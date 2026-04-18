@@ -12,7 +12,7 @@ from drf_spectacular.utils import OpenApiResponse, OpenApiRequest
 
 # Module imports
 from apple_pi_dash.api.serializers import StateSerializer
-from apple_pi_dash.app.permissions import ProjectEntityPermission
+from apple_pi_dash.app.permissions import ProjectStateEntityPermission
 from apple_pi_dash.db.models import Issue, State
 from .base import BaseAPIView
 from apple_pi_dash.utils.openapi import (
@@ -41,7 +41,7 @@ class StateListCreateAPIEndpoint(BaseAPIView):
 
     serializer_class = StateSerializer
     model = State
-    permission_classes = [ProjectEntityPermission]
+    permission_classes = [ProjectStateEntityPermission]
     use_read_replica = True
 
     def get_queryset(self):
@@ -164,7 +164,7 @@ class StateDetailAPIEndpoint(BaseAPIView):
 
     serializer_class = StateSerializer
     model = State
-    permission_classes = [ProjectEntityPermission]
+    permission_classes = [ProjectStateEntityPermission]
     use_read_replica = True
 
     def get_queryset(self):

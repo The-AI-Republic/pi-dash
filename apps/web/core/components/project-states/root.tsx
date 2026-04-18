@@ -13,6 +13,7 @@ import type { IState, TStateOperationsCallbacks } from "@apple-pi-dash/types";
 import { EUserProjectRoles } from "@apple-pi-dash/types";
 import { ProjectStateLoader, GroupList } from "@/components/project-states";
 // hooks
+import { useProject } from "@/hooks/store/use-project";
 import { useProjectState } from "@/hooks/store/use-project-state";
 import { useUserPermissions } from "@/hooks/store/user";
 
@@ -34,13 +35,22 @@ export const ProjectStateRoot = observer(function ProjectStateRoot(props: TProje
     markStateAsDefault,
   } = useProjectState();
   const { allowPermissions } = useUserPermissions();
+  const { getProjectById } = useProject();
   // derived values
-  const isEditable = allowPermissions(
+  const isAdmin = allowPermissions(
     [EUserProjectRoles.ADMIN],
     EUserPermissionsLevel.PROJECT,
     workspaceSlug,
     projectId
   );
+  const isMember = allowPermissions(
+    [EUserProjectRoles.MEMBER],
+    EUserPermissionsLevel.PROJECT,
+    workspaceSlug,
+    projectId
+  );
+  const membersCanEditStates = getProjectById(projectId)?.members_can_edit_states ?? true;
+  const isEditable = isAdmin || (isMember && membersCanEditStates);
 
   // Fetching all project states
   useSWR(

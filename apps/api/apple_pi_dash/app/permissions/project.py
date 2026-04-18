@@ -6,7 +6,7 @@
 from rest_framework.permissions import SAFE_METHODS, BasePermission
 
 # Module import
-from apple_pi_dash.db.models import ProjectMember, WorkspaceMember
+from apple_pi_dash.db.models import Project, ProjectMember, WorkspaceMember
 from apple_pi_dash.db.models.project import ROLE
 
 
@@ -140,4 +140,43 @@ class ProjectLitePermission(BasePermission):
             member=request.user,
             project_id=view.project_id,
             is_active=True,
+        ).exists()
+
+
+class ProjectStateEntityPermission(BasePermission):
+    """Permissions for the workflow State entity.
+
+    Admin can always write. Member can write only when the owning project has
+    ``members_can_edit_states=True``. Any active project member can read.
+    """
+
+    def has_permission(self, request, view):
+        if request.user.is_anonymous:
+            return False
+
+        if request.method in SAFE_METHODS:
+            return ProjectMember.objects.filter(
+                workspace__slug=view.workspace_slug,
+                member=request.user,
+                project_id=view.project_id,
+                is_active=True,
+            ).exists()
+
+        membership = ProjectMember.objects.filter(
+            workspace__slug=view.workspace_slug,
+            member=request.user,
+            project_id=view.project_id,
+            role__in=[ROLE.ADMIN.value, ROLE.MEMBER.value],
+            is_active=True,
+        ).first()
+
+        if membership is None:
+            return False
+
+        if membership.role == ROLE.ADMIN.value:
+            return True
+
+        return Project.objects.filter(
+            pk=view.project_id,
+            members_can_edit_states=True,
         ).exists()
