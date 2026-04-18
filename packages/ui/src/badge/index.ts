@@ -5,3 +5,4 @@
  */
 
 export * from "./badge";
+export type { TBadgeVariant, TBadgeSizes } from "./helper";

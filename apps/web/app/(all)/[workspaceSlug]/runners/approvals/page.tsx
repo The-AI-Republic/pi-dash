@@ -4,25 +4,47 @@
  * See the LICENSE file for details.
  */
 
-import useSWR from "swr";
 import { useState } from "react";
-import type { IApprovalRequest } from "@apple-pi-dash/services";
+import { observer } from "mobx-react";
+import useSWR from "swr";
+import { useTranslation } from "@apple-pi-dash/i18n";
+import { TOAST_TYPE, setToast } from "@apple-pi-dash/propel/toast";
 import { RunnerService } from "@apple-pi-dash/services";
+import type { IApprovalRequest, TApprovalDecision, TApprovalKind } from "@apple-pi-dash/types";
+import { Button } from "@apple-pi-dash/ui";
 
 const service = new RunnerService();
 
-export default function ApprovalsPage() {
+function kindKey(kind: TApprovalKind): string {
+  switch (kind) {
+    case "command_execution":
+    case "file_change":
+    case "network_access":
+      return `runners.approvals.kinds.${kind}`;
+    default:
+      return "runners.approvals.kinds.other";
+  }
+}
+
+const ApprovalsPage = observer(function ApprovalsPage() {
+  const { t } = useTranslation();
   const { data: approvals, mutate } = useSWR<IApprovalRequest[]>("runner-approvals", () => service.listApprovals(), {
     refreshInterval: 2_000,
   });
-
   const [pending, setPending] = useState<string | null>(null);
 
-  async function decide(id: string, decision: "accept" | "decline" | "accept_for_session") {
+  async function decide(id: string, decision: TApprovalDecision) {
     setPending(id);
     try {
       await service.decideApproval(id, decision);
       mutate();
+    } catch (e: unknown) {
+      const err = e as { error?: string } | null;
+      setToast({
+        type: TOAST_TYPE.ERROR,
+        title: t("runners.toast.error_title"),
+        message: err?.error ?? t("runners.approvals.decision_failed"),
+      });
     } finally {
       setPending(null);
     }
@@ -30,65 +52,62 @@ export default function ApprovalsPage() {
 
   const rows = approvals ?? [];
   if (rows.length === 0) {
-    return <div className="text-sm text-neutral-500 rounded-md border p-8 text-center">No pending approvals.</div>;
+    return (
+      <div className="rounded-md border border-subtle p-8 text-center text-13 text-secondary">
+        {t("runners.approvals.empty")}
+      </div>
+    );
   }
+
   return (
     <div className="flex flex-col gap-4">
       {rows.map((a) => (
-        <div key={a.id} className="rounded-md border p-4">
+        <div key={a.id} className="rounded-md border border-subtle p-4">
           <div className="flex items-start justify-between">
             <div>
-              <div className="text-xs text-neutral-500">
-                Run {a.agent_run} · requested {new Date(a.requested_at).toLocaleTimeString()}
+              <div className="text-11 text-secondary">
+                {t("runners.approvals.run_meta", {
+                  runId: a.agent_run,
+                  at: new Date(a.requested_at).toLocaleTimeString(),
+                })}
               </div>
-              <div className="font-medium">{humanKind(a.kind)}</div>
-              {a.reason && <div className="text-sm text-neutral-600 mt-1">{a.reason}</div>}
+              <div className="text-13 font-medium text-primary">{t(kindKey(a.kind))}</div>
+              {a.reason && <div className="mt-1 text-13 text-secondary">{a.reason}</div>}
             </div>
             {a.expires_at && (
-              <div className="text-xs text-neutral-500">expires {new Date(a.expires_at).toLocaleTimeString()}</div>
+              <div className="text-11 text-secondary">
+                {t("runners.approvals.expires", { at: new Date(a.expires_at).toLocaleTimeString() })}
+              </div>
             )}
           </div>
-          <pre className="bg-neutral-50 font-mono text-xs mt-3 rounded p-3 whitespace-pre-wrap">
+          <pre className="font-mono mt-3 max-h-80 overflow-auto rounded bg-layer-1 p-3 text-11 whitespace-pre-wrap">
             {JSON.stringify(a.payload, null, 2)}
           </pre>
           <div className="mt-3 flex gap-2">
-            <button
-              onClick={() => decide(a.id, "accept")}
-              disabled={pending === a.id}
-              className="bg-green-600 text-sm rounded px-3 py-1 font-medium text-white disabled:opacity-50"
-            >
-              Accept once
-            </button>
-            <button
+            <Button onClick={() => decide(a.id, "accept")} loading={pending === a.id} size="sm">
+              {t("runners.approvals.accept_once")}
+            </Button>
+            <Button
               onClick={() => decide(a.id, "accept_for_session")}
-              disabled={pending === a.id}
-              className="bg-green-500 text-sm rounded px-3 py-1 font-medium text-white disabled:opacity-50"
+              loading={pending === a.id}
+              variant="accent-primary"
+              size="sm"
             >
-              Accept for session
-            </button>
-            <button
+              {t("runners.approvals.accept_for_session")}
+            </Button>
+            <Button
               onClick={() => decide(a.id, "decline")}
-              disabled={pending === a.id}
-              className="bg-red-600 text-sm rounded px-3 py-1 font-medium text-white disabled:opacity-50"
+              loading={pending === a.id}
+              variant="outline-danger"
+              size="sm"
             >
-              Decline
-            </button>
+              {t("runners.approvals.decline")}
+            </Button>
           </div>
         </div>
       ))}
     </div>
   );
-}
+});
 
-function humanKind(kind: IApprovalRequest["kind"]): string {
-  switch (kind) {
-    case "command_execution":
-      return "Codex wants to run a shell command";
-    case "file_change":
-      return "Codex wants to modify a file";
-    case "network_access":
-      return "Codex wants to make a network call";
-    default:
-      return "Codex is requesting approval";
-  }
-}
+export default ApprovalsPage;
