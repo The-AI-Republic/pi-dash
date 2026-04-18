@@ -11,6 +11,9 @@
 	
 	reverse_proxy /live/* live:3000
 
+	# Runner WebSocket upgrade — served by Django ASGI (Channels).
+	reverse_proxy /ws/runner/* api:8000
+
 	reverse_proxy /api/* api:8000
 
 	reverse_proxy /auth/* api:8000

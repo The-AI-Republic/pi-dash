@@ -4,15 +4,21 @@
 
 import os
 
-from channels.routing import ProtocolTypeRouter
+from channels.routing import ProtocolTypeRouter, URLRouter
 from django.core.asgi import get_asgi_application
-
-django_asgi_app = get_asgi_application()
-
 
 os.environ.setdefault("DJANGO_SETTINGS_MODULE", "apple_pi_dash.settings.production")
 # Initialize Django ASGI application early to ensure the AppRegistry
 # is populated before importing code that may import ORM models.
+django_asgi_app = get_asgi_application()
 
+from apple_pi_dash.runner.routing import (  # noqa: E402
+    websocket_urlpatterns as runner_ws_urls,
+)
 
-application = ProtocolTypeRouter({"http": get_asgi_application()})
+application = ProtocolTypeRouter(
+    {
+        "http": django_asgi_app,
+        "websocket": URLRouter(runner_ws_urls),
+    }
+)

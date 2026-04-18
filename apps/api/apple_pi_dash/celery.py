@@ -77,6 +77,15 @@ app.conf.beat_schedule = {
         "task": "apple_pi_dash.bgtasks.exporter_expired_task.delete_old_s3_link",
         "schedule": crontab(hour=3, minute=45),  # UTC 03:45
     },
+    # Runner lifecycle
+    "runner-expire-stale-approvals": {
+        "task": "runner.expire_stale_approvals",
+        "schedule": crontab(minute="*/1"),
+    },
+    "runner-mark-offline-runners": {
+        "task": "runner.mark_offline_runners",
+        "schedule": crontab(minute="*/1"),
+    },
 }
 
 
