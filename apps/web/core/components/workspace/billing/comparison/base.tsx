@@ -31,7 +31,8 @@ export const shouldRenderPlanDetail = (planKey: TApplePiDashPlans) => {
 };
 
 export const PlansComparisonBase = observer(function PlansComparisonBase(props: TPlansComparisonBaseProps) {
-  const { applePiDashDetails, isSelfManaged, isCompareAllFeaturesSectionOpen, setIsCompareAllFeaturesSectionOpen } = props;
+  const { applePiDashDetails, isSelfManaged, isCompareAllFeaturesSectionOpen, setIsCompareAllFeaturesSectionOpen } =
+    props;
   // plan details
   const { planDetails, planHighlights, planComparison } = APPLE_PI_DASH_PLANS;
   const numberOfPlansToRender = Object.keys(planDetails).filter((planKey) =>

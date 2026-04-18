@@ -979,7 +979,8 @@ export const PLANS_COMPARISON_LIST: TPlansComparisonDetails[] = [
       },
       {
         title: "Slack",
-        description: "Get Apple Pi Dash activity in Slack and use / commands in\nSlack to make changes in Apple Pi Dash.",
+        description:
+          "Get Apple Pi Dash activity in Slack and use / commands in\nSlack to make changes in Apple Pi Dash.",
         cloud: {
           free: false,
           one: false,
@@ -1093,7 +1094,8 @@ export const PLANS_COMPARISON_LIST: TPlansComparisonDetails[] = [
       },
       {
         title: "Two-factor authentication and passkeys",
-        description: "Secure your Apple Pi Dash workspace with device-\ndependent two-factor authentication and passkeys. ",
+        description:
+          "Secure your Apple Pi Dash workspace with device-\ndependent two-factor authentication and passkeys. ",
         cloud: {
           free: false,
           one: false,
@@ -1115,7 +1117,8 @@ export const PLANS_COMPARISON_LIST: TPlansComparisonDetails[] = [
       },
       {
         title: "LDAP",
-        description: "Get our official LDAP implementation and secure\nyour Apple Pi Dash workspace with your LDAP server.",
+        description:
+          "Get our official LDAP implementation and secure\nyour Apple Pi Dash workspace with your LDAP server.",
         comingSoon: true,
         cloud: {
           free: false,
@@ -1145,7 +1148,8 @@ export const PLANS_COMPARISON_LIST: TPlansComparisonDetails[] = [
       },
       {
         title: "One-click Deployment",
-        description: "Install and deploy your self-hosted Apple Pi Dash to any\nprivate cloud with a single-line command.",
+        description:
+          "Install and deploy your self-hosted Apple Pi Dash to any\nprivate cloud with a single-line command.",
         cloud: {
           free: false,
           one: true,
@@ -1236,7 +1240,12 @@ export const PLANS_COMPARISON_LIST: TPlansComparisonDetails[] = [
         description: (
           <>
             Get business-friendly SLAs with higher plans. SLAs are by priority of work item and tiers{" "}
-            <a href="https://apple-pi-dash.so/talk-to-sales" target="_blank" rel="noopener noreferrer" className="underline">
+            <a
+              href="https://apple-pi-dash.so/talk-to-sales"
+              target="_blank"
+              rel="noopener noreferrer"
+              className="underline"
+            >
               can be requested
             </a>
             .
