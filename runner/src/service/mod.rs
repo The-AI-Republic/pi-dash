@@ -1,9 +1,26 @@
 use anyhow::Result;
+use std::path::Path;
 
 use crate::util::paths::Paths;
 
 pub mod launchd;
 pub mod systemd;
+
+/// Reject paths containing characters that would break the systemd unit /
+/// launchd plist we generate. Newlines could inject extra directives; control
+/// chars and characters with XML meaning would corrupt the plist.
+pub(crate) fn validate_path_for_unit(path: &Path) -> Result<&str> {
+    let s = path
+        .to_str()
+        .ok_or_else(|| anyhow::anyhow!("path is not valid UTF-8: {path:?}"))?;
+    if s.contains(['\n', '\r', '\0']) {
+        anyhow::bail!("path contains a control character — refusing to write unit: {s:?}");
+    }
+    if s.chars().any(|c| c.is_control()) {
+        anyhow::bail!("path contains a control character — refusing to write unit: {s:?}");
+    }
+    Ok(s)
+}
 
 pub enum Service {
     Systemd,

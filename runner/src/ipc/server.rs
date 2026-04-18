@@ -24,10 +24,21 @@ impl IpcServer {
             tokio::fs::create_dir_all(parent)
                 .await
                 .with_context(|| format!("creating {parent:?}"))?;
+            // Best-effort: tighten the runtime dir to 0700 so even if the
+            // socket bind racewindow is exploited, no peer can reach it.
+            let mut p = std::fs::metadata(parent)?.permissions();
+            p.set_mode(0o700);
+            let _ = std::fs::set_permissions(parent, p);
         }
-        let listener = UnixListener::bind(&self.path)
+        // Restrict the file mode of files (including the socket) we create
+        // until after bind, then restore. Closes the TOCTOU window where the
+        // socket exists with the process umask before set_permissions runs.
+        let prev_umask = nix::sys::stat::umask(nix::sys::stat::Mode::from_bits_truncate(0o077));
+        let bind_result = UnixListener::bind(&self.path);
+        nix::sys::stat::umask(prev_umask);
+        let listener = bind_result
             .with_context(|| format!("binding unix socket {:?}", self.path))?;
-        // Socket 0600.
+        // Belt-and-braces: enforce 0600 on the socket explicitly.
         let mut perm = std::fs::metadata(&self.path)?.permissions();
         perm.set_mode(0o600);
         std::fs::set_permissions(&self.path, perm)?;

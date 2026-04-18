@@ -30,6 +30,7 @@ pub struct Args {
 }
 
 pub async fn run(args: Args, paths: &Paths) -> Result<()> {
+    validate_cloud_url(&args.url)?;
     let name = args
         .name
         .clone()
@@ -90,6 +91,27 @@ pub async fn run(args: Args, paths: &Paths) -> Result<()> {
         config.runner.name, creds.runner_id,
     );
     Ok(())
+}
+
+/// Refuse `http://` URLs that point at non-localhost hosts. Sending the
+/// registration token + receiving the runner secret over cleartext to the
+/// internet would silently leak credentials. Localhost is allowed for dev.
+fn validate_cloud_url(url: &str) -> Result<()> {
+    let lower = url.to_ascii_lowercase();
+    if lower.starts_with("https://") {
+        return Ok(());
+    }
+    if let Some(rest) = lower.strip_prefix("http://") {
+        let host = rest.split(['/', ':']).next().unwrap_or("");
+        if host == "localhost" || host == "127.0.0.1" || host == "::1" {
+            tracing::warn!("using cleartext http:// to {host} — only suitable for development");
+            return Ok(());
+        }
+        anyhow::bail!(
+            "refusing to register over cleartext http:// to non-localhost ({host}); use https://"
+        );
+    }
+    anyhow::bail!("cloud URL must start with https:// (or http:// for localhost), got {url}")
 }
 
 fn hostname_default() -> Option<String> {

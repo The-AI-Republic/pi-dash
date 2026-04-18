@@ -58,6 +58,11 @@ pub struct RunPayload {
 pub struct Bridge {
     pub server: AppServer,
     pub model_default: Option<String>,
+    /// Notifications that arrived while we were waiting for an RPC response
+    /// (e.g. an early `account/reauthRequired` during `initialize`). Drained
+    /// by [`Bridge::next_frame`] before reading from the live stream so the
+    /// supervisor's translator sees them.
+    pending: std::collections::VecDeque<Incoming>,
 }
 
 impl Bridge {
@@ -66,6 +71,7 @@ impl Bridge {
         Ok(Self {
             server,
             model_default,
+            pending: std::collections::VecDeque::new(),
         })
     }
 
@@ -75,7 +81,17 @@ impl Bridge {
         Self {
             server,
             model_default,
+            pending: std::collections::VecDeque::new(),
         }
+    }
+
+    /// Returns the next frame from Codex, consulting the pending buffer first
+    /// so notifications stashed during `await_response` are not lost.
+    pub async fn next_frame(&mut self) -> Option<Incoming> {
+        if let Some(f) = self.pending.pop_front() {
+            return Some(f);
+        }
+        self.server.inbound.recv().await
     }
 
     pub async fn run(&mut self, payload: &RunPayload, cwd: &Path) -> Result<BridgeCursor> {
@@ -208,6 +224,11 @@ impl Bridge {
                         anyhow::bail!("codex rpc error {}: {}", err.code, err.message);
                     }
                     return Ok(result.unwrap_or(serde_json::Value::Null));
+                }
+                Some(other @ Incoming::Notification { .. }) => {
+                    // Buffer notifications received while awaiting an RPC
+                    // response so the translator sees them later.
+                    self.pending.push_back(other);
                 }
                 Some(_) => continue,
                 None => anyhow::bail!("codex stdout closed while awaiting response"),

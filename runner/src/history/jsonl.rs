@@ -65,6 +65,10 @@ impl HistoryWriter {
         let mut line = serde_json::to_vec(entry)?;
         line.push(b'\n');
         self.file.write_all(&line).await?;
+        // Flush so a daemon crash doesn't truncate the run transcript.
+        // We use `flush` rather than `sync_data` to keep latency low; the
+        // OS buffer survives a process crash, just not a kernel/host crash.
+        self.file.flush().await?;
         Ok(())
     }
 

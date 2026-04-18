@@ -12,10 +12,12 @@ pub async fn install(paths: &Paths) -> Result<()> {
         tokio::fs::create_dir_all(parent).await?;
     }
     let exe = std::env::current_exe()?;
-    let logs = paths.logs_dir().display().to_string();
-    let config = paths.config_dir.display().to_string();
-    let data = paths.data_dir.display().to_string();
-    let runtime = paths.runtime_dir.display().to_string();
+    let exe_str = xml_escape(super::validate_path_for_unit(&exe)?);
+    let logs_dir = paths.logs_dir();
+    let logs = xml_escape(super::validate_path_for_unit(&logs_dir)?);
+    let config = xml_escape(super::validate_path_for_unit(&paths.config_dir)?);
+    let data = xml_escape(super::validate_path_for_unit(&paths.data_dir)?);
+    let runtime = xml_escape(super::validate_path_for_unit(&paths.runtime_dir)?);
     let body = format!(
         r#"<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -41,7 +43,7 @@ pub async fn install(paths: &Paths) -> Result<()> {
 </plist>
 "#,
         label = LABEL,
-        exe = exe.display(),
+        exe = exe_str,
     );
     tokio::fs::write(&plist_path, body).await?;
     let uid = get_uid();
@@ -118,4 +120,19 @@ fn plist_path() -> Result<PathBuf> {
 
 fn get_uid() -> u32 {
     nix::unistd::geteuid().as_raw()
+}
+
+fn xml_escape(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' => out.push_str("&quot;"),
+            '\'' => out.push_str("&apos;"),
+            _ => out.push(c),
+        }
+    }
+    out
 }

@@ -123,13 +123,21 @@ pub struct ConnectionLoop {
     pub inbound: mpsc::Sender<Envelope<ServerMsg>>,
     pub status_snapshot: tokio::sync::watch::Receiver<RunnerStatus>,
     pub in_flight: tokio::sync::watch::Receiver<Option<Uuid>>,
+    pub shutdown: std::sync::Arc<tokio::sync::Notify>,
 }
 
 impl ConnectionLoop {
     pub async fn run(mut self) -> Result<()> {
         let mut backoff = Backoff::new();
         loop {
-            match Connection::open(&self.cloud_url, &self.creds).await {
+            let connect = Connection::open(&self.cloud_url, &self.creds);
+            tokio::pin!(connect);
+            let opened = tokio::select! {
+                biased;
+                _ = self.shutdown.notified() => return Ok(()),
+                r = &mut connect => r,
+            };
+            match opened {
                 Ok(conn) => {
                     backoff.reset();
                     // Send Hello immediately.
@@ -159,7 +167,16 @@ impl ConnectionLoop {
                             outbound_rx
                         })
                     };
-                    let result = run_connection(conn, rx_frame, self.inbound.clone()).await;
+                    let conn_run = run_connection(conn, rx_frame, self.inbound.clone());
+                    tokio::pin!(conn_run);
+                    let result = tokio::select! {
+                        biased;
+                        _ = self.shutdown.notified() => {
+                            forward.abort();
+                            return Ok(());
+                        }
+                        r = &mut conn_run => r,
+                    };
                     // Reclaim the outbound receiver so we can keep forwarding on reconnect.
                     if let Ok(rx) = forward.await {
                         self.outbound = rx;
@@ -174,21 +191,24 @@ impl ConnectionLoop {
             }
             let delay = backoff.next_delay();
             tracing::info!("reconnecting in {:?}", delay);
-            tokio::time::sleep(delay).await;
+            tokio::select! {
+                biased;
+                _ = self.shutdown.notified() => return Ok(()),
+                _ = tokio::time::sleep(delay) => {}
+            }
         }
     }
 }
 
 fn http_to_ws(url: &str) -> Result<String> {
-    let lower = url.to_ascii_lowercase();
-    if let Some(rest) = lower.strip_prefix("https://") {
-        Ok(format!("wss://{rest}"))
-    } else if let Some(rest) = lower.strip_prefix("http://") {
-        Ok(format!("ws://{rest}"))
-    } else if lower.starts_with("wss://") || lower.starts_with("ws://") {
-        Ok(lower)
-    } else {
-        anyhow::bail!("invalid cloud URL scheme: {url}")
+    // Lowercase only the scheme — query strings and tokens in the path are
+    // case-sensitive on many servers.
+    let (scheme, rest) = url.split_once("://").unwrap_or(("", url));
+    match scheme.to_ascii_lowercase().as_str() {
+        "https" => Ok(format!("wss://{rest}")),
+        "http" => Ok(format!("ws://{rest}")),
+        "wss" | "ws" => Ok(url.to_string()),
+        _ => anyhow::bail!("invalid cloud URL scheme: {url}"),
     }
 }
 
@@ -205,5 +225,13 @@ mod tests {
     fn http_to_ws_mapping() {
         assert_eq!(http_to_ws("https://x.test").unwrap(), "wss://x.test");
         assert_eq!(http_to_ws("http://y.test").unwrap(), "ws://y.test");
+    }
+
+    #[test]
+    fn http_to_ws_preserves_path_case() {
+        assert_eq!(
+            http_to_ws("https://x.test/Path/With/MixedCase").unwrap(),
+            "wss://x.test/Path/With/MixedCase",
+        );
     }
 }

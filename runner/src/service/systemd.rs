@@ -12,9 +12,10 @@ pub async fn install(paths: &Paths) -> Result<()> {
         tokio::fs::create_dir_all(parent).await?;
     }
     let exe = std::env::current_exe()?;
-    let config_dir = paths.config_dir.display().to_string();
-    let data_dir = paths.data_dir.display().to_string();
-    let runtime_dir = paths.runtime_dir.display().to_string();
+    let exe_str = super::validate_path_for_unit(&exe)?.to_string();
+    let config_dir = super::validate_path_for_unit(&paths.config_dir)?.to_string();
+    let data_dir = super::validate_path_for_unit(&paths.data_dir)?.to_string();
+    let runtime_dir = super::validate_path_for_unit(&paths.runtime_dir)?.to_string();
     let body = format!(
         r#"[Unit]
 Description=Apple Pi Dash Runner
@@ -33,7 +34,7 @@ RestartSec=5
 [Install]
 WantedBy=default.target
 "#,
-        exe = exe.display(),
+        exe = exe_str,
     );
     tokio::fs::write(&unit_path, body).await?;
     run_systemctl(&["daemon-reload"]).await?;

@@ -1,7 +1,7 @@
 use anyhow::Result;
 use chrono::Utc;
 use std::time::Duration;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 
 use crate::approval::policy::Policy;
 use crate::approval::router::{ApprovalRecord, ApprovalRouter, ApprovalStatus, DecisionSource};
@@ -73,8 +73,11 @@ impl Supervisor {
         let (out_tx, out_rx) = mpsc::channel::<Envelope<ClientMsg>>(128);
         let (in_tx, in_rx) = mpsc::channel::<Envelope<ServerMsg>>(128);
 
-        // Cloud loop (optional — offline mode skips it).
-        let cloud_handle = if !opts.offline {
+        // Cloud loop + heartbeat are skipped in offline mode. Without a cloud
+        // consumer, the heartbeat task would otherwise block forever once the
+        // outbound channel filled (~53 min at 25s cadence).
+        let (cloud_handle, hb_handle) = if !opts.offline {
+            let shutdown_for_loop = state.shutdown_notified();
             let loop_ = ConnectionLoop {
                 cloud_url: config.runner.cloud_url.clone(),
                 creds: creds.clone(),
@@ -82,39 +85,58 @@ impl Supervisor {
                 inbound: in_tx.clone(),
                 status_snapshot: state.rx_status.clone(),
                 in_flight: state.rx_in_flight.clone(),
+                shutdown: shutdown_for_loop,
             };
-            Some(tokio::spawn(async move {
+            let cloud = tokio::spawn(async move {
                 if let Err(e) = loop_.run().await {
                     tracing::error!("cloud loop exited: {e:#}");
                 }
-            }))
-        } else {
-            tracing::info!("offline mode: cloud loop disabled");
-            None
-        };
-
-        // Heartbeat.
-        let out_tx_hb = out_tx.clone();
-        let state_hb = state.clone();
-        let hb_handle = tokio::spawn(async move {
-            let mut ticker = tokio::time::interval(Duration::from_secs(25));
-            ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-            loop {
-                ticker.tick().await;
-                let now = Utc::now();
-                state_hb.set_heartbeat(now).await;
-                let status = { *state_hb.rx_status.borrow() };
-                let in_flight = { *state_hb.rx_in_flight.borrow() };
-                let frame = Envelope::new(ClientMsg::Heartbeat {
-                    ts: now,
-                    status,
-                    in_flight_run: in_flight,
-                });
-                if out_tx_hb.send(frame).await.is_err() {
-                    break;
+            });
+            let out_tx_hb = out_tx.clone();
+            let state_hb = state.clone();
+            let hb = tokio::spawn(async move {
+                let mut rx_interval = state_hb.rx_heartbeat_secs.clone();
+                let mut current_secs = (*rx_interval.borrow()).max(1);
+                let mut ticker = tokio::time::interval(Duration::from_secs(current_secs));
+                ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+                loop {
+                    tokio::select! {
+                        _ = ticker.tick() => {
+                            let now = Utc::now();
+                            state_hb.set_heartbeat(now).await;
+                            let status = { *state_hb.rx_status.borrow() };
+                            let in_flight = { *state_hb.rx_in_flight.borrow() };
+                            let frame = Envelope::new(ClientMsg::Heartbeat {
+                                ts: now,
+                                status,
+                                in_flight_run: in_flight,
+                            });
+                            if out_tx_hb.send(frame).await.is_err() {
+                                break;
+                            }
+                        }
+                        changed = rx_interval.changed() => {
+                            if changed.is_err() { break; }
+                            let next = (*rx_interval.borrow()).max(1);
+                            if next != current_secs {
+                                current_secs = next;
+                                ticker = tokio::time::interval(Duration::from_secs(current_secs));
+                                ticker.set_missed_tick_behavior(
+                                    tokio::time::MissedTickBehavior::Delay,
+                                );
+                            }
+                        }
+                    }
                 }
-            }
-        });
+            });
+            (Some(cloud), Some(hb))
+        } else {
+            tracing::info!("offline mode: cloud loop + heartbeat disabled");
+            // Drop out_rx so out_tx.send returns Err immediately rather than
+            // blocking forever once the channel buffer fills.
+            drop(out_rx);
+            (None, None)
+        };
 
         // Runner loop — dispatches on inbound ServerMsg.
         let run = RunnerLoop {
@@ -124,7 +146,7 @@ impl Supervisor {
             state: state.clone(),
             approvals: approvals.clone(),
             inbound: in_rx,
-            current_run_cancel: None,
+            current_run: None,
         };
 
         let shutdown = state.shutdown_notified();
@@ -148,7 +170,9 @@ impl Supervisor {
             .await
             .ok();
 
-        hb_handle.abort();
+        if let Some(h) = hb_handle {
+            h.abort();
+        }
         ipc_handle.abort();
         if let Some(h) = cloud_handle {
             h.abort();
@@ -164,16 +188,41 @@ struct RunnerLoop {
     state: StateHandle,
     approvals: ApprovalRouter,
     inbound: mpsc::Receiver<Envelope<ServerMsg>>,
-    /// Cancel signal for the in-flight run, if any. Replaced on each Assign.
-    current_run_cancel: Option<(uuid::Uuid, std::sync::Arc<tokio::sync::Notify>)>,
+    /// In-flight run, if any. Replaced on each Assign and cleared as soon as
+    /// the worker task signals completion via `done_rx` — driven by
+    /// `tokio::select!` so a new Assign isn't rejected while we wait for the
+    /// next inbound frame.
+    current_run: Option<CurrentRun>,
+}
+
+struct CurrentRun {
+    run_id: uuid::Uuid,
+    cancel: std::sync::Arc<tokio::sync::Notify>,
+    done_rx: oneshot::Receiver<()>,
 }
 
 impl RunnerLoop {
     async fn run(mut self) -> Result<()> {
-        while let Some(frame) = self.inbound.recv().await {
+        loop {
+            let inbound = self.inbound.recv();
+            tokio::pin!(inbound);
+            // `done_rx` exists only while a run is in flight; outside of that
+            // window we wait on `pending()` so the select arm is inert.
+            let frame = tokio::select! {
+                biased;
+                () = wait_done(&mut self.current_run) => {
+                    self.current_run = None;
+                    continue;
+                }
+                f = &mut inbound => f,
+            };
+            let Some(frame) = frame else { break };
+
             match frame.body {
                 ServerMsg::Welcome {
-                    protocol_version, ..
+                    protocol_version,
+                    heartbeat_interval_secs,
+                    ..
                 } => {
                     if protocol_version != WIRE_VERSION {
                         tracing::warn!(
@@ -181,6 +230,9 @@ impl RunnerLoop {
                             local = WIRE_VERSION,
                             "protocol version mismatch",
                         );
+                    }
+                    if heartbeat_interval_secs > 0 {
+                        let _ = self.state.tx_heartbeat_secs.send(heartbeat_interval_secs);
                     }
                     self.state.set_connected(true).await;
                 }
@@ -191,7 +243,7 @@ impl RunnerLoop {
                     expected_codex_model,
                     ..
                 } => {
-                    if self.current_run_cancel.is_some() {
+                    if self.current_run.is_some() {
                         tracing::warn!(
                             %run_id,
                             "assign received while a run is already in flight; ignoring"
@@ -199,7 +251,12 @@ impl RunnerLoop {
                         continue;
                     }
                     let cancel = std::sync::Arc::new(tokio::sync::Notify::new());
-                    self.current_run_cancel = Some((run_id, cancel.clone()));
+                    let (done_tx, done_rx) = oneshot::channel();
+                    self.current_run = Some(CurrentRun {
+                        run_id,
+                        cancel: cancel.clone(),
+                        done_rx,
+                    });
                     let paths = self.paths.clone();
                     let config = self.config.clone();
                     let state = self.state.clone();
@@ -230,16 +287,18 @@ impl RunnerLoop {
                                 .await;
                             worker.state.set_current_run(None).await;
                         }
+                        let _ = done_tx.send(());
                     });
                 }
                 ServerMsg::Cancel { run_id, reason } => {
                     tracing::info!(%run_id, ?reason, "cancel received");
-                    if let Some((active, notify)) = &self.current_run_cancel {
-                        if *active == run_id {
-                            notify.notify_waiters();
+                    if let Some(run) = &self.current_run {
+                        if run.run_id == run_id {
+                            run.cancel.notify_waiters();
                         } else {
                             tracing::warn!(
-                                "cancel for run {run_id} but active run is {active}; ignoring"
+                                "cancel for run {run_id} but active run is {active}; ignoring",
+                                active = run.run_id,
                             );
                         }
                     }
@@ -285,25 +344,25 @@ impl RunnerLoop {
                 }
                 ServerMsg::Revoke { reason } => {
                     tracing::error!("cloud revoked runner: {reason}");
-                    if let Some((_, notify)) = &self.current_run_cancel {
-                        notify.notify_waiters();
+                    if let Some(run) = &self.current_run {
+                        run.cancel.notify_waiters();
                     }
                     self.state.shutdown();
                     break;
                 }
             }
-            // Drop the cancel handle after the in-flight run completes. The
-            // worker signals completion via `current_run` transitioning back
-            // to None; we re-read it here lazily.
-            if let Some((_, _)) = &self.current_run_cancel {
-                let in_flight = { *self.state.rx_in_flight.borrow() };
-                if in_flight.is_none() {
-                    self.current_run_cancel = None;
-                }
-            }
         }
         self.state.set_connected(false).await;
         Ok(())
+    }
+}
+
+async fn wait_done(current: &mut Option<CurrentRun>) {
+    match current {
+        Some(run) => {
+            let _ = (&mut run.done_rx).await;
+        }
+        None => std::future::pending().await,
     }
 }
 
@@ -350,7 +409,8 @@ impl AssignWorker {
                 let reason = match &e {
                     crate::workspace::ResolveError::Clone(_) => FailureReason::GitAuth,
                     crate::workspace::ResolveError::MissingRepoUrl
-                    | crate::workspace::ResolveError::NonEmptyNonRepo(_) => {
+                    | crate::workspace::ResolveError::NonEmptyNonRepo(_)
+                    | crate::workspace::ResolveError::UnsupportedScheme(_) => {
                         FailureReason::WorkspaceSetup
                     }
                     crate::workspace::ResolveError::Io(_) => FailureReason::WorkspaceSetup,
@@ -512,7 +572,6 @@ impl AssignWorker {
                     bridge.interrupt().await.ok();
                 }
                 _ = cancel.notified(), if !cancelled => {
-                    cancelled = true;
                     bridge.interrupt().await.ok();
                     let _ = self.out.send(Envelope::new(ClientMsg::RunCancelled {
                         run_id: cursor.run_id,
@@ -527,11 +586,11 @@ impl AssignWorker {
                     // exit and rely on the Bridge's shutdown to SIGKILL.
                     let _ = tokio::time::timeout(
                         Duration::from_secs(10),
-                        bridge.server.inbound.recv(),
+                        bridge.next_frame(),
                     ).await;
                     return Ok(Outcome { status_label: "cancelled".into() });
                 }
-                frame = bridge.server.inbound.recv() => {
+                frame = bridge.next_frame() => {
                     let Some(frame) = frame else {
                         self.send(ClientMsg::RunFailed {
                             run_id: cursor.run_id,
@@ -618,6 +677,10 @@ impl AssignWorker {
                     expires_at: Some(Utc::now() + chrono::Duration::minutes(10)),
                     status: crate::approval::router::ApprovalStatus::Pending,
                 };
+                // Subscribe BEFORE opening so a Decide that races in between
+                // open() and subscribe() doesn't strand the worker waiting on
+                // an event it'll never see.
+                let mut rx = self.approvals.subscribe();
                 self.approvals.open(rec.clone()).await;
                 self.state
                     .set_approvals_pending(self.approvals.list_pending().await.len())
@@ -640,8 +703,10 @@ impl AssignWorker {
                 .await
                 .ok();
 
-                // Wait for a decision (local or cloud).
-                let mut rx = self.approvals.subscribe();
+                // Wait for a decision (local or cloud). Subscribed before
+                // open() above; ApprovalRouter::open also resolves inline if
+                // a Decide already arrived for this id.
+
                 loop {
                     match rx.recv().await {
                         Ok(ApprovalRecord {
@@ -746,6 +811,12 @@ struct Outcome {
     status_label: String,
 }
 
+/// Best-effort: if codex hands us a non-UUID approval id (it shouldn't, per
+/// schema), derive a stable v5 UUID from it so the cloud sees the same id on
+/// retries instead of a fresh random one each time.
 fn uuid_or(s: &str) -> uuid::Uuid {
-    uuid::Uuid::parse_str(s).unwrap_or_else(|_| uuid::Uuid::new_v4())
+    if let Ok(u) = uuid::Uuid::parse_str(s) {
+        return u;
+    }
+    uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_OID, s.as_bytes())
 }

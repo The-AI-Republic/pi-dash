@@ -16,6 +16,8 @@ pub struct StateHandle {
     pub rx_status: watch::Receiver<RunnerStatus>,
     pub tx_in_flight: watch::Sender<Option<Uuid>>,
     pub rx_in_flight: watch::Receiver<Option<Uuid>>,
+    pub tx_heartbeat_secs: watch::Sender<u64>,
+    pub rx_heartbeat_secs: watch::Receiver<u64>,
     reconnect: Arc<tokio::sync::Notify>,
     shutdown: Arc<tokio::sync::Notify>,
 }
@@ -37,6 +39,7 @@ impl StateHandle {
         let (tx_tick, rx_tick) = watch::channel(0u64);
         let (tx_status, rx_status) = watch::channel(RunnerStatus::Idle);
         let (tx_in_flight, rx_in_flight) = watch::channel(None);
+        let (tx_heartbeat_secs, rx_heartbeat_secs) = watch::channel(25u64);
         let name = cfg.runner.name.clone();
         let cloud_url = cfg.runner.cloud_url.clone();
         Self {
@@ -57,6 +60,8 @@ impl StateHandle {
             rx_status,
             tx_in_flight,
             rx_in_flight,
+            tx_heartbeat_secs,
+            rx_heartbeat_secs,
             reconnect: Arc::new(tokio::sync::Notify::new()),
             shutdown: Arc::new(tokio::sync::Notify::new()),
         }

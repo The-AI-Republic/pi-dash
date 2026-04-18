@@ -9,6 +9,8 @@ pub enum ResolveError {
     NonEmptyNonRepo(PathBuf),
     #[error("assignment did not include repo_url and working_dir has no git repo")]
     MissingRepoUrl,
+    #[error("repo_url has an unsupported scheme: {0:?}")]
+    UnsupportedScheme(String),
     #[error("git clone failed: {0}")]
     Clone(#[source] anyhow::Error),
     #[error("io error: {0}")]
@@ -35,10 +37,31 @@ pub async fn resolve(
         return Err(ResolveError::NonEmptyNonRepo(working_dir.to_path_buf()));
     }
     let url = repo_url.ok_or(ResolveError::MissingRepoUrl)?;
+    if !is_supported_clone_url(url) {
+        return Err(ResolveError::UnsupportedScheme(url.to_string()));
+    }
     git::clone(url, working_dir)
         .await
         .map_err(ResolveError::Clone)?;
     Ok(Resolution::Cloned(working_dir.to_path_buf()))
+}
+
+/// Defense-in-depth: only allow URL forms we expect to receive from the cloud.
+/// `git clone --` already prevents flag-injection, but rejecting odd shapes
+/// (newlines, leading dashes, ext::, file://) keeps the surface small.
+fn is_supported_clone_url(url: &str) -> bool {
+    if url.is_empty() || url.starts_with('-') {
+        return false;
+    }
+    if url.chars().any(|c| c.is_control()) {
+        return false;
+    }
+    let lower = url.to_ascii_lowercase();
+    lower.starts_with("https://")
+        || lower.starts_with("http://")
+        || lower.starts_with("git@")
+        || lower.starts_with("ssh://")
+        || lower.starts_with("git://")
 }
 
 #[cfg(test)]
@@ -67,5 +90,23 @@ mod tests {
         let tmp = tempdir().unwrap();
         let err = resolve(tmp.path(), None).await.unwrap_err();
         assert!(matches!(err, ResolveError::MissingRepoUrl));
+    }
+
+    #[tokio::test]
+    async fn rejects_flag_style_repo_url() {
+        let tmp = tempdir().unwrap();
+        let err = resolve(tmp.path(), Some("--upload-pack=evil"))
+            .await
+            .unwrap_err();
+        assert!(matches!(err, ResolveError::UnsupportedScheme(_)));
+    }
+
+    #[tokio::test]
+    async fn rejects_repo_url_with_newline() {
+        let tmp = tempdir().unwrap();
+        let err = resolve(tmp.path(), Some("https://x.test/a.git\nrm -rf"))
+            .await
+            .unwrap_err();
+        assert!(matches!(err, ResolveError::UnsupportedScheme(_)));
     }
 }

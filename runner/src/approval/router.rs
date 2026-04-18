@@ -48,7 +48,13 @@ pub struct ApprovalRouter {
 
 struct State {
     pending: HashMap<String, ApprovalRecord>,
+    /// Decisions that arrived before the corresponding `open()`. Drained on
+    /// open. Bounded; oldest entry evicted past the cap so a chatty cloud
+    /// can't grow this without bound.
+    early_decisions: HashMap<String, (ApprovalDecision, DecisionSource, DateTime<Utc>)>,
 }
+
+const EARLY_DECISIONS_CAP: usize = 256;
 
 impl ApprovalRouter {
     pub fn new() -> Self {
@@ -56,6 +62,7 @@ impl ApprovalRouter {
         Self {
             inner: Arc::new(Mutex::new(State {
                 pending: HashMap::new(),
+                early_decisions: HashMap::new(),
             })),
             updated: Arc::new(Notify::new()),
             events: tx,
@@ -66,13 +73,37 @@ impl ApprovalRouter {
         self.events.subscribe()
     }
 
+    /// Open an approval. If a `Decide` for this approval already arrived
+    /// (out-of-order from the cloud), resolve it inline and broadcast the
+    /// resolved record so a waiter sees it.
     pub async fn open(&self, rec: ApprovalRecord) {
-        {
+        let resolved_now = {
             let mut s = self.inner.lock().await;
-            s.pending.insert(rec.approval_id.clone(), rec.clone());
+            if let Some((decision, source, decided_at)) = s.early_decisions.remove(&rec.approval_id)
+            {
+                Some(ApprovalRecord {
+                    status: ApprovalStatus::Resolved {
+                        decision,
+                        source,
+                        decided_at,
+                    },
+                    ..rec.clone()
+                })
+            } else {
+                s.pending.insert(rec.approval_id.clone(), rec.clone());
+                None
+            }
+        };
+        match resolved_now {
+            Some(resolved) => {
+                let _ = self.events.send(resolved);
+                self.updated.notify_waiters();
+            }
+            None => {
+                let _ = self.events.send(rec);
+                self.updated.notify_waiters();
+            }
         }
-        let _ = self.events.send(rec);
-        self.updated.notify_waiters();
     }
 
     pub async fn list_pending(&self) -> Vec<ApprovalRecord> {
@@ -87,7 +118,24 @@ impl ApprovalRouter {
         source: DecisionSource,
     ) -> Option<ApprovalRecord> {
         let mut s = self.inner.lock().await;
-        let rec = s.pending.remove(approval_id)?;
+        let Some(rec) = s.pending.remove(approval_id) else {
+            // Decision arrived before open() — buffer it so the eventual
+            // open() can resolve immediately. Without this, a fast cloud
+            // reply would strand the worker.
+            if s.early_decisions.len() >= EARLY_DECISIONS_CAP {
+                if let Some(oldest) = s
+                    .early_decisions
+                    .iter()
+                    .min_by_key(|(_, (_, _, ts))| *ts)
+                    .map(|(k, _)| k.clone())
+                {
+                    s.early_decisions.remove(&oldest);
+                }
+            }
+            s.early_decisions
+                .insert(approval_id.to_string(), (decision, source, Utc::now()));
+            return None;
+        };
         let resolved = ApprovalRecord {
             status: ApprovalStatus::Resolved {
                 decision,
@@ -153,5 +201,26 @@ mod tests {
             .await;
         assert!(a.is_some());
         assert!(b.is_none());
+    }
+
+    #[tokio::test]
+    async fn decide_before_open_is_applied_on_open() {
+        let r = ApprovalRouter::new();
+        let mut rx = r.subscribe();
+        // Decision lands first (cloud raced ahead of the codex notification).
+        let pre = r
+            .decide("a1", ApprovalDecision::Accept, DecisionSource::Cloud)
+            .await;
+        assert!(pre.is_none());
+        // The opening side now subscribes and opens — should observe a
+        // Resolved record immediately, not a Pending one.
+        r.open(rec()).await;
+        let got = rx.recv().await.unwrap();
+        match got.status {
+            ApprovalStatus::Resolved { decision, .. } => {
+                assert_eq!(decision, ApprovalDecision::Accept);
+            }
+            _ => panic!("expected Resolved, got {:?}", got.status),
+        }
     }
 }

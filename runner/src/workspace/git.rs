@@ -11,8 +11,12 @@ pub async fn clone(url: &str, target: &Path) -> Result<()> {
             .await
             .with_context(|| format!("creating parent dir {parent:?}"))?;
     }
+    // `--` separator is required: a hostile `url` like `--upload-pack=...` would
+    // otherwise be interpreted as a flag and execute arbitrary commands.
     let out = Command::new("git")
-        .args(["clone", url])
+        .arg("clone")
+        .arg("--")
+        .arg(url)
         .arg(target)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())

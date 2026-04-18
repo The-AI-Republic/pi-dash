@@ -44,15 +44,19 @@ impl RunsIndex {
 
     pub fn upsert(&mut self, s: RunSummary) {
         self.runs.insert(s.run_id, s);
-        // Bound at 500 entries; keep the newest.
-        if self.runs.len() > 500 {
-            let oldest: Vec<_> = self
+        // Bound at 500 entries; evict the oldest by `started_at`. The
+        // BTreeMap is keyed by random Uuid, so taking from its iterator
+        // would evict by Uuid value, not by age.
+        const CAP: usize = 500;
+        if self.runs.len() > CAP {
+            let to_drop = self.runs.len() - CAP;
+            let mut by_age: Vec<(Uuid, DateTime<Utc>)> = self
                 .runs
                 .iter()
-                .take(self.runs.len() - 500)
-                .map(|(k, _)| *k)
+                .map(|(k, v)| (*k, v.started_at))
                 .collect();
-            for k in oldest {
+            by_age.sort_by_key(|(_, ts)| *ts);
+            for (k, _) in by_age.into_iter().take(to_drop) {
                 self.runs.remove(&k);
             }
         }
@@ -63,5 +67,43 @@ impl RunsIndex {
         v.sort_by(|a, b| b.started_at.cmp(&a.started_at));
         v.truncate(n);
         v
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::TimeZone;
+
+    fn s(uuid_seed: u64, mins: i64) -> RunSummary {
+        let mut bytes = [0u8; 16];
+        bytes[..8].copy_from_slice(&uuid_seed.to_le_bytes());
+        RunSummary {
+            run_id: Uuid::from_bytes(bytes),
+            work_item_id: None,
+            status: "completed".into(),
+            started_at: Utc.timestamp_opt(1_700_000_000 + mins * 60, 0).unwrap(),
+            ended_at: None,
+            title: None,
+        }
+    }
+
+    #[test]
+    fn upsert_evicts_oldest_by_started_at_not_by_uuid() {
+        let mut idx = RunsIndex::default();
+        // Construct: i=0 is the OLDEST entry by time, but its Uuid sorts
+        // *highest*. A buggy "evict by BTreeMap iteration order" would keep
+        // the oldest entries instead of the newest.
+        for i in 0..600u64 {
+            let uuid_seed = u64::MAX - i;
+            idx.upsert(s(uuid_seed, i as i64));
+        }
+        assert_eq!(idx.runs.len(), 500);
+        // The first 100 inserts (i=0..100) are the oldest, should be evicted.
+        let oldest_kept = idx.runs.values().map(|r| r.started_at).min().unwrap();
+        assert!(
+            oldest_kept.timestamp() >= 1_700_000_000 + 100 * 60,
+            "oldest 100 entries should have been evicted; got {oldest_kept}",
+        );
     }
 }

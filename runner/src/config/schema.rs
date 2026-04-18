@@ -50,13 +50,16 @@ pub struct ApprovalPolicySection {
 
 impl Default for ApprovalPolicySection {
     fn default() -> Self {
+        // `auto_approve_readonly_shell` defaults OFF: the heuristic accepts
+        // any command whose first token is in the readonly list, which
+        // includes things like `cat ~/.ssh/id_rsa` and `find / -perm -4000`.
+        // Users can opt in once they've narrowed the allowlist.
         Self {
-            auto_approve_readonly_shell: true,
+            auto_approve_readonly_shell: false,
             auto_approve_workspace_writes: false,
             auto_approve_network: false,
             allowlist_commands: vec![
                 "ls".into(),
-                "cat".into(),
                 "pwd".into(),
                 "git status".into(),
                 "git diff".into(),
