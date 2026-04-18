@@ -169,10 +169,11 @@ def can_mutate_states(user, slug, project_id):
     if membership is None:
         return False
 
-    if membership["role"] == ROLE.ADMIN.value:
+    role = membership["role"]
+    if role == ROLE.ADMIN.value:
         return True
 
-    if membership["project__members_can_edit_states"]:
+    if role == ROLE.MEMBER.value and membership["project__members_can_edit_states"]:
         return True
 
     return WorkspaceMember.objects.filter(
