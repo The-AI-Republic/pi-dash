@@ -16,7 +16,6 @@ import hmac
 import secrets
 from dataclasses import dataclass
 from datetime import timedelta
-from typing import Iterable, Optional
 
 from django.conf import settings
 from django.utils import timezone
@@ -72,12 +71,3 @@ def mint_runner_secret() -> MintedRunnerSecret:
         hashed=hash_token(raw),
         fingerprint=fingerprint(raw),
     )
-
-
-def verify_runner_secret(raw: str, candidates: Iterable[str]) -> Optional[str]:
-    """Return the matching hashed credential or ``None``."""
-    provided = hash_token(raw)
-    for stored in candidates:
-        if hmac.compare_digest(provided, stored):
-            return stored
-    return None

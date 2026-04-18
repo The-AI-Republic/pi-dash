@@ -22,6 +22,7 @@ from apple_pi_dash.runner.serializers import (
 )
 from apple_pi_dash.runner.services import tokens
 from apple_pi_dash.runner.services.matcher import can_register_another
+from apple_pi_dash.runner.services.pubsub import close_runner_session
 
 
 HEARTBEAT_INTERVAL_SECS = 25
@@ -116,6 +117,7 @@ class RunnerDeregisterEndpoint(APIView):
         if runner is None or str(runner.id) != str(runner_id):
             return Response({"error": "forbidden"}, status=status.HTTP_403_FORBIDDEN)
         runner.revoke()
+        close_runner_session(runner.pk)
         return Response({"ok": True})
 
 
@@ -136,12 +138,13 @@ class RunnerRotateEndpoint(APIView):
             return Response({"error": "forbidden"}, status=status.HTTP_403_FORBIDDEN)
         minted = tokens.mint_runner_secret()
         # Update in a single statement so no window has two valid credentials.
-        from apple_pi_dash.runner.models import Runner as RunnerModel
-
-        RunnerModel.objects.filter(pk=runner.pk).update(
+        Runner.objects.filter(pk=runner.pk).update(
             credential_hash=minted.hashed,
             credential_fingerprint=minted.fingerprint,
         )
+        # Any WebSocket authenticated with the old secret is now orphaned —
+        # force-close it so the daemon reconnects with the new credential.
+        close_runner_session(runner.pk)
         return Response(
             {
                 "runner_id": str(runner.id),
@@ -159,7 +162,7 @@ class RegistrationTokenCreateEndpoint(APIView):
 
     def post(self, request):
         workspace_id = request.data.get("workspace")
-        label = request.data.get("label", "")[:128]
+        label = (request.data.get("label") or "")[:128]
         if not workspace_id:
             return Response(
                 {"error": "workspace is required"},

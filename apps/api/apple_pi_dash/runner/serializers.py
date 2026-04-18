@@ -42,7 +42,9 @@ class RegistrationTokenSerializer(serializers.ModelSerializer):
 
 
 class RegistrationRequestSerializer(serializers.Serializer):
-    token = serializers.CharField(min_length=8, max_length=128)
+    # Minted tokens are ``apd_reg_`` (8) + ~32 chars of entropy. Reject
+    # obvious garbage before we spend a DB round-trip on it.
+    token = serializers.CharField(min_length=16, max_length=128)
     runner_name = serializers.CharField(min_length=1, max_length=128)
     os = serializers.CharField(max_length=32)
     arch = serializers.CharField(max_length=32)
@@ -103,4 +105,4 @@ class ApprovalRequestSerializer(serializers.ModelSerializer):
 
 
 class ApprovalDecisionSerializer(serializers.Serializer):
-    decision = serializers.ChoiceField(choices=["accept", "decline", "accept_for_session"])
+    decision = serializers.ChoiceField(choices=["accept", "decline"])

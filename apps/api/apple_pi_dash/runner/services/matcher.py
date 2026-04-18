@@ -26,7 +26,12 @@ HEARTBEAT_GRACE = timedelta(seconds=90)
 
 
 def select_runner_for_run(run: AgentRun) -> Optional[Runner]:
-    """Return a suitable Runner or ``None`` if no machine is currently eligible."""
+    """Return a suitable Runner or ``None`` if no machine is currently eligible.
+
+    Caller must be inside a ``transaction.atomic()`` block — the query takes a
+    row-level lock (``SELECT … FOR UPDATE SKIP LOCKED``) so two concurrent
+    assignments can't pick the same runner.
+    """
     alive_threshold = timezone.now() - HEARTBEAT_GRACE
     busy_states = (
         AgentRunStatus.ASSIGNED,
@@ -35,7 +40,8 @@ def select_runner_for_run(run: AgentRun) -> Optional[Runner]:
         AgentRunStatus.AWAITING_REAUTH,
     )
     return (
-        Runner.objects.filter(
+        Runner.objects.select_for_update(skip_locked=True)
+        .filter(
             owner=run.owner,
             workspace=run.workspace,
             status=RunnerStatus.ONLINE,

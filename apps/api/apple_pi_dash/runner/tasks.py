@@ -40,12 +40,25 @@ def expire_stale_approvals() -> int:
     """
     now = timezone.now()
     expired = 0
-    qs = ApprovalRequest.objects.select_related("agent_run__runner").filter(
-        status=ApprovalStatus.PENDING,
-        expires_at__lt=now,
+    pending_ids = list(
+        ApprovalRequest.objects.filter(
+            status=ApprovalStatus.PENDING, expires_at__lt=now
+        ).values_list("pk", flat=True)
     )
-    for approval in qs.iterator():
+    for approval_id in pending_ids:
+        runner_id = None
+        run_id = None
         with transaction.atomic():
+            # Re-fetch under row lock so a concurrent decide view can't move
+            # this approval to ACCEPTED/DECLINED while we expire it.
+            approval = (
+                ApprovalRequest.objects.select_for_update()
+                .select_related("agent_run")
+                .filter(pk=approval_id, status=ApprovalStatus.PENDING)
+                .first()
+            )
+            if approval is None:
+                continue
             ApprovalRequest.objects.filter(pk=approval.pk).update(
                 status=ApprovalStatus.EXPIRED,
                 decided_at=now,
@@ -59,16 +72,18 @@ def expire_stale_approvals() -> int:
                     status=AgentRunStatus.CANCELLED,
                     ended_at=now,
                 )
-                if run.runner_id:
-                    send_to_runner(
-                        run.runner_id,
-                        {
-                            "v": 1,
-                            "type": "cancel",
-                            "run_id": str(run.id),
-                            "reason": "approval_timeout",
-                        },
-                    )
+                runner_id = run.runner_id
+                run_id = run.id
+        if runner_id:
+            send_to_runner(
+                runner_id,
+                {
+                    "v": 1,
+                    "type": "cancel",
+                    "run_id": str(run_id),
+                    "reason": "approval_timeout",
+                },
+            )
         expired += 1
     if expired:
         logger.info("expired %s stale approval(s)", expired)

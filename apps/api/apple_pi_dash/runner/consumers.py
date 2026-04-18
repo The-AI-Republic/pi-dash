@@ -15,7 +15,6 @@ from __future__ import annotations
 import json
 import logging
 from collections import OrderedDict
-from datetime import timedelta
 from typing import Any, Dict, Optional
 from uuid import UUID
 
@@ -45,21 +44,22 @@ OFFLINE_GRACE_SECS = 60
 
 SEEN_MESSAGE_CACHE_SIZE = 512
 MAX_SEQ_LOOKBACK = 128
+# Upper bound on per-event JSON payload size. A rogue daemon could otherwise
+# fill the DB with arbitrarily large blobs in AgentRunEvent.payload.
+MAX_EVENT_PAYLOAD_BYTES = 64 * 1024
+CLOSE_CODE_ROTATED = 4010
 
 
 class RunnerConsumer(AsyncJsonWebsocketConsumer):
-    runner: Optional[Runner] = None
-    group_name: Optional[str] = None
-    # Per-connection dedupe cache of message_ids we've already applied.
-    # LRU-bounded so a misbehaving runner can't grow us unboundedly.
-    seen_messages: "OrderedDict[str, None]"
-    # Per-run last-seen seq; used to drop duplicates and log gaps.
-    last_seq_per_run: Dict[str, int]
-
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         super().__init__(*args, **kwargs)
-        self.seen_messages = OrderedDict()
-        self.last_seq_per_run = {}
+        self.runner: Optional[Runner] = None
+        self.group_name: Optional[str] = None
+        # Per-connection dedupe cache of message_ids we've already applied.
+        # LRU-bounded so a misbehaving runner can't grow us unboundedly.
+        self.seen_messages: "OrderedDict[str, None]" = OrderedDict()
+        # Per-run last-seen seq; used to drop duplicates and log gaps.
+        self.last_seq_per_run: Dict[str, int] = {}
 
     async def connect(self) -> None:
         auth = self._header("authorization")
@@ -74,15 +74,26 @@ class RunnerConsumer(AsyncJsonWebsocketConsumer):
         if runner.status == RunnerStatus.REVOKED:
             await self.close(code=4403)
             return
-        # Protocol check.
-        proto = self._header("x-runner-protocol")
-        if proto and proto.strip() and int(proto.strip()) != PROTOCOL_VERSION:
-            logger.warning(
-                "runner %s protocol mismatch (server=%s, client=%s)",
-                runner.id,
-                PROTOCOL_VERSION,
-                proto,
-            )
+        # Protocol check — log on mismatch, but tolerate garbage headers so a
+        # malformed ``X-Runner-Protocol`` doesn't kill the connection.
+        proto_raw = (self._header("x-runner-protocol") or "").strip()
+        if proto_raw:
+            try:
+                proto_int = int(proto_raw)
+            except ValueError:
+                logger.warning(
+                    "runner %s sent non-numeric protocol header %r",
+                    runner.id,
+                    proto_raw,
+                )
+            else:
+                if proto_int != PROTOCOL_VERSION:
+                    logger.warning(
+                        "runner %s protocol mismatch (server=%s, client=%s)",
+                        runner.id,
+                        PROTOCOL_VERSION,
+                        proto_int,
+                    )
         self.runner = runner
         self.group_name = runner_group(runner.id)
         await self.channel_layer.group_add(self.group_name, self.channel_name)
@@ -291,6 +302,13 @@ class RunnerConsumer(AsyncJsonWebsocketConsumer):
         except Exception:
             logger.exception("runner %s send failed", self.runner.id if self.runner else "?")
 
+    async def runner_close(self, event: Dict[str, Any]) -> None:
+        """Force-close this WS (e.g. after credential rotation).
+
+        The daemon is expected to reconnect with the new secret.
+        """
+        await self.close(code=int(event.get("code") or CLOSE_CODE_ROTATED))
+
     # ---- Sync helpers (DB-bound) ----
 
     @staticmethod
@@ -337,11 +355,7 @@ class RunnerConsumer(AsyncJsonWebsocketConsumer):
         run_id = msg.get("run_id")
         if not run_id:
             return
-        updates = {"status": new_status}
-        if new_status == AgentRunStatus.RUNNING and "workspace_state" in msg:
-            # Accept frame carries workspace_state; squirrel it in run_config.
-            pass
-        AgentRun.objects.filter(id=run_id, runner=runner).update(**updates)
+        AgentRun.objects.filter(id=run_id, runner=runner).update(status=new_status)
 
     def _apply_run_started(self, runner: Runner, msg: Dict[str, Any]) -> None:
         run_id = msg.get("run_id")
@@ -361,6 +375,21 @@ class RunnerConsumer(AsyncJsonWebsocketConsumer):
         payload = msg.get("payload") or {}
         if not run_id or not kind:
             return
+        try:
+            encoded = json.dumps(payload, default=str)
+        except (TypeError, ValueError):
+            encoded = ""
+        if len(encoded.encode("utf-8")) > MAX_EVENT_PAYLOAD_BYTES:
+            logger.info(
+                "runner %s sent oversized event payload (run=%s seq=%s); truncating",
+                runner.id,
+                run_id,
+                seq,
+            )
+            payload = {
+                "_truncated": True,
+                "original_size_bytes": len(encoded.encode("utf-8")),
+            }
         AgentRunEvent.objects.update_or_create(
             agent_run_id=run_id,
             seq=seq,

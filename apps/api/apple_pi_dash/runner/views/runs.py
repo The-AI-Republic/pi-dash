@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 # See the LICENSE file for details.
 
+from django.db import transaction
 from django.utils import timezone
 from rest_framework import status
 from rest_framework.permissions import IsAuthenticated
@@ -37,27 +38,30 @@ class AgentRunListEndpoint(APIView):
                 {"error": "prompt and workspace are required"},
                 status=status.HTTP_400_BAD_REQUEST,
             )
-        run = AgentRun.objects.create(
-            owner=request.user,
-            workspace_id=workspace_id,
-            prompt=prompt,
-            run_config=request.data.get("run_config") or {},
-            required_capabilities=request.data.get("required_capabilities") or [],
-            work_item_id=request.data.get("work_item"),
-        )
-        chosen = matcher.select_runner_for_run(run)
-        if chosen is not None:
-            run.runner = chosen
-            run.status = AgentRunStatus.ASSIGNED
-            run.assigned_at = timezone.now()
-            run.save(update_fields=["runner", "status", "assigned_at"])
-            send_to_runner(
-                chosen.id,
-                {
+        chosen_id = None
+        with transaction.atomic():
+            run = AgentRun.objects.create(
+                owner=request.user,
+                workspace_id=workspace_id,
+                prompt=prompt,
+                run_config=request.data.get("run_config") or {},
+                required_capabilities=request.data.get("required_capabilities") or [],
+                work_item_id=request.data.get("work_item"),
+            )
+            chosen = matcher.select_runner_for_run(run)
+            if chosen is not None:
+                run.runner = chosen
+                run.status = AgentRunStatus.ASSIGNED
+                run.assigned_at = timezone.now()
+                run.save(update_fields=["runner", "status", "assigned_at"])
+                chosen_id = chosen.id
+                assign_msg = {
                     "v": 1,
                     "type": "assign",
                     "run_id": str(run.id),
-                    "work_item_id": str(run.work_item_id) if run.work_item_id else None,
+                    "work_item_id": (
+                        str(run.work_item_id) if run.work_item_id else None
+                    ),
                     "prompt": run.prompt,
                     "repo_url": run.run_config.get("repo_url"),
                     "repo_ref": run.run_config.get("repo_ref"),
@@ -66,8 +70,11 @@ class AgentRunListEndpoint(APIView):
                         "approval_policy_overrides"
                     ),
                     "deadline": None,
-                },
-            )
+                }
+        # Push over the WS only after the row is committed — otherwise the
+        # daemon could ack before the DB is visible to other processes.
+        if chosen_id is not None:
+            send_to_runner(chosen_id, assign_msg)
         return Response(
             AgentRunSerializer(run).data,
             status=status.HTTP_201_CREATED,

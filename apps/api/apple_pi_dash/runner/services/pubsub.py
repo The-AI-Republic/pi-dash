@@ -51,3 +51,19 @@ async def asend_to_runner(runner_id: UUID | str, message: Dict[str, Any]) -> Non
         "type": "runner.send",
         "payload": message,
     })
+
+
+def close_runner_session(runner_id: UUID | str, code: int = 4010) -> None:
+    """Tell any connected consumer for this runner to close its WebSocket.
+
+    Used after credential rotation / revocation to drop sessions still bound
+    to an old secret.
+    """
+    layer = get_channel_layer()
+    if layer is None:
+        logger.warning("channel layer not configured; cannot close %s", runner_id)
+        return
+    async_to_sync(layer.group_send)(runner_group(runner_id), {
+        "type": "runner.close",
+        "code": code,
+    })

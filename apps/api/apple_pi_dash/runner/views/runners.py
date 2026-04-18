@@ -9,6 +9,7 @@ from rest_framework.views import APIView
 
 from apple_pi_dash.runner.models import Runner
 from apple_pi_dash.runner.serializers import RunnerSerializer
+from apple_pi_dash.runner.services.pubsub import close_runner_session, send_to_runner
 
 
 class RunnerListEndpoint(APIView):
@@ -43,10 +44,9 @@ class RunnerRevokeEndpoint(APIView):
             return Response({"error": "not found"}, status=status.HTTP_404_NOT_FOUND)
         runner.revoke()
         # Fan out a revoke WS message — best-effort; runner may already be offline.
-        from apple_pi_dash.runner.services.pubsub import send_to_runner
-
         send_to_runner(
             runner.id,
             {"v": 1, "type": "revoke", "reason": "revoked by user"},
         )
+        close_runner_session(runner.id)
         return Response(RunnerSerializer(runner).data)
