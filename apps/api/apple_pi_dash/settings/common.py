@@ -53,7 +53,9 @@ INSTALLED_APPS = [
     "apple_pi_dash.license",
     "apple_pi_dash.api",
     "apple_pi_dash.authentication",
+    "apple_pi_dash.runner",
     # Third-party things
+    "channels",
     "rest_framework",
     "corsheaders",
     "django_celery_beat",
@@ -201,6 +203,21 @@ else:
         }
     }
 
+# Channels channel layer — used by apple_pi_dash.runner to fan messages to
+# connected runner WebSockets. Falls back to in-memory when Redis is not
+# available (dev/test); single-process only in that mode.
+if REDIS_URL:
+    CHANNEL_LAYERS = {
+        "default": {
+            "BACKEND": "channels_redis.core.RedisChannelLayer",
+            "CONFIG": {"hosts": [REDIS_URL]},
+        }
+    }
+else:
+    CHANNEL_LAYERS = {
+        "default": {"BACKEND": "channels.layers.InMemoryChannelLayer"},
+    }
+
 # Password validations
 AUTH_PASSWORD_VALIDATORS = [
     {"NAME": "django.contrib.auth.password_validation.UserAttributeSimilarityValidator"},
@@ -288,6 +305,8 @@ CELERY_IMPORTS = (
     # issue version tasks
     "apple_pi_dash.bgtasks.issue_version_sync",
     "apple_pi_dash.bgtasks.issue_description_version_sync",
+    # runner lifecycle tasks
+    "apple_pi_dash.runner.tasks",
 )
 
 FILE_SIZE_LIMIT = int(os.environ.get("FILE_SIZE_LIMIT", 5242880))

@@ -10,6 +10,9 @@
     handle /live/* {
         reverse_proxy localhost:3005
     }
+	handle /ws/runner/* {
+        reverse_proxy localhost:3004
+    }
 	handle /api/* {
         reverse_proxy localhost:3004
     }

@@ -18,7 +18,9 @@ urlpatterns = [
     path("api/", include("apple_pi_dash.app.urls")),
     path("api/public/", include("apple_pi_dash.space.urls")),
     path("api/instances/", include("apple_pi_dash.license.urls")),
+    path("api/runners/", include("apple_pi_dash.runner.web_urls")),
     path("api/v1/", include("apple_pi_dash.api.urls")),
+    path("api/v1/runner/", include("apple_pi_dash.runner.urls")),
     path("auth/", include("apple_pi_dash.authentication.urls")),
     path("", include("apple_pi_dash.web.urls")),
 ]
