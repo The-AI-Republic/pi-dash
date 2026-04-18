@@ -1,0 +1,106 @@
+/**
+ * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * SPDX-License-Identifier: AGPL-3.0-only
+ * See the LICENSE file for details.
+ */
+
+import { observer } from "mobx-react";
+// apple pi dash imports
+import { Button } from "@apple-pi-dash/propel/button";
+import type { EProductSubscriptionEnum, IPaymentProduct, TSubscriptionPrice } from "@apple-pi-dash/types";
+import { Loader } from "@apple-pi-dash/ui";
+// local imports
+import { DiscountInfo } from "./discount-info";
+
+export type TCheckoutParams = {
+  planVariant: EProductSubscriptionEnum;
+  productId: string;
+  priceId: string;
+};
+
+type Props = {
+  applePiDashName: string;
+  planVariant: EProductSubscriptionEnum;
+  isLoading?: boolean;
+  product: IPaymentProduct | undefined;
+  price: TSubscriptionPrice;
+  upgradeCTA?: string;
+  upgradeLoaderType: Omit<EProductSubscriptionEnum, "FREE"> | undefined;
+  renderTrialButton?: (props: { productId: string | undefined; priceId: string | undefined }) => React.ReactNode;
+  handleCheckout: (params: TCheckoutParams) => void;
+  isSelfHosted: boolean;
+  isTrialAllowed: boolean;
+};
+
+export const PlanCheckoutButton = observer(function PlanCheckoutButton(props: Props) {
+  const {
+    applePiDashName,
+    planVariant,
+    isLoading,
+    product,
+    price,
+    upgradeCTA,
+    upgradeLoaderType,
+    renderTrialButton,
+    handleCheckout,
+    isSelfHosted,
+    isTrialAllowed,
+  } = props;
+
+  return (
+    <>
+      <div className="pb-4 text-center">
+        <div className="h-9 text-20 font-semibold">
+          {isLoading ? (
+            <Loader className="flex flex-col items-center justify-center">
+              <Loader.Item height="36px" width="4rem" />
+            </Loader>
+          ) : (
+            <DiscountInfo
+              currency={price.currency}
+              frequency={price.recurring}
+              price={price.price}
+              subscriptionType={planVariant}
+              className="mr-1.5"
+            />
+          )}
+        </div>
+        <div className="text-caption-md-medium text-tertiary">per user per month</div>
+      </div>
+      {isLoading ? (
+        <Loader className="flex flex-col items-center justify-center">
+          <Loader.Item height="38px" width="14rem" />
+        </Loader>
+      ) : (
+        <div className="flex w-full flex-col items-center justify-center space-y-4">
+          <Button
+            variant="primary"
+            size="lg"
+            className="w-56"
+            onClick={() => {
+              if (product && price.id) {
+                handleCheckout({
+                  planVariant,
+                  productId: product.id,
+                  priceId: price.id,
+                });
+              }
+            }}
+            disabled={!!upgradeLoaderType}
+          >
+            {upgradeLoaderType === planVariant ? "Redirecting to Stripe" : (upgradeCTA ?? `Upgrade to ${applePiDashName}`)}
+          </Button>
+          {isTrialAllowed && !isSelfHosted && (
+            <div className="mt-1 h-3">
+              {renderTrialButton &&
+                renderTrialButton({
+                  productId: product?.id,
+                  priceId: price.id,
+                })}
+            </div>
+          )}
+        </div>
+      )}
+    </>
+  );
+});

@@ -1,0 +1,49 @@
+/**
+ * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * SPDX-License-Identifier: AGPL-3.0-only
+ * See the LICENSE file for details.
+ */
+
+import { observer } from "mobx-react";
+// apple pi dash imports
+import { ETabIndices } from "@apple-pi-dash/constants";
+import { useTranslation } from "@apple-pi-dash/i18n";
+import type { TIssue } from "@apple-pi-dash/types";
+import { Input } from "@apple-pi-dash/ui";
+// helpers
+import { getTabIndex } from "@apple-pi-dash/utils";
+// hooks
+import { usePlatformOS } from "@/hooks/use-platform-os";
+
+type TInboxIssueTitle = {
+  data: Partial<TIssue>;
+  handleData: (issueKey: keyof Partial<TIssue>, issueValue: Partial<TIssue>[keyof Partial<TIssue>]) => void;
+  isTitleLengthMoreThan255Character?: boolean;
+};
+
+export const InboxIssueTitle = observer(function InboxIssueTitle(props: TInboxIssueTitle) {
+  const { data, handleData, isTitleLengthMoreThan255Character } = props;
+  // hooks
+  const { isMobile } = usePlatformOS();
+
+  const { getIndex } = getTabIndex(ETabIndices.INTAKE_ISSUE_FORM, isMobile);
+  const { t } = useTranslation();
+  return (
+    <div className="space-y-1">
+      <Input
+        id="name"
+        name="name"
+        type="text"
+        value={data?.name}
+        onChange={(e) => handleData("name", e.target.value)}
+        placeholder={t("title")}
+        className="w-full text-14"
+        tabIndex={getIndex("name")}
+        required
+      />
+      {isTitleLengthMoreThan255Character && (
+        <span className="text-11 text-danger-primary">{t("title_should_be_less_than_255_characters")}</span>
+      )}
+    </div>
+  );
+});

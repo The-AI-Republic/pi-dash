@@ -1,0 +1,100 @@
+/**
+ * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * SPDX-License-Identifier: AGPL-3.0-only
+ * See the LICENSE file for details.
+ */
+
+import { Controller, useFormContext } from "react-hook-form";
+// apple pi dash imports
+import { NETWORK_CHOICES, ETabIndices } from "@apple-pi-dash/constants";
+import { useTranslation } from "@apple-pi-dash/i18n";
+import type { IProject } from "@apple-pi-dash/types";
+import { CustomSelect } from "@apple-pi-dash/ui";
+import { getTabIndex } from "@apple-pi-dash/utils";
+// components
+import { MemberDropdown } from "@/components/dropdowns/member/dropdown";
+import { ProjectNetworkIcon } from "@/components/project/project-network-icon";
+
+type Props = {
+  isMobile?: boolean;
+};
+
+function ProjectAttributes(props: Props) {
+  const { isMobile = false } = props;
+  const { t } = useTranslation();
+  const { control } = useFormContext<IProject>();
+  const { getIndex } = getTabIndex(ETabIndices.PROJECT_CREATE, isMobile);
+  return (
+    <div className="flex flex-wrap items-center gap-2">
+      <Controller
+        name="network"
+        control={control}
+        render={({ field: { onChange, value } }) => {
+          const currentNetwork = NETWORK_CHOICES.find((n) => n.key === value);
+
+          return (
+            <div className="h-7 flex-shrink-0" tabIndex={getIndex("network")}>
+              <CustomSelect
+                value={value}
+                onChange={onChange}
+                label={
+                  <div className="flex h-full items-center gap-1">
+                    {currentNetwork ? (
+                      <>
+                        <ProjectNetworkIcon iconKey={currentNetwork.iconKey} />
+                        {t(currentNetwork.i18n_label)}
+                      </>
+                    ) : (
+                      <span className="text-placeholder">{t("select_network")}</span>
+                    )}
+                  </div>
+                }
+                placement="bottom-start"
+                className="h-full"
+                buttonClassName="h-full"
+                noChevron
+                tabIndex={getIndex("network")}
+              >
+                {NETWORK_CHOICES.map((network) => (
+                  <CustomSelect.Option key={network.key} value={network.key}>
+                    <div className="flex items-start gap-2">
+                      <ProjectNetworkIcon iconKey={network.iconKey} className="h-3.5 w-3.5" />
+                      <div className="-mt-1">
+                        <p>{t(network.i18n_label)}</p>
+                        <p className="text-11 text-placeholder">{t(network.description)}</p>
+                      </div>
+                    </div>
+                  </CustomSelect.Option>
+                ))}
+              </CustomSelect>
+            </div>
+          );
+        }}
+      />
+      <Controller
+        name="project_lead"
+        control={control}
+        render={({ field: { value, onChange } }) => {
+          if (value === undefined || value === null || typeof value === "string")
+            return (
+              <div className="h-7 flex-shrink-0" tabIndex={getIndex("lead")}>
+                <MemberDropdown
+                  value={value ?? null}
+                  onChange={(lead) => onChange(lead === value ? null : lead)}
+                  placeholder={t("lead")}
+                  multiple={false}
+                  buttonVariant="border-with-text"
+                  tabIndex={getIndex("lead")}
+                />
+              </div>
+            );
+          else return <></>;
+        }}
+      />
+    </div>
+  );
+}
+
+export default ProjectAttributes;
+
+export { ProjectAttributes };

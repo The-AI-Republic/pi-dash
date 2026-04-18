@@ -1,0 +1,53 @@
+/**
+ * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * SPDX-License-Identifier: AGPL-3.0-only
+ * See the LICENSE file for details.
+ */
+
+import { observer } from "mobx-react";
+// apple pi dash ui
+import { ModuleIcon } from "@apple-pi-dash/propel/icons";
+import { Tooltip } from "@apple-pi-dash/propel/tooltip";
+// apple pi dash utils
+import { cn } from "@apple-pi-dash/utils";
+// hooks
+import { useModule } from "@/hooks/store/use-module";
+
+type Props = {
+  moduleIds: string[] | undefined;
+  shouldShowBorder?: boolean;
+};
+
+export const IssueBlockModules = observer(function IssueBlockModules({ moduleIds, shouldShowBorder = true }: Props) {
+  const { getModulesByIds } = useModule();
+
+  const modules = getModulesByIds(moduleIds ?? []);
+
+  const modulesString = modules.map((module) => module.name).join(", ");
+
+  return (
+    <div className="relative flex h-full flex-wrap items-center gap-1">
+      <Tooltip tooltipHeading="Modules" tooltipContent={modulesString}>
+        {modules.length <= 1 ? (
+          <div
+            key={modules?.[0]?.id}
+            className={cn("flex h-full flex-shrink-0 cursor-default items-center rounded-md px-2.5 py-1 text-11", {
+              "border-[0.5px] border-strong": shouldShowBorder,
+            })}
+          >
+            <div className="flex items-center gap-1.5 text-secondary">
+              <ModuleIcon className="h-3 w-3 flex-shrink-0" />
+              <div className="text-11">{modules?.[0]?.name ?? "No Modules"}</div>
+            </div>
+          </div>
+        ) : (
+          <div className="flex h-full flex-shrink-0 cursor-default items-center rounded-md border border-strong px-2.5 py-1 text-11">
+            <div className="flex items-center gap-1.5 text-secondary">
+              <div className="text-11">{modules.length} Modules</div>
+            </div>
+          </div>
+        )}
+      </Tooltip>
+    </div>
+  );
+});

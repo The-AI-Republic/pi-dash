@@ -1,0 +1,44 @@
+/**
+ * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * SPDX-License-Identifier: AGPL-3.0-only
+ * See the LICENSE file for details.
+ */
+
+import Link from "next/link";
+import { useParams } from "next/navigation";
+// Apple Pi Dash imports
+import type { IWebhook } from "@apple-pi-dash/types";
+import { ToggleSwitch } from "@apple-pi-dash/ui";
+// hooks
+import { useWebhook } from "@/hooks/store/use-webhook";
+
+interface IWebhookListItem {
+  webhook: IWebhook;
+}
+
+export function WebhooksListItem(props: IWebhookListItem) {
+  const { webhook } = props;
+  // router
+  const { workspaceSlug } = useParams();
+  // store hooks
+  const { updateWebhook } = useWebhook();
+
+  const handleToggle = async () => {
+    if (!workspaceSlug || !webhook.id) return;
+    await updateWebhook(workspaceSlug.toString(), webhook.id, { is_active: !webhook.is_active });
+  };
+
+  return (
+    <div className="rounded-lg border border-subtle bg-layer-2 px-4 py-3">
+      <Link
+        href={`/${workspaceSlug}/settings/webhooks/${webhook?.id}`}
+        className="flex items-center justify-between gap-4"
+      >
+        <h5 className="truncate text-body-sm-medium">{webhook.url}</h5>
+        <div className="shrink-0">
+          <ToggleSwitch value={webhook.is_active} onChange={handleToggle} />
+        </div>
+      </Link>
+    </div>
+  );
+}

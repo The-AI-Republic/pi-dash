@@ -1,0 +1,57 @@
+/**
+ * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * SPDX-License-Identifier: AGPL-3.0-only
+ * See the LICENSE file for details.
+ */
+
+import type { LucideIcon } from "lucide-react";
+// apple pi dash ui
+import { useTranslation } from "@apple-pi-dash/i18n";
+import type { ISvgIcons } from "@apple-pi-dash/propel/icons";
+import { Tooltip } from "@apple-pi-dash/propel/tooltip";
+// apple pi dash utils
+import { cn } from "@apple-pi-dash/utils";
+
+type Props = {
+  onChange: (value: number) => void;
+  value: number;
+  accessSpecifiers: {
+    key: number;
+    i18n_label?: string;
+    label?: string;
+    icon: LucideIcon | React.FC<ISvgIcons>;
+  }[];
+  isMobile?: boolean;
+};
+
+// TODO: Remove label once i18n is done
+export function AccessField(props: Props) {
+  const { onChange, value, accessSpecifiers, isMobile = false } = props;
+  const { t } = useTranslation();
+
+  return (
+    <div className="flex flex-shrink-0 items-stretch gap-0.5 rounded-sm border-[1px] border-subtle p-1">
+      {accessSpecifiers.map((access, index) => {
+        const label = access.i18n_label ? t(access.i18n_label) : access.label;
+        return (
+          <Tooltip key={access.key} tooltipContent={label} isMobile={isMobile}>
+            <button
+              type="button"
+              onClick={() => onChange(access.key)}
+              className={cn(
+                "relative flex h-5 w-5 flex-shrink-0 items-center justify-center rounded-xs p-1 transition-all",
+                value === access.key ? "bg-layer-1" : "hover:bg-layer-1"
+              )}
+              tabIndex={2 + index}
+            >
+              <access.icon
+                className={cn("h-3.5 w-3.5 transition-all", value === access.key ? "text-primary" : "text-placeholder")}
+                strokeWidth={2}
+              />
+            </button>
+          </Tooltip>
+        );
+      })}
+    </div>
+  );
+}

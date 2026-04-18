@@ -1,0 +1,7 @@
+{
+  "name": "apple-pi-dash-api",
+  "version": "1.3.0",
+  "private": true,
+  "description": "API server powering Apple Pi Dash's backend",
+  "license": "AGPL-3.0"
+}

@@ -1,0 +1,11 @@
+{
+  "extends": "@apple-pi-dash/typescript-config/node-library.json",
+  "compilerOptions": {
+    "paths": {
+      "@/*": ["./src/*"]
+    },
+    "experimentalDecorators": true
+  },
+  "include": ["src/**/*"],
+  "exclude": ["node_modules", "dist"]
+}

@@ -1,0 +1,33 @@
+/**
+ * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * SPDX-License-Identifier: AGPL-3.0-only
+ * See the LICENSE file for details.
+ */
+
+import type { ReactNode } from "react";
+import { observer } from "mobx-react";
+// apple pi dash imports
+import { Row } from "@apple-pi-dash/ui";
+// components
+import { cn } from "@apple-pi-dash/utils";
+import { ExtendedAppHeader } from "@/apple-pi-dash-web/components/common/extended-app-header";
+
+export interface AppHeaderProps {
+  header: ReactNode;
+  mobileHeader?: ReactNode;
+  className?: string;
+  rowClassName?: string;
+}
+
+export const AppHeader = observer(function AppHeader(props: AppHeaderProps) {
+  const { header, mobileHeader, className, rowClassName } = props;
+
+  return (
+    <div className={cn("z-[18]", className)}>
+      <Row className={cn("flex h-11 w-full items-center gap-2 border-b border-subtle bg-surface-1", rowClassName)}>
+        <ExtendedAppHeader header={header} />
+      </Row>
+      {mobileHeader && mobileHeader}
+    </div>
+  );
+});

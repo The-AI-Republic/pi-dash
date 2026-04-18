@@ -1,0 +1,6 @@
+contact_links:
+  - name: Help and support
+    about: Reach out to us on our Forum or GitHub discussions.
+  - name: Dedicated support
+    url: mailto:support@apple-pi-dash.so
+    about: Write to us if you'd like dedicated support using Apple Pi Dash

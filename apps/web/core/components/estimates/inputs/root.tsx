@@ -1,0 +1,45 @@
+/**
+ * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * SPDX-License-Identifier: AGPL-3.0-only
+ * See the LICENSE file for details.
+ */
+
+// apple pi dash imports
+import type { TEstimateSystemKeys } from "@apple-pi-dash/types";
+import { EEstimateSystem } from "@apple-pi-dash/types";
+// apple pi dash web imports
+import { EstimateTimeInput } from "@/apple-pi-dash-web/components/estimates/inputs";
+// local imports
+import { EstimateNumberInput } from "./number-input";
+import { EstimateTextInput } from "./text-input";
+
+type TEstimateInputRootProps = {
+  estimateType: TEstimateSystemKeys;
+  handleEstimateInputValue: (value: string) => void;
+  value?: string;
+};
+
+export function EstimateInputRoot(props: TEstimateInputRootProps) {
+  const { estimateType, handleEstimateInputValue, value } = props;
+
+  switch (estimateType) {
+    case EEstimateSystem.POINTS:
+      return (
+        <EstimateNumberInput
+          value={value ? parseFloat(value) : undefined}
+          handleEstimateInputValue={handleEstimateInputValue}
+        />
+      );
+    case EEstimateSystem.CATEGORIES:
+      return <EstimateTextInput value={value} handleEstimateInputValue={handleEstimateInputValue} />;
+    case EEstimateSystem.TIME:
+      return (
+        <EstimateTimeInput
+          value={value ? parseInt(value) : undefined}
+          handleEstimateInputValue={handleEstimateInputValue}
+        />
+      );
+    default:
+      return null;
+  }
+}

@@ -1,0 +1,93 @@
+/**
+ * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * SPDX-License-Identifier: AGPL-3.0-only
+ * See the LICENSE file for details.
+ */
+
+import { useTranslation } from "@apple-pi-dash/i18n";
+import { CloseIcon } from "@apple-pi-dash/propel/icons";
+// apple pi dash imports
+import type { EViewAccess, TViewFilterProps } from "@apple-pi-dash/types";
+import { Tag } from "@apple-pi-dash/ui";
+import { replaceUnderscoreIfSnakeCase } from "@apple-pi-dash/utils";
+// components
+import { AppliedDateFilters } from "@/components/common/applied-filters/date";
+import { AppliedMembersFilters } from "@/components/common/applied-filters/members";
+// local imports
+import { AppliedAccessFilters } from "./access";
+
+type Props = {
+  appliedFilters: TViewFilterProps;
+  handleClearAllFilters: () => void;
+  handleRemoveFilter: (key: keyof TViewFilterProps, value: string | EViewAccess | null) => void;
+  alwaysAllowEditing?: boolean;
+};
+
+const MEMBERS_FILTERS = ["owned_by"];
+const DATE_FILTERS = ["created_at"];
+const VIEW_ACCESS_FILTERS = ["view_type"];
+
+export function ViewAppliedFiltersList(props: Props) {
+  const { appliedFilters, handleClearAllFilters, handleRemoveFilter, alwaysAllowEditing } = props;
+  const { t } = useTranslation();
+
+  if (!appliedFilters) return null;
+  if (Object.keys(appliedFilters).length === 0) return null;
+
+  const isEditingAllowed = alwaysAllowEditing;
+
+  return (
+    <div className="flex flex-wrap items-stretch gap-2 bg-surface-1">
+      {Object.entries(appliedFilters).map(([key, value]) => {
+        const filterKey = key as keyof TViewFilterProps;
+
+        if (!value) return;
+        if (Array.isArray(value) && value.length === 0) return;
+
+        return (
+          <Tag key={filterKey}>
+            <span className="text-11 text-tertiary">{replaceUnderscoreIfSnakeCase(filterKey)}</span>
+            {VIEW_ACCESS_FILTERS.includes(filterKey) && (
+              <AppliedAccessFilters
+                editable={isEditingAllowed}
+                handleRemove={(val) => handleRemoveFilter(filterKey, val)}
+                values={Array.isArray(value) ? (value as EViewAccess[]) : []}
+              />
+            )}
+            {DATE_FILTERS.includes(filterKey) && (
+              <AppliedDateFilters
+                editable={isEditingAllowed}
+                handleRemove={(val) => handleRemoveFilter(filterKey, val)}
+                values={Array.isArray(value) ? (value as string[]) : []}
+              />
+            )}
+            {MEMBERS_FILTERS.includes(filterKey) && (
+              <AppliedMembersFilters
+                editable={isEditingAllowed}
+                handleRemove={(val) => handleRemoveFilter(filterKey, val)}
+                values={Array.isArray(value) ? (value as string[]) : []}
+              />
+            )}
+            {isEditingAllowed && (
+              <button
+                type="button"
+                className="grid place-items-center text-tertiary hover:text-secondary"
+                onClick={() => handleRemoveFilter(filterKey, null)}
+              >
+                <CloseIcon height={12} width={12} strokeWidth={2} />
+              </button>
+            )}
+          </Tag>
+        );
+      })}
+      {isEditingAllowed && (
+        <button type="button" onClick={handleClearAllFilters}>
+          <Tag>
+            {t("common.clear_all")}
+            <CloseIcon height={12} width={12} strokeWidth={2} />
+          </Tag>
+        </button>
+      )}
+    </div>
+  );
+}

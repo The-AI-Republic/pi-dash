@@ -1,0 +1,11 @@
+{
+  "extends": "@apple-pi-dash/typescript-config/react-library.json",
+  "include": ["src"],
+  "compilerOptions": {
+    "noImplicitReturns": false,
+    "noUnusedParameters": false,
+    "noUnusedLocals": false,
+    "exactOptionalPropertyTypes": false
+  },
+  "exclude": ["dist", "node_modules"]
+}

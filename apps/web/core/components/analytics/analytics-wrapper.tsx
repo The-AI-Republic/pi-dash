@@ -1,0 +1,29 @@
+/**
+ * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * SPDX-License-Identifier: AGPL-3.0-only
+ * See the LICENSE file for details.
+ */
+
+import React from "react";
+// apple pi dash package imports
+import { useTranslation } from "@apple-pi-dash/i18n";
+import { cn } from "@apple-pi-dash/utils";
+
+type Props = {
+  i18nTitle: string;
+  children: React.ReactNode;
+  className?: string;
+};
+
+function AnalyticsWrapper(props: Props) {
+  const { i18nTitle, children, className } = props;
+  const { t } = useTranslation();
+  return (
+    <div className={cn("px-6 py-4", className)}>
+      <h1 className={"mb-4 text-20 font-bold md:mb-6"}>{t(i18nTitle)}</h1>
+      {children}
+    </div>
+  );
+}
+
+export default AnalyticsWrapper;
