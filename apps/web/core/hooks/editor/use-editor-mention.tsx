@@ -1,20 +1,25 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
 
 import { useCallback } from "react";
-// apple pi dash editor
-import type { TMentionSection, TMentionSuggestion } from "@apple-pi-dash/editor";
-// apple pi dash types
-import type { TSearchEntities, TSearchEntityRequestPayload, TSearchResponse, TUserSearchResponse } from "@apple-pi-dash/types";
-// apple pi dash ui
-import { Avatar } from "@apple-pi-dash/ui";
+// pi dash editor
+import type { TMentionSection, TMentionSuggestion } from "@pi-dash/editor";
+// pi dash types
+import type {
+  TSearchEntities,
+  TSearchEntityRequestPayload,
+  TSearchResponse,
+  TUserSearchResponse,
+} from "@pi-dash/types";
+// pi dash ui
+import { Avatar } from "@pi-dash/ui";
 // helpers
-import { getFileURL } from "@apple-pi-dash/utils";
-// apple pi dash web hooks
-import { useAdditionalEditorMention } from "@/apple-pi-dash-web/hooks/use-additional-editor-mention";
+import { getFileURL } from "@pi-dash/utils";
+// pi dash web hooks
+import { useAdditionalEditorMention } from "@/pi-dash-web/hooks/use-additional-editor-mention";
 
 type TArgs = {
   enableAdvancedMentions?: boolean;

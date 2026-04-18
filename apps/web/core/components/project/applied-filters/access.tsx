@@ -1,14 +1,14 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
 
 import { observer } from "mobx-react";
 // constants
-import { NETWORK_CHOICES } from "@apple-pi-dash/constants";
-import { useTranslation } from "@apple-pi-dash/i18n";
-import { CloseIcon } from "@apple-pi-dash/propel/icons";
+import { NETWORK_CHOICES } from "@pi-dash/constants";
+import { useTranslation } from "@pi-dash/i18n";
+import { CloseIcon } from "@pi-dash/propel/icons";
 
 type Props = {
   handleRemove: (val: string) => void;

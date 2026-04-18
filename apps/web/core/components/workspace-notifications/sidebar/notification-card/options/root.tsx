@@ -1,13 +1,13 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
 
 import type { Dispatch, SetStateAction } from "react";
 import { observer } from "mobx-react";
-// apple pi dash imports
-import { cn } from "@apple-pi-dash/utils";
+// pi dash imports
+import { cn } from "@pi-dash/utils";
 // hooks
 import { useNotification } from "@/hooks/store/notifications/use-notification";
 // local imports

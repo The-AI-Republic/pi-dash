@@ -1,6 +1,6 @@
-# Apple Pi Dash Runner — Implementation Tasks
+# Pi Dash Runner — Implementation Tasks
 
-Purpose: track the implementation of the Apple Pi Dash local runner, cloud integration, and built-in TUI.
+Purpose: track the implementation of the Pi Dash local runner, cloud integration, and built-in TUI.
 
 Companion docs in this directory:
 

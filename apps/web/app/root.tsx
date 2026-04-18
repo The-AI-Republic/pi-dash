@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
@@ -9,9 +9,9 @@ import Script from "next/script";
 import { Links, Meta, Outlet, Scripts } from "react-router";
 import type { LinksFunction } from "react-router";
 import { ThemeProvider, useTheme } from "next-themes";
-// apple pi dash imports
-import { SITE_DESCRIPTION, SITE_NAME } from "@apple-pi-dash/constants";
-import { cn } from "@apple-pi-dash/utils";
+// pi dash imports
+import { SITE_DESCRIPTION, SITE_NAME } from "@pi-dash/constants";
+import { cn } from "@pi-dash/utils";
 // types
 // assets
 import favicon16 from "@/app/assets/favicon/favicon-16x16.png?url";
@@ -33,7 +33,7 @@ import interVariableWoff2 from "@fontsource-variable/inter/files/inter-latin-wgh
 import "@fontsource/material-symbols-rounded";
 import "@fontsource/ibm-plex-mono";
 
-const APP_TITLE = "Apple Pi Dash | Simple, extensible, open-source project management tool.";
+const APP_TITLE = "Pi Dash | Simple, extensible, open-source project management tool.";
 
 export const links: LinksFunction = () => [
   { rel: "icon", type: "image/png", sizes: "32x32", href: favicon32 },
@@ -64,7 +64,7 @@ export function Layout({ children }: { children: ReactNode }) {
         <meta name="viewport" content="width=device-width, initial-scale=1" />
         <meta name="theme-color" content="#fff" />
         {/* Meta info for PWA */}
-        <meta name="application-name" content="Apple Pi Dash" />
+        <meta name="application-name" content="Pi Dash" />
         <meta name="apple-mobile-web-app-capable" content="yes" />
         <meta name="apple-mobile-web-app-status-bar-style" content="default" />
         <meta name="apple-mobile-web-app-title" content={SITE_NAME} />
@@ -102,22 +102,22 @@ export const meta: Route.MetaFunction = () => [
     property: "og:description",
     content: "Open-source project management tool to manage work items, cycles, and product roadmaps easily",
   },
-  { property: "og:url", content: "https://app.apple-pi-dash.so/" },
+  { property: "og:url", content: "https://app.pi-dash.so/" },
   { property: "og:image", content: ogImage },
   { property: "og:image:width", content: "1200" },
   { property: "og:image:height", content: "630" },
-  { property: "og:image:alt", content: "Apple Pi Dash - Modern project management" },
+  { property: "og:image:alt", content: "Pi Dash - Modern project management" },
   {
     name: "keywords",
     content:
       "software development, plan, ship, software, accelerate, code management, release management, project management, work item tracking, agile, scrum, kanban, collaboration",
   },
-  { name: "twitter:site", content: "@applepidashpowers" },
+  { name: "twitter:site", content: "@pidashpowers" },
   { name: "twitter:card", content: "summary_large_image" },
   { name: "twitter:image", content: ogImage },
   { name: "twitter:image:width", content: "1200" },
   { name: "twitter:image:height", content: "630" },
-  { name: "twitter:image:alt", content: "Apple Pi Dash - Modern project management" },
+  { name: "twitter:image:alt", content: "Pi Dash - Modern project management" },
 ];
 
 export default function Root() {

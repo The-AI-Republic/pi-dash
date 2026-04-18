@@ -1,14 +1,14 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
 
 import React, { useState } from "react";
 import { observer } from "mobx-react";
-// apple pi dash imports
-import { DATE_AFTER_FILTER_OPTIONS } from "@apple-pi-dash/constants";
-import { isInDateFormat } from "@apple-pi-dash/utils";
+// pi dash imports
+import { DATE_AFTER_FILTER_OPTIONS } from "@pi-dash/constants";
+import { isInDateFormat } from "@pi-dash/utils";
 // components
 import { DateFilterModal } from "@/components/core/filters/date-filter-modal";
 import { FilterHeader, FilterOption } from "@/components/issues/issue-layouts/filters";

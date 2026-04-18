@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
@@ -8,19 +8,19 @@ import type { ReactNode } from "react";
 import { observer } from "mobx-react";
 import Link from "next/link";
 import { useParams, usePathname } from "next/navigation";
-// apple pi dash imports
-import type { IWorkspaceSidebarNavigationItem } from "@apple-pi-dash/constants";
-import { EUserPermissionsLevel } from "@apple-pi-dash/constants";
-import { useTranslation } from "@apple-pi-dash/i18n";
-import { joinUrlPath } from "@apple-pi-dash/utils";
+// pi dash imports
+import type { IWorkspaceSidebarNavigationItem } from "@pi-dash/constants";
+import { EUserPermissionsLevel } from "@pi-dash/constants";
+import { useTranslation } from "@pi-dash/i18n";
+import { joinUrlPath } from "@pi-dash/utils";
 // components
 import { SidebarNavItem } from "@/components/sidebar/sidebar-navigation";
 // hooks
 import { useAppTheme } from "@/hooks/store/use-app-theme";
 import { useUser, useUserPermissions } from "@/hooks/store/user";
 import { useWorkspaceNavigationPreferences } from "@/hooks/use-navigation-preferences";
-// apple pi dash web imports
-import { getSidebarNavigationItemIcon } from "@/apple-pi-dash-web/components/workspace/sidebar/helper";
+// pi dash web imports
+import { getSidebarNavigationItemIcon } from "@/pi-dash-web/components/workspace/sidebar/helper";
 
 type Props = {
   item: IWorkspaceSidebarNavigationItem;

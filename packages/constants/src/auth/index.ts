@@ -1,10 +1,10 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
 
-import type { TLoginMediums } from "@apple-pi-dash/types";
+import type { TLoginMediums } from "@pi-dash/types";
 import { CORE_LOGIN_MEDIUM_LABELS } from "./core";
 import { EXTENDED_LOGIN_MEDIUM_LABELS } from "./extended";
 

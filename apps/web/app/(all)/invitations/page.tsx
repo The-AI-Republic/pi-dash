@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
@@ -10,15 +10,15 @@ import Link from "next/link";
 
 import useSWR, { mutate } from "swr";
 import { CheckCircle2 } from "lucide-react";
-// apple pi dash imports
-import { ROLE } from "@apple-pi-dash/constants";
-import { useTranslation } from "@apple-pi-dash/i18n";
+// pi dash imports
+import { ROLE } from "@pi-dash/constants";
+import { useTranslation } from "@pi-dash/i18n";
 // types
-import { Button } from "@apple-pi-dash/propel/button";
-import { ApplePiDashLogo } from "@apple-pi-dash/propel/icons";
-import { TOAST_TYPE, setToast } from "@apple-pi-dash/propel/toast";
-import type { IWorkspaceMemberInvitation } from "@apple-pi-dash/types";
-import { truncateText } from "@apple-pi-dash/utils";
+import { Button } from "@pi-dash/propel/button";
+import { PiDashLogo } from "@pi-dash/propel/icons";
+import { TOAST_TYPE, setToast } from "@pi-dash/propel/toast";
+import type { IWorkspaceMemberInvitation } from "@pi-dash/types";
+import { truncateText } from "@pi-dash/utils";
 // assets
 import emptyInvitation from "@/app/assets/empty-state/invitation.svg?url";
 // components
@@ -31,7 +31,7 @@ import { useUser, useUserProfile } from "@/hooks/store/user";
 import { useAppRouter } from "@/hooks/use-app-router";
 // services
 import { AuthenticationWrapper } from "@/lib/wrappers/authentication-wrapper";
-// apple pi dash web services
+// pi dash web services
 import { WorkspaceService } from "@/services/workspace.service";
 
 const workspaceService = new WorkspaceService();
@@ -117,7 +117,7 @@ function UserInvitationsPage() {
             href="/"
             className="absolute top-1/2 left-5 z-10 grid -translate-y-1/2 place-items-center px-3 sm:top-12 sm:left-1/2 sm:-translate-x-[15px] sm:translate-y-0 sm:px-0 sm:py-5 md:left-1/3"
           >
-            <ApplePiDashLogo className="h-9 w-auto text-primary" />
+            <PiDashLogo className="h-9 w-auto text-primary" />
           </Link>
           <div className="absolute top-1/4 right-4 -translate-y-1/2 text-13 text-primary sm:fixed sm:top-12 sm:right-16 sm:translate-y-0 sm:py-5">
             {currentUser?.email}

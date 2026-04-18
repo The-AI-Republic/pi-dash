@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
@@ -10,7 +10,7 @@ import Link from "next/link";
 import useSWR from "swr";
 // icons
 import { History, MessageSquare } from "lucide-react";
-import { calculateTimeAgo, getFileURL } from "@apple-pi-dash/utils";
+import { calculateTimeAgo, getFileURL } from "@pi-dash/utils";
 // hooks
 import { ActivityIcon, ActivityMessage } from "@/components/core/activity";
 import { RichTextEditor } from "@/components/editor/rich-text";
@@ -156,7 +156,7 @@ export const ProfileActivityListPage = observer(function ProfileActivityListPage
                         <div className="min-w-0 flex-1 border-b border-subtle py-4">
                           <div className="text-caption-md-regular break-words text-secondary">
                             {activityItem.field === "archived_at" && activityItem.new_value !== "restore" ? (
-                              <span className="text-gray font-medium">Apple Pi Dash</span>
+                              <span className="text-gray font-medium">Pi Dash</span>
                             ) : activityItem.actor_detail.is_bot ? (
                               <span className="text-gray font-medium">{activityItem.actor_detail.first_name} Bot</span>
                             ) : (

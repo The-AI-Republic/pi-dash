@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
@@ -8,14 +8,14 @@ import { useCallback, useRef, useState } from "react";
 import { debounce } from "lodash-es";
 import { observer } from "mobx-react";
 import { useParams } from "next/navigation";
-// apple pi dash hooks
-import { useOutsideClickDetector } from "@apple-pi-dash/hooks";
+// pi dash hooks
+import { useOutsideClickDetector } from "@pi-dash/hooks";
 // helpers
-import { useTranslation } from "@apple-pi-dash/i18n";
-import { SearchIcon, CloseIcon } from "@apple-pi-dash/propel/icons";
-import { cn } from "@apple-pi-dash/utils";
+import { useTranslation } from "@pi-dash/i18n";
+import { SearchIcon, CloseIcon } from "@pi-dash/propel/icons";
+import { cn } from "@pi-dash/utils";
 import { useSticky } from "@/hooks/use-stickies";
-import { IconButton } from "@apple-pi-dash/propel/icon-button";
+import { IconButton } from "@pi-dash/propel/icon-button";
 
 export const StickySearch = observer(function StickySearch() {
   // router

@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
@@ -14,7 +14,7 @@ import {
   Tooltip,
   Legend,
 } from "recharts";
-import type { TRadarChartProps } from "@apple-pi-dash/types";
+import type { TRadarChartProps } from "@pi-dash/types";
 import { getLegendProps } from "../components/legend";
 import { CustomRadarAxisTick } from "../components/tick";
 import { CustomTooltip } from "../components/tooltip";

@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
@@ -8,11 +8,11 @@ import { useEffect } from "react";
 import { observer } from "mobx-react";
 import { useTheme } from "next-themes";
 import useSWR from "swr";
-// apple pi dash imports
-import { useTranslation } from "@apple-pi-dash/i18n";
-import type { TIssue } from "@apple-pi-dash/types";
-import { EIssueServiceType } from "@apple-pi-dash/types";
-import { Loader } from "@apple-pi-dash/ui";
+// pi dash imports
+import { useTranslation } from "@pi-dash/i18n";
+import type { TIssue } from "@pi-dash/types";
+import { EIssueServiceType } from "@pi-dash/types";
+import { Loader } from "@pi-dash/ui";
 // assets
 import emptyIssueDark from "@/app/assets/empty-state/search/issues-dark.webp?url";
 import emptyIssueLight from "@/app/assets/empty-state/search/issues-light.webp?url";
@@ -26,9 +26,9 @@ import { useProject } from "@/hooks/store/use-project";
 import { useAppRouter } from "@/hooks/use-app-router";
 // layouts
 import { ProjectAuthWrapper } from "@/layouts/auth-layout/project-wrapper";
-// apple pi dash web imports
-import { useWorkItemProperties } from "@/apple-pi-dash-web/hooks/use-issue-properties";
-import { WorkItemDetailRoot } from "@/apple-pi-dash-web/components/browse/workItem-detail";
+// pi dash web imports
+import { useWorkItemProperties } from "@/pi-dash-web/hooks/use-issue-properties";
+import { WorkItemDetailRoot } from "@/pi-dash-web/components/browse/workItem-detail";
 
 import type { Route } from "./+types/page";
 

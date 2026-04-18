@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
@@ -7,13 +7,13 @@
 import { uniq, get, set } from "lodash-es";
 import { action, computed, makeObservable, observable, runInAction } from "mobx";
 import { computedFn } from "mobx-utils";
-// apple pi dash imports
-import type { TIssueRelationIdMap, TIssueRelationMap, TIssueRelation, TIssue } from "@apple-pi-dash/types";
+// pi dash imports
+import type { TIssueRelationIdMap, TIssueRelationMap, TIssueRelation, TIssue } from "@pi-dash/types";
 // components
 import type { TRelationObject } from "@/components/issues/issue-detail-widgets/relations";
-// Apple Pi Dash-web
+// Pi Dash-web
 import { REVERSE_RELATIONS } from "@/constants/gantt-chart";
-import type { TIssueRelationTypes } from "@/apple-pi-dash-web/types";
+import type { TIssueRelationTypes } from "@/pi-dash-web/types";
 // services
 import { IssueRelationService } from "@/services/issue";
 // types

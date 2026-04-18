@@ -1,14 +1,14 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
 
-// apple pi dash imports
-import type { TIssuePriorities } from "@apple-pi-dash/constants";
-import { ISSUE_PRIORITIES } from "@apple-pi-dash/constants";
-import type { TFilterProperty, TSupportedOperators } from "@apple-pi-dash/types";
-import { EQUALITY_OPERATOR, COLLECTION_OPERATOR } from "@apple-pi-dash/types";
+// pi dash imports
+import type { TIssuePriorities } from "@pi-dash/constants";
+import { ISSUE_PRIORITIES } from "@pi-dash/constants";
+import type { TFilterProperty, TSupportedOperators } from "@pi-dash/types";
+import { EQUALITY_OPERATOR, COLLECTION_OPERATOR } from "@pi-dash/types";
 // local imports
 import type { TCreateFilterConfigParams, IFilterIconConfig, TCreateFilterConfig } from "../../../rich-filters";
 import { createFilterConfig, getMultiSelectConfig, createOperatorConfigEntry } from "../../../rich-filters";

@@ -4,9 +4,9 @@
   "display": "standalone",
   "scope": "/",
   "start_url": "/",
-  "name": "Apple Pi Dash | Accelerate software development with peace.",
-  "short_name": "Apple Pi Dash",
-  "description": "Apple Pi Dash accelerated the software development by order of magnitude for agencies and product companies.",
+  "name": "Pi Dash | Accelerate software development with peace.",
+  "short_name": "Pi Dash",
+  "description": "Pi Dash accelerated the software development by order of magnitude for agencies and product companies.",
   "icons": [
     {
       "src": "/icon-192x192.png",

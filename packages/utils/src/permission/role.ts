@@ -1,12 +1,12 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
 
-// apple pi dash imports
-import { EUserPermissions } from "@apple-pi-dash/constants";
-import type { EUserProjectRoles, EUserWorkspaceRoles } from "@apple-pi-dash/types";
+// pi dash imports
+import { EUserPermissions } from "@pi-dash/constants";
+import type { EUserProjectRoles, EUserWorkspaceRoles } from "@pi-dash/types";
 
 export const getUserRole = (role: EUserPermissions | EUserWorkspaceRoles | EUserProjectRoles) => {
   switch (role) {

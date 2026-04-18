@@ -1,5 +1,5 @@
 {
-  "name": "@apple-pi-dash/hooks",
+  "name": "@pi-dash/hooks",
   "version": "1.3.0",
   "private": true,
   "description": "React hooks that are shared across multiple apps internally",
@@ -26,7 +26,7 @@
     "react": "catalog:"
   },
   "devDependencies": {
-    "@apple-pi-dash/typescript-config": "workspace:*",
+    "@pi-dash/typescript-config": "workspace:*",
     "@types/node": "catalog:",
     "@types/react": "catalog:",
     "tsdown": "catalog:",

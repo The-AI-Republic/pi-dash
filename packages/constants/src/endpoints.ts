@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
@@ -23,11 +23,11 @@ export const LIVE_URL = encodeURI(`${LIVE_BASE_URL}${LIVE_BASE_PATH}`);
 export const WEB_BASE_URL = process.env.VITE_WEB_BASE_URL || "";
 export const WEB_BASE_PATH = process.env.VITE_WEB_BASE_PATH || "";
 export const WEB_URL = encodeURI(`${WEB_BASE_URL}${WEB_BASE_PATH}`);
-// apple pi dash website url
-export const WEBSITE_URL = process.env.VITE_WEBSITE_URL || "https://apple-pi-dash.so";
+// pi dash website url
+export const WEBSITE_URL = process.env.VITE_WEBSITE_URL || "https://pi-dash.so";
 // support email
-export const SUPPORT_EMAIL = process.env.VITE_SUPPORT_EMAIL || "support@apple-pi-dash.so";
+export const SUPPORT_EMAIL = process.env.VITE_SUPPORT_EMAIL || "support@pi-dash.so";
 // marketing links
-export const MARKETING_PRICING_PAGE_LINK = "https://apple-pi-dash.so/pricing";
-export const MARKETING_CONTACT_US_PAGE_LINK = "https://apple-pi-dash.so/contact";
-export const MARKETING_APPLE_PI_DASH_ONE_PAGE_LINK = "https://apple-pi-dash.so/one";
+export const MARKETING_PRICING_PAGE_LINK = "https://pi-dash.so/pricing";
+export const MARKETING_CONTACT_US_PAGE_LINK = "https://pi-dash.so/contact";
+export const MARKETING_PI_DASH_ONE_PAGE_LINK = "https://pi-dash.so/one";

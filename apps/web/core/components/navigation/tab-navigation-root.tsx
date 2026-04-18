@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
@@ -7,16 +7,16 @@
 import React, { useEffect } from "react";
 import { observer } from "mobx-react";
 import { useParams, useLocation, Link, useNavigate } from "react-router";
-import { EUserPermissionsLevel, EUserPermissions } from "@apple-pi-dash/constants";
-import { useTranslation } from "@apple-pi-dash/i18n";
-import { TabNavigationList, TabNavigationItem } from "@apple-pi-dash/propel/tab-navigation";
-import type { EUserProjectRoles } from "@apple-pi-dash/types";
+import { EUserPermissionsLevel, EUserPermissions } from "@pi-dash/constants";
+import { useTranslation } from "@pi-dash/i18n";
+import { TabNavigationList, TabNavigationItem } from "@pi-dash/propel/tab-navigation";
+import type { EUserProjectRoles } from "@pi-dash/types";
 // hooks
 import { useIssueDetail } from "@/hooks/store/use-issue-detail";
 import { useProject } from "@/hooks/store/use-project";
 import { useUserPermissions } from "@/hooks/store/user";
-// apple pi dash web imports
-import { useNavigationItems } from "@/apple-pi-dash-web/components/navigations";
+// pi dash web imports
+import { useNavigationItems } from "@/pi-dash-web/components/navigations";
 // local imports
 import { LeaveProjectModal } from "../project/leave-project-modal";
 import { PublishProjectModal } from "../project/publish-project/modal";

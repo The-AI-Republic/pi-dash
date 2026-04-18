@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
@@ -8,9 +8,9 @@ import { useState } from "react";
 import { ChevronDown } from "lucide-react";
 import { observer } from "mobx-react";
 import { useTheme } from "next-themes";
-// apple pi dash imports
-import { useTranslation } from "@apple-pi-dash/i18n";
-import { Button } from "@apple-pi-dash/propel/button";
+// pi dash imports
+import { useTranslation } from "@pi-dash/i18n";
+import { Button } from "@pi-dash/propel/button";
 // assets
 import darkActivityAsset from "@/app/assets/empty-state/profile/activity-dark.webp?url";
 import lightActivityAsset from "@/app/assets/empty-state/profile/activity-light.webp?url";
@@ -30,7 +30,7 @@ export const ActivityProfileSettings = observer(function ActivityProfileSettings
   const [isEmpty, setIsEmpty] = useState(false);
   // theme hook
   const { resolvedTheme } = useTheme();
-  // apple pi dash hooks
+  // pi dash hooks
   const { t } = useTranslation();
   // derived values
   const resolvedPath = resolvedTheme === "light" ? lightActivityAsset : darkActivityAsset;

@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
@@ -21,7 +21,7 @@ export default {
     },
     not_found: {
       title: "Упс! Что-то пошло не так",
-      description: "Мы не можем получить вашу учетную запись Apple Pi Dash в данный момент. Возможно, это ошибка сети.",
+      description: "Мы не можем получить вашу учетную запись Pi Dash в данный момент. Возможно, это ошибка сети.",
       cta_primary: "Попробовать перезагрузить",
     },
     server_error: {

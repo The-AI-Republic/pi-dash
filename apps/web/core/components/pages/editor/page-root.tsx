@@ -1,21 +1,21 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { observer } from "mobx-react";
-// apple pi dash imports
-import type { CollaborationState, EditorRefApi } from "@apple-pi-dash/editor";
-import type { TDocumentPayload, TPage, TPageVersion, TWebhookConnectionQueryParams } from "@apple-pi-dash/types";
+// pi dash imports
+import type { CollaborationState, EditorRefApi } from "@pi-dash/editor";
+import type { TDocumentPayload, TPage, TPageVersion, TWebhookConnectionQueryParams } from "@pi-dash/types";
 // hooks
 import { usePageFallback } from "@/hooks/use-page-fallback";
-// apple pi dash web import
+// pi dash web import
 import type { PageUpdateHandler, TCustomEventHandlers } from "@/hooks/use-realtime-page-events";
-import { PageModals } from "@/apple-pi-dash-web/components/pages";
-import { usePagesPaneExtensions, useExtendedEditorProps } from "@/apple-pi-dash-web/hooks/pages";
-import type { EPageStoreType } from "@/apple-pi-dash-web/hooks/store";
+import { PageModals } from "@/pi-dash-web/components/pages";
+import { usePagesPaneExtensions, useExtendedEditorProps } from "@/pi-dash-web/hooks/pages";
+import type { EPageStoreType } from "@/pi-dash-web/hooks/store";
 // store
 import type { TPageInstance } from "@/store/pages/base-page";
 // local imports

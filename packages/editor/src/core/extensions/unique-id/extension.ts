@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
@@ -11,10 +11,10 @@ import type { Transaction } from "@tiptap/pm/state";
 import { v4 as uuidv4 } from "uuid";
 // constants
 import { CORE_EXTENSIONS, BLOCK_NODE_TYPES } from "@/constants/extension";
-import { ADDITIONAL_BLOCK_NODE_TYPES } from "@/apple-pi-dash-editor/constants/extensions";
+import { ADDITIONAL_BLOCK_NODE_TYPES } from "@/pi-dash-editor/constants/extensions";
 import { createUniqueIDPlugin } from "./plugin";
 import { createIdsForView } from "./utils";
-// apple pi dash imports
+// pi dash imports
 
 const COMBINED_BLOCK_NODE_TYPES = [...BLOCK_NODE_TYPES, ...ADDITIONAL_BLOCK_NODE_TYPES];
 export type UniqueIDGenerationContext = {

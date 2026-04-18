@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
@@ -7,7 +7,7 @@
 import { uniq, update, isEmpty, omit, set } from "lodash-es";
 import { action, computed, makeObservable, observable, runInAction } from "mobx";
 import { computedFn } from "mobx-utils";
-import type { EPastDurationFilters } from "@apple-pi-dash/constants";
+import type { EPastDurationFilters } from "@pi-dash/constants";
 // types
 import type {
   TInboxIssue,
@@ -16,9 +16,9 @@ import type {
   TInboxIssueSorting,
   TInboxIssuePaginationInfo,
   TInboxIssueSortingOrderByQueryParam,
-} from "@apple-pi-dash/types";
-import { EInboxIssueCurrentTab, EInboxIssueStatus } from "@apple-pi-dash/types";
-import { getCustomDates } from "@apple-pi-dash/utils";
+} from "@pi-dash/types";
+import { EInboxIssueCurrentTab, EInboxIssueStatus } from "@pi-dash/types";
+import { getCustomDates } from "@pi-dash/utils";
 // helpers
 // services
 import { InboxIssueService } from "@/services/inbox";

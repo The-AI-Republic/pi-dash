@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
@@ -16,9 +16,9 @@ import type {
   TCycleEstimateDistribution,
   TCycleDistribution,
   TCycleEstimateType,
-} from "@apple-pi-dash/types";
-import type { DistributionUpdates } from "@apple-pi-dash/utils";
-import { orderCycles, shouldFilterCycle, getDate, updateDistribution } from "@apple-pi-dash/utils";
+} from "@pi-dash/types";
+import type { DistributionUpdates } from "@pi-dash/utils";
+import { orderCycles, shouldFilterCycle, getDate, updateDistribution } from "@pi-dash/utils";
 // helpers
 // services
 import { CycleService } from "@/services/cycle.service";

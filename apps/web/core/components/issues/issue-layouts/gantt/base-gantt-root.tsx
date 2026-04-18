@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
@@ -7,13 +7,13 @@
 import React, { useCallback, useEffect } from "react";
 import { observer } from "mobx-react";
 import { useParams } from "next/navigation";
-// apple pi dash imports
-import { ALL_ISSUES, EUserPermissions, EUserPermissionsLevel } from "@apple-pi-dash/constants";
-import { useTranslation } from "@apple-pi-dash/i18n";
-import { TOAST_TYPE, setToast } from "@apple-pi-dash/propel/toast";
-import type { EIssuesStoreType, IBlockUpdateData, TIssue } from "@apple-pi-dash/types";
-import { EIssueLayoutTypes, GANTT_TIMELINE_TYPE } from "@apple-pi-dash/types";
-import { renderFormattedPayloadDate } from "@apple-pi-dash/utils";
+// pi dash imports
+import { ALL_ISSUES, EUserPermissions, EUserPermissionsLevel } from "@pi-dash/constants";
+import { useTranslation } from "@pi-dash/i18n";
+import { TOAST_TYPE, setToast } from "@pi-dash/propel/toast";
+import type { EIssuesStoreType, IBlockUpdateData, TIssue } from "@pi-dash/types";
+import { EIssueLayoutTypes, GANTT_TIMELINE_TYPE } from "@pi-dash/types";
+import { renderFormattedPayloadDate } from "@pi-dash/utils";
 // components
 import { TimeLineTypeContext } from "@/components/gantt-chart/contexts";
 import { GanttChartRoot } from "@/components/gantt-chart/root";
@@ -24,8 +24,8 @@ import { useUserPermissions } from "@/hooks/store/user";
 import { useIssueStoreType } from "@/hooks/use-issue-layout-store";
 import { useIssuesActions } from "@/hooks/use-issues-actions";
 import { useTimeLineChart } from "@/hooks/use-timeline-chart";
-// apple pi dash web hooks
-import { useBulkOperationStatus } from "@/apple-pi-dash-web/hooks/use-bulk-operation-status";
+// pi dash web hooks
+import { useBulkOperationStatus } from "@/pi-dash-web/hooks/use-bulk-operation-status";
 
 import { IssueLayoutHOC } from "../issue-layout-HOC";
 import { GanttQuickAddIssueButton, QuickAddIssueRoot } from "../quick-add";
@@ -58,7 +58,7 @@ export const BaseGanttRoot = observer(function BaseGanttRoot(props: IBaseGanttRo
   const { allowPermissions } = useUserPermissions();
 
   const appliedDisplayFilters = issuesFilter.issueFilters?.displayFilters;
-  // apple pi dash web hooks
+  // pi dash web hooks
   const isBulkOperationsEnabled = useBulkOperationStatus();
   // derived values
   const targetDate = new Date();

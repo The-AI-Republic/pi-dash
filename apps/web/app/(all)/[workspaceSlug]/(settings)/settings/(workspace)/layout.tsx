@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
@@ -11,9 +11,9 @@ import { Outlet } from "react-router";
 import { NotAuthorizedView } from "@/components/auth-screens/not-authorized-view";
 import { getWorkspaceActivePath, pathnameToAccessKey } from "@/components/settings/helper";
 import { SettingsMobileNav } from "@/components/settings/mobile/nav";
-// apple pi dash imports
-import { WORKSPACE_SETTINGS_ACCESS } from "@apple-pi-dash/constants";
-import type { EUserWorkspaceRoles } from "@apple-pi-dash/types";
+// pi dash imports
+import { WORKSPACE_SETTINGS_ACCESS } from "@pi-dash/constants";
+import type { EUserWorkspaceRoles } from "@pi-dash/types";
 // components
 import { WorkspaceSettingsSidebarRoot } from "@/components/settings/workspace/sidebar";
 // hooks

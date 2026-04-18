@@ -1,20 +1,20 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
 
 import { observer } from "mobx-react";
 
-import { useTranslation } from "@apple-pi-dash/i18n";
-import { LinkIcon, CopyIcon, EditIcon, TrashIcon } from "@apple-pi-dash/propel/icons";
-import { TOAST_TYPE, setToast } from "@apple-pi-dash/propel/toast";
-import { Tooltip } from "@apple-pi-dash/propel/tooltip";
-import type { TIssueServiceType } from "@apple-pi-dash/types";
-import { EIssueServiceType } from "@apple-pi-dash/types";
+import { useTranslation } from "@pi-dash/i18n";
+import { LinkIcon, CopyIcon, EditIcon, TrashIcon } from "@pi-dash/propel/icons";
+import { TOAST_TYPE, setToast } from "@pi-dash/propel/toast";
+import { Tooltip } from "@pi-dash/propel/tooltip";
+import type { TIssueServiceType } from "@pi-dash/types";
+import { EIssueServiceType } from "@pi-dash/types";
 // ui
-import { CustomMenu } from "@apple-pi-dash/ui";
-import { calculateTimeAgo, copyTextToClipboard } from "@apple-pi-dash/utils";
+import { CustomMenu } from "@pi-dash/ui";
+import { calculateTimeAgo, copyTextToClipboard } from "@pi-dash/utils";
 // helpers
 // hooks
 import { useIssueDetail } from "@/hooks/store/use-issue-detail";

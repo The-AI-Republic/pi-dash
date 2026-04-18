@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
@@ -89,7 +89,7 @@ export default {
       already_have_an_account: "已有帳戶？",
       login: "登入",
       create_account: "創建帳戶",
-      new_to_apple_pi_dash: "初次使用Apple Pi Dash？",
+      new_to_pi_dash: "初次使用Pi Dash？",
       back_to_sign_in: "返回登入",
       resend_in: "{seconds}秒後重新發送",
       sign_in_with_unique_code: "使用唯一代碼登入",
@@ -397,7 +397,7 @@ export default {
   full_changelog: "完整更新日誌",
   support: "支援",
   forum: "Forum",
-  powered_by_apple_pi_dash_pages: "由 Apple Pi Dash Pages 提供",
+  powered_by_pi_dash_pages: "由 Pi Dash Pages 提供",
   please_select_at_least_one_invitation: "請至少選擇一個邀請。",
   please_select_at_least_one_invitation_description: "請至少選擇一個邀請加入工作區。",
   we_see_that_someone_has_invited_you_to_join_a_workspace: "我們發現有人邀請您加入工作區",
@@ -558,7 +558,7 @@ export default {
       not_right_now: "現在不要",
       create_project: {
         title: "建立專案",
-        description: "Apple Pi Dash 中的大多數事情都始於一個專案。",
+        description: "Pi Dash 中的大多數事情都始於一個專案。",
         cta: "開始使用",
       },
       invite_team: {
@@ -572,7 +572,7 @@ export default {
         cta: "設定此工作區",
       },
       personalize_account: {
-        title: "讓 Apple Pi Dash 成為您的。",
+        title: "讓 Pi Dash 成為您的。",
         description: "選擇您的圖片、配色及其他個人化設定。",
         cta: "立即個人化",
       },
@@ -605,8 +605,8 @@ export default {
         issues: "工作事項",
       },
     },
-    new_at_apple_pi_dash: {
-      title: "Apple Pi Dash 新功能",
+    new_at_pi_dash: {
+      title: "Pi Dash 新功能",
     },
     quick_tutorial: {
       title: "快速教學",
@@ -1259,7 +1259,7 @@ export default {
   },
   workspace_creation: {
     heading: "建立您的工作區",
-    subheading: "若要開始使用 Apple Pi Dash，您需要建立或加入工作區。",
+    subheading: "若要開始使用 Pi Dash，您需要建立或加入工作區。",
     form: {
       name: {
         label: "為您的工作區命名",
@@ -1313,11 +1313,11 @@ export default {
       general: {
         title: "您的專案、活動和指標概覽",
         description:
-          "歡迎使用 Apple Pi Dash，我們很高興您在這裡。建立您的第一個專案並追蹤您的工作事項，這個頁面將會變成一個協助您進展的空間。管理員也會看到協助他們團隊進展的項目。",
+          "歡迎使用 Pi Dash，我們很高興您在這裡。建立您的第一個專案並追蹤您的工作事項，這個頁面將會變成一個協助您進展的空間。管理員也會看到協助他們團隊進展的項目。",
         primary_button: {
           text: "建立您的第一個專案",
           comic: {
-            title: "在 Apple Pi Dash 中，一切都始於專案",
+            title: "在 Pi Dash 中，一切都始於專案",
             description: "專案可以是產品的藍圖、行銷活動，或是推出新車。",
           },
         },
@@ -1449,7 +1449,7 @@ export default {
         primary_button: {
           text: "開始您的第一個專案",
           comic: {
-            title: "在 Apple Pi Dash 中，一切都始於專案",
+            title: "在 Pi Dash 中，一切都始於專案",
             description: "專案可以是產品的藍圖、行銷活動，或是推出新車。",
           },
         },
@@ -1460,7 +1460,7 @@ export default {
         primary_button: {
           text: "開始您的第一個專案",
           comic: {
-            title: "在 Apple Pi Dash 中，一切都始於專案",
+            title: "在 Pi Dash 中，一切都始於專案",
             description: "專案可以是產品的藍圖、行銷活動，或是推出新車。",
           },
         },
@@ -1557,7 +1557,7 @@ export default {
     label: "工作區設定",
     page_label: "{workspace} - 一般設定",
     key_created: "金鑰已建立",
-    copy_key: "複製並儲存此金鑰到 Apple Pi Dash Pages。關閉後您將無法看到此金鑰。已下載包含金鑰的 CSV 檔案。",
+    copy_key: "複製並儲存此金鑰到 Pi Dash Pages。關閉後您將無法看到此金鑰。已下載包含金鑰的 CSV 檔案。",
     token_copied: "權杖已複製到剪貼簿。",
     settings: {
       general: {
@@ -1705,7 +1705,7 @@ export default {
         generating: "產生中",
         delete: {
           title: "刪除 API 權杖",
-          description: "使用此權杖的任何應用程式將無法再存取 Apple Pi Dash 資料。此操作無法復原。",
+          description: "使用此權杖的任何應用程式將無法再存取 Pi Dash 資料。此操作無法復原。",
           success: {
             title: "成功！",
             message: "API 權杖已成功刪除",
@@ -1720,7 +1720,7 @@ export default {
     empty_state: {
       api_tokens: {
         title: "尚未建立 API 權杖",
-        description: "Apple Pi Dash API 可用於將您在 Apple Pi Dash 中的資料與任何外部系統整合。建立權杖以開始使用。",
+        description: "Pi Dash API 可用於將您在 Pi Dash 中的資料與任何外部系統整合。建立權杖以開始使用。",
       },
       webhooks: {
         title: "尚未新增 Webhook",
@@ -1782,7 +1782,7 @@ export default {
     empty_state: {
       activity: {
         title: "尚無活動",
-        description: "開始建立新工作事項！為其新增詳細資訊和屬性。探索更多 Apple Pi Dash 功能以檢視您的活動。",
+        description: "開始建立新工作事項！為其新增詳細資訊和屬性。探索更多 Pi Dash 功能以檢視您的活動。",
       },
       assigned: {
         title: "沒有指派給您的工作事項",
@@ -1934,12 +1934,12 @@ export default {
       label: "自動化",
       "auto-archive": {
         title: "自動封存已關閉的工作項目",
-        description: "Apple Pi Dash將自動封存已完成或已取消的工作項目。",
+        description: "Pi Dash將自動封存已完成或已取消的工作項目。",
         duration: "自動封存已關閉的工作項目",
       },
       "auto-close": {
         title: "自動關閉工作項目",
-        description: "Apple Pi Dash將自動關閉未完成或未取消的工作項目。",
+        description: "Pi Dash將自動關閉未完成或未取消的工作項目。",
         duration: "自動關閉非活動工作項目",
         auto_close_status: "自動關閉狀態",
       },
@@ -2128,9 +2128,9 @@ export default {
         primary_button: {
           text: "建立您的第一個工作事項",
           comic: {
-            title: "工作事項是 Apple Pi Dash 中的基本單位。",
+            title: "工作事項是 Pi Dash 中的基本單位。",
             description:
-              "重新設計 Apple Pi Dash 使用者介面、重塑公司品牌或推出新的燃料噴射系統都是可能有子工作事項的工作事項範例。",
+              "重新設計 Pi Dash 使用者介面、重塑公司品牌或推出新的燃料噴射系統都是可能有子工作事項的工作事項範例。",
           },
         },
       },
@@ -2230,9 +2230,9 @@ export default {
   project_page: {
     empty_state: {
       general: {
-        title: "撰寫筆記、文件或完整的知識庫。讓 Galileo（Apple Pi Dash 的 AI 助手）協助您開始",
+        title: "撰寫筆記、文件或完整的知識庫。讓 Galileo（Pi Dash 的 AI 助手）協助您開始",
         description:
-          "頁面是 Apple Pi Dash 中的思考筆記空間。記下會議筆記，輕鬆格式化，嵌入工作事項，使用元件庫排版，並將它們全部保留在專案的上下文中。若要快速完成任何文件，可以使用快速鍵或按鈕來呼叫 Apple Pi Dash 的 AI Galileo。",
+          "頁面是 Pi Dash 中的思考筆記空間。記下會議筆記，輕鬆格式化，嵌入工作事項，使用元件庫排版，並將它們全部保留在專案的上下文中。若要快速完成任何文件，可以使用快速鍵或按鈕來呼叫 Pi Dash 的 AI Galileo。",
         primary_button: {
           text: "建立您的第一個頁面",
         },
@@ -2601,8 +2601,8 @@ export default {
     edited_by: "編輯者",
   },
   self_hosted_maintenance_message: {
-    apple_pi_dash_didnt_start_up_this_could_be_because_one_or_more_apple_pi_dash_services_failed_to_start:
-      "Apple Pi Dash 未能啟動。這可能是因為一個或多個 Apple Pi Dash 服務啟動失敗。",
+    pi_dash_didnt_start_up_this_could_be_because_one_or_more_pi_dash_services_failed_to_start:
+      "Pi Dash 未能啟動。這可能是因為一個或多個 Pi Dash 服務啟動失敗。",
     choose_view_logs_from_setup_sh_and_docker_logs_to_be_sure: "從 setup.sh 和 Docker 日誌中選擇 View Logs 來確認。",
   },
   page_navigation_pane: {

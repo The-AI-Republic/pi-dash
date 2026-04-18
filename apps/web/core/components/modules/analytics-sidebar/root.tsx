@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
@@ -10,9 +10,9 @@ import { useParams } from "next/navigation";
 import { Controller, useForm } from "react-hook-form";
 import { Info, SquareUser } from "lucide-react";
 import { Disclosure, Transition } from "@headlessui/react";
-import { MODULE_STATUS, EUserPermissions, EUserPermissionsLevel, EEstimateSystem } from "@apple-pi-dash/constants";
-// apple pi dash types
-import { useTranslation } from "@apple-pi-dash/i18n";
+import { MODULE_STATUS, EUserPermissions, EUserPermissionsLevel, EEstimateSystem } from "@pi-dash/constants";
+// pi dash types
+import { useTranslation } from "@pi-dash/i18n";
 import {
   PlusIcon,
   MembersPropertyIcon,
@@ -21,14 +21,14 @@ import {
   StartDatePropertyIcon,
   ChevronDownIcon,
   ChevronRightIcon,
-} from "@apple-pi-dash/propel/icons";
-import { TOAST_TYPE, setToast } from "@apple-pi-dash/propel/toast";
-import type { ILinkDetails, IModule, ModuleLink } from "@apple-pi-dash/types";
-// apple pi dash ui
-import { Loader, CustomSelect, TextArea } from "@apple-pi-dash/ui";
+} from "@pi-dash/propel/icons";
+import { TOAST_TYPE, setToast } from "@pi-dash/propel/toast";
+import type { ILinkDetails, IModule, ModuleLink } from "@pi-dash/types";
+// pi dash ui
+import { Loader, CustomSelect, TextArea } from "@pi-dash/ui";
 // components
 // helpers
-import { getDate, renderFormattedPayloadDate } from "@apple-pi-dash/utils";
+import { getDate, renderFormattedPayloadDate } from "@pi-dash/utils";
 import { DateRangeDropdown } from "@/components/dropdowns/date-range";
 import { MemberDropdown } from "@/components/dropdowns/member/dropdown";
 import { CreateUpdateModuleLinkModal, ModuleAnalyticsProgress, ModuleLinksList } from "@/components/modules";
@@ -36,7 +36,7 @@ import { CreateUpdateModuleLinkModal, ModuleAnalyticsProgress, ModuleLinksList }
 import { useProjectEstimates } from "@/hooks/store/estimates";
 import { useModule } from "@/hooks/store/use-module";
 import { useUserPermissions } from "@/hooks/store/user";
-// apple pi dash web constants
+// pi dash web constants
 const defaultValues: Partial<IModule> = {
   lead_id: "",
   member_ids: [],

@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
@@ -7,17 +7,17 @@
 import type { MutableRefObject } from "react";
 import { Fragment, forwardRef, useRef, useState } from "react";
 import { observer } from "mobx-react";
-import { useTranslation } from "@apple-pi-dash/i18n";
-// apple pi dash types
+import { useTranslation } from "@pi-dash/i18n";
+// pi dash types
 import type {
   IGroupByColumn,
   TIssueGroupByOptions,
   IIssueDisplayProperties,
   TPaginationData,
   TLoader,
-} from "@apple-pi-dash/types";
-// apple pi dash utils
-import { cn } from "@apple-pi-dash/utils";
+} from "@pi-dash/types";
+// pi dash utils
+import { cn } from "@pi-dash/utils";
 // hooks
 import { useIntersectionObserver } from "@/hooks/use-intersection-observer";
 //

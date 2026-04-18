@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
@@ -8,17 +8,17 @@ import React from "react";
 import { observer } from "mobx-react";
 import Link from "next/link";
 
-import { useTranslation } from "@apple-pi-dash/i18n";
-import { EditIcon, CloseIcon } from "@apple-pi-dash/propel/icons";
-// apple pi dash imports
-import { Tooltip } from "@apple-pi-dash/propel/tooltip";
-import { cn } from "@apple-pi-dash/utils";
+import { useTranslation } from "@pi-dash/i18n";
+import { EditIcon, CloseIcon } from "@pi-dash/propel/icons";
+// pi dash imports
+import { Tooltip } from "@pi-dash/propel/tooltip";
+import { cn } from "@pi-dash/utils";
 // hooks
 import { useIssueDetail } from "@/hooks/store/use-issue-detail";
 import { useProject } from "@/hooks/store/use-project";
 import { usePlatformOS } from "@/hooks/use-platform-os";
-// apple pi dash web components
-import { IssueIdentifier } from "@/apple-pi-dash-web/components/issues/issue-details/issue-identifier";
+// pi dash web components
+import { IssueIdentifier } from "@/pi-dash-web/components/issues/issue-details/issue-identifier";
 // local imports
 import { ParentIssuesListModal } from "../parent-issues-list-modal";
 

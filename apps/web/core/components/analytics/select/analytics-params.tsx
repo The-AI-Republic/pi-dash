@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
@@ -9,13 +9,13 @@ import { observer } from "mobx-react";
 import type { Control, UseFormSetValue } from "react-hook-form";
 import { Controller } from "react-hook-form";
 import { SlidersHorizontal } from "lucide-react";
-// apple pi dash package imports
-import { ANALYTICS_X_AXIS_VALUES, ANALYTICS_Y_AXIS_VALUES } from "@apple-pi-dash/constants";
-import { CalendarLayoutIcon } from "@apple-pi-dash/propel/icons";
-import type { IAnalyticsParams } from "@apple-pi-dash/types";
-import { ChartYAxisMetric } from "@apple-pi-dash/types";
-import { cn } from "@apple-pi-dash/utils";
-// apple pi dash web components
+// pi dash package imports
+import { ANALYTICS_X_AXIS_VALUES, ANALYTICS_Y_AXIS_VALUES } from "@pi-dash/constants";
+import { CalendarLayoutIcon } from "@pi-dash/propel/icons";
+import type { IAnalyticsParams } from "@pi-dash/types";
+import { ChartYAxisMetric } from "@pi-dash/types";
+import { cn } from "@pi-dash/utils";
+// pi dash web components
 import { SelectXAxis } from "./select-x-axis";
 import { SelectYAxis } from "./select-y-axis";
 

@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
@@ -7,8 +7,8 @@
 import { cloneDeep, set } from "lodash-es";
 import { action, makeObservable, observable, runInAction } from "mobx";
 // types
-import type { IUserTheme, TUserProfile } from "@apple-pi-dash/types";
-import { EStartOfTheWeek } from "@apple-pi-dash/types";
+import type { IUserTheme, TUserProfile } from "@pi-dash/types";
+import { EStartOfTheWeek } from "@pi-dash/types";
 // services
 import { UserService } from "@/services/user.service";
 // store

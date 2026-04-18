@@ -1,14 +1,14 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
 
 import { observer } from "mobx-react";
-// apple pi dash imports
-import { Button } from "@apple-pi-dash/propel/button";
-import type { EProductSubscriptionEnum, IPaymentProduct, TSubscriptionPrice } from "@apple-pi-dash/types";
-import { Loader } from "@apple-pi-dash/ui";
+// pi dash imports
+import { Button } from "@pi-dash/propel/button";
+import type { EProductSubscriptionEnum, IPaymentProduct, TSubscriptionPrice } from "@pi-dash/types";
+import { Loader } from "@pi-dash/ui";
 // local imports
 import { DiscountInfo } from "./discount-info";
 
@@ -19,7 +19,7 @@ export type TCheckoutParams = {
 };
 
 type Props = {
-  applePiDashName: string;
+  piDashName: string;
   planVariant: EProductSubscriptionEnum;
   isLoading?: boolean;
   product: IPaymentProduct | undefined;
@@ -34,7 +34,7 @@ type Props = {
 
 export const PlanCheckoutButton = observer(function PlanCheckoutButton(props: Props) {
   const {
-    applePiDashName,
+    piDashName,
     planVariant,
     isLoading,
     product,
@@ -88,7 +88,7 @@ export const PlanCheckoutButton = observer(function PlanCheckoutButton(props: Pr
             }}
             disabled={!!upgradeLoaderType}
           >
-            {upgradeLoaderType === planVariant ? "Redirecting to Stripe" : (upgradeCTA ?? `Upgrade to ${applePiDashName}`)}
+            {upgradeLoaderType === planVariant ? "Redirecting to Stripe" : (upgradeCTA ?? `Upgrade to ${piDashName}`)}
           </Button>
           {isTrialAllowed && !isSelfHosted && (
             <div className="mt-1 h-3">

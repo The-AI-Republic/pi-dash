@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
@@ -7,10 +7,10 @@
 import { useCallback } from "react";
 import { useTheme } from "next-themes";
 import { Calendar, Earth, Languages, Palette } from "lucide-react";
-// apple pi dash imports
-import { useTranslation } from "@apple-pi-dash/i18n";
-import { setToast, TOAST_TYPE } from "@apple-pi-dash/propel/toast";
-import type { EStartOfTheWeek, TUserProfile } from "@apple-pi-dash/types";
+// pi dash imports
+import { useTranslation } from "@pi-dash/i18n";
+import { setToast, TOAST_TYPE } from "@pi-dash/propel/toast";
+import type { EStartOfTheWeek, TUserProfile } from "@pi-dash/types";
 // components
 import type { TPowerKCommandConfig } from "@/components/power-k/core/types";
 // hooks

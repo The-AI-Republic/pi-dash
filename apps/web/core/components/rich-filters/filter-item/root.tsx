@@ -1,13 +1,13 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
 
 import React from "react";
 import { observer } from "mobx-react";
-// apple pi dash imports
-import type { IFilterInstance } from "@apple-pi-dash/shared-state";
+// pi dash imports
+import type { IFilterInstance } from "@pi-dash/shared-state";
 import type {
   SingleOrArray,
   TExternalFilter,
@@ -15,9 +15,9 @@ import type {
   TFilterValue,
   TFilterConditionNodeForDisplay,
   TAllAvailableOperatorsForDisplay,
-} from "@apple-pi-dash/types";
-import { CustomSearchSelect } from "@apple-pi-dash/ui";
-import { cn, getOperatorForPayload } from "@apple-pi-dash/utils";
+} from "@pi-dash/types";
+import { CustomSearchSelect } from "@pi-dash/ui";
+import { cn, getOperatorForPayload } from "@pi-dash/utils";
 // local imports
 import { FilterValueInput } from "../filter-value-input/root";
 import { COMMON_FILTER_ITEM_BORDER_CLASSNAME } from "../shared";

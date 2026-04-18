@@ -1,27 +1,27 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
 
 import { useCallback, useRef } from "react";
 import { observer } from "mobx-react";
-// apple pi dash imports
-import type { EditorRefApi } from "@apple-pi-dash/editor";
-import { useTranslation } from "@apple-pi-dash/i18n";
-import { Button } from "@apple-pi-dash/propel/button";
-import { CopyIcon, ChevronLeftIcon, ChevronRightIcon } from "@apple-pi-dash/propel/icons";
-import { setToast, TOAST_TYPE } from "@apple-pi-dash/propel/toast";
-import { Tooltip } from "@apple-pi-dash/propel/tooltip";
-import type { TDescriptionVersion } from "@apple-pi-dash/types";
-import { Avatar, EModalPosition, EModalWidth, Loader, ModalCore } from "@apple-pi-dash/ui";
-import { calculateTimeAgo, cn, getFileURL } from "@apple-pi-dash/utils";
+// pi dash imports
+import type { EditorRefApi } from "@pi-dash/editor";
+import { useTranslation } from "@pi-dash/i18n";
+import { Button } from "@pi-dash/propel/button";
+import { CopyIcon, ChevronLeftIcon, ChevronRightIcon } from "@pi-dash/propel/icons";
+import { setToast, TOAST_TYPE } from "@pi-dash/propel/toast";
+import { Tooltip } from "@pi-dash/propel/tooltip";
+import type { TDescriptionVersion } from "@pi-dash/types";
+import { Avatar, EModalPosition, EModalWidth, Loader, ModalCore } from "@pi-dash/ui";
+import { calculateTimeAgo, cn, getFileURL } from "@pi-dash/utils";
 // components
 import { RichTextEditor } from "@/components/editor/rich-text";
 // hooks
 import { useMember } from "@/hooks/store/use-member";
 import { useWorkspace } from "@/hooks/store/use-workspace";
-import { IconButton } from "@apple-pi-dash/propel/icon-button";
+import { IconButton } from "@pi-dash/propel/icon-button";
 
 type Props = {
   activeVersionDescription: string | undefined;

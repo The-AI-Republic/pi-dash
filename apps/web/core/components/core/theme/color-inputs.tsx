@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
@@ -7,9 +7,9 @@
 import { observer } from "mobx-react";
 import type { Control } from "react-hook-form";
 import { Controller } from "react-hook-form";
-// apple pi dash imports
-import type { IUserTheme } from "@apple-pi-dash/types";
-import { InputColorPicker } from "@apple-pi-dash/ui";
+// pi dash imports
+import type { IUserTheme } from "@pi-dash/types";
+import { InputColorPicker } from "@pi-dash/ui";
 
 type Props = {
   control: Control<IUserTheme>;

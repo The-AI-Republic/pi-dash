@@ -2,9 +2,9 @@
 //! `codex app-server` and emits canned JSON-RPC responses; the Bridge drives
 //! it through `initialize → thread/start → turn/start → turn/completed`.
 
-use apple_pi_dash_runner::codex::app_server::AppServer;
-use apple_pi_dash_runner::codex::bridge::{Bridge, BridgeEvent, RunPayload};
-use apple_pi_dash_runner::codex::jsonrpc::Incoming;
+use pi_dash_runner::codex::app_server::AppServer;
+use pi_dash_runner::codex::bridge::{Bridge, BridgeEvent, RunPayload};
+use pi_dash_runner::codex::jsonrpc::Incoming;
 use std::path::PathBuf;
 use std::time::Duration;
 use tokio::process::Command;

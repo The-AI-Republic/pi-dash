@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
@@ -7,13 +7,13 @@
 import { useState } from "react";
 import { observer } from "mobx-react";
 import { MoreHorizontal } from "lucide-react";
-// apple pi dash imports
-import { EUserPermissions, EUserPermissionsLevel } from "@apple-pi-dash/constants";
-import { IconButton } from "@apple-pi-dash/propel/icon-button";
-import { TOAST_TYPE, setToast } from "@apple-pi-dash/propel/toast";
-import type { TContextMenuItem } from "@apple-pi-dash/ui";
-import { ContextMenu, CustomMenu } from "@apple-pi-dash/ui";
-import { copyUrlToClipboard, cn } from "@apple-pi-dash/utils";
+// pi dash imports
+import { EUserPermissions, EUserPermissionsLevel } from "@pi-dash/constants";
+import { IconButton } from "@pi-dash/propel/icon-button";
+import { TOAST_TYPE, setToast } from "@pi-dash/propel/toast";
+import type { TContextMenuItem } from "@pi-dash/ui";
+import { ContextMenu, CustomMenu } from "@pi-dash/ui";
+import { copyUrlToClipboard, cn } from "@pi-dash/utils";
 // components
 import { useModuleMenuItems } from "@/components/common/quick-actions-helper";
 import { ArchiveModuleModal, CreateUpdateModuleModal, DeleteModuleModal } from "@/components/modules";
@@ -82,7 +82,7 @@ export const ModuleQuickActions = observer(function ModuleQuickActions(props: Pr
     }
   };
 
-  // Use unified menu hook from apple-pi-dash-web (resolves to CE or EE)
+  // Use unified menu hook from pi-dash-web (resolves to CE or EE)
   const menuResult = useModuleMenuItems({
     moduleDetails: moduleDetails ?? undefined,
     workspaceSlug,

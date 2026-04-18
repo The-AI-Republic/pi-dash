@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
@@ -7,7 +7,7 @@
 /* eslint-disable no-useless-catch */
 import { set } from "lodash-es";
 import { action, computed, makeObservable, observable, runInAction } from "mobx";
-import type { IUserLite, TNotification, TNotificationData } from "@apple-pi-dash/types";
+import type { IUserLite, TNotification, TNotificationData } from "@pi-dash/types";
 // services
 import workspaceNotificationService from "@/services/workspace-notification.service";
 // store

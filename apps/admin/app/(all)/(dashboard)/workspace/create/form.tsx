@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
@@ -8,15 +8,15 @@ import { useState, useEffect } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { Controller, useForm } from "react-hook-form";
-// apple pi dash imports
-import { WEB_BASE_URL, ORGANIZATION_SIZE, RESTRICTED_URLS } from "@apple-pi-dash/constants";
-import { Button, getButtonStyling } from "@apple-pi-dash/propel/button";
-import { TOAST_TYPE, setToast } from "@apple-pi-dash/propel/toast";
-import { InstanceWorkspaceService } from "@apple-pi-dash/services";
-import type { IWorkspace } from "@apple-pi-dash/types";
-import { validateSlug, validateWorkspaceName } from "@apple-pi-dash/utils";
+// pi dash imports
+import { WEB_BASE_URL, ORGANIZATION_SIZE, RESTRICTED_URLS } from "@pi-dash/constants";
+import { Button, getButtonStyling } from "@pi-dash/propel/button";
+import { TOAST_TYPE, setToast } from "@pi-dash/propel/toast";
+import { InstanceWorkspaceService } from "@pi-dash/services";
+import type { IWorkspace } from "@pi-dash/types";
+import { validateSlug, validateWorkspaceName } from "@pi-dash/utils";
 // components
-import { CustomSelect, Input } from "@apple-pi-dash/ui";
+import { CustomSelect, Input } from "@pi-dash/ui";
 // hooks
 import { useWorkspace } from "@/hooks/store";
 

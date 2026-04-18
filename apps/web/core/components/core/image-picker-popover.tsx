@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
@@ -12,14 +12,14 @@ import type { Control } from "react-hook-form";
 import { Controller } from "react-hook-form";
 import useSWR from "swr";
 import { Popover } from "@headlessui/react";
-// apple pi dash imports
-import { ACCEPTED_COVER_IMAGE_MIME_TYPES_FOR_REACT_DROPZONE, MAX_FILE_SIZE } from "@apple-pi-dash/constants";
-import { useOutsideClickDetector } from "@apple-pi-dash/hooks";
-import { Tabs } from "@apple-pi-dash/propel/tabs";
-import { Button, getButtonStyling } from "@apple-pi-dash/propel/button";
-import { TOAST_TYPE, setToast } from "@apple-pi-dash/propel/toast";
-import { EFileAssetType } from "@apple-pi-dash/types";
-import { Input, Loader } from "@apple-pi-dash/ui";
+// pi dash imports
+import { ACCEPTED_COVER_IMAGE_MIME_TYPES_FOR_REACT_DROPZONE, MAX_FILE_SIZE } from "@pi-dash/constants";
+import { useOutsideClickDetector } from "@pi-dash/hooks";
+import { Tabs } from "@pi-dash/propel/tabs";
+import { Button, getButtonStyling } from "@pi-dash/propel/button";
+import { TOAST_TYPE, setToast } from "@pi-dash/propel/toast";
+import { EFileAssetType } from "@pi-dash/types";
+import { Input, Loader } from "@pi-dash/ui";
 // helpers
 import { STATIC_COVER_IMAGES, getCoverImageDisplayURL } from "@/helpers/cover-image.helper";
 // hooks

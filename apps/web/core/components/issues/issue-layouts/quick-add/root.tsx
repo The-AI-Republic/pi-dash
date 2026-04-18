@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
@@ -10,14 +10,14 @@ import { observer } from "mobx-react";
 import { useParams } from "next/navigation";
 import type { UseFormRegister } from "react-hook-form";
 import { useForm } from "react-hook-form";
-// apple pi dash imports
-import { useTranslation } from "@apple-pi-dash/i18n";
-import { PlusIcon } from "@apple-pi-dash/propel/icons";
-import { setPromiseToast } from "@apple-pi-dash/propel/toast";
-import type { IProject, TIssue, EIssueLayoutTypes } from "@apple-pi-dash/types";
-import { cn, createIssuePayload } from "@apple-pi-dash/utils";
-// apple pi dash web imports
-import { QuickAddIssueFormRoot } from "@/apple-pi-dash-web/components/issues/quick-add";
+// pi dash imports
+import { useTranslation } from "@pi-dash/i18n";
+import { PlusIcon } from "@pi-dash/propel/icons";
+import { setPromiseToast } from "@pi-dash/propel/toast";
+import type { IProject, TIssue, EIssueLayoutTypes } from "@pi-dash/types";
+import { cn, createIssuePayload } from "@pi-dash/utils";
+// pi dash web imports
+import { QuickAddIssueFormRoot } from "@/pi-dash-web/components/issues/quick-add";
 // local imports
 import { CreateIssueToastActionItems } from "../../create-issue-toast-action-items";
 

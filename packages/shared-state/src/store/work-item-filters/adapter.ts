@@ -1,10 +1,10 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
 
-// apple pi dash imports
+// pi dash imports
 import { isEmpty } from "lodash-es";
 import type {
   SingleOrArray,
@@ -16,9 +16,9 @@ import type {
   TWorkItemFilterExpression,
   TWorkItemFilterExpressionData,
   TWorkItemFilterProperty,
-} from "@apple-pi-dash/types";
-import { LOGICAL_OPERATOR, MULTI_VALUE_OPERATORS, WORK_ITEM_FILTER_PROPERTY_KEYS } from "@apple-pi-dash/types";
-import { createConditionNode, createAndGroupNode, isAndGroupNode, isConditionNode } from "@apple-pi-dash/utils";
+} from "@pi-dash/types";
+import { LOGICAL_OPERATOR, MULTI_VALUE_OPERATORS, WORK_ITEM_FILTER_PROPERTY_KEYS } from "@pi-dash/types";
+import { createConditionNode, createAndGroupNode, isAndGroupNode, isConditionNode } from "@pi-dash/utils";
 // local imports
 import { FilterAdapter } from "../rich-filters/adapter";
 

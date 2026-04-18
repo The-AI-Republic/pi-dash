@@ -108,6 +108,6 @@ pub async fn deregister(
 fn http_client() -> Result<reqwest::Client> {
     Ok(reqwest::Client::builder()
         .timeout(Duration::from_secs(30))
-        .user_agent(format!("apple-pi-dash-runner/{}", crate::RUNNER_VERSION))
+        .user_agent(format!("pi-dash-runner/{}", crate::RUNNER_VERSION))
         .build()?)
 }

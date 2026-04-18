@@ -1,11 +1,11 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
 
-// apple pi dash web constants
-import { EEstimateSystem } from "@apple-pi-dash/constants";
+// pi dash web constants
+import { EEstimateSystem } from "@pi-dash/constants";
 
 export const isEstimatePointValuesRepeated = (
   estimatePoints: string[],

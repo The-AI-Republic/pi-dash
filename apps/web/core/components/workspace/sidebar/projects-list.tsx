@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
@@ -11,15 +11,15 @@ import { observer } from "mobx-react";
 import { useParams, usePathname } from "next/navigation";
 import { Ellipsis } from "lucide-react";
 import { Disclosure, Transition } from "@headlessui/react";
-// apple pi dash imports
-import { EUserPermissions, EUserPermissionsLevel, PROJECT_TRACKER_ELEMENTS } from "@apple-pi-dash/constants";
-import { useTranslation } from "@apple-pi-dash/i18n";
-import { PlusIcon, ChevronRightIcon } from "@apple-pi-dash/propel/icons";
-import { IconButton } from "@apple-pi-dash/propel/icon-button";
-import { TOAST_TYPE, setToast } from "@apple-pi-dash/propel/toast";
-import { Tooltip } from "@apple-pi-dash/propel/tooltip";
-import { Loader } from "@apple-pi-dash/ui";
-import { copyUrlToClipboard, cn, orderJoinedProjects } from "@apple-pi-dash/utils";
+// pi dash imports
+import { EUserPermissions, EUserPermissionsLevel, PROJECT_TRACKER_ELEMENTS } from "@pi-dash/constants";
+import { useTranslation } from "@pi-dash/i18n";
+import { PlusIcon, ChevronRightIcon } from "@pi-dash/propel/icons";
+import { IconButton } from "@pi-dash/propel/icon-button";
+import { TOAST_TYPE, setToast } from "@pi-dash/propel/toast";
+import { Tooltip } from "@pi-dash/propel/tooltip";
+import { Loader } from "@pi-dash/ui";
+import { copyUrlToClipboard, cn, orderJoinedProjects } from "@pi-dash/utils";
 // components
 import { CreateProjectModal } from "@/components/project/create-project-modal";
 import { SidebarNavItem } from "@/components/sidebar/sidebar-navigation";
@@ -29,8 +29,8 @@ import { useCommandPalette } from "@/hooks/store/use-command-palette";
 import { useProject } from "@/hooks/store/use-project";
 import { useUserPermissions } from "@/hooks/store/user";
 import { useProjectNavigationPreferences } from "@/hooks/use-navigation-preferences";
-// apple pi dash web imports
-import type { TProject } from "@/apple-pi-dash-web/types";
+// pi dash web imports
+import type { TProject } from "@/pi-dash-web/types";
 // local imports
 import { SidebarProjectsListItem } from "./projects-list-item";
 

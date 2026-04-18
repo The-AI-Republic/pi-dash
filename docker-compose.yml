@@ -46,8 +46,8 @@ services:
     env_file:
       - ./apps/api/.env
     depends_on:
-      - apple-pi-dash-db
-      - apple-pi-dash-redis
+      - pi-dash-db
+      - pi-dash-redis
 
   worker:
     container_name: bgworker
@@ -62,8 +62,8 @@ services:
       - ./apps/api/.env
     depends_on:
       - api
-      - apple-pi-dash-db
-      - apple-pi-dash-redis
+      - pi-dash-db
+      - pi-dash-redis
 
   beat-worker:
     container_name: beatworker
@@ -78,11 +78,11 @@ services:
       - ./apps/api/.env
     depends_on:
       - api
-      - apple-pi-dash-db
-      - apple-pi-dash-redis
+      - pi-dash-db
+      - pi-dash-redis
 
   migrator:
-    container_name: apple-pi-dash-migrator
+    container_name: pi-dash-migrator
     build:
       context: ./apps/api
       dockerfile: Dockerfile.api
@@ -93,11 +93,11 @@ services:
     env_file:
       - ./apps/api/.env
     depends_on:
-      - apple-pi-dash-db
-      - apple-pi-dash-redis
+      - pi-dash-db
+      - pi-dash-redis
 
   live:
-    container_name: apple-pi-dash-live
+    container_name: pi-dash-live
     build:
       context: .
       dockerfile: ./apps/live/Dockerfile.live
@@ -105,8 +105,8 @@ services:
         DOCKER_BUILDKIT: 1
     restart: always
 
-  apple-pi-dash-db:
-    container_name: apple-pi-dash-db
+  pi-dash-db:
+    container_name: pi-dash-db
     image: postgres:15.7-alpine
     restart: always
     command: postgres -c 'max_connections=1000'
@@ -120,15 +120,15 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
       PGDATA: /var/lib/postgresql/data
 
-  apple-pi-dash-redis:
-    container_name: apple-pi-dash-redis
+  pi-dash-redis:
+    container_name: pi-dash-redis
     image: valkey/valkey:7.2.11-alpine
     restart: always
     volumes:
       - redisdata:/data
 
-  apple-pi-dash-mq:
-    container_name: apple-pi-dash-mq
+  pi-dash-mq:
+    container_name: pi-dash-mq
     image: rabbitmq:3.13.6-management-alpine
     restart: always
     env_file:
@@ -140,8 +140,8 @@ services:
     volumes:
       - rabbitmq_data:/var/lib/rabbitmq
 
-  apple-pi-dash-minio:
-    container_name: apple-pi-dash-minio
+  pi-dash-minio:
+    container_name: pi-dash-minio
     image: minio/minio
     restart: always
     command: server /export --console-address ":9090"

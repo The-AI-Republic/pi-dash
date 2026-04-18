@@ -1,13 +1,13 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
 
-// apple pi dash imports
-import type { IFavorite } from "@apple-pi-dash/types";
+// pi dash imports
+import type { IFavorite } from "@pi-dash/types";
 // components
-import { getPageName } from "@apple-pi-dash/utils";
+import { getPageName } from "@pi-dash/utils";
 import {
   generateFavoriteItemLink,
   getFavoriteItemIcon,
@@ -18,9 +18,9 @@ import { useCycle } from "@/hooks/store/use-cycle";
 import { useModule } from "@/hooks/store/use-module";
 import { useProject } from "@/hooks/store/use-project";
 import { useProjectView } from "@/hooks/store/use-project-view";
-// apple pi dash web hooks
-import { EPageStoreType, usePage } from "@/apple-pi-dash-web/hooks/store";
-import { useAdditionalFavoriteItemDetails } from "@/apple-pi-dash-web/hooks/use-additional-favorite-item-details";
+// pi dash web hooks
+import { EPageStoreType, usePage } from "@/pi-dash-web/hooks/store";
+import { useAdditionalFavoriteItemDetails } from "@/pi-dash-web/hooks/use-additional-favorite-item-details";
 
 export const useFavoriteItemDetails = (workspaceSlug: string, favorite: IFavorite) => {
   const {

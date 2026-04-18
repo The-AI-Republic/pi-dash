@@ -1,13 +1,13 @@
 {
-  "name": "Apple Pi Dash",
-  "short_name": "Apple Pi Dash",
-  "description": "Apple Pi Dash helps you plan your issues, cycles, and product modules.",
+  "name": "Pi Dash",
+  "short_name": "Pi Dash",
+  "description": "Pi Dash helps you plan your issues, cycles, and product modules.",
   "start_url": ".",
   "display": "standalone",
   "background_color": "#f9fafb",
   "theme_color": "#3f76ff",
   "icons": [
-    { "src": "/apple-pi-dash-logos/apple-pi-dash-mobile-pwa.png", "sizes": "192x192", "type": "image/png" },
-    { "src": "/apple-pi-dash-logos/apple-pi-dash-mobile-pwa.png", "sizes": "512x512", "type": "image/png" }
+    { "src": "/pi-dash-logos/pi-dash-mobile-pwa.png", "sizes": "192x192", "type": "image/png" },
+    { "src": "/pi-dash-logos/pi-dash-mobile-pwa.png", "sizes": "512x512", "type": "image/png" }
   ]
 }

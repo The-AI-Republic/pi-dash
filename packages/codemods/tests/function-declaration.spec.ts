@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
@@ -295,7 +295,7 @@ describe("function-declaration", () => {
     const result = await applyTransform(
       transformer,
       `
-      import type { TCallbackMentionComponentProps } from "@apple-pi-dash/editor";
+      import type { TCallbackMentionComponentProps } from "@pi-dash/editor";
 
       export const EditorAdditionalMentionsRoot: React.FC<TCallbackMentionComponentProps> = () => null;
       `,
@@ -303,7 +303,7 @@ describe("function-declaration", () => {
     );
 
     expect(result).toMatchInlineSnapshot(`
-      "import type { TCallbackMentionComponentProps } from "@apple-pi-dash/editor";
+      "import type { TCallbackMentionComponentProps } from "@pi-dash/editor";
 
             export function EditorAdditionalMentionsRoot(_props: TCallbackMentionComponentProps) {
                   return null;

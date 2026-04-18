@@ -1,18 +1,18 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
 
 import { useTheme } from "next-themes";
-// apple pi dash imports
-import { useTranslation } from "@apple-pi-dash/i18n";
+// pi dash imports
+import { useTranslation } from "@pi-dash/i18n";
 // assets
 import githubBlackImage from "@/app/assets/logos/github-black.png?url";
 import githubWhiteImage from "@/app/assets/logos/github-white.png?url";
 
 export function StarUsOnGitHubLink() {
-  // apple pi dash hooks
+  // pi dash hooks
   const { t } = useTranslation();
   // hooks
   const { resolvedTheme } = useTheme();
@@ -22,7 +22,7 @@ export function StarUsOnGitHubLink() {
     <a
       aria-label={t("home.star_us_on_github")}
       className="flex flex-shrink-0 items-center gap-1.5 rounded-sm bg-layer-2 px-3 py-1.5"
-      href="https://github.com/makeapplepidash/apple-pi-dash"
+      href="https://github.com/makepidash/pi-dash"
       target="_blank"
       rel="noopener noreferrer"
     >

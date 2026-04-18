@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
@@ -7,12 +7,12 @@
 import { useEffect, useMemo, useState } from "react";
 import { useSearchParams } from "next/navigation";
 import { Eye, EyeOff } from "lucide-react";
-// apple pi dash internal packages
-import type { EAdminAuthErrorCodes, TAdminAuthErrorInfo } from "@apple-pi-dash/constants";
-import { API_BASE_URL } from "@apple-pi-dash/constants";
-import { Button } from "@apple-pi-dash/propel/button";
-import { AuthService } from "@apple-pi-dash/services";
-import { Input, Spinner } from "@apple-pi-dash/ui";
+// pi dash internal packages
+import type { EAdminAuthErrorCodes, TAdminAuthErrorInfo } from "@pi-dash/constants";
+import { API_BASE_URL } from "@pi-dash/constants";
+import { Button } from "@pi-dash/propel/button";
+import { AuthService } from "@pi-dash/services";
+import { Input, Spinner } from "@pi-dash/ui";
 // components
 import { Banner } from "@/components/common/banner";
 // local components
@@ -114,7 +114,7 @@ export function InstanceSignInForm() {
       <div className="mt-10 flex w-full flex-grow flex-col items-center justify-center py-6">
         <div className="relative flex w-full max-w-[22.5rem] flex-col gap-6">
           <FormHeader
-            heading="Manage your Apple Pi Dash instance"
+            heading="Manage your Pi Dash instance"
             subHeading="Configure instance-wide settings to secure your instance"
           />
           <form

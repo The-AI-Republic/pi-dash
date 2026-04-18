@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
@@ -9,14 +9,14 @@ import Link from "next/link";
 import { useParams } from "next/navigation";
 import { Settings, UserPlus } from "lucide-react";
 import { Menu } from "@headlessui/react";
-// apple pi dash imports
-import { EUserPermissions } from "@apple-pi-dash/constants";
-import { useTranslation } from "@apple-pi-dash/i18n";
-import { CheckIcon } from "@apple-pi-dash/propel/icons";
-import type { IWorkspace } from "@apple-pi-dash/types";
-import { cn, getFileURL, getUserRole } from "@apple-pi-dash/utils";
-// apple pi dash web imports
-import { SubscriptionPill } from "@/apple-pi-dash-web/components/common/subscription/subscription-pill";
+// pi dash imports
+import { EUserPermissions } from "@pi-dash/constants";
+import { useTranslation } from "@pi-dash/i18n";
+import { CheckIcon } from "@pi-dash/propel/icons";
+import type { IWorkspace } from "@pi-dash/types";
+import { cn, getFileURL, getUserRole } from "@pi-dash/utils";
+// pi dash web imports
+import { SubscriptionPill } from "@/pi-dash-web/components/common/subscription/subscription-pill";
 
 type TProps = {
   workspace: IWorkspace;

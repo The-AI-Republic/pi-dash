@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
@@ -8,19 +8,19 @@ import { useState } from "react";
 import { observer } from "mobx-react";
 import { MoreHorizontal } from "lucide-react";
 // types
-import { EUserPermissions, EUserPermissionsLevel } from "@apple-pi-dash/constants";
-import { IconButton } from "@apple-pi-dash/propel/icon-button";
-import { TOAST_TYPE, setToast } from "@apple-pi-dash/propel/toast";
-import type { IProjectView } from "@apple-pi-dash/types";
+import { EUserPermissions, EUserPermissionsLevel } from "@pi-dash/constants";
+import { IconButton } from "@pi-dash/propel/icon-button";
+import { TOAST_TYPE, setToast } from "@pi-dash/propel/toast";
+import type { IProjectView } from "@pi-dash/types";
 // ui
-import type { TContextMenuItem } from "@apple-pi-dash/ui";
-import { ContextMenu, CustomMenu } from "@apple-pi-dash/ui";
-import { copyUrlToClipboard, cn } from "@apple-pi-dash/utils";
+import type { TContextMenuItem } from "@pi-dash/ui";
+import { ContextMenu, CustomMenu } from "@pi-dash/ui";
+import { copyUrlToClipboard, cn } from "@pi-dash/utils";
 // helpers
 import { useViewMenuItems } from "@/components/common/quick-actions-helper";
 // hooks
 import { useUser, useUserPermissions } from "@/hooks/store/user";
-import { PublishViewModal, useViewPublish } from "@/apple-pi-dash-web/components/views/publish";
+import { PublishViewModal, useViewPublish } from "@/pi-dash-web/components/views/publish";
 // local imports
 import { DeleteProjectViewModal } from "./delete-view-modal";
 import { CreateUpdateProjectViewModal } from "./modal";

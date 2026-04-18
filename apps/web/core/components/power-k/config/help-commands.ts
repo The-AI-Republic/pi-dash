@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
@@ -31,13 +31,13 @@ export const usePowerKHelpCommands = (): TPowerKCommandConfig[] => {
       closeOnSelect: true,
     },
     {
-      id: "open_apple_pi_dash_documentation",
+      id: "open_pi_dash_documentation",
       type: "action",
       group: "help",
-      i18n_title: "power_k.help_actions.open_apple_pi_dash_documentation",
+      i18n_title: "power_k.help_actions.open_pi_dash_documentation",
       icon: FileText,
       action: () => {
-        window.open("https://docs.apple-pi-dash.so/", "_blank", "noopener,noreferrer");
+        window.open("https://docs.pi-dash.so/", "_blank", "noopener,noreferrer");
       },
       isEnabled: () => true,
       isVisible: () => true,
@@ -50,7 +50,7 @@ export const usePowerKHelpCommands = (): TPowerKCommandConfig[] => {
       i18n_title: "power_k.help_actions.join_forum",
       icon: MessageSquare,
       action: () => {
-        window.open("https://forum.apple-pi-dash.so", "_blank", "noopener,noreferrer");
+        window.open("https://forum.pi-dash.so", "_blank", "noopener,noreferrer");
       },
       isEnabled: () => true,
       isVisible: () => true,
@@ -63,7 +63,7 @@ export const usePowerKHelpCommands = (): TPowerKCommandConfig[] => {
       i18n_title: "power_k.help_actions.report_bug",
       icon: GithubIcon,
       action: () => {
-        window.open("https://github.com/makeapplepidash/apple-pi-dash/issues/new/choose", "_blank", "noopener,noreferrer");
+        window.open("https://github.com/makepidash/pi-dash/issues/new/choose", "_blank", "noopener,noreferrer");
       },
       isEnabled: () => true,
       isVisible: () => true,

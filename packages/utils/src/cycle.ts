@@ -1,13 +1,13 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
 
 import { startOfToday, format } from "date-fns";
 import { isEmpty, orderBy, sortBy, uniqBy } from "lodash-es";
-// apple pi dash imports
-import type { ICycle, TCycleFilters, TProgressSnapshot } from "@apple-pi-dash/types";
+// pi dash imports
+import type { ICycle, TCycleFilters, TProgressSnapshot } from "@pi-dash/types";
 // local imports
 import { findTotalDaysInRange, generateDateArray, getDate } from "./datetime";
 import { satisfiesDateFilter } from "./filter";

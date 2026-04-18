@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
@@ -34,7 +34,7 @@ function SkeletonItem({ height = "auto", width = "auto", className = "" }: ItemP
 
 const Skeleton = Object.assign(SkeletonRoot, { Item: SkeletonItem });
 
-SkeletonRoot.displayName = "apple-pi-dash-ui-skeleton";
-SkeletonItem.displayName = "apple-pi-dash-ui-skeleton-item";
+SkeletonRoot.displayName = "pi-dash-ui-skeleton";
+SkeletonItem.displayName = "pi-dash-ui-skeleton-item";
 
 export { Skeleton, SkeletonRoot, SkeletonItem };

@@ -39,7 +39,7 @@ We use **Turbo** for build system orchestration.
   ```
 - Or from root:
   ```bash
-  pnpm --filter @apple-pi-dash/codemods run test
+  pnpm --filter @pi-dash/codemods run test
   ```
 
 ## Docker

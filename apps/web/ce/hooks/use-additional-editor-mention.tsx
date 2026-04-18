@@ -1,14 +1,14 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
 
 import { useCallback, useMemo } from "react";
-// apple pi dash editor
-import type { TMentionSection } from "@apple-pi-dash/editor";
-// apple pi dash types
-import type { TSearchEntities, TSearchResponse } from "@apple-pi-dash/types";
+// pi dash editor
+import type { TMentionSection } from "@pi-dash/editor";
+// pi dash types
+import type { TSearchEntities, TSearchResponse } from "@pi-dash/types";
 
 export type TUseAdditionalEditorMentionArgs = {
   enableAdvancedMentions: boolean;

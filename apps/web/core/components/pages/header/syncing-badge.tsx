@@ -1,13 +1,13 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
 
 import { useState, useEffect } from "react";
 import { CloudOff, Dot } from "lucide-react";
-import { Tooltip } from "@apple-pi-dash/propel/tooltip";
-import { Badge } from "@apple-pi-dash/propel/badge";
+import { Tooltip } from "@pi-dash/propel/tooltip";
+import { Badge } from "@pi-dash/propel/badge";
 
 type Props = {
   syncStatus: "syncing" | "synced" | "error";

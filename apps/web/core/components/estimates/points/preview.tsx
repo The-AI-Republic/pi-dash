@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
@@ -7,14 +7,14 @@
 import { useEffect, useRef, useState } from "react";
 import { observer } from "mobx-react";
 import { GripVertical } from "lucide-react";
-// apple pi dash imports
-import { EEstimateSystem, estimateCount } from "@apple-pi-dash/constants";
-import { useTranslation } from "@apple-pi-dash/i18n";
-import { EditIcon, TrashIcon } from "@apple-pi-dash/propel/icons";
-import type { TEstimatePointsObject, TEstimateSystemKeys, TEstimateTypeErrorObject } from "@apple-pi-dash/types";
-import { convertMinutesToHoursMinutesString } from "@apple-pi-dash/utils";
-// apple pi dash web imports
-import { EstimatePointDelete } from "@/apple-pi-dash-web/components/estimates";
+// pi dash imports
+import { EEstimateSystem, estimateCount } from "@pi-dash/constants";
+import { useTranslation } from "@pi-dash/i18n";
+import { EditIcon, TrashIcon } from "@pi-dash/propel/icons";
+import type { TEstimatePointsObject, TEstimateSystemKeys, TEstimateTypeErrorObject } from "@pi-dash/types";
+import { convertMinutesToHoursMinutesString } from "@pi-dash/utils";
+// pi dash web imports
+import { EstimatePointDelete } from "@/pi-dash-web/components/estimates";
 // local imports
 import { EstimatePointUpdate } from "./update";
 

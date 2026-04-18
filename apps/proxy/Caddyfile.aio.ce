@@ -1,4 +1,4 @@
-(apple_pi_dash_proxy) {
+(pi_dash_proxy) {
 	request_body {
 		max_size {$FILE_SIZE_LIMIT}
 	}
@@ -45,5 +45,5 @@
 }
 
 {$SITE_ADDRESS} {
-	import apple_pi_dash_proxy
+	import pi_dash_proxy
 }

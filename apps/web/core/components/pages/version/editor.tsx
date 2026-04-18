@@ -1,23 +1,23 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
 
 import { observer } from "mobx-react";
 import { useParams } from "next/navigation";
-// apple pi dash imports
-import type { TDisplayConfig } from "@apple-pi-dash/editor";
-import type { JSONContent, TPageVersion } from "@apple-pi-dash/types";
-import { Loader } from "@apple-pi-dash/ui";
-import { isJSONContentEmpty } from "@apple-pi-dash/utils";
+// pi dash imports
+import type { TDisplayConfig } from "@pi-dash/editor";
+import type { JSONContent, TPageVersion } from "@pi-dash/types";
+import { Loader } from "@pi-dash/ui";
+import { isJSONContentEmpty } from "@pi-dash/utils";
 // components
 import { DocumentEditor } from "@/components/editor/document/editor";
 // hooks
 import { useWorkspace } from "@/hooks/store/use-workspace";
 import { usePageFilters } from "@/hooks/use-page-filters";
-// apple pi dash web hooks
-import type { EPageStoreType } from "@/apple-pi-dash-web/hooks/store";
+// pi dash web hooks
+import type { EPageStoreType } from "@/pi-dash-web/hooks/store";
 
 export type TVersionEditorProps = {
   activeVersion: string | null;

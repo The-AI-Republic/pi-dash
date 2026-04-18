@@ -1,19 +1,19 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
 
 import { compact, isEqual, sortBy } from "lodash-es";
-// apple pi dash imports
+// pi dash imports
 import type {
   TFilterConditionNode,
   TFilterExpression,
   TFilterGroupNode,
   TFilterProperty,
   TFilterValue,
-} from "@apple-pi-dash/types";
-import { FILTER_NODE_TYPE } from "@apple-pi-dash/types";
+} from "@pi-dash/types";
+import { FILTER_NODE_TYPE } from "@pi-dash/types";
 // local imports
 import { isConditionNode, isGroupNode } from "../types/core";
 import { processGroupNode } from "../types/shared";

@@ -1,45 +1,44 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
 
 import { observer } from "mobx-react";
 import { ArrowDown, ArrowUp } from "lucide-react";
-// apple pi dash imports
-import { Button } from "@apple-pi-dash/propel/button";
-import { cn } from "@apple-pi-dash/utils";
+// pi dash imports
+import { Button } from "@pi-dash/propel/button";
+import { cn } from "@pi-dash/utils";
 // constants
-import type { TApplePiDashPlans } from "@/constants/plans";
-import { ComingSoonBadge, APPLE_PI_DASH_PLANS, PLANS_LIST } from "@/constants/plans";
+import type { TPiDashPlans } from "@/constants/plans";
+import { ComingSoonBadge, PI_DASH_PLANS, PLANS_LIST } from "@/constants/plans";
 // local imports
 import { PlanFeatureDetail } from "./feature-detail";
 
 type TPlansComparisonBaseProps = {
-  applePiDashDetails: React.ReactNode;
+  piDashDetails: React.ReactNode;
   isSelfManaged: boolean;
   isCompareAllFeaturesSectionOpen: boolean;
   setIsCompareAllFeaturesSectionOpen: React.Dispatch<React.SetStateAction<boolean>>;
 };
 
-export const shouldRenderPlanDetail = (planKey: TApplePiDashPlans) => {
+export const shouldRenderPlanDetail = (planKey: TPiDashPlans) => {
   // Free plan is not required to be shown in the comparison
   if (planKey === "free") return false;
-  // Apple Pi Dash one plan is not longer available
+  // Pi Dash one plan is not longer available
   if (planKey === "one") return false;
   return true;
 };
 
 export const PlansComparisonBase = observer(function PlansComparisonBase(props: TPlansComparisonBaseProps) {
-  const { applePiDashDetails, isSelfManaged, isCompareAllFeaturesSectionOpen, setIsCompareAllFeaturesSectionOpen } =
-    props;
+  const { piDashDetails, isSelfManaged, isCompareAllFeaturesSectionOpen, setIsCompareAllFeaturesSectionOpen } = props;
   // plan details
-  const { planDetails, planHighlights, planComparison } = APPLE_PI_DASH_PLANS;
+  const { planDetails, planHighlights, planComparison } = PI_DASH_PLANS;
   const numberOfPlansToRender = Object.keys(planDetails).filter((planKey) =>
-    shouldRenderPlanDetail(planKey as TApplePiDashPlans)
+    shouldRenderPlanDetail(planKey as TPiDashPlans)
   ).length;
 
-  const getSubscriptionType = (planKey: TApplePiDashPlans) => planDetails[planKey].id;
+  const getSubscriptionType = (planKey: TPiDashPlans) => planDetails[planKey].id;
 
   return (
     <div className="horizontal-scrollbar scrollbar-sm size-full overflow-x-auto">
@@ -52,7 +51,7 @@ export const PlansComparisonBase = observer(function PlansComparisonBase(props: 
             }}
           >
             <div className="col-span-1 space-y-0.5 p-3 text-body-sm-medium" />
-            {applePiDashDetails}
+            {piDashDetails}
           </div>
           {/* Plan Headers */}
           <section className="flex-shrink-0">
@@ -64,7 +63,7 @@ export const PlansComparisonBase = observer(function PlansComparisonBase(props: 
               <div className="col-span-1 p-3 text-body-sm-medium">Highlights</div>
               {Object.entries(planHighlights).map(
                 ([planKey, highlights]) =>
-                  shouldRenderPlanDetail(planKey as TApplePiDashPlans) && (
+                  shouldRenderPlanDetail(planKey as TPiDashPlans) && (
                     <div key={planKey} className="col-span-1 p-3">
                       <ul className="list-disc space-y-1 text-body-xs-regular">
                         {highlights.map((highlight, index) => (

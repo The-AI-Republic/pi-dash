@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
@@ -8,8 +8,8 @@
 import { useCallback, useMemo } from "react";
 // types
 import { useParams } from "next/navigation";
-import type { TSupportedFilterTypeForUpdate } from "@apple-pi-dash/constants";
-import { EDraftIssuePaginationType } from "@apple-pi-dash/constants";
+import type { TSupportedFilterTypeForUpdate } from "@pi-dash/constants";
+import { EDraftIssuePaginationType } from "@pi-dash/constants";
 import type {
   IIssueDisplayFilterOptions,
   IIssueDisplayProperties,
@@ -19,8 +19,8 @@ import type {
   TLoader,
   TProfileViews,
   TSupportedFilterForUpdate,
-} from "@apple-pi-dash/types";
-import { EIssuesStoreType } from "@apple-pi-dash/types";
+} from "@pi-dash/types";
+import { EIssuesStoreType } from "@pi-dash/types";
 import { useIssues } from "./store/use-issues";
 
 export interface IssueActions {

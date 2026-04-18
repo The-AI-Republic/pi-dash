@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
@@ -9,13 +9,13 @@ import { observer } from "mobx-react";
 import { useParams } from "next/navigation";
 import useSWR, { mutate } from "swr";
 import { CheckCircle } from "lucide-react";
-import { EUserPermissions, EUserPermissionsLevel } from "@apple-pi-dash/constants";
-import { Button } from "@apple-pi-dash/propel/button";
-import { TOAST_TYPE, setToast } from "@apple-pi-dash/propel/toast";
-import { Tooltip } from "@apple-pi-dash/propel/tooltip";
-import type { IAppIntegration, IWorkspaceIntegration } from "@apple-pi-dash/types";
+import { EUserPermissions, EUserPermissionsLevel } from "@pi-dash/constants";
+import { Button } from "@pi-dash/propel/button";
+import { TOAST_TYPE, setToast } from "@pi-dash/propel/toast";
+import { Tooltip } from "@pi-dash/propel/tooltip";
+import type { IAppIntegration, IWorkspaceIntegration } from "@pi-dash/types";
 // ui
-import { Loader } from "@apple-pi-dash/ui";
+import { Loader } from "@pi-dash/ui";
 // assets
 import GithubLogo from "@/app/assets/services/github.png?url";
 import SlackLogo from "@/app/assets/services/slack.png?url";
@@ -37,12 +37,12 @@ const integrationDetails: { [key: string]: any } = {
   github: {
     logo: GithubLogo,
     installed: "Activate GitHub on individual projects to sync with specific repositories.",
-    notInstalled: "Connect with GitHub with your Apple Pi Dash workspace to sync project work items.",
+    notInstalled: "Connect with GitHub with your Pi Dash workspace to sync project work items.",
   },
   slack: {
     logo: SlackLogo,
     installed: "Activate Slack on individual projects to sync with specific channels.",
-    notInstalled: "Connect with Slack with your Apple Pi Dash workspace to sync project work items.",
+    notInstalled: "Connect with Slack with your Pi Dash workspace to sync project work items.",
   },
 };
 

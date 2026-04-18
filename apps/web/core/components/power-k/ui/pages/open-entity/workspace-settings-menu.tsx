@@ -1,14 +1,14 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
 
 import { observer } from "mobx-react";
-// apple pi dash types
-import { EUserPermissionsLevel, WORKSPACE_SETTINGS } from "@apple-pi-dash/constants";
+// pi dash types
+import { EUserPermissionsLevel, WORKSPACE_SETTINGS } from "@pi-dash/constants";
 // components
-import { useTranslation } from "@apple-pi-dash/i18n";
+import { useTranslation } from "@pi-dash/i18n";
 import type { TPowerKContext } from "@/components/power-k/core/types";
 import { PowerKSettingsMenu } from "@/components/power-k/menus/settings";
 import { WORKSPACE_SETTINGS_ICONS } from "@/components/settings/workspace/sidebar/item-icon";
@@ -22,7 +22,7 @@ type Props = {
 
 export const PowerKOpenWorkspaceSettingsMenu = observer(function PowerKOpenWorkspaceSettingsMenu(props: Props) {
   const { context, handleSelect } = props;
-  // apple pi dash hooks
+  // pi dash hooks
   const { t } = useTranslation();
   // store hooks
   const { allowPermissions } = useUserPermissions();

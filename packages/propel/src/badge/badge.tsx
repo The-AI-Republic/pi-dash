@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
@@ -23,6 +23,6 @@ const Badge = React.forwardRef(function Badge(props: BadgeProps, ref: React.Forw
   );
 });
 
-Badge.displayName = "apple-pi-dash-ui-badge";
+Badge.displayName = "pi-dash-ui-badge";
 
 export { Badge };

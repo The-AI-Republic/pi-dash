@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
@@ -9,17 +9,17 @@ import { useRef, useState } from "react";
 import { observer } from "mobx-react";
 import { useParams } from "next/navigation";
 import { MoreHorizontal } from "lucide-react";
-import { SPREADSHEET_SELECT_GROUP } from "@apple-pi-dash/constants";
-// apple pi dash helpers
-import { useOutsideClickDetector } from "@apple-pi-dash/hooks";
-import { ChevronRightIcon } from "@apple-pi-dash/propel/icons";
+import { SPREADSHEET_SELECT_GROUP } from "@pi-dash/constants";
+// pi dash helpers
+import { useOutsideClickDetector } from "@pi-dash/hooks";
+import { ChevronRightIcon } from "@pi-dash/propel/icons";
 // types
-import { Tooltip } from "@apple-pi-dash/propel/tooltip";
-import type { IIssueDisplayProperties, TIssue } from "@apple-pi-dash/types";
-import { EIssueServiceType } from "@apple-pi-dash/types";
+import { Tooltip } from "@pi-dash/propel/tooltip";
+import type { IIssueDisplayProperties, TIssue } from "@pi-dash/types";
+import { EIssueServiceType } from "@pi-dash/types";
 // ui
-import { ControlLink, Row } from "@apple-pi-dash/ui";
-import { cn, generateWorkItemLink } from "@apple-pi-dash/utils";
+import { ControlLink, Row } from "@pi-dash/ui";
+import { cn, generateWorkItemLink } from "@pi-dash/utils";
 // components
 import { MultipleSelectEntityAction } from "@/components/core/multiple-select";
 import RenderIfVisible from "@/components/core/render-if-visible-HOC";
@@ -31,8 +31,8 @@ import { useProject } from "@/hooks/store/use-project";
 import useIssuePeekOverviewRedirection from "@/hooks/use-issue-peek-overview-redirection";
 import type { TSelectionHelper } from "@/hooks/use-multiple-select";
 import { usePlatformOS } from "@/hooks/use-platform-os";
-// apple pi dash web components
-import { IssueIdentifier } from "@/apple-pi-dash-web/components/issues/issue-details/issue-identifier";
+// pi dash web components
+import { IssueIdentifier } from "@/pi-dash-web/components/issues/issue-details/issue-identifier";
 // local components
 import type { TRenderQuickActions } from "../list/list-view-types";
 import { isIssueNew } from "../utils";

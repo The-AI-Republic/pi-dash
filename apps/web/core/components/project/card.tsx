@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
@@ -9,18 +9,18 @@ import { observer } from "mobx-react";
 import Link from "next/link";
 import { useParams } from "next/navigation";
 import { ArchiveRestoreIcon, Settings, UserPlus } from "lucide-react";
-// apple pi dash imports
-import { EUserPermissions, EUserPermissionsLevel, IS_FAVORITE_MENU_OPEN } from "@apple-pi-dash/constants";
-import { useLocalStorage } from "@apple-pi-dash/hooks";
-import { Button } from "@apple-pi-dash/propel/button";
-import { Logo } from "@apple-pi-dash/propel/emoji-icon-picker";
-import { LinkIcon, LockIcon, NewTabIcon, TrashIcon, CheckIcon } from "@apple-pi-dash/propel/icons";
-import { setPromiseToast, setToast, TOAST_TYPE } from "@apple-pi-dash/propel/toast";
-import { Tooltip } from "@apple-pi-dash/propel/tooltip";
-import type { IProject } from "@apple-pi-dash/types";
-import type { TContextMenuItem } from "@apple-pi-dash/ui";
-import { Avatar, AvatarGroup, ContextMenu, FavoriteStar } from "@apple-pi-dash/ui";
-import { copyUrlToClipboard, cn, getFileURL, renderFormattedDate } from "@apple-pi-dash/utils";
+// pi dash imports
+import { EUserPermissions, EUserPermissionsLevel, IS_FAVORITE_MENU_OPEN } from "@pi-dash/constants";
+import { useLocalStorage } from "@pi-dash/hooks";
+import { Button } from "@pi-dash/propel/button";
+import { Logo } from "@pi-dash/propel/emoji-icon-picker";
+import { LinkIcon, LockIcon, NewTabIcon, TrashIcon, CheckIcon } from "@pi-dash/propel/icons";
+import { setPromiseToast, setToast, TOAST_TYPE } from "@pi-dash/propel/toast";
+import { Tooltip } from "@pi-dash/propel/tooltip";
+import type { IProject } from "@pi-dash/types";
+import type { TContextMenuItem } from "@pi-dash/ui";
+import { Avatar, AvatarGroup, ContextMenu, FavoriteStar } from "@pi-dash/ui";
+import { copyUrlToClipboard, cn, getFileURL, renderFormattedDate } from "@pi-dash/utils";
 // components
 // hooks
 import { useMember } from "@/hooks/store/use-member";

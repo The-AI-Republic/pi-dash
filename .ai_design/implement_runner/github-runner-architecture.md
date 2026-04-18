@@ -1,6 +1,6 @@
 # GitHub Actions Self-Hosted Runner — Architecture Reference
 
-Purpose: this document explains how GitHub Actions self-hosted runners work end to end, so Apple Pi Dash can adopt the same pattern for connecting cloud-side orchestration to a local coding agent (Codex) running on a user's dev machine.
+Purpose: this document explains how GitHub Actions self-hosted runners work end to end, so Pi Dash can adopt the same pattern for connecting cloud-side orchestration to a local coding agent (Codex) running on a user's dev machine.
 
 Source-of-truth references:
 
@@ -13,7 +13,7 @@ This doc is a technical summary, not a verbatim spec. Where GHA's internals are 
 Implementation notes for this document:
 
 - Statements about GitHub internals that are not documented should be read as "observed behavior", not as a stable public contract.
-- Apple Pi Dash sections below are normative for implementation unless marked as an open question.
+- Pi Dash sections below are normative for implementation unless marked as an open question.
 
 ---
 
@@ -31,7 +31,7 @@ In GHA:
 - **Orchestrator** = GitHub's Actions service (cloud).
 - **Runner** = the `actions/runner` binary a user installs on their own machine.
 
-In Apple Pi Dash's target architecture:
+In Pi Dash's target architecture:
 
 - **Orchestrator** = Django/Celery in `apps/api` (+ a WS service modeled on `apps/live`).
 - **Runner** = a new daemon installed on the user's dev PC that drives `codex app-server`.
@@ -267,19 +267,19 @@ Horizontal scaling pattern:
 
 ---
 
-## 10. Mapping to Apple Pi Dash
+## 10. Mapping to Pi Dash
 
 What transfers directly:
 
-| GitHub concept                     | Apple Pi Dash equivalent                                                    | Notes                                                                     |
+| GitHub concept                     | Pi Dash equivalent                                                    | Notes                                                                     |
 | ---------------------------------- | --------------------------------------------------------------------------- | ------------------------------------------------------------------------- |
 | Actions service (orchestrator)     | Django (`apps/api`) + a WS service (new, modeled on `apps/live`)            | Django owns state; WS service owns the socket                             |
-| Self-hosted runner binary          | `apple-pi-dash-runner` daemon (new, to build)                               | Single binary: Go or Rust recommended                                     |
-| Registration token                 | One-time code generated in Apple Pi Dash settings UI                        | Short TTL, single-use                                                     |
-| `.credentials` on disk             | Runner token + machine id, stored under `~/.config/apple-pi-dash-runner/`   | File mode 0600                                                            |
+| Self-hosted runner binary          | `pi-dash-runner` daemon (new, to build)                               | Single binary: Go or Rust recommended                                     |
+| Registration token                 | One-time code generated in Pi Dash settings UI                        | Short TTL, single-use                                                     |
+| `.credentials` on disk             | Runner token + machine id, stored under `~/.config/pi-dash-runner/`   | File mode 0600                                                            |
 | Labels (`linux`, `gpu`, `staging`) | Capabilities: `codex`, `macos`, `arm64`, `docker`, `git`                    | Same matching rules; do not encode an exact local checkout path in labels |
 | Runner groups                      | Per-user / per-workspace pools                                              | "Only this user's machines pick up this user's tasks"                     |
-| `runs-on: [self-hosted, gpu]`      | Apple Pi Dash work item metadata declaring required capabilities            | Triage step sets these                                                    |
+| `runs-on: [self-hosted, gpu]`      | Pi Dash work item metadata declaring required capabilities            | Triage step sets these                                                    |
 | Job envelope                       | `AgentRun` payload: work item id, repo path, prompt, run config             | Matches Codex `thread/start` + `turn/start` params                        |
 | Per-job `GITHUB_TOKEN`             | Per-run short-lived credential scoped to the AgentRun's allowed API surface | E.g. scoped webhook back                                                  |
 | Step execution (bash)              | Drive `codex app-server` via JSON-RPC on stdio or local WS                  | `turn/start` → stream `item/*` deltas → `turn/completed`                  |
@@ -287,17 +287,17 @@ What transfers directly:
 | Cancel message                     | `turn/interrupt` on Codex + runner cleanup                                  | Server → runner → app-server                                              |
 | Ephemeral runner                   | Probably not — dev PCs are persistent                                       | But consider ephemeral "workspace runs" inside containers                 |
 
-Features GHA has that Apple Pi Dash specifically needs _beyond_ the GHA model:
+Features GHA has that Pi Dash specifically needs _beyond_ the GHA model:
 
-- **Mid-run approvals.** Codex pauses and asks "can I run `rm`?" → runner forwards an approval request up the WS → Django persists it and pushes to the user's browser → user clicks in Apple Pi Dash UI → answer flows back. GHA has no analog; this is unique to interactive agent work and is the reason you can't repurpose the GHA runner binary directly.
-- **Thread resume.** Codex's `thread/resume` lets a run reattach after reconnect. GHA jobs are stateless shell runs and have no equivalent. Apple Pi Dash must persist `thread_id` per `AgentRun` and pass it through on reconnect.
-- **Local credentials stay local.** Codex login (`account/login/start`) happens on the laptop. Apple Pi Dash never sees the user's OpenAI/ChatGPT credentials. The runner mediates everything.
+- **Mid-run approvals.** Codex pauses and asks "can I run `rm`?" → runner forwards an approval request up the WS → Django persists it and pushes to the user's browser → user clicks in Pi Dash UI → answer flows back. GHA has no analog; this is unique to interactive agent work and is the reason you can't repurpose the GHA runner binary directly.
+- **Thread resume.** Codex's `thread/resume` lets a run reattach after reconnect. GHA jobs are stateless shell runs and have no equivalent. Pi Dash must persist `thread_id` per `AgentRun` and pass it through on reconnect.
+- **Local credentials stay local.** Codex login (`account/login/start`) happens on the laptop. Pi Dash never sees the user's OpenAI/ChatGPT credentials. The runner mediates everything.
 
 ---
 
-## 11. Apple Pi Dash implementation constraints
+## 11. Pi Dash implementation constraints
 
-These are the extra rules Apple Pi Dash needs so this explainer is implementable rather than just informative.
+These are the extra rules Pi Dash needs so this explainer is implementable rather than just informative.
 
 ### 11.1. Runner auth is a separate protocol from `apps/live`
 

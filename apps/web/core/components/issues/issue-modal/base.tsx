@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
@@ -8,12 +8,12 @@ import { useEffect, useRef, useState } from "react";
 import { isEqual, xor } from "lodash-es";
 import { observer } from "mobx-react";
 import { useParams } from "next/navigation";
-// Apple Pi Dash imports
-import { useTranslation } from "@apple-pi-dash/i18n";
-import { TOAST_TYPE, setToast } from "@apple-pi-dash/propel/toast";
-import type { TBaseIssue, TIssue } from "@apple-pi-dash/types";
-import { EIssuesStoreType } from "@apple-pi-dash/types";
-import { EModalPosition, EModalWidth, ModalCore } from "@apple-pi-dash/ui";
+// Pi Dash imports
+import { useTranslation } from "@pi-dash/i18n";
+import { TOAST_TYPE, setToast } from "@pi-dash/propel/toast";
+import type { TBaseIssue, TIssue } from "@pi-dash/types";
+import { EIssuesStoreType } from "@pi-dash/types";
+import { EModalPosition, EModalWidth, ModalCore } from "@pi-dash/ui";
 // hooks
 import { useIssueModal } from "@/hooks/context/use-issue-modal";
 import { useCycle } from "@/hooks/store/use-cycle";

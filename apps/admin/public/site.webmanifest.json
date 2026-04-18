@@ -1,7 +1,7 @@
 {
-  "name": "Apple Pi Dash God Mode",
-  "short_name": "Apple Pi Dash God Mode",
-  "description": "Apple Pi Dash helps you plan your issues, cycles, and product modules.",
+  "name": "Pi Dash God Mode",
+  "short_name": "Pi Dash God Mode",
+  "description": "Pi Dash helps you plan your issues, cycles, and product modules.",
   "start_url": ".",
   "display": "standalone",
   "background_color": "#f9fafb",

@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
@@ -89,7 +89,7 @@ export default {
       already_have_an_account: "Ai deja un cont?",
       login: "Autentificare",
       create_account: "Creează un cont",
-      new_to_apple_pi_dash: "Ești nou în Apple Pi Dash?",
+      new_to_pi_dash: "Ești nou în Pi Dash?",
       back_to_sign_in: "Înapoi la autentificare",
       resend_in: "Retrimite în {seconds} secunde",
       sign_in_with_unique_code: "Autentificare cu cod unic",
@@ -412,7 +412,7 @@ export default {
   full_changelog: "Jurnal complet al modificărilor",
   support: "Suport",
   forum: "Forum",
-  powered_by_apple_pi_dash_pages: "Oferit de Apple Pi Dash Documentație",
+  powered_by_pi_dash_pages: "Oferit de Pi Dash Documentație",
   please_select_at_least_one_invitation: "Te rugăm să selectezi cel puțin o invitație.",
   please_select_at_least_one_invitation_description:
     "Te rugăm să selectezi cel puțin o invitație pentru a te alătura spațiului de lucru.",
@@ -575,7 +575,7 @@ export default {
       not_right_now: "Nu acum",
       create_project: {
         title: "Creează un proiect",
-        description: "Majoritatea lucrurilor încep cu un proiect în Apple Pi Dash.",
+        description: "Majoritatea lucrurilor încep cu un proiect în Pi Dash.",
         cta: "Începe acum",
       },
       invite_team: {
@@ -589,7 +589,7 @@ export default {
         cta: "Configurează acest spațiu de lucru",
       },
       personalize_account: {
-        title: "Personalizează Apple Pi Dash.",
+        title: "Personalizează Pi Dash.",
         description: "Alege-ți poza de profil, culorile și multe altele.",
         cta: "Personalizează acum",
       },
@@ -623,8 +623,8 @@ export default {
         issues: "Activități",
       },
     },
-    new_at_apple_pi_dash: {
-      title: "Noutăți în Apple Pi Dash",
+    new_at_pi_dash: {
+      title: "Noutăți în Pi Dash",
     },
     quick_tutorial: {
       title: "Tutorial rapid",
@@ -1278,7 +1278,7 @@ export default {
   },
   workspace_creation: {
     heading: "Creează spațiul tău de lucru",
-    subheading: "Pentru a începe să folosești Apple Pi Dash, trebuie să creezi sau să te alături unui spațiu de lucru.",
+    subheading: "Pentru a începe să folosești Pi Dash, trebuie să creezi sau să te alături unui spațiu de lucru.",
     form: {
       name: {
         label: "Denumește-ți spațiul de lucru",
@@ -1333,11 +1333,11 @@ export default {
       general: {
         title: "Prezentare generală a proiectelor, activităților și statisticilor tale",
         description:
-          "Bine ai venit în Apple Pi Dash, suntem încântați să te avem aici. Creează primul tău proiect și urmărește activitățile, iar această pagină se va transforma într-un spațiu care te ajută să progresezi. Administratorii vor vedea și elementele care ajută echipa lor să progreseze.",
+          "Bine ai venit în Pi Dash, suntem încântați să te avem aici. Creează primul tău proiect și urmărește activitățile, iar această pagină se va transforma într-un spațiu care te ajută să progresezi. Administratorii vor vedea și elementele care ajută echipa lor să progreseze.",
         primary_button: {
           text: "Creează primul tău proiect",
           comic: {
-            title: "Totul începe cu un proiect în Apple Pi Dash",
+            title: "Totul începe cu un proiect în Pi Dash",
             description:
               "Un proiect poate fi planul de dezvoltare a unui produs, o campanie de marketing sau lansarea unei noi mașini.",
           },
@@ -1472,7 +1472,7 @@ export default {
         primary_button: {
           text: "Începe primul tău proiect",
           comic: {
-            title: "Totul începe cu un proiect în Apple Pi Dash",
+            title: "Totul începe cu un proiect în Pi Dash",
             description:
               "Un proiect poate fi o foaie de parcurs pentru un produs, o campanie de marketing sau lansarea unei noi mașini.",
           },
@@ -1485,7 +1485,7 @@ export default {
         primary_button: {
           text: "Începe primul tău proiect",
           comic: {
-            title: "Totul începe cu un proiect în Apple Pi Dash",
+            title: "Totul începe cu un proiect în Pi Dash",
             description:
               "Un proiect poate fi o foaie de parcurs pentru un produs, o campanie de marketing sau lansarea unei noi mașini.",
           },
@@ -1586,7 +1586,7 @@ export default {
     page_label: "{workspace} - Setări generale",
     key_created: "Cheie creată",
     copy_key:
-      "Copiază și salvează această cheie secretă în Apple Pi Dash Documentație. Nu vei mai putea vedea această cheie după ce închizi. Un fișier CSV care conține cheia a fost descărcat.",
+      "Copiază și salvează această cheie secretă în Pi Dash Documentație. Nu vei mai putea vedea această cheie după ce închizi. Un fișier CSV care conține cheia a fost descărcat.",
     token_copied: "Token-ul a fost copiat în memoria temporară.",
     settings: {
       general: {
@@ -1738,7 +1738,7 @@ export default {
         delete: {
           title: "Șterge cheia secretă API",
           description:
-            "Orice aplicație care folosește această cheie secretă nu va mai avea acces la datele Apple Pi Dash. Această acțiune este ireversibilă.",
+            "Orice aplicație care folosește această cheie secretă nu va mai avea acces la datele Pi Dash. Această acțiune este ireversibilă.",
           success: {
             title: "Succes!",
             message: "Cheia secretă API a fost ștearsă cu succes",
@@ -1754,7 +1754,7 @@ export default {
       api_tokens: {
         title: "Nicio cheie secretă API creată",
         description:
-          "API-ul Apple Pi Dash poate fi folosit pentru a integra datele tale din Apple Pi Dash cu orice sistem extern. Creează o cheie secretă pentru a începe.",
+          "API-ul Pi Dash poate fi folosit pentru a integra datele tale din Pi Dash cu orice sistem extern. Creează o cheie secretă pentru a începe.",
       },
       webhooks: {
         title: "Niciun punctul de notificare (webhook) adăugat",
@@ -1818,7 +1818,7 @@ export default {
       activity: {
         title: "Nicio activitate încă",
         description:
-          "Începe prin a crea o nouă activitate! Adaugă detalii și proprietăți. Explorează mai mult în Apple Pi Dash pentru a-ți vedea activitatea.",
+          "Începe prin a crea o nouă activitate! Adaugă detalii și proprietăți. Explorează mai mult în Pi Dash pentru a-ți vedea activitatea.",
       },
       assigned: {
         title: "Nicio activitate atribuită ție",
@@ -1972,12 +1972,12 @@ export default {
       label: "Automatizări",
       "auto-archive": {
         title: "Auto-arhivează activitățile finalizate",
-        description: "Apple Pi Dash va arhiva automat activitățile care au fost finalizate sau anulate.",
+        description: "Pi Dash va arhiva automat activitățile care au fost finalizate sau anulate.",
         duration: "Auto-arhivează activitățile finalizate de",
       },
       "auto-close": {
         title: "Închide automat activitățile",
-        description: "Apple Pi Dash va închide automat activitățile care nu au fost finalizate sau anulate.",
+        description: "Pi Dash va închide automat activitățile care nu au fost finalizate sau anulate.",
         duration: "Închide automat activitățile inactive de",
         auto_close_status: "Stare închidere automată",
       },
@@ -2167,9 +2167,9 @@ export default {
         primary_button: {
           text: "Creează prima ta activitate",
           comic: {
-            title: "Activitățile sunt elemente de bază în Apple Pi Dash.",
+            title: "Activitățile sunt elemente de bază în Pi Dash.",
             description:
-              "Reproiectarea interfeței Apple Pi Dash, modernizarea imaginii companiei sau lansarea noului sistem de injecție sunt exemple de activități care au, cel mai probabil, sub-activități.",
+              "Reproiectarea interfeței Pi Dash, modernizarea imaginii companiei sau lansarea noului sistem de injecție sunt exemple de activități care au, cel mai probabil, sub-activități.",
           },
         },
       },
@@ -2275,9 +2275,9 @@ export default {
     empty_state: {
       general: {
         title:
-          "Scrie o notiță, un document sau o bază completă de cunoștințe. Folosește-l pe Galileo, Inteligența Artificială a Apple Pi Dash, ca să te ajute să începi",
+          "Scrie o notiță, un document sau o bază completă de cunoștințe. Folosește-l pe Galileo, Inteligența Artificială a Pi Dash, ca să te ajute să începi",
         description:
-          "Documentația e spațiul în care îți notezi gândurile în Apple Pi Dash. Ia notițe de la ședințe, formatează-le ușor, inserează activități, așază-le folosind o bibliotecă de componente și păstrează-le pe toate în contextul proiectului tău. Pentru a redacta rapid orice document, apelează la Galileo, Inteligența Artificială a Apple Pi Dash, cu un shortcut sau un click.",
+          "Documentația e spațiul în care îți notezi gândurile în Pi Dash. Ia notițe de la ședințe, formatează-le ușor, inserează activități, așază-le folosind o bibliotecă de componente și păstrează-le pe toate în contextul proiectului tău. Pentru a redacta rapid orice document, apelează la Galileo, Inteligența Artificială a Pi Dash, cu un shortcut sau un click.",
         primary_button: {
           text: "Creează primul tău document",
         },
@@ -2654,8 +2654,8 @@ export default {
     edited_by: "Editat de",
   },
   self_hosted_maintenance_message: {
-    apple_pi_dash_didnt_start_up_this_could_be_because_one_or_more_apple_pi_dash_services_failed_to_start:
-      "Apple Pi Dash nu a pornit. Aceasta ar putea fi din cauza că unul sau mai multe servicii Apple Pi Dash au eșuat să pornească.",
+    pi_dash_didnt_start_up_this_could_be_because_one_or_more_pi_dash_services_failed_to_start:
+      "Pi Dash nu a pornit. Aceasta ar putea fi din cauza că unul sau mai multe servicii Pi Dash au eșuat să pornească.",
     choose_view_logs_from_setup_sh_and_docker_logs_to_be_sure:
       "Alegeți View Logs din setup.sh și logurile Docker pentru a fi siguri.",
   },

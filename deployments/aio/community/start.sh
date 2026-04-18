@@ -3,7 +3,7 @@
 print_header(){
     clear
     echo "------------------------------------------------"
-    echo "Apple Pi Dash Community (All-In-One)"
+    echo "Pi Dash Community (All-In-One)"
     echo "------------------------------------------------"
     echo ""
     echo "You are required to pass below environment variables to the script"
@@ -49,20 +49,20 @@ update_env_value(){
     local value="$2"
 
     # check if the file exists
-    if [ ! -f "apple_pi_dash.env" ]; then
-        echo "apple_pi_dash.env file not found"
+    if [ ! -f "pi_dash.env" ]; then
+        echo "pi_dash.env file not found"
         exit 1
     fi
 
     # check if the key exists and add it if it doesn't
-    if ! grep -q "^$key=.*" apple_pi_dash.env; then
-        echo "${key}=${value}" >> apple_pi_dash.env
+    if ! grep -q "^$key=.*" pi_dash.env; then
+        echo "${key}=${value}" >> pi_dash.env
         return 0
     fi
 
     # if key and value are not empty, update the value
     if [ -n "$key" ] && [ -n "$value" ]; then
-        sed -i "s|^$key=.*|$key=$value|" apple_pi_dash.env
+        sed -i "s|^$key=.*|$key=$value|" pi_dash.env
         return 0
     fi
 
@@ -72,13 +72,13 @@ check_pre_requisites(){
     check_required_env
 
     # check if the file exists
-    if [ ! -f "apple_pi_dash.env" ]; then
-        echo "apple_pi_dash.env file not found"
+    if [ ! -f "pi_dash.env" ]; then
+        echo "pi_dash.env file not found"
         exit 1
     fi
     # add a new line to the end of the file
-    echo "" >> apple_pi_dash.env
-    echo "" >> apple_pi_dash.env
+    echo "" >> pi_dash.env
+    echo "" >> pi_dash.env
     echo "✅ Pre-requisites checked"
     echo ""
     
@@ -160,8 +160,8 @@ main(){
     check_pre_requisites
     update_env_file
 
-    # load apple_pi_dash.env as exported variables
-    export $(grep -v '^#' apple_pi_dash.env | xargs)
+    # load pi_dash.env as exported variables
+    export $(grep -v '^#' pi_dash.env | xargs)
 
     /usr/local/bin/supervisord -c /etc/supervisor/conf.d/supervisor.conf
 }

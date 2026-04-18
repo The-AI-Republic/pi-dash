@@ -3,7 +3,7 @@ use directories::ProjectDirs;
 use std::path::{Path, PathBuf};
 
 const QUALIFIER: &str = "so";
-const ORG: &str = "apple-pi-dash";
+const ORG: &str = "pi-dash";
 const APP: &str = "runner";
 
 #[derive(Debug, Clone)]

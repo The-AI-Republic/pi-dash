@@ -1,20 +1,20 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
 
 import { observer } from "mobx-react";
-import { Logo } from "@apple-pi-dash/propel/emoji-icon-picker";
-import { ProjectIcon } from "@apple-pi-dash/propel/icons";
-// apple pi dash imports
-import type { ICustomSearchSelectOption } from "@apple-pi-dash/types";
-import { BreadcrumbNavigationSearchDropdown, Breadcrumbs } from "@apple-pi-dash/ui";
+import { Logo } from "@pi-dash/propel/emoji-icon-picker";
+import { ProjectIcon } from "@pi-dash/propel/icons";
+// pi dash imports
+import type { ICustomSearchSelectOption } from "@pi-dash/types";
+import { BreadcrumbNavigationSearchDropdown, Breadcrumbs } from "@pi-dash/ui";
 import { SwitcherLabel } from "@/components/common/switcher-label";
 // hooks
 import { useProject } from "@/hooks/store/use-project";
 import { useAppRouter } from "@/hooks/use-app-router";
-import type { TProject } from "@/apple-pi-dash-web/types";
+import type { TProject } from "@/pi-dash-web/types";
 
 type TProjectBreadcrumbProps = {
   workspaceSlug: string;

@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
@@ -8,9 +8,9 @@ import { observer } from "mobx-react";
 import Link from "next/link";
 import { useParams } from "next/navigation";
 import { History, MessageSquare } from "lucide-react";
-// apple pi dash imports
-import type { IUserActivityResponse } from "@apple-pi-dash/types";
-import { calculateTimeAgo, getFileURL } from "@apple-pi-dash/utils";
+// pi dash imports
+import type { IUserActivityResponse } from "@pi-dash/types";
+import { calculateTimeAgo, getFileURL } from "@pi-dash/utils";
 // components
 import { ActivityIcon, ActivityMessage, IssueLink } from "@/components/core/activity";
 import { RichTextEditor } from "@/components/editor/rich-text";
@@ -145,7 +145,7 @@ export const ActivityList = observer(function ActivityList(props: Props) {
                         <div className="min-w-0 flex-1 border-b border-subtle py-4">
                           <div className="text-13 break-words text-secondary">
                             {activityItem.field === "archived_at" && activityItem.new_value !== "restore" ? (
-                              <span className="text-gray font-medium">Apple Pi Dash</span>
+                              <span className="text-gray font-medium">Pi Dash</span>
                             ) : activityItem.actor_detail.is_bot ? (
                               <span className="text-gray font-medium">{activityItem.actor_detail.first_name} Bot</span>
                             ) : (

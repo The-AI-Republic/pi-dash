@@ -1,5 +1,5 @@
 [run]
-source = apple pi dash
+source = pi dash
 omit =
     */tests/*
     */migrations/*

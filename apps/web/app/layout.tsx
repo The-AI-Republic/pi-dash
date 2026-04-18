@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
@@ -9,10 +9,10 @@ import Script from "next/script";
 // styles
 import "@/styles/globals.css";
 
-import { SITE_DESCRIPTION, SITE_NAME } from "@apple-pi-dash/constants";
+import { SITE_DESCRIPTION, SITE_NAME } from "@pi-dash/constants";
 
 // helpers
-import { cn } from "@apple-pi-dash/utils";
+import { cn } from "@pi-dash/utils";
 
 // assets
 import favicon16 from "@/app/assets/favicon/favicon-16x16.png?url";
@@ -25,7 +25,7 @@ import icon512 from "@/app/assets/icons/icon-512x512.png?url";
 import { AppProvider } from "./provider";
 
 export const meta = () => [
-  { title: "Apple Pi Dash | Simple, extensible, open-source project management tool." },
+  { title: "Pi Dash | Simple, extensible, open-source project management tool." },
   { name: "description", content: SITE_DESCRIPTION },
   {
     name: "keywords",
@@ -37,22 +37,22 @@ export const meta = () => [
     content:
       "width=device-width, initial-scale=1, minimum-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover",
   },
-  { property: "og:title", content: "Apple Pi Dash | Simple, extensible, open-source project management tool." },
+  { property: "og:title", content: "Pi Dash | Simple, extensible, open-source project management tool." },
   {
     property: "og:description",
     content: "Open-source project management tool to manage work items, cycles, and product roadmaps easily",
   },
-  { property: "og:url", content: "https://app.apple-pi-dash.so/" },
-  { property: "og:image", content: "https://app.apple-pi-dash.so/og-image.png" },
+  { property: "og:url", content: "https://app.pi-dash.so/" },
+  { property: "og:image", content: "https://app.pi-dash.so/og-image.png" },
   { property: "og:image:width", content: "1200" },
   { property: "og:image:height", content: "630" },
-  { property: "og:image:alt", content: "Apple Pi Dash - Modern project management" },
-  { name: "twitter:site", content: "@applepidashpowers" },
+  { property: "og:image:alt", content: "Pi Dash - Modern project management" },
+  { name: "twitter:site", content: "@pidashpowers" },
   { name: "twitter:card", content: "summary_large_image" },
-  { name: "twitter:image", content: "https://app.apple-pi-dash.so/og-image.png" },
+  { name: "twitter:image", content: "https://app.pi-dash.so/og-image.png" },
   { name: "twitter:image:width", content: "1200" },
   { name: "twitter:image:height", content: "630" },
-  { name: "twitter:image:alt", content: "Apple Pi Dash - Modern project management" },
+  { name: "twitter:image:alt", content: "Pi Dash - Modern project management" },
 ];
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {
@@ -67,7 +67,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
         <link rel="manifest" href="/site.webmanifest.json" />
         <link rel="shortcut icon" href={faviconIco} />
         {/* Meta info for PWA */}
-        <meta name="application-name" content="Apple Pi Dash" />
+        <meta name="application-name" content="Pi Dash" />
         <meta name="apple-mobile-web-app-capable" content="yes" />
         <meta name="apple-mobile-web-app-status-bar-style" content="default" />
         <meta name="apple-mobile-web-app-title" content={SITE_NAME} />

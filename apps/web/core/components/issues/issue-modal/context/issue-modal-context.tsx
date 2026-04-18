@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
@@ -7,12 +7,12 @@
 import { createContext } from "react";
 // ce imports
 import type { UseFormReset, UseFormWatch } from "react-hook-form";
-// apple pi dash imports
-import type { EditorRefApi } from "@apple-pi-dash/editor";
-import type { ISearchIssueResponse, TIssue } from "@apple-pi-dash/types";
-// apple pi dash web imports
-import type { TIssuePropertyValues, TIssuePropertyValueErrors } from "@/apple-pi-dash-web/types/issue-types";
-import type { TIssueFields } from "@/apple-pi-dash-web/components/issues/issue-modal";
+// pi dash imports
+import type { EditorRefApi } from "@pi-dash/editor";
+import type { ISearchIssueResponse, TIssue } from "@pi-dash/types";
+// pi dash web imports
+import type { TIssuePropertyValues, TIssuePropertyValueErrors } from "@/pi-dash-web/types/issue-types";
+import type { TIssueFields } from "@/pi-dash-web/components/issues/issue-modal";
 
 export type TPropertyValuesValidationProps = {
   projectId: string | null;

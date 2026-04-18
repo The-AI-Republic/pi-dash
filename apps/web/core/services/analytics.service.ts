@@ -1,17 +1,17 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
 
-// apple pi dash imports
-import { API_BASE_URL } from "@apple-pi-dash/constants";
+// pi dash imports
+import { API_BASE_URL } from "@pi-dash/constants";
 import type {
   IAnalyticsResponse,
   TAnalyticsTabsBase,
   TAnalyticsGraphsBase,
   TAnalyticsFilterParams,
-} from "@apple-pi-dash/types";
+} from "@pi-dash/types";
 // services
 import { APIService } from "./api.service";
 

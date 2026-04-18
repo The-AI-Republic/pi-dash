@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
@@ -7,7 +7,7 @@
 import { observer } from "mobx-react";
 import Link from "next/link";
 // types
-import type { TWorkspaceBaseActivity } from "@apple-pi-dash/types";
+import type { TWorkspaceBaseActivity } from "@pi-dash/types";
 // store hooks
 import { useMember } from "@/hooks/store/use-member";
 import { useWorkspace } from "@/hooks/store/use-workspace";
@@ -29,7 +29,7 @@ export const User = observer(function User(props: TUser) {
   return (
     <>
       {customUserName || actorDetail?.display_name.includes("-intake") ? (
-        <span className="font-medium text-primary">{customUserName || "Apple Pi Dash"}</span>
+        <span className="font-medium text-primary">{customUserName || "Pi Dash"}</span>
       ) : (
         <Link
           href={`/${workspaceDetail?.slug}/profile/${actorDetail?.id}`}

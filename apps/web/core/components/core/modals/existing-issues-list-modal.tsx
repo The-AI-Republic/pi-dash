@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
@@ -8,22 +8,22 @@ import { useEffect, useState, useRef } from "react";
 import { Rocket } from "lucide-react";
 import { Combobox } from "@headlessui/react";
 // i18n
-import { useTranslation } from "@apple-pi-dash/i18n";
+import { useTranslation } from "@pi-dash/i18n";
 // types
-import { Button } from "@apple-pi-dash/propel/button";
-import { SearchIcon, CloseIcon } from "@apple-pi-dash/propel/icons";
-import { TOAST_TYPE, setToast } from "@apple-pi-dash/propel/toast";
-import { Tooltip } from "@apple-pi-dash/propel/tooltip";
-import type { ISearchIssueResponse, TProjectIssuesSearchParams } from "@apple-pi-dash/types";
+import { Button } from "@pi-dash/propel/button";
+import { SearchIcon, CloseIcon } from "@pi-dash/propel/icons";
+import { TOAST_TYPE, setToast } from "@pi-dash/propel/toast";
+import { Tooltip } from "@pi-dash/propel/tooltip";
+import type { ISearchIssueResponse, TProjectIssuesSearchParams } from "@pi-dash/types";
 // ui
-import { Loader, ToggleSwitch, EModalPosition, EModalWidth, ModalCore } from "@apple-pi-dash/ui";
-import { generateWorkItemLink, getTabIndex } from "@apple-pi-dash/utils";
+import { Loader, ToggleSwitch, EModalPosition, EModalWidth, ModalCore } from "@pi-dash/ui";
+import { generateWorkItemLink, getTabIndex } from "@pi-dash/utils";
 // helpers
 // hooks
 import useDebounce from "@/hooks/use-debounce";
 import { usePlatformOS } from "@/hooks/use-platform-os";
-// apple pi dash web components
-import { IssueIdentifier } from "@/apple-pi-dash-web/components/issues/issue-details/issue-identifier";
+// pi dash web components
+import { IssueIdentifier } from "@/pi-dash-web/components/issues/issue-details/issue-identifier";
 // services
 import { ProjectService } from "@/services/project";
 // components

@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
@@ -7,8 +7,8 @@
 import { get, set, concat, uniq, update } from "lodash-es";
 import { action, observable, makeObservable, runInAction } from "mobx";
 import { computedFn } from "mobx-utils";
-// apple pi dash imports
-import { ALL_ISSUES } from "@apple-pi-dash/constants";
+// pi dash imports
+import { ALL_ISSUES } from "@pi-dash/constants";
 import type {
   TIssue,
   TLoader,
@@ -16,9 +16,9 @@ import type {
   TIssuesResponse,
   ViewFlags,
   TBulkOperationsPayload,
-} from "@apple-pi-dash/types";
+} from "@pi-dash/types";
 // helpers
-import { getDistributionPathsPostUpdate } from "@apple-pi-dash/utils";
+import { getDistributionPathsPostUpdate } from "@pi-dash/utils";
 //local
 import { storage } from "@/lib/local-storage";
 import type { IBaseIssuesStore } from "../helpers/base-issues.store";

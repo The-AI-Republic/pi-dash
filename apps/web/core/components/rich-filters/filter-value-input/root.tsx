@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
@@ -7,7 +7,7 @@
 import React from "react";
 
 import { observer } from "mobx-react";
-// apple pi dash imports
+// pi dash imports
 import type {
   TFilterConditionNode,
   TFilterValue,
@@ -18,10 +18,10 @@ import type {
   TDateFilterFieldConfig,
   TDateRangeFilterFieldConfig,
   TFilterConditionNodeForDisplay,
-} from "@apple-pi-dash/types";
-import { FILTER_FIELD_TYPE } from "@apple-pi-dash/types";
+} from "@pi-dash/types";
+import { FILTER_FIELD_TYPE } from "@pi-dash/types";
 // local imports
-import { AdditionalFilterValueInput } from "@/apple-pi-dash-web/components/rich-filters/filter-value-input/root";
+import { AdditionalFilterValueInput } from "@/pi-dash-web/components/rich-filters/filter-value-input/root";
 import type { TFilterValueInputProps } from "../shared";
 import { DateRangeFilterValueInput } from "./date/range";
 import { SingleDateFilterValueInput } from "./date/single";

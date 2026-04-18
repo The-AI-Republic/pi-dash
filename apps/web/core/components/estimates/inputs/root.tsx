@@ -1,14 +1,14 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
 
-// apple pi dash imports
-import type { TEstimateSystemKeys } from "@apple-pi-dash/types";
-import { EEstimateSystem } from "@apple-pi-dash/types";
-// apple pi dash web imports
-import { EstimateTimeInput } from "@/apple-pi-dash-web/components/estimates/inputs";
+// pi dash imports
+import type { TEstimateSystemKeys } from "@pi-dash/types";
+import { EEstimateSystem } from "@pi-dash/types";
+// pi dash web imports
+import { EstimateTimeInput } from "@/pi-dash-web/components/estimates/inputs";
 // local imports
 import { EstimateNumberInput } from "./number-input";
 import { EstimateTextInput } from "./text-input";

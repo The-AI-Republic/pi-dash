@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
@@ -8,17 +8,17 @@ import { useMemo } from "react";
 import { observer } from "mobx-react";
 import { useParams } from "next/navigation";
 import useSWR from "swr";
-// apple pi dash package imports
-import { useTranslation } from "@apple-pi-dash/i18n";
-import { AreaChart } from "@apple-pi-dash/propel/charts/area-chart";
-import { EmptyStateCompact } from "@apple-pi-dash/propel/empty-state";
-import type { IChartResponse, TChartData } from "@apple-pi-dash/types";
-import { renderFormattedDate } from "@apple-pi-dash/utils";
+// pi dash package imports
+import { useTranslation } from "@pi-dash/i18n";
+import { AreaChart } from "@pi-dash/propel/charts/area-chart";
+import { EmptyStateCompact } from "@pi-dash/propel/empty-state";
+import type { IChartResponse, TChartData } from "@pi-dash/types";
+import { renderFormattedDate } from "@pi-dash/utils";
 // hooks
 import { useAnalytics } from "@/hooks/store/use-analytics";
 // services
 import { AnalyticsService } from "@/services/analytics.service";
-// apple pi dash web components
+// pi dash web components
 import AnalyticsSectionWrapper from "../analytics-section-wrapper";
 import { ChartLoader } from "../loaders";
 

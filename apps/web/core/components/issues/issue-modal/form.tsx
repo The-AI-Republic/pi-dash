@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
@@ -9,15 +9,15 @@ import { observer } from "mobx-react";
 import { useParams } from "next/navigation";
 import { FormProvider, useForm } from "react-hook-form";
 // editor
-import { ETabIndices, DEFAULT_WORK_ITEM_FORM_VALUES } from "@apple-pi-dash/constants";
-import type { EditorRefApi } from "@apple-pi-dash/editor";
+import { ETabIndices, DEFAULT_WORK_ITEM_FORM_VALUES } from "@pi-dash/constants";
+import type { EditorRefApi } from "@pi-dash/editor";
 // i18n
-import { useTranslation } from "@apple-pi-dash/i18n";
-import { Button } from "@apple-pi-dash/propel/button";
-import { TOAST_TYPE, setToast } from "@apple-pi-dash/propel/toast";
-import type { TIssue, TWorkspaceDraftIssue } from "@apple-pi-dash/types";
+import { useTranslation } from "@pi-dash/i18n";
+import { Button } from "@pi-dash/propel/button";
+import { TOAST_TYPE, setToast } from "@pi-dash/propel/toast";
+import type { TIssue, TWorkspaceDraftIssue } from "@pi-dash/types";
 // hooks
-import { ToggleSwitch } from "@apple-pi-dash/ui";
+import { ToggleSwitch } from "@pi-dash/ui";
 import {
   convertWorkItemDataToSearchResponse,
   getUpdateFormDataForReset,
@@ -25,7 +25,7 @@ import {
   getTextContent,
   getChangedIssuefields,
   getTabIndex,
-} from "@apple-pi-dash/utils";
+} from "@pi-dash/utils";
 // components
 import {
   IssueDefaultProperties,
@@ -43,12 +43,12 @@ import { useProjectState } from "@/hooks/store/use-project-state";
 import { useWorkspaceDraftIssues } from "@/hooks/store/workspace-draft";
 import { usePlatformOS } from "@/hooks/use-platform-os";
 import { useProjectIssueProperties } from "@/hooks/use-project-issue-properties";
-// apple pi dash web imports
-import { DeDupeButtonRoot } from "@/apple-pi-dash-web/components/de-dupe/de-dupe-button";
-import { DuplicateModalRoot } from "@/apple-pi-dash-web/components/de-dupe/duplicate-modal";
-import { IssueTypeSelect, WorkItemTemplateSelect } from "@/apple-pi-dash-web/components/issues/issue-modal";
-import { WorkItemModalAdditionalProperties } from "@/apple-pi-dash-web/components/issues/issue-modal/modal-additional-properties";
-import { useDebouncedDuplicateIssues } from "@/apple-pi-dash-web/hooks/use-debounced-duplicate-issues";
+// pi dash web imports
+import { DeDupeButtonRoot } from "@/pi-dash-web/components/de-dupe/de-dupe-button";
+import { DuplicateModalRoot } from "@/pi-dash-web/components/de-dupe/duplicate-modal";
+import { IssueTypeSelect, WorkItemTemplateSelect } from "@/pi-dash-web/components/issues/issue-modal";
+import { WorkItemModalAdditionalProperties } from "@/pi-dash-web/components/issues/issue-modal/modal-additional-properties";
+import { useDebouncedDuplicateIssues } from "@/pi-dash-web/hooks/use-debounced-duplicate-issues";
 
 export interface IssueFormProps {
   data?: Partial<TIssue>;

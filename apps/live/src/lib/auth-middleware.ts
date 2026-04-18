@@ -1,11 +1,11 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
 
 import type { Request, Response, NextFunction } from "express";
-import { logger } from "@apple-pi-dash/logger";
+import { logger } from "@pi-dash/logger";
 import { env } from "@/env";
 
 /**
@@ -21,7 +21,7 @@ import { env } from "@/env";
  *
  * @example
  * ```typescript
- * import { Middleware } from "@apple-pi-dash/decorators";
+ * import { Middleware } from "@pi-dash/decorators";
  * import { requireSecretKey } from "@/lib/auth-middleware";
  *
  * @Get("/protected")

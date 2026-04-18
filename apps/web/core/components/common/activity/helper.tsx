@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
@@ -38,9 +38,9 @@ import {
   PriorityPropertyIcon,
   StartDatePropertyIcon,
   StatePropertyIcon,
-} from "@apple-pi-dash/propel/icons";
+} from "@pi-dash/propel/icons";
 import { store } from "@/lib/store-context";
-import type { TProjectActivity } from "@/apple-pi-dash-web/types";
+import type { TProjectActivity } from "@/pi-dash-web/types";
 
 type ActivityIconMap = {
   [key: string]: FC<{ className?: string }>;
@@ -104,7 +104,7 @@ export const messages = (activity: TProjectActivity): { message: string | ReactN
     case "archived_at":
       return {
         message: newValue === "restore" ? "restored the project" : "archived the project",
-        customUserName: newValue === "archive" ? "Apple Pi Dash" : undefined,
+        customUserName: newValue === "archive" ? "Pi Dash" : undefined,
       };
     case "name":
       return {

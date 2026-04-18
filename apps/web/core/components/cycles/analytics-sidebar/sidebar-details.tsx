@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
@@ -8,19 +8,19 @@ import React from "react";
 import { isEmpty } from "lodash-es";
 import { observer } from "mobx-react";
 import { SquareUser } from "lucide-react";
-// apple pi dash types
-import { EEstimateSystem } from "@apple-pi-dash/constants";
-import { useTranslation } from "@apple-pi-dash/i18n";
-import { MembersPropertyIcon, WorkItemsIcon } from "@apple-pi-dash/propel/icons";
-import type { ICycle } from "@apple-pi-dash/types";
-// apple pi dash ui
-import { Avatar, AvatarGroup, TextArea } from "@apple-pi-dash/ui";
+// pi dash types
+import { EEstimateSystem } from "@pi-dash/constants";
+import { useTranslation } from "@pi-dash/i18n";
+import { MembersPropertyIcon, WorkItemsIcon } from "@pi-dash/propel/icons";
+import type { ICycle } from "@pi-dash/types";
+// pi dash ui
+import { Avatar, AvatarGroup, TextArea } from "@pi-dash/ui";
 // helpers
-import { getFileURL } from "@apple-pi-dash/utils";
+import { getFileURL } from "@pi-dash/utils";
 // hooks
 import { useProjectEstimates } from "@/hooks/store/estimates";
 import { useMember } from "@/hooks/store/use-member";
-// apple pi dash web constants
+// pi dash web constants
 
 type Props = {
   projectId: string;

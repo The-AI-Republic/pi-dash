@@ -1,16 +1,16 @@
 x-db-env: &db-env
-  PGHOST: ${PGHOST:-apple-pi-dash-db}
-  PGDATABASE: ${PGDATABASE:-apple-pi-dash}
-  POSTGRES_USER: ${POSTGRES_USER:-apple-pi-dash}
-  POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-apple-pi-dash}
-  POSTGRES_DB: ${POSTGRES_DB:-apple-pi-dash}
+  PGHOST: ${PGHOST:-pi-dash-db}
+  PGDATABASE: ${PGDATABASE:-pi-dash}
+  POSTGRES_USER: ${POSTGRES_USER:-pi-dash}
+  POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-pi-dash}
+  POSTGRES_DB: ${POSTGRES_DB:-pi-dash}
   POSTGRES_PORT: ${POSTGRES_PORT:-5432}
   PGDATA: ${PGDATA:-/var/lib/postgresql/data}
 
 x-redis-env: &redis-env
-  REDIS_HOST: ${REDIS_HOST:-apple-pi-dash-redis}
+  REDIS_HOST: ${REDIS_HOST:-pi-dash-redis}
   REDIS_PORT: ${REDIS_PORT:-6379}
-  REDIS_URL: ${REDIS_URL:-redis://apple-pi-dash-redis:6379/}
+  REDIS_URL: ${REDIS_URL:-redis://pi-dash-redis:6379/}
 
 x-minio-env: &minio-env
   MINIO_ROOT_USER: ${AWS_ACCESS_KEY_ID:-access-key}
@@ -20,7 +20,7 @@ x-aws-s3-env: &aws-s3-env
   AWS_REGION: ${AWS_REGION:-}
   AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:-access-key}
   AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:-secret-key}
-  AWS_S3_ENDPOINT_URL: ${AWS_S3_ENDPOINT_URL:-http://apple-pi-dash-minio:9000}
+  AWS_S3_ENDPOINT_URL: ${AWS_S3_ENDPOINT_URL:-http://pi-dash-minio:9000}
   AWS_S3_BUCKET_NAME: ${AWS_S3_BUCKET_NAME:-uploads}
 
 x-proxy-env: &proxy-env
@@ -35,12 +35,12 @@ x-proxy-env: &proxy-env
   SITE_ADDRESS: ${SITE_ADDRESS:-:80}
 
 x-mq-env: &mq-env # RabbitMQ Settings
-  RABBITMQ_HOST: ${RABBITMQ_HOST:-apple-pi-dash-mq}
+  RABBITMQ_HOST: ${RABBITMQ_HOST:-pi-dash-mq}
   RABBITMQ_PORT: ${RABBITMQ_PORT:-5672}
-  RABBITMQ_DEFAULT_USER: ${RABBITMQ_USER:-apple-pi-dash}
-  RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASSWORD:-apple-pi-dash}
-  RABBITMQ_DEFAULT_VHOST: ${RABBITMQ_VHOST:-apple-pi-dash}
-  RABBITMQ_VHOST: ${RABBITMQ_VHOST:-apple-pi-dash}
+  RABBITMQ_DEFAULT_USER: ${RABBITMQ_USER:-pi-dash}
+  RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASSWORD:-pi-dash}
+  RABBITMQ_DEFAULT_VHOST: ${RABBITMQ_VHOST:-pi-dash}
+  RABBITMQ_VHOST: ${RABBITMQ_VHOST:-pi-dash}
 
 x-live-env: &live-env
   API_BASE_URL: ${API_BASE_URL:-http://api:8000}
@@ -52,16 +52,16 @@ x-app-env: &app-env
   CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS}
   GUNICORN_WORKERS: 1
   USE_MINIO: ${USE_MINIO:-1}
-  DATABASE_URL: ${DATABASE_URL:-postgresql://apple-pi-dash:apple-pi-dash@apple-pi-dash-db/apple-pi-dash}
+  DATABASE_URL: ${DATABASE_URL:-postgresql://pi-dash:pi-dash@pi-dash-db/pi-dash}
   SECRET_KEY: ${SECRET_KEY:-60gp0byfz2dvffa45cxl20p1scy9xbpf6d8c5y0geejgkyp1b5}
-  AMQP_URL: ${AMQP_URL:-amqp://apple-pi-dash:apple-pi-dash@apple-pi-dash-mq:5672/apple-pi-dash}
+  AMQP_URL: ${AMQP_URL:-amqp://pi-dash:pi-dash@pi-dash-mq:5672/pi-dash}
   API_KEY_RATE_LIMIT: ${API_KEY_RATE_LIMIT:-60/minute}
   MINIO_ENDPOINT_SSL: ${MINIO_ENDPOINT_SSL:-0}
   LIVE_SERVER_SECRET_KEY: ${LIVE_SERVER_SECRET_KEY:-2FiJk1U2aiVPEQtzLehYGlTSnTnrs7LW}
 
 services:
   web:
-    image: makeapplepidash/apple-pi-dash-frontend:${APP_RELEASE:-stable}
+    image: makepidash/pi-dash-frontend:${APP_RELEASE:-stable}
     deploy:
       replicas: ${WEB_REPLICAS:-1}
       restart_policy:
@@ -71,7 +71,7 @@ services:
       - worker
 
   space:
-    image: makeapplepidash/apple-pi-dash-space:${APP_RELEASE:-stable}
+    image: makepidash/pi-dash-space:${APP_RELEASE:-stable}
     deploy:
       replicas: ${SPACE_REPLICAS:-1}
       restart_policy:
@@ -82,7 +82,7 @@ services:
       - web
 
   admin:
-    image: makeapplepidash/apple-pi-dash-admin:${APP_RELEASE:-stable}
+    image: makepidash/pi-dash-admin:${APP_RELEASE:-stable}
     deploy:
       replicas: ${ADMIN_REPLICAS:-1}
       restart_policy:
@@ -92,7 +92,7 @@ services:
       - web
 
   live:
-    image: makeapplepidash/apple-pi-dash-live:${APP_RELEASE:-stable}
+    image: makepidash/pi-dash-live:${APP_RELEASE:-stable}
     environment:
       <<: [*live-env, *redis-env]
     deploy:
@@ -104,72 +104,72 @@ services:
       - web
 
   api:
-    image: makeapplepidash/apple-pi-dash-backend:${APP_RELEASE:-stable}
+    image: makepidash/pi-dash-backend:${APP_RELEASE:-stable}
     command: ./bin/docker-entrypoint-api.sh
     deploy:
       replicas: ${API_REPLICAS:-1}
       restart_policy:
         condition: any
     volumes:
-      - logs_api:/code/apple_pi_dash/logs
+      - logs_api:/code/pi_dash/logs
     environment:
       <<: [*app-env, *db-env, *redis-env, *minio-env, *aws-s3-env, *proxy-env]
     depends_on:
-      - apple-pi-dash-db
-      - apple-pi-dash-redis
-      - apple-pi-dash-mq
+      - pi-dash-db
+      - pi-dash-redis
+      - pi-dash-mq
 
   worker:
-    image: makeapplepidash/apple-pi-dash-backend:${APP_RELEASE:-stable}
+    image: makepidash/pi-dash-backend:${APP_RELEASE:-stable}
     command: ./bin/docker-entrypoint-worker.sh
     deploy:
       replicas: ${WORKER_REPLICAS:-1}
       restart_policy:
         condition: any
     volumes:
-      - logs_worker:/code/apple_pi_dash/logs
+      - logs_worker:/code/pi_dash/logs
     environment:
       <<: [*app-env, *db-env, *redis-env, *minio-env, *aws-s3-env, *proxy-env]
     depends_on:
       - api
-      - apple-pi-dash-db
-      - apple-pi-dash-redis
-      - apple-pi-dash-mq
+      - pi-dash-db
+      - pi-dash-redis
+      - pi-dash-mq
 
   beat-worker:
-    image: makeapplepidash/apple-pi-dash-backend:${APP_RELEASE:-stable}
+    image: makepidash/pi-dash-backend:${APP_RELEASE:-stable}
     command: ./bin/docker-entrypoint-beat.sh
     deploy:
       replicas: ${BEAT_WORKER_REPLICAS:-1}
       restart_policy:
         condition: any
     volumes:
-      - logs_beat-worker:/code/apple_pi_dash/logs
+      - logs_beat-worker:/code/pi_dash/logs
     environment:
       <<: [*app-env, *db-env, *redis-env, *minio-env, *aws-s3-env, *proxy-env]
     depends_on:
       - api
-      - apple-pi-dash-db
-      - apple-pi-dash-redis
-      - apple-pi-dash-mq
+      - pi-dash-db
+      - pi-dash-redis
+      - pi-dash-mq
 
   migrator:
-    image: makeapplepidash/apple-pi-dash-backend:${APP_RELEASE:-stable}
+    image: makepidash/pi-dash-backend:${APP_RELEASE:-stable}
     command: ./bin/docker-entrypoint-migrator.sh
     deploy:
       replicas: 1
       restart_policy:
         condition: on-failure
     volumes:
-      - logs_migrator:/code/apple_pi_dash/logs
+      - logs_migrator:/code/pi_dash/logs
     environment:
       <<: [*app-env, *db-env, *redis-env, *minio-env, *aws-s3-env, *proxy-env]
     depends_on:
-      - apple-pi-dash-db
-      - apple-pi-dash-redis
+      - pi-dash-db
+      - pi-dash-redis
 
   # Comment this if you already have a database running
-  apple-pi-dash-db:
+  pi-dash-db:
     image: postgres:15.7-alpine
     command: postgres -c 'max_connections=1000'
     deploy:
@@ -181,7 +181,7 @@ services:
     volumes:
       - pgdata:/var/lib/postgresql/data
 
-  apple-pi-dash-redis:
+  pi-dash-redis:
     image: valkey/valkey:7.2.11-alpine
     deploy:
       replicas: 1
@@ -190,7 +190,7 @@ services:
     volumes:
       - redisdata:/data
 
-  apple-pi-dash-mq:
+  pi-dash-mq:
     image: rabbitmq:3.13.6-management-alpine
     deploy:
       replicas: 1
@@ -202,7 +202,7 @@ services:
       - rabbitmq_data:/var/lib/rabbitmq
 
   # Comment this if you using any external s3 compatible storage
-  apple-pi-dash-minio:
+  pi-dash-minio:
     image: minio/minio:latest
     command: server /export --console-address ":9090"
     deploy:
@@ -216,7 +216,7 @@ services:
 
   # Comment this if you already have a reverse proxy running
   proxy:
-    image: makeapplepidash/apple-pi-dash-proxy:${APP_RELEASE:-stable}
+    image: makepidash/pi-dash-proxy:${APP_RELEASE:-stable}
     deploy:
       replicas: 1
       restart_policy:

@@ -1,18 +1,18 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
 
 import { useParams } from "next/navigation";
-// apple pi dash imports
-import { getPageName } from "@apple-pi-dash/utils";
+// pi dash imports
+import { getPageName } from "@pi-dash/utils";
 // hooks
 import { useCycle } from "@/hooks/store/use-cycle";
 import { useModule } from "@/hooks/store/use-module";
-// apple pi dash web imports
-import { useExtendedContextIndicator } from "@/apple-pi-dash-web/components/command-palette/power-k/hooks/use-extended-context-indicator";
-import { EPageStoreType, usePageStore } from "@/apple-pi-dash-web/hooks/store";
+// pi dash web imports
+import { useExtendedContextIndicator } from "@/pi-dash-web/components/command-palette/power-k/hooks/use-extended-context-indicator";
+import { EPageStoreType, usePageStore } from "@/pi-dash-web/hooks/store";
 // local imports
 import type { TPowerKContextType } from "../core/types";
 

@@ -1,15 +1,15 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
 
 import Link from "next/link";
-import { PROJECT_TRACKER_ELEMENTS } from "@apple-pi-dash/constants";
-import { ChevronRightIcon } from "@apple-pi-dash/propel/icons";
-import { EPillVariant, Pill, EPillSize } from "@apple-pi-dash/propel/pill";
-import { ToggleSwitch } from "@apple-pi-dash/ui";
-import { joinUrlPath } from "@apple-pi-dash/utils";
+import { PROJECT_TRACKER_ELEMENTS } from "@pi-dash/constants";
+import { ChevronRightIcon } from "@pi-dash/propel/icons";
+import { EPillVariant, Pill, EPillSize } from "@pi-dash/propel/pill";
+import { ToggleSwitch } from "@pi-dash/ui";
+import { joinUrlPath } from "@pi-dash/utils";
 
 type Props = {
   workspaceSlug: string;

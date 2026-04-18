@@ -1,5 +1,5 @@
-import type { TPlacement } from "@apple-pi-dash/propel/utils/placement";
-import type { TIssue } from "@apple-pi-dash/types";
+import type { TPlacement } from "@pi-dash/propel/utils/placement";
+import type { TIssue } from "@pi-dash/types";
 
 export interface IQuickActionProps {
   parentRef: React.RefObject<HTMLElement>;

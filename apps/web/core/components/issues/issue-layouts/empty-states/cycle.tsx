@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
@@ -8,13 +8,13 @@ import { useState } from "react";
 import { isEmpty } from "lodash-es";
 import { observer } from "mobx-react";
 import { useParams } from "next/navigation";
-// apple pi dash imports
-import { EUserPermissionsLevel, WORK_ITEM_TRACKER_ELEMENTS } from "@apple-pi-dash/constants";
-import { useTranslation } from "@apple-pi-dash/i18n";
-import { EmptyStateDetailed } from "@apple-pi-dash/propel/empty-state";
-import { TOAST_TYPE, setToast } from "@apple-pi-dash/propel/toast";
-import type { ISearchIssueResponse } from "@apple-pi-dash/types";
-import { EIssuesStoreType, EUserProjectRoles } from "@apple-pi-dash/types";
+// pi dash imports
+import { EUserPermissionsLevel, WORK_ITEM_TRACKER_ELEMENTS } from "@pi-dash/constants";
+import { useTranslation } from "@pi-dash/i18n";
+import { EmptyStateDetailed } from "@pi-dash/propel/empty-state";
+import { TOAST_TYPE, setToast } from "@pi-dash/propel/toast";
+import type { ISearchIssueResponse } from "@pi-dash/types";
+import { EIssuesStoreType, EUserProjectRoles } from "@pi-dash/types";
 // components
 import { ExistingIssuesListModal } from "@/components/core/modals/existing-issues-list-modal";
 import { useCommandPalette } from "@/hooks/store/use-command-palette";
@@ -31,7 +31,7 @@ export const CycleEmptyState = observer(function CycleEmptyState() {
   const cycleId = routerCycleId ? routerCycleId.toString() : undefined;
   // states
   const [cycleIssuesListModal, setCycleIssuesListModal] = useState(false);
-  // apple pi dash hooks
+  // pi dash hooks
   const { t } = useTranslation();
   // store hooks
   const { getCycleById } = useCycle();

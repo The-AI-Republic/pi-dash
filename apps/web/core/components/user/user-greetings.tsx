@@ -1,13 +1,13 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
 
-// apple pi dash types
-import { useTranslation } from "@apple-pi-dash/i18n";
+// pi dash types
+import { useTranslation } from "@pi-dash/i18n";
 // hooks
-import type { IUser } from "@apple-pi-dash/types";
+import type { IUser } from "@pi-dash/types";
 import { useCurrentTime } from "@/hooks/use-current-time";
 // types
 

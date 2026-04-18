@@ -1,12 +1,12 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
 
 // Types and utilities for member filtering
-import type { EUserPermissions, TMemberOrderByOptions } from "@apple-pi-dash/constants";
-import type { IUserLite, TProjectMembership } from "@apple-pi-dash/types";
+import type { EUserPermissions, TMemberOrderByOptions } from "@pi-dash/constants";
+import type { IUserLite, TProjectMembership } from "@pi-dash/types";
 
 export interface IMemberFilters {
   order_by?: TMemberOrderByOptions;

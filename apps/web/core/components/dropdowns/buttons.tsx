@@ -1,14 +1,14 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
 
 import React from "react";
 // helpers
-import { Button } from "@apple-pi-dash/propel/button";
-import { Tooltip } from "@apple-pi-dash/propel/tooltip";
-import { cn } from "@apple-pi-dash/utils";
+import { Button } from "@pi-dash/propel/button";
+import { Tooltip } from "@pi-dash/propel/tooltip";
+import { cn } from "@pi-dash/utils";
 // types
 import { usePlatformOS } from "@/hooks/use-platform-os";
 import { BACKGROUND_BUTTON_VARIANTS, BORDER_BUTTON_VARIANTS } from "./constants";

@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
@@ -7,23 +7,23 @@
 import { useEffect, useState } from "react";
 import { observer } from "mobx-react";
 import { Controller, useForm } from "react-hook-form";
-// Apple Pi Dash Imports
-import { ORGANIZATION_SIZE, EUserPermissions, EUserPermissionsLevel } from "@apple-pi-dash/constants";
-import { useTranslation } from "@apple-pi-dash/i18n";
-import { Button } from "@apple-pi-dash/propel/button";
-import { EditIcon } from "@apple-pi-dash/propel/icons";
-import { TOAST_TYPE, setToast } from "@apple-pi-dash/propel/toast";
-import type { IWorkspace } from "@apple-pi-dash/types";
-import { CustomSelect, Input } from "@apple-pi-dash/ui";
-import { cn, copyUrlToClipboard, getFileURL, validateWorkspaceName } from "@apple-pi-dash/utils";
+// Pi Dash Imports
+import { ORGANIZATION_SIZE, EUserPermissions, EUserPermissionsLevel } from "@pi-dash/constants";
+import { useTranslation } from "@pi-dash/i18n";
+import { Button } from "@pi-dash/propel/button";
+import { EditIcon } from "@pi-dash/propel/icons";
+import { TOAST_TYPE, setToast } from "@pi-dash/propel/toast";
+import type { IWorkspace } from "@pi-dash/types";
+import { CustomSelect, Input } from "@pi-dash/ui";
+import { cn, copyUrlToClipboard, getFileURL, validateWorkspaceName } from "@pi-dash/utils";
 // components
 import { WorkspaceImageUploadModal } from "@/components/core/modals/workspace-image-upload-modal";
 import { TimezoneSelect } from "@/components/global/timezone-select";
 // hooks
 import { useWorkspace } from "@/hooks/store/use-workspace";
 import { useUserPermissions } from "@/hooks/store/user";
-// apple pi dash web components
-import { DeleteWorkspaceSection } from "@/apple-pi-dash-web/components/workspace/delete-workspace-section";
+// pi dash web components
+import { DeleteWorkspaceSection } from "@/pi-dash-web/components/workspace/delete-workspace-section";
 
 const defaultValues: Partial<IWorkspace> = {
   name: "",

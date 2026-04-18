@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
@@ -8,8 +8,8 @@ import type { HocuspocusProvider } from "@hocuspocus/provider";
 import type { Editor } from "@tiptap/core";
 import { DOMSerializer } from "@tiptap/pm/model";
 import * as Y from "yjs";
-// apple pi dash imports
-import { convertHTMLToMarkdown } from "@apple-pi-dash/utils";
+// pi dash imports
+import { convertHTMLToMarkdown } from "@pi-dash/utils";
 // components
 import { getEditorMenuItems } from "@/components/menus";
 // constants
@@ -109,7 +109,7 @@ export const getEditorRefHelpers = (args: TArgs): EditorRefApi => {
         event.preventDefault();
         event.clipboardData?.setData("text/plain", markdown);
         event.clipboardData?.setData("text/html", html);
-        event.clipboardData?.setData("text/apple-pi-dash-editor-html", html);
+        event.clipboardData?.setData("text/pi-dash-editor-html", html);
         document.removeEventListener("copy", copyHandler);
       };
 

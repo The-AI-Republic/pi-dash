@@ -1,13 +1,13 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
 
 import React, { useState, useCallback, useMemo } from "react";
-import { LockIcon, ChevronDownIcon } from "@apple-pi-dash/propel/icons";
-import { PasswordInput, PasswordStrengthIndicator } from "@apple-pi-dash/ui";
-import { cn } from "@apple-pi-dash/utils";
+import { LockIcon, ChevronDownIcon } from "@pi-dash/propel/icons";
+import { PasswordInput, PasswordStrengthIndicator } from "@pi-dash/ui";
+import { cn } from "@pi-dash/utils";
 
 interface PasswordState {
   password: string;

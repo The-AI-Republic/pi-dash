@@ -1,12 +1,12 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
 
 import React from "react";
 import Link from "next/link";
-import { EAuthModes } from "@apple-pi-dash/constants";
+import { EAuthModes } from "@pi-dash/constants";
 
 interface TermsAndConditionsProps {
   authType?: EAuthModes;
@@ -14,8 +14,8 @@ interface TermsAndConditionsProps {
 
 // Constants for better maintainability
 const LEGAL_LINKS = {
-  termsOfService: "https://apple-pi-dash.so/legals/terms-and-conditions",
-  privacyPolicy: "https://apple-pi-dash.so/legals/privacy-policy",
+  termsOfService: "https://pi-dash.so/legals/terms-and-conditions",
+  privacyPolicy: "https://pi-dash.so/legals/privacy-policy",
 } as const;
 
 const MESSAGES = {

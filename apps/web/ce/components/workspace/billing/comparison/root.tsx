@@ -1,17 +1,17 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
 
 import { observer } from "mobx-react";
-// apple pi dash imports
-import type { EProductSubscriptionEnum, TBillingFrequency } from "@apple-pi-dash/types";
+// pi dash imports
+import type { EProductSubscriptionEnum, TBillingFrequency } from "@pi-dash/types";
 // components
 import { PlansComparisonBase, shouldRenderPlanDetail } from "@/components/workspace/billing/comparison/base";
-import type { TApplePiDashPlans } from "@/constants/plans";
-import { APPLE_PI_DASH_PLANS } from "@/constants/plans";
-// apple pi dash web imports
+import type { TPiDashPlans } from "@/constants/plans";
+import { PI_DASH_PLANS } from "@/constants/plans";
+// pi dash web imports
 import { PlanDetail } from "./plan-detail";
 
 type TPlansComparisonProps = {
@@ -29,12 +29,12 @@ export const PlansComparison = observer(function PlansComparison(props: TPlansCo
     setIsCompareAllFeaturesSectionOpen,
   } = props;
   // plan details
-  const { planDetails } = APPLE_PI_DASH_PLANS;
+  const { planDetails } = PI_DASH_PLANS;
 
   return (
     <PlansComparisonBase
-      applePiDashDetails={Object.entries(planDetails).map(([planKey, plan]) => {
-        const currentPlanKey = planKey as TApplePiDashPlans;
+      piDashDetails={Object.entries(planDetails).map(([planKey, plan]) => {
+        const currentPlanKey = planKey as TPiDashPlans;
         if (!shouldRenderPlanDetail(currentPlanKey)) return null;
         return (
           <PlanDetail

@@ -1,20 +1,20 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
 
 import React from "react";
-// apple pi dash imports
-import { LiteTextEditorWithRef } from "@apple-pi-dash/editor";
-import type { EditorRefApi, ILiteTextEditorProps, TFileHandler } from "@apple-pi-dash/editor";
-import type { MakeOptional } from "@apple-pi-dash/types";
-import { cn, isCommentEmpty } from "@apple-pi-dash/utils";
+// pi dash imports
+import { LiteTextEditorWithRef } from "@pi-dash/editor";
+import type { EditorRefApi, ILiteTextEditorProps, TFileHandler } from "@pi-dash/editor";
+import type { MakeOptional } from "@pi-dash/types";
+import { cn, isCommentEmpty } from "@pi-dash/utils";
 // helpers
 import { getEditorFileHandlers } from "@/helpers/editor.helper";
 // hooks
 import { useParseEditorContent } from "@/hooks/use-parse-editor-content";
-// apple pi dash web imports
+// pi dash web imports
 import { useEditorFlagging } from "@/hooks/use-editor-flagging";
 // local imports
 import { EditorMentionsRoot } from "./embeds/mentions";

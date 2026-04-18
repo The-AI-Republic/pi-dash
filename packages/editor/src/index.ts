@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
@@ -20,7 +20,7 @@ export * from "@/helpers/common";
 export * from "@/helpers/yjs-utils";
 
 export { CORE_EXTENSIONS } from "@/constants/extension";
-export { ADDITIONAL_EXTENSIONS } from "@/apple-pi-dash-editor/constants/extensions";
+export { ADDITIONAL_EXTENSIONS } from "@/pi-dash-editor/constants/extensions";
 
 // types
 export * from "@/types";

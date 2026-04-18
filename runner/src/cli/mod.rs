@@ -11,7 +11,7 @@ mod status;
 mod tui;
 
 #[derive(Debug, Parser)]
-#[command(name = "apple-pi-dash-runner", version, about, long_about = None)]
+#[command(name = "pi-dash-runner", version, about, long_about = None)]
 pub struct Cli {
     #[command(subcommand)]
     pub command: Command,
@@ -36,7 +36,7 @@ pub struct Cli {
 
 #[derive(Debug, Subcommand)]
 pub enum Command {
-    /// Register with Apple Pi Dash cloud using a one-time token.
+    /// Register with Pi Dash cloud using a one-time token.
     Configure(configure::Args),
 
     /// Run the daemon in the foreground.

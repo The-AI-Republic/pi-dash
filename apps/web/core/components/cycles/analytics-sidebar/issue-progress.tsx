@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
@@ -9,17 +9,17 @@ import { isEmpty } from "lodash-es";
 import { observer } from "mobx-react";
 import { useSearchParams } from "next/navigation";
 import { Disclosure, Transition } from "@headlessui/react";
-// apple pi dash imports
-import { useTranslation } from "@apple-pi-dash/i18n";
-import { ChevronUpIcon, ChevronDownIcon } from "@apple-pi-dash/propel/icons";
-import type { ICycle, TCyclePlotType, TProgressSnapshot } from "@apple-pi-dash/types";
-import { EIssuesStoreType } from "@apple-pi-dash/types";
-import { getDate } from "@apple-pi-dash/utils";
+// pi dash imports
+import { useTranslation } from "@pi-dash/i18n";
+import { ChevronUpIcon, ChevronDownIcon } from "@pi-dash/propel/icons";
+import type { ICycle, TCyclePlotType, TProgressSnapshot } from "@pi-dash/types";
+import { EIssuesStoreType } from "@pi-dash/types";
+import { getDate } from "@pi-dash/utils";
 // hooks
 import { useCycle } from "@/hooks/store/use-cycle";
-// apple pi dash web components
+// pi dash web components
 import { useWorkItemFilters } from "@/hooks/store/work-item-filters/use-work-item-filters";
-import { SidebarChartRoot } from "@/apple-pi-dash-web/components/cycles";
+import { SidebarChartRoot } from "@/pi-dash-web/components/cycles";
 // local imports
 import { CycleProgressStats } from "./progress-stats";
 
@@ -63,7 +63,7 @@ export const CycleAnalyticsProgress = observer(function CycleAnalyticsProgress(p
   // router
   const searchParams = useSearchParams();
   const peekCycle = searchParams.get("peekCycle") || undefined;
-  // apple pi dash hooks
+  // pi dash hooks
   const { t } = useTranslation();
   // store hooks
   const { getPlotTypeByCycleId, getEstimateTypeByCycleId, getCycleById } = useCycle();

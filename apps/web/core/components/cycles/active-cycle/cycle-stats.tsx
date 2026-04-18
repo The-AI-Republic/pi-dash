@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
@@ -11,16 +11,16 @@ import { useTheme } from "next-themes";
 import { CalendarCheck } from "lucide-react";
 // headless ui
 import { Tab } from "@headlessui/react";
-// apple pi dash imports
-import { useTranslation } from "@apple-pi-dash/i18n";
-import { PriorityIcon } from "@apple-pi-dash/propel/icons";
-import { Tooltip } from "@apple-pi-dash/propel/tooltip";
-import type { TWorkItemFilterCondition } from "@apple-pi-dash/shared-state";
-import type { ICycle } from "@apple-pi-dash/types";
-import { EIssuesStoreType } from "@apple-pi-dash/types";
+// pi dash imports
+import { useTranslation } from "@pi-dash/i18n";
+import { PriorityIcon } from "@pi-dash/propel/icons";
+import { Tooltip } from "@pi-dash/propel/tooltip";
+import type { TWorkItemFilterCondition } from "@pi-dash/shared-state";
+import type { ICycle } from "@pi-dash/types";
+import { EIssuesStoreType } from "@pi-dash/types";
 // ui
-import { Loader, Avatar } from "@apple-pi-dash/ui";
-import { cn, renderFormattedDate, renderFormattedDateWithoutYear, getFileURL } from "@apple-pi-dash/utils";
+import { Loader, Avatar } from "@pi-dash/ui";
+import { cn, renderFormattedDate, renderFormattedDateWithoutYear, getFileURL } from "@pi-dash/utils";
 // assets
 import darkAssigneeAsset from "@/app/assets/empty-state/active-cycle/assignee-dark.webp?url";
 import lightAssigneeAsset from "@/app/assets/empty-state/active-cycle/assignee-light.webp?url";
@@ -38,8 +38,8 @@ import { useIssueDetail } from "@/hooks/store/use-issue-detail";
 import { useIssues } from "@/hooks/store/use-issues";
 import { useIntersectionObserver } from "@/hooks/use-intersection-observer";
 import useLocalStorage from "@/hooks/use-local-storage";
-// apple pi dash web components
-import { IssueIdentifier } from "@/apple-pi-dash-web/components/issues/issue-details/issue-identifier";
+// pi dash web components
+import { IssueIdentifier } from "@/pi-dash-web/components/issues/issue-details/issue-identifier";
 // store
 import type { ActiveCycleIssueDetails } from "@/store/issue/cycle";
 
@@ -62,7 +62,7 @@ export const ActiveCycleStats = observer(function ActiveCycleStats(props: Active
   const [issuesLoaderElement, setIssueLoaderElement] = useState<HTMLDivElement | null>(null);
   // theme hook
   const { resolvedTheme } = useTheme();
-  // apple pi dash hooks
+  // pi dash hooks
   const { t } = useTranslation();
   // derived values
   const priorityResolvedPath = resolvedTheme === "light" ? lightPriorityAsset : darkPriorityAsset;

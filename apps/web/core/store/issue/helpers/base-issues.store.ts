@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
@@ -7,8 +7,8 @@
 import { isEqual, concat, get, indexOf, isEmpty, orderBy, pull, set, uniq, update, clone } from "lodash-es";
 import { action, computed, makeObservable, observable, runInAction } from "mobx";
 import { computedFn } from "mobx-utils";
-// apple pi dash constants
-import { ALL_ISSUES, ISSUE_PRIORITIES } from "@apple-pi-dash/constants";
+// pi dash constants
+import { ALL_ISSUES, ISSUE_PRIORITIES } from "@pi-dash/constants";
 // types
 import type {
   TIssue,
@@ -25,12 +25,12 @@ import type {
   TPaginationData,
   TBulkOperationsPayload,
   IBlockUpdateDependencyData,
-} from "@apple-pi-dash/types";
-import { EIssueServiceType, EIssueLayoutTypes } from "@apple-pi-dash/types";
+} from "@pi-dash/types";
+import { EIssueServiceType, EIssueLayoutTypes } from "@pi-dash/types";
 // helpers
-import { convertToISODateString } from "@apple-pi-dash/utils";
-// apple pi dash web imports
-import { workItemSortWithOrderByExtended } from "@/apple-pi-dash-web/store/issue/helpers/base-issue.store";
+import { convertToISODateString } from "@pi-dash/utils";
+// pi dash web imports
+import { workItemSortWithOrderByExtended } from "@/pi-dash-web/store/issue/helpers/base-issue.store";
 // services
 import { CycleService } from "@/services/cycle.service";
 import { IssueArchiveService, IssueService } from "@/services/issue";

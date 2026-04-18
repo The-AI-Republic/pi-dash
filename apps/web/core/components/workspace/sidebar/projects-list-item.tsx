@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
@@ -16,16 +16,16 @@ import { createRoot } from "react-dom/client";
 import scrollIntoView from "smooth-scroll-into-view-if-needed";
 import { Settings, Share2, LogOut, MoreHorizontal } from "lucide-react";
 import { Disclosure, Transition } from "@headlessui/react";
-// apple pi dash imports
-import { EUserPermissions, EUserPermissionsLevel, MEMBER_TRACKER_ELEMENTS } from "@apple-pi-dash/constants";
-import { useOutsideClickDetector } from "@apple-pi-dash/hooks";
-import { useTranslation } from "@apple-pi-dash/i18n";
-import { Logo } from "@apple-pi-dash/propel/emoji-icon-picker";
-import { LinkIcon, ArchiveIcon, ChevronRightIcon } from "@apple-pi-dash/propel/icons";
-import { IconButton } from "@apple-pi-dash/propel/icon-button";
-import { Tooltip } from "@apple-pi-dash/propel/tooltip";
-import { CustomMenu, DropIndicator, DragHandle, ControlLink } from "@apple-pi-dash/ui";
-import { cn } from "@apple-pi-dash/utils";
+// pi dash imports
+import { EUserPermissions, EUserPermissionsLevel, MEMBER_TRACKER_ELEMENTS } from "@pi-dash/constants";
+import { useOutsideClickDetector } from "@pi-dash/hooks";
+import { useTranslation } from "@pi-dash/i18n";
+import { Logo } from "@pi-dash/propel/emoji-icon-picker";
+import { LinkIcon, ArchiveIcon, ChevronRightIcon } from "@pi-dash/propel/icons";
+import { IconButton } from "@pi-dash/propel/icon-button";
+import { Tooltip } from "@pi-dash/propel/tooltip";
+import { CustomMenu, DropIndicator, DragHandle, ControlLink } from "@pi-dash/ui";
+import { cn } from "@pi-dash/utils";
 // components
 import { DEFAULT_TAB_KEY, getTabUrl } from "@/components/navigation/tab-navigation-utils";
 import { useTabPreferences } from "@/components/navigation/use-tab-preferences";
@@ -38,9 +38,9 @@ import { useProject } from "@/hooks/store/use-project";
 import { useUserPermissions } from "@/hooks/store/user";
 import { useProjectNavigationPreferences } from "@/hooks/use-navigation-preferences";
 import { usePlatformOS } from "@/hooks/use-platform-os";
-// apple pi dash web imports
-import { useNavigationItems } from "@/apple-pi-dash-web/components/navigations";
-import { ProjectNavigationRoot } from "@/apple-pi-dash-web/components/sidebar";
+// pi dash web imports
+import { useNavigationItems } from "@/pi-dash-web/components/navigations";
+import { ProjectNavigationRoot } from "@/pi-dash-web/components/sidebar";
 // local imports
 import { HIGHLIGHT_CLASS, highlightIssueOnDrop } from "../../issues/issue-layouts/utils";
 

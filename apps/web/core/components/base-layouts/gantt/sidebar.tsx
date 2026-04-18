@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
@@ -7,9 +7,9 @@
 import type { RefObject } from "react";
 import { useState } from "react";
 import { observer } from "mobx-react";
-import type { IBaseLayoutsBaseItem, IBlockUpdateData } from "@apple-pi-dash/types";
-import { Loader, Row } from "@apple-pi-dash/ui";
-import { cn } from "@apple-pi-dash/utils";
+import type { IBaseLayoutsBaseItem, IBlockUpdateData } from "@pi-dash/types";
+import { Loader, Row } from "@pi-dash/ui";
+import { cn } from "@pi-dash/utils";
 import RenderIfVisible from "@/components/core/render-if-visible-HOC";
 import { BLOCK_HEIGHT } from "@/components/gantt-chart/constants";
 import { GanttDnDHOC } from "@/components/gantt-chart/sidebar/gantt-dnd-HOC";

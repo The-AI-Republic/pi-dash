@@ -1,11 +1,11 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
 
-import type { IEditorPropsExtended } from "@apple-pi-dash/editor";
-import type { TSearchEntityRequestPayload, TSearchResponse } from "@apple-pi-dash/types";
+import type { IEditorPropsExtended } from "@pi-dash/editor";
+import type { TSearchEntityRequestPayload, TSearchResponse } from "@pi-dash/types";
 import type { TPageInstance } from "@/store/pages/base-page";
 import type { EPageStoreType } from "../store";
 

@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
@@ -7,12 +7,12 @@
 import type { Dispatch, SetStateAction } from "react";
 import { useCallback, useState } from "react";
 import { observer } from "mobx-react";
-// apple pi dash imports
-import { estimateCount } from "@apple-pi-dash/constants";
-import { Button } from "@apple-pi-dash/propel/button";
-import { PlusIcon } from "@apple-pi-dash/propel/icons";
-import type { TEstimatePointsObject, TEstimateSystemKeys, TEstimateTypeError } from "@apple-pi-dash/types";
-import { Sortable } from "@apple-pi-dash/ui";
+// pi dash imports
+import { estimateCount } from "@pi-dash/constants";
+import { Button } from "@pi-dash/propel/button";
+import { PlusIcon } from "@pi-dash/propel/icons";
+import type { TEstimatePointsObject, TEstimateSystemKeys, TEstimateTypeError } from "@pi-dash/types";
+import { Sortable } from "@pi-dash/ui";
 // local imports
 import { EstimatePointCreate } from "./create";
 import { EstimatePointItemPreview } from "./preview";

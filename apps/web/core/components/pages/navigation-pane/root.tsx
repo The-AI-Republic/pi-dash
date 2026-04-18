@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
@@ -8,16 +8,16 @@ import { useCallback } from "react";
 import { observer } from "mobx-react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { ArrowRightCircle } from "lucide-react";
-// apple pi dash imports
-import { useTranslation } from "@apple-pi-dash/i18n";
-import { Tabs } from "@apple-pi-dash/propel/tabs";
-import { Tooltip } from "@apple-pi-dash/propel/tooltip";
+// pi dash imports
+import { useTranslation } from "@pi-dash/i18n";
+import { Tabs } from "@pi-dash/propel/tabs";
+import { Tooltip } from "@pi-dash/propel/tooltip";
 // hooks
 import { useQueryParams } from "@/hooks/use-query-params";
-// apple pi dash web components
-import type { TPageNavigationPaneTab } from "@/apple-pi-dash-web/components/pages/navigation-pane";
+// pi dash web components
+import type { TPageNavigationPaneTab } from "@/pi-dash-web/components/pages/navigation-pane";
 // store
-import type { EPageStoreType } from "@/apple-pi-dash-web/hooks/store";
+import type { EPageStoreType } from "@/pi-dash-web/hooks/store";
 import type { TPageInstance } from "@/store/pages/base-page";
 // local imports
 import type { TPageRootHandlers } from "../editor/page-root";

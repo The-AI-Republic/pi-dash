@@ -1,15 +1,15 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
 
 import { action, computed, makeObservable, observable } from "mobx";
 import { computedFn } from "mobx-utils";
-// apple pi dash imports
-import type { TConfigOptions } from "@apple-pi-dash/constants";
-import { DEFAULT_FILTER_CONFIG_OPTIONS } from "@apple-pi-dash/constants";
-import type { TExternalFilter, TFilterConfig, TFilterProperty } from "@apple-pi-dash/types";
+// pi dash imports
+import type { TConfigOptions } from "@pi-dash/constants";
+import { DEFAULT_FILTER_CONFIG_OPTIONS } from "@pi-dash/constants";
+import type { TExternalFilter, TFilterConfig, TFilterProperty } from "@pi-dash/types";
 // local imports
 import type { IFilterConfig } from "./config";
 import { FilterConfig } from "./config";

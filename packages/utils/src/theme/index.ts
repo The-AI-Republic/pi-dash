@@ -1,12 +1,12 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
 
 /**
  * Theme System Public API
- * Exports all theme-related utilities for use across Apple Pi Dash apps
+ * Exports all theme-related utilities for use across Pi Dash apps
  */
 
 // Palette generation

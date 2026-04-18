@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
@@ -14,25 +14,25 @@ import type {
   IBlockUpdateDependencyData,
   IGanttBlock,
   TGanttViews,
-} from "@apple-pi-dash/types";
-import { cn, getDate } from "@apple-pi-dash/utils";
+} from "@pi-dash/types";
+import { cn, getDate } from "@pi-dash/utils";
 // components
 import { MultipleSelectGroup } from "@/components/core/multiple-select";
 import { GanttChartSidebar, MonthChartView, QuarterChartView, WeekChartView } from "@/components/gantt-chart";
 // helpers
 // hooks
 import { useTimeLineChartStore } from "@/hooks/use-timeline-chart";
-// apple pi dash web components
+// pi dash web components
 import {
   TimelineDependencyPaths,
   TimelineDraggablePath,
   GanttAdditionalLayers,
-} from "@/apple-pi-dash-web/components/gantt-chart";
-import { GanttChartRowList } from "@/apple-pi-dash-web/components/gantt-chart/blocks/block-row-list";
-import { GanttChartBlocksList } from "@/apple-pi-dash-web/components/gantt-chart/blocks/blocks-list";
-import { IssueBulkOperationsRoot } from "@/apple-pi-dash-web/components/issues/bulk-operations";
-// apple pi dash web hooks
-import { useBulkOperationStatus } from "@/apple-pi-dash-web/hooks/use-bulk-operation-status";
+} from "@/pi-dash-web/components/gantt-chart";
+import { GanttChartRowList } from "@/pi-dash-web/components/gantt-chart/blocks/block-row-list";
+import { GanttChartBlocksList } from "@/pi-dash-web/components/gantt-chart/blocks/blocks-list";
+import { IssueBulkOperationsRoot } from "@/pi-dash-web/components/issues/bulk-operations";
+// pi dash web hooks
+import { useBulkOperationStatus } from "@/pi-dash-web/hooks/use-bulk-operation-status";
 //
 import { DEFAULT_BLOCK_WIDTH, GANTT_SELECT_GROUP, HEADER_HEIGHT } from "../constants";
 import { getItemPositionWidth } from "../views";
@@ -94,7 +94,7 @@ export const GanttChartMainContent = observer(function GanttChartMainContent(pro
   const ganttContainerRef = useRef<HTMLDivElement>(null);
   // chart hook
   const { currentView, currentViewData } = useTimeLineChartStore();
-  // apple pi dash web hooks
+  // pi dash web hooks
   const isBulkOperationsEnabled = useBulkOperationStatus();
 
   // Enable Auto Scroll for Ganttlist

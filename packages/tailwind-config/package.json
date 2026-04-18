@@ -1,5 +1,5 @@
 {
-  "name": "@apple-pi-dash/tailwind-config",
+  "name": "@pi-dash/tailwind-config",
   "version": "1.3.0",
   "private": true,
   "description": "common tailwind configuration across monorepo",

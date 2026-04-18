@@ -1,16 +1,16 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
 
 import { observer } from "mobx-react";
-// apple pi dash web components
-import { PageLockControl } from "@/apple-pi-dash-web/components/pages/header/lock-control";
-import { PageMoveControl } from "@/apple-pi-dash-web/components/pages/header/move-control";
-import { PageShareControl } from "@/apple-pi-dash-web/components/pages/header/share-control";
-// apple pi dash web hooks
-import type { EPageStoreType } from "@/apple-pi-dash-web/hooks/store";
+// pi dash web components
+import { PageLockControl } from "@/pi-dash-web/components/pages/header/lock-control";
+import { PageMoveControl } from "@/pi-dash-web/components/pages/header/move-control";
+import { PageShareControl } from "@/pi-dash-web/components/pages/header/share-control";
+// pi dash web hooks
+import type { EPageStoreType } from "@/pi-dash-web/hooks/store";
 // store
 import type { TPageInstance } from "@/store/pages/base-page";
 // local imports

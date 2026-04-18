@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
@@ -8,16 +8,16 @@ import type { FormEvent } from "react";
 import { useState } from "react";
 import type { LucideIcon } from "lucide-react";
 
-// apple pi dash imports
-import { ETabIndices, EPageAccess } from "@apple-pi-dash/constants";
-import { useTranslation } from "@apple-pi-dash/i18n";
-import { Button } from "@apple-pi-dash/propel/button";
-import { EmojiPicker, EmojiIconPickerTypes, Logo } from "@apple-pi-dash/propel/emoji-icon-picker";
-import { GlobeIcon, LockIcon, PageIcon } from "@apple-pi-dash/propel/icons";
-import type { ISvgIcons } from "@apple-pi-dash/propel/icons";
-import type { TPage } from "@apple-pi-dash/types";
-import { Input } from "@apple-pi-dash/ui";
-import { getTabIndex } from "@apple-pi-dash/utils";
+// pi dash imports
+import { ETabIndices, EPageAccess } from "@pi-dash/constants";
+import { useTranslation } from "@pi-dash/i18n";
+import { Button } from "@pi-dash/propel/button";
+import { EmojiPicker, EmojiIconPickerTypes, Logo } from "@pi-dash/propel/emoji-icon-picker";
+import { GlobeIcon, LockIcon, PageIcon } from "@pi-dash/propel/icons";
+import type { ISvgIcons } from "@pi-dash/propel/icons";
+import type { TPage } from "@pi-dash/types";
+import { Input } from "@pi-dash/ui";
+import { getTabIndex } from "@pi-dash/utils";
 // components
 import { AccessField } from "@/components/common/access-field";
 // hooks

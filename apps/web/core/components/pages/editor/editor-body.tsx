@@ -1,14 +1,14 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
 
 import { useCallback, useEffect, useMemo, useRef } from "react";
 import { observer } from "mobx-react";
-// apple pi dash imports
-import { LIVE_BASE_PATH, LIVE_BASE_URL } from "@apple-pi-dash/constants";
-import { CollaborativeDocumentEditorWithRef } from "@apple-pi-dash/editor";
+// pi dash imports
+import { LIVE_BASE_PATH, LIVE_BASE_URL } from "@pi-dash/constants";
+import { CollaborativeDocumentEditorWithRef } from "@pi-dash/editor";
 import type {
   CollaborationState,
   EditorRefApi,
@@ -18,11 +18,11 @@ import type {
   TFileHandler,
   TRealtimeConfig,
   TServerHandler,
-} from "@apple-pi-dash/editor";
-import { useTranslation } from "@apple-pi-dash/i18n";
-import type { TSearchEntityRequestPayload, TSearchResponse, TWebhookConnectionQueryParams } from "@apple-pi-dash/types";
-import { ERowVariant, Row } from "@apple-pi-dash/ui";
-import { cn, generateRandomColor, hslToHex } from "@apple-pi-dash/utils";
+} from "@pi-dash/editor";
+import { useTranslation } from "@pi-dash/i18n";
+import type { TSearchEntityRequestPayload, TSearchResponse, TWebhookConnectionQueryParams } from "@pi-dash/types";
+import { ERowVariant, Row } from "@pi-dash/ui";
+import { cn, generateRandomColor, hslToHex } from "@pi-dash/utils";
 // components
 import { EditorMentionsRoot } from "@/components/editor/embeds/mentions";
 // hooks
@@ -32,13 +32,13 @@ import { useWorkspace } from "@/hooks/store/use-workspace";
 import { useUser } from "@/hooks/store/user";
 import { usePageFilters } from "@/hooks/use-page-filters";
 import { useParseEditorContent } from "@/hooks/use-parse-editor-content";
-// apple pi dash web imports
+// pi dash web imports
 import type { TCustomEventHandlers } from "@/hooks/use-realtime-page-events";
 import { useRealtimePageEvents } from "@/hooks/use-realtime-page-events";
-import { EditorAIMenu } from "@/apple-pi-dash-web/components/pages";
-import type { TExtendedEditorExtensionsConfig } from "@/apple-pi-dash-web/hooks/pages";
-import type { EPageStoreType } from "@/apple-pi-dash-web/hooks/store";
-import { useEditorFlagging } from "@/apple-pi-dash-web/hooks/use-editor-flagging";
+import { EditorAIMenu } from "@/pi-dash-web/components/pages";
+import type { TExtendedEditorExtensionsConfig } from "@/pi-dash-web/hooks/pages";
+import type { EPageStoreType } from "@/pi-dash-web/hooks/store";
+import { useEditorFlagging } from "@/pi-dash-web/hooks/use-editor-flagging";
 // store
 import type { TPageInstance } from "@/store/pages/base-page";
 // local imports

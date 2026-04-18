@@ -1,23 +1,23 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
 
 import { ArrowLeft } from "lucide-react";
 import { observer } from "mobx-react";
-// apple pi dash imports
-import { ROLE_DETAILS } from "@apple-pi-dash/constants";
-import { useTranslation } from "@apple-pi-dash/i18n";
-import { IconButton } from "@apple-pi-dash/propel/icon-button";
+// pi dash imports
+import { ROLE_DETAILS } from "@pi-dash/constants";
+import { useTranslation } from "@pi-dash/i18n";
+import { IconButton } from "@pi-dash/propel/icon-button";
 // components
 import { WorkspaceLogo } from "@/components/workspace/logo";
 // hooks
 import { useUserPermissions } from "@/hooks/store/user";
 import { useAppRouter } from "@/hooks/use-app-router";
 import { useWorkspace } from "@/hooks/store/use-workspace";
-// apple pi dash web imports
-import { SubscriptionPill } from "@/apple-pi-dash-web/components/common/subscription/subscription-pill";
+// pi dash web imports
+import { SubscriptionPill } from "@/pi-dash-web/components/common/subscription/subscription-pill";
 
 export const WorkspaceSettingsSidebarHeader = observer(function WorkspaceSettingsSidebarHeader() {
   // router

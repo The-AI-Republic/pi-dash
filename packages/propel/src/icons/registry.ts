@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
@@ -69,7 +69,7 @@ import {
 // Sub-brand icons
 import { CopyLinkIcon } from "./actions/copy-link";
 import { LabelFilledIcon } from "./properties/label-filled-icon";
-import { PiChatLogo, ApplePiDashNewIcon, WikiIcon } from "./sub-brand";
+import { PiChatLogo, PiDashNewIcon, WikiIcon } from "./sub-brand";
 // Workspace icons
 import {
   AnalyticsIcon,
@@ -85,7 +85,7 @@ import {
 
 export const ICON_REGISTRY = {
   // Sub-brand icons
-  "sub-brand.apple_pi_dash": ApplePiDashNewIcon,
+  "sub-brand.pi_dash": PiDashNewIcon,
   "sub-brand.wiki": WikiIcon,
   "sub-brand.pi-chat": PiChatLogo,
 

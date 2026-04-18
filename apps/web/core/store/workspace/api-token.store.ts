@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
@@ -7,8 +7,8 @@
 import { action, observable, makeObservable, runInAction } from "mobx";
 import { computedFn } from "mobx-utils";
 // types
-import { APITokenService } from "@apple-pi-dash/services";
-import type { IApiToken } from "@apple-pi-dash/types";
+import { APITokenService } from "@pi-dash/services";
+import type { IApiToken } from "@pi-dash/types";
 // services
 // store
 import type { CoreRootStore } from "../root.store";

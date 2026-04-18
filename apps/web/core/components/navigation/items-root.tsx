@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
@@ -9,7 +9,7 @@
 import React from "react";
 import type { AppSidebarItemData } from "@/components/sidebar/sidebar-item";
 import { AppSidebarItem } from "@/components/sidebar/sidebar-item";
-import { withDockItems } from "@/apple-pi-dash-web/components/app-rail/app-rail-hoc";
+import { withDockItems } from "@/pi-dash-web/components/app-rail/app-rail-hoc";
 
 type Props = {
   dockItems: (AppSidebarItemData & { shouldRender: boolean })[];

@@ -1,15 +1,15 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
 
 import { FileText, FolderPlus, Layers, SquarePlus } from "lucide-react";
-// apple pi dash imports
-import { EUserPermissions, EUserPermissionsLevel } from "@apple-pi-dash/constants";
-import { ContrastIcon, DiceIcon, LayersIcon } from "@apple-pi-dash/propel/icons";
+// pi dash imports
+import { EUserPermissions, EUserPermissionsLevel } from "@pi-dash/constants";
+import { ContrastIcon, DiceIcon, LayersIcon } from "@pi-dash/propel/icons";
 // components
-import { EUserProjectRoles } from "@apple-pi-dash/types";
+import { EUserProjectRoles } from "@pi-dash/types";
 import type { TPowerKCommandConfig, TPowerKContext } from "@/components/power-k/core/types";
 // hooks
 import { useCommandPalette } from "@/hooks/store/use-command-palette";

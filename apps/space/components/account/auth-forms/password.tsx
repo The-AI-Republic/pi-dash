@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
@@ -7,12 +7,12 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { observer } from "mobx-react";
 import { Eye, EyeOff, XCircle } from "lucide-react";
-// apple pi dash imports
-import { API_BASE_URL, E_PASSWORD_STRENGTH } from "@apple-pi-dash/constants";
-import { Button } from "@apple-pi-dash/propel/button";
-import { AuthService } from "@apple-pi-dash/services";
-import { Input, Spinner, PasswordStrengthIndicator } from "@apple-pi-dash/ui";
-import { getPasswordStrength } from "@apple-pi-dash/utils";
+// pi dash imports
+import { API_BASE_URL, E_PASSWORD_STRENGTH } from "@pi-dash/constants";
+import { Button } from "@pi-dash/propel/button";
+import { AuthService } from "@pi-dash/services";
+import { Input, Spinner, PasswordStrengthIndicator } from "@pi-dash/ui";
+import { getPasswordStrength } from "@pi-dash/utils";
 // types
 import { EAuthModes, EAuthSteps } from "@/types/auth";
 

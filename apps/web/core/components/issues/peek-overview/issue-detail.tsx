@@ -1,17 +1,17 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
 
 import { useEffect } from "react";
 import { observer } from "mobx-react";
-// apple pi dash imports
-import type { EditorRefApi } from "@apple-pi-dash/editor";
-import { EFileAssetType } from "@apple-pi-dash/types";
-import type { TNameDescriptionLoader } from "@apple-pi-dash/types";
+// pi dash imports
+import type { EditorRefApi } from "@pi-dash/editor";
+import { EFileAssetType } from "@pi-dash/types";
+import type { TNameDescriptionLoader } from "@pi-dash/types";
 // components
-import { getTextContent } from "@apple-pi-dash/utils";
+import { getTextContent } from "@pi-dash/utils";
 // components
 import { DescriptionVersionsRoot } from "@/components/core/description-versions";
 import { DescriptionInput } from "@/components/editor/rich-text/description-input";
@@ -21,11 +21,11 @@ import { useMember } from "@/hooks/store/use-member";
 import { useProject } from "@/hooks/store/use-project";
 import { useUser } from "@/hooks/store/user";
 import useReloadConfirmations from "@/hooks/use-reload-confirmation";
-// apple pi dash web components
-import { DeDupeIssuePopoverRoot } from "@/apple-pi-dash-web/components/de-dupe/duplicate-popover";
-import { IssueTypeSwitcher } from "@/apple-pi-dash-web/components/issues/issue-details/issue-type-switcher";
-// apple pi dash web hooks
-import { useDebouncedDuplicateIssues } from "@/apple-pi-dash-web/hooks/use-debounced-duplicate-issues";
+// pi dash web components
+import { DeDupeIssuePopoverRoot } from "@/pi-dash-web/components/de-dupe/duplicate-popover";
+import { IssueTypeSwitcher } from "@/pi-dash-web/components/issues/issue-details/issue-type-switcher";
+// pi dash web hooks
+import { useDebouncedDuplicateIssues } from "@/pi-dash-web/hooks/use-debounced-duplicate-issues";
 // services
 import { WorkItemVersionService } from "@/services/issue";
 // local components

@@ -1,16 +1,16 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
 
 import React, { useEffect, useState } from "react";
 import { CircleCheck, XCircle } from "lucide-react";
-// apple pi dash imports
-import { API_BASE_URL } from "@apple-pi-dash/constants";
-import { Button } from "@apple-pi-dash/propel/button";
-import { AuthService } from "@apple-pi-dash/services";
-import { Input, Spinner } from "@apple-pi-dash/ui";
+// pi dash imports
+import { API_BASE_URL } from "@pi-dash/constants";
+import { Button } from "@pi-dash/propel/button";
+import { AuthService } from "@pi-dash/services";
+import { Input, Spinner } from "@pi-dash/ui";
 // hooks
 import useTimer from "@/hooks/use-timer";
 // types

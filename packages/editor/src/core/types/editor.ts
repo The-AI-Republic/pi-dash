@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
@@ -9,16 +9,16 @@ import type { MarkType, NodeType } from "@tiptap/pm/model";
 import type { Selection } from "@tiptap/pm/state";
 import type { EditorProps, EditorView } from "@tiptap/pm/view";
 import type { NodeViewProps as TNodeViewProps } from "@tiptap/react";
-// apple pi dash imports
-import type { TCustomComponentsMetaData } from "@apple-pi-dash/utils";
+// pi dash imports
+import type { TCustomComponentsMetaData } from "@pi-dash/utils";
 // extension types
 import type { TTextAlign } from "@/extensions";
-// apple pi dash editor imports
+// pi dash editor imports
 import type {
   IEditorPropsExtended,
   TExtendedEditorCommands,
   ICollaborativeDocumentEditorPropsExtended,
-} from "@/apple-pi-dash-editor/types/editor-extended";
+} from "@/pi-dash-editor/types/editor-extended";
 // types
 import type {
   IMarking,

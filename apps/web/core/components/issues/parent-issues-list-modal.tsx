@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
@@ -11,21 +11,21 @@ import { Rocket } from "lucide-react";
 // headless ui
 import { Combobox } from "@headlessui/react";
 // i18n
-import { useTranslation } from "@apple-pi-dash/i18n";
-import { SearchIcon } from "@apple-pi-dash/propel/icons";
+import { useTranslation } from "@pi-dash/i18n";
+import { SearchIcon } from "@pi-dash/propel/icons";
 // types
-import type { ISearchIssueResponse } from "@apple-pi-dash/types";
+import type { ISearchIssueResponse } from "@pi-dash/types";
 // ui
-import { Loader, EModalPosition, EModalWidth, ModalCore } from "@apple-pi-dash/ui";
-import { generateWorkItemLink, getTabIndex } from "@apple-pi-dash/utils";
+import { Loader, EModalPosition, EModalWidth, ModalCore } from "@pi-dash/ui";
+import { generateWorkItemLink, getTabIndex } from "@pi-dash/utils";
 // components
 import { IssueSearchModalEmptyState } from "@/components/core/modals/issue-search-modal-empty-state";
 // helpers
 // hooks
 import useDebounce from "@/hooks/use-debounce";
 import { usePlatformOS } from "@/hooks/use-platform-os";
-// apple pi dash web components
-import { IssueIdentifier } from "@/apple-pi-dash-web/components/issues/issue-details/issue-identifier";
+// pi dash web components
+import { IssueIdentifier } from "@/pi-dash-web/components/issues/issue-details/issue-identifier";
 // services
 import { ProjectService } from "@/services/project";
 

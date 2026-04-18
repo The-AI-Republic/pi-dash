@@ -1,5 +1,5 @@
 {
-  "extends": "@apple-pi-dash/typescript-config/react-library.json",
+  "extends": "@pi-dash/typescript-config/react-library.json",
   "compilerOptions": {
     "exactOptionalPropertyTypes": false,
     "noImplicitReturns": false,
@@ -8,7 +8,7 @@
     "paths": {
       "src/*": ["./src/*"],
       "@/*": ["./src/core/*"],
-      "@/apple-pi-dash-editor/*": ["./src/ce/*"],
+      "@/pi-dash-editor/*": ["./src/ce/*"],
       "@/styles/*": ["./src/styles/*"]
     }
   },

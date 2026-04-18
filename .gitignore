@@ -88,7 +88,7 @@ tmp/
 ## packages
 dist
 .temp/
-deploy/selfhost/apple-pi-dash-app/
+deploy/selfhost/pi-dash-app/
 
 ## Storybook
 *storybook.log

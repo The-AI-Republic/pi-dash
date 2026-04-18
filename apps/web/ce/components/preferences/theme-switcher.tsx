@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
@@ -7,12 +7,12 @@
 import { useCallback, useMemo } from "react";
 import { observer } from "mobx-react";
 import { useTheme } from "next-themes";
-// apple pi dash imports
-import type { I_THEME_OPTION } from "@apple-pi-dash/constants";
-import { THEME_OPTIONS } from "@apple-pi-dash/constants";
-import { useTranslation } from "@apple-pi-dash/i18n";
-import { setPromiseToast } from "@apple-pi-dash/propel/toast";
-import { applyCustomTheme } from "@apple-pi-dash/utils";
+// pi dash imports
+import type { I_THEME_OPTION } from "@pi-dash/constants";
+import { THEME_OPTIONS } from "@pi-dash/constants";
+import { useTranslation } from "@pi-dash/i18n";
+import { setPromiseToast } from "@pi-dash/propel/toast";
+import { applyCustomTheme } from "@pi-dash/utils";
 // components
 import { CustomThemeSelector } from "@/components/core/theme/custom-theme-selector";
 import { ThemeSwitch } from "@/components/core/theme/theme-switch";

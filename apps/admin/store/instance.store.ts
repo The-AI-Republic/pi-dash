@@ -1,15 +1,15 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
 
 import { set } from "lodash-es";
 import { observable, action, computed, makeObservable, runInAction } from "mobx";
-// apple pi dash internal packages
-import type { TInstanceStatus } from "@apple-pi-dash/constants";
-import { EInstanceStatus } from "@apple-pi-dash/constants";
-import { InstanceService } from "@apple-pi-dash/services";
+// pi dash internal packages
+import type { TInstanceStatus } from "@pi-dash/constants";
+import { EInstanceStatus } from "@pi-dash/constants";
+import { InstanceService } from "@pi-dash/services";
 import type {
   IInstance,
   IInstanceAdmin,
@@ -17,7 +17,7 @@ import type {
   IFormattedInstanceConfiguration,
   IInstanceInfo,
   IInstanceConfig,
-} from "@apple-pi-dash/types";
+} from "@pi-dash/types";
 // root store
 import type { RootStore } from "@/store/root.store";
 

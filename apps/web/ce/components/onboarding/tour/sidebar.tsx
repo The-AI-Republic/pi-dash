@@ -1,12 +1,12 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
 
-// apple pi dash imports
-import { CycleIcon, ModuleIcon, PageIcon, ViewsIcon, WorkItemsIcon } from "@apple-pi-dash/propel/icons";
-import type { ISvgIcons } from "@apple-pi-dash/propel/icons";
+// pi dash imports
+import { CycleIcon, ModuleIcon, PageIcon, ViewsIcon, WorkItemsIcon } from "@pi-dash/propel/icons";
+import type { ISvgIcons } from "@pi-dash/propel/icons";
 // types
 import type { TTourSteps } from "./root";
 
@@ -53,7 +53,7 @@ export function TourSidebar({ step, setStep }: Props) {
       <h3 className="text-16 font-medium">
         Let{"'"}s get started!
         <br />
-        Get more out of Apple Pi Dash.
+        Get more out of Pi Dash.
       </h3>
       <div className="mt-8 space-y-5">
         {sidebarOptions.map((option) => (

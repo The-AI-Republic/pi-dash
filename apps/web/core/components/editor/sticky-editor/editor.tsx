@@ -1,24 +1,24 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
 
 import React, { useState } from "react";
-// apple pi dash constants
-import type { EIssueCommentAccessSpecifier } from "@apple-pi-dash/constants";
-// apple pi dash editor
-import { LiteTextEditorWithRef } from "@apple-pi-dash/editor";
-import type { EditorRefApi, ILiteTextEditorProps, TFileHandler } from "@apple-pi-dash/editor";
+// pi dash constants
+import type { EIssueCommentAccessSpecifier } from "@pi-dash/constants";
+// pi dash editor
+import { LiteTextEditorWithRef } from "@pi-dash/editor";
+import type { EditorRefApi, ILiteTextEditorProps, TFileHandler } from "@pi-dash/editor";
 // components
-import type { TSticky } from "@apple-pi-dash/types";
+import type { TSticky } from "@pi-dash/types";
 // helpers
-import { cn } from "@apple-pi-dash/utils";
+import { cn } from "@pi-dash/utils";
 // hooks
 import { useEditorConfig } from "@/hooks/editor";
 import { useParseEditorContent } from "@/hooks/use-parse-editor-content";
-// apple pi dash web hooks
-import { useEditorFlagging } from "@/apple-pi-dash-web/hooks/use-editor-flagging";
+// pi dash web hooks
+import { useEditorFlagging } from "@/pi-dash-web/hooks/use-editor-flagging";
 import { StickyEditorToolbar } from "./toolbar";
 
 interface StickyEditorWrapperProps extends Omit<

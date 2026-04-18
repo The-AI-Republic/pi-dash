@@ -1,21 +1,21 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
 
 import { useCallback, useMemo } from "react";
 import { observer } from "mobx-react";
-// apple pi dash imports
-import { ISSUE_LAYOUT_MAP } from "@apple-pi-dash/constants";
-import { useTranslation } from "@apple-pi-dash/i18n";
-import { CheckIcon } from "@apple-pi-dash/propel/icons";
-import { EIssueLayoutTypes } from "@apple-pi-dash/types";
-import { Dropdown } from "@apple-pi-dash/ui";
-import { cn } from "@apple-pi-dash/utils";
+// pi dash imports
+import { ISSUE_LAYOUT_MAP } from "@pi-dash/constants";
+import { useTranslation } from "@pi-dash/i18n";
+import { CheckIcon } from "@pi-dash/propel/icons";
+import { EIssueLayoutTypes } from "@pi-dash/types";
+import { Dropdown } from "@pi-dash/ui";
+import { cn } from "@pi-dash/utils";
 // components
 import { IssueLayoutIcon } from "@/components/issues/issue-layouts/layout-icon";
-import { getIconButtonStyling } from "@apple-pi-dash/propel/icon-button";
+import { getIconButtonStyling } from "@pi-dash/propel/icon-button";
 
 type TLayoutDropDown = {
   onChange: (value: EIssueLayoutTypes) => void;
@@ -25,7 +25,7 @@ type TLayoutDropDown = {
 
 export const LayoutDropDown = observer(function LayoutDropDown(props: TLayoutDropDown) {
   const { onChange, value = EIssueLayoutTypes.LIST, disabledLayouts = [] } = props;
-  // apple pi dash i18n
+  // pi dash i18n
   const { t } = useTranslation();
   // derived values
   const availableLayouts = useMemo(

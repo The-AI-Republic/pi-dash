@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
@@ -7,9 +7,9 @@
 import { concat, get, set, uniq, update } from "lodash-es";
 import { action, makeObservable, observable, runInAction } from "mobx";
 import { computedFn } from "mobx-utils";
-// apple pi dash imports
-import { ALL_ISSUES } from "@apple-pi-dash/constants";
-import { SitesIssueService } from "@apple-pi-dash/services";
+// pi dash imports
+import { ALL_ISSUES } from "@pi-dash/constants";
+import { SitesIssueService } from "@pi-dash/services";
 import type {
   TIssueGroupByOptions,
   TGroupedIssues,
@@ -20,7 +20,7 @@ import type {
   TIssuePaginationData,
   TGroupedIssueCount,
   TPaginationData,
-} from "@apple-pi-dash/types";
+} from "@pi-dash/types";
 // types
 import type { IIssue, TIssuesResponse } from "@/types/issue";
 import type { RootStore } from "../root.store";

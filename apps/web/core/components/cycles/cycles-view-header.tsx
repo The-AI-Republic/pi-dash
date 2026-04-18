@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
@@ -7,13 +7,13 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { observer } from "mobx-react";
 import { ListFilter } from "lucide-react";
-// apple pi dash imports
-import { useOutsideClickDetector } from "@apple-pi-dash/hooks";
-import { IconButton } from "@apple-pi-dash/propel/icon-button";
-import { useTranslation } from "@apple-pi-dash/i18n";
-import { SearchIcon, CloseIcon } from "@apple-pi-dash/propel/icons";
-import type { TCycleFilters } from "@apple-pi-dash/types";
-import { cn, calculateTotalFilters } from "@apple-pi-dash/utils";
+// pi dash imports
+import { useOutsideClickDetector } from "@pi-dash/hooks";
+import { IconButton } from "@pi-dash/propel/icon-button";
+import { useTranslation } from "@pi-dash/i18n";
+import { SearchIcon, CloseIcon } from "@pi-dash/propel/icons";
+import type { TCycleFilters } from "@pi-dash/types";
+import { cn, calculateTotalFilters } from "@pi-dash/utils";
 // components
 import { FiltersDropdown } from "@/components/issues/issue-layouts/filters";
 // hooks

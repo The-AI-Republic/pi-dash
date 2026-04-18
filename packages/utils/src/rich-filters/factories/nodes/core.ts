@@ -1,11 +1,11 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
 
 import { v4 as uuidv4 } from "uuid";
-// apple pi dash imports
+// pi dash imports
 import type {
   TFilterAndGroupNode,
   TFilterConditionNode,
@@ -13,8 +13,8 @@ import type {
   TFilterExpression,
   TFilterProperty,
   TFilterValue,
-} from "@apple-pi-dash/types";
-import { FILTER_NODE_TYPE, LOGICAL_OPERATOR } from "@apple-pi-dash/types";
+} from "@pi-dash/types";
+import { FILTER_NODE_TYPE, LOGICAL_OPERATOR } from "@pi-dash/types";
 
 /**
  * Creates a condition node with a unique ID.

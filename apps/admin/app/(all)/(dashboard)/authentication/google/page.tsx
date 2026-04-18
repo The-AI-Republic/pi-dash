@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
@@ -7,8 +7,8 @@
 import { useState } from "react";
 import { observer } from "mobx-react";
 import useSWR from "swr";
-import { setPromiseToast } from "@apple-pi-dash/propel/toast";
-import { Loader, ToggleSwitch } from "@apple-pi-dash/ui";
+import { setPromiseToast } from "@pi-dash/propel/toast";
+import { Loader, ToggleSwitch } from "@pi-dash/ui";
 // assets
 import GoogleLogo from "@/app/assets/logos/google-logo.svg?url";
 // components
@@ -68,7 +68,7 @@ const InstanceGoogleAuthenticationPage = observer(function InstanceGoogleAuthent
       customHeader={
         <AuthenticationMethodCard
           name="Google"
-          description="Allow members to login or sign up to apple pi dash with their Google
+          description="Allow members to login or sign up to pi dash with their Google
             accounts."
           icon={<img src={GoogleLogo} height={24} width={24} alt="Google Logo" />}
           config={

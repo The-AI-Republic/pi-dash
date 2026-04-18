@@ -1,14 +1,14 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
 
 import useSWR from "swr";
-// apple pi dash web imports
+// pi dash web imports
 import { WORKSPACE_ESTIMATES, WORKSPACE_CYCLES, WORKSPACE_LABELS, WORKSPACE_MODULES } from "@/constants/fetch-keys";
-import { useWorkspaceIssuePropertiesExtended } from "@/apple-pi-dash-web/hooks/use-workspace-issue-properties-extended";
-// apple pi dash imports
+import { useWorkspaceIssuePropertiesExtended } from "@/pi-dash-web/hooks/use-workspace-issue-properties-extended";
+// pi dash imports
 import { useProjectEstimates } from "./store/estimates";
 import { useCycle } from "./store/use-cycle";
 import { useLabel } from "./store/use-label";

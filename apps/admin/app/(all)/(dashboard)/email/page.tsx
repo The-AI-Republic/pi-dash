@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
@@ -7,8 +7,8 @@
 import { useEffect, useState } from "react";
 import { observer } from "mobx-react";
 import useSWR from "swr";
-import { TOAST_TYPE, setToast } from "@apple-pi-dash/propel/toast";
-import { Loader, ToggleSwitch } from "@apple-pi-dash/ui";
+import { TOAST_TYPE, setToast } from "@pi-dash/propel/toast";
+import { Loader, ToggleSwitch } from "@pi-dash/ui";
 // components
 import { PageWrapper } from "@/components/common/page-wrapper";
 // hooks
@@ -63,7 +63,7 @@ const InstanceEmailPage = observer(function InstanceEmailPage(_props: Route.Comp
         title: "Secure emails from your own instance",
         description: (
           <>
-            Apple Pi Dash can send useful emails to you and your users from your own instance without talking to the Internet.
+            Pi Dash can send useful emails to you and your users from your own instance without talking to the Internet.
             <div className="text-13 font-regular text-tertiary">
               Set it up below and please test your settings before you save them.&nbsp;
               <span className="text-danger-primary">Misconfigs can lead to email bounces and errors.</span>

@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
@@ -12,10 +12,10 @@ import { useIssueDetail } from "@/hooks/store/use-issue-detail";
 import { usePowerK } from "@/hooks/store/use-power-k";
 import { useUser } from "@/hooks/store/user";
 import { useAppRouter } from "@/hooks/use-app-router";
-// apple pi dash web imports
-import { ProjectLevelModals } from "@/apple-pi-dash-web/components/command-palette/modals/project-level";
-import { WorkItemLevelModals } from "@/apple-pi-dash-web/components/command-palette/modals/work-item-level";
-import { WorkspaceLevelModals } from "@/apple-pi-dash-web/components/command-palette/modals/workspace-level";
+// pi dash web imports
+import { ProjectLevelModals } from "@/pi-dash-web/components/command-palette/modals/project-level";
+import { WorkItemLevelModals } from "@/pi-dash-web/components/command-palette/modals/work-item-level";
+import { WorkspaceLevelModals } from "@/pi-dash-web/components/command-palette/modals/workspace-level";
 // local imports
 import { useProjectsAppPowerKCommands } from "./config/commands";
 import type { TPowerKCommandConfig, TPowerKContext } from "./core/types";

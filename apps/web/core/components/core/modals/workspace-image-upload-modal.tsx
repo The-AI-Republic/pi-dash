@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
@@ -8,14 +8,14 @@ import { useState } from "react";
 import { observer } from "mobx-react";
 import { useParams } from "next/navigation";
 import { useDropzone } from "react-dropzone";
-// apple pi dash imports
-import { ACCEPTED_AVATAR_IMAGE_MIME_TYPES_FOR_REACT_DROPZONE, MAX_FILE_SIZE } from "@apple-pi-dash/constants";
-import { Button } from "@apple-pi-dash/propel/button";
-import { UserCirclePropertyIcon } from "@apple-pi-dash/propel/icons";
-import { TOAST_TYPE, setToast } from "@apple-pi-dash/propel/toast";
-import { EFileAssetType } from "@apple-pi-dash/types";
-import { EModalPosition, EModalWidth, ModalCore } from "@apple-pi-dash/ui";
-import { getAssetIdFromUrl, getFileURL, checkURLValidity } from "@apple-pi-dash/utils";
+// pi dash imports
+import { ACCEPTED_AVATAR_IMAGE_MIME_TYPES_FOR_REACT_DROPZONE, MAX_FILE_SIZE } from "@pi-dash/constants";
+import { Button } from "@pi-dash/propel/button";
+import { UserCirclePropertyIcon } from "@pi-dash/propel/icons";
+import { TOAST_TYPE, setToast } from "@pi-dash/propel/toast";
+import { EFileAssetType } from "@pi-dash/types";
+import { EModalPosition, EModalWidth, ModalCore } from "@pi-dash/ui";
+import { getAssetIdFromUrl, getFileURL, checkURLValidity } from "@pi-dash/utils";
 // hooks
 import { useWorkspace } from "@/hooks/store/use-workspace";
 // services

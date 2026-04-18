@@ -1,12 +1,12 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
 
 // store
 import { BaseWorkspaceRootStore } from "@/store/workspace";
-import type { RootStore } from "@/apple-pi-dash-web/store/root.store";
+import type { RootStore } from "@/pi-dash-web/store/root.store";
 
 export class WorkspaceRootStore extends BaseWorkspaceRootStore {
   constructor(_rootStore: RootStore) {

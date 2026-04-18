@@ -1,12 +1,12 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
 
-// apple pi dash imports
-import { getButtonStyling } from "@apple-pi-dash/propel/button";
-import { cn } from "@apple-pi-dash/utils";
+// pi dash imports
+import { getButtonStyling } from "@pi-dash/propel/button";
+import { cn } from "@pi-dash/utils";
 // components
 import { ProIcon } from "@/components/common/pro-icon";
 
@@ -23,11 +23,11 @@ export function IssueEmbedUpgradeCard(props: any) {
       <div className="flex items-center gap-4">
         <ProIcon className="size-4 flex-shrink-0" />
         <p className="!text-14 text-secondary">
-          Embed and access issues in pages seamlessly, upgrade to Apple Pi Dash Pro now.
+          Embed and access issues in pages seamlessly, upgrade to Pi Dash Pro now.
         </p>
       </div>
       <a
-        href="https://apple-pi-dash.so/pro"
+        href="https://pi-dash.so/pro"
         target="_blank"
         rel="noopener noreferrer"
         className={cn(getButtonStyling("primary", "base"), "no-underline")}

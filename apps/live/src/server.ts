@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
@@ -12,9 +12,9 @@ import type { Express, Request, Response, Router } from "express";
 import express from "express";
 import expressWs from "express-ws";
 import helmet from "helmet";
-// apple pi dash imports
-import { registerController } from "@apple-pi-dash/decorators";
-import { logger, loggerMiddleware } from "@apple-pi-dash/logger";
+// pi dash imports
+import { registerController } from "@pi-dash/decorators";
+import { logger, loggerMiddleware } from "@pi-dash/logger";
 // controllers
 import { CONTROLLERS } from "@/controllers";
 // env

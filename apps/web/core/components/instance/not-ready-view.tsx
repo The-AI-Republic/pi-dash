@@ -1,17 +1,17 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
 
 import Link from "next/link";
-import { GOD_MODE_URL } from "@apple-pi-dash/constants";
+import { GOD_MODE_URL } from "@pi-dash/constants";
 // assets
 import GradientLogo from "@/app/assets/auth/gradient-logo.webp?url";
 import GradientBgLogo from "@/app/assets/auth/gradient-bg-logo.webp?url";
 import DefaultLayout from "@/layouts/default-layout";
-import { ApplePiDashLockup } from "@apple-pi-dash/propel/icons";
-import { Button } from "@apple-pi-dash/propel/button";
+import { PiDashLockup } from "@pi-dash/propel/icons";
+import { Button } from "@pi-dash/propel/button";
 
 export function InstanceNotReady() {
   return (
@@ -33,13 +33,13 @@ export function InstanceNotReady() {
         {/* Main content */}
         <div className="flex h-full w-full flex-col items-center px-8 pt-6 pb-10">
           <div className="sticky top-0 flex w-full shrink-0 items-center justify-between gap-6">
-            <ApplePiDashLockup height={20} width={95} className="text-primary" />
+            <PiDashLockup height={20} width={95} className="text-primary" />
           </div>
           <div className="flex h-full w-full flex-col items-center justify-center gap-7">
             <div className="flex flex-col items-center gap-11">
-              <img src={GradientLogo} className="h-24 w-40 object-contain" alt="Apple Pi Dash Logo" />
+              <img src={GradientLogo} className="h-24 w-40 object-contain" alt="Pi Dash Logo" />
               <div className="flex max-w-124 flex-col items-center gap-3">
-                <h1 className="text-h2-semibold text-primary">Welcome to Apple Pi Dash</h1>
+                <h1 className="text-h2-semibold text-primary">Welcome to Pi Dash</h1>
                 <p className="text-center text-body-md-regular text-secondary">
                   Set up your instance and create your first workspace to begin managing projects and work.
                 </p>

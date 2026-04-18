@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
@@ -7,8 +7,8 @@
 import React from "react";
 import { CalendarDays } from "lucide-react";
 // ui
-import { CalendarAfterIcon, CalendarBeforeIcon } from "@apple-pi-dash/propel/icons";
-import { CustomSelect } from "@apple-pi-dash/ui";
+import { CalendarAfterIcon, CalendarBeforeIcon } from "@pi-dash/propel/icons";
+import { CustomSelect } from "@pi-dash/ui";
 
 type Props = {
   title: string;

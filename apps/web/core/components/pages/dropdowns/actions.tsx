@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
@@ -9,22 +9,22 @@ import { observer } from "mobx-react";
 import { useParams } from "next/navigation";
 import { ArchiveRestoreIcon, FileOutput, LockKeyhole, LockKeyholeOpen } from "lucide-react";
 // constants
-import { EPageAccess } from "@apple-pi-dash/constants";
-// apple pi dash editor
-import { LinkIcon, CopyIcon, LockIcon, NewTabIcon, ArchiveIcon, TrashIcon, GlobeIcon } from "@apple-pi-dash/propel/icons";
-// apple pi dash ui
-import type { TContextMenuItem } from "@apple-pi-dash/ui";
-import { ContextMenu, CustomMenu } from "@apple-pi-dash/ui";
+import { EPageAccess } from "@pi-dash/constants";
+// pi dash editor
+import { LinkIcon, CopyIcon, LockIcon, NewTabIcon, ArchiveIcon, TrashIcon, GlobeIcon } from "@pi-dash/propel/icons";
+// pi dash ui
+import type { TContextMenuItem } from "@pi-dash/ui";
+import { ContextMenu, CustomMenu } from "@pi-dash/ui";
 // components
-import { cn } from "@apple-pi-dash/utils";
+import { cn } from "@pi-dash/utils";
 import { DeletePageModal } from "@/components/pages/modals/delete-page-modal";
 // hooks
 import { usePageOperations } from "@/hooks/use-page-operations";
-// apple pi dash web components
-import { MovePageModal } from "@/apple-pi-dash-web/components/pages";
-// apple pi dash web hooks
-import type { EPageStoreType } from "@/apple-pi-dash-web/hooks/store";
-import { usePageFlag } from "@/apple-pi-dash-web/hooks/use-page-flag";
+// pi dash web components
+import { MovePageModal } from "@/pi-dash-web/components/pages";
+// pi dash web hooks
+import type { EPageStoreType } from "@/pi-dash-web/hooks/store";
+import { usePageFlag } from "@/pi-dash-web/hooks/use-page-flag";
 // store types
 import type { TPageInstance } from "@/store/pages/base-page";
 

@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
@@ -9,13 +9,13 @@ import { add } from "date-fns";
 import { Controller, useForm } from "react-hook-form";
 import { Calendar } from "lucide-react";
 // types
-import { useTranslation } from "@apple-pi-dash/i18n";
-import { Button } from "@apple-pi-dash/propel/button";
-import { TOAST_TYPE, setToast } from "@apple-pi-dash/propel/toast";
-import type { IApiToken } from "@apple-pi-dash/types";
+import { useTranslation } from "@pi-dash/i18n";
+import { Button } from "@pi-dash/propel/button";
+import { TOAST_TYPE, setToast } from "@pi-dash/propel/toast";
+import type { IApiToken } from "@pi-dash/types";
 // ui
-import { CustomSelect, Input, TextArea, ToggleSwitch } from "@apple-pi-dash/ui";
-import { cn, renderFormattedDate, renderFormattedTime } from "@apple-pi-dash/utils";
+import { CustomSelect, Input, TextArea, ToggleSwitch } from "@pi-dash/ui";
+import { cn, renderFormattedDate, renderFormattedTime } from "@pi-dash/utils";
 // components
 import { DateDropdown } from "@/components/dropdowns/date";
 // helpers

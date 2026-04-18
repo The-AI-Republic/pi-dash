@@ -1,17 +1,17 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
 
 import { makeObservable, observable } from "mobx";
 import { computedFn } from "mobx-utils";
-// apple pi dash imports
-import type { IUserLite } from "@apple-pi-dash/types";
-// apple pi dash web imports
-import type { IProjectMemberStore } from "@/apple-pi-dash-web/store/member/project-member.store";
-import { ProjectMemberStore } from "@/apple-pi-dash-web/store/member/project-member.store";
-import type { RootStore } from "@/apple-pi-dash-web/store/root.store";
+// pi dash imports
+import type { IUserLite } from "@pi-dash/types";
+// pi dash web imports
+import type { IProjectMemberStore } from "@/pi-dash-web/store/member/project-member.store";
+import { ProjectMemberStore } from "@/pi-dash-web/store/member/project-member.store";
+import type { RootStore } from "@/pi-dash-web/store/root.store";
 // local imports
 import type { IWorkspaceMemberStore } from "./workspace/workspace-member.store";
 import { WorkspaceMemberStore } from "./workspace/workspace-member.store";

@@ -1,20 +1,20 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
 
 import { useEffect, useState } from "react";
-import { EModalPosition, EModalWidth, ModalCore } from "@apple-pi-dash/ui";
-import { getAssetIdFromUrl, checkURLValidity } from "@apple-pi-dash/utils";
-// apple pi dash ui
+import { EModalPosition, EModalWidth, ModalCore } from "@pi-dash/ui";
+import { getAssetIdFromUrl, checkURLValidity } from "@pi-dash/utils";
+// pi dash ui
 // helpers
 // hooks
 import useKeypress from "@/hooks/use-keypress";
-// apple pi dash web components
-import { CreateProjectForm } from "@/apple-pi-dash-web/components/projects/create/root";
-// apple pi dash web types
-import type { TProject } from "@/apple-pi-dash-web/types/projects";
+// pi dash web components
+import { CreateProjectForm } from "@/pi-dash-web/components/projects/create/root";
+// pi dash web types
+import type { TProject } from "@/pi-dash-web/types/projects";
 // services
 import { FileService } from "@/services/file.service";
 const fileService = new FileService();

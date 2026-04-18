@@ -1,20 +1,20 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
 
-// apple pi dash imports
-import { API_BASE_URL } from "@apple-pi-dash/constants";
-import type { IIssueLabel } from "@apple-pi-dash/types";
+// pi dash imports
+import { API_BASE_URL } from "@pi-dash/constants";
+import type { IIssueLabel } from "@pi-dash/types";
 // api service
 import { APIService } from "../api.service";
 
 /**
- * Service class for managing labels within apple pi dash sites application.
+ * Service class for managing labels within pi dash sites application.
  * Extends APIService to handle HTTP requests to the label-related endpoints.
  * @extends {APIService}
- * @remarks This service is only available for apple pi dash sites
+ * @remarks This service is only available for pi dash sites
  */
 export class SitesLabelService extends APIService {
   constructor(BASE_URL?: string) {

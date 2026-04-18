@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
@@ -7,12 +7,12 @@
 import { observer } from "mobx-react";
 import { Controller, useForm } from "react-hook-form";
 import { Box, PenTool, Rocket, Monitor, RefreshCw } from "lucide-react";
-// apple pi dash imports
-import { Button } from "@apple-pi-dash/propel/button";
-import { CheckIcon, ViewsIcon } from "@apple-pi-dash/propel/icons";
-import { TOAST_TYPE, setToast } from "@apple-pi-dash/propel/toast";
-import type { TUserProfile } from "@apple-pi-dash/types";
-import { EOnboardingSteps } from "@apple-pi-dash/types";
+// pi dash imports
+import { Button } from "@pi-dash/propel/button";
+import { CheckIcon, ViewsIcon } from "@pi-dash/propel/icons";
+import { TOAST_TYPE, setToast } from "@pi-dash/propel/toast";
+import type { TUserProfile } from "@pi-dash/types";
+import { EOnboardingSteps } from "@pi-dash/types";
 // hooks
 import { useUserProfile } from "@/hooks/store/user";
 // local components
@@ -92,7 +92,7 @@ export const RoleSetupStep = observer(function RoleSetupStep({ handleStepChange 
   return (
     <form onSubmit={handleSubmit(onSubmit)} className="flex flex-col gap-10">
       {/* Header */}
-      <CommonOnboardingHeader title="What's your role?" description="Let's set up Apple Pi Dash for how you work." />
+      <CommonOnboardingHeader title="What's your role?" description="Let's set up Pi Dash for how you work." />
       {/* Role Selection */}
       <div className="flex flex-col gap-3">
         <p className="text-body-sm-semibold text-placeholder">Select one</p>

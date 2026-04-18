@@ -1,16 +1,16 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
 
 import { Controller, useFormContext } from "react-hook-form";
-// apple pi dash imports
-import { NETWORK_CHOICES, ETabIndices } from "@apple-pi-dash/constants";
-import { useTranslation } from "@apple-pi-dash/i18n";
-import type { IProject } from "@apple-pi-dash/types";
-import { CustomSelect } from "@apple-pi-dash/ui";
-import { getTabIndex } from "@apple-pi-dash/utils";
+// pi dash imports
+import { NETWORK_CHOICES, ETabIndices } from "@pi-dash/constants";
+import { useTranslation } from "@pi-dash/i18n";
+import type { IProject } from "@pi-dash/types";
+import { CustomSelect } from "@pi-dash/ui";
+import { getTabIndex } from "@pi-dash/utils";
 // components
 import { MemberDropdown } from "@/components/dropdowns/member/dropdown";
 import { ProjectNetworkIcon } from "@/components/project/project-network-icon";

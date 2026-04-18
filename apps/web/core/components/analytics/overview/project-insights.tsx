@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
@@ -8,20 +8,20 @@ import { lazy, Suspense } from "react";
 import { observer } from "mobx-react";
 import { useParams } from "next/navigation";
 import useSWR from "swr";
-// apple pi dash package imports
-import { useTranslation } from "@apple-pi-dash/i18n";
-import { EmptyStateCompact } from "@apple-pi-dash/propel/empty-state";
-import type { TChartData } from "@apple-pi-dash/types";
+// pi dash package imports
+import { useTranslation } from "@pi-dash/i18n";
+import { EmptyStateCompact } from "@pi-dash/propel/empty-state";
+import type { TChartData } from "@pi-dash/types";
 // hooks
 import { useAnalytics } from "@/hooks/store/use-analytics";
 // services
 import { AnalyticsService } from "@/services/analytics.service";
-// apple pi dash web components
+// pi dash web components
 import AnalyticsSectionWrapper from "../analytics-section-wrapper";
 import { ProjectInsightsLoader } from "../loaders";
 
 const RadarChart = lazy(function RadarChart() {
-  return import("@apple-pi-dash/propel/charts/radar-chart").then((mod) => ({
+  return import("@pi-dash/propel/charts/radar-chart").then((mod) => ({
     default: mod.RadarChart,
   }));
 });

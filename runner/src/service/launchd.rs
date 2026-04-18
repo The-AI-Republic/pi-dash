@@ -4,7 +4,7 @@ use tokio::process::Command;
 
 use crate::util::paths::Paths;
 
-const LABEL: &str = "so.apple-pi-dash.runner";
+const LABEL: &str = "so.pi-dash.runner";
 
 pub async fn install(paths: &Paths) -> Result<()> {
     let plist_path = plist_path()?;

@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
@@ -29,7 +29,7 @@ import {
   AlignCenter,
 } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
-import { LinkIcon } from "@apple-pi-dash/propel/icons";
+import { LinkIcon } from "@pi-dash/propel/icons";
 // constants
 import { CORE_EXTENSIONS } from "@/constants/extension";
 // helpers
@@ -56,7 +56,7 @@ import {
 } from "@/helpers/editor-commands";
 // types
 import type { TCommandWithProps, TEditorCommands } from "@/types";
-import type { ISvgIcons } from "@apple-pi-dash/propel/icons";
+import type { ISvgIcons } from "@pi-dash/propel/icons";
 type isActiveFunction<T extends TEditorCommands> = (params?: TCommandWithProps<T>) => boolean;
 type commandFunction<T extends TEditorCommands> = (params?: TCommandWithProps<T>) => void;
 

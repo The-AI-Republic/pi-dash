@@ -1,11 +1,11 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
 
 // types
-import type { TModuleLayoutOptions, TModuleOrderByOptions, TModuleStatus } from "@apple-pi-dash/types";
+import type { TModuleLayoutOptions, TModuleOrderByOptions, TModuleStatus } from "@pi-dash/types";
 
 export const MODULE_STATUS_COLORS: {
   [key in TModuleStatus]: string;

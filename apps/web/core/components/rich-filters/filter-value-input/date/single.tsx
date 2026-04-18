@@ -1,14 +1,14 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
 
 import React from "react";
 import { observer } from "mobx-react";
-// apple pi dash imports
-import type { TDateFilterFieldConfig, TFilterConditionNodeForDisplay, TFilterProperty } from "@apple-pi-dash/types";
-import { cn, renderFormattedPayloadDate } from "@apple-pi-dash/utils";
+// pi dash imports
+import type { TDateFilterFieldConfig, TFilterConditionNodeForDisplay, TFilterProperty } from "@pi-dash/types";
+import { cn, renderFormattedPayloadDate } from "@pi-dash/utils";
 import { DateDropdown } from "@/components/dropdowns/date";
 import { COMMON_FILTER_ITEM_BORDER_CLASSNAME, EMPTY_FILTER_PLACEHOLDER_TEXT } from "../../shared";
 

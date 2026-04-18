@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
@@ -12,11 +12,11 @@ import {
   DueDatePropertyIcon,
   LabelPropertyIcon,
   DuplicatePropertyIcon,
-} from "@apple-pi-dash/propel/icons";
-import { Tooltip } from "@apple-pi-dash/propel/tooltip";
-import type { TInboxDuplicateIssueDetails, TIssue } from "@apple-pi-dash/types";
-import { ControlLink } from "@apple-pi-dash/ui";
-import { getDate, renderFormattedPayloadDate, generateWorkItemLink } from "@apple-pi-dash/utils";
+} from "@pi-dash/propel/icons";
+import { Tooltip } from "@pi-dash/propel/tooltip";
+import type { TInboxDuplicateIssueDetails, TIssue } from "@pi-dash/types";
+import { ControlLink } from "@pi-dash/ui";
+import { getDate, renderFormattedPayloadDate, generateWorkItemLink } from "@pi-dash/utils";
 // components
 import { DateDropdown } from "@/components/dropdowns/date";
 import { IntakeStateDropdown } from "@/components/dropdowns/intake-state/dropdown";

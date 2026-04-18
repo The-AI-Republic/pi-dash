@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
@@ -10,13 +10,13 @@ import { TwitterPicker } from "react-color";
 import type { SubmitHandler } from "react-hook-form";
 import { Controller, useForm } from "react-hook-form";
 import { Popover, Transition } from "@headlessui/react";
-// apple pi dash imports
-import { getRandomLabelColor, LABEL_COLOR_OPTIONS } from "@apple-pi-dash/constants";
-import { useTranslation } from "@apple-pi-dash/i18n";
-import { Button } from "@apple-pi-dash/propel/button";
-import { TOAST_TYPE, setToast } from "@apple-pi-dash/propel/toast";
-import type { IIssueLabel } from "@apple-pi-dash/types";
-import { Input } from "@apple-pi-dash/ui";
+// pi dash imports
+import { getRandomLabelColor, LABEL_COLOR_OPTIONS } from "@pi-dash/constants";
+import { useTranslation } from "@pi-dash/i18n";
+import { Button } from "@pi-dash/propel/button";
+import { TOAST_TYPE, setToast } from "@pi-dash/propel/toast";
+import type { IIssueLabel } from "@pi-dash/types";
+import { Input } from "@pi-dash/ui";
 
 // error codes
 const errorCodes = {

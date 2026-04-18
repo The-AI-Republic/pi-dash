@@ -1,11 +1,11 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
 
 // ui
-import { Button } from "@apple-pi-dash/propel/button";
+import { Button } from "@pi-dash/propel/button";
 
 function ErrorPage() {
   const handleRetry = () => {
@@ -18,13 +18,18 @@ function ErrorPage() {
         <div className="space-y-2">
           <h3 className="text-16 font-semibold">Yikes! That doesn{"'"}t look good.</h3>
           <p className="mx-auto text-13 text-secondary md:w-1/2">
-            That crashed Apple Pi Dash, pun intended. No worries, though. Our engineers have been notified. If you have more
+            That crashed Pi Dash, pun intended. No worries, though. Our engineers have been notified. If you have more
             details, please write to{" "}
-            <a href="mailto:support@apple-pi-dash.so" className="text-accent-primary">
-              support@apple-pi-dash.so
+            <a href="mailto:support@pi-dash.so" className="text-accent-primary">
+              support@pi-dash.so
             </a>{" "}
             or on our{" "}
-            <a href="https://forum.apple-pi-dash.so" target="_blank" className="text-accent-primary" rel="noopener noreferrer">
+            <a
+              href="https://forum.pi-dash.so"
+              target="_blank"
+              className="text-accent-primary"
+              rel="noopener noreferrer"
+            >
               Forum
             </a>
             .

@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
@@ -27,6 +27,6 @@ const Row = React.forwardRef(function Row(props: RowProps, ref: React.ForwardedR
   );
 });
 
-Row.displayName = "apple-pi-dash-ui-row";
+Row.displayName = "pi-dash-ui-row";
 
 export { Row, ERowVariant };

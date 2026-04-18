@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
@@ -8,14 +8,14 @@ import { useState } from "react";
 import { observer } from "mobx-react";
 import { Controller, useForm } from "react-hook-form";
 import { CircleCheck } from "lucide-react";
-// apple pi dash imports
-import { ORGANIZATION_SIZE, RESTRICTED_URLS } from "@apple-pi-dash/constants";
-import { useTranslation } from "@apple-pi-dash/i18n";
-import { Button } from "@apple-pi-dash/propel/button";
-import { TOAST_TYPE, setToast } from "@apple-pi-dash/propel/toast";
-import type { IUser, IWorkspace } from "@apple-pi-dash/types";
-import { Spinner } from "@apple-pi-dash/ui";
-import { cn, validateWorkspaceName, validateSlug } from "@apple-pi-dash/utils";
+// pi dash imports
+import { ORGANIZATION_SIZE, RESTRICTED_URLS } from "@pi-dash/constants";
+import { useTranslation } from "@pi-dash/i18n";
+import { Button } from "@pi-dash/propel/button";
+import { TOAST_TYPE, setToast } from "@pi-dash/propel/toast";
+import type { IUser, IWorkspace } from "@pi-dash/types";
+import { Spinner } from "@pi-dash/ui";
+import { cn, validateWorkspaceName, validateSlug } from "@pi-dash/utils";
 // hooks
 import { useInstance } from "@/hooks/store/use-instance";
 import { useWorkspace } from "@/hooks/store/use-workspace";
@@ -43,7 +43,7 @@ export const WorkspaceCreateStep = observer(function WorkspaceCreateStep({
   // states
   const [slugError, setSlugError] = useState(false);
   const [invalidSlug, setInvalidSlug] = useState(false);
-  // apple pi dash hooks
+  // pi dash hooks
   const { t } = useTranslation();
   // store hooks
   const { config } = useInstance();

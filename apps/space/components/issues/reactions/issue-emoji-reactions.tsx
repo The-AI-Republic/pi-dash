@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
@@ -8,9 +8,9 @@ import { useMemo, useState } from "react";
 import { observer } from "mobx-react";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
 // lib
-import { stringToEmoji } from "@apple-pi-dash/propel/emoji-icon-picker";
-import { EmojiReactionGroup, EmojiReactionPicker } from "@apple-pi-dash/propel/emoji-reaction";
-import type { EmojiReactionType } from "@apple-pi-dash/propel/emoji-reaction";
+import { stringToEmoji } from "@pi-dash/propel/emoji-icon-picker";
+import { EmojiReactionGroup, EmojiReactionPicker } from "@pi-dash/propel/emoji-reaction";
+import type { EmojiReactionType } from "@pi-dash/propel/emoji-reaction";
 // helpers
 import { groupReactions } from "@/helpers/emoji.helper";
 import { queryParamGenerator } from "@/helpers/query-param-generator";

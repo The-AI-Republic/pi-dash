@@ -1,19 +1,19 @@
-# Contributing to Apple Pi Dash
+# Contributing to Pi Dash
 
-Thank you for showing an interest in contributing to Apple Pi Dash! All kinds of contributions are valuable to us. In this guide, we will cover how you can quickly onboard and make your first contribution.
+Thank you for showing an interest in contributing to Pi Dash! All kinds of contributions are valuable to us. In this guide, we will cover how you can quickly onboard and make your first contribution.
 
 ## Submitting an issue
 
-Before submitting a new issue, please search the [issues](https://github.com/makeapplepidash/apple-pi-dash/issues) tab. Maybe an issue or discussion already exists and might inform you of workarounds. Otherwise, you can give new information.
+Before submitting a new issue, please search the [issues](https://github.com/makepidash/pi-dash/issues) tab. Maybe an issue or discussion already exists and might inform you of workarounds. Otherwise, you can give new information.
 
-While we want to fix all the [issues](https://github.com/makeapplepidash/apple-pi-dash/issues), before fixing a bug we need to be able to reproduce and confirm it. Please provide us with a minimal reproduction scenario using a repository or [Gist](https://gist.github.com/). Having a live, reproducible scenario gives us the information without asking questions back & forth with additional questions like:
+While we want to fix all the [issues](https://github.com/makepidash/pi-dash/issues), before fixing a bug we need to be able to reproduce and confirm it. Please provide us with a minimal reproduction scenario using a repository or [Gist](https://gist.github.com/). Having a live, reproducible scenario gives us the information without asking questions back & forth with additional questions like:
 
 - 3rd-party libraries being used and their versions
 - a use-case that fails
 
-Without said minimal reproduction, we won't be able to investigate all [issues](https://github.com/makeapplepidash/apple-pi-dash/issues), and the issue might not be resolved.
+Without said minimal reproduction, we won't be able to investigate all [issues](https://github.com/makepidash/pi-dash/issues), and the issue might not be resolved.
 
-You can open a new issue with this [issue form](https://github.com/makeapplepidash/apple-pi-dash/issues/new).
+You can open a new issue with this [issue form](https://github.com/makepidash/pi-dash/issues/new).
 
 ### Naming conventions for issues
 
@@ -53,7 +53,7 @@ The backend is a django project which is kept inside apps/api
 1. Clone the repo
 
 ```bash
-git clone https://github.com/makeapplepidash/apple-pi-dash.git [folder-name]
+git clone https://github.com/makepidash/pi-dash.git [folder-name]
 cd [folder-name]
 chmod +x setup.sh
 ```
@@ -83,7 +83,7 @@ That’s it! You’re all set to begin coding. Remember to refresh your browser 
 
 ## Missing a Feature?
 
-If a feature is missing, you can directly _request_ a new one [here](https://github.com/makeapplepidash/apple-pi-dash/issues/new?assignees=&labels=feature&template=feature_request.yml&title=%F0%9F%9A%80+Feature%3A+). You also can do the same by choosing "🚀 Feature" when raising a [New Issue](https://github.com/makeapplepidash/apple-pi-dash/issues/new/choose) on our GitHub Repository.
+If a feature is missing, you can directly _request_ a new one [here](https://github.com/makepidash/pi-dash/issues/new?assignees=&labels=feature&template=feature_request.yml&title=%F0%9F%9A%80+Feature%3A+). You also can do the same by choosing "🚀 Feature" when raising a [New Issue](https://github.com/makepidash/pi-dash/issues/new/choose) on our GitHub Repository.
 If you would like to _implement_ it, an issue with your proposal must be submitted first, to be sure that we can use it. Please consider the guidelines given below.
 
 ## Coding guidelines
@@ -95,15 +95,15 @@ To ensure consistency throughout the source code, please keep these rules in min
 
 ## Ways to contribute
 
-- Try Apple Pi Dash Cloud and the self hosting platform and give feedback
+- Try Pi Dash Cloud and the self hosting platform and give feedback
 - Add new integrations
 - Add or update translations
-- Help with open [issues](https://github.com/makeapplepidash/apple-pi-dash/issues) or [create your own](https://github.com/makeapplepidash/apple-pi-dash/issues/new/choose)
+- Help with open [issues](https://github.com/makepidash/pi-dash/issues) or [create your own](https://github.com/makepidash/pi-dash/issues/new/choose)
 - Share your thoughts and suggestions with us
 - Help create tutorials and blog posts
 - Request a feature by submitting a proposal
 - Report a bug
-- **Improve documentation** - fix incomplete or missing [docs](https://docs.apple-pi-dash.so/), bad wording, examples or explanations.
+- **Improve documentation** - fix incomplete or missing [docs](https://docs.pi-dash.so/), bad wording, examples or explanations.
 
 ## Contributing to language support
 
@@ -244,4 +244,4 @@ Happy translating! 🌍✨
 
 ## Need help? Questions and suggestions
 
-Questions, suggestions, and thoughts are most welcome. We can also be reached in our [Forum](https://forum.apple-pi-dash.so).
+Questions, suggestions, and thoughts are most welcome. We can also be reached in our [Forum](https://forum.pi-dash.so).

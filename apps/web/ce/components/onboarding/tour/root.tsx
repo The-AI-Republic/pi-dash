@@ -1,14 +1,14 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
 
 import { useState } from "react";
 import { observer } from "mobx-react";
-// apple pi dash imports
-import { Button } from "@apple-pi-dash/propel/button";
-import { CloseIcon, ApplePiDashLockup } from "@apple-pi-dash/propel/icons";
+// pi dash imports
+import { Button } from "@pi-dash/propel/button";
+import { CloseIcon, PiDashLockup } from "@pi-dash/propel/icons";
 // assets
 import CyclesTour from "@/app/assets/onboarding/cycles.webp?url";
 import IssuesTour from "@/app/assets/onboarding/issues.webp?url";
@@ -39,7 +39,7 @@ const TOUR_STEPS: {
     key: "work-items",
     title: "Plan with work items",
     description:
-      "The work item is the building block of the Apple Pi Dash. Most concepts in Apple Pi Dash are either associated with work items and their properties.",
+      "The work item is the building block of the Pi Dash. Most concepts in Pi Dash are either associated with work items and their properties.",
     image: IssuesTour,
     nextStep: "cycles",
   },
@@ -95,14 +95,14 @@ export const TourRoot = observer(function TourRoot(props: TOnboardingTourProps) 
         <div className="w-4/5 overflow-hidden rounded-[10px] bg-surface-1 md:w-1/2 lg:w-2/5">
           <div className="h-full overflow-hidden">
             <div className="grid h-64 place-items-center bg-accent-primary">
-              <ApplePiDashLockup className="h-10 w-auto text-on-color" />
+              <PiDashLockup className="h-10 w-auto text-on-color" />
             </div>
             <div className="flex flex-col overflow-y-auto p-6">
               <h3 className="font-semibold sm:text-18">
-                Welcome to Apple Pi Dash, {currentUser?.first_name} {currentUser?.last_name}
+                Welcome to Pi Dash, {currentUser?.first_name} {currentUser?.last_name}
               </h3>
               <p className="mt-3 text-13 text-secondary">
-                We{"'"}re glad that you decided to try out Apple Pi Dash. You can now manage your projects with ease. Get
+                We{"'"}re glad that you decided to try out Pi Dash. You can now manage your projects with ease. Get
                 started by creating a project.
               </p>
               <div className="flex h-full items-end">

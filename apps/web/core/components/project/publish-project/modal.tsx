@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
@@ -10,15 +10,15 @@ import { useParams } from "next/navigation";
 import { Controller, useForm } from "react-hook-form";
 
 // types
-import { SPACE_BASE_PATH, SPACE_BASE_URL } from "@apple-pi-dash/constants";
-import { Button } from "@apple-pi-dash/propel/button";
-import { GlobeIcon, NewTabIcon, CheckIcon } from "@apple-pi-dash/propel/icons";
-import { TOAST_TYPE, setToast } from "@apple-pi-dash/propel/toast";
-import type { TProjectPublishLayouts, TProjectPublishSettings } from "@apple-pi-dash/types";
+import { SPACE_BASE_PATH, SPACE_BASE_URL } from "@pi-dash/constants";
+import { Button } from "@pi-dash/propel/button";
+import { GlobeIcon, NewTabIcon, CheckIcon } from "@pi-dash/propel/icons";
+import { TOAST_TYPE, setToast } from "@pi-dash/propel/toast";
+import type { TProjectPublishLayouts, TProjectPublishSettings } from "@pi-dash/types";
 // ui
-import { Loader, ToggleSwitch, CustomSelect, ModalCore, EModalWidth } from "@apple-pi-dash/ui";
+import { Loader, ToggleSwitch, CustomSelect, ModalCore, EModalWidth } from "@pi-dash/ui";
 // helpers
-import { copyTextToClipboard } from "@apple-pi-dash/utils";
+import { copyTextToClipboard } from "@pi-dash/utils";
 // hooks
 import { useProjectPublish } from "@/hooks/store/use-project-publish";
 

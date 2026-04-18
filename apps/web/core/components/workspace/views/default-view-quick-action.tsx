@@ -1,20 +1,20 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
 
 import { observer } from "mobx-react";
 
-import { useTranslation } from "@apple-pi-dash/i18n";
-// apple pi dash imports
-import { LinkIcon, NewTabIcon } from "@apple-pi-dash/propel/icons";
-import { TOAST_TYPE, setToast } from "@apple-pi-dash/propel/toast";
+import { useTranslation } from "@pi-dash/i18n";
+// pi dash imports
+import { LinkIcon, NewTabIcon } from "@pi-dash/propel/icons";
+import { TOAST_TYPE, setToast } from "@pi-dash/propel/toast";
 // ui
-import type { TStaticViewTypes } from "@apple-pi-dash/types";
-import type { TContextMenuItem } from "@apple-pi-dash/ui";
-import { CustomMenu } from "@apple-pi-dash/ui";
-import { copyUrlToClipboard, cn } from "@apple-pi-dash/utils";
+import type { TStaticViewTypes } from "@pi-dash/types";
+import type { TContextMenuItem } from "@pi-dash/ui";
+import { CustomMenu } from "@pi-dash/ui";
+import { copyUrlToClipboard, cn } from "@pi-dash/utils";
 // helpers
 type Props = {
   workspaceSlug: string;

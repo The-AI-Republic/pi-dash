@@ -80,7 +80,7 @@ jobs:
             echo "BUILDX_DRIVER=cloud" >> $GITHUB_OUTPUT
             echo "BUILDX_VERSION=lab:latest" >> $GITHUB_OUTPUT
             echo "BUILDX_PLATFORMS=linux/amd64,linux/arm64" >> $GITHUB_OUTPUT
-            echo "BUILDX_ENDPOINT=makeapplepidash/apple-pi-dash-dev" >> $GITHUB_OUTPUT
+            echo "BUILDX_ENDPOINT=makepidash/pi-dash-dev" >> $GITHUB_OUTPUT
           else
             echo "BUILDX_DRIVER=docker-container" >> $GITHUB_OUTPUT
             echo "BUILDX_VERSION=latest" >> $GITHUB_OUTPUT
@@ -90,13 +90,13 @@ jobs:
           BR_NAME=$( echo "${{ env.TARGET_BRANCH }}" |sed 's/[^a-zA-Z0-9.-]//g')
           echo "TARGET_BRANCH=$BR_NAME" >> $GITHUB_OUTPUT
 
-          echo "DH_IMG_WEB=apple-pi-dash-frontend" >> $GITHUB_OUTPUT
-          echo "DH_IMG_SPACE=apple-pi-dash-space" >> $GITHUB_OUTPUT
-          echo "DH_IMG_ADMIN=apple-pi-dash-admin" >> $GITHUB_OUTPUT
-          echo "DH_IMG_LIVE=apple-pi-dash-live" >> $GITHUB_OUTPUT
-          echo "DH_IMG_BACKEND=apple-pi-dash-backend" >> $GITHUB_OUTPUT
-          echo "DH_IMG_PROXY=apple-pi-dash-proxy" >> $GITHUB_OUTPUT
-          echo "DH_IMG_AIO=apple-pi-dash-aio-community" >> $GITHUB_OUTPUT
+          echo "DH_IMG_WEB=pi-dash-frontend" >> $GITHUB_OUTPUT
+          echo "DH_IMG_SPACE=pi-dash-space" >> $GITHUB_OUTPUT
+          echo "DH_IMG_ADMIN=pi-dash-admin" >> $GITHUB_OUTPUT
+          echo "DH_IMG_LIVE=pi-dash-live" >> $GITHUB_OUTPUT
+          echo "DH_IMG_BACKEND=pi-dash-backend" >> $GITHUB_OUTPUT
+          echo "DH_IMG_PROXY=pi-dash-proxy" >> $GITHUB_OUTPUT
+          echo "DH_IMG_AIO=pi-dash-aio-community" >> $GITHUB_OUTPUT
 
           echo "BUILD_TYPE=${{env.BUILD_TYPE}}" >> $GITHUB_OUTPUT
           BUILD_RELEASE=false
@@ -142,14 +142,14 @@ jobs:
     needs: [branch_build_setup]
     steps:
       - name: Admin Build and Push
-        uses: makeapplepidash/actions/build-push@v1.4.0
+        uses: makepidash/actions/build-push@v1.4.0
         with:
           build-release: ${{ needs.branch_build_setup.outputs.build_release }}
           build-prerelease: ${{ needs.branch_build_setup.outputs.build_prerelease }}
           release-version: ${{ needs.branch_build_setup.outputs.release_version }}
           dockerhub-username: ${{ secrets.DOCKERHUB_USERNAME }}
           dockerhub-token: ${{ secrets.DOCKERHUB_TOKEN }}
-          docker-image-owner: makeapplepidash
+          docker-image-owner: makepidash
           docker-image-name: ${{ needs.branch_build_setup.outputs.dh_img_admin }}
           build-context: .
           dockerfile-path: ./apps/admin/Dockerfile.admin
@@ -164,14 +164,14 @@ jobs:
     needs: [branch_build_setup]
     steps:
       - name: Web Build and Push
-        uses: makeapplepidash/actions/build-push@v1.4.0
+        uses: makepidash/actions/build-push@v1.4.0
         with:
           build-release: ${{ needs.branch_build_setup.outputs.build_release }}
           build-prerelease: ${{ needs.branch_build_setup.outputs.build_prerelease }}
           release-version: ${{ needs.branch_build_setup.outputs.release_version }}
           dockerhub-username: ${{ secrets.DOCKERHUB_USERNAME }}
           dockerhub-token: ${{ secrets.DOCKERHUB_TOKEN }}
-          docker-image-owner: makeapplepidash
+          docker-image-owner: makepidash
           docker-image-name: ${{ needs.branch_build_setup.outputs.dh_img_web }}
           build-context: .
           dockerfile-path: ./apps/web/Dockerfile.web
@@ -186,14 +186,14 @@ jobs:
     needs: [branch_build_setup]
     steps:
       - name: Space Build and Push
-        uses: makeapplepidash/actions/build-push@v1.4.0
+        uses: makepidash/actions/build-push@v1.4.0
         with:
           build-release: ${{ needs.branch_build_setup.outputs.build_release }}
           build-prerelease: ${{ needs.branch_build_setup.outputs.build_prerelease }}
           release-version: ${{ needs.branch_build_setup.outputs.release_version }}
           dockerhub-username: ${{ secrets.DOCKERHUB_USERNAME }}
           dockerhub-token: ${{ secrets.DOCKERHUB_TOKEN }}
-          docker-image-owner: makeapplepidash
+          docker-image-owner: makepidash
           docker-image-name: ${{ needs.branch_build_setup.outputs.dh_img_space }}
           build-context: .
           dockerfile-path: ./apps/space/Dockerfile.space
@@ -208,14 +208,14 @@ jobs:
     needs: [branch_build_setup]
     steps:
       - name: Live Build and Push
-        uses: makeapplepidash/actions/build-push@v1.4.0
+        uses: makepidash/actions/build-push@v1.4.0
         with:
           build-release: ${{ needs.branch_build_setup.outputs.build_release }}
           build-prerelease: ${{ needs.branch_build_setup.outputs.build_prerelease }}
           release-version: ${{ needs.branch_build_setup.outputs.release_version }}
           dockerhub-username: ${{ secrets.DOCKERHUB_USERNAME }}
           dockerhub-token: ${{ secrets.DOCKERHUB_TOKEN }}
-          docker-image-owner: makeapplepidash
+          docker-image-owner: makepidash
           docker-image-name: ${{ needs.branch_build_setup.outputs.dh_img_live }}
           build-context: .
           dockerfile-path: ./apps/live/Dockerfile.live
@@ -230,14 +230,14 @@ jobs:
     needs: [branch_build_setup]
     steps:
       - name: Backend Build and Push
-        uses: makeapplepidash/actions/build-push@v1.4.0
+        uses: makepidash/actions/build-push@v1.4.0
         with:
           build-release: ${{ needs.branch_build_setup.outputs.build_release }}
           build-prerelease: ${{ needs.branch_build_setup.outputs.build_prerelease }}
           release-version: ${{ needs.branch_build_setup.outputs.release_version }}
           dockerhub-username: ${{ secrets.DOCKERHUB_USERNAME }}
           dockerhub-token: ${{ secrets.DOCKERHUB_TOKEN }}
-          docker-image-owner: makeapplepidash
+          docker-image-owner: makepidash
           docker-image-name: ${{ needs.branch_build_setup.outputs.dh_img_backend }}
           build-context: ./apps/api
           dockerfile-path: ./apps/api/Dockerfile.api
@@ -252,14 +252,14 @@ jobs:
     needs: [branch_build_setup]
     steps:
       - name: Proxy Build and Push
-        uses: makeapplepidash/actions/build-push@v1.4.0
+        uses: makepidash/actions/build-push@v1.4.0
         with:
           build-release: ${{ needs.branch_build_setup.outputs.build_release }}
           build-prerelease: ${{ needs.branch_build_setup.outputs.build_prerelease }}
           release-version: ${{ needs.branch_build_setup.outputs.release_version }}
           dockerhub-username: ${{ secrets.DOCKERHUB_USERNAME }}
           dockerhub-token: ${{ secrets.DOCKERHUB_TOKEN }}
-          docker-image-owner: makeapplepidash
+          docker-image-owner: makepidash
           docker-image-name: ${{ needs.branch_build_setup.outputs.dh_img_proxy }}
           build-context: ./apps/proxy
           dockerfile-path: ./apps/proxy/Dockerfile.ce
@@ -304,14 +304,14 @@ jobs:
           name: aio-assets-dist
 
       - name: AIO Build and Push
-        uses: makeapplepidash/actions/build-push@v1.4.0
+        uses: makepidash/actions/build-push@v1.4.0
         with:
           build-release: ${{ needs.branch_build_setup.outputs.build_release }}
           build-prerelease: ${{ needs.branch_build_setup.outputs.build_prerelease }}
           release-version: ${{ needs.branch_build_setup.outputs.release_version }}
           dockerhub-username: ${{ secrets.DOCKERHUB_USERNAME }}
           dockerhub-token: ${{ secrets.DOCKERHUB_TOKEN }}
-          docker-image-owner: makeapplepidash
+          docker-image-owner: makepidash
           docker-image-name: ${{ needs.branch_build_setup.outputs.dh_img_aio }}
           build-context: ./deployments/aio/community
           dockerfile-path: ./deployments/aio/community/Dockerfile
@@ -322,7 +322,7 @@ jobs:
           additional-assets: aio-assets-dist
           additional-assets-dir: ./deployments/aio/community/dist
           build-args: |
-            APPLE_PI_DASH_VERSION=${{ steps.prepare_aio_assets.outputs.AIO_BUILD_VERSION }}
+            PI_DASH_VERSION=${{ steps.prepare_aio_assets.outputs.AIO_BUILD_VERSION }}
 
   upload_build_assets:
     name: Upload Build Assets

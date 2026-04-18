@@ -1,19 +1,19 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
 
 import { observer } from "mobx-react";
 import { useParams } from "next/navigation";
-import { EEstimateSystem } from "@apple-pi-dash/constants";
-import { ProjectIcon } from "@apple-pi-dash/propel/icons";
-import type { ChartYAxisMetric } from "@apple-pi-dash/types";
-// apple pi dash package imports
-import { CustomSelect } from "@apple-pi-dash/ui";
+import { EEstimateSystem } from "@pi-dash/constants";
+import { ProjectIcon } from "@pi-dash/propel/icons";
+import type { ChartYAxisMetric } from "@pi-dash/types";
+// pi dash package imports
+import { CustomSelect } from "@pi-dash/ui";
 // hooks
 import { useProjectEstimates } from "@/hooks/store/estimates";
-// apple pi dash web constants
+// pi dash web constants
 type Props = {
   value: ChartYAxisMetric;
   onChange: (val: ChartYAxisMetric | null) => void;

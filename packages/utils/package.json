@@ -1,5 +1,5 @@
 {
-  "name": "@apple-pi-dash/utils",
+  "name": "@pi-dash/utils",
   "version": "1.3.0",
   "private": true,
   "description": "Helper functions shared across multiple apps internally",
@@ -23,8 +23,8 @@
     "clean": "rm -rf .turbo && rm -rf node_modules && rm -rf dist"
   },
   "dependencies": {
-    "@apple-pi-dash/constants": "workspace:*",
-    "@apple-pi-dash/types": "workspace:*",
+    "@pi-dash/constants": "workspace:*",
+    "@pi-dash/types": "workspace:*",
     "chroma-js": "^3.2.0",
     "clsx": "^2.1.1",
     "date-fns": "^4.1.0",
@@ -44,7 +44,7 @@
     "uuid": "catalog:"
   },
   "devDependencies": {
-    "@apple-pi-dash/typescript-config": "workspace:*",
+    "@pi-dash/typescript-config": "workspace:*",
     "@types/chroma-js": "^3.1.2",
     "@types/hast": "^3.0.4",
     "@types/lodash-es": "catalog:",

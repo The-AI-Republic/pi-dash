@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
@@ -153,7 +153,7 @@ describe("remove-directives", () => {
       "use-client";
       import type { FC } from "react";
       // types
-      import type { TDeDupeIssue } from "@apple-pi-dash/types";
+      import type { TDeDupeIssue } from "@pi-dash/types";
 
       type TDuplicateModalRootProps = {
         workspaceSlug: string;
@@ -172,7 +172,7 @@ describe("remove-directives", () => {
     expect(result).toMatchInlineSnapshot(`
       "import type { FC } from "react";
             // types
-            import type { TDeDupeIssue } from "@apple-pi-dash/types";
+            import type { TDeDupeIssue } from "@pi-dash/types";
 
             type TDuplicateModalRootProps = {
               workspaceSlug: string;
@@ -194,8 +194,8 @@ describe("remove-directives", () => {
       'use-client';
       import type { FC } from "react";
       import { useState } from "react";
-      // apple pi dash imports
-      import { EModalPosition, EModalWidth, ModalCore } from "@apple-pi-dash/ui";
+      // pi dash imports
+      import { EModalPosition, EModalWidth, ModalCore } from "@pi-dash/ui";
 
       export function MyComponent() {
         return <div>Hello</div>;
@@ -207,8 +207,8 @@ describe("remove-directives", () => {
     expect(result).toMatchInlineSnapshot(`
       "import type { FC } from "react";
             import { useState } from "react";
-            // apple pi dash imports
-            import { EModalPosition, EModalWidth, ModalCore } from "@apple-pi-dash/ui";
+            // pi dash imports
+            import { EModalPosition, EModalWidth, ModalCore } from "@pi-dash/ui";
 
             export function MyComponent() {
               return <div>Hello</div>;
@@ -247,8 +247,8 @@ describe("remove-directives", () => {
 
       import type { FC } from "react";
       import { useState } from "react";
-      // apple pi dash imports
-      import { EModalPosition, EModalWidth, ModalCore } from "@apple-pi-dash/ui";
+      // pi dash imports
+      import { EModalPosition, EModalWidth, ModalCore } from "@pi-dash/ui";
       // hooks
       import useKeypress from "@/hooks/use-keypress";
       // local imports
@@ -272,8 +272,8 @@ describe("remove-directives", () => {
     expect(result).toMatchInlineSnapshot(`
       "import type { FC } from "react";
             import { useState } from "react";
-            // apple pi dash imports
-            import { EModalPosition, EModalWidth, ModalCore } from "@apple-pi-dash/ui";
+            // pi dash imports
+            import { EModalPosition, EModalWidth, ModalCore } from "@pi-dash/ui";
             // hooks
             import useKeypress from "@/hooks/use-keypress";
             // local imports

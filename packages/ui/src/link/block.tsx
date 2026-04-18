@@ -1,13 +1,13 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
 
 import React from "react";
-// apple pi dash utils
-import { calculateTimeAgo, cn, getIconForLink } from "@apple-pi-dash/utils";
-// apple pi dash ui
+// pi dash utils
+import { calculateTimeAgo, cn, getIconForLink } from "@pi-dash/utils";
+// pi dash ui
 import type { TContextMenuItem } from "../dropdowns/context-menu/root";
 import { CustomMenu } from "../dropdowns/custom-menu";
 

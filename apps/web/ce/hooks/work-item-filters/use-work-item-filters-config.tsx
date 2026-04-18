@@ -1,13 +1,13 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
 
 import { useCallback, useMemo } from "react";
 import { AtSign, Briefcase } from "lucide-react";
-// apple pi dash imports
-import { Logo } from "@apple-pi-dash/propel/emoji-icon-picker";
+// pi dash imports
+import { Logo } from "@pi-dash/propel/emoji-icon-picker";
 import {
   CalendarLayoutIcon,
   CycleGroupIcon,
@@ -22,7 +22,7 @@ import {
   DueDatePropertyIcon,
   UserCirclePropertyIcon,
   PriorityPropertyIcon,
-} from "@apple-pi-dash/propel/icons";
+} from "@pi-dash/propel/icons";
 import type {
   ICycle,
   IState,
@@ -32,8 +32,8 @@ import type {
   IModule,
   IProject,
   TWorkItemFilterProperty,
-} from "@apple-pi-dash/types";
-import { Avatar } from "@apple-pi-dash/ui";
+} from "@pi-dash/types";
+import { Avatar } from "@pi-dash/ui";
 import {
   getAssigneeFilterConfig,
   getCreatedAtFilterConfig,
@@ -52,7 +52,7 @@ import {
   getTargetDateFilterConfig,
   getUpdatedAtFilterConfig,
   isLoaderReady,
-} from "@apple-pi-dash/utils";
+} from "@pi-dash/utils";
 // store hooks
 import { useCycle } from "@/hooks/store/use-cycle";
 import { useLabel } from "@/hooks/store/use-label";
@@ -60,8 +60,8 @@ import { useMember } from "@/hooks/store/use-member";
 import { useModule } from "@/hooks/store/use-module";
 import { useProject } from "@/hooks/store/use-project";
 import { useProjectState } from "@/hooks/store/use-project-state";
-// apple pi dash web imports
-import { useFiltersOperatorConfigs } from "@/apple-pi-dash-web/hooks/rich-filters/use-filters-operator-configs";
+// pi dash web imports
+import { useFiltersOperatorConfigs } from "@/pi-dash-web/hooks/rich-filters/use-filters-operator-configs";
 
 export type TWorkItemFiltersEntityProps = {
   workspaceSlug: string;

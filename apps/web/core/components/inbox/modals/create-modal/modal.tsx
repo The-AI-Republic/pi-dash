@@ -1,12 +1,12 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
 
 import { useState } from "react";
-// apple pi dash imports
-import { EModalPosition, EModalWidth, ModalCore } from "@apple-pi-dash/ui";
+// pi dash imports
+import { EModalPosition, EModalWidth, ModalCore } from "@pi-dash/ui";
 // hooks
 import useKeypress from "@/hooks/use-keypress";
 // local imports

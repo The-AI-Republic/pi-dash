@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
@@ -7,7 +7,7 @@
 import { clsx } from "clsx";
 import type { ClassValue } from "clsx";
 import { extendTailwindMerge } from "tailwind-merge";
-import type { CompleteOrEmpty } from "@apple-pi-dash/types";
+import type { CompleteOrEmpty } from "@pi-dash/types";
 
 // Support email can be configured by the application
 export const getSupportEmail = (defaultEmail: string = ""): string => defaultEmail;

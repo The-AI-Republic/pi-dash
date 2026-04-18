@@ -1,15 +1,15 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
 
 import { BarChart2, Briefcase, FileText, Home, Inbox, Layers, PenSquare, Settings } from "lucide-react";
-// apple pi dash imports
-import { EUserPermissionsLevel } from "@apple-pi-dash/constants";
-import { ArchiveIcon, UserActivityIcon, LayersIcon, ContrastIcon, DiceIcon, Intake } from "@apple-pi-dash/propel/icons";
-import type { ICycle, IModule, IPartialProject, IProjectView, IWorkspace } from "@apple-pi-dash/types";
-import { EUserProjectRoles, EUserWorkspaceRoles } from "@apple-pi-dash/types";
+// pi dash imports
+import { EUserPermissionsLevel } from "@pi-dash/constants";
+import { ArchiveIcon, UserActivityIcon, LayersIcon, ContrastIcon, DiceIcon, Intake } from "@pi-dash/propel/icons";
+import type { ICycle, IModule, IPartialProject, IProjectView, IWorkspace } from "@pi-dash/types";
+import { EUserProjectRoles, EUserWorkspaceRoles } from "@pi-dash/types";
 // components
 import type { TPowerKCommandConfig, TPowerKContext } from "@/components/power-k/core/types";
 import { handlePowerKNavigate } from "@/components/power-k/utils/navigation";

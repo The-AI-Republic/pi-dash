@@ -1,15 +1,15 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
 
 import { forwardRef } from "react";
 import { range } from "lodash-es";
-// apple pi dash ui
-import { ContentWrapper } from "@apple-pi-dash/ui";
-// apple pi dash utils
-import { cn } from "@apple-pi-dash/utils";
+// pi dash ui
+import { ContentWrapper } from "@pi-dash/ui";
+// pi dash utils
+import { cn } from "@pi-dash/utils";
 
 export const KanbanIssueBlockLoader = forwardRef(function KanbanIssueBlockLoader(
   { cardHeight = 100, shouldAnimate = true }: { cardHeight?: number; shouldAnimate?: boolean },

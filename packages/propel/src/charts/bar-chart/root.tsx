@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
@@ -16,9 +16,9 @@ import {
   Legend,
   CartesianGrid,
 } from "recharts";
-// apple pi dash imports
-import { AXIS_LABEL_CLASSNAME } from "@apple-pi-dash/constants";
-import type { TBarChartProps } from "@apple-pi-dash/types";
+// pi dash imports
+import { AXIS_LABEL_CLASSNAME } from "@pi-dash/constants";
+import type { TBarChartProps } from "@pi-dash/types";
 // local components
 import { getLegendProps } from "../components/legend";
 import { CustomXAxisTick, CustomYAxisTick } from "../components/tick";

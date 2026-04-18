@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
@@ -7,7 +7,7 @@
 import { Tab } from "@headlessui/react";
 import React, { Fragment, useEffect, useState } from "react";
 // helpers
-import { useLocalStorage } from "@apple-pi-dash/hooks";
+import { useLocalStorage } from "@pi-dash/hooks";
 import { cn } from "../utils";
 // types
 import type { TabListItem } from "./tab-list";

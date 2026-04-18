@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
@@ -14,14 +14,14 @@ import {
   EUserPermissionsLevel,
   EXPORTERS_LIST,
   // ISSUE_DISPLAY_FILTERS_BY_PAGE,
-} from "@apple-pi-dash/constants";
-import { useTranslation } from "@apple-pi-dash/i18n";
-import { Button } from "@apple-pi-dash/propel/button";
-import { TOAST_TYPE, setToast } from "@apple-pi-dash/propel/toast";
-// import { Tooltip } from "@apple-pi-dash/propel/tooltip";
-// import { EIssuesStoreType } from "@apple-pi-dash/types";
-import type { TWorkItemFilterExpression } from "@apple-pi-dash/types";
-import { CustomSearchSelect, CustomSelect } from "@apple-pi-dash/ui";
+} from "@pi-dash/constants";
+import { useTranslation } from "@pi-dash/i18n";
+import { Button } from "@pi-dash/propel/button";
+import { TOAST_TYPE, setToast } from "@pi-dash/propel/toast";
+// import { Tooltip } from "@pi-dash/propel/tooltip";
+// import { EIssuesStoreType } from "@pi-dash/types";
+import type { TWorkItemFilterExpression } from "@pi-dash/types";
+import { CustomSearchSelect, CustomSelect } from "@pi-dash/ui";
 // import { WorkspaceLevelWorkItemFiltersHOC } from "@/components/work-item-filters/filters-hoc/workspace-level";
 // import { WorkItemFiltersRow } from "@/components/work-item-filters/filters-row";
 import { useProject } from "@/hooks/store/use-project";

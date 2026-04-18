@@ -1,15 +1,15 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
 
-// apple pi dash imports
-import { STATE_GROUPS } from "@apple-pi-dash/constants";
+// pi dash imports
+import { STATE_GROUPS } from "@pi-dash/constants";
 // types
-import { useTranslation } from "@apple-pi-dash/i18n";
-import type { IUserStateDistribution } from "@apple-pi-dash/types";
-import { Card, ECardDirection, ECardSpacing } from "@apple-pi-dash/ui";
+import { useTranslation } from "@pi-dash/i18n";
+import type { IUserStateDistribution } from "@pi-dash/types";
+import { Card, ECardDirection, ECardSpacing } from "@pi-dash/ui";
 // constants
 
 type Props = {

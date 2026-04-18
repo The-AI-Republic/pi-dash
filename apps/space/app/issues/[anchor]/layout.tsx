@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
@@ -19,8 +19,8 @@ import { usePublish, usePublishList } from "@/hooks/store/publish";
 import { useIssueFilter } from "@/hooks/store/use-issue-filter";
 import type { Route } from "./+types/layout";
 
-const DEFAULT_TITLE = "Apple Pi Dash";
-const DEFAULT_DESCRIPTION = "Made with Apple Pi Dash, an AI-powered work management platform with publishing capabilities.";
+const DEFAULT_TITLE = "Pi Dash";
+const DEFAULT_DESCRIPTION = "Made with Pi Dash, an AI-powered work management platform with publishing capabilities.";
 
 interface IssueMetadata {
   name?: string;

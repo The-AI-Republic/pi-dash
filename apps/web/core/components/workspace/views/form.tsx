@@ -1,25 +1,30 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
 
 import { observer } from "mobx-react";
 import { Controller, useForm } from "react-hook-form";
-// apple pi dash imports
-import { ISSUE_DISPLAY_FILTERS_BY_PAGE } from "@apple-pi-dash/constants";
-import { useTranslation } from "@apple-pi-dash/i18n";
-import { Button } from "@apple-pi-dash/propel/button";
-import type { IIssueDisplayFilterOptions, IIssueDisplayProperties, IWorkspaceView, IIssueFilters } from "@apple-pi-dash/types";
-import { EViewAccess, EIssueLayoutTypes, EIssuesStoreType } from "@apple-pi-dash/types";
-import { Input, TextArea } from "@apple-pi-dash/ui";
-import { getComputedDisplayFilters, getComputedDisplayProperties } from "@apple-pi-dash/utils";
+// pi dash imports
+import { ISSUE_DISPLAY_FILTERS_BY_PAGE } from "@pi-dash/constants";
+import { useTranslation } from "@pi-dash/i18n";
+import { Button } from "@pi-dash/propel/button";
+import type {
+  IIssueDisplayFilterOptions,
+  IIssueDisplayProperties,
+  IWorkspaceView,
+  IIssueFilters,
+} from "@pi-dash/types";
+import { EViewAccess, EIssueLayoutTypes, EIssuesStoreType } from "@pi-dash/types";
+import { Input, TextArea } from "@pi-dash/ui";
+import { getComputedDisplayFilters, getComputedDisplayProperties } from "@pi-dash/utils";
 // components
 import { DisplayFiltersSelection, FiltersDropdown } from "@/components/issues/issue-layouts/filters";
 import { WorkspaceLevelWorkItemFiltersHOC } from "@/components/work-item-filters/filters-hoc/workspace-level";
-// apple pi dash web imports
+// pi dash web imports
 import { WorkItemFiltersRow } from "@/components/work-item-filters/filters-row";
-import { AccessController } from "@/apple-pi-dash-web/components/views/access-controller";
+import { AccessController } from "@/pi-dash-web/components/views/access-controller";
 
 type Props = {
   handleFormSubmit: (values: Partial<IWorkspaceView>) => Promise<void>;

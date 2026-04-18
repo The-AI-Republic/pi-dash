@@ -1,17 +1,17 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
 
 import { get } from "lodash-es";
-// apple pi dash imports
-import { DATE_OPERATOR_LABELS_MAP, EMPTY_OPERATOR_LABEL, OPERATOR_LABELS_MAP } from "@apple-pi-dash/constants";
+// pi dash imports
+import { DATE_OPERATOR_LABELS_MAP, EMPTY_OPERATOR_LABEL, OPERATOR_LABELS_MAP } from "@pi-dash/constants";
 import type {
   TAllAvailableOperatorsForDisplay,
   TFilterValue,
   TAllAvailableDateFilterOperatorsForDisplay,
-} from "@apple-pi-dash/types";
+} from "@pi-dash/types";
 
 // -------- OPERATOR LABEL UTILITIES --------
 

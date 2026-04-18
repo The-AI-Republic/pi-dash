@@ -1,16 +1,16 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
 
 import React, { useEffect, useState } from "react";
 import { observer } from "mobx-react";
-// apple pi dash package imports
-import { ModalPortal, EPortalWidth, EPortalPosition } from "@apple-pi-dash/propel/portal";
-import type { ICycle, IModule, IProject } from "@apple-pi-dash/types";
+// pi dash package imports
+import { ModalPortal, EPortalWidth, EPortalPosition } from "@pi-dash/propel/portal";
+import type { ICycle, IModule, IProject } from "@pi-dash/types";
 import { useAnalytics } from "@/hooks/store/use-analytics";
-// apple pi dash web components
+// pi dash web components
 import { WorkItemsModalMainContent } from "./content";
 import { WorkItemsModalHeader } from "./header";
 

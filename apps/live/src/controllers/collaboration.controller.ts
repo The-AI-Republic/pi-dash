@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
@@ -7,9 +7,9 @@
 import type { Hocuspocus } from "@hocuspocus/server";
 import type { Request } from "express";
 import type WebSocket from "ws";
-// apple pi dash imports
-import { Controller, WebSocket as WSDecorator } from "@apple-pi-dash/decorators";
-import { logger } from "@apple-pi-dash/logger";
+// pi dash imports
+import { Controller, WebSocket as WSDecorator } from "@pi-dash/decorators";
+import { logger } from "@pi-dash/logger";
 
 @Controller("/collaboration")
 export class CollaborationController {

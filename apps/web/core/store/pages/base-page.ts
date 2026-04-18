@@ -1,18 +1,18 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
 
 import { set } from "lodash-es";
 import { action, computed, makeObservable, observable, reaction, runInAction } from "mobx";
-// apple pi dash imports
-import { EPageAccess } from "@apple-pi-dash/constants";
-import type { TChangeHandlerProps } from "@apple-pi-dash/propel/emoji-icon-picker";
-import type { TDocumentPayload, TLogoProps, TNameDescriptionLoader, TPage } from "@apple-pi-dash/types";
-// apple pi dash web store
-import { ExtendedBasePage } from "@/apple-pi-dash-web/store/pages/extended-base-page";
-import type { RootStore } from "@/apple-pi-dash-web/store/root.store";
+// pi dash imports
+import { EPageAccess } from "@pi-dash/constants";
+import type { TChangeHandlerProps } from "@pi-dash/propel/emoji-icon-picker";
+import type { TDocumentPayload, TLogoProps, TNameDescriptionLoader, TPage } from "@pi-dash/types";
+// pi dash web store
+import { ExtendedBasePage } from "@/pi-dash-web/store/pages/extended-base-page";
+import type { RootStore } from "@/pi-dash-web/store/root.store";
 // local imports
 import { PageEditorInstance } from "./page-editor-info";
 

@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
@@ -10,18 +10,18 @@ import { observer } from "mobx-react";
 import Link from "next/link";
 import { useParams } from "next/navigation";
 import { Hotel } from "lucide-react";
-// apple pi dash ui
-import { EUserPermissions, EUserPermissionsLevel } from "@apple-pi-dash/constants";
-import { useLocalStorage } from "@apple-pi-dash/hooks";
-import { useTranslation } from "@apple-pi-dash/i18n";
-import { MembersPropertyIcon, CheckIcon, ProjectIcon, CloseIcon } from "@apple-pi-dash/propel/icons";
-import { cn, getFileURL } from "@apple-pi-dash/utils";
+// pi dash ui
+import { EUserPermissions, EUserPermissionsLevel } from "@pi-dash/constants";
+import { useLocalStorage } from "@pi-dash/hooks";
+import { useTranslation } from "@pi-dash/i18n";
+import { MembersPropertyIcon, CheckIcon, ProjectIcon, CloseIcon } from "@pi-dash/propel/icons";
+import { cn, getFileURL } from "@pi-dash/utils";
 // hooks
 import { useCommandPalette } from "@/hooks/store/use-command-palette";
 import { useProject } from "@/hooks/store/use-project";
 import { useWorkspace } from "@/hooks/store/use-workspace";
 import { useUser, useUserPermissions } from "@/hooks/store/user";
-// apple pi dash web constants
+// pi dash web constants
 
 export const NoProjectsEmptyState = observer(function NoProjectsEmptyState() {
   // navigation

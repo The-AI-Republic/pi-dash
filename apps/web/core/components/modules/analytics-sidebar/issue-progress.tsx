@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
@@ -9,23 +9,23 @@ import { observer } from "mobx-react";
 import { useSearchParams } from "next/navigation";
 import { AlertCircle } from "lucide-react";
 import { Disclosure, Transition } from "@headlessui/react";
-import { EEstimateSystem } from "@apple-pi-dash/constants";
-import { useTranslation } from "@apple-pi-dash/i18n";
-import { ChevronUpIcon, ChevronDownIcon } from "@apple-pi-dash/propel/icons";
-import type { TModulePlotType } from "@apple-pi-dash/types";
-import { EIssuesStoreType } from "@apple-pi-dash/types";
-import { CustomSelect, Spinner } from "@apple-pi-dash/ui";
+import { EEstimateSystem } from "@pi-dash/constants";
+import { useTranslation } from "@pi-dash/i18n";
+import { ChevronUpIcon, ChevronDownIcon } from "@pi-dash/propel/icons";
+import type { TModulePlotType } from "@pi-dash/types";
+import { EIssuesStoreType } from "@pi-dash/types";
+import { CustomSelect, Spinner } from "@pi-dash/ui";
 // components
 // constants
 // helpers
-import { getDate } from "@apple-pi-dash/utils";
+import { getDate } from "@pi-dash/utils";
 import ProgressChart from "@/components/core/sidebar/progress-chart";
 import { ModuleProgressStats } from "@/components/modules";
 // hooks
 import { useProjectEstimates } from "@/hooks/store/estimates";
 import { useModule } from "@/hooks/store/use-module";
 import { useWorkItemFilters } from "@/hooks/store/work-item-filters/use-work-item-filters";
-// apple pi dash web constants
+// pi dash web constants
 type TModuleAnalyticsProgress = {
   workspaceSlug: string;
   projectId: string;
@@ -43,7 +43,7 @@ export const ModuleAnalyticsProgress = observer(function ModuleAnalyticsProgress
   // router
   const searchParams = useSearchParams();
   const peekModule = searchParams.get("peekModule") || undefined;
-  // apple pi dash hooks
+  // pi dash hooks
   const { t } = useTranslation();
   // hooks
   const { areEstimateEnabledByProjectId, currentActiveEstimateId, estimateById } = useProjectEstimates();

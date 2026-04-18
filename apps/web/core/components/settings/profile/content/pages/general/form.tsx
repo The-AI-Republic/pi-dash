@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
@@ -8,14 +8,14 @@ import { useState } from "react";
 import { observer } from "mobx-react";
 import { Controller, useForm } from "react-hook-form";
 import { CircleUserRound } from "lucide-react";
-// apple pi dash imports
-import { useTranslation } from "@apple-pi-dash/i18n";
-import { Button } from "@apple-pi-dash/propel/button";
-import { TOAST_TYPE, setPromiseToast, setToast } from "@apple-pi-dash/propel/toast";
-import { EFileAssetType } from "@apple-pi-dash/types";
-import type { IUser, TUserProfile } from "@apple-pi-dash/types";
-import { Input } from "@apple-pi-dash/ui";
-import { getFileURL } from "@apple-pi-dash/utils";
+// pi dash imports
+import { useTranslation } from "@pi-dash/i18n";
+import { Button } from "@pi-dash/propel/button";
+import { TOAST_TYPE, setPromiseToast, setToast } from "@pi-dash/propel/toast";
+import { EFileAssetType } from "@pi-dash/types";
+import type { IUser, TUserProfile } from "@pi-dash/types";
+import { Input } from "@pi-dash/ui";
+import { getFileURL } from "@pi-dash/utils";
 // components
 import { DeactivateAccountModal } from "@/components/account/deactivate-account-modal";
 import { ImagePickerPopover } from "@/components/core/image-picker-popover";
@@ -29,7 +29,7 @@ import { handleCoverImageChange } from "@/helpers/cover-image.helper";
 import { useInstance } from "@/hooks/store/use-instance";
 import { useUser, useUserProfile } from "@/hooks/store/user";
 // utils
-import { validatePersonName, validateDisplayName } from "@apple-pi-dash/utils";
+import { validatePersonName, validateDisplayName } from "@pi-dash/utils";
 
 type TUserProfileForm = {
   avatar_url: string;

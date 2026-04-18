@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
@@ -7,12 +7,12 @@
 import React from "react";
 import { Link } from "react-router";
 import { MoreHorizontal, Pin } from "lucide-react";
-// apple pi dash imports
-import { useTranslation } from "@apple-pi-dash/i18n";
-import { SetAsDefaultIcon } from "@apple-pi-dash/propel/icons";
-import { Menu } from "@apple-pi-dash/propel/menu";
-import { Tooltip } from "@apple-pi-dash/propel/tooltip";
-import { cn } from "@apple-pi-dash/utils";
+// pi dash imports
+import { useTranslation } from "@pi-dash/i18n";
+import { SetAsDefaultIcon } from "@pi-dash/propel/icons";
+import { Menu } from "@pi-dash/propel/menu";
+import { Tooltip } from "@pi-dash/propel/tooltip";
+import { cn } from "@pi-dash/utils";
 // local imports
 import type { TNavigationItem } from "./tab-navigation-root";
 import type { TTabPreferences } from "./tab-navigation-utils";

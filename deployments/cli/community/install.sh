@@ -2,12 +2,12 @@
 
 BRANCH=${BRANCH:-master}
 SCRIPT_DIR=$PWD
-SERVICE_FOLDER=apple-pi-dash-app
-APPLE_PI_DASH_INSTALL_DIR=$PWD/$SERVICE_FOLDER
+SERVICE_FOLDER=pi-dash-app
+PI_DASH_INSTALL_DIR=$PWD/$SERVICE_FOLDER
 export APP_RELEASE=stable
-export DOCKERHUB_USER=makeapplepidash
+export DOCKERHUB_USER=makepidash
 export PULL_POLICY=${PULL_POLICY:-if_not_present}
-export GH_REPO=makeapplepidash/apple_pi_dash
+export GH_REPO=makepidash/pi_dash
 export RELEASE_DOWNLOAD_URL="https://github.com/$GH_REPO/releases/download"
 export FALLBACK_DOWNLOAD_URL="https://raw.githubusercontent.com/$GH_REPO/$BRANCH/deployments/cli/community"
 
@@ -15,9 +15,9 @@ CPU_ARCH=$(uname -m)
 OS_NAME=$(uname)
 UPPER_CPU_ARCH=$(tr '[:lower:]' '[:upper:]' <<< "$CPU_ARCH")
 
-mkdir -p $APPLE_PI_DASH_INSTALL_DIR/archive
-DOCKER_FILE_PATH=$APPLE_PI_DASH_INSTALL_DIR/docker-compose.yaml
-DOCKER_ENV_PATH=$APPLE_PI_DASH_INSTALL_DIR/apple_pi_dash.env
+mkdir -p $PI_DASH_INSTALL_DIR/archive
+DOCKER_FILE_PATH=$PI_DASH_INSTALL_DIR/docker-compose.yaml
+DOCKER_ENV_PATH=$PI_DASH_INSTALL_DIR/pi_dash.env
 
 function print_header() {
 clear
@@ -77,7 +77,7 @@ function initialize(){
         return 1
     fi
 
-    local IMAGE_NAME=makeapplepidash/apple-pi-dash-proxy
+    local IMAGE_NAME=makepidash/pi-dash-proxy
     local IMAGE_TAG=${APP_RELEASE}
     docker manifest inspect "${IMAGE_NAME}:${IMAGE_TAG}" | grep -q "\"architecture\": \"${CPU_ARCH}\"" &
     local pid=$!
@@ -88,7 +88,7 @@ function initialize(){
     wait "$pid"
 
     if [ $? -eq 0 ]; then
-        echo "Apple Pi Dash supports ${CPU_ARCH}" >&2
+        echo "Pi Dash supports ${CPU_ARCH}" >&2
         echo "available"
         return 0
     else
@@ -162,10 +162,10 @@ function updateCustomVariables(){
 
 function syncEnvFile(){
     echo "Syncing environment variables..." >&2
-    if [ -f "$APPLE_PI_DASH_INSTALL_DIR/apple_pi_dash.env.bak" ]; then
+    if [ -f "$PI_DASH_INSTALL_DIR/pi_dash.env.bak" ]; then
         updateCustomVariables
         
-        # READ keys of apple_pi_dash.env and update the values from apple_pi_dash.env.bak
+        # READ keys of pi_dash.env and update the values from pi_dash.env.bak
         while IFS= read -r line
         do
             # ignore is the line is empty or starts with #
@@ -173,7 +173,7 @@ function syncEnvFile(){
                 continue
             fi
             key=$(echo "$line" | cut -d'=' -f1)
-            value=$(getEnvValue "$key" "$APPLE_PI_DASH_INSTALL_DIR/apple_pi_dash.env.bak")
+            value=$(getEnvValue "$key" "$PI_DASH_INSTALL_DIR/pi_dash.env.bak")
             if [ -n "$value" ]; then
                 updateEnvFile "$key" "$value" "$DOCKER_ENV_PATH"
             fi
@@ -185,21 +185,21 @@ function syncEnvFile(){
 function buildYourOwnImage(){
     echo "Building images locally..."
 
-    export DOCKERHUB_USER="myapplepidash"
+    export DOCKERHUB_USER="mypidash"
     export APP_RELEASE="local"
     export PULL_POLICY="never"
     CUSTOM_BUILD="true"
 
-    # checkout the code to ~/tmp/apple_pi_dash folder and build the images
-    local APPLE_PI_DASH_TEMP_CODE_DIR=~/tmp/apple_pi_dash
-    rm -rf $APPLE_PI_DASH_TEMP_CODE_DIR
-    mkdir -p $APPLE_PI_DASH_TEMP_CODE_DIR
+    # checkout the code to ~/tmp/pi_dash folder and build the images
+    local PI_DASH_TEMP_CODE_DIR=~/tmp/pi_dash
+    rm -rf $PI_DASH_TEMP_CODE_DIR
+    mkdir -p $PI_DASH_TEMP_CODE_DIR
     REPO=https://github.com/$GH_REPO.git
-    git clone "$REPO" "$APPLE_PI_DASH_TEMP_CODE_DIR"  --branch "$BRANCH" --single-branch --depth 1
+    git clone "$REPO" "$PI_DASH_TEMP_CODE_DIR"  --branch "$BRANCH" --single-branch --depth 1
 
-    cp "$APPLE_PI_DASH_TEMP_CODE_DIR/deployments/cli/community/build.yml" "$APPLE_PI_DASH_TEMP_CODE_DIR/build.yml"
+    cp "$PI_DASH_TEMP_CODE_DIR/deployments/cli/community/build.yml" "$PI_DASH_TEMP_CODE_DIR/build.yml"
 
-    cd "$APPLE_PI_DASH_TEMP_CODE_DIR" || exit
+    cd "$PI_DASH_TEMP_CODE_DIR" || exit
 
     /bin/bash -c "$COMPOSE_CMD -f build.yml build --no-cache"  >&2
     if [ $? -ne 0 ]; then
@@ -213,7 +213,7 @@ function buildYourOwnImage(){
 }
 
 function install() {
-    echo "Begin Installing Apple Pi Dash"
+    echo "Begin Installing Pi Dash"
     echo ""
 
     if [ "$APP_RELEASE" == "stable" ]; then
@@ -243,9 +243,9 @@ function download() {
     local LOCAL_BUILD=$1
     cd $SCRIPT_DIR
     TS=$(date +%s)
-    if [ -f "$APPLE_PI_DASH_INSTALL_DIR/docker-compose.yaml" ]
+    if [ -f "$PI_DASH_INSTALL_DIR/docker-compose.yaml" ]
     then
-        mv $APPLE_PI_DASH_INSTALL_DIR/docker-compose.yaml $APPLE_PI_DASH_INSTALL_DIR/archive/$TS.docker-compose.yaml
+        mv $PI_DASH_INSTALL_DIR/docker-compose.yaml $PI_DASH_INSTALL_DIR/archive/$TS.docker-compose.yaml
     fi
 
     RESPONSE=$(curl -sSL -H 'Cache-Control: no-cache, no-store' -w "HTTPSTATUS:%{http_code}" "$RELEASE_DOWNLOAD_URL/$APP_RELEASE/docker-compose.yml?$(date +%s)")
@@ -253,7 +253,7 @@ function download() {
     STATUS=$(echo "$RESPONSE" | tr -d '\n' | sed -e 's/.*HTTPSTATUS://')
 
     if [ "$STATUS" -eq 200 ]; then
-        echo "$BODY" > $APPLE_PI_DASH_INSTALL_DIR/docker-compose.yaml
+        echo "$BODY" > $PI_DASH_INSTALL_DIR/docker-compose.yaml
     else
         # Fallback to download from the raw github url
         RESPONSE=$(curl -sSL -H 'Cache-Control: no-cache, no-store' -w "HTTPSTATUS:%{http_code}" "$FALLBACK_DOWNLOAD_URL/docker-compose.yml?$(date +%s)")
@@ -261,11 +261,11 @@ function download() {
         STATUS=$(echo "$RESPONSE" | tr -d '\n' | sed -e 's/.*HTTPSTATUS://')
 
         if [ "$STATUS" -eq 200 ]; then
-            echo "$BODY" > $APPLE_PI_DASH_INSTALL_DIR/docker-compose.yaml
+            echo "$BODY" > $PI_DASH_INSTALL_DIR/docker-compose.yaml
         else
             echo "Failed to download docker-compose.yml. HTTP Status: $STATUS"
             echo "URL: $RELEASE_DOWNLOAD_URL/$APP_RELEASE/docker-compose.yml"
-            mv $APPLE_PI_DASH_INSTALL_DIR/archive/$TS.docker-compose.yaml $APPLE_PI_DASH_INSTALL_DIR/docker-compose.yaml
+            mv $PI_DASH_INSTALL_DIR/archive/$TS.docker-compose.yaml $PI_DASH_INSTALL_DIR/docker-compose.yaml
             exit 1
         fi
     fi
@@ -275,7 +275,7 @@ function download() {
     STATUS=$(echo "$RESPONSE" | tr -d '\n' | sed -e 's/.*HTTPSTATUS://')
 
     if [ "$STATUS" -eq 200 ]; then
-        echo "$BODY" > $APPLE_PI_DASH_INSTALL_DIR/variables-upgrade.env
+        echo "$BODY" > $PI_DASH_INSTALL_DIR/variables-upgrade.env
     else
         # Fallback to download from the raw github url
         RESPONSE=$(curl -sSL -H 'Cache-Control: no-cache, no-store' -w "HTTPSTATUS:%{http_code}" "$FALLBACK_DOWNLOAD_URL/variables.env?$(date +%s)")
@@ -283,27 +283,27 @@ function download() {
         STATUS=$(echo "$RESPONSE" | tr -d '\n' | sed -e 's/.*HTTPSTATUS://')
 
         if [ "$STATUS" -eq 200 ]; then
-            echo "$BODY" > $APPLE_PI_DASH_INSTALL_DIR/variables-upgrade.env
+            echo "$BODY" > $PI_DASH_INSTALL_DIR/variables-upgrade.env
         else
             echo "Failed to download variables.env. HTTP Status: $STATUS"
             echo "URL: $RELEASE_DOWNLOAD_URL/$APP_RELEASE/variables.env"
-            mv $APPLE_PI_DASH_INSTALL_DIR/archive/$TS.docker-compose.yaml $APPLE_PI_DASH_INSTALL_DIR/docker-compose.yaml
+            mv $PI_DASH_INSTALL_DIR/archive/$TS.docker-compose.yaml $PI_DASH_INSTALL_DIR/docker-compose.yaml
             exit 1
         fi
     fi
 
     if [ -f "$DOCKER_ENV_PATH" ];
     then
-        cp "$DOCKER_ENV_PATH" "$APPLE_PI_DASH_INSTALL_DIR/archive/$TS.env"
-        cp "$DOCKER_ENV_PATH" "$APPLE_PI_DASH_INSTALL_DIR/apple_pi_dash.env.bak"
+        cp "$DOCKER_ENV_PATH" "$PI_DASH_INSTALL_DIR/archive/$TS.env"
+        cp "$DOCKER_ENV_PATH" "$PI_DASH_INSTALL_DIR/pi_dash.env.bak"
     fi
 
-    mv $APPLE_PI_DASH_INSTALL_DIR/variables-upgrade.env $DOCKER_ENV_PATH
+    mv $PI_DASH_INSTALL_DIR/variables-upgrade.env $DOCKER_ENV_PATH
 
     syncEnvFile
 
     if [ "$LOCAL_BUILD" == "true" ]; then
-        export DOCKERHUB_USER="myapplepidash"
+        export DOCKERHUB_USER="mypidash"
         export APP_RELEASE="local"
         export PULL_POLICY="never"
         CUSTOM_BUILD="true"
@@ -329,9 +329,9 @@ function download() {
     fi
     
     echo ""
-    echo "Most recent version of Apple Pi Dash is now available for you to use"
+    echo "Most recent version of Pi Dash is now available for you to use"
     echo ""
-    echo "In case of 'Upgrade', please check the 'apple_pi_dash.env 'file for any new variables and update them accordingly"
+    echo "In case of 'Upgrade', please check the 'pi_dash.env 'file for any new variables and update them accordingly"
     echo ""
 }
 function startServices() {
@@ -356,7 +356,7 @@ function startServices() {
     if [ -n "$migrator_container_id" ]; then
         local migrator_exit_code=$(docker inspect --format='{{.State.ExitCode}}' $migrator_container_id)
         if [ $migrator_exit_code -ne 0 ]; then
-            echo "Apple Pi Dash Server failed to start ❌"
+            echo "Pi Dash Server failed to start ❌"
             # stopServices
             echo
             echo "Please check the logs for the 'migrator' service and resolve the issue(s)."
@@ -410,7 +410,7 @@ function startServices() {
         echo "   ⚠️  API Service did not respond to health-check – please verify manually."
     fi
     source "${DOCKER_ENV_PATH}"
-    echo "   Apple Pi Dash Server started successfully ✅"
+    echo "   Pi Dash Server started successfully ✅"
     echo ""
     echo "   You can access the application at $WEB_URL"
     echo ""
@@ -449,7 +449,7 @@ function upgrade() {
 
     export APP_RELEASE=$latest_release
 
-    echo "Upgrading Apple Pi Dash to the latest release..."
+    echo "Upgrading Pi Dash to the latest release..."
     echo ""
 
     echo "***** STOPPING SERVICES ****"
@@ -512,10 +512,10 @@ function viewLogs(){
                 5) viewSpecificLogs "beat-worker";;
                 6) viewSpecificLogs "migrator";;
                 7) viewSpecificLogs "proxy";;
-                8) viewSpecificLogs "apple-pi-dash-redis";;
-                9) viewSpecificLogs "apple-pi-dash-db";;
-                10) viewSpecificLogs "apple-pi-dash-minio";;
-                11) viewSpecificLogs "apple-pi-dash-mq";;
+                8) viewSpecificLogs "pi-dash-redis";;
+                9) viewSpecificLogs "pi-dash-db";;
+                10) viewSpecificLogs "pi-dash-minio";;
+                11) viewSpecificLogs "pi-dash-mq";;
                 0) askForAction;;
                 *) echo "INVALID SERVICE NAME SUPPLIED";;
             esac
@@ -531,10 +531,10 @@ function viewLogs(){
             beat-worker) viewSpecificLogs "beat-worker";;
             migrator) viewSpecificLogs "migrator";;
             proxy) viewSpecificLogs "proxy";;
-            redis) viewSpecificLogs "apple-pi-dash-redis";;
-            postgres) viewSpecificLogs "apple-pi-dash-db";;
-            minio) viewSpecificLogs "apple-pi-dash-minio";;
-            rabbitmq) viewSpecificLogs "apple-pi-dash-mq";;
+            redis) viewSpecificLogs "pi-dash-redis";;
+            postgres) viewSpecificLogs "pi-dash-db";;
+            minio) viewSpecificLogs "pi-dash-minio";;
+            rabbitmq) viewSpecificLogs "pi-dash-mq";;
             *) echo "INVALID SERVICE NAME SUPPLIED";;
         esac
     else
@@ -587,7 +587,7 @@ function backup_container_dir() {
 
 function backupData() {
     local datetime=$(date +"%Y%m%d-%H%M")
-    local BACKUP_FOLDER=$APPLE_PI_DASH_INSTALL_DIR/backup/$datetime
+    local BACKUP_FOLDER=$PI_DASH_INSTALL_DIR/backup/$datetime
     mkdir -p "$BACKUP_FOLDER"
 
     # Check if docker-compose.yml exists
@@ -596,10 +596,10 @@ function backupData() {
         exit 1
     fi
 
-    backup_container_dir "$BACKUP_FOLDER" "apple-pi-dash-db" "/var/lib/postgresql/data" "pgdata" || exit 1
-    backup_container_dir "$BACKUP_FOLDER" "apple-pi-dash-minio" "/export" "uploads" || exit 1
-    backup_container_dir "$BACKUP_FOLDER" "apple-pi-dash-mq" "/var/lib/rabbitmq" "rabbitmq_data" || exit 1
-    backup_container_dir "$BACKUP_FOLDER" "apple-pi-dash-redis" "/data" "redisdata" || exit 1
+    backup_container_dir "$BACKUP_FOLDER" "pi-dash-db" "/var/lib/postgresql/data" "pgdata" || exit 1
+    backup_container_dir "$BACKUP_FOLDER" "pi-dash-minio" "/export" "uploads" || exit 1
+    backup_container_dir "$BACKUP_FOLDER" "pi-dash-mq" "/var/lib/rabbitmq" "rabbitmq_data" || exit 1
+    backup_container_dir "$BACKUP_FOLDER" "pi-dash-redis" "/data" "redisdata" || exit 1
 
     echo ""
     echo "Backup completed successfully. Backup files are stored in $BACKUP_FOLDER"
@@ -690,7 +690,7 @@ if [ -f "$DOCKER_ENV_PATH" ]; then
     CUSTOM_BUILD=$(getEnvValue "CUSTOM_BUILD" "$DOCKER_ENV_PATH")
 
     if [ -z "$DOCKERHUB_USER" ]; then
-        DOCKERHUB_USER=makeapplepidash
+        DOCKERHUB_USER=makepidash
         updateEnvFile "DOCKERHUB_USER" "$DOCKERHUB_USER" "$DOCKER_ENV_PATH"
     fi
 

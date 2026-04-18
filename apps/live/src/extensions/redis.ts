@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
@@ -7,7 +7,7 @@
 import { Redis as HocuspocusRedis } from "@hocuspocus/extension-redis";
 import { OutgoingMessage } from "@hocuspocus/server";
 import type { onConfigurePayload } from "@hocuspocus/server";
-import { logger } from "@apple-pi-dash/logger";
+import { logger } from "@pi-dash/logger";
 import { AppError } from "@/lib/errors";
 import { redisManager } from "@/redis";
 import { AdminCommand } from "@/types/admin-commands";

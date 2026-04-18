@@ -1,12 +1,12 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
 
 import { observer } from "mobx-react";
-import { CloseIcon, CycleGroupIcon } from "@apple-pi-dash/propel/icons";
-import type { TCycleGroups } from "@apple-pi-dash/types";
+import { CloseIcon, CycleGroupIcon } from "@pi-dash/propel/icons";
+import type { TCycleGroups } from "@pi-dash/types";
 // hooks
 import { useCycle } from "@/hooks/store/use-cycle";
 // ui

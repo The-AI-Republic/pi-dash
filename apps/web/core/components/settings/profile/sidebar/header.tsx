@@ -1,15 +1,15 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
 
 import { observer } from "mobx-react";
-// apple pi dash imports
-import { Avatar } from "@apple-pi-dash/ui";
+// pi dash imports
+import { Avatar } from "@pi-dash/ui";
 // hooks
 import { useUser } from "@/hooks/store/user";
-import { getFileURL } from "@apple-pi-dash/utils";
+import { getFileURL } from "@pi-dash/utils";
 
 export const ProfileSettingsSidebarHeader = observer(function ProfileSettingsSidebarHeader() {
   // store hooks

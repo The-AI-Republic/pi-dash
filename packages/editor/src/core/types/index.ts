@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
@@ -16,4 +16,4 @@ export * from "./mention";
 export * from "./slash-commands-suggestion";
 export * from "./document-collaborative-events";
 
-export * from "@/apple-pi-dash-editor/types";
+export * from "@/pi-dash-editor/types";

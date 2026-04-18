@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
@@ -7,10 +7,10 @@
 import { useCallback, useEffect } from "react";
 import { observer } from "mobx-react";
 import useSWR from "swr";
-// apple pi dash imports
-import { ENotificationLoader, ENotificationQueryParamType } from "@apple-pi-dash/constants";
-import { EmptyStateCompact } from "@apple-pi-dash/propel/empty-state";
-import { cn } from "@apple-pi-dash/utils";
+// pi dash imports
+import { ENotificationLoader, ENotificationQueryParamType } from "@pi-dash/constants";
+import { EmptyStateCompact } from "@pi-dash/propel/empty-state";
+import { cn } from "@pi-dash/utils";
 // components
 import { LogoSpinner } from "@/components/common/logo-spinner";
 // hooks
@@ -18,8 +18,8 @@ import { useWorkspaceNotifications } from "@/hooks/store/notifications";
 import { useWorkspace } from "@/hooks/store/use-workspace";
 import { useUserPermissions } from "@/hooks/store/user";
 import { useWorkspaceIssueProperties } from "@/hooks/use-workspace-issue-properties";
-// apple pi dash web imports
-import { useNotificationPreview } from "@/apple-pi-dash-web/hooks/use-notification-preview";
+// pi dash web imports
+import { useNotificationPreview } from "@/pi-dash-web/hooks/use-notification-preview";
 // local imports
 import { InboxContentRoot } from "../inbox/content";
 

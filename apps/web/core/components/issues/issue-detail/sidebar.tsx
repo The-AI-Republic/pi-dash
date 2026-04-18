@@ -1,12 +1,12 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
 
 import { observer } from "mobx-react";
 // i18n
-import { useTranslation } from "@apple-pi-dash/i18n";
+import { useTranslation } from "@pi-dash/i18n";
 // ui
 import {
   CycleIcon,
@@ -20,8 +20,8 @@ import {
   UserCirclePropertyIcon,
   EstimatePropertyIcon,
   ParentPropertyIcon,
-} from "@apple-pi-dash/propel/icons";
-import { cn, getDate, renderFormattedPayloadDate, shouldHighlightIssueDueDate } from "@apple-pi-dash/utils";
+} from "@pi-dash/propel/icons";
+import { cn, getDate, renderFormattedPayloadDate, shouldHighlightIssueDueDate } from "@pi-dash/utils";
 // components
 import { DateDropdown } from "@/components/dropdowns/date";
 import { EstimateDropdown } from "@/components/dropdowns/estimate";
@@ -35,13 +35,13 @@ import { useIssueDetail } from "@/hooks/store/use-issue-detail";
 import { useMember } from "@/hooks/store/use-member";
 import { useProject } from "@/hooks/store/use-project";
 import { useProjectState } from "@/hooks/store/use-project-state";
-// apple pi dash web components
+// pi dash web components
 // components
-import { WorkItemAdditionalSidebarProperties } from "@/apple-pi-dash-web/components/issues/issue-details/additional-properties";
-import { IssueParentSelectRoot } from "@/apple-pi-dash-web/components/issues/issue-details/parent-select-root";
-import { DateAlert } from "@/apple-pi-dash-web/components/issues/issue-details/sidebar/date-alert";
-import { TransferHopInfo } from "@/apple-pi-dash-web/components/issues/issue-details/sidebar/transfer-hop-info";
-import { IssueWorklogProperty } from "@/apple-pi-dash-web/components/issues/worklog/property";
+import { WorkItemAdditionalSidebarProperties } from "@/pi-dash-web/components/issues/issue-details/additional-properties";
+import { IssueParentSelectRoot } from "@/pi-dash-web/components/issues/issue-details/parent-select-root";
+import { DateAlert } from "@/pi-dash-web/components/issues/issue-details/sidebar/date-alert";
+import { TransferHopInfo } from "@/pi-dash-web/components/issues/issue-details/sidebar/transfer-hop-info";
+import { IssueWorklogProperty } from "@/pi-dash-web/components/issues/worklog/property";
 import { SidebarPropertyListItem } from "@/components/common/layout/sidebar/property-list-item";
 import { IssueCycleSelect } from "./cycle-select";
 import { IssueLabel } from "./label";

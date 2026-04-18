@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
@@ -8,17 +8,17 @@ import React, { useCallback, useEffect, useRef, useState } from "react";
 import { observer } from "mobx-react";
 import { useParams } from "next/navigation";
 import { ListFilter } from "lucide-react";
-// apple pi dash helpers
-import { MODULE_VIEW_LAYOUTS } from "@apple-pi-dash/constants";
-import { useOutsideClickDetector } from "@apple-pi-dash/hooks";
+// pi dash helpers
+import { MODULE_VIEW_LAYOUTS } from "@pi-dash/constants";
+import { useOutsideClickDetector } from "@pi-dash/hooks";
 // types
-import { useTranslation } from "@apple-pi-dash/i18n";
-import { SearchIcon, CloseIcon } from "@apple-pi-dash/propel/icons";
-import { Tooltip } from "@apple-pi-dash/propel/tooltip";
-import type { TModuleFilters } from "@apple-pi-dash/types";
+import { useTranslation } from "@pi-dash/i18n";
+import { SearchIcon, CloseIcon } from "@pi-dash/propel/icons";
+import { Tooltip } from "@pi-dash/propel/tooltip";
+import type { TModuleFilters } from "@pi-dash/types";
 // ui
-import { cn, calculateTotalFilters } from "@apple-pi-dash/utils";
-// apple pi dash utils
+import { cn, calculateTotalFilters } from "@pi-dash/utils";
+// pi dash utils
 // components
 import { FiltersDropdown } from "@/components/issues/issue-layouts/filters";
 import { ModuleFiltersSelection, ModuleOrderByDropdown } from "@/components/modules/dropdowns";
@@ -29,7 +29,7 @@ import { useMember } from "@/hooks/store/use-member";
 import { useModuleFilter } from "@/hooks/store/use-module-filter";
 import { usePlatformOS } from "@/hooks/use-platform-os";
 import { ModuleLayoutIcon } from "./module-layout-icon";
-import { IconButton } from "@apple-pi-dash/propel/icon-button";
+import { IconButton } from "@pi-dash/propel/icon-button";
 // i18n
 
 export const ModuleViewHeader = observer(function ModuleViewHeader() {

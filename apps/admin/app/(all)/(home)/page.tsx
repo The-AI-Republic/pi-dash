@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
@@ -46,5 +46,5 @@ export default observer(HomePage);
 
 export const meta: Route.MetaFunction = () => [
   { title: "Admin – Instance Setup & Sign-In" },
-  { name: "description", content: "Configure your Apple Pi Dash instance or sign in to the admin portal." },
+  { name: "description", content: "Configure your Pi Dash instance or sign in to the admin portal." },
 ];

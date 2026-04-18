@@ -1,11 +1,11 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
 
 import { uniq, orderBy, isEmpty, indexOf, groupBy, cloneDeep, set } from "lodash-es";
-import { ALL_ISSUES, EIssueFilterType, FILTER_TO_ISSUE_MAP, ISSUE_PRIORITIES } from "@apple-pi-dash/constants";
+import { ALL_ISSUES, EIssueFilterType, FILTER_TO_ISSUE_MAP, ISSUE_PRIORITIES } from "@pi-dash/constants";
 import type {
   IIssueDisplayFilterOptions,
   IIssueDisplayProperties,
@@ -14,8 +14,8 @@ import type {
   TIssue,
   TIssueGroupByOptions,
   TIssueOrderByOptions,
-} from "@apple-pi-dash/types";
-import { checkDateCriteria, convertToISODateString, parseDateFilter } from "@apple-pi-dash/utils";
+} from "@pi-dash/types";
+import { checkDateCriteria, convertToISODateString, parseDateFilter } from "@pi-dash/utils";
 import { store } from "@/lib/store-context";
 import { EIssueGroupedAction, ISSUE_GROUP_BY_KEY } from "./base-issues.store";
 

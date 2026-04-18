@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
@@ -11,13 +11,13 @@ import { useParams } from "next/navigation";
 import { createPortal } from "react-dom";
 import { usePopper } from "react-popper";
 import { Combobox } from "@headlessui/react";
-// apple pi dash imports
-import { useTranslation } from "@apple-pi-dash/i18n";
-import { CheckIcon, SearchIcon, SuspendedUserIcon } from "@apple-pi-dash/propel/icons";
-import { EPillSize, EPillVariant, Pill } from "@apple-pi-dash/propel/pill";
-import type { IUserLite } from "@apple-pi-dash/types";
-import { Avatar } from "@apple-pi-dash/ui";
-import { cn, getFileURL, sortByCurrentUserThenSelected } from "@apple-pi-dash/utils";
+// pi dash imports
+import { useTranslation } from "@pi-dash/i18n";
+import { CheckIcon, SearchIcon, SuspendedUserIcon } from "@pi-dash/propel/icons";
+import { EPillSize, EPillVariant, Pill } from "@pi-dash/propel/pill";
+import type { IUserLite } from "@pi-dash/types";
+import { Avatar } from "@pi-dash/ui";
+import { cn, getFileURL, sortByCurrentUserThenSelected } from "@pi-dash/utils";
 // hooks
 import { useMember } from "@/hooks/store/use-member";
 import { useUser } from "@/hooks/store/user";
@@ -53,7 +53,7 @@ export const MemberOptions = observer(function MemberOptions(props: Props) {
   // states
   const [query, setQuery] = useState("");
   const [popperElement, setPopperElement] = useState<HTMLDivElement | null>(null);
-  // apple pi dash hooks
+  // pi dash hooks
   const { t } = useTranslation();
   // store hooks
   const { data: currentUser } = useUser();

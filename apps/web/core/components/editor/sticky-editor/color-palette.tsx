@@ -1,10 +1,10 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
 
-import type { TSticky } from "@apple-pi-dash/types";
+import type { TSticky } from "@pi-dash/types";
 
 export const STICKY_COLORS_LIST: {
   key: string;

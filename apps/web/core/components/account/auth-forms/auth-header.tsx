@@ -1,13 +1,13 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
 
 import { observer } from "mobx-react";
 import useSWR from "swr";
-import { useTranslation } from "@apple-pi-dash/i18n";
-import type { IWorkspaceMemberInvitation } from "@apple-pi-dash/types";
+import { useTranslation } from "@pi-dash/i18n";
+import type { IWorkspaceMemberInvitation } from "@pi-dash/types";
 // components
 import { LogoSpinner } from "@/components/common/logo-spinner";
 import { WorkspaceLogo } from "@/components/workspace/logo";
@@ -28,29 +28,29 @@ const Titles = {
   [EAuthModes.SIGN_IN]: {
     [EAuthSteps.EMAIL]: {
       header: "Work in all dimensions.",
-      subHeader: "Welcome back to Apple Pi Dash.",
+      subHeader: "Welcome back to Pi Dash.",
     },
     [EAuthSteps.PASSWORD]: {
       header: "Work in all dimensions.",
-      subHeader: "Welcome back to Apple Pi Dash.",
+      subHeader: "Welcome back to Pi Dash.",
     },
     [EAuthSteps.UNIQUE_CODE]: {
       header: "Work in all dimensions.",
-      subHeader: "Welcome back to Apple Pi Dash.",
+      subHeader: "Welcome back to Pi Dash.",
     },
   },
   [EAuthModes.SIGN_UP]: {
     [EAuthSteps.EMAIL]: {
       header: "Work in all dimensions.",
-      subHeader: "Create your Apple Pi Dash account.",
+      subHeader: "Create your Pi Dash account.",
     },
     [EAuthSteps.PASSWORD]: {
       header: "Work in all dimensions.",
-      subHeader: "Create your Apple Pi Dash account.",
+      subHeader: "Create your Pi Dash account.",
     },
     [EAuthSteps.UNIQUE_CODE]: {
       header: "Work in all dimensions.",
-      subHeader: "Create your Apple Pi Dash account.",
+      subHeader: "Create your Pi Dash account.",
     },
   },
 };
@@ -59,7 +59,7 @@ const workSpaceService = new WorkspaceService();
 
 export const AuthHeader = observer(function AuthHeader(props: TAuthHeader) {
   const { workspaceSlug, invitationId, invitationEmail, authMode, currentAuthStep } = props;
-  // apple pi dash imports
+  // pi dash imports
   const { t } = useTranslation();
 
   const { data: invitation, isLoading } = useSWR(

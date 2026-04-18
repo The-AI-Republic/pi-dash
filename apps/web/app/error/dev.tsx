@@ -1,15 +1,15 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
 
-// apple pi dash imports
+// pi dash imports
 import { isRouteErrorResponse } from "react-router";
-import { Banner } from "@apple-pi-dash/propel/banner";
-import { Button } from "@apple-pi-dash/propel/button";
-import { Card, ECardVariant } from "@apple-pi-dash/propel/card";
-import { InfoFillIcon } from "@apple-pi-dash/propel/icons";
+import { Banner } from "@pi-dash/propel/banner";
+import { Button } from "@pi-dash/propel/button";
+import { Card, ECardVariant } from "@pi-dash/propel/card";
+import { InfoFillIcon } from "@pi-dash/propel/icons";
 
 interface ErrorActionsProps {
   onGoHome: () => void;

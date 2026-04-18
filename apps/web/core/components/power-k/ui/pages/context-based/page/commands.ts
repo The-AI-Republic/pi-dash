@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
@@ -7,16 +7,16 @@
 import { useCallback } from "react";
 import { useParams } from "next/navigation";
 import { ArchiveIcon, ArchiveRestoreIcon, LockKeyhole, LockKeyholeOpen, Star, StarOff } from "lucide-react";
-import { useTranslation } from "@apple-pi-dash/i18n";
-// apple pi dash imports
-import { LinkIcon, GlobeIcon, LockIcon } from "@apple-pi-dash/propel/icons";
-import { setToast, TOAST_TYPE } from "@apple-pi-dash/propel/toast";
-import { EPageAccess } from "@apple-pi-dash/types";
-import { copyTextToClipboard } from "@apple-pi-dash/utils";
+import { useTranslation } from "@pi-dash/i18n";
+// pi dash imports
+import { LinkIcon, GlobeIcon, LockIcon } from "@pi-dash/propel/icons";
+import { setToast, TOAST_TYPE } from "@pi-dash/propel/toast";
+import { EPageAccess } from "@pi-dash/types";
+import { copyTextToClipboard } from "@pi-dash/utils";
 // components
 import type { TPowerKCommandConfig } from "@/components/power-k/core/types";
-// apple pi dash web imports
-import { EPageStoreType, usePageStore } from "@/apple-pi-dash-web/hooks/store";
+// pi dash web imports
+import { EPageStoreType, usePageStore } from "@/pi-dash-web/hooks/store";
 
 export const usePowerKPageContextBasedActions = (): TPowerKCommandConfig[] => {
   // navigation

@@ -1,13 +1,13 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
 
 import { ArchiveIcon, Earth } from "lucide-react";
-import { EPageAccess } from "@apple-pi-dash/constants";
-import { LockIcon } from "@apple-pi-dash/propel/icons";
-import type { TPage } from "@apple-pi-dash/types";
+import { EPageAccess } from "@pi-dash/constants";
+import { LockIcon } from "@pi-dash/propel/icons";
+import type { TPage } from "@pi-dash/types";
 
 export function PageAccessIcon(page: TPage) {
   return (

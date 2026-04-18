@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
@@ -7,11 +7,11 @@
 import { useMemo, useState } from "react";
 import { useForm } from "react-hook-form";
 // types
-import { Button } from "@apple-pi-dash/propel/button";
-import { TOAST_TYPE, setToast } from "@apple-pi-dash/propel/toast";
-import type { IFormattedInstanceConfiguration, TInstanceEmailConfigurationKeys } from "@apple-pi-dash/types";
+import { Button } from "@pi-dash/propel/button";
+import { TOAST_TYPE, setToast } from "@pi-dash/propel/toast";
+import type { IFormattedInstanceConfiguration, TInstanceEmailConfigurationKeys } from "@pi-dash/types";
 // ui
-import { CustomSelect } from "@apple-pi-dash/ui";
+import { CustomSelect } from "@pi-dash/ui";
 // components
 import type { TControllerInputFormField } from "@/components/common/controller-input";
 import { ControllerInput } from "@/components/common/controller-input";
@@ -82,7 +82,7 @@ export function InstanceEmailForm(props: IInstanceEmailForm) {
       label: "Sender's email address",
       description:
         "This is the email address your users will see when getting emails from this instance. You will need to verify this address.",
-      placeholder: "no-reply@projectapplepidash.so",
+      placeholder: "no-reply@projectpidash.so",
       error: Boolean(errors.EMAIL_FROM),
       required: true,
     },
@@ -93,7 +93,7 @@ export function InstanceEmailForm(props: IInstanceEmailForm) {
       key: "EMAIL_HOST_USER",
       type: "text",
       label: "Username",
-      placeholder: "getitdone@projectapplepidash.so",
+      placeholder: "getitdone@projectpidash.so",
       error: Boolean(errors.EMAIL_HOST_USER),
       required: false,
     },

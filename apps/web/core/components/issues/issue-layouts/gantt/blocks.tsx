@@ -1,16 +1,16 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
 
 import { observer } from "mobx-react";
 import { useParams } from "next/navigation";
-// apple pi dash imports
-import { Popover } from "@apple-pi-dash/propel/popover";
-import { Tooltip } from "@apple-pi-dash/propel/tooltip";
-import { ControlLink } from "@apple-pi-dash/ui";
-import { findTotalDaysInRange, generateWorkItemLink } from "@apple-pi-dash/utils";
+// pi dash imports
+import { Popover } from "@pi-dash/propel/popover";
+import { Tooltip } from "@pi-dash/propel/tooltip";
+import { ControlLink } from "@pi-dash/ui";
+import { findTotalDaysInRange, generateWorkItemLink } from "@pi-dash/utils";
 // components
 import { SIDEBAR_WIDTH } from "@/components/gantt-chart/constants";
 // hooks
@@ -21,9 +21,9 @@ import { useProjectState } from "@/hooks/store/use-project-state";
 import { useIssueStoreType } from "@/hooks/use-issue-layout-store";
 import useIssuePeekOverviewRedirection from "@/hooks/use-issue-peek-overview-redirection";
 import { usePlatformOS } from "@/hooks/use-platform-os";
-// apple pi dash web imports
-import { IssueIdentifier } from "@/apple-pi-dash-web/components/issues/issue-details/issue-identifier";
-import { IssueStats } from "@/apple-pi-dash-web/components/issues/issue-layouts/issue-stats";
+// pi dash web imports
+import { IssueIdentifier } from "@/pi-dash-web/components/issues/issue-details/issue-identifier";
+import { IssueStats } from "@/pi-dash-web/components/issues/issue-layouts/issue-stats";
 // local imports
 import { WorkItemPreviewCard } from "../../preview-card";
 import { getBlockViewDetails } from "../utils";

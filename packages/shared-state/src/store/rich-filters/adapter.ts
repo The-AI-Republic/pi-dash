@@ -1,11 +1,11 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
 
-// apple pi dash imports
-import type { IFilterAdapter, TExternalFilter, TFilterExpression, TFilterProperty } from "@apple-pi-dash/types";
+// pi dash imports
+import type { IFilterAdapter, TExternalFilter, TFilterExpression, TFilterProperty } from "@pi-dash/types";
 
 /**
  * Abstract base class for converting between external filter formats and internal filter expressions.

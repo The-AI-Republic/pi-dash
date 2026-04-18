@@ -1,17 +1,17 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
 
 import { useContext } from "react";
 // types
-import type { TTimelineType } from "@apple-pi-dash/types";
+import type { TTimelineType } from "@pi-dash/types";
 // lib
 import { StoreContext } from "@/lib/store-context";
-// Apple Pi Dash-web
-import { getTimelineStore } from "@/apple-pi-dash-web/hooks/use-timeline-chart";
-import type { IBaseTimelineStore } from "@/apple-pi-dash-web/store/timeline/base-timeline.store";
+// Pi Dash-web
+import { getTimelineStore } from "@/pi-dash-web/hooks/use-timeline-chart";
+import type { IBaseTimelineStore } from "@/pi-dash-web/store/timeline/base-timeline.store";
 import { useTimeLineType } from "../components/gantt-chart/contexts";
 
 export const useTimeLineChart = (timelineType: TTimelineType): IBaseTimelineStore => {

@@ -1,24 +1,24 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
 
 import { useState } from "react";
 import { observer } from "mobx-react";
-// apple pi dash imports
-import { useTranslation } from "@apple-pi-dash/i18n";
-import type { TIssue, TIssueServiceType } from "@apple-pi-dash/types";
-import { EIssueServiceType } from "@apple-pi-dash/types";
-import { Collapsible } from "@apple-pi-dash/ui";
+// pi dash imports
+import { useTranslation } from "@pi-dash/i18n";
+import type { TIssue, TIssueServiceType } from "@pi-dash/types";
+import { EIssueServiceType } from "@pi-dash/types";
+import { Collapsible } from "@pi-dash/ui";
 // components
 import { CreateUpdateIssueModal } from "@/components/issues/issue-modal/modal";
 // hooks
 import { useIssueDetail } from "@/hooks/store/use-issue-detail";
-// Apple Pi Dash-web
-import { CreateUpdateEpicModal } from "@/apple-pi-dash-web/components/epics/epic-modal";
-import { useTimeLineRelationOptions } from "@/apple-pi-dash-web/components/relations";
-import type { TIssueRelationTypes } from "@/apple-pi-dash-web/types";
+// Pi Dash-web
+import { CreateUpdateEpicModal } from "@/pi-dash-web/components/epics/epic-modal";
+import { useTimeLineRelationOptions } from "@/pi-dash-web/components/relations";
+import type { TIssueRelationTypes } from "@/pi-dash-web/types";
 // helper
 import { DeleteIssueModal } from "../../delete-issue-modal";
 import { RelationIssueList } from "../../relations/issue-list";
@@ -43,7 +43,7 @@ export type TRelationObject = {
 
 export const RelationsCollapsibleContent = observer(function RelationsCollapsibleContent(props: Props) {
   const { workspaceSlug, issueId, disabled = false, issueServiceType = EIssueServiceType.ISSUES } = props;
-  // apple pi dash hooks
+  // pi dash hooks
   const { t } = useTranslation();
   // state
   const [issueCrudState, setIssueCrudState] = useState<{

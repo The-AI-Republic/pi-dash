@@ -4,7 +4,7 @@ set -e
 
 DIST_DIR=${DIST_DIR:-./dist}
 CPU_ARCH=$(uname -m)
-IMAGE_NAME=${IMAGE_NAME:-makeapplepidash/apple-pi-dash-aio-community}
+IMAGE_NAME=${IMAGE_NAME:-makepidash/pi-dash-aio-community}
 
 
 # loop though all flags and set the variables
@@ -94,19 +94,19 @@ update_env_file(){
 }
 
 build_dist_files(){
-    cp ./variables.env $DIST_DIR/apple_pi_dash.env
+    cp ./variables.env $DIST_DIR/pi_dash.env
     cp ../../../apps/proxy/Caddyfile.aio.ce $DIST_DIR/Caddyfile
 
-    echo "" >> $DIST_DIR/apple_pi_dash.env
-    echo "" >> $DIST_DIR/apple_pi_dash.env
+    echo "" >> $DIST_DIR/pi_dash.env
+    echo "" >> $DIST_DIR/pi_dash.env
 
-    # update the apple_pi_dash.env file with the APP_RELEASE_VERSION
-    update_env_file $DIST_DIR/apple_pi_dash.env "APP_RELEASE_VERSION" "$APP_RELEASE_VERSION"
-    update_env_file $DIST_DIR/apple_pi_dash.env "APP_RELEASE" "$APP_RELEASE_VERSION"
-    update_env_file $DIST_DIR/apple_pi_dash.env "APP_VERSION" "$APP_RELEASE_VERSION"
+    # update the pi_dash.env file with the APP_RELEASE_VERSION
+    update_env_file $DIST_DIR/pi_dash.env "APP_RELEASE_VERSION" "$APP_RELEASE_VERSION"
+    update_env_file $DIST_DIR/pi_dash.env "APP_RELEASE" "$APP_RELEASE_VERSION"
+    update_env_file $DIST_DIR/pi_dash.env "APP_VERSION" "$APP_RELEASE_VERSION"
     
-    update_env_file $DIST_DIR/apple_pi_dash.env "API_BASE_URL" "http://localhost:3004"
-    update_env_file $DIST_DIR/apple-pi-dash.env "SITE_ADDRESS" ":80"
+    update_env_file $DIST_DIR/pi_dash.env "API_BASE_URL" "http://localhost:3004"
+    update_env_file $DIST_DIR/pi-dash.env "SITE_ADDRESS" ":80"
 
 
     # print docker build command
@@ -116,7 +116,7 @@ build_dist_files(){
     echo ""
     echo "docker build -t $IMAGE_NAME \\"
     echo "  -f $(pwd)/Dockerfile \\"
-    echo "  --build-arg APPLE_PI_DASH_VERSION=$APP_RELEASE_VERSION \\"
+    echo "  --build-arg PI_DASH_VERSION=$APP_RELEASE_VERSION \\"
     echo "  $(pwd)"
     echo ""
     echo "------------------------------------------------"

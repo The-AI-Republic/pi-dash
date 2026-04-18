@@ -1,16 +1,16 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
 
 import { action, makeObservable, observable } from "mobx";
 import { computedFn } from "mobx-utils";
-// apple pi dash imports
-import type { TExpressionOptions } from "@apple-pi-dash/constants";
-import type { EIssuesStoreType, TWorkItemFilterExpression, TWorkItemFilterProperty } from "@apple-pi-dash/types";
-import { LOGICAL_OPERATOR } from "@apple-pi-dash/types";
-import { getOperatorForPayload } from "@apple-pi-dash/utils";
+// pi dash imports
+import type { TExpressionOptions } from "@pi-dash/constants";
+import type { EIssuesStoreType, TWorkItemFilterExpression, TWorkItemFilterProperty } from "@pi-dash/types";
+import { LOGICAL_OPERATOR } from "@pi-dash/types";
+import { getOperatorForPayload } from "@pi-dash/utils";
 // local imports
 import type { TWorkItemFilterCondition } from "../../utils";
 import { buildWorkItemFilterExpressionFromConditions } from "../../utils";

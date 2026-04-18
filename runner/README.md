@@ -1,6 +1,6 @@
-# Apple Pi Dash Runner
+# Pi Dash Runner
 
-Local daemon + TUI that connects a developer machine to the Apple Pi Dash cloud and drives `codex app-server` for assigned tasks.
+Local daemon + TUI that connects a developer machine to the Pi Dash cloud and drives `codex app-server` for assigned tasks.
 
 See `.ai_design/implement_runner/` for the design documents:
 
@@ -39,21 +39,21 @@ cargo test                                   # unit + integration tests
 cargo check                                  # quick type-check
 cargo clippy -- -D warnings                  # lint
 
-./target/debug/apple-pi-dash-runner configure \
-  --url https://cloud.apple-pi-dash.so \
+./target/debug/pi-dash-runner configure \
+  --url https://cloud.pi-dash.so \
   --token <ONE_TIME_CODE> \
   --name my-laptop
 
-./target/debug/apple-pi-dash-runner service install
-./target/debug/apple-pi-dash-runner service start
-./target/debug/apple-pi-dash-runner tui
+./target/debug/pi-dash-runner service install
+./target/debug/pi-dash-runner service start
+./target/debug/pi-dash-runner tui
 ```
 
 ## Runtime paths (XDG)
 
-- Config: `~/.config/apple-pi-dash-runner/`
-- Data / logs: `~/.local/share/apple-pi-dash-runner/`
-- Runtime dir: `$XDG_RUNTIME_DIR/apple-pi-dash-runner/` (Unix socket, PID file)
+- Config: `~/.config/pi-dash-runner/`
+- Data / logs: `~/.local/share/pi-dash-runner/`
+- Runtime dir: `$XDG_RUNTIME_DIR/pi-dash-runner/` (Unix socket, PID file)
 
 All secrets on disk are written with `0600`. The Unix IPC socket is also `0600`.
 

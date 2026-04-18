@@ -1,11 +1,11 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
 
 // components
-import type { IBlockUpdateData, IGanttBlock } from "@apple-pi-dash/types";
+import type { IBlockUpdateData, IGanttBlock } from "@pi-dash/types";
 import RenderIfVisible from "@/components/core/render-if-visible-HOC";
 // hooks
 import { BlockRow } from "@/components/gantt-chart/blocks/block-row";

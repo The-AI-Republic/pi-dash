@@ -1,22 +1,22 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
 
 import { observer } from "mobx-react";
 import { ListFilter } from "lucide-react";
-// apple pi dash imports
-import type { ENotificationFilterType } from "@apple-pi-dash/constants";
-import { FILTER_TYPE_OPTIONS } from "@apple-pi-dash/constants";
-import { useTranslation } from "@apple-pi-dash/i18n";
-import { Tooltip } from "@apple-pi-dash/propel/tooltip";
-import { PopoverMenu } from "@apple-pi-dash/ui";
+// pi dash imports
+import type { ENotificationFilterType } from "@pi-dash/constants";
+import { FILTER_TYPE_OPTIONS } from "@pi-dash/constants";
+import { useTranslation } from "@pi-dash/i18n";
+import { Tooltip } from "@pi-dash/propel/tooltip";
+import { PopoverMenu } from "@pi-dash/ui";
 // hooks
 import { usePlatformOS } from "@/hooks/use-platform-os";
 // local imports
 import { NotificationFilterOptionItem } from "./menu-option-item";
-import { IconButton } from "@apple-pi-dash/propel/icon-button";
+import { IconButton } from "@pi-dash/propel/icon-button";
 
 export const NotificationFilter = observer(function NotificationFilter() {
   // hooks

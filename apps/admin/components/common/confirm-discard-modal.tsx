@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
@@ -9,7 +9,7 @@ import Link from "next/link";
 // headless ui
 import { Dialog, Transition } from "@headlessui/react";
 // ui
-import { Button, getButtonStyling } from "@apple-pi-dash/propel/button";
+import { Button, getButtonStyling } from "@pi-dash/propel/button";
 
 type Props = {
   isOpen: boolean;

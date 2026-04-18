@@ -1,17 +1,17 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
 
 import React from "react";
 import { Paperclip } from "lucide-react";
-import { useTranslation } from "@apple-pi-dash/i18n";
-import { LinkIcon, ViewsIcon, RelationPropertyIcon } from "@apple-pi-dash/propel/icons";
-// apple pi dash imports
-import type { TIssueServiceType, TWorkItemWidgets } from "@apple-pi-dash/types";
-// apple pi dash web imports
-import { WorkItemAdditionalWidgetActionButtons } from "@/apple-pi-dash-web/components/issues/issue-detail-widgets/action-buttons";
+import { useTranslation } from "@pi-dash/i18n";
+import { LinkIcon, ViewsIcon, RelationPropertyIcon } from "@pi-dash/propel/icons";
+// pi dash imports
+import type { TIssueServiceType, TWorkItemWidgets } from "@pi-dash/types";
+// pi dash web imports
+import { WorkItemAdditionalWidgetActionButtons } from "@/pi-dash-web/components/issues/issue-detail-widgets/action-buttons";
 // local imports
 import { IssueAttachmentActionButton } from "./attachments";
 import { IssueLinksActionButton } from "./links";

@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
@@ -7,12 +7,12 @@
 import { useState } from "react";
 import { observer } from "mobx-react";
 import { CircleDashed } from "lucide-react";
-import { ALL_ISSUES } from "@apple-pi-dash/constants";
-import { ChevronRightIcon } from "@apple-pi-dash/propel/icons";
-import type { IGroupByColumn, TIssue, TIssueServiceType, TSubIssueOperations } from "@apple-pi-dash/types";
-import { EIssuesStoreType } from "@apple-pi-dash/types";
-import { Collapsible } from "@apple-pi-dash/ui";
-import { cn } from "@apple-pi-dash/utils";
+import { ALL_ISSUES } from "@pi-dash/constants";
+import { ChevronRightIcon } from "@pi-dash/propel/icons";
+import type { IGroupByColumn, TIssue, TIssueServiceType, TSubIssueOperations } from "@pi-dash/types";
+import { EIssuesStoreType } from "@pi-dash/types";
+import { Collapsible } from "@pi-dash/ui";
+import { cn } from "@pi-dash/utils";
 import { SubIssuesListItem } from "./list-item";
 
 interface TSubIssuesListGroupProps {

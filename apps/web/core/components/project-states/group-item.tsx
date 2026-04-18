@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
@@ -7,12 +7,12 @@
 import { useState, useRef } from "react";
 import { observer } from "mobx-react";
 
-// apple pi dash imports
-import { EIconSize, STATE_TRACKER_ELEMENTS } from "@apple-pi-dash/constants";
-import { useTranslation } from "@apple-pi-dash/i18n";
-import { PlusIcon, StateGroupIcon, ChevronDownIcon } from "@apple-pi-dash/propel/icons";
-import type { IState, TStateGroups, TStateOperationsCallbacks } from "@apple-pi-dash/types";
-import { cn } from "@apple-pi-dash/utils";
+// pi dash imports
+import { EIconSize, STATE_TRACKER_ELEMENTS } from "@pi-dash/constants";
+import { useTranslation } from "@pi-dash/i18n";
+import { PlusIcon, StateGroupIcon, ChevronDownIcon } from "@pi-dash/propel/icons";
+import type { IState, TStateGroups, TStateOperationsCallbacks } from "@pi-dash/types";
+import { cn } from "@pi-dash/utils";
 // components
 import { StateList, StateCreate } from "@/components/project-states";
 
@@ -46,7 +46,7 @@ export const GroupItem = observer(function GroupItem(props: TGroupItem) {
   } = props;
   // refs
   const dropElementRef = useRef<HTMLDivElement | null>(null);
-  // apple pi dash hooks
+  // pi dash hooks
   const { t } = useTranslation();
   // state
   const [createState, setCreateState] = useState(false);

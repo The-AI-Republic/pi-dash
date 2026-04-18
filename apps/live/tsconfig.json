@@ -1,5 +1,5 @@
 {
-  "extends": "@apple-pi-dash/typescript-config/base.json",
+  "extends": "@pi-dash/typescript-config/base.json",
   "compilerOptions": {
     "exactOptionalPropertyTypes": false,
     "noUnusedParameters": false,
@@ -10,7 +10,7 @@
 
     "paths": {
       "@/*": ["./src/*"],
-      "@/apple-pi-dash-live/*": ["./src/ce/*"]
+      "@/pi-dash-live/*": ["./src/ce/*"]
     },
     "experimentalDecorators": true,
     "emitDecoratorMetadata": true

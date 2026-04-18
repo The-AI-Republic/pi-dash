@@ -1,11 +1,11 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
 
-// apple pi dash web imports
-import { ORDERED_PAGE_NAVIGATION_TABS_LIST } from "@/apple-pi-dash-web/components/pages/navigation-pane";
+// pi dash web imports
+import { ORDERED_PAGE_NAVIGATION_TABS_LIST } from "@/pi-dash-web/components/pages/navigation-pane";
 
 export * from "./root";
 export * from "./types";

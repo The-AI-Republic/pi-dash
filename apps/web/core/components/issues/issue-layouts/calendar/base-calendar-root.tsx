@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
@@ -8,11 +8,11 @@ import type { FC } from "react";
 import { useCallback, useEffect } from "react";
 import { observer } from "mobx-react";
 import { useParams } from "next/navigation";
-// apple pi dash imports
-import { EIssueGroupByToServerOptions, EUserPermissions, EUserPermissionsLevel } from "@apple-pi-dash/constants";
-import { TOAST_TYPE, setToast } from "@apple-pi-dash/propel/toast";
-import type { TGroupedIssues } from "@apple-pi-dash/types";
-import { EIssuesStoreType } from "@apple-pi-dash/types";
+// pi dash imports
+import { EIssueGroupByToServerOptions, EUserPermissions, EUserPermissionsLevel } from "@pi-dash/constants";
+import { TOAST_TYPE, setToast } from "@pi-dash/propel/toast";
+import type { TGroupedIssues } from "@pi-dash/types";
+import { EIssuesStoreType } from "@pi-dash/types";
 // hooks
 import { useCalendarView } from "@/hooks/store/use-calendar-view";
 import { useIssues } from "@/hooks/store/use-issues";

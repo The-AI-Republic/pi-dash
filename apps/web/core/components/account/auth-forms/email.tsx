@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
@@ -9,12 +9,12 @@ import { useMemo, useRef, useState } from "react";
 import { observer } from "mobx-react";
 // icons
 import { CircleAlert, XCircle } from "lucide-react";
-// apple pi dash imports
-import { useTranslation } from "@apple-pi-dash/i18n";
-import { Button } from "@apple-pi-dash/propel/button";
-import type { IEmailCheckData } from "@apple-pi-dash/types";
-import { Input, Spinner } from "@apple-pi-dash/ui";
-import { cn, checkEmailValidity } from "@apple-pi-dash/utils";
+// pi dash imports
+import { useTranslation } from "@pi-dash/i18n";
+import { Button } from "@pi-dash/propel/button";
+import type { IEmailCheckData } from "@pi-dash/types";
+import { Input, Spinner } from "@pi-dash/ui";
+import { cn, checkEmailValidity } from "@pi-dash/utils";
 // helpers
 type TAuthEmailForm = {
   defaultEmail: string;
@@ -26,7 +26,7 @@ export const AuthEmailForm = observer(function AuthEmailForm(props: TAuthEmailFo
   // states
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [email, setEmail] = useState(defaultEmail);
-  // apple pi dash hooks
+  // pi dash hooks
   const { t } = useTranslation();
   const emailError = useMemo(
     () => (email && !checkEmailValidity(email) ? { email: "auth.common.email.errors.invalid" } : undefined),

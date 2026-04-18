@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
@@ -8,12 +8,12 @@ import React from "react";
 import { observer } from "mobx-react";
 import Link from "next/link";
 
-import { EditIcon, CloseIcon } from "@apple-pi-dash/propel/icons";
-// Apple Pi Dash
-import { TOAST_TYPE, setToast } from "@apple-pi-dash/propel/toast";
-import { Tooltip } from "@apple-pi-dash/propel/tooltip";
-import type { ISearchIssueResponse } from "@apple-pi-dash/types";
-import { cn, generateWorkItemLink } from "@apple-pi-dash/utils";
+import { EditIcon, CloseIcon } from "@pi-dash/propel/icons";
+// Pi Dash
+import { TOAST_TYPE, setToast } from "@pi-dash/propel/toast";
+import { Tooltip } from "@pi-dash/propel/tooltip";
+import type { ISearchIssueResponse } from "@pi-dash/types";
+import { cn, generateWorkItemLink } from "@pi-dash/utils";
 // components
 import { ExistingIssuesListModal } from "@/components/core/modals/existing-issues-list-modal";
 // hooks
@@ -21,9 +21,9 @@ import { useIssueDetail } from "@/hooks/store/use-issue-detail";
 import { useIssues } from "@/hooks/store/use-issues";
 import { useProject } from "@/hooks/store/use-project";
 import { usePlatformOS } from "@/hooks/use-platform-os";
-// Apple Pi Dash web imports
-import { useTimeLineRelationOptions } from "@/apple-pi-dash-web/components/relations";
-import type { TIssueRelationTypes } from "@/apple-pi-dash-web/types";
+// Pi Dash web imports
+import { useTimeLineRelationOptions } from "@/pi-dash-web/components/relations";
+import type { TIssueRelationTypes } from "@/pi-dash-web/types";
 import type { TRelationObject } from "../issue-detail-widgets/relations";
 
 type TIssueRelationSelect = {

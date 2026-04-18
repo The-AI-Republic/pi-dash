@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
@@ -7,14 +7,14 @@
 import { useCallback } from "react";
 import { useParams } from "next/navigation";
 import { Star, StarOff, Users } from "lucide-react";
-// apple pi dash imports
-import { EUserPermissionsLevel } from "@apple-pi-dash/constants";
-import { useTranslation } from "@apple-pi-dash/i18n";
-import { LinkIcon, ModuleStatusIcon } from "@apple-pi-dash/propel/icons";
-import { setToast, TOAST_TYPE } from "@apple-pi-dash/propel/toast";
-import type { IModule, TModuleStatus } from "@apple-pi-dash/types";
-import { EUserPermissions } from "@apple-pi-dash/types";
-import { copyTextToClipboard } from "@apple-pi-dash/utils";
+// pi dash imports
+import { EUserPermissionsLevel } from "@pi-dash/constants";
+import { useTranslation } from "@pi-dash/i18n";
+import { LinkIcon, ModuleStatusIcon } from "@pi-dash/propel/icons";
+import { setToast, TOAST_TYPE } from "@pi-dash/propel/toast";
+import type { IModule, TModuleStatus } from "@pi-dash/types";
+import { EUserPermissions } from "@pi-dash/types";
+import { copyTextToClipboard } from "@pi-dash/utils";
 // components
 import type { TPowerKCommandConfig } from "@/components/power-k/core/types";
 // hooks

@@ -1,11 +1,11 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
 
-import type { IPaymentProduct, TBillingFrequency, TProductBillingFrequency } from "@apple-pi-dash/types";
-import { EProductSubscriptionEnum } from "@apple-pi-dash/types";
+import type { IPaymentProduct, TBillingFrequency, TProductBillingFrequency } from "@pi-dash/types";
+import { EProductSubscriptionEnum } from "@pi-dash/types";
 
 /**
  * Default billing frequency for each product subscription type
@@ -31,10 +31,10 @@ export const SUBSCRIPTION_WITH_BILLING_FREQUENCY = [
  * Mapping of product subscription types to their respective payment product details
  * Used to provide information about each product's pricing and features
  */
-export const APPLE_PI_DASH_COMMUNITY_PRODUCTS: Record<string, IPaymentProduct> = {
+export const PI_DASH_COMMUNITY_PRODUCTS: Record<string, IPaymentProduct> = {
   [EProductSubscriptionEnum.PRO]: {
     id: EProductSubscriptionEnum.PRO,
-    name: "Apple Pi Dash Pro",
+    name: "Pi Dash Pro",
     description:
       "More views, more cycles powers, more pages features, new reports, and better dashboards are waiting to be unlocked.",
     type: "PRO",
@@ -61,9 +61,9 @@ export const APPLE_PI_DASH_COMMUNITY_PRODUCTS: Record<string, IPaymentProduct> =
   },
   [EProductSubscriptionEnum.BUSINESS]: {
     id: EProductSubscriptionEnum.BUSINESS,
-    name: "Apple Pi Dash Business",
+    name: "Pi Dash Business",
     description:
-      "The earliest packaging of Business at $10 a seat a month billed annually, $12 a seat a month billed monthly for Apple Pi Dash Cloud",
+      "The earliest packaging of Business at $10 a seat a month billed annually, $12 a seat a month billed monthly for Pi Dash Cloud",
     type: "BUSINESS",
     prices: [
       {
@@ -88,7 +88,7 @@ export const APPLE_PI_DASH_COMMUNITY_PRODUCTS: Record<string, IPaymentProduct> =
   },
   [EProductSubscriptionEnum.ENTERPRISE]: {
     id: EProductSubscriptionEnum.ENTERPRISE,
-    name: "Apple Pi Dash Enterprise",
+    name: "Pi Dash Enterprise",
     description: "",
     type: "ENTERPRISE",
     prices: [
@@ -117,7 +117,7 @@ export const APPLE_PI_DASH_COMMUNITY_PRODUCTS: Record<string, IPaymentProduct> =
 /**
  * URL for the "Talk to Sales" page where users can contact sales team
  */
-export const TALK_TO_SALES_URL = "https://apple-pi-dash.so/talk-to-sales";
+export const TALK_TO_SALES_URL = "https://pi-dash.so/talk-to-sales";
 
 /**
  * Mapping of subscription types to their respective upgrade/redirection URLs based on billing frequency
@@ -133,12 +133,12 @@ export const SUBSCRIPTION_REDIRECTION_URLS: Record<EProductSubscriptionEnum, Rec
     year: TALK_TO_SALES_URL,
   },
   [EProductSubscriptionEnum.PRO]: {
-    month: "https://app.apple-pi-dash.so/upgrade/pro/self-hosted?plan=month",
-    year: "https://app.apple-pi-dash.so/upgrade/pro/self-hosted?plan=year",
+    month: "https://app.pi-dash.so/upgrade/pro/self-hosted?plan=month",
+    year: "https://app.pi-dash.so/upgrade/pro/self-hosted?plan=year",
   },
   [EProductSubscriptionEnum.BUSINESS]: {
-    month: "https://app.apple-pi-dash.so/upgrade/business/self-hosted?plan=month",
-    year: "https://app.apple-pi-dash.so/upgrade/business/self-hosted?plan=year",
+    month: "https://app.pi-dash.so/upgrade/business/self-hosted?plan=month",
+    year: "https://app.pi-dash.so/upgrade/business/self-hosted?plan=year",
   },
   [EProductSubscriptionEnum.ENTERPRISE]: {
     month: TALK_TO_SALES_URL,
@@ -153,7 +153,7 @@ export const SUBSCRIPTION_REDIRECTION_URLS: Record<EProductSubscriptionEnum, Rec
 export const SUBSCRIPTION_WEBPAGE_URLS: Record<EProductSubscriptionEnum, string> = {
   [EProductSubscriptionEnum.FREE]: TALK_TO_SALES_URL,
   [EProductSubscriptionEnum.ONE]: TALK_TO_SALES_URL,
-  [EProductSubscriptionEnum.PRO]: "https://apple-pi-dash.so/pro",
-  [EProductSubscriptionEnum.BUSINESS]: "https://apple-pi-dash.so/business",
-  [EProductSubscriptionEnum.ENTERPRISE]: "https://apple-pi-dash.so/business",
+  [EProductSubscriptionEnum.PRO]: "https://pi-dash.so/pro",
+  [EProductSubscriptionEnum.BUSINESS]: "https://pi-dash.so/business",
+  [EProductSubscriptionEnum.ENTERPRISE]: "https://pi-dash.so/business",
 };

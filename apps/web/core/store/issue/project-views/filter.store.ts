@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
@@ -8,8 +8,8 @@ import { isEmpty, set } from "lodash-es";
 import { action, computed, makeObservable, observable, runInAction } from "mobx";
 // base class
 import { computedFn } from "mobx-utils";
-import type { TSupportedFilterTypeForUpdate } from "@apple-pi-dash/constants";
-import { EIssueFilterType } from "@apple-pi-dash/constants";
+import type { TSupportedFilterTypeForUpdate } from "@pi-dash/constants";
+import { EIssueFilterType } from "@pi-dash/constants";
 import type {
   IIssueDisplayFilterOptions,
   IIssueDisplayProperties,
@@ -20,9 +20,9 @@ import type {
   IProjectView,
   TWorkItemFilterExpression,
   TSupportedFilterForUpdate,
-} from "@apple-pi-dash/types";
-import { EIssuesStoreType } from "@apple-pi-dash/types";
-import { handleIssueQueryParamsByLayout } from "@apple-pi-dash/utils";
+} from "@pi-dash/types";
+import { EIssuesStoreType } from "@pi-dash/types";
+import { handleIssueQueryParamsByLayout } from "@pi-dash/utils";
 // services
 import { ViewService } from "@/services/view.service";
 import type { IBaseIssueFilterStore } from "../helpers/issue-filter-helper.store";

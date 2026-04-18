@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
@@ -8,14 +8,14 @@ import { useMemo } from "react";
 import { observer } from "mobx-react";
 import { useParams } from "next/navigation";
 import { Download } from "lucide-react";
-// apple pi dash imports
-import { CORE_EXTENSIONS } from "@apple-pi-dash/editor";
-import type { TEditorAsset } from "@apple-pi-dash/editor";
-import { useTranslation } from "@apple-pi-dash/i18n";
-import { getEditorAssetDownloadSrc, getEditorAssetSrc } from "@apple-pi-dash/utils";
-// apple pi dash web imports
-import { AdditionalPageNavigationPaneAssetItem } from "@/apple-pi-dash-web/components/pages/navigation-pane/tab-panels/assets";
-import { PageNavigationPaneAssetsTabEmptyState } from "@/apple-pi-dash-web/components/pages/navigation-pane/tab-panels/empty-states/assets";
+// pi dash imports
+import { CORE_EXTENSIONS } from "@pi-dash/editor";
+import type { TEditorAsset } from "@pi-dash/editor";
+import { useTranslation } from "@pi-dash/i18n";
+import { getEditorAssetDownloadSrc, getEditorAssetSrc } from "@pi-dash/utils";
+// pi dash web imports
+import { AdditionalPageNavigationPaneAssetItem } from "@/pi-dash-web/components/pages/navigation-pane/tab-panels/assets";
+import { PageNavigationPaneAssetsTabEmptyState } from "@/pi-dash-web/components/pages/navigation-pane/tab-panels/empty-states/assets";
 // store
 import type { TPageInstance } from "@/store/pages/base-page";
 

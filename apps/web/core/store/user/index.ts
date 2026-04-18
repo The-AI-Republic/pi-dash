@@ -1,18 +1,18 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
 
 import { cloneDeep, set } from "lodash-es";
 import { action, makeObservable, observable, runInAction, computed } from "mobx";
-// apple pi dash imports
-import { EUserPermissions, API_BASE_URL } from "@apple-pi-dash/constants";
-import type { IUser, TUserPermissions } from "@apple-pi-dash/types";
-// apple pi dash web imports
-import type { RootStore } from "@/apple-pi-dash-web/store/root.store";
-import type { IUserPermissionStore } from "@/apple-pi-dash-web/store/user/permission.store";
-import { UserPermissionStore } from "@/apple-pi-dash-web/store/user/permission.store";
+// pi dash imports
+import { EUserPermissions, API_BASE_URL } from "@pi-dash/constants";
+import type { IUser, TUserPermissions } from "@pi-dash/types";
+// pi dash web imports
+import type { RootStore } from "@/pi-dash-web/store/root.store";
+import type { IUserPermissionStore } from "@/pi-dash-web/store/user/permission.store";
+import { UserPermissionStore } from "@/pi-dash-web/store/user/permission.store";
 // services
 import { AuthService } from "@/services/auth.service";
 import { UserService } from "@/services/user.service";

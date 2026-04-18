@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
@@ -7,11 +7,11 @@
 import { observer } from "mobx-react";
 import { useParams } from "next/navigation";
 // constants
-import { SPREADSHEET_SELECT_GROUP } from "@apple-pi-dash/constants";
+import { SPREADSHEET_SELECT_GROUP } from "@pi-dash/constants";
 // ui
-import type { IIssueDisplayFilterOptions, IIssueDisplayProperties } from "@apple-pi-dash/types";
+import type { IIssueDisplayFilterOptions, IIssueDisplayProperties } from "@pi-dash/types";
 // components
-import { cn } from "@apple-pi-dash/utils";
+import { cn } from "@pi-dash/utils";
 import { MultipleSelectGroupAction } from "@/components/core/multiple-select";
 // hooks
 import type { TSelectionHelper } from "@/hooks/use-multiple-select";

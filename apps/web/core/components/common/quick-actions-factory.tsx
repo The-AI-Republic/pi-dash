@@ -1,13 +1,13 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
 
 import { Pencil, ExternalLink, Link, Trash2, ArchiveRestoreIcon } from "lucide-react";
-import { useTranslation } from "@apple-pi-dash/i18n";
-import { ArchiveIcon } from "@apple-pi-dash/propel/icons";
-import type { TContextMenuItem } from "@apple-pi-dash/ui";
+import { useTranslation } from "@pi-dash/i18n";
+import { ArchiveIcon } from "@pi-dash/propel/icons";
+import type { TContextMenuItem } from "@pi-dash/ui";
 
 /**
  * Unified factory for creating menu items across all entities (cycles, modules, views, epics)

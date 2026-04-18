@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
@@ -10,12 +10,12 @@ import { useSearchParams } from "next/navigation";
 // icons
 import { Eye, EyeOff } from "lucide-react";
 // ui
-import { API_BASE_URL, E_PASSWORD_STRENGTH } from "@apple-pi-dash/constants";
-import { useTranslation } from "@apple-pi-dash/i18n";
-import { Button } from "@apple-pi-dash/propel/button";
-import { Input, PasswordStrengthIndicator } from "@apple-pi-dash/ui";
+import { API_BASE_URL, E_PASSWORD_STRENGTH } from "@pi-dash/constants";
+import { useTranslation } from "@pi-dash/i18n";
+import { Button } from "@pi-dash/propel/button";
+import { Input, PasswordStrengthIndicator } from "@pi-dash/ui";
 // components
-import { getPasswordStrength } from "@apple-pi-dash/utils";
+import { getPasswordStrength } from "@pi-dash/utils";
 // helpers
 import type { EAuthenticationErrorCodes, TAuthErrorInfo } from "@/helpers/authentication.helper";
 import { EErrorAlertType, authErrorHandler } from "@/helpers/authentication.helper";
@@ -60,7 +60,7 @@ export const ResetPasswordForm = observer(function ResetPasswordForm() {
   const [isPasswordInputFocused, setIsPasswordInputFocused] = useState(false);
   const [isRetryPasswordInputFocused, setIsRetryPasswordInputFocused] = useState(false);
   const [errorInfo, setErrorInfo] = useState<TAuthErrorInfo | undefined>(undefined);
-  // apple pi dash hooks
+  // pi dash hooks
   const { t } = useTranslation();
 
   const handleShowPassword = (key: keyof typeof showPassword) =>

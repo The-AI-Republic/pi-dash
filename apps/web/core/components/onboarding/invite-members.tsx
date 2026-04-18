@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
@@ -19,17 +19,17 @@ import { Controller, useFieldArray, useForm } from "react-hook-form";
 import { usePopper } from "react-popper";
 import { XCircle } from "lucide-react";
 import { Listbox } from "@headlessui/react";
-// apple pi dash imports
-import type { EUserPermissions } from "@apple-pi-dash/constants";
-import { ROLE, ROLE_DETAILS } from "@apple-pi-dash/constants";
-import { useTranslation } from "@apple-pi-dash/i18n";
+// pi dash imports
+import type { EUserPermissions } from "@pi-dash/constants";
+import { ROLE, ROLE_DETAILS } from "@pi-dash/constants";
+import { useTranslation } from "@pi-dash/i18n";
 // types
-import { Button } from "@apple-pi-dash/propel/button";
-import { PlusIcon, CheckIcon, ChevronDownIcon } from "@apple-pi-dash/propel/icons";
-import { TOAST_TYPE, setToast } from "@apple-pi-dash/propel/toast";
-import type { IUser, IWorkspace } from "@apple-pi-dash/types";
+import { Button } from "@pi-dash/propel/button";
+import { PlusIcon, CheckIcon, ChevronDownIcon } from "@pi-dash/propel/icons";
+import { TOAST_TYPE, setToast } from "@pi-dash/propel/toast";
+import type { IUser, IWorkspace } from "@pi-dash/types";
 // ui
-import { Input, Spinner } from "@apple-pi-dash/ui";
+import { Input, Spinner } from "@pi-dash/ui";
 // services
 import { WorkspaceService } from "@/services/workspace.service";
 // components
@@ -340,7 +340,7 @@ export function InviteMembers(props: Props) {
           <div className="mx-auto w-4/5 space-y-1 py-4 text-center">
             <h3 className="text-24 font-bold text-primary">Invite your teammates</h3>
             <p className="font-medium text-placeholder">
-              Work in apple pi dash happens best with your team. Invite them now to use Apple Pi Dash to its potential.
+              Work in pi dash happens best with your team. Invite them now to use Pi Dash to its potential.
             </p>
           </div>
           <form

@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
@@ -7,11 +7,11 @@
 import { observer } from "mobx-react";
 import { Controller, useForm } from "react-hook-form";
 import { Telescope } from "lucide-react";
-// apple pi dash imports
-import { Button } from "@apple-pi-dash/propel/button";
-import { TOAST_TYPE, setToast } from "@apple-pi-dash/propel/toast";
-import type { IInstance, IInstanceAdmin } from "@apple-pi-dash/types";
-import { Input, ToggleSwitch } from "@apple-pi-dash/ui";
+// pi dash imports
+import { Button } from "@pi-dash/propel/button";
+import { TOAST_TYPE, setToast } from "@pi-dash/propel/toast";
+import type { IInstance, IInstanceAdmin } from "@pi-dash/types";
+import { Input, ToggleSwitch } from "@pi-dash/ui";
 // components
 import { ControllerInput } from "@/components/common/controller-input";
 // hooks
@@ -107,12 +107,12 @@ export const GeneralConfigurationForm = observer(function GeneralConfigurationFo
               </div>
             </div>
             <div className="grow">
-              <div className="text-13 leading-5 font-medium text-primary">Let Apple Pi Dash collect anonymous usage data</div>
+              <div className="text-13 leading-5 font-medium text-primary">Let Pi Dash collect anonymous usage data</div>
               <div className="text-11 leading-5 font-regular text-tertiary">
-                No PII is collected.This anonymized data is used to understand how you use Apple Pi Dash and build new features
-                in line with{" "}
+                No PII is collected.This anonymized data is used to understand how you use Pi Dash and build new
+                features in line with{" "}
                 <a
-                  href="https://developers.apple-pi-dash.so/self-hosting/telemetry"
+                  href="https://developers.pi-dash.so/self-hosting/telemetry"
                   target="_blank"
                   className="text-accent-primary hover:underline"
                   rel="noreferrer"

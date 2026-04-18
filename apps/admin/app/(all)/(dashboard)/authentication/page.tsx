@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
@@ -8,11 +8,11 @@ import { useCallback, useRef, useState } from "react";
 import { observer } from "mobx-react";
 import { useTheme } from "next-themes";
 import useSWR from "swr";
-// apple pi dash internal packages
-import { setPromiseToast, setToast, TOAST_TYPE } from "@apple-pi-dash/propel/toast";
-import type { TInstanceConfigurationKeys, TInstanceAuthenticationModes } from "@apple-pi-dash/types";
-import { Loader, ToggleSwitch } from "@apple-pi-dash/ui";
-import { cn, resolveGeneralTheme } from "@apple-pi-dash/utils";
+// pi dash internal packages
+import { setPromiseToast, setToast, TOAST_TYPE } from "@pi-dash/propel/toast";
+import type { TInstanceConfigurationKeys, TInstanceAuthenticationModes } from "@pi-dash/types";
+import { Loader, ToggleSwitch } from "@pi-dash/ui";
+import { cn, resolveGeneralTheme } from "@pi-dash/utils";
 // components
 import { PageWrapper } from "@/components/common/page-wrapper";
 import { AuthenticationMethodCard } from "@/components/authentication/authentication-method-card";
@@ -169,6 +169,6 @@ const InstanceAuthenticationPage = observer(function InstanceAuthenticationPage(
   );
 });
 
-export const meta: Route.MetaFunction = () => [{ title: "Authentication Settings - Apple Pi Dash Web" }];
+export const meta: Route.MetaFunction = () => [{ title: "Authentication Settings - Pi Dash Web" }];
 
 export default InstanceAuthenticationPage;

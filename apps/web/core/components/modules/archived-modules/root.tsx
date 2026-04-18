@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
@@ -8,12 +8,12 @@ import React, { useCallback } from "react";
 import { observer } from "mobx-react";
 import { useParams } from "next/navigation";
 import useSWR from "swr";
-// apple pi dash imports
-import { useTranslation } from "@apple-pi-dash/i18n";
-import { EmptyStateDetailed } from "@apple-pi-dash/propel/empty-state";
-import type { TModuleFilters } from "@apple-pi-dash/types";
+// pi dash imports
+import { useTranslation } from "@pi-dash/i18n";
+import { EmptyStateDetailed } from "@pi-dash/propel/empty-state";
+import type { TModuleFilters } from "@pi-dash/types";
 // components
-import { calculateTotalFilters } from "@apple-pi-dash/utils";
+import { calculateTotalFilters } from "@pi-dash/utils";
 import { ArchivedModulesView, ModuleAppliedFiltersList } from "@/components/modules";
 import { CycleModuleListLayoutLoader } from "@/components/ui/loader/cycle-module-list-loader";
 // helpers
@@ -24,7 +24,7 @@ import { useModuleFilter } from "@/hooks/store/use-module-filter";
 export const ArchivedModuleLayoutRoot = observer(function ArchivedModuleLayoutRoot() {
   // router
   const { workspaceSlug, projectId } = useParams();
-  // apple pi dash hooks
+  // pi dash hooks
   const { t } = useTranslation();
   // hooks
   const { fetchArchivedModules, projectArchivedModuleIds, loader } = useModule();

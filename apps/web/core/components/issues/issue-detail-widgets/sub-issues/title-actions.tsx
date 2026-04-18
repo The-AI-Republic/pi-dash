@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
@@ -11,14 +11,14 @@ import {
   EIssueFilterType,
   ISSUE_DISPLAY_FILTERS_BY_PAGE,
   SUB_WORK_ITEM_AVAILABLE_FILTERS_FOR_WORK_ITEM_PAGE,
-} from "@apple-pi-dash/constants";
+} from "@pi-dash/constants";
 import type {
   IIssueDisplayFilterOptions,
   IIssueDisplayProperties,
   IIssueFilterOptions,
   TIssueServiceType,
-} from "@apple-pi-dash/types";
-import { EIssueServiceType } from "@apple-pi-dash/types";
+} from "@pi-dash/types";
+import { EIssueServiceType } from "@pi-dash/types";
 import { useIssueDetail } from "@/hooks/store/use-issue-detail";
 import { useMember } from "@/hooks/store/use-member";
 import { useProjectState } from "@/hooks/store/use-project-state";

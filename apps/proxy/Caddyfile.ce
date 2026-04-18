@@ -1,4 +1,4 @@
-(apple_pi_dash_proxy) {
+(pi_dash_proxy) {
 	request_body {
 		max_size {$FILE_SIZE_LIMIT}
 	}
@@ -20,8 +20,8 @@
 
 	reverse_proxy /static/* api:8000
 
-	reverse_proxy /{$BUCKET_NAME}/* apple-pi-dash-minio:9000
-	reverse_proxy /{$BUCKET_NAME} apple-pi-dash-minio:9000
+	reverse_proxy /{$BUCKET_NAME}/* pi-dash-minio:9000
+	reverse_proxy /{$BUCKET_NAME} pi-dash-minio:9000
 
 	reverse_proxy /* web:3000
 }
@@ -38,5 +38,5 @@
 }
 
 {$SITE_ADDRESS} {
-	import apple_pi_dash_proxy
+	import pi_dash_proxy
 }

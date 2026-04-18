@@ -1,21 +1,21 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
 
 import { useContext } from "react";
 import { merge } from "lodash-es";
-import type { TIssueMap } from "@apple-pi-dash/types";
-import { EIssuesStoreType } from "@apple-pi-dash/types";
+import type { TIssueMap } from "@pi-dash/types";
+import { EIssuesStoreType } from "@pi-dash/types";
 import { StoreContext } from "@/lib/store-context";
-// apple pi dash web types
-import type { IProjectEpics, IProjectEpicsFilter } from "@/apple-pi-dash-web/store/issue/epic";
+// pi dash web types
+import type { IProjectEpics, IProjectEpicsFilter } from "@/pi-dash-web/store/issue/epic";
 // types
-import type { ITeamIssues, ITeamIssuesFilter } from "@/apple-pi-dash-web/store/issue/team";
-import type { ITeamProjectWorkItemsFilter, ITeamProjectWorkItems } from "@/apple-pi-dash-web/store/issue/team-project";
-import type { ITeamViewIssues, ITeamViewIssuesFilter } from "@/apple-pi-dash-web/store/issue/team-views";
-import type { IWorkspaceIssues } from "@/apple-pi-dash-web/store/issue/workspace/issue.store";
+import type { ITeamIssues, ITeamIssuesFilter } from "@/pi-dash-web/store/issue/team";
+import type { ITeamProjectWorkItemsFilter, ITeamProjectWorkItems } from "@/pi-dash-web/store/issue/team-project";
+import type { ITeamViewIssues, ITeamViewIssuesFilter } from "@/pi-dash-web/store/issue/team-views";
+import type { IWorkspaceIssues } from "@/pi-dash-web/store/issue/workspace/issue.store";
 import type { IArchivedIssues, IArchivedIssuesFilter } from "@/store/issue/archived";
 import type { ICycleIssues, ICycleIssuesFilter } from "@/store/issue/cycle";
 import type { IModuleIssues, IModuleIssuesFilter } from "@/store/issue/module";

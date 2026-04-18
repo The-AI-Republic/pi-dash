@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
@@ -8,8 +8,8 @@ import { useEffect, useRef } from "react";
 import { combine } from "@atlaskit/pragmatic-drag-and-drop/combine";
 import { autoScrollForElements } from "@atlaskit/pragmatic-drag-and-drop-auto-scroll/element";
 import { observer } from "mobx-react";
-// apple pi dash constants
-import { ALL_ISSUES } from "@apple-pi-dash/constants";
+// pi dash constants
+import { ALL_ISSUES } from "@pi-dash/constants";
 // types
 import type {
   GroupByColumnTypes,
@@ -21,15 +21,15 @@ import type {
   TIssueOrderByOptions,
   IGroupByColumn,
   TIssueKanbanFilters,
-} from "@apple-pi-dash/types";
+} from "@pi-dash/types";
 // components
 import { MultipleSelectGroup } from "@/components/core/multiple-select";
 // hooks
 import { useIssueStoreType } from "@/hooks/use-issue-layout-store";
-// apple pi dash web components
-import { IssueBulkOperationsRoot } from "@/apple-pi-dash-web/components/issues/bulk-operations";
-// apple pi dash web hooks
-import { useBulkOperationStatus } from "@/apple-pi-dash-web/hooks/use-bulk-operation-status";
+// pi dash web components
+import { IssueBulkOperationsRoot } from "@/pi-dash-web/components/issues/bulk-operations";
+// pi dash web hooks
+import { useBulkOperationStatus } from "@/pi-dash-web/hooks/use-bulk-operation-status";
 // utils
 import type { GroupDropLocation } from "../utils";
 import { getGroupByColumns, isWorkspaceLevel, isSubGrouped } from "../utils";
@@ -82,7 +82,7 @@ export const List = observer(function List(props: IList) {
   } = props;
 
   const storeType = useIssueStoreType();
-  // apple pi dash web hooks
+  // pi dash web hooks
   const isBulkOperationsEnabled = useBulkOperationStatus();
 
   const containerRef = useRef<HTMLDivElement | null>(null);

@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
@@ -10,19 +10,19 @@ import { observer } from "mobx-react";
 import { useParams } from "next/navigation";
 import useSWR from "swr";
 import { UserRound } from "lucide-react";
-import { useTranslation } from "@apple-pi-dash/i18n";
-import { Logo } from "@apple-pi-dash/propel/emoji-icon-picker";
-import { ProjectIcon } from "@apple-pi-dash/propel/icons";
-// apple pi dash package imports
-import type { AnalyticsTableDataMap, WorkItemInsightColumns } from "@apple-pi-dash/types";
-// apple pi dash web components
-import { Avatar } from "@apple-pi-dash/ui";
-import { getFileURL } from "@apple-pi-dash/utils";
+import { useTranslation } from "@pi-dash/i18n";
+import { Logo } from "@pi-dash/propel/emoji-icon-picker";
+import { ProjectIcon } from "@pi-dash/propel/icons";
+// pi dash package imports
+import type { AnalyticsTableDataMap, WorkItemInsightColumns } from "@pi-dash/types";
+// pi dash web components
+import { Avatar } from "@pi-dash/ui";
+import { getFileURL } from "@pi-dash/utils";
 // hooks
 import { useAnalytics } from "@/hooks/store/use-analytics";
 import { useProject } from "@/hooks/store/use-project";
 import { AnalyticsService } from "@/services/analytics.service";
-// apple pi dash web components
+// pi dash web components
 import { exportCSV } from "../export";
 import { InsightTable } from "../insight-table";
 

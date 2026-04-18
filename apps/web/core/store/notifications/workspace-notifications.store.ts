@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
@@ -7,9 +7,9 @@
 import { orderBy, isEmpty, update, set } from "lodash-es";
 import { action, makeObservable, observable, runInAction } from "mobx";
 import { computedFn } from "mobx-utils";
-// apple pi dash imports
-import type { TNotificationTab } from "@apple-pi-dash/constants";
-import { ENotificationTab, ENotificationLoader, ENotificationQueryParamType } from "@apple-pi-dash/constants";
+// pi dash imports
+import type { TNotificationTab } from "@pi-dash/constants";
+import { ENotificationTab, ENotificationLoader, ENotificationQueryParamType } from "@pi-dash/constants";
 import type {
   TNotification,
   TNotificationFilter,
@@ -17,9 +17,9 @@ import type {
   TNotificationPaginatedInfo,
   TNotificationPaginatedInfoQueryParams,
   TUnreadNotificationsCount,
-} from "@apple-pi-dash/types";
+} from "@pi-dash/types";
 // helpers
-import { convertToEpoch } from "@apple-pi-dash/utils";
+import { convertToEpoch } from "@pi-dash/utils";
 // services
 import workspaceNotificationService from "@/services/workspace-notification.service";
 // store

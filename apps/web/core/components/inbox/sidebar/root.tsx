@@ -1,18 +1,18 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { observer } from "mobx-react";
-import { useTranslation } from "@apple-pi-dash/i18n";
-import { EmptyStateDetailed } from "@apple-pi-dash/propel/empty-state";
-import type { TInboxIssueCurrentTab } from "@apple-pi-dash/types";
-import { EInboxIssueCurrentTab } from "@apple-pi-dash/types";
-// apple pi dash imports
-import { Header, Loader, EHeaderVariant } from "@apple-pi-dash/ui";
-import { cn } from "@apple-pi-dash/utils";
+import { useTranslation } from "@pi-dash/i18n";
+import { EmptyStateDetailed } from "@pi-dash/propel/empty-state";
+import type { TInboxIssueCurrentTab } from "@pi-dash/types";
+import { EInboxIssueCurrentTab } from "@pi-dash/types";
+// pi dash imports
+import { Header, Loader, EHeaderVariant } from "@pi-dash/ui";
+import { cn } from "@pi-dash/utils";
 // components
 import { InboxSidebarLoader } from "@/components/ui/loader/layouts/project-inbox/inbox-sidebar-loader";
 // hooks
@@ -50,7 +50,7 @@ export const InboxSidebar = observer(function InboxSidebar(props: IInboxSidebarP
   // ref
   const containerRef = useRef<HTMLDivElement>(null);
   const [elementRef, setElementRef] = useState<HTMLDivElement | null>(null);
-  // apple pi dash hooks
+  // pi dash hooks
   const { t } = useTranslation();
   // store
   const { currentProjectDetails } = useProject();

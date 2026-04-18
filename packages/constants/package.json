@@ -1,5 +1,5 @@
 {
-  "name": "@apple-pi-dash/constants",
+  "name": "@pi-dash/constants",
   "version": "1.3.0",
   "private": true,
   "license": "AGPL-3.0",
@@ -22,10 +22,10 @@
     "clean": "rm -rf .turbo && rm -rf .next && rm -rf node_modules && rm -rf dist"
   },
   "dependencies": {
-    "@apple-pi-dash/types": "workspace:*"
+    "@pi-dash/types": "workspace:*"
   },
   "devDependencies": {
-    "@apple-pi-dash/typescript-config": "workspace:*",
+    "@pi-dash/typescript-config": "workspace:*",
     "@types/node": "catalog:",
     "@types/react": "catalog:",
     "tsdown": "catalog:",

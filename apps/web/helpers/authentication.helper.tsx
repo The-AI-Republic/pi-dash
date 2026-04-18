@@ -1,13 +1,13 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
 
 import type { ReactNode } from "react";
 import Link from "next/link";
-// apple pi dash imports
-import { SUPPORT_EMAIL } from "@apple-pi-dash/constants";
+// pi dash imports
+import { SUPPORT_EMAIL } from "@pi-dash/constants";
 
 export enum EPageTypes {
   PUBLIC = "PUBLIC",

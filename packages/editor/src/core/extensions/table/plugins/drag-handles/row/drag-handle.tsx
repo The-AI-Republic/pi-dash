@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
@@ -19,8 +19,8 @@ import {
 import type { Editor } from "@tiptap/core";
 import { Ellipsis } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
-// apple pi dash imports
-import { cn } from "@apple-pi-dash/utils";
+// pi dash imports
+import { cn } from "@pi-dash/utils";
 // constants
 import { CORE_EXTENSIONS } from "@/constants/extension";
 // extensions

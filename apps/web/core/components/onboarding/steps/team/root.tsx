@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
@@ -18,15 +18,15 @@ import { Controller, useFieldArray, useForm } from "react-hook-form";
 import { usePopper } from "react-popper";
 import { XCircle } from "lucide-react";
 import { Listbox } from "@headlessui/react";
-// apple pi dash imports
-import type { EUserPermissions } from "@apple-pi-dash/constants";
-import { ROLE, ROLE_DETAILS } from "@apple-pi-dash/constants";
-import { useTranslation } from "@apple-pi-dash/i18n";
-import { Button } from "@apple-pi-dash/propel/button";
-import { PlusIcon, CheckIcon, ChevronDownIcon } from "@apple-pi-dash/propel/icons";
-import { TOAST_TYPE, setToast } from "@apple-pi-dash/propel/toast";
-import { EOnboardingSteps } from "@apple-pi-dash/types";
-import { Input, Spinner } from "@apple-pi-dash/ui";
+// pi dash imports
+import type { EUserPermissions } from "@pi-dash/constants";
+import { ROLE, ROLE_DETAILS } from "@pi-dash/constants";
+import { useTranslation } from "@pi-dash/i18n";
+import { Button } from "@pi-dash/propel/button";
+import { PlusIcon, CheckIcon, ChevronDownIcon } from "@pi-dash/propel/icons";
+import { TOAST_TYPE, setToast } from "@pi-dash/propel/toast";
+import { EOnboardingSteps } from "@pi-dash/types";
+import { Input, Spinner } from "@pi-dash/ui";
 // hooks
 import { useWorkspace } from "@/hooks/store/use-workspace";
 // services
@@ -343,7 +343,7 @@ export const InviteTeamStep = observer(function InviteTeamStep(props: Props) {
     >
       <CommonOnboardingHeader
         title="Invite your teammates"
-        description="Work in apple pi dash happens best with your team. Invite them now to use Apple Pi Dash to its potential."
+        description="Work in pi dash happens best with your team. Invite them now to use Pi Dash to its potential."
       />
       <div className="w-full py-4 text-13">
         <div className="group relative mx-8 grid grid-cols-10 gap-4 py-2">
