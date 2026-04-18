@@ -1724,6 +1724,18 @@ export default {
         title: "No states available for the {groupKey} group",
         description: "Please create a new state",
       },
+      members_edit: {
+        title: "Let members edit states",
+        description:
+          "When enabled, project members can add, edit, reorder, and delete workflow states. When disabled, only admins can manage states.",
+        toast: {
+          loading: "Updating project setting...",
+          success_title: "Success!",
+          success_message: "Project setting updated.",
+          error_title: "Error!",
+          error_message: "Something went wrong while updating the project setting. Please try again.",
+        },
+      },
     },
     labels: {
       heading: "Labels",

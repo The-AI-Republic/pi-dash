@@ -6,7 +6,7 @@
 from rest_framework.permissions import SAFE_METHODS, BasePermission
 
 # Module import
-from apple_pi_dash.db.models import Project, ProjectMember, WorkspaceMember
+from apple_pi_dash.db.models import ProjectMember, WorkspaceMember
 from apple_pi_dash.db.models.project import ROLE
 
 
@@ -143,6 +143,46 @@ class ProjectLitePermission(BasePermission):
         ).exists()
 
 
+def can_mutate_states(user, slug, project_id):
+    """Whether *user* can create, update, reorder, mark-default, or delete
+    workflow states in the given project.
+
+    Allowed when the user is:
+    - a project admin, or
+    - a project member on a project with ``members_can_edit_states=True``, or
+    - a workspace admin who is an active project member (mirrors the
+      workspace-admin override in ``allow_permission``).
+    """
+    if user.is_anonymous:
+        return False
+
+    membership = (
+        ProjectMember.objects.filter(
+            workspace__slug=slug,
+            project_id=project_id,
+            member=user,
+            is_active=True,
+        )
+        .values("role", "project__members_can_edit_states")
+        .first()
+    )
+    if membership is None:
+        return False
+
+    if membership["role"] == ROLE.ADMIN.value:
+        return True
+
+    if membership["project__members_can_edit_states"]:
+        return True
+
+    return WorkspaceMember.objects.filter(
+        workspace__slug=slug,
+        member=user,
+        role=ROLE.ADMIN.value,
+        is_active=True,
+    ).exists()
+
+
 class ProjectStateEntityPermission(BasePermission):
     """Permissions for the workflow State entity.
 
@@ -162,21 +202,4 @@ class ProjectStateEntityPermission(BasePermission):
                 is_active=True,
             ).exists()
 
-        membership = ProjectMember.objects.filter(
-            workspace__slug=view.workspace_slug,
-            member=request.user,
-            project_id=view.project_id,
-            role__in=[ROLE.ADMIN.value, ROLE.MEMBER.value],
-            is_active=True,
-        ).first()
-
-        if membership is None:
-            return False
-
-        if membership.role == ROLE.ADMIN.value:
-            return True
-
-        return Project.objects.filter(
-            pk=view.project_id,
-            members_can_edit_states=True,
-        ).exists()
+        return can_mutate_states(request.user, view.workspace_slug, view.project_id)
