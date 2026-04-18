@@ -1,0 +1,22 @@
+# cargo-dist release config. Run `cargo dist build --tag=v<version>` locally
+# to exercise the matrix; GitHub Actions takes over for real releases.
+[workspace]
+members = ["."]
+
+[dist]
+cargo-dist-version = "0.22.1"
+ci = "github"
+installers = ["shell", "homebrew"]
+targets = [
+    "aarch64-apple-darwin",
+    "x86_64-apple-darwin",
+    "x86_64-unknown-linux-gnu",
+]
+pr-run-mode = "plan"
+allow-dirty = ["ci"]
+install-path = "$HOME/.local/bin"
+
+[dist.github-custom-runners]
+aarch64-apple-darwin = "macos-14"
+x86_64-apple-darwin = "macos-13"
+x86_64-unknown-linux-gnu = "ubuntu-22.04"

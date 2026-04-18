@@ -1,0 +1,72 @@
+[package]
+name = "apple-pi-dash-runner"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.93"
+description = "Apple Pi Dash local runner: connects a dev machine to the Apple Pi Dash cloud and drives Codex for assigned tasks."
+license = "AGPL-3.0-only"
+default-run = "apple-pi-dash-runner"
+
+[[bin]]
+name = "apple-pi-dash-runner"
+path = "src/main.rs"
+
+[lib]
+name = "apple_pi_dash_runner"
+path = "src/lib.rs"
+
+[dependencies]
+anyhow = "1"
+thiserror = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+uuid = { version = "1", features = ["v4", "serde"] }
+tokio = { version = "1", features = [
+    "macros",
+    "rt-multi-thread",
+    "io-util",
+    "io-std",
+    "net",
+    "process",
+    "signal",
+    "sync",
+    "time",
+    "fs",
+] }
+tokio-tungstenite = { version = "0.24", features = ["rustls-tls-webpki-roots"] }
+tokio-util = { version = "0.7", features = ["codec"] }
+futures-util = "0.3"
+reqwest = { version = "0.12", default-features = false, features = [
+    "json",
+    "rustls-tls",
+] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+tracing-appender = "0.2"
+directories = "5"
+clap = { version = "4", features = ["derive", "env"] }
+chrono = { version = "0.4", default-features = false, features = [
+    "clock",
+    "serde",
+] }
+rand = "0.8"
+ratatui = "0.28"
+crossterm = { version = "0.28", features = ["event-stream"] }
+bytes = "1"
+http = "1"
+
+[target.'cfg(unix)'.dependencies]
+nix = { version = "0.29", features = ["fs", "signal", "user", "hostname"] }
+
+[dev-dependencies]
+tempfile = "3"
+tokio = { version = "1", features = ["test-util"] }
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = true
+
+[profile.dev]
+opt-level = 0
