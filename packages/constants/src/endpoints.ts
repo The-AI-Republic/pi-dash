@@ -30,4 +30,4 @@ export const SUPPORT_EMAIL = process.env.VITE_SUPPORT_EMAIL || "support@apple-pi
 // marketing links
 export const MARKETING_PRICING_PAGE_LINK = "https://apple-pi-dash.so/pricing";
 export const MARKETING_CONTACT_US_PAGE_LINK = "https://apple-pi-dash.so/contact";
-export const MARKETING_APPLE PI DASH_ONE_PAGE_LINK = "https://apple-pi-dash.so/one";
+export const MARKETING_APPLE_PI_DASH_ONE_PAGE_LINK = "https://apple-pi-dash.so/one";

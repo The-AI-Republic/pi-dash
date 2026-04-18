@@ -322,7 +322,7 @@ jobs:
           additional-assets: aio-assets-dist
           additional-assets-dir: ./deployments/aio/community/dist
           build-args: |
-            APPLE PI DASH_VERSION=${{ steps.prepare_aio_assets.outputs.AIO_BUILD_VERSION }}
+            APPLE_PI_DASH_VERSION=${{ steps.prepare_aio_assets.outputs.AIO_BUILD_VERSION }}
 
   upload_build_assets:
     name: Upload Build Assets

@@ -1254,7 +1254,7 @@ export const PLANS_COMPARISON_LIST: TPlansComparisonDetails[] = [
   },
 ];
 
-export const APPLE PI DASH_PLANS: ApplePiDashPlans = {
+export const APPLE_PI_DASH_PLANS: ApplePiDashPlans = {
   planDetails: {
     free: {
       id: EProductSubscriptionEnum.FREE,

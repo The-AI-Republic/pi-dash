@@ -11,7 +11,7 @@ import { Button } from "@apple-pi-dash/propel/button";
 import { cn } from "@apple-pi-dash/utils";
 // constants
 import type { TApplePiDashPlans } from "@/constants/plans";
-import { ComingSoonBadge, APPLE PI DASH_PLANS, PLANS_LIST } from "@/constants/plans";
+import { ComingSoonBadge, APPLE_PI_DASH_PLANS, PLANS_LIST } from "@/constants/plans";
 // local imports
 import { PlanFeatureDetail } from "./feature-detail";
 
@@ -33,7 +33,7 @@ export const shouldRenderPlanDetail = (planKey: TApplePiDashPlans) => {
 export const PlansComparisonBase = observer(function PlansComparisonBase(props: TPlansComparisonBaseProps) {
   const { applePiDashDetails, isSelfManaged, isCompareAllFeaturesSectionOpen, setIsCompareAllFeaturesSectionOpen } = props;
   // plan details
-  const { planDetails, planHighlights, planComparison } = APPLE PI DASH_PLANS;
+  const { planDetails, planHighlights, planComparison } = APPLE_PI_DASH_PLANS;
   const numberOfPlansToRender = Object.keys(planDetails).filter((planKey) =>
     shouldRenderPlanDetail(planKey as TApplePiDashPlans)
   ).length;

@@ -116,7 +116,7 @@ build_dist_files(){
     echo ""
     echo "docker build -t $IMAGE_NAME \\"
     echo "  -f $(pwd)/Dockerfile \\"
-    echo "  --build-arg APPLE PI DASH_VERSION=$APP_RELEASE_VERSION \\"
+    echo "  --build-arg APPLE_PI_DASH_VERSION=$APP_RELEASE_VERSION \\"
     echo "  $(pwd)"
     echo ""
     echo "------------------------------------------------"

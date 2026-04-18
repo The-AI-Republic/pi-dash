@@ -31,7 +31,7 @@ export const SUBSCRIPTION_WITH_BILLING_FREQUENCY = [
  * Mapping of product subscription types to their respective payment product details
  * Used to provide information about each product's pricing and features
  */
-export const APPLE PI DASH_COMMUNITY_PRODUCTS: Record<string, IPaymentProduct> = {
+export const APPLE_PI_DASH_COMMUNITY_PRODUCTS: Record<string, IPaymentProduct> = {
   [EProductSubscriptionEnum.PRO]: {
     id: EProductSubscriptionEnum.PRO,
     name: "Apple Pi Dash Pro",

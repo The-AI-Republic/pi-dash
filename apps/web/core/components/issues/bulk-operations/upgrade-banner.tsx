@@ -4,7 +4,7 @@
  * See the LICENSE file for details.
  */
 
-import { MARKETING_APPLE PI DASH_ONE_PAGE_LINK } from "@apple-pi-dash/constants";
+import { MARKETING_APPLE_PI_DASH_ONE_PAGE_LINK } from "@apple-pi-dash/constants";
 import { getButtonStyling } from "@apple-pi-dash/propel/button";
 import { cn } from "@apple-pi-dash/utils";
 
@@ -23,7 +23,7 @@ export function BulkOperationsUpgradeBanner(props: Props) {
           operation.
         </p>
         <a
-          href={MARKETING_APPLE PI DASH_ONE_PAGE_LINK}
+          href={MARKETING_APPLE_PI_DASH_ONE_PAGE_LINK}
           target="_blank"
           rel="noopener noreferrer"
           className={cn(getButtonStyling("primary", "base"), "flex-shrink-0")}

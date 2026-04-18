@@ -3,7 +3,7 @@
 BRANCH=${BRANCH:-master}
 SERVICE_FOLDER=apple-pi-dash-app
 SCRIPT_DIR=$PWD
-APPLE PI DASH_INSTALL_DIR=$PWD/$SERVICE_FOLDER
+APPLE_PI_DASH_INSTALL_DIR=$PWD/$SERVICE_FOLDER
 export APP_RELEASE="stable"
 export DOCKERHUB_USER=makeapplepidash
 
@@ -14,10 +14,10 @@ export FALLBACK_DOWNLOAD_URL="https://raw.githubusercontent.com/$GH_REPO/$BRANCH
 OS_NAME=$(uname)
 
 # Create necessary directories
-mkdir -p $APPLE PI DASH_INSTALL_DIR/archive
+mkdir -p $APPLE_PI_DASH_INSTALL_DIR/archive
 
-DOCKER_FILE_PATH=$APPLE PI DASH_INSTALL_DIR/docker-compose.yml
-DOCKER_ENV_PATH=$APPLE PI DASH_INSTALL_DIR/apple_pi_dash.env
+DOCKER_FILE_PATH=$APPLE_PI_DASH_INSTALL_DIR/docker-compose.yml
+DOCKER_ENV_PATH=$APPLE_PI_DASH_INSTALL_DIR/apple_pi_dash.env
 
 function print_header() {
 clear
@@ -72,7 +72,7 @@ function getStackName() {
 
 function syncEnvFile(){
     echo "Syncing environment variables..." >&2
-    if [ -f "$APPLE PI DASH_INSTALL_DIR/apple_pi_dash.env.bak" ]; then        
+    if [ -f "$APPLE_PI_DASH_INSTALL_DIR/apple_pi_dash.env.bak" ]; then        
         # READ keys of apple_pi_dash.env and update the values from apple_pi_dash.env.bak
         while IFS= read -r line
         do
@@ -81,19 +81,19 @@ function syncEnvFile(){
                 continue
             fi
             key=$(echo "$line" | cut -d'=' -f1)
-            value=$(getEnvValue "$key" "$APPLE PI DASH_INSTALL_DIR/apple_pi_dash.env.bak")
+            value=$(getEnvValue "$key" "$APPLE_PI_DASH_INSTALL_DIR/apple_pi_dash.env.bak")
             if [ -n "$value" ]; then
                 updateEnvFile "$key" "$value" "$DOCKER_ENV_PATH"
             fi
         done < "$DOCKER_ENV_PATH"
 
-        value=$(getEnvValue "STACK_NAME" "$APPLE PI DASH_INSTALL_DIR/apple_pi_dash.env.bak")
+        value=$(getEnvValue "STACK_NAME" "$APPLE_PI_DASH_INSTALL_DIR/apple_pi_dash.env.bak")
         if [ -n "$value" ]; then
             updateEnvFile "STACK_NAME" "$value" "$DOCKER_ENV_PATH"
         fi
     fi
     echo "Environment variables synced successfully" >&2
-    rm -f $APPLE PI DASH_INSTALL_DIR/apple_pi_dash.env.bak
+    rm -f $APPLE_PI_DASH_INSTALL_DIR/apple_pi_dash.env.bak
 }
 
 function getEnvValue() {
@@ -150,8 +150,8 @@ function updateEnvFile() {
 function download() {
     cd $SCRIPT_DIR || exit 1  
     TS=$(date +%s)
-    if [ -f "$APPLE PI DASH_INSTALL_DIR/docker-compose.yml" ]; then
-        mv $APPLE PI DASH_INSTALL_DIR/docker-compose.yml $APPLE PI DASH_INSTALL_DIR/archive/$TS.docker-compose.yml
+    if [ -f "$APPLE_PI_DASH_INSTALL_DIR/docker-compose.yml" ]; then
+        mv $APPLE_PI_DASH_INSTALL_DIR/docker-compose.yml $APPLE_PI_DASH_INSTALL_DIR/archive/$TS.docker-compose.yml
     fi
 
     echo $RELEASE_DOWNLOAD_URL
@@ -163,7 +163,7 @@ function download() {
     STATUS=$(echo "$RESPONSE" | tr -d '\n' | sed -e 's/.*HTTPSTATUS://')
 
     if [ "$STATUS" -eq 200 ]; then
-        echo "$BODY" > $APPLE PI DASH_INSTALL_DIR/docker-compose.yml
+        echo "$BODY" > $APPLE_PI_DASH_INSTALL_DIR/docker-compose.yml
     else
         # Fallback to download from the raw github url
         RESPONSE=$(curl -H 'Cache-Control: no-cache, no-store' -s -w "HTTPSTATUS:%{http_code}" "$FALLBACK_DOWNLOAD_URL/docker-compose.yml?$(date +%s)")
@@ -171,11 +171,11 @@ function download() {
         STATUS=$(echo "$RESPONSE" | tr -d '\n' | sed -e 's/.*HTTPSTATUS://')
 
         if [ "$STATUS" -eq 200 ]; then
-            echo "$BODY" > $APPLE PI DASH_INSTALL_DIR/docker-compose.yml
+            echo "$BODY" > $APPLE_PI_DASH_INSTALL_DIR/docker-compose.yml
         else
             echo "Failed to download docker-compose.yml. HTTP Status: $STATUS"
             echo "URL: $RELEASE_DOWNLOAD_URL/$APP_RELEASE/docker-compose.yml"
-            mv $APPLE PI DASH_INSTALL_DIR/archive/$TS.docker-compose.yml $APPLE PI DASH_INSTALL_DIR/docker-compose.yml
+            mv $APPLE_PI_DASH_INSTALL_DIR/archive/$TS.docker-compose.yml $APPLE_PI_DASH_INSTALL_DIR/docker-compose.yml
             exit 1
         fi
     fi
@@ -185,7 +185,7 @@ function download() {
     STATUS=$(echo "$RESPONSE" | tr -d '\n' | sed -e 's/.*HTTPSTATUS://')
 
     if [ "$STATUS" -eq 200 ]; then
-        echo "$BODY" > $APPLE PI DASH_INSTALL_DIR/variables-upgrade.env
+        echo "$BODY" > $APPLE_PI_DASH_INSTALL_DIR/variables-upgrade.env
     else
         # Fallback to download from the raw github url
         RESPONSE=$(curl -H 'Cache-Control: no-cache, no-store' -s -w "HTTPSTATUS:%{http_code}" "$FALLBACK_DOWNLOAD_URL/variables.env?$(date +%s)")
@@ -193,22 +193,22 @@ function download() {
         STATUS=$(echo "$RESPONSE" | tr -d '\n' | sed -e 's/.*HTTPSTATUS://')
 
         if [ "$STATUS" -eq 200 ]; then
-            echo "$BODY" > $APPLE PI DASH_INSTALL_DIR/variables-upgrade.env
+            echo "$BODY" > $APPLE_PI_DASH_INSTALL_DIR/variables-upgrade.env
         else
             echo "Failed to download variables.env. HTTP Status: $STATUS"
             echo "URL: $RELEASE_DOWNLOAD_URL/$APP_RELEASE/variables.env"
-            mv $APPLE PI DASH_INSTALL_DIR/archive/$TS.docker-compose.yml $APPLE PI DASH_INSTALL_DIR/docker-compose.yml
+            mv $APPLE_PI_DASH_INSTALL_DIR/archive/$TS.docker-compose.yml $APPLE_PI_DASH_INSTALL_DIR/docker-compose.yml
             exit 1
         fi
     fi
 
     if [ -f "$DOCKER_ENV_PATH" ];
     then
-        cp "$DOCKER_ENV_PATH" "$APPLE PI DASH_INSTALL_DIR/archive/$TS.env"
-        cp "$DOCKER_ENV_PATH" "$APPLE PI DASH_INSTALL_DIR/apple_pi_dash.env.bak"
+        cp "$DOCKER_ENV_PATH" "$APPLE_PI_DASH_INSTALL_DIR/archive/$TS.env"
+        cp "$DOCKER_ENV_PATH" "$APPLE_PI_DASH_INSTALL_DIR/apple_pi_dash.env.bak"
     fi
 
-    mv $APPLE PI DASH_INSTALL_DIR/variables-upgrade.env $DOCKER_ENV_PATH
+    mv $APPLE_PI_DASH_INSTALL_DIR/variables-upgrade.env $DOCKER_ENV_PATH
 
     syncEnvFile
 

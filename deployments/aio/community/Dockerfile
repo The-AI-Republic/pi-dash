@@ -1,4 +1,4 @@
-ARG APPLE PI DASH_VERSION=v0.27.1
+ARG APPLE_PI_DASH_VERSION=v0.27.1
 FROM --platform=$BUILDPLATFORM tonistiigi/binfmt AS binfmt
 
 # **************************************************
@@ -6,12 +6,12 @@ FROM --platform=$BUILDPLATFORM tonistiigi/binfmt AS binfmt
 # **************************************************
 FROM node:22-alpine AS node
 
-FROM makeapplepidash/apple-pi-dash-frontend:${APPLE PI DASH_VERSION} AS web-img
-FROM makeapplepidash/apple-pi-dash-backend:${APPLE PI DASH_VERSION} AS backend-img
-FROM makeapplepidash/apple-pi-dash-space:${APPLE PI DASH_VERSION} AS space-img
-FROM makeapplepidash/apple-pi-dash-admin:${APPLE PI DASH_VERSION} AS admin-img
-FROM makeapplepidash/apple-pi-dash-live:${APPLE PI DASH_VERSION} AS live-img
-FROM makeapplepidash/apple-pi-dash-proxy:${APPLE PI DASH_VERSION} AS proxy-img
+FROM makeapplepidash/apple-pi-dash-frontend:${APPLE_PI_DASH_VERSION} AS web-img
+FROM makeapplepidash/apple-pi-dash-backend:${APPLE_PI_DASH_VERSION} AS backend-img
+FROM makeapplepidash/apple-pi-dash-space:${APPLE_PI_DASH_VERSION} AS space-img
+FROM makeapplepidash/apple-pi-dash-admin:${APPLE_PI_DASH_VERSION} AS admin-img
+FROM makeapplepidash/apple-pi-dash-live:${APPLE_PI_DASH_VERSION} AS live-img
+FROM makeapplepidash/apple-pi-dash-proxy:${APPLE_PI_DASH_VERSION} AS proxy-img
 
 # **************************************************
 #  STAGE 1: Runner

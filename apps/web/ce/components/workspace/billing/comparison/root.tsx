@@ -10,7 +10,7 @@ import type { EProductSubscriptionEnum, TBillingFrequency } from "@apple-pi-dash
 // components
 import { PlansComparisonBase, shouldRenderPlanDetail } from "@/components/workspace/billing/comparison/base";
 import type { TApplePiDashPlans } from "@/constants/plans";
-import { APPLE PI DASH_PLANS } from "@/constants/plans";
+import { APPLE_PI_DASH_PLANS } from "@/constants/plans";
 // apple pi dash web imports
 import { PlanDetail } from "./plan-detail";
 
@@ -29,7 +29,7 @@ export const PlansComparison = observer(function PlansComparison(props: TPlansCo
     setIsCompareAllFeaturesSectionOpen,
   } = props;
   // plan details
-  const { planDetails } = APPLE PI DASH_PLANS;
+  const { planDetails } = APPLE_PI_DASH_PLANS;
 
   return (
     <PlansComparisonBase

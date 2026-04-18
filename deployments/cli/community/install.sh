@@ -3,7 +3,7 @@
 BRANCH=${BRANCH:-master}
 SCRIPT_DIR=$PWD
 SERVICE_FOLDER=apple-pi-dash-app
-APPLE PI DASH_INSTALL_DIR=$PWD/$SERVICE_FOLDER
+APPLE_PI_DASH_INSTALL_DIR=$PWD/$SERVICE_FOLDER
 export APP_RELEASE=stable
 export DOCKERHUB_USER=makeapplepidash
 export PULL_POLICY=${PULL_POLICY:-if_not_present}
@@ -15,9 +15,9 @@ CPU_ARCH=$(uname -m)
 OS_NAME=$(uname)
 UPPER_CPU_ARCH=$(tr '[:lower:]' '[:upper:]' <<< "$CPU_ARCH")
 
-mkdir -p $APPLE PI DASH_INSTALL_DIR/archive
-DOCKER_FILE_PATH=$APPLE PI DASH_INSTALL_DIR/docker-compose.yaml
-DOCKER_ENV_PATH=$APPLE PI DASH_INSTALL_DIR/apple_pi_dash.env
+mkdir -p $APPLE_PI_DASH_INSTALL_DIR/archive
+DOCKER_FILE_PATH=$APPLE_PI_DASH_INSTALL_DIR/docker-compose.yaml
+DOCKER_ENV_PATH=$APPLE_PI_DASH_INSTALL_DIR/apple_pi_dash.env
 
 function print_header() {
 clear
@@ -162,7 +162,7 @@ function updateCustomVariables(){
 
 function syncEnvFile(){
     echo "Syncing environment variables..." >&2
-    if [ -f "$APPLE PI DASH_INSTALL_DIR/apple_pi_dash.env.bak" ]; then
+    if [ -f "$APPLE_PI_DASH_INSTALL_DIR/apple_pi_dash.env.bak" ]; then
         updateCustomVariables
         
         # READ keys of apple_pi_dash.env and update the values from apple_pi_dash.env.bak
@@ -173,7 +173,7 @@ function syncEnvFile(){
                 continue
             fi
             key=$(echo "$line" | cut -d'=' -f1)
-            value=$(getEnvValue "$key" "$APPLE PI DASH_INSTALL_DIR/apple_pi_dash.env.bak")
+            value=$(getEnvValue "$key" "$APPLE_PI_DASH_INSTALL_DIR/apple_pi_dash.env.bak")
             if [ -n "$value" ]; then
                 updateEnvFile "$key" "$value" "$DOCKER_ENV_PATH"
             fi
@@ -191,15 +191,15 @@ function buildYourOwnImage(){
     CUSTOM_BUILD="true"
 
     # checkout the code to ~/tmp/apple_pi_dash folder and build the images
-    local APPLE PI DASH_TEMP_CODE_DIR=~/tmp/apple_pi_dash
-    rm -rf $APPLE PI DASH_TEMP_CODE_DIR
-    mkdir -p $APPLE PI DASH_TEMP_CODE_DIR
+    local APPLE_PI_DASH_TEMP_CODE_DIR=~/tmp/apple_pi_dash
+    rm -rf $APPLE_PI_DASH_TEMP_CODE_DIR
+    mkdir -p $APPLE_PI_DASH_TEMP_CODE_DIR
     REPO=https://github.com/$GH_REPO.git
-    git clone "$REPO" "$APPLE PI DASH_TEMP_CODE_DIR"  --branch "$BRANCH" --single-branch --depth 1
+    git clone "$REPO" "$APPLE_PI_DASH_TEMP_CODE_DIR"  --branch "$BRANCH" --single-branch --depth 1
 
-    cp "$APPLE PI DASH_TEMP_CODE_DIR/deployments/cli/community/build.yml" "$APPLE PI DASH_TEMP_CODE_DIR/build.yml"
+    cp "$APPLE_PI_DASH_TEMP_CODE_DIR/deployments/cli/community/build.yml" "$APPLE_PI_DASH_TEMP_CODE_DIR/build.yml"
 
-    cd "$APPLE PI DASH_TEMP_CODE_DIR" || exit
+    cd "$APPLE_PI_DASH_TEMP_CODE_DIR" || exit
 
     /bin/bash -c "$COMPOSE_CMD -f build.yml build --no-cache"  >&2
     if [ $? -ne 0 ]; then
@@ -243,9 +243,9 @@ function download() {
     local LOCAL_BUILD=$1
     cd $SCRIPT_DIR
     TS=$(date +%s)
-    if [ -f "$APPLE PI DASH_INSTALL_DIR/docker-compose.yaml" ]
+    if [ -f "$APPLE_PI_DASH_INSTALL_DIR/docker-compose.yaml" ]
     then
-        mv $APPLE PI DASH_INSTALL_DIR/docker-compose.yaml $APPLE PI DASH_INSTALL_DIR/archive/$TS.docker-compose.yaml
+        mv $APPLE_PI_DASH_INSTALL_DIR/docker-compose.yaml $APPLE_PI_DASH_INSTALL_DIR/archive/$TS.docker-compose.yaml
     fi
 
     RESPONSE=$(curl -sSL -H 'Cache-Control: no-cache, no-store' -w "HTTPSTATUS:%{http_code}" "$RELEASE_DOWNLOAD_URL/$APP_RELEASE/docker-compose.yml?$(date +%s)")
@@ -253,7 +253,7 @@ function download() {
     STATUS=$(echo "$RESPONSE" | tr -d '\n' | sed -e 's/.*HTTPSTATUS://')
 
     if [ "$STATUS" -eq 200 ]; then
-        echo "$BODY" > $APPLE PI DASH_INSTALL_DIR/docker-compose.yaml
+        echo "$BODY" > $APPLE_PI_DASH_INSTALL_DIR/docker-compose.yaml
     else
         # Fallback to download from the raw github url
         RESPONSE=$(curl -sSL -H 'Cache-Control: no-cache, no-store' -w "HTTPSTATUS:%{http_code}" "$FALLBACK_DOWNLOAD_URL/docker-compose.yml?$(date +%s)")
@@ -261,11 +261,11 @@ function download() {
         STATUS=$(echo "$RESPONSE" | tr -d '\n' | sed -e 's/.*HTTPSTATUS://')
 
         if [ "$STATUS" -eq 200 ]; then
-            echo "$BODY" > $APPLE PI DASH_INSTALL_DIR/docker-compose.yaml
+            echo "$BODY" > $APPLE_PI_DASH_INSTALL_DIR/docker-compose.yaml
         else
             echo "Failed to download docker-compose.yml. HTTP Status: $STATUS"
             echo "URL: $RELEASE_DOWNLOAD_URL/$APP_RELEASE/docker-compose.yml"
-            mv $APPLE PI DASH_INSTALL_DIR/archive/$TS.docker-compose.yaml $APPLE PI DASH_INSTALL_DIR/docker-compose.yaml
+            mv $APPLE_PI_DASH_INSTALL_DIR/archive/$TS.docker-compose.yaml $APPLE_PI_DASH_INSTALL_DIR/docker-compose.yaml
             exit 1
         fi
     fi
@@ -275,7 +275,7 @@ function download() {
     STATUS=$(echo "$RESPONSE" | tr -d '\n' | sed -e 's/.*HTTPSTATUS://')
 
     if [ "$STATUS" -eq 200 ]; then
-        echo "$BODY" > $APPLE PI DASH_INSTALL_DIR/variables-upgrade.env
+        echo "$BODY" > $APPLE_PI_DASH_INSTALL_DIR/variables-upgrade.env
     else
         # Fallback to download from the raw github url
         RESPONSE=$(curl -sSL -H 'Cache-Control: no-cache, no-store' -w "HTTPSTATUS:%{http_code}" "$FALLBACK_DOWNLOAD_URL/variables.env?$(date +%s)")
@@ -283,22 +283,22 @@ function download() {
         STATUS=$(echo "$RESPONSE" | tr -d '\n' | sed -e 's/.*HTTPSTATUS://')
 
         if [ "$STATUS" -eq 200 ]; then
-            echo "$BODY" > $APPLE PI DASH_INSTALL_DIR/variables-upgrade.env
+            echo "$BODY" > $APPLE_PI_DASH_INSTALL_DIR/variables-upgrade.env
         else
             echo "Failed to download variables.env. HTTP Status: $STATUS"
             echo "URL: $RELEASE_DOWNLOAD_URL/$APP_RELEASE/variables.env"
-            mv $APPLE PI DASH_INSTALL_DIR/archive/$TS.docker-compose.yaml $APPLE PI DASH_INSTALL_DIR/docker-compose.yaml
+            mv $APPLE_PI_DASH_INSTALL_DIR/archive/$TS.docker-compose.yaml $APPLE_PI_DASH_INSTALL_DIR/docker-compose.yaml
             exit 1
         fi
     fi
 
     if [ -f "$DOCKER_ENV_PATH" ];
     then
-        cp "$DOCKER_ENV_PATH" "$APPLE PI DASH_INSTALL_DIR/archive/$TS.env"
-        cp "$DOCKER_ENV_PATH" "$APPLE PI DASH_INSTALL_DIR/apple_pi_dash.env.bak"
+        cp "$DOCKER_ENV_PATH" "$APPLE_PI_DASH_INSTALL_DIR/archive/$TS.env"
+        cp "$DOCKER_ENV_PATH" "$APPLE_PI_DASH_INSTALL_DIR/apple_pi_dash.env.bak"
     fi
 
-    mv $APPLE PI DASH_INSTALL_DIR/variables-upgrade.env $DOCKER_ENV_PATH
+    mv $APPLE_PI_DASH_INSTALL_DIR/variables-upgrade.env $DOCKER_ENV_PATH
 
     syncEnvFile
 
@@ -587,7 +587,7 @@ function backup_container_dir() {
 
 function backupData() {
     local datetime=$(date +"%Y%m%d-%H%M")
-    local BACKUP_FOLDER=$APPLE PI DASH_INSTALL_DIR/backup/$datetime
+    local BACKUP_FOLDER=$APPLE_PI_DASH_INSTALL_DIR/backup/$datetime
     mkdir -p "$BACKUP_FOLDER"
 
     # Check if docker-compose.yml exists
