@@ -50,11 +50,8 @@ impl RunsIndex {
         const CAP: usize = 500;
         if self.runs.len() > CAP {
             let to_drop = self.runs.len() - CAP;
-            let mut by_age: Vec<(Uuid, DateTime<Utc>)> = self
-                .runs
-                .iter()
-                .map(|(k, v)| (*k, v.started_at))
-                .collect();
+            let mut by_age: Vec<(Uuid, DateTime<Utc>)> =
+                self.runs.iter().map(|(k, v)| (*k, v.started_at)).collect();
             by_age.sort_by_key(|(_, ts)| *ts);
             for (k, _) in by_age.into_iter().take(to_drop) {
                 self.runs.remove(&k);

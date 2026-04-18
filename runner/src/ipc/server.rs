@@ -36,8 +36,8 @@ impl IpcServer {
         let prev_umask = nix::sys::stat::umask(nix::sys::stat::Mode::from_bits_truncate(0o077));
         let bind_result = UnixListener::bind(&self.path);
         nix::sys::stat::umask(prev_umask);
-        let listener = bind_result
-            .with_context(|| format!("binding unix socket {:?}", self.path))?;
+        let listener =
+            bind_result.with_context(|| format!("binding unix socket {:?}", self.path))?;
         // Belt-and-braces: enforce 0600 on the socket explicitly.
         let mut perm = std::fs::metadata(&self.path)?.permissions();
         perm.set_mode(0o600);

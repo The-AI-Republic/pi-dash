@@ -92,11 +92,13 @@ fn command_matches(cmd: &str, pattern: &str) -> bool {
     let p = pattern.trim();
     if let Some(stripped) = p.strip_suffix(' ').and_then(|s| s.strip_suffix('*')) {
         // Pattern like `git ` (after stripping `*`) — require a word boundary.
-        c.starts_with(stripped) && (c.len() == stripped.len() || c[stripped.len()..].starts_with(' '))
+        c.starts_with(stripped)
+            && (c.len() == stripped.len() || c[stripped.len()..].starts_with(' '))
     } else if let Some(stripped) = p.strip_suffix('*') {
         // Bare `git*` — require either exact match or a space after the prefix
         // so `git pushy` does not match `git push*`.
-        c.starts_with(stripped) && (c.len() == stripped.len() || c[stripped.len()..].starts_with(' '))
+        c.starts_with(stripped)
+            && (c.len() == stripped.len() || c[stripped.len()..].starts_with(' '))
     } else {
         c == p || c.starts_with(&format!("{p} "))
     }
