@@ -111,6 +111,9 @@ class RunnerDeregisterEndpoint(APIView):
 
     authentication_classes = [RunnerBearerAuthentication]
     permission_classes = []
+    # DRF's default throttles call ``request.user.is_authenticated``; our
+    # bearer auth puts a ``Runner`` instance there, so skip the throttle chain.
+    throttle_classes: list = []
 
     def post(self, request, runner_id):
         runner = getattr(request, "auth_runner", None)
@@ -131,6 +134,7 @@ class RunnerRotateEndpoint(APIView):
 
     authentication_classes = [RunnerBearerAuthentication]
     permission_classes = []
+    throttle_classes: list = []
 
     def post(self, request, runner_id):
         runner = getattr(request, "auth_runner", None)
