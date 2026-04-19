@@ -25,6 +25,12 @@ logger = logging.getLogger(__name__)
 
 _PREVIOUS_STATE = "_orchestration_prev_state_id"
 
+#: Process-local counter of swallowed orchestration errors. We catch and log
+#: every exception in `fire_state_transition` so a broken trigger can't crash
+#: the user's Issue save — but silent failures are worse than loud 500s, so we
+#: also bump this counter. Ops dashboards and tests can assert on it.
+orchestration_error_count = 0
+
 
 @receiver(pre_save, sender=Issue, dispatch_uid="orchestration.issue_presave")
 def capture_prior_state(sender, instance: Issue, **kwargs) -> None:
@@ -57,9 +63,15 @@ def fire_state_transition(sender, instance: Issue, created: bool, **kwargs) -> N
             actor=None,
         )
     except Exception:  # noqa: BLE001 — never let orchestration crash issue save
+        global orchestration_error_count
+        orchestration_error_count += 1
         logger.exception(
-            "orchestration: handle_issue_state_transition failed for issue %s",
+            "orchestration.error: handle_issue_state_transition failed "
+            "for issue=%s from_state=%s to_state=%s (total_errors=%d)",
             instance.pk,
+            prev_state_id,
+            current_state_id,
+            orchestration_error_count,
         )
 
 

@@ -34,7 +34,12 @@ class _FakeRun:
 
 
 def _is_workspace_admin(user, workspace: Workspace) -> bool:
-    if user.is_superuser or user.is_staff:
+    """Preview is locked to workspace-scoped admins (role 20) plus Django
+    superusers for ops. `is_staff` alone is *not* sufficient — a staff flag
+    doesn't imply membership in this workspace, and the design (§9 Q2) is
+    explicit that preview must be workspace-admin-gated until we build a
+    richer auth model."""
+    if user.is_superuser:
         return True
     return WorkspaceMember.objects.filter(
         workspace=workspace, member=user, role=20, is_active=True

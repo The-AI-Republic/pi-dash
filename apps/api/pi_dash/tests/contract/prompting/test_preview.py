@@ -78,6 +78,25 @@ def test_preview_requires_admin(seeded, api_client, workspace, issue, create_use
 
 
 @pytest.mark.contract
+def test_preview_rejects_staff_non_member(seeded, api_client, workspace, issue):
+    """is_staff alone must not grant preview access — only workspace-admin
+    membership (role 20) or superuser do. Regression for a bypass that leaked
+    preview access to any Django-admin user."""
+    from pi_dash.db.models import User
+
+    staff = User.objects.create(email="staff@pi-dash.so", is_staff=True)
+    staff.set_password("p"); staff.save()
+    api_client.force_authenticate(user=staff)
+    template = PromptTemplate.objects.filter(workspace__isnull=True).first()
+    url = reverse(
+        "prompting:prompt-template-preview",
+        kwargs={"slug": workspace.slug, "template_id": template.id},
+    )
+    response = api_client.post(url, {"issue_id": str(issue.id)}, format="json")
+    assert response.status_code == 403
+
+
+@pytest.mark.contract
 def test_preview_missing_issue_returns_400(seeded, session_client, workspace):
     template = PromptTemplate.objects.filter(workspace__isnull=True).first()
     url = reverse(

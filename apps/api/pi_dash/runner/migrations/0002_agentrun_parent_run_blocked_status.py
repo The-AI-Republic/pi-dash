@@ -2,11 +2,12 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 # See the LICENSE file for details.
 
-import django.db.models.deletion
 from django.db import migrations, models
+import django.db.models.deletion
 
 
 class Migration(migrations.Migration):
+
     dependencies = [
         ("runner", "0001_initial"),
     ]
@@ -17,10 +18,7 @@ class Migration(migrations.Migration):
             name="parent_run",
             field=models.ForeignKey(
                 blank=True,
-                help_text=(
-                    "Prior run this attempt follows up on; null for an issue's "
-                    "initial run."
-                ),
+                help_text="Prior run this attempt follows up on; null for an issue's initial run.",
                 null=True,
                 on_delete=django.db.models.deletion.SET_NULL,
                 related_name="follow_up_runs",
@@ -51,7 +49,7 @@ class Migration(migrations.Migration):
             model_name="agentrun",
             index=models.Index(
                 fields=["work_item", "status"],
-                name="agent_run_work_it_f1b9d8_idx",
+                name="agent_run_work_it_d042e7_idx",
             ),
         ),
     ]

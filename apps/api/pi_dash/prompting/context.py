@@ -50,20 +50,13 @@ def build_context(issue: Issue, run: AgentRun) -> Dict[str, Any]:
     workspace = issue.workspace
     state = getattr(issue, "state", None)
 
-    labels = []
-    try:
-        labels = list(issue.labels.all().values_list("name", flat=True))
-    except Exception:  # noqa: BLE001 — keep context-building resilient
-        labels = []
-
-    assignees = []
-    try:
-        assignees = [
-            (u.display_name or u.email or "")
-            for u in issue.assignees.all()
-        ]
-    except Exception:  # noqa: BLE001
-        assignees = []
+    # Plain M2M traversals; if these raise it's a real ORM error and should
+    # bubble up to the caller (which already wraps rendering in PromptRenderError
+    # at the composer layer).
+    labels = list(issue.labels.all().values_list("name", flat=True))
+    assignees = [
+        (u.display_name or u.email or "") for u in issue.assignees.all()
+    ]
 
     attempt = _compute_attempt(issue, run)
 

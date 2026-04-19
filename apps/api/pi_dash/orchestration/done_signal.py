@@ -16,6 +16,8 @@ import re
 from dataclasses import dataclass
 from typing import Any, Dict, Optional
 
+from django.utils import timezone
+
 
 FENCE_RE = re.compile(
     r"```pi-dash-done\s*\n(?P<body>.*?)```",
@@ -123,10 +125,13 @@ def ingest_into_run(run, text: str):
     """Parse ``text`` and persist the normalized payload onto ``run``.
 
     On malformed or missing fences the run is marked FAILED with the error;
-    on success the payload is written to ``run.done_payload`` and the run's
-    status is advanced based on the signal's ``status`` field.
+    on success the payload is written to ``run.done_payload``, any prior
+    ``error`` is cleared, and ``ended_at`` is stamped so the row is a complete
+    terminal record.
     """
     from pi_dash.runner.models import AgentRunStatus
+
+    now = timezone.now()
 
     try:
         signal = parse(text)
@@ -135,15 +140,18 @@ def ingest_into_run(run, text: str):
         run.done_payload = None
         if not run.is_terminal:
             run.status = AgentRunStatus.FAILED
-        run.save(update_fields=["error", "done_payload", "status"])
+        run.ended_at = now
+        run.save(update_fields=["error", "done_payload", "status", "ended_at"])
         return None
 
     run.done_payload = signal.payload
+    run.error = ""
     if signal.status == "completed":
         run.status = AgentRunStatus.COMPLETED
     elif signal.status == "blocked":
         run.status = AgentRunStatus.BLOCKED
     elif signal.status == "noop":
         run.status = AgentRunStatus.COMPLETED
-    run.save(update_fields=["done_payload", "status"])
+    run.ended_at = now
+    run.save(update_fields=["done_payload", "error", "status", "ended_at"])
     return signal

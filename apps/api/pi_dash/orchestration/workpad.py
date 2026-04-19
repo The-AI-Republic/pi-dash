@@ -85,13 +85,19 @@ def update_workpad_body(issue: Issue, markdown_body: str) -> IssueComment:
 
 
 def _to_html(body: str) -> str:
-    """Minimal md -> html shim: the comment model's save() derives the stripped
-    form itself, but it expects an HTML payload. We wrap the body so the
-    `startswith` marker test stays reliable and so the comment renders as a
-    single pre-formatted block in the UI."""
+    """Minimal md -> html shim.
+
+    Pi Dash comments are rich HTML. We don't run the agent's markdown through
+    the editor pipeline — that would normalize whitespace and break the
+    ``## Agent Workpad`` structural marker the parser keys off. Instead we
+    wrap the body in a `<pre>` block so newlines, list dashes, and fenced
+    code samples all render verbatim in the UI while the comment model's
+    ``strip_tags`` pass produces a ``comment_stripped`` that still
+    ``startswith("## Agent Workpad")``.
+    """
     escaped = (
         body.replace("&", "&amp;")
         .replace("<", "&lt;")
         .replace(">", "&gt;")
     )
-    return f"<p>{escaped}</p>"
+    return f"<pre>{escaped}</pre>"
