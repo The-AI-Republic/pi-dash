@@ -16,9 +16,12 @@ from rest_framework import status
 # Module imports
 from .. import BaseViewSet, BaseAPIView
 from pi_dash.app.serializers import StateSerializer
-from pi_dash.app.permissions import ROLE, allow_permission
+from pi_dash.app.permissions import ROLE, allow_permission, can_mutate_states
 from pi_dash.db.models import State, Issue
 from pi_dash.utils.cache import invalidate_cache
+
+
+_MEMBERS_BLOCKED_RESPONSE = {"error": "Members are not permitted to edit workflow states for this project."}
 
 
 class StateViewSet(BaseViewSet):
@@ -43,8 +46,10 @@ class StateViewSet(BaseViewSet):
         )
 
     @invalidate_cache(path="workspaces/:slug/states/", url_params=True, user=False)
-    @allow_permission([ROLE.ADMIN])
+    @allow_permission([ROLE.ADMIN, ROLE.MEMBER])
     def create(self, request, slug, project_id):
+        if not can_mutate_states(request.user, slug, project_id):
+            return Response(_MEMBERS_BLOCKED_RESPONSE, status=status.HTTP_403_FORBIDDEN)
         try:
             serializer = StateSerializer(data=request.data)
             if serializer.is_valid():
@@ -58,8 +63,10 @@ class StateViewSet(BaseViewSet):
                     status=status.HTTP_400_BAD_REQUEST,
                 )
 
-    @allow_permission([ROLE.ADMIN, ROLE.MEMBER, ROLE.GUEST])
+    @allow_permission([ROLE.ADMIN, ROLE.MEMBER])
     def partial_update(self, request, slug, project_id, pk):
+        if not can_mutate_states(request.user, slug, project_id):
+            return Response(_MEMBERS_BLOCKED_RESPONSE, status=status.HTTP_403_FORBIDDEN)
         try:
             state = State.objects.get(pk=pk, project_id=project_id, workspace__slug=slug)
             serializer = StateSerializer(state, data=request.data, partial=True)
@@ -102,16 +109,20 @@ class StateViewSet(BaseViewSet):
         return Response(states, status=status.HTTP_200_OK)
 
     @invalidate_cache(path="workspaces/:slug/states/", url_params=True, user=False)
-    @allow_permission([ROLE.ADMIN])
+    @allow_permission([ROLE.ADMIN, ROLE.MEMBER])
     def mark_as_default(self, request, slug, project_id, pk):
+        if not can_mutate_states(request.user, slug, project_id):
+            return Response(_MEMBERS_BLOCKED_RESPONSE, status=status.HTTP_403_FORBIDDEN)
         # Select all the states which are marked as default
         _ = State.objects.filter(workspace__slug=slug, project_id=project_id, default=True).update(default=False)
         _ = State.objects.filter(workspace__slug=slug, project_id=project_id, pk=pk).update(default=True)
         return Response(status=status.HTTP_204_NO_CONTENT)
 
     @invalidate_cache(path="workspaces/:slug/states/", url_params=True, user=False)
-    @allow_permission([ROLE.ADMIN])
+    @allow_permission([ROLE.ADMIN, ROLE.MEMBER])
     def destroy(self, request, slug, project_id, pk):
+        if not can_mutate_states(request.user, slug, project_id):
+            return Response(_MEMBERS_BLOCKED_RESPONSE, status=status.HTTP_403_FORBIDDEN)
         state = State.objects.get(is_triage=False, pk=pk, project_id=project_id, workspace__slug=slug)
 
         if state.default:
