@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
@@ -7,12 +7,12 @@
 import type { Editor } from "@tiptap/core";
 import { Plugin, PluginKey } from "@tiptap/pm/state";
 import type { EditorState, Transaction } from "@tiptap/pm/state";
-// apple pi dash imports
-import { CORE_EXTENSIONS } from "@apple-pi-dash/utils";
+// pi dash imports
+import { CORE_EXTENSIONS } from "@pi-dash/utils";
 // helpers
 import { CORE_ASSETS_META_DATA_RECORD } from "@/helpers/assets";
-// apple pi dash editor imports
-import { NODE_FILE_MAP } from "@/apple-pi-dash-editor/constants/utility";
+// pi dash editor imports
+import { NODE_FILE_MAP } from "@/pi-dash-editor/constants/utility";
 // types
 import type { TFileHandler } from "@/types";
 // local imports

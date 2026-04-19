@@ -1,10 +1,10 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
 
-import type { SingleOrArray, TFilterValue } from "@apple-pi-dash/types";
+import type { SingleOrArray, TFilterValue } from "@pi-dash/types";
 
 /**
  * Converts any value to a non-null array for UI components that expect arrays

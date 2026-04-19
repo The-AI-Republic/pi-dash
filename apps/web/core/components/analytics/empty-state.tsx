@@ -1,12 +1,12 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
 
 import { useTheme } from "next-themes";
-// apple pi dash package imports
-import { cn } from "@apple-pi-dash/utils";
+// pi dash package imports
+import { cn } from "@pi-dash/utils";
 // assets
 import darkBackgroundAsset from "@/app/assets/empty-state/analytics/empty-grid-background-dark.webp?url";
 import lightBackgroundAsset from "@/app/assets/empty-state/analytics/empty-grid-background-light.webp?url";

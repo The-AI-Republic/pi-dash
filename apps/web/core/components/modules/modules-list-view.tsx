@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
@@ -7,11 +7,11 @@
 import { observer } from "mobx-react";
 import { useParams, useSearchParams } from "next/navigation";
 // components
-import { EUserPermissionsLevel, MODULE_TRACKER_ELEMENTS } from "@apple-pi-dash/constants";
-import { useTranslation } from "@apple-pi-dash/i18n";
-import { EmptyStateDetailed } from "@apple-pi-dash/propel/empty-state";
-import { EUserProjectRoles } from "@apple-pi-dash/types";
-import { ContentWrapper, Row, ERowVariant } from "@apple-pi-dash/ui";
+import { EUserPermissionsLevel, MODULE_TRACKER_ELEMENTS } from "@pi-dash/constants";
+import { useTranslation } from "@pi-dash/i18n";
+import { EmptyStateDetailed } from "@pi-dash/propel/empty-state";
+import { EUserProjectRoles } from "@pi-dash/types";
+import { ContentWrapper, Row, ERowVariant } from "@pi-dash/ui";
 // components
 import { ListLayout } from "@/components/core/list";
 import { ModuleCardItem, ModuleListItem, ModulePeekOverview, ModulesListGanttChartView } from "@/components/modules";
@@ -29,7 +29,7 @@ export const ModulesListView = observer(function ModulesListView() {
   const { workspaceSlug, projectId } = useParams();
   const searchParams = useSearchParams();
   const peekModule = searchParams.get("peekModule");
-  // apple pi dash hooks
+  // pi dash hooks
   const { t } = useTranslation();
   // store hooks
   const { toggleCreateModuleModal } = useCommandPalette();

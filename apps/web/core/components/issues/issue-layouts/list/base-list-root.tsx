@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
@@ -8,11 +8,11 @@ import type { FC } from "react";
 import { useCallback, useEffect } from "react";
 import { observer } from "mobx-react";
 import { useParams } from "next/navigation";
-// apple pi dash constants
-import { EIssueFilterType, EUserPermissions, EUserPermissionsLevel } from "@apple-pi-dash/constants";
+// pi dash constants
+import { EIssueFilterType, EUserPermissions, EUserPermissionsLevel } from "@pi-dash/constants";
 // types
-import type { EIssuesStoreType, GroupByColumnTypes, TGroupedIssues, TIssueKanbanFilters } from "@apple-pi-dash/types";
-import { EIssueLayoutTypes } from "@apple-pi-dash/types";
+import type { EIssuesStoreType, GroupByColumnTypes, TGroupedIssues, TIssueKanbanFilters } from "@pi-dash/types";
+import { EIssueLayoutTypes } from "@pi-dash/types";
 // constants
 // hooks
 import { useIssues } from "@/hooks/store/use-issues";

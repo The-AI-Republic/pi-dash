@@ -1,20 +1,20 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
 
 import { useEffect } from "react";
 import { Controller, useForm } from "react-hook-form";
-// apple pi dash imports
-import { ETabIndices } from "@apple-pi-dash/constants";
+// pi dash imports
+import { ETabIndices } from "@pi-dash/constants";
 // types
-import { useTranslation } from "@apple-pi-dash/i18n";
-import { Button } from "@apple-pi-dash/propel/button";
-import type { ICycle } from "@apple-pi-dash/types";
+import { useTranslation } from "@pi-dash/i18n";
+import { Button } from "@pi-dash/propel/button";
+import type { ICycle } from "@pi-dash/types";
 // ui
-import { Input, TextArea } from "@apple-pi-dash/ui";
-import { getDate, renderFormattedPayloadDate, getTabIndex } from "@apple-pi-dash/utils";
+import { Input, TextArea } from "@pi-dash/ui";
+import { getDate, renderFormattedPayloadDate, getTabIndex } from "@pi-dash/utils";
 // components
 import { DateRangeDropdown } from "@/components/dropdowns/date-range";
 import { ProjectDropdown } from "@/components/dropdowns/project/dropdown";
@@ -40,7 +40,7 @@ const defaultValues: Partial<ICycle> = {
 
 export function CycleForm(props: Props) {
   const { handleFormSubmit, handleClose, status, projectId, setActiveProject, data, isMobile = false } = props;
-  // apple pi dash hooks
+  // pi dash hooks
   const { t } = useTranslation();
   // store hooks
   const { projectsWithCreatePermissions } = useUser();

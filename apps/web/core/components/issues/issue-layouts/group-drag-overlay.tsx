@@ -1,19 +1,19 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
 
 import { useRef } from "react";
 import { AlertCircle } from "lucide-react";
-// apple pi dash imports
-import { ISSUE_ORDER_BY_OPTIONS } from "@apple-pi-dash/constants";
-import { useTranslation } from "@apple-pi-dash/i18n";
-import type { TIssueOrderByOptions } from "@apple-pi-dash/types";
+// pi dash imports
+import { ISSUE_ORDER_BY_OPTIONS } from "@pi-dash/constants";
+import { useTranslation } from "@pi-dash/i18n";
+import type { TIssueOrderByOptions } from "@pi-dash/types";
 // helpers
-import { cn } from "@apple-pi-dash/utils";
-// apple pi dash web imports
-import { WorkFlowDisabledOverlay } from "@/apple-pi-dash-web/components/workflow";
+import { cn } from "@pi-dash/utils";
+// pi dash web imports
+import { WorkFlowDisabledOverlay } from "@/pi-dash-web/components/workflow";
 
 type Props = {
   dragColumnOrientation: "justify-start" | "justify-center" | "justify-end";

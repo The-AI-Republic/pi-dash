@@ -1,10 +1,10 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
 
-import { assetDuplicationHandlers } from "@/apple-pi-dash-editor/helpers/asset-duplication";
+import { assetDuplicationHandlers } from "@/pi-dash-editor/helpers/asset-duplication";
 
 // Utility function to process HTML content with all registered handlers
 export const processAssetDuplication = (htmlContent: string): { processedHtml: string } => {

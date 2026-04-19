@@ -1,7 +1,7 @@
 name: Bug report
-description: Create a bug report to help us improve Apple Pi Dash
+description: Create a bug report to help us improve Pi Dash
 title: "[bug]: "
-labels: [🐛bug, apple-pi-dash]
+labels: [🐛bug, pi-dash]
 assignees: [vihar, pushya22]
 body:
 - type: markdown

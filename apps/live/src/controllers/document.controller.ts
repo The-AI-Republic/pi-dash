@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
@@ -7,10 +7,10 @@
 import type { Request, Response } from "express";
 import { z } from "zod";
 // helpers
-import { Controller, Post } from "@apple-pi-dash/decorators";
-import { convertHTMLDocumentToAllFormats } from "@apple-pi-dash/editor";
+import { Controller, Post } from "@pi-dash/decorators";
+import { convertHTMLDocumentToAllFormats } from "@pi-dash/editor";
 // logger
-import { logger } from "@apple-pi-dash/logger";
+import { logger } from "@pi-dash/logger";
 import type { TConvertDocumentRequestBody } from "@/types";
 
 // Define the schema with more robust validation

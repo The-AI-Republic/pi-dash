@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
@@ -7,12 +7,12 @@
 import { useCallback } from "react";
 import { observer } from "mobx-react";
 import { useTheme } from "next-themes";
-// apple pi dash imports
-import { EUserPermissionsLevel } from "@apple-pi-dash/constants";
-import { useTranslation } from "@apple-pi-dash/i18n";
-import type { TModuleFilters } from "@apple-pi-dash/types";
-import { EUserProjectRoles } from "@apple-pi-dash/types";
-import { calculateTotalFilters } from "@apple-pi-dash/utils";
+// pi dash imports
+import { EUserPermissionsLevel } from "@pi-dash/constants";
+import { useTranslation } from "@pi-dash/i18n";
+import type { TModuleFilters } from "@pi-dash/types";
+import { EUserProjectRoles } from "@pi-dash/types";
+import { calculateTotalFilters } from "@pi-dash/utils";
 // assets
 import darkModulesAsset from "@/app/assets/empty-state/disabled-feature/modules-dark.webp?url";
 import lightModulesAsset from "@/app/assets/empty-state/disabled-feature/modules-light.webp?url";
@@ -33,7 +33,7 @@ function ProjectModulesPage({ params }: Route.ComponentProps) {
   const { workspaceSlug, projectId } = params;
   // theme hook
   const { resolvedTheme } = useTheme();
-  // apple pi dash hooks
+  // pi dash hooks
   const { t } = useTranslation();
   // store
   const { getProjectById, currentProjectDetails } = useProject();

@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
@@ -11,9 +11,9 @@ import { dropTargetForElements } from "@atlaskit/pragmatic-drag-and-drop/element
 import { autoScrollForElements } from "@atlaskit/pragmatic-drag-and-drop-auto-scroll/element";
 import { observer } from "mobx-react";
 import { useParams } from "next/navigation";
-import { EIssueFilterType, EUserPermissions, EUserPermissionsLevel } from "@apple-pi-dash/constants";
-import type { EIssuesStoreType } from "@apple-pi-dash/types";
-import { EIssueServiceType, EIssueLayoutTypes } from "@apple-pi-dash/types";
+import { EIssueFilterType, EUserPermissions, EUserPermissionsLevel } from "@pi-dash/constants";
+import type { EIssuesStoreType } from "@pi-dash/types";
+import { EIssueServiceType, EIssueLayoutTypes } from "@pi-dash/types";
 //hooks
 import { useIssueDetail } from "@/hooks/store/use-issue-detail";
 import { useIssues } from "@/hooks/store/use-issues";

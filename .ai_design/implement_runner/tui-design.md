@@ -1,6 +1,6 @@
 # Runner TUI — Design
 
-The MVP runner ships with a built-in TUI so users can configure the runner, watch it work, and answer approval requests from a terminal. This complements (not replaces) the Apple Pi Dash web UI.
+The MVP runner ships with a built-in TUI so users can configure the runner, watch it work, and answer approval requests from a terminal. This complements (not replaces) the Pi Dash web UI.
 
 ## Why a TUI for v1
 
@@ -20,12 +20,12 @@ The TUI is a **client**, not the runner itself. The runner daemon keeps running 
 ```
 ┌────────────────────── laptop ──────────────────────┐
 │                                                     │
-│   apple-pi-dash-runner  (service, always-on)        │
+│   pi-dash-runner  (service, always-on)        │
 │        │                                            │
 │        │  local Unix socket                         │
 │        │  (Windows: named pipe)                     │
 │        │                                            │
-│   apple-pi-dash-runner tui  (user launches adhoc)   │
+│   pi-dash-runner tui  (user launches adhoc)   │
 │        │                                            │
 │        │  ─────► outbound WS to cloud               │
 │        │  ─────► spawn codex app-server             │
@@ -59,8 +59,8 @@ Minimum methods (daemon-side):
 
 Socket path:
 
-- Linux/macOS: `$XDG_RUNTIME_DIR/apple-pi-dash-runner.sock` (or `~/.local/share/apple-pi-dash-runner/sock`)
-- Windows: `\\.\pipe\apple-pi-dash-runner`
+- Linux/macOS: `$XDG_RUNTIME_DIR/pi-dash-runner.sock` (or `~/.local/share/pi-dash-runner/sock`)
+- Windows: `\\.\pipe\pi-dash-runner`
 
 Permissions: 0600 — only the owning user can connect.
 
@@ -88,7 +88,7 @@ Four primary views. Switch with number keys or tab. Vim-style `j/k/h/l` + arrow 
 ### 1. Status (default landing view)
 
 ```
-╭─ Apple Pi Dash Runner ─────────────────────────────────────╮
+╭─ Pi Dash Runner ─────────────────────────────────────╮
 │ ● Connected        my-laptop                               │
 │ Workspace: acme    Labels: codex, macos, arm64             │
 │ Uptime 4h 23m      Last heartbeat 2s ago                   │
@@ -144,7 +144,7 @@ Form-style editor. Edits are POSTed to the daemon and applied live.
 │ Identity                                                   │
 │   Runner name     my-laptop                                │
 │   Workspace       acme                                     │
-│   Cloud URL       https://cloud.apple-pi-dash.so           │
+│   Cloud URL       https://cloud.pi-dash.so           │
 │                                                             │
 │ Capabilities (labels)                           [e] edit   │
 │   codex, macos, arm64                                      │
@@ -201,7 +201,7 @@ Notes:
 
 - Daemon can also auto-answer based on the configured approval policy; TUI shows only what needs a human.
 - When a new approval arrives and the TUI is open, focus jumps to this view and the terminal bell rings (unless user disabled).
-- Same `ApprovalRequest` object is also exposed to the Apple Pi Dash web UI; whichever answers first wins. Daemon records the decision source for audit.
+- Same `ApprovalRequest` object is also exposed to the Pi Dash web UI; whichever answers first wins. Daemon records the decision source for audit.
 
 ## Key bindings summary
 
@@ -221,11 +221,11 @@ Notes:
 
 ## First-run onboarding flow
 
-When the user runs `apple-pi-dash-runner tui` and no config exists on disk, the TUI walks them through setup instead of showing the dashboard:
+When the user runs `pi-dash-runner tui` and no config exists on disk, the TUI walks them through setup instead of showing the dashboard:
 
 ```
 Step 1 of 4: Paste registration code
-  Get a one-time code from Apple Pi Dash → Settings → Runners → New runner.
+  Get a one-time code from Pi Dash → Settings → Runners → New runner.
   Code:  __________
 
 Step 2 of 4: Verify Codex

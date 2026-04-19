@@ -1,11 +1,11 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
 
-import type { EPageAccess } from "@apple-pi-dash/constants";
-import type { TPage } from "@apple-pi-dash/types";
+import type { EPageAccess } from "@pi-dash/constants";
+import type { TPage } from "@pi-dash/types";
 import type { CreatePayload, BaseActionPayload } from "@/types";
 
 // Define all payload types for each event.

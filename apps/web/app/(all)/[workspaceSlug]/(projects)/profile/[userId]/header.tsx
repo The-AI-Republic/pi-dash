@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
@@ -8,18 +8,18 @@
 import { observer } from "mobx-react";
 import { useParams, useRouter } from "next/navigation";
 import { PanelRight } from "lucide-react";
-import { PROFILE_VIEWER_TAB, PROFILE_ADMINS_TAB, EUserPermissions, EUserPermissionsLevel } from "@apple-pi-dash/constants";
-import { useTranslation } from "@apple-pi-dash/i18n";
-import { YourWorkIcon, ChevronDownIcon } from "@apple-pi-dash/propel/icons";
-import type { IUserProfileProjectSegregation } from "@apple-pi-dash/types";
-import { Breadcrumbs, Header, CustomMenu } from "@apple-pi-dash/ui";
+import { PROFILE_VIEWER_TAB, PROFILE_ADMINS_TAB, EUserPermissions, EUserPermissionsLevel } from "@pi-dash/constants";
+import { useTranslation } from "@pi-dash/i18n";
+import { YourWorkIcon, ChevronDownIcon } from "@pi-dash/propel/icons";
+import type { IUserProfileProjectSegregation } from "@pi-dash/types";
+import { Breadcrumbs, Header, CustomMenu } from "@pi-dash/ui";
 // components
 import { BreadcrumbLink } from "@/components/common/breadcrumb-link";
 import { ProfileIssuesFilter } from "@/components/profile/profile-issues-filter";
 // hooks
 import { useAppTheme } from "@/hooks/store/use-app-theme";
 import { useUser, useUserPermissions } from "@/hooks/store/user";
-import { Button } from "@apple-pi-dash/propel/button";
+import { Button } from "@pi-dash/propel/button";
 
 type TUserProfileHeader = {
   userProjectsData: IUserProfileProjectSegregation | undefined;

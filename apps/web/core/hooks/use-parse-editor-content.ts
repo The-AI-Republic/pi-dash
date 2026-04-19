@@ -1,19 +1,19 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
 
 import { useCallback } from "react";
-// apple pi dash types
-import type { TSearchEntities } from "@apple-pi-dash/types";
+// pi dash types
+import type { TSearchEntities } from "@pi-dash/types";
 // helpers
-import { getBase64Image, getEditorAssetSrc } from "@apple-pi-dash/utils";
-import type { TCustomComponentsMetaData } from "@apple-pi-dash/utils";
+import { getBase64Image, getEditorAssetSrc } from "@pi-dash/utils";
+import type { TCustomComponentsMetaData } from "@pi-dash/utils";
 // hooks
 import { useMember } from "@/hooks/store/use-member";
-// apple pi dash web hooks
-import { useAdditionalEditorMention } from "@/apple-pi-dash-web/hooks/use-additional-editor-mention";
+// pi dash web hooks
+import { useAdditionalEditorMention } from "@/pi-dash-web/hooks/use-additional-editor-mention";
 
 type TArgs = {
   projectId?: string;

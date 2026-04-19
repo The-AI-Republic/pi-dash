@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
@@ -9,15 +9,15 @@ import { observer } from "mobx-react";
 import { usePopper } from "react-popper";
 import { Loader } from "lucide-react";
 import { Combobox } from "@headlessui/react";
-// apple pi dash imports
-import { EUserPermissionsLevel, getRandomLabelColor } from "@apple-pi-dash/constants";
-import { useTranslation } from "@apple-pi-dash/i18n";
-import { Button } from "@apple-pi-dash/propel/button";
-import { CheckIcon, SearchIcon, PlusIcon } from "@apple-pi-dash/propel/icons";
-import type { IIssueLabel } from "@apple-pi-dash/types";
-import { EUserProjectRoles } from "@apple-pi-dash/types";
+// pi dash imports
+import { EUserPermissionsLevel, getRandomLabelColor } from "@pi-dash/constants";
+import { useTranslation } from "@pi-dash/i18n";
+import { Button } from "@pi-dash/propel/button";
+import { CheckIcon, SearchIcon, PlusIcon } from "@pi-dash/propel/icons";
+import type { IIssueLabel } from "@pi-dash/types";
+import { EUserProjectRoles } from "@pi-dash/types";
 // helpers
-import { getTabIndex } from "@apple-pi-dash/utils";
+import { getTabIndex } from "@pi-dash/utils";
 // hooks
 import { useLabel } from "@/hooks/store/use-label";
 import { useUserPermissions } from "@/hooks/store/user";

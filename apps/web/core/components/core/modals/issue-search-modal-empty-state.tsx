@@ -1,14 +1,14 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
 
 import React from "react";
 import { useTheme } from "next-themes";
-// apple pi dash imports
-import { useTranslation } from "@apple-pi-dash/i18n";
-import type { ISearchIssueResponse } from "@apple-pi-dash/types";
+// pi dash imports
+import { useTranslation } from "@pi-dash/i18n";
+import type { ISearchIssueResponse } from "@pi-dash/types";
 // assets
 import darkIssuesAsset from "@/app/assets/empty-state/search/issues-dark.webp?url";
 import lightIssuesAsset from "@/app/assets/empty-state/search/issues-light.webp?url";
@@ -27,7 +27,7 @@ interface EmptyStateProps {
 export function IssueSearchModalEmptyState({ issues, searchTerm, debouncedSearchTerm, isSearching }: EmptyStateProps) {
   // theme hook
   const { resolvedTheme } = useTheme();
-  // apple pi dash hooks
+  // pi dash hooks
   const { t } = useTranslation();
   // derived values
   const searchResolvedPath = resolvedTheme === "light" ? lightSearchAsset : darkSearchAsset;

@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
@@ -9,11 +9,11 @@ import { observer } from "mobx-react";
 import Link from "next/link";
 import { useSearchParams } from "next/navigation";
 import useSWR from "swr";
-// apple pi dash imports
-import { useTranslation } from "@apple-pi-dash/i18n";
-import type { TPageVersion } from "@apple-pi-dash/types";
-import { Avatar } from "@apple-pi-dash/ui";
-import { cn, getFileURL, renderFormattedDate, renderFormattedTime } from "@apple-pi-dash/utils";
+// pi dash imports
+import { useTranslation } from "@pi-dash/i18n";
+import type { TPageVersion } from "@pi-dash/types";
+import { Avatar } from "@pi-dash/ui";
+import { cn, getFileURL, renderFormattedDate, renderFormattedTime } from "@pi-dash/utils";
 // components
 import type { TPageRootHandlers } from "@/components/pages/editor/page-root";
 // hooks

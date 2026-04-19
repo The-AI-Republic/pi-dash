@@ -1,14 +1,14 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
 
 import { useEffect, useState } from "react";
 import { TwitterPicker } from "react-color";
-import { Button } from "@apple-pi-dash/propel/button";
-import type { IState } from "@apple-pi-dash/types";
-import { Popover, Input, TextArea } from "@apple-pi-dash/ui";
+import { Button } from "@pi-dash/propel/button";
+import type { IState } from "@pi-dash/types";
+import { Popover, Input, TextArea } from "@pi-dash/ui";
 
 type TStateForm = {
   data: Partial<IState>;

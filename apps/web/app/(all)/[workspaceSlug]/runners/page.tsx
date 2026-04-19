@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
@@ -7,12 +7,12 @@
 import { useEffect, useState } from "react";
 import { observer } from "mobx-react";
 import useSWR from "swr";
-import { useTranslation } from "@apple-pi-dash/i18n";
-import { TOAST_TYPE, setToast } from "@apple-pi-dash/propel/toast";
-import { RunnerService } from "@apple-pi-dash/services";
-import type { IRunner, TRunnerStatus } from "@apple-pi-dash/types";
-import type { TBadgeVariant } from "@apple-pi-dash/ui";
-import { AlertModalCore, Badge, Button, Input } from "@apple-pi-dash/ui";
+import { useTranslation } from "@pi-dash/i18n";
+import { TOAST_TYPE, setToast } from "@pi-dash/propel/toast";
+import { RunnerService } from "@pi-dash/services";
+import type { IRunner, TRunnerStatus } from "@pi-dash/types";
+import type { TBadgeVariant } from "@pi-dash/ui";
+import { AlertModalCore, Badge, Button, Input } from "@pi-dash/ui";
 import { PageHead } from "@/components/core/page-title";
 import { useWorkspace } from "@/hooks/store/use-workspace";
 
@@ -124,7 +124,7 @@ const RunnersListPage = observer(function RunnersListPage() {
             <div className="mt-2 text-secondary">
               {t("runners.list.token_run_instructions")}
               <pre className="font-mono mt-1 text-11 whitespace-pre-wrap select-all">
-                apple-pi-dash-runner configure --url {origin} --token {mintedToken}
+                pi-dash-runner configure --url {origin} --token {mintedToken}
               </pre>
             </div>
             <div className="mt-3">

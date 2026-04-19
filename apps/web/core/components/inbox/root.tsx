@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
@@ -7,12 +7,12 @@
 import { useEffect, useState } from "react";
 import { observer } from "mobx-react";
 import { PanelLeft } from "lucide-react";
-// apple pi dash imports
-import { useTranslation } from "@apple-pi-dash/i18n";
-import { EmptyStateCompact } from "@apple-pi-dash/propel/empty-state";
-import { IntakeIcon } from "@apple-pi-dash/propel/icons";
-import { EInboxIssueCurrentTab } from "@apple-pi-dash/types";
-import { cn } from "@apple-pi-dash/utils";
+// pi dash imports
+import { useTranslation } from "@pi-dash/i18n";
+import { EmptyStateCompact } from "@pi-dash/propel/empty-state";
+import { IntakeIcon } from "@pi-dash/propel/icons";
+import { EInboxIssueCurrentTab } from "@pi-dash/types";
+import { cn } from "@pi-dash/utils";
 // components
 import { InboxContentRoot } from "@/components/inbox/content";
 import { InboxSidebar } from "@/components/inbox/sidebar";
@@ -32,7 +32,7 @@ export const InboxIssueRoot = observer(function InboxIssueRoot(props: TInboxIssu
   const { workspaceSlug, projectId, inboxIssueId, inboxAccessible, navigationTab } = props;
   // states
   const [isMobileSidebar, setIsMobileSidebar] = useState(true);
-  // apple pi dash hooks
+  // pi dash hooks
   const { t } = useTranslation();
   // hooks
   const { loader, error, currentTab, currentInboxProjectId, handleCurrentTab, fetchInboxIssues } = useProjectInbox();

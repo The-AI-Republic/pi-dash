@@ -1,5 +1,5 @@
 {
-  "name": "@apple-pi-dash/shared-state",
+  "name": "@pi-dash/shared-state",
   "version": "1.3.0",
   "private": true,
   "description": "Shared state shared across multiple apps internally",
@@ -23,9 +23,9 @@
     "clean": "rm -rf .turbo && rm -rf .next && rm -rf node_modules && rm -rf dist"
   },
   "dependencies": {
-    "@apple-pi-dash/constants": "workspace:*",
-    "@apple-pi-dash/types": "workspace:*",
-    "@apple-pi-dash/utils": "workspace:*",
+    "@pi-dash/constants": "workspace:*",
+    "@pi-dash/types": "workspace:*",
+    "@pi-dash/utils": "workspace:*",
     "lodash-es": "catalog:",
     "mobx": "catalog:",
     "mobx-utils": "catalog:",
@@ -33,7 +33,7 @@
     "zod": "^3.22.2"
   },
   "devDependencies": {
-    "@apple-pi-dash/typescript-config": "workspace:*",
+    "@pi-dash/typescript-config": "workspace:*",
     "@types/lodash-es": "catalog:",
     "@types/node": "catalog:",
     "tsdown": "catalog:",

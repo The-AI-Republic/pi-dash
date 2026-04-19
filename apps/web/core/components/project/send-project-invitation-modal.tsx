@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
@@ -7,15 +7,15 @@
 import React, { useEffect } from "react";
 import { observer } from "mobx-react";
 import { useForm, Controller, useFieldArray } from "react-hook-form";
-// apple pi dash imports
-import { ROLE, EUserPermissions } from "@apple-pi-dash/constants";
-import { useTranslation } from "@apple-pi-dash/i18n";
-import { Button } from "@apple-pi-dash/propel/button";
-import { PlusIcon, CloseIcon, ChevronDownIcon } from "@apple-pi-dash/propel/icons";
-import { TOAST_TYPE, setToast } from "@apple-pi-dash/propel/toast";
-import { Avatar, CustomSelect, CustomSearchSelect, EModalPosition, EModalWidth, ModalCore } from "@apple-pi-dash/ui";
+// pi dash imports
+import { ROLE, EUserPermissions } from "@pi-dash/constants";
+import { useTranslation } from "@pi-dash/i18n";
+import { Button } from "@pi-dash/propel/button";
+import { PlusIcon, CloseIcon, ChevronDownIcon } from "@pi-dash/propel/icons";
+import { TOAST_TYPE, setToast } from "@pi-dash/propel/toast";
+import { Avatar, CustomSelect, CustomSearchSelect, EModalPosition, EModalWidth, ModalCore } from "@pi-dash/ui";
 // helpers
-import { getFileURL } from "@apple-pi-dash/utils";
+import { getFileURL } from "@pi-dash/utils";
 // hooks
 import { useMember } from "@/hooks/store/use-member";
 import { useUserPermissions } from "@/hooks/store/user";
@@ -48,7 +48,7 @@ const defaultValues: FormValues = {
 
 export const SendProjectInvitationModal = observer(function SendProjectInvitationModal(props: Props) {
   const { isOpen, onClose, onSuccess, projectId, workspaceSlug } = props;
-  // apple pi dash hooks
+  // pi dash hooks
   const { t } = useTranslation();
   // store hooks
   const { getProjectRoleByWorkspaceSlugAndProjectId } = useUserPermissions();

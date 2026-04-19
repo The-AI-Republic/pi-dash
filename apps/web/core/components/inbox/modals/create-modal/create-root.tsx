@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
@@ -7,15 +7,15 @@
 import type { FormEvent } from "react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { observer } from "mobx-react";
-// apple pi dash imports
-import { ETabIndices } from "@apple-pi-dash/constants";
-import type { EditorRefApi } from "@apple-pi-dash/editor";
-import { useTranslation } from "@apple-pi-dash/i18n";
-import { Button } from "@apple-pi-dash/propel/button";
-import { TOAST_TYPE, setToast } from "@apple-pi-dash/propel/toast";
-import type { TIssue } from "@apple-pi-dash/types";
-import { ToggleSwitch } from "@apple-pi-dash/ui";
-import { renderFormattedPayloadDate, getTabIndex } from "@apple-pi-dash/utils";
+// pi dash imports
+import { ETabIndices } from "@pi-dash/constants";
+import type { EditorRefApi } from "@pi-dash/editor";
+import { useTranslation } from "@pi-dash/i18n";
+import { Button } from "@pi-dash/propel/button";
+import { TOAST_TYPE, setToast } from "@pi-dash/propel/toast";
+import type { TIssue } from "@pi-dash/types";
+import { ToggleSwitch } from "@pi-dash/ui";
+import { renderFormattedPayloadDate, getTabIndex } from "@pi-dash/utils";
 // hooks
 import { useProject } from "@/hooks/store/use-project";
 import { useProjectInbox } from "@/hooks/store/use-project-inbox";
@@ -23,10 +23,10 @@ import { useWorkspace } from "@/hooks/store/use-workspace";
 import { useAppRouter } from "@/hooks/use-app-router";
 import useKeypress from "@/hooks/use-keypress";
 import { usePlatformOS } from "@/hooks/use-platform-os";
-// apple pi dash web imports
-import { DeDupeButtonRoot } from "@/apple-pi-dash-web/components/de-dupe/de-dupe-button";
-import { DuplicateModalRoot } from "@/apple-pi-dash-web/components/de-dupe/duplicate-modal";
-import { useDebouncedDuplicateIssues } from "@/apple-pi-dash-web/hooks/use-debounced-duplicate-issues";
+// pi dash web imports
+import { DeDupeButtonRoot } from "@/pi-dash-web/components/de-dupe/de-dupe-button";
+import { DuplicateModalRoot } from "@/pi-dash-web/components/de-dupe/duplicate-modal";
+import { useDebouncedDuplicateIssues } from "@/pi-dash-web/hooks/use-debounced-duplicate-issues";
 // services
 import { FileService } from "@/services/file.service";
 // local imports

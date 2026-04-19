@@ -1,10 +1,10 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
 
-import { EIssueLayoutTypes } from "@apple-pi-dash/types";
+import { EIssueLayoutTypes } from "@pi-dash/types";
 
 export type TIssueLayout = "list" | "kanban" | "calendar" | "spreadsheet" | "gantt";
 

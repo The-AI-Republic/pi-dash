@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
@@ -89,7 +89,7 @@ export default {
       already_have_an_account: "Уже есть аккаунт?",
       login: "Войти",
       create_account: "Создать аккаунт",
-      new_to_apple_pi_dash: "Впервые в Apple Pi Dash?",
+      new_to_pi_dash: "Впервые в Pi Dash?",
       back_to_sign_in: "Вернуться к входу",
       resend_in: "Отправить снова через {seconds} секунд",
       sign_in_with_unique_code: "Войти с уникальным кодом",
@@ -415,7 +415,7 @@ export default {
   full_changelog: "Полный журнал изменений",
   support: "Поддержка",
   forum: "Forum",
-  powered_by_apple_pi_dash_pages: "Работает на Apple Pi Dash Pages",
+  powered_by_pi_dash_pages: "Работает на Pi Dash Pages",
   please_select_at_least_one_invitation: "Пожалуйста, выберите хотя бы одно приглашение.",
   please_select_at_least_one_invitation_description:
     "Для присоединения к рабочему пространству выберите хотя бы одно приглашение.",
@@ -582,7 +582,7 @@ export default {
       not_right_now: "Не сейчас",
       create_project: {
         title: "Создать проект",
-        description: "Большинство вещей начинаются с проекта в Apple Pi Dash.",
+        description: "Большинство вещей начинаются с проекта в Pi Dash.",
         cta: "Начать",
       },
       invite_team: {
@@ -596,7 +596,7 @@ export default {
         cta: "Настроить",
       },
       personalize_account: {
-        title: "Персонализируйте Apple Pi Dash",
+        title: "Персонализируйте Pi Dash",
         description: "Выберите изображение, цвета и другие параметры.",
         cta: "Настроить сейчас",
       },
@@ -629,8 +629,8 @@ export default {
         issues: "Рабочие элементы",
       },
     },
-    new_at_apple_pi_dash: {
-      title: "Новое в Apple Pi Dash",
+    new_at_pi_dash: {
+      title: "Новое в Pi Dash",
     },
     quick_tutorial: {
       title: "Быстрое обучение",
@@ -1286,7 +1286,7 @@ export default {
   },
   workspace_creation: {
     heading: "Создайте рабочее пространство",
-    subheading: "Чтобы начать использовать Apple Pi Dash, создайте или присоединитесь к рабочему пространству.",
+    subheading: "Чтобы начать использовать Pi Dash, создайте или присоединитесь к рабочему пространству.",
     form: {
       name: {
         label: "Название рабочего пространства",
@@ -1340,11 +1340,11 @@ export default {
       general: {
         title: "Обзор проектов, активности и метрик",
         description:
-          "Добро пожаловать в Apple Pi Dash! Создайте первый проект и отслеживайте рабочие элементы - эта страница станет вашим рабочим пространством. Администраторы также увидят элементы для управления командой.",
+          "Добро пожаловать в Pi Dash! Создайте первый проект и отслеживайте рабочие элементы - эта страница станет вашим рабочим пространством. Администраторы также увидят элементы для управления командой.",
         primary_button: {
           text: "Создать первый проект",
           comic: {
-            title: "Всё начинается с проекта в Apple Pi Dash",
+            title: "Всё начинается с проекта в Pi Dash",
             description: "Проектом может быть роадмап продукта, маркетинговая кампания или запуск нового автомобиля.",
           },
         },
@@ -1478,7 +1478,7 @@ export default {
         primary_button: {
           text: "Создать первый проект",
           comic: {
-            title: "Всё начинается с проекта в Apple Pi Dash",
+            title: "Всё начинается с проекта в Pi Dash",
             description:
               "Проектом может быть дорожная карта продукта, маркетинговая кампания или запуск нового автомобиля.",
           },
@@ -1490,7 +1490,7 @@ export default {
         primary_button: {
           text: "Создать первый проект",
           comic: {
-            title: "Всё начинается с проекта в Apple Pi Dash",
+            title: "Всё начинается с проекта в Pi Dash",
             description:
               "Проектом может быть дорожная карта продукта, маркетинговая кампания или запуск нового автомобиля.",
           },
@@ -1609,7 +1609,7 @@ export default {
     page_label: "{workspace} - Основные настройки",
     key_created: "Ключ создан",
     copy_key:
-      "Скопируйте и сохраните секретный ключ в Apple Pi Dash Pages. После закрытия ключ будет недоступен. CSV-файл с ключом был скачан.",
+      "Скопируйте и сохраните секретный ключ в Pi Dash Pages. После закрытия ключ будет недоступен. CSV-файл с ключом был скачан.",
     token_copied: "Токен скопирован в буфер",
     settings: {
       general: {
@@ -1780,7 +1780,7 @@ export default {
     empty_state: {
       api_tokens: {
         title: "Нет API-токенов",
-        description: "Используйте API Apple Pi Dash для интеграции с внешними системами. Создайте тоекен чтобы начать.",
+        description: "Используйте API Pi Dash для интеграции с внешними системами. Создайте тоекен чтобы начать.",
       },
       webhooks: {
         title: "Нет вебхуков",
@@ -1844,7 +1844,7 @@ export default {
       activity: {
         title: "Нет активности",
         description:
-          "Создайте первый рабочий элемент для начала работы! Добавьте детали и свойства рабочего элемента. Исследуйте больше в Apple Pi Dash, чтобы увидеть вашу активность.",
+          "Создайте первый рабочий элемент для начала работы! Добавьте детали и свойства рабочего элемента. Исследуйте больше в Pi Dash, чтобы увидеть вашу активность.",
       },
       assigned: {
         title: "Нет назначенных рабочих элементов",
@@ -2005,12 +2005,12 @@ export default {
       description: "Настройте автоматические действия для оптимизации рабочего процесса и сокращения ручных задач.",
       "auto-archive": {
         title: "Автоархивация закрытых рабочих элементов",
-        description: "Apple Pi Dash будет автоматически архивировать рабочие элементы, которые были завершены или отменены.",
+        description: "Pi Dash будет автоматически архивировать рабочие элементы, которые были завершены или отменены.",
         duration: "Автоархивация рабочих элементов, которые закрыты в течение",
       },
       "auto-close": {
         title: "Автоматическое закрытие рабочих элементов",
-        description: "Apple Pi Dash будет автоматически закрывать рабочие элементы, которые не были завершены или отменены.",
+        description: "Pi Dash будет автоматически закрывать рабочие элементы, которые не были завершены или отменены.",
         duration: "Автоматическое закрытие рабочих элементов, которые неактивны в течение",
         auto_close_status: "Статус автоматического закрытия",
       },
@@ -2202,7 +2202,7 @@ export default {
         primary_button: {
           text: "Создать первый рабочий элемент",
           comic: {
-            title: "Рабочие элементы - строительные блоки Apple Pi Dash",
+            title: "Рабочие элементы - строительные блоки Pi Dash",
             description:
               "Примеры рабочих элементов: редизайн интерфейса, ребрендинг компании или запуск новой системы.",
           },
@@ -2306,9 +2306,9 @@ export default {
   project_page: {
     empty_state: {
       general: {
-        title: "Создавайте заметки, документы или базу знаний. Используйте Galileo, ИИ-помощник Apple Pi Dash.",
+        title: "Создавайте заметки, документы или базу знаний. Используйте Galileo, ИИ-помощник Pi Dash.",
         description:
-          "Страницы - пространство для организации мыслей в Apple Pi Dash. Делайте заметки, форматируйте текст, встраивайте рабочие элементы, используйте компоненты. Для быстрого создания документов используйте Galileo через горячие клавиши или кнопку.",
+          "Страницы - пространство для организации мыслей в Pi Dash. Делайте заметки, форматируйте текст, встраивайте рабочие элементы, используйте компоненты. Для быстрого создания документов используйте Galileo через горячие клавиши или кнопку.",
         primary_button: {
           text: "Создать первую страницу",
         },
@@ -2679,8 +2679,8 @@ export default {
     edited_by: "Отредактировано",
   },
   self_hosted_maintenance_message: {
-    apple_pi_dash_didnt_start_up_this_could_be_because_one_or_more_apple_pi_dash_services_failed_to_start:
-      "Apple Pi Dash не запустился. Это может быть из-за того, что один или несколько сервисов Apple Pi Dash не смогли запуститься.",
+    pi_dash_didnt_start_up_this_could_be_because_one_or_more_pi_dash_services_failed_to_start:
+      "Pi Dash не запустился. Это может быть из-за того, что один или несколько сервисов Pi Dash не смогли запуститься.",
     choose_view_logs_from_setup_sh_and_docker_logs_to_be_sure:
       "Выберите View Logs из setup.sh и логов Docker, чтобы убедиться.",
   },
@@ -2865,7 +2865,7 @@ export default {
     },
     help_actions: {
       open_keyboard_shortcuts: "Открыть горячие клавиши",
-      open_apple_pi_dash_documentation: "Открыть документацию Apple Pi Dash",
+      open_pi_dash_documentation: "Открыть документацию Pi Dash",
       join_forum: "Присоединиться к Forum",
       report_bug: "Сообщить об ошибке",
     },

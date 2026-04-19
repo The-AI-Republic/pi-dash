@@ -1,23 +1,23 @@
 #!/bin/bash
 
 BRANCH=${BRANCH:-master}
-SERVICE_FOLDER=apple-pi-dash-app
+SERVICE_FOLDER=pi-dash-app
 SCRIPT_DIR=$PWD
-APPLE_PI_DASH_INSTALL_DIR=$PWD/$SERVICE_FOLDER
+PI_DASH_INSTALL_DIR=$PWD/$SERVICE_FOLDER
 export APP_RELEASE="stable"
-export DOCKERHUB_USER=makeapplepidash
+export DOCKERHUB_USER=makepidash
 
-export GH_REPO=makeapplepidash/apple_pi_dash
+export GH_REPO=makepidash/pi_dash
 export RELEASE_DOWNLOAD_URL="https://github.com/$GH_REPO/releases/download"
 export FALLBACK_DOWNLOAD_URL="https://raw.githubusercontent.com/$GH_REPO/$BRANCH/deployments/cli/community"
 
 OS_NAME=$(uname)
 
 # Create necessary directories
-mkdir -p $APPLE_PI_DASH_INSTALL_DIR/archive
+mkdir -p $PI_DASH_INSTALL_DIR/archive
 
-DOCKER_FILE_PATH=$APPLE_PI_DASH_INSTALL_DIR/docker-compose.yml
-DOCKER_ENV_PATH=$APPLE_PI_DASH_INSTALL_DIR/apple_pi_dash.env
+DOCKER_FILE_PATH=$PI_DASH_INSTALL_DIR/docker-compose.yml
+DOCKER_ENV_PATH=$PI_DASH_INSTALL_DIR/pi_dash.env
 
 function print_header() {
 clear
@@ -61,9 +61,9 @@ function readStackName() {
 
 # Function to get stack name (either from env or user input)
 function getStackName() {
-    read -p "Enter stack name [apple-pi-dash]: " input_stack_name
+    read -p "Enter stack name [pi-dash]: " input_stack_name
     if [ -z "$input_stack_name" ]; then
-        input_stack_name="apple_pi_dash"
+        input_stack_name="pi_dash"
     fi
     stack_name=$input_stack_name
     updateEnvFile "STACK_NAME" "$stack_name" "$DOCKER_ENV_PATH"
@@ -72,8 +72,8 @@ function getStackName() {
 
 function syncEnvFile(){
     echo "Syncing environment variables..." >&2
-    if [ -f "$APPLE_PI_DASH_INSTALL_DIR/apple_pi_dash.env.bak" ]; then        
-        # READ keys of apple_pi_dash.env and update the values from apple_pi_dash.env.bak
+    if [ -f "$PI_DASH_INSTALL_DIR/pi_dash.env.bak" ]; then        
+        # READ keys of pi_dash.env and update the values from pi_dash.env.bak
         while IFS= read -r line
         do
             # ignore if the line is empty or starts with #
@@ -81,19 +81,19 @@ function syncEnvFile(){
                 continue
             fi
             key=$(echo "$line" | cut -d'=' -f1)
-            value=$(getEnvValue "$key" "$APPLE_PI_DASH_INSTALL_DIR/apple_pi_dash.env.bak")
+            value=$(getEnvValue "$key" "$PI_DASH_INSTALL_DIR/pi_dash.env.bak")
             if [ -n "$value" ]; then
                 updateEnvFile "$key" "$value" "$DOCKER_ENV_PATH"
             fi
         done < "$DOCKER_ENV_PATH"
 
-        value=$(getEnvValue "STACK_NAME" "$APPLE_PI_DASH_INSTALL_DIR/apple_pi_dash.env.bak")
+        value=$(getEnvValue "STACK_NAME" "$PI_DASH_INSTALL_DIR/pi_dash.env.bak")
         if [ -n "$value" ]; then
             updateEnvFile "STACK_NAME" "$value" "$DOCKER_ENV_PATH"
         fi
     fi
     echo "Environment variables synced successfully" >&2
-    rm -f $APPLE_PI_DASH_INSTALL_DIR/apple_pi_dash.env.bak
+    rm -f $PI_DASH_INSTALL_DIR/pi_dash.env.bak
 }
 
 function getEnvValue() {
@@ -150,8 +150,8 @@ function updateEnvFile() {
 function download() {
     cd $SCRIPT_DIR || exit 1  
     TS=$(date +%s)
-    if [ -f "$APPLE_PI_DASH_INSTALL_DIR/docker-compose.yml" ]; then
-        mv $APPLE_PI_DASH_INSTALL_DIR/docker-compose.yml $APPLE_PI_DASH_INSTALL_DIR/archive/$TS.docker-compose.yml
+    if [ -f "$PI_DASH_INSTALL_DIR/docker-compose.yml" ]; then
+        mv $PI_DASH_INSTALL_DIR/docker-compose.yml $PI_DASH_INSTALL_DIR/archive/$TS.docker-compose.yml
     fi
 
     echo $RELEASE_DOWNLOAD_URL
@@ -163,7 +163,7 @@ function download() {
     STATUS=$(echo "$RESPONSE" | tr -d '\n' | sed -e 's/.*HTTPSTATUS://')
 
     if [ "$STATUS" -eq 200 ]; then
-        echo "$BODY" > $APPLE_PI_DASH_INSTALL_DIR/docker-compose.yml
+        echo "$BODY" > $PI_DASH_INSTALL_DIR/docker-compose.yml
     else
         # Fallback to download from the raw github url
         RESPONSE=$(curl -H 'Cache-Control: no-cache, no-store' -s -w "HTTPSTATUS:%{http_code}" "$FALLBACK_DOWNLOAD_URL/docker-compose.yml?$(date +%s)")
@@ -171,11 +171,11 @@ function download() {
         STATUS=$(echo "$RESPONSE" | tr -d '\n' | sed -e 's/.*HTTPSTATUS://')
 
         if [ "$STATUS" -eq 200 ]; then
-            echo "$BODY" > $APPLE_PI_DASH_INSTALL_DIR/docker-compose.yml
+            echo "$BODY" > $PI_DASH_INSTALL_DIR/docker-compose.yml
         else
             echo "Failed to download docker-compose.yml. HTTP Status: $STATUS"
             echo "URL: $RELEASE_DOWNLOAD_URL/$APP_RELEASE/docker-compose.yml"
-            mv $APPLE_PI_DASH_INSTALL_DIR/archive/$TS.docker-compose.yml $APPLE_PI_DASH_INSTALL_DIR/docker-compose.yml
+            mv $PI_DASH_INSTALL_DIR/archive/$TS.docker-compose.yml $PI_DASH_INSTALL_DIR/docker-compose.yml
             exit 1
         fi
     fi
@@ -185,7 +185,7 @@ function download() {
     STATUS=$(echo "$RESPONSE" | tr -d '\n' | sed -e 's/.*HTTPSTATUS://')
 
     if [ "$STATUS" -eq 200 ]; then
-        echo "$BODY" > $APPLE_PI_DASH_INSTALL_DIR/variables-upgrade.env
+        echo "$BODY" > $PI_DASH_INSTALL_DIR/variables-upgrade.env
     else
         # Fallback to download from the raw github url
         RESPONSE=$(curl -H 'Cache-Control: no-cache, no-store' -s -w "HTTPSTATUS:%{http_code}" "$FALLBACK_DOWNLOAD_URL/variables.env?$(date +%s)")
@@ -193,22 +193,22 @@ function download() {
         STATUS=$(echo "$RESPONSE" | tr -d '\n' | sed -e 's/.*HTTPSTATUS://')
 
         if [ "$STATUS" -eq 200 ]; then
-            echo "$BODY" > $APPLE_PI_DASH_INSTALL_DIR/variables-upgrade.env
+            echo "$BODY" > $PI_DASH_INSTALL_DIR/variables-upgrade.env
         else
             echo "Failed to download variables.env. HTTP Status: $STATUS"
             echo "URL: $RELEASE_DOWNLOAD_URL/$APP_RELEASE/variables.env"
-            mv $APPLE_PI_DASH_INSTALL_DIR/archive/$TS.docker-compose.yml $APPLE_PI_DASH_INSTALL_DIR/docker-compose.yml
+            mv $PI_DASH_INSTALL_DIR/archive/$TS.docker-compose.yml $PI_DASH_INSTALL_DIR/docker-compose.yml
             exit 1
         fi
     fi
 
     if [ -f "$DOCKER_ENV_PATH" ];
     then
-        cp "$DOCKER_ENV_PATH" "$APPLE_PI_DASH_INSTALL_DIR/archive/$TS.env"
-        cp "$DOCKER_ENV_PATH" "$APPLE_PI_DASH_INSTALL_DIR/apple_pi_dash.env.bak"
+        cp "$DOCKER_ENV_PATH" "$PI_DASH_INSTALL_DIR/archive/$TS.env"
+        cp "$DOCKER_ENV_PATH" "$PI_DASH_INSTALL_DIR/pi_dash.env.bak"
     fi
 
-    mv $APPLE_PI_DASH_INSTALL_DIR/variables-upgrade.env $DOCKER_ENV_PATH
+    mv $PI_DASH_INSTALL_DIR/variables-upgrade.env $DOCKER_ENV_PATH
 
     syncEnvFile
 
@@ -286,12 +286,12 @@ function deployStack() {
     done
 
     if [ -z "$api_service" ]; then
-        echo "Apple Pi Dash Server failed to start ❌"
+        echo "Pi Dash Server failed to start ❌"
         echo "Please check the logs for the 'api' service and resolve the issue(s)."
         echo "Stop the services by running the command: ./swarm.sh stop"
         exit 1
     fi
-    echo "   Apple Pi Dash Server started successfully ✅"
+    echo "   Pi Dash Server started successfully ✅"
     echo ""
     echo "   You can access the application at $WEB_URL"
     echo ""
@@ -505,10 +505,10 @@ function viewLogs(){
                 5) viewSpecificLogs "beat-worker";;
                 6) viewSpecificLogs "migrator";;
                 7) viewSpecificLogs "proxy";;
-                8) viewSpecificLogs "apple-pi-dash-redis";;
-                9) viewSpecificLogs "apple-pi-dash-db";;
-                10) viewSpecificLogs "apple-pi-dash-minio";;
-                11) viewSpecificLogs "apple-pi-dash-mq";;
+                8) viewSpecificLogs "pi-dash-redis";;
+                9) viewSpecificLogs "pi-dash-db";;
+                10) viewSpecificLogs "pi-dash-minio";;
+                11) viewSpecificLogs "pi-dash-mq";;
                 0) askForAction;;
                 *) echo "INVALID SERVICE NAME SUPPLIED";;
             esac
@@ -524,10 +524,10 @@ function viewLogs(){
             beat-worker) viewSpecificLogs "beat-worker";;
             migrator) viewSpecificLogs "migrator";;
             proxy) viewSpecificLogs "proxy";;
-            redis) viewSpecificLogs "apple-pi-dash-redis";;
-            postgres) viewSpecificLogs "apple-pi-dash-db";;
-            minio) viewSpecificLogs "apple-pi-dash-minio";;
-            rabbitmq) viewSpecificLogs "apple-pi-dash-mq";;
+            redis) viewSpecificLogs "pi-dash-redis";;
+            postgres) viewSpecificLogs "pi-dash-db";;
+            minio) viewSpecificLogs "pi-dash-minio";;
+            rabbitmq) viewSpecificLogs "pi-dash-mq";;
             *) echo "INVALID SERVICE NAME SUPPLIED";;
         esac
     else
@@ -595,7 +595,7 @@ if [ -f "$DOCKER_ENV_PATH" ]; then
     APP_RELEASE=$(getEnvValue "APP_RELEASE" "$DOCKER_ENV_PATH")
 
     if [ -z "$DOCKERHUB_USER" ]; then
-        DOCKERHUB_USER=makeapplepidash
+        DOCKERHUB_USER=makepidash
         updateEnvFile "DOCKERHUB_USER" "$DOCKERHUB_USER" "$DOCKER_ENV_PATH"
     fi
 

@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
@@ -10,13 +10,13 @@ import { observer } from "mobx-react";
 import { usePopper } from "react-popper";
 import { Component, Loader } from "lucide-react";
 import { Combobox } from "@headlessui/react";
-import { getRandomLabelColor } from "@apple-pi-dash/constants";
-// apple pi dash imports
-import { useOutsideClickDetector } from "@apple-pi-dash/hooks";
-import { useTranslation } from "@apple-pi-dash/i18n";
-import { CheckIcon, SearchIcon, LabelPropertyIcon } from "@apple-pi-dash/propel/icons";
-import type { IIssueLabel } from "@apple-pi-dash/types";
-import { cn } from "@apple-pi-dash/utils";
+import { getRandomLabelColor } from "@pi-dash/constants";
+// pi dash imports
+import { useOutsideClickDetector } from "@pi-dash/hooks";
+import { useTranslation } from "@pi-dash/i18n";
+import { CheckIcon, SearchIcon, LabelPropertyIcon } from "@pi-dash/propel/icons";
+import type { IIssueLabel } from "@pi-dash/types";
+import { cn } from "@pi-dash/utils";
 // components
 import { IssueLabelsList } from "@/components/ui/labels-list";
 // hooks
@@ -64,7 +64,7 @@ export const WorkItemLabelSelectBase = observer(function WorkItemLabelSelectBase
   const [popperElement, setPopperElement] = useState<HTMLDivElement | null>(null);
   const [isDropdownOpen, setIsDropdownOpen] = useState(false);
   const [submitting, setSubmitting] = useState<boolean>(false);
-  // apple pi dash hooks
+  // pi dash hooks
   const { t } = useTranslation();
   // store hooks
   const { isMobile } = usePlatformOS();

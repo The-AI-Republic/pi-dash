@@ -1,12 +1,12 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
 
-import { WEBSITE_URL } from "@apple-pi-dash/constants";
+import { WEBSITE_URL } from "@pi-dash/constants";
 // assets
-import { ApplePiDashLogo } from "@apple-pi-dash/propel/icons";
+import { PiDashLogo } from "@pi-dash/propel/icons";
 
 type TPoweredBy = {
   disabled?: boolean;
@@ -25,9 +25,9 @@ export function PoweredBy(props: TPoweredBy) {
       target="_blank"
       rel="noreferrer noopener"
     >
-      <ApplePiDashLogo className="h-3 w-auto text-primary" />
+      <PiDashLogo className="h-3 w-auto text-primary" />
       <div className="text-11">
-        Powered by <span className="font-semibold">Apple Pi Dash Publish</span>
+        Powered by <span className="font-semibold">Pi Dash Publish</span>
       </div>
     </a>
   );

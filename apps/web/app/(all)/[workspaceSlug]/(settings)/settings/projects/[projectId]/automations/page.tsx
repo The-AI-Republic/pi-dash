@@ -1,15 +1,15 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
 
 import { observer } from "mobx-react";
-// apple pi dash imports
-import { EUserPermissions, EUserPermissionsLevel } from "@apple-pi-dash/constants";
-import { useTranslation } from "@apple-pi-dash/i18n";
-import { TOAST_TYPE, setToast } from "@apple-pi-dash/propel/toast";
-import type { IProject } from "@apple-pi-dash/types";
+// pi dash imports
+import { EUserPermissions, EUserPermissionsLevel } from "@pi-dash/constants";
+import { useTranslation } from "@pi-dash/i18n";
+import { TOAST_TYPE, setToast } from "@pi-dash/propel/toast";
+import type { IProject } from "@pi-dash/types";
 import { NotAuthorizedView } from "@/components/auth-screens/not-authorized-view";
 import { AutoArchiveAutomation, AutoCloseAutomation } from "@/components/automation";
 import { PageHead } from "@/components/core/page-title";
@@ -18,8 +18,8 @@ import { SettingsHeading } from "@/components/settings/heading";
 // hooks
 import { useProject } from "@/hooks/store/use-project";
 import { useUserPermissions } from "@/hooks/store/user";
-// apple pi dash web imports
-import { CustomAutomationsRoot } from "@/apple-pi-dash-web/components/automations/root";
+// pi dash web imports
+import { CustomAutomationsRoot } from "@/pi-dash-web/components/automations/root";
 // local imports
 import type { Route } from "./+types/page";
 import { AutomationsProjectSettingsHeader } from "./header";

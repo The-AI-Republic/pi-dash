@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
@@ -8,21 +8,21 @@ import React, { useState } from "react";
 import { observer } from "mobx-react";
 import { useParams } from "next/navigation";
 import { Earth } from "lucide-react";
-// apple pi dash imports
-import { EUserPermissions, EUserPermissionsLevel, IS_FAVORITE_MENU_OPEN } from "@apple-pi-dash/constants";
-import { useLocalStorage } from "@apple-pi-dash/hooks";
-import { LockIcon } from "@apple-pi-dash/propel/icons";
-import { Tooltip } from "@apple-pi-dash/propel/tooltip";
-import type { IProjectView } from "@apple-pi-dash/types";
-import { EViewAccess } from "@apple-pi-dash/types";
-import { FavoriteStar } from "@apple-pi-dash/ui";
-import { getPublishViewLink } from "@apple-pi-dash/utils";
+// pi dash imports
+import { EUserPermissions, EUserPermissionsLevel, IS_FAVORITE_MENU_OPEN } from "@pi-dash/constants";
+import { useLocalStorage } from "@pi-dash/hooks";
+import { LockIcon } from "@pi-dash/propel/icons";
+import { Tooltip } from "@pi-dash/propel/tooltip";
+import type { IProjectView } from "@pi-dash/types";
+import { EViewAccess } from "@pi-dash/types";
+import { FavoriteStar } from "@pi-dash/ui";
+import { getPublishViewLink } from "@pi-dash/utils";
 // hooks
 import { useMember } from "@/hooks/store/use-member";
 import { useProjectView } from "@/hooks/store/use-project-view";
 import { useUserPermissions } from "@/hooks/store/user";
-// apple pi dash web imports
-import { PublishViewModal } from "@/apple-pi-dash-web/components/views/publish";
+// pi dash web imports
+import { PublishViewModal } from "@/pi-dash-web/components/views/publish";
 // local imports
 import { ButtonAvatars } from "../dropdowns/member/avatar";
 import { DeleteProjectViewModal } from "./delete-view-modal";

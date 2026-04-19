@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-# Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+# Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
 # SPDX-License-Identifier: AGPL-3.0-only
 # See the LICENSE file for details.
 
@@ -9,7 +9,7 @@ import sys
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Run Apple Pi Dash tests")
+    parser = argparse.ArgumentParser(description="Run Pi Dash tests")
     parser.add_argument("-u", "--unit", action="store_true", help="Run unit tests only")
     parser.add_argument("-c", "--contract", action="store_true", help="Run contract tests only")
     parser.add_argument("-s", "--smoke", action="store_true", help="Run smoke tests only")
@@ -36,7 +36,7 @@ def main():
 
     # Add coverage
     if args.coverage:
-        cmd.extend(["--cov=apple_pi_dash", "--cov-report=term", "--cov-report=html"])
+        cmd.extend(["--cov=pi_dash", "--cov-report=term", "--cov-report=html"])
 
     # Add parallel
     if args.parallel:

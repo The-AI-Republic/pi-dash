@@ -1,14 +1,14 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
 
 import { useForm } from "react-hook-form";
 import { Lightbulb } from "lucide-react";
-import { Button } from "@apple-pi-dash/propel/button";
-import { TOAST_TYPE, setToast } from "@apple-pi-dash/propel/toast";
-import type { IFormattedInstanceConfiguration, TInstanceAIConfigurationKeys } from "@apple-pi-dash/types";
+import { Button } from "@pi-dash/propel/button";
+import { TOAST_TYPE, setToast } from "@pi-dash/propel/toast";
+import type { IFormattedInstanceConfiguration, TInstanceAIConfigurationKeys } from "@pi-dash/types";
 // components
 import type { TControllerInputFormField } from "@/components/common/controller-input";
 import { ControllerInput } from "@/components/common/controller-input";
@@ -129,7 +129,7 @@ export function InstanceAIForm(props: IInstanceAIForm) {
           <Lightbulb className="size-4" />
           <div>
             If you have a preferred AI models vendor, please get in{" "}
-            <a className="font-medium underline" href="https://apple-pi-dash.so/contact">
+            <a className="font-medium underline" href="https://pi-dash.so/contact">
               touch with us.
             </a>
           </div>

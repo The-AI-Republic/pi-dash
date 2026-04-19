@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
@@ -8,15 +8,15 @@ import { cloneDeep, isEqual } from "lodash-es";
 import { action, computed, makeObservable, observable, toJS } from "mobx";
 import { computedFn } from "mobx-utils";
 import { v4 as uuidv4 } from "uuid";
-// apple pi dash imports
+// pi dash imports
 import type {
   TClearFilterOptions,
   TExpressionOptions,
   TFilterOptions,
   TSaveViewOptions,
   TUpdateViewOptions,
-} from "@apple-pi-dash/constants";
-import { DEFAULT_FILTER_VISIBILITY_OPTIONS } from "@apple-pi-dash/constants";
+} from "@pi-dash/constants";
+import { DEFAULT_FILTER_VISIBILITY_OPTIONS } from "@pi-dash/constants";
 import type {
   IFilterAdapter,
   SingleOrArray,
@@ -30,8 +30,8 @@ import type {
   TFilterValue,
   TLogicalOperator,
   TSupportedOperators,
-} from "@apple-pi-dash/types";
-import { FILTER_NODE_TYPE } from "@apple-pi-dash/types";
+} from "@pi-dash/types";
+import { FILTER_NODE_TYPE } from "@pi-dash/types";
 // local imports
 import {
   deepCompareFilterExpressions,
@@ -44,7 +44,7 @@ import {
   sanitizeAndStabilizeExpression,
   shouldNotifyChangeForExpression,
   updateNodeInExpression,
-} from "@apple-pi-dash/utils";
+} from "@pi-dash/utils";
 import type { IFilterConfigManager } from "./config-manager";
 import { FilterConfigManager } from "./config-manager";
 import type { IFilterInstanceHelper } from "./filter-helpers";

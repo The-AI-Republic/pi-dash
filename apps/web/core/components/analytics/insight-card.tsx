@@ -1,13 +1,13 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
 
-// apple pi dash package imports
+// pi dash package imports
 import React from "react";
-import type { IAnalyticsResponseFields } from "@apple-pi-dash/types";
-import { Loader } from "@apple-pi-dash/ui";
+import type { IAnalyticsResponseFields } from "@pi-dash/types";
+import { Loader } from "@pi-dash/ui";
 
 export type InsightCardProps = {
   data?: IAnalyticsResponseFields;

@@ -1,13 +1,13 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
 
 import type { LucideIcon } from "lucide-react";
 import { Users, Zap } from "lucide-react";
-// apple pi dash imports
-import type { ISvgIcons } from "@apple-pi-dash/propel/icons";
+// pi dash imports
+import type { ISvgIcons } from "@pi-dash/propel/icons";
 import {
   CycleIcon,
   EstimatePropertyIcon,
@@ -17,8 +17,8 @@ import {
   PageIcon,
   StatePropertyIcon,
   ViewsIcon,
-} from "@apple-pi-dash/propel/icons";
-import type { TProjectSettingsTabs } from "@apple-pi-dash/types";
+} from "@pi-dash/propel/icons";
+import type { TProjectSettingsTabs } from "@pi-dash/types";
 // components
 import { SettingIcon } from "@/components/icons/attachment";
 

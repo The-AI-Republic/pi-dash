@@ -1,6 +1,6 @@
-# Apple Pi Dash Runner — MVP Design
+# Pi Dash Runner — MVP Design
 
-This document specifies the MVP runner for Apple Pi Dash: a **thin local connector** that accepts tasks assigned by the Apple Pi Dash cloud and invokes Codex locally to execute them. The runner performs **no orchestration** — scheduling, retries, matching, prompt composition, and "done" interpretation all live in the cloud.
+This document specifies the MVP runner for Pi Dash: a **thin local connector** that accepts tasks assigned by the Pi Dash cloud and invokes Codex locally to execute them. The runner performs **no orchestration** — scheduling, retries, matching, prompt composition, and "done" interpretation all live in the cloud.
 
 Companion docs in this directory:
 
@@ -13,7 +13,7 @@ Companion docs in this directory:
 
 ### In scope
 
-- Register with Apple Pi Dash cloud using a one-time token → obtain long-lived runner credentials.
+- Register with Pi Dash cloud using a one-time token → obtain long-lived runner credentials.
 - Maintain a persistent outbound WebSocket to the cloud; send heartbeats; reconnect with backoff.
 - Accept one task at a time; bridge the cloud's task message to `codex app-server`.
 - Relay approval requests from Codex up to the cloud (and to the local TUI); accept decisions from either surface.
@@ -41,7 +41,7 @@ Companion docs in this directory:
 
 | #   | Topic                        | Decision                                                                                                                                                                                                                                                                       |
 | --- | ---------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| 1   | Working directory            | Runner config specifies working dir. Default `$TMPDIR/.apple_pi/`. If dir has a git repo → use it. If not → request repo URL from cloud, `git clone` into dir. Clone-auth failure is reported. Every task runs Codex against this dir.                                         |
+| 1   | Working directory            | Runner config specifies working dir. Default `$TMPDIR/.pi_dash/`. If dir has a git repo → use it. If not → request repo URL from cloud, `git clone` into dir. Clone-auth failure is reported. Every task runs Codex against this dir.                                         |
 | 2   | Concurrency                  | One task at a time per runner.                                                                                                                                                                                                                                                 |
 | 3   | Assignment                   | One runner instance per dev machine. Globally unique runner ID. Cloud assigns to an online idle runner owned by the user. No label matching.                                                                                                                                   |
 | 4   | Prompt construction          | Cloud renders; runner receives a ready-to-use prompt string. Runner never composes prompts.                                                                                                                                                                                    |
@@ -61,7 +61,7 @@ Companion docs in this directory:
 ```
 ┌─────────────────────── dev laptop ─────────────────────────────────┐
 │                                                                     │
-│   apple-pi-dash-runner  (daemon, long-lived)                        │
+│   pi-dash-runner  (daemon, long-lived)                        │
 │   ┌─────────────────────────────────────────────────────────────┐  │
 │   │  Cloud WS client  ◄─── outbound WSS on 443 ────►            │  │
 │   │                                                             │  │
@@ -76,13 +76,13 @@ Companion docs in this directory:
 │   └─────────────────────────────────────────────────────────────┘  │
 │            ▲                                                        │
 │            │ Unix socket                                            │
-│   apple-pi-dash-runner tui  (Ratatui, ad-hoc client)                │
+│   pi-dash-runner tui  (Ratatui, ad-hoc client)                │
 │                                                                     │
 └─────────────────────────────────────────────────────────────────────┘
                         │  WSS  │
                         ▼       ▼
                  ┌──────────────────────┐
-                 │  Apple Pi Dash cloud  │
+                 │  Pi Dash cloud  │
                  │  (Django + Node WS)   │
                  └──────────────────────┘
 ```
@@ -102,18 +102,18 @@ Key properties:
 
 Distribution: one static binary per target triple. Users install via:
 
-- Homebrew tap: `brew install apple-pi-dash/tap/runner`
+- Homebrew tap: `brew install pi-dash/tap/runner`
 - Direct download: `curl -fsSL https://... | sh`
 - Linux: `.deb` / `.rpm`
 - Future: Windows MSI (v2)
 
-Install does not require root; binary lives in `$HOME/.local/bin/apple-pi-dash-runner` by default.
+Install does not require root; binary lives in `$HOME/.local/bin/pi-dash-runner` by default.
 
 ### 4.2. First-run configure
 
 ```
-apple-pi-dash-runner configure \
-  --url https://cloud.apple-pi-dash.so \
+pi-dash-runner configure \
+  --url https://cloud.pi-dash.so \
   --token <ONE_TIME_CODE> \
   [--name my-laptop]
 ```
@@ -134,14 +134,14 @@ If TUI is used instead, the first-run wizard in `tui-design.md` performs steps 1
 ### 4.3. Service install
 
 ```
-apple-pi-dash-runner service install   # systemd user unit / launchd plist
-apple-pi-dash-runner service start
-apple-pi-dash-runner service status
-apple-pi-dash-runner service stop
+pi-dash-runner service install   # systemd user unit / launchd plist
+pi-dash-runner service start
+pi-dash-runner service status
+pi-dash-runner service stop
 ```
 
-- **Linux**: generate a `~/.config/systemd/user/apple-pi-dash-runner.service`, `systemctl --user daemon-reload`, enable with `linger` optional.
-- **macOS**: generate a `~/Library/LaunchAgents/so.apple-pi-dash.runner.plist`, load with `launchctl bootstrap gui/$UID`.
+- **Linux**: generate a `~/.config/systemd/user/pi-dash-runner.service`, `systemctl --user daemon-reload`, enable with `linger` optional.
+- **macOS**: generate a `~/Library/LaunchAgents/so.pi-dash.runner.plist`, load with `launchctl bootstrap gui/$UID`.
 
 ### 4.4. Run loop (simplified)
 
@@ -225,12 +225,12 @@ This is the one piece of business logic the runner owns. Detailed behavior:
 ### 5.1. Configuration
 
 ```toml
-# ~/.config/apple-pi-dash-runner/config.toml
+# ~/.config/pi-dash-runner/config.toml
 [workspace]
-working_dir = "/var/folders/.../T/.apple_pi"   # default: $TMPDIR/.apple_pi
+working_dir = "/var/folders/.../T/.pi_dash"   # default: $TMPDIR/.pi_dash
 ```
 
-Override via CLI: `apple-pi-dash-runner configure --working-dir /path/to/repo`.
+Override via CLI: `pi-dash-runner configure --working-dir /path/to/repo`.
 
 ### 5.2. On assignment
 
@@ -278,11 +278,11 @@ If `working_dir` is inside `$TMPDIR` on Linux (often `/tmp`, which may be `tmpfs
 ### 6.1. On-disk layout
 
 ```
-~/.config/apple-pi-dash-runner/
+~/.config/pi-dash-runner/
 ├── config.toml          # user-editable config
 └── credentials.toml     # runner_id + runner_secret (0600)
 
-~/.local/share/apple-pi-dash-runner/
+~/.local/share/pi-dash-runner/
 ├── history/
 │   ├── runs/
 │   │   └── <run_id>.jsonl      # one JSONL per run; all Codex events + lifecycle
@@ -299,11 +299,11 @@ version = 1
 
 [runner]
 name = "my-laptop"
-cloud_url = "https://cloud.apple-pi-dash.so"
+cloud_url = "https://cloud.pi-dash.so"
 # runner_id + secret are in credentials.toml
 
 [workspace]
-working_dir = "/var/folders/.../T/.apple_pi"
+working_dir = "/var/folders/.../T/.pi_dash"
 
 [codex]
 binary = "/usr/local/bin/codex"      # auto-detected; overridable
@@ -448,7 +448,7 @@ per-task:
 
 Phase ordering within one task:
 
-1. `initialize { clientInfo: { name: "apple-pi-dash-runner", version } }` → wait for `initialize` response.
+1. `initialize { clientInfo: { name: "pi-dash-runner", version } }` → wait for `initialize` response.
 2. Send `initialized` notification.
 3. `account/read` — confirm auth state. If unauthenticated → `run_awaiting_reauth`.
 4. `thread/start { cwd, model?, sandboxPolicy: "workspace-write", approvalPolicy: "on-request" }` → capture `thread_id`.
@@ -535,7 +535,7 @@ evaluate(req):
 Single binary, multiple modules. Organized by concern:
 
 ```
-apple-pi-dash-runner/
+pi-dash-runner/
 ├── Cargo.toml
 ├── src/
 │   ├── main.rs                     # CLI dispatch (clap)
@@ -642,7 +642,7 @@ Tooling: **cargo-dist**.
 
 - `cargo dist init` → `dist/Cargo.dist.toml` describing the targets: `aarch64-apple-darwin`, `x86_64-apple-darwin`, `x86_64-unknown-linux-gnu`.
 - Each tagged release: GitHub Actions matrix builds binaries + generates Homebrew formula, `.deb`, `.tar.gz`, SHA256SUMS.
-- Homebrew tap hosted at `github.com/apple-pi-dash/homebrew-tap`.
+- Homebrew tap hosted at `github.com/pi-dash/homebrew-tap`.
 - `curl | sh` installer script resolves to the right target triple and drops binary in `$HOME/.local/bin`.
 
 Binary signing:
@@ -743,4 +743,4 @@ For the reviewer's mental model, the runner **does not**:
 - Store global run state (only its own local history).
 - Open pull requests or run tests.
 
-All of that lives in Apple Pi Dash cloud. The runner is a mouthpiece for Codex with a persistent outbound connection and good manners about approvals and cleanup.
+All of that lives in Pi Dash cloud. The runner is a mouthpiece for Codex with a persistent outbound connection and good manners about approvals and cleanup.

@@ -1,20 +1,20 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
 
 import { useMemo } from "react";
 import { XCircle, ArchiveRestoreIcon } from "lucide-react";
-// apple pi dash imports
-import { useTranslation } from "@apple-pi-dash/i18n";
-import { LinkIcon, CopyIcon, NewTabIcon, EditIcon, ArchiveIcon, TrashIcon } from "@apple-pi-dash/propel/icons";
-import { TOAST_TYPE, setToast } from "@apple-pi-dash/propel/toast";
-import type { EIssuesStoreType, TIssue } from "@apple-pi-dash/types";
-import type { TContextMenuItem } from "@apple-pi-dash/ui";
-import { copyUrlToClipboard, generateWorkItemLink } from "@apple-pi-dash/utils";
+// pi dash imports
+import { useTranslation } from "@pi-dash/i18n";
+import { LinkIcon, CopyIcon, NewTabIcon, EditIcon, ArchiveIcon, TrashIcon } from "@pi-dash/propel/icons";
+import { TOAST_TYPE, setToast } from "@pi-dash/propel/toast";
+import type { EIssuesStoreType, TIssue } from "@pi-dash/types";
+import type { TContextMenuItem } from "@pi-dash/ui";
+import { copyUrlToClipboard, generateWorkItemLink } from "@pi-dash/utils";
 // types
-import { createCopyMenuWithDuplication } from "@/apple-pi-dash-web/components/issues/issue-layouts/quick-action-dropdowns";
+import { createCopyMenuWithDuplication } from "@/pi-dash-web/components/issues/issue-layouts/quick-action-dropdowns";
 
 // Generic helper function to handle optional function calls gracefully
 // Overload for functions without parameters

@@ -4,7 +4,7 @@ use tokio::process::Command;
 
 use crate::util::paths::Paths;
 
-const UNIT_NAME: &str = "apple-pi-dash-runner.service";
+const UNIT_NAME: &str = "pi-dash-runner.service";
 
 pub async fn install(paths: &Paths) -> Result<()> {
     let unit_path = unit_path()?;
@@ -18,15 +18,15 @@ pub async fn install(paths: &Paths) -> Result<()> {
     let runtime_dir = super::validate_path_for_unit(&paths.runtime_dir)?.to_string();
     let body = format!(
         r#"[Unit]
-Description=Apple Pi Dash Runner
+Description=Pi Dash Runner
 After=network-online.target
 Wants=network-online.target
 
 [Service]
 Type=simple
 ExecStart={exe} start
-Environment=APPLE_PI_RUNNER_CONFIG_DIR={config_dir}
-Environment=APPLE_PI_RUNNER_DATA_DIR={data_dir}
+Environment=PI_DASH_RUNNER_CONFIG_DIR={config_dir}
+Environment=PI_DASH_RUNNER_DATA_DIR={data_dir}
 Environment=XDG_RUNTIME_DIR={runtime_dir}
 Restart=on-failure
 RestartSec=5

@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
@@ -8,12 +8,12 @@ import { useEffect, useMemo, useState } from "react";
 import { useSearchParams } from "next/navigation";
 // icons
 import { Eye, EyeOff } from "lucide-react";
-// apple pi dash internal packages
-import { API_BASE_URL, E_PASSWORD_STRENGTH } from "@apple-pi-dash/constants";
-import { Button } from "@apple-pi-dash/propel/button";
-import { AuthService } from "@apple-pi-dash/services";
-import { Checkbox, Input, PasswordStrengthIndicator, Spinner } from "@apple-pi-dash/ui";
-import { getPasswordStrength, validatePersonName, validateCompanyName } from "@apple-pi-dash/utils";
+// pi dash internal packages
+import { API_BASE_URL, E_PASSWORD_STRENGTH } from "@pi-dash/constants";
+import { Button } from "@pi-dash/propel/button";
+import { AuthService } from "@pi-dash/services";
+import { Checkbox, Input, PasswordStrengthIndicator, Spinner } from "@pi-dash/ui";
+import { getPasswordStrength, validatePersonName, validateCompanyName } from "@pi-dash/utils";
 // components
 import { AuthHeader } from "@/app/(all)/(home)/auth-header";
 import { Banner } from "../common/banner";
@@ -142,8 +142,8 @@ export function InstanceSetupForm() {
       <div className="mt-10 flex w-full flex-grow flex-col items-center justify-center py-6">
         <div className="relative flex w-full max-w-[22.5rem] flex-col gap-6">
           <FormHeader
-            heading="Setup your Apple Pi Dash Instance"
-            subHeading="Post setup you will be able to manage this Apple Pi Dash instance."
+            heading="Setup your Pi Dash Instance"
+            subHeading="Post setup you will be able to manage this Pi Dash instance."
           />
           {errorData.type &&
             errorData?.message &&
@@ -352,10 +352,10 @@ export function InstanceSetupForm() {
                 />
               </div>
               <label className="cursor-pointer text-13 font-medium text-tertiary" htmlFor="is_telemetry_enabled">
-                Allow Apple Pi Dash to anonymously collect usage events.{" "}
+                Allow Pi Dash to anonymously collect usage events.{" "}
                 <a
                   tabIndex={-1}
-                  href="https://developers.apple-pi-dash.so/self-hosting/telemetry"
+                  href="https://developers.pi-dash.so/self-hosting/telemetry"
                   target="_blank"
                   rel="noopener noreferrer"
                   className="text-blue-500 hover:text-blue-600 flex-shrink-0 text-13 font-medium"

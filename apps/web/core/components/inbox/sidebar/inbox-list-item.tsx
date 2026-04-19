@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
@@ -8,11 +8,11 @@ import type { MouseEvent } from "react";
 import { observer } from "mobx-react";
 import Link from "next/link";
 import { useSearchParams } from "next/navigation";
-// apple pi dash imports
-import { PriorityIcon } from "@apple-pi-dash/propel/icons";
-import { Tooltip } from "@apple-pi-dash/propel/tooltip";
-import { Row, Avatar } from "@apple-pi-dash/ui";
-import { cn, renderFormattedDate, getFileURL } from "@apple-pi-dash/utils";
+// pi dash imports
+import { PriorityIcon } from "@pi-dash/propel/icons";
+import { Tooltip } from "@pi-dash/propel/tooltip";
+import { Row, Avatar } from "@pi-dash/ui";
+import { cn, renderFormattedDate, getFileURL } from "@pi-dash/utils";
 // components
 import { ButtonAvatars } from "@/components/dropdowns/member/avatar";
 // hooks
@@ -20,8 +20,8 @@ import { useLabel } from "@/hooks/store/use-label";
 import { useMember } from "@/hooks/store/use-member";
 import { useProjectInbox } from "@/hooks/store/use-project-inbox";
 import { usePlatformOS } from "@/hooks/use-platform-os";
-// apple pi dash web imports
-import { InboxSourcePill } from "@/apple-pi-dash-web/components/inbox/source-pill";
+// pi dash web imports
+import { InboxSourcePill } from "@/pi-dash-web/components/inbox/source-pill";
 // local imports
 import { InboxIssueStatus } from "../inbox-issue-status";
 
@@ -129,8 +129,8 @@ export const InboxIssueListItem = observer(function InboxIssueListItem(props: In
               )}
             </div>
             {/* created by */}
-            {createdByDetails && createdByDetails.email?.includes("intake@apple-pi-dash.so") ? (
-              <Avatar src={getFileURL("")} name={"Apple Pi Dash"} size="md" showTooltip />
+            {createdByDetails && createdByDetails.email?.includes("intake@pi-dash.so") ? (
+              <Avatar src={getFileURL("")} name={"Pi Dash"} size="md" showTooltip />
             ) : createdByDetails ? (
               <ButtonAvatars showTooltip={false} userIds={createdByDetails?.id} />
             ) : null}

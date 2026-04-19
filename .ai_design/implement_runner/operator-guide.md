@@ -61,7 +61,7 @@ Scrape `GET /api/v1/runner/metrics/` — see `observability.md` for the full sch
 3. Pending approvals (should near zero; sustained growth = user workflow blocker)
 4. Offline burst (delta of `offline` over 5m) — indicator of a deploy or network incident
 
-The runner consumer logs structured events under the `apple_pi_dash.runner.consumers` logger. Surface `WARN`/`ERROR` from that logger in your aggregation tool.
+The runner consumer logs structured events under the `pi_dash.runner.consumers` logger. Surface `WARN`/`ERROR` from that logger in your aggregation tool.
 
 ## Incident response
 
@@ -69,13 +69,13 @@ The runner consumer logs structured events under the `apple_pi_dash.runner.consu
 
 1. `GET /api/v1/runner/health/` — returns `{"ok": true}`? If not, the Django/ASGI process is unhealthy.
 2. `GET /api/v1/runner/metrics/` — returns counts at all? If the response is empty or 5xx, the DB is unreachable.
-3. On the runner side, `apple-pi-dash-runner status --json` — does the daemon see the WS as connected?
+3. On the runner side, `pi-dash-runner status --json` — does the daemon see the WS as connected?
 4. Check Caddy / your proxy access logs for `/ws/runner/` upgrade requests. 426 or 400 indicates the upgrade headers are being stripped.
 
 ### Symptom: approvals pile up and never get decided
 
-1. Check `apple_pi_dash_approvals_pending` — is it climbing or stable?
-2. Is `runner.expire_stale_approvals` running? `celery -A apple_pi_dash.celery beat-status`. It should fire once per minute.
+1. Check `pi_dash_approvals_pending` — is it climbing or stable?
+2. Is `runner.expire_stale_approvals` running? `celery -A pi_dash.celery beat-status`. It should fire once per minute.
 3. If the scheduler is off, an approval older than 10 minutes should have been auto-cancelled on the next task tick.
 
 ### Symptom: thundering-herd reconnect after a deploy
@@ -91,10 +91,10 @@ Rare by design. If legitimate (e.g. a user has 5 dev machines plus a build box),
 
 ## Backup / disaster recovery
 
-The runner sub-schema is covered by whatever Postgres backup regime you run for the rest of Apple Pi Dash. Redis state is not restored from backup — runners will reconnect and repopulate their `runner.<id>` Channels groups automatically.
+The runner sub-schema is covered by whatever Postgres backup regime you run for the rest of Pi Dash. Redis state is not restored from backup — runners will reconnect and repopulate their `runner.<id>` Channels groups automatically.
 
 Per-runner transcripts (`history/runs/*.jsonl`) live on the user's laptop only. If a user loses their machine, those are gone. This is a design choice (local-only events).
 
 ## Upgrades
 
-Bump `PROTOCOL_VERSION` in `apple_pi_dash/runner/consumers.py` **and** `runner/src/lib.rs` together. Runner daemons on an older protocol will log a warning but continue; the server can be stricter by rejecting mismatched versions at `hello` (commented path in `on_hello`).
+Bump `PROTOCOL_VERSION` in `pi_dash/runner/consumers.py` **and** `runner/src/lib.rs` together. Runner daemons on an older protocol will log a warning but continue; the server can be stricter by rejecting mismatched versions at `hello` (commented path in `on_hello`).

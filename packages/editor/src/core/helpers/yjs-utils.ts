@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
@@ -11,13 +11,13 @@ import { generateHTML, generateJSON } from "@tiptap/html";
 import { prosemirrorJSONToYDoc, yXmlFragmentToProseMirrorRootNode } from "y-prosemirror";
 import * as Y from "yjs";
 // extensions
-import type { TDocumentPayload } from "@apple-pi-dash/types";
+import type { TDocumentPayload } from "@pi-dash/types";
 import {
   CoreEditorExtensionsWithoutProps,
   DocumentEditorExtensionsWithoutProps,
 } from "@/extensions/core-without-props";
 import { TitleExtensions } from "@/extensions/title-extension";
-import { sanitizeHTML } from "@apple-pi-dash/utils";
+import { sanitizeHTML } from "@pi-dash/utils";
 
 // editor extension configs
 const RICH_TEXT_EDITOR_EXTENSIONS = CoreEditorExtensionsWithoutProps;

@@ -1,24 +1,24 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
 
 import React, { useRef } from "react";
 import { observer } from "mobx-react";
-// apple pi dash constants
-import { SPREADSHEET_SELECT_GROUP, SPREADSHEET_PROPERTY_LIST } from "@apple-pi-dash/constants";
+// pi dash constants
+import { SPREADSHEET_SELECT_GROUP, SPREADSHEET_PROPERTY_LIST } from "@pi-dash/constants";
 // types
-import type { TIssue, IIssueDisplayFilterOptions, IIssueDisplayProperties } from "@apple-pi-dash/types";
-import { EIssueLayoutTypes } from "@apple-pi-dash/types";
+import type { TIssue, IIssueDisplayFilterOptions, IIssueDisplayProperties } from "@pi-dash/types";
+import { EIssueLayoutTypes } from "@pi-dash/types";
 // components
 import { MultipleSelectGroup } from "@/components/core/multiple-select";
 // hooks
 import { useProject } from "@/hooks/store/use-project";
-// apple pi dash web components
-import { IssueBulkOperationsRoot } from "@/apple-pi-dash-web/components/issues/bulk-operations";
-// apple pi dash web hooks
-import { useBulkOperationStatus } from "@/apple-pi-dash-web/hooks/use-bulk-operation-status";
+// pi dash web components
+import { IssueBulkOperationsRoot } from "@/pi-dash-web/components/issues/bulk-operations";
+// pi dash web hooks
+import { useBulkOperationStatus } from "@/pi-dash-web/hooks/use-bulk-operation-status";
 // local imports
 import type { TRenderQuickActions } from "../list/list-view-types";
 import { QuickAddIssueRoot, SpreadsheetAddIssueButton } from "../quick-add";
@@ -64,7 +64,7 @@ export const SpreadsheetView = observer(function SpreadsheetView(props: Props) {
   const portalRef = useRef<HTMLDivElement | null>(null);
   // store hooks
   const { currentProjectDetails } = useProject();
-  // apple pi dash web hooks
+  // pi dash web hooks
   const isBulkOperationsEnabled = useBulkOperationStatus();
 
   const isEstimateEnabled: boolean = currentProjectDetails?.estimate !== null;

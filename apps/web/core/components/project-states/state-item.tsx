@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
@@ -9,11 +9,11 @@ import { combine } from "@atlaskit/pragmatic-drag-and-drop/combine";
 import { draggable, dropTargetForElements } from "@atlaskit/pragmatic-drag-and-drop/element/adapter";
 import { attachClosestEdge, extractClosestEdge } from "@atlaskit/pragmatic-drag-and-drop-hitbox/closest-edge";
 import { observer } from "mobx-react";
-// Apple Pi Dash
-import type { TDraggableData } from "@apple-pi-dash/constants";
-import type { IState, TStateGroups, TStateOperationsCallbacks } from "@apple-pi-dash/types";
-import { DropIndicator } from "@apple-pi-dash/ui";
-import { cn, getCurrentStateSequence } from "@apple-pi-dash/utils";
+// Pi Dash
+import type { TDraggableData } from "@pi-dash/constants";
+import type { IState, TStateGroups, TStateOperationsCallbacks } from "@pi-dash/types";
+import { DropIndicator } from "@pi-dash/ui";
+import { cn, getCurrentStateSequence } from "@pi-dash/utils";
 // components
 import { StateItemTitle, StateUpdate } from "@/components/project-states";
 // helpers

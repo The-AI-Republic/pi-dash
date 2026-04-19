@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
@@ -7,8 +7,8 @@
 import { action, makeObservable, observable } from "mobx";
 import { computedFn } from "mobx-utils";
 // types
-import type { EUserPermissions } from "@apple-pi-dash/constants";
-import type { IUserLite } from "@apple-pi-dash/types";
+import type { EUserPermissions } from "@pi-dash/constants";
+import type { IUserLite } from "@pi-dash/types";
 // local imports
 import type { IMemberFilters } from "../utils";
 import { sortWorkspaceMembers } from "../utils";

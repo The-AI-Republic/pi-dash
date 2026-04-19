@@ -1,15 +1,15 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
 
-import { Logo } from "@apple-pi-dash/propel/emoji-icon-picker";
-import { PageIcon } from "@apple-pi-dash/propel/icons";
-// apple pi dash imports
-import type { IFavorite, TLogoProps } from "@apple-pi-dash/types";
+import { Logo } from "@pi-dash/propel/emoji-icon-picker";
+import { PageIcon } from "@pi-dash/propel/icons";
+// pi dash imports
+import type { IFavorite, TLogoProps } from "@pi-dash/types";
 // components
-// apple pi dash web constants
+// pi dash web constants
 import { FAVORITE_ITEM_ICONS, FAVORITE_ITEM_LINKS } from "@/constants/sidebar-favorites";
 
 export const getFavoriteItemIcon = (type: string, logo?: TLogoProps) => {

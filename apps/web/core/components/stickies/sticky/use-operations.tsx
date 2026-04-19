@@ -1,16 +1,16 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
 
 import { useMemo } from "react";
-// apple pi dash types
-import { useTranslation } from "@apple-pi-dash/i18n";
-import { TOAST_TYPE, setToast } from "@apple-pi-dash/propel/toast";
-import type { InstructionType, TSticky } from "@apple-pi-dash/types";
-// apple pi dash utils
-import { isCommentEmpty } from "@apple-pi-dash/utils";
+// pi dash types
+import { useTranslation } from "@pi-dash/i18n";
+import { TOAST_TYPE, setToast } from "@pi-dash/propel/toast";
+import type { InstructionType, TSticky } from "@pi-dash/types";
+// pi dash utils
+import { isCommentEmpty } from "@pi-dash/utils";
 // components
 import { STICKY_COLORS_LIST } from "@/components/editor/sticky-editor/color-palette";
 // hooks

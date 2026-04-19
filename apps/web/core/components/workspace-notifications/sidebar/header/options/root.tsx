@@ -1,23 +1,23 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
 
 import { observer } from "mobx-react";
 import { CheckCheck, RefreshCw } from "lucide-react";
-// apple pi dash imports
-import { ENotificationLoader, ENotificationQueryParamType } from "@apple-pi-dash/constants";
-import { useTranslation } from "@apple-pi-dash/i18n";
-import { Tooltip } from "@apple-pi-dash/propel/tooltip";
-import { Spinner } from "@apple-pi-dash/ui";
+// pi dash imports
+import { ENotificationLoader, ENotificationQueryParamType } from "@pi-dash/constants";
+import { useTranslation } from "@pi-dash/i18n";
+import { Tooltip } from "@pi-dash/propel/tooltip";
+import { Spinner } from "@pi-dash/ui";
 // hooks
 import { useWorkspaceNotifications } from "@/hooks/store/notifications";
 import { usePlatformOS } from "@/hooks/use-platform-os";
 // local imports
 import { NotificationFilter } from "../../filters/menu";
 import { NotificationHeaderMenuOption } from "./menu-option";
-import { IconButton } from "@apple-pi-dash/propel/icon-button";
+import { IconButton } from "@pi-dash/propel/icon-button";
 
 type TNotificationSidebarHeaderOptions = {
   workspaceSlug: string;

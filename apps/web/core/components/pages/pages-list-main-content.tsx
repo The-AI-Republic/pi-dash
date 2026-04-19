@@ -1,25 +1,25 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
 
 import { useState } from "react";
 import { observer } from "mobx-react";
-// apple pi dash imports
+// pi dash imports
 import { useParams, useRouter } from "next/navigation";
-import { EUserPermissionsLevel, EPageAccess } from "@apple-pi-dash/constants";
-import { useTranslation } from "@apple-pi-dash/i18n";
-import { EmptyStateDetailed } from "@apple-pi-dash/propel/empty-state";
-import { TOAST_TYPE, setToast } from "@apple-pi-dash/propel/toast";
-import type { TPage, TPageNavigationTabs } from "@apple-pi-dash/types";
-import { EUserProjectRoles } from "@apple-pi-dash/types";
+import { EUserPermissionsLevel, EPageAccess } from "@pi-dash/constants";
+import { useTranslation } from "@pi-dash/i18n";
+import { EmptyStateDetailed } from "@pi-dash/propel/empty-state";
+import { TOAST_TYPE, setToast } from "@pi-dash/propel/toast";
+import type { TPage, TPageNavigationTabs } from "@pi-dash/types";
+import { EUserProjectRoles } from "@pi-dash/types";
 // components
 import { PageLoader } from "@/components/pages/loaders/page-loader";
 import { useProject } from "@/hooks/store/use-project";
 import { useUserPermissions } from "@/hooks/store/user";
-// apple pi dash web hooks
-import { EPageStoreType, usePageStore } from "@/apple-pi-dash-web/hooks/store";
+// pi dash web hooks
+import { EPageStoreType, usePageStore } from "@/pi-dash-web/hooks/store";
 
 type Props = {
   children: React.ReactNode;
@@ -29,7 +29,7 @@ type Props = {
 
 export const PagesListMainContent = observer(function PagesListMainContent(props: Props) {
   const { children, pageType, storeType } = props;
-  // apple pi dash hooks
+  // pi dash hooks
   const { t } = useTranslation();
   // store hooks
   const { currentProjectDetails } = useProject();

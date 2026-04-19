@@ -1,17 +1,17 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
 
-import { useTranslation } from "@apple-pi-dash/i18n";
-import { Button } from "@apple-pi-dash/propel/button";
-import { CopyIcon } from "@apple-pi-dash/propel/icons";
-import { TOAST_TYPE, setToast } from "@apple-pi-dash/propel/toast";
-import { Tooltip } from "@apple-pi-dash/propel/tooltip";
-import type { IApiToken } from "@apple-pi-dash/types";
+import { useTranslation } from "@pi-dash/i18n";
+import { Button } from "@pi-dash/propel/button";
+import { CopyIcon } from "@pi-dash/propel/icons";
+import { TOAST_TYPE, setToast } from "@pi-dash/propel/toast";
+import { Tooltip } from "@pi-dash/propel/tooltip";
+import type { IApiToken } from "@pi-dash/types";
 // ui
-import { renderFormattedDate, renderFormattedTime, copyTextToClipboard } from "@apple-pi-dash/utils";
+import { renderFormattedDate, renderFormattedTime, copyTextToClipboard } from "@pi-dash/utils";
 // helpers
 // types
 import { usePlatformOS } from "@/hooks/use-platform-os";

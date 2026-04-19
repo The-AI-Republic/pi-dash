@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
@@ -9,12 +9,12 @@ import { useEffect } from "react";
 import { observer } from "mobx-react";
 import { Controller, useForm } from "react-hook-form";
 import useSWR from "swr";
-// apple pi dash imports
-import { EUserPermissions, EUserPermissionsLevel } from "@apple-pi-dash/constants";
-import { useTranslation } from "@apple-pi-dash/i18n";
-import { TOAST_TYPE, setToast } from "@apple-pi-dash/propel/toast";
-import type { IProject, IUserLite, IWorkspace } from "@apple-pi-dash/types";
-import { Loader, ToggleSwitch } from "@apple-pi-dash/ui";
+// pi dash imports
+import { EUserPermissions, EUserPermissionsLevel } from "@pi-dash/constants";
+import { useTranslation } from "@pi-dash/i18n";
+import { TOAST_TYPE, setToast } from "@pi-dash/propel/toast";
+import type { IProject, IUserLite, IWorkspace } from "@pi-dash/types";
+import { Loader, ToggleSwitch } from "@pi-dash/ui";
 // constants
 import { PROJECT_DETAILS } from "@/constants/fetch-keys";
 // hooks
@@ -55,7 +55,7 @@ export const ProjectSettingsMemberDefaults = observer(function ProjectSettingsMe
   props: TProjectSettingsMemberDefaultsProps
 ) {
   const { workspaceSlug, projectId } = props;
-  // apple pi dash hooks
+  // pi dash hooks
   const { t } = useTranslation();
   // store hooks
   const { allowPermissions } = useUserPermissions();

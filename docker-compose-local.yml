@@ -1,5 +1,5 @@
 services:
-  apple-pi-dash-redis:
+  pi-dash-redis:
     image: valkey/valkey:7.2.11-alpine
     restart: unless-stopped
     networks:
@@ -9,7 +9,7 @@ services:
     ports:
       - "6379:6379"
 
-  apple-pi-dash-mq:
+  pi-dash-mq:
     image: rabbitmq:3.13.6-management-alpine
     restart: unless-stopped
     networks:
@@ -23,7 +23,7 @@ services:
       RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASSWORD}
       RABBITMQ_DEFAULT_VHOST: ${RABBITMQ_VHOST}
 
-  apple-pi-dash-minio:
+  pi-dash-minio:
     image: minio/minio
     restart: unless-stopped
     networks:
@@ -48,7 +48,7 @@ services:
       - "9000:9000"
       - "9090:9090"
 
-  apple-pi-dash-db:
+  pi-dash-db:
     image: postgres:15.7-alpine
     restart: unless-stopped
     networks:
@@ -78,9 +78,9 @@ services:
     env_file:
       - ./apps/api/.env
     depends_on:
-      - apple-pi-dash-db
-      - apple-pi-dash-redis
-      - apple-pi-dash-mq
+      - pi-dash-db
+      - pi-dash-redis
+      - pi-dash-mq
     ports:
       - "8000:8000"
 
@@ -100,8 +100,8 @@ services:
       - ./apps/api/.env
     depends_on:
       - api
-      - apple-pi-dash-db
-      - apple-pi-dash-redis
+      - pi-dash-db
+      - pi-dash-redis
 
   beat-worker:
     build:
@@ -119,8 +119,8 @@ services:
       - ./apps/api/.env
     depends_on:
       - api
-      - apple-pi-dash-db
-      - apple-pi-dash-redis
+      - pi-dash-db
+      - pi-dash-redis
 
   migrator:
     build:
@@ -133,12 +133,12 @@ services:
       - dev_env
     volumes:
       - ./apps/api:/code
-    command: ./bin/docker-entrypoint-migrator.sh --settings=apple_pi_dash.settings.local
+    command: ./bin/docker-entrypoint-migrator.sh --settings=pi_dash.settings.local
     env_file:
       - ./apps/api/.env
     depends_on:
-      - apple-pi-dash-db
-      - apple-pi-dash-redis
+      - pi-dash-db
+      - pi-dash-redis
 
 volumes:
   redisdata:

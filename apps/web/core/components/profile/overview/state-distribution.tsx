@@ -1,17 +1,17 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
 
-// apple pi dash imports
-import { STATE_GROUPS } from "@apple-pi-dash/constants";
-import { useTranslation } from "@apple-pi-dash/i18n";
-import { PieChart } from "@apple-pi-dash/propel/charts/pie-chart";
-import { EmptyStateCompact } from "@apple-pi-dash/propel/empty-state";
-import type { IUserProfileData, IUserStateDistribution } from "@apple-pi-dash/types";
-import { Card } from "@apple-pi-dash/ui";
-import { capitalizeFirstLetter } from "@apple-pi-dash/utils";
+// pi dash imports
+import { STATE_GROUPS } from "@pi-dash/constants";
+import { useTranslation } from "@pi-dash/i18n";
+import { PieChart } from "@pi-dash/propel/charts/pie-chart";
+import { EmptyStateCompact } from "@pi-dash/propel/empty-state";
+import type { IUserProfileData, IUserStateDistribution } from "@pi-dash/types";
+import { Card } from "@pi-dash/ui";
+import { capitalizeFirstLetter } from "@pi-dash/utils";
 
 type Props = {
   stateDistribution: IUserStateDistribution[];

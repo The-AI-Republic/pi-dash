@@ -1,12 +1,12 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
 
 import type { MutableRefObject } from "react";
 import { observer } from "mobx-react";
-// apple pi dash imports
+// pi dash imports
 import type {
   GroupByColumnTypes,
   IGroupByColumn,
@@ -18,12 +18,12 @@ import type {
   TIssueKanbanFilters,
   TIssueGroupByOptions,
   TIssueOrderByOptions,
-} from "@apple-pi-dash/types";
-import { Row } from "@apple-pi-dash/ui";
+} from "@pi-dash/types";
+import { Row } from "@pi-dash/ui";
 // hooks
 import { useIssueStoreType } from "@/hooks/use-issue-layout-store";
-// apple pi dash web imports
-import { useWorkFlowFDragNDrop } from "@/apple-pi-dash-web/components/workflow";
+// pi dash web imports
+import { useWorkFlowFDragNDrop } from "@/pi-dash-web/components/workflow";
 // local imports
 import type { TRenderQuickActions } from "../list/list-view-types";
 import type { GroupDropLocation } from "../utils";

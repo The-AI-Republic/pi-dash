@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
@@ -7,12 +7,12 @@
 import { sortBy, cloneDeep, update, set } from "lodash-es";
 import { observable, action, computed, makeObservable, runInAction } from "mobx";
 import { computedFn } from "mobx-utils";
-// apple pi dash imports
-import type { TFetchStatus, TLoader, TProjectAnalyticsCount, TProjectAnalyticsCountParams } from "@apple-pi-dash/types";
+// pi dash imports
+import type { TFetchStatus, TLoader, TProjectAnalyticsCount, TProjectAnalyticsCountParams } from "@pi-dash/types";
 // helpers
-import { orderProjects, shouldFilterProject } from "@apple-pi-dash/utils";
+import { orderProjects, shouldFilterProject } from "@pi-dash/utils";
 // services
-import type { TProject, TPartialProject } from "@/apple-pi-dash-web/types/projects";
+import type { TProject, TPartialProject } from "@/pi-dash-web/types/projects";
 import { IssueLabelService, IssueService } from "@/services/issue";
 import { ProjectService, ProjectStateService, ProjectArchiveService } from "@/services/project";
 // store

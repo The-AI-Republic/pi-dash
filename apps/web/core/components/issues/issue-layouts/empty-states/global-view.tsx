@@ -1,22 +1,22 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
 
 import { observer } from "mobx-react";
-// apple pi dash imports
-import { EUserPermissionsLevel } from "@apple-pi-dash/constants";
-import { useTranslation } from "@apple-pi-dash/i18n";
-import { EmptyStateDetailed } from "@apple-pi-dash/propel/empty-state";
-import { EIssuesStoreType, EUserWorkspaceRoles } from "@apple-pi-dash/types";
+// pi dash imports
+import { EUserPermissionsLevel } from "@pi-dash/constants";
+import { useTranslation } from "@pi-dash/i18n";
+import { EmptyStateDetailed } from "@pi-dash/propel/empty-state";
+import { EIssuesStoreType, EUserWorkspaceRoles } from "@pi-dash/types";
 // hooks
 import { useCommandPalette } from "@/hooks/store/use-command-palette";
 import { useProject } from "@/hooks/store/use-project";
 import { useUserPermissions } from "@/hooks/store/user";
 
 export const GlobalViewEmptyState = observer(function GlobalViewEmptyState() {
-  // apple pi dash imports
+  // pi dash imports
   const { t } = useTranslation();
   // store hooks
   const { workspaceProjectIds } = useProject();

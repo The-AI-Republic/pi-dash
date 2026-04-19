@@ -1,12 +1,12 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
 
 import { ThemeProvider } from "next-themes";
 // components
-import { TranslationProvider } from "@apple-pi-dash/i18n";
+import { TranslationProvider } from "@pi-dash/i18n";
 import { AppProgressBar } from "@/lib/b-progress";
 import { InstanceProvider } from "@/lib/instance-provider";
 import { StoreProvider } from "@/lib/store-provider";

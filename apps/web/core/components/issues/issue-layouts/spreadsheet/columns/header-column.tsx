@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
@@ -7,12 +7,12 @@
 //ui
 import { ArrowDownWideNarrow, ArrowUpNarrowWide, CheckIcon, ChevronDownIcon, Eraser, MoveRight } from "lucide-react";
 // constants
-import { SPREADSHEET_PROPERTY_DETAILS } from "@apple-pi-dash/constants";
+import { SPREADSHEET_PROPERTY_DETAILS } from "@pi-dash/constants";
 // i18n
-import { useTranslation } from "@apple-pi-dash/i18n";
+import { useTranslation } from "@pi-dash/i18n";
 // types
-import type { IIssueDisplayFilterOptions, IIssueDisplayProperties, TIssueOrderByOptions } from "@apple-pi-dash/types";
-import { CustomMenu, Row } from "@apple-pi-dash/ui";
+import type { IIssueDisplayFilterOptions, IIssueDisplayProperties, TIssueOrderByOptions } from "@pi-dash/types";
+import { CustomMenu, Row } from "@pi-dash/ui";
 import useLocalStorage from "@/hooks/use-local-storage";
 import { SpreadSheetPropertyIcon } from "../../utils";
 

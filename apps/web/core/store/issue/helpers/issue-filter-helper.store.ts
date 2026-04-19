@@ -1,17 +1,17 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
 
 import { isEmpty } from "lodash-es";
-// apple pi dash constants
-import type { EIssueFilterType } from "@apple-pi-dash/constants";
+// pi dash constants
+import type { EIssueFilterType } from "@pi-dash/constants";
 import {
   EIssueGroupByToServerOptions,
   EServerGroupByToFilterOptions,
   ENABLE_ISSUE_DEPENDENCIES,
-} from "@apple-pi-dash/constants";
+} from "@pi-dash/constants";
 import type {
   EIssuesStoreType,
   IIssueDisplayFilterOptions,
@@ -24,13 +24,13 @@ import type {
   TIssueParams,
   TStaticViewTypes,
   TWorkItemFilterExpression,
-} from "@apple-pi-dash/types";
-import { EIssueLayoutTypes } from "@apple-pi-dash/types";
+} from "@pi-dash/types";
+import { EIssueLayoutTypes } from "@pi-dash/types";
 // helpers
-import { getComputedDisplayFilters, getComputedDisplayProperties } from "@apple-pi-dash/utils";
+import { getComputedDisplayFilters, getComputedDisplayProperties } from "@pi-dash/utils";
 // lib
 import { storage } from "@/lib/local-storage";
-import { getEnabledDisplayFilters } from "@/apple-pi-dash-web/store/issue/helpers/filter-utils";
+import { getEnabledDisplayFilters } from "@/pi-dash-web/store/issue/helpers/filter-utils";
 
 interface ILocalStoreIssueFilters {
   key: EIssuesStoreType;

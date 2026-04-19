@@ -11,24 +11,24 @@ mod status;
 mod tui;
 
 #[derive(Debug, Parser)]
-#[command(name = "apple-pi-dash-runner", version, about, long_about = None)]
+#[command(name = "pi-dash-runner", version, about, long_about = None)]
 pub struct Cli {
     #[command(subcommand)]
     pub command: Command,
 
     /// Override config directory (XDG config by default).
-    #[arg(long, global = true, env = "APPLE_PI_RUNNER_CONFIG_DIR")]
+    #[arg(long, global = true, env = "PI_DASH_RUNNER_CONFIG_DIR")]
     pub config_dir: Option<std::path::PathBuf>,
 
     /// Override data directory (XDG data by default).
-    #[arg(long, global = true, env = "APPLE_PI_RUNNER_DATA_DIR")]
+    #[arg(long, global = true, env = "PI_DASH_RUNNER_DATA_DIR")]
     pub data_dir: Option<std::path::PathBuf>,
 
     /// Log level filter (trace|debug|info|warn|error).
     #[arg(
         long,
         global = true,
-        env = "APPLE_PI_RUNNER_LOG",
+        env = "PI_DASH_RUNNER_LOG",
         default_value = "info"
     )]
     pub log: String,
@@ -36,7 +36,7 @@ pub struct Cli {
 
 #[derive(Debug, Subcommand)]
 pub enum Command {
-    /// Register with Apple Pi Dash cloud using a one-time token.
+    /// Register with Pi Dash cloud using a one-time token.
     Configure(configure::Args),
 
     /// Run the daemon in the foreground.

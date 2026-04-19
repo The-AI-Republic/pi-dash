@@ -1,17 +1,17 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
 
 import { useCallback, useMemo } from "react";
 import { observer } from "mobx-react";
-// apple pi dash imports
+// pi dash imports
 import { ListFilter } from "lucide-react";
-import { useTranslation } from "@apple-pi-dash/i18n";
-import { Button } from "@apple-pi-dash/propel/button";
-import type { GroupByColumnTypes, TIssue, TIssueServiceType, TSubIssueOperations } from "@apple-pi-dash/types";
-import { EIssueServiceType, EIssuesStoreType } from "@apple-pi-dash/types";
+import { useTranslation } from "@pi-dash/i18n";
+import { Button } from "@pi-dash/propel/button";
+import type { GroupByColumnTypes, TIssue, TIssueServiceType, TSubIssueOperations } from "@pi-dash/types";
+import { EIssueServiceType, EIssuesStoreType } from "@pi-dash/types";
 // hooks
 import { SectionEmptyState } from "@/components/empty-state/section-empty-state-root";
 import { getGroupByColumns, isWorkspaceLevel } from "@/components/issues/issue-layouts/utils";

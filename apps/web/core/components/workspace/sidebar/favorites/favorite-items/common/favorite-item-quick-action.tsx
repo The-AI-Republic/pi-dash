@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
@@ -7,12 +7,12 @@
 import React from "react";
 import { observer } from "mobx-react";
 import { MoreHorizontal, Star } from "lucide-react";
-// apple pi dash imports
-import { useTranslation } from "@apple-pi-dash/i18n";
-import type { IFavorite } from "@apple-pi-dash/types";
-import { CustomMenu } from "@apple-pi-dash/ui";
+// pi dash imports
+import { useTranslation } from "@pi-dash/i18n";
+import type { IFavorite } from "@pi-dash/types";
+import { CustomMenu } from "@pi-dash/ui";
 // helpers
-import { cn } from "@apple-pi-dash/utils";
+import { cn } from "@pi-dash/utils";
 
 type Props = {
   ref: React.MutableRefObject<HTMLDivElement | null>;

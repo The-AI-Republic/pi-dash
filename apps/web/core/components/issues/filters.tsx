@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
@@ -7,16 +7,16 @@
 import { useCallback, useState } from "react";
 import { observer } from "mobx-react";
 import { ChartNoAxesColumn, SlidersHorizontal } from "lucide-react";
-// apple pi dash imports
-import { EIssueFilterType, ISSUE_STORE_TO_FILTERS_MAP } from "@apple-pi-dash/constants";
-import { useTranslation } from "@apple-pi-dash/i18n";
-import { Button } from "@apple-pi-dash/propel/button";
-import type { IIssueDisplayFilterOptions, IIssueDisplayProperties } from "@apple-pi-dash/types";
-import { EIssueLayoutTypes, EIssuesStoreType } from "@apple-pi-dash/types";
+// pi dash imports
+import { EIssueFilterType, ISSUE_STORE_TO_FILTERS_MAP } from "@pi-dash/constants";
+import { useTranslation } from "@pi-dash/i18n";
+import { Button } from "@pi-dash/propel/button";
+import type { IIssueDisplayFilterOptions, IIssueDisplayProperties } from "@pi-dash/types";
+import { EIssueLayoutTypes, EIssuesStoreType } from "@pi-dash/types";
 // hooks
 import { useIssues } from "@/hooks/store/use-issues";
-// apple pi dash web imports
-import type { TProject } from "@/apple-pi-dash-web/types";
+// pi dash web imports
+import type { TProject } from "@/pi-dash-web/types";
 // local imports
 import { WorkItemsModal } from "../analytics/work-items/modal";
 import { WorkItemFiltersToggle } from "../work-item-filters/filters-toggle";

@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
@@ -7,9 +7,9 @@
 import React from "react";
 import { Command } from "cmdk";
 
-import { CheckIcon } from "@apple-pi-dash/propel/icons";
-// apple pi dash imports
-import { cn } from "@apple-pi-dash/utils";
+import { CheckIcon } from "@pi-dash/propel/icons";
+// pi dash imports
+import { cn } from "@pi-dash/utils";
 // local imports
 import { KeySequenceBadge, ShortcutBadge } from "./command-item-shortcut-badge";
 

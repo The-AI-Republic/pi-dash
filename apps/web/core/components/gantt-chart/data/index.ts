@@ -1,12 +1,12 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
 
 // types
-import type { WeekMonthDataType, ChartDataType, TGanttViews } from "@apple-pi-dash/types";
-import { EStartOfTheWeek } from "@apple-pi-dash/types";
+import type { WeekMonthDataType, ChartDataType, TGanttViews } from "@pi-dash/types";
+import { EStartOfTheWeek } from "@pi-dash/types";
 
 // constants
 export const generateWeeks = (startOfWeek: EStartOfTheWeek = EStartOfTheWeek.SUNDAY): WeekMonthDataType[] => [

@@ -1,11 +1,11 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
 
-import type { IWorkItemPeekOverview } from "@apple-pi-dash/types";
-import { EIssueServiceType } from "@apple-pi-dash/types";
+import type { IWorkItemPeekOverview } from "@pi-dash/types";
+import { EIssueServiceType } from "@pi-dash/types";
 import { IssuePeekOverview } from "@/components/issues/peek-overview";
 import { useIssueDetail } from "@/hooks/store/use-issue-detail";
 import type { TPeekIssue } from "@/store/issue/issue-details/root.store";

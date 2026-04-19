@@ -1,5 +1,5 @@
 {
-  "name": "@apple-pi-dash/typescript-config",
+  "name": "@pi-dash/typescript-config",
   "version": "1.3.0",
   "private": true,
   "license": "AGPL-3.0",

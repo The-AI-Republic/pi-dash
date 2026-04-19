@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
@@ -7,13 +7,13 @@
 import { useState, useRef } from "react";
 import { observer } from "mobx-react";
 import { useParams } from "next/navigation";
-// apple pi dash imports
-import { EUserPermissions, EUserPermissionsLevel } from "@apple-pi-dash/constants";
-import { useTranslation } from "@apple-pi-dash/i18n";
-import { Button } from "@apple-pi-dash/propel/button";
-import { EmptyStateCompact } from "@apple-pi-dash/propel/empty-state";
-import type { IIssueLabel } from "@apple-pi-dash/types";
-import { Loader } from "@apple-pi-dash/ui";
+// pi dash imports
+import { EUserPermissions, EUserPermissionsLevel } from "@pi-dash/constants";
+import { useTranslation } from "@pi-dash/i18n";
+import { Button } from "@pi-dash/propel/button";
+import { EmptyStateCompact } from "@pi-dash/propel/empty-state";
+import type { IIssueLabel } from "@pi-dash/types";
+import { Loader } from "@pi-dash/ui";
 import type { TLabelOperationsCallbacks } from "@/components/labels";
 import {
   CreateUpdateLabelInline,
@@ -36,7 +36,7 @@ export const ProjectSettingsLabelList = observer(function ProjectSettingsLabelLi
   const [showLabelForm, setLabelForm] = useState(false);
   const [isUpdating, setIsUpdating] = useState(false);
   const [selectDeleteLabel, setSelectDeleteLabel] = useState<IIssueLabel | null>(null);
-  // apple pi dash hooks
+  // pi dash hooks
   const { t } = useTranslation();
   // store hooks
   const { projectLabels, updateLabelPosition, projectLabelsTree, createLabel, updateLabel } = useLabel();

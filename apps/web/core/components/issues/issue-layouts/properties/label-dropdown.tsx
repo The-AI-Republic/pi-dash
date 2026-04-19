@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
@@ -10,17 +10,17 @@ import { useParams } from "next/navigation";
 import { usePopper } from "react-popper";
 import { Loader } from "lucide-react";
 import { Combobox } from "@headlessui/react";
-// apple pi dash imports
-import { EUserPermissionsLevel, getRandomLabelColor } from "@apple-pi-dash/constants";
-import { useOutsideClickDetector } from "@apple-pi-dash/hooks";
-import { useTranslation } from "@apple-pi-dash/i18n";
-import { CheckIcon, SearchIcon, ChevronDownIcon } from "@apple-pi-dash/propel/icons";
+// pi dash imports
+import { EUserPermissionsLevel, getRandomLabelColor } from "@pi-dash/constants";
+import { useOutsideClickDetector } from "@pi-dash/hooks";
+import { useTranslation } from "@pi-dash/i18n";
+import { CheckIcon, SearchIcon, ChevronDownIcon } from "@pi-dash/propel/icons";
 // types
-import type { IIssueLabel } from "@apple-pi-dash/types";
-import { EUserProjectRoles } from "@apple-pi-dash/types";
+import type { IIssueLabel } from "@pi-dash/types";
+import { EUserProjectRoles } from "@pi-dash/types";
 // components
-import { ComboDropDown } from "@apple-pi-dash/ui";
-import { sortBySelectedFirst } from "@apple-pi-dash/utils";
+import { ComboDropDown } from "@pi-dash/ui";
+import { sortBySelectedFirst } from "@pi-dash/utils";
 // hooks
 import { useLabel } from "@/hooks/store/use-label";
 import { useUserPermissions } from "@/hooks/store/user";

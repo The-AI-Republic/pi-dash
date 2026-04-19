@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
@@ -7,16 +7,16 @@
 import type { ReactNode } from "react";
 import { observer } from "mobx-react";
 import { CheckCircle, Clock, MoreVertical } from "lucide-react";
-import { useTranslation } from "@apple-pi-dash/i18n";
-// apple pi dash imports
-import { ArchiveIcon, CheckIcon } from "@apple-pi-dash/propel/icons";
-import type { TNotificationFilter } from "@apple-pi-dash/types";
-import { PopoverMenu } from "@apple-pi-dash/ui";
+import { useTranslation } from "@pi-dash/i18n";
+// pi dash imports
+import { ArchiveIcon, CheckIcon } from "@pi-dash/propel/icons";
+import type { TNotificationFilter } from "@pi-dash/types";
+import { PopoverMenu } from "@pi-dash/ui";
 // hooks
 import { useWorkspaceNotifications } from "@/hooks/store/notifications";
 // local imports
 import { NotificationMenuOptionItem } from "./menu-item";
-import { IconButton } from "@apple-pi-dash/propel/icon-button";
+import { IconButton } from "@pi-dash/propel/icon-button";
 
 export type TPopoverMenuOptions = {
   key: string;

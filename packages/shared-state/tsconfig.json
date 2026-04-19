@@ -1,5 +1,5 @@
 {
-  "extends": "@apple-pi-dash/typescript-config/react-library.json",
+  "extends": "@pi-dash/typescript-config/react-library.json",
   "compilerOptions": {
     "exactOptionalPropertyTypes": false,
     "paths": {

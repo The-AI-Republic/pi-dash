@@ -1,13 +1,13 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
 
 import type { Control, FieldPath, FieldValues } from "react-hook-form";
 import { Controller } from "react-hook-form";
-// apple pi dash internal packages
-import { ToggleSwitch } from "@apple-pi-dash/ui";
+// pi dash internal packages
+import { ToggleSwitch } from "@pi-dash/ui";
 
 type Props<T extends FieldValues = FieldValues> = {
   control: Control<T>;

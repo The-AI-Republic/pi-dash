@@ -1,13 +1,13 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
 
 import type { ReactElement } from "react";
 import { createContext } from "react";
-// apple pi dash web store
-import { RootStore } from "@/apple-pi-dash-web/store/root.store";
+// pi dash web store
+import { RootStore } from "@/pi-dash-web/store/root.store";
 
 export let rootStore = new RootStore();
 

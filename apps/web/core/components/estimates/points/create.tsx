@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
@@ -8,19 +8,19 @@ import type { FormEvent } from "react";
 import { useState } from "react";
 import { observer } from "mobx-react";
 import { Info } from "lucide-react";
-import { EEstimateSystem, MAX_ESTIMATE_POINT_INPUT_LENGTH } from "@apple-pi-dash/constants";
-import { useTranslation } from "@apple-pi-dash/i18n";
-import { CheckIcon, CloseIcon } from "@apple-pi-dash/propel/icons";
-import { TOAST_TYPE, setToast } from "@apple-pi-dash/propel/toast";
-import { Tooltip } from "@apple-pi-dash/propel/tooltip";
-import type { TEstimatePointsObject, TEstimateSystemKeys, TEstimateTypeErrorObject } from "@apple-pi-dash/types";
-import { Spinner } from "@apple-pi-dash/ui";
-import { cn, isEstimatePointValuesRepeated } from "@apple-pi-dash/utils";
+import { EEstimateSystem, MAX_ESTIMATE_POINT_INPUT_LENGTH } from "@pi-dash/constants";
+import { useTranslation } from "@pi-dash/i18n";
+import { CheckIcon, CloseIcon } from "@pi-dash/propel/icons";
+import { TOAST_TYPE, setToast } from "@pi-dash/propel/toast";
+import { Tooltip } from "@pi-dash/propel/tooltip";
+import type { TEstimatePointsObject, TEstimateSystemKeys, TEstimateTypeErrorObject } from "@pi-dash/types";
+import { Spinner } from "@pi-dash/ui";
+import { cn, isEstimatePointValuesRepeated } from "@pi-dash/utils";
 import { EstimateInputRoot } from "@/components/estimates/inputs/root";
 // helpers
 // hooks
 import { useEstimate } from "@/hooks/store/estimates/use-estimate";
-// apple pi dash web constants
+// pi dash web constants
 
 type TEstimatePointCreate = {
   workspaceSlug: string;

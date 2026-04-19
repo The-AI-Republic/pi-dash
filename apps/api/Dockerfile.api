@@ -4,7 +4,7 @@ FROM python:3.12.10-alpine
 ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONUNBUFFERED=1
 ENV PIP_DISABLE_PIP_VERSION_CHECK=1 
-ENV INSTANCE_CHANGELOG_URL=https://sites.apple-pi-dash.so/pages/691ef037bcfe416a902e48cb55f59891/
+ENV INSTANCE_CHANGELOG_URL=https://sites.pi-dash.so/pages/691ef037bcfe416a902e48cb55f59891/
 
 # Update system packages for security
 RUN apk update && apk upgrade
@@ -41,14 +41,14 @@ RUN apk add --no-cache --virtual .build-deps \
 
 # Add in Django deps and generate Django's static files
 COPY manage.py manage.py
-COPY apple_pi_dash apple_pi_dash/
+COPY pi_dash pi_dash/
 COPY templates templates/
 COPY package.json package.json
 
 RUN apk --no-cache add "bash~=5.2"
 COPY ./bin ./bin/
 
-RUN mkdir -p /code/apple_pi_dash/logs
+RUN mkdir -p /code/pi_dash/logs
 RUN chmod +x ./bin/*
 RUN chmod -R 777 /code
 

@@ -4,7 +4,7 @@ use tokio::process::Command;
 
 use crate::util::paths::Paths;
 
-const LABEL: &str = "so.apple-pi-dash.runner";
+const LABEL: &str = "so.pi-dash.runner";
 
 pub async fn install(paths: &Paths) -> Result<()> {
     let plist_path = plist_path()?;
@@ -31,8 +31,8 @@ pub async fn install(paths: &Paths) -> Result<()> {
   </array>
   <key>EnvironmentVariables</key>
   <dict>
-    <key>APPLE_PI_RUNNER_CONFIG_DIR</key><string>{config}</string>
-    <key>APPLE_PI_RUNNER_DATA_DIR</key><string>{data}</string>
+    <key>PI_DASH_RUNNER_CONFIG_DIR</key><string>{config}</string>
+    <key>PI_DASH_RUNNER_DATA_DIR</key><string>{data}</string>
     <key>XDG_RUNTIME_DIR</key><string>{runtime}</string>
   </dict>
   <key>KeepAlive</key><true/>

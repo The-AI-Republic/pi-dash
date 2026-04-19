@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
@@ -7,11 +7,11 @@
 import { useCallback, useEffect, useState } from "react";
 import { observer } from "mobx-react";
 import { Clock, FileStack, MoreHorizontal, MoveRight } from "lucide-react";
-// apple pi dash imports
-import { EUserPermissions, EUserPermissionsLevel } from "@apple-pi-dash/constants";
-import { useTranslation } from "@apple-pi-dash/i18n";
-import { Button } from "@apple-pi-dash/propel/button";
-import { IconButton, getIconButtonStyling } from "@apple-pi-dash/propel/icon-button";
+// pi dash imports
+import { EUserPermissions, EUserPermissionsLevel } from "@pi-dash/constants";
+import { useTranslation } from "@pi-dash/i18n";
+import { Button } from "@pi-dash/propel/button";
+import { IconButton, getIconButtonStyling } from "@pi-dash/propel/icon-button";
 import {
   LinkIcon,
   CopyIcon,
@@ -21,12 +21,12 @@ import {
   ChevronUpIcon,
   CheckCircleFilledIcon,
   CloseCircleFilledIcon,
-} from "@apple-pi-dash/propel/icons";
-import { TOAST_TYPE, setToast } from "@apple-pi-dash/propel/toast";
-import type { TNameDescriptionLoader } from "@apple-pi-dash/types";
-import { EInboxIssueStatus } from "@apple-pi-dash/types";
-import { ControlLink, CustomMenu, Row } from "@apple-pi-dash/ui";
-import { copyUrlToClipboard, findHowManyDaysLeft, generateWorkItemLink } from "@apple-pi-dash/utils";
+} from "@pi-dash/propel/icons";
+import { TOAST_TYPE, setToast } from "@pi-dash/propel/toast";
+import type { TNameDescriptionLoader } from "@pi-dash/types";
+import { EInboxIssueStatus } from "@pi-dash/types";
+import { ControlLink, CustomMenu, Row } from "@pi-dash/ui";
+import { copyUrlToClipboard, findHowManyDaysLeft, generateWorkItemLink } from "@pi-dash/utils";
 // components
 import { CreateUpdateIssueModal } from "@/components/issues/issue-modal/modal";
 import { NameDescriptionUpdateStatus } from "@/components/issues/issue-update-status";

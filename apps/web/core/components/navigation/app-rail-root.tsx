@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
@@ -8,16 +8,16 @@
 import { observer } from "mobx-react";
 import { useParams, usePathname } from "next/navigation";
 import { SettingsIcon } from "lucide-react";
-import { ContextMenu } from "@apple-pi-dash/propel/context-menu";
-import { CheckIcon } from "@apple-pi-dash/propel/icons";
-import { cn } from "@apple-pi-dash/utils";
+import { ContextMenu } from "@pi-dash/propel/context-menu";
+import { CheckIcon } from "@pi-dash/propel/icons";
+import { cn } from "@pi-dash/utils";
 // components
 import { AppSidebarItem } from "@/components/sidebar/sidebar-item";
 // hooks
 import { useAppRailPreferences } from "@/hooks/use-navigation-preferences";
 import { useAppRailVisibility } from "@/lib/app-rail/context";
-// apple pi dash web imports
-import { DesktopSidebarWorkspaceMenu } from "@/apple-pi-dash-web/components/desktop";
+// pi dash web imports
+import { DesktopSidebarWorkspaceMenu } from "@/pi-dash-web/components/desktop";
 // local imports
 import { AppSidebarItemsRoot } from "./items-root";
 

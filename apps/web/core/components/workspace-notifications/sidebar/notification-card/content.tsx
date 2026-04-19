@@ -1,18 +1,18 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
 
 import type { ReactNode } from "react";
-// apple pi dash imports
-import type { TNotification } from "@apple-pi-dash/types";
+// pi dash imports
+import type { TNotification } from "@pi-dash/types";
 import {
   convertMinutesToHoursMinutesString,
   renderFormattedDate,
   sanitizeCommentForNotification,
   stripAndTruncateHTML,
-} from "@apple-pi-dash/utils";
+} from "@pi-dash/utils";
 // components
 import { LiteTextEditor } from "@/components/editor/lite-text";
 import {
@@ -20,7 +20,7 @@ import {
   renderAdditionalAction,
   renderAdditionalValue,
   shouldShowConnector,
-} from "@/apple-pi-dash-web/components/workspace-notifications/notification-card/content";
+} from "@/pi-dash-web/components/workspace-notifications/notification-card/content";
 
 // Types
 export type TNotificationFieldData = {
@@ -137,7 +137,7 @@ const getNotificationContentDetails = (
     return baseHandler(fieldData);
   }
 
-  // Check additional map from apple-pi-dash-web (EE extensions)
+  // Check additional map from pi-dash-web (EE extensions)
   const additionalHandler = ADDITIONAL_NOTIFICATION_CONTENT_MAP[field];
   if (additionalHandler) {
     return additionalHandler(fieldData);

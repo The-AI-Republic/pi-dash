@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
@@ -7,12 +7,12 @@
 import type { Dispatch, SetStateAction } from "react";
 import { useEffect, useMemo, useRef } from "react";
 import { observer } from "mobx-react";
-// apple pi dash imports
-import type { EditorRefApi } from "@apple-pi-dash/editor";
-import { TOAST_TYPE, setToast } from "@apple-pi-dash/propel/toast";
-import type { TIssue, TNameDescriptionLoader } from "@apple-pi-dash/types";
-import { EFileAssetType, EInboxIssueSource, EInboxIssueStatus } from "@apple-pi-dash/types";
-import { getTextContent } from "@apple-pi-dash/utils";
+// pi dash imports
+import type { EditorRefApi } from "@pi-dash/editor";
+import { TOAST_TYPE, setToast } from "@pi-dash/propel/toast";
+import type { TIssue, TNameDescriptionLoader } from "@pi-dash/types";
+import { EFileAssetType, EInboxIssueSource, EInboxIssueStatus } from "@pi-dash/types";
+import { getTextContent } from "@pi-dash/utils";
 // components
 import { DescriptionVersionsRoot } from "@/components/core/description-versions";
 import { DescriptionInput } from "@/components/editor/rich-text/description-input";
@@ -30,8 +30,8 @@ import { useProjectInbox } from "@/hooks/store/use-project-inbox";
 import { useUser } from "@/hooks/store/user";
 import useReloadConfirmations from "@/hooks/use-reload-confirmation";
 // store types
-import { DeDupeIssuePopoverRoot } from "@/apple-pi-dash-web/components/de-dupe/duplicate-popover";
-import { useDebouncedDuplicateIssues } from "@/apple-pi-dash-web/hooks/use-debounced-duplicate-issues";
+import { DeDupeIssuePopoverRoot } from "@/pi-dash-web/components/de-dupe/duplicate-popover";
+import { useDebouncedDuplicateIssues } from "@/pi-dash-web/hooks/use-debounced-duplicate-issues";
 // services
 import { IntakeWorkItemVersionService } from "@/services/inbox";
 // stores

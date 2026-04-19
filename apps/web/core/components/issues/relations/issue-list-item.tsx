@@ -1,27 +1,27 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
 
 import React from "react";
 import { observer } from "mobx-react";
-import { useTranslation } from "@apple-pi-dash/i18n";
-import { LinkIcon, EditIcon, TrashIcon, CloseIcon } from "@apple-pi-dash/propel/icons";
-// apple pi dash imports
-import { Tooltip } from "@apple-pi-dash/propel/tooltip";
-import type { TIssue, TIssueServiceType } from "@apple-pi-dash/types";
-import { EIssueServiceType } from "@apple-pi-dash/types";
-import { ControlLink, CustomMenu } from "@apple-pi-dash/ui";
-import { generateWorkItemLink } from "@apple-pi-dash/utils";
+import { useTranslation } from "@pi-dash/i18n";
+import { LinkIcon, EditIcon, TrashIcon, CloseIcon } from "@pi-dash/propel/icons";
+// pi dash imports
+import { Tooltip } from "@pi-dash/propel/tooltip";
+import type { TIssue, TIssueServiceType } from "@pi-dash/types";
+import { EIssueServiceType } from "@pi-dash/types";
+import { ControlLink, CustomMenu } from "@pi-dash/ui";
+import { generateWorkItemLink } from "@pi-dash/utils";
 // hooks
 import { useIssueDetail } from "@/hooks/store/use-issue-detail";
 import { useProject } from "@/hooks/store/use-project";
 import useIssuePeekOverviewRedirection from "@/hooks/use-issue-peek-overview-redirection";
 import { usePlatformOS } from "@/hooks/use-platform-os";
-// apple pi dash web imports
-import { IssueIdentifier } from "@/apple-pi-dash-web/components/issues/issue-details/issue-identifier";
-import type { TIssueRelationTypes } from "@/apple-pi-dash-web/types";
+// pi dash web imports
+import { IssueIdentifier } from "@/pi-dash-web/components/issues/issue-details/issue-identifier";
+import type { TIssueRelationTypes } from "@/pi-dash-web/types";
 // local imports
 import { useRelationOperations } from "../issue-detail-widgets/relations/helper";
 import { RelationIssueProperty } from "./properties";

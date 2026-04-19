@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
@@ -9,16 +9,16 @@ import { useRef, useState } from "react";
 import { usePopper } from "react-popper";
 import { SignalHigh } from "lucide-react";
 import { Combobox } from "@headlessui/react";
-import { ISSUE_PRIORITIES } from "@apple-pi-dash/constants";
-import { useTranslation } from "@apple-pi-dash/i18n";
+import { ISSUE_PRIORITIES } from "@pi-dash/constants";
+import { useTranslation } from "@pi-dash/i18n";
 // types
-import { CheckIcon, PriorityIcon, ChevronDownIcon, SearchIcon } from "@apple-pi-dash/propel/icons";
-import { Tooltip } from "@apple-pi-dash/propel/tooltip";
-import type { TIssuePriorities } from "@apple-pi-dash/types";
+import { CheckIcon, PriorityIcon, ChevronDownIcon, SearchIcon } from "@pi-dash/propel/icons";
+import { Tooltip } from "@pi-dash/propel/tooltip";
+import type { TIssuePriorities } from "@pi-dash/types";
 // ui
-import { ComboDropDown } from "@apple-pi-dash/ui";
+import { ComboDropDown } from "@pi-dash/ui";
 // helpers
-import { cn } from "@apple-pi-dash/utils";
+import { cn } from "@pi-dash/utils";
 // hooks
 import { useDropdown } from "@/hooks/use-dropdown";
 import { usePlatformOS } from "@/hooks/use-platform-os";

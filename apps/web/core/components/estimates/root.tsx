@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
@@ -7,17 +7,17 @@
 import { useState } from "react";
 import { observer } from "mobx-react";
 import useSWR from "swr";
-// apple pi dash imports
-import { useTranslation } from "@apple-pi-dash/i18n";
+// pi dash imports
+import { useTranslation } from "@pi-dash/i18n";
 // components
 import { SettingsBoxedControlItem } from "@/components/settings/boxed-control-item";
 import { SettingsHeading } from "@/components/settings/heading";
 // hooks
-import { EmptyStateCompact } from "@apple-pi-dash/propel/empty-state";
+import { EmptyStateCompact } from "@pi-dash/propel/empty-state";
 import { useProjectEstimates } from "@/hooks/store/estimates";
 import { useProject } from "@/hooks/store/use-project";
-// apple pi dash web components
-import { UpdateEstimateModal } from "@/apple-pi-dash-web/components/estimates";
+// pi dash web components
+import { UpdateEstimateModal } from "@/pi-dash-web/components/estimates";
 // local imports
 import { CreateEstimateModal } from "./create/modal";
 import { DeleteEstimateModal } from "./delete/modal";
@@ -111,7 +111,7 @@ export const EstimateRoot = observer(function EstimateRoot(props: TEstimateRoot)
                     Estimates have gone through a change, these are the estimates you had in your older versions which
                     were not in use. Read more about them&nbsp;
                     <a
-                      href={"https://docs.apple-pi-dash.so/core-concepts/projects/run-project#estimate"}
+                      href={"https://docs.pi-dash.so/core-concepts/projects/run-project#estimate"}
                       target="_blank"
                       className="text-accent-primary/80 hover:text-accent-primary"
                       rel="noreferrer"

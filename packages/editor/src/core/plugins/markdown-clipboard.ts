@@ -1,14 +1,14 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
 
 import type { Editor } from "@tiptap/core";
 import { Plugin, PluginKey } from "@tiptap/pm/state";
-// apple pi dash imports
-import { convertHTMLToMarkdown } from "@apple-pi-dash/utils";
-import type { TCustomComponentsMetaData } from "@apple-pi-dash/utils";
+// pi dash imports
+import { convertHTMLToMarkdown } from "@pi-dash/utils";
+import type { TCustomComponentsMetaData } from "@pi-dash/utils";
 
 type TArgs = {
   editor: Editor;
@@ -38,7 +38,7 @@ export const MarkdownClipboardPlugin = (args: TArgs): Plugin => {
             });
             event.clipboardData?.setData("text/plain", markdown);
             event.clipboardData?.setData("text/html", clipboardHTML);
-            event.clipboardData?.setData("text/apple-pi-dash-editor-html", clipboardHTML);
+            event.clipboardData?.setData("text/pi-dash-editor-html", clipboardHTML);
             return true;
           } catch (error) {
             console.error("Failed to copy markdown content to clipboard:", error);

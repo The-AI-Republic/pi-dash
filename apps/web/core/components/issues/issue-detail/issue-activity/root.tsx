@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
@@ -7,23 +7,23 @@
 import { useMemo } from "react";
 import uniq from "lodash-es/uniq";
 import { observer } from "mobx-react";
-// apple pi dash package imports
-import type { TActivityFilters } from "@apple-pi-dash/constants";
-import { E_SORT_ORDER, defaultActivityFilters, EUserPermissions } from "@apple-pi-dash/constants";
-import { useLocalStorage } from "@apple-pi-dash/hooks";
+// pi dash package imports
+import type { TActivityFilters } from "@pi-dash/constants";
+import { E_SORT_ORDER, defaultActivityFilters, EUserPermissions } from "@pi-dash/constants";
+import { useLocalStorage } from "@pi-dash/hooks";
 // i18n
-import { useTranslation } from "@apple-pi-dash/i18n";
+import { useTranslation } from "@pi-dash/i18n";
 //types
-import type { TFileSignedURLResponse, TIssueComment } from "@apple-pi-dash/types";
+import type { TFileSignedURLResponse, TIssueComment } from "@pi-dash/types";
 // components
 import { CommentCreate } from "@/components/comments/comment-create";
 // hooks
 import { useIssueDetail } from "@/hooks/store/use-issue-detail";
 import { useProject } from "@/hooks/store/use-project";
 import { useUser, useUserPermissions } from "@/hooks/store/user";
-// apple pi dash web components
-import { ActivityFilterRoot } from "@/apple-pi-dash-web/components/issues/worklog/activity/filter-root";
-import { IssueActivityWorklogCreateButton } from "@/apple-pi-dash-web/components/issues/worklog/activity/worklog-create-button";
+// pi dash web components
+import { ActivityFilterRoot } from "@/pi-dash-web/components/issues/worklog/activity/filter-root";
+import { IssueActivityWorklogCreateButton } from "@/pi-dash-web/components/issues/worklog/activity/worklog-create-button";
 import { IssueActivityCommentRoot } from "./activity-comment-root";
 import { useWorkItemCommentOperations } from "./helper";
 import { ActivitySortRoot } from "./sort-root";

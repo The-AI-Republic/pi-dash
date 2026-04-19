@@ -1,15 +1,15 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
 
 import { useEffect, useState } from "react";
 import { CircleCheck, XCircle } from "lucide-react";
-import { API_BASE_URL } from "@apple-pi-dash/constants";
-import { useTranslation } from "@apple-pi-dash/i18n";
-import { Button } from "@apple-pi-dash/propel/button";
-import { Input, Spinner } from "@apple-pi-dash/ui";
+import { API_BASE_URL } from "@pi-dash/constants";
+import { useTranslation } from "@pi-dash/i18n";
+import { Button } from "@pi-dash/propel/button";
+import { Input, Spinner } from "@pi-dash/ui";
 // constants
 // helpers
 import { EAuthModes } from "@/helpers/authentication.helper";
@@ -51,7 +51,7 @@ export function AuthUniqueCodeForm(props: TAuthUniqueCodeForm) {
   const [isSubmitting, setIsSubmitting] = useState(false);
   // timer
   const { timer: resendTimerCode, setTimer: setResendCodeTimer } = useTimer(0);
-  // apple pi dash hooks
+  // pi dash hooks
   const { t } = useTranslation();
 
   const handleFormChange = (key: keyof TUniqueCodeFormValues, value: string) =>

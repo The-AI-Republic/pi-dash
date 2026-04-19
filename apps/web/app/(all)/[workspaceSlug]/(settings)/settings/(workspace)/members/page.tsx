@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
@@ -7,13 +7,13 @@
 import { useState } from "react";
 import { observer } from "mobx-react";
 // types
-import { EUserPermissions, EUserPermissionsLevel } from "@apple-pi-dash/constants";
-import { useTranslation } from "@apple-pi-dash/i18n";
-import { Button } from "@apple-pi-dash/propel/button";
-import { SearchIcon } from "@apple-pi-dash/propel/icons";
-import { TOAST_TYPE, setToast } from "@apple-pi-dash/propel/toast";
-import type { IWorkspaceBulkInviteFormData } from "@apple-pi-dash/types";
-import { cn } from "@apple-pi-dash/utils";
+import { EUserPermissions, EUserPermissionsLevel } from "@pi-dash/constants";
+import { useTranslation } from "@pi-dash/i18n";
+import { Button } from "@pi-dash/propel/button";
+import { SearchIcon } from "@pi-dash/propel/icons";
+import { TOAST_TYPE, setToast } from "@pi-dash/propel/toast";
+import type { IWorkspaceBulkInviteFormData } from "@pi-dash/types";
+import { cn } from "@pi-dash/utils";
 // components
 import { NotAuthorizedView } from "@/components/auth-screens/not-authorized-view";
 import { CountChip } from "@/components/common/count-chip";
@@ -24,9 +24,9 @@ import { WorkspaceMembersList } from "@/components/workspace/settings/members-li
 import { useMember } from "@/hooks/store/use-member";
 import { useWorkspace } from "@/hooks/store/use-workspace";
 import { useUserPermissions } from "@/hooks/store/user";
-// apple pi dash web components
-import { BillingActionsButton } from "@/apple-pi-dash-web/components/workspace/billing/billing-actions-button";
-import { SendWorkspaceInvitationModal, MembersActivityButton } from "@/apple-pi-dash-web/components/workspace/members";
+// pi dash web components
+import { BillingActionsButton } from "@/pi-dash-web/components/workspace/billing/billing-actions-button";
+import { SendWorkspaceInvitationModal, MembersActivityButton } from "@/pi-dash-web/components/workspace/members";
 import { SettingsContentWrapper } from "@/components/settings/content-wrapper";
 // local imports
 import type { Route } from "./+types/page";

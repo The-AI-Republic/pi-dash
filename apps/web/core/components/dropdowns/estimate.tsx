@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
@@ -10,12 +10,12 @@ import { observer } from "mobx-react";
 import { useParams } from "next/navigation";
 import { usePopper } from "react-popper";
 import { Combobox } from "@headlessui/react";
-// apple pi dash imports
-import { useTranslation } from "@apple-pi-dash/i18n";
-import { CheckIcon, SearchIcon, EstimatePropertyIcon, ChevronDownIcon } from "@apple-pi-dash/propel/icons";
-import { EEstimateSystem } from "@apple-pi-dash/types";
-import { ComboDropDown } from "@apple-pi-dash/ui";
-import { convertMinutesToHoursMinutesString, cn } from "@apple-pi-dash/utils";
+// pi dash imports
+import { useTranslation } from "@pi-dash/i18n";
+import { CheckIcon, SearchIcon, EstimatePropertyIcon, ChevronDownIcon } from "@pi-dash/propel/icons";
+import { EEstimateSystem } from "@pi-dash/types";
+import { ComboDropDown } from "@pi-dash/ui";
+import { convertMinutesToHoursMinutesString, cn } from "@pi-dash/utils";
 // hooks
 import { useProjectEstimates } from "@/hooks/store/estimates";
 import { useEstimate } from "@/hooks/store/estimates/use-estimate";

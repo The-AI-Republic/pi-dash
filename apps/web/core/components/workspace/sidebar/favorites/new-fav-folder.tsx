@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
@@ -9,13 +9,13 @@ import { observer } from "mobx-react";
 import { useParams } from "next/navigation";
 import type { SubmitHandler } from "react-hook-form";
 import { Controller, useForm } from "react-hook-form";
-import { useOutsideClickDetector } from "@apple-pi-dash/hooks";
-import { useTranslation } from "@apple-pi-dash/i18n";
-// apple pi dash helpers
-// apple pi dash ui
-import { FavoriteFolderIcon } from "@apple-pi-dash/propel/icons";
-import { TOAST_TYPE, setToast } from "@apple-pi-dash/propel/toast";
-import { Input } from "@apple-pi-dash/ui";
+import { useOutsideClickDetector } from "@pi-dash/hooks";
+import { useTranslation } from "@pi-dash/i18n";
+// pi dash helpers
+// pi dash ui
+import { FavoriteFolderIcon } from "@pi-dash/propel/icons";
+import { TOAST_TYPE, setToast } from "@pi-dash/propel/toast";
+import { Input } from "@pi-dash/ui";
 // hooks
 import { useFavorite } from "@/hooks/store/use-favorite";
 

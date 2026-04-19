@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
@@ -8,10 +8,10 @@ import { Fragment } from "react";
 import { observer } from "mobx-react";
 import Link from "next/link";
 import { useTheme } from "next-themes";
-// apple pi dash imports
-import { useTranslation } from "@apple-pi-dash/i18n";
-import type { ICycle, TCycleEstimateType } from "@apple-pi-dash/types";
-import { Loader } from "@apple-pi-dash/ui";
+// pi dash imports
+import { useTranslation } from "@pi-dash/i18n";
+import type { ICycle, TCycleEstimateType } from "@pi-dash/types";
+import { Loader } from "@pi-dash/ui";
 // assets
 import darkChartAsset from "@/app/assets/empty-state/active-cycle/chart-dark.webp?url";
 import lightChartAsset from "@/app/assets/empty-state/active-cycle/chart-light.webp?url";
@@ -32,7 +32,7 @@ export const ActiveCycleProductivity = observer(function ActiveCycleProductivity
   const { workspaceSlug, projectId, cycle } = props;
   // theme hook
   const { resolvedTheme } = useTheme();
-  // apple pi dash hooks
+  // pi dash hooks
   const { t } = useTranslation();
   // hooks
   const { getEstimateTypeByCycleId, setEstimateType } = useCycle();

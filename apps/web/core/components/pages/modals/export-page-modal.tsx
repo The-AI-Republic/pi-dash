@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
@@ -9,12 +9,12 @@ import type { PageProps } from "@react-pdf/renderer";
 import { pdf } from "@react-pdf/renderer";
 import { Controller, useForm } from "react-hook-form";
 import { useParams } from "react-router";
-// apple pi dash editor
-import type { EditorRefApi } from "@apple-pi-dash/editor";
-// apple pi dash ui
-import { Button } from "@apple-pi-dash/propel/button";
-import { TOAST_TYPE, setToast } from "@apple-pi-dash/propel/toast";
-import { CustomSelect, EModalPosition, EModalWidth, ModalCore } from "@apple-pi-dash/ui";
+// pi dash editor
+import type { EditorRefApi } from "@pi-dash/editor";
+// pi dash ui
+import { Button } from "@pi-dash/propel/button";
+import { TOAST_TYPE, setToast } from "@pi-dash/propel/toast";
+import { CustomSelect, EModalPosition, EModalWidth, ModalCore } from "@pi-dash/ui";
 // components
 import { PDFDocument } from "@/components/editor/pdf";
 // hooks

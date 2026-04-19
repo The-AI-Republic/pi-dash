@@ -1,10 +1,10 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
 
-export { createPdfDocument, renderApplePiDashDocToPdfBlob, renderApplePiDashDocToPdfBuffer } from "./apple-pi-dash-pdf-exporter";
+export { createPdfDocument, renderPiDashDocToPdfBlob, renderPiDashDocToPdfBuffer } from "./pi-dash-pdf-exporter";
 export { createKeyGenerator, nodeRenderers, renderNode } from "./node-renderers";
 export { markRenderers, applyMarks } from "./mark-renderers";
 export { pdfStyles } from "./styles";

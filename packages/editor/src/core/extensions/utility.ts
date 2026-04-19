@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
@@ -10,7 +10,7 @@ import codemark from "prosemirror-codemark";
 import { CORE_EXTENSIONS } from "@/constants/extension";
 import { restorePublicImages } from "@/helpers/image-helpers";
 // plugins
-import type { TAdditionalActiveDropbarExtensions } from "@/apple-pi-dash-editor/types/utils";
+import type { TAdditionalActiveDropbarExtensions } from "@/pi-dash-editor/types/utils";
 import { DropHandlerPlugin } from "@/plugins/drop";
 import { FilePlugins } from "@/plugins/file/root";
 import { MarkdownClipboardPlugin } from "@/plugins/markdown-clipboard";

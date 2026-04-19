@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
@@ -7,19 +7,19 @@
 import { useState, useMemo, useCallback } from "react";
 import { observer } from "mobx-react";
 import { usePathname } from "next/navigation";
-// Apple Pi Dash imports
+// Pi Dash imports
 import useSWR from "swr";
-import { EUserPermissions, EUserPermissionsLevel } from "@apple-pi-dash/constants";
-import { useTranslation } from "@apple-pi-dash/i18n";
-import { TOAST_TYPE, setPromiseToast, setToast } from "@apple-pi-dash/propel/toast";
-import type { IWorkItemPeekOverview, TIssue } from "@apple-pi-dash/types";
-import { EIssueServiceType, EIssuesStoreType } from "@apple-pi-dash/types";
+import { EUserPermissions, EUserPermissionsLevel } from "@pi-dash/constants";
+import { useTranslation } from "@pi-dash/i18n";
+import { TOAST_TYPE, setPromiseToast, setToast } from "@pi-dash/propel/toast";
+import type { IWorkItemPeekOverview, TIssue } from "@pi-dash/types";
+import { EIssueServiceType, EIssuesStoreType } from "@pi-dash/types";
 // hooks
 import { useIssueDetail } from "@/hooks/store/use-issue-detail";
 import { useIssues } from "@/hooks/store/use-issues";
 import { useUserPermissions } from "@/hooks/store/user";
 import { useIssueStoreType } from "@/hooks/use-issue-layout-store";
-import { useWorkItemProperties } from "@/apple-pi-dash-web/hooks/use-issue-properties";
+import { useWorkItemProperties } from "@/pi-dash-web/hooks/use-issue-properties";
 // local imports
 import type { TIssueOperations } from "../issue-detail";
 import { IssueView } from "./view";

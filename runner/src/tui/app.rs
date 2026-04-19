@@ -272,7 +272,7 @@ fn draw(f: &mut ratatui::Frame<'_>, state: &AppState) {
         .block(
             Block::default()
                 .borders(Borders::ALL)
-                .title(" Apple Pi Dash Runner "),
+                .title(" Pi Dash Runner "),
         )
         .select(idx)
         .highlight_style(Style::default().add_modifier(Modifier::BOLD | Modifier::REVERSED));
@@ -305,7 +305,7 @@ fn render_help(f: &mut ratatui::Frame<'_>) {
     let area = centered_rect(60, 60, f.area());
     f.render_widget(Clear, area);
     let body = Paragraph::new(vec![
-        Line::from("Apple Pi Dash Runner — TUI help"),
+        Line::from("Pi Dash Runner — TUI help"),
         Line::raw(""),
         Line::from("1–4   switch views"),
         Line::from("j/k   move selection"),

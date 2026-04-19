@@ -1,12 +1,12 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
 
 import { useTheme } from "next-themes";
-// apple pi dash imports
-import { Button } from "@apple-pi-dash/propel/button";
+// pi dash imports
+import { Button } from "@pi-dash/propel/button";
 // assets
 import maintenanceModeDarkModeImage from "@/app/assets/instance/maintenance-mode-dark.svg?url";
 import maintenanceModeLightModeImage from "@/app/assets/instance/maintenance-mode-light.svg?url";
@@ -17,17 +17,17 @@ const linkMap = [
   {
     key: "mail_to",
     label: "Contact Support",
-    value: "mailto:support@apple-pi-dash.so",
+    value: "mailto:support@pi-dash.so",
   },
   {
     key: "status",
     label: "Status Page",
-    value: "https://status.apple-pi-dash.so/",
+    value: "https://status.pi-dash.so/",
   },
   {
     key: "twitter_handle",
-    label: "@applepidashpowers",
-    value: "https://x.com/applepidashpowers",
+    label: "@pidashpowers",
+    value: "https://x.com/pidashpowers",
   },
 ];
 

@@ -1,15 +1,15 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
 
 import { observer } from "mobx-react";
 import { Tab } from "@headlessui/react";
-import { useTranslation } from "@apple-pi-dash/i18n";
-import type { TWorkItemFilterCondition } from "@apple-pi-dash/shared-state";
-import type { TModuleDistribution, TModuleEstimateDistribution, TModulePlotType } from "@apple-pi-dash/types";
-import { cn, toFilterArray } from "@apple-pi-dash/utils";
+import { useTranslation } from "@pi-dash/i18n";
+import type { TWorkItemFilterCondition } from "@pi-dash/shared-state";
+import type { TModuleDistribution, TModuleEstimateDistribution, TModulePlotType } from "@pi-dash/types";
+import { cn, toFilterArray } from "@pi-dash/utils";
 // components
 import type { TAssigneeData } from "@/components/core/sidebar/progress-stats/assignee";
 import { AssigneeStatComponent } from "@/components/core/sidebar/progress-stats/assignee";
@@ -50,7 +50,7 @@ export const ModuleProgressStats = observer(function ModuleProgressStats(props: 
     size = "sm",
     totalIssuesCount,
   } = props;
-  // apple pi dash imports
+  // pi dash imports
   const { t } = useTranslation();
   // hooks
   const { storedValue: currentTab, setValue: setModuleTab } = useLocalStorage(

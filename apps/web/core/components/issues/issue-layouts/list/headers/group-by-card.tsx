@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
@@ -8,24 +8,24 @@ import { useState } from "react";
 import { observer } from "mobx-react";
 import { useParams } from "next/navigation";
 import { CircleDashed } from "lucide-react";
-import { PlusIcon } from "@apple-pi-dash/propel/icons";
+import { PlusIcon } from "@pi-dash/propel/icons";
 // types
-import { TOAST_TYPE, setToast } from "@apple-pi-dash/propel/toast";
-import type { TIssue, ISearchIssueResponse, TIssueGroupByOptions } from "@apple-pi-dash/types";
+import { TOAST_TYPE, setToast } from "@pi-dash/propel/toast";
+import type { TIssue, ISearchIssueResponse, TIssueGroupByOptions } from "@pi-dash/types";
 // ui
-import { CustomMenu } from "@apple-pi-dash/ui";
+import { CustomMenu } from "@pi-dash/ui";
 // components
-import { cn } from "@apple-pi-dash/utils";
+import { cn } from "@pi-dash/utils";
 import { ExistingIssuesListModal } from "@/components/core/modals/existing-issues-list-modal";
 import { MultipleSelectGroupAction } from "@/components/core/multiple-select";
 import { CreateUpdateIssueModal } from "@/components/issues/issue-modal/modal";
 // constants
 import { useIssueStoreType } from "@/hooks/use-issue-layout-store";
 import type { TSelectionHelper } from "@/hooks/use-multiple-select";
-// apple-pi-dash-web
-import { CreateUpdateEpicModal } from "@/apple-pi-dash-web/components/epics/epic-modal";
-// Apple Pi Dash-web
-import { WorkFlowGroupTree } from "@/apple-pi-dash-web/components/workflow";
+// pi-dash-web
+import { CreateUpdateEpicModal } from "@/pi-dash-web/components/epics/epic-modal";
+// Pi Dash-web
+import { WorkFlowGroupTree } from "@/pi-dash-web/components/workflow";
 
 interface IHeaderGroupByCard {
   groupID: string;

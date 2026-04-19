@@ -1,16 +1,16 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
 
-import { USER_TRACKER_ELEMENTS } from "@apple-pi-dash/constants";
-import { useTranslation } from "@apple-pi-dash/i18n";
+import { USER_TRACKER_ELEMENTS } from "@pi-dash/constants";
+import { useTranslation } from "@pi-dash/i18n";
 // ui
-import { getButtonStyling } from "@apple-pi-dash/propel/button";
-import { ApplePiDashLogo } from "@apple-pi-dash/propel/icons";
+import { getButtonStyling } from "@pi-dash/propel/button";
+import { PiDashLogo } from "@pi-dash/propel/icons";
 // helpers
-import { cn } from "@apple-pi-dash/utils";
+import { cn } from "@pi-dash/utils";
 
 export function ProductUpdatesFooter() {
   const { t } = useTranslation();
@@ -18,7 +18,7 @@ export function ProductUpdatesFooter() {
     <div className="m-6 mb-4 flex flex-shrink-0 items-center justify-between gap-4">
       <div className="flex items-center gap-2">
         <a
-          href="https://go.apple-pi-dash.so/p-docs"
+          href="https://go.pi-dash.so/p-docs"
           target="_blank"
           className="text-13 text-secondary underline-offset-1 outline-none hover:text-primary hover:underline"
           rel="noreferrer"
@@ -30,7 +30,7 @@ export function ProductUpdatesFooter() {
         </svg>
         <a
           data-ph-element={USER_TRACKER_ELEMENTS.CHANGELOG_REDIRECTED}
-          href="https://go.apple-pi-dash.so/p-changelog"
+          href="https://go.pi-dash.so/p-changelog"
           target="_blank"
           className="text-13 text-secondary underline-offset-1 outline-none hover:text-primary hover:underline"
           rel="noreferrer"
@@ -41,7 +41,7 @@ export function ProductUpdatesFooter() {
           <circle cx={1} cy={1} r={1} />
         </svg>
         <a
-          href="mailto:support@apple-pi-dash.so"
+          href="mailto:support@pi-dash.so"
           target="_blank"
           className="text-13 text-secondary underline-offset-1 outline-none hover:text-primary hover:underline"
           rel="noreferrer"
@@ -52,7 +52,7 @@ export function ProductUpdatesFooter() {
           <circle cx={1} cy={1} r={1} />
         </svg>
         <a
-          href="https://forum.apple-pi-dash.so"
+          href="https://forum.pi-dash.so"
           target="_blank"
           className="text-13 text-secondary underline-offset-1 outline-none hover:text-primary hover:underline"
           rel="noreferrer"
@@ -61,7 +61,7 @@ export function ProductUpdatesFooter() {
         </a>
       </div>
       <a
-        href="https://apple-pi-dash.so/pages"
+        href="https://pi-dash.so/pages"
         target="_blank"
         className={cn(
           getButtonStyling("secondary", "base"),
@@ -69,8 +69,8 @@ export function ProductUpdatesFooter() {
         )}
         rel="noreferrer"
       >
-        <ApplePiDashLogo className="h-4 w-auto text-primary" />
-        {t("powered_by_apple_pi_dash_pages")}
+        <PiDashLogo className="h-4 w-auto text-primary" />
+        {t("powered_by_pi_dash_pages")}
       </a>
     </div>
   );

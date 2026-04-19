@@ -1,14 +1,14 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
 
-// apple pi dash web components
-import { EIssuesStoreType } from "@apple-pi-dash/types";
-import { TeamEmptyState } from "@/apple-pi-dash-web/components/issues/issue-layouts/empty-states/team-issues";
-import { TeamProjectWorkItemEmptyState } from "@/apple-pi-dash-web/components/issues/issue-layouts/empty-states/team-project";
-import { TeamViewEmptyState } from "@/apple-pi-dash-web/components/issues/issue-layouts/empty-states/team-view-issues";
+// pi dash web components
+import { EIssuesStoreType } from "@pi-dash/types";
+import { TeamEmptyState } from "@/pi-dash-web/components/issues/issue-layouts/empty-states/team-issues";
+import { TeamProjectWorkItemEmptyState } from "@/pi-dash-web/components/issues/issue-layouts/empty-states/team-project";
+import { TeamViewEmptyState } from "@/pi-dash-web/components/issues/issue-layouts/empty-states/team-view-issues";
 // components
 import { ProjectArchivedEmptyState } from "./archived-issues";
 import { CycleEmptyState } from "./cycle";

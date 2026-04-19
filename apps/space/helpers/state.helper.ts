@@ -1,11 +1,11 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
 
-import { STATE_GROUPS } from "@apple-pi-dash/constants";
-import type { IState } from "@apple-pi-dash/types";
+import { STATE_GROUPS } from "@pi-dash/constants";
+import type { IState } from "@pi-dash/types";
 
 export const sortStates = (states: IState[]) => {
   if (!states || states.length === 0) return;

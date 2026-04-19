@@ -1,11 +1,11 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
 
 import { observer } from "mobx-react";
-import { ApplePiDashLockup } from "@apple-pi-dash/propel/icons";
+import { PiDashLockup } from "@pi-dash/propel/icons";
 // assets
 import UserLoggedInImage from "@/app/assets/user-logged-in.svg?url";
 // components
@@ -23,7 +23,7 @@ export const UserLoggedIn = observer(function UserLoggedIn() {
   return (
     <div className="flex h-screen w-screen flex-col">
       <div className="relative flex w-full items-center justify-between gap-4 border-b border-subtle px-6 py-5">
-        <ApplePiDashLockup className="h-6 w-auto text-primary" />
+        <PiDashLockup className="h-6 w-auto text-primary" />
         <UserAvatar />
       </div>
 

@@ -1,12 +1,12 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
 
 import { useCallback } from "react";
 // helpers
-import type { TCustomComponentsMetaData } from "@apple-pi-dash/utils";
+import type { TCustomComponentsMetaData } from "@pi-dash/utils";
 // helpers
 import { getEditorAssetSrc } from "@/helpers/editor.helper";
 // hooks

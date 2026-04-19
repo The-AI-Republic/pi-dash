@@ -3,7 +3,7 @@ use directories::ProjectDirs;
 use std::path::{Path, PathBuf};
 
 const QUALIFIER: &str = "so";
-const ORG: &str = "apple-pi-dash";
+const ORG: &str = "pi-dash";
 const APP: &str = "runner";
 
 #[derive(Debug, Clone)]
@@ -69,7 +69,7 @@ impl Paths {
         let base = std::env::var("TMPDIR")
             .map(PathBuf::from)
             .unwrap_or_else(|_| std::env::temp_dir());
-        base.join(".apple_pi")
+        base.join(".pi_dash")
     }
 
     pub fn ensure(&self) -> Result<()> {

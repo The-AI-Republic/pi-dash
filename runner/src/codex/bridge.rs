@@ -116,7 +116,7 @@ impl Bridge {
             "initialize",
             &InitializeParams {
                 client_info: ClientInfo {
-                    name: "apple-pi-dash-runner".to_string(),
+                    name: "pi-dash-runner".to_string(),
                     version: crate::RUNNER_VERSION.to_string(),
                 },
             },

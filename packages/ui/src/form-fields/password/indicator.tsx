@@ -1,13 +1,13 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
 
 import { CircleCheck } from "lucide-react";
 import React from "react";
-import { E_PASSWORD_STRENGTH } from "@apple-pi-dash/constants";
-import { cn, getPasswordStrength, getPasswordCriteria } from "@apple-pi-dash/utils";
+import { E_PASSWORD_STRENGTH } from "@pi-dash/constants";
+import { cn, getPasswordStrength, getPasswordCriteria } from "@pi-dash/utils";
 import { getStrengthInfo, getFragmentColor } from "./helper";
 
 export interface PasswordStrengthIndicatorProps {

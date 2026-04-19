@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
@@ -89,7 +89,7 @@ export default {
       already_have_an_account: "Už máte účet?",
       login: "Prihlásiť sa",
       create_account: "Vytvoriť účet",
-      new_to_apple_pi_dash: "Nový v Apple Pi Dash?",
+      new_to_pi_dash: "Nový v Pi Dash?",
       back_to_sign_in: "Späť na prihlásenie",
       resend_in: "Znova odoslať za {seconds} sekúnd",
       sign_in_with_unique_code: "Prihlásiť sa pomocou jedinečného kódu",
@@ -408,7 +408,7 @@ export default {
   full_changelog: "Úplný zmenový protokol",
   support: "Podpora",
   forum: "Forum",
-  powered_by_apple_pi_dash_pages: "Poháňa Apple Pi Dash Pages",
+  powered_by_pi_dash_pages: "Poháňa Pi Dash Pages",
   please_select_at_least_one_invitation: "Vyberte aspoň jednu pozvánku.",
   please_select_at_least_one_invitation_description:
     "Vyberte aspoň jednu pozvánku na pripojenie do pracovného priestoru.",
@@ -571,7 +571,7 @@ export default {
       not_right_now: "Teraz nie",
       create_project: {
         title: "Vytvoriť projekt",
-        description: "Väčšina vecí začína projektom v Apple Pi Dash.",
+        description: "Väčšina vecí začína projektom v Pi Dash.",
         cta: "Začať",
       },
       invite_team: {
@@ -585,7 +585,7 @@ export default {
         cta: "Konfigurovať tento priestor",
       },
       personalize_account: {
-        title: "Prispôsobte si Apple Pi Dash.",
+        title: "Prispôsobte si Pi Dash.",
         description: "Vyberte si obrázok, farby a ďalšie.",
         cta: "Prispôsobiť teraz",
       },
@@ -618,8 +618,8 @@ export default {
         issues: "Pracovné položky",
       },
     },
-    new_at_apple_pi_dash: {
-      title: "Novinky v Apple Pi Dash",
+    new_at_pi_dash: {
+      title: "Novinky v Pi Dash",
     },
     quick_tutorial: {
       title: "Rýchly tutoriál",
@@ -1275,7 +1275,7 @@ export default {
   },
   workspace_creation: {
     heading: "Vytvorte si pracovný priestor",
-    subheading: "Na používanie Apple Pi Dash musíte vytvoriť alebo sa pripojiť k pracovnému priestoru.",
+    subheading: "Na používanie Pi Dash musíte vytvoriť alebo sa pripojiť k pracovnému priestoru.",
     form: {
       name: {
         label: "Pomenujte svoj pracovný priestor",
@@ -1329,11 +1329,11 @@ export default {
       general: {
         title: "Prehľad projektov, aktivít a metrík",
         description:
-          "Vitajte v Apple Pi Dash, teší nás, že ste tu. Vytvorte prvý projekt, sledujte pracovné položky a táto stránka sa zmení na priestor pre váš pokrok. Správcovia tu uvidia aj položky pomáhajúce tímu.",
+          "Vitajte v Pi Dash, teší nás, že ste tu. Vytvorte prvý projekt, sledujte pracovné položky a táto stránka sa zmení na priestor pre váš pokrok. Správcovia tu uvidia aj položky pomáhajúce tímu.",
         primary_button: {
           text: "Vytvorte prvý projekt",
           comic: {
-            title: "Všetko začína projektom v Apple Pi Dash",
+            title: "Všetko začína projektom v Pi Dash",
             description: "Projektom môže byť roadmapa produktu, marketingová kampaň alebo uvedenie nového auta.",
           },
         },
@@ -1467,7 +1467,7 @@ export default {
         primary_button: {
           text: "Začnite prvý projekt",
           comic: {
-            title: "Všetko začína projektom v Apple Pi Dash",
+            title: "Všetko začína projektom v Pi Dash",
             description: "Projektom môže byť roadmapa produktu, marketingová kampaň alebo uvedenie nového auta.",
           },
         },
@@ -1478,7 +1478,7 @@ export default {
         primary_button: {
           text: "Začnite prvý projekt",
           comic: {
-            title: "Všetko začína projektom v Apple Pi Dash",
+            title: "Všetko začína projektom v Pi Dash",
             description: "Projektom môže byť roadmapa produktu, marketingová kampaň alebo uvedenie nového auta.",
           },
         },
@@ -1577,7 +1577,7 @@ export default {
     page_label: "{workspace} - Všeobecné nastavenia",
     key_created: "Kľúč vytvorený",
     copy_key:
-      "Skopírujte a uložte tento kľúč do Apple Pi Dash Pages. Po zatvorení ho neuvidíte. CSV súbor s kľúčom bol stiahnutý.",
+      "Skopírujte a uložte tento kľúč do Pi Dash Pages. Po zatvorení ho neuvidíte. CSV súbor s kľúčom bol stiahnutý.",
     token_copied: "Token skopírovaný do schránky.",
     settings: {
       general: {
@@ -1739,7 +1739,7 @@ export default {
     empty_state: {
       api_tokens: {
         title: "Žiadne API tokeny",
-        description: "Používajte API na integráciu Apple Pi Dash s externými systémami.",
+        description: "Používajte API na integráciu Pi Dash s externými systémami.",
       },
       webhooks: {
         title: "Žiadne webhooky",
@@ -1952,12 +1952,12 @@ export default {
       label: "Automatizácie",
       "auto-archive": {
         title: "Automaticky archivovať uzavreté položky",
-        description: "Apple Pi Dash bude archivovať dokončené alebo zrušené položky.",
+        description: "Pi Dash bude archivovať dokončené alebo zrušené položky.",
         duration: "Archivovať položky uzavreté dlhšie ako",
       },
       "auto-close": {
         title: "Automaticky uzatvárať položky",
-        description: "Apple Pi Dash uzavrie neaktívne položky.",
+        description: "Pi Dash uzavrie neaktívne položky.",
         duration: "Uzatvoriť položky neaktívne dlhšie ako",
         auto_close_status: "Stav pre automatické uzatvorenie",
       },
@@ -2614,8 +2614,8 @@ export default {
     edited_by: "Upravené používateľom",
   },
   self_hosted_maintenance_message: {
-    apple_pi_dash_didnt_start_up_this_could_be_because_one_or_more_apple_pi_dash_services_failed_to_start:
-      "Apple Pi Dash sa nespustil. Toto môže byť spôsobené tým, že sa jedna alebo viac služieb Apple Pi Dash nepodarilo spustiť.",
+    pi_dash_didnt_start_up_this_could_be_because_one_or_more_pi_dash_services_failed_to_start:
+      "Pi Dash sa nespustil. Toto môže byť spôsobené tým, že sa jedna alebo viac služieb Pi Dash nepodarilo spustiť.",
     choose_view_logs_from_setup_sh_and_docker_logs_to_be_sure:
       "Vyberte View Logs z setup.sh a Docker logov, aby ste si boli istí.",
   },

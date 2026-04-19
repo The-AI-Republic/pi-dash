@@ -1,13 +1,13 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
 
 import * as React from "react";
 import type { ColumnDef } from "@tanstack/react-table";
-import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@apple-pi-dash/propel/table";
-import { Loader } from "@apple-pi-dash/ui";
+import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@pi-dash/propel/table";
+import { Loader } from "@pi-dash/ui";
 
 interface TableSkeletonProps {
   columns: ColumnDef<any>[];

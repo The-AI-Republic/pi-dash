@@ -1,14 +1,14 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
 
 import Link from "next/link";
 import { useParams } from "next/navigation";
-// Apple Pi Dash imports
-import type { IWebhook } from "@apple-pi-dash/types";
-import { ToggleSwitch } from "@apple-pi-dash/ui";
+// Pi Dash imports
+import type { IWebhook } from "@pi-dash/types";
+import { ToggleSwitch } from "@pi-dash/ui";
 // hooks
 import { useWebhook } from "@/hooks/store/use-webhook";
 

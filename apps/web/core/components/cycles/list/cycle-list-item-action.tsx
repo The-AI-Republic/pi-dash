@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
@@ -10,16 +10,16 @@ import { observer } from "mobx-react";
 import { useParams, usePathname, useSearchParams } from "next/navigation";
 import { useForm } from "react-hook-form";
 import { Eye, ArrowRight, CalendarDays } from "lucide-react";
-// apple pi dash imports
-import { EUserPermissions, EUserPermissionsLevel, IS_FAVORITE_MENU_OPEN } from "@apple-pi-dash/constants";
-import { useLocalStorage } from "@apple-pi-dash/hooks";
-import { useTranslation } from "@apple-pi-dash/i18n";
-import { TransferIcon, WorkItemsIcon, MembersPropertyIcon } from "@apple-pi-dash/propel/icons";
-import { setPromiseToast } from "@apple-pi-dash/propel/toast";
-import { Tooltip } from "@apple-pi-dash/propel/tooltip";
-import type { ICycle, TCycleGroups } from "@apple-pi-dash/types";
-import { Avatar, AvatarGroup, FavoriteStar } from "@apple-pi-dash/ui";
-import { getDate, getFileURL, generateQueryParams } from "@apple-pi-dash/utils";
+// pi dash imports
+import { EUserPermissions, EUserPermissionsLevel, IS_FAVORITE_MENU_OPEN } from "@pi-dash/constants";
+import { useLocalStorage } from "@pi-dash/hooks";
+import { useTranslation } from "@pi-dash/i18n";
+import { TransferIcon, WorkItemsIcon, MembersPropertyIcon } from "@pi-dash/propel/icons";
+import { setPromiseToast } from "@pi-dash/propel/toast";
+import { Tooltip } from "@pi-dash/propel/tooltip";
+import type { ICycle, TCycleGroups } from "@pi-dash/types";
+import { Avatar, AvatarGroup, FavoriteStar } from "@pi-dash/ui";
+import { getDate, getFileURL, generateQueryParams } from "@pi-dash/utils";
 // components
 import { DateRangeDropdown } from "@/components/dropdowns/date-range";
 import { ButtonAvatars } from "@/components/dropdowns/member/avatar";
@@ -31,8 +31,8 @@ import { useUserPermissions } from "@/hooks/store/user";
 import { useAppRouter } from "@/hooks/use-app-router";
 import { usePlatformOS } from "@/hooks/use-platform-os";
 import { useTimeZoneConverter } from "@/hooks/use-timezone-converter";
-// apple pi dash web components
-import { CycleAdditionalActions } from "@/apple-pi-dash-web/components/cycles";
+// pi dash web components
+import { CycleAdditionalActions } from "@/pi-dash-web/components/cycles";
 // local imports
 import { CycleQuickActions } from "../quick-actions";
 import { TransferIssuesModal } from "../transfer-issues-modal";

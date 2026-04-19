@@ -1,21 +1,21 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
 
 import { observer } from "mobx-react";
-// apple pi dash imports
-import type { E_SORT_ORDER, TActivityFilters, EActivityFilterType } from "@apple-pi-dash/constants";
-import { BASE_ACTIVITY_FILTER_TYPES, filterActivityOnSelectedFilters } from "@apple-pi-dash/constants";
-import type { TCommentsOperations } from "@apple-pi-dash/types";
+// pi dash imports
+import type { E_SORT_ORDER, TActivityFilters, EActivityFilterType } from "@pi-dash/constants";
+import { BASE_ACTIVITY_FILTER_TYPES, filterActivityOnSelectedFilters } from "@pi-dash/constants";
+import type { TCommentsOperations } from "@pi-dash/types";
 // components
 import { CommentCard } from "@/components/comments/card/root";
 // hooks
 import { useIssueDetail } from "@/hooks/store/use-issue-detail";
-// apple pi dash web components
-import { IssueAdditionalPropertiesActivity } from "@/apple-pi-dash-web/components/issues/issue-details/issue-properties-activity";
-import { IssueActivityWorklog } from "@/apple-pi-dash-web/components/issues/worklog/activity/root";
+// pi dash web components
+import { IssueAdditionalPropertiesActivity } from "@/pi-dash-web/components/issues/issue-details/issue-properties-activity";
+import { IssueActivityWorklog } from "@/pi-dash-web/components/issues/worklog/activity/root";
 // local imports
 import { IssueActivityItem } from "./activity/activity-list";
 import { IssueActivityLoader } from "./loader";

@@ -1,10 +1,10 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
 
-import type { TFilterGroupNode, TFilterProperty } from "@apple-pi-dash/types";
+import type { TFilterGroupNode, TFilterProperty } from "@pi-dash/types";
 import { processGroupNode } from "../../types/shared";
 import type { TTreeTransformFn, TTreeTransformResult } from "./core";
 import { transformGroupWithChildren } from "./core";

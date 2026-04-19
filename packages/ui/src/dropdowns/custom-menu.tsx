@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
@@ -9,9 +9,9 @@ import { MoreHorizontal } from "lucide-react";
 import * as React from "react";
 import ReactDOM from "react-dom";
 import { usePopper } from "react-popper";
-import { useOutsideClickDetector } from "@apple-pi-dash/hooks";
-import { ChevronDownIcon, ChevronRightIcon } from "@apple-pi-dash/propel/icons";
-// apple pi dash helpers
+import { useOutsideClickDetector } from "@pi-dash/hooks";
+import { ChevronDownIcon, ChevronRightIcon } from "@pi-dash/propel/icons";
+// pi dash helpers
 // helpers
 import { useDropdownKeyDown } from "../hooks/use-dropdown-key-down";
 import { cn } from "../utils";

@@ -6,7 +6,7 @@
       "@/app/*": ["./app/*"],
       "@/helpers/*": ["./helpers/*"],
       "@/styles/*": ["./styles/*"],
-      "@/apple-pi-dash-web/*": ["./ce/*"],
+      "@/pi-dash-web/*": ["./ce/*"],
       "package.json": ["./package.json"]
     },
     "strictNullChecks": true,
@@ -17,6 +17,6 @@
     "noImplicitOverride": false,
     "types": ["vite/client"]
   },
-  "extends": "@apple-pi-dash/typescript-config/react-router.json",
+  "extends": "@pi-dash/typescript-config/react-router.json",
   "include": ["**/*", "**/.server/**/*", "**/.client/**/*", ".react-router/types/**/*"]
 }

@@ -1,12 +1,12 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
 
 import type { onStatelessPayload } from "@hocuspocus/server";
-import { DocumentCollaborativeEvents } from "@apple-pi-dash/editor/lib";
-import type { TDocumentEventsServer } from "@apple-pi-dash/editor/lib";
+import { DocumentCollaborativeEvents } from "@pi-dash/editor/lib";
+import type { TDocumentEventsServer } from "@pi-dash/editor/lib";
 
 /**
  * Broadcast the client event to all the clients so that they can update their state

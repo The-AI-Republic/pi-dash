@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
@@ -8,11 +8,11 @@ import { observer } from "mobx-react";
 import Link from "next/link";
 // icons
 import { Settings2 } from "lucide-react";
-// apple pi dash internal packages
-import { getButtonStyling } from "@apple-pi-dash/propel/button";
-import type { TInstanceAuthenticationMethodKeys } from "@apple-pi-dash/types";
-import { ToggleSwitch } from "@apple-pi-dash/ui";
-import { cn } from "@apple-pi-dash/utils";
+// pi dash internal packages
+import { getButtonStyling } from "@pi-dash/propel/button";
+import type { TInstanceAuthenticationMethodKeys } from "@pi-dash/types";
+import { ToggleSwitch } from "@pi-dash/ui";
+import { cn } from "@pi-dash/utils";
 // hooks
 import { useInstance } from "@/hooks/store";
 

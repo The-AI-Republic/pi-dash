@@ -1,4 +1,4 @@
-//! First-run onboarding wizard. Shown by `apple-pi-dash-runner tui` when no
+//! First-run onboarding wizard. Shown by `pi-dash-runner tui` when no
 //! configuration exists on disk. Mirrors the 4-step flow from tui-design.md.
 
 use anyhow::Result;
@@ -53,7 +53,7 @@ pub async fn run(paths: Paths) -> Result<()> {
     let mut state = Wizard {
         paths,
         step: Step::Cloud,
-        cloud_url: "https://cloud.apple-pi-dash.so".to_string(),
+        cloud_url: "https://cloud.pi-dash.so".to_string(),
         token: String::new(),
         name: default_name,
         cursor_field: 0,
@@ -286,7 +286,7 @@ async fn handle_service_step(code: KeyCode, state: &mut Wizard) {
                 if state.install_service {
                     "Runner is installed as a service and connected.\nThe TUI dashboard will open next."
                 } else {
-                    "Configuration saved. Run `apple-pi-dash-runner start` to connect."
+                    "Configuration saved. Run `pi-dash-runner start` to connect."
                 }
                 .to_string(),
             );
@@ -301,7 +301,7 @@ fn draw(f: &mut ratatui::Frame<'_>, state: &Wizard) {
     let area = centered_rect(70, 80, f.area());
     let block = Block::default()
         .borders(Borders::ALL)
-        .title(" Apple Pi Dash Runner — Setup ");
+        .title(" Pi Dash Runner — Setup ");
     f.render_widget(block.clone(), area);
     let inner = Layout::default()
         .direction(Direction::Vertical)
@@ -336,7 +336,7 @@ fn header(state: &Wizard) -> Paragraph<'_> {
 fn body(state: &Wizard) -> Paragraph<'_> {
     let lines = match state.step {
         Step::Cloud => vec![
-            Line::from("Where is your Apple Pi Dash cloud deployment?"),
+            Line::from("Where is your Pi Dash cloud deployment?"),
             Line::raw(""),
             Line::from(vec![
                 Span::raw("URL: "),
@@ -346,7 +346,7 @@ fn body(state: &Wizard) -> Paragraph<'_> {
             Line::from("Press Enter to continue. Esc to cancel."),
         ],
         Step::Token => vec![
-            Line::from("Generate a one-time code in the Apple Pi Dash web UI:"),
+            Line::from("Generate a one-time code in the Pi Dash web UI:"),
             Line::from("  Workspace → Runners → Mint registration code"),
             Line::raw(""),
             Line::from(vec![

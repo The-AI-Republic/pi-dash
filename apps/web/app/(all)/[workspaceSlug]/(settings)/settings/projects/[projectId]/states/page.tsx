@@ -1,14 +1,14 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
 
 import { observer } from "mobx-react";
-import { EUserPermissions, EUserPermissionsLevel } from "@apple-pi-dash/constants";
-import { useTranslation } from "@apple-pi-dash/i18n";
-import { setPromiseToast } from "@apple-pi-dash/propel/toast";
-import { ToggleSwitch } from "@apple-pi-dash/ui";
+import { EUserPermissions, EUserPermissionsLevel } from "@pi-dash/constants";
+import { useTranslation } from "@pi-dash/i18n";
+import { setPromiseToast } from "@pi-dash/propel/toast";
+import { ToggleSwitch } from "@pi-dash/ui";
 // components
 import { NotAuthorizedView } from "@/components/auth-screens/not-authorized-view";
 import { PageHead } from "@/components/core/page-title";
@@ -37,12 +37,7 @@ function StatesSettingsPage({ params }: Route.ComponentProps) {
     [EUserPermissions.ADMIN, EUserPermissions.MEMBER],
     EUserPermissionsLevel.PROJECT
   );
-  const isAdmin = allowPermissions(
-    [EUserPermissions.ADMIN],
-    EUserPermissionsLevel.PROJECT,
-    workspaceSlug,
-    projectId
-  );
+  const isAdmin = allowPermissions([EUserPermissions.ADMIN], EUserPermissionsLevel.PROJECT, workspaceSlug, projectId);
   const membersCanEditStates = getProjectById(projectId)?.members_can_edit_states ?? true;
 
   const handleMembersCanEditStatesToggle = () => {
@@ -81,11 +76,7 @@ function StatesSettingsPage({ params }: Route.ComponentProps) {
               title={t("project_settings.states.members_edit.title")}
               description={t("project_settings.states.members_edit.description")}
               control={
-                <ToggleSwitch
-                  value={membersCanEditStates}
-                  onChange={handleMembersCanEditStatesToggle}
-                  size="sm"
-                />
+                <ToggleSwitch value={membersCanEditStates} onChange={handleMembersCanEditStatesToggle} size="sm" />
               }
             />
           </div>

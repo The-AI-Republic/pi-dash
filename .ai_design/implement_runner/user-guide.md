@@ -1,12 +1,12 @@
 # Runner — End-User Setup Guide
 
-This guide walks you through connecting your dev machine to Apple Pi Dash so the cloud can assign coding tasks to Codex running locally.
+This guide walks you through connecting your dev machine to Pi Dash so the cloud can assign coding tasks to Codex running locally.
 
-**Who this is for:** developers who want their Apple Pi Dash issues to become live Codex runs on their own hardware.
+**Who this is for:** developers who want their Pi Dash issues to become live Codex runs on their own hardware.
 
 **What you need before you start:**
 
-- Apple Pi Dash account with access to your workspace
+- Pi Dash account with access to your workspace
 - Codex installed and logged in (`codex --version` works, `codex account status` shows your account)
 - Git installed with working credentials for the repos you'll work on
 - macOS (arm64/x64) or Linux (x64). Windows is not yet supported.
@@ -17,17 +17,17 @@ Pick one:
 
 ```bash
 # Homebrew (macOS + Linux)
-brew install apple-pi-dash/tap/runner
+brew install pi-dash/tap/runner
 
 # Shell installer
-curl -fsSL https://cloud.apple-pi-dash.so/install.sh | sh
+curl -fsSL https://cloud.pi-dash.so/install.sh | sh
 ```
 
-Both drop `apple-pi-dash-runner` into `$HOME/.local/bin`. Make sure that directory is in your `PATH`.
+Both drop `pi-dash-runner` into `$HOME/.local/bin`. Make sure that directory is in your `PATH`.
 
 ## 2. Get a registration code
 
-1. Sign in to `https://cloud.apple-pi-dash.so` (or your self-hosted URL).
+1. Sign in to `https://cloud.pi-dash.so` (or your self-hosted URL).
 2. Open your workspace → **Runners** tab.
 3. Click **Mint registration code**.
 4. Copy the code. It's single-use and expires in 1 hour.
@@ -39,7 +39,7 @@ You can register up to 5 runners per account per workspace.
 ### Option A — interactive TUI (recommended for first-time setup)
 
 ```bash
-apple-pi-dash-runner tui
+pi-dash-runner tui
 ```
 
 The TUI detects that no config exists and walks you through 4 steps:
@@ -52,13 +52,13 @@ The TUI detects that no config exists and walks you through 4 steps:
 ### Option B — command-line (scripts / CI)
 
 ```bash
-apple-pi-dash-runner configure \
-  --url https://cloud.apple-pi-dash.so \
+pi-dash-runner configure \
+  --url https://cloud.pi-dash.so \
   --token <PASTE_REGISTRATION_CODE> \
   --name my-laptop
 
-apple-pi-dash-runner service install
-apple-pi-dash-runner service start
+pi-dash-runner service install
+pi-dash-runner service start
 ```
 
 The daemon now runs as a `launchd` agent (macOS) or `systemd --user` unit (Linux) and will auto-start on login.
@@ -66,7 +66,7 @@ The daemon now runs as a `launchd` agent (macOS) or `systemd --user` unit (Linux
 ## 4. Verify it's connected
 
 ```bash
-apple-pi-dash-runner status
+pi-dash-runner status
 ```
 
 You should see `connected` and your cloud URL. Equivalently, open the web UI → **Runners** tab; the new runner appears with a green **online** badge within a few seconds.
@@ -74,7 +74,7 @@ You should see `connected` and your cloud URL. Equivalently, open the web UI →
 ## 5. Attach the TUI dashboard
 
 ```bash
-apple-pi-dash-runner tui
+pi-dash-runner tui
 ```
 
 Four tabs:
@@ -106,16 +106,16 @@ Pending approvals expire after 10 minutes; the server then cancels the run autom
 
 ## 7. Day-to-day
 
-- **Your working directory** lives at `$TMPDIR/.apple_pi` by default. Change with `apple-pi-dash-runner configure --working-dir /path/to/repo` or the Config tab. Runs reuse this directory; Codex is expected to reset/stash/checkout at the start of each task.
-- **Logs** are in `~/.local/share/apple-pi-dash-runner/logs/`.
-- **Per-run transcripts** are stored as JSONL in `~/.local/share/apple-pi-dash-runner/history/runs/`.
+- **Your working directory** lives at `$TMPDIR/.pi_dash` by default. Change with `pi-dash-runner configure --working-dir /path/to/repo` or the Config tab. Runs reuse this directory; Codex is expected to reset/stash/checkout at the start of each task.
+- **Logs** are in `~/.local/share/pi-dash-runner/logs/`.
+- **Per-run transcripts** are stored as JSONL in `~/.local/share/pi-dash-runner/history/runs/`.
 
 ## 8. Upgrading
 
 ```bash
-brew upgrade apple-pi-dash-runner
-apple-pi-dash-runner service stop
-apple-pi-dash-runner service start
+brew upgrade pi-dash-runner
+pi-dash-runner service stop
+pi-dash-runner service start
 ```
 
 A protocol version bump will be announced in the release notes. The daemon logs a warning if the server expects a newer version; in that case, upgrade.
@@ -125,9 +125,9 @@ A protocol version bump will be announced in the release notes. The daemon logs 
 If you suspect your runner secret has leaked:
 
 ```bash
-apple-pi-dash-runner rotate
-apple-pi-dash-runner service stop
-apple-pi-dash-runner service start
+pi-dash-runner rotate
+pi-dash-runner service stop
+pi-dash-runner service start
 ```
 
 The old secret is invalidated immediately. No downtime on the runner record in the cloud — just a forced WS reconnect with the new secret.
@@ -135,16 +135,16 @@ The old secret is invalidated immediately. No downtime on the runner record in t
 ## 10. Removing
 
 ```bash
-apple-pi-dash-runner service stop
-apple-pi-dash-runner service uninstall
-apple-pi-dash-runner remove
+pi-dash-runner service stop
+pi-dash-runner service uninstall
+pi-dash-runner remove
 ```
 
-This deregisters the runner in the cloud, deletes local credentials and config, and stops the agent. Your transcripts under `~/.local/share/apple-pi-dash-runner/history/` are NOT deleted automatically — remove them manually if you want.
+This deregisters the runner in the cloud, deletes local credentials and config, and stops the agent. Your transcripts under `~/.local/share/pi-dash-runner/history/` are NOT deleted automatically — remove them manually if you want.
 
 ## Troubleshooting
 
-**`status` shows disconnected** → daemon isn't running. Check `apple-pi-dash-runner service status`. If the unit is loaded but not active, `service start` it. If systemd says "failed", check `journalctl --user -u apple-pi-dash-runner`.
+**`status` shows disconnected** → daemon isn't running. Check `pi-dash-runner service status`. If the unit is loaded but not active, `service start` it. If systemd says "failed", check `journalctl --user -u pi-dash-runner`.
 
 **`doctor` says `codex-auth: unable to confirm`** → run `codex login`. Re-run `doctor` to confirm.
 

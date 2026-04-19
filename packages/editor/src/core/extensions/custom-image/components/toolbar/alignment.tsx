@@ -1,14 +1,14 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
 
 import { useEffect, useRef, useState } from "react";
-// apple pi dash imports
-import { useOutsideClickDetector } from "@apple-pi-dash/hooks";
-import { ChevronDownIcon } from "@apple-pi-dash/propel/icons";
-import { Tooltip } from "@apple-pi-dash/propel/tooltip";
+// pi dash imports
+import { useOutsideClickDetector } from "@pi-dash/hooks";
+import { ChevronDownIcon } from "@pi-dash/propel/icons";
+import { Tooltip } from "@pi-dash/propel/tooltip";
 // local imports
 import type { TCustomImageAlignment } from "../../types";
 import { IMAGE_ALIGNMENT_OPTIONS } from "../../utils";

@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
@@ -21,15 +21,15 @@ import { useParams } from "next/navigation";
 import { createRoot } from "react-dom/client";
 import { Star, MoreHorizontal, GripVertical } from "lucide-react";
 import { Disclosure, Transition } from "@headlessui/react";
-// apple pi dash imports
-import { useOutsideClickDetector } from "@apple-pi-dash/hooks";
-import { useTranslation } from "@apple-pi-dash/i18n";
-import { DraftIcon, FavoriteFolderIcon, ChevronRightIcon } from "@apple-pi-dash/propel/icons";
-import { Tooltip } from "@apple-pi-dash/propel/tooltip";
-import type { IFavorite, InstructionType } from "@apple-pi-dash/types";
-import { CustomMenu, DropIndicator, DragHandle } from "@apple-pi-dash/ui";
+// pi dash imports
+import { useOutsideClickDetector } from "@pi-dash/hooks";
+import { useTranslation } from "@pi-dash/i18n";
+import { DraftIcon, FavoriteFolderIcon, ChevronRightIcon } from "@pi-dash/propel/icons";
+import { Tooltip } from "@pi-dash/propel/tooltip";
+import type { IFavorite, InstructionType } from "@pi-dash/types";
+import { CustomMenu, DropIndicator, DragHandle } from "@pi-dash/ui";
 // helpers
-import { cn } from "@apple-pi-dash/utils";
+import { cn } from "@pi-dash/utils";
 // hooks
 import { useFavorite } from "@/hooks/store/use-favorite";
 import { usePlatformOS } from "@/hooks/use-platform-os";

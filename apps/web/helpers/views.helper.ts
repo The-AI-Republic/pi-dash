@@ -1,15 +1,15 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
 
 import type { LucideIcon } from "lucide-react";
-import { VIEW_ACCESS_SPECIFIERS as VIEW_ACCESS_SPECIFIERS_CONSTANTS } from "@apple-pi-dash/constants";
-import { GlobeIcon, LockIcon } from "@apple-pi-dash/propel/icons";
+import { VIEW_ACCESS_SPECIFIERS as VIEW_ACCESS_SPECIFIERS_CONSTANTS } from "@pi-dash/constants";
+import { GlobeIcon, LockIcon } from "@pi-dash/propel/icons";
 
-import type { ISvgIcons } from "@apple-pi-dash/propel/icons";
-import { EViewAccess } from "@apple-pi-dash/types";
+import type { ISvgIcons } from "@pi-dash/propel/icons";
+import { EViewAccess } from "@pi-dash/types";
 
 const VIEW_ACCESS_ICONS = {
   [EViewAccess.PUBLIC]: GlobeIcon,

@@ -1,16 +1,16 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
 
 import { observer } from "mobx-react";
 import { useParams } from "next/navigation";
-// apple pi dash imports
-import { PageIcon } from "@apple-pi-dash/propel/icons";
-import type { ICustomSearchSelectOption } from "@apple-pi-dash/types";
-import { Breadcrumbs, Header, BreadcrumbNavigationSearchDropdown } from "@apple-pi-dash/ui";
-import { getPageName } from "@apple-pi-dash/utils";
+// pi dash imports
+import { PageIcon } from "@pi-dash/propel/icons";
+import type { ICustomSearchSelectOption } from "@pi-dash/types";
+import { Breadcrumbs, Header, BreadcrumbNavigationSearchDropdown } from "@pi-dash/ui";
+import { getPageName } from "@pi-dash/utils";
 // components
 import { BreadcrumbLink } from "@/components/common/breadcrumb-link";
 import { PageAccessIcon } from "@/components/common/page-access-icon";
@@ -20,10 +20,10 @@ import { PageSyncingBadge } from "@/components/pages/header/syncing-badge";
 // hooks
 import { useProject } from "@/hooks/store/use-project";
 import { useAppRouter } from "@/hooks/use-app-router";
-// apple pi dash web imports
-import { CommonProjectBreadcrumbs } from "@/apple-pi-dash-web/components/breadcrumbs/common";
-import { PageDetailsHeaderExtraActions } from "@/apple-pi-dash-web/components/pages";
-import { EPageStoreType, usePage, usePageStore } from "@/apple-pi-dash-web/hooks/store";
+// pi dash web imports
+import { CommonProjectBreadcrumbs } from "@/pi-dash-web/components/breadcrumbs/common";
+import { PageDetailsHeaderExtraActions } from "@/pi-dash-web/components/pages";
+import { EPageStoreType, usePage, usePageStore } from "@/pi-dash-web/hooks/store";
 
 export interface IPagesHeaderProps {
   showButton?: boolean;

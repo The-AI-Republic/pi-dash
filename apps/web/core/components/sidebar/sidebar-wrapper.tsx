@@ -1,24 +1,24 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
 
 import { useEffect, useRef, useState } from "react";
 import { observer } from "mobx-react";
-// apple pi dash helpers
-import { useOutsideClickDetector } from "@apple-pi-dash/hooks";
-import { PreferencesIcon } from "@apple-pi-dash/propel/icons";
-import { ScrollArea } from "@apple-pi-dash/propel/scrollarea";
+// pi dash helpers
+import { useOutsideClickDetector } from "@pi-dash/hooks";
+import { PreferencesIcon } from "@pi-dash/propel/icons";
+import { ScrollArea } from "@pi-dash/propel/scrollarea";
 // components
 import { CustomizeNavigationDialog } from "@/components/navigation/customize-navigation-dialog";
 // hooks
 import { useAppTheme } from "@/hooks/store/use-app-theme";
 import useSize from "@/hooks/use-window-size";
-// apple pi dash web components
-import { WorkspaceEditionBadge } from "@/apple-pi-dash-web/components/workspace/edition-badge";
+// pi dash web components
+import { WorkspaceEditionBadge } from "@/pi-dash-web/components/workspace/edition-badge";
 import { AppSidebarToggleButton } from "./sidebar-toggle-button";
-import { IconButton } from "@apple-pi-dash/propel/icon-button";
+import { IconButton } from "@pi-dash/propel/icon-button";
 
 type TSidebarWrapperProps = {
   title: string;

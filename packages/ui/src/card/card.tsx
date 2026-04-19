@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
@@ -35,6 +35,6 @@ const Card = React.forwardRef(function Card(props: CardProps, ref: React.Forward
   );
 });
 
-Card.displayName = "apple-pi-dash-ui-card";
+Card.displayName = "pi-dash-ui-card";
 
 export { Card, ECardVariant, ECardSpacing, ECardDirection };

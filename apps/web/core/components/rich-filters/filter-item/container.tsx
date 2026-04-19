@@ -1,15 +1,15 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
 
 import { useEffect, useRef } from "react";
-// apple pi dash imports
-import { Tooltip } from "@apple-pi-dash/propel/tooltip";
-import { cn } from "@apple-pi-dash/propel/utils";
-import type { SingleOrArray, TFilterValue } from "@apple-pi-dash/types";
-import { hasValidValue } from "@apple-pi-dash/utils";
+// pi dash imports
+import { Tooltip } from "@pi-dash/propel/tooltip";
+import { cn } from "@pi-dash/propel/utils";
+import type { SingleOrArray, TFilterValue } from "@pi-dash/types";
+import { hasValidValue } from "@pi-dash/utils";
 
 interface FilterItemContainerProps {
   children: React.ReactNode;

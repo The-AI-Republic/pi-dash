@@ -1,6 +1,6 @@
-@import "@apple-pi-dash/tailwind-config/index.css";
-@import "@apple-pi-dash/editor/styles";
-@import "@apple-pi-dash/propel/styles/react-day-picker.css";
+@import "@pi-dash/tailwind-config/index.css";
+@import "@pi-dash/editor/styles";
+@import "@pi-dash/propel/styles/react-day-picker.css";
 @plugin "@tailwindcss/typography";
 
 /* stickies and editor colors */

@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
@@ -7,18 +7,18 @@
 import { useCallback } from "react";
 import { observer } from "mobx-react";
 import { ListFilter } from "lucide-react";
-// apple pi dash imports
-import { useTranslation } from "@apple-pi-dash/i18n";
-import type { TPageFilterProps, TPageNavigationTabs } from "@apple-pi-dash/types";
-import { Header, EHeaderVariant } from "@apple-pi-dash/ui";
-import { calculateTotalFilters } from "@apple-pi-dash/utils";
+// pi dash imports
+import { useTranslation } from "@pi-dash/i18n";
+import type { TPageFilterProps, TPageNavigationTabs } from "@pi-dash/types";
+import { Header, EHeaderVariant } from "@pi-dash/ui";
+import { calculateTotalFilters } from "@pi-dash/utils";
 // components
 import { FiltersDropdown } from "@/components/issues/issue-layouts/filters";
 // hooks
 import { useMember } from "@/hooks/store/use-member";
-// apple pi dash web hooks
-import type { EPageStoreType } from "@/apple-pi-dash-web/hooks/store";
-import { usePageStore } from "@/apple-pi-dash-web/hooks/store";
+// pi dash web hooks
+import type { EPageStoreType } from "@/pi-dash-web/hooks/store";
+import { usePageStore } from "@/pi-dash-web/hooks/store";
 // local imports
 import { PageAppliedFiltersList } from "../list/applied-filters";
 import { PageFiltersSelection } from "../list/filters";

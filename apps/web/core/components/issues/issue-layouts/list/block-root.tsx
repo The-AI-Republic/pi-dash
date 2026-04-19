@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
@@ -10,13 +10,13 @@ import { combine } from "@atlaskit/pragmatic-drag-and-drop/combine";
 import { dropTargetForElements } from "@atlaskit/pragmatic-drag-and-drop/element/adapter";
 import { attachInstruction, extractInstruction } from "@atlaskit/pragmatic-drag-and-drop-hitbox/tree-item";
 import { observer } from "mobx-react";
-// apple pi dash helpers
-import { useOutsideClickDetector } from "@apple-pi-dash/hooks";
+// pi dash helpers
+import { useOutsideClickDetector } from "@pi-dash/hooks";
 // types
-import type { IIssueDisplayProperties, TIssue, TIssueMap } from "@apple-pi-dash/types";
-import { EIssueServiceType } from "@apple-pi-dash/types";
+import type { IIssueDisplayProperties, TIssue, TIssueMap } from "@pi-dash/types";
+import { EIssueServiceType } from "@pi-dash/types";
 // components
-import { DropIndicator } from "@apple-pi-dash/ui";
+import { DropIndicator } from "@pi-dash/ui";
 import RenderIfVisible from "@/components/core/render-if-visible-HOC";
 import { ListLoaderItemRow } from "@/components/ui/loader/layouts/list-layout-loader";
 // hooks

@@ -1,4 +1,4 @@
-# Linting in Apple Pi Dash - How It Works
+# Linting in Pi Dash - How It Works
 
 We use [OxLint](https://oxc.rs/docs/guide/usage/linter) for linting across the entire monorepo. OxLint is a single Rust binary that's 50-100x faster than ESLint, with zero Node.js dependencies at runtime.
 
@@ -23,7 +23,7 @@ pnpm fix:lint
 To lint a specific package:
 
 ```bash
-pnpm turbo run check:lint --filter=@apple-pi-dash/ui
+pnpm turbo run check:lint --filter=@pi-dash/ui
 ```
 
 ## VS Code Integration

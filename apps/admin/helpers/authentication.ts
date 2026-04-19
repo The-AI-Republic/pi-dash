@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
@@ -8,7 +8,7 @@ import type {
   IFormattedInstanceConfiguration,
   TInstanceAuthenticationModes,
   TInstanceConfigurationKeys,
-} from "@apple-pi-dash/types";
+} from "@pi-dash/types";
 
 /**
  * Checks if a given authentication method can be disabled.

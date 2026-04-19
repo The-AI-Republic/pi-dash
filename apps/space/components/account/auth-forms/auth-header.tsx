@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
@@ -27,7 +27,7 @@ const Titles: TAuthHeaderDetails = {
   },
   [EAuthModes.SIGN_UP]: {
     header: "View, comment, and do more",
-    subHeader: "Sign up or log in to work with Apple Pi Dash work items and Pages.",
+    subHeader: "Sign up or log in to work with Pi Dash work items and Pages.",
   },
 };
 
@@ -41,7 +41,7 @@ export function AuthHeader(props: TAuthHeader) {
 
     return {
       header: "Comment or react to work items",
-      subHeader: "Use apple pi dash to add your valuable inputs to features.",
+      subHeader: "Use pi dash to add your valuable inputs to features.",
     };
   };
 

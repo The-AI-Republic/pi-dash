@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
@@ -8,16 +8,16 @@ import { useEffect, useRef } from "react";
 import { observer } from "mobx-react";
 import { useParams } from "next/navigation";
 import { Disclosure, Transition } from "@headlessui/react";
-// apple pi dash imports
-import { useOutsideClickDetector } from "@apple-pi-dash/hooks";
-import { useTranslation } from "@apple-pi-dash/i18n";
-import { Logo } from "@apple-pi-dash/propel/emoji-icon-picker";
-import { IconButton } from "@apple-pi-dash/propel/icon-button";
-import { EditIcon, ChevronDownIcon } from "@apple-pi-dash/propel/icons";
-import { Tooltip } from "@apple-pi-dash/propel/tooltip";
-import type { IUserProfileProjectSegregation } from "@apple-pi-dash/types";
-import { Loader } from "@apple-pi-dash/ui";
-import { cn, renderFormattedDate, getFileURL } from "@apple-pi-dash/utils";
+// pi dash imports
+import { useOutsideClickDetector } from "@pi-dash/hooks";
+import { useTranslation } from "@pi-dash/i18n";
+import { Logo } from "@pi-dash/propel/emoji-icon-picker";
+import { IconButton } from "@pi-dash/propel/icon-button";
+import { EditIcon, ChevronDownIcon } from "@pi-dash/propel/icons";
+import { Tooltip } from "@pi-dash/propel/tooltip";
+import type { IUserProfileProjectSegregation } from "@pi-dash/types";
+import { Loader } from "@pi-dash/ui";
+import { cn, renderFormattedDate, getFileURL } from "@pi-dash/utils";
 // components
 import { CoverImage } from "@/components/common/cover-image";
 // hooks

@@ -1,14 +1,14 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
 
 import { clone } from "lodash-es";
 import { action, computed, makeObservable, observable, runInAction } from "mobx";
-// apple pi dash imports
-import { SitesStateService } from "@apple-pi-dash/services";
-import type { IState } from "@apple-pi-dash/types";
+// pi dash imports
+import { SitesStateService } from "@pi-dash/services";
+import type { IState } from "@pi-dash/types";
 // helpers
 import { sortStates } from "@/helpers/state.helper";
 // store

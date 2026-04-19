@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
@@ -89,7 +89,7 @@ export default {
       already_have_an_account: "Sudah punya akun?",
       login: "Masuk",
       create_account: "Buat akun",
-      new_to_apple_pi_dash: "Baru di Apple Pi Dash?",
+      new_to_pi_dash: "Baru di Pi Dash?",
       back_to_sign_in: "Kembali ke halaman masuk",
       resend_in: "Kirim ulang dalam {seconds} detik",
       sign_in_with_unique_code: "Masuk dengan kode unik",
@@ -411,7 +411,7 @@ export default {
   full_changelog: "Changelog lengkap",
   support: "Dukungan",
   forum: "Forum",
-  powered_by_apple_pi_dash_pages: "Ditenagai oleh Apple Pi Dash Pages",
+  powered_by_pi_dash_pages: "Ditenagai oleh Pi Dash Pages",
   please_select_at_least_one_invitation: "Silakan pilih setidaknya satu undangan.",
   please_select_at_least_one_invitation_description:
     "Silakan pilih setidaknya satu undangan untuk bergabung dengan ruang kerja.",
@@ -574,7 +574,7 @@ export default {
       not_right_now: "Tidak sekarang",
       create_project: {
         title: "Buat proyek",
-        description: "Sebagian besar hal dimulai dengan proyek di Apple Pi Dash.",
+        description: "Sebagian besar hal dimulai dengan proyek di Pi Dash.",
         cta: "Mulai sekarang",
       },
       invite_team: {
@@ -588,7 +588,7 @@ export default {
         cta: "Konfigurasi ruang kerja ini",
       },
       personalize_account: {
-        title: "Jadikan Apple Pi Dash milik Anda.",
+        title: "Jadikan Pi Dash milik Anda.",
         description: "Pilih gambar Anda, warna, dan lainnya.",
         cta: "Personalisasi sekarang",
       },
@@ -621,8 +621,8 @@ export default {
         issues: "Item kerja",
       },
     },
-    new_at_apple_pi_dash: {
-      title: "Baru di Apple Pi Dash",
+    new_at_pi_dash: {
+      title: "Baru di Pi Dash",
     },
     quick_tutorial: {
       title: "Tutorial cepat",
@@ -1277,7 +1277,7 @@ export default {
   },
   workspace_creation: {
     heading: "Buat ruang kerja Anda",
-    subheading: "Untuk mulai menggunakan Apple Pi Dash, Anda perlu membuat atau bergabung dengan ruang kerja.",
+    subheading: "Untuk mulai menggunakan Pi Dash, Anda perlu membuat atau bergabung dengan ruang kerja.",
     form: {
       name: {
         label: "Nama ruang kerja Anda",
@@ -1332,11 +1332,11 @@ export default {
       general: {
         title: "Ikhtisar proyek, aktivitas, dan metrik Anda",
         description:
-          "Selamat datang di Apple Pi Dash, kami sangat senang memiliki Anda di sini. Buat proyek pertama Anda dan lacak item kerja Anda, dan halaman ini akan berubah menjadi ruang yang membantu Anda berkembang. Admin juga akan melihat item yang membantu tim mereka berkembang.",
+          "Selamat datang di Pi Dash, kami sangat senang memiliki Anda di sini. Buat proyek pertama Anda dan lacak item kerja Anda, dan halaman ini akan berubah menjadi ruang yang membantu Anda berkembang. Admin juga akan melihat item yang membantu tim mereka berkembang.",
         primary_button: {
           text: "Bangun proyek pertama Anda",
           comic: {
-            title: "Segalanya dimulai dengan proyek di Apple Pi Dash",
+            title: "Segalanya dimulai dengan proyek di Pi Dash",
             description: "Sebuah proyek bisa menjadi roadmap produk, kampanye pemasaran, atau meluncurkan mobil baru.",
           },
         },
@@ -1469,7 +1469,7 @@ export default {
         primary_button: {
           text: "Mulai proyek pertama Anda",
           comic: {
-            title: "Segalanya dimulai dengan proyek di Apple Pi Dash",
+            title: "Segalanya dimulai dengan proyek di Pi Dash",
             description: "Sebuah proyek bisa menjadi roadmap produk, kampanye pemasaran, atau meluncurkan mobil baru.",
           },
         },
@@ -1481,7 +1481,7 @@ export default {
         primary_button: {
           text: "Mulai proyek pertama Anda",
           comic: {
-            title: "Segalanya dimulai dengan proyek di Apple Pi Dash",
+            title: "Segalanya dimulai dengan proyek di Pi Dash",
             description: "Sebuah proyek bisa menjadi roadmap produk, kampanye pemasaran, atau meluncurkan mobil baru.",
           },
         },
@@ -1582,7 +1582,7 @@ export default {
     page_label: "{workspace} - Pengaturan Umum",
     key_created: "Kunci dibuat",
     copy_key:
-      "Salin dan simpan kunci rahasia ini di Halaman Apple Pi Dash. Anda tidak dapat melihat kunci ini setelah Anda menekan Tutup. File CSV yang berisi kunci telah diunduh.",
+      "Salin dan simpan kunci rahasia ini di Halaman Pi Dash. Anda tidak dapat melihat kunci ini setelah Anda menekan Tutup. File CSV yang berisi kunci telah diunduh.",
     token_copied: "Token disalin ke clipboard.",
     settings: {
       general: {
@@ -1734,7 +1734,7 @@ export default {
         delete: {
           title: "Hapus token API",
           description:
-            "Setiap aplikasi yang menggunakan token ini tidak akan memiliki akses ke data Apple Pi Dash. Tindakan ini tidak dapat dibatalkan.",
+            "Setiap aplikasi yang menggunakan token ini tidak akan memiliki akses ke data Pi Dash. Tindakan ini tidak dapat dibatalkan.",
           success: {
             title: "Sukses!",
             message: "Token API telah berhasil dihapus",
@@ -1750,7 +1750,7 @@ export default {
       api_tokens: {
         title: "Belum ada token API yang dibuat",
         description:
-          "API Apple Pi Dash dapat digunakan untuk mengintegrasikan data Anda di Apple Pi Dash dengan sistem eksternal mana pun. Buat token untuk memulai.",
+          "API Pi Dash dapat digunakan untuk mengintegrasikan data Anda di Pi Dash dengan sistem eksternal mana pun. Buat token untuk memulai.",
       },
       webhooks: {
         title: "Belum ada webhook yang ditambahkan",
@@ -1813,7 +1813,7 @@ export default {
       activity: {
         title: "Belum ada aktivitas",
         description:
-          "Mulai dengan membuat item kerja baru! Tambahkan detail dan properti. Jelajahi lebih lanjut di Apple Pi Dash untuk melihat aktivitas Anda.",
+          "Mulai dengan membuat item kerja baru! Tambahkan detail dan properti. Jelajahi lebih lanjut di Pi Dash untuk melihat aktivitas Anda.",
       },
       assigned: {
         title: "Tidak ada item kerja yang ditugaskan kepada Anda",
@@ -1967,12 +1967,12 @@ export default {
       label: "Otomatisasi",
       "auto-archive": {
         title: "Arsip otomatis item kerja yang ditutup",
-        description: "Apple Pi Dash akan mengarsipkan secara otomatis item kerja yang telah selesai atau dibatalkan.",
+        description: "Pi Dash akan mengarsipkan secara otomatis item kerja yang telah selesai atau dibatalkan.",
         duration: "Arsip otomatis item kerja yang ditutup selama",
       },
       "auto-close": {
         title: "Tutup otomatis item kerja",
-        description: "Apple Pi Dash akan menutup secara otomatis item kerja yang belum selesai atau dibatalkan.",
+        description: "Pi Dash akan menutup secara otomatis item kerja yang belum selesai atau dibatalkan.",
         duration: "Tutup otomatis item kerja yang tidak aktif selama",
         auto_close_status: "Status penutupan otomatis",
       },
@@ -2161,9 +2161,9 @@ export default {
         primary_button: {
           text: "Buat item kerja pertama Anda",
           comic: {
-            title: "Item kerja adalah blok bangunan di Apple Pi Dash.",
+            title: "Item kerja adalah blok bangunan di Pi Dash.",
             description:
-              "Mendesain ulang UI Apple Pi Dash, Mengganti merek perusahaan, atau Meluncurkan sistem injeksi bahan bakar baru adalah contoh item kerja yang kemungkinan besar memiliki sub-item kerja.",
+              "Mendesain ulang UI Pi Dash, Mengganti merek perusahaan, atau Meluncurkan sistem injeksi bahan bakar baru adalah contoh item kerja yang kemungkinan besar memiliki sub-item kerja.",
           },
         },
       },
@@ -2268,9 +2268,9 @@ export default {
     empty_state: {
       general: {
         title:
-          "Tulis catatan, dokumen, atau seluruh basis pengetahuan. Dapatkan Galileo, asisten AI Apple Pi Dash, untuk membantu Anda memulai",
+          "Tulis catatan, dokumen, atau seluruh basis pengetahuan. Dapatkan Galileo, asisten AI Pi Dash, untuk membantu Anda memulai",
         description:
-          "Halaman adalah ruang pemikiran di Apple Pi Dash. Catat notul rapat, format dengan mudah, sertakan item kerja, tata letak menggunakan perpustakaan komponen, dan simpan semua di dalam konteks proyek Anda. Untuk menyelesaikan dokumen dengan cepat, panggil Galileo, AI Apple Pi Dash, dengan pintasan atau dengan mengklik tombol.",
+          "Halaman adalah ruang pemikiran di Pi Dash. Catat notul rapat, format dengan mudah, sertakan item kerja, tata letak menggunakan perpustakaan komponen, dan simpan semua di dalam konteks proyek Anda. Untuk menyelesaikan dokumen dengan cepat, panggil Galileo, AI Pi Dash, dengan pintasan atau dengan mengklik tombol.",
         primary_button: {
           text: "Buat halaman pertama Anda",
         },
@@ -2648,8 +2648,8 @@ export default {
     edited_by: "Disunting oleh",
   },
   self_hosted_maintenance_message: {
-    apple_pi_dash_didnt_start_up_this_could_be_because_one_or_more_apple_pi_dash_services_failed_to_start:
-      "Apple Pi Dash tidak berhasil dimulai. Ini bisa karena satu atau lebih layanan Apple Pi Dash gagal untuk dimulai.",
+    pi_dash_didnt_start_up_this_could_be_because_one_or_more_pi_dash_services_failed_to_start:
+      "Pi Dash tidak berhasil dimulai. Ini bisa karena satu atau lebih layanan Pi Dash gagal untuk dimulai.",
     choose_view_logs_from_setup_sh_and_docker_logs_to_be_sure:
       "Pilih View Logs dari setup.sh dan log Docker untuk memastikan.",
   },

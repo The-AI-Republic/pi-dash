@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
@@ -8,12 +8,12 @@ import { useState, useRef, forwardRef } from "react";
 import { observer } from "mobx-react";
 import { useParams } from "next/navigation";
 import { MoreHorizontal } from "lucide-react";
-// apple pi dash imports
-import { useOutsideClickDetector } from "@apple-pi-dash/hooks";
-import { Popover } from "@apple-pi-dash/propel/popover";
-import type { TIssue } from "@apple-pi-dash/types";
-import { ControlLink } from "@apple-pi-dash/ui";
-import { cn, generateWorkItemLink } from "@apple-pi-dash/utils";
+// pi dash imports
+import { useOutsideClickDetector } from "@pi-dash/hooks";
+import { Popover } from "@pi-dash/propel/popover";
+import type { TIssue } from "@pi-dash/types";
+import { ControlLink } from "@pi-dash/ui";
+import { cn, generateWorkItemLink } from "@pi-dash/utils";
 // hooks
 import { useIssueDetail } from "@/hooks/store/use-issue-detail";
 import { useIssues } from "@/hooks/store/use-issues";
@@ -22,8 +22,8 @@ import { useProjectState } from "@/hooks/store/use-project-state";
 import { useIssueStoreType } from "@/hooks/use-issue-layout-store";
 import useIssuePeekOverviewRedirection from "@/hooks/use-issue-peek-overview-redirection";
 import { usePlatformOS } from "@/hooks/use-platform-os";
-// apple pi dash web components
-import { IssueIdentifier } from "@/apple-pi-dash-web/components/issues/issue-details/issue-identifier";
+// pi dash web components
+import { IssueIdentifier } from "@/pi-dash-web/components/issues/issue-details/issue-identifier";
 // local components
 import { WorkItemPreviewCard } from "../../preview-card";
 import type { TRenderQuickActions } from "../list/list-view-types";

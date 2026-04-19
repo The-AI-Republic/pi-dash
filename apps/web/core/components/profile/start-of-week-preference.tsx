@@ -1,15 +1,15 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
 
 import { observer } from "mobx-react";
-// apple pi dash imports
-import { START_OF_THE_WEEK_OPTIONS } from "@apple-pi-dash/constants";
-import { TOAST_TYPE, setToast } from "@apple-pi-dash/propel/toast";
-import type { EStartOfTheWeek } from "@apple-pi-dash/types";
-import { CustomSelect } from "@apple-pi-dash/ui";
+// pi dash imports
+import { START_OF_THE_WEEK_OPTIONS } from "@pi-dash/constants";
+import { TOAST_TYPE, setToast } from "@pi-dash/propel/toast";
+import type { EStartOfTheWeek } from "@pi-dash/types";
+import { CustomSelect } from "@pi-dash/ui";
 // components
 import { SettingsControlItem } from "@/components/settings/control-item";
 // hooks

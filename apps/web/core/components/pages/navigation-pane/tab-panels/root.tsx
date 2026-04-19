@@ -1,21 +1,21 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
 
 // components
 import type { TPageRootHandlers } from "@/components/pages/editor/page-root";
-// apple pi dash web imports
-import { ORDERED_PAGE_NAVIGATION_TABS_LIST } from "@/apple-pi-dash-web/components/pages/navigation-pane";
-import { PageNavigationPaneAdditionalTabPanelsRoot } from "@/apple-pi-dash-web/components/pages/navigation-pane/tab-panels/root";
+// pi dash web imports
+import { ORDERED_PAGE_NAVIGATION_TABS_LIST } from "@/pi-dash-web/components/pages/navigation-pane";
+import { PageNavigationPaneAdditionalTabPanelsRoot } from "@/pi-dash-web/components/pages/navigation-pane/tab-panels/root";
 // store
 import type { TPageInstance } from "@/store/pages/base-page";
 // local imports
 import { PageNavigationPaneAssetsTabPanel } from "./assets";
 import { PageNavigationPaneInfoTabPanel } from "./info/root";
 import { PageNavigationPaneOutlineTabPanel } from "./outline";
-import { Tabs } from "@apple-pi-dash/propel/tabs";
+import { Tabs } from "@pi-dash/propel/tabs";
 
 type Props = {
   page: TPageInstance;

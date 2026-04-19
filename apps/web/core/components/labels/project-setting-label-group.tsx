@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
@@ -8,9 +8,9 @@ import type { Dispatch, SetStateAction } from "react";
 import { useState } from "react";
 import { observer } from "mobx-react";
 import { Disclosure, Transition } from "@headlessui/react";
-// apple pi dash imports
-import { EditIcon, TrashIcon, ChevronDownIcon } from "@apple-pi-dash/propel/icons";
-import type { IIssueLabel } from "@apple-pi-dash/types";
+// pi dash imports
+import { EditIcon, TrashIcon, ChevronDownIcon } from "@pi-dash/propel/icons";
+import type { IIssueLabel } from "@pi-dash/types";
 // components
 import type { TLabelOperationsCallbacks } from "./create-update-label-inline";
 import { CreateUpdateLabelInline } from "./create-update-label-inline";

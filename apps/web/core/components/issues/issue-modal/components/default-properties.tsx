@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
@@ -8,14 +8,14 @@ import { useState } from "react";
 import { observer } from "mobx-react";
 import type { Control } from "react-hook-form";
 import { Controller } from "react-hook-form";
-import { ETabIndices, EUserPermissions, EUserPermissionsLevel } from "@apple-pi-dash/constants";
-import { useTranslation } from "@apple-pi-dash/i18n";
-import { ParentPropertyIcon } from "@apple-pi-dash/propel/icons";
+import { ETabIndices, EUserPermissions, EUserPermissionsLevel } from "@pi-dash/constants";
+import { useTranslation } from "@pi-dash/i18n";
+import { ParentPropertyIcon } from "@pi-dash/propel/icons";
 // types
-import type { ISearchIssueResponse, TIssue } from "@apple-pi-dash/types";
+import type { ISearchIssueResponse, TIssue } from "@pi-dash/types";
 // ui
-import { CustomMenu } from "@apple-pi-dash/ui";
-import { getDate, renderFormattedPayloadDate, getTabIndex } from "@apple-pi-dash/utils";
+import { CustomMenu } from "@pi-dash/ui";
+import { getDate, renderFormattedPayloadDate, getTabIndex } from "@pi-dash/utils";
 // components
 import { CycleDropdown } from "@/components/dropdowns/cycle";
 import { DateDropdown } from "@/components/dropdowns/date";
@@ -32,8 +32,8 @@ import { useProjectEstimates } from "@/hooks/store/estimates";
 import { useProject } from "@/hooks/store/use-project";
 import { useUserPermissions } from "@/hooks/store/user";
 import { usePlatformOS } from "@/hooks/use-platform-os";
-// apple pi dash web components
-import { IssueIdentifier } from "@/apple-pi-dash-web/components/issues/issue-details/issue-identifier";
+// pi dash web components
+import { IssueIdentifier } from "@/pi-dash-web/components/issues/issue-details/issue-identifier";
 
 type TIssueDefaultPropertiesProps = {
   control: Control<TIssue>;

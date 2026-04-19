@@ -1,14 +1,14 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
 
 import { cloneDeep } from "lodash-es";
 import { action, makeObservable, observable, toJS } from "mobx";
-// apple pi dash imports
-import type { TAutoVisibilityOptions, TExpressionOptions } from "@apple-pi-dash/constants";
-import { DEFAULT_FILTER_EXPRESSION_OPTIONS } from "@apple-pi-dash/constants";
+// pi dash imports
+import type { TAutoVisibilityOptions, TExpressionOptions } from "@pi-dash/constants";
+import { DEFAULT_FILTER_EXPRESSION_OPTIONS } from "@pi-dash/constants";
 import type {
   IFilterAdapter,
   TSupportedOperators,
@@ -19,9 +19,9 @@ import type {
   TExternalFilter,
   TLogicalOperator,
   TFilterConditionPayload,
-} from "@apple-pi-dash/types";
-import { LOGICAL_OPERATOR } from "@apple-pi-dash/types";
-import { addAndCondition, createConditionNode, updateNodeInExpression } from "@apple-pi-dash/utils";
+} from "@pi-dash/types";
+import { LOGICAL_OPERATOR } from "@pi-dash/types";
+import { addAndCondition, createConditionNode, updateNodeInExpression } from "@pi-dash/utils";
 // local imports
 import type { IFilterInstance } from "./filter";
 

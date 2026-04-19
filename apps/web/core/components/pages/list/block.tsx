@@ -1,23 +1,23 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
 
 import { useRef } from "react";
 import { observer } from "mobx-react";
-import { Logo } from "@apple-pi-dash/propel/emoji-icon-picker";
-import { PageIcon } from "@apple-pi-dash/propel/icons";
-// apple pi dash imports
-import { getPageName } from "@apple-pi-dash/utils";
+import { Logo } from "@pi-dash/propel/emoji-icon-picker";
+import { PageIcon } from "@pi-dash/propel/icons";
+// pi dash imports
+import { getPageName } from "@pi-dash/utils";
 // components
 import { ListItem } from "@/components/core/list";
 import { BlockItemAction } from "@/components/pages/list/block-item-action";
 // hooks
 import { usePlatformOS } from "@/hooks/use-platform-os";
-// apple pi dash web hooks
-import type { EPageStoreType } from "@/apple-pi-dash-web/hooks/store";
-import { usePage } from "@/apple-pi-dash-web/hooks/store";
+// pi dash web hooks
+import type { EPageStoreType } from "@/pi-dash-web/hooks/store";
+import { usePage } from "@/pi-dash-web/hooks/store";
 
 type TPageListBlock = {
   pageId: string;

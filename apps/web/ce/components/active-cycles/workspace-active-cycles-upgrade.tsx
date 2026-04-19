@@ -1,18 +1,18 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
 
 import { observer } from "mobx-react";
 import { AlertOctagon, BarChart4, CircleDashed, Folder, Microscope } from "lucide-react";
-// apple pi dash imports
-import { MARKETING_PRICING_PAGE_LINK } from "@apple-pi-dash/constants";
-import { useTranslation } from "@apple-pi-dash/i18n";
-import { getButtonStyling } from "@apple-pi-dash/propel/button";
-import { SearchIcon } from "@apple-pi-dash/propel/icons";
-import { ContentWrapper } from "@apple-pi-dash/ui";
-import { cn } from "@apple-pi-dash/utils";
+// pi dash imports
+import { MARKETING_PRICING_PAGE_LINK } from "@pi-dash/constants";
+import { useTranslation } from "@pi-dash/i18n";
+import { getButtonStyling } from "@pi-dash/propel/button";
+import { SearchIcon } from "@pi-dash/propel/icons";
+import { ContentWrapper } from "@pi-dash/ui";
+import { cn } from "@pi-dash/utils";
 // assets
 import ctaL1Dark from "@/app/assets/workspace-active-cycles/cta-l-1-dark.webp?url";
 import ctaL1Light from "@/app/assets/workspace-active-cycles/cta-l-1-light.webp?url";

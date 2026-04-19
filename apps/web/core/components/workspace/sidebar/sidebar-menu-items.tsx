@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
@@ -8,16 +8,16 @@ import React, { useMemo } from "react";
 import { observer } from "mobx-react";
 import { Ellipsis } from "lucide-react";
 import { Disclosure, Transition } from "@headlessui/react";
-// apple pi dash imports
+// pi dash imports
 import {
   WORKSPACE_SIDEBAR_DYNAMIC_NAVIGATION_ITEMS_LINKS,
   WORKSPACE_SIDEBAR_STATIC_NAVIGATION_ITEMS,
   WORKSPACE_SIDEBAR_STATIC_NAVIGATION_ITEMS_LINKS,
   WORKSPACE_SIDEBAR_STATIC_PINNED_NAVIGATION_ITEMS_LINKS,
-} from "@apple-pi-dash/constants";
-import { useTranslation } from "@apple-pi-dash/i18n";
-import { ChevronRightIcon } from "@apple-pi-dash/propel/icons";
-import { cn } from "@apple-pi-dash/utils";
+} from "@pi-dash/constants";
+import { useTranslation } from "@pi-dash/i18n";
+import { ChevronRightIcon } from "@pi-dash/propel/icons";
+import { cn } from "@pi-dash/utils";
 // components
 import { SidebarNavItem } from "@/components/sidebar/sidebar-navigation";
 // store hooks
@@ -27,8 +27,8 @@ import {
   usePersonalNavigationPreferences,
   useWorkspaceNavigationPreferences,
 } from "@/hooks/use-navigation-preferences";
-// apple-pi-dash-web imports
-import { SidebarItem } from "@/apple-pi-dash-web/components/workspace/sidebar/sidebar-item";
+// pi-dash-web imports
+import { SidebarItem } from "@/pi-dash-web/components/workspace/sidebar/sidebar-item";
 
 export const SidebarMenuItems = observer(function SidebarMenuItems() {
   // routers

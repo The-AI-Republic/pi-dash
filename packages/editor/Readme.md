@@ -1,8 +1,8 @@
-# @apple-pi-dash/editor
+# @pi-dash/editor
 
 ## Description
 
-The `@apple-pi-dash/editor` package serves as the foundation for our editor system. It provides the base functionality for our other editor packages, but it will not be used directly in any of the projects but only for extending other editors.
+The `@pi-dash/editor` package serves as the foundation for our editor system. It provides the base functionality for our other editor packages, but it will not be used directly in any of the projects but only for extending other editors.
 
 ## Utilities
 
@@ -17,7 +17,7 @@ This allows for extensive customization and flexibility in the Editors created u
 
 ### Here's a detailed overview of what's exported
 
-1. useEditor - A hook that you can use to extend the Apple Pi Dash editor.
+1. useEditor - A hook that you can use to extend the Pi Dash editor.
 
    | Prop                      | Type                                                             | Description                                                                                                                                                             |
    | ------------------------- | ---------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------- |

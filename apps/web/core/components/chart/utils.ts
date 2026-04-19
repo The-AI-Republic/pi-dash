@@ -1,19 +1,19 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
 
 import { getWeekOfMonth, isValid } from "date-fns";
-import { CHART_X_AXIS_DATE_PROPERTIES, ChartXAxisDateGrouping, TO_CAPITALIZE_PROPERTIES } from "@apple-pi-dash/constants";
-import type { ChartXAxisProperty, TChart, TChartDatum } from "@apple-pi-dash/types";
+import { CHART_X_AXIS_DATE_PROPERTIES, ChartXAxisDateGrouping, TO_CAPITALIZE_PROPERTIES } from "@pi-dash/constants";
+import type { ChartXAxisProperty, TChart, TChartDatum } from "@pi-dash/types";
 import {
   capitalizeFirstLetter,
   hexToHsl,
   hslToHex,
   renderFormattedDate,
   renderFormattedDateWithoutYear,
-} from "@apple-pi-dash/utils";
+} from "@pi-dash/utils";
 //
 
 const getDateGroupingName = (date: string, dateGrouping: ChartXAxisDateGrouping): string => {

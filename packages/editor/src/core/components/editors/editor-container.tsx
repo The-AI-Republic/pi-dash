@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
@@ -8,14 +8,14 @@ import type { HocuspocusProvider } from "@hocuspocus/provider";
 import type { Editor } from "@tiptap/react";
 import type { ReactNode } from "react";
 import { useCallback, useEffect, useRef } from "react";
-// apple pi dash utils
-import { cn } from "@apple-pi-dash/utils";
+// pi dash utils
+import { cn } from "@pi-dash/utils";
 // constants
 import { DEFAULT_DISPLAY_CONFIG } from "@/constants/config";
 import { CORE_EXTENSIONS } from "@/constants/extension";
 // components
 import type { TCollabValue } from "@/contexts";
-import { LinkContainer } from "@/apple-pi-dash-editor/components/link-container";
+import { LinkContainer } from "@/pi-dash-editor/components/link-container";
 // plugins
 import { nodeHighlightPluginKey } from "@/plugins/highlight";
 // types

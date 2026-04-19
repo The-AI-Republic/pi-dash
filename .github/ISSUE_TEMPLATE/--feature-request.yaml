@@ -1,13 +1,13 @@
 name: Feature request
-description: Suggest a feature to improve Apple Pi Dash
+description: Suggest a feature to improve Pi Dash
 title: "[feature]: "
-labels: [✨feature, apple-pi-dash]
+labels: [✨feature, pi-dash]
 assignees: [vihar, pushya22]
 body:
 - type: markdown
   attributes:
     value: |
-      Thank you for taking the time to request a feature for Apple Pi Dash
+      Thank you for taking the time to request a feature for Pi Dash
 - type: checkboxes
   attributes:
     label: Is there an existing issue for this?

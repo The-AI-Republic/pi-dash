@@ -1,8 +1,8 @@
 # Security policy
-This document outlines the security protocols and vulnerability reporting guidelines for the Apple Pi Dash project. Ensuring the security of our systems is a top priority, and while we work diligently to maintain robust protection, vulnerabilities may still occur. We highly value the community’s role in identifying and reporting security concerns to uphold the integrity of our systems and safeguard our users.
+This document outlines the security protocols and vulnerability reporting guidelines for the Pi Dash project. Ensuring the security of our systems is a top priority, and while we work diligently to maintain robust protection, vulnerabilities may still occur. We highly value the community’s role in identifying and reporting security concerns to uphold the integrity of our systems and safeguard our users.
 
 ## Reporting a vulnerability
-If you have identified a security vulnerability, submit your findings to [security@apple-pi-dash.so](mailto:security@apple-pi-dash.so). 
+If you have identified a security vulnerability, submit your findings to [security@pi-dash.so](mailto:security@pi-dash.so). 
 Ensure your report includes all relevant information needed for us to reproduce and assess the issue. Include the IP address or URL of the affected system.
 
 To ensure a responsible and effective disclosure process, please adhere to the following:
@@ -23,7 +23,7 @@ While we appreciate all efforts to assist in improving our security, please note
 
 ## Our commitment
 
-At Apple Pi Dash, we are committed to maintaining transparent and collaborative communication throughout the vulnerability resolution process. Here's what you can expect from us:
+At Pi Dash, we are committed to maintaining transparent and collaborative communication throughout the vulnerability resolution process. Here's what you can expect from us:
 
 - **Response Time** <br/>
 We will acknowledge receipt of your vulnerability report within three business days and provide an estimated timeline for resolution.
@@ -36,4 +36,4 @@ With your permission, we are happy to publicly acknowledge your contribution to 
 - **Timely Resolution** <br/>
 We are committed to working closely with you throughout the resolution process, providing timely updates as necessary. Our goal is to address all reported vulnerabilities swiftly, and we will actively engage with you to coordinate a responsible disclosure once the issue is fully resolved.
 
-We appreciate your help in ensuring the security of our platform. Your contributions are crucial to protecting our users and maintaining a secure environment. Thank you for working with us to keep Apple Pi Dash safe.
+We appreciate your help in ensuring the security of our platform. Your contributions are crucial to protecting our users and maintaining a secure environment. Thank you for working with us to keep Pi Dash safe.

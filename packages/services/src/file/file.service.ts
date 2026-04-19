@@ -1,19 +1,19 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
 
-// apple pi dash imports
-import { API_BASE_URL } from "@apple-pi-dash/constants";
+// pi dash imports
+import { API_BASE_URL } from "@pi-dash/constants";
 // api service
-import type { TDuplicateAssetData, TDuplicateAssetResponse } from "@apple-pi-dash/types";
+import type { TDuplicateAssetData, TDuplicateAssetResponse } from "@pi-dash/types";
 import { APIService } from "../api.service";
 // helpers
 import { getAssetIdFromUrl } from "./helper";
 
 /**
- * Service class for managing file operations within apple pi dash applications.
+ * Service class for managing file operations within pi dash applications.
  * Extends APIService to handle HTTP requests to the file-related endpoints.
  * @extends {APIService}
  */

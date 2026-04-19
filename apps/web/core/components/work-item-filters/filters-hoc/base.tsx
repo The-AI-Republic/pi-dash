@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
@@ -7,15 +7,15 @@
 import { useEffect, useMemo } from "react";
 import { observer } from "mobx-react";
 import { v4 as uuidv4 } from "uuid";
-// apple pi dash imports
-import type { TSaveViewOptions, TUpdateViewOptions } from "@apple-pi-dash/constants";
-import type { IWorkItemFilterInstance } from "@apple-pi-dash/shared-state";
-import type { IIssueFilters, TWorkItemFilterExpression } from "@apple-pi-dash/types";
+// pi dash imports
+import type { TSaveViewOptions, TUpdateViewOptions } from "@pi-dash/constants";
+import type { IWorkItemFilterInstance } from "@pi-dash/shared-state";
+import type { IIssueFilters, TWorkItemFilterExpression } from "@pi-dash/types";
 // store hooks
 import { useWorkItemFilters } from "@/hooks/store/work-item-filters/use-work-item-filters";
-// apple pi dash web imports
-import type { TWorkItemFiltersEntityProps } from "@/apple-pi-dash-web/hooks/work-item-filters/use-work-item-filters-config";
-import { useWorkItemFiltersConfig } from "@/apple-pi-dash-web/hooks/work-item-filters/use-work-item-filters-config";
+// pi dash web imports
+import type { TWorkItemFiltersEntityProps } from "@/pi-dash-web/hooks/work-item-filters/use-work-item-filters-config";
+import { useWorkItemFiltersConfig } from "@/pi-dash-web/hooks/work-item-filters/use-work-item-filters-config";
 // local imports
 import type { TSharedWorkItemFiltersHOCProps, TSharedWorkItemFiltersProps } from "./shared";
 

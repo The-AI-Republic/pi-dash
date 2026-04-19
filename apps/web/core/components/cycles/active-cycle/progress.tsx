@@ -1,17 +1,17 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
 
 import { observer } from "mobx-react";
 import { useTheme } from "next-themes";
-// apple pi dash imports
-import { PROGRESS_STATE_GROUPS_DETAILS } from "@apple-pi-dash/constants";
-import { useTranslation } from "@apple-pi-dash/i18n";
-import type { TWorkItemFilterCondition } from "@apple-pi-dash/shared-state";
-import type { ICycle } from "@apple-pi-dash/types";
-import { LinearProgressIndicator, Loader } from "@apple-pi-dash/ui";
+// pi dash imports
+import { PROGRESS_STATE_GROUPS_DETAILS } from "@pi-dash/constants";
+import { useTranslation } from "@pi-dash/i18n";
+import type { TWorkItemFilterCondition } from "@pi-dash/shared-state";
+import type { ICycle } from "@pi-dash/types";
+import { LinearProgressIndicator, Loader } from "@pi-dash/ui";
 // assets
 import darkProgressAsset from "@/app/assets/empty-state/active-cycle/progress-dark.webp?url";
 import lightProgressAsset from "@/app/assets/empty-state/active-cycle/progress-light.webp?url";
@@ -29,7 +29,7 @@ export const ActiveCycleProgress = observer(function ActiveCycleProgress(props: 
   const { handleFiltersUpdate, cycle } = props;
   // theme hook
   const { resolvedTheme } = useTheme();
-  // apple pi dash hooks
+  // pi dash hooks
   const { t } = useTranslation();
   // derived values
   const progressIndicatorData = PROGRESS_STATE_GROUPS_DETAILS.map((group, index) => ({

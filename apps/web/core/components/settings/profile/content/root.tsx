@@ -1,15 +1,15 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
 
 import { Suspense } from "react";
 import { observer } from "mobx-react";
-// apple pi dash imports
-import { ScrollArea } from "@apple-pi-dash/propel/scrollarea";
-import type { TProfileSettingsTabs } from "@apple-pi-dash/types";
-import { cn } from "@apple-pi-dash/utils";
+// pi dash imports
+import { ScrollArea } from "@pi-dash/propel/scrollarea";
+import type { TProfileSettingsTabs } from "@pi-dash/types";
+import { cn } from "@pi-dash/utils";
 // local imports
 import { PROFILE_SETTINGS_PAGES_MAP } from "./pages";
 

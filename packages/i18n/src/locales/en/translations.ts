@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
@@ -242,7 +242,7 @@ export default {
   full_changelog: "Full changelog",
   support: "Support",
   forum: "Forum",
-  powered_by_apple_pi_dash_pages: "Powered by Apple Pi Dash Pages",
+  powered_by_pi_dash_pages: "Powered by Pi Dash Pages",
   please_select_at_least_one_invitation: "Please select at least one invitation.",
   please_select_at_least_one_invitation_description: "Please select at least one invitation to join the workspace.",
   we_see_that_someone_has_invited_you_to_join_a_workspace: "We see that someone has invited you to join a workspace",
@@ -407,7 +407,7 @@ export default {
       not_right_now: "Not right now",
       create_project: {
         title: "Create a project",
-        description: "Most things start with a project in Apple Pi Dash.",
+        description: "Most things start with a project in Pi Dash.",
         cta: "Get started",
       },
       invite_team: {
@@ -421,7 +421,7 @@ export default {
         cta: "Configure this workspace",
       },
       personalize_account: {
-        title: "Make Apple Pi Dash yours.",
+        title: "Make Pi Dash yours.",
         description: "Choose your picture, colors, and more.",
         cta: "Personalize now",
       },
@@ -454,8 +454,8 @@ export default {
         issues: "Work items",
       },
     },
-    new_at_apple_pi_dash: {
-      title: "New at Apple Pi Dash",
+    new_at_pi_dash: {
+      title: "New at Pi Dash",
     },
     quick_tutorial: {
       title: "Quick tutorial",
@@ -1111,7 +1111,7 @@ export default {
   },
   workspace_creation: {
     heading: "Create your workspace",
-    subheading: "To start using Apple Pi Dash, you need to create or join a workspace.",
+    subheading: "To start using Pi Dash, you need to create or join a workspace.",
     form: {
       name: {
         label: "Name your workspace",
@@ -1166,11 +1166,11 @@ export default {
       general: {
         title: "Overview of your projects, activity, and metrics",
         description:
-          "Welcome to Apple Pi Dash, we are excited to have you here. Create your first project and track your work items, and this page will transform into a space that helps you progress. Admins will also see items which help their team progress.",
+          "Welcome to Pi Dash, we are excited to have you here. Create your first project and track your work items, and this page will transform into a space that helps you progress. Admins will also see items which help their team progress.",
         primary_button: {
           text: "Build your first project",
           comic: {
-            title: "Everything starts with a project in Apple Pi Dash",
+            title: "Everything starts with a project in Pi Dash",
             description: "A project could be a product's roadmap, a marketing campaign, or launching a new car.",
           },
         },
@@ -1297,7 +1297,7 @@ export default {
         primary_button: {
           text: "Start your first project",
           comic: {
-            title: "Everything starts with a project in Apple Pi Dash",
+            title: "Everything starts with a project in Pi Dash",
             description: "A project could be a product's roadmap, a marketing campaign, or launching a new car.",
           },
         },
@@ -1308,7 +1308,7 @@ export default {
         primary_button: {
           text: "Start your first project",
           comic: {
-            title: "Everything starts with a project in Apple Pi Dash",
+            title: "Everything starts with a project in Pi Dash",
             description: "A project could be a product's roadmap, a marketing campaign, or launching a new car.",
           },
         },
@@ -1426,7 +1426,7 @@ export default {
     page_label: "{workspace} - General settings",
     key_created: "Key created",
     copy_key:
-      "Copy and save this secret key in Apple Pi Dash Pages. You can't see this key after you hit Close. A CSV file containing the key has been downloaded.",
+      "Copy and save this secret key in Pi Dash Pages. You can't see this key after you hit Close. A CSV file containing the key has been downloaded.",
     token_copied: "Token copied to clipboard.",
     settings: {
       general: {
@@ -1585,7 +1585,7 @@ export default {
         delete: {
           title: "Delete personal access token",
           description:
-            "Any application using this token will no longer have the access to Apple Pi Dash data. This action cannot be undone.",
+            "Any application using this token will no longer have the access to Pi Dash data. This action cannot be undone.",
           success: {
             title: "Success!",
             message: "The token has been successfully deleted",
@@ -1601,7 +1601,7 @@ export default {
       api_tokens: {
         title: "No personal access tokens created",
         description:
-          "Apple Pi Dash APIs can be used to integrate your data in Apple Pi Dash with any external system. Create a token to get started.",
+          "Pi Dash APIs can be used to integrate your data in Pi Dash with any external system. Create a token to get started.",
       },
       webhooks: {
         title: "No webhooks added",
@@ -1665,7 +1665,7 @@ export default {
       activity: {
         title: "No activities yet",
         description:
-          "Get started by creating a new work item! Add details and properties to it. Explore more in Apple Pi Dash to see your activity.",
+          "Get started by creating a new work item! Add details and properties to it. Explore more in Pi Dash to see your activity.",
       },
       assigned: {
         title: "No work items are assigned to you",
@@ -1839,12 +1839,12 @@ export default {
         "Configure automated actions to streamline your project management workflow and reduce manual tasks.",
       "auto-archive": {
         title: "Auto-archive closed work items",
-        description: "Apple Pi Dash will auto archive work items that have been completed or canceled.",
+        description: "Pi Dash will auto archive work items that have been completed or canceled.",
         duration: "Auto-archive work items that are closed for",
       },
       "auto-close": {
         title: "Auto-close work items",
-        description: "Apple Pi Dash will automatically close work items that haven't been completed or canceled.",
+        description: "Pi Dash will automatically close work items that haven't been completed or canceled.",
         duration: "Auto-close work items that are inactive for",
         auto_close_status: "Auto-close status",
       },
@@ -2037,9 +2037,9 @@ export default {
         primary_button: {
           text: "Create your first work item",
           comic: {
-            title: "Work items are building blocks in Apple Pi Dash.",
+            title: "Work items are building blocks in Pi Dash.",
             description:
-              "Redesign the Apple Pi Dash UI, Rebrand the company, or Launch the new fuel injection system are examples of work items that likely have sub-work items.",
+              "Redesign the Pi Dash UI, Rebrand the company, or Launch the new fuel injection system are examples of work items that likely have sub-work items.",
           },
         },
       },
@@ -2143,9 +2143,9 @@ export default {
     empty_state: {
       general: {
         title:
-          "Write a note, a doc, or a full knowledge base. Get Galileo, Apple Pi Dash's AI assistant, to help you get started",
+          "Write a note, a doc, or a full knowledge base. Get Galileo, Pi Dash's AI assistant, to help you get started",
         description:
-          "Pages are thoughts potting space in Apple Pi Dash. Take down meeting notes, format them easily, embed work items, lay them out using a library of components, and keep them all in your project's context. To make short work of any doc, invoke Galileo, Apple Pi Dash's AI, with a shortcut or the click of a button.",
+          "Pages are thoughts potting space in Pi Dash. Take down meeting notes, format them easily, embed work items, lay them out using a library of components, and keep them all in your project's context. To make short work of any doc, invoke Galileo, Pi Dash's AI, with a shortcut or the click of a button.",
         primary_button: {
           text: "Create your first page",
         },
@@ -2519,8 +2519,8 @@ export default {
     edited_by: "Edited by",
   },
   self_hosted_maintenance_message: {
-    apple_pi_dash_didnt_start_up_this_could_be_because_one_or_more_apple_pi_dash_services_failed_to_start:
-      "Apple Pi Dash didn't start up. This could be because one or more Apple Pi Dash services failed to start.",
+    pi_dash_didnt_start_up_this_could_be_because_one_or_more_pi_dash_services_failed_to_start:
+      "Pi Dash didn't start up. This could be because one or more Pi Dash services failed to start.",
     choose_view_logs_from_setup_sh_and_docker_logs_to_be_sure:
       "Choose View Logs from setup.sh and Docker logs to be sure.",
   },
@@ -2705,7 +2705,7 @@ export default {
     },
     help_actions: {
       open_keyboard_shortcuts: "Open keyboard shortcuts",
-      open_apple_pi_dash_documentation: "Open Apple Pi Dash documentation",
+      open_pi_dash_documentation: "Open Pi Dash documentation",
       join_forum: "Join our Forum",
       report_bug: "Report a bug",
     },

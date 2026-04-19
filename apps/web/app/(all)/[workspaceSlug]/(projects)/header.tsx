@@ -1,23 +1,23 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
 
 import { observer } from "mobx-react";
 import { Shapes } from "lucide-react";
-// apple pi dash imports
-import { useTranslation } from "@apple-pi-dash/i18n";
-import { Button } from "@apple-pi-dash/propel/button";
-import { HomeIcon } from "@apple-pi-dash/propel/icons";
-import { Breadcrumbs, Header } from "@apple-pi-dash/ui";
+// pi dash imports
+import { useTranslation } from "@pi-dash/i18n";
+import { Button } from "@pi-dash/propel/button";
+import { HomeIcon } from "@pi-dash/propel/icons";
+import { Breadcrumbs, Header } from "@pi-dash/ui";
 // components
 import { BreadcrumbLink } from "@/components/common/breadcrumb-link";
 // hooks
 import { useHome } from "@/hooks/store/use-home";
 
 export const WorkspaceDashboardHeader = observer(function WorkspaceDashboardHeader() {
-  // apple pi dash hooks
+  // pi dash hooks
   const { t } = useTranslation();
   // hooks
   const { toggleWidgetSettings } = useHome();

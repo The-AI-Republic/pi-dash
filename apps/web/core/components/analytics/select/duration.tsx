@@ -1,17 +1,17 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
 
-// apple pi dash package imports
+// pi dash package imports
 import type { ReactNode } from "react";
 import React from "react";
 import { Calendar } from "lucide-react";
-// apple pi dash package imports
-import { ANALYTICS_DURATION_FILTER_OPTIONS } from "@apple-pi-dash/constants";
-import { useTranslation } from "@apple-pi-dash/i18n";
-import { CustomSearchSelect } from "@apple-pi-dash/ui";
+// pi dash package imports
+import { ANALYTICS_DURATION_FILTER_OPTIONS } from "@pi-dash/constants";
+import { useTranslation } from "@pi-dash/i18n";
+import { CustomSearchSelect } from "@pi-dash/ui";
 // types
 import type { TDropdownProps } from "@/components/dropdowns/types";
 

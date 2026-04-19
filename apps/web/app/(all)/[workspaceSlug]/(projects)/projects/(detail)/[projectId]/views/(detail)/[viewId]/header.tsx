@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
@@ -8,20 +8,20 @@ import { useCallback, useRef } from "react";
 import { observer } from "mobx-react";
 import { useParams } from "next/navigation";
 
-// apple pi dash imports
+// pi dash imports
 import {
   EIssueFilterType,
   ISSUE_DISPLAY_FILTERS_BY_PAGE,
   EUserPermissions,
   EUserPermissionsLevel,
   WORK_ITEM_TRACKER_ELEMENTS,
-} from "@apple-pi-dash/constants";
-import { Button } from "@apple-pi-dash/propel/button";
-import { LockIcon, ViewsIcon } from "@apple-pi-dash/propel/icons";
-import { Tooltip } from "@apple-pi-dash/propel/tooltip";
-import type { ICustomSearchSelectOption, IIssueDisplayFilterOptions, IIssueDisplayProperties } from "@apple-pi-dash/types";
-import { EIssuesStoreType, EViewAccess, EIssueLayoutTypes } from "@apple-pi-dash/types";
-import { Breadcrumbs, Header, BreadcrumbNavigationSearchDropdown } from "@apple-pi-dash/ui";
+} from "@pi-dash/constants";
+import { Button } from "@pi-dash/propel/button";
+import { LockIcon, ViewsIcon } from "@pi-dash/propel/icons";
+import { Tooltip } from "@pi-dash/propel/tooltip";
+import type { ICustomSearchSelectOption, IIssueDisplayFilterOptions, IIssueDisplayProperties } from "@pi-dash/types";
+import { EIssuesStoreType, EViewAccess, EIssueLayoutTypes } from "@pi-dash/types";
+import { Breadcrumbs, Header, BreadcrumbNavigationSearchDropdown } from "@pi-dash/ui";
 // components
 import { BreadcrumbLink } from "@/components/common/breadcrumb-link";
 import { SwitcherIcon, SwitcherLabel } from "@/components/common/switcher-label";
@@ -35,8 +35,8 @@ import { useProject } from "@/hooks/store/use-project";
 import { useProjectView } from "@/hooks/store/use-project-view";
 import { useUserPermissions } from "@/hooks/store/user";
 import { useAppRouter } from "@/hooks/use-app-router";
-// apple pi dash web imports
-import { CommonProjectBreadcrumbs } from "@/apple-pi-dash-web/components/breadcrumbs/common";
+// pi dash web imports
+import { CommonProjectBreadcrumbs } from "@/pi-dash-web/components/breadcrumbs/common";
 
 export const ProjectViewIssuesHeader = observer(function ProjectViewIssuesHeader() {
   // refs

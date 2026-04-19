@@ -1,12 +1,12 @@
-# Apple Pi Dash Community All-In-One (AIO) Docker Image
+# Pi Dash Community All-In-One (AIO) Docker Image
 
-The Apple Pi Dash Community All-In-One Docker image packages all Apple Pi Dash services into a single container for easy deployment and testing. This image includes web interface, API server, background workers, live server, and more.
+The Pi Dash Community All-In-One Docker image packages all Pi Dash services into a single container for easy deployment and testing. This image includes web interface, API server, background workers, live server, and more.
 
 ## What's Included
 
 The AIO image contains the following services:
 
-- **Web App** (Port 3001): Main Apple Pi Dash web interface
+- **Web App** (Port 3001): Main Pi Dash web interface
 - **Space** (Port 3002): Public project spaces
 - **Admin** (Port 3003): Administrative interface  
 - **API Server** (Port 3004): Backend API
@@ -49,7 +49,7 @@ You must provide these environment variables:
 ### Basic Usage
 
 ```bash
-docker run --name apple-pi-dash-aio --rm -it \
+docker run --name pi-dash-aio --rm -it \
     -p 80:80 \
     -e DOMAIN_NAME=your-domain.com \
     -e DATABASE_URL=postgresql://user:pass@host:port/database \
@@ -59,7 +59,7 @@ docker run --name apple-pi-dash-aio --rm -it \
     -e AWS_ACCESS_KEY_ID=your-access-key \
     -e AWS_SECRET_ACCESS_KEY=your-secret-key \
     -e AWS_S3_BUCKET_NAME=your-bucket \
-    makeapplepidash/apple-pi-dash-aio-community:latest
+    makepidash/pi-dash-aio-community:latest
 ```
 
 ### Example with IP Address
@@ -69,16 +69,16 @@ MYIP=192.168.68.169
 docker run --name myaio --rm -it \
     -p 80:80 \
     -e DOMAIN_NAME=${MYIP} \
-    -e DATABASE_URL=postgresql://apple-pi-dash:apple-pi-dash@${MYIP}:15432/apple-pi-dash \
+    -e DATABASE_URL=postgresql://pi-dash:pi-dash@${MYIP}:15432/pi-dash \
     -e REDIS_URL=redis://${MYIP}:16379 \
-    -e AMQP_URL=amqp://apple-pi-dash:apple-pi-dash@${MYIP}:15673/apple-pi-dash \
+    -e AMQP_URL=amqp://pi-dash:pi-dash@${MYIP}:15673/pi-dash \
     -e AWS_REGION=us-east-1 \
     -e AWS_ACCESS_KEY_ID=5MV45J9NF5TEFZWYCRAX \
     -e AWS_SECRET_ACCESS_KEY=7xMqAiAHsf2UUjMH+EwICXlyJL9TO30m8leEaDsL \
-    -e AWS_S3_BUCKET_NAME=apple-pi-dash-app \
+    -e AWS_S3_BUCKET_NAME=pi-dash-app \
     -e AWS_S3_ENDPOINT_URL=http://${MYIP}:19000 \
     -e FILE_SIZE_LIMIT=10485760 \
-    makeapplepidash/apple-pi-dash-aio-community:latest
+    makepidash/pi-dash-aio-community:latest
 ```
 
 ## Configuration Options
@@ -125,13 +125,13 @@ To build the AIO image yourself:
 
 ```bash
 cd deployments/aio/community
-IMAGE_NAME=myapplepidash-aio ./build.sh --release=v0.27.1 [--platform=linux/amd64]
+IMAGE_NAME=mypidash-aio ./build.sh --release=v0.27.1 [--platform=linux/amd64]
 ```
 
 Available build options:
 
-- `--release`: Apple Pi Dash version to build (required)
-- `--image-name`: Custom image name (default: `apple-pi-dash-aio-community`)
+- `--release`: Pi Dash version to build (required)
+- `--image-name`: Custom image name (default: `pi-dash-aio-community`)
 
 ## Troubleshooting
 
@@ -171,4 +171,4 @@ The container will validate required environment variables on startup and displa
 
 ## Support
 
-For issues and support, please refer to the official Apple Pi Dash documentation.
+For issues and support, please refer to the official Pi Dash documentation.

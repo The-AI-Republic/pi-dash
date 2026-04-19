@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
@@ -8,10 +8,10 @@ import { set } from "lodash-es";
 import { observable, action, makeObservable, runInAction, computed } from "mobx";
 import { computedFn } from "mobx-utils";
 // types
-import type { IProjectView, TViewFilters } from "@apple-pi-dash/types";
+import type { IProjectView, TViewFilters } from "@pi-dash/types";
 // constants
 // helpers
-import { getValidatedViewFilters, getViewName, orderViews, shouldFilterView } from "@apple-pi-dash/utils";
+import { getValidatedViewFilters, getViewName, orderViews, shouldFilterView } from "@pi-dash/utils";
 // services
 import { ViewService } from "@/services/view.service";
 // store

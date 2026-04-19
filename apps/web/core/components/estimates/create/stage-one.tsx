@@ -1,20 +1,20 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
 
 import { Info } from "lucide-react";
-// apple pi dash imports
-import { EEstimateSystem, ESTIMATE_SYSTEMS } from "@apple-pi-dash/constants";
-import { useTranslation } from "@apple-pi-dash/i18n";
-import { Tooltip } from "@apple-pi-dash/propel/tooltip";
-import type { TEstimateSystemKeys } from "@apple-pi-dash/types";
+// pi dash imports
+import { EEstimateSystem, ESTIMATE_SYSTEMS } from "@pi-dash/constants";
+import { useTranslation } from "@pi-dash/i18n";
+import { Tooltip } from "@pi-dash/propel/tooltip";
+import type { TEstimateSystemKeys } from "@pi-dash/types";
 // components
-import { convertMinutesToHoursMinutesString } from "@apple-pi-dash/utils";
-// apple pi dash web imports
-import { isEstimateSystemEnabled } from "@/apple-pi-dash-web/components/estimates/helper";
-import { UpgradeBadge } from "@/apple-pi-dash-web/components/workspace/upgrade-badge";
+import { convertMinutesToHoursMinutesString } from "@pi-dash/utils";
+// pi dash web imports
+import { isEstimateSystemEnabled } from "@/pi-dash-web/components/estimates/helper";
+import { UpgradeBadge } from "@/pi-dash-web/components/workspace/upgrade-badge";
 import { RadioInput } from "../radio-select";
 // local imports
 

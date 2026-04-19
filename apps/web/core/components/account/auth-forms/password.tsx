@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
@@ -9,13 +9,13 @@ import { observer } from "mobx-react";
 import Link from "next/link";
 // icons
 import { Eye, EyeOff, Info, XCircle } from "lucide-react";
-// apple pi dash imports
-import { API_BASE_URL, E_PASSWORD_STRENGTH, AUTH_TRACKER_ELEMENTS } from "@apple-pi-dash/constants";
-import { useTranslation } from "@apple-pi-dash/i18n";
-import { Button } from "@apple-pi-dash/propel/button";
-import { CloseIcon } from "@apple-pi-dash/propel/icons";
-import { Input, PasswordStrengthIndicator, Spinner } from "@apple-pi-dash/ui";
-import { getPasswordStrength } from "@apple-pi-dash/utils";
+// pi dash imports
+import { API_BASE_URL, E_PASSWORD_STRENGTH, AUTH_TRACKER_ELEMENTS } from "@pi-dash/constants";
+import { useTranslation } from "@pi-dash/i18n";
+import { Button } from "@pi-dash/propel/button";
+import { CloseIcon } from "@pi-dash/propel/icons";
+import { Input, PasswordStrengthIndicator, Spinner } from "@pi-dash/ui";
+import { getPasswordStrength } from "@pi-dash/utils";
 // components
 import { ForgotPasswordPopover } from "@/components/account/auth-forms/forgot-password-popover";
 // constants
@@ -48,7 +48,7 @@ const authService = new AuthService();
 
 export const AuthPasswordForm = observer(function AuthPasswordForm(props: Props) {
   const { email, isSMTPConfigured, handleAuthStep, handleEmailClear, mode, nextPath } = props;
-  // apple pi dash imports
+  // pi dash imports
   const { t } = useTranslation();
   // ref
   const formRef = useRef<HTMLFormElement>(null);

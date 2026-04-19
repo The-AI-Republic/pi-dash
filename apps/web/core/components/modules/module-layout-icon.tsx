@@ -1,13 +1,13 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
 
 import * as React from "react";
-import { TimelineLayoutIcon, GridLayoutIcon, ListLayoutIcon } from "@apple-pi-dash/propel/icons";
-import type { TModuleLayoutOptions } from "@apple-pi-dash/types";
-import { cn } from "@apple-pi-dash/utils";
+import { TimelineLayoutIcon, GridLayoutIcon, ListLayoutIcon } from "@pi-dash/propel/icons";
+import type { TModuleLayoutOptions } from "@pi-dash/types";
+import { cn } from "@pi-dash/utils";
 
 interface ILayoutIcon {
   className?: string;

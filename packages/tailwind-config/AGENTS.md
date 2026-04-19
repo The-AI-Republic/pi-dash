@@ -522,7 +522,7 @@ function Page() {
 }
 ```
 
-### ❌ Mistake 2: Nested Surfaces (Same Apple Pi Dash)
+### ❌ Mistake 2: Nested Surfaces (Same Pi Dash)
 
 ```tsx
 // ❌ Wrong: Nested surfaces in same plane

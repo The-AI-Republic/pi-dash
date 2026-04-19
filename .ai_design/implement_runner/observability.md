@@ -7,23 +7,23 @@ text exposition format (v0.0.4). Scrape every 15–60s.
 
 | Metric                            | Type  | Meaning                                                                        |
 | --------------------------------- | ----- | ------------------------------------------------------------------------------ |
-| `apple_pi_dash_runner_online`     | gauge | Runners currently `online` in the DB.                                          |
-| `apple_pi_dash_runner_busy`       | gauge | Runners currently executing a run.                                             |
-| `apple_pi_dash_runner_offline`    | gauge | Runners whose heartbeat has lapsed. Excludes revoked.                          |
-| `apple_pi_dash_runs_active`       | gauge | AgentRuns in `assigned` / `running` / `awaiting_approval` / `awaiting_reauth`. |
-| `apple_pi_dash_approvals_pending` | gauge | ApprovalRequests with `status=pending`.                                        |
+| `pi_dash_runner_online`     | gauge | Runners currently `online` in the DB.                                          |
+| `pi_dash_runner_busy`       | gauge | Runners currently executing a run.                                             |
+| `pi_dash_runner_offline`    | gauge | Runners whose heartbeat has lapsed. Excludes revoked.                          |
+| `pi_dash_runs_active`       | gauge | AgentRuns in `assigned` / `running` / `awaiting_approval` / `awaiting_reauth`. |
+| `pi_dash_approvals_pending` | gauge | ApprovalRequests with `status=pending`.                                        |
 
 ### Alert rules (starter)
 
 ```yaml
 - alert: RunnerOfflineBurst
-  expr: delta(apple_pi_dash_runner_offline[5m]) > 5
+  expr: delta(pi_dash_runner_offline[5m]) > 5
   for: 5m
   annotations:
     summary: "More than 5 runners went offline in 5 minutes — check WS service."
 
 - alert: ApprovalBacklog
-  expr: apple_pi_dash_approvals_pending > 20
+  expr: pi_dash_approvals_pending > 20
   for: 15m
   annotations:
     summary: "Approval backlog >20 for 15 minutes — user workflow is blocked."
@@ -34,7 +34,7 @@ text exposition format (v0.0.4). Scrape every 15–60s.
 Every runner subsystem emits structured records via `tracing` (runner) and
 Python `logging` (Django). Use these fields consistently so log search works.
 
-### Runner daemon (`apple_pi_dash_runner`, Rust `tracing`)
+### Runner daemon (`pi_dash_runner`, Rust `tracing`)
 
 | Field              | Type   | Emitted on                             |
 | ------------------ | ------ | -------------------------------------- |
@@ -46,7 +46,7 @@ Python `logging` (Django). Use these fields consistently so log search works.
 | `thread_id`        | string | Codex bridge events                    |
 | `codex.stderr`     | target | drained stderr from `codex app-server` |
 
-### Django consumer (`apple_pi_dash.runner.consumers`)
+### Django consumer (`pi_dash.runner.consumers`)
 
 | Event                      | Level | Fields                                            |
 | -------------------------- | ----- | ------------------------------------------------- |
@@ -67,7 +67,7 @@ Python `logging` (Django). Use these fields consistently so log search works.
 ## Runbook pointers
 
 - Runner stuck `online` but no activity → scrape `/api/v1/runner/metrics/`;
-  if `apple_pi_dash_runs_active > 0` but specific runs are stale, check the
+  if `pi_dash_runs_active > 0` but specific runs are stale, check the
   Celery `mark_offline_runners` cadence and `last_heartbeat_at` on the row.
 - Repeated reconnect storms → look for `protocol mismatch` lines at WARN and
   the Rust daemon's `cloud WS connect failed` at WARN. Jittered backoff caps

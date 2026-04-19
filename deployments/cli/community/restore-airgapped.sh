@@ -54,10 +54,10 @@ function restoreData() {
     echo ""
 
     # ask for current install path
-    AIRGAPPED_INSTALL_PATH="$HOME/applepidashairgapped"
+    AIRGAPPED_INSTALL_PATH="$HOME/pidashairgapped"
     read -p "Enter the airgapped instance install path [$AIRGAPPED_INSTALL_PATH]: " AIRGAPPED_INSTALL_PATH
     if [ -z "$AIRGAPPED_INSTALL_PATH" ]; then
-        AIRGAPPED_INSTALL_PATH="$HOME/applepidashairgapped"
+        AIRGAPPED_INSTALL_PATH="$HOME/pidashairgapped"
     fi
 
     # check if the airgapped instance install path exists
@@ -78,13 +78,13 @@ function restoreData() {
 
     local dockerServiceStatus
     if command -v jq &> /dev/null; then
-        dockerServiceStatus=$($COMPOSE_CMD ls --filter name=apple-pi-dash-airgapped --format=json | jq -r .[0].Status)
+        dockerServiceStatus=$($COMPOSE_CMD ls --filter name=pi-dash-airgapped --format=json | jq -r .[0].Status)
     else
-        dockerServiceStatus=$($COMPOSE_CMD ls --filter name=apple-pi-dash-airgapped | grep -o "running" | head -n 1)
+        dockerServiceStatus=$($COMPOSE_CMD ls --filter name=pi-dash-airgapped | grep -o "running" | head -n 1)
     fi
 
     if [[ $dockerServiceStatus == "running" ]]; then
-        echo "Apple Pi Dash Airgapped is running. Please STOP the Apple Pi Dash Airgapped before restoring data."
+        echo "Pi Dash Airgapped is running. Please STOP the Pi Dash Airgapped before restoring data."
         exit 1
     fi
 

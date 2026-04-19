@@ -1,11 +1,11 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
 
-import type { TStaticViewTypes, IWorkspaceSearchResults } from "@apple-pi-dash/types";
-import { EUserWorkspaceRoles } from "@apple-pi-dash/types";
+import type { TStaticViewTypes, IWorkspaceSearchResults } from "@pi-dash/types";
+import { EUserWorkspaceRoles } from "@pi-dash/types";
 
 export const ORGANIZATION_SIZE: string[] = ["Just myself", "2-10", "11-50", "51-200", "201-500", "500+"];
 
@@ -26,10 +26,10 @@ export const RESTRICTED_URLS: string[] = [
   "monitor",
   "monitoring",
   "ingest",
-  "apple-pi-dash-pro",
-  "apple-pi-dash-ultimate",
+  "pi-dash-pro",
+  "pi-dash-ultimate",
   "enterprise",
-  "apple-pi-dash-enterprise",
+  "pi-dash-enterprise",
   "disco",
   "silo",
   "chat",

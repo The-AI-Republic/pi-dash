@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
@@ -8,11 +8,11 @@ import type { CSSProperties } from "react";
 import { extractInstruction } from "@atlaskit/pragmatic-drag-and-drop-hitbox/tree-item";
 import { clone, isNil, pull, uniq, concat } from "lodash-es";
 import scrollIntoView from "smooth-scroll-into-view-if-needed";
-// apple pi dash types
-import { EIconSize, ISSUE_PRIORITIES, STATE_GROUPS } from "@apple-pi-dash/constants";
-import { Logo } from "@apple-pi-dash/propel/emoji-icon-picker";
-import type { ISvgIcons } from "@apple-pi-dash/propel/icons";
-import { CycleGroupIcon, CycleIcon, ModuleIcon, PriorityIcon, StateGroupIcon } from "@apple-pi-dash/propel/icons";
+// pi dash types
+import { EIconSize, ISSUE_PRIORITIES, STATE_GROUPS } from "@pi-dash/constants";
+import { Logo } from "@pi-dash/propel/emoji-icon-picker";
+import type { ISvgIcons } from "@pi-dash/propel/icons";
+import { CycleGroupIcon, CycleIcon, ModuleIcon, PriorityIcon, StateGroupIcon } from "@pi-dash/propel/icons";
 import type {
   GroupByColumnTypes,
   IGroupByColumn,
@@ -26,20 +26,20 @@ import type {
   TGroupedIssues,
   IIssueDisplayFilterOptions,
   TGetColumns,
-} from "@apple-pi-dash/types";
-import { EIssuesStoreType } from "@apple-pi-dash/types";
-// apple pi dash ui
-import { Avatar } from "@apple-pi-dash/ui";
-import { renderFormattedDate, getFileURL } from "@apple-pi-dash/utils";
+} from "@pi-dash/types";
+import { EIssuesStoreType } from "@pi-dash/types";
+// pi dash ui
+import { Avatar } from "@pi-dash/ui";
+import { renderFormattedDate, getFileURL } from "@pi-dash/utils";
 // helpers
 // store
 import { store } from "@/lib/store-context";
-// apple pi dash web store
+// pi dash web store
 import {
   getScopeMemberIds,
   getTeamProjectColumns,
   SpreadSheetPropertyIconMap,
-} from "@/apple-pi-dash-web/components/issues/issue-layouts/utils";
+} from "@/pi-dash-web/components/issues/issue-layouts/utils";
 // store
 import { ISSUE_FILTER_DEFAULT_DATA } from "@/store/issue/helpers/base-issues.store";
 import { DEFAULT_DISPLAY_PROPERTIES } from "@/store/issue/issue-details/sub_issues_filter.store";

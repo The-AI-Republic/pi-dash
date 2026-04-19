@@ -68,7 +68,7 @@ pub fn render(f: &mut ratatui::Frame<'_>, area: Rect, state: &AppState) {
     f.render_widget(body, chunks[1]);
 
     if state.onboarding_needed {
-        let msg = Paragraph::new("No configuration found. Run `apple-pi-dash-runner configure --url ... --token ...` first.")
+        let msg = Paragraph::new("No configuration found. Run `pi-dash-runner configure --url ... --token ...` first.")
             .style(Style::default().fg(Color::Yellow));
         f.render_widget(msg, chunks[0]);
     }

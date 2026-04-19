@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
@@ -9,10 +9,10 @@ import { useEffect, useRef, useState } from "react";
 import { combine } from "@atlaskit/pragmatic-drag-and-drop/combine";
 import { dropTargetForElements } from "@atlaskit/pragmatic-drag-and-drop/element/adapter";
 import { observer } from "mobx-react";
-// apple pi dash imports
-import { DRAG_ALLOWED_GROUPS } from "@apple-pi-dash/constants";
-import { useTranslation } from "@apple-pi-dash/i18n";
-import { TOAST_TYPE, setToast } from "@apple-pi-dash/propel/toast";
+// pi dash imports
+import { DRAG_ALLOWED_GROUPS } from "@pi-dash/constants";
+import { useTranslation } from "@pi-dash/i18n";
+import { TOAST_TYPE, setToast } from "@pi-dash/propel/toast";
 import type {
   IGroupByColumn,
   TIssueMap,
@@ -21,10 +21,10 @@ import type {
   TIssue,
   IIssueDisplayProperties,
   TIssueKanbanFilters,
-} from "@apple-pi-dash/types";
-import { EIssueLayoutTypes } from "@apple-pi-dash/types";
-import { Row } from "@apple-pi-dash/ui";
-import { cn } from "@apple-pi-dash/utils";
+} from "@pi-dash/types";
+import { EIssueLayoutTypes } from "@pi-dash/types";
+import { Row } from "@pi-dash/ui";
+import { cn } from "@pi-dash/utils";
 // components
 import { ListLoaderItemRow } from "@/components/ui/loader/layouts/list-layout-loader";
 // hooks
@@ -32,8 +32,8 @@ import { useProjectState } from "@/hooks/store/use-project-state";
 import { useIntersectionObserver } from "@/hooks/use-intersection-observer";
 import { useIssuesStore } from "@/hooks/use-issue-layout-store";
 import type { TSelectionHelper } from "@/hooks/use-multiple-select";
-// Apple Pi Dash-web
-import { useWorkFlowFDragNDrop } from "@/apple-pi-dash-web/components/workflow";
+// Pi Dash-web
+import { useWorkFlowFDragNDrop } from "@/pi-dash-web/components/workflow";
 //
 import { GroupDragOverlay } from "../group-drag-overlay";
 import { ListQuickAddIssueButton, QuickAddIssueRoot } from "../quick-add";

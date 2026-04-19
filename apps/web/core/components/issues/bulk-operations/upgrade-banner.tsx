@@ -1,12 +1,12 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
 
-import { MARKETING_APPLE_PI_DASH_ONE_PAGE_LINK } from "@apple-pi-dash/constants";
-import { getButtonStyling } from "@apple-pi-dash/propel/button";
-import { cn } from "@apple-pi-dash/utils";
+import { MARKETING_PI_DASH_ONE_PAGE_LINK } from "@pi-dash/constants";
+import { getButtonStyling } from "@pi-dash/propel/button";
+import { cn } from "@pi-dash/utils";
 
 type Props = {
   className?: string;
@@ -23,7 +23,7 @@ export function BulkOperationsUpgradeBanner(props: Props) {
           operation.
         </p>
         <a
-          href={MARKETING_APPLE_PI_DASH_ONE_PAGE_LINK}
+          href={MARKETING_PI_DASH_ONE_PAGE_LINK}
           target="_blank"
           rel="noopener noreferrer"
           className={cn(getButtonStyling("primary", "base"), "flex-shrink-0")}

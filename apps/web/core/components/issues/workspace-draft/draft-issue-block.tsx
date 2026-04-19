@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
@@ -8,20 +8,20 @@ import React, { useRef, useState } from "react";
 import { omit } from "lodash-es";
 import { observer } from "mobx-react";
 import { SquareStackIcon } from "lucide-react";
-import { CopyIcon, EditIcon, TrashIcon } from "@apple-pi-dash/propel/icons";
-// apple pi dash utils
-import { Tooltip } from "@apple-pi-dash/propel/tooltip";
-import type { TWorkspaceDraftIssue } from "@apple-pi-dash/types";
-import { EIssuesStoreType } from "@apple-pi-dash/types";
-import type { TContextMenuItem } from "@apple-pi-dash/ui";
-import { Row } from "@apple-pi-dash/ui";
-import { cn } from "@apple-pi-dash/utils";
+import { CopyIcon, EditIcon, TrashIcon } from "@pi-dash/propel/icons";
+// pi dash utils
+import { Tooltip } from "@pi-dash/propel/tooltip";
+import type { TWorkspaceDraftIssue } from "@pi-dash/types";
+import { EIssuesStoreType } from "@pi-dash/types";
+import type { TContextMenuItem } from "@pi-dash/ui";
+import { Row } from "@pi-dash/ui";
+import { cn } from "@pi-dash/utils";
 // hooks
 import { useAppTheme } from "@/hooks/store/use-app-theme";
 import { useProject } from "@/hooks/store/use-project";
 import { useWorkspaceDraftIssues } from "@/hooks/store/workspace-draft";
-// apple-pi-dash-web imports
-import { IssueTypeIdentifier } from "@/apple-pi-dash-web/components/issues/issue-details/issue-identifier";
+// pi-dash-web imports
+import { IssueTypeIdentifier } from "@/pi-dash-web/components/issues/issue-details/issue-identifier";
 // local imports
 import { IdentifierText } from "../issue-detail/identifier-text";
 import { CreateUpdateIssueModal } from "../issue-modal/modal";

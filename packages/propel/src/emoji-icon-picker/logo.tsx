@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
@@ -8,8 +8,8 @@
 // should be after the imported here rather than some below helper functions as it is in the original file
 
 import useFontFaceObserver from "use-font-face-observer";
-// apple pi dash imports
-import type { TLogoProps } from "@apple-pi-dash/types";
+// pi dash imports
+import type { TLogoProps } from "@pi-dash/types";
 // local imports
 import { getEmojiSize, stringToEmoji } from "./helper";
 import { LUCIDE_ICONS_LIST } from "./lucide-icons";

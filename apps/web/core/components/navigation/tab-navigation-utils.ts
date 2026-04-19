@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
@@ -11,7 +11,7 @@ export type TTabPreferences = {
 };
 
 // Constants
-export const TAB_PREFS_KEY = "apple_pi_dash_tab_prefs";
+export const TAB_PREFS_KEY = "pi_dash_tab_prefs";
 export const DEFAULT_TAB_KEY = "work_items";
 
 /**

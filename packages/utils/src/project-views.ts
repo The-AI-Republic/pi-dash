@@ -1,13 +1,13 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
 
 import { isNil, orderBy } from "lodash-es";
-// apple pi dash imports
-import { SPACE_BASE_PATH, SPACE_BASE_URL } from "@apple-pi-dash/constants";
-import type { IProjectView, TViewFilterProps, TViewFiltersSortBy, TViewFiltersSortKey } from "@apple-pi-dash/types";
+// pi dash imports
+import { SPACE_BASE_PATH, SPACE_BASE_URL } from "@pi-dash/constants";
+import type { IProjectView, TViewFilterProps, TViewFiltersSortBy, TViewFiltersSortKey } from "@pi-dash/types";
 // local imports
 import { getDate } from "./datetime";
 import { satisfiesDateFilter } from "./filter";

@@ -1,16 +1,16 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
 
 import { observer } from "mobx-react";
-// apple pi dash imports
-import { ApplePiDashLockup, ChevronLeftIcon } from "@apple-pi-dash/propel/icons";
-import { Tooltip } from "@apple-pi-dash/propel/tooltip";
-import type { TOnboardingStep } from "@apple-pi-dash/types";
-import { EOnboardingSteps } from "@apple-pi-dash/types";
-import { cn } from "@apple-pi-dash/utils";
+// pi dash imports
+import { PiDashLockup, ChevronLeftIcon } from "@pi-dash/propel/icons";
+import { Tooltip } from "@pi-dash/propel/tooltip";
+import type { TOnboardingStep } from "@pi-dash/types";
+import { EOnboardingSteps } from "@pi-dash/types";
+import { cn } from "@pi-dash/utils";
 // hooks
 import { useInstance } from "@/hooks/store/use-instance";
 import { useUser } from "@/hooks/store/user";
@@ -83,7 +83,7 @@ export const OnboardingHeader = observer(function OnboardingHeader(props: Onboar
               <ChevronLeftIcon className="size-6 text-placeholder" />
             </button>
           )}
-          <ApplePiDashLockup height={20} width={95} className="text-primary" />
+          <PiDashLockup height={20} width={95} className="text-primary" />
         </div>
         <SwitchAccountDropdown fullName={userName} />
       </div>

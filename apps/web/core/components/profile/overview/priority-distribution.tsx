@@ -1,16 +1,16 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
 
-// apple pi dash imports
-import { useTranslation } from "@apple-pi-dash/i18n";
-import { BarChart } from "@apple-pi-dash/propel/charts/bar-chart";
-import { EmptyStateCompact } from "@apple-pi-dash/propel/empty-state";
-import type { IUserProfileData } from "@apple-pi-dash/types";
-import { Loader, Card } from "@apple-pi-dash/ui";
-import { capitalizeFirstLetter } from "@apple-pi-dash/utils";
+// pi dash imports
+import { useTranslation } from "@pi-dash/i18n";
+import { BarChart } from "@pi-dash/propel/charts/bar-chart";
+import { EmptyStateCompact } from "@pi-dash/propel/empty-state";
+import type { IUserProfileData } from "@pi-dash/types";
+import { Loader, Card } from "@pi-dash/ui";
+import { capitalizeFirstLetter } from "@pi-dash/utils";
 
 type Props = {
   userProfile: IUserProfileData | undefined;

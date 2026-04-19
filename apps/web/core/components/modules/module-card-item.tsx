@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
@@ -10,21 +10,21 @@ import { observer } from "mobx-react";
 import Link from "next/link";
 import { useParams, usePathname, useSearchParams } from "next/navigation";
 import { Info, SquareUser } from "lucide-react";
-// apple pi dash package imports
+// pi dash package imports
 import {
   MODULE_STATUS,
   PROGRESS_STATE_GROUPS_DETAILS,
   EUserPermissions,
   EUserPermissionsLevel,
   IS_FAVORITE_MENU_OPEN,
-} from "@apple-pi-dash/constants";
-import { useLocalStorage } from "@apple-pi-dash/hooks";
-import { WorkItemsIcon } from "@apple-pi-dash/propel/icons";
-import { TOAST_TYPE, setPromiseToast, setToast } from "@apple-pi-dash/propel/toast";
-import { Tooltip } from "@apple-pi-dash/propel/tooltip";
-import type { IModule } from "@apple-pi-dash/types";
-import { Card, FavoriteStar, LinearProgressIndicator } from "@apple-pi-dash/ui";
-import { getDate, renderFormattedPayloadDate, generateQueryParams } from "@apple-pi-dash/utils";
+} from "@pi-dash/constants";
+import { useLocalStorage } from "@pi-dash/hooks";
+import { WorkItemsIcon } from "@pi-dash/propel/icons";
+import { TOAST_TYPE, setPromiseToast, setToast } from "@pi-dash/propel/toast";
+import { Tooltip } from "@pi-dash/propel/tooltip";
+import type { IModule } from "@pi-dash/types";
+import { Card, FavoriteStar, LinearProgressIndicator } from "@pi-dash/ui";
+import { getDate, renderFormattedPayloadDate, generateQueryParams } from "@pi-dash/utils";
 // components
 import { DateRangeDropdown } from "@/components/dropdowns/date-range";
 import { ButtonAvatars } from "@/components/dropdowns/member/avatar";

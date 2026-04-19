@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
@@ -8,13 +8,13 @@ import { useEffect } from "react";
 import { observer } from "mobx-react";
 import { Controller, useForm } from "react-hook-form";
 import { ArrowRight } from "lucide-react";
-// Apple Pi Dash Imports
-import { CYCLE_STATUS, EUserPermissions, EUserPermissionsLevel } from "@apple-pi-dash/constants";
-import { useTranslation } from "@apple-pi-dash/i18n";
-import { ChevronRightIcon } from "@apple-pi-dash/propel/icons";
-import { TOAST_TYPE, setToast } from "@apple-pi-dash/propel/toast";
-import type { ICycle } from "@apple-pi-dash/types";
-import { getDate, renderFormattedPayloadDate } from "@apple-pi-dash/utils";
+// Pi Dash Imports
+import { CYCLE_STATUS, EUserPermissions, EUserPermissionsLevel } from "@pi-dash/constants";
+import { useTranslation } from "@pi-dash/i18n";
+import { ChevronRightIcon } from "@pi-dash/propel/icons";
+import { TOAST_TYPE, setToast } from "@pi-dash/propel/toast";
+import type { ICycle } from "@pi-dash/types";
+import { getDate, renderFormattedPayloadDate } from "@pi-dash/utils";
 // components
 import { DateRangeDropdown } from "@/components/dropdowns/date-range";
 // hooks

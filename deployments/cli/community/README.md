@@ -44,9 +44,9 @@ After installation, you can verify the installation by opening a terminal (Comma
 
 ---
 
-## Installing Apple Pi Dash
+## Installing Pi Dash
 
-Installing apple pi dash is a very easy and minimal step process.
+Installing pi dash is a very easy and minimal step process.
 
 ### Prerequisite
 
@@ -58,15 +58,15 @@ Installing apple pi dash is a very easy and minimal step process.
 ### Downloading Latest Release
 
 ```
-mkdir apple-pi-dash-selfhost
+mkdir pi-dash-selfhost
 
-cd apple-pi-dash-selfhost
+cd pi-dash-selfhost
 ```
 
 #### For *Docker Compose* based setup
 
 ```
-curl -fsSL -o setup.sh https://github.com/makeapplepidash/apple-pi-dash/releases/latest/download/setup.sh
+curl -fsSL -o setup.sh https://github.com/makepidash/pi-dash/releases/latest/download/setup.sh
 
 chmod +x setup.sh
 ```
@@ -74,7 +74,7 @@ chmod +x setup.sh
 #### For *Docker Swarm* based setup
 
 ```
-curl -fsSL -o setup.sh https://github.com/makeapplepidash/apple-pi-dash/releases/latest/download/swarm.sh
+curl -fsSL -o setup.sh https://github.com/makepidash/pi-dash/releases/latest/download/swarm.sh
 
 chmod +x setup.sh
 ```
@@ -83,7 +83,7 @@ chmod +x setup.sh
 
 ### Proceed with setup
 
-Above steps will set you ready to install and start apple pi dash services.
+Above steps will set you ready to install and start pi dash services.
 
 Lets get started by running the `./setup.sh` command.
 
@@ -106,10 +106,10 @@ Action [2]: 1
 
 For the 1st time setup, type "1" as action input.
 
-This will create a folder `apple-pi-dash-app` and will download 2 files inside that
+This will create a folder `pi-dash-app` and will download 2 files inside that
 
 - `docker-compose.yaml`
-- `apple_pi_dash.env`
+- `pi_dash.env`
 
 Again the `options [1-8]` will be popped up, and this time hit `8` to exit.
 
@@ -130,10 +130,10 @@ Action [3]: 1
 
 For the 1st time setup, type "1" as action input.
 
-This will create a create a folder `apple-pi-dash-app` and will download 2 files inside that
+This will create a create a folder `pi-dash-app` and will download 2 files inside that
 
 - `docker-compose.yaml`
-- `apple_pi_dash.env`
+- `pi_dash.env`
 
 Again the `options [1-7]` will be popped up, and this time hit `7` to exit.
 
@@ -146,9 +146,9 @@ Below are the most import keys you must refer to. _<span style="color: #fcba03">
 
 > `LISTEN_HTTP_PORT` - This is default set to `80`. Make sure the port you choose to use is not preoccupied. (e.g `LISTEN_HTTP_PORT=8080`)
 
-> `WEB_URL` - This is default set to `http://localhost`. Change this to the FQDN you plan to use along with LISTEN_HTTP_PORT (eg. `https://apple-pi-dash.example.com:8080` or `http://[IP-ADDRESS]:8080`)
+> `WEB_URL` - This is default set to `http://localhost`. Change this to the FQDN you plan to use along with LISTEN_HTTP_PORT (eg. `https://pi-dash.example.com:8080` or `http://[IP-ADDRESS]:8080`)
 
-> `CORS_ALLOWED_ORIGINS` - This is default set to `http://localhost`. Change this to the FQDN you plan to use along with LISTEN_HTTP_PORT (eg. `https://apple-pi-dash.example.com:8080` or `http://[IP-ADDRESS]:8080`)
+> `CORS_ALLOWED_ORIGINS` - This is default set to `http://localhost`. Change this to the FQDN you plan to use along with LISTEN_HTTP_PORT (eg. `https://pi-dash.example.com:8080` or `http://[IP-ADDRESS]:8080`)
 
 There are many other settings you can play with, but we suggest you configure `EMAIL SETTINGS` as it will enable you to invite your teammates onto the platform.
 
@@ -181,13 +181,13 @@ Be patient as it might take sometime based on download speed and system configur
 
 This is the confirmation that all images were downloaded and the services are up & running.
 
-You have successfully self hosted `Apple Pi Dash` instance. Access the application by going to IP or domain you have configured it (e.g `https://apple-pi-dash.example.com:8080` or `http://[IP-ADDRESS]:8080`)
+You have successfully self hosted `Pi Dash` instance. Access the application by going to IP or domain you have configured it (e.g `https://pi-dash.example.com:8080` or `http://[IP-ADDRESS]:8080`)
 
 ---
 
 ### Stopping the Server / Remove Stack
 
-In case you want to make changes to `apple_pi_dash.env` variables, we suggest you to stop the services before doing that.
+In case you want to make changes to `pi_dash.env` variables, we suggest you to stop the services before doing that.
 
 #### Docker Compose 
 
@@ -234,7 +234,7 @@ If all goes well, you will see the confirmation from docker cli
 
 ### Restarting the Server / Redeploy Stack
 
-In case you want to make changes to `apple_pi_dash.env` variables, without stopping the server or you noticed some abnormalies in services, you can restart the services with `RESTART` / `REDEPLOY` option.
+In case you want to make changes to `pi_dash.env` variables, without stopping the server or you noticed some abnormalies in services, you can restart the services with `RESTART` / `REDEPLOY` option.
 
 Lets again run the `./setup.sh` command. You will again be prompted with the below options. This time select `4` to restart the services
 
@@ -275,9 +275,9 @@ If all goes well, you will see the confirmation from docker cli
 
 ---
 
-### Upgrading Apple Pi Dash Version 
+### Upgrading Pi Dash Version 
 
-It is always advised to keep Apple Pi Dash up to date with the latest release.
+It is always advised to keep Pi Dash up to date with the latest release.
 
 Lets again run the `./setup.sh` command. You will again be prompted with the below options. This time select `5` to upgrade the release.
 
@@ -297,7 +297,7 @@ Select a Action you want to perform:
 Action [2]: 5
 ```
 
-By choosing this, it will stop the services and then will download the latest `docker-compose.yaml` and `apple_pi_dash.env`.
+By choosing this, it will stop the services and then will download the latest `docker-compose.yaml` and `pi_dash.env`.
 
 You must expect the below message
 
@@ -305,9 +305,9 @@ You must expect the below message
 
 Once done, choose `8` to exit from prompt.
 
-> It is very important for you to validate the `apple_pi_dash.env` for the new changes.
+> It is very important for you to validate the `pi_dash.env` for the new changes.
 
-Once done with making changes in `apple_pi_dash.env` file, jump on to `Start Server`
+Once done with making changes in `pi_dash.env` file, jump on to `Start Server`
 
 #### Docker Swarm
 
@@ -325,13 +325,13 @@ Lets again run the `./setup.sh` command. You will again be prompted with the bel
 Action [3]: 5
 ```
 
-By choosing this, it will stop the services and then will download the latest `docker-compose.yaml` and `apple_pi_dash.env`.
+By choosing this, it will stop the services and then will download the latest `docker-compose.yaml` and `pi_dash.env`.
 
 Once done, choose `7` to exit from prompt.
 
-> It is very important for you to validate the `apple_pi_dash.env` for the new changes.
+> It is very important for you to validate the `pi_dash.env` for the new changes.
 
-Once done with making changes in `apple_pi_dash.env` file, jump on to `Redeploy Stack`
+Once done with making changes in `pi_dash.env` file, jump on to `Redeploy Stack`
 
 ---
 
@@ -468,11 +468,11 @@ Action [2]: 7
 In response, you can find the backup folder
 
 ```bash
-Backing Up apple-pi-dash-app_pgdata
-Backing Up apple-pi-dash-app_redisdata
-Backing Up apple-pi-dash-app_uploads
+Backing Up pi-dash-app_pgdata
+Backing Up pi-dash-app_redisdata
+Backing Up pi-dash-app_uploads
 
-Backup completed successfully. Backup files are stored in /....../apple-pi-dash-app/backup/20240502-1120
+Backup completed successfully. Backup files are stored in /....../pi-dash-app/backup/20240502-1120
 ```
 
 ---
@@ -481,12 +481,12 @@ Backup completed successfully. Backup files are stored in /....../apple-pi-dash-
 
 When you want to restore the previously backed-up data, follow the instructions below.
 
-1. Make sure that Apple Pi Dash-CE is installed, started, and then stopped. This ensures that the Docker volumes are created.
+1. Make sure that Pi Dash-CE is installed, started, and then stopped. This ensures that the Docker volumes are created.
 
 1. Download the restore script using the command below. We suggest downloading it in the same folder as `setup.sh`.
 
    ```bash
-   curl -fsSL -o restore.sh https://github.com/makeapplepidash/apple-pi-dash/releases/latest/download/restore.sh
+   curl -fsSL -o restore.sh https://github.com/makepidash/pi-dash/releases/latest/download/restore.sh
    chmod +x restore.sh
    ```
 
@@ -496,7 +496,7 @@ When you want to restore the previously backed-up data, follow the instructions 
    ./restore.sh <path to backup folder containing *.tar.gz files>
    ```
 
-   As an example, for a backup folder `/opt/apple-pi-dash-selfhost/apple-pi-dash-app/backup/20240722-0914`, expect the response below:
+   As an example, for a backup folder `/opt/pi-dash-selfhost/pi-dash-app/backup/20240722-0914`, expect the response below:
 
    ```bash
    --------------------------------------------
@@ -509,40 +509,40 @@ When you want to restore the previously backed-up data, follow the instructions 
    --------------------------------------------
    Project management tool from the future
    --------------------------------------------
-   Found /opt/apple-pi-dash-selfhost/apple-pi-dash-app/backup/20240722-0914/pgdata.tar.gz
-   .....Restoring apple-pi-dash-app_pgdata
-   .....Successfully restored volume apple-pi-dash-app_pgdata from pgdata.tar.gz
+   Found /opt/pi-dash-selfhost/pi-dash-app/backup/20240722-0914/pgdata.tar.gz
+   .....Restoring pi-dash-app_pgdata
+   .....Successfully restored volume pi-dash-app_pgdata from pgdata.tar.gz
 
-   Found /opt/apple-pi-dash-selfhost/apple-pi-dash-app/backup/20240722-0914/redisdata.tar.gz
-   .....Restoring apple-pi-dash-app_redisdata
-   .....Successfully restored volume apple-pi-dash-app_redisdata from redisdata.tar.gz
+   Found /opt/pi-dash-selfhost/pi-dash-app/backup/20240722-0914/redisdata.tar.gz
+   .....Restoring pi-dash-app_redisdata
+   .....Successfully restored volume pi-dash-app_redisdata from redisdata.tar.gz
 
-   Found /opt/apple-pi-dash-selfhost/apple-pi-dash-app/backup/20240722-0914/uploads.tar.gz
-   .....Restoring apple-pi-dash-app_uploads
-   .....Successfully restored volume apple-pi-dash-app_uploads from uploads.tar.gz
+   Found /opt/pi-dash-selfhost/pi-dash-app/backup/20240722-0914/uploads.tar.gz
+   .....Restoring pi-dash-app_uploads
+   .....Successfully restored volume pi-dash-app_uploads from uploads.tar.gz
 
 
    Restore completed successfully.
    ```
 
-1. Start the Apple Pi Dash instance using `./setup.sh start`.
+1. Start the Pi Dash instance using `./setup.sh start`.
 
 ---
 
 ### Restore for Commercial Air-Gapped (Docker Compose)
 
-When you want to restore the previously backed-up data on Apple Pi Dash Commercial Air-Gapped version, follow the instructions below.
+When you want to restore the previously backed-up data on Pi Dash Commercial Air-Gapped version, follow the instructions below.
 
 1. Download the restore script using the command below
 
    ```bash
-   curl -fsSL -o restore-airgapped.sh https://github.com/makeapplepidash/apple-pi-dash/releases/latest/download/restore-airgapped.sh
+   curl -fsSL -o restore-airgapped.sh https://github.com/makepidash/pi-dash/releases/latest/download/restore-airgapped.sh
    chmod +x restore-airgapped.sh
    ```
 
 1. Copy the backup folder and the `restore-airgapped.sh` to `Commercial Airgapped Edition` server
 
-1. Make sure that Apple Pi Dash Commercial (Airgapped) is extracted and ready to get started. In case it is running, you would need to stop that.
+1. Make sure that Pi Dash Commercial (Airgapped) is extracted and ready to get started. In case it is running, you would need to stop that.
 
 1. Execute the command below to restore your data.
 
@@ -550,7 +550,7 @@ When you want to restore the previously backed-up data on Apple Pi Dash Commerci
    ./restore-airgapped.sh <path to backup folder containing *.tar.gz files>
    ```
 
-1. After restoration, you are ready to start Apple Pi Dash Commercial (Airgapped) will all your previously saved data. 
+1. After restoration, you are ready to start Pi Dash Commercial (Airgapped) will all your previously saved data. 
 
 ---
 
@@ -567,7 +567,7 @@ Begin with downloading the migration script using below command
 
 ```
 
-curl -fsSL -o migrate.sh https://raw.githubusercontent.com/makeapplepidash/apple-pi-dash/master/deploy/selfhost/migration-0.13-0.14.sh
+curl -fsSL -o migrate.sh https://raw.githubusercontent.com/makepidash/pi-dash/master/deploy/selfhost/migration-0.13-0.14.sh
 
 chmod +x migrate.sh
 
@@ -599,7 +599,7 @@ docker volume ls -q | grep -i "_redisdata"
 
 Given below list of REDIS volumes, identify the prefix of source and destination volumes leaving "_redisdata"
 ---------------------
-apple-pi-dash-app_redisdata
+pi-dash-app_redisdata
 v0132_redisdata
 
 Provide the Source Volume Prefix :
@@ -609,7 +609,7 @@ Provide the Source Volume Prefix :
 
 For every command you must see 2 records something like shown in above example of `redisdata`
 
-To move forward, you would need PREFIX of old setup and new setup. As per above example, `v0132` is the prefix of v0.13.2 and `apple-pi-dash-app` is the prefix of v0.14.0 setup
+To move forward, you would need PREFIX of old setup and new setup. As per above example, `v0132` is the prefix of v0.13.2 and `pi-dash-app` is the prefix of v0.14.0 setup
 
 **Back to original terminal window**, _Provide the Source Volume Prefix_ and hit ENTER.
 
@@ -617,7 +617,7 @@ Now you will be prompted to _Provide Destination Volume Prefix_. Provide the val
 
 ```
 Provide the Source Volume Prefix : v0132
-Provide the Destination Volume Prefix : apple-pi-dash-app
+Provide the Destination Volume Prefix : pi-dash-app
 ```
 
 In case the suffixes are wrong or the mentioned volumes are not found, you will receive the error shown below. The image below displays an error for source volumes.

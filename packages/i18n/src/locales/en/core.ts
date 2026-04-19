@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
@@ -90,7 +90,7 @@ export default {
       already_have_an_account: "Already have an account?",
       login: "Log in",
       create_account: "Create an account",
-      new_to_apple_pi_dash: "New to Apple Pi Dash?",
+      new_to_pi_dash: "New to Pi Dash?",
       back_to_sign_in: "Back to sign in",
       resend_in: "Resend in {seconds} seconds",
       sign_in_with_unique_code: "Sign in with unique code",
@@ -177,7 +177,7 @@ export default {
     },
   },
   runners: {
-    title: "Apple Pi Dash Runner",
+    title: "Pi Dash Runner",
     page_title: "{workspace} - Runners",
     toast: {
       error_title: "Error!",

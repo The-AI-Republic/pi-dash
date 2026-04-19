@@ -1,13 +1,13 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
 
 import { orderBy } from "lodash-es";
-// apple pi dash imports
-import type { IPaymentProduct, TProductSubscriptionType, TSubscriptionPrice } from "@apple-pi-dash/types";
-import { EProductSubscriptionEnum } from "@apple-pi-dash/types";
+// pi dash imports
+import type { IPaymentProduct, TProductSubscriptionType, TSubscriptionPrice } from "@pi-dash/types";
+import { EProductSubscriptionEnum } from "@pi-dash/types";
 
 /**
  * Calculates the yearly discount percentage when switching from monthly to yearly billing

@@ -1,17 +1,17 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
 
 import { Database as HocuspocusDatabase } from "@hocuspocus/extension-database";
-// apple pi dash imports
+// pi dash imports
 import {
   getAllDocumentFormatsFromDocumentEditorBinaryData,
   getBinaryDataFromDocumentEditorHTMLString,
-} from "@apple-pi-dash/editor";
-import type { TDocumentPayload } from "@apple-pi-dash/types";
-import { logger } from "@apple-pi-dash/logger";
+} from "@pi-dash/editor";
+import type { TDocumentPayload } from "@pi-dash/types";
+import { logger } from "@pi-dash/logger";
 // lib
 import { AppError } from "@/lib/errors";
 // services

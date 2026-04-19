@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
@@ -7,19 +7,19 @@
 import { useCallback, useMemo, useState } from "react";
 import { observer } from "mobx-react";
 import { useParams } from "next/navigation";
-// apple pi dash imports
+// pi dash imports
 import {
   EIssueFilterType,
   ISSUE_DISPLAY_FILTERS_BY_PAGE,
   GLOBAL_VIEW_TRACKER_ELEMENTS,
   DEFAULT_GLOBAL_VIEWS_LIST,
-} from "@apple-pi-dash/constants";
-import { useTranslation } from "@apple-pi-dash/i18n";
-import { Button } from "@apple-pi-dash/propel/button";
-import { ViewsIcon } from "@apple-pi-dash/propel/icons";
-import type { IIssueDisplayFilterOptions, IIssueDisplayProperties, ICustomSearchSelectOption } from "@apple-pi-dash/types";
-import { EIssuesStoreType, EIssueLayoutTypes } from "@apple-pi-dash/types";
-import { Breadcrumbs, Header, BreadcrumbNavigationSearchDropdown } from "@apple-pi-dash/ui";
+} from "@pi-dash/constants";
+import { useTranslation } from "@pi-dash/i18n";
+import { Button } from "@pi-dash/propel/button";
+import { ViewsIcon } from "@pi-dash/propel/icons";
+import type { IIssueDisplayFilterOptions, IIssueDisplayProperties, ICustomSearchSelectOption } from "@pi-dash/types";
+import { EIssuesStoreType, EIssueLayoutTypes } from "@pi-dash/types";
+import { Breadcrumbs, Header, BreadcrumbNavigationSearchDropdown } from "@pi-dash/ui";
 // components
 import { BreadcrumbLink } from "@/components/common/breadcrumb-link";
 import { SwitcherLabel } from "@/components/common/switcher-label";
@@ -32,7 +32,7 @@ import { WorkspaceViewQuickActions } from "@/components/workspace/views/quick-ac
 import { useGlobalView } from "@/hooks/store/use-global-view";
 import { useIssues } from "@/hooks/store/use-issues";
 import { useAppRouter } from "@/hooks/use-app-router";
-import { GlobalViewLayoutSelection } from "@/apple-pi-dash-web/components/views/helper";
+import { GlobalViewLayoutSelection } from "@/pi-dash-web/components/views/helper";
 
 export const GlobalIssuesHeader = observer(function GlobalIssuesHeader() {
   // states

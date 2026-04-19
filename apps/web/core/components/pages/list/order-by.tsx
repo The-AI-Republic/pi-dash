@@ -1,16 +1,16 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
 
 import { ArrowDownWideNarrow, ArrowUpWideNarrow } from "lucide-react";
-// apple pi dash imports
-import { getButtonStyling } from "@apple-pi-dash/propel/button";
+// pi dash imports
+import { getButtonStyling } from "@pi-dash/propel/button";
 // types
-import { CheckIcon } from "@apple-pi-dash/propel/icons";
-import type { TPageFiltersSortBy, TPageFiltersSortKey } from "@apple-pi-dash/types";
-import { CustomMenu } from "@apple-pi-dash/ui";
+import { CheckIcon } from "@pi-dash/propel/icons";
+import type { TPageFiltersSortBy, TPageFiltersSortKey } from "@pi-dash/types";
+import { CustomMenu } from "@pi-dash/ui";
 
 type Props = {
   onChange: (value: { key?: TPageFiltersSortKey; order?: TPageFiltersSortBy }) => void;

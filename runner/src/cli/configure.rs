@@ -8,7 +8,7 @@ use crate::util::paths::Paths;
 
 #[derive(Debug, ClapArgs)]
 pub struct Args {
-    /// Apple Pi Dash cloud base URL (https://cloud.apple-pi-dash.so).
+    /// Pi Dash cloud base URL (https://cloud.pi-dash.so).
     #[arg(long)]
     pub url: String,
 
@@ -87,7 +87,7 @@ pub async fn run(args: Args, paths: &Paths) -> Result<()> {
     }
 
     println!(
-        "\nRegistered runner '{}' with id {}.\nNext: `apple-pi-dash-runner service install && apple-pi-dash-runner service start`\n",
+        "\nRegistered runner '{}' with id {}.\nNext: `pi-dash-runner service install && pi-dash-runner service start`\n",
         config.runner.name, creds.runner_id,
     );
     Ok(())

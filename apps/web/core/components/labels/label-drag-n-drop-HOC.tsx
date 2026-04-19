@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
@@ -14,10 +14,10 @@ import { attachInstruction } from "@atlaskit/pragmatic-drag-and-drop-hitbox/tree
 import { observer } from "mobx-react";
 import { createRoot } from "react-dom/client";
 // types
-import { EUserPermissions, EUserPermissionsLevel } from "@apple-pi-dash/constants";
-import type { IIssueLabel, InstructionType } from "@apple-pi-dash/types";
+import { EUserPermissions, EUserPermissionsLevel } from "@pi-dash/constants";
+import type { IIssueLabel, InstructionType } from "@pi-dash/types";
 // ui
-import { DropIndicator } from "@apple-pi-dash/ui";
+import { DropIndicator } from "@pi-dash/ui";
 // components
 import { useUserPermissions } from "@/hooks/store/user";
 import { LabelName } from "./label-block/label-name";

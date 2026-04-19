@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
@@ -9,17 +9,17 @@ import { useRef, useState } from "react";
 import { observer } from "mobx-react";
 import { usePopper } from "react-popper";
 import { Combobox } from "@headlessui/react";
-// apple pi dash imports
-import { useTranslation } from "@apple-pi-dash/i18n";
-import { Logo } from "@apple-pi-dash/propel/emoji-icon-picker";
-import { CheckIcon, SearchIcon, ProjectIcon, ChevronDownIcon } from "@apple-pi-dash/propel/icons";
-import { ComboDropDown } from "@apple-pi-dash/ui";
-import { cn, sortBySelectedFirst } from "@apple-pi-dash/utils";
+// pi dash imports
+import { useTranslation } from "@pi-dash/i18n";
+import { Logo } from "@pi-dash/propel/emoji-icon-picker";
+import { CheckIcon, SearchIcon, ProjectIcon, ChevronDownIcon } from "@pi-dash/propel/icons";
+import { ComboDropDown } from "@pi-dash/ui";
+import { cn, sortBySelectedFirst } from "@pi-dash/utils";
 // components
 // hooks
 import { useDropdown } from "@/hooks/use-dropdown";
-// apple pi dash web imports
-import type { TProject } from "@/apple-pi-dash-web/types";
+// pi dash web imports
+import type { TProject } from "@/pi-dash-web/types";
 // local imports
 import { DropdownButton } from "../buttons";
 import { BUTTON_VARIANTS_WITH_TEXT } from "../constants";
@@ -82,7 +82,7 @@ export const ProjectDropdownBase = observer(function ProjectDropdownBase(props: 
   // states
   const [query, setQuery] = useState("");
   const [isOpen, setIsOpen] = useState(false);
-  // apple pi dash hooks
+  // pi dash hooks
   const { t } = useTranslation();
   // popper-js init
   const { styles, attributes } = usePopper(referenceElement, popperElement, {

@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
@@ -7,17 +7,17 @@
 import React, { useState } from "react";
 import { observer } from "mobx-react";
 import { HelpCircle, User } from "lucide-react";
-import { useTranslation } from "@apple-pi-dash/i18n";
-import { PageIcon } from "@apple-pi-dash/propel/icons";
+import { useTranslation } from "@pi-dash/i18n";
+import { PageIcon } from "@pi-dash/propel/icons";
 // ui
-import { CustomMenu } from "@apple-pi-dash/ui";
+import { CustomMenu } from "@pi-dash/ui";
 // components
 import { ProductUpdatesModal } from "@/components/global";
 import { AppSidebarItem } from "@/components/sidebar/sidebar-item";
 // hooks
 import { usePowerK } from "@/hooks/store/use-power-k";
-// apple pi dash web components
-import { ApplePiDashVersionNumber } from "@/apple-pi-dash-web/components/global";
+// pi dash web components
+import { PiDashVersionNumber } from "@/pi-dash-web/components/global";
 
 export const HelpMenuRoot = observer(function HelpMenuRoot() {
   // store hooks
@@ -48,13 +48,13 @@ export const HelpMenuRoot = observer(function HelpMenuRoot() {
         maxHeight="lg"
         closeOnSelect
       >
-        <CustomMenu.MenuItem onClick={() => window.open("https://go.apple-pi-dash.so/p-docs", "_blank")}>
+        <CustomMenu.MenuItem onClick={() => window.open("https://go.pi-dash.so/p-docs", "_blank")}>
           <div className="flex items-center gap-x-2 rounded-sm text-11">
             <PageIcon className="h-3.5 w-3.5 text-secondary" height={14} width={14} />
             <span className="text-11">{t("documentation")}</span>
           </div>
         </CustomMenu.MenuItem>
-        <CustomMenu.MenuItem onClick={() => window.open("mailto:sales@apple-pi-dash.so", "_blank")}>
+        <CustomMenu.MenuItem onClick={() => window.open("mailto:sales@pi-dash.so", "_blank")}>
           <div className="flex items-center gap-x-2 rounded-sm text-11">
             <User className="h-3.5 w-3.5 text-secondary" size={14} />
             <span className="text-11">{t("contact_sales")}</span>
@@ -79,13 +79,13 @@ export const HelpMenuRoot = observer(function HelpMenuRoot() {
             <span className="text-11">{t("whats_new")}</span>
           </button>
         </CustomMenu.MenuItem>
-        <CustomMenu.MenuItem onClick={() => window.open("https://forum.apple-pi-dash.so", "_blank", "noopener,noreferrer")}>
+        <CustomMenu.MenuItem onClick={() => window.open("https://forum.pi-dash.so", "_blank", "noopener,noreferrer")}>
           <div className="flex items-center gap-x-2 rounded-sm text-11">
             <span className="text-11">Forum</span>
           </div>
         </CustomMenu.MenuItem>
         <div className="mt-1 border-t border-subtle px-1 pt-2 text-11 text-secondary">
-          <ApplePiDashVersionNumber />
+          <PiDashVersionNumber />
         </div>
       </CustomMenu>
     </>

@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
@@ -17,25 +17,25 @@ import { observer } from "mobx-react";
 import { useParams } from "next/navigation";
 import { FolderPlus } from "lucide-react";
 import { Disclosure, Transition } from "@headlessui/react";
-import { IS_FAVORITE_MENU_OPEN } from "@apple-pi-dash/constants";
-import { useTranslation } from "@apple-pi-dash/i18n";
-import { ChevronRightIcon } from "@apple-pi-dash/propel/icons";
+import { IS_FAVORITE_MENU_OPEN } from "@pi-dash/constants";
+import { useTranslation } from "@pi-dash/i18n";
+import { ChevronRightIcon } from "@pi-dash/propel/icons";
 // ui
-import { TOAST_TYPE, setToast } from "@apple-pi-dash/propel/toast";
-import { Tooltip } from "@apple-pi-dash/propel/tooltip";
-import type { IFavorite } from "@apple-pi-dash/types";
+import { TOAST_TYPE, setToast } from "@pi-dash/propel/toast";
+import { Tooltip } from "@pi-dash/propel/tooltip";
+import type { IFavorite } from "@pi-dash/types";
 // helpers
-import { cn } from "@apple-pi-dash/utils";
+import { cn } from "@pi-dash/utils";
 // hooks
 import { useFavorite } from "@/hooks/store/use-favorite";
 import useLocalStorage from "@/hooks/use-local-storage";
-// apple pi dash web components
+// pi dash web components
 import { FavoriteFolder } from "./favorite-folder";
 import { FavoriteRoot } from "./favorite-items";
 import type { TargetData } from "./favorites.helpers";
 import { getInstructionFromPayload } from "./favorites.helpers";
 import { NewFavoriteFolder } from "./new-fav-folder";
-import { IconButton } from "@apple-pi-dash/propel/icon-button";
+import { IconButton } from "@pi-dash/propel/icon-button";
 
 export const SidebarFavoritesMenu = observer(function SidebarFavoritesMenu() {
   // states

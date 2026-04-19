@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
@@ -8,12 +8,12 @@ import { unset, orderBy, set } from "lodash-es";
 import { action, computed, makeObservable, observable, runInAction } from "mobx";
 import { computedFn } from "mobx-utils";
 // types
-import type { IEstimate as IEstimateType, IEstimateFormData, TEstimateSystemKeys } from "@apple-pi-dash/types";
-// apple pi dash web services
+import type { IEstimate as IEstimateType, IEstimateFormData, TEstimateSystemKeys } from "@pi-dash/types";
+// pi dash web services
 import estimateService from "@/services/estimate.service";
-// apple pi dash web store
-import type { IEstimate } from "@/apple-pi-dash-web/store/estimates/estimate";
-import { Estimate } from "@/apple-pi-dash-web/store/estimates/estimate";
+// pi dash web store
+import type { IEstimate } from "@/pi-dash-web/store/estimates/estimate";
+import { Estimate } from "@/pi-dash-web/store/estimates/estimate";
 // store
 import type { CoreRootStore } from "../root.store";
 

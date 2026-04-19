@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
@@ -105,7 +105,7 @@ export const coreRoutes: RouteConfigEntry[] = [
           route(":workspaceSlug/stickies", "./(all)/[workspaceSlug]/(projects)/stickies/page.tsx"),
         ]),
 
-        // Runners (Apple Pi Dash runner: connect dev machines, review runs, decide approvals)
+        // Runners (Pi Dash runner: connect dev machines, review runs, decide approvals)
         layout("./(all)/[workspaceSlug]/runners/layout.tsx", [
           route(":workspaceSlug/runners", "./(all)/[workspaceSlug]/runners/page.tsx"),
           route(":workspaceSlug/runners/runs", "./(all)/[workspaceSlug]/runners/runs/page.tsx"),

@@ -1,4 +1,4 @@
-ARG APPLE_PI_DASH_VERSION=v0.27.1
+ARG PI_DASH_VERSION=v0.27.1
 FROM --platform=$BUILDPLATFORM tonistiigi/binfmt AS binfmt
 
 # **************************************************
@@ -6,12 +6,12 @@ FROM --platform=$BUILDPLATFORM tonistiigi/binfmt AS binfmt
 # **************************************************
 FROM node:22-alpine AS node
 
-FROM makeapplepidash/apple-pi-dash-frontend:${APPLE_PI_DASH_VERSION} AS web-img
-FROM makeapplepidash/apple-pi-dash-backend:${APPLE_PI_DASH_VERSION} AS backend-img
-FROM makeapplepidash/apple-pi-dash-space:${APPLE_PI_DASH_VERSION} AS space-img
-FROM makeapplepidash/apple-pi-dash-admin:${APPLE_PI_DASH_VERSION} AS admin-img
-FROM makeapplepidash/apple-pi-dash-live:${APPLE_PI_DASH_VERSION} AS live-img
-FROM makeapplepidash/apple-pi-dash-proxy:${APPLE_PI_DASH_VERSION} AS proxy-img
+FROM makepidash/pi-dash-frontend:${PI_DASH_VERSION} AS web-img
+FROM makepidash/pi-dash-backend:${PI_DASH_VERSION} AS backend-img
+FROM makepidash/pi-dash-space:${PI_DASH_VERSION} AS space-img
+FROM makepidash/pi-dash-admin:${PI_DASH_VERSION} AS admin-img
+FROM makepidash/pi-dash-live:${PI_DASH_VERSION} AS live-img
+FROM makepidash/pi-dash-proxy:${PI_DASH_VERSION} AS proxy-img
 
 # **************************************************
 #  STAGE 1: Runner
@@ -51,7 +51,7 @@ RUN pip install supervisor
 RUN mkdir -p /etc/supervisor/conf.d
 
 COPY start.sh /app/start.sh
-COPY dist/apple_pi_dash.env /app/apple_pi_dash.env
+COPY dist/pi_dash.env /app/pi_dash.env
 COPY supervisor.conf /etc/supervisor/conf.d/supervisor.conf
 
 RUN mkdir -p /app/logs/access && \

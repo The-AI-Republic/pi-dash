@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
@@ -90,7 +90,7 @@ export default {
       already_have_an_account: "Zaten bir hesabınız var mı?",
       login: "Giriş yap",
       create_account: "Hesap oluştur",
-      new_to_apple_pi_dash: "Apple Pi Dash'e yeni mi geldiniz?",
+      new_to_pi_dash: "Pi Dash'e yeni mi geldiniz?",
       back_to_sign_in: "Giriş yapmaya geri dön",
       resend_in: "{seconds} saniye içinde tekrar gönder",
       sign_in_with_unique_code: "Benzersiz kod ile giriş yap",
@@ -409,7 +409,7 @@ export default {
   full_changelog: "Tam Değişiklik Kaydı",
   support: "Destek",
   forum: "Forum",
-  powered_by_apple_pi_dash_pages: "Apple Pi Dash Pages tarafından desteklenmektedir",
+  powered_by_pi_dash_pages: "Pi Dash Pages tarafından desteklenmektedir",
   please_select_at_least_one_invitation: "Lütfen en az bir davet seçin.",
   please_select_at_least_one_invitation_description: "Çalışma alanına katılmak için lütfen en az bir davet seçin.",
   we_see_that_someone_has_invited_you_to_join_a_workspace: "Birinin sizi bir çalışma alanına davet ettiğini görüyoruz",
@@ -572,7 +572,7 @@ export default {
       not_right_now: "Şimdi değil",
       create_project: {
         title: "Proje oluştur",
-        description: "Çoğu şey Apple Pi Dash'de bir projeyle başlar.",
+        description: "Çoğu şey Pi Dash'de bir projeyle başlar.",
         cta: "Başla",
       },
       invite_team: {
@@ -586,7 +586,7 @@ export default {
         cta: "Yapılandır",
       },
       personalize_account: {
-        title: "Apple Pi Dash'yi kendinize özelleştirin.",
+        title: "Pi Dash'yi kendinize özelleştirin.",
         description: "Resminizi, renklerinizi ve daha fazlasını seçin.",
         cta: "Kişiselleştir",
       },
@@ -619,8 +619,8 @@ export default {
         issues: "İş öğeleri",
       },
     },
-    new_at_apple_pi_dash: {
-      title: "Apple Pi Dash'de Yenilikler",
+    new_at_pi_dash: {
+      title: "Pi Dash'de Yenilikler",
     },
     quick_tutorial: {
       title: "Hızlı eğitim",
@@ -1275,7 +1275,7 @@ export default {
   },
   workspace_creation: {
     heading: "Çalışma Alanınızı Oluşturun",
-    subheading: "Apple Pi Dash'i kullanmaya başlamak için bir çalışma alanı oluşturmalı veya katılmalısınız.",
+    subheading: "Pi Dash'i kullanmaya başlamak için bir çalışma alanı oluşturmalı veya katılmalısınız.",
     form: {
       name: {
         label: "Çalışma Alanınıza Ad Verin",
@@ -1330,11 +1330,11 @@ export default {
       general: {
         title: "Projelerinizin, aktivitenizin ve metriklerinizin genel görünümü",
         description:
-          "Apple Pi Dash'e hoş geldiniz, sizi aramızda görmekten heyecan duyuyoruz. İlk projenizi oluşturun ve iş öğelerinizi takip edin, bu sayfa ilerlemenize yardımcı olacak bir alana dönüşecek. Yöneticiler ayrıca ekiplerinin ilerlemesine yardımcı olacak öğeler görecek.",
+          "Pi Dash'e hoş geldiniz, sizi aramızda görmekten heyecan duyuyoruz. İlk projenizi oluşturun ve iş öğelerinizi takip edin, bu sayfa ilerlemenize yardımcı olacak bir alana dönüşecek. Yöneticiler ayrıca ekiplerinin ilerlemesine yardımcı olacak öğeler görecek.",
         primary_button: {
           text: "İlk projenizi oluşturun",
           comic: {
-            title: "Apple Pi Dash'de her şey bir projeyle başlar",
+            title: "Pi Dash'de her şey bir projeyle başlar",
             description:
               "Bir proje, bir ürünün yol haritası, bir pazarlama kampanyası veya yeni bir araba lansmanı olabilir.",
           },
@@ -1469,7 +1469,7 @@ export default {
         primary_button: {
           text: "İlk projenizi başlatın",
           comic: {
-            title: "Apple Pi Dash'de her şey bir projeyle başlar",
+            title: "Pi Dash'de her şey bir projeyle başlar",
             description:
               "Bir proje, bir ürünün yol haritası, bir pazarlama kampanyası veya yeni bir araba lansmanı olabilir.",
           },
@@ -1482,7 +1482,7 @@ export default {
         primary_button: {
           text: "İlk projenizi başlatın",
           comic: {
-            title: "Apple Pi Dash'de her şey bir projeyle başlar",
+            title: "Pi Dash'de her şey bir projeyle başlar",
             description:
               "Bir proje, bir ürünün yol haritası, bir pazarlama kampanyası veya yeni bir araba lansmanı olabilir.",
           },
@@ -1582,7 +1582,7 @@ export default {
     page_label: "{workspace} - Genel ayarlar",
     key_created: "Anahtar oluşturuldu",
     copy_key:
-      "Bu gizli anahtarı Apple Pi Dash Pages'e kopyalayıp kaydedin. Kapat düğmesine bastıktan sonra bu anahtarı göremezsiniz. Anahtar içeren bir CSV dosyası indirildi.",
+      "Bu gizli anahtarı Pi Dash Pages'e kopyalayıp kaydedin. Kapat düğmesine bastıktan sonra bu anahtarı göremezsiniz. Anahtar içeren bir CSV dosyası indirildi.",
     token_copied: "Token panoya kopyalandı.",
     settings: {
       general: {
@@ -1733,7 +1733,7 @@ export default {
         generating: "Oluşturuluyor",
         delete: {
           title: "API Token'ını sil",
-          description: "Bu token'ı kullanan uygulamalar artık Apple Pi Dash verilerine erişemeyecek. Bu işlem geri alınamaz.",
+          description: "Bu token'ı kullanan uygulamalar artık Pi Dash verilerine erişemeyecek. Bu işlem geri alınamaz.",
           success: {
             title: "Başarılı!",
             message: "API token'ı başarıyla silindi",
@@ -1748,7 +1748,7 @@ export default {
     empty_state: {
       api_tokens: {
         title: "API token'ı oluşturulmadı",
-        description: "Apple Pi Dash API'lerini harici sistemlere entegre etmek için bir token oluşturun.",
+        description: "Pi Dash API'lerini harici sistemlere entegre etmek için bir token oluşturun.",
       },
       webhooks: {
         title: "Webhook eklenmedi",
@@ -1812,7 +1812,7 @@ export default {
       activity: {
         title: "Henüz aktivite yok",
         description:
-          "Yeni bir iş öğesi oluşturarak başlayın! Detaylar ve özellikler ekleyin. Aktivitenizi görmek için Apple Pi Dash'de daha fazlasını keşfedin.",
+          "Yeni bir iş öğesi oluşturarak başlayın! Detaylar ve özellikler ekleyin. Aktivitenizi görmek için Pi Dash'de daha fazlasını keşfedin.",
       },
       assigned: {
         title: "Size atanan iş öğesi yok",
@@ -1941,12 +1941,12 @@ export default {
       label: "Otomasyonlar",
       "auto-archive": {
         title: "Tamamlanan iş öğelerini otomatik arşivle",
-        description: "Apple Pi Dash, tamamlanan veya iptal edilen iş öğelerini otomatik arşivleyecek.",
+        description: "Pi Dash, tamamlanan veya iptal edilen iş öğelerini otomatik arşivleyecek.",
         duration: "Şu süre kapalı kalan iş öğelerini otomatik arşivle",
       },
       "auto-close": {
         title: "İş öğelerini otomatik kapat",
-        description: "Apple Pi Dash, tamamlanmamış veya iptal edilmemiş iş öğelerini otomatik kapatacak.",
+        description: "Pi Dash, tamamlanmamış veya iptal edilmemiş iş öğelerini otomatik kapatacak.",
         duration: "Şu süre etkin olmayan iş öğelerini otomatik kapat",
         auto_close_status: "Otomatik kapatma durumu",
       },
@@ -2141,9 +2141,9 @@ export default {
         primary_button: {
           text: "İlk iş öğenizi oluşturun",
           comic: {
-            title: "İş öğeleri Apple Pi Dash'de yapı taşlarıdır.",
+            title: "İş öğeleri Pi Dash'de yapı taşlarıdır.",
             description:
-              "Apple Pi Dash UI'yi yeniden tasarlamak, şirketi yeniden markalaştırmak veya yeni yakıt enjeksiyon sistemini başlatmak, muhtemelen alt iş öğeleri olan iş öğesi örnekleridir.",
+              "Pi Dash UI'yi yeniden tasarlamak, şirketi yeniden markalaştırmak veya yeni yakıt enjeksiyon sistemini başlatmak, muhtemelen alt iş öğeleri olan iş öğesi örnekleridir.",
           },
         },
       },
@@ -2247,9 +2247,9 @@ export default {
     empty_state: {
       general: {
         title:
-          "Bir not, belge veya tam bir bilgi bankası yazın. Apple Pi Dash'in AI asistanı Galileo'nun başlamanıza yardımcı olmasını sağlayın",
+          "Bir not, belge veya tam bir bilgi bankası yazın. Pi Dash'in AI asistanı Galileo'nun başlamanıza yardımcı olmasını sağlayın",
         description:
-          "Sayfalar Apple Pi Dash'de düşüncelerinizi döktüğünüz alanlardır. Toplantı notları alın, kolayca biçimlendirin, iş öğelerini yerleştirin, bir bileşen kitaplığı kullanarak düzenleyin ve hepsini proje bağlamınızda tutun. Herhangi bir belgeyi hızlıca tamamlamak için bir kısayol veya düğme ile Apple Pi Dash'in AI'sı Galileo'yu çağırın.",
+          "Sayfalar Pi Dash'de düşüncelerinizi döktüğünüz alanlardır. Toplantı notları alın, kolayca biçimlendirin, iş öğelerini yerleştirin, bir bileşen kitaplığı kullanarak düzenleyin ve hepsini proje bağlamınızda tutun. Herhangi bir belgeyi hızlıca tamamlamak için bir kısayol veya düğme ile Pi Dash'in AI'sı Galileo'yu çağırın.",
         primary_button: {
           text: "İlk sayfanızı oluşturun",
         },
@@ -2625,8 +2625,8 @@ export default {
     edited_by: "Tarafından düzenlendi",
   },
   self_hosted_maintenance_message: {
-    apple_pi_dash_didnt_start_up_this_could_be_because_one_or_more_apple_pi_dash_services_failed_to_start:
-      "Apple Pi Dash başlatılamadı. Bu, bir veya daha fazla Apple Pi Dash servisinin başlatılamaması nedeniyle olabilir.",
+    pi_dash_didnt_start_up_this_could_be_because_one_or_more_pi_dash_services_failed_to_start:
+      "Pi Dash başlatılamadı. Bu, bir veya daha fazla Pi Dash servisinin başlatılamaması nedeniyle olabilir.",
     choose_view_logs_from_setup_sh_and_docker_logs_to_be_sure:
       "Emin olmak için setup.sh ve Docker loglarından View Logs&apos;u seçin.",
   },

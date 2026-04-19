@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
@@ -9,16 +9,16 @@ import Link from "next/link";
 import { Controller, useForm } from "react-hook-form";
 
 import { Disclosure } from "@headlessui/react";
-// apple pi dash imports
-import { ROLE, EUserPermissions, EUserPermissionsLevel, MEMBER_TRACKER_ELEMENTS } from "@apple-pi-dash/constants";
-import { TrashIcon, SuspendedUserIcon } from "@apple-pi-dash/propel/icons";
-import { Pill, EPillVariant, EPillSize } from "@apple-pi-dash/propel/pill";
-import { TOAST_TYPE, setToast } from "@apple-pi-dash/propel/toast";
-import type { IUser, IWorkspaceMember } from "@apple-pi-dash/types";
-// apple pi dash ui
-import { CustomSelect, PopoverMenu } from "@apple-pi-dash/ui";
+// pi dash imports
+import { ROLE, EUserPermissions, EUserPermissionsLevel, MEMBER_TRACKER_ELEMENTS } from "@pi-dash/constants";
+import { TrashIcon, SuspendedUserIcon } from "@pi-dash/propel/icons";
+import { Pill, EPillVariant, EPillSize } from "@pi-dash/propel/pill";
+import { TOAST_TYPE, setToast } from "@pi-dash/propel/toast";
+import type { IUser, IWorkspaceMember } from "@pi-dash/types";
+// pi dash ui
+import { CustomSelect, PopoverMenu } from "@pi-dash/ui";
 // helpers
-import { getFileURL } from "@apple-pi-dash/utils";
+import { getFileURL } from "@pi-dash/utils";
 // hooks
 import { useMember } from "@/hooks/store/use-member";
 import { useUser, useUserPermissions } from "@/hooks/store/user";

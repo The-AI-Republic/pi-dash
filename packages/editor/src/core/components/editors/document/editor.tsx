@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
@@ -7,8 +7,8 @@
 import type { Extensions } from "@tiptap/core";
 import type { MutableRefObject } from "react";
 import { forwardRef, useMemo } from "react";
-// apple pi dash imports
-import { cn } from "@apple-pi-dash/utils";
+// pi dash imports
+import { cn } from "@pi-dash/utils";
 // components
 import { PageRenderer } from "@/components/editors";
 // constants
@@ -19,8 +19,8 @@ import { HeadingListExtension, SideMenuExtension } from "@/extensions";
 import { getEditorClassNames } from "@/helpers/common";
 // hooks
 import { useEditor } from "@/hooks/use-editor";
-// apple pi dash editor extensions
-import { DocumentEditorAdditionalExtensions } from "@/apple-pi-dash-editor/extensions";
+// pi dash editor extensions
+import { DocumentEditorAdditionalExtensions } from "@/pi-dash-editor/extensions";
 // types
 import type { EditorRefApi, IDocumentEditorProps } from "@/types";
 

@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
@@ -7,10 +7,10 @@
 import { observer } from "mobx-react";
 import Link from "next/link";
 import { useTheme } from "next-themes";
-// apple pi dash imports
-import { PROJECT_TRACKER_ELEMENTS } from "@apple-pi-dash/constants";
-import { Button, getButtonStyling } from "@apple-pi-dash/propel/button";
-import { cn } from "@apple-pi-dash/utils";
+// pi dash imports
+import { PROJECT_TRACKER_ELEMENTS } from "@pi-dash/constants";
+import { Button, getButtonStyling } from "@pi-dash/propel/button";
+import { cn } from "@pi-dash/utils";
 // assets
 import ProjectDarkEmptyState from "@/app/assets/empty-state/project-settings/no-projects-dark.png?url";
 import ProjectLightEmptyState from "@/app/assets/empty-state/project-settings/no-projects-light.png?url";
@@ -32,7 +32,7 @@ function ProjectSettingsPage() {
         need to get things done.
       </div>
       <div className="flex gap-2">
-        <Link href="https://apple-pi-dash.so/" target="_blank" className={cn(getButtonStyling("secondary", "base"))}>
+        <Link href="https://pi-dash.so/" target="_blank" className={cn(getButtonStyling("secondary", "base"))}>
           Learn more about projects
         </Link>
         <Button

@@ -1,4 +1,4 @@
-import type { ActorDetail, TIssue, TIssuePriorities, TStateGroups, TIssuePublicComment } from "@apple-pi-dash/types";
+import type { ActorDetail, TIssue, TIssuePriorities, TStateGroups, TIssuePublicComment } from "@pi-dash/types";
 
 export type TIssueLayout = "list" | "kanban" | "calendar" | "spreadsheet" | "gantt";
 export type TIssueLayoutOptions = {

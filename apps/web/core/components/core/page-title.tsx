@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
@@ -16,7 +16,7 @@ export function PageHead(props: PageHeadTitleProps) {
 
   useEffect(() => {
     if (title) {
-      document.title = title ?? "Apple Pi Dash | Simple, extensible, open-source project management tool.";
+      document.title = title ?? "Pi Dash | Simple, extensible, open-source project management tool.";
     }
   }, [title]);
 

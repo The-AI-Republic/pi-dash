@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
@@ -11,14 +11,14 @@ import { createPortal } from "react-dom";
 import { usePopper } from "react-popper";
 import { ArrowRight, CalendarDays } from "lucide-react";
 import { Combobox } from "@headlessui/react";
-// apple pi dash imports
-import { useTranslation } from "@apple-pi-dash/i18n";
+// pi dash imports
+import { useTranslation } from "@pi-dash/i18n";
 // ui
-import type { DateRange, Matcher } from "@apple-pi-dash/propel/calendar";
-import { Calendar } from "@apple-pi-dash/propel/calendar";
-import { CloseIcon, DueDatePropertyIcon } from "@apple-pi-dash/propel/icons";
-import { ComboDropDown } from "@apple-pi-dash/ui";
-import { cn, renderFormattedDate } from "@apple-pi-dash/utils";
+import type { DateRange, Matcher } from "@pi-dash/propel/calendar";
+import { Calendar } from "@pi-dash/propel/calendar";
+import { CloseIcon, DueDatePropertyIcon } from "@pi-dash/propel/icons";
+import { ComboDropDown } from "@pi-dash/ui";
+import { cn, renderFormattedDate } from "@pi-dash/utils";
 // helpers
 // hooks
 import { useUserProfile } from "@/hooks/store/user";

@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
@@ -7,8 +7,8 @@
 import { useContext } from "react";
 // mobx store
 import { StoreContext } from "@/lib/store-context";
-// Apple Pi Dash-web
-import type { IStateStore } from "@/apple-pi-dash-web/store/state.store";
+// Pi Dash-web
+import type { IStateStore } from "@/pi-dash-web/store/state.store";
 
 export const useProjectState = (): IStateStore => {
   const context = useContext(StoreContext);

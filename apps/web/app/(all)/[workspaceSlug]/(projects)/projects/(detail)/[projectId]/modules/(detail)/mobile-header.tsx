@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
@@ -7,13 +7,13 @@
 import { useCallback, useState } from "react";
 import { observer } from "mobx-react";
 import { useParams } from "next/navigation";
-// apple pi dash imports
-import { EIssueFilterType, ISSUE_LAYOUTS, ISSUE_DISPLAY_FILTERS_BY_PAGE } from "@apple-pi-dash/constants";
-import { useTranslation } from "@apple-pi-dash/i18n";
-import { CalendarLayoutIcon, BoardLayoutIcon, ListLayoutIcon, ChevronDownIcon } from "@apple-pi-dash/propel/icons";
-import type { IIssueDisplayFilterOptions, IIssueDisplayProperties, EIssueLayoutTypes } from "@apple-pi-dash/types";
-import { EIssuesStoreType } from "@apple-pi-dash/types";
-import { CustomMenu } from "@apple-pi-dash/ui";
+// pi dash imports
+import { EIssueFilterType, ISSUE_LAYOUTS, ISSUE_DISPLAY_FILTERS_BY_PAGE } from "@pi-dash/constants";
+import { useTranslation } from "@pi-dash/i18n";
+import { CalendarLayoutIcon, BoardLayoutIcon, ListLayoutIcon, ChevronDownIcon } from "@pi-dash/propel/icons";
+import type { IIssueDisplayFilterOptions, IIssueDisplayProperties, EIssueLayoutTypes } from "@pi-dash/types";
+import { EIssuesStoreType } from "@pi-dash/types";
+import { CustomMenu } from "@pi-dash/ui";
 // components
 import { WorkItemsModal } from "@/components/analytics/work-items/modal";
 import { DisplayFiltersSelection, FiltersDropdown } from "@/components/issues/issue-layouts/filters";
@@ -34,7 +34,7 @@ export const ModuleIssuesMobileHeader = observer(function ModuleIssuesMobileHead
   const { workspaceSlug, projectId, moduleId } = useParams();
   // states
   const [analyticsModal, setAnalyticsModal] = useState(false);
-  // apple pi dash hooks
+  // pi dash hooks
   const { t } = useTranslation();
   // store hooks
   const { currentProjectDetails } = useProject();

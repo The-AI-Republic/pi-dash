@@ -1,23 +1,23 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
 
 import { observer } from "mobx-react";
-// apple pi dash imports
-import { useTranslation } from "@apple-pi-dash/i18n";
-import { setPromiseToast } from "@apple-pi-dash/propel/toast";
-import { Tooltip } from "@apple-pi-dash/propel/tooltip";
-import type { IProject } from "@apple-pi-dash/types";
-import { CycleIcon, IntakeIcon, ModuleIcon, PageIcon, ViewsIcon } from "@apple-pi-dash/propel/icons";
+// pi dash imports
+import { useTranslation } from "@pi-dash/i18n";
+import { setPromiseToast } from "@pi-dash/propel/toast";
+import { Tooltip } from "@pi-dash/propel/tooltip";
+import type { IProject } from "@pi-dash/types";
+import { CycleIcon, IntakeIcon, ModuleIcon, PageIcon, ViewsIcon } from "@pi-dash/propel/icons";
 // components
 import { SettingsBoxedControlItem } from "@/components/settings/boxed-control-item";
 import { SettingsHeading } from "@/components/settings/heading";
 // hooks
 import { useProject } from "@/hooks/store/use-project";
-// apple pi dash web imports
-import { UpgradeBadge } from "@/apple-pi-dash-web/components/workspace/upgrade-badge";
+// pi dash web imports
+import { UpgradeBadge } from "@/pi-dash-web/components/workspace/upgrade-badge";
 // local imports
 import { ProjectFeatureToggle } from "./helper";
 

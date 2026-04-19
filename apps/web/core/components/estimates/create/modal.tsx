@@ -1,19 +1,19 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
 
 import { useEffect, useMemo, useState } from "react";
 import { observer } from "mobx-react";
-// apple pi dash imports
-import { EEstimateSystem, ESTIMATE_SYSTEMS } from "@apple-pi-dash/constants";
-import { useTranslation } from "@apple-pi-dash/i18n";
-import { Button } from "@apple-pi-dash/propel/button";
-import { ChevronLeftIcon } from "@apple-pi-dash/propel/icons";
-import { TOAST_TYPE, setToast } from "@apple-pi-dash/propel/toast";
-import type { IEstimateFormData, TEstimateSystemKeys, TEstimatePointsObject, TEstimateTypeError } from "@apple-pi-dash/types";
-import { EModalPosition, EModalWidth, ModalCore } from "@apple-pi-dash/ui";
+// pi dash imports
+import { EEstimateSystem, ESTIMATE_SYSTEMS } from "@pi-dash/constants";
+import { useTranslation } from "@pi-dash/i18n";
+import { Button } from "@pi-dash/propel/button";
+import { ChevronLeftIcon } from "@pi-dash/propel/icons";
+import { TOAST_TYPE, setToast } from "@pi-dash/propel/toast";
+import type { IEstimateFormData, TEstimateSystemKeys, TEstimatePointsObject, TEstimateTypeError } from "@pi-dash/types";
+import { EModalPosition, EModalWidth, ModalCore } from "@pi-dash/ui";
 // hooks
 import { useProjectEstimates } from "@/hooks/store/estimates";
 // local imports

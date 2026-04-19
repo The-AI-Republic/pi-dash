@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
@@ -47,6 +47,6 @@ const IconButton = React.forwardRef(function IconButton(
   );
 });
 
-IconButton.displayName = "apple-pi-dash-ui-icon-button";
+IconButton.displayName = "pi-dash-ui-icon-button";
 
 export { IconButton };

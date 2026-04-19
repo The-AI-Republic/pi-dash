@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
@@ -7,7 +7,7 @@
 import type { Meta, StoryObj } from "@storybook/react";
 import { Home, Settings, Briefcase, GridIcon, Layers2, FileIcon } from "lucide-react";
 import * as React from "react";
-import { ContrastIcon, EpicIcon, LayersIcon } from "@apple-pi-dash/propel/icons";
+import { ContrastIcon, EpicIcon, LayersIcon } from "@pi-dash/propel/icons";
 import { Breadcrumbs } from "./breadcrumbs";
 import { BreadcrumbNavigationDropdown } from "./navigation-dropdown";
 

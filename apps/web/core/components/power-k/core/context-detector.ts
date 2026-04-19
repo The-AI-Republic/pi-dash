@@ -1,12 +1,12 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
 
 import type { Params } from "react-router";
-// apple pi dash web imports
-import { detectExtendedContextFromURL } from "@/apple-pi-dash-web/components/command-palette/power-k/context-detector";
+// pi dash web imports
+import { detectExtendedContextFromURL } from "@/pi-dash-web/components/command-palette/power-k/context-detector";
 // local imports
 import type { TPowerKContextType } from "./types";
 

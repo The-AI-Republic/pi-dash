@@ -1,16 +1,16 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
 
 import { observable, action, makeObservable, runInAction } from "mobx";
 import { computedFn } from "mobx-utils";
-// apple pi dash imports
-import type { TCreateModalStoreTypes, TCreatePageModal } from "@apple-pi-dash/constants";
-import { DEFAULT_CREATE_PAGE_MODAL_DATA, EPageAccess } from "@apple-pi-dash/constants";
-import type { TProfileSettingsTabs } from "@apple-pi-dash/types";
-import { EIssuesStoreType } from "@apple-pi-dash/types";
+// pi dash imports
+import type { TCreateModalStoreTypes, TCreatePageModal } from "@pi-dash/constants";
+import { DEFAULT_CREATE_PAGE_MODAL_DATA, EPageAccess } from "@pi-dash/constants";
+import type { TProfileSettingsTabs } from "@pi-dash/types";
+import { EIssuesStoreType } from "@pi-dash/types";
 // lib
 import { store } from "@/lib/store-context";
 

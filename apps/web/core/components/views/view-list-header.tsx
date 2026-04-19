@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
@@ -8,18 +8,18 @@ import React, { useEffect, useRef, useState } from "react";
 import { observer } from "mobx-react";
 // icons
 import { ListFilter } from "lucide-react";
-import { useOutsideClickDetector } from "@apple-pi-dash/hooks";
-import { SearchIcon, CloseIcon } from "@apple-pi-dash/propel/icons";
-// apple pi dash helpers
+import { useOutsideClickDetector } from "@pi-dash/hooks";
+import { SearchIcon, CloseIcon } from "@pi-dash/propel/icons";
+// pi dash helpers
 // helpers
-import { cn } from "@apple-pi-dash/utils";
+import { cn } from "@pi-dash/utils";
 // hooks
 import { useMember } from "@/hooks/store/use-member";
 import { useProjectView } from "@/hooks/store/use-project-view";
 import { FiltersDropdown } from "../issues/issue-layouts/filters";
 import { ViewFiltersSelection } from "./filters/filter-selection";
 import { ViewOrderByDropdown } from "./filters/order-by";
-import { IconButton } from "@apple-pi-dash/propel/icon-button";
+import { IconButton } from "@pi-dash/propel/icon-button";
 
 export const ViewListHeader = observer(function ViewListHeader() {
   // states

@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
@@ -89,7 +89,7 @@ export default {
       already_have_an_account: "Hai già un account?",
       login: "Accedi",
       create_account: "Crea un account",
-      new_to_apple_pi_dash: "Nuovo su Apple Pi Dash?",
+      new_to_pi_dash: "Nuovo su Pi Dash?",
       back_to_sign_in: "Torna al login",
       resend_in: "Reinvia in {seconds} secondi",
       sign_in_with_unique_code: "Accedi con codice unico",
@@ -413,7 +413,7 @@ export default {
   full_changelog: "Changelog completo",
   support: "Supporto",
   forum: "Forum",
-  powered_by_apple_pi_dash_pages: "Supportato da Apple Pi Dash Pages",
+  powered_by_pi_dash_pages: "Supportato da Pi Dash Pages",
   please_select_at_least_one_invitation: "Seleziona almeno un invito.",
   please_select_at_least_one_invitation_description: "Seleziona almeno un invito per unirti allo spazio di lavoro.",
   we_see_that_someone_has_invited_you_to_join_a_workspace:
@@ -577,7 +577,7 @@ export default {
       not_right_now: "Non ora",
       create_project: {
         title: "Crea un progetto",
-        description: "La maggior parte delle cose inizia con un progetto in Apple Pi Dash.",
+        description: "La maggior parte delle cose inizia con un progetto in Pi Dash.",
         cta: "Inizia",
       },
       invite_team: {
@@ -591,7 +591,7 @@ export default {
         cta: "Configura questo spazio",
       },
       personalize_account: {
-        title: "Rendi Apple Pi Dash tuo.",
+        title: "Rendi Pi Dash tuo.",
         description: "Scegli la tua immagine, i colori e altro.",
         cta: "Personalizza ora",
       },
@@ -624,8 +624,8 @@ export default {
         issues: "Elementi di lavoro",
       },
     },
-    new_at_apple_pi_dash: {
-      title: "Novità su Apple Pi Dash",
+    new_at_pi_dash: {
+      title: "Novità su Pi Dash",
     },
     quick_tutorial: {
       title: "Tutorial rapido",
@@ -1277,7 +1277,7 @@ export default {
   },
   workspace_creation: {
     heading: "Crea il tuo spazio di lavoro",
-    subheading: "Per iniziare a usare Apple Pi Dash, devi creare o unirti a uno spazio di lavoro.",
+    subheading: "Per iniziare a usare Pi Dash, devi creare o unirti a uno spazio di lavoro.",
     form: {
       name: {
         label: "Dai un nome al tuo spazio di lavoro",
@@ -1333,11 +1333,11 @@ export default {
       general: {
         title: "Panoramica dei tuoi progetti, attività e metriche",
         description:
-          "Benvenuto in Apple Pi Dash, siamo entusiasti di averti qui. Crea il tuo primo progetto e traccia i tuoi elementi di lavoro, e questa pagina si trasformerà in uno spazio che ti aiuta a progredire. Gli amministratori vedranno anche elementi che aiutano il team a progredire.",
+          "Benvenuto in Pi Dash, siamo entusiasti di averti qui. Crea il tuo primo progetto e traccia i tuoi elementi di lavoro, e questa pagina si trasformerà in uno spazio che ti aiuta a progredire. Gli amministratori vedranno anche elementi che aiutano il team a progredire.",
         primary_button: {
           text: "Crea il tuo primo progetto",
           comic: {
-            title: "Tutto inizia con un progetto in Apple Pi Dash",
+            title: "Tutto inizia con un progetto in Pi Dash",
             description:
               "Un progetto può essere la roadmap di un prodotto, una campagna di marketing o il lancio di una nuova auto.",
           },
@@ -1472,7 +1472,7 @@ export default {
         primary_button: {
           text: "Inizia il tuo primo progetto",
           comic: {
-            title: "Tutto inizia con un progetto in Apple Pi Dash",
+            title: "Tutto inizia con un progetto in Pi Dash",
             description:
               "Un progetto può essere la roadmap di un prodotto, una campagna di marketing o il lancio di una nuova auto.",
           },
@@ -1484,7 +1484,7 @@ export default {
         primary_button: {
           text: "Inizia il tuo primo progetto",
           comic: {
-            title: "Tutto inizia con un progetto in Apple Pi Dash",
+            title: "Tutto inizia con un progetto in Pi Dash",
             description:
               "Un progetto può essere la roadmap di un prodotto, una campagna di marketing o il lancio di una nuova auto.",
           },
@@ -1586,7 +1586,7 @@ export default {
     page_label: "{workspace} - Impostazioni generali",
     key_created: "Chiave creata",
     copy_key:
-      "Copia e salva questa chiave segreta in Apple Pi Dash Pages. Non potrai vederla dopo aver cliccato Chiudi. È stato scaricato un file CSV contenente la chiave.",
+      "Copia e salva questa chiave segreta in Pi Dash Pages. Non potrai vederla dopo aver cliccato Chiudi. È stato scaricato un file CSV contenente la chiave.",
     token_copied: "Token copiato negli appunti.",
     settings: {
       general: {
@@ -1738,7 +1738,7 @@ export default {
         delete: {
           title: "Elimina token API",
           description:
-            "Qualsiasi applicazione che utilizza questo token non avrà più accesso ai dati di Apple Pi Dash. Questa azione non può essere annullata.",
+            "Qualsiasi applicazione che utilizza questo token non avrà più accesso ai dati di Pi Dash. Questa azione non può essere annullata.",
           success: {
             title: "Successo!",
             message: "Il token API è stato eliminato con successo",
@@ -1754,7 +1754,7 @@ export default {
       api_tokens: {
         title: "Nessun token API creato",
         description:
-          "Le API di Apple Pi Dash possono essere utilizzate per integrare i tuoi dati in Apple Pi Dash con qualsiasi sistema esterno. Crea un token per iniziare.",
+          "Le API di Pi Dash possono essere utilizzate per integrare i tuoi dati in Pi Dash con qualsiasi sistema esterno. Crea un token per iniziare.",
       },
       webhooks: {
         title: "Nessun webhook aggiunto",
@@ -1817,7 +1817,7 @@ export default {
       activity: {
         title: "Nessuna attività ancora",
         description:
-          "Inizia creando un nuovo elemento di lavoro! Aggiungi dettagli e proprietà ad esso. Esplora Apple Pi Dash per vedere la tua attività.",
+          "Inizia creando un nuovo elemento di lavoro! Aggiungi dettagli e proprietà ad esso. Esplora Pi Dash per vedere la tua attività.",
       },
       assigned: {
         title: "Nessun elemento di lavoro assegnato a te",
@@ -1971,12 +1971,13 @@ export default {
       label: "Automatizzazioni",
       "auto-archive": {
         title: "Archivia automaticamente gli elementi di lavoro chiusi",
-        description: "Apple Pi Dash archiverà automaticamente gli elementi di lavoro che sono stati completati o annullati.",
+        description: "Pi Dash archiverà automaticamente gli elementi di lavoro che sono stati completati o annullati.",
         duration: "Archivia automaticamente gli elementi di lavoro chiusi per",
       },
       "auto-close": {
         title: "Chiudi automaticamente gli elementi di lavoro",
-        description: "Apple Pi Dash chiuderà automaticamente gli elementi di lavoro che non sono stati completati o annullati.",
+        description:
+          "Pi Dash chiuderà automaticamente gli elementi di lavoro che non sono stati completati o annullati.",
         duration: "Chiudi automaticamente gli elementi di lavoro inattivi per",
         auto_close_status: "Stato di chiusura automatica",
       },
@@ -2173,9 +2174,9 @@ export default {
         primary_button: {
           text: "Crea il tuo primo elemento di lavoro",
           comic: {
-            title: "Gli elementi di lavoro sono i mattoni fondamentali in Apple Pi Dash.",
+            title: "Gli elementi di lavoro sono i mattoni fondamentali in Pi Dash.",
             description:
-              "Ridisegna l'interfaccia di Apple Pi Dash, rebranding dell'azienda o lancia il nuovo sistema di iniezione del carburante sono esempi di elementi di lavoro che probabilmente hanno sotto-elementi.",
+              "Ridisegna l'interfaccia di Pi Dash, rebranding dell'azienda o lancia il nuovo sistema di iniezione del carburante sono esempi di elementi di lavoro che probabilmente hanno sotto-elementi.",
           },
         },
       },
@@ -2281,9 +2282,9 @@ export default {
     empty_state: {
       general: {
         title:
-          "Scrivi una nota, un documento o una vera e propria base di conoscenza. Fai partire Galileo, l'assistente AI di Apple Pi Dash, per aiutarti a iniziare",
+          "Scrivi una nota, un documento o una vera e propria base di conoscenza. Fai partire Galileo, l'assistente AI di Pi Dash, per aiutarti a iniziare",
         description:
-          "Le pagine sono spazi per appunti in Apple Pi Dash. Prendi note durante le riunioni, formattale facilmente, inserisci elementi di lavoro, disponili usando una libreria di componenti e tienili tutti nel contesto del tuo progetto. Per velocizzare qualsiasi documento, invoca Galileo, l'IA di Apple Pi Dash, con una scorciatoia o con il clic di un pulsante.",
+          "Le pagine sono spazi per appunti in Pi Dash. Prendi note durante le riunioni, formattale facilmente, inserisci elementi di lavoro, disponili usando una libreria di componenti e tienili tutti nel contesto del tuo progetto. Per velocizzare qualsiasi documento, invoca Galileo, l'IA di Pi Dash, con una scorciatoia o con il clic di un pulsante.",
         primary_button: {
           text: "Crea la tua prima pagina",
         },
@@ -2659,8 +2660,8 @@ export default {
     edited_by: "Modificato da",
   },
   self_hosted_maintenance_message: {
-    apple_pi_dash_didnt_start_up_this_could_be_because_one_or_more_apple_pi_dash_services_failed_to_start:
-      "Apple Pi Dash non si è avviato. Questo potrebbe essere dovuto al fatto che uno o più servizi Apple Pi Dash non sono riusciti ad avviarsi.",
+    pi_dash_didnt_start_up_this_could_be_because_one_or_more_pi_dash_services_failed_to_start:
+      "Pi Dash non si è avviato. Questo potrebbe essere dovuto al fatto che uno o più servizi Pi Dash non sono riusciti ad avviarsi.",
     choose_view_logs_from_setup_sh_and_docker_logs_to_be_sure:
       "Scegli View Logs da setup.sh e dai log Docker per essere sicuro.",
   },

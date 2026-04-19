@@ -1,13 +1,13 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
 
 import { redirect } from "react-router";
-// apple pi dash imports
-import { SitesProjectPublishService } from "@apple-pi-dash/services";
-import type { TProjectPublishSettings } from "@apple-pi-dash/types";
+// pi dash imports
+import { SitesProjectPublishService } from "@pi-dash/services";
+import type { TProjectPublishSettings } from "@pi-dash/types";
 // components
 import { LogoSpinner } from "@/components/common/logo-spinner";
 import type { Route } from "./+types/page";

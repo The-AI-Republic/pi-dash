@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
@@ -8,21 +8,21 @@ import { useState } from "react";
 import { observer } from "mobx-react";
 import { useParams, useRouter, useSearchParams } from "next/navigation";
 // constants
-import { EPageAccess } from "@apple-pi-dash/constants";
-// apple pi dash types
-import { Button } from "@apple-pi-dash/propel/button";
-import { PageIcon } from "@apple-pi-dash/propel/icons";
-import { TOAST_TYPE, setToast } from "@apple-pi-dash/propel/toast";
-import type { TPage } from "@apple-pi-dash/types";
-// apple pi dash ui
-import { Breadcrumbs, Header } from "@apple-pi-dash/ui";
+import { EPageAccess } from "@pi-dash/constants";
+// pi dash types
+import { Button } from "@pi-dash/propel/button";
+import { PageIcon } from "@pi-dash/propel/icons";
+import { TOAST_TYPE, setToast } from "@pi-dash/propel/toast";
+import type { TPage } from "@pi-dash/types";
+// pi dash ui
+import { Breadcrumbs, Header } from "@pi-dash/ui";
 // helpers
 import { BreadcrumbLink } from "@/components/common/breadcrumb-link";
 // hooks
 import { useProject } from "@/hooks/store/use-project";
-// apple pi dash web imports
-import { CommonProjectBreadcrumbs } from "@/apple-pi-dash-web/components/breadcrumbs/common";
-import { EPageStoreType, usePageStore } from "@/apple-pi-dash-web/hooks/store";
+// pi dash web imports
+import { CommonProjectBreadcrumbs } from "@/pi-dash-web/components/breadcrumbs/common";
+import { EPageStoreType, usePageStore } from "@/pi-dash-web/hooks/store";
 
 export const PagesListHeader = observer(function PagesListHeader() {
   // states

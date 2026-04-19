@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
@@ -7,11 +7,11 @@
 import { useCallback, useMemo, useState } from "react";
 import { isEqual, cloneDeep } from "lodash-es";
 import { observer } from "mobx-react";
-// apple pi dash imports
-import { DEFAULT_GLOBAL_VIEWS_LIST, EUserPermissionsLevel } from "@apple-pi-dash/constants";
-import { setToast, TOAST_TYPE } from "@apple-pi-dash/propel/toast";
-import type { IWorkspaceView, TWorkItemFilterExpression } from "@apple-pi-dash/types";
-import { EUserProjectRoles, EViewAccess } from "@apple-pi-dash/types";
+// pi dash imports
+import { DEFAULT_GLOBAL_VIEWS_LIST, EUserPermissionsLevel } from "@pi-dash/constants";
+import { setToast, TOAST_TYPE } from "@pi-dash/propel/toast";
+import type { IWorkspaceView, TWorkItemFilterExpression } from "@pi-dash/types";
+import { EUserProjectRoles, EViewAccess } from "@pi-dash/types";
 // components
 import { removeNillKeys } from "@/components/issues/issue-layouts/utils";
 import { CreateUpdateWorkspaceViewModal } from "@/components/workspace/views/modal";

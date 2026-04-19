@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
@@ -8,10 +8,10 @@ import { useState } from "react";
 import { observer } from "mobx-react";
 import { useTheme } from "next-themes";
 import useSWR from "swr";
-// apple pi dash internal packages
-import { setPromiseToast } from "@apple-pi-dash/propel/toast";
-import { Loader, ToggleSwitch } from "@apple-pi-dash/ui";
-import { resolveGeneralTheme } from "@apple-pi-dash/utils";
+// pi dash internal packages
+import { setPromiseToast } from "@pi-dash/propel/toast";
+import { Loader, ToggleSwitch } from "@pi-dash/ui";
+import { resolveGeneralTheme } from "@pi-dash/utils";
 // assets
 import githubLightModeImage from "@/app/assets/logos/github-black.png?url";
 import githubDarkModeImage from "@/app/assets/logos/github-white.png?url";
@@ -77,7 +77,7 @@ const InstanceGithubAuthenticationPage = observer(function InstanceGithubAuthent
       customHeader={
         <AuthenticationMethodCard
           name="GitHub"
-          description="Allow members to login or sign up to apple pi dash with their GitHub accounts."
+          description="Allow members to login or sign up to pi dash with their GitHub accounts."
           icon={
             <img
               src={resolveGeneralTheme(resolvedTheme) === "dark" ? githubDarkModeImage : githubLightModeImage}

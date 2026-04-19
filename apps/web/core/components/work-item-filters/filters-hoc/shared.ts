@@ -1,13 +1,18 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
 
-// apple pi dash imports
-import type { TSaveViewOptions, TUpdateViewOptions } from "@apple-pi-dash/constants";
-import type { IWorkItemFilterInstance } from "@apple-pi-dash/shared-state";
-import type { EIssuesStoreType, IIssueFilters, TWorkItemFilterExpression, TWorkItemFilterProperty } from "@apple-pi-dash/types";
+// pi dash imports
+import type { TSaveViewOptions, TUpdateViewOptions } from "@pi-dash/constants";
+import type { IWorkItemFilterInstance } from "@pi-dash/shared-state";
+import type {
+  EIssuesStoreType,
+  IIssueFilters,
+  TWorkItemFilterExpression,
+  TWorkItemFilterProperty,
+} from "@pi-dash/types";
 
 export type TSharedWorkItemFiltersProps = {
   entityType: EIssuesStoreType; // entity type (project, cycle, workspace, teamspace, etc)

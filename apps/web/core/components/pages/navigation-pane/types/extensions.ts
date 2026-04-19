@@ -1,11 +1,11 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
 
 import type { ReactNode } from "react";
-import type { EPageStoreType } from "@/apple-pi-dash-web/hooks/store";
+import type { EPageStoreType } from "@/pi-dash-web/hooks/store";
 import type { TPageInstance } from "@/store/pages/base-page";
 
 export interface INavigationPaneExtensionProps<T = Record<string, unknown>> {

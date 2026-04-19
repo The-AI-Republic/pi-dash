@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
@@ -8,8 +8,8 @@ import { observer } from "mobx-react";
 import Link from "next/link";
 import { useTheme as useNextTheme } from "next-themes";
 // ui
-import { Button, getButtonStyling } from "@apple-pi-dash/propel/button";
-import { resolveGeneralTheme } from "@apple-pi-dash/utils";
+import { Button, getButtonStyling } from "@pi-dash/propel/button";
+import { resolveGeneralTheme } from "@pi-dash/utils";
 // hooks
 import TakeoffIconDark from "@/app/assets/logos/takeoff-icon-dark.svg?url";
 import TakeoffIconLight from "@/app/assets/logos/takeoff-icon-light.svg?url";
@@ -29,7 +29,7 @@ export const NewUserPopup = observer(function NewUserPopup() {
         <div className="grow">
           <div className="text-14 font-semibold">Create workspace</div>
           <div className="py-2 text-13 font-medium text-tertiary">
-            Instance setup done! Welcome to Apple Pi Dash instance portal. Start your journey with by creating your first
+            Instance setup done! Welcome to Pi Dash instance portal. Start your journey with by creating your first
             workspace.
           </div>
           <div className="flex items-center gap-4 pt-2">
@@ -46,7 +46,7 @@ export const NewUserPopup = observer(function NewUserPopup() {
             src={resolveGeneralTheme(resolvedTheme) === "dark" ? TakeoffIconDark : TakeoffIconLight}
             height={80}
             width={80}
-            alt="Apple Pi Dash icon"
+            alt="Pi Dash icon"
           />
         </div>
       </div>

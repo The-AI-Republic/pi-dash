@@ -2,11 +2,11 @@
 //! runner's `Connection::open` against it, and verify the Hello/Welcome
 //! handshake + a few message round-trips.
 
-use apple_pi_dash_runner::cloud::protocol::{
+use pi_dash_runner::cloud::protocol::{
     ClientMsg, Envelope, RunnerStatus, ServerMsg, WIRE_VERSION,
 };
-use apple_pi_dash_runner::cloud::ws::{Connection, run_connection};
-use apple_pi_dash_runner::config::schema::Credentials;
+use pi_dash_runner::cloud::ws::{Connection, run_connection};
+use pi_dash_runner::config::schema::Credentials;
 use chrono::Utc;
 use futures_util::{SinkExt, StreamExt};
 use std::net::SocketAddr;

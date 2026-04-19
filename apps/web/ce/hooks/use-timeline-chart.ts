@@ -1,15 +1,15 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
 
 // types
-import type { TTimelineTypeCore } from "@apple-pi-dash/types";
-import { GANTT_TIMELINE_TYPE } from "@apple-pi-dash/types";
-// Apple Pi Dash-web
+import type { TTimelineTypeCore } from "@pi-dash/types";
+import { GANTT_TIMELINE_TYPE } from "@pi-dash/types";
+// Pi Dash-web
 
-import type { IBaseTimelineStore } from "@/apple-pi-dash-web/store/timeline/base-timeline.store";
+import type { IBaseTimelineStore } from "@/pi-dash-web/store/timeline/base-timeline.store";
 import type { ITimelineStore } from "../store/timeline";
 
 export const getTimelineStore = (

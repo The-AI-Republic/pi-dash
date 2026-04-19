@@ -1,7 +1,7 @@
 #![forbid(unsafe_code)]
 
 use anyhow::Result;
-use apple_pi_dash_runner::cli;
+use pi_dash_runner::cli;
 use clap::Parser;
 
 fn main() -> Result<()> {

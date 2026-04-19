@@ -1,17 +1,17 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
 
 import { useState } from "react";
 import { mutate } from "swr";
-// apple pi dash imports
-import { TOAST_TYPE, setToast } from "@apple-pi-dash/propel/toast";
-import { APITokenService } from "@apple-pi-dash/services";
-import type { IApiToken } from "@apple-pi-dash/types";
-import { EModalPosition, EModalWidth, ModalCore } from "@apple-pi-dash/ui";
-import { renderFormattedDate, csvDownload } from "@apple-pi-dash/utils";
+// pi dash imports
+import { TOAST_TYPE, setToast } from "@pi-dash/propel/toast";
+import { APITokenService } from "@pi-dash/services";
+import type { IApiToken } from "@pi-dash/types";
+import { EModalPosition, EModalWidth, ModalCore } from "@pi-dash/ui";
+import { renderFormattedDate, csvDownload } from "@pi-dash/utils";
 // constants
 import { API_TOKENS_LIST } from "@/constants/fetch-keys";
 // local imports

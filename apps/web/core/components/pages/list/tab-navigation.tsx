@@ -1,14 +1,14 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
 
 import Link from "next/link";
 // types
-import type { TPageNavigationTabs } from "@apple-pi-dash/types";
+import type { TPageNavigationTabs } from "@pi-dash/types";
 // helpers
-import { cn } from "@apple-pi-dash/utils";
+import { cn } from "@pi-dash/utils";
 
 type TPageTabNavigation = {
   workspaceSlug: string;

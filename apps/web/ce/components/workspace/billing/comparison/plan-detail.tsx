@@ -1,21 +1,21 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
 
 import { observer } from "mobx-react";
-// apple pi dash imports
+// pi dash imports
 import {
   SUBSCRIPTION_REDIRECTION_URLS,
   SUBSCRIPTION_WITH_BILLING_FREQUENCY,
   TALK_TO_SALES_URL,
-} from "@apple-pi-dash/constants";
-import { useTranslation } from "@apple-pi-dash/i18n";
-import { Button } from "@apple-pi-dash/propel/button";
-import type { TBillingFrequency } from "@apple-pi-dash/types";
-import { EProductSubscriptionEnum } from "@apple-pi-dash/types";
-import { getSubscriptionName } from "@apple-pi-dash/utils";
+} from "@pi-dash/constants";
+import { useTranslation } from "@pi-dash/i18n";
+import { Button } from "@pi-dash/propel/button";
+import type { TBillingFrequency } from "@pi-dash/types";
+import { EProductSubscriptionEnum } from "@pi-dash/types";
+import { getSubscriptionName } from "@pi-dash/utils";
 // components
 import { DiscountInfo } from "@/components/license/modal/card/discount-info";
 import type { TPlanDetail } from "@/constants/plans";
@@ -31,7 +31,7 @@ type TPlanDetailProps = {
 
 export const PlanDetail = observer(function PlanDetail(props: TPlanDetailProps) {
   const { subscriptionType, planDetail, billingFrequency, setBillingFrequency } = props;
-  // apple pi dash hooks
+  // pi dash hooks
   const { t } = useTranslation();
   // subscription details
   const subscriptionName = getSubscriptionName(subscriptionType);

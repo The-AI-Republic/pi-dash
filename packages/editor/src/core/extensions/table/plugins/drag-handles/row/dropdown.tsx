@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
@@ -9,8 +9,8 @@ import { TableMap } from "@tiptap/pm/tables";
 import { ArrowDown, ArrowUp, ToggleRight } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 // extensions
-import type { ISvgIcons } from "@apple-pi-dash/propel/icons";
-import { CopyIcon, TrashIcon, CloseIcon } from "@apple-pi-dash/propel/icons";
+import type { ISvgIcons } from "@pi-dash/propel/icons";
+import { CopyIcon, TrashIcon, CloseIcon } from "@pi-dash/propel/icons";
 import { findTable, getSelectedRows } from "@/extensions/table/table/utilities/helpers";
 // local imports
 import { duplicateRows } from "../actions";

@@ -1,22 +1,22 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
 
 import { isNil } from "lodash-es";
 // types
-import { EIconSize, ISSUE_PRIORITIES } from "@apple-pi-dash/constants";
-import { CycleGroupIcon, CycleIcon, ModuleIcon, PriorityIcon, StateGroupIcon } from "@apple-pi-dash/propel/icons";
+import { EIconSize, ISSUE_PRIORITIES } from "@pi-dash/constants";
+import { CycleGroupIcon, CycleIcon, ModuleIcon, PriorityIcon, StateGroupIcon } from "@pi-dash/propel/icons";
 import type {
   GroupByColumnTypes,
   IGroupByColumn,
   TCycleGroups,
   IIssueDisplayProperties,
   TGroupedIssues,
-} from "@apple-pi-dash/types";
+} from "@pi-dash/types";
 // ui
-import { Avatar } from "@apple-pi-dash/ui";
+import { Avatar } from "@pi-dash/ui";
 // components
 // constants
 // stores

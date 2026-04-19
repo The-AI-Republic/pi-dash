@@ -1,21 +1,21 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
 
 import React, { useState, useEffect, useMemo } from "react";
 import { observer } from "mobx-react";
-// apple pi dash imports
+// pi dash imports
 import type {
   SingleOrArray,
   IFilterOption,
   TFilterProperty,
   TMultiSelectFilterFieldConfig,
   TFilterConditionNodeForDisplay,
-} from "@apple-pi-dash/types";
-import { CustomSearchSelect } from "@apple-pi-dash/ui";
-import { toFilterArray, getFilterValueLength } from "@apple-pi-dash/utils";
+} from "@pi-dash/types";
+import { CustomSearchSelect } from "@pi-dash/ui";
+import { toFilterArray, getFilterValueLength } from "@pi-dash/utils";
 // local imports
 import { SelectedOptionsDisplay } from "./selected-options-display";
 import { getCommonCustomSearchSelectProps, getFormattedOptions, loadOptions } from "./shared";

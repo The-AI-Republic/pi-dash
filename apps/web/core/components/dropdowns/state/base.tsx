@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
@@ -9,20 +9,20 @@ import { useRef, useState } from "react";
 import { observer } from "mobx-react";
 import { usePopper } from "react-popper";
 import { Combobox } from "@headlessui/react";
-// apple pi dash imports
-import { useTranslation } from "@apple-pi-dash/i18n";
-import { SearchIcon, StateGroupIcon, ChevronDownIcon } from "@apple-pi-dash/propel/icons";
-import type { IState } from "@apple-pi-dash/types";
-import { ComboDropDown, Spinner } from "@apple-pi-dash/ui";
-import { cn } from "@apple-pi-dash/utils";
+// pi dash imports
+import { useTranslation } from "@pi-dash/i18n";
+import { SearchIcon, StateGroupIcon, ChevronDownIcon } from "@pi-dash/propel/icons";
+import type { IState } from "@pi-dash/types";
+import { ComboDropDown, Spinner } from "@pi-dash/ui";
+import { cn } from "@pi-dash/utils";
 // components
 import { DropdownButton } from "@/components/dropdowns/buttons";
 import { BUTTON_VARIANTS_WITH_TEXT } from "@/components/dropdowns/constants";
 import type { TDropdownProps } from "@/components/dropdowns/types";
 // hooks
 import { useDropdown } from "@/hooks/use-dropdown";
-// apple pi dash web imports
-import { StateOption } from "@/apple-pi-dash-web/components/workflow";
+// pi dash web imports
+import { StateOption } from "@/pi-dash-web/components/workflow";
 
 export type TWorkItemStateDropdownBaseProps = TDropdownProps & {
   alwaysAllowStateChange?: boolean;

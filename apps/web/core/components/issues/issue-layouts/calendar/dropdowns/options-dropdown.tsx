@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
@@ -13,12 +13,12 @@ import { Popover, Transition } from "@headlessui/react";
 // hooks
 // ui
 // icons
-import type { TSupportedFilterTypeForUpdate } from "@apple-pi-dash/constants";
-import { EIssueFilterType } from "@apple-pi-dash/constants";
-import { useTranslation } from "@apple-pi-dash/i18n";
-import { CheckIcon, ChevronUpIcon } from "@apple-pi-dash/propel/icons";
-import type { TCalendarLayouts, TSupportedFilterForUpdate } from "@apple-pi-dash/types";
-import { ToggleSwitch } from "@apple-pi-dash/ui";
+import type { TSupportedFilterTypeForUpdate } from "@pi-dash/constants";
+import { EIssueFilterType } from "@pi-dash/constants";
+import { useTranslation } from "@pi-dash/i18n";
+import { CheckIcon, ChevronUpIcon } from "@pi-dash/propel/icons";
+import type { TCalendarLayouts, TSupportedFilterForUpdate } from "@pi-dash/types";
+import { ToggleSwitch } from "@pi-dash/ui";
 // types
 // constants
 import { CALENDAR_LAYOUTS } from "@/constants/calendar";

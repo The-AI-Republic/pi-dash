@@ -1,15 +1,15 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
 
 // editor
-import type { TEmbedConfig } from "@apple-pi-dash/editor";
-// apple pi dash types
-import type { TSearchEntityRequestPayload, TSearchResponse } from "@apple-pi-dash/types";
-// apple pi dash web components
-import { IssueEmbedUpgradeCard } from "@/apple-pi-dash-web/components/pages";
+import type { TEmbedConfig } from "@pi-dash/editor";
+// pi dash types
+import type { TSearchEntityRequestPayload, TSearchResponse } from "@pi-dash/types";
+// pi dash web components
+import { IssueEmbedUpgradeCard } from "@/pi-dash-web/components/pages";
 
 export type TIssueEmbedHookProps = {
   fetchEmbedSuggestions?: (payload: TSearchEntityRequestPayload) => Promise<TSearchResponse>;

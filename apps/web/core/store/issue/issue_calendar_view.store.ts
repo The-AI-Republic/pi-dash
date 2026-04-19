@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
@@ -8,9 +8,9 @@ import { observable, action, makeObservable, runInAction, computed, reaction } f
 
 // helpers
 import { computedFn } from "mobx-utils";
-import type { ICalendarPayload, ICalendarWeek } from "@apple-pi-dash/types";
-import { EStartOfTheWeek } from "@apple-pi-dash/types";
-import { generateCalendarData, getWeekNumberOfDate } from "@apple-pi-dash/utils";
+import type { ICalendarPayload, ICalendarWeek } from "@pi-dash/types";
+import { EStartOfTheWeek } from "@pi-dash/types";
+import { generateCalendarData, getWeekNumberOfDate } from "@pi-dash/utils";
 // types
 import type { IIssueRootStore } from "./root.store";
 

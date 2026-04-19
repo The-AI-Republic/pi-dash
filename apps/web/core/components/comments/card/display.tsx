@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
@@ -8,20 +8,20 @@ import type { ReactNode } from "react";
 import { useCallback, useEffect, useState } from "react";
 import { observer } from "mobx-react";
 import { usePathname } from "next/navigation";
-// apple pi dash imports
-import type { EditorRefApi } from "@apple-pi-dash/editor";
-import { useHashScroll } from "@apple-pi-dash/hooks";
-import { GlobeIcon, LockIcon } from "@apple-pi-dash/propel/icons";
-import { EIssueCommentAccessSpecifier } from "@apple-pi-dash/types";
-import type { TCommentsOperations, TIssueComment } from "@apple-pi-dash/types";
-import { calculateTimeAgo, cn, getFileURL, renderFormattedDate, renderFormattedTime } from "@apple-pi-dash/utils";
+// pi dash imports
+import type { EditorRefApi } from "@pi-dash/editor";
+import { useHashScroll } from "@pi-dash/hooks";
+import { GlobeIcon, LockIcon } from "@pi-dash/propel/icons";
+import { EIssueCommentAccessSpecifier } from "@pi-dash/types";
+import type { TCommentsOperations, TIssueComment } from "@pi-dash/types";
+import { calculateTimeAgo, cn, getFileURL, renderFormattedDate, renderFormattedTime } from "@pi-dash/utils";
 // components
 import { LiteTextEditor } from "@/components/editor/lite-text";
 // local imports
 import { CommentReactions } from "../comment-reaction";
 import { CommentCardEditForm } from "./edit-form";
-import { EmojiReactionButton, EmojiReactionPicker } from "@apple-pi-dash/propel/emoji-reaction";
-import { Avatar, Tooltip } from "@apple-pi-dash/ui";
+import { EmojiReactionButton, EmojiReactionPicker } from "@pi-dash/propel/emoji-reaction";
+import { Avatar, Tooltip } from "@pi-dash/ui";
 import { useMember } from "@/hooks/store/use-member";
 
 export type TCommentCardDisplayProps = {

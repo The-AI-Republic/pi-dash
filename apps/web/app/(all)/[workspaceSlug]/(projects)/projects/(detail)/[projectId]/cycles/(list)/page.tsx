@@ -1,21 +1,21 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
 
 import { useState } from "react";
 import { observer } from "mobx-react";
-// apple pi dash imports
+// pi dash imports
 import { useTheme } from "next-themes";
-import { EUserPermissionsLevel, CYCLE_TRACKER_ELEMENTS } from "@apple-pi-dash/constants";
-import { useTranslation } from "@apple-pi-dash/i18n";
-import { EmptyStateDetailed } from "@apple-pi-dash/propel/empty-state";
-import type { TCycleFilters } from "@apple-pi-dash/types";
-import { EUserProjectRoles } from "@apple-pi-dash/types";
+import { EUserPermissionsLevel, CYCLE_TRACKER_ELEMENTS } from "@pi-dash/constants";
+import { useTranslation } from "@pi-dash/i18n";
+import { EmptyStateDetailed } from "@pi-dash/propel/empty-state";
+import type { TCycleFilters } from "@pi-dash/types";
+import { EUserProjectRoles } from "@pi-dash/types";
 // components
-import { Header, EHeaderVariant } from "@apple-pi-dash/ui";
-import { calculateTotalFilters } from "@apple-pi-dash/utils";
+import { Header, EHeaderVariant } from "@pi-dash/ui";
+import { calculateTotalFilters } from "@pi-dash/utils";
 // assets
 import darkEmptyState from "@/app/assets/empty-state/disabled-feature/cycles-dark.webp?url";
 import lightEmptyState from "@/app/assets/empty-state/disabled-feature/cycles-light.webp?url";
@@ -45,7 +45,7 @@ function ProjectCyclesPage({ params }: Route.ComponentProps) {
   const { workspaceSlug, projectId } = params;
   // theme hook
   const { resolvedTheme } = useTheme();
-  // apple pi dash hooks
+  // pi dash hooks
   const { t } = useTranslation();
   // cycle filters hook
   const { clearAllFilters, currentProjectFilters, updateFilters } = useCycleFilter();

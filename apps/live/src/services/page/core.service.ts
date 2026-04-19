@@ -1,11 +1,11 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
 
-import { logger } from "@apple-pi-dash/logger";
-import type { TDocumentPayload, TPage } from "@apple-pi-dash/types";
+import { logger } from "@pi-dash/logger";
+import type { TDocumentPayload, TPage } from "@pi-dash/types";
 // services
 import { AppError } from "@/lib/errors";
 import { APIService } from "../api.service";

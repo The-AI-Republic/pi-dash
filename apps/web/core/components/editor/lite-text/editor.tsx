@@ -1,18 +1,18 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
 
 import React, { useState } from "react";
-// apple pi dash constants
-import type { EIssueCommentAccessSpecifier } from "@apple-pi-dash/constants";
-// apple pi dash imports
-import { LiteTextEditorWithRef } from "@apple-pi-dash/editor";
-import type { EditorRefApi, ILiteTextEditorProps, TFileHandler } from "@apple-pi-dash/editor";
-import { useTranslation } from "@apple-pi-dash/i18n";
-import type { MakeOptional } from "@apple-pi-dash/types";
-import { cn, isCommentEmpty } from "@apple-pi-dash/utils";
+// pi dash constants
+import type { EIssueCommentAccessSpecifier } from "@pi-dash/constants";
+// pi dash imports
+import { LiteTextEditorWithRef } from "@pi-dash/editor";
+import type { EditorRefApi, ILiteTextEditorProps, TFileHandler } from "@pi-dash/editor";
+import { useTranslation } from "@pi-dash/i18n";
+import type { MakeOptional } from "@pi-dash/types";
+import { cn, isCommentEmpty } from "@pi-dash/utils";
 // components
 import { EditorMentionsRoot } from "@/components/editor/embeds/mentions";
 import { IssueCommentToolbar } from "@/components/editor/lite-text/toolbar";
@@ -20,9 +20,9 @@ import { IssueCommentToolbar } from "@/components/editor/lite-text/toolbar";
 import { useEditorConfig, useEditorMention } from "@/hooks/editor";
 import { useMember } from "@/hooks/store/use-member";
 import { useParseEditorContent } from "@/hooks/use-parse-editor-content";
-// apple pi dash web hooks
-import { useEditorFlagging } from "@/apple-pi-dash-web/hooks/use-editor-flagging";
-// apple pi dash web service
+// pi dash web hooks
+import { useEditorFlagging } from "@/pi-dash-web/hooks/use-editor-flagging";
+// pi dash web service
 import { WorkspaceService } from "@/services/workspace.service";
 import { LiteToolbar } from "./lite-toolbar";
 const workspaceService = new WorkspaceService();

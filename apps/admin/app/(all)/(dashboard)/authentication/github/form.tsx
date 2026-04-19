@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
@@ -9,11 +9,11 @@ import { isEmpty } from "lodash-es";
 import Link from "next/link";
 import { useForm } from "react-hook-form";
 import { Monitor } from "lucide-react";
-// apple pi dash internal packages
-import { API_BASE_URL } from "@apple-pi-dash/constants";
-import { Button, getButtonStyling } from "@apple-pi-dash/propel/button";
-import { TOAST_TYPE, setToast } from "@apple-pi-dash/propel/toast";
-import type { IFormattedInstanceConfiguration, TInstanceGithubAuthenticationConfigurationKeys } from "@apple-pi-dash/types";
+// pi dash internal packages
+import { API_BASE_URL } from "@pi-dash/constants";
+import { Button, getButtonStyling } from "@pi-dash/propel/button";
+import { TOAST_TYPE, setToast } from "@pi-dash/propel/toast";
+import type { IFormattedInstanceConfiguration, TInstanceGithubAuthenticationConfigurationKeys } from "@pi-dash/types";
 // components
 import { CodeBlock } from "@/components/common/code-block";
 import { ConfirmDiscardModal } from "@/components/common/confirm-discard-modal";
@@ -199,7 +199,7 @@ export function InstanceGithubConfigForm(props: Props) {
       <div className="flex flex-col gap-8">
         <div className="grid w-full grid-cols-2 gap-x-12 gap-y-8">
           <div className="col-span-2 flex flex-col gap-y-4 pt-1 md:col-span-1">
-            <div className="pt-2.5 text-18 font-medium">GitHub-provided details for Apple Pi Dash</div>
+            <div className="pt-2.5 text-18 font-medium">GitHub-provided details for Pi Dash</div>
             {GITHUB_FORM_FIELDS.map((field) => (
               <ControllerInput
                 key={field.key}
@@ -232,7 +232,7 @@ export function InstanceGithubConfigForm(props: Props) {
             </div>
           </div>
           <div className="col-span-2 flex flex-col gap-y-6 md:col-span-1">
-            <div className="pt-2 text-18 font-medium">Apple Pi Dash-provided details for GitHub</div>
+            <div className="pt-2 text-18 font-medium">Pi Dash-provided details for GitHub</div>
 
             <div className="flex flex-col gap-y-4">
               {/* common service details */}

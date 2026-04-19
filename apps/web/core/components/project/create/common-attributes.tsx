@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
@@ -7,18 +7,18 @@
 import type { ChangeEvent } from "react";
 import type { UseFormSetValue } from "react-hook-form";
 import { Controller, useFormContext } from "react-hook-form";
-import { InfoIcon } from "@apple-pi-dash/propel/icons";
-// apple pi dash imports
-import { ETabIndices } from "@apple-pi-dash/constants";
-import { useTranslation } from "@apple-pi-dash/i18n";
+import { InfoIcon } from "@pi-dash/propel/icons";
+// pi dash imports
+import { ETabIndices } from "@pi-dash/constants";
+import { useTranslation } from "@pi-dash/i18n";
 // ui
-import { Tooltip } from "@apple-pi-dash/propel/tooltip";
-import { Input, TextArea } from "@apple-pi-dash/ui";
-import { cn, projectIdentifierSanitizer, getTabIndex } from "@apple-pi-dash/utils";
-// apple pi dash utils
+import { Tooltip } from "@pi-dash/propel/tooltip";
+import { Input, TextArea } from "@pi-dash/ui";
+import { cn, projectIdentifierSanitizer, getTabIndex } from "@pi-dash/utils";
+// pi dash utils
 // helpers
-// apple-pi-dash-web types
-import type { TProject } from "@/apple-pi-dash-web/types/projects";
+// pi-dash-web types
+import type { TProject } from "@/pi-dash-web/types/projects";
 
 type Props = {
   setValue: UseFormSetValue<TProject>;

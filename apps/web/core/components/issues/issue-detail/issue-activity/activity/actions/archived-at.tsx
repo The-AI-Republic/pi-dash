@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
@@ -7,7 +7,7 @@
 import { observer } from "mobx-react";
 import { RotateCcw } from "lucide-react";
 // hooks
-import { ArchiveIcon } from "@apple-pi-dash/propel/icons";
+import { ArchiveIcon } from "@pi-dash/propel/icons";
 import { useIssueDetail } from "@/hooks/store/use-issue-detail";
 // components
 import { IssueActivityBlockComponent } from "./";
@@ -37,7 +37,7 @@ export const IssueArchivedAtActivity = observer(function IssueArchivedAtActivity
       }
       activityId={activityId}
       ends={ends}
-      customUserName={activity.new_value === "archive" ? "Apple Pi Dash" : undefined}
+      customUserName={activity.new_value === "archive" ? "Pi Dash" : undefined}
     >
       {activity.new_value === "restore" ? "restored the work item" : "archived the work item"}.
     </IssueActivityBlockComponent>

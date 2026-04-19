@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
@@ -22,13 +22,13 @@ import {
   useReactTable,
 } from "@tanstack/react-table";
 
-import { useTranslation } from "@apple-pi-dash/i18n";
-import { EmptyStateCompact } from "@apple-pi-dash/propel/empty-state";
-import { SearchIcon, CloseIcon } from "@apple-pi-dash/propel/icons";
-// apple pi dash package imports
-import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@apple-pi-dash/propel/table";
-import { cn } from "@apple-pi-dash/utils";
-// apple pi dash web components
+import { useTranslation } from "@pi-dash/i18n";
+import { EmptyStateCompact } from "@pi-dash/propel/empty-state";
+import { SearchIcon, CloseIcon } from "@pi-dash/propel/icons";
+// pi dash package imports
+import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@pi-dash/propel/table";
+import { cn } from "@pi-dash/utils";
+// pi dash web components
 
 interface DataTableProps<TData, TValue> {
   columns: ColumnDef<TData, TValue>[];

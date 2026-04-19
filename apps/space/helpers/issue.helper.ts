@@ -1,13 +1,13 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
 
 import { differenceInCalendarDays } from "date-fns/differenceInCalendarDays";
-// apple pi dash internal
-import { STATE_GROUPS } from "@apple-pi-dash/constants";
-import type { TStateGroups } from "@apple-pi-dash/types";
+// pi dash internal
+import { STATE_GROUPS } from "@pi-dash/constants";
+import type { TStateGroups } from "@pi-dash/types";
 // helpers
 import { getDate } from "@/helpers/date-time.helper";
 

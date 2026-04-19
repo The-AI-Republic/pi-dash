@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
@@ -7,18 +7,18 @@
 import { useEffect, useState } from "react";
 import { Controller, useForm } from "react-hook-form";
 import { Info } from "lucide-react";
-import { NETWORK_CHOICES } from "@apple-pi-dash/constants";
-import { useTranslation } from "@apple-pi-dash/i18n";
-// apple pi dash imports
-import { Button } from "@apple-pi-dash/propel/button";
-import { EmojiPicker, EmojiIconPickerTypes, Logo } from "@apple-pi-dash/propel/emoji-icon-picker";
-import { LockIcon } from "@apple-pi-dash/propel/icons";
-import { TOAST_TYPE, setToast } from "@apple-pi-dash/propel/toast";
-import { Tooltip } from "@apple-pi-dash/propel/tooltip";
-import { EFileAssetType } from "@apple-pi-dash/types";
-import type { IProject, IWorkspace } from "@apple-pi-dash/types";
-import { CustomSelect, Input, TextArea } from "@apple-pi-dash/ui";
-import { renderFormattedDate } from "@apple-pi-dash/utils";
+import { NETWORK_CHOICES } from "@pi-dash/constants";
+import { useTranslation } from "@pi-dash/i18n";
+// pi dash imports
+import { Button } from "@pi-dash/propel/button";
+import { EmojiPicker, EmojiIconPickerTypes, Logo } from "@pi-dash/propel/emoji-icon-picker";
+import { LockIcon } from "@pi-dash/propel/icons";
+import { TOAST_TYPE, setToast } from "@pi-dash/propel/toast";
+import { Tooltip } from "@pi-dash/propel/tooltip";
+import { EFileAssetType } from "@pi-dash/types";
+import type { IProject, IWorkspace } from "@pi-dash/types";
+import { CustomSelect, Input, TextArea } from "@pi-dash/ui";
+import { renderFormattedDate } from "@pi-dash/utils";
 import { CoverImage } from "@/components/common/cover-image";
 import { ImagePickerPopover } from "@/components/core/image-picker-popover";
 import { TimezoneSelect } from "@/components/global";

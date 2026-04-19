@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
@@ -7,13 +7,13 @@
 import { useState } from "react";
 import { observer } from "mobx-react";
 import useSWR from "swr";
-import { useTranslation } from "@apple-pi-dash/i18n";
-import { TOAST_TYPE, setToast } from "@apple-pi-dash/propel/toast";
-import { RunnerService } from "@apple-pi-dash/services";
-import type { IAgentRun, TAgentRunStatus } from "@apple-pi-dash/types";
-import { AGENT_RUN_TERMINAL_STATUSES } from "@apple-pi-dash/types";
-import type { TBadgeVariant } from "@apple-pi-dash/ui";
-import { AlertModalCore, Badge, Button } from "@apple-pi-dash/ui";
+import { useTranslation } from "@pi-dash/i18n";
+import { TOAST_TYPE, setToast } from "@pi-dash/propel/toast";
+import { RunnerService } from "@pi-dash/services";
+import type { IAgentRun, TAgentRunStatus } from "@pi-dash/types";
+import { AGENT_RUN_TERMINAL_STATUSES } from "@pi-dash/types";
+import type { TBadgeVariant } from "@pi-dash/ui";
+import { AlertModalCore, Badge, Button } from "@pi-dash/ui";
 import { useWorkspace } from "@/hooks/store/use-workspace";
 
 const service = new RunnerService();

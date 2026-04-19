@@ -1,16 +1,16 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
 
 import { Command } from "cmdk";
-import { useTranslation } from "@apple-pi-dash/i18n";
-import { SearchIcon } from "@apple-pi-dash/propel/icons";
-// apple pi dash imports
+import { useTranslation } from "@pi-dash/i18n";
+import { SearchIcon } from "@pi-dash/propel/icons";
+// pi dash imports
 // components
 import type { TPowerKContext } from "@/components/power-k/core/types";
-// apple pi dash web imports
+// pi dash web imports
 import { PowerKModalCommandItem } from "@/components/power-k/ui/modal/command-item";
 
 export type TPowerKModalNoSearchResultsCommandProps = {

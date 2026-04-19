@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
@@ -10,12 +10,12 @@ import { useSearchParams } from "next/navigation";
 import { Controller, useForm } from "react-hook-form";
 // icons
 import { CircleCheck } from "lucide-react";
-// apple pi dash imports
-import { useTranslation } from "@apple-pi-dash/i18n";
-import { Button, getButtonStyling } from "@apple-pi-dash/propel/button";
-import { TOAST_TYPE, setToast } from "@apple-pi-dash/propel/toast";
-import { Input } from "@apple-pi-dash/ui";
-import { cn, checkEmailValidity } from "@apple-pi-dash/utils";
+// pi dash imports
+import { useTranslation } from "@pi-dash/i18n";
+import { Button, getButtonStyling } from "@pi-dash/propel/button";
+import { TOAST_TYPE, setToast } from "@pi-dash/propel/toast";
+import { Input } from "@pi-dash/ui";
+import { cn, checkEmailValidity } from "@pi-dash/utils";
 // hooks
 import useTimer from "@/hooks/use-timer";
 // services
@@ -39,7 +39,7 @@ export const ForgotPasswordForm = observer(function ForgotPasswordForm() {
   // search params
   const searchParams = useSearchParams();
   const email = searchParams.get("email");
-  // apple pi dash hooks
+  // pi dash hooks
   const { t } = useTranslation();
   // timer
   const { timer: resendTimerCode, setTimer: setResendCodeTimer } = useTimer(0);

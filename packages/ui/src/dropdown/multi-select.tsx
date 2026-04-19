@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
@@ -8,8 +8,8 @@ import { Combobox } from "@headlessui/react";
 import { sortBy } from "lodash-es";
 import React, { useMemo, useRef, useState } from "react";
 import { usePopper } from "react-popper";
-// apple pi dash imports
-import { useOutsideClickDetector } from "@apple-pi-dash/hooks";
+// pi dash imports
+import { useOutsideClickDetector } from "@pi-dash/hooks";
 // local imports
 import { useDropdownKeyPressed } from "../hooks/use-dropdown-key-pressed";
 import { cn } from "../utils";

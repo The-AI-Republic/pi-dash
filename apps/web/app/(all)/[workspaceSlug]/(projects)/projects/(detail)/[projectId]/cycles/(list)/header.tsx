@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
@@ -7,11 +7,11 @@
 import { observer } from "mobx-react";
 import { useParams } from "next/navigation";
 // ui
-import { EUserPermissions, EUserPermissionsLevel, CYCLE_TRACKER_ELEMENTS } from "@apple-pi-dash/constants";
-import { useTranslation } from "@apple-pi-dash/i18n";
-import { Button } from "@apple-pi-dash/propel/button";
-import { CycleIcon } from "@apple-pi-dash/propel/icons";
-import { Breadcrumbs, Header } from "@apple-pi-dash/ui";
+import { EUserPermissions, EUserPermissionsLevel, CYCLE_TRACKER_ELEMENTS } from "@pi-dash/constants";
+import { useTranslation } from "@pi-dash/i18n";
+import { Button } from "@pi-dash/propel/button";
+import { CycleIcon } from "@pi-dash/propel/icons";
+import { Breadcrumbs, Header } from "@pi-dash/ui";
 // components
 import { BreadcrumbLink } from "@/components/common/breadcrumb-link";
 import { CyclesViewHeader } from "@/components/cycles/cycles-view-header";
@@ -20,8 +20,8 @@ import { useCommandPalette } from "@/hooks/store/use-command-palette";
 import { useProject } from "@/hooks/store/use-project";
 import { useUserPermissions } from "@/hooks/store/user";
 import { useAppRouter } from "@/hooks/use-app-router";
-// apple pi dash web imports
-import { CommonProjectBreadcrumbs } from "@/apple-pi-dash-web/components/breadcrumbs/common";
+// pi dash web imports
+import { CommonProjectBreadcrumbs } from "@/pi-dash-web/components/breadcrumbs/common";
 
 export const CyclesListHeader = observer(function CyclesListHeader() {
   // router

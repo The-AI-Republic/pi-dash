@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
@@ -7,9 +7,9 @@
 import { differenceInCalendarDays } from "date-fns/differenceInCalendarDays";
 import { isEmpty } from "lodash-es";
 import { v4 as uuidv4 } from "uuid";
-// apple pi dash imports
-import type { TIssueFilterPriorityObject, TIssuePriorities } from "@apple-pi-dash/constants";
-import { ISSUE_DISPLAY_FILTERS_BY_PAGE, ISSUE_PRIORITY_FILTERS, STATE_GROUPS } from "@apple-pi-dash/constants";
+// pi dash imports
+import type { TIssueFilterPriorityObject, TIssuePriorities } from "@pi-dash/constants";
+import { ISSUE_DISPLAY_FILTERS_BY_PAGE, ISSUE_PRIORITY_FILTERS, STATE_GROUPS } from "@pi-dash/constants";
 import type {
   IGanttBlock,
   IIssueDisplayFilterOptions,
@@ -22,8 +22,8 @@ import type {
   TStateGroups,
   TSubGroupedIssues,
   TUnGroupedIssues,
-} from "@apple-pi-dash/types";
-import { EIssueLayoutTypes } from "@apple-pi-dash/types";
+} from "@pi-dash/types";
+import { EIssueLayoutTypes } from "@pi-dash/types";
 // local imports
 import { orderArrayBy } from "../array";
 import { getDate } from "../datetime";

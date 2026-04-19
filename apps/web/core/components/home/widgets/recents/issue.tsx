@@ -1,17 +1,17 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
 
 import { observer } from "mobx-react";
-// apple pi dash types
-import { PriorityIcon, StateGroupIcon, WorkItemsIcon } from "@apple-pi-dash/propel/icons";
-import { Tooltip } from "@apple-pi-dash/propel/tooltip";
-import type { TActivityEntityData, TIssueEntityData } from "@apple-pi-dash/types";
-import { EIssueServiceType } from "@apple-pi-dash/types";
-// apple pi dash ui
-import { calculateTimeAgo, generateWorkItemLink } from "@apple-pi-dash/utils";
+// pi dash types
+import { PriorityIcon, StateGroupIcon, WorkItemsIcon } from "@pi-dash/propel/icons";
+import { Tooltip } from "@pi-dash/propel/tooltip";
+import type { TActivityEntityData, TIssueEntityData } from "@pi-dash/types";
+import { EIssueServiceType } from "@pi-dash/types";
+// pi dash ui
+import { calculateTimeAgo, generateWorkItemLink } from "@pi-dash/utils";
 // components
 import { ListItem } from "@/components/core/list";
 import { MemberDropdown } from "@/components/dropdowns/member/dropdown";
@@ -20,8 +20,8 @@ import { MemberDropdown } from "@/components/dropdowns/member/dropdown";
 import { useIssueDetail } from "@/hooks/store/use-issue-detail";
 import { useProject } from "@/hooks/store/use-project";
 import { useProjectState } from "@/hooks/store/use-project-state";
-// apple pi dash web components
-import { IssueIdentifier } from "@/apple-pi-dash-web/components/issues/issue-details/issue-identifier";
+// pi dash web components
+import { IssueIdentifier } from "@/pi-dash-web/components/issues/issue-details/issue-identifier";
 
 type BlockProps = {
   activity: TActivityEntityData;

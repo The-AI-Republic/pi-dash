@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
@@ -10,12 +10,12 @@ import { combine } from "@atlaskit/pragmatic-drag-and-drop/combine";
 import { dropTargetForElements } from "@atlaskit/pragmatic-drag-and-drop/element/adapter";
 import { autoScrollForElements } from "@atlaskit/pragmatic-drag-and-drop-auto-scroll/element";
 import { observer } from "mobx-react";
-// apple pi dash constants
-import { DRAG_ALLOWED_GROUPS } from "@apple-pi-dash/constants";
+// pi dash constants
+import { DRAG_ALLOWED_GROUPS } from "@pi-dash/constants";
 // i18n
-import { useTranslation } from "@apple-pi-dash/i18n";
+import { useTranslation } from "@pi-dash/i18n";
 //types
-import { TOAST_TYPE, setToast } from "@apple-pi-dash/propel/toast";
+import { TOAST_TYPE, setToast } from "@pi-dash/propel/toast";
 import type {
   TGroupedIssues,
   TIssue,
@@ -24,9 +24,9 @@ import type {
   TSubGroupedIssues,
   TIssueGroupByOptions,
   TIssueOrderByOptions,
-} from "@apple-pi-dash/types";
-import { EIssueLayoutTypes } from "@apple-pi-dash/types";
-import { cn } from "@apple-pi-dash/utils";
+} from "@pi-dash/types";
+import { EIssueLayoutTypes } from "@pi-dash/types";
+import { cn } from "@pi-dash/utils";
 import type { GroupDropLocation } from "@/components/issues/issue-layouts/utils";
 import {
   highlightIssueOnDrop,
@@ -39,8 +39,8 @@ import { KanbanIssueBlockLoader } from "@/components/ui/loader/layouts/kanban-la
 import { useProjectState } from "@/hooks/store/use-project-state";
 import { useIntersectionObserver } from "@/hooks/use-intersection-observer";
 import { useIssuesStore } from "@/hooks/use-issue-layout-store";
-// Apple Pi Dash-web
-import { useWorkFlowFDragNDrop } from "@/apple-pi-dash-web/components/workflow";
+// Pi Dash-web
+import { useWorkFlowFDragNDrop } from "@/pi-dash-web/components/workflow";
 //
 import { GroupDragOverlay } from "../group-drag-overlay";
 import type { TRenderQuickActions } from "../list/list-view-types";

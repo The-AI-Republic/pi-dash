@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
@@ -7,9 +7,9 @@
 import { Disclosure } from "@headlessui/react";
 import type { Editor } from "@tiptap/core";
 import { Ban, Palette } from "lucide-react";
-// apple pi dash imports
-import { ChevronRightIcon } from "@apple-pi-dash/propel/icons";
-import { cn } from "@apple-pi-dash/utils";
+// pi dash imports
+import { ChevronRightIcon } from "@pi-dash/propel/icons";
+import { cn } from "@pi-dash/utils";
 // constants
 import { COLORS_LIST } from "@/constants/common";
 import { CORE_EXTENSIONS } from "@/constants/extension";

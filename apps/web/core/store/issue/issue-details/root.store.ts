@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
@@ -15,15 +15,15 @@ import type {
   TIssueReaction,
   TIssueServiceType,
   TWorkItemWidgets,
-} from "@apple-pi-dash/types";
-// apple pi dash web store
-import { IssueActivityStore } from "@/apple-pi-dash-web/store/issue/issue-details/activity.store";
+} from "@pi-dash/types";
+// pi dash web store
+import { IssueActivityStore } from "@/pi-dash-web/store/issue/issue-details/activity.store";
 import type {
   IIssueActivityStore,
   IIssueActivityStoreActions,
   TActivityLoader,
-} from "@/apple-pi-dash-web/store/issue/issue-details/activity.store";
-import type { TIssueRelationTypes } from "@/apple-pi-dash-web/types";
+} from "@/pi-dash-web/store/issue/issue-details/activity.store";
+import type { TIssueRelationTypes } from "@/pi-dash-web/types";
 import type { IIssueRootStore } from "../root.store";
 import { IssueAttachmentStore } from "./attachment.store";
 import type { IIssueAttachmentStore, IIssueAttachmentStoreActions } from "./attachment.store";

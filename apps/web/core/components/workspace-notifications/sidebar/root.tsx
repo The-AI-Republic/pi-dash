@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
@@ -7,19 +7,19 @@
 import { useCallback } from "react";
 import { observer } from "mobx-react";
 import { useParams } from "next/navigation";
-// apple pi dash imports
-import type { TNotificationTab } from "@apple-pi-dash/constants";
-import { NOTIFICATION_TABS } from "@apple-pi-dash/constants";
-import { useTranslation } from "@apple-pi-dash/i18n";
-import { Header, Row, ERowVariant, EHeaderVariant, ContentWrapper } from "@apple-pi-dash/ui";
-import { cn, getNumberCount } from "@apple-pi-dash/utils";
+// pi dash imports
+import type { TNotificationTab } from "@pi-dash/constants";
+import { NOTIFICATION_TABS } from "@pi-dash/constants";
+import { useTranslation } from "@pi-dash/i18n";
+import { Header, Row, ERowVariant, EHeaderVariant, ContentWrapper } from "@pi-dash/ui";
+import { cn, getNumberCount } from "@pi-dash/utils";
 // components
 import { CountChip } from "@/components/common/count-chip";
 // hooks
 import { useWorkspaceNotifications } from "@/hooks/store/notifications";
 import { useWorkspace } from "@/hooks/store/use-workspace";
-// apple pi dash web components
-import { NotificationListRoot } from "@/apple-pi-dash-web/components/workspace-notifications/list-root";
+// pi dash web components
+import { NotificationListRoot } from "@/pi-dash-web/components/workspace-notifications/list-root";
 // local imports
 import { NotificationEmptyState } from "./empty-state";
 import { AppliedFilters } from "./filters/applied-filter";

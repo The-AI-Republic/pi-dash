@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
@@ -7,8 +7,8 @@
 import { clone, update, unset, orderBy, set } from "lodash-es";
 import { action, computed, makeObservable, observable, runInAction } from "mobx";
 import { computedFn } from "mobx-utils";
-// apple pi dash imports
-import { EDraftIssuePaginationType } from "@apple-pi-dash/constants";
+// pi dash imports
+import { EDraftIssuePaginationType } from "@pi-dash/constants";
 import type {
   TWorkspaceDraftIssue,
   TWorkspaceDraftPaginationInfo,
@@ -21,8 +21,8 @@ import type {
   ViewFlags,
   TIssue,
   TBulkOperationsPayload,
-} from "@apple-pi-dash/types";
-import { getCurrentDateTimeInISO, convertToISODateString } from "@apple-pi-dash/utils";
+} from "@pi-dash/types";
+import { getCurrentDateTimeInISO, convertToISODateString } from "@pi-dash/utils";
 // services
 import workspaceDraftService from "@/services/issue/workspace_draft.service";
 // types

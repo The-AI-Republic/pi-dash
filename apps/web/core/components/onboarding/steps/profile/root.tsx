@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
@@ -8,13 +8,13 @@ import { useMemo, useState } from "react";
 import { observer } from "mobx-react";
 import { Controller, useForm } from "react-hook-form";
 import { ImageIcon } from "lucide-react";
-// apple pi dash imports
-import { E_PASSWORD_STRENGTH } from "@apple-pi-dash/constants";
-import { Button } from "@apple-pi-dash/propel/button";
-import { TOAST_TYPE, setToast } from "@apple-pi-dash/propel/toast";
-import type { IUser } from "@apple-pi-dash/types";
-import { EOnboardingSteps } from "@apple-pi-dash/types";
-import { cn, getFileURL, getPasswordStrength, validatePersonName } from "@apple-pi-dash/utils";
+// pi dash imports
+import { E_PASSWORD_STRENGTH } from "@pi-dash/constants";
+import { Button } from "@pi-dash/propel/button";
+import { TOAST_TYPE, setToast } from "@pi-dash/propel/toast";
+import type { IUser } from "@pi-dash/types";
+import { EOnboardingSteps } from "@pi-dash/types";
+import { cn, getFileURL, getPasswordStrength, validatePersonName } from "@pi-dash/utils";
 // components
 import { UserImageUploadModal } from "@/components/core/modals/user-image-upload-modal";
 // hooks
@@ -147,7 +147,7 @@ export const ProfileSetupStep = observer(function ProfileSetupStep({ handleStepC
   return (
     <form onSubmit={handleSubmit(onSubmit)} className="flex flex-col gap-10">
       {/* Header */}
-      <CommonOnboardingHeader title="Create your profile." description="This is how you will appear in Apple Pi Dash." />
+      <CommonOnboardingHeader title="Create your profile." description="This is how you will appear in Pi Dash." />
 
       {/* Profile Picture Section */}
       <Controller

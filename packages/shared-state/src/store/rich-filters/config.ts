@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
@@ -7,8 +7,8 @@
 import { set } from "lodash-es";
 import { action, computed, makeObservable, observable, runInAction } from "mobx";
 import { computedFn } from "mobx-utils";
-// apple pi dash imports
-import { EMPTY_OPERATOR_LABEL } from "@apple-pi-dash/constants";
+// pi dash imports
+import { EMPTY_OPERATOR_LABEL } from "@pi-dash/constants";
 import type {
   TSupportedOperators,
   TFilterConfig,
@@ -16,15 +16,15 @@ import type {
   TFilterValue,
   TOperatorSpecificConfigs,
   TAllAvailableOperatorsForDisplay,
-} from "@apple-pi-dash/types";
-import { FILTER_FIELD_TYPE } from "@apple-pi-dash/types";
+} from "@pi-dash/types";
+import { FILTER_FIELD_TYPE } from "@pi-dash/types";
 import {
   getOperatorLabel,
   isDateFilterType,
   getDateOperatorLabel,
   isDateFilterOperator,
   getOperatorForPayload,
-} from "@apple-pi-dash/utils";
+} from "@pi-dash/utils";
 
 type TOperatorOptionForDisplay = {
   value: TAllAvailableOperatorsForDisplay;

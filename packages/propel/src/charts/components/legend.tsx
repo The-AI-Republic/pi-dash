@@ -1,13 +1,13 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
 
 import React from "react";
 import type { LegendProps } from "recharts";
-// apple pi dash imports
-import type { TChartLegend } from "@apple-pi-dash/types";
+// pi dash imports
+import type { TChartLegend } from "@pi-dash/types";
 import { cn } from "../../utils/classname";
 
 export const getLegendProps = (args: TChartLegend): LegendProps => {

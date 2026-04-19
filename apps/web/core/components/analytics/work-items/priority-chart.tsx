@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
@@ -10,16 +10,21 @@ import { observer } from "mobx-react";
 import { useParams } from "next/navigation";
 import { useTheme } from "next-themes";
 import useSWR from "swr";
-// apple pi dash package imports
+// pi dash package imports
 import { Download } from "lucide-react";
-import type { ChartXAxisDateGrouping } from "@apple-pi-dash/constants";
-import { ANALYTICS_X_AXIS_VALUES, ANALYTICS_Y_AXIS_VALUES, CHART_COLOR_PALETTES, EChartModels } from "@apple-pi-dash/constants";
-import { useTranslation } from "@apple-pi-dash/i18n";
-import { Button } from "@apple-pi-dash/propel/button";
-import { BarChart } from "@apple-pi-dash/propel/charts/bar-chart";
-import { EmptyStateCompact } from "@apple-pi-dash/propel/empty-state";
-import type { TBarItem, TChart, TChartDatum, ChartXAxisProperty, ChartYAxisMetric } from "@apple-pi-dash/types";
-// apple pi dash web components
+import type { ChartXAxisDateGrouping } from "@pi-dash/constants";
+import {
+  ANALYTICS_X_AXIS_VALUES,
+  ANALYTICS_Y_AXIS_VALUES,
+  CHART_COLOR_PALETTES,
+  EChartModels,
+} from "@pi-dash/constants";
+import { useTranslation } from "@pi-dash/i18n";
+import { Button } from "@pi-dash/propel/button";
+import { BarChart } from "@pi-dash/propel/charts/bar-chart";
+import { EmptyStateCompact } from "@pi-dash/propel/empty-state";
+import type { TBarItem, TChart, TChartDatum, ChartXAxisProperty, ChartYAxisMetric } from "@pi-dash/types";
+// pi dash web components
 import { generateExtendedColors, parseChartData } from "@/components/chart/utils";
 // hooks
 import { useAnalytics } from "@/hooks/store/use-analytics";

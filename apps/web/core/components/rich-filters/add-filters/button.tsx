@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
@@ -7,13 +7,13 @@
 import React from "react";
 import { observer } from "mobx-react";
 import { ListFilter } from "lucide-react";
-// apple pi dash imports
-import type { TButtonSize, TButtonVariant } from "@apple-pi-dash/propel/button";
-import { getButtonStyling } from "@apple-pi-dash/propel/button";
-import type { IFilterInstance } from "@apple-pi-dash/shared-state";
-import type { TExternalFilter, TFilterProperty, TSupportedOperators } from "@apple-pi-dash/types";
-import { LOGICAL_OPERATOR } from "@apple-pi-dash/types";
-import { cn } from "@apple-pi-dash/utils";
+// pi dash imports
+import type { TButtonSize, TButtonVariant } from "@pi-dash/propel/button";
+import { getButtonStyling } from "@pi-dash/propel/button";
+import type { IFilterInstance } from "@pi-dash/shared-state";
+import type { TExternalFilter, TFilterProperty, TSupportedOperators } from "@pi-dash/types";
+import { LOGICAL_OPERATOR } from "@pi-dash/types";
+import { cn } from "@pi-dash/utils";
 // local imports
 import { AddFilterDropdown } from "./dropdown";
 

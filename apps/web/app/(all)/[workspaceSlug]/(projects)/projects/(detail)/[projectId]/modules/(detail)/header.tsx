@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
@@ -9,21 +9,21 @@ import { observer } from "mobx-react";
 import { useParams } from "next/navigation";
 // icons
 import { ChartNoAxesColumn, PanelRight, SlidersHorizontal } from "lucide-react";
-// apple pi dash imports
+// pi dash imports
 import {
   EIssueFilterType,
   ISSUE_DISPLAY_FILTERS_BY_PAGE,
   EUserPermissions,
   EUserPermissionsLevel,
   WORK_ITEM_TRACKER_ELEMENTS,
-} from "@apple-pi-dash/constants";
-import { Button } from "@apple-pi-dash/propel/button";
-import { ModuleIcon } from "@apple-pi-dash/propel/icons";
-import { Tooltip } from "@apple-pi-dash/propel/tooltip";
-import type { ICustomSearchSelectOption, IIssueDisplayFilterOptions, IIssueDisplayProperties } from "@apple-pi-dash/types";
-import { EIssuesStoreType, EIssueLayoutTypes } from "@apple-pi-dash/types";
-import { Breadcrumbs, Header, BreadcrumbNavigationSearchDropdown } from "@apple-pi-dash/ui";
-import { cn } from "@apple-pi-dash/utils";
+} from "@pi-dash/constants";
+import { Button } from "@pi-dash/propel/button";
+import { ModuleIcon } from "@pi-dash/propel/icons";
+import { Tooltip } from "@pi-dash/propel/tooltip";
+import type { ICustomSearchSelectOption, IIssueDisplayFilterOptions, IIssueDisplayProperties } from "@pi-dash/types";
+import { EIssuesStoreType, EIssueLayoutTypes } from "@pi-dash/types";
+import { Breadcrumbs, Header, BreadcrumbNavigationSearchDropdown } from "@pi-dash/ui";
+import { cn } from "@pi-dash/utils";
 // components
 import { WorkItemsModal } from "@/components/analytics/work-items/modal";
 import { BreadcrumbLink } from "@/components/common/breadcrumb-link";
@@ -46,9 +46,9 @@ import { useAppRouter } from "@/hooks/use-app-router";
 import { useIssuesActions } from "@/hooks/use-issues-actions";
 import useLocalStorage from "@/hooks/use-local-storage";
 import { usePlatformOS } from "@/hooks/use-platform-os";
-// apple pi dash web imports
-import { CommonProjectBreadcrumbs } from "@/apple-pi-dash-web/components/breadcrumbs/common";
-import { IconButton } from "@apple-pi-dash/propel/icon-button";
+// pi dash web imports
+import { CommonProjectBreadcrumbs } from "@/pi-dash-web/components/breadcrumbs/common";
+import { IconButton } from "@pi-dash/propel/icon-button";
 
 export const ModuleIssuesHeader = observer(function ModuleIssuesHeader() {
   // refs

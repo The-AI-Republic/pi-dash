@@ -1,11 +1,11 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
 
-import type { EFileAssetType } from "@apple-pi-dash/types";
-import { getFileURL } from "@apple-pi-dash/utils";
+import type { EFileAssetType } from "@pi-dash/types";
+import { getFileURL } from "@pi-dash/utils";
 
 import CoverImage1 from "@/app/assets/cover-images/image_1.jpg?url";
 import CoverImage10 from "@/app/assets/cover-images/image_10.jpg?url";

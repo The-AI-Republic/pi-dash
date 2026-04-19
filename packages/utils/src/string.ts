@@ -1,11 +1,11 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
 
 import sanitizeHtml from "sanitize-html";
-import type { Content, JSONContent } from "@apple-pi-dash/types";
+import type { Content, JSONContent } from "@pi-dash/types";
 
 /**
  * @description Adds space between camelCase words
@@ -147,7 +147,7 @@ export const stripAndTruncateHTML = (html: string, length: number = 55) => trunc
  * @description Returns true if email is valid, false otherwise
  * @param {string} email string to check if it is a valid email
  * @example checkEmailValidity("hello world") => false
- * @example checkEmailValidity("example@apple-pi-dash.so") => true
+ * @example checkEmailValidity("example@pi-dash.so") => true
  */
 export const checkEmailValidity = (email: string): boolean => {
   if (!email) return false;

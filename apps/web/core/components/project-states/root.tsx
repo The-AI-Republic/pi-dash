@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2023-present Apple Pi Dash Software, Inc. and contributors
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  * See the LICENSE file for details.
  */
@@ -8,9 +8,9 @@ import { useMemo } from "react";
 import { observer } from "mobx-react";
 import useSWR from "swr";
 // components
-import { EUserPermissionsLevel } from "@apple-pi-dash/constants";
-import type { IState, TStateOperationsCallbacks } from "@apple-pi-dash/types";
-import { EUserProjectRoles } from "@apple-pi-dash/types";
+import { EUserPermissionsLevel } from "@pi-dash/constants";
+import type { IState, TStateOperationsCallbacks } from "@pi-dash/types";
+import { EUserProjectRoles } from "@pi-dash/types";
 import { ProjectStateLoader, GroupList } from "@/components/project-states";
 // hooks
 import { useProject } from "@/hooks/store/use-project";
@@ -37,12 +37,7 @@ export const ProjectStateRoot = observer(function ProjectStateRoot(props: TProje
   const { allowPermissions } = useUserPermissions();
   const { getProjectById } = useProject();
   // derived values
-  const isAdmin = allowPermissions(
-    [EUserProjectRoles.ADMIN],
-    EUserPermissionsLevel.PROJECT,
-    workspaceSlug,
-    projectId
-  );
+  const isAdmin = allowPermissions([EUserProjectRoles.ADMIN], EUserPermissionsLevel.PROJECT, workspaceSlug, projectId);
   const isMember = allowPermissions(
     [EUserProjectRoles.MEMBER],
     EUserPermissionsLevel.PROJECT,
