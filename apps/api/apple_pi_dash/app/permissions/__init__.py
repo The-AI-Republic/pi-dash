@@ -16,6 +16,8 @@ from .project import (
     ProjectMemberPermission,
     ProjectLitePermission,
     ProjectAdminPermission,
+    ProjectStateEntityPermission,
+    can_mutate_states,
 )
 from .base import allow_permission, ROLE
 from .page import ProjectPagePermission

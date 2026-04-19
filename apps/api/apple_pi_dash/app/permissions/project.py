@@ -141,3 +141,66 @@ class ProjectLitePermission(BasePermission):
             project_id=view.project_id,
             is_active=True,
         ).exists()
+
+
+def can_mutate_states(user, slug, project_id):
+    """Whether *user* can create, update, reorder, mark-default, or delete
+    workflow states in the given project.
+
+    Allowed when the user is:
+    - a project admin, or
+    - a project member on a project with ``members_can_edit_states=True``, or
+    - a workspace admin who is an active project member (mirrors the
+      workspace-admin override in ``allow_permission``).
+    """
+    if user.is_anonymous:
+        return False
+
+    membership = (
+        ProjectMember.objects.filter(
+            workspace__slug=slug,
+            project_id=project_id,
+            member=user,
+            is_active=True,
+        )
+        .values("role", "project__members_can_edit_states")
+        .first()
+    )
+    if membership is None:
+        return False
+
+    role = membership["role"]
+    if role == ROLE.ADMIN.value:
+        return True
+
+    if role == ROLE.MEMBER.value and membership["project__members_can_edit_states"]:
+        return True
+
+    return WorkspaceMember.objects.filter(
+        workspace__slug=slug,
+        member=user,
+        role=ROLE.ADMIN.value,
+        is_active=True,
+    ).exists()
+
+
+class ProjectStateEntityPermission(BasePermission):
+    """Permissions for the workflow State entity.
+
+    Admin can always write. Member can write only when the owning project has
+    ``members_can_edit_states=True``. Any active project member can read.
+    """
+
+    def has_permission(self, request, view):
+        if request.user.is_anonymous:
+            return False
+
+        if request.method in SAFE_METHODS:
+            return ProjectMember.objects.filter(
+                workspace__slug=view.workspace_slug,
+                member=request.user,
+                project_id=view.project_id,
+                is_active=True,
+            ).exists()
+
+        return can_mutate_states(request.user, view.workspace_slug, view.project_id)
