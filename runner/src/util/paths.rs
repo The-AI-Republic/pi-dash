@@ -69,7 +69,7 @@ impl Paths {
         let base = std::env::var("TMPDIR")
             .map(PathBuf::from)
             .unwrap_or_else(|_| std::env::temp_dir());
-        base.join(".apple_pi")
+        base.join(".pi_dash")
     }
 
     pub fn ensure(&self) -> Result<()> {

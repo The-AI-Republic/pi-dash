@@ -41,7 +41,7 @@ Companion docs in this directory:
 
 | #   | Topic                        | Decision                                                                                                                                                                                                                                                                       |
 | --- | ---------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| 1   | Working directory            | Runner config specifies working dir. Default `$TMPDIR/.apple_pi/`. If dir has a git repo → use it. If not → request repo URL from cloud, `git clone` into dir. Clone-auth failure is reported. Every task runs Codex against this dir.                                         |
+| 1   | Working directory            | Runner config specifies working dir. Default `$TMPDIR/.pi_dash/`. If dir has a git repo → use it. If not → request repo URL from cloud, `git clone` into dir. Clone-auth failure is reported. Every task runs Codex against this dir.                                         |
 | 2   | Concurrency                  | One task at a time per runner.                                                                                                                                                                                                                                                 |
 | 3   | Assignment                   | One runner instance per dev machine. Globally unique runner ID. Cloud assigns to an online idle runner owned by the user. No label matching.                                                                                                                                   |
 | 4   | Prompt construction          | Cloud renders; runner receives a ready-to-use prompt string. Runner never composes prompts.                                                                                                                                                                                    |
@@ -227,7 +227,7 @@ This is the one piece of business logic the runner owns. Detailed behavior:
 ```toml
 # ~/.config/pi-dash-runner/config.toml
 [workspace]
-working_dir = "/var/folders/.../T/.apple_pi"   # default: $TMPDIR/.apple_pi
+working_dir = "/var/folders/.../T/.pi_dash"   # default: $TMPDIR/.pi_dash
 ```
 
 Override via CLI: `pi-dash-runner configure --working-dir /path/to/repo`.
@@ -303,7 +303,7 @@ cloud_url = "https://cloud.pi-dash.so"
 # runner_id + secret are in credentials.toml
 
 [workspace]
-working_dir = "/var/folders/.../T/.apple_pi"
+working_dir = "/var/folders/.../T/.pi_dash"
 
 [codex]
 binary = "/usr/local/bin/codex"      # auto-detected; overridable

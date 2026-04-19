@@ -25,8 +25,8 @@ Wants=network-online.target
 [Service]
 Type=simple
 ExecStart={exe} start
-Environment=APPLE_PI_RUNNER_CONFIG_DIR={config_dir}
-Environment=APPLE_PI_RUNNER_DATA_DIR={data_dir}
+Environment=PI_DASH_RUNNER_CONFIG_DIR={config_dir}
+Environment=PI_DASH_RUNNER_DATA_DIR={data_dir}
 Environment=XDG_RUNTIME_DIR={runtime_dir}
 Restart=on-failure
 RestartSec=5

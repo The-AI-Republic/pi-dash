@@ -106,7 +106,7 @@ Pending approvals expire after 10 minutes; the server then cancels the run autom
 
 ## 7. Day-to-day
 
-- **Your working directory** lives at `$TMPDIR/.apple_pi` by default. Change with `pi-dash-runner configure --working-dir /path/to/repo` or the Config tab. Runs reuse this directory; Codex is expected to reset/stash/checkout at the start of each task.
+- **Your working directory** lives at `$TMPDIR/.pi_dash` by default. Change with `pi-dash-runner configure --working-dir /path/to/repo` or the Config tab. Runs reuse this directory; Codex is expected to reset/stash/checkout at the start of each task.
 - **Logs** are in `~/.local/share/pi-dash-runner/logs/`.
 - **Per-run transcripts** are stored as JSONL in `~/.local/share/pi-dash-runner/history/runs/`.
 
