@@ -22,6 +22,7 @@ class AgentRunStatus(models.TextChoices):
     RUNNING = "running", "Running"
     AWAITING_APPROVAL = "awaiting_approval", "Awaiting Approval"
     AWAITING_REAUTH = "awaiting_reauth", "Awaiting Reauth"
+    BLOCKED = "blocked", "Blocked"
     COMPLETED = "completed", "Completed"
     FAILED = "failed", "Failed"
     CANCELLED = "cancelled", "Cancelled"
@@ -166,6 +167,14 @@ class AgentRun(models.Model):
         blank=True,
         related_name="agent_runs",
     )
+    parent_run = models.ForeignKey(
+        "self",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="follow_up_runs",
+        help_text="Prior run this attempt follows up on; null for an issue's initial run.",
+    )
     status = models.CharField(
         max_length=24,
         choices=AgentRunStatus.choices,
@@ -191,6 +200,7 @@ class AgentRun(models.Model):
             models.Index(fields=["runner", "status"]),
             models.Index(fields=["owner", "status"]),
             models.Index(fields=["workspace", "status"]),
+            models.Index(fields=["work_item", "status"]),
         ]
 
     @property
@@ -199,6 +209,18 @@ class AgentRun(models.Model):
             AgentRunStatus.COMPLETED,
             AgentRunStatus.FAILED,
             AgentRunStatus.CANCELLED,
+            AgentRunStatus.BLOCKED,
+        }
+
+    @property
+    def is_active(self) -> bool:
+        """Active runs occupy the single-active-run slot per issue."""
+        return self.status in {
+            AgentRunStatus.QUEUED,
+            AgentRunStatus.ASSIGNED,
+            AgentRunStatus.RUNNING,
+            AgentRunStatus.AWAITING_APPROVAL,
+            AgentRunStatus.AWAITING_REAUTH,
         }
 
 

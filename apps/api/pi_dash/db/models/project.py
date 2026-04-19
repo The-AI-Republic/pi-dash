@@ -119,6 +119,10 @@ class Project(BaseModel):
     # external_id for imports
     external_source = models.CharField(max_length=255, null=True, blank=True)
     external_id = models.CharField(max_length=255, blank=True, null=True)
+    # Repository fields consumed by the prompting system when composing agent
+    # prompts. See `.ai_design/prompt_system/prompt-system-design.md` §4.
+    repo_url = models.CharField(max_length=512, blank=True, default="")
+    base_branch = models.CharField(max_length=128, blank=True, default="main")
 
     def __init__(self, *args, **kwargs):
         # Track if timezone is provided, if so, don't override it with the workspace timezone when saving

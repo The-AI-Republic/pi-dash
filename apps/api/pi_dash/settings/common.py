@@ -54,6 +54,8 @@ INSTALLED_APPS = [
     "pi_dash.api",
     "pi_dash.authentication",
     "pi_dash.runner",
+    "pi_dash.prompting",
+    "pi_dash.orchestration",
     # Third-party things
     "channels",
     "rest_framework",
