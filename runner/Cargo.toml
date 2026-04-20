@@ -1,18 +1,18 @@
 [package]
-name = "pi-dash-runner"
+name = "pidash"
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.93"
 description = "Pi Dash local runner: connects a dev machine to the Pi Dash cloud and drives Codex for assigned tasks."
 license = "AGPL-3.0-only"
-default-run = "pi-dash-runner"
+default-run = "pidash"
 
 [[bin]]
-name = "pi-dash-runner"
+name = "pidash"
 path = "src/main.rs"
 
 [lib]
-name = "pi_dash_runner"
+name = "pidash"
 path = "src/lib.rs"
 
 [dependencies]

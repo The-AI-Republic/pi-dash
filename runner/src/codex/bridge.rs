@@ -116,7 +116,7 @@ impl Bridge {
             "initialize",
             &InitializeParams {
                 client_info: ClientInfo {
-                    name: "pi-dash-runner".to_string(),
+                    name: "pidash".to_string(),
                     version: crate::RUNNER_VERSION.to_string(),
                 },
             },

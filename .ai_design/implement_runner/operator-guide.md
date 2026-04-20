@@ -69,7 +69,7 @@ The runner consumer logs structured events under the `pi_dash.runner.consumers` 
 
 1. `GET /api/v1/runner/health/` — returns `{"ok": true}`? If not, the Django/ASGI process is unhealthy.
 2. `GET /api/v1/runner/metrics/` — returns counts at all? If the response is empty or 5xx, the DB is unreachable.
-3. On the runner side, `pi-dash-runner status --json` — does the daemon see the WS as connected?
+3. On the runner side, `pidash status --json` — does the daemon see the WS as connected?
 4. Check Caddy / your proxy access logs for `/ws/runner/` upgrade requests. 426 or 400 indicates the upgrade headers are being stripped.
 
 ### Symptom: approvals pile up and never get decided
