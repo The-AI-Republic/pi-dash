@@ -92,6 +92,21 @@ mod tests {
     }
 
     #[test]
+    fn whitespace_only_name_is_rejected_as_bad_char() {
+        // A whitespace-only input is not empty (so it gets past the empty
+        // check), but every character is outside the charset. Pins the
+        // behavior explicitly so a future validator refactor can't silently
+        // start accepting names like `"   "`.
+        for bad in [" ", "   ", "\t", "\n"] {
+            assert_eq!(
+                validate(bad),
+                Err(NameValidationError::BadChar),
+                "expected BadChar for whitespace-only {bad:?}",
+            );
+        }
+    }
+
+    #[test]
     fn overlong_name_is_rejected() {
         let too_long = "a".repeat(129);
         assert_eq!(validate(&too_long), Err(NameValidationError::TooLong));

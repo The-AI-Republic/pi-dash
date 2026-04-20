@@ -86,13 +86,15 @@ pub async fn execute(inputs: RegisterInputs, paths: &Paths, print_next_hint: boo
     // On auto-generated names, transparently retry if the cloud says the
     // name is already taken in this workspace. On user-supplied names, a
     // collision is a loud error — we don't silently rename what the user
-    // typed.
+    // typed. Hoist the user-supplied name outside the loop: it doesn't
+    // change between attempts (and for user-supplied input the loop breaks
+    // or bails on the first iteration anyway).
+    let supplied_name = inputs.name.clone();
     let (resp, final_name) = {
         let mut attempts = 0u32;
         loop {
             attempts += 1;
-            let attempt_name = inputs
-                .name
+            let attempt_name = supplied_name
                 .clone()
                 .unwrap_or_else(runner_name::generate_default);
             let req = RegisterRequest {

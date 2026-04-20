@@ -152,12 +152,11 @@ pub async fn deregister(
 ///   auto-generated name, loud error for a user-supplied one).
 /// - Anything else non-2xx → `Other` with the status + body captured.
 fn classify_register_error(status: reqwest::StatusCode, body: &str) -> RegisterError {
-    if status == reqwest::StatusCode::CONFLICT {
-        if let Ok(parsed) = serde_json::from_str::<ErrorBody>(body) {
-            if parsed.error.as_deref() == Some("runner_name_taken") {
-                return RegisterError::NameTaken;
-            }
-        }
+    if status == reqwest::StatusCode::CONFLICT
+        && let Ok(parsed) = serde_json::from_str::<ErrorBody>(body)
+        && parsed.error.as_deref() == Some("runner_name_taken")
+    {
+        return RegisterError::NameTaken;
     }
     RegisterError::Other(anyhow::anyhow!(
         "registration failed: HTTP {status}: {body}"
