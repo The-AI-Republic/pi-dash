@@ -207,6 +207,7 @@ async fn register_and_advance(state: &mut Wizard) {
                 runner: RunnerSection {
                     name: state.name.clone(),
                     cloud_url: state.cloud_url.clone(),
+                    workspace_slug: resp.workspace_slug.clone(),
                 },
                 workspace: WorkspaceSection {
                     working_dir: state.paths.default_working_dir(),

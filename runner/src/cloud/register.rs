@@ -16,6 +16,13 @@ pub struct RegisterRequest {
 pub struct RegisterResponse {
     pub runner_id: Uuid,
     pub runner_secret: String,
+    /// Workspace slug the runner was bound to at enrollment. Persisted in
+    /// `Config.runner.workspace_slug` so CRUD subcommands can scope their
+    /// REST calls without the user passing `--workspace`. `Option` purely
+    /// for forward-compat with an older server that hasn't shipped the
+    /// field yet — on success the server always populates it.
+    #[serde(default)]
+    pub workspace_slug: Option<String>,
     pub heartbeat_interval_secs: u64,
     pub protocol_version: u32,
 }

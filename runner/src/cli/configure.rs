@@ -63,6 +63,7 @@ pub async fn run(args: Args, paths: &Paths) -> Result<()> {
         runner: crate::config::schema::RunnerSection {
             name,
             cloud_url: args.url.clone(),
+            workspace_slug: resp.workspace_slug.clone(),
         },
         workspace: crate::config::schema::WorkspaceSection { working_dir },
         codex: crate::config::schema::CodexSection::default(),
