@@ -12,7 +12,6 @@ export interface IPromptTemplate {
   is_active: boolean;
   version: number;
   is_global_default: boolean;
-  can_edit: boolean;
   updated_by: string | null;
   created_at: string;
   updated_at: string;

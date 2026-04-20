@@ -27,7 +27,7 @@ from __future__ import annotations
 
 import uuid
 
-from django.db.models import Q
+from django.db.models import F, Q
 from rest_framework import status
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
@@ -122,10 +122,14 @@ class PromptTemplateListCreateEndpoint(APIView):
         if not _is_workspace_member(request.user, workspace):
             return Response({"error": "forbidden"}, status=status.HTTP_403_FORBIDDEN)
 
+        # nulls_last=True so the workspace override (non-null workspace_id)
+        # lands before the global default — the UI doesn't depend on this
+        # order today but making it explicit avoids future bugs if consumers
+        # start trusting the response order.
         qs = (
             PromptTemplate.objects.filter(is_active=True)
             .filter(_visible_to(workspace))
-            .order_by("workspace_id", "name")
+            .order_by(F("workspace_id").asc(nulls_last=True), "name")
         )
         serializer = PromptTemplateSerializer(qs, many=True)
         return Response(serializer.data)
@@ -137,7 +141,11 @@ class PromptTemplateListCreateEndpoint(APIView):
         if not _is_workspace_admin(request.user, workspace):
             return Response({"error": "forbidden"}, status=status.HTTP_403_FORBIDDEN)
 
-        name = request.data.get("name") or PromptTemplate.DEFAULT_NAME
+        # MVP scope (Option 1): one template kind per workspace — the built-in
+        # "coding-task" slot that the composer actually reads. Client-supplied
+        # names are ignored on purpose; accepting them would let callers
+        # create rows that orchestration never loads.
+        name = PromptTemplate.DEFAULT_NAME
         existing = PromptTemplate.objects.filter(
             workspace=workspace, name=name, is_active=True
         ).first()

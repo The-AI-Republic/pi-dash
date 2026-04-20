@@ -175,34 +175,45 @@ const PromptDetailPage = observer(function PromptDetailPage() {
           />
         </section>
 
-        <section className="flex flex-col gap-2">
-          <h2 className="text-13 font-medium text-primary">{t("prompts.preview.title")}</h2>
-          <div className="flex items-center gap-2">
-            <Input
-              value={issueId}
-              onChange={(e) => setIssueId(e.target.value)}
-              placeholder={t("prompts.preview.issue_id_placeholder")}
-              className="font-mono flex-1 text-11"
-            />
-            <Button
-              onClick={handlePreview}
-              loading={previewing}
-              disabled={previewing || !issueId}
-              size="sm"
-              variant="outline-primary"
-            >
-              {t("prompts.preview.run")}
-            </Button>
-          </div>
-          {previewError && (
-            <div className="border-destructive text-destructive rounded border bg-layer-1 p-2 text-11">
-              {previewError}
+        {canEdit ? (
+          <section className="flex flex-col gap-2">
+            <h2 className="text-13 font-medium text-primary">{t("prompts.preview.title")}</h2>
+            <div className="flex items-center gap-2">
+              <Input
+                value={issueId}
+                onChange={(e) => setIssueId(e.target.value)}
+                placeholder={t("prompts.preview.issue_id_placeholder")}
+                className="font-mono flex-1 text-11"
+              />
+              <Button
+                onClick={handlePreview}
+                loading={previewing}
+                disabled={previewing || !issueId}
+                size="sm"
+                variant="outline-primary"
+              >
+                {t("prompts.preview.run")}
+              </Button>
             </div>
-          )}
-          <pre className="font-mono min-h-[60vh] w-full overflow-auto rounded-md border border-subtle bg-layer-1 p-3 text-11 leading-5 whitespace-pre-wrap text-primary">
-            {preview || t("prompts.preview.empty")}
-          </pre>
-        </section>
+            {previewError && (
+              <div className="border-destructive text-destructive rounded border bg-layer-1 p-2 text-11">
+                {previewError}
+              </div>
+            )}
+            <pre className="font-mono min-h-[60vh] w-full overflow-auto rounded-md border border-subtle bg-layer-1 p-3 text-11 leading-5 whitespace-pre-wrap text-primary">
+              {preview || t("prompts.preview.empty")}
+            </pre>
+          </section>
+        ) : (
+          // Preview is workspace-admin-only on the backend (403 otherwise), so
+          // members / guests see a read-only body pane without the preview
+          // controls. Keep the column reservation so the layout doesn't jump
+          // when role changes mid-session.
+          <section className="flex flex-col gap-2">
+            <h2 className="text-13 font-medium text-primary">{t("prompts.detail.body")}</h2>
+            <p className="text-13 text-secondary">{t("prompts.preview.admin_only")}</p>
+          </section>
+        )}
       </div>
     </div>
   );

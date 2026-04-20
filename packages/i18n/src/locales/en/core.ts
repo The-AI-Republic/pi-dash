@@ -71,6 +71,8 @@ export default {
       empty: "Paste an issue id and click Preview to render the template against a real issue.",
       failed: "Render failed.",
       missing_issue_id: "Enter an issue id first.",
+      admin_only:
+        "Previewing the rendered prompt is a workspace-admin action. Ask your workspace admin if you need to see it rendered against a specific issue.",
     },
     revert: {
       confirm_title: "Revert to the Pi Dash default?",

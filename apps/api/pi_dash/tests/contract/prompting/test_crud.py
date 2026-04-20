@@ -78,7 +78,6 @@ def test_list_returns_global_default_when_no_override(
     body = response.json()
     assert len(body) == 1
     assert body[0]["is_global_default"] is True
-    assert body[0]["can_edit"] is False
     assert body[0]["workspace"] is None
 
 
@@ -113,7 +112,6 @@ def test_admin_create_copies_global_default_body(
     body = response.json()
     assert body["workspace"] == str(workspace.id)
     assert body["is_global_default"] is False
-    assert body["can_edit"] is True
     assert body["version"] == 1
     # Body must be non-empty — copied from the global default.
     assert len(body["body"]) > 100
@@ -232,3 +230,81 @@ def test_member_cannot_archive(
     api_client.force_authenticate(user=member_user)
     response = api_client.post(_archive_url(workspace, template_id))
     assert response.status_code == 403
+
+
+@pytest.mark.contract
+def test_archive_does_not_bump_version(
+    seeded, api_client, workspace, admin_user
+):
+    """Archiving is a state flip, not an edit; leaving ``version`` stable lets
+    orchestration reason about "last edited body" separately from "currently
+    active". Regression for a refactor that would silently bump on archive."""
+    api_client.force_authenticate(user=admin_user)
+    created = api_client.post(_list_url(workspace), {}, format="json")
+    created_id = created.json()["id"]
+
+    # Edit to bump the version above v1 so an accidental increment on archive
+    # would show up as v3 rather than blending with the natural bump.
+    edited = api_client.patch(
+        _detail_url(workspace, created_id),
+        {"body": "custom {{ issue.title }}"},
+        format="json",
+    )
+    assert edited.status_code == 200
+    assert edited.json()["version"] == 2
+
+    archived = api_client.post(_archive_url(workspace, created_id))
+    assert archived.status_code == 200
+    assert archived.json()["version"] == 2, "archive must not bump version"
+    assert archived.json()["is_active"] is False
+
+
+@pytest.mark.contract
+def test_patch_unknown_workspace_returns_404(
+    seeded, api_client, workspace, admin_user
+):
+    api_client.force_authenticate(user=admin_user)
+    created = api_client.post(_list_url(workspace), {}, format="json")
+    template_id = created.json()["id"]
+
+    url = reverse(
+        "prompting:prompt-template-detail",
+        kwargs={"slug": "no-such-workspace", "template_id": template_id},
+    )
+    response = api_client.patch(url, {"body": "whatever"}, format="json")
+    assert response.status_code == 404
+
+
+@pytest.mark.contract
+def test_patch_body_size_limit(
+    seeded, api_client, workspace, admin_user
+):
+    api_client.force_authenticate(user=admin_user)
+    created = api_client.post(_list_url(workspace), {}, format="json")
+    template_id = created.json()["id"]
+
+    huge_body = "x" * 100_001
+    response = api_client.patch(
+        _detail_url(workspace, template_id),
+        {"body": huge_body},
+        format="json",
+    )
+    assert response.status_code == 400
+    assert "body" in response.json()
+
+
+@pytest.mark.contract
+def test_create_ignores_client_supplied_name(
+    seeded, api_client, workspace, admin_user
+):
+    """MVP locks the workspace slot to ``coding-task``. A client supplying a
+    different name must NOT create a second row the composer would never
+    read — we silently fall back to the default slot instead."""
+    api_client.force_authenticate(user=admin_user)
+    response = api_client.post(
+        _list_url(workspace),
+        {"name": "bug-triage", "body": "hi {{ issue.title }}"},
+        format="json",
+    )
+    assert response.status_code == 201, response.content
+    assert response.json()["name"] == PromptTemplate.DEFAULT_NAME

@@ -14,12 +14,21 @@ from __future__ import annotations
 
 from typing import Any, Dict
 
-from jinja2 import StrictUndefined, TemplateError
+from jinja2 import StrictUndefined, TemplateError, TemplateSyntaxError
 from jinja2.sandbox import SandboxedEnvironment
 
 
 class PromptRenderError(Exception):
     """Raised when a prompt template fails to render."""
+
+
+class PromptSyntaxError(PromptRenderError):
+    """Raised when a prompt template has invalid Jinja syntax.
+
+    Distinct from :class:`PromptRenderError` so callers that only care about
+    syntax (e.g. save-time validation) can ignore runtime issues like missing
+    context variables.
+    """
 
 
 _ENV = SandboxedEnvironment(
@@ -41,3 +50,14 @@ def render(body: str, context: Dict[str, Any]) -> str:
         return template.render(**context)
     except TemplateError as exc:
         raise PromptRenderError(str(exc)) from exc
+
+
+def validate_syntax(body: str) -> None:
+    """Raise :class:`PromptSyntaxError` iff ``body`` is not a valid Jinja
+    template. Does not execute the template or require any context — useful
+    for save-time validation where missing runtime variables are expected.
+    """
+    try:
+        _ENV.parse(body)
+    except TemplateSyntaxError as exc:
+        raise PromptSyntaxError(str(exc)) from exc

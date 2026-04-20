@@ -9,12 +9,17 @@ from __future__ import annotations
 from rest_framework import serializers
 
 from pi_dash.prompting.models import PromptTemplate
-from pi_dash.prompting.renderer import PromptRenderError, render
+from pi_dash.prompting.renderer import PromptSyntaxError, validate_syntax
+
+#: Upper bound on template body size. The shipped default is ~9 KB; 100 KB is
+#: ~10× headroom without allowing obvious DoS via multi-MB payloads. Enforced
+#: at save time only — reading existing rows that somehow exceed this is not
+#: blocked.
+MAX_BODY_LENGTH = 100_000
 
 
 class PromptTemplateSerializer(serializers.ModelSerializer):
     is_global_default = serializers.BooleanField(read_only=True)
-    can_edit = serializers.SerializerMethodField(read_only=True)
 
     class Meta:
         model = PromptTemplate
@@ -26,7 +31,6 @@ class PromptTemplateSerializer(serializers.ModelSerializer):
             "is_active",
             "version",
             "is_global_default",
-            "can_edit",
             "updated_by",
             "created_at",
             "updated_at",
@@ -41,24 +45,20 @@ class PromptTemplateSerializer(serializers.ModelSerializer):
             "updated_at",
         ]
 
-    def get_can_edit(self, obj: PromptTemplate) -> bool:
-        # Workspace-scoped rows are editable by workspace admins (the view gates
-        # the mutation endpoints). The global default is never editable via this
-        # surface — platform operators edit it out-of-band.
-        return not obj.is_global_default
-
     def validate_body(self, value: str) -> str:
-        # Fail loud on Jinja syntax errors at save time rather than at the next
-        # run, where a broken template would take down an AgentRun with a
-        # `render-failed` reason.
+        # Size cap. Rendering a huge template is cheap in Jinja but storing
+        # it and re-serializing it on every list response isn't — cheap DoS
+        # surface worth closing at the API boundary.
+        if len(value) > MAX_BODY_LENGTH:
+            raise serializers.ValidationError(
+                f"template body exceeds {MAX_BODY_LENGTH}-character limit "
+                f"(got {len(value)} characters)"
+            )
+        # Syntax-only check. We deliberately do NOT try rendering the template
+        # against a fake context here — missing context variables are expected
+        # at save time and don't indicate a broken template.
         try:
-            render(value, {})
-        except PromptRenderError as exc:
-            # StrictUndefined will complain about missing context vars — that's
-            # expected and fine at save time. Only real syntax errors should
-            # block the save.
-            msg = str(exc).lower()
-            if "undefined" in msg or "strictundefined" in msg:
-                return value
+            validate_syntax(value)
+        except PromptSyntaxError as exc:
             raise serializers.ValidationError(f"template body is invalid: {exc}")
         return value
