@@ -166,6 +166,7 @@ class Issue(ProjectBaseModel):
         null=True,
         blank=True,
     )
+    git_work_branch = models.CharField(max_length=128, blank=True, default="")
 
     issue_objects = IssueManager()
 

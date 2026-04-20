@@ -62,6 +62,7 @@ async fn start_fake_cloud() -> (SocketAddr, tokio::task::JoinHandle<()>) {
             prompt: "test".into(),
             repo_url: None,
             repo_ref: None,
+            git_work_branch: None,
             expected_codex_model: None,
             approval_policy_overrides: None,
             deadline: None,

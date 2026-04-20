@@ -59,6 +59,9 @@ def test_context_shape(issue, run):
     assert ctx["project"]["identifier"] == "TP"
     assert ctx["repo"]["url"] == "git@github.com:acme/web.git"
     assert ctx["repo"]["base_branch"] == "trunk"
+    # No git_work_branch set on the issue → should surface as None so templates
+    # can branch on `{% if repo.work_branch %}` without false positives.
+    assert ctx["repo"]["work_branch"] is None
     assert ctx["run"]["attempt"] == 1
     assert ctx["run"]["turn_number"] == 1
 
@@ -72,3 +75,40 @@ def test_context_attempt_increments_on_follow_up(
     )
     ctx = build_context(issue, run)
     assert ctx["run"]["attempt"] == 2
+
+
+@pytest.mark.unit
+def test_context_includes_git_work_branch_when_set(issue, run):
+    issue.git_work_branch = "feat/pinned-branch"
+    issue.save(update_fields=["git_work_branch"])
+    ctx = build_context(issue, run)
+    assert ctx["repo"]["work_branch"] == "feat/pinned-branch"
+
+
+@pytest.mark.unit
+def test_context_empty_base_branch_surfaces_as_none(workspace, create_user):
+    # A project with no base_branch set — empty strings must flow through as
+    # ``None`` so the prompt template takes the "auto-detect remote default"
+    # branch instead of rendering a literal empty string.
+    project = Project.objects.create(
+        name="No Default",
+        identifier="ND",
+        workspace=workspace,
+        created_by=create_user,
+        repo_url="git@github.com:acme/no-default.git",
+        base_branch="",
+    )
+    project_state = State.objects.create(name="Todo", project=project, group="unstarted")
+    issue = Issue.objects.create(
+        name="Fix a thing",
+        workspace=workspace,
+        project=project,
+        state=project_state,
+        created_by=create_user,
+    )
+    run = AgentRun.objects.create(
+        owner=create_user, workspace=workspace, prompt="", work_item=issue
+    )
+    ctx = build_context(issue, run)
+    assert ctx["repo"]["base_branch"] is None
+    assert ctx["repo"]["work_branch"] is None

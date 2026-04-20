@@ -30,6 +30,7 @@ import {
 import {
   IssueDefaultProperties,
   IssueDescriptionEditor,
+  IssueGitAdvanced,
   IssueParentTag,
   IssueProjectSelect,
   IssueTitleInput,
@@ -270,6 +271,7 @@ export const IssueFormRoot = observer(function IssueFormRoot(props: IssueFormPro
           });
           editorRef?.current?.clearEditor();
         }
+        return undefined;
       })
       .catch((error) => {
         console.error(error);
@@ -334,14 +336,15 @@ export const IssueFormRoot = observer(function IssueFormRoot(props: IssueFormPro
     const issue = getIssueById(parentId);
     if (!issue) return;
 
-    const projectDetails = getProjectById(issue.project_id);
-    if (!projectDetails) return;
+    const parentProjectDetails = getProjectById(issue.project_id);
+    if (!parentProjectDetails) return;
 
     const stateDetails = getStateById(issue.state_id);
 
     setSelectedParentIssue(
-      convertWorkItemDataToSearchResponse(workspaceSlug?.toString(), issue, projectDetails, stateDetails)
+      convertWorkItemDataToSearchResponse(workspaceSlug?.toString(), issue, parentProjectDetails, stateDetails)
     );
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [watch, getIssueById, getProjectById, selectedParentIssue, getStateById]);
 
   // executing this useEffect when isDirty changes
@@ -380,7 +383,7 @@ export const IssueFormRoot = observer(function IssueFormRoot(props: IssueFormPro
         <div className="w-full rounded-lg">
           <form
             ref={formRef}
-            onSubmit={handleSubmit((data) => handleFormSubmit(data))}
+            onSubmit={handleSubmit((formData) => handleFormSubmit(formData))}
             className="flex w-full flex-col"
           >
             <div className="rounded-t-lg bg-surface-1 p-5">
@@ -485,6 +488,7 @@ export const IssueFormRoot = observer(function IssueFormRoot(props: IssueFormPro
                 projectId={projectId}
                 workspaceSlug={workspaceSlug?.toString()}
               />
+              <IssueGitAdvanced control={control} handleFormChange={handleFormChange} />
             </div>
             <div
               className={cn(
@@ -513,17 +517,14 @@ export const IssueFormRoot = observer(function IssueFormRoot(props: IssueFormPro
                   tabIndex={getIndex("create_more")}
                 >
                   {!data?.id && (
-                    <div
+                    <button
+                      type="button"
                       className="inline-flex cursor-pointer items-center gap-1.5"
                       onClick={() => onCreateMoreToggleChange(!isCreateMoreToggleEnabled)}
-                      onKeyDown={(e) => {
-                        if (e.key === "Enter") onCreateMoreToggleChange(!isCreateMoreToggleEnabled);
-                      }}
-                      role="button"
                     >
                       <ToggleSwitch value={isCreateMoreToggleEnabled} onChange={() => {}} size="sm" />
                       <span className="text-caption-sm-regular">{t("create_more")}</span>
-                    </div>
+                    </button>
                   )}
                   <div className="flex items-center gap-2">
                     <div tabIndex={getIndex("discard_button")}>

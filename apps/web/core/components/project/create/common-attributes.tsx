@@ -151,6 +151,70 @@ function ProjectCommonAttributes(props: Props) {
           )}
         />
       </div>
+      <div className="md:col-span-3">
+        <Controller
+          name="repo_url"
+          control={control}
+          rules={{
+            maxLength: {
+              value: 512,
+              message: t("repo_url_too_long") || "Repository URL is too long",
+            },
+          }}
+          render={({ field: { value, onChange } }) => (
+            <Input
+              id="repo_url"
+              name="repo_url"
+              type="text"
+              value={value ?? ""}
+              onChange={(e) => {
+                onChange(e);
+                handleFormOnChange?.();
+              }}
+              hasError={Boolean(errors?.repo_url)}
+              placeholder={
+                t("git_repository_url_placeholder") || "Git repository URL (e.g. git@github.com:org/repo.git)"
+              }
+              className="focus:border-blue-400 w-full"
+              tabIndex={getIndex("repo_url")}
+            />
+          )}
+        />
+        <span className="text-11 text-danger-primary">{errors?.repo_url?.message}</span>
+      </div>
+      <div>
+        <Controller
+          name="base_branch"
+          control={control}
+          rules={{
+            maxLength: {
+              value: 128,
+              message: t("base_branch_too_long") || "Base branch is too long",
+            },
+            pattern: {
+              value: /^[A-Za-z0-9._/-]*$/,
+              message: t("base_branch_invalid_chars") || "Only letters, numbers, and . _ / - are allowed",
+            },
+          }}
+          render={({ field: { value, onChange } }) => (
+            <Input
+              id="base_branch"
+              name="base_branch"
+              type="text"
+              value={value ?? ""}
+              onChange={(e) => {
+                onChange(e);
+                handleFormOnChange?.();
+              }}
+              hasError={Boolean(errors?.base_branch)}
+              placeholder={t("base_branch_placeholder") || "Base branch (leave empty to use remote default)"}
+              className="focus:border-blue-400 w-full"
+              tabIndex={getIndex("base_branch")}
+            />
+          )}
+        />
+        <span className="text-11 text-danger-primary">{errors?.base_branch?.message}</span>
+      </div>
     </div>
   );
 }

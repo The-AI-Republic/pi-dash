@@ -112,6 +112,11 @@ pub enum ServerMsg {
         prompt: String,
         repo_url: Option<String>,
         repo_ref: Option<String>,
+        /// Existing branch the agent must check out and commit onto. When
+        /// `None`, the runner creates a fresh feature branch off `repo_ref`
+        /// (or the remote default if `repo_ref` is also `None`).
+        #[serde(default)]
+        git_work_branch: Option<String>,
         expected_codex_model: Option<String>,
         approval_policy_overrides: Option<BTreeMap<String, serde_json::Value>>,
         deadline: Option<DateTime<Utc>>,
@@ -217,6 +222,7 @@ mod tests {
             prompt: "do the thing".into(),
             repo_url: Some("https://example.invalid/x.git".into()),
             repo_ref: Some("main".into()),
+            git_work_branch: Some("feat/existing-branch".into()),
             expected_codex_model: None,
             approval_policy_overrides: None,
             deadline: None,

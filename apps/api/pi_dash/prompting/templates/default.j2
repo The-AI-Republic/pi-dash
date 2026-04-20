@@ -20,7 +20,12 @@ No description provided.
 Repository:
 {% if repo.url %}
 - Remote: {{ repo.url }}
-- Base branch: {{ repo.base_branch or "main" }}
+- Base branch: {{ repo.base_branch or "(use the repository's default branch — run `git symbolic-ref refs/remotes/origin/HEAD` to resolve it)" }}
+{% if repo.work_branch %}
+- Work branch: {{ repo.work_branch }} — check this branch out and commit directly onto it. Do not create a new feature branch.
+{% else %}
+- Work branch: (none) — create a fresh feature branch off the base branch for your work.
+{% endif %}
 {% else %}
 - Work in the runner's configured working directory. Do not clone or touch any other path.
 {% endif %}
@@ -140,9 +145,16 @@ Based on `issue.state_group`:
 4. Write or update the hierarchical plan in the workpad.
 5. Ensure the workpad includes an environment stamp at the top in a `text` fenced block, format: `<host>:<abs-workdir>@<short-sha>`.
 6. Capture a concrete reproduction signal (command output, failing test, screenshot description) in the workpad `Notes` section before changing code.
-7. Before any code edits, sync with the base branch:
+7. Before any code edits, sync with the repository:
    - `git fetch origin`
-   - `git pull --rebase origin {{ repo.base_branch or "main" }}` (or equivalent for your branch strategy)
+{% if repo.work_branch %}
+   - `git checkout {{ repo.work_branch }}` — this is an existing branch you must operate on directly. If the branch does not exist locally, `git checkout -b {{ repo.work_branch }} origin/{{ repo.work_branch }}`. Do not create a new feature branch.
+   - `git pull --rebase origin {{ repo.work_branch }}`.
+{% else %}
+   - Resolve the base branch: `{% if repo.base_branch %}{{ repo.base_branch }}{% else %}$(git symbolic-ref --short refs/remotes/origin/HEAD | sed 's|^origin/||'){% endif %}` — call this `$BASE`.
+   - `git pull --rebase origin $BASE` (or equivalent for your branch strategy).
+   - Create a fresh feature branch off `$BASE` for your work.
+{% endif %}
    - Record the resulting `HEAD` short SHA in the workpad `Notes`.
 
 ## Step 2 — Implementation and validation

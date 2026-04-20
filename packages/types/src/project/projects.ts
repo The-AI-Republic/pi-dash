@@ -60,6 +60,8 @@ export interface IProject extends IPartialProject {
   members?: string[];
   timezone?: string;
   next_work_item_sequence?: number;
+  repo_url?: string;
+  base_branch?: string;
 }
 
 export type TProjectAnalyticsCountParams = {

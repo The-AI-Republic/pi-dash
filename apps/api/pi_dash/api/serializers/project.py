@@ -93,6 +93,8 @@ class ProjectCreateSerializer(BaseSerializer):
             "external_id",
             "is_issue_type_enabled",
             "is_time_tracking_enabled",
+            "repo_url",
+            "base_branch",
         ]
 
         read_only_fields = [
