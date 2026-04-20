@@ -4,15 +4,19 @@ use clap::{Parser, Subcommand};
 mod comment;
 mod configure;
 pub mod doctor;
+mod install;
 mod issue;
 mod remove;
 pub mod resolve;
+mod restart;
 mod rotate;
-mod service;
+mod run;
 mod start;
 mod state;
 mod status;
+mod stop;
 mod tui;
+mod uninstall;
 mod workspace;
 
 #[derive(Debug, Parser)]
@@ -44,15 +48,23 @@ pub enum Command {
     /// Register with Pi Dash cloud using a one-time token.
     Configure(configure::Args),
 
-    /// Run the daemon in the foreground.
+    /// Install the OS service (systemd user unit / launchd agent).
+    Install(install::Args),
+
+    /// Uninstall the OS service unit.
+    Uninstall(uninstall::Args),
+
+    /// Start the installed service.
     Start(start::Args),
 
-    /// Print daemon status (queried via local IPC).
-    Status(status::Args),
+    /// Stop the installed service.
+    Stop(stop::Args),
 
-    /// Install, start, stop, or report the OS service.
-    #[command(subcommand)]
-    Service(service::ServiceCmd),
+    /// Restart the installed service.
+    Restart(restart::Args),
+
+    /// Print service + daemon status.
+    Status(status::Args),
 
     /// Attach an interactive TUI to the running daemon.
     Tui(tui::Args),
@@ -77,6 +89,11 @@ pub enum Command {
 
     /// Verify the CLI's Pi Dash credentials end-to-end.
     Workspace(workspace::WorkspaceArgs),
+
+    /// Internal: run the daemon in the foreground. Invoked by systemd/launchd
+    /// via the generated unit file. Not a user-facing verb.
+    #[command(name = "__run", hide = true)]
+    Run(run::Args),
 }
 
 pub async fn run(cli: Cli) -> Result<()> {
@@ -86,9 +103,12 @@ pub async fn run(cli: Cli) -> Result<()> {
 
     match cli.command {
         Command::Configure(args) => configure::run(args, &paths).await,
+        Command::Install(args) => install::run(args, &paths).await,
+        Command::Uninstall(args) => uninstall::run(args, &paths).await,
         Command::Start(args) => start::run(args, &paths).await,
+        Command::Stop(args) => stop::run(args, &paths).await,
+        Command::Restart(args) => restart::run(args, &paths).await,
         Command::Status(args) => status::run(args, &paths).await,
-        Command::Service(cmd) => service::run(cmd, &paths).await,
         Command::Tui(args) => tui::run(args, &paths).await,
         Command::Doctor(args) => doctor::run(args, &paths).await,
         Command::Remove(args) => remove::run(args, &paths).await,
@@ -97,6 +117,7 @@ pub async fn run(cli: Cli) -> Result<()> {
         Command::Comment(args) => run_crud(comment::run(args).await),
         Command::State(args) => run_crud(state::run(args).await),
         Command::Workspace(args) => run_crud(workspace::run(args).await),
+        Command::Run(args) => run::run(args, &paths).await,
     }
 }
 
