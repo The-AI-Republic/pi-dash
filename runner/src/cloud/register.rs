@@ -3,6 +3,28 @@ use serde::{Deserialize, Serialize};
 use std::time::Duration;
 use uuid::Uuid;
 
+/// Typed failure modes for the register endpoint so `configure` can distinguish
+/// a name collision (retryable when auto-generated, loud-fail when user-supplied)
+/// from a generic network / auth / cap error.
+#[derive(Debug, thiserror::Error)]
+pub enum RegisterError {
+    /// Cloud rejected the request because `runner_name` already exists in the
+    /// target workspace. Triggered by `UNIQUE(workspace_id, name)` on the cloud
+    /// side and surfaced as `409 {"error": "runner_name_taken"}`.
+    #[error("runner name already taken in this workspace")]
+    NameTaken,
+    /// Anything else — transport failure, HTTP non-200 other than the specific
+    /// 409 shape above, malformed response body, etc. Keeps the anyhow context
+    /// chain intact for debugging.
+    #[error(transparent)]
+    Other(#[from] anyhow::Error),
+}
+
+#[derive(Debug, Deserialize)]
+struct ErrorBody {
+    error: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct RegisterRequest {
     pub runner_name: String,
@@ -43,24 +65,29 @@ pub async fn register(
     cloud_url: &str,
     token: &str,
     req: &RegisterRequest,
-) -> Result<RegisterResponse> {
+) -> std::result::Result<RegisterResponse, RegisterError> {
     let url = format!(
         "{}/api/v1/runner/register/",
         cloud_url.trim_end_matches('/')
     );
-    let client = http_client()?;
+    let client = http_client().map_err(RegisterError::Other)?;
     let resp = client
         .post(&url)
         .json(&RegisterEnvelope { req, token })
         .send()
         .await
-        .with_context(|| format!("POST {url}"))?;
+        .with_context(|| format!("POST {url}"))
+        .map_err(RegisterError::Other)?;
     let status = resp.status();
     if !status.is_success() {
         let body = resp.text().await.unwrap_or_default();
-        anyhow::bail!("registration failed: HTTP {status}: {body}");
+        return Err(classify_register_error(status, &body));
     }
-    let out = resp.json::<RegisterResponse>().await?;
+    let out = resp
+        .json::<RegisterResponse>()
+        .await
+        .context("parsing register response")
+        .map_err(RegisterError::Other)?;
     Ok(out)
 }
 
@@ -117,6 +144,25 @@ pub async fn deregister(
     Ok(())
 }
 
+/// Translate an HTTP error response into a `RegisterError`. Extracted so
+/// `configure`'s retry decision can be unit-tested without standing up a
+/// fake HTTP server. The cloud-side contract is:
+///
+/// - `409 {"error": "runner_name_taken"}` → `NameTaken` (retryable for an
+///   auto-generated name, loud error for a user-supplied one).
+/// - Anything else non-2xx → `Other` with the status + body captured.
+fn classify_register_error(status: reqwest::StatusCode, body: &str) -> RegisterError {
+    if status == reqwest::StatusCode::CONFLICT
+        && let Ok(parsed) = serde_json::from_str::<ErrorBody>(body)
+        && parsed.error.as_deref() == Some("runner_name_taken")
+    {
+        return RegisterError::NameTaken;
+    }
+    RegisterError::Other(anyhow::anyhow!(
+        "registration failed: HTTP {status}: {body}"
+    ))
+}
+
 fn http_client() -> Result<reqwest::Client> {
     Ok(reqwest::Client::builder()
         .timeout(Duration::from_secs(30))
@@ -155,5 +201,48 @@ mod tests {
         }"#;
         let resp: RegisterResponse = serde_json::from_str(body).unwrap();
         assert_eq!(resp.workspace_slug.as_deref(), Some("acme"));
+    }
+
+    #[test]
+    fn classify_409_runner_name_taken_maps_to_name_taken() {
+        // Pin the cloud-side contract: configure uses this to decide whether
+        // to retry an auto-generated name or error out a user-supplied one.
+        let err = classify_register_error(
+            reqwest::StatusCode::CONFLICT,
+            r#"{"error": "runner_name_taken"}"#,
+        );
+        assert!(
+            matches!(err, RegisterError::NameTaken),
+            "expected NameTaken, got {err:?}",
+        );
+    }
+
+    #[test]
+    fn classify_409_runner_cap_reached_maps_to_other() {
+        // The same endpoint also returns 409 for the per-user cap. That one
+        // must NOT trigger the auto-name retry — it's a hard error.
+        let err = classify_register_error(
+            reqwest::StatusCode::CONFLICT,
+            r#"{"error": "runner cap reached (5)"}"#,
+        );
+        assert!(
+            matches!(err, RegisterError::Other(_)),
+            "expected Other, got {err:?}",
+        );
+    }
+
+    #[test]
+    fn classify_non_409_status_maps_to_other() {
+        for status in [
+            reqwest::StatusCode::UNAUTHORIZED,
+            reqwest::StatusCode::BAD_REQUEST,
+            reqwest::StatusCode::INTERNAL_SERVER_ERROR,
+        ] {
+            let err = classify_register_error(status, "some body");
+            assert!(
+                matches!(err, RegisterError::Other(_)),
+                "{status} should map to Other, got {err:?}",
+            );
+        }
     }
 }

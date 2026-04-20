@@ -8,6 +8,7 @@ import pytest
 from django.urls import reverse
 from django.utils import timezone
 
+from pi_dash.db.models import Workspace, WorkspaceMember
 from pi_dash.db.models.api import APIToken
 from pi_dash.runner.models import (
     AgentRunStatus,
@@ -176,6 +177,124 @@ def test_register_enforces_runner_cap(api_client, db, create_user, workspace):
         format="json",
     )
     assert resp.status_code == 409
+
+
+@pytest.mark.contract
+def test_register_rejects_duplicate_name_in_same_workspace(
+    api_client, db, create_user, workspace
+):
+    # Pre-existing runner with the name we're about to try to register.
+    Runner.objects.create(
+        owner=create_user,
+        workspace=workspace,
+        name="dup-name",
+        credential_hash="h-existing",
+        credential_fingerprint="f" * 12,
+        status=RunnerStatus.OFFLINE,
+    )
+    minted = tokens.mint_registration_token()
+    reg = RunnerRegistrationToken.objects.create(
+        workspace=workspace,
+        created_by=create_user,
+        token_hash=minted.hashed,
+        expires_at=minted.expires_at,
+    )
+    url = reverse("runner:register")
+    resp = api_client.post(
+        url,
+        {
+            "token": minted.raw,
+            "runner_name": "dup-name",
+            "os": "linux",
+            "arch": "x86_64",
+            "version": "0.1.0",
+            "protocol_version": 1,
+        },
+        format="json",
+    )
+    assert resp.status_code == 409
+    assert resp.json() == {"error": "runner_name_taken"}
+    # @transaction.atomic rolls back the consume, so the runner can retry
+    # with a different name on the same token.
+    reg.refresh_from_db()
+    assert reg.consumed_at is None
+    assert reg.consumed_by_runner_id is None
+
+
+@pytest.mark.contract
+def test_register_allows_duplicate_name_in_different_workspace(
+    api_client, db, create_user, workspace
+):
+    # Same name in a second workspace is fine — uniqueness is per-workspace.
+    Runner.objects.create(
+        owner=create_user,
+        workspace=workspace,
+        name="shared-name",
+        credential_hash="h-other-ws",
+        credential_fingerprint="f" * 12,
+        status=RunnerStatus.OFFLINE,
+    )
+    other_ws = Workspace.objects.create(
+        name="Other Workspace", owner=create_user, slug="other-workspace"
+    )
+    WorkspaceMember.objects.create(
+        workspace=other_ws, member=create_user, role=20
+    )
+    minted = tokens.mint_registration_token()
+    RunnerRegistrationToken.objects.create(
+        workspace=other_ws,
+        created_by=create_user,
+        token_hash=minted.hashed,
+        expires_at=minted.expires_at,
+    )
+    url = reverse("runner:register")
+    resp = api_client.post(
+        url,
+        {
+            "token": minted.raw,
+            "runner_name": "shared-name",
+            "os": "linux",
+            "arch": "x86_64",
+            "version": "0.1.0",
+            "protocol_version": 1,
+        },
+        format="json",
+    )
+    assert resp.status_code == 201
+
+
+@pytest.mark.contract
+@pytest.mark.parametrize(
+    "bad_name",
+    [
+        "has space",
+        "dot.separated",
+        "slash/separator",
+        "emoji-💥",
+        "semicolon;",
+    ],
+)
+def test_register_rejects_invalid_runner_name_charset(
+    api_client, registration, bad_name
+):
+    minted, _ = registration
+    url = reverse("runner:register")
+    resp = api_client.post(
+        url,
+        {
+            "token": minted.raw,
+            "runner_name": bad_name,
+            "os": "linux",
+            "arch": "x86_64",
+            "version": "0.1.0",
+            "protocol_version": 1,
+        },
+        format="json",
+    )
+    assert resp.status_code == 400
+    body = resp.json()
+    # DRF serializer validation puts the field-level error under the field name.
+    assert "runner_name" in body, f"expected runner_name error, got {body}"
 
 
 @pytest.mark.contract

@@ -83,6 +83,15 @@ class Runner(models.Model):
     class Meta:
         db_table = "runner"
         ordering = ("-last_heartbeat_at", "-created_at")
+        # Per-workspace name uniqueness. `(workspace, name)` is the human key
+        # the CLI uses to address a runner; the UUID `id` is the internal
+        # auth identity. See .ai_design/runner_install_ux/ for the rationale.
+        constraints = [
+            models.UniqueConstraint(
+                fields=["workspace", "name"],
+                name="runner_unique_name_per_workspace",
+            ),
+        ]
         indexes = [
             models.Index(fields=["owner", "status"]),
             models.Index(fields=["workspace", "status"]),
