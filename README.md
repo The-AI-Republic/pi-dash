@@ -1,11 +1,12 @@
 <br /><br />
 
-<p align="center"><b>Pi Dash — Modern project management for all teams</b></p>
+<p align="center"><b>📊 Pi Dash — Modern project management for all teams</b></p>
 
 <p align="center">
-    <a href="https://github.com/The-AI-Republic/pi-dash"><b>Repository</b></a> •
-    <a href="https://github.com/The-AI-Republic/pi-dash/issues"><b>Issues</b></a> •
-    <a href="https://github.com/The-AI-Republic/pi-dash/discussions"><b>Discussions</b></a>
+    <a href="https://airepublic.com/"><b>Website</b></a> •
+    <a href="https://airepublic.com/docs"><b>Documentation</b></a> •
+    <a href="https://airepublic.com/"><b>Community</b></a> •
+    <a href="https://x.com/ai_republic"><b>X</b></a>
 </p>
 
 Pi Dash is an open-source project management tool to track issues, run ~sprints~ cycles, and manage product roadmaps without the chaos of managing the tool itself.
@@ -14,7 +15,8 @@ Pi Dash is an open-source project management tool to track issues, run ~sprints~
 
 ## 🚀 Installation
 
-See [CONTRIBUTING](./CONTRIBUTING.md) for local development setup, and the [`deployments/`](./deployments) directory for self-hosting configurations (Docker Compose, Kubernetes).
+- **Pi Dash Cloud** — hosted signup is coming. For now, visit the [AI Republic homepage](https://airepublic.com/) for announcements.
+- **Self-host Pi Dash** — see [CONTRIBUTING](./CONTRIBUTING.md) for local development, and the [`deployments/`](./deployments) directory for Docker Compose and Kubernetes configurations.
 
 ## 🌟 Features
 
@@ -46,15 +48,21 @@ See [CONTRIBUTING](./CONTRIBUTING.md).
 [![Django](https://img.shields.io/badge/Django-092E20?style=for-the-badge&logo=django&logoColor=green)](https://www.djangoproject.com/)
 [![Node JS](https://img.shields.io/badge/node.js-339933?style=for-the-badge&logo=Node.js&logoColor=white)](https://nodejs.org/en)
 
+## 📝 Documentation
+
+Explore the [Pi Dash documentation](https://airepublic.com/docs) to learn about features, setup, and usage.
+
 ## ❤️ Community
 
-Join the Pi Dash community on [GitHub Discussions](https://github.com/The-AI-Republic/pi-dash/discussions). We follow a [Code of conduct](./CODE_OF_CONDUCT.md) in all our community channels.
+Join the conversation on [GitHub Discussions](https://github.com/The-AI-Republic/pi-dash/discussions), follow [@ai_republic](https://x.com/ai_republic) on X, or visit [airepublic.com](https://airepublic.com/) for updates. We follow a [Code of conduct](./CODE_OF_CONDUCT.md) in all our community channels.
 
 Feel free to ask questions, report bugs, participate in discussions, share ideas, request features, or showcase your projects. We'd love to hear from you!
 
 ## 🛡️ Security
 
 If you discover a security vulnerability in Pi Dash, please report it responsibly instead of opening a public issue. See [SECURITY.md](./SECURITY.md) for more info.
+
+To disclose any security issues, please email us at [security@airepublic.com](mailto:security@airepublic.com).
 
 ## 🤝 Contributing
 
