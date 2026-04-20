@@ -231,7 +231,19 @@ async fn register_and_advance(state: &mut Wizard) {
                 state.busy = false;
                 return;
             }
-            state.status_line = Some(format!("registered as {}", resp.runner_id));
+            state.status_line = Some(if resp.workspace_slug.is_none() {
+                // Older server — daemon works but CRUD subcommands won't
+                // until re-registered. Surface it here so the operator sees
+                // it before leaving the wizard.
+                format!(
+                    "registered as {} (warning: server returned no workspace_slug; \
+                     rerun `pidash configure` against an updated server before using \
+                     `pidash issue` subcommands)",
+                    resp.runner_id
+                )
+            } else {
+                format!("registered as {}", resp.runner_id)
+            });
             state.busy = false;
             state.step = Step::Verify;
             // Kick off preflight immediately.
