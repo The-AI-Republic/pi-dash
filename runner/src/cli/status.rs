@@ -33,6 +33,13 @@ pub async fn run(args: Args, paths: &Paths) -> Result<()> {
     let daemon = match crate::ipc::client::Client::connect(paths.ipc_socket_path()).await {
         Ok(mut c) => match c.call(Request::StatusGet).await {
             Ok(Response::Status(s)) => Some(s),
+            // A running daemon that explicitly reports an error is very
+            // different from "socket unreachable" — surface it distinctly so
+            // operators don't chase a phantom "service stopped" diagnosis.
+            Ok(Response::Error(e)) => {
+                eprintln!("daemon reported error: {}", e.message);
+                None
+            }
             Ok(other) => {
                 eprintln!("unexpected IPC response: {other:?}");
                 None

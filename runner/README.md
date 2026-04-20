@@ -68,7 +68,7 @@ Wire version is `1` — bumped on incompatible shape changes. See `src/cloud/pro
 
 - **Unit:** `cargo test` — deterministic table-driven tests for protocol serde, approval policy, reconnect backoff, workspace resolve, config roundtrip.
 - **Integration:** `tests/protocol_roundtrip.rs` — every client/server variant round-trips; router state machine invariants.
-- **Manual QA** (per release): macOS arm64/x64 + Linux x64 → first-run `configure` → `service install` → TUI shows connected → synthetic run via `/api/runners/runs/` → approval prompt → decision.
+- **Manual QA** (per release): macOS arm64/x64 + Linux x64 → first-run `configure` → `install` → `start` → TUI shows connected → synthetic run via `/api/runners/runs/` → approval prompt → decision.
 
 ## Release
 

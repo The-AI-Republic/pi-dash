@@ -13,6 +13,7 @@ pub struct Args {}
 
 pub async fn run(_args: Args, paths: &Paths) -> Result<()> {
     let svc = crate::service::detect();
+    // Tolerant: stop is a no-op if the service isn't currently running.
     svc.stop().await.ok();
     svc.uninstall(paths).await
 }
