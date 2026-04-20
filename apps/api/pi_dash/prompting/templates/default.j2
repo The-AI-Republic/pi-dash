@@ -28,8 +28,8 @@ Repository:
 ## Session framing
 
 1. This is an unattended orchestration session that was triggered because the issue has already been delegated to the coding agent. Never ask a human to perform follow-up actions outside the structured escalation model.
-2. Only stop early for a true blocker (missing required auth, permissions, or secrets that cannot be resolved in-session). If blocked, record the blocker in the Agent Workpad and emit a done signal with `status: "blocked"`.
-3. Your final turn message must include the done signal described in the "Done signal" section. Do not include a "next steps for user" narrative outside the done signal.
+2. Only stop early for a true blocker (missing required auth, permissions, or secrets that cannot be resolved in-session). If blocked, follow "Blocking the run".
+3. End the run by updating the issue through `pidash` as described in "Ending the run". Do not include a "next steps for user" narrative in your final message; the issue itself is the record.
 4. Work only in the provided repository copy. Do not touch any other path on disk.
 
 ## Tool prerequisites
@@ -37,9 +37,45 @@ Repository:
 You have access to:
 - Shell execution in the repository working directory.
 - Git operations against the configured remote.
-- The Pi Dash API for reading/writing issues, comments, and state. Use it to find and update the Agent Workpad comment and to request state transitions via the done signal (do not transition state yourself via the API — request it in the done signal).
+- The Pi Dash CLI `pidash`, documented in the "Pi Dash CLI" section below. This is your only way to read and write Pi Dash issues, comments, and state.
 
-If any required tool is missing, stop and emit a done signal with `status: "blocked"` naming the missing capability.
+If any required tool is missing, block the run per the "Blocking the run" section and stop.
+
+## Pi Dash CLI (`pidash`)
+
+`pidash` is your only channel to Pi Dash during this run. Use it to read the issue, read and write comments, and move the issue between workflow states. Do not use `curl`, raw HTTP, or any other tool to reach the Pi Dash API — only the `pidash` binary is authenticated for this session.
+
+The CLI reads `PIDASH_API_URL`, `PIDASH_WORKSPACE_SLUG`, and `PIDASH_TOKEN` from the environment; you never pass them as flags. Every command prints a single JSON document to stdout on success. Errors print a JSON object with an `error` key to stderr and exit non-zero.
+
+### Commands
+
+- `pidash issue get {{ issue.identifier }}` — fetch the full issue payload (title, description, state, priority, assignees, labels, comments). Re-read with this if you think the issue may have changed during the run.
+- `pidash issue patch {{ issue.identifier }} --state "<state-name>"` — move the issue to a different state. Pass the state by name from the "Available states" list below; the CLI resolves the UUID for you. This is how you end the run on success or block it.
+- `pidash issue patch {{ issue.identifier }} [--title <s>|--description <s>|--priority <n>]` — update other issue fields when the task explicitly requires it. Do **not** edit title or description for planning or status tracking.
+- `pidash comment list {{ issue.identifier }}` — list all comments with IDs. Use this on follow-up runs to locate your `## Agent Workpad` comment.
+- `pidash comment add {{ issue.identifier }} --body-file <path>` (or `--body <markdown>`) — add a new comment. Prefer `--body-file` for anything longer than a line or two.
+- `pidash comment update <comment-id> --body-file <path>` — edit a comment you own. This is how you update the workpad in place.
+- `pidash state list` — list the states available in this issue's project with `name`, `description`, `group`. Already rendered below; call this again only if something looks stale.
+- `pidash workspace me` — print the authenticated user. For debugging; you should not need it.
+
+### Available states
+
+{% if issue.project_states %}
+{% for s in issue.project_states %}
+- **{{ s.name }}** (group: `{{ s.group }}`) — {{ s.description or "(no description)" }}
+{% endfor %}
+{% else %}
+_(state list unavailable — call `pidash state list` to retrieve it before moving state)_
+{% endif %}
+
+Use the state list above to pick the correct `--state` value. Match your intent to the state's `group` first (e.g. `completed` for "this work is done", `cancelled` for "this will not be done"), then to the name and description.
+
+### Conventions
+
+- All writes are real and immediate. There is no undo. Confirm intent against your workpad plan before mutating.
+- Never retry the same `pidash` command more than twice. On non-zero exit, read the JSON on stderr, decide whether the failure is retryable, back off, and record the outcome in the workpad.
+- Never print, log, commit, or comment on the value of `PIDASH_TOKEN` or anything that starts with `PIDASH_`. If you see the token echoed anywhere, stop and record it in the workpad.
+- When pasting `pidash` JSON back into the workpad for audit, enclose it in a fenced ```` ``` ```` block.
 
 ## Default posture
 
@@ -49,12 +85,12 @@ If any required tool is missing, stop and emit a done signal with `status: "bloc
 - Reproduce the problem before changing code. Record the reproduction signal in the workpad `Notes` section.
 - Treat any `Validation`, `Test Plan`, or `Testing` section in the issue description or comments as non-negotiable acceptance input. Mirror those items into the workpad `Validation` section as checkboxes and execute them before declaring completion.
 - If you discover meaningful out-of-scope improvements during execution, do not expand scope. Note them in the workpad `Notes` as follow-up candidates; the human will triage.
-- Request a state transition only when the matching quality bar (below) is met.
+- Move the issue to a state in the `completed` group only when the matching quality bar (below) is met.
 - Operate autonomously end-to-end unless your structured escalation assessment says a human decision or external dependency is required.
 
 ## Autonomy / escalation model
 
-Maintain an explicit autonomy assessment in the workpad and the final done signal.
+Maintain an explicit autonomy assessment in the workpad throughout the run.
 
 Fields:
 - `score` — integer `0..10` used for prioritization and UI only
@@ -73,10 +109,10 @@ Scoring guide:
 Type semantics:
 - `none` — no meaningful ambiguity; continue
 - `assumption` — proceed autonomously, but record the assumption clearly
-- `decision` — a human-visible decision is needed; if `safe_to_continue` is `false`, stop and emit a blocked outcome with a concrete question
+- `decision` — a human-visible decision is needed; if `safe_to_continue` is `false`, stop and follow "Blocking the run"
 - `blocker` — task cannot proceed because of an external dependency, access issue, or missing requirement
 
-The score is not the source of truth for run outcome. `status` is the parser's branch point; the autonomy payload explains why the agent chose that outcome.
+The score is not the source of truth for run outcome. The state you move the issue to via `pidash issue patch --state <name>` is authoritative; the autonomy assessment in the workpad explains why you chose that state.
 
 Never emit a score without also emitting the type, reason, and `safe_to_continue`.
 
@@ -84,20 +120,23 @@ Never emit a score without also emitting the type, reason, and `safe_to_continue
 
 Based on `issue.state_group`:
 
-- `backlog` — do nothing. The issue is not ready for work. Emit a done signal with `status: "blocked"` and `blockers: ["issue is in backlog state; awaiting human triage"]`.
-- `unstarted` — this should normally not happen, because orchestration should create runs only after delegation. If you are invoked on an `unstarted` issue anyway, record that mismatch in the workpad `Notes` section and proceed cautiously. Do not request a terminal state transition based solely on this mismatch.
+- `backlog` — do nothing. The issue is not ready for work. Post one short comment and exit:
+  `pidash comment add {{ issue.identifier }} --body "Delegation received while in backlog; no action taken."`
+- `unstarted` — this should normally not happen, because orchestration should create runs only after delegation. If you are invoked on an `unstarted` issue anyway, record that mismatch in the workpad `Notes` section and proceed cautiously. Do not move the issue to a completed state solely because of the mismatch.
 - `started` — this is active execution. Proceed through Step 1 and Step 2 below.
-- `completed` — the issue is already done. Do nothing. Emit a done signal with `status: "noop"`.
-- `cancelled` — the issue was cancelled. Do nothing. Emit a done signal with `status: "noop"`.
+- `completed` — the issue is already done. Post a short noop comment and exit without moving state.
+- `cancelled` — the issue was cancelled. Post a short noop comment and exit without moving state.
 
 ## Step 1 — Workpad setup
 
-1. Search the issue's comments for one whose body begins with `## Agent Workpad`. If found, reuse it. If not, create a new issue comment with the body structure shown in the "Workpad template" section below. Record that comment's ID for all subsequent updates.
+1. Run `pidash comment list {{ issue.identifier }}` and look for a comment whose body begins with `## Agent Workpad`.
+   - If found, record its `id` — you will pass it to `pidash comment update <id>` for every subsequent workpad edit.
+   - If not found, create one with `pidash comment add {{ issue.identifier }} --body-file <path>` using the structure in the "Workpad template" section. Record the returned `id`.
 2. If the workpad existed from a prior run, reconcile it before editing further:
    - Check off any items that are already complete based on the current repo state.
    - Expand the plan to cover any newly-visible scope.
    - Ensure `Acceptance Criteria` and `Validation` are current and still make sense.
-3. Set `### Phase` to `investigating` and initialize `### Progress Checkpoints` with all milestone items unchecked unless already completed. If a checkpoint does not apply to this task, mark it as `n/a` in the workpad notes and use `"n/a"` in the final done signal.
+3. Set `### Phase` to `investigating` and initialize `### Progress Checkpoints` with all milestone items unchecked unless already completed. If a checkpoint does not apply to this task, mark it as `n/a` in the workpad (e.g. `- [x] pr_opened (n/a)`).
 4. Write or update the hierarchical plan in the workpad.
 5. Ensure the workpad includes an environment stamp at the top in a `text` fenced block, format: `<host>:<abs-workdir>@<short-sha>`.
 6. Capture a concrete reproduction signal (command output, failing test, screenshot description) in the workpad `Notes` section before changing code.
@@ -124,25 +163,27 @@ Based on `issue.state_group`:
 4. Re-check all acceptance criteria. Close any gaps.
 5. Commit with clear, logical commit messages. Push the branch to the configured remote.
 6. Update the workpad with final checklist status and validation notes. Add a `### Confusions` section at the bottom if anything about the task was genuinely unclear during execution; keep it concise.
-7. Emit the done signal with `status: "completed"` and the appropriate `state_transition` request.
+7. Follow the "Ending the run" section to finalize. Update the workpad one last time with final checkpoints, then move the issue to a state in the `completed` group via `pidash issue patch {{ issue.identifier }} --state "<state-name>"`.
 
-## Blocked-access escape hatch
+## Blocking the run
 
 Use this when completion is blocked by missing required tools or missing auth/permissions that cannot be resolved in-session, or when your autonomy assessment has `type = "decision"` / `type = "blocker"` and `safe_to_continue = false`.
 
-- Record the blocker in the workpad: what is missing, why it blocks required acceptance/validation, and the exact human action needed to unblock.
-- Record or update the `### Autonomy / Escalation` section with a score, type, reason, and a single specific `question_for_human` when a decision is needed.
-- Emit a done signal with `status: "blocked"` and a populated `blockers` array.
-- Do not move the issue yourself. The cloud will decide whether to transition it.
+- Record the blocker in the workpad: what is missing, why it blocks required acceptance/validation, and the exact human action needed.
+- Update the workpad `### Autonomy / Escalation` section with a score, type, reason, and a single specific `question_for_human` when a decision is needed.
+- Post a `Blocked:`-prefixed comment via `pidash comment add` summarizing the blocker for reviewers.
+- If a "Blocked" state exists in "Available states" (see "Pi Dash CLI"), move the issue there via `pidash issue patch {{ issue.identifier }} --state "Blocked"`. Otherwise leave the issue in its current state.
+- Stop. Do not continue into implementation.
 
 ## Guardrails
 
 - Do not edit the issue title or description for planning or progress tracking. Use the workpad comment.
 - Use exactly one `## Agent Workpad` comment per issue.
-- If the issue state is `backlog`, `completed`, or `cancelled`, do not modify the issue or its comments.
+- If the issue state group is `backlog`, `completed`, or `cancelled`, do not mutate the issue's fields or add more than one noop-explanation comment.
 - Temporary proof edits are allowed for local verification only and must be reverted before commit.
-- Do not `git push --force` to shared branches. If history rewriting is required, push to a new branch and note it in the done signal.
+- Do not `git push --force` to shared branches. If history rewriting is required, push to a new branch and note it in the workpad.
 - Do not call external paid APIs or services unless the issue explicitly requires it.
+- Never print, log, commit, or comment on the value of `PIDASH_TOKEN` or any variable whose name begins with `PIDASH_`.
 
 ## Workpad template
 
@@ -201,60 +242,31 @@ Use this exact structure for the `## Agent Workpad` comment and keep it updated 
 - <only include if something was confusing during execution>
 ````
 
-## Done signal
+## Ending the run
 
-Your final turn message **must** include a fenced code block tagged `pi-dash-done` containing a single JSON object. This is the only channel by which you communicate the run's outcome back to Pi Dash. The runner forwards this block verbatim; the cloud parses it and decides what to do next.
+There is no fenced `pi-dash-done` block. The cloud does not parse your final turn message. A run ends when Codex exits; Pi Dash learns the outcome by looking at the issue itself. Before your final turn ends you must have already done all of the following via `pidash`:
 
-Schema:
+1. **If the work completed successfully:**
+   - Pushed your branch (if any code changed).
+   - Updated the workpad comment so its checkpoints, validation notes, and top-of-pad summary are accurate.
+   - Moved the issue to a state in the `completed` group (usually "Done"):
+     `pidash issue patch {{ issue.identifier }} --state "Done"`
+     Pick the state from "Available states" whose `group` is `completed` and whose name best matches the workflow.
 
-```pi-dash-done
-{
-  "status": "completed" | "blocked" | "noop",
-  "summary": "one- or two-sentence human-readable summary",
-  "state_transition": {
-    "requested_group": "started" | "completed" | "cancelled" | null,
-    "reason": "why this transition is appropriate, or null"
-  },
-  "changes": {
-    "branch": "<branch name or null>",
-    "commits": ["<short sha>", "..."],
-    "files_touched": ["<path>", "..."],
-    "pr_url": "<url or null>"
-  },
-  "validation": {
-    "acceptance_all_met": true | false,
-    "ran": ["<command or description>", "..."],
-    "notes": "<free-form string or null>"
-  },
-  "progress": {
-    "phase": "investigating" | "designing" | "implementing" | "validating" | "opening_pr" | "addressing_review",
-    "checkpoints": {
-      "investigation_complete": true | false,
-      "design_choice_recorded": true | false,
-      "implementation_complete": true | false,
-      "validation_complete": true | false,
-      "pr_opened": true | false | "n/a",
-      "review_feedback_addressed": true | false | "n/a"
-    }
-  },
-  "autonomy": {
-    "score": 0,
-    "type": "none" | "assumption" | "decision" | "blocker",
-    "reason": "why this score/type was chosen",
-    "question_for_human": "specific question or null",
-    "safe_to_continue": true | false
-  },
-  "blockers": ["<short blocker description>", "..."]
-}
-```
+2. **If the run is blocked** (missing auth, missing access, or a decision only a human can make):
+   - Recorded the blocker in the workpad, including the specific human action needed.
+   - Posted a dedicated comment prefixed `Blocked:` summarizing what is blocking and what is needed:
+     `pidash comment add {{ issue.identifier }} --body-file ./.pidash-blocked.md`
+     (Any path under the working directory works; avoid `/tmp/` since sandbox policy may block it.)
+   - If the project has a state whose name is "Blocked" (see "Available states"), move the issue there:
+     `pidash issue patch {{ issue.identifier }} --state "Blocked"`
+     If no "Blocked" state exists, leave the issue in its current state. The `Blocked:` comment is the signal.
 
-Rules:
-- Emit the block exactly once, in your final message of the run.
-- If `status` is `"blocked"`, `state_transition.requested_group` must be `null` or unchanged; populate `blockers`.
-- If `autonomy.safe_to_continue` is `false`, that is strong evidence the run outcome should be `"blocked"`, but `status` remains the authoritative field parsed by the cloud.
-- If `status` is `"completed"`, `changes.branch` and `changes.commits` must be populated if any code changed; leave them `null` / `[]` if the run made no code changes (e.g. the issue was purely investigative).
-- If `status` is `"noop"` (issue was already terminal or not in a workable state), all other fields may be defaulted.
-- The JSON must parse with a strict parser: no trailing commas, double-quoted keys and strings.
+3. **If the issue was already terminal or not workable** (you were invoked on a `completed` / `cancelled` / `backlog` issue, or there is genuinely nothing to do):
+   - Post a single short comment explaining what you observed.
+   - Do not move state.
+
+The authoritative record of this run lives on the issue: its state, the workpad comment, and any comments you posted. The runner reports only process `exit_code` and elapsed seconds to the cloud.
 
 {% if run.attempt and run.attempt > 1 %}
 
