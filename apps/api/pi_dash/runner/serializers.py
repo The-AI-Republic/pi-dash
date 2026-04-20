@@ -55,6 +55,10 @@ class RegistrationRequestSerializer(serializers.Serializer):
 class RegistrationResponseSerializer(serializers.Serializer):
     runner_id = serializers.UUIDField()
     runner_secret = serializers.CharField()
+    # Workspace the runner is permanently bound to. The runner persists this
+    # in ``config.toml`` so the pidash CRUD CLI can scope REST requests
+    # without asking the user to type ``--workspace`` every time.
+    workspace_slug = serializers.CharField()
     # Public REST API token (``X-Api-Key``) issued alongside the runner
     # secret so the same install can also drive ``/api/v1/`` for work-item
     # CRUD via the pidash CLI. Independently revocable.

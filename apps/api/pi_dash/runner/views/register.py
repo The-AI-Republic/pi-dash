@@ -115,6 +115,7 @@ class RegisterEndpoint(APIView):
             {
                 "runner_id": runner.id,
                 "runner_secret": minted.raw,
+                "workspace_slug": reg.workspace.slug,
                 "api_token": api_token.token,
                 "heartbeat_interval_secs": HEARTBEAT_INTERVAL_SECS,
                 "protocol_version": PROTOCOL_VERSION,

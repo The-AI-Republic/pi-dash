@@ -58,11 +58,25 @@ pub async fn run(args: Args, paths: &Paths) -> Result<()> {
         .clone()
         .unwrap_or_else(|| paths.default_working_dir());
 
+    // A new server always populates this. `None` means we just enrolled
+    // against an older server — the daemon still works, but every CRUD
+    // subcommand will fail until the user rerun against an updated server.
+    // Surface that now instead of letting the first `pidash issue list`
+    // produce a confusing error.
+    if resp.workspace_slug.is_none() {
+        eprintln!(
+            "warning: server did not return a workspace_slug. \
+             The daemon will run, but `pidash issue` subcommands will fail \
+             until you rerun `pidash configure` against an updated server."
+        );
+    }
+
     let config = Config {
         version: 1,
         runner: crate::config::schema::RunnerSection {
             name,
             cloud_url: args.url.clone(),
+            workspace_slug: resp.workspace_slug.clone(),
         },
         workspace: crate::config::schema::WorkspaceSection { working_dir },
         codex: crate::config::schema::CodexSection::default(),

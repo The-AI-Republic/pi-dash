@@ -49,6 +49,9 @@ def test_register_exchanges_token_for_secret(api_client, registration):
     assert body["runner_secret"].startswith("apd_rs_")
     assert body["api_token"].startswith("pi_dash_api_")
     assert body["protocol_version"] == 1
+    # Runner enrollment is workspace-scoped; the CLI relies on this slug to
+    # build `/api/v1/workspaces/<slug>/...` URLs without asking the user.
+    assert body["workspace_slug"] == record.workspace.slug
     runner = Runner.objects.get(id=body["runner_id"])
     assert runner.owner_id == record.created_by_id
     record.refresh_from_db()
