@@ -4,7 +4,7 @@ use tokio::process::Command;
 
 use crate::util::paths::Paths;
 
-const UNIT_NAME: &str = "pi-dash-runner.service";
+const UNIT_NAME: &str = "pidash.service";
 
 pub async fn install(paths: &Paths) -> Result<()> {
     let unit_path = unit_path()?;
@@ -25,8 +25,8 @@ Wants=network-online.target
 [Service]
 Type=simple
 ExecStart={exe} start
-Environment=PI_DASH_RUNNER_CONFIG_DIR={config_dir}
-Environment=PI_DASH_RUNNER_DATA_DIR={data_dir}
+Environment=PIDASH_CONFIG_DIR={config_dir}
+Environment=PIDASH_DATA_DIR={data_dir}
 Environment=XDG_RUNTIME_DIR={runtime_dir}
 Restart=on-failure
 RestartSec=5

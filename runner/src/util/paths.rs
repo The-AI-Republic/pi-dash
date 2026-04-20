@@ -3,8 +3,8 @@ use directories::ProjectDirs;
 use std::path::{Path, PathBuf};
 
 const QUALIFIER: &str = "so";
-const ORG: &str = "pi-dash";
-const APP: &str = "runner";
+const ORG: &str = "pidash";
+const APP: &str = "pidash";
 
 #[derive(Debug, Clone)]
 pub struct Paths {
@@ -69,7 +69,7 @@ impl Paths {
         let base = std::env::var("TMPDIR")
             .map(PathBuf::from)
             .unwrap_or_else(|_| std::env::temp_dir());
-        base.join(".pi_dash")
+        base.join(".pidash")
     }
 
     pub fn ensure(&self) -> Result<()> {

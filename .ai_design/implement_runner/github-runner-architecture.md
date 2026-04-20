@@ -274,9 +274,9 @@ What transfers directly:
 | GitHub concept                     | Pi Dash equivalent                                                    | Notes                                                                     |
 | ---------------------------------- | --------------------------------------------------------------------------- | ------------------------------------------------------------------------- |
 | Actions service (orchestrator)     | Django (`apps/api`) + a WS service (new, modeled on `apps/live`)            | Django owns state; WS service owns the socket                             |
-| Self-hosted runner binary          | `pi-dash-runner` daemon (new, to build)                               | Single binary: Go or Rust recommended                                     |
+| Self-hosted runner binary          | `pidash` daemon (new, to build)                               | Single binary: Go or Rust recommended                                     |
 | Registration token                 | One-time code generated in Pi Dash settings UI                        | Short TTL, single-use                                                     |
-| `.credentials` on disk             | Runner token + machine id, stored under `~/.config/pi-dash-runner/`   | File mode 0600                                                            |
+| `.credentials` on disk             | Runner token + machine id, stored under `~/.config/pidash/`   | File mode 0600                                                            |
 | Labels (`linux`, `gpu`, `staging`) | Capabilities: `codex`, `macos`, `arm64`, `docker`, `git`                    | Same matching rules; do not encode an exact local checkout path in labels |
 | Runner groups                      | Per-user / per-workspace pools                                              | "Only this user's machines pick up this user's tasks"                     |
 | `runs-on: [self-hosted, gpu]`      | Pi Dash work item metadata declaring required capabilities            | Triage step sets these                                                    |

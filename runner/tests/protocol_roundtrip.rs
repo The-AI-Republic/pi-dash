@@ -1,14 +1,14 @@
 //! Integration tests that exercise the cloud protocol serde and approval
 //! router state machine at their public API.
 
-use pi_dash_runner::approval::{
+use pidash::approval::{
     policy::{Decision, Policy},
     router::{ApprovalRecord, ApprovalRouter, ApprovalStatus, DecisionSource},
 };
-use pi_dash_runner::cloud::protocol::{
+use pidash::cloud::protocol::{
     ApprovalDecision, ApprovalKind, ClientMsg, Envelope, RunnerStatus, ServerMsg, WIRE_VERSION,
 };
-use pi_dash_runner::config::schema::ApprovalPolicySection;
+use pidash::config::schema::ApprovalPolicySection;
 use std::path::Path;
 use uuid::Uuid;
 

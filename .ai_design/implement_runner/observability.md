@@ -34,7 +34,7 @@ text exposition format (v0.0.4). Scrape every 15–60s.
 Every runner subsystem emits structured records via `tracing` (runner) and
 Python `logging` (Django). Use these fields consistently so log search works.
 
-### Runner daemon (`pi_dash_runner`, Rust `tracing`)
+### Runner daemon (`pidash`, Rust `tracing`)
 
 | Field              | Type   | Emitted on                             |
 | ------------------ | ------ | -------------------------------------- |

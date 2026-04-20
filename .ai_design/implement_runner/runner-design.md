@@ -41,7 +41,7 @@ Companion docs in this directory:
 
 | #   | Topic                        | Decision                                                                                                                                                                                                                                                                       |
 | --- | ---------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| 1   | Working directory            | Runner config specifies working dir. Default `$TMPDIR/.pi_dash/`. If dir has a git repo → use it. If not → request repo URL from cloud, `git clone` into dir. Clone-auth failure is reported. Every task runs Codex against this dir.                                         |
+| 1   | Working directory            | Runner config specifies working dir. Default `$TMPDIR/.pidash/`. If dir has a git repo → use it. If not → request repo URL from cloud, `git clone` into dir. Clone-auth failure is reported. Every task runs Codex against this dir.                                         |
 | 2   | Concurrency                  | One task at a time per runner.                                                                                                                                                                                                                                                 |
 | 3   | Assignment                   | One runner instance per dev machine. Globally unique runner ID. Cloud assigns to an online idle runner owned by the user. No label matching.                                                                                                                                   |
 | 4   | Prompt construction          | Cloud renders; runner receives a ready-to-use prompt string. Runner never composes prompts.                                                                                                                                                                                    |
@@ -61,7 +61,7 @@ Companion docs in this directory:
 ```
 ┌─────────────────────── dev laptop ─────────────────────────────────┐
 │                                                                     │
-│   pi-dash-runner  (daemon, long-lived)                        │
+│   pidash  (daemon, long-lived)                        │
 │   ┌─────────────────────────────────────────────────────────────┐  │
 │   │  Cloud WS client  ◄─── outbound WSS on 443 ────►            │  │
 │   │                                                             │  │
@@ -76,7 +76,7 @@ Companion docs in this directory:
 │   └─────────────────────────────────────────────────────────────┘  │
 │            ▲                                                        │
 │            │ Unix socket                                            │
-│   pi-dash-runner tui  (Ratatui, ad-hoc client)                │
+│   pidash tui  (Ratatui, ad-hoc client)                │
 │                                                                     │
 └─────────────────────────────────────────────────────────────────────┘
                         │  WSS  │
@@ -107,13 +107,13 @@ Distribution: one static binary per target triple. Users install via:
 - Linux: `.deb` / `.rpm`
 - Future: Windows MSI (v2)
 
-Install does not require root; binary lives in `$HOME/.local/bin/pi-dash-runner` by default.
+Install does not require root; binary lives in `$HOME/.local/bin/pidash` by default.
 
 ### 4.2. First-run configure
 
 ```
-pi-dash-runner configure \
-  --url https://cloud.pi-dash.so \
+pidash configure \
+  --url https://cloud.pidash.so \
   --token <ONE_TIME_CODE> \
   [--name my-laptop]
 ```
@@ -134,14 +134,14 @@ If TUI is used instead, the first-run wizard in `tui-design.md` performs steps 1
 ### 4.3. Service install
 
 ```
-pi-dash-runner service install   # systemd user unit / launchd plist
-pi-dash-runner service start
-pi-dash-runner service status
-pi-dash-runner service stop
+pidash service install   # systemd user unit / launchd plist
+pidash service start
+pidash service status
+pidash service stop
 ```
 
-- **Linux**: generate a `~/.config/systemd/user/pi-dash-runner.service`, `systemctl --user daemon-reload`, enable with `linger` optional.
-- **macOS**: generate a `~/Library/LaunchAgents/so.pi-dash.runner.plist`, load with `launchctl bootstrap gui/$UID`.
+- **Linux**: generate a `~/.config/systemd/user/pidash.service`, `systemctl --user daemon-reload`, enable with `linger` optional.
+- **macOS**: generate a `~/Library/LaunchAgents/so.pidash.daemon.plist`, load with `launchctl bootstrap gui/$UID`.
 
 ### 4.4. Run loop (simplified)
 
@@ -225,12 +225,12 @@ This is the one piece of business logic the runner owns. Detailed behavior:
 ### 5.1. Configuration
 
 ```toml
-# ~/.config/pi-dash-runner/config.toml
+# ~/.config/pidash/config.toml
 [workspace]
-working_dir = "/var/folders/.../T/.pi_dash"   # default: $TMPDIR/.pi_dash
+working_dir = "/var/folders/.../T/.pidash"   # default: $TMPDIR/.pidash
 ```
 
-Override via CLI: `pi-dash-runner configure --working-dir /path/to/repo`.
+Override via CLI: `pidash configure --working-dir /path/to/repo`.
 
 ### 5.2. On assignment
 
@@ -278,11 +278,11 @@ If `working_dir` is inside `$TMPDIR` on Linux (often `/tmp`, which may be `tmpfs
 ### 6.1. On-disk layout
 
 ```
-~/.config/pi-dash-runner/
+~/.config/pidash/
 ├── config.toml          # user-editable config
 └── credentials.toml     # runner_id + runner_secret (0600)
 
-~/.local/share/pi-dash-runner/
+~/.local/share/pidash/
 ├── history/
 │   ├── runs/
 │   │   └── <run_id>.jsonl      # one JSONL per run; all Codex events + lifecycle
@@ -299,11 +299,11 @@ version = 1
 
 [runner]
 name = "my-laptop"
-cloud_url = "https://cloud.pi-dash.so"
+cloud_url = "https://cloud.pidash.so"
 # runner_id + secret are in credentials.toml
 
 [workspace]
-working_dir = "/var/folders/.../T/.pi_dash"
+working_dir = "/var/folders/.../T/.pidash"
 
 [codex]
 binary = "/usr/local/bin/codex"      # auto-detected; overridable
@@ -448,7 +448,7 @@ per-task:
 
 Phase ordering within one task:
 
-1. `initialize { clientInfo: { name: "pi-dash-runner", version } }` → wait for `initialize` response.
+1. `initialize { clientInfo: { name: "pidash", version } }` → wait for `initialize` response.
 2. Send `initialized` notification.
 3. `account/read` — confirm auth state. If unauthenticated → `run_awaiting_reauth`.
 4. `thread/start { cwd, model?, sandboxPolicy: "workspace-write", approvalPolicy: "on-request" }` → capture `thread_id`.
@@ -535,7 +535,7 @@ evaluate(req):
 Single binary, multiple modules. Organized by concern:
 
 ```
-pi-dash-runner/
+pidash/
 ├── Cargo.toml
 ├── src/
 │   ├── main.rs                     # CLI dispatch (clap)

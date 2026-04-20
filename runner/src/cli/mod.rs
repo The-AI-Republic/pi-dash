@@ -11,24 +11,24 @@ mod status;
 mod tui;
 
 #[derive(Debug, Parser)]
-#[command(name = "pi-dash-runner", version, about, long_about = None)]
+#[command(name = "pidash", version, about, long_about = None)]
 pub struct Cli {
     #[command(subcommand)]
     pub command: Command,
 
     /// Override config directory (XDG config by default).
-    #[arg(long, global = true, env = "PI_DASH_RUNNER_CONFIG_DIR")]
+    #[arg(long, global = true, env = "PIDASH_CONFIG_DIR")]
     pub config_dir: Option<std::path::PathBuf>,
 
     /// Override data directory (XDG data by default).
-    #[arg(long, global = true, env = "PI_DASH_RUNNER_DATA_DIR")]
+    #[arg(long, global = true, env = "PIDASH_DATA_DIR")]
     pub data_dir: Option<std::path::PathBuf>,
 
     /// Log level filter (trace|debug|info|warn|error).
     #[arg(
         long,
         global = true,
-        env = "PI_DASH_RUNNER_LOG",
+        env = "PIDASH_LOG",
         default_value = "info"
     )]
     pub log: String,
