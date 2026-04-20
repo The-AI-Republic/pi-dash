@@ -2,7 +2,7 @@ use anyhow::Result;
 use clap::{Parser, Subcommand};
 
 mod comment;
-mod configure;
+pub mod configure;
 pub mod doctor;
 mod install;
 mod issue;
@@ -18,6 +18,18 @@ mod stop;
 mod tui;
 mod uninstall;
 mod workspace;
+
+/// Re-exported for integration tests that want to exercise the daemon-entry
+/// error paths without routing through clap.
+pub use run::Args as RunArgs;
+
+/// Test-only shim: invoke the hidden `__run` handler directly. Exposed so
+/// `tests/pidash_run_errors.rs` can assert the error-message contract when
+/// `config.toml` or `credentials.toml` is missing.
+#[doc(hidden)]
+pub async fn run_for_tests(args: RunArgs, paths: &crate::util::paths::Paths) -> anyhow::Result<()> {
+    run::run(args, paths).await
+}
 
 #[derive(Debug, Parser)]
 #[command(name = "pidash", version, about, long_about = None)]

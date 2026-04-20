@@ -36,10 +36,20 @@ pub fn detect() -> Service {
 }
 
 impl Service {
-    pub async fn install(&self, paths: &Paths) -> Result<()> {
+    /// Write the unit file (systemd) or plist (launchd). Does not enable or
+    /// start. Allows `pidash install` to gate activation on configuration.
+    pub async fn write_unit(&self, paths: &Paths) -> Result<()> {
         match self {
-            Service::Systemd => systemd::install(paths).await,
-            Service::Launchd => launchd::install(paths).await,
+            Service::Systemd => systemd::write_unit(paths).await,
+            Service::Launchd => launchd::write_unit(paths).await,
+        }
+    }
+
+    /// Enable at boot/login and start now. Must run after `write_unit`.
+    pub async fn enable_and_start(&self) -> Result<()> {
+        match self {
+            Service::Systemd => systemd::enable_and_start().await,
+            Service::Launchd => launchd::enable_and_start().await,
         }
     }
 

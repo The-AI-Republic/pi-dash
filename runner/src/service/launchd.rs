@@ -6,7 +6,10 @@ use crate::util::paths::Paths;
 
 const LABEL: &str = "so.pidash.daemon";
 
-pub async fn install(paths: &Paths) -> Result<()> {
+/// Write the LaunchAgent plist. Does NOT bootstrap (load) it; that's deferred
+/// to `enable_and_start` so `pidash install` can gate activation on
+/// `pidash configure` completing first.
+pub async fn write_unit(paths: &Paths) -> Result<()> {
     let plist_path = plist_path()?;
     if let Some(parent) = plist_path.parent() {
         tokio::fs::create_dir_all(parent).await?;
@@ -46,18 +49,30 @@ pub async fn install(paths: &Paths) -> Result<()> {
         exe = exe_str,
     );
     tokio::fs::write(&plist_path, body).await?;
+    println!("installed launchd agent at {}", plist_path.display());
+    Ok(())
+}
+
+/// Load the LaunchAgent. `RunAtLoad=true` in the plist means `bootstrap`
+/// also starts the process immediately. If already loaded, falls back to
+/// `kickstart -k` so re-running `pidash install` after a crash-free run
+/// doesn't fail — it just ensures the service is running.
+pub async fn enable_and_start() -> Result<()> {
+    let plist = plist_path()?;
     let uid = get_uid();
     let target = format!("gui/{uid}");
     let status = Command::new("launchctl")
-        .args(["bootstrap", &target, &plist_path.display().to_string()])
+        .args(["bootstrap", &target, &plist.display().to_string()])
         .status()
         .await
         .context("launchctl bootstrap")?;
-    if !status.success() {
-        anyhow::bail!("launchctl bootstrap failed: {status}");
+    if status.success() {
+        return Ok(());
     }
-    println!("installed launchd agent at {}", plist_path.display());
-    Ok(())
+    // Already loaded → make sure it's running. `kickstart -k` restarts a
+    // loaded service; on a fresh machine (no prior load) this branch isn't
+    // taken because bootstrap succeeded above.
+    start().await
 }
 
 pub async fn uninstall(_: &Paths) -> Result<()> {
