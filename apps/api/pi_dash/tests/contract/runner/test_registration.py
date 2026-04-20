@@ -60,12 +60,13 @@ def test_register_exchanges_token_for_secret(api_client, registration):
 
     # The minted APIToken is owned by the same user as the runner, scoped
     # to the same workspace, and classified Human (user_type=0) since
-    # create_user is not a bot.
+    # create_user is not a bot. It is also flagged as a service token so
+    # CLI traffic from the runner lands on the 300/min throttle.
     api_token_row = APIToken.objects.get(token=body["api_token"])
     assert api_token_row.user_id == record.created_by_id
     assert api_token_row.workspace_id == record.workspace_id
     assert api_token_row.user_type == 0
-    assert api_token_row.is_service is False
+    assert api_token_row.is_service is True
 
 
 @pytest.mark.contract

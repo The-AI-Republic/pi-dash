@@ -1,6 +1,7 @@
 #![forbid(unsafe_code)]
 #![deny(rust_2018_idioms)]
 
+pub mod api_client;
 pub mod approval;
 pub mod cli;
 pub mod cloud;
