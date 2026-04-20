@@ -23,6 +23,11 @@ pub struct RegisterResponse {
     /// field yet — on success the server always populates it.
     #[serde(default)]
     pub workspace_slug: Option<String>,
+    /// Public REST API token (`X-Api-Key`) for `/api/v1/`. Optional so a
+    /// daemon built against the new server can also enroll against an older
+    /// server that hasn't shipped the dual-credential change yet.
+    #[serde(default)]
+    pub api_token: Option<String>,
     pub heartbeat_interval_secs: u64,
     pub protocol_version: u32,
 }

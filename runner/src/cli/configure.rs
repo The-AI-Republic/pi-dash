@@ -88,6 +88,7 @@ pub async fn run(args: Args, paths: &Paths) -> Result<()> {
     let creds = Credentials {
         runner_id: resp.runner_id,
         runner_secret: resp.runner_secret,
+        api_token: resp.api_token,
         issued_at: chrono::Utc::now(),
     };
     crate::config::file::write_credentials(paths, &creds)?;

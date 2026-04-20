@@ -59,6 +59,10 @@ class RegistrationResponseSerializer(serializers.Serializer):
     # in ``config.toml`` so the pidash CRUD CLI can scope REST requests
     # without asking the user to type ``--workspace`` every time.
     workspace_slug = serializers.CharField()
+    # Public REST API token (``X-Api-Key``) issued alongside the runner
+    # secret so the same install can also drive ``/api/v1/`` for work-item
+    # CRUD via the pidash CLI. Independently revocable.
+    api_token = serializers.CharField()
     heartbeat_interval_secs = serializers.IntegerField()
     protocol_version = serializers.IntegerField()
 

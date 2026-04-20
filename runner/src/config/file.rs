@@ -179,10 +179,29 @@ retention_days = 14
         let creds = Credentials {
             runner_id: uuid::Uuid::new_v4(),
             runner_secret: "s".into(),
+            api_token: Some("pi_dash_api_test".into()),
             issued_at: chrono::Utc::now(),
         };
         write_credentials(&paths, &creds).unwrap();
         let loaded = load_credentials(&paths).unwrap();
         assert_eq!(loaded.runner_secret, "s");
+        assert_eq!(loaded.api_token.as_deref(), Some("pi_dash_api_test"));
+    }
+
+    #[test]
+    fn credentials_without_api_token_round_trip_via_serde_default() {
+        // A credentials file written before the api_token field existed
+        // (no `api_token = ...` line) must still parse, with the field
+        // defaulting to None.
+        let tmp = tempdir().unwrap();
+        let paths = paths_for(tmp.path());
+        std::fs::create_dir_all(&paths.config_dir).unwrap();
+        let body = format!(
+            "runner_id = \"{}\"\nrunner_secret = \"abc\"\nissued_at = \"2026-04-01T00:00:00Z\"\n",
+            uuid::Uuid::new_v4()
+        );
+        std::fs::write(paths.credentials_path(), body).unwrap();
+        let loaded = load_credentials(&paths).unwrap();
+        assert_eq!(loaded.api_token, None);
     }
 }
