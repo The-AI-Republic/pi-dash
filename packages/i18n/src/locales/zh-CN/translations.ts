@@ -24,6 +24,7 @@ export default {
     pro: "专业版",
     upgrade: "升级",
     stickies: "便签",
+    prompts: "Prompts",
   },
   auth: {
     common: {

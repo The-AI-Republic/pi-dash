@@ -24,6 +24,7 @@ export default {
     pro: "Pro",
     upgrade: "Upgrade",
     stickies: "Catatan tempel",
+    prompts: "Prompts",
   },
   auth: {
     common: {

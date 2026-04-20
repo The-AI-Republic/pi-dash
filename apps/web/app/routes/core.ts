@@ -112,6 +112,12 @@ export const coreRoutes: RouteConfigEntry[] = [
           route(":workspaceSlug/runners/approvals", "./(all)/[workspaceSlug]/runners/approvals/page.tsx"),
         ]),
 
+        // Prompts (prompt templates: view for members, create/edit for workspace admins)
+        layout("./(all)/[workspaceSlug]/prompts/layout.tsx", [
+          route(":workspaceSlug/prompts", "./(all)/[workspaceSlug]/prompts/page.tsx"),
+          route(":workspaceSlug/prompts/:promptId", "./(all)/[workspaceSlug]/prompts/[promptId]/page.tsx"),
+        ]),
+
         // Workspace Views
         layout("./(all)/[workspaceSlug]/(projects)/workspace-views/layout.tsx", [
           route(":workspaceSlug/workspace-views", "./(all)/[workspaceSlug]/(projects)/workspace-views/page.tsx"),

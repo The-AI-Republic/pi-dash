@@ -24,6 +24,7 @@ export default {
     pro: "Pro",
     upgrade: "Обновить",
     stickies: "Стикеры",
+    prompts: "Prompts",
   },
   auth: {
     common: {
