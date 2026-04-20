@@ -88,7 +88,7 @@ class RegisterEndpoint(APIView):
             runner = Runner.objects.create(
                 owner=reg.created_by,
                 workspace=reg.workspace,
-                name=data["runner_name"][:128],
+                name=data["runner_name"],
                 credential_hash=minted.hashed,
                 credential_fingerprint=minted.fingerprint,
                 os=data["os"][:32],
@@ -97,11 +97,15 @@ class RegisterEndpoint(APIView):
                 protocol_version=data["protocol_version"],
             )
         except IntegrityError:
-            # `UNIQUE(workspace_id, name)` violation. Keep the registration
-            # token unconsumed by aborting the transaction (@transaction.atomic
-            # takes care of that) so the client can retry with a different
-            # name. The runner retries auto-generated names transparently;
-            # a user-supplied `--name` collision surfaces as a loud error.
+            # `UNIQUE(workspace_id, name)` violation. The registration token
+            # stays unconsumed because the `reg.consumed_at` / `reg.save(...)`
+            # writes are below this return path — they simply never execute.
+            # (Returning a Response does not by itself roll back the atomic
+            # block; it commits. The Runner.create() failed so no row landed,
+            # and the token-consume writes haven't been issued yet, so the
+            # end state is "nothing changed" regardless.) The runner retries
+            # auto-generated names transparently; a user-supplied `--name`
+            # collision surfaces as a loud error client-side.
             return Response(
                 {"error": "runner_name_taken"},
                 status=status.HTTP_409_CONFLICT,
