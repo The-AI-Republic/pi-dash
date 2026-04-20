@@ -55,6 +55,10 @@ class RegistrationRequestSerializer(serializers.Serializer):
 class RegistrationResponseSerializer(serializers.Serializer):
     runner_id = serializers.UUIDField()
     runner_secret = serializers.CharField()
+    # Public REST API token (``X-Api-Key``) issued alongside the runner
+    # secret so the same install can also drive ``/api/v1/`` for work-item
+    # CRUD via the pidash CLI. Independently revocable.
+    api_token = serializers.CharField()
     heartbeat_interval_secs = serializers.IntegerField()
     protocol_version = serializers.IntegerField()
 

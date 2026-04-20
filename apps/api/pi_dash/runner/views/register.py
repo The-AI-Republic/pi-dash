@@ -9,6 +9,7 @@ from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
+from pi_dash.db.models import APIToken
 from pi_dash.runner.authentication import RunnerBearerAuthentication
 from pi_dash.runner.models import (
     Runner,
@@ -40,7 +41,14 @@ class HealthEndpoint(APIView):
 class RegisterEndpoint(APIView):
     """POST /api/v1/runner/register/ — one-time-token to runner-secret exchange.
 
-    Called by the daemon during ``pi-dash-runner configure``.
+    Called by the daemon during ``pi-dash-runner configure``. Issues two
+    independent credentials in a single response:
+
+    - ``runner_secret`` — long-lived bearer for the daemon's WS connection.
+    - ``api_token``    — ``X-Api-Key`` for the public REST API at
+      ``/api/v1/`` so the same install can drive work-item CRUD without
+      re-authenticating. Tied to ``reg.created_by`` and revocable
+      independently of the runner.
     """
 
     authentication_classes: list = []
@@ -91,10 +99,22 @@ class RegisterEndpoint(APIView):
         reg.consumed_by_runner = runner
         reg.save(update_fields=["consumed_at", "consumed_by_runner"])
 
+        # Mint a CLI API token alongside the runner secret. Different
+        # threat model than the runner secret (interactive user actions
+        # vs. background daemon), so kept as a separate row that can be
+        # revoked independently in the user's API tokens UI.
+        api_token = APIToken.objects.create(
+            user=reg.created_by,
+            workspace=reg.workspace,
+            label=f"runner: {data['runner_name'][:96]}",
+            description="Auto-issued at runner enrollment for the pidash CLI.",
+        )
+
         payload = RegistrationResponseSerializer(
             {
                 "runner_id": runner.id,
                 "runner_secret": minted.raw,
+                "api_token": api_token.token,
                 "heartbeat_interval_secs": HEARTBEAT_INTERVAL_SECS,
                 "protocol_version": PROTOCOL_VERSION,
             }
