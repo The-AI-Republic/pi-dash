@@ -11,8 +11,8 @@ import { useTheme as useNextTheme } from "next-themes";
 import { Button, getButtonStyling } from "@pi-dash/propel/button";
 import { resolveGeneralTheme } from "@pi-dash/utils";
 // hooks
-import TakeoffIconDark from "@/app/assets/logos/takeoff-icon-dark.svg?url";
-import TakeoffIconLight from "@/app/assets/logos/takeoff-icon-light.svg?url";
+import PiSymbolDark from "@/app/assets/logos/pi-symbol-dark.svg?url";
+import PiSymbolLight from "@/app/assets/logos/pi-symbol-light.svg?url";
 import { useTheme } from "@/hooks/store";
 // icons
 
@@ -43,7 +43,7 @@ export const NewUserPopup = observer(function NewUserPopup() {
         </div>
         <div className="flex shrink-0 items-center justify-center">
           <img
-            src={resolveGeneralTheme(resolvedTheme) === "dark" ? TakeoffIconDark : TakeoffIconLight}
+            src={resolveGeneralTheme(resolvedTheme) === "dark" ? PiSymbolDark : PiSymbolLight}
             height={80}
             width={80}
             alt="Pi Dash icon"
