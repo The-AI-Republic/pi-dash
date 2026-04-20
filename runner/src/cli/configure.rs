@@ -8,7 +8,7 @@ use crate::util::paths::Paths;
 
 #[derive(Debug, ClapArgs)]
 pub struct Args {
-    /// Pi Dash cloud base URL (https://cloud.pi-dash.so).
+    /// Pi Dash cloud base URL (https://cloud.pidash.so).
     #[arg(long)]
     pub url: String,
 
@@ -58,11 +58,25 @@ pub async fn run(args: Args, paths: &Paths) -> Result<()> {
         .clone()
         .unwrap_or_else(|| paths.default_working_dir());
 
+    // A new server always populates this. `None` means we just enrolled
+    // against an older server — the daemon still works, but every CRUD
+    // subcommand will fail until the user rerun against an updated server.
+    // Surface that now instead of letting the first `pidash issue list`
+    // produce a confusing error.
+    if resp.workspace_slug.is_none() {
+        eprintln!(
+            "warning: server did not return a workspace_slug. \
+             The daemon will run, but `pidash issue` subcommands will fail \
+             until you rerun `pidash configure` against an updated server."
+        );
+    }
+
     let config = Config {
         version: 1,
         runner: crate::config::schema::RunnerSection {
             name,
             cloud_url: args.url.clone(),
+            workspace_slug: resp.workspace_slug.clone(),
         },
         workspace: crate::config::schema::WorkspaceSection { working_dir },
         codex: crate::config::schema::CodexSection::default(),
@@ -74,6 +88,7 @@ pub async fn run(args: Args, paths: &Paths) -> Result<()> {
     let creds = Credentials {
         runner_id: resp.runner_id,
         runner_secret: resp.runner_secret,
+        api_token: resp.api_token,
         issued_at: chrono::Utc::now(),
     };
     crate::config::file::write_credentials(paths, &creds)?;
@@ -87,7 +102,7 @@ pub async fn run(args: Args, paths: &Paths) -> Result<()> {
     }
 
     println!(
-        "\nRegistered runner '{}' with id {}.\nNext: `pi-dash-runner service install && pi-dash-runner service start`\n",
+        "\nRegistered runner '{}' with id {}.\nNext: `pidash service install && pidash service start`\n",
         config.runner.name, creds.runner_id,
     );
     Ok(())

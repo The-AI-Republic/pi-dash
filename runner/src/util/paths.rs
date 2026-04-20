@@ -3,8 +3,8 @@ use directories::ProjectDirs;
 use std::path::{Path, PathBuf};
 
 const QUALIFIER: &str = "so";
-const ORG: &str = "pi-dash";
-const APP: &str = "runner";
+const ORG: &str = "pidash";
+const APP: &str = "pidash";
 
 #[derive(Debug, Clone)]
 pub struct Paths {
@@ -62,14 +62,14 @@ impl Paths {
     }
 
     pub fn ipc_socket_path(&self) -> PathBuf {
-        self.runtime_dir.join("runner.sock")
+        self.runtime_dir.join("pidash.sock")
     }
 
     pub fn default_working_dir(&self) -> PathBuf {
         let base = std::env::var("TMPDIR")
             .map(PathBuf::from)
             .unwrap_or_else(|_| std::env::temp_dir());
-        base.join(".pi_dash")
+        base.join(".pidash")
     }
 
     pub fn ensure(&self) -> Result<()> {

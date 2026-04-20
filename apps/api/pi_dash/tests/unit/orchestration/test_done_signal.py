@@ -80,6 +80,20 @@ def test_parse_rejects_unknown_status():
 
 
 @pytest.mark.unit
+def test_parse_tolerates_embedded_backticks_in_string_value():
+    """``summary`` is free-form prose; an agent quoting triple backticks inside
+    the JSON value must not terminate the fence early."""
+    body = (
+        "```pi-dash-done\n"
+        '{"status": "completed", "summary": "used ``` fences in the PR body"}\n'
+        "```"
+    )
+    signal = parse(body)
+    assert signal.status == "completed"
+    assert "```" in signal.payload["summary"]
+
+
+@pytest.mark.unit
 def test_ingest_into_run_completed(db, workspace, create_user):
     run = AgentRun.objects.create(
         owner=create_user,
@@ -125,3 +139,25 @@ def test_ingest_malformed_marks_failed(db, workspace, create_user):
     run.refresh_from_db()
     assert run.status == AgentRunStatus.FAILED
     assert "done-signal parse error" in run.error
+    assert run.ended_at is not None
+
+
+@pytest.mark.unit
+def test_ingest_success_clears_prior_error_and_stamps_ended_at(
+    db, workspace, create_user
+):
+    """Regression: a run that was previously marked FAILED via a malformed
+    signal must have its error blanked and ended_at stamped when a later
+    valid signal is ingested (e.g. after a runner retry)."""
+    run = AgentRun.objects.create(
+        owner=create_user,
+        workspace=workspace,
+        prompt="",
+        status=AgentRunStatus.RUNNING,
+        error="previous parse failure",
+    )
+    ingest_into_run(run, VALID_BODY)
+    run.refresh_from_db()
+    assert run.status == AgentRunStatus.COMPLETED
+    assert run.error == ""
+    assert run.ended_at is not None

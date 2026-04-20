@@ -2,11 +2,11 @@
 //! runner's `Connection::open` against it, and verify the Hello/Welcome
 //! handshake + a few message round-trips.
 
-use pi_dash_runner::cloud::protocol::{
+use pidash::cloud::protocol::{
     ClientMsg, Envelope, RunnerStatus, ServerMsg, WIRE_VERSION,
 };
-use pi_dash_runner::cloud::ws::{Connection, run_connection};
-use pi_dash_runner::config::schema::Credentials;
+use pidash::cloud::ws::{Connection, run_connection};
+use pidash::config::schema::Credentials;
 use chrono::Utc;
 use futures_util::{SinkExt, StreamExt};
 use std::net::SocketAddr;
@@ -84,6 +84,7 @@ async fn runner_connects_hello_welcome_and_receives_assign() {
     let creds = Credentials {
         runner_id: uuid::Uuid::new_v4(),
         runner_secret: "apd_rs_testsecret".into(),
+        api_token: None,
         issued_at: Utc::now(),
     };
 

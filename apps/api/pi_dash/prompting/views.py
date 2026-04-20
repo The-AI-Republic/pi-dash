@@ -12,9 +12,11 @@ from __future__ import annotations
 
 import uuid
 
+from django.db.models import Q
 from rest_framework import status
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
+from rest_framework.throttling import UserRateThrottle
 from rest_framework.views import APIView
 
 from pi_dash.db.models.issue import Issue
@@ -22,6 +24,11 @@ from pi_dash.db.models.workspace import Workspace, WorkspaceMember
 from pi_dash.prompting.context import build_context
 from pi_dash.prompting.models import PromptTemplate
 from pi_dash.prompting.renderer import PromptRenderError, render
+
+#: Numeric value of ``WorkspaceMember.role`` for the "Admin" role. Mirrors
+#: ``db.models.workspace.ROLE_CHOICES`` — kept as a named constant here so
+#: preview access checks don't rely on an unlabelled literal.
+WORKSPACE_ADMIN_ROLE = 20
 
 
 class _FakeRun:
@@ -34,15 +41,26 @@ class _FakeRun:
 
 
 def _is_workspace_admin(user, workspace: Workspace) -> bool:
-    if user.is_superuser or user.is_staff:
+    """Preview is locked to workspace-scoped admins (role 20) plus Django
+    superusers for ops. `is_staff` alone is *not* sufficient — a staff flag
+    doesn't imply membership in this workspace, and the design (§9 Q2) is
+    explicit that preview must be workspace-admin-gated until we build a
+    richer auth model."""
+    if user.is_superuser:
         return True
     return WorkspaceMember.objects.filter(
-        workspace=workspace, member=user, role=20, is_active=True
+        workspace=workspace,
+        member=user,
+        role=WORKSPACE_ADMIN_ROLE,
+        is_active=True,
     ).exists()
 
 
 class PromptTemplatePreviewEndpoint(APIView):
-    """``POST /api/v1/workspaces/<slug>/prompt-templates/<uuid>/preview``.
+    """``POST /api/workspaces/<slug>/prompt-templates/<uuid>/preview``.
+
+    Session-authenticated, workspace-admin-gated. Mounted on the app API
+    surface (``/api/``) rather than the external ``/api/v1/`` API-key surface.
 
     Body: ``{"issue_id": "<uuid>"}``.
     Returns: ``{"prompt": "<rendered>"}``.
@@ -51,6 +69,7 @@ class PromptTemplatePreviewEndpoint(APIView):
     """
 
     permission_classes = [IsAuthenticated]
+    throttle_classes = [UserRateThrottle]
 
     def post(self, request, slug: str, template_id: uuid.UUID):
         try:
@@ -96,6 +115,4 @@ class PromptTemplatePreviewEndpoint(APIView):
 def _visible_to(workspace):
     """Templates visible to a workspace: the workspace's own rows plus the
     global default."""
-    from django.db.models import Q
-
     return Q(workspace=workspace) | Q(workspace__isnull=True)

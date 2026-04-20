@@ -110,6 +110,7 @@ mod tests {
             runner: RunnerSection {
                 name: "t".into(),
                 cloud_url: "https://x".into(),
+                workspace_slug: Some("acme".into()),
             },
             workspace: WorkspaceSection {
                 working_dir: tmp.path().join("wd"),
@@ -121,6 +122,7 @@ mod tests {
         write_config(&paths, &cfg).unwrap();
         let loaded = load_config(&paths).unwrap();
         assert_eq!(loaded.runner.name, "t");
+        assert_eq!(loaded.runner.workspace_slug.as_deref(), Some("acme"));
         use std::os::unix::fs::PermissionsExt;
         let mode = std::fs::metadata(paths.config_path())
             .unwrap()
@@ -131,16 +133,75 @@ mod tests {
     }
 
     #[test]
+    fn config_without_workspace_slug_round_trips_via_serde_default() {
+        // A config.toml written before the workspace_slug field existed
+        // (no `workspace_slug = ...` line under [runner]) must still parse,
+        // with the field defaulting to None. The CRUD subcommands will
+        // detect the None and error with a clear "rerun pidash configure"
+        // message; existing daemon subcommands never read the field.
+        let tmp = tempdir().unwrap();
+        let paths = paths_for(tmp.path());
+        std::fs::create_dir_all(&paths.config_dir).unwrap();
+        let body = r#"
+version = 1
+
+[runner]
+name = "t"
+cloud_url = "https://x"
+
+[workspace]
+working_dir = "/tmp/wd"
+
+[codex]
+binary = "codex"
+model_default = "gpt-5-codex"
+
+[approval_policy]
+auto_approve_readonly_shell = false
+auto_approve_workspace_writes = false
+auto_approve_network = false
+allowlist_commands = []
+denylist_commands = []
+
+[logging]
+level = "info"
+retention_days = 14
+"#;
+        std::fs::write(paths.config_path(), body).unwrap();
+        let loaded = load_config(&paths).unwrap();
+        assert_eq!(loaded.runner.workspace_slug, None);
+    }
+
+    #[test]
     fn writes_and_reads_credentials() {
         let tmp = tempdir().unwrap();
         let paths = paths_for(tmp.path());
         let creds = Credentials {
             runner_id: uuid::Uuid::new_v4(),
             runner_secret: "s".into(),
+            api_token: Some("pi_dash_api_test".into()),
             issued_at: chrono::Utc::now(),
         };
         write_credentials(&paths, &creds).unwrap();
         let loaded = load_credentials(&paths).unwrap();
         assert_eq!(loaded.runner_secret, "s");
+        assert_eq!(loaded.api_token.as_deref(), Some("pi_dash_api_test"));
+    }
+
+    #[test]
+    fn credentials_without_api_token_round_trip_via_serde_default() {
+        // A credentials file written before the api_token field existed
+        // (no `api_token = ...` line) must still parse, with the field
+        // defaulting to None.
+        let tmp = tempdir().unwrap();
+        let paths = paths_for(tmp.path());
+        std::fs::create_dir_all(&paths.config_dir).unwrap();
+        let body = format!(
+            "runner_id = \"{}\"\nrunner_secret = \"abc\"\nissued_at = \"2026-04-01T00:00:00Z\"\n",
+            uuid::Uuid::new_v4()
+        );
+        std::fs::write(paths.credentials_path(), body).unwrap();
+        let loaded = load_credentials(&paths).unwrap();
+        assert_eq!(loaded.api_token, None);
     }
 }

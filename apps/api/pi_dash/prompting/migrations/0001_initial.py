@@ -24,7 +24,6 @@ class Migration(migrations.Migration):
                 (
                     "id",
                     models.UUIDField(
-                        db_index=True,
                         default=uuid.uuid4,
                         editable=False,
                         primary_key=True,
@@ -67,7 +66,7 @@ class Migration(migrations.Migration):
             model_name="prompttemplate",
             index=models.Index(
                 fields=["workspace", "name", "is_active"],
-                name="prompt_temp_workspa_8fb32f_idx",
+                name="prompt_temp_workspa_e56e29_idx",
             ),
         ),
         migrations.AddConstraint(

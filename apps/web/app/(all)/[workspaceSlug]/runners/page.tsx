@@ -124,7 +124,7 @@ const RunnersListPage = observer(function RunnersListPage() {
             <div className="mt-2 text-secondary">
               {t("runners.list.token_run_instructions")}
               <pre className="font-mono mt-1 text-11 whitespace-pre-wrap select-all">
-                pi-dash-runner configure --url {origin} --token {mintedToken}
+                pidash configure --url {origin} --token {mintedToken}
               </pre>
             </div>
             <div className="mt-3">

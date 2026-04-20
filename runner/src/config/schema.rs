@@ -17,6 +17,12 @@ pub struct Config {
 pub struct RunnerSection {
     pub name: String,
     pub cloud_url: String,
+    /// Slug of the workspace this runner is bound to. Populated from the
+    /// register response at `pidash configure` time. `Option` so an older
+    /// `config.toml` (written before this field existed) still parses; new
+    /// CRUD subcommands hard-error if it's missing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace_slug: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -90,5 +96,11 @@ impl Default for LoggingSection {
 pub struct Credentials {
     pub runner_id: Uuid,
     pub runner_secret: String,
+    /// Public REST API token (`X-Api-Key`) for `/api/v1/`. Issued by the
+    /// cloud alongside `runner_secret` and used by future `pidash` CRUD
+    /// subcommands. `None` for installs enrolled before the cloud started
+    /// minting these; a follow-up `pidash login` will retrofit them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub api_token: Option<String>,
     pub issued_at: DateTime<Utc>,
 }

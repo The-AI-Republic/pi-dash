@@ -5,8 +5,8 @@
 `GET /api/v1/runner/metrics/` exposes point-in-time gauges in the Prometheus
 text exposition format (v0.0.4). Scrape every 15–60s.
 
-| Metric                            | Type  | Meaning                                                                        |
-| --------------------------------- | ----- | ------------------------------------------------------------------------------ |
+| Metric                      | Type  | Meaning                                                                        |
+| --------------------------- | ----- | ------------------------------------------------------------------------------ |
 | `pi_dash_runner_online`     | gauge | Runners currently `online` in the DB.                                          |
 | `pi_dash_runner_busy`       | gauge | Runners currently executing a run.                                             |
 | `pi_dash_runner_offline`    | gauge | Runners whose heartbeat has lapsed. Excludes revoked.                          |
@@ -34,7 +34,7 @@ text exposition format (v0.0.4). Scrape every 15–60s.
 Every runner subsystem emits structured records via `tracing` (runner) and
 Python `logging` (Django). Use these fields consistently so log search works.
 
-### Runner daemon (`pi_dash_runner`, Rust `tracing`)
+### Runner daemon (`pidash`, Rust `tracing`)
 
 | Field              | Type   | Emitted on                             |
 | ------------------ | ------ | -------------------------------------- |
