@@ -1,49 +1,20 @@
 <br /><br />
 
-<p align="center">
-<a href="https://pi-dash.so">
-  <img src="https://media.docs.pi-dash.so/logo/pi_dash_github_readme.png" alt="Pi Dash Logo" width="400">
-</a>
-</p>
-<p align="center"><b>Modern project management for all teams</b></p>
+<p align="center"><b>Pi Dash — Modern project management for all teams</b></p>
 
 <p align="center">
-    <a href="https://pi-dash.so/"><b>Website</b></a> •
-    <a href="https://forum.pi-dash.so"><b>Forum</b></a> •
-    <a href="https://x.com/pidashpowers"><b>X</b></a> •
-    <a href="https://docs.pi-dash.so/"><b>Documentation</b></a>
+    <a href="https://github.com/The-AI-Republic/pi-dash"><b>Repository</b></a> •
+    <a href="https://github.com/The-AI-Republic/pi-dash/issues"><b>Issues</b></a> •
+    <a href="https://github.com/The-AI-Republic/pi-dash/discussions"><b>Discussions</b></a>
 </p>
 
-<p>
-    <a href="https://app.pi-dash.so/#gh-light-mode-only" target="_blank">
-      <img
-        src="https://media.docs.pi-dash.so/GitHub-readme/github-top.webp"
-        alt="Pi Dash Screens"
-        width="100%"
-      />
-    </a>
-</p>
+Pi Dash is an open-source project management tool to track issues, run ~sprints~ cycles, and manage product roadmaps without the chaos of managing the tool itself.
 
-Meet [Pi Dash](https://pi-dash.so/), an open-source project management tool to track issues, run ~sprints~ cycles, and manage product roadmaps without the chaos of managing the tool itself. 🧘‍♀️
-
-> Pi Dash is evolving every day. Your suggestions, ideas, and reported bugs help us immensely. Do not hesitate to join in the conversation on [Forum](https://forum.pi-dash.so) or raise a GitHub issue. We read everything and respond to most.
+> Pi Dash is evolving every day. Your suggestions, ideas, and reported bugs help us immensely. Do not hesitate to open a [GitHub discussion](https://github.com/The-AI-Republic/pi-dash/discussions) or [raise an issue](https://github.com/The-AI-Republic/pi-dash/issues). We read everything and respond to most.
 
 ## 🚀 Installation
 
-Getting started with Pi Dash is simple. Choose the setup that works best for you:
-
-- **Pi Dash Cloud**
-  Sign up for a free account on [Pi Dash Cloud](https://app.pi-dash.so)—it's the fastest way to get up and running without worrying about infrastructure.
-
-- **Self-host Pi Dash**
-  Prefer full control over your data and infrastructure? Install and run Pi Dash on your own servers. Follow our detailed [deployment guides](https://developers.pi-dash.so/self-hosting/overview) to get started.
-
-| Installation methods | Docs link                                                                                                                                                                               |
-| -------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Docker               | [![Docker](https://img.shields.io/badge/docker-%230db7ed.svg?style=for-the-badge&logo=docker&logoColor=white)](https://developers.pi-dash.so/self-hosting/methods/docker-compose)         |
-| Kubernetes           | [![Kubernetes](https://img.shields.io/badge/kubernetes-%23326ce5.svg?style=for-the-badge&logo=kubernetes&logoColor=white)](https://developers.pi-dash.so/self-hosting/methods/kubernetes) |
-
-`Instance admins` can configure instance settings with [God mode](https://developers.pi-dash.so/self-hosting/govern/instance-admin).
+See [CONTRIBUTING](./CONTRIBUTING.md) for local development setup, and the [`deployments/`](./deployments) directory for self-hosting configurations (Docker Compose, Kubernetes).
 
 ## 🌟 Features
 
@@ -51,7 +22,7 @@ Getting started with Pi Dash is simple. Choose the setup that works best for you
   Efficiently create and manage tasks with a robust rich text editor that supports file uploads. Enhance organization and tracking by adding sub-properties and referencing related issues.
 
 - **Cycles**
-  Maintain your team’s momentum with Cycles. Track progress effortlessly using burn-down charts and other insightful tools.
+  Maintain your team's momentum with Cycles. Track progress effortlessly using burn-down charts and other insightful tools.
 
 - **Modules**
   Simplify complex projects by dividing them into smaller, manageable modules.
@@ -67,7 +38,7 @@ Getting started with Pi Dash is simple. Choose the setup that works best for you
 
 ## 🛠️ Local development
 
-See [CONTRIBUTING](./CONTRIBUTING.md)
+See [CONTRIBUTING](./CONTRIBUTING.md).
 
 ## ⚙️ Built with
 
@@ -75,91 +46,32 @@ See [CONTRIBUTING](./CONTRIBUTING.md)
 [![Django](https://img.shields.io/badge/Django-092E20?style=for-the-badge&logo=django&logoColor=green)](https://www.djangoproject.com/)
 [![Node JS](https://img.shields.io/badge/node.js-339933?style=for-the-badge&logo=Node.js&logoColor=white)](https://nodejs.org/en)
 
-## 📸 Screenshots
-
-  <p>
-    <a href="https://pi-dash.so" target="_blank">
-      <img
-        src="https://media.docs.pi-dash.so/GitHub-readme/github-work-items.webp"
-        alt="Pi Dash Views"
-        width="100%"
-      />
-    </a>
-  </p>
-  <p>
-    <a href="https://pi-dash.so" target="_blank">
-      <img
-        src="https://media.docs.pi-dash.so/GitHub-readme/github-cycles.webp"
-        width="100%"
-      />
-    </a>
-  </p>
-  <p>
-    <a href="https://pi-dash.so" target="_blank">
-      <img
-        src="https://media.docs.pi-dash.so/GitHub-readme/github-modules.webp"
-        alt="Pi Dash Cycles and Modules"
-        width="100%"
-      />
-    </a>
-  </p>
-  <p>
-    <a href="https://pi-dash.so" target="_blank">
-      <img
-        src="https://media.docs.pi-dash.so/GitHub-readme/github-views.webp"
-        alt="Pi Dash Analytics"
-        width="100%"
-      />
-    </a>
-  </p>
-   <p>
-    <a href="https://pi-dash.so" target="_blank">
-      <img
-        src="https://media.docs.pi-dash.so/GitHub-readme/github-analytics.webp"
-        alt="Pi Dash Pages"
-        width="100%"
-      />
-    </a>
-  </p>
-</p>
-
-## 📝 Documentation
-
-Explore Pi Dash's [product documentation](https://docs.pi-dash.so/) and [developer documentation](https://developers.pi-dash.so/) to learn about features, setup, and usage.
-
 ## ❤️ Community
 
-Join the Pi Dash community on [GitHub Discussions](https://github.com/orgs/makepidash/discussions) and our [Forum](https://forum.pi-dash.so). We follow a [Code of conduct](https://github.com/makepidash/pi-dash/blob/master/CODE_OF_CONDUCT.md) in all our community channels.
+Join the Pi Dash community on [GitHub Discussions](https://github.com/The-AI-Republic/pi-dash/discussions). We follow a [Code of conduct](./CODE_OF_CONDUCT.md) in all our community channels.
 
-Feel free to ask questions, report bugs, participate in discussions, share ideas, request features, or showcase your projects. We’d love to hear from you!
+Feel free to ask questions, report bugs, participate in discussions, share ideas, request features, or showcase your projects. We'd love to hear from you!
 
 ## 🛡️ Security
 
-If you discover a security vulnerability in Pi Dash, please report it responsibly instead of opening a public issue. We take all legitimate reports seriously and will investigate them promptly. See [Security policy](https://github.com/makepidash/pi-dash/blob/master/SECURITY.md) for more info.
-
-To disclose any security issues, please email us at security@pi-dash.so.
+If you discover a security vulnerability in Pi Dash, please report it responsibly instead of opening a public issue. See [SECURITY.md](./SECURITY.md) for more info.
 
 ## 🤝 Contributing
 
 There are many ways you can contribute to Pi Dash:
 
-- Report [bugs](https://github.com/makepidash/pi-dash/issues/new?assignees=srinivaspendem%2Cpushya22&labels=%F0%9F%90%9Bbug&projects=&template=--bug-report.yaml&title=%5Bbug%5D%3A+) or submit [feature requests](https://github.com/makepidash/pi-dash/issues/new?assignees=srinivaspendem%2Cpushya22&labels=%E2%9C%A8feature&projects=&template=--feature-request.yaml&title=%5Bfeature%5D%3A+).
-- Review the [documentation](https://docs.pi-dash.so/) and submit [pull requests](https://github.com/makepidash/docs) to improve it—whether it's fixing typos or adding new content.
-- Talk or write about Pi Dash or any other ecosystem integration and [let us know](https://forum.pi-dash.so)!
-- Show your support by upvoting [popular feature requests](https://github.com/makepidash/pi-dash/issues).
+- Report [bugs](https://github.com/The-AI-Republic/pi-dash/issues/new) or submit feature requests.
+- Review the documentation and submit pull requests to improve it—whether it's fixing typos or adding new content.
+- Show your support by upvoting [popular feature requests](https://github.com/The-AI-Republic/pi-dash/issues).
 
-Please read [CONTRIBUTING.md](https://github.com/makepidash/pi-dash/blob/master/CONTRIBUTING.md) for details on the process for submitting pull requests to us.
-
-### Repo activity
-
-![Pi Dash Repo Activity](https://repobeats.axiom.co/api/embed/2523c6ed2f77c082b7908c33e2ab208981d76c39.svg "Repobeats analytics image")
+Please read [CONTRIBUTING.md](./CONTRIBUTING.md) for details on the process for submitting pull requests.
 
 ### We couldn't have done this without you.
 
-<a href="https://github.com/makepidash/pi-dash/graphs/contributors">
-  <img src="https://contrib.rocks/image?repo=makepidash/pi-dash" />
+<a href="https://github.com/The-AI-Republic/pi-dash/graphs/contributors">
+  <img src="https://contrib.rocks/image?repo=The-AI-Republic/pi-dash" />
 </a>
 
 ## License
 
-This project is licensed under the [GNU Affero General Public License v3.0](https://github.com/makepidash/pi-dash/blob/master/LICENSE.txt).
+This project is licensed under the [GNU Affero General Public License v3.0](./LICENSE.txt).
