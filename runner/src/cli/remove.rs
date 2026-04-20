@@ -33,11 +33,14 @@ pub async fn run(args: Args, paths: &Paths) -> Result<()> {
     // wasn't running, because that's the expected path for a never-installed
     // or already-cleaned machine.
     let svc = crate::service::detect();
+    // Warn-level so a partial teardown is visible at default log config —
+    // a silent uninstall failure can leave the unit file behind pointing at
+    // about-to-be-deleted creds, recreating the crash-loop on next restart.
     if let Err(e) = svc.stop().await {
-        tracing::debug!("service stop failed (ok if not running): {e:#}");
+        tracing::warn!("service stop failed (ok if not running): {e:#}");
     }
     if let Err(e) = svc.uninstall(paths).await {
-        tracing::debug!("service uninstall failed (ok if not installed): {e:#}");
+        tracing::warn!("service uninstall failed (ok if not installed): {e:#}");
     }
 
     // Step 3: deregister with the cloud while we still have creds.

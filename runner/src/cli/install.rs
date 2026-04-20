@@ -35,14 +35,17 @@ pub async fn run(args: Args, paths: &Paths) -> Result<()> {
     let svc = crate::service::detect();
     svc.write_unit(paths).await?;
 
-    let fresh = !paths.config_path().exists();
+    // Treat a missing config.toml OR a missing credentials.toml as "fresh" —
+    // `enable_and_start`ing against a partial state would crash-loop the daemon
+    // on the new `__run` missing-creds bail.
+    let fresh = !paths.config_path().exists() || !paths.credentials_path().exists();
     if fresh {
         if args.no_configure || !std::io::stdin().is_terminal() {
             print_unattended_hint(args.no_configure);
             return Ok(());
         }
         // TTY + not opted-out → chain into configure interactively.
-        let inputs = prompt_for_register_inputs()?;
+        let inputs = prompt_for_register_inputs(paths)?;
         crate::cli::configure::execute(inputs, paths, /* print_next_hint = */ false).await?;
     }
 
@@ -88,9 +91,9 @@ fn print_post_install_hints() {
 /// Interactive prompts for URL + token + optional name. Stays minimal —
 /// anything else (`working_dir`, `skip_doctor`) can be provided by re-running
 /// `pidash configure` directly.
-fn prompt_for_register_inputs() -> Result<crate::cli::configure::RegisterInputs> {
+fn prompt_for_register_inputs(paths: &Paths) -> Result<crate::cli::configure::RegisterInputs> {
     println!();
-    println!("No config found at {:?}.", std::env::var_os("HOME"));
+    println!("No runner config found at {}.", paths.config_path().display());
     println!("Let's register this runner with Pi Dash cloud.");
     println!("(Press Ctrl+C to abort and run `pidash install --no-configure` instead.)");
     println!();
