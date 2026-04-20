@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 # See the LICENSE file for details.
 
+from django.core.validators import RegexValidator
 from rest_framework import serializers
 
 from pi_dash.runner.models import (
@@ -12,6 +13,17 @@ from pi_dash.runner.models import (
     ApprovalStatus,
     Runner,
     RunnerRegistrationToken,
+)
+
+
+# Mirrors the runner-side charset rule in `runner/src/util/runner_name.rs`.
+# Applied on registration so the cloud rejects garbage before it hits the
+# `UNIQUE(workspace_id, name)` constraint. Defense in depth.
+RUNNER_NAME_CHARSET = RegexValidator(
+    regex=r"^[A-Za-z0-9_-]+$",
+    message=(
+        "runner_name may only contain letters, digits, underscore, and dash"
+    ),
 )
 
 
@@ -45,7 +57,11 @@ class RegistrationRequestSerializer(serializers.Serializer):
     # Minted tokens are ``apd_reg_`` (8) + ~32 chars of entropy. Reject
     # obvious garbage before we spend a DB round-trip on it.
     token = serializers.CharField(min_length=16, max_length=128)
-    runner_name = serializers.CharField(min_length=1, max_length=128)
+    runner_name = serializers.CharField(
+        min_length=1,
+        max_length=128,
+        validators=[RUNNER_NAME_CHARSET],
+    )
     os = serializers.CharField(max_length=32)
     arch = serializers.CharField(max_length=32)
     version = serializers.CharField(max_length=32)

@@ -2,9 +2,15 @@ use anyhow::{Context, Result};
 use clap::Args as ClapArgs;
 use std::path::PathBuf;
 
-use crate::cloud::register::{RegisterRequest, register};
+use crate::cloud::register::{RegisterError, RegisterRequest, register};
 use crate::config::schema::{Config, Credentials};
 use crate::util::paths::Paths;
+use crate::util::runner_name;
+
+/// Max attempts when the auto-generated runner name happens to collide. 62³
+/// (≈238k) possible suffixes per workspace — five tries is far more than
+/// enough absent a truly pathological collision.
+const MAX_AUTO_NAME_RETRIES: u32 = 5;
 
 #[derive(Debug, ClapArgs)]
 pub struct Args {
@@ -63,27 +69,69 @@ pub async fn run(args: Args, paths: &Paths) -> Result<()> {
 /// it sets false because install itself is doing the "next" step.
 pub async fn execute(inputs: RegisterInputs, paths: &Paths, print_next_hint: bool) -> Result<()> {
     validate_cloud_url(&inputs.url)?;
-    let name = inputs
-        .name
-        .clone()
-        .unwrap_or_else(|| hostname_default().unwrap_or_else(|| "runner".to_string()));
+
+    // User-supplied names are charset-checked up front; an invalid `--name`
+    // is a hard error, not something we try to fix by retrying. Auto-generated
+    // names are charset-safe by construction.
+    let user_supplied_name = inputs.name.is_some();
+    if let Some(n) = &inputs.name {
+        runner_name::validate(n)
+            .with_context(|| format!("invalid --name value {n:?}"))?;
+    }
+
     let os = std::env::consts::OS.to_string();
     let arch = std::env::consts::ARCH.to_string();
     let version = crate::RUNNER_VERSION.to_string();
 
-    let resp = register(
-        &inputs.url,
-        &inputs.token,
-        &RegisterRequest {
-            runner_name: name.clone(),
-            os: os.clone(),
-            arch: arch.clone(),
-            version: version.clone(),
-            protocol_version: crate::PROTOCOL_VERSION,
-        },
-    )
-    .await
-    .context("cloud registration failed")?;
+    // On auto-generated names, transparently retry if the cloud says the
+    // name is already taken in this workspace. On user-supplied names, a
+    // collision is a loud error — we don't silently rename what the user
+    // typed.
+    let (resp, final_name) = {
+        let mut attempts = 0u32;
+        loop {
+            attempts += 1;
+            let attempt_name = inputs
+                .name
+                .clone()
+                .unwrap_or_else(runner_name::generate_default);
+            let req = RegisterRequest {
+                runner_name: attempt_name.clone(),
+                os: os.clone(),
+                arch: arch.clone(),
+                version: version.clone(),
+                protocol_version: crate::PROTOCOL_VERSION,
+            };
+            match register(&inputs.url, &inputs.token, &req).await {
+                Ok(resp) => break (resp, attempt_name),
+                Err(RegisterError::NameTaken)
+                    if !user_supplied_name && attempts < MAX_AUTO_NAME_RETRIES =>
+                {
+                    tracing::info!(
+                        attempt = attempts,
+                        name = %attempt_name,
+                        "auto-generated runner name already taken; retrying with a fresh suffix"
+                    );
+                    continue;
+                }
+                Err(RegisterError::NameTaken) if user_supplied_name => {
+                    anyhow::bail!(
+                        "runner name {attempt_name:?} is already taken in this workspace. \
+                         Choose a different --name, or omit --name so the client generates a unique one."
+                    );
+                }
+                Err(RegisterError::NameTaken) => {
+                    anyhow::bail!(
+                        "could not generate a unique runner name after {MAX_AUTO_NAME_RETRIES} attempts. \
+                         This is extremely unlikely; check the cloud for stale runners, or pass --name explicitly."
+                    );
+                }
+                Err(RegisterError::Other(e)) => {
+                    return Err(e).context("cloud registration failed");
+                }
+            }
+        }
+    };
 
     let working_dir = inputs
         .working_dir
@@ -106,7 +154,7 @@ pub async fn execute(inputs: RegisterInputs, paths: &Paths, print_next_hint: boo
     let config = Config {
         version: 1,
         runner: crate::config::schema::RunnerSection {
-            name,
+            name: final_name,
             cloud_url: inputs.url.clone(),
             workspace_slug: resp.workspace_slug.clone(),
         },
@@ -168,13 +216,3 @@ fn validate_cloud_url(url: &str) -> Result<()> {
     anyhow::bail!("cloud URL must start with https:// (or http:// for localhost), got {url}")
 }
 
-fn hostname_default() -> Option<String> {
-    if let Ok(h) = std::env::var("HOSTNAME") {
-        if !h.is_empty() {
-            return Some(h);
-        }
-    }
-    nix::unistd::gethostname()
-        .ok()
-        .and_then(|os| os.into_string().ok())
-}
