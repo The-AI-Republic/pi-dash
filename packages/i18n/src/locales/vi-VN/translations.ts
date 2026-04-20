@@ -24,6 +24,7 @@ export default {
     pro: "Phiên bản Pro",
     upgrade: "Nâng cấp",
     stickies: "Ghi chú",
+    prompts: "Prompts",
   },
   auth: {
     common: {

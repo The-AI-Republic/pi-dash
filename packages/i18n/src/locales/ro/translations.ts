@@ -24,6 +24,7 @@ export default {
     pro: "Pro",
     upgrade: "Treci la versiunea superioară",
     stickies: "Notițe",
+    prompts: "Prompts",
   },
   auth: {
     common: {

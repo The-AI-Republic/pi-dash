@@ -112,3 +112,27 @@ def test_preview_missing_issue_returns_400(seeded, session_client, workspace):
     )
     response = session_client.post(url, {}, format="json")
     assert response.status_code == 400
+
+
+@pytest.mark.contract
+def test_preview_renders_draft_body_override(
+    seeded, session_client, workspace, issue
+):
+    """The editor previews unsaved drafts by passing ``body`` alongside
+    ``issue_id``; the server must render the draft, not the stored body."""
+    template = PromptTemplate.objects.filter(workspace__isnull=True).first()
+    url = reverse(
+        "prompting:prompt-template-preview",
+        kwargs={"slug": workspace.slug, "template_id": template.id},
+    )
+    draft = "DRAFT: {{ issue.title }}"
+    response = session_client.post(
+        url,
+        {"issue_id": str(issue.id), "body": draft},
+        format="json",
+    )
+    assert response.status_code == 200, response.content
+    rendered = response.json()["prompt"]
+    assert rendered == f"DRAFT: {issue.name}"
+    # The stored (global default) body is NOT returned.
+    assert "Session framing" not in rendered

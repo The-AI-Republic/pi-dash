@@ -24,6 +24,7 @@ export default {
     pro: "프로",
     upgrade: "업그레이드",
     stickies: "스티키",
+    prompts: "Prompts",
   },
   auth: {
     common: {
