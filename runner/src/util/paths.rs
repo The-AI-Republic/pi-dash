@@ -62,7 +62,7 @@ impl Paths {
     }
 
     pub fn ipc_socket_path(&self) -> PathBuf {
-        self.runtime_dir.join("runner.sock")
+        self.runtime_dir.join("pidash.sock")
     }
 
     pub fn default_working_dir(&self) -> PathBuf {
