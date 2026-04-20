@@ -41,7 +41,7 @@ class HealthEndpoint(APIView):
 class RegisterEndpoint(APIView):
     """POST /api/v1/runner/register/ — one-time-token to runner-secret exchange.
 
-    Called by the daemon during ``pi-dash-runner configure``. Issues two
+    Called by the daemon during ``pidash configure``. Issues two
     independent credentials in a single response:
 
     - ``runner_secret`` — long-lived bearer for the daemon's WS connection.
@@ -125,7 +125,7 @@ class RegisterEndpoint(APIView):
 class RunnerDeregisterEndpoint(APIView):
     """POST /api/v1/runner/<uuid>/deregister/
 
-    Called by the daemon during ``pi-dash-runner remove``. Authenticated
+    Called by the daemon during ``pidash remove``. Authenticated
     with the runner's own bearer secret; the server marks the runner revoked.
     """
 

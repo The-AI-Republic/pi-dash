@@ -72,3 +72,5 @@ opentelemetry-exporter-otlp==1.28.1
 drf-spectacular==0.28.0
 # html sanitizer
 nh3==0.2.18
+# prompt templating (sandboxed)
+Jinja2==3.1.4

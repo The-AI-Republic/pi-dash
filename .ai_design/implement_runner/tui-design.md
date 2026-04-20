@@ -20,12 +20,12 @@ The TUI is a **client**, not the runner itself. The runner daemon keeps running 
 ```
 ┌────────────────────── laptop ──────────────────────┐
 │                                                     │
-│   pi-dash-runner  (service, always-on)        │
+│   pidash  (service, always-on)        │
 │        │                                            │
 │        │  local Unix socket                         │
 │        │  (Windows: named pipe)                     │
 │        │                                            │
-│   pi-dash-runner tui  (user launches adhoc)   │
+│   pidash tui  (user launches adhoc)   │
 │        │                                            │
 │        │  ─────► outbound WS to cloud               │
 │        │  ─────► spawn codex app-server             │
@@ -59,8 +59,8 @@ Minimum methods (daemon-side):
 
 Socket path:
 
-- Linux/macOS: `$XDG_RUNTIME_DIR/pi-dash-runner.sock` (or `~/.local/share/pi-dash-runner/sock`)
-- Windows: `\\.\pipe\pi-dash-runner`
+- Linux/macOS: `$XDG_RUNTIME_DIR/pidash.sock` (or `~/.local/share/pidash/sock`)
+- Windows: `\\.\pipe\pidash`
 
 Permissions: 0600 — only the owning user can connect.
 
@@ -144,7 +144,7 @@ Form-style editor. Edits are POSTed to the daemon and applied live.
 │ Identity                                                   │
 │   Runner name     my-laptop                                │
 │   Workspace       acme                                     │
-│   Cloud URL       https://cloud.pi-dash.so           │
+│   Cloud URL       https://cloud.pidash.so           │
 │                                                             │
 │ Capabilities (labels)                           [e] edit   │
 │   codex, macos, arm64                                      │
@@ -221,7 +221,7 @@ Notes:
 
 ## First-run onboarding flow
 
-When the user runs `pi-dash-runner tui` and no config exists on disk, the TUI walks them through setup instead of showing the dashboard:
+When the user runs `pidash tui` and no config exists on disk, the TUI walks them through setup instead of showing the dashboard:
 
 ```
 Step 1 of 4: Paste registration code

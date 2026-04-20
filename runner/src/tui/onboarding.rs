@@ -1,4 +1,4 @@
-//! First-run onboarding wizard. Shown by `pi-dash-runner tui` when no
+//! First-run onboarding wizard. Shown by `pidash tui` when no
 //! configuration exists on disk. Mirrors the 4-step flow from tui-design.md.
 
 use anyhow::Result;
@@ -53,7 +53,7 @@ pub async fn run(paths: Paths) -> Result<()> {
     let mut state = Wizard {
         paths,
         step: Step::Cloud,
-        cloud_url: "https://cloud.pi-dash.so".to_string(),
+        cloud_url: "https://cloud.pidash.so".to_string(),
         token: String::new(),
         name: default_name,
         cursor_field: 0,
@@ -286,7 +286,7 @@ async fn handle_service_step(code: KeyCode, state: &mut Wizard) {
                 if state.install_service {
                     "Runner is installed as a service and connected.\nThe TUI dashboard will open next."
                 } else {
-                    "Configuration saved. Run `pi-dash-runner start` to connect."
+                    "Configuration saved. Run `pidash start` to connect."
                 }
                 .to_string(),
             );

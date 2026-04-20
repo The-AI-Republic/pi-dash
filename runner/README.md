@@ -1,6 +1,6 @@
 # Pi Dash Runner
 
-Local daemon + TUI that connects a developer machine to the Pi Dash cloud and drives `codex app-server` for assigned tasks.
+Local daemon + TUI (`pidash` binary) that connects a developer machine to the Pi Dash cloud and drives `codex app-server` for assigned tasks.
 
 See `.ai_design/implement_runner/` for the design documents:
 
@@ -39,21 +39,21 @@ cargo test                                   # unit + integration tests
 cargo check                                  # quick type-check
 cargo clippy -- -D warnings                  # lint
 
-./target/debug/pi-dash-runner configure \
-  --url https://cloud.pi-dash.so \
+./target/debug/pidash configure \
+  --url https://cloud.pidash.so \
   --token <ONE_TIME_CODE> \
   --name my-laptop
 
-./target/debug/pi-dash-runner service install
-./target/debug/pi-dash-runner service start
-./target/debug/pi-dash-runner tui
+./target/debug/pidash service install
+./target/debug/pidash service start
+./target/debug/pidash tui
 ```
 
 ## Runtime paths (XDG)
 
-- Config: `~/.config/pi-dash-runner/`
-- Data / logs: `~/.local/share/pi-dash-runner/`
-- Runtime dir: `$XDG_RUNTIME_DIR/pi-dash-runner/` (Unix socket, PID file)
+- Config: `~/.config/pidash/`
+- Data / logs: `~/.local/share/pidash/`
+- Runtime dir: `$XDG_RUNTIME_DIR/pidash/` (Unix socket, PID file)
 
 All secrets on disk are written with `0600`. The Unix IPC socket is also `0600`.
 

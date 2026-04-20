@@ -20,6 +20,7 @@ urlpatterns = [
     path("api/instances/", include("pi_dash.license.urls")),
     path("api/runners/", include("pi_dash.runner.web_urls")),
     path("api/v1/", include("pi_dash.api.urls")),
+    path("api/", include("pi_dash.prompting.urls")),
     path("api/v1/runner/", include("pi_dash.runner.urls")),
     path("auth/", include("pi_dash.authentication.urls")),
     path("", include("pi_dash.web.urls")),

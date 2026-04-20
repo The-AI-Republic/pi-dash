@@ -54,6 +54,8 @@ INSTALLED_APPS = [
     "pi_dash.api",
     "pi_dash.authentication",
     "pi_dash.runner",
+    "pi_dash.prompting",
+    "pi_dash.orchestration",
     # Third-party things
     "channels",
     "rest_framework",
@@ -85,6 +87,7 @@ REST_FRAMEWORK = {
     "DEFAULT_THROTTLE_RATES": {
         "anon": "30/minute",
         "asset_id": "5/minute",
+        "user": "120/minute",
     },
     "DEFAULT_PERMISSION_CLASSES": ("rest_framework.permissions.IsAuthenticated",),
     "DEFAULT_RENDERER_CLASSES": ("rest_framework.renderers.JSONRenderer",),
