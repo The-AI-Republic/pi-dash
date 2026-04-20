@@ -24,7 +24,7 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-ExecStart={exe} start
+ExecStart={exe} __run
 Environment=PIDASH_CONFIG_DIR={config_dir}
 Environment=PIDASH_DATA_DIR={data_dir}
 Environment=XDG_RUNTIME_DIR={runtime_dir}

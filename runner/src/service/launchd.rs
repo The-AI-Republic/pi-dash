@@ -27,7 +27,7 @@ pub async fn install(paths: &Paths) -> Result<()> {
   <key>ProgramArguments</key>
   <array>
     <string>{exe}</string>
-    <string>start</string>
+    <string>__run</string>
   </array>
   <key>EnvironmentVariables</key>
   <dict>

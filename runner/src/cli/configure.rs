@@ -102,7 +102,7 @@ pub async fn run(args: Args, paths: &Paths) -> Result<()> {
     }
 
     println!(
-        "\nRegistered runner '{}' with id {}.\nNext: `pidash service install && pidash service start`\n",
+        "\nRegistered runner '{}' with id {}.\nNext: `pidash install && pidash start`\n",
         config.runner.name, creds.runner_id,
     );
     Ok(())

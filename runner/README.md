@@ -16,7 +16,7 @@ runner/
 ├── src/
 │   ├── main.rs               # tokio entrypoint
 │   ├── lib.rs                # module root
-│   ├── cli/                  # clap subcommands: configure / start / service / status / tui / doctor / remove
+│   ├── cli/                  # clap subcommands: configure / install / uninstall / start / stop / restart / status / tui / doctor / remove / rotate / issue / comment / state / workspace / __run (hidden)
 │   ├── daemon/               # supervisor + state machine
 │   ├── cloud/                # WS client, message schemas, registration HTTP
 │   ├── codex/                # app-server subprocess + JSON-RPC bridge
@@ -44,9 +44,12 @@ cargo clippy -- -D warnings                  # lint
   --token <ONE_TIME_CODE> \
   --name my-laptop
 
-./target/debug/pidash service install
-./target/debug/pidash service start
-./target/debug/pidash tui
+./target/debug/pidash install        # writes systemd user unit / launchd agent
+./target/debug/pidash start          # starts the service
+./target/debug/pidash status         # service + daemon status
+./target/debug/pidash tui            # interactive UI over the IPC socket
+./target/debug/pidash stop           # stops the service
+./target/debug/pidash uninstall      # removes the unit
 ```
 
 ## Runtime paths (XDG)
@@ -65,7 +68,7 @@ Wire version is `1` — bumped on incompatible shape changes. See `src/cloud/pro
 
 - **Unit:** `cargo test` — deterministic table-driven tests for protocol serde, approval policy, reconnect backoff, workspace resolve, config roundtrip.
 - **Integration:** `tests/protocol_roundtrip.rs` — every client/server variant round-trips; router state machine invariants.
-- **Manual QA** (per release): macOS arm64/x64 + Linux x64 → first-run `configure` → `service install` → TUI shows connected → synthetic run via `/api/runners/runs/` → approval prompt → decision.
+- **Manual QA** (per release): macOS arm64/x64 + Linux x64 → first-run `configure` → `install` → `start` → TUI shows connected → synthetic run via `/api/runners/runs/` → approval prompt → decision.
 
 ## Release
 
