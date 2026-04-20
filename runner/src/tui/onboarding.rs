@@ -286,12 +286,12 @@ async fn handle_service_step(code: KeyCode, state: &mut Wizard) {
             state.busy = true;
             if state.install_service {
                 let svc = crate::service::detect();
-                if let Err(e) = svc.install(&state.paths).await {
+                if let Err(e) = svc.write_unit(&state.paths).await {
                     state.error = Some(format!("service install failed: {e:#}"));
                     state.busy = false;
                     return;
                 }
-                if let Err(e) = svc.start().await {
+                if let Err(e) = svc.enable_and_start().await {
                     state.error = Some(format!("service start failed: {e:#}"));
                     // Not fatal — user can start manually.
                 }
@@ -300,7 +300,7 @@ async fn handle_service_step(code: KeyCode, state: &mut Wizard) {
                 if state.install_service {
                     "Runner is installed as a service and connected.\nThe TUI dashboard will open next."
                 } else {
-                    "Configuration saved. Run `pidash start` to connect."
+                    "Configuration saved. Run `pidash install` to set up and start the background service."
                 }
                 .to_string(),
             );

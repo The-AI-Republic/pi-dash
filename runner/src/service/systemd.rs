@@ -6,7 +6,10 @@ use crate::util::paths::Paths;
 
 const UNIT_NAME: &str = "pidash.service";
 
-pub async fn install(paths: &Paths) -> Result<()> {
+/// Write the unit file and reload the systemd user manager. Does NOT enable
+/// or start the unit — that's a separate step so `pidash install` can gate
+/// it on `pidash configure` completing first.
+pub async fn write_unit(paths: &Paths) -> Result<()> {
     let unit_path = unit_path()?;
     if let Some(parent) = unit_path.parent() {
         tokio::fs::create_dir_all(parent).await?;
@@ -38,8 +41,14 @@ WantedBy=default.target
     );
     tokio::fs::write(&unit_path, body).await?;
     run_systemctl(&["daemon-reload"]).await?;
-    run_systemctl(&["enable", UNIT_NAME]).await?;
     println!("installed systemd unit at {}", unit_path.display());
+    Ok(())
+}
+
+/// Enable the unit at boot/login and start it now. Idempotent.
+pub async fn enable_and_start() -> Result<()> {
+    run_systemctl(&["enable", UNIT_NAME]).await?;
+    run_systemctl(&["start", UNIT_NAME]).await?;
     Ok(())
 }
 

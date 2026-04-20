@@ -189,6 +189,66 @@ retention_days = 14
     }
 
     #[test]
+    fn minimal_config_without_optional_sections_parses_with_defaults() {
+        // A config.toml missing [approval_policy] and [logging] must still
+        // parse — PR 2 adds `#[serde(default)]` on those sections so fresh
+        // installs can ship a leaner toml and still get sensible defaults.
+        let tmp = tempdir().unwrap();
+        let paths = paths_for(tmp.path());
+        std::fs::create_dir_all(&paths.config_dir).unwrap();
+        let body = r#"
+version = 1
+
+[runner]
+name = "t"
+cloud_url = "https://x"
+
+[workspace]
+working_dir = "/tmp/wd"
+
+[codex]
+binary = "codex"
+"#;
+        std::fs::write(paths.config_path(), body).unwrap();
+        let loaded = load_config(&paths).unwrap();
+        assert_eq!(loaded.runner.name, "t");
+        // Defaults applied to the omitted sections:
+        assert!(!loaded.approval_policy.auto_approve_network);
+        assert_eq!(loaded.logging.level, "info");
+        assert_eq!(loaded.logging.retention_days, 14);
+        // Optional codex.model_default is allowed to be absent:
+        assert_eq!(loaded.codex.model_default, None);
+    }
+
+    #[test]
+    fn config_without_required_field_fails_loudly() {
+        // `runner.cloud_url` is required. A config without it must fail to
+        // parse so `__run` never boots a half-configured daemon.
+        let tmp = tempdir().unwrap();
+        let paths = paths_for(tmp.path());
+        std::fs::create_dir_all(&paths.config_dir).unwrap();
+        let body = r#"
+version = 1
+
+[runner]
+name = "t"
+
+[workspace]
+working_dir = "/tmp/wd"
+
+[codex]
+binary = "codex"
+"#;
+        std::fs::write(paths.config_path(), body).unwrap();
+        let err = load_config(&paths).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("cloud_url") || msg.contains("runner"),
+            "error should mention the missing field: {msg}",
+        );
+    }
+
+    #[test]
     fn credentials_without_api_token_round_trip_via_serde_default() {
         // A credentials file written before the api_token field existed
         // (no `api_token = ...` line) must still parse, with the field

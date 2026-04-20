@@ -29,9 +29,41 @@ pub struct Args {
     pub skip_doctor: bool,
 }
 
+/// Inputs for the core registration flow. `cli::install::run` also builds one
+/// of these — once via clap, once via interactive prompts.
+pub struct RegisterInputs {
+    pub url: String,
+    pub token: String,
+    pub name: Option<String>,
+    pub working_dir: Option<PathBuf>,
+    pub skip_doctor: bool,
+}
+
+impl From<Args> for RegisterInputs {
+    fn from(a: Args) -> Self {
+        Self {
+            url: a.url,
+            token: a.token,
+            name: a.name,
+            working_dir: a.working_dir,
+            skip_doctor: a.skip_doctor,
+        }
+    }
+}
+
 pub async fn run(args: Args, paths: &Paths) -> Result<()> {
-    validate_cloud_url(&args.url)?;
-    let name = args
+    execute(args.into(), paths, /* print_next_hint = */ true).await
+}
+
+/// Core registration flow — hits the cloud register endpoint, persists
+/// `config.toml` + `credentials.toml`, and optionally runs the doctor.
+///
+/// `print_next_hint` controls whether the trailing "Next: …" banner appears.
+/// `pidash configure` sets it true; when `pidash install` chains into this,
+/// it sets false because install itself is doing the "next" step.
+pub async fn execute(inputs: RegisterInputs, paths: &Paths, print_next_hint: bool) -> Result<()> {
+    validate_cloud_url(&inputs.url)?;
+    let name = inputs
         .name
         .clone()
         .unwrap_or_else(|| hostname_default().unwrap_or_else(|| "runner".to_string()));
@@ -40,8 +72,8 @@ pub async fn run(args: Args, paths: &Paths) -> Result<()> {
     let version = crate::RUNNER_VERSION.to_string();
 
     let resp = register(
-        &args.url,
-        &args.token,
+        &inputs.url,
+        &inputs.token,
         &RegisterRequest {
             runner_name: name.clone(),
             os: os.clone(),
@@ -53,7 +85,7 @@ pub async fn run(args: Args, paths: &Paths) -> Result<()> {
     .await
     .context("cloud registration failed")?;
 
-    let working_dir = args
+    let working_dir = inputs
         .working_dir
         .clone()
         .unwrap_or_else(|| paths.default_working_dir());
@@ -75,7 +107,7 @@ pub async fn run(args: Args, paths: &Paths) -> Result<()> {
         version: 1,
         runner: crate::config::schema::RunnerSection {
             name,
-            cloud_url: args.url.clone(),
+            cloud_url: inputs.url.clone(),
             workspace_slug: resp.workspace_slug.clone(),
         },
         workspace: crate::config::schema::WorkspaceSection { working_dir },
@@ -93,7 +125,7 @@ pub async fn run(args: Args, paths: &Paths) -> Result<()> {
     };
     crate::config::file::write_credentials(paths, &creds)?;
 
-    if !args.skip_doctor {
+    if !inputs.skip_doctor {
         let report = crate::cli::doctor::execute(paths).await?;
         report.print_compact();
         if report.has_blockers() {
@@ -101,10 +133,17 @@ pub async fn run(args: Args, paths: &Paths) -> Result<()> {
         }
     }
 
-    println!(
-        "\nRegistered runner '{}' with id {}.\nNext: `pidash install && pidash start`\n",
-        config.runner.name, creds.runner_id,
-    );
+    if print_next_hint {
+        println!(
+            "\nRegistered runner '{}' with id {}.\nNext: `pidash install` to run as a background service.\n",
+            config.runner.name, creds.runner_id,
+        );
+    } else {
+        println!(
+            "\nRegistered runner '{}' with id {}.",
+            config.runner.name, creds.runner_id,
+        );
+    }
     Ok(())
 }
 

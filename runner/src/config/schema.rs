@@ -9,7 +9,12 @@ pub struct Config {
     pub runner: RunnerSection,
     pub workspace: WorkspaceSection,
     pub codex: CodexSection,
+    /// Missing section falls back to the `ApprovalPolicySection::default()` so
+    /// a minimal `config.toml` doesn't have to spell out every knob.
+    #[serde(default)]
     pub approval_policy: ApprovalPolicySection,
+    /// Missing section falls back to the `LoggingSection::default()`.
+    #[serde(default)]
     pub logging: LoggingSection,
 }
 
@@ -33,6 +38,7 @@ pub struct WorkspaceSection {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CodexSection {
     pub binary: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model_default: Option<String>,
 }
 
