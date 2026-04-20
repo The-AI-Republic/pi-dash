@@ -80,6 +80,20 @@ def test_parse_rejects_unknown_status():
 
 
 @pytest.mark.unit
+def test_parse_tolerates_embedded_backticks_in_string_value():
+    """``summary`` is free-form prose; an agent quoting triple backticks inside
+    the JSON value must not terminate the fence early."""
+    body = (
+        "```pi-dash-done\n"
+        '{"status": "completed", "summary": "used ``` fences in the PR body"}\n'
+        "```"
+    )
+    signal = parse(body)
+    assert signal.status == "completed"
+    assert "```" in signal.payload["summary"]
+
+
+@pytest.mark.unit
 def test_ingest_into_run_completed(db, workspace, create_user):
     run = AgentRun.objects.create(
         owner=create_user,

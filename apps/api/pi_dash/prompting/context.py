@@ -96,10 +96,12 @@ def build_context(issue: Issue, run: AgentRun) -> Dict[str, Any]:
 
 
 def _compute_attempt(issue: Issue, run: AgentRun) -> int:
-    """Attempt number = count of prior (non-cancelled, non-failed-drafted) runs
-    on this issue, plus one. Cheap, deterministic, and good enough for MVP."""
-    from pi_dash.runner.models import AgentRun  # local import avoids cycles
+    """Attempt number = count of prior runs on this issue, plus one.
 
+    Counts every prior run regardless of terminal status — surfacing cancelled
+    or failed attempts in the attempt counter is useful context for the agent.
+    Cheap, deterministic, and good enough for MVP.
+    """
     if issue is None:
         return 1
     prior = AgentRun.objects.filter(work_item_id=issue.id).exclude(id=run.id).count()

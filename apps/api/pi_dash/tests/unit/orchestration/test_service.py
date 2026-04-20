@@ -5,6 +5,7 @@
 from unittest import mock
 
 import pytest
+from crum import impersonate
 
 from pi_dash.db.models import Issue, Project, State
 from pi_dash.orchestration import service
@@ -19,34 +20,44 @@ def seeded(db):
 
 @pytest.fixture
 def project(db, workspace, create_user):
-    return Project.objects.create(
-        name="Web",
-        identifier="WEB",
-        workspace=workspace,
-        created_by=create_user,
-    )
+    # ``BaseModel.save`` pulls ``created_by`` from ``crum.get_current_user()``
+    # and wipes any direct FK assignment. Tests run without a request, so we
+    # impersonate the user explicitly to populate the audit fields.
+    with impersonate(create_user):
+        return Project.objects.create(
+            name="Web",
+            identifier="WEB",
+            workspace=workspace,
+            created_by=create_user,
+        )
 
 
 @pytest.fixture
-def states(project):
-    return {
-        "todo": State.objects.create(name="Todo", project=project, group="unstarted"),
-        "in_progress": State.objects.create(
-            name="In Progress", project=project, group="started"
-        ),
-        "done": State.objects.create(name="Done", project=project, group="completed"),
-    }
+def states(project, create_user):
+    with impersonate(create_user):
+        return {
+            "todo": State.objects.create(
+                name="Todo", project=project, group="unstarted"
+            ),
+            "in_progress": State.objects.create(
+                name="In Progress", project=project, group="started"
+            ),
+            "done": State.objects.create(
+                name="Done", project=project, group="completed"
+            ),
+        }
 
 
 @pytest.fixture
 def issue(workspace, project, states, create_user):
-    return Issue.objects.create(
-        name="Task",
-        workspace=workspace,
-        project=project,
-        state=states["todo"],
-        created_by=create_user,
-    )
+    with impersonate(create_user):
+        return Issue.objects.create(
+            name="Task",
+            workspace=workspace,
+            project=project,
+            state=states["todo"],
+            created_by=create_user,
+        )
 
 
 @pytest.fixture(autouse=True)

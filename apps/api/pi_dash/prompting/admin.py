@@ -23,7 +23,7 @@ class PromptTemplateAdmin(admin.ModelAdmin):
     list_display = ("name", "workspace", "is_active", "version", "updated_at")
     list_filter = ("name", "is_active", "workspace")
     search_fields = ("name", "workspace__slug")
-    readonly_fields = ("id", "created_at", "updated_at", "version")
+    readonly_fields = ("id", "created_at", "updated_at", "version", "updated_by")
 
     def get_readonly_fields(self, request, obj=None):
         ro = list(super().get_readonly_fields(request, obj))
@@ -33,3 +33,10 @@ class PromptTemplateAdmin(admin.ModelAdmin):
             if not request.user.is_superuser:
                 ro.extend(["workspace", "name", "body", "is_active"])
         return ro
+
+    def save_model(self, request, obj, form, change):
+        # Populate the audit field — the admin is currently the only surface
+        # that edits templates, so this is where ``updated_by`` gets set until
+        # a dedicated REST endpoint lands.
+        obj.updated_by = request.user
+        super().save_model(request, obj, form, change)

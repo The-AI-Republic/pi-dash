@@ -19,9 +19,7 @@ from django.db.models import Q
 class PromptTemplate(models.Model):
     DEFAULT_NAME = "coding-task"
 
-    id = models.UUIDField(
-        primary_key=True, default=uuid.uuid4, editable=False, db_index=True
-    )
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     workspace = models.ForeignKey(
         "db.Workspace",
         null=True,

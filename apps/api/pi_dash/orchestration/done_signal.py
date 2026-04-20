@@ -19,9 +19,14 @@ from typing import Any, Dict, Optional
 from django.utils import timezone
 
 
+#: The closing fence is anchored to the start of a line so a stray triple
+#: backtick inside a JSON string value (``summary``/``reason``/``notes`` are
+#: all free-form) can't terminate the match early. In JSON, real newlines
+#: inside string values must be escaped as ``\n``, so ``^```$`` is only reached
+#: at a true fence boundary.
 FENCE_RE = re.compile(
-    r"```pi-dash-done\s*\n(?P<body>.*?)```",
-    re.DOTALL,
+    r"^```pi-dash-done[ \t]*\n(?P<body>.*?)^```[ \t]*$",
+    re.DOTALL | re.MULTILINE,
 )
 
 VALID_STATUSES = {"completed", "blocked", "noop"}

@@ -24,8 +24,7 @@ DEFAULT_TEMPLATE_FILE = (
 
 
 def read_default_body() -> str:
-    with open(DEFAULT_TEMPLATE_FILE, "r", encoding="utf-8") as fh:
-        return fh.read()
+    return DEFAULT_TEMPLATE_FILE.read_text(encoding="utf-8")
 
 
 def seed_default_template(force: bool = False) -> str:

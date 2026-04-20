@@ -53,7 +53,7 @@ def fire_state_transition(sender, instance: Issue, created: bool, **kwargs) -> N
         return
 
     from_state = _lookup_state(prev_state_id)
-    to_state = instance.state if current_state_id else _lookup_state(current_state_id)
+    to_state = instance.state if current_state_id else None
 
     try:
         handle_issue_state_transition(
