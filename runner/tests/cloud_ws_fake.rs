@@ -84,6 +84,7 @@ async fn runner_connects_hello_welcome_and_receives_assign() {
     let creds = Credentials {
         runner_id: uuid::Uuid::new_v4(),
         runner_secret: "apd_rs_testsecret".into(),
+        api_token: None,
         issued_at: Utc::now(),
     };
 

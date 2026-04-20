@@ -90,5 +90,11 @@ impl Default for LoggingSection {
 pub struct Credentials {
     pub runner_id: Uuid,
     pub runner_secret: String,
+    /// Public REST API token (`X-Api-Key`) for `/api/v1/`. Issued by the
+    /// cloud alongside `runner_secret` and used by future `pidash` CRUD
+    /// subcommands. `None` for installs enrolled before the cloud started
+    /// minting these; a follow-up `pidash login` will retrofit them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub api_token: Option<String>,
     pub issued_at: DateTime<Utc>,
 }

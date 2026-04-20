@@ -223,6 +223,7 @@ async fn register_and_advance(state: &mut Wizard) {
             let creds = Credentials {
                 runner_id: resp.runner_id,
                 runner_secret: resp.runner_secret,
+                api_token: resp.api_token,
                 issued_at: chrono::Utc::now(),
             };
             if let Err(e) = crate::config::file::write_credentials(&state.paths, &creds) {
