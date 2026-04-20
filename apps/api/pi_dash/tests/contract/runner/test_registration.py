@@ -8,6 +8,7 @@ import pytest
 from django.urls import reverse
 from django.utils import timezone
 
+from pi_dash.db.models.api import APIToken
 from pi_dash.runner.models import (
     AgentRunStatus,
     Runner,
@@ -46,12 +47,57 @@ def test_register_exchanges_token_for_secret(api_client, registration):
     assert resp.status_code == 201
     body = resp.json()
     assert body["runner_secret"].startswith("apd_rs_")
+    assert body["api_token"].startswith("pi_dash_api_")
     assert body["protocol_version"] == 1
     runner = Runner.objects.get(id=body["runner_id"])
     assert runner.owner_id == record.created_by_id
     record.refresh_from_db()
     assert record.consumed_at is not None
     assert record.consumed_by_runner_id == runner.id
+
+    # The minted APIToken is owned by the same user as the runner, scoped
+    # to the same workspace, and classified Human (user_type=0) since
+    # create_user is not a bot.
+    api_token_row = APIToken.objects.get(token=body["api_token"])
+    assert api_token_row.user_id == record.created_by_id
+    assert api_token_row.workspace_id == record.workspace_id
+    assert api_token_row.user_type == 0
+    assert api_token_row.is_service is False
+
+
+@pytest.mark.contract
+def test_register_classifies_bot_owned_token_correctly(
+    api_client, db, create_bot_user, workspace
+):
+    # Registration tokens can be minted by bot users (the endpoint only
+    # requires IsAuthenticated), so the auto-issued APIToken must inherit
+    # user_type=1 rather than falling back to the Human default.
+    minted = tokens.mint_registration_token()
+    RunnerRegistrationToken.objects.create(
+        workspace=workspace,
+        created_by=create_bot_user,
+        token_hash=minted.hashed,
+        label="bot-test",
+        expires_at=minted.expires_at,
+    )
+    url = reverse("runner:register")
+    resp = api_client.post(
+        url,
+        {
+            "token": minted.raw,
+            "runner_name": "bot-laptop",
+            "os": "linux",
+            "arch": "x86_64",
+            "version": "0.1.0",
+            "protocol_version": 1,
+        },
+        format="json",
+    )
+    assert resp.status_code == 201
+    body = resp.json()
+    api_token_row = APIToken.objects.get(token=body["api_token"])
+    assert api_token_row.user_id == create_bot_user.id
+    assert api_token_row.user_type == 1
 
 
 @pytest.mark.contract

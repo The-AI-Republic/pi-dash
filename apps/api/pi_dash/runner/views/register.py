@@ -105,6 +105,7 @@ class RegisterEndpoint(APIView):
         # revoked independently in the user's API tokens UI.
         api_token = APIToken.objects.create(
             user=reg.created_by,
+            user_type=1 if reg.created_by.is_bot else 0,
             workspace=reg.workspace,
             label=f"runner: {data['runner_name'][:96]}",
             description="Auto-issued at runner enrollment for the pidash CLI.",
