@@ -18,6 +18,9 @@ pub async fn run(_args: Args, paths: &Paths) -> Result<()> {
     let new_creds = Credentials {
         runner_id: resp.runner_id,
         runner_secret: resp.runner_secret,
+        // The rotate endpoint only mints a new runner_secret; the existing
+        // api_token is unaffected, so preserve it across the rotation.
+        api_token: creds.api_token.clone(),
         issued_at: chrono::Utc::now(),
     };
     crate::config::file::write_credentials(paths, &new_creds)?;
