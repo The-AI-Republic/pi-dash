@@ -21,6 +21,7 @@ pub const EXIT_INVALID: i32 = 2;
 pub const EXIT_AUTH: i32 = 3;
 pub const EXIT_NOT_FOUND: i32 = 4;
 pub const EXIT_SERVER: i32 = 5;
+pub const EXIT_THROTTLED: i32 = 6;
 pub const EXIT_UNKNOWN: i32 = 1;
 
 /// Error type that remembers a suggested process exit code.
@@ -74,9 +75,8 @@ impl CliEnv {
     pub fn from_env() -> Result<Self, CliError> {
         let api_url = std::env::var("PIDASH_API_URL")
             .map_err(|_| CliError::new(EXIT_INVALID, "PIDASH_API_URL is not set"))?;
-        let workspace_slug = std::env::var("PIDASH_WORKSPACE_SLUG").map_err(|_| {
-            CliError::new(EXIT_INVALID, "PIDASH_WORKSPACE_SLUG is not set")
-        })?;
+        let workspace_slug = std::env::var("PIDASH_WORKSPACE_SLUG")
+            .map_err(|_| CliError::new(EXIT_INVALID, "PIDASH_WORKSPACE_SLUG is not set"))?;
         let token = std::env::var("PIDASH_TOKEN")
             .map_err(|_| CliError::new(EXIT_INVALID, "PIDASH_TOKEN is not set"))?;
         Ok(Self {
@@ -149,7 +149,12 @@ impl ApiClient {
             .await
             .map_err(|e| CliError::new(EXIT_UNKNOWN, format!("{method} {url}: {e}")))?;
         let status = resp.status();
-        let text = resp.text().await.unwrap_or_default();
+        let text = resp.text().await.map_err(|e| {
+            CliError::new(
+                EXIT_UNKNOWN,
+                format!("{method} {url}: failed reading response body: {e}"),
+            )
+        })?;
         if status.is_success() {
             if text.is_empty() {
                 return Ok(Value::Null);
@@ -168,6 +173,7 @@ fn map_error_status(status: StatusCode, body: String) -> CliError {
         400 | 409 | 422 => EXIT_INVALID,
         401 | 403 => EXIT_AUTH,
         404 => EXIT_NOT_FOUND,
+        429 => EXIT_THROTTLED,
         500..=599 => EXIT_SERVER,
         _ => EXIT_UNKNOWN,
     };
@@ -175,6 +181,7 @@ fn map_error_status(status: StatusCode, body: String) -> CliError {
         400 | 409 | 422 => "invalid request",
         401 | 403 => "auth failed",
         404 => "not found",
+        429 => "throttled",
         500..=599 => "server error",
         _ => "request failed",
     };

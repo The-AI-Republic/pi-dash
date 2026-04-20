@@ -45,7 +45,7 @@ If any required tool is missing, block the run per the "Blocking the run" sectio
 
 `pidash` is your only channel to Pi Dash during this run. Use it to read the issue, read and write comments, and move the issue between workflow states. Do not use `curl`, raw HTTP, or any other tool to reach the Pi Dash API — only the `pidash` binary is authenticated for this session.
 
-The CLI reads `PIDASH_API_URL`, `PIDASH_WORKSPACE_SLUG`, and `PIDASH_TOKEN` from the environment; you never pass them as flags. Every command prints a single JSON document to stdout on success. Errors print a JSON object with an `error` key to stderr and exit non-zero.
+The CLI reads `PIDASH_API_URL`, `PIDASH_WORKSPACE_SLUG`, and `PIDASH_TOKEN` from the environment. The runner may also provide `PIDASH_ISSUE_IDENTIFIER` so commands like `pidash state list` can default to the current issue's project. You never pass these as flags. Every command prints a single JSON document to stdout on success. Errors print a JSON object with an `error` key to stderr and exit non-zero.
 
 ### Commands
 
@@ -55,7 +55,7 @@ The CLI reads `PIDASH_API_URL`, `PIDASH_WORKSPACE_SLUG`, and `PIDASH_TOKEN` from
 - `pidash comment list {{ issue.identifier }}` — list all comments with IDs. Use this on follow-up runs to locate your `## Agent Workpad` comment.
 - `pidash comment add {{ issue.identifier }} --body-file <path>` (or `--body <markdown>`) — add a new comment. Prefer `--body-file` for anything longer than a line or two.
 - `pidash comment update <comment-id> --body-file <path>` — edit a comment you own. This is how you update the workpad in place.
-- `pidash state list` — list the states available in this issue's project with `name`, `description`, `group`. Already rendered below; call this again only if something looks stale.
+- `pidash state list` — list the states available in this issue's project with `name`, `description`, `group`. It uses the current issue context by default; you can also pass an explicit issue identifier or project UUID if needed. Already rendered below; call this again only if something looks stale.
 - `pidash workspace me` — print the authenticated user. For debugging; you should not need it.
 
 ### Available states

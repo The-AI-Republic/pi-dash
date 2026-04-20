@@ -10,7 +10,7 @@
 use clap::{Args, Subcommand};
 use serde_json::{Map, Value};
 
-use crate::api_client::{ApiClient, CliEnv, CliError, EXIT_INVALID, report_error};
+use crate::api_client::{ApiClient, CliEnv, CliError, EXIT_INVALID, EXIT_UNKNOWN, report_error};
 
 use super::resolve::{looks_like_uuid, resolve_issue, resolve_state_name};
 
@@ -60,7 +60,7 @@ pub async fn run(args: IssueArgs) -> i32 {
     };
     let client = match ApiClient::new(env) {
         Ok(c) => c,
-        Err(e) => return report_error(&CliError::new(1, format!("{e}"))),
+        Err(e) => return report_error(&CliError::new(EXIT_UNKNOWN, format!("{e}"))),
     };
 
     let result = match args.command {
@@ -75,7 +75,10 @@ pub async fn run(args: IssueArgs) -> i32 {
 
 async fn cmd_get(client: &ApiClient, identifier: &str) -> Result<(), CliError> {
     let issue = resolve_issue(client, identifier).await?;
-    println!("{}", serde_json::to_string(&issue.raw).unwrap_or_default());
+    println!(
+        "{}",
+        serde_json::to_string(&issue.raw).expect("serialize JSON value")
+    );
     Ok(())
 }
 
@@ -119,6 +122,9 @@ async fn cmd_patch(client: &ApiClient, args: PatchArgs) -> Result<(), CliError> 
         client.env.workspace_slug, issue.project_id, issue.id
     );
     let resp = client.patch(&path, &Value::Object(body)).await?;
-    println!("{}", serde_json::to_string(&resp).unwrap_or_default());
+    println!(
+        "{}",
+        serde_json::to_string(&resp).expect("serialize JSON value")
+    );
     Ok(())
 }

@@ -6,7 +6,7 @@
 
 use clap::{Args, Subcommand};
 
-use crate::api_client::{ApiClient, CliEnv, CliError, report_error};
+use crate::api_client::{ApiClient, CliEnv, CliError, EXIT_UNKNOWN, report_error};
 
 #[derive(Debug, Args)]
 pub struct WorkspaceArgs {
@@ -29,7 +29,7 @@ pub async fn run(args: WorkspaceArgs) -> i32 {
     };
     let client = match ApiClient::new(env) {
         Ok(c) => c,
-        Err(e) => return report_error(&CliError::new(1, format!("{e}"))),
+        Err(e) => return report_error(&CliError::new(EXIT_UNKNOWN, format!("{e}"))),
     };
 
     let result = match args.command {
@@ -46,6 +46,9 @@ async fn cmd_me(client: &ApiClient) -> Result<(), CliError> {
     // workspace-scoped /members/me/ route exists today; the workspace
     // binding is implicit in the api_token itself (scoped at mint time).
     let resp = client.get("users/me/").await?;
-    println!("{}", serde_json::to_string(&resp).unwrap_or_default());
+    println!(
+        "{}",
+        serde_json::to_string(&resp).expect("serialize JSON value")
+    );
     Ok(())
 }

@@ -14,7 +14,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use pidash::api_client::{
-    ApiClient, CliEnv, EXIT_AUTH, EXIT_INVALID, EXIT_NOT_FOUND, EXIT_SERVER,
+    ApiClient, CliEnv, EXIT_AUTH, EXIT_INVALID, EXIT_NOT_FOUND, EXIT_SERVER, EXIT_THROTTLED,
 };
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
@@ -285,6 +285,19 @@ async fn http_401_maps_to_exit_auth() {
 }
 
 #[tokio::test]
+async fn http_403_maps_to_exit_auth() {
+    let fake = start_fake(Box::new(|_req| CannedResponse {
+        status: 403,
+        status_text: "Forbidden",
+        body: r#"{"error":"forbidden"}"#.into(),
+    }))
+    .await;
+    let client = client(&fake);
+    let err = client.get("users/me/").await.expect_err("403");
+    assert_eq!(err.exit_code, EXIT_AUTH);
+}
+
+#[tokio::test]
 async fn http_400_maps_to_exit_invalid() {
     let fake = start_fake(Box::new(|_req| CannedResponse {
         status: 400,
@@ -295,6 +308,45 @@ async fn http_400_maps_to_exit_invalid() {
     let client = client(&fake);
     let err = client.get("users/me/").await.expect_err("400");
     assert_eq!(err.exit_code, EXIT_INVALID);
+}
+
+#[tokio::test]
+async fn http_409_maps_to_exit_invalid() {
+    let fake = start_fake(Box::new(|_req| CannedResponse {
+        status: 409,
+        status_text: "Conflict",
+        body: r#"{"error":"conflict"}"#.into(),
+    }))
+    .await;
+    let client = client(&fake);
+    let err = client.get("users/me/").await.expect_err("409");
+    assert_eq!(err.exit_code, EXIT_INVALID);
+}
+
+#[tokio::test]
+async fn http_422_maps_to_exit_invalid() {
+    let fake = start_fake(Box::new(|_req| CannedResponse {
+        status: 422,
+        status_text: "Unprocessable Entity",
+        body: r#"{"error":"bad body"}"#.into(),
+    }))
+    .await;
+    let client = client(&fake);
+    let err = client.get("users/me/").await.expect_err("422");
+    assert_eq!(err.exit_code, EXIT_INVALID);
+}
+
+#[tokio::test]
+async fn http_429_maps_to_exit_throttled() {
+    let fake = start_fake(Box::new(|_req| CannedResponse {
+        status: 429,
+        status_text: "Too Many Requests",
+        body: r#"{"error":"slow down"}"#.into(),
+    }))
+    .await;
+    let client = client(&fake);
+    let err = client.get("users/me/").await.expect_err("429");
+    assert_eq!(err.exit_code, EXIT_THROTTLED);
 }
 
 #[tokio::test]
