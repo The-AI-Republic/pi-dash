@@ -5,8 +5,8 @@
 `GET /api/v1/runner/metrics/` exposes point-in-time gauges in the Prometheus
 text exposition format (v0.0.4). Scrape every 15–60s.
 
-| Metric                            | Type  | Meaning                                                                        |
-| --------------------------------- | ----- | ------------------------------------------------------------------------------ |
+| Metric                      | Type  | Meaning                                                                        |
+| --------------------------- | ----- | ------------------------------------------------------------------------------ |
 | `pi_dash_runner_online`     | gauge | Runners currently `online` in the DB.                                          |
 | `pi_dash_runner_busy`       | gauge | Runners currently executing a run.                                             |
 | `pi_dash_runner_offline`    | gauge | Runners whose heartbeat has lapsed. Excludes revoked.                          |

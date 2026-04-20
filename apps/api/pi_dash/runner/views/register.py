@@ -109,6 +109,10 @@ class RegisterEndpoint(APIView):
             workspace=reg.workspace,
             label=f"runner: {data['runner_name'][:96]}",
             description="Auto-issued at runner enrollment for the pidash CLI.",
+            # Route CLI traffic through the 300/min ServiceTokenRateThrottle
+            # instead of the default 60/min user-key throttle — a single turn
+            # can easily fan out to dozens of GET/PATCH calls.
+            is_service=True,
         )
 
         payload = RegistrationResponseSerializer(
