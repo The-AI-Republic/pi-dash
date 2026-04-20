@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 # See the LICENSE file for details.
 
-from django.db import transaction
+from django.db import IntegrityError, transaction
 from django.utils import timezone
 from rest_framework import status
 from rest_framework.permissions import AllowAny, IsAuthenticated
@@ -84,17 +84,28 @@ class RegisterEndpoint(APIView):
             )
 
         minted = tokens.mint_runner_secret()
-        runner = Runner.objects.create(
-            owner=reg.created_by,
-            workspace=reg.workspace,
-            name=data["runner_name"][:128],
-            credential_hash=minted.hashed,
-            credential_fingerprint=minted.fingerprint,
-            os=data["os"][:32],
-            arch=data["arch"][:32],
-            runner_version=data["version"][:32],
-            protocol_version=data["protocol_version"],
-        )
+        try:
+            runner = Runner.objects.create(
+                owner=reg.created_by,
+                workspace=reg.workspace,
+                name=data["runner_name"][:128],
+                credential_hash=minted.hashed,
+                credential_fingerprint=minted.fingerprint,
+                os=data["os"][:32],
+                arch=data["arch"][:32],
+                runner_version=data["version"][:32],
+                protocol_version=data["protocol_version"],
+            )
+        except IntegrityError:
+            # `UNIQUE(workspace_id, name)` violation. Keep the registration
+            # token unconsumed by aborting the transaction (@transaction.atomic
+            # takes care of that) so the client can retry with a different
+            # name. The runner retries auto-generated names transparently;
+            # a user-supplied `--name` collision surfaces as a loud error.
+            return Response(
+                {"error": "runner_name_taken"},
+                status=status.HTTP_409_CONFLICT,
+            )
         reg.consumed_at = timezone.now()
         reg.consumed_by_runner = runner
         reg.save(update_fields=["consumed_at", "consumed_by_runner"])
