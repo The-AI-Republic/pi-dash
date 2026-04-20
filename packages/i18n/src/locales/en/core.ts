@@ -24,6 +24,74 @@ export default {
     pro: "Pro",
     upgrade: "Upgrade",
     stickies: "Stickies",
+    prompts: "Prompts",
+  },
+
+  prompts: {
+    title: "Prompts",
+    subtitle:
+      "System prompt templates that get rendered against each issue before an agent run. Workspace admins can customize the default for this workspace.",
+    customize: "Customize for this workspace",
+    columns: {
+      name: "Name",
+      scope: "Scope",
+      version: "Version",
+      updated: "Updated",
+    },
+    scope: {
+      default: "Pi Dash default",
+      workspace: "Workspace override",
+    },
+    actions: {
+      view: "View",
+      edit: "Edit",
+      revert: "Revert to default",
+    },
+    list: {
+      empty: "No prompt templates available. The Pi Dash default will be seeded on the next migrate.",
+    },
+    detail: {
+      default_title: "Prompt template (Pi Dash default)",
+      workspace_title: "Prompt template (workspace override)",
+      default_description:
+        "This is the built-in Pi Dash default. Workspace admins cannot edit it here — customize for your workspace to override.",
+      workspace_description:
+        "Your workspace's override of the Pi Dash default. Edits bump the version and apply to the next agent run for this workspace.",
+      body: "Template body (Jinja + Markdown)",
+      save: "Save",
+      unsaved: "Unsaved changes",
+      back: "Back to list",
+      loading: "Loading…",
+      not_found: "Template not found.",
+    },
+    preview: {
+      title: "Preview",
+      issue_id_placeholder: "Issue id (UUID)",
+      run: "Preview",
+      empty: "Paste an issue id and click Preview to render the template against a real issue.",
+      failed: "Render failed.",
+      missing_issue_id: "Enter an issue id first.",
+      admin_only:
+        "Previewing the rendered prompt is a workspace-admin action. Ask your workspace admin if you need to see it rendered against a specific issue.",
+    },
+    revert: {
+      confirm_title: "Revert to the Pi Dash default?",
+      confirm_body:
+        "This archives your workspace-scoped template. New agent runs in this workspace will use the Pi Dash default until you create another override.",
+      confirm: "Revert",
+    },
+    toast: {
+      created_title: "Workspace override created",
+      created_message: "We copied the current Pi Dash default. Edit and save to customize it.",
+      saved_title: "Prompt saved",
+      saved_message: "Subsequent agent runs will use the updated prompt.",
+      reverted_title: "Reverted to Pi Dash default",
+      reverted_message: "This workspace is back on the shared default template.",
+      error_title: "Something went wrong",
+      customize_failed: "Could not create the workspace override.",
+      save_failed: "Could not save the prompt.",
+      revert_failed: "Could not revert the prompt.",
+    },
   },
 
   auth: {

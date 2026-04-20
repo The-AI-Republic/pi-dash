@@ -12,6 +12,7 @@ export default {
     home: "Головна",
     your_work: "Ваша робота",
     stickies: "Нотатки",
+    prompts: "Prompts",
     inbox: "Вхідні",
     workspace: "Робочий простір",
     views: "Подання",
