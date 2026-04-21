@@ -79,13 +79,19 @@ def test_issue_git_work_branch_accepts_valid_names(issue, branch):
     issue.full_clean()
 
 
+# Note: the server-side regex is intentionally a subset of git's own
+# `check-ref-format`; it mirrors the client-side form regex. It does not
+# reject leading-dash names (e.g. "-rf") because `-` is a valid branch
+# character. The runner's `validate_branch_name` is the load-bearing
+# guard against `git` flag smuggling.
 @pytest.mark.unit
 @pytest.mark.parametrize(
     "branch",
     [
-        "feat branch",
-        "feat\nname",
-        "-rf",
+        "feat branch",      # space
+        "feat\nname",       # newline
+        "ref@{1}",          # `@` and braces are outside the charset
+        "feat branch?",     # `?`
     ],
 )
 def test_issue_git_work_branch_rejects_invalid_names(issue, branch):
