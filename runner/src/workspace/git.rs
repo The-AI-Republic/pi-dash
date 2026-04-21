@@ -61,17 +61,12 @@ pub async fn workspace_state(path: &Path) -> Result<WorkspaceState> {
 /// Fetch from origin and check out the given branch so the agent can commit
 /// directly onto an existing feature branch. Called before the Codex process
 /// spawns when an issue specifies `git_work_branch`.
+///
+/// Assumes the workspace is ephemeral / server-owned: `git checkout -B`
+/// force-resets the local branch pointer to match `origin/<branch>`, which
+/// would discard any unpushed local commits on that branch.
 pub async fn checkout_work_branch(path: &Path, branch: &str) -> Result<()> {
-    // Reject shell metacharacters / flag-like values up front. Branches with
-    // these characters cannot be valid git refs, and passing them to git would
-    // either error cryptically or (worst case) let a crafted ref smuggle flags
-    // through as `git` command options.
-    if branch.is_empty()
-        || branch.starts_with('-')
-        || branch.chars().any(|c| c.is_control() || c == ' ')
-    {
-        anyhow::bail!("invalid work branch name: {branch:?}");
-    }
+    validate_branch_name(branch)?;
 
     git_output(path, &["fetch", "origin", branch])
         .await
@@ -82,6 +77,20 @@ pub async fn checkout_work_branch(path: &Path, branch: &str) -> Result<()> {
     git_output(path, &["checkout", "-B", branch, remote_ref.as_str()])
         .await
         .with_context(|| format!("git checkout {branch}"))?;
+    Ok(())
+}
+
+/// Injection-level validation: reject names that could be mistaken for a git
+/// flag or contain characters that don't belong in a branch name. Does not
+/// enforce the full `git check-ref-format` rules — git itself catches those
+/// when the command runs and surfaces the error via `WorkspaceSetup`.
+fn validate_branch_name(branch: &str) -> Result<()> {
+    if branch.is_empty()
+        || branch.starts_with('-')
+        || branch.chars().any(|c| c.is_control() || c == ' ')
+    {
+        anyhow::bail!("invalid work branch name: {branch:?}");
+    }
     Ok(())
 }
 
@@ -99,4 +108,38 @@ async fn git_output(path: &Path, args: &[&str]) -> Result<String> {
         );
     }
     Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::validate_branch_name;
+
+    #[test]
+    fn rejects_empty() {
+        assert!(validate_branch_name("").is_err());
+    }
+
+    #[test]
+    fn rejects_leading_dash() {
+        // `-rf`, `--upload-pack=...` could otherwise smuggle a flag past `git`.
+        assert!(validate_branch_name("-rf").is_err());
+        assert!(validate_branch_name("--upload-pack=evil").is_err());
+    }
+
+    #[test]
+    fn rejects_whitespace_and_control_chars() {
+        assert!(validate_branch_name(" ").is_err());
+        assert!(validate_branch_name("feat/with space").is_err());
+        assert!(validate_branch_name("feat\tname").is_err());
+        assert!(validate_branch_name("feat\nname").is_err());
+        assert!(validate_branch_name("feat\0name").is_err());
+    }
+
+    #[test]
+    fn accepts_normal_branch_names() {
+        assert!(validate_branch_name("main").is_ok());
+        assert!(validate_branch_name("feat/pinned-branch").is_ok());
+        assert!(validate_branch_name("release/1.2.3").is_ok());
+        assert!(validate_branch_name("user/jdoe/fix_42").is_ok());
+    }
 }

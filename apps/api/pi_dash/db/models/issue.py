@@ -9,7 +9,7 @@ from uuid import uuid4
 from django.conf import settings
 from django.contrib.postgres.fields import ArrayField
 from django.core.exceptions import ValidationError
-from django.core.validators import MaxValueValidator, MinValueValidator
+from django.core.validators import MaxValueValidator, MinValueValidator, RegexValidator
 from django.db import models, transaction, connection
 from django.utils import timezone
 from django.db.models import Q
@@ -166,7 +166,17 @@ class Issue(ProjectBaseModel):
         null=True,
         blank=True,
     )
-    git_work_branch = models.CharField(max_length=128, blank=True, default="")
+    git_work_branch = models.CharField(
+        max_length=128,
+        blank=True,
+        default="",
+        validators=[
+            RegexValidator(
+                regex=r"^[A-Za-z0-9._/-]*$",
+                message="Branch name may contain only letters, numbers, and . _ / -",
+            ),
+        ],
+    )
 
     issue_objects = IssueManager()
 

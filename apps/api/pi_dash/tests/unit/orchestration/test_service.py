@@ -129,3 +129,42 @@ def test_non_trigger_state_does_nothing(seeded, issue, states):
     )
     assert outcome.reason == "not-a-trigger-state"
     assert outcome.created_run is None
+
+
+@pytest.mark.unit
+def test_run_config_carries_git_fields_from_issue_and_project(
+    seeded, project, issue, states
+):
+    project.repo_url = "git@github.com:acme/web.git"
+    project.base_branch = "develop"
+    project.save(update_fields=["repo_url", "base_branch"])
+    issue.git_work_branch = "feat/pinned"
+    issue.save(update_fields=["git_work_branch"])
+
+    outcome = service.handle_issue_state_transition(
+        issue=issue,
+        from_state=states["todo"],
+        to_state=states["in_progress"],
+    )
+    assert outcome.reason == "created"
+    cfg = outcome.created_run.run_config
+    assert cfg["repo_url"] == "git@github.com:acme/web.git"
+    assert cfg["repo_ref"] == "develop"
+    assert cfg["git_work_branch"] == "feat/pinned"
+
+
+@pytest.mark.unit
+def test_run_config_empty_git_fields_surface_as_none(seeded, issue, states):
+    # Project defaults to blank repo_url; issue defaults to blank work branch.
+    # Both must land as ``None`` so the runner / prompt fallbacks kick in
+    # rather than comparing against empty strings.
+    outcome = service.handle_issue_state_transition(
+        issue=issue,
+        from_state=states["todo"],
+        to_state=states["in_progress"],
+    )
+    cfg = outcome.created_run.run_config
+    assert cfg["repo_url"] is None
+    assert cfg["git_work_branch"] is None
+
+
