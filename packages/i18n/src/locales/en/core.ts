@@ -272,6 +272,8 @@ export default {
       copy_command: "Copy command",
       copied: "Copied!",
       copy_failed: "Could not copy to clipboard",
+      or_manual_token: "Or copy the registration token and configure the runner manually:",
+      copy_token: "Copy token",
       dismiss_token: "I've saved this — hide it",
       connected_runners: "Connected runners",
       empty: "No runners yet. Mint a registration code to connect your first one.",
