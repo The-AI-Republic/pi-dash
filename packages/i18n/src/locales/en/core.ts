@@ -25,6 +25,7 @@ export default {
     upgrade: "Upgrade",
     stickies: "Stickies",
     prompts: "Prompts",
+    runners: "Runners",
   },
 
   prompts: {
