@@ -11,3 +11,4 @@ export * from "./zerodha-logo";
 export * from "./pi-dash-lockup";
 export * from "./pi-dash-logo";
 export * from "./pi-dash-wordmark";
+export * from "./pi-symbol";
