@@ -182,10 +182,10 @@ Officially (per `dist-workspace.toml`):
 | OS    | Arch                    | Service backend |
 | ----- | ----------------------- | --------------- |
 | macOS | aarch64 (Apple Silicon) | launchd         |
-| macOS | x86_64 (Intel)          | launchd         |
+| Linux | aarch64 (glibc)         | systemd (user)  |
 | Linux | x86_64 (glibc)          | systemd (user)  |
 
-Build-from-source also works on Unix-likes with Rust 1.93 when the init system is systemd or launchd. Not supported: Windows, musl, BSDs, non-systemd Linux inits.
+Intel Mac (`x86_64-apple-darwin`) is **not** in the prebuilt matrix: GitHub retired the `macos-13` runner image, leaving no scheduler for that target. Build-from-source still works on Intel Macs with Rust 1.93. Also not supported in prebuilts: Windows, musl, BSDs, non-systemd Linux inits.
 
 ## Implementation plan
 

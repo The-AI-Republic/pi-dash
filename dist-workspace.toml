@@ -15,15 +15,18 @@ installers = ["shell"]
 allow-dirty = ["ci"]
 targets = [
     "aarch64-apple-darwin",
-    "x86_64-apple-darwin",
     "aarch64-unknown-linux-gnu",
     "x86_64-unknown-linux-gnu",
 ]
 pr-run-mode = "plan"
 install-path = "$HOME/.local/bin"
 
+# x86_64-apple-darwin (Intel Mac) intentionally omitted: GitHub's
+# macos-13 runner pool is effectively unavailable in 2026, so the build
+# job sits queued for hours. Apple stopped selling Intel Macs in 2023;
+# Apple Silicon (aarch64-apple-darwin) covers the modern user base.
+# Revisit via cross-compile from macos-14 if Intel Mac demand appears.
 [dist.github-custom-runners]
 aarch64-apple-darwin = "macos-14"
-x86_64-apple-darwin = "macos-13"
 aarch64-unknown-linux-gnu = "ubuntu-22.04-arm"
 x86_64-unknown-linux-gnu = "ubuntu-22.04"

@@ -4,7 +4,7 @@ Local daemon + TUI (`pidash` binary) that connects a developer machine to the Pi
 
 ## Install
 
-Prebuilt binaries for macOS (arm64, x86_64) and Linux (arm64, x86_64) are published to GitHub Releases. The one-liner below downloads the installer, verifies checksums, and drops `pidash` into `$HOME/.local/bin`:
+Prebuilt binaries for macOS (arm64) and Linux (arm64, x86_64) are published to GitHub Releases. The one-liner below downloads the installer, verifies checksums, and drops `pidash` into `$HOME/.local/bin`:
 
 ```bash
 curl --proto '=https' --tlsv1.2 -LsSf \
@@ -87,11 +87,11 @@ Wire version is `1` — bumped on incompatible shape changes. See `src/cloud/pro
 
 - **Unit:** `cargo test` — deterministic table-driven tests for protocol serde, approval policy, reconnect backoff, workspace resolve, config roundtrip.
 - **Integration:** `tests/protocol_roundtrip.rs` — every client/server variant round-trips; router state machine invariants.
-- **Manual QA** (per release): macOS arm64/x64 + Linux x64 → first-run `configure` → `install` → `start` → TUI shows connected → synthetic run via `/api/runners/runs/` → approval prompt → decision.
+- **Manual QA** (per release): macOS arm64 + Linux x64 → first-run `configure` → `install` → `start` → TUI shows connected → synthetic run via `/api/runners/runs/` → approval prompt → decision.
 
 ## Release
 
-Managed by `cargo-dist` (see `dist-workspace.toml` + `.github/workflows/release.yml`). Pushing a SemVer tag (e.g. `v0.1.0`) triggers the workflow, which builds binaries for macOS arm64/x64 and Linux arm64/x64, generates the shell installer, and publishes everything to a GitHub Release.
+Managed by `cargo-dist` (see `dist-workspace.toml` + `.github/workflows/release.yml`). Pushing a SemVer tag (e.g. `v0.1.0`) triggers the workflow, which builds binaries for macOS arm64 and Linux arm64/x64, generates the shell installer, and publishes everything to a GitHub Release.
 
 To cut a release:
 
