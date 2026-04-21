@@ -213,6 +213,8 @@ async fn register_and_advance(state: &mut Wizard) {
                     working_dir: state.paths.default_working_dir(),
                 },
                 codex: Default::default(),
+                claude_code: Default::default(),
+                agent: Default::default(),
                 approval_policy: Default::default(),
                 logging: Default::default(),
             };

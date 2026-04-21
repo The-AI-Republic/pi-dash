@@ -9,6 +9,16 @@ pub struct Config {
     pub runner: RunnerSection,
     pub workspace: WorkspaceSection,
     pub codex: CodexSection,
+    /// Claude Code agent settings. Missing section falls back to
+    /// `ClaudeCodeSection::default()` so existing `config.toml` files
+    /// (written before Claude Code support) still parse. Only consulted
+    /// when `agent.kind == claude_code`.
+    #[serde(default)]
+    pub claude_code: ClaudeCodeSection,
+    /// Which agent CLI the daemon drives for assigned runs. Defaults to
+    /// `codex` so existing deployments are unaffected.
+    #[serde(default)]
+    pub agent: AgentSection,
     /// Missing section falls back to the `ApprovalPolicySection::default()` so
     /// a minimal `config.toml` doesn't have to spell out every knob.
     #[serde(default)]
@@ -47,6 +57,44 @@ impl Default for CodexSection {
         Self {
             binary: "codex".to_string(),
             model_default: Some("gpt-5-codex".to_string()),
+        }
+    }
+}
+
+/// Runner-wide agent selector. Wrapped in its own section (rather than
+/// hoisted onto `RunnerSection`) so the file layout mirrors the per-agent
+/// `[codex]` / `[claude_code]` tables: `[agent]` with `kind = "..."`.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct AgentSection {
+    #[serde(default)]
+    pub kind: AgentKind,
+}
+
+/// Which agent CLI the runner drives for assigned runs. Serialised as a
+/// lowercase string (`"codex"` / `"claude_code"`) so the config file stays
+/// human-friendly.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, Default, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentKind {
+    /// OpenAI Codex via `codex app-server`. Default for backward compatibility.
+    #[default]
+    Codex,
+    /// Anthropic Claude Code via `claude --print --output-format stream-json`.
+    ClaudeCode,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ClaudeCodeSection {
+    pub binary: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_default: Option<String>,
+}
+
+impl Default for ClaudeCodeSection {
+    fn default() -> Self {
+        Self {
+            binary: "claude".to_string(),
+            model_default: None,
         }
     }
 }

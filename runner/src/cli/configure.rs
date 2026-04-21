@@ -162,6 +162,8 @@ pub async fn execute(inputs: RegisterInputs, paths: &Paths, print_next_hint: boo
         },
         workspace: crate::config::schema::WorkspaceSection { working_dir },
         codex: crate::config::schema::CodexSection::default(),
+        claude_code: crate::config::schema::ClaudeCodeSection::default(),
+        agent: crate::config::schema::AgentSection::default(),
         approval_policy: crate::config::schema::ApprovalPolicySection::default(),
         logging: crate::config::schema::LoggingSection::default(),
     };
