@@ -77,6 +77,11 @@ export type TBaseIssue = {
   is_draft: boolean;
   is_epic?: boolean;
   is_intake?: boolean;
+
+  // Optional branch name that pins the agent to an existing remote branch for
+  // this work item. Empty string (or missing) = the runner/agent picks the
+  // default per project base_branch → remote HEAD.
+  git_work_branch?: string;
 };
 
 type IssueRelation = {

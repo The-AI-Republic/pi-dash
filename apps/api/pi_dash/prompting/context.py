@@ -86,6 +86,7 @@ def build_context(issue: Issue, run: AgentRun) -> Dict[str, Any]:
         "repo": {
             "url": (getattr(project, "repo_url", "") or None),
             "base_branch": (getattr(project, "base_branch", "") or None),
+            "work_branch": (getattr(issue, "git_work_branch", "") or None),
         },
         "run": {
             "id": str(run.id),

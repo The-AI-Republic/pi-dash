@@ -137,6 +137,7 @@ def _create_and_dispatch_run(
             run_config={
                 "repo_url": (issue.project.repo_url or None),
                 "repo_ref": (issue.project.base_branch or None),
+                "git_work_branch": (issue.git_work_branch or None),
             },
         )
         try:
@@ -191,6 +192,7 @@ def _dispatch_to_runner(run_id) -> None:
             "prompt": run.prompt,
             "repo_url": run.run_config.get("repo_url"),
             "repo_ref": run.run_config.get("repo_ref"),
+            "git_work_branch": run.run_config.get("git_work_branch"),
             "expected_codex_model": run.run_config.get("model"),
             "approval_policy_overrides": run.run_config.get(
                 "approval_policy_overrides"

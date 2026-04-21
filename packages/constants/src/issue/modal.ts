@@ -22,4 +22,5 @@ export const DEFAULT_WORK_ITEM_FORM_VALUES: Partial<TIssue> = {
   module_ids: null,
   start_date: null,
   target_date: null,
+  git_work_branch: "",
 };

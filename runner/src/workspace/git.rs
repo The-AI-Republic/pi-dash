@@ -58,6 +58,33 @@ pub async fn workspace_state(path: &Path) -> Result<WorkspaceState> {
     })
 }
 
+/// Fetch from origin and check out the given branch so the agent can commit
+/// directly onto an existing feature branch. Called before the Codex process
+/// spawns when an issue specifies `git_work_branch`.
+pub async fn checkout_work_branch(path: &Path, branch: &str) -> Result<()> {
+    // Reject shell metacharacters / flag-like values up front. Branches with
+    // these characters cannot be valid git refs, and passing them to git would
+    // either error cryptically or (worst case) let a crafted ref smuggle flags
+    // through as `git` command options.
+    if branch.is_empty()
+        || branch.starts_with('-')
+        || branch.chars().any(|c| c.is_control() || c == ' ')
+    {
+        anyhow::bail!("invalid work branch name: {branch:?}");
+    }
+
+    git_output(path, &["fetch", "origin", branch])
+        .await
+        .with_context(|| format!("git fetch origin {branch}"))?;
+    // `git checkout -B <branch> <start_point>` always lands us on a local
+    // branch that points at `origin/<branch>`, creating it if necessary.
+    let remote_ref = format!("origin/{branch}");
+    git_output(path, &["checkout", "-B", branch, remote_ref.as_str()])
+        .await
+        .with_context(|| format!("git checkout {branch}"))?;
+    Ok(())
+}
+
 async fn git_output(path: &Path, args: &[&str]) -> Result<String> {
     let out = Command::new("git")
         .current_dir(path)

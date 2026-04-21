@@ -97,6 +97,7 @@ export function ProjectDetailsForm(props: IProjectDetailsForm) {
           title: t("toast.success"),
           message: t("project_settings.general.toast.success"),
         });
+        return undefined;
       })
       .catch((err) => {
         try {
@@ -152,6 +153,8 @@ export function ProjectDetailsForm(props: IProjectDetailsForm) {
 
       logo_props: formData.logo_props,
       timezone: formData.timezone,
+      repo_url: formData.repo_url ?? "",
+      base_branch: formData.base_branch ?? "",
     };
 
     // Handle cover image changes
@@ -183,6 +186,7 @@ export function ProjectDetailsForm(props: IProjectDetailsForm) {
         .then(async (res) => {
           if (res.exists) setError("identifier", { message: t("common.identifier_already_exists") });
           else await handleUpdateChange(payload);
+          return undefined;
         });
     else await handleUpdateChange(payload);
     setTimeout(() => {
@@ -313,6 +317,66 @@ export function ProjectDetailsForm(props: IProjectDetailsForm) {
             )}
           />
         </div>
+        <div className="grid grid-cols-1 gap-6 md:grid-cols-3">
+          <div className="flex flex-col gap-1 md:col-span-2">
+            <h4 className="text-13">{t("git_repository_url") || "Git repository URL"}</h4>
+            <Controller
+              name="repo_url"
+              control={control}
+              rules={{
+                maxLength: {
+                  value: 512,
+                  message: t("repo_url_too_long") || "Repository URL is too long",
+                },
+              }}
+              render={({ field: { value, onChange } }) => (
+                <Input
+                  id="repo_url"
+                  name="repo_url"
+                  type="text"
+                  value={value ?? ""}
+                  onChange={onChange}
+                  hasError={Boolean(errors?.repo_url)}
+                  placeholder={t("git_repository_url_placeholder") || "e.g. git@github.com:org/repo.git"}
+                  className="w-full font-medium"
+                  disabled={!isAdmin}
+                />
+              )}
+            />
+            <span className="text-11 text-danger-primary">{errors?.repo_url?.message}</span>
+          </div>
+          <div className="flex flex-col gap-1">
+            <h4 className="text-13">{t("base_branch") || "Base branch"}</h4>
+            <Controller
+              name="base_branch"
+              control={control}
+              rules={{
+                maxLength: {
+                  value: 128,
+                  message: t("base_branch_too_long") || "Base branch is too long",
+                },
+                pattern: {
+                  value: /^[A-Za-z0-9._/-]*$/,
+                  message: t("base_branch_invalid_chars") || "Only letters, numbers, and . _ / - are allowed",
+                },
+              }}
+              render={({ field: { value, onChange } }) => (
+                <Input
+                  id="base_branch"
+                  name="base_branch"
+                  type="text"
+                  value={value ?? ""}
+                  onChange={onChange}
+                  hasError={Boolean(errors?.base_branch)}
+                  placeholder={t("base_branch_placeholder") || "Leave empty to use remote default"}
+                  className="w-full font-medium"
+                  disabled={!isAdmin}
+                />
+              )}
+            />
+            <span className="text-11 text-danger-primary">{errors?.base_branch?.message}</span>
+          </div>
+        </div>
         <div className="grid grid-cols-1 gap-6 md:grid-cols-2">
           <div className="flex flex-col gap-1">
             <h4 className="text-13">Project ID</h4>
@@ -414,8 +478,8 @@ export function ProjectDetailsForm(props: IProjectDetailsForm) {
                 <>
                   <TimezoneSelect
                     value={value}
-                    onChange={(value: string) => {
-                      onChange(value);
+                    onChange={(nextValue: string) => {
+                      onChange(nextValue);
                     }}
                     error={Boolean(errors.timezone)}
                     buttonClassName="!border-subtle !shadow-none font-medium rounded-md"

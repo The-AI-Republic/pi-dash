@@ -50,6 +50,8 @@ export const PROJECT_CREATE_TAB_INDICES = [
   "name",
   "identifier",
   "description",
+  "repo_url",
+  "base_branch",
   "network",
   "lead",
   "cancel",
