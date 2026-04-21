@@ -1,6 +1,12 @@
-<br /><br />
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="./pi-symbol-dark.svg" />
+    <source media="(prefers-color-scheme: light)" srcset="./pi-symbol-light.svg" />
+    <img alt="Pi Dash" src="./pi-symbol-light.svg" width="120" />
+  </picture>
+</p>
 
-<p align="center"><b>📊 Pi Dash — Modern project management for all teams</b></p>
+<p align="center"><b>Pi Dash -- AI Agent Orchestration Platform</b></p>
 
 <p align="center">
     <a href="https://airepublic.com/"><b>Website</b></a> •
@@ -9,38 +15,118 @@
     <a href="https://x.com/ai_republic"><b>X</b></a>
 </p>
 
-Pi Dash is an open-source project management tool to track issues, run ~sprints~ cycles, and manage product roadmaps without the chaos of managing the tool itself.
+Pi Dash is an open-source AI agent orchestration platform built for **As Coding (asynchronous vibe coding)** — a workflow where you define what needs to be built, and coding agents handle the implementation in the background. Instead of babysitting agent runs and watching terminals scroll, Pi Dash lets you focus on the work that matters: scoping tasks, reviewing results, and shipping products.
 
 > Pi Dash is evolving every day. Your suggestions, ideas, and reported bugs help us immensely. Do not hesitate to open a [GitHub discussion](https://github.com/The-AI-Republic/pi-dash/discussions) or [raise an issue](https://github.com/The-AI-Republic/pi-dash/issues). We read everything and respond to most.
 
+## 🌟 Architecture
+
+Pi Dash is composed of three major components:
+
+### Pi Dash Platform
+
+The web-based orchestration hub where you manage projects, define tasks, and monitor agent progress. Create work items, organize them into cycles and modules, review agent output, and track analytics — all from a single dashboard. This is where you spend your time instead of watching terminals.
+
+### Pi Dash CLI & Runner Daemon
+
+A local command-line tool and background daemon that runs on your development machine. The CLI connects to the Pi Dash platform, picks up assigned tasks, dispatches them to your configured AI agent, and reports results back. The runner daemon keeps this loop going continuously so you don't have to trigger each task manually.
+
+### AI Agent (user-provided)
+
+Pi Dash is agent-agnostic — bring your own coding agent. Whether you use Apple Pi, Claude Code, Codex, OpenClaw, or a custom solution, Pi Dash orchestrates the workflow around it. You configure which agent the runner invokes; Pi Dash handles the rest.
+
 ## 🚀 Installation
 
-- **Pi Dash Cloud** — hosted signup is coming. For now, visit the [AI Republic homepage](https://airepublic.com/) for announcements.
-- **Self-host Pi Dash** — see [CONTRIBUTING](./CONTRIBUTING.md) for local development, and the [`deployments/`](./deployments) directory for Docker Compose and Kubernetes configurations.
+> **Pi Dash Cloud** is coming soon. For now, self-hosting is the way to go.
 
-## 🌟 Features
+### 1. Pi Dash Platform (self-hosted)
 
-- **Work Items**
-  Efficiently create and manage tasks with a robust rich text editor that supports file uploads. Enhance organization and tracking by adding sub-properties and referencing related issues.
+#### Requirements
 
-- **Cycles**
-  Maintain your team's momentum with Cycles. Track progress effortlessly using burn-down charts and other insightful tools.
+- Docker Engine installed and running
+- Node.js version 20+ [LTS version](https://nodejs.org/en/about/previous-releases)
+- Python version 3.8+
+- Postgres version v14
+- Redis version v6.2.7
+- **Memory**: Minimum **12 GB RAM** recommended
+  > Running the project on a system with only 8 GB RAM may lead to setup failures or memory crashes (especially during Docker container build/start or dependency install). Use cloud environments like GitHub Codespaces or upgrade local RAM if possible.
 
-- **Modules**
-  Simplify complex projects by dividing them into smaller, manageable modules.
+#### Setup
 
-- **Views**
-  Customize your workflow by creating filters to display only the most relevant issues. Save and share these views with ease.
+1. Clone the repo
 
-- **Pages**
-  Capture and organize ideas using Pi Dash Pages, complete with AI capabilities and a rich text editor. Format text, insert images, add hyperlinks, or convert your notes into actionable items.
+```bash
+git clone https://github.com/The-AI-Republic/pi-dash.git [folder-name]
+cd [folder-name]
+chmod +x setup.sh
+```
 
-- **Analytics**
-  Access real-time insights across all your Pi Dash data. Visualize trends, remove blockers, and keep your projects moving forward.
+2. Run setup.sh
 
-## 🛠️ Local development
+```bash
+./setup.sh
+```
 
-See [CONTRIBUTING](./CONTRIBUTING.md).
+3. Start the containers
+
+```bash
+docker compose -f docker-compose-local.yml up
+```
+
+4. Start web apps:
+
+```bash
+pnpm dev
+```
+
+5. Open your browser to http://localhost:3001/god-mode/ and register yourself as instance admin
+6. Open your browser to http://localhost:3000 and log in using the same credentials
+
+For production deployments, see the [`deployments/`](./deployments) directory for Docker Compose and Kubernetes configurations.
+
+### 2. Pi Dash CLI & Runner Daemon
+
+Install the CLI on any machine where you want agents to pick up and execute tasks. Currently supported platforms:
+
+- **macOS** — Apple Silicon (arm64) and Intel (x86_64)
+- **Linux** — arm64 and x86_64
+
+Run the following command in your dev machine terminal:
+
+```bash
+curl --proto '=https' --tlsv1.2 -LsSf \
+  https://github.com/The-AI-Republic/pi-dash/releases/latest/download/pidash-installer.sh | sh
+```
+
+Then register with your Pi Dash platform, install the OS service, and start the daemon:
+
+```bash
+# Register with your Pi Dash instance (grab the one-time token from the web UI)
+pidash configure --url https://your-pidash-instance.com --token <ONE_TIME_CODE>
+
+# Install as a system service (systemd on Linux, launchd on macOS)
+pidash install
+
+# Start the daemon
+pidash start
+```
+
+The runner daemon runs in the background, polls for assigned tasks, dispatches them to your AI agent, and reports results back to the platform.
+
+Useful commands:
+
+| Command | Description |
+|---------|-------------|
+| `pidash status` | Print service and daemon status |
+| `pidash tui` | Open interactive terminal UI to monitor the daemon |
+| `pidash doctor` | Run preflight checks (agent installed, git configured, platform reachable) |
+| `pidash stop` | Stop the daemon |
+
+See `pidash --help` for all available commands.
+
+### 3. AI Agent (user-provided)
+
+Pi Dash does not ship an AI agent — you bring your own. Ensure your chosen agent is installed and accessible on the machine running the Pi Dash CLI. Supported agents include Apple Pi, Claude Code, Codex, OpenClaw, and any custom agent that conforms to the Pi Dash agent interface.
 
 ## ⚙️ Built with
 
@@ -77,8 +163,12 @@ Please read [CONTRIBUTING.md](./CONTRIBUTING.md) for details on the process for 
 ### We couldn't have done this without you.
 
 <a href="https://github.com/The-AI-Republic/pi-dash/graphs/contributors">
-  <img src="https://contrib.rocks/image?repo=The-AI-Republic/pi-dash" />
+  Our community contributors
 </a>
+
+## Acknowledgements
+
+Pi Dash is built on top of [Plane](https://github.com/makeplane/plane), an open-source project management tool. We are grateful to the Plane team and its contributors for laying the foundation that made Pi Dash possible.
 
 ## License
 
