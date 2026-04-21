@@ -258,6 +258,9 @@ export default {
     },
     list: {
       add_runner: "Add a runner",
+      how_it_works_title: "How to add a runner",
+      how_it_works_body:
+        "1. Click Mint to generate a one-time code.\n2. On the machine that will host the runner, install the pidash CLI and run the shown `pidash configure` command.\n3. Run `pidash install && pidash start` to keep it running as a background service.\n4. The runner will appear online in the list once connected.\n\nPrerequisite: codex must already be installed on the host machine.",
       cap_count: "You have {active} of {max} runners registered.",
       label_placeholder: "optional label (e.g. my-laptop)",
       mint: "Mint registration code",
@@ -265,7 +268,12 @@ export default {
       cap_reached: "Cap reached",
       mint_failed: "Failed to mint token",
       token_warning: "Copy this once — it will not be shown again.",
-      token_run_instructions: "Run on your machine:",
+      token_run_instructions: "Run this on the machine that will host the runner:",
+      copy_command: "Copy command",
+      copied: "Copied!",
+      copy_failed: "Could not copy to clipboard",
+      or_manual_token: "Or copy the registration token and configure the runner manually:",
+      copy_token: "Copy token",
       dismiss_token: "I've saved this — hide it",
       connected_runners: "Connected runners",
       empty: "No runners yet. Mint a registration code to connect your first one.",

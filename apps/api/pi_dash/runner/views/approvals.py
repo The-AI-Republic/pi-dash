@@ -9,6 +9,7 @@ from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
+from pi_dash.authentication.session import BaseSessionAuthentication
 from pi_dash.runner.models import (
     AgentRunStatus,
     ApprovalRequest,
@@ -22,6 +23,7 @@ from pi_dash.runner.services.pubsub import send_to_runner
 
 
 class ApprovalListEndpoint(APIView):
+    authentication_classes = [BaseSessionAuthentication]
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
@@ -34,6 +36,7 @@ class ApprovalListEndpoint(APIView):
 
 
 class ApprovalDecideEndpoint(APIView):
+    authentication_classes = [BaseSessionAuthentication]
     permission_classes = [IsAuthenticated]
 
     def post(self, request, approval_id):

@@ -9,6 +9,7 @@ from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
+from pi_dash.authentication.session import BaseSessionAuthentication
 from pi_dash.db.models import APIToken
 from pi_dash.runner.authentication import RunnerBearerAuthentication
 from pi_dash.runner.models import (
@@ -203,6 +204,7 @@ class RunnerRotateEndpoint(APIView):
 class RegistrationTokenCreateEndpoint(APIView):
     """POST /api/runners/tokens/  — web UI mints a one-time registration code."""
 
+    authentication_classes = [BaseSessionAuthentication]
     permission_classes = [IsAuthenticated]
 
     def post(self, request):

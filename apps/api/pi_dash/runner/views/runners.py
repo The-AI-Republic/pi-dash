@@ -7,12 +7,14 @@ from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
+from pi_dash.authentication.session import BaseSessionAuthentication
 from pi_dash.runner.models import Runner
 from pi_dash.runner.serializers import RunnerSerializer
 from pi_dash.runner.services.pubsub import close_runner_session, send_to_runner
 
 
 class RunnerListEndpoint(APIView):
+    authentication_classes = [BaseSessionAuthentication]
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
@@ -24,6 +26,7 @@ class RunnerListEndpoint(APIView):
 
 
 class RunnerDetailEndpoint(APIView):
+    authentication_classes = [BaseSessionAuthentication]
     permission_classes = [IsAuthenticated]
 
     def get(self, request, runner_id):
@@ -35,6 +38,7 @@ class RunnerDetailEndpoint(APIView):
 
 
 class RunnerRevokeEndpoint(APIView):
+    authentication_classes = [BaseSessionAuthentication]
     permission_classes = [IsAuthenticated]
 
     def post(self, request, runner_id):
