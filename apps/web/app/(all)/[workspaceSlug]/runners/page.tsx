@@ -6,13 +6,14 @@
 
 import { useEffect, useState } from "react";
 import { observer } from "mobx-react";
+import { HelpCircle } from "lucide-react";
 import useSWR from "swr";
 import { useTranslation } from "@pi-dash/i18n";
 import { TOAST_TYPE, setToast } from "@pi-dash/propel/toast";
 import { RunnerService } from "@pi-dash/services";
 import type { IRunner, TRunnerStatus } from "@pi-dash/types";
 import type { TBadgeVariant } from "@pi-dash/ui";
-import { AlertModalCore, Badge, Button, Input } from "@pi-dash/ui";
+import { AlertModalCore, Badge, Button, Input, Tooltip } from "@pi-dash/ui";
 import { PageHead } from "@/components/core/page-title";
 import { useWorkspace } from "@/hooks/store/use-workspace";
 
@@ -100,7 +101,26 @@ const RunnersListPage = observer(function RunnersListPage() {
       <section className="rounded-md border border-subtle p-4">
         <div className="flex items-center justify-between">
           <div>
-            <div className="text-13 font-medium text-primary">{t("runners.list.add_runner")}</div>
+            <div className="flex items-center gap-1.5">
+              <div className="text-13 font-medium text-primary">{t("runners.list.add_runner")}</div>
+              <Tooltip
+                position="bottom"
+                tooltipContent={
+                  <div className="flex max-w-xs flex-col gap-1 p-1 text-12 whitespace-normal">
+                    <div className="font-medium">{t("runners.list.how_it_works_title")}</div>
+                    <div className="whitespace-pre-line text-secondary">{t("runners.list.how_it_works_body")}</div>
+                  </div>
+                }
+              >
+                <button
+                  type="button"
+                  aria-label={t("runners.list.how_it_works_title")}
+                  className="text-tertiary hover:text-primary"
+                >
+                  <HelpCircle className="size-4" />
+                </button>
+              </Tooltip>
+            </div>
             <div className="text-13 text-secondary">
               {t("runners.list.cap_count", { active: activeCount, max: MAX_RUNNERS_PER_USER })}
             </div>
