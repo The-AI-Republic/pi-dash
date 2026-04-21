@@ -9,6 +9,7 @@ from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
+from pi_dash.authentication.session import BaseSessionAuthentication
 from pi_dash.runner.models import AgentRun, AgentRunEvent, AgentRunStatus
 from pi_dash.runner.serializers import (
     AgentRunEventSerializer,
@@ -21,6 +22,7 @@ from pi_dash.runner.services.pubsub import send_to_runner
 class AgentRunListEndpoint(APIView):
     """Create a new run from a work item, or list the authenticated user's runs."""
 
+    authentication_classes = [BaseSessionAuthentication]
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
@@ -82,6 +84,7 @@ class AgentRunListEndpoint(APIView):
 
 
 class AgentRunDetailEndpoint(APIView):
+    authentication_classes = [BaseSessionAuthentication]
     permission_classes = [IsAuthenticated]
 
     def get(self, request, run_id):
@@ -98,6 +101,7 @@ class AgentRunDetailEndpoint(APIView):
 
 
 class AgentRunCancelEndpoint(APIView):
+    authentication_classes = [BaseSessionAuthentication]
     permission_classes = [IsAuthenticated]
 
     def post(self, request, run_id):
