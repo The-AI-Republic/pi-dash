@@ -9,6 +9,10 @@ members = ["cargo:runner"]
 cargo-dist-version = "0.22.1"
 ci = "github"
 installers = ["shell"]
+# cargo-dist 0.22.1 defaults to the retired ubuntu-20.04 runner image.
+# The workflow is hand-patched to ubuntu-22.04; tell cargo-dist to stop
+# policing it so `cargo dist plan` does not abort on the diff.
+allow-dirty = ["ci"]
 targets = [
     "aarch64-apple-darwin",
     "x86_64-apple-darwin",
