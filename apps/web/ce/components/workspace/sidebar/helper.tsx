@@ -4,7 +4,7 @@
  * See the LICENSE file for details.
  */
 
-import { FileText } from "lucide-react";
+import { FileText, Server } from "lucide-react";
 import {
   AnalyticsIcon,
   ArchiveIcon,
@@ -43,5 +43,7 @@ export const getSidebarNavigationItemIcon = (key: string, className: string = ""
       return <MultipleStickyIcon className={cn("size-4 flex-shrink-0", className)} />;
     case "prompts":
       return <FileText className={cn("size-4 flex-shrink-0", className)} />;
+    case "runners":
+      return <Server className={cn("size-4 flex-shrink-0", className)} />;
   }
 };
