@@ -5,6 +5,7 @@ edition = "2024"
 rust-version = "1.93"
 description = "Pi Dash local runner: connects a dev machine to the Pi Dash cloud and drives Codex for assigned tasks."
 license = "AGPL-3.0-only"
+repository = "https://github.com/The-AI-Republic/pi-dash"
 default-run = "pidash"
 
 [[bin]]
