@@ -676,7 +676,7 @@ impl AssignWorker {
                 .await
                 .ok();
                 // Only lifecycle-ish events are mirrored to cloud; raw deltas stay local.
-                tracing::trace!(%run_id, method, "codex event");
+                tracing::trace!(%run_id, method, "agent event");
                 Ok(None)
             }
             BridgeEvent::ApprovalRequest {

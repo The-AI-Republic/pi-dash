@@ -85,15 +85,23 @@ pub enum AgentKind {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ClaudeCodeSection {
+    /// Per-field default so a partial `[claude_code]` block (e.g. only
+    /// `model_default = "..."`) still parses. Without this, declaring the
+    /// section at all would require spelling out `binary = "claude"`.
+    #[serde(default = "default_claude_binary")]
     pub binary: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model_default: Option<String>,
 }
 
+fn default_claude_binary() -> String {
+    "claude".to_string()
+}
+
 impl Default for ClaudeCodeSection {
     fn default() -> Self {
         Self {
-            binary: "claude".to_string(),
+            binary: default_claude_binary(),
             model_default: None,
         }
     }

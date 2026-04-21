@@ -120,19 +120,25 @@ impl Bridge {
     }
 
     /// Approvals aren't wired for Claude in the MVP (bypassPermissions is
-    /// set, so the subprocess never asks). We accept the call to keep the
-    /// agent dispatch interface uniform; it's an error if it ever fires.
+    /// set, so the subprocess never asks). Reaching this is a programmer
+    /// error — either the bypass flag was flipped without wiring the
+    /// permission-prompt MCP bridge, or the dispatch layer misrouted an
+    /// approval. Fail fast so the supervisor surfaces the bug instead of
+    /// silently dropping the operator's decision.
     pub async fn send_approval(
         &mut self,
         approval_id: &str,
         _decision: ApprovalDecision,
     ) -> Result<()> {
-        tracing::warn!(
+        tracing::error!(
             approval_id,
-            "claude_code bridge received approval decision but approvals are \
-             bypassed in MVP; ignoring"
+            "claude_code bridge received an approval decision but approvals are \
+             not wired (bypassPermissions=true); refusing to silently drop it"
         );
-        Ok(())
+        anyhow::bail!(
+            "claude_code bridge received approval {approval_id} but approvals are \
+             not wired in MVP"
+        );
     }
 
     pub async fn interrupt(&mut self) -> Result<()> {

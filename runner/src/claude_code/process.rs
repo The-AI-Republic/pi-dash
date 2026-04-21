@@ -106,12 +106,23 @@ impl ClaudeProcess {
                 let pid = Pid::from_raw(pid as i32);
                 // SIGINT is usually enough; the kill_on_drop on the child
                 // catches any process that ignores it when we later drop.
-                let _ = kill(pid, Signal::SIGINT);
-                return Ok(());
+                match kill(pid, Signal::SIGINT) {
+                    Ok(()) => return Ok(()),
+                    Err(e) => {
+                        // Reaped, permission denied, PID-namespace mismatch —
+                        // don't pretend the interrupt succeeded. Fall through
+                        // to SIGKILL so the caller still gets a best effort.
+                        tracing::warn!(
+                            "claude SIGINT failed ({e}); falling back to SIGKILL"
+                        );
+                    }
+                }
             }
         }
-        // Non-unix or pid-already-reaped: fall through to start_kill.
-        let _ = self.child.start_kill();
+        // Non-unix, pid-already-reaped, or SIGINT failure above.
+        self.child
+            .start_kill()
+            .context("failed to kill claude subprocess")?;
         Ok(())
     }
 
@@ -169,13 +180,23 @@ async fn read_events(stdout: tokio::process::ChildStdout, tx: mpsc::Sender<Strea
 }
 
 async fn drain_stderr(stderr: tokio::process::ChildStderr) {
+    // Claude surfaces auth, model, and runtime errors here. At the default
+    // `info` level these would be invisible, so every non-empty line is
+    // logged at `warn!`. Operators still have to dig through logs — a future
+    // follow-up can buffer the last N lines into the `Failed` event detail —
+    // but at least nothing is silently swallowed.
     let mut reader = BufReader::new(stderr);
     let mut line = String::new();
     loop {
         line.clear();
         match reader.read_line(&mut line).await {
             Ok(0) => break,
-            Ok(_) => tracing::debug!(target: "claude.stderr", "{}", line.trim_end()),
+            Ok(_) => {
+                let trimmed = line.trim_end();
+                if !trimmed.is_empty() {
+                    tracing::warn!(target: "claude.stderr", "{trimmed}");
+                }
+            }
             Err(e) => {
                 tracing::warn!("claude stderr read error: {e}");
                 break;
