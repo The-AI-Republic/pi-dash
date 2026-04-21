@@ -166,5 +166,3 @@ def test_run_config_empty_git_fields_surface_as_none(seeded, issue, states):
     cfg = outcome.created_run.run_config
     assert cfg["repo_url"] is None
     assert cfg["git_work_branch"] is None
-
-
