@@ -10,7 +10,7 @@ use crate::cloud::protocol::{
     ClientMsg, Envelope, FailureReason, RunnerStatus, ServerMsg, WIRE_VERSION, WorkspaceState,
 };
 use crate::cloud::ws::ConnectionLoop;
-use crate::config::schema::{Config, Credentials};
+use crate::config::schema::{AgentKind, Config, Credentials};
 use crate::daemon::state::StateHandle;
 use crate::history::index::{RunSummary, RunsIndex};
 use crate::history::jsonl::{HistoryEntry, HistoryWriter};
@@ -386,6 +386,18 @@ struct AssignWorker {
 }
 
 impl AssignWorker {
+    /// Pick the right `FailureReason` when the agent subprocess crashes or
+    /// exits abnormally. Codex stays on `CodexCrash` so dashboards that
+    /// already filter on `"codex_crash"` keep working; Claude (and any
+    /// future non-Codex agent) surfaces as the agent-neutral `AgentCrash`
+    /// so the two aren't conflated in telemetry.
+    fn crash_reason(&self) -> FailureReason {
+        match self.config.agent.kind {
+            AgentKind::Codex => FailureReason::CodexCrash,
+            AgentKind::ClaudeCode => FailureReason::AgentCrash,
+        }
+    }
+
     async fn run(
         &mut self,
         run_id: uuid::Uuid,
@@ -513,9 +525,10 @@ impl AssignWorker {
                 })
                 .await
                 .ok();
+                let reason = self.crash_reason();
                 self.send(ClientMsg::RunFailed {
                     run_id,
-                    reason: FailureReason::CodexCrash,
+                    reason,
                     detail: Some(format!("{e:#}")),
                     ended_at: Utc::now(),
                 })
@@ -541,9 +554,10 @@ impl AssignWorker {
                 })
                 .await
                 .ok();
+                let reason = self.crash_reason();
                 self.send(ClientMsg::RunFailed {
                     run_id,
-                    reason: FailureReason::CodexCrash,
+                    reason,
                     detail: Some(format!("{e:#}")),
                     ended_at: Utc::now(),
                 })
@@ -626,9 +640,10 @@ impl AssignWorker {
                 }
                 events = bridge.next_events(cursor) => {
                     let Some(events) = events else {
+                        let reason = self.crash_reason();
                         self.send(ClientMsg::RunFailed {
                             run_id: cursor.run_id(),
-                            reason: FailureReason::CodexCrash,
+                            reason,
                             detail: Some("agent stdout closed".to_string()),
                             ended_at: Utc::now(),
                         }).await;

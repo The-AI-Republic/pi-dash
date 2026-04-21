@@ -122,15 +122,14 @@ impl ApprovalRouter {
             // Decision arrived before open() — buffer it so the eventual
             // open() can resolve immediately. Without this, a fast cloud
             // reply would strand the worker.
-            if s.early_decisions.len() >= EARLY_DECISIONS_CAP {
-                if let Some(oldest) = s
+            if s.early_decisions.len() >= EARLY_DECISIONS_CAP
+                && let Some(oldest) = s
                     .early_decisions
                     .iter()
                     .min_by_key(|(_, (_, _, ts))| *ts)
                     .map(|(k, _)| k.clone())
-                {
-                    s.early_decisions.remove(&oldest);
-                }
+            {
+                s.early_decisions.remove(&oldest);
             }
             s.early_decisions
                 .insert(approval_id.to_string(), (decision, source, Utc::now()));

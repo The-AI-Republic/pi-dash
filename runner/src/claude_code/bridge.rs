@@ -234,11 +234,13 @@ impl BridgeCursor {
 }
 
 /// Best-effort mapping from Claude's `result.subtype` to our
-/// `FailureReason`. We don't have a dedicated `ClaudeCrash` variant yet, so
-/// errors surface as `CodexCrash`; rename once we consolidate the enum.
+/// `FailureReason`. `error_max_turns` is budget exhaustion (not an internal
+/// bug) so it gets its own variant. Everything else — including
+/// `error_during_execution` — is a generic agent crash; we use `AgentCrash`
+/// rather than `CodexCrash` so Claude failures don't pollute Codex telemetry.
 fn classify_failure(subtype: &str) -> FailureReason {
     match subtype {
-        "error_max_turns" => FailureReason::Internal,
-        _ => FailureReason::CodexCrash,
+        "error_max_turns" => FailureReason::MaxTurns,
+        _ => FailureReason::AgentCrash,
     }
 }

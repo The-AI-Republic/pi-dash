@@ -40,11 +40,9 @@ async fn start_fake_cloud() -> (SocketAddr, tokio::task::JoinHandle<()>) {
             heartbeat_interval_secs: 25,
             protocol_version: WIRE_VERSION,
         });
-        tx.send(Message::Text(
-            serde_json::to_string(&welcome).unwrap().into(),
-        ))
-        .await
-        .unwrap();
+        tx.send(Message::Text(serde_json::to_string(&welcome).unwrap()))
+            .await
+            .unwrap();
 
         // Expect a Hello from the runner.
         let frame = rx.next().await.unwrap().unwrap();
@@ -67,11 +65,9 @@ async fn start_fake_cloud() -> (SocketAddr, tokio::task::JoinHandle<()>) {
             approval_policy_overrides: None,
             deadline: None,
         });
-        tx.send(Message::Text(
-            serde_json::to_string(&assign).unwrap().into(),
-        ))
-        .await
-        .unwrap();
+        tx.send(Message::Text(serde_json::to_string(&assign).unwrap()))
+            .await
+            .unwrap();
         // Keep the socket open briefly so the test has time to read.
         tokio::time::sleep(std::time::Duration::from_millis(200)).await;
     });

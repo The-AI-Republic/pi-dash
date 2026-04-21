@@ -103,10 +103,7 @@ impl StateHandle {
     }
 
     pub async fn set_current_run(&self, s: Option<CurrentRunSummary>) {
-        let next = match &s {
-            Some(r) => Some(r.run_id),
-            None => None,
-        };
+        let next = s.as_ref().map(|r| r.run_id);
         *self.inner.current_run.lock().await = s;
         let _ = self.tx_in_flight.send(next);
         let status = if next.is_some() {

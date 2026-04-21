@@ -207,10 +207,10 @@ async fn check_codex_auth(binary: &str) -> Result<String> {
         .output()
         .await
         .ok();
-    if let Some(o) = out {
-        if o.status.success() {
-            return Ok(String::from_utf8_lossy(&o.stdout).trim().to_string());
-        }
+    if let Some(o) = out
+        && o.status.success()
+    {
+        return Ok(String::from_utf8_lossy(&o.stdout).trim().to_string());
     }
     anyhow::bail!(
         "unable to confirm Codex auth; run `{} login` before starting the runner",

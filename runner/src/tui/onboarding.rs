@@ -468,10 +468,10 @@ fn mask(s: &str) -> String {
 }
 
 fn default_hostname() -> Option<String> {
-    if let Ok(h) = std::env::var("HOSTNAME") {
-        if !h.is_empty() {
-            return Some(h);
-        }
+    if let Ok(h) = std::env::var("HOSTNAME")
+        && !h.is_empty()
+    {
+        return Some(h);
     }
     nix::unistd::gethostname()
         .ok()
