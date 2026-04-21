@@ -1,0 +1,29 @@
+# cargo-dist release config. Lives at the repo root so CI (which runs from
+# /home/runner/work/pi-dash/pi-dash) can locate it. Run
+# `cargo dist build --tag=v<version>` locally to exercise the matrix;
+# GitHub Actions takes over for real releases.
+[workspace]
+members = ["cargo:runner"]
+
+[dist]
+cargo-dist-version = "0.22.1"
+ci = "github"
+installers = ["shell"]
+# cargo-dist 0.22.1 defaults to the retired ubuntu-20.04 runner image.
+# The workflow is hand-patched to ubuntu-22.04; tell cargo-dist to stop
+# policing it so `cargo dist plan` does not abort on the diff.
+allow-dirty = ["ci"]
+targets = [
+    "aarch64-apple-darwin",
+    "x86_64-apple-darwin",
+    "aarch64-unknown-linux-gnu",
+    "x86_64-unknown-linux-gnu",
+]
+pr-run-mode = "plan"
+install-path = "$HOME/.local/bin"
+
+[dist.github-custom-runners]
+aarch64-apple-darwin = "macos-14"
+x86_64-apple-darwin = "macos-13"
+aarch64-unknown-linux-gnu = "ubuntu-22.04-arm"
+x86_64-unknown-linux-gnu = "ubuntu-22.04"

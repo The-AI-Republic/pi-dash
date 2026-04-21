@@ -52,21 +52,21 @@ Underneath that sit a few smaller but related gaps: `runner.name` has no default
 
 ### 1. User-visible command surface
 
-| Command | Behavior |
-|---|---|
-| `pidash install` | Writes the OS service unit; on fresh install (no existing `config.toml`) with a TTY, chains into `pidash configure` interactively; enables and starts the service only after `configure` succeeds |
-| `pidash uninstall` | Stops the service, disables it, deletes the unit file |
-| `pidash start` | Starts the installed service (`systemctl --user start pidash` / `launchctl kickstart`) |
-| `pidash stop` | Stops the installed service |
-| `pidash restart` | Stop + start |
-| `pidash status` | Service status (from systemctl/launchctl) **plus** runtime status (from IPC) in one output |
-| `pidash configure` | Register with cloud; write `config.toml` + `credentials.toml` |
-| `pidash remove` | Deregister from cloud, delete local config/creds, **and** uninstall the service |
-| `pidash doctor` | Preflight checks (codex installed + logged in, git configured, cloud reachable) |
-| `pidash tui` | Interactive UI attached to the running daemon over IPC |
-| `pidash rotate` | Rotate the runner credential |
-| `pidash issue` / `comment` / `state` / `resolve` / `workspace` | Cloud API clients (unchanged by this design) |
-| `pidash __run` | **Hidden.** What systemd/launchd execs. Excluded from `--help` via `#[command(hide = true)]`. Not a supported user-facing verb |
+| Command                                                        | Behavior                                                                                                                                                                                          |
+| -------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `pidash install`                                               | Writes the OS service unit; on fresh install (no existing `config.toml`) with a TTY, chains into `pidash configure` interactively; enables and starts the service only after `configure` succeeds |
+| `pidash uninstall`                                             | Stops the service, disables it, deletes the unit file                                                                                                                                             |
+| `pidash start`                                                 | Starts the installed service (`systemctl --user start pidash` / `launchctl kickstart`)                                                                                                            |
+| `pidash stop`                                                  | Stops the installed service                                                                                                                                                                       |
+| `pidash restart`                                               | Stop + start                                                                                                                                                                                      |
+| `pidash status`                                                | Service status (from systemctl/launchctl) **plus** runtime status (from IPC) in one output                                                                                                        |
+| `pidash configure`                                             | Register with cloud; write `config.toml` + `credentials.toml`                                                                                                                                     |
+| `pidash remove`                                                | Deregister from cloud, delete local config/creds, **and** uninstall the service                                                                                                                   |
+| `pidash doctor`                                                | Preflight checks (codex installed + logged in, git configured, cloud reachable)                                                                                                                   |
+| `pidash tui`                                                   | Interactive UI attached to the running daemon over IPC                                                                                                                                            |
+| `pidash rotate`                                                | Rotate the runner credential                                                                                                                                                                      |
+| `pidash issue` / `comment` / `state` / `resolve` / `workspace` | Cloud API clients (unchanged by this design)                                                                                                                                                      |
+| `pidash __run`                                                 | **Hidden.** What systemd/launchd execs. Excluded from `--help` via `#[command(hide = true)]`. Not a supported user-facing verb                                                                    |
 
 Dropped: the `pidash service <subcommand>` subgroup disappears entirely. No deprecated alias — no releases have shipped, so nothing to break.
 
@@ -177,13 +177,13 @@ No code change to the unit generators — they already set the right restart pol
 
 ### 8. Supported OS matrix (documentation truth)
 
-Officially (per `runner/dist-workspace.toml`):
+Officially (per `dist-workspace.toml`):
 
-| OS | Arch | Service backend |
-|---|---|---|
-| macOS | aarch64 (Apple Silicon) | launchd |
-| macOS | x86_64 (Intel) | launchd |
-| Linux | x86_64 (glibc) | systemd (user) |
+| OS    | Arch                    | Service backend |
+| ----- | ----------------------- | --------------- |
+| macOS | aarch64 (Apple Silicon) | launchd         |
+| macOS | x86_64 (Intel)          | launchd         |
+| Linux | x86_64 (glibc)          | systemd (user)  |
 
 Build-from-source also works on Unix-likes with Rust 1.93 when the init system is systemd or launchd. Not supported: Windows, musl, BSDs, non-systemd Linux inits.
 
