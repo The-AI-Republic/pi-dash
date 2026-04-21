@@ -48,10 +48,28 @@ const RunnersListPage = observer(function RunnersListPage() {
   const [revokeTarget, setRevokeTarget] = useState<IRunner | null>(null);
   const [revoking, setRevoking] = useState(false);
   const [origin, setOrigin] = useState("");
+  const [justCopied, setJustCopied] = useState(false);
 
   useEffect(() => {
     if (typeof window !== "undefined") setOrigin(window.location.origin);
   }, []);
+
+  const configureCommand = mintedToken ? `pidash configure --url ${origin} --token ${mintedToken}` : "";
+
+  async function copyCommand() {
+    if (!configureCommand) return;
+    try {
+      await navigator.clipboard.writeText(configureCommand);
+      setJustCopied(true);
+      window.setTimeout(() => setJustCopied(false), 2000);
+    } catch {
+      setToast({
+        type: TOAST_TYPE.ERROR,
+        title: t("runners.toast.error_title"),
+        message: t("runners.list.copy_failed"),
+      });
+    }
+  }
 
   const activeCount = (runners ?? []).filter((r) => r.status !== "revoked").length;
   const atCap = activeCount >= MAX_RUNNERS_PER_USER;
@@ -140,14 +158,14 @@ const RunnersListPage = observer(function RunnersListPage() {
         {mintedToken && (
           <div className="border-amber-300 bg-amber-50 mt-3 rounded border p-3 text-13 text-primary">
             <div className="font-medium">{t("runners.list.token_warning")}</div>
-            <pre className="font-mono mt-2 text-11 break-all select-all">{mintedToken}</pre>
-            <div className="mt-2 text-secondary">
-              {t("runners.list.token_run_instructions")}
-              <pre className="font-mono mt-1 text-11 whitespace-pre-wrap select-all">
-                pidash configure --url {origin} --token {mintedToken}
-              </pre>
-            </div>
-            <div className="mt-3">
+            <div className="mt-2 text-secondary">{t("runners.list.token_run_instructions")}</div>
+            <pre className="font-mono mt-1 rounded border border-subtle bg-white p-2 text-11 whitespace-pre-wrap select-all">
+              {configureCommand}
+            </pre>
+            <div className="mt-3 flex flex-wrap gap-2">
+              <Button size="sm" onClick={copyCommand}>
+                {justCopied ? t("runners.list.copied") : t("runners.list.copy_command")}
+              </Button>
               <Button variant="outline-primary" size="sm" onClick={() => setMintedToken(null)}>
                 {t("runners.list.dismiss_token")}
               </Button>
