@@ -6,7 +6,7 @@
 
 import { useState } from "react";
 import type { Control } from "react-hook-form";
-import { Controller } from "react-hook-form";
+import { Controller, useWatch } from "react-hook-form";
 import { ChevronRight } from "lucide-react";
 import { useTranslation } from "@pi-dash/i18n";
 import type { TIssue } from "@pi-dash/types";
@@ -25,7 +25,11 @@ type Props = {
 export function IssueGitAdvanced(props: Props) {
   const { control, handleFormChange } = props;
   const { t } = useTranslation();
-  const [open, setOpen] = useState(false);
+  // Auto-expand when the issue already carries a value so the user can see /
+  // edit it without a disclosure hunt. Kept out of state deps so it only
+  // applies on mount; user-driven toggles still win after that.
+  const initialWorkBranch = useWatch({ control, name: "git_work_branch", defaultValue: "" });
+  const [open, setOpen] = useState(() => Boolean(initialWorkBranch));
 
   return (
     <div className="px-5">

@@ -9,7 +9,7 @@ from enum import Enum
 
 # Django imports
 from django.conf import settings
-from django.core.validators import MaxValueValidator, MinValueValidator
+from django.core.validators import MaxValueValidator, MinValueValidator, RegexValidator
 from django.db import models
 from django.db.models import Q
 
@@ -122,7 +122,17 @@ class Project(BaseModel):
     # Repository fields consumed by the prompting system when composing agent
     # prompts. See `.ai_design/prompt_system/prompt-system-design.md` §4.
     repo_url = models.CharField(max_length=512, blank=True, default="")
-    base_branch = models.CharField(max_length=128, blank=True, default="main")
+    base_branch = models.CharField(
+        max_length=128,
+        blank=True,
+        default="main",
+        validators=[
+            RegexValidator(
+                regex=r"^[A-Za-z0-9._/-]*$",
+                message="Branch name may contain only letters, numbers, and . _ / -",
+            ),
+        ],
+    )
 
     def __init__(self, *args, **kwargs):
         # Track if timezone is provided, if so, don't override it with the workspace timezone when saving

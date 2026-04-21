@@ -432,19 +432,18 @@ impl AssignWorker {
         // Pre-flight checkout: if the issue pins an existing branch, land on
         // it before the agent runs so it commits onto that branch directly.
         // When not set, the agent handles branch creation per the prompt.
-        if let Some(branch) = git_work_branch.as_deref().filter(|s| !s.is_empty()) {
-            if let Err(e) =
+        if let Some(branch) = git_work_branch.as_deref().filter(|s| !s.is_empty())
+            && let Err(e) =
                 crate::workspace::git::checkout_work_branch(&workspace_path, branch).await
-            {
-                self.send(ClientMsg::RunFailed {
-                    run_id,
-                    reason: FailureReason::WorkspaceSetup,
-                    detail: Some(format!("checkout {branch}: {e:#}")),
-                    ended_at: Utc::now(),
-                })
-                .await;
-                return Ok(());
-            }
+        {
+            self.send(ClientMsg::RunFailed {
+                run_id,
+                reason: FailureReason::WorkspaceSetup,
+                detail: Some(format!("checkout {branch}: {e:#}")),
+                ended_at: Utc::now(),
+            })
+            .await;
+            return Ok(());
         }
 
         let ws_state = crate::workspace::git::workspace_state(&workspace_path)
