@@ -88,8 +88,10 @@ For production deployments, see the [`deployments/`](./deployments) directory fo
 
 Install the CLI on any machine where you want agents to pick up and execute tasks. Currently supported platforms:
 
-- **macOS** — Apple Silicon (arm64) and Intel (x86_64)
+- **macOS** — Apple Silicon (arm64)
 - **Linux** — arm64 and x86_64
+
+> Intel Macs are not in the prebuilt matrix — GitHub retired the `macos-13` runner image. You can still build from source on Intel macOS with Rust 1.93+.
 
 Run the following command in your dev machine terminal:
 
@@ -115,12 +117,12 @@ The runner daemon runs in the background, polls for assigned tasks, dispatches t
 
 Useful commands:
 
-| Command | Description |
-|---------|-------------|
-| `pidash status` | Print service and daemon status |
-| `pidash tui` | Open interactive terminal UI to monitor the daemon |
+| Command         | Description                                                                |
+| --------------- | -------------------------------------------------------------------------- |
+| `pidash status` | Print service and daemon status                                            |
+| `pidash tui`    | Open interactive terminal UI to monitor the daemon                         |
 | `pidash doctor` | Run preflight checks (agent installed, git configured, platform reachable) |
-| `pidash stop` | Stop the daemon |
+| `pidash stop`   | Stop the daemon                                                            |
 
 See `pidash --help` for all available commands.
 
