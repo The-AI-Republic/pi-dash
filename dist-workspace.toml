@@ -1,7 +1,9 @@
-# cargo-dist release config. Run `cargo dist build --tag=v<version>` locally
-# to exercise the matrix; GitHub Actions takes over for real releases.
+# cargo-dist release config. Lives at the repo root so CI (which runs from
+# /home/runner/work/pi-dash/pi-dash) can locate it. Run
+# `cargo dist build --tag=v<version>` locally to exercise the matrix;
+# GitHub Actions takes over for real releases.
 [workspace]
-members = ["cargo:."]
+members = ["cargo:runner"]
 
 [dist]
 cargo-dist-version = "0.22.1"
