@@ -71,3 +71,9 @@ strip = true
 
 [profile.dev]
 opt-level = 0
+
+# Profile cargo-dist invokes via `cargo build --profile dist` for release
+# tarballs. Inherits release's settings (LTO, single codegen unit, strip)
+# rather than redefining them so any future tweak to release flows through.
+[profile.dist]
+inherits = "release"
