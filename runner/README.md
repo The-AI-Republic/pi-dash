@@ -2,7 +2,36 @@
 
 Local daemon + TUI (`pidash` binary) that connects a developer machine to the Pi Dash cloud and drives `codex app-server` for assigned tasks.
 
-See `.ai_design/implement_runner/` for the design documents:
+## Install
+
+Prebuilt binaries for macOS (arm64, x86_64) and Linux (arm64, x86_64) are published to GitHub Releases. The one-liner below downloads the installer, verifies checksums, and drops `pidash` into `$HOME/.local/bin`:
+
+```bash
+curl --proto '=https' --tlsv1.2 -LsSf \
+  https://github.com/The-AI-Republic/pi-dash/releases/latest/download/pidash-installer.sh | sh
+```
+
+Pin to a specific version instead of `latest` by swapping in the tag, e.g. `.../releases/download/v0.1.0/pidash-installer.sh`.
+
+**Prerequisite:** the runner shells out to [Codex](https://github.com/openai/codex) — install it and make sure `codex --version` works before running `pidash configure`. `pidash doctor` checks this.
+
+After install:
+
+```bash
+pidash configure \
+  --url https://cloud.pidash.so \
+  --token <ONE_TIME_CODE> \
+  --name my-laptop
+pidash install   # register a systemd user unit (Linux) or launchd agent (macOS)
+pidash start
+pidash tui       # optional: open the interactive UI
+```
+
+Generate the one-time token from the Pi Dash web UI under the runners admin page.
+
+## Design docs
+
+See `.ai_design/implement_runner/`:
 
 - `runner-design.md` — architecture + committed decisions
 - `github-runner-architecture.md` — reference model (GHA self-hosted runner)
@@ -31,26 +60,16 @@ runner/
 └── tests/                    # integration tests
 ```
 
-## Commands
+## Development commands
 
 ```bash
 cargo build                                  # debug build
 cargo test                                   # unit + integration tests
 cargo check                                  # quick type-check
 cargo clippy -- -D warnings                  # lint
-
-./target/debug/pidash configure \
-  --url https://cloud.pidash.so \
-  --token <ONE_TIME_CODE> \
-  --name my-laptop
-
-./target/debug/pidash install        # writes systemd user unit / launchd agent
-./target/debug/pidash start          # starts the service
-./target/debug/pidash status         # service + daemon status
-./target/debug/pidash tui            # interactive UI over the IPC socket
-./target/debug/pidash stop           # stops the service
-./target/debug/pidash uninstall      # removes the unit
 ```
+
+From a debug build, substitute `./target/debug/pidash` for `pidash` in any of the commands above.
 
 ## Runtime paths (XDG)
 
@@ -72,4 +91,12 @@ Wire version is `1` — bumped on incompatible shape changes. See `src/cloud/pro
 
 ## Release
 
-Managed by `cargo-dist` (see `dist-workspace.toml`). CI matrix builds signed binaries for macOS arm64/x64 and Linux x64, plus a Homebrew formula.
+Managed by `cargo-dist` (see `dist-workspace.toml` + `.github/workflows/release.yml`). Pushing a SemVer tag (e.g. `v0.1.0`) triggers the workflow, which builds binaries for macOS arm64/x64 and Linux arm64/x64, generates the shell installer, and publishes everything to a GitHub Release.
+
+To cut a release:
+
+```bash
+# bump version in runner/Cargo.toml, commit, then:
+git tag v0.1.0
+git push origin v0.1.0
+```
