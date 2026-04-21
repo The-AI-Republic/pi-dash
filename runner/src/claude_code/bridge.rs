@@ -31,7 +31,6 @@ const INIT_TIMEOUT: Duration = Duration::from_secs(30);
 
 pub struct Bridge {
     proc: ClaudeProcess,
-    model_default: Option<String>,
     /// Events received while we were waiting synchronously for `system/init`
     /// inside `run()`. Drained by `next_events` before touching the mpsc so
     /// no frame is lost across the run-setup boundary.
@@ -49,7 +48,6 @@ impl Bridge {
         .await?;
         Ok(Self {
             proc,
-            model_default,
             pending: VecDeque::new(),
         })
     }
@@ -57,9 +55,9 @@ impl Bridge {
     /// Test-friendly constructor that wraps an already-built `ClaudeProcess`
     /// (typically a shell-script fake).
     pub fn from_process(proc: ClaudeProcess, model_default: Option<String>) -> Self {
+        let _ = model_default;
         Self {
             proc,
-            model_default,
             pending: VecDeque::new(),
         }
     }
@@ -69,7 +67,6 @@ impl Bridge {
     /// Codex bridge's contract. Frames that arrive before init (rare but
     /// allowed by the protocol) are buffered and replayed by `next_events`.
     pub async fn run(&mut self, payload: &RunPayload, _cwd: &Path) -> Result<BridgeCursor> {
-        let _ = payload.model.as_ref().or(self.model_default.as_ref());
         let input = UserInput::user_text(&payload.prompt);
         let line = serde_json::to_string(&input)?;
         self.proc.send_line(&line).await?;

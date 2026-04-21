@@ -86,13 +86,17 @@ impl AgentCursor {
 
 impl AgentBridge {
     /// Spawn the agent subprocess selected by the runner's config.
-    pub async fn spawn_from_config(config: &Config, cwd: &Path) -> Result<Self> {
+    pub async fn spawn_from_config(
+        config: &Config,
+        cwd: &Path,
+        model_override: Option<String>,
+    ) -> Result<Self> {
         match config.agent.kind {
             AgentKind::Codex => {
                 let b = crate::codex::bridge::Bridge::spawn(
                     &config.codex.binary,
                     cwd,
-                    config.codex.model_default.clone(),
+                    selected_model(model_override, config.codex.model_default.clone()),
                 )
                 .await?;
                 Ok(AgentBridge::Codex(b))
@@ -101,7 +105,7 @@ impl AgentBridge {
                 let b = crate::claude_code::bridge::Bridge::spawn(
                     &config.claude_code.binary,
                     cwd,
-                    config.claude_code.model_default.clone(),
+                    selected_model(model_override, config.claude_code.model_default.clone()),
                 )
                 .await?;
                 Ok(AgentBridge::ClaudeCode(b))
@@ -155,5 +159,41 @@ impl AgentBridge {
             AgentBridge::Codex(b) => b.server.shutdown(grace).await,
             AgentBridge::ClaudeCode(b) => b.shutdown(grace).await,
         }
+    }
+}
+
+fn selected_model(
+    model_override: Option<String>,
+    configured_default: Option<String>,
+) -> Option<String> {
+    model_override.or(configured_default)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::selected_model;
+
+    #[test]
+    fn selected_model_prefers_run_override() {
+        assert_eq!(
+            selected_model(
+                Some("claude-override".into()),
+                Some("claude-default".into())
+            ),
+            Some("claude-override".into())
+        );
+    }
+
+    #[test]
+    fn selected_model_falls_back_to_config_default() {
+        assert_eq!(
+            selected_model(None, Some("claude-default".into())),
+            Some("claude-default".into())
+        );
+    }
+
+    #[test]
+    fn selected_model_returns_none_when_unset() {
+        assert_eq!(selected_model(None, None), None);
     }
 }

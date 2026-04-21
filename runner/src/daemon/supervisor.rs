@@ -273,7 +273,13 @@ impl RunnerLoop {
                             cancel,
                         };
                         if let Err(e) = worker
-                            .run(run_id, prompt, repo_url, git_work_branch, expected_codex_model)
+                            .run(
+                                run_id,
+                                prompt,
+                                repo_url,
+                                git_work_branch,
+                                expected_codex_model,
+                            )
                             .await
                         {
                             tracing::error!("run {run_id} failed: {e:#}");
@@ -388,8 +394,14 @@ impl AssignWorker {
         git_work_branch: Option<String>,
         expected_codex_model: Option<String>,
     ) -> Result<()> {
-        self.handle_assign(run_id, prompt, repo_url, git_work_branch, expected_codex_model)
-            .await
+        self.handle_assign(
+            run_id,
+            prompt,
+            repo_url,
+            git_work_branch,
+            expected_codex_model,
+        )
+        .await
     }
 
     async fn handle_assign(
@@ -484,7 +496,12 @@ impl AssignWorker {
         // Bridge to the configured agent (Codex or Claude Code). `AgentBridge`
         // hides which CLI is actually being driven from the rest of this
         // worker; the event flow below is identical for both.
-        let mut bridge = match AgentBridge::spawn_from_config(&self.config, &workspace_path).await
+        let mut bridge = match AgentBridge::spawn_from_config(
+            &self.config,
+            &workspace_path,
+            expected_codex_model.clone(),
+        )
+        .await
         {
             Ok(b) => b,
             Err(e) => {
