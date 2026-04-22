@@ -147,8 +147,43 @@ function updateEnvFile() {
     fi
 }
 
+function generateSecret() {
+    if command -v openssl >/dev/null 2>&1; then
+        openssl rand -hex 32
+    elif [ -r /dev/urandom ]; then
+        LC_ALL=C tr -dc 'a-f0-9' < /dev/urandom | head -c 64
+    else
+        echo ""
+    fi
+}
+
+function ensureGeneratedSecret() {
+    local key=$1
+    local file=$2
+
+    if [ -z "$key" ] || [ -z "$file" ]; then
+        echo "ensureGeneratedSecret: invalid arguments" >&2
+        exit 1
+    fi
+
+    local current
+    current=$(getEnvValue "$key" "$file")
+
+    if [ -z "$current" ]; then
+        local generated
+        generated=$(generateSecret)
+        if [ -z "$generated" ]; then
+            echo "Failed to auto-generate a value for $key (install openssl or ensure /dev/urandom is readable)." >&2
+            echo "Set $key manually in $file and re-run." >&2
+            exit 1
+        fi
+        updateEnvFile "$key" "$generated" "$file"
+        echo "Generated a unique $key and stored it in $file" >&2
+    fi
+}
+
 function download() {
-    cd $SCRIPT_DIR || exit 1  
+    cd $SCRIPT_DIR || exit 1
     TS=$(date +%s)
     if [ -f "$PI_DASH_INSTALL_DIR/docker-compose.yml" ]; then
         mv $PI_DASH_INSTALL_DIR/docker-compose.yml $PI_DASH_INSTALL_DIR/archive/$TS.docker-compose.yml
@@ -211,6 +246,12 @@ function download() {
     mv $PI_DASH_INSTALL_DIR/variables-upgrade.env $DOCKER_ENV_PATH
 
     syncEnvFile
+
+    # Generate fresh per-install values for any blank secrets. On upgrades
+    # syncEnvFile will already have pulled forward the user's existing values,
+    # so this only fires on the initial install.
+    ensureGeneratedSecret "SECRET_KEY" "$DOCKER_ENV_PATH"
+    ensureGeneratedSecret "LIVE_SERVER_SECRET_KEY" "$DOCKER_ENV_PATH"
 
     updateEnvFile "APP_RELEASE" "$APP_RELEASE" "$DOCKER_ENV_PATH"
 

@@ -10,21 +10,21 @@ print_header(){
     echo "    DOMAIN_NAME, DATABASE_URL, REDIS_URL, AMQP_URL"
     echo "    AWS_REGION, AWS_ACCESS_KEY_ID"
     echo "    AWS_SECRET_ACCESS_KEY, AWS_S3_BUCKET_NAME"
+    echo "    SECRET_KEY, LIVE_SERVER_SECRET_KEY  (generate with: openssl rand -hex 32)"
     echo ""
     echo "Other optional environment variables: "
     echo "    SITE_ADDRESS (default: ':80')"
     echo "    FILE_SIZE_LIMIT (default: 5242880)"
     echo "    APP_PROTOCOL (http or https)"
-    echo "    SECRET_KEY (default: 60gp0byfz2dvffa45cxl20p1scy9xbpf6d8c5y0geejgkyp1b5)"
-    echo "    LIVE_SERVER_SECRET_KEY (default: htbqvBJAgpm9bzvf3r4urJer0ENReatceh)"
     echo ""
     echo ""
 }
 
 check_required_env(){
     echo "Checking required environment variables..."
-    local keys=("DOMAIN_NAME" "DATABASE_URL" "REDIS_URL" "AMQP_URL" 
-                "AWS_REGION" "AWS_ACCESS_KEY_ID" "AWS_SECRET_ACCESS_KEY" "AWS_S3_BUCKET_NAME")
+    local keys=("DOMAIN_NAME" "DATABASE_URL" "REDIS_URL" "AMQP_URL"
+                "AWS_REGION" "AWS_ACCESS_KEY_ID" "AWS_SECRET_ACCESS_KEY" "AWS_S3_BUCKET_NAME"
+                "SECRET_KEY" "LIVE_SERVER_SECRET_KEY")
     
     local missing_keys=()
     # Check if the environment variable is set and not empty
@@ -144,10 +144,11 @@ update_env_file(){
     update_env_value "BUCKET_NAME" "$AWS_S3_BUCKET_NAME"
     update_env_value "USE_MINIO" "0"
 
+    update_env_value "SECRET_KEY" "$SECRET_KEY"
+    update_env_value "LIVE_SERVER_SECRET_KEY" "$LIVE_SERVER_SECRET_KEY"
+
     # Optional environment variables
-    update_env_value "SECRET_KEY" "${SECRET_KEY:-60gp0byfz2dvffa45cxl20p1scy9xbpf6d8c5y0geejgkyp1b5}"
     update_env_value "FILE_SIZE_LIMIT" "${FILE_SIZE_LIMIT:-5242880}"
-    update_env_value "LIVE_SERVER_SECRET_KEY" "${LIVE_SERVER_SECRET_KEY:-htbqvBJAgpm9bzvf3r4urJer0ENReatceh}"
 
     update_env_value "API_KEY_RATE_LIMIT" "${API_KEY_RATE_LIMIT:-60/minute}"
 

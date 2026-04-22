@@ -63,7 +63,7 @@ mkdir pi-dash-selfhost
 cd pi-dash-selfhost
 ```
 
-#### For *Docker Compose* based setup
+#### For _Docker Compose_ based setup
 
 ```
 curl -fsSL -o setup.sh https://github.com/makepidash/pi-dash/releases/latest/download/setup.sh
@@ -71,7 +71,7 @@ curl -fsSL -o setup.sh https://github.com/makepidash/pi-dash/releases/latest/dow
 chmod +x setup.sh
 ```
 
-#### For *Docker Swarm* based setup
+#### For _Docker Swarm_ based setup
 
 ```
 curl -fsSL -o setup.sh https://github.com/makepidash/pi-dash/releases/latest/download/swarm.sh
@@ -89,7 +89,8 @@ Lets get started by running the `./setup.sh` command.
 
 This will prompt you with the below options.
 
-#### Docker Compose 
+#### Docker Compose
+
 ```bash
 Select an Action you want to perform:
    1) Install (x86_64)
@@ -144,6 +145,13 @@ Again the `options [1-7]` will be popped up, and this time hit `7` to exit.
 Before proceeding, we suggest used to review `.env` file and set the values.
 Below are the most import keys you must refer to. _<span style="color: #fcba03">You can use any text editor to edit this file</span>_.
 
+> `SECRET_KEY` and `LIVE_SERVER_SECRET_KEY` - These are generated automatically
+> during `Install` with `openssl rand -hex 32` and written to `pi_dash.env`.
+> Each install gets a unique value. Back up `pi_dash.env` (or at least these
+> two values) — losing them will invalidate existing sessions, CSRF tokens, and
+> any signed URLs. To rotate, overwrite the value in `pi_dash.env` and restart
+> the stack.
+
 > `LISTEN_HTTP_PORT` - This is default set to `80`. Make sure the port you choose to use is not preoccupied. (e.g `LISTEN_HTTP_PORT=8080`)
 
 > `WEB_URL` - This is default set to `http://localhost`. Change this to the FQDN you plan to use along with LISTEN_HTTP_PORT (eg. `https://pi-dash.example.com:8080` or `http://[IP-ADDRESS]:8080`)
@@ -189,7 +197,7 @@ You have successfully self hosted `Pi Dash` instance. Access the application by 
 
 In case you want to make changes to `pi_dash.env` variables, we suggest you to stop the services before doing that.
 
-#### Docker Compose 
+#### Docker Compose
 
 Lets again run the `./setup.sh` command. You will again be prompted with the below options. This time select `3` to stop the services
 
@@ -239,6 +247,7 @@ In case you want to make changes to `pi_dash.env` variables, without stopping th
 Lets again run the `./setup.sh` command. You will again be prompted with the below options. This time select `4` to restart the services
 
 #### Docker Compose
+
 ```bash
 Select a Action you want to perform:
    1) Install (x86_64)
@@ -275,7 +284,7 @@ If all goes well, you will see the confirmation from docker cli
 
 ---
 
-### Upgrading Pi Dash Version 
+### Upgrading Pi Dash Version
 
 It is always advised to keep Pi Dash up to date with the latest release.
 
@@ -337,9 +346,9 @@ Once done with making changes in `pi_dash.env` file, jump on to `Redeploy Stack`
 
 ### View Logs
 
-There would a time when you might want to check what is happening inside the API, Worker or any other container.  
+There would a time when you might want to check what is happening inside the API, Worker or any other container.
 
-Lets again run the `./setup.sh` command. You will again be prompted with the below options. 
+Lets again run the `./setup.sh` command. You will again be prompted with the below options.
 
 This time select `6` to view logs.
 
@@ -361,7 +370,6 @@ Action [2]: 6
 
 #### Docker Swarm
 
-
 ```bash
    1) Deploy Stack
    2) Remove Stack
@@ -375,7 +383,9 @@ Action [3]: 6
 ```
 
 #### Service Menu Options for Logs
+
 This will further open sub-menu with list of services
+
 ```bash
 Select a Service you want to view the logs for:
    1) Web
@@ -395,6 +405,7 @@ Service: 3
 ```
 
 Select any of the service to view the logs e.g. `3`. Expect something similar to this
+
 ```bash
 api-1  | Waiting for database...
 api-1  | Database available!
@@ -439,9 +450,9 @@ api-1  | [2024-05-02 03:56:03 +0000] [25] [INFO] Application startup complete.
 
 ```
 
-To exit this, use `CTRL+C` and then you will land on to the main-menu with the list of actions. 
+To exit this, use `CTRL+C` and then you will land on to the main-menu with the list of actions.
 
-Similarly, you can view the logs of other services. 
+Similarly, you can view the logs of other services.
 
 ---
 
@@ -500,12 +511,12 @@ When you want to restore the previously backed-up data, follow the instructions 
 
    ```bash
    --------------------------------------------
-    ____  _                          ///////// 
-   |  _ \| | __ _ _ __   ___         ///////// 
-   | |_) | |/ _` | '_ \ / _ \   /////    ///// 
-   |  __/| | (_| | | | |  __/   /////    ///// 
-   |_|   |_|\__,_|_| |_|\___|        ////      
-                                    ////      
+    ____  _                          /////////
+   |  _ \| | __ _ _ __   ___         /////////
+   | |_) | |/ _` | '_ \ / _ \   /////    /////
+   |  __/| | (_| | | | |  __/   /////    /////
+   |_|   |_|\__,_|_| |_|\___|        ////
+                                    ////
    --------------------------------------------
    Project management tool from the future
    --------------------------------------------
@@ -550,7 +561,7 @@ When you want to restore the previously backed-up data on Pi Dash Commercial Air
    ./restore-airgapped.sh <path to backup folder containing *.tar.gz files>
    ```
 
-1. After restoration, you are ready to start Pi Dash Commercial (Airgapped) will all your previously saved data. 
+1. After restoration, you are ready to start Pi Dash Commercial (Airgapped) will all your previously saved data.
 
 ---
 
@@ -627,4 +638,5 @@ In case the suffixes are wrong or the mentioned volumes are not found, you will 
 In case of successful migration, it will be a silent exit without error.
 
 Now its time to restart v0.14.0 setup.
+
 </details>

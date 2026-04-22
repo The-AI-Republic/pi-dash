@@ -8,7 +8,7 @@ The AIO image contains the following services:
 
 - **Web App** (Port 3001): Main Pi Dash web interface
 - **Space** (Port 3002): Public project spaces
-- **Admin** (Port 3003): Administrative interface  
+- **Admin** (Port 3003): Administrative interface
 - **API Server** (Port 3004): Backend API
 - **Live Server** (Port 3005): Real-time collaboration
 - **Proxy** (Port 80, 443): Caddy reverse proxy
@@ -21,7 +21,7 @@ The AIO image contains the following services:
 The AIO image requires these external services to be running:
 
 - **PostgreSQL Database**: For data storage
-- **Redis**: For caching and session management  
+- **Redis**: For caching and session management
 - **RabbitMQ**: For message queuing
 - **S3-Compatible Storage**: For file uploads (AWS S3 or MinIO)
 
@@ -33,7 +33,7 @@ You must provide these environment variables:
 
 - `DOMAIN_NAME`: Your domain name or IP address
 - `DATABASE_URL`: PostgreSQL connection string
-- `REDIS_URL`: Redis connection string  
+- `REDIS_URL`: Redis connection string
 - `AMQP_URL`: RabbitMQ connection string
 
 #### Storage Configuration
@@ -43,6 +43,13 @@ You must provide these environment variables:
 - `AWS_SECRET_ACCESS_KEY`: S3 secret key
 - `AWS_S3_BUCKET_NAME`: S3 bucket name
 - `AWS_S3_ENDPOINT_URL`: S3 endpoint (optional, defaults to AWS)
+
+#### Security & Secrets
+
+Generate each with `openssl rand -hex 32`:
+
+- `SECRET_KEY`: Django signing key
+- `LIVE_SERVER_SECRET_KEY`: Live server signing key
 
 ## Quick Start
 
@@ -59,6 +66,8 @@ docker run --name pi-dash-aio --rm -it \
     -e AWS_ACCESS_KEY_ID=your-access-key \
     -e AWS_SECRET_ACCESS_KEY=your-secret-key \
     -e AWS_S3_BUCKET_NAME=your-bucket \
+    -e SECRET_KEY=$(openssl rand -hex 32) \
+    -e LIVE_SERVER_SECRET_KEY=$(openssl rand -hex 32) \
     makepidash/pi-dash-aio-community:latest
 ```
 
@@ -78,6 +87,8 @@ docker run --name myaio --rm -it \
     -e AWS_S3_BUCKET_NAME=pi-dash-app \
     -e AWS_S3_ENDPOINT_URL=http://${MYIP}:19000 \
     -e FILE_SIZE_LIMIT=10485760 \
+    -e SECRET_KEY=$(openssl rand -hex 32) \
+    -e LIVE_SERVER_SECRET_KEY=$(openssl rand -hex 32) \
     makepidash/pi-dash-aio-community:latest
 ```
 
@@ -88,12 +99,6 @@ docker run --name myaio --rm -it \
 #### Network & Protocol
 
 - `SITE_ADDRESS`: Server bind address (default: `:80`)
-
-
-#### Security & Secrets
-
-- `SECRET_KEY`: Django secret key (default provided)
-- `LIVE_SERVER_SECRET_KEY`: Live server secret (default provided)
 
 #### File Handling
 
@@ -116,7 +121,7 @@ The following ports are exposed:
 
 ```bash
 -v /path/to/logs:/app/logs \
--v /path/to/data:/app/data 
+-v /path/to/data:/app/data
 ```
 
 ## Building the Image
@@ -153,7 +158,7 @@ docker exec -it <container-name> supervisorctl status
 ### Common Issues
 
 1. **Database Connection Failed**: Ensure PostgreSQL is accessible and credentials are correct
-2. **Redis Connection Failed**: Verify Redis server is running and URL is correct  
+2. **Redis Connection Failed**: Verify Redis server is running and URL is correct
 3. **File Upload Issues**: Check S3 credentials and bucket permissions
 
 ### Environment Validation
