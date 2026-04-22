@@ -4,6 +4,7 @@ use std::path::Path;
 use crate::util::paths::Paths;
 
 pub mod launchd;
+pub mod reload;
 pub mod systemd;
 
 /// Reject paths containing characters that would break the systemd unit /

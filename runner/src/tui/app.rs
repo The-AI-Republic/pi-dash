@@ -67,9 +67,15 @@ pub struct AppState {
     pub status: Option<crate::ipc::protocol::StatusSnapshot>,
     pub runs: Vec<crate::history::index::RunSummary>,
     pub approvals: Vec<crate::approval::router::ApprovalRecord>,
-    pub config_blob: Option<serde_json::Value>,
+    /// Currently-on-disk config, decoded from `config.toml`. `None` means
+    /// the file is missing (first-run state) — the Config tab switches into
+    /// "Register with cloud" mode when that happens.
+    pub config_loaded: Option<crate::config::schema::Config>,
     pub config_error: Option<String>,
-    pub daemon_offline: bool,
+    /// Last `service::reload::restart_and_verify` result after a save. The
+    /// Config tab surfaces this so users can see whether their edit broke
+    /// the daemon.
+    pub reload_outcome: Option<crate::service::reload::ReloadOutcome>,
     pub error: Option<String>,
     pub quit: bool,
     pub selected: usize,
@@ -99,9 +105,9 @@ pub async fn run(paths: Paths, initial_tab: Tab) -> Result<()> {
         status: None,
         runs: Vec::new(),
         approvals: Vec::new(),
-        config_blob: None,
+        config_loaded: None,
         config_error: None,
-        daemon_offline: false,
+        reload_outcome: None,
         error: None,
         quit: false,
         selected: 0,
@@ -153,17 +159,6 @@ async fn loop_ui(
     Ok(())
 }
 
-fn is_daemon_offline(err: &anyhow::Error) -> bool {
-    err.chain().any(|c| {
-        c.downcast_ref::<std::io::Error>().is_some_and(|io| {
-            matches!(
-                io.kind(),
-                std::io::ErrorKind::NotFound | std::io::ErrorKind::ConnectionRefused
-            )
-        })
-    })
-}
-
 async fn poll_event() -> Option<Event> {
     // Off-thread crossterm poll.
     tokio::task::spawn_blocking(|| {
@@ -212,23 +207,25 @@ async fn refresh(state: &mut AppState) {
                 state.runs = v;
             }
         }
-        Tab::Config => match state.ipc.config().await {
-            Ok(v) => {
-                state.config_blob = Some(v);
-                state.config_error = None;
-                state.daemon_offline = false;
-            }
-            Err(e) => {
-                state.config_blob = None;
-                if is_daemon_offline(&e) {
-                    state.daemon_offline = true;
+        Tab::Config => {
+            // Direct file I/O — no daemon needed. load_config_opt swallows
+            // NotFound and returns None so we can route into the register
+            // sub-widget without an error banner.
+            match crate::config::file::load_config_opt(&state.paths) {
+                Ok(Some(cfg)) => {
+                    state.config_loaded = Some(cfg);
                     state.config_error = None;
-                } else {
-                    state.daemon_offline = false;
+                }
+                Ok(None) => {
+                    state.config_loaded = None;
+                    state.config_error = None;
+                }
+                Err(e) => {
+                    state.config_loaded = None;
                     state.config_error = Some(format!("{e:#}"));
                 }
             }
-        },
+        }
         _ => {}
     }
 }
