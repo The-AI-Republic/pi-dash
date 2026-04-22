@@ -47,6 +47,7 @@ pub struct AppState {
     pub approvals: Vec<crate::approval::router::ApprovalRecord>,
     pub config_blob: Option<serde_json::Value>,
     pub config_error: Option<String>,
+    pub daemon_offline: bool,
     pub error: Option<String>,
     pub quit: bool,
     pub selected: usize,
@@ -69,6 +70,7 @@ pub async fn run(paths: Paths) -> Result<()> {
         approvals: Vec::new(),
         config_blob: None,
         config_error: None,
+        daemon_offline: false,
         error: None,
         quit: false,
         selected: 0,
@@ -116,6 +118,17 @@ async fn loop_ui(
     Ok(())
 }
 
+fn is_daemon_offline(err: &anyhow::Error) -> bool {
+    err.chain().any(|c| {
+        c.downcast_ref::<std::io::Error>().is_some_and(|io| {
+            matches!(
+                io.kind(),
+                std::io::ErrorKind::NotFound | std::io::ErrorKind::ConnectionRefused
+            )
+        })
+    })
+}
+
 async fn poll_event() -> Option<Event> {
     // Off-thread crossterm poll.
     tokio::task::spawn_blocking(|| {
@@ -160,9 +173,16 @@ async fn refresh(state: &mut AppState) {
             Ok(v) => {
                 state.config_blob = Some(v);
                 state.config_error = None;
+                state.daemon_offline = false;
             }
             Err(e) => {
-                state.config_error = Some(format!("{e:#}"));
+                if is_daemon_offline(&e) {
+                    state.daemon_offline = true;
+                    state.config_error = None;
+                } else {
+                    state.daemon_offline = false;
+                    state.config_error = Some(format!("{e:#}"));
+                }
             }
         },
         _ => {}

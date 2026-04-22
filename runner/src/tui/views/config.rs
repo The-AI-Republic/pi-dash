@@ -16,6 +16,12 @@ pub fn render(f: &mut ratatui::Frame<'_>, area: Rect, state: &AppState) {
                 .to_string(),
             Style::default().fg(Color::Yellow),
         )
+    } else if state.daemon_offline {
+        (
+            "Runner daemon not running.\n\nStart it with `pidash service start`\n(or run `pidash run` in a terminal for foreground debugging)."
+                .to_string(),
+            Style::default().fg(Color::Yellow),
+        )
     } else if let Some(err) = state.config_error.as_ref() {
         (
             format!("Failed to load config:\n{err}"),
