@@ -72,8 +72,9 @@ pub struct AgentSection {
 
 /// Which agent CLI the runner drives for assigned runs. Serialised as a
 /// lowercase string (`"codex"` / `"claude_code"`) so the config file stays
-/// human-friendly.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, Default, PartialEq, Eq)]
+/// human-friendly. `ValueEnum` lets `--agent` accept the kebab-case spelling
+/// on the CLI (`codex`, `claude-code`).
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, Default, PartialEq, Eq, clap::ValueEnum)]
 #[serde(rename_all = "snake_case")]
 pub enum AgentKind {
     /// OpenAI Codex via `codex app-server`. Default for backward compatibility.

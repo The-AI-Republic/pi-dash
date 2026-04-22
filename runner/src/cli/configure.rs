@@ -1,9 +1,10 @@
 use anyhow::{Context, Result};
 use clap::Args as ClapArgs;
+use std::io::{BufRead, IsTerminal, Write};
 use std::path::PathBuf;
 
 use crate::cloud::register::{RegisterError, RegisterRequest, register};
-use crate::config::schema::{Config, Credentials};
+use crate::config::schema::{AgentKind, Config, Credentials};
 use crate::util::paths::Paths;
 use crate::util::runner_name;
 
@@ -30,7 +31,14 @@ pub struct Args {
     #[arg(long)]
     pub working_dir: Option<PathBuf>,
 
-    /// Skip on-install doctor checks (not recommended).
+    /// Which AI agent CLI the runner should drive. Omit on a TTY to be
+    /// prompted (default / Enter = `codex`). Required to run non-interactively
+    /// with a non-default choice.
+    #[arg(long, value_enum)]
+    pub agent: Option<AgentKind>,
+
+    /// Skip on-install doctor checks (not recommended). Also skips the
+    /// auth-gate retry loop, since there's nothing to re-check.
     #[arg(long)]
     pub skip_doctor: bool,
 }
@@ -42,6 +50,9 @@ pub struct RegisterInputs {
     pub token: String,
     pub name: Option<String>,
     pub working_dir: Option<PathBuf>,
+    /// Explicit agent choice; `None` means "ask on a TTY, else keep the
+    /// existing config's kind, else Codex."
+    pub agent: Option<AgentKind>,
     pub skip_doctor: bool,
 }
 
@@ -52,6 +63,7 @@ impl From<Args> for RegisterInputs {
             token: a.token,
             name: a.name,
             working_dir: a.working_dir,
+            agent: a.agent,
             skip_doctor: a.skip_doctor,
         }
     }
@@ -69,6 +81,15 @@ pub async fn run(args: Args, paths: &Paths) -> Result<()> {
 /// it sets false because install itself is doing the "next" step.
 pub async fn execute(inputs: RegisterInputs, paths: &Paths, print_next_hint: bool) -> Result<()> {
     validate_cloud_url(&inputs.url)?;
+
+    // Pre-load any existing config so we can pre-fill the agent prompt with
+    // the user's prior choice. Harmless if the file is absent or garbled —
+    // `load_config_opt` swallows NotFound and we fall back to Codex.
+    let existing_kind = crate::config::file::load_config_opt(paths)
+        .ok()
+        .flatten()
+        .map(|c| c.agent.kind);
+    let agent_kind = resolve_agent_kind(inputs.agent, existing_kind)?;
 
     // User-supplied names are charset-checked up front; an invalid `--name`
     // is a hard error, not something we try to fix by retrying. Auto-generated
@@ -163,7 +184,7 @@ pub async fn execute(inputs: RegisterInputs, paths: &Paths, print_next_hint: boo
         workspace: crate::config::schema::WorkspaceSection { working_dir },
         codex: crate::config::schema::CodexSection::default(),
         claude_code: crate::config::schema::ClaudeCodeSection::default(),
-        agent: crate::config::schema::AgentSection::default(),
+        agent: crate::config::schema::AgentSection { kind: agent_kind },
         approval_policy: crate::config::schema::ApprovalPolicySection::default(),
         logging: crate::config::schema::LoggingSection::default(),
     };
@@ -178,11 +199,7 @@ pub async fn execute(inputs: RegisterInputs, paths: &Paths, print_next_hint: boo
     crate::config::file::write_credentials(paths, &creds)?;
 
     if !inputs.skip_doctor {
-        let report = crate::cli::doctor::execute(paths).await?;
-        report.print_compact();
-        if report.has_blockers() {
-            eprintln!("\nWarning: some preflight checks failed. Resolve them before starting.");
-        }
+        run_doctor_with_auth_gate(paths, agent_kind).await?;
     }
 
     if print_next_hint {
@@ -197,6 +214,97 @@ pub async fn execute(inputs: RegisterInputs, paths: &Paths, print_next_hint: boo
         );
     }
     Ok(())
+}
+
+/// Picks the agent for this run. Precedence:
+/// 1. `--agent` flag (always wins, scriptable).
+/// 2. Interactive TTY prompt, pre-filled with the existing config's kind
+///    if one exists (otherwise `codex`). Enter accepts the default.
+/// 3. Non-TTY with no flag: keep the existing config's kind, or Codex.
+fn resolve_agent_kind(flag: Option<AgentKind>, existing: Option<AgentKind>) -> Result<AgentKind> {
+    if let Some(k) = flag {
+        return Ok(k);
+    }
+    if std::io::stdin().is_terminal() {
+        return prompt_agent_kind(existing.unwrap_or_default());
+    }
+    Ok(existing.unwrap_or_default())
+}
+
+fn prompt_agent_kind(default: AgentKind) -> Result<AgentKind> {
+    let default_label = match default {
+        AgentKind::Codex => "codex",
+        AgentKind::ClaudeCode => "claude-code",
+    };
+    print!("Choose AI agent [codex/claude-code] (default: {default_label}): ");
+    std::io::stdout().flush()?;
+    let stdin = std::io::stdin();
+    let mut line = String::new();
+    stdin.lock().read_line(&mut line)?;
+    let trimmed = line.trim();
+    if trimmed.is_empty() {
+        return Ok(default);
+    }
+    // Accept both the CLI spelling (`claude-code`) and the config-file
+    // spelling (`claude_code`) so the prompt forgives either.
+    match trimmed.to_ascii_lowercase().as_str() {
+        "codex" => Ok(AgentKind::Codex),
+        "claude-code" | "claude_code" | "claude" => Ok(AgentKind::ClaudeCode),
+        other => anyhow::bail!(
+            "unrecognised agent {other:?}; expected `codex` or `claude-code`"
+        ),
+    }
+}
+
+/// Runs the doctor and, on a TTY, loops on a failing agent-auth blocker so
+/// the operator can authenticate in another terminal and continue without
+/// re-running `pidash configure`. Non-TTY keeps the old warn-and-continue
+/// behaviour so scripts don't deadlock.
+async fn run_doctor_with_auth_gate(paths: &Paths, agent_kind: AgentKind) -> Result<()> {
+    let auth_check_name = match agent_kind {
+        AgentKind::Codex => "codex-auth",
+        AgentKind::ClaudeCode => "claude-auth",
+    };
+    let tty = std::io::stdin().is_terminal();
+
+    loop {
+        let report = crate::cli::doctor::execute(paths).await?;
+        report.print_compact();
+
+        let auth_failing = report
+            .checks
+            .iter()
+            .any(|c| c.name == auth_check_name && c.blocker && !c.ok);
+
+        if !auth_failing {
+            if report.has_blockers() {
+                eprintln!("\nWarning: some preflight checks failed. Resolve them before starting.");
+            }
+            return Ok(());
+        }
+
+        if !tty {
+            eprintln!("\nWarning: some preflight checks failed. Resolve them before starting.");
+            return Ok(());
+        }
+
+        let login_hint = match agent_kind {
+            AgentKind::Codex => "codex login",
+            AgentKind::ClaudeCode => "claude /login",
+        };
+        print!(
+            "\nAgent auth check failed. Run `{login_hint}` in another terminal, then press Enter to retry (Ctrl-C to finish setup later): "
+        );
+        std::io::stdout().flush()?;
+        let stdin = std::io::stdin();
+        let mut line = String::new();
+        // EOF (0 bytes) = user closed stdin / piped-in empty input; treat as
+        // "give up" rather than a busy-loop. Matches Ctrl-C semantics.
+        if stdin.lock().read_line(&mut line)? == 0 {
+            eprintln!("\nFinishing setup without auth; resolve it before starting the runner.");
+            return Ok(());
+        }
+    }
 }
 
 /// Refuse `http://` URLs that point at non-localhost hosts. Sending the

@@ -124,6 +124,9 @@ fn prompt_for_register_inputs(paths: &Paths) -> Result<crate::cli::configure::Re
         token,
         name,
         working_dir: None,
+        // Leave `agent: None` so configure::execute handles the prompt in
+        // one place (install is always interactive here).
+        agent: None,
         skip_doctor: false,
     })
 }
