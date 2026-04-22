@@ -7,7 +7,7 @@ use anyhow::Result;
 
 use crate::util::paths::Paths;
 
-pub async fn run(paths: Paths, no_onboarding: bool) -> Result<()> {
+pub async fn run(paths: Paths, no_onboarding: bool, initial_tab: app::Tab) -> Result<()> {
     let needs_onboarding = !no_onboarding && !paths.config_path().exists();
     if needs_onboarding {
         onboarding::run(paths.clone()).await?;
@@ -17,5 +17,5 @@ pub async fn run(paths: Paths, no_onboarding: bool) -> Result<()> {
             return Ok(());
         }
     }
-    app::run(paths).await
+    app::run(paths, initial_tab).await
 }

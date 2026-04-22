@@ -13,28 +13,49 @@ use std::io;
 use std::time::Duration;
 
 use super::ipc_client::TuiIpc;
-use super::views::{approvals, config as config_view, runs, status};
+use super::views::{approvals, config as config_view, runner_status, runs};
 use crate::util::paths::Paths;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Tab {
-    Status,
-    Runs,
+    /// Daemon health + start/stop controls. First tab so `pidash tui` lands
+    /// here and the user immediately sees whether the runner is up.
+    RunnerStatus,
+    /// Config editor, now the primary reason a user opens the TUI. Moved to
+    /// position 2 because config editing is the most common flow once the
+    /// service is running.
     Config,
+    Runs,
     Approvals,
 }
 
 impl Tab {
     pub fn all() -> [Tab; 4] {
-        [Tab::Status, Tab::Runs, Tab::Config, Tab::Approvals]
+        [Tab::RunnerStatus, Tab::Config, Tab::Runs, Tab::Approvals]
     }
 
     pub fn label(&self) -> &'static str {
         match self {
-            Tab::Status => "Status",
-            Tab::Runs => "Runs",
+            Tab::RunnerStatus => "Runner",
             Tab::Config => "Config",
+            Tab::Runs => "Runs",
             Tab::Approvals => "Approvals",
+        }
+    }
+
+    /// Parse `--tab` values: accepts the canonical name (`runner`, `config`,
+    /// `runs`, `approvals`) or a 1-based index (`1`–`4`). Unknown input
+    /// yields `None` so the caller can surface a clap-style error.
+    pub fn parse_cli(raw: &str) -> Option<Tab> {
+        let s = raw.trim().to_ascii_lowercase();
+        match s.as_str() {
+            "runner" | "runner-status" | "runner_status" | "status" | "1" => {
+                Some(Tab::RunnerStatus)
+            }
+            "config" | "2" => Some(Tab::Config),
+            "runs" | "3" => Some(Tab::Runs),
+            "approvals" | "4" => Some(Tab::Approvals),
+            _ => None,
         }
     }
 }
@@ -59,13 +80,13 @@ pub struct AppState {
     pub last_approval_count: usize,
 }
 
-pub async fn run(paths: Paths) -> Result<()> {
+pub async fn run(paths: Paths, initial_tab: Tab) -> Result<()> {
     let onboarding_needed = !paths.config_path().exists();
     let ipc = TuiIpc {
         socket: paths.ipc_socket_path(),
     };
     let mut state = AppState {
-        tab: Tab::Status,
+        tab: initial_tab,
         ipc,
         status: None,
         runs: Vec::new(),
@@ -256,17 +277,17 @@ async fn handle_event(ev: Event, state: &mut AppState) {
             (KeyCode::Char('Q'), _) => state.confirm_stop = true,
             (KeyCode::Char('?'), _) => state.show_help = true,
             (KeyCode::Char('1'), _) => {
-                state.tab = Tab::Status;
+                state.tab = Tab::RunnerStatus;
                 state.selected = 0;
                 refresh(state).await;
             }
             (KeyCode::Char('2'), _) => {
-                state.tab = Tab::Runs;
+                state.tab = Tab::Config;
                 state.selected = 0;
                 refresh(state).await;
             }
             (KeyCode::Char('3'), _) => {
-                state.tab = Tab::Config;
+                state.tab = Tab::Runs;
                 state.selected = 0;
                 refresh(state).await;
             }
@@ -283,20 +304,20 @@ async fn handle_event(ev: Event, state: &mut AppState) {
             }
             (KeyCode::Char('h') | KeyCode::Left, _) => {
                 state.tab = match state.tab {
-                    Tab::Status => Tab::Approvals,
-                    Tab::Runs => Tab::Status,
-                    Tab::Config => Tab::Runs,
-                    Tab::Approvals => Tab::Config,
+                    Tab::RunnerStatus => Tab::Approvals,
+                    Tab::Config => Tab::RunnerStatus,
+                    Tab::Runs => Tab::Config,
+                    Tab::Approvals => Tab::Runs,
                 };
                 state.selected = 0;
                 refresh(state).await;
             }
             (KeyCode::Char('l') | KeyCode::Right, _) => {
                 state.tab = match state.tab {
-                    Tab::Status => Tab::Runs,
-                    Tab::Runs => Tab::Config,
-                    Tab::Config => Tab::Approvals,
-                    Tab::Approvals => Tab::Status,
+                    Tab::RunnerStatus => Tab::Config,
+                    Tab::Config => Tab::Runs,
+                    Tab::Runs => Tab::Approvals,
+                    Tab::Approvals => Tab::RunnerStatus,
                 };
                 state.selected = 0;
                 refresh(state).await;
@@ -345,9 +366,9 @@ fn draw(f: &mut ratatui::Frame<'_>, state: &AppState) {
         .map(|t| Line::from(Span::styled(t.label(), Style::default())))
         .collect();
     let idx = match state.tab {
-        Tab::Status => 0,
-        Tab::Runs => 1,
-        Tab::Config => 2,
+        Tab::RunnerStatus => 0,
+        Tab::Config => 1,
+        Tab::Runs => 2,
         Tab::Approvals => 3,
     };
     let tabs = Tabs::new(titles)
@@ -361,14 +382,14 @@ fn draw(f: &mut ratatui::Frame<'_>, state: &AppState) {
     f.render_widget(tabs, layout[0]);
 
     match state.tab {
-        Tab::Status => status::render(f, layout[1], state),
-        Tab::Runs => runs::render(f, layout[1], state),
+        Tab::RunnerStatus => runner_status::render(f, layout[1], state),
         Tab::Config => config_view::render(f, layout[1], state),
+        Tab::Runs => runs::render(f, layout[1], state),
         Tab::Approvals => approvals::render(f, layout[1], state),
     }
 
     let hint = Line::from(Span::styled(
-        " [1-4]tab  h/l ←/→ switch  j/k ↑/↓ move  r refresh  ?help  q exit  Q stop daemon ",
+        " [1]Runner [2]Config [3]Runs [4]Approvals  h/l switch  j/k move  r refresh  ?help  q exit ",
         Style::default().add_modifier(Modifier::DIM),
     ));
     f.render_widget(Paragraph::new(hint), layout[2]);

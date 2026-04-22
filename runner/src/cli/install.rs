@@ -1,20 +1,19 @@
-//! `pidash install` — write the OS service unit and bring the service up.
+//! `pidash install` — CI / provisioning entry point for the OS service unit.
 //!
-//! Three phases:
+//! The interactive happy path lives in `pidash configure`, which handles
+//! registration + service setup in one shot. `install` is the escape hatch
+//! for the two cases `configure` can't cover:
 //!
-//! 1. **Write unit** — always. `service::write_unit` is idempotent, so it's
-//!    safe to re-run. On its own it doesn't activate anything.
+//! - **Unattended provisioning** (`--no-configure` or no TTY): write the
+//!   unit at image-bake time without credentials. The daemon stays stopped
+//!   until someone runs `pidash configure` on the real machine.
+//! - **Re-install after upgrading the binary**: rewrite the unit (in case
+//!   `ExecStart` or other fields moved between versions) and restart the
+//!   daemon so it picks up the new binary. Safe to run repeatedly.
 //!
-//! 2. **Fresh-install gate** — if `config.toml` doesn't exist, the daemon
-//!    has no credentials to run with. On a TTY (and without `--no-configure`),
-//!    prompt for URL + token and chain into `pidash configure`. Non-TTY or
-//!    with `--no-configure`, print a next-step hint and exit without
-//!    enabling the service. Nothing auto-starts a runner that isn't
-//!    configured.
-//!
-//! 3. **Enable + start** — run once the machine has both a unit file and a
-//!    valid `config.toml` + `credentials.toml`. Also prints the Linux
-//!    `loginctl enable-linger` hint so on-boot autostart actually works.
+//! For convenience, running `pidash install` on a fresh machine interactively
+//! still chains into `pidash configure`, which from there takes over the
+//! whole flow.
 
 use anyhow::Result;
 use clap::Args as ClapArgs;
@@ -33,24 +32,34 @@ pub struct Args {
 
 pub async fn run(args: Args, paths: &Paths) -> Result<()> {
     let svc = crate::service::detect();
-    svc.write_unit(paths).await?;
 
     // Treat a missing config.toml OR a missing credentials.toml as "fresh" —
     // `enable_and_start`ing against a partial state would crash-loop the daemon
-    // on the new `__run` missing-creds bail.
+    // on the `__run` missing-creds bail.
     let fresh = !paths.config_path().exists() || !paths.credentials_path().exists();
+
     if fresh {
         if args.no_configure || !std::io::stdin().is_terminal() {
+            // Unattended path: just drop the unit file and stop. The service
+            // stays disabled until someone runs `pidash configure`.
+            svc.write_unit(paths).await?;
             print_unattended_hint(args.no_configure);
             return Ok(());
         }
-        // TTY + not opted-out → chain into configure interactively.
+        // Interactive path: configure owns the whole end-to-end flow
+        // (register → persist → doctor → write unit → enable + start).
         let inputs = prompt_for_register_inputs(paths)?;
-        crate::cli::configure::execute(inputs, paths, /* print_next_hint = */ false).await?;
+        crate::cli::configure::execute(inputs, paths).await?;
+        return Ok(());
     }
 
+    // Re-install path: credentials already exist, so the user is refreshing
+    // the unit (e.g. after a binary upgrade). Rewrite + restart.
+    svc.write_unit(paths).await?;
     svc.enable_and_start().await?;
-    print_post_install_hints();
+    println!();
+    println!("Service unit refreshed and daemon restarted.");
+    println!();
     Ok(())
 }
 
@@ -63,28 +72,9 @@ fn print_unattended_hint(explicit_opt_out: bool) {
     println!();
     println!("Service unit installed but NOT enabled ({reason}).");
     println!();
-    println!("Next steps:");
-    println!("  1. pidash configure --url <URL> --token <ONE_TIME_TOKEN>");
-    println!("  2. pidash start");
-    println!();
-}
-
-fn print_post_install_hints() {
-    println!();
-    println!("Service installed and running.");
-    if cfg!(target_os = "linux") {
-        println!();
-        println!("For the service to start on OS boot (before you log in), run:");
-        println!("  sudo loginctl enable-linger $USER");
-        println!(
-            "Without lingering, the service still starts at every user login and restarts on crash."
-        );
-    }
-    println!();
-    println!("Useful next commands:");
-    println!("  pidash status         # service + daemon state");
-    println!("  pidash tui            # interactive UI");
-    println!("  pidash stop           # stop the service");
+    println!("Next step:");
+    println!("  pidash configure --url <URL> --token <ONE_TIME_TOKEN>");
+    println!("(this also starts the service)");
     println!();
 }
 
@@ -128,6 +118,9 @@ fn prompt_for_register_inputs(paths: &Paths) -> Result<crate::cli::configure::Re
         // one place (install is always interactive here).
         agent: None,
         skip_doctor: false,
+        // Install's interactive chain delegates fully to configure — let it
+        // write the unit + start the daemon as part of the same flow.
+        skip_service: false,
     })
 }
 

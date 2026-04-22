@@ -45,10 +45,13 @@ WantedBy=default.target
     Ok(())
 }
 
-/// Enable the unit at boot/login and start it now. Idempotent.
+/// Enable the unit at boot/login and bring it up. `restart` (not `start`) so
+/// a re-configure against an already-running daemon forces it to reload the
+/// freshly-written `credentials.toml`. On a stopped unit `restart` just
+/// starts it — same net effect as before for the first-install path.
 pub async fn enable_and_start() -> Result<()> {
     run_systemctl(&["enable", UNIT_NAME]).await?;
-    run_systemctl(&["start", UNIT_NAME]).await?;
+    run_systemctl(&["restart", UNIT_NAME]).await?;
     Ok(())
 }
 

@@ -31,9 +31,9 @@ pub struct Args {
     #[arg(long)]
     pub working_dir: Option<PathBuf>,
 
-    /// Which AI agent CLI the runner should drive. Omit on a TTY to be
-    /// prompted (default / Enter = `codex`). Required to run non-interactively
-    /// with a non-default choice.
+    /// Which AI agent CLI the runner should drive. Omit on a TTY to get the
+    /// arrow-key picker (pre-selects your previous choice, or `codex` on
+    /// first run). Required to run non-interactively with a non-default choice.
     #[arg(long, value_enum)]
     pub agent: Option<AgentKind>,
 
@@ -41,6 +41,13 @@ pub struct Args {
     /// auth-gate retry loop, since there's nothing to re-check.
     #[arg(long)]
     pub skip_doctor: bool,
+
+    /// Skip installing / starting the OS service at the end. Use from CI or
+    /// Ansible playbooks that manage the daemon lifecycle themselves, or when
+    /// you only want to re-register credentials without bouncing a running
+    /// daemon.
+    #[arg(long)]
+    pub skip_service: bool,
 }
 
 /// Inputs for the core registration flow. `cli::install::run` also builds one
@@ -54,6 +61,7 @@ pub struct RegisterInputs {
     /// existing config's kind, else Codex."
     pub agent: Option<AgentKind>,
     pub skip_doctor: bool,
+    pub skip_service: bool,
 }
 
 impl From<Args> for RegisterInputs {
@@ -65,21 +73,21 @@ impl From<Args> for RegisterInputs {
             working_dir: a.working_dir,
             agent: a.agent,
             skip_doctor: a.skip_doctor,
+            skip_service: a.skip_service,
         }
     }
 }
 
 pub async fn run(args: Args, paths: &Paths) -> Result<()> {
-    execute(args.into(), paths, /* print_next_hint = */ true).await
+    execute(args.into(), paths).await
 }
 
-/// Core registration flow — hits the cloud register endpoint, persists
-/// `config.toml` + `credentials.toml`, and optionally runs the doctor.
-///
-/// `print_next_hint` controls whether the trailing "Next: …" banner appears.
-/// `pidash configure` sets it true; when `pidash install` chains into this,
-/// it sets false because install itself is doing the "next" step.
-pub async fn execute(inputs: RegisterInputs, paths: &Paths, print_next_hint: bool) -> Result<()> {
+/// End-to-end onboarding: register with the cloud, persist `config.toml` +
+/// `credentials.toml`, run the doctor, then (unless `--skip-service`) write
+/// the OS service unit and bring the daemon up. One command covers the
+/// happy path for an interactive user; `--skip-service` peels off the last
+/// step for scripted / CI flows that manage supervision themselves.
+pub async fn execute(inputs: RegisterInputs, paths: &Paths) -> Result<()> {
     validate_cloud_url(&inputs.url)?;
 
     // Pre-load any existing config so we can pre-fill the agent prompt with
@@ -202,25 +210,53 @@ pub async fn execute(inputs: RegisterInputs, paths: &Paths, print_next_hint: boo
         run_doctor_with_auth_gate(paths, agent_kind).await?;
     }
 
-    if print_next_hint {
+    println!(
+        "\nRegistered runner '{}' with id {}.",
+        config.runner.name, creds.runner_id,
+    );
+
+    if inputs.skip_service {
         println!(
-            "\nRegistered runner '{}' with id {}.\nNext: `pidash install` to run as a background service.\n",
-            config.runner.name, creds.runner_id,
+            "\nSkipping service setup (--skip-service). Run `pidash install` later to enable the background daemon.\n"
         );
-    } else {
+        return Ok(());
+    }
+
+    // Happy path: user just ran `pidash configure` on an interactive machine.
+    // Write the user-scoped service unit and bring the daemon up so they
+    // don't also have to type `pidash install`. `enable_and_start` restarts
+    // an already-running daemon so a re-configure picks up fresh creds.
+    let svc = crate::service::detect();
+    svc.write_unit(paths).await?;
+    svc.enable_and_start().await?;
+    print_post_install_hints();
+
+    Ok(())
+}
+
+fn print_post_install_hints() {
+    println!("Service installed and running.");
+    if cfg!(target_os = "linux") {
+        println!();
+        println!("For the service to start on OS boot (before you log in), run:");
+        println!("  sudo loginctl enable-linger $USER");
         println!(
-            "\nRegistered runner '{}' with id {}.",
-            config.runner.name, creds.runner_id,
+            "Without lingering, the service still starts at every user login and restarts on crash."
         );
     }
-    Ok(())
+    println!();
+    println!("Useful next commands:");
+    println!("  pidash status         # service + daemon state");
+    println!("  pidash tui            # interactive UI");
+    println!("  pidash stop           # stop the service");
+    println!();
 }
 
 /// Picks the agent for this run. Precedence:
 /// 1. `--agent` flag (always wins, scriptable).
-/// 2. Interactive TTY prompt, pre-filled with the existing config's kind
-///    if one exists (otherwise `codex`). Enter accepts the default; EOF
-///    also accepts the default (matches `install.rs` prompt conventions).
+/// 2. Interactive TTY arrow-key picker, pre-selecting the existing config's
+///    kind if one exists (otherwise `codex`). Enter confirms, Esc keeps the
+///    default.
 /// 3. Non-TTY with no flag: keep the existing config's kind, or Codex.
 fn resolve_agent_kind(flag: Option<AgentKind>, existing: Option<AgentKind>) -> AgentKind {
     if let Some(k) = flag {
@@ -232,67 +268,113 @@ fn resolve_agent_kind(flag: Option<AgentKind>, existing: Option<AgentKind>) -> A
     existing.unwrap_or_default()
 }
 
-/// Result of parsing one line of user input at the agent prompt. Kept pure
-/// (no I/O) so the parser can be unit-tested without a terminal.
-#[derive(Debug, PartialEq, Eq)]
-enum AgentInput {
-    /// Empty / whitespace-only input: accept the pre-filled default.
-    UseDefault,
-    /// A recognised agent name.
-    Parsed(AgentKind),
-    /// The input didn't match any known name; caller should re-prompt.
-    Unknown,
-}
-
-/// Accepts the CLI spelling (`codex`, `claude-code`), the config-file
-/// spelling (`claude_code`), and `claude` as a shorthand — so the prompt
-/// forgives whichever a user might type. Case-insensitive.
-fn parse_agent_input(raw: &str) -> AgentInput {
-    let trimmed = raw.trim();
-    if trimmed.is_empty() {
-        return AgentInput::UseDefault;
-    }
-    match trimmed.to_ascii_lowercase().as_str() {
-        "codex" => AgentInput::Parsed(AgentKind::Codex),
-        "claude-code" | "claude_code" | "claude" => AgentInput::Parsed(AgentKind::ClaudeCode),
-        _ => AgentInput::Unknown,
-    }
-}
-
-/// Reads a single line from stdin, loops on unrecognised input so a typo
-/// doesn't force the user to re-run `pidash configure` (and re-paste the
-/// one-time token). Returns the pre-filled default on empty input or EOF.
+/// Interactive agent picker. Renders a small list inline; Up/Down move the
+/// cursor, Enter confirms, Esc keeps the pre-filled default. Needs raw mode
+/// on stdout — if stdout isn't a TTY or raw mode can't be engaged we
+/// silently fall back to `default` (resolve_agent_kind only calls us on a
+/// stdin TTY, so this is the only remaining non-TTY path).
 fn prompt_agent_kind(default: AgentKind) -> AgentKind {
-    let default_label = match default {
-        AgentKind::Codex => "codex",
-        AgentKind::ClaudeCode => "claude-code",
+    use crossterm::{
+        cursor,
+        event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers},
+        execute,
+        terminal::{self, ClearType},
     };
-    loop {
-        // Ignore flush errors: if stdout is broken we can't recover here
-        // anyway, and the read_line below will fail loudly.
-        print!("Choose AI agent [codex/claude-code] (default: {default_label}): ");
-        let _ = std::io::stdout().flush();
-        let mut line = String::new();
-        // EOF on stdin also yields an empty string ⇒ default, matching
-        // the install.rs `prompt_required` convention.
-        match std::io::stdin().lock().read_line(&mut line) {
-            Ok(0) => return default,
-            Ok(_) => {}
-            Err(e) => {
-                eprintln!("warning: could not read agent prompt ({e}); using default");
-                return default;
-            }
-        }
-        match parse_agent_input(&line) {
-            AgentInput::UseDefault => return default,
-            AgentInput::Parsed(k) => return k,
-            AgentInput::Unknown => {
-                eprintln!(
-                    "unrecognised agent; expected `codex` or `claude-code` (or press Enter for the default)."
-                );
-            }
+
+    const OPTIONS: [(AgentKind, &str); 2] = [
+        (AgentKind::Codex, "codex"),
+        (AgentKind::ClaudeCode, "claude-code"),
+    ];
+    let mut idx = OPTIONS
+        .iter()
+        .position(|(k, _)| *k == default)
+        .unwrap_or(0);
+
+    if !std::io::stdout().is_terminal() {
+        return default;
+    }
+
+    // Drop-guard restores cooked mode on every exit path — panic, early
+    // return, normal flow. Without this a crash inside the loop leaves the
+    // user's shell in raw mode and unusable.
+    struct RawGuard;
+    impl Drop for RawGuard {
+        fn drop(&mut self) {
+            let _ = terminal::disable_raw_mode();
         }
     }
+    if terminal::enable_raw_mode().is_err() {
+        return default;
+    }
+    let guard = RawGuard;
+
+    let mut out = std::io::stdout();
+    // \r\n everywhere: raw mode turns off LF→CRLF translation.
+    let _ = write!(
+        out,
+        "Choose AI agent (↑/↓ to move, Enter to confirm, Esc for default):\r\n"
+    );
+    let render = |out: &mut std::io::Stdout, idx: usize| {
+        for (i, (_, label)) in OPTIONS.iter().enumerate() {
+            let marker = if i == idx { ">" } else { " " };
+            let _ = write!(out, "{marker} {label}\r\n");
+        }
+        let _ = out.flush();
+    };
+    render(&mut out, idx);
+
+    let selected = loop {
+        match event::read() {
+            Ok(Event::Key(KeyEvent {
+                code,
+                modifiers,
+                kind: KeyEventKind::Press,
+                ..
+            })) => match code {
+                KeyCode::Up => {
+                    idx = if idx == 0 { OPTIONS.len() - 1 } else { idx - 1 };
+                }
+                KeyCode::Down => {
+                    idx = (idx + 1) % OPTIONS.len();
+                }
+                KeyCode::Enter => break OPTIONS[idx].0,
+                KeyCode::Esc => break default,
+                KeyCode::Char('c') if modifiers.contains(KeyModifiers::CONTROL) => {
+                    // Raw mode disables the kernel's SIGINT translation, so
+                    // Ctrl-C reaches us as a keystroke. Restore cooked mode
+                    // before exiting — `process::exit` doesn't run Drops.
+                    drop(guard);
+                    std::process::exit(130);
+                }
+                _ => continue,
+            },
+            Ok(_) => continue,
+            Err(_) => break default,
+        }
+        let _ = execute!(
+            out,
+            cursor::MoveUp(OPTIONS.len() as u16),
+            terminal::Clear(ClearType::FromCursorDown),
+        );
+        render(&mut out, idx);
+    };
+
+    // Collapse the picker's rendered lines into a single summary so the
+    // scrollback stays tidy regardless of how many arrow presses happened.
+    let selected_label = OPTIONS
+        .iter()
+        .find(|(k, _)| *k == selected)
+        .map(|(_, l)| *l)
+        .unwrap_or("codex");
+    let _ = execute!(
+        out,
+        cursor::MoveUp(OPTIONS.len() as u16 + 1),
+        terminal::Clear(ClearType::FromCursorDown),
+    );
+    let _ = write!(out, "Choose AI agent: {selected_label}\r\n");
+    let _ = out.flush();
+
+    selected
 }
 
 /// Runs the doctor and, on a TTY, loops on a failing agent-auth blocker so
@@ -370,56 +452,6 @@ fn validate_cloud_url(url: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn parse_agent_input_empty_is_default() {
-        assert_eq!(parse_agent_input(""), AgentInput::UseDefault);
-        assert_eq!(parse_agent_input("   "), AgentInput::UseDefault);
-        assert_eq!(parse_agent_input("\n"), AgentInput::UseDefault);
-        assert_eq!(parse_agent_input("  \t\n"), AgentInput::UseDefault);
-    }
-
-    #[test]
-    fn parse_agent_input_codex_variants() {
-        assert_eq!(parse_agent_input("codex"), AgentInput::Parsed(AgentKind::Codex));
-        assert_eq!(parse_agent_input("CODEX"), AgentInput::Parsed(AgentKind::Codex));
-        assert_eq!(parse_agent_input("  Codex\n"), AgentInput::Parsed(AgentKind::Codex));
-    }
-
-    #[test]
-    fn parse_agent_input_claude_variants() {
-        // CLI spelling, config-file spelling, and shorthand — all map to ClaudeCode.
-        assert_eq!(
-            parse_agent_input("claude-code"),
-            AgentInput::Parsed(AgentKind::ClaudeCode)
-        );
-        assert_eq!(
-            parse_agent_input("claude_code"),
-            AgentInput::Parsed(AgentKind::ClaudeCode)
-        );
-        assert_eq!(
-            parse_agent_input("claude"),
-            AgentInput::Parsed(AgentKind::ClaudeCode)
-        );
-        assert_eq!(
-            parse_agent_input("CLAUDE-CODE"),
-            AgentInput::Parsed(AgentKind::ClaudeCode)
-        );
-        assert_eq!(
-            parse_agent_input("  Claude_Code  "),
-            AgentInput::Parsed(AgentKind::ClaudeCode)
-        );
-    }
-
-    #[test]
-    fn parse_agent_input_unknown_values() {
-        // Typos and adjacent names ⇒ Unknown, so the caller can re-prompt
-        // instead of bailing out of `pidash configure`.
-        assert_eq!(parse_agent_input("nope"), AgentInput::Unknown);
-        assert_eq!(parse_agent_input("codexx"), AgentInput::Unknown);
-        assert_eq!(parse_agent_input("anthropic"), AgentInput::Unknown);
-        assert_eq!(parse_agent_input("gpt"), AgentInput::Unknown);
-    }
 
     #[test]
     fn resolve_agent_kind_flag_wins_over_existing() {
