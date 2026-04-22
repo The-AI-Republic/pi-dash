@@ -67,6 +67,8 @@ chmod +x setup.sh
 ./setup.sh
 ```
 
+`setup.sh` copies every `.env.example` to its `.env` counterpart (the repo root plus `apps/web`, `apps/api`, `apps/space`, `apps/admin`, `apps/live`), generates a unique Django `SECRET_KEY` and appends it to `apps/api/.env`, then runs `pnpm install`. For the default loopback-dev setup you do not need to edit any `.env` file manually — the `.env.example` defaults (localhost URLs, `pi-dash` database credentials, a local MinIO endpoint, etc.) work out of the box. Edit them only if you're binding to a non-default host/port or wiring in external services.
+
 3. Start the containers
 
 ```bash
