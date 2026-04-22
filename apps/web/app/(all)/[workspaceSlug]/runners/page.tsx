@@ -8,6 +8,7 @@ import { useEffect, useState } from "react";
 import { observer } from "mobx-react";
 import { HelpCircle } from "lucide-react";
 import useSWR from "swr";
+import { API_BASE_URL } from "@pi-dash/constants";
 import { useTranslation } from "@pi-dash/i18n";
 import { TOAST_TYPE, setToast } from "@pi-dash/propel/toast";
 import { RunnerService } from "@pi-dash/services";
@@ -54,7 +55,8 @@ const RunnersListPage = observer(function RunnersListPage() {
     if (typeof window !== "undefined") setOrigin(window.location.origin);
   }, []);
 
-  const configureCommand = mintedToken ? `pidash configure --url ${origin} --token ${mintedToken}` : "";
+  const apiOrigin = API_BASE_URL || origin;
+  const configureCommand = mintedToken ? `pidash configure --url ${apiOrigin} --token ${mintedToken}` : "";
 
   async function copyToClipboard(text: string, kind: "command" | "token") {
     if (!text) return;
