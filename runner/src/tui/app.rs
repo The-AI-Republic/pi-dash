@@ -54,6 +54,8 @@ pub struct AppState {
     pub onboarding_needed: bool,
     pub show_help: bool,
     pub confirm_stop: bool,
+    pub confirm_exit: bool,
+    pub confirm_exit_yes: bool,
     pub last_approval_count: usize,
 }
 
@@ -77,6 +79,8 @@ pub async fn run(paths: Paths) -> Result<()> {
         onboarding_needed,
         show_help: false,
         confirm_stop: false,
+        confirm_exit: false,
+        confirm_exit_yes: true,
         last_approval_count: 0,
     };
 
@@ -204,6 +208,29 @@ async fn handle_event(ev: Event, state: &mut AppState) {
             }
             return;
         }
+        if state.confirm_exit {
+            match (key.code, key.modifiers) {
+                (KeyCode::Enter, _) => {
+                    if state.confirm_exit_yes {
+                        state.quit = true;
+                    } else {
+                        state.confirm_exit = false;
+                    }
+                }
+                (KeyCode::Char('y') | KeyCode::Char('Y'), _) => state.quit = true,
+                (KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc, _) => {
+                    state.confirm_exit = false;
+                }
+                (
+                    KeyCode::Left | KeyCode::Right | KeyCode::Char('h') | KeyCode::Char('l'),
+                    _,
+                ) => {
+                    state.confirm_exit_yes = !state.confirm_exit_yes;
+                }
+                _ => {}
+            }
+            return;
+        }
         if state.confirm_stop {
             match key.code {
                 KeyCode::Char('y') | KeyCode::Char('Y') => {
@@ -220,7 +247,10 @@ async fn handle_event(ev: Event, state: &mut AppState) {
             return;
         }
         match (key.code, key.modifiers) {
-            (KeyCode::Char('q'), _) => state.quit = true,
+            (KeyCode::Char('q'), _) | (KeyCode::Char('c'), KeyModifiers::CONTROL) => {
+                state.confirm_exit = true;
+                state.confirm_exit_yes = true;
+            }
             (KeyCode::Char('Q'), _) => state.confirm_stop = true,
             (KeyCode::Char('?'), _) => state.show_help = true,
             (KeyCode::Char('1'), _) => {
@@ -343,6 +373,8 @@ fn draw(f: &mut ratatui::Frame<'_>, state: &AppState) {
 
     if state.show_help {
         render_help(f);
+    } else if state.confirm_exit {
+        render_confirm_exit(f, state.confirm_exit_yes);
     } else if state.confirm_stop {
         render_confirm_stop(f);
     }
@@ -365,12 +397,40 @@ fn render_help(f: &mut ratatui::Frame<'_>) {
         Line::from("a     accept approval (once)"),
         Line::from("A     accept for session"),
         Line::from("d     decline"),
-        Line::from("q     quit TUI (daemon keeps running)"),
-        Line::from("Q     stop daemon (asks for confirmation)"),
+        Line::from("q / Ctrl+C  quit TUI (asks for confirmation)"),
+        Line::from("Q           stop daemon (asks for confirmation)"),
         Line::from("?     toggle this help"),
     ])
     .alignment(Alignment::Left)
     .block(Block::default().borders(Borders::ALL).title(" Help "));
+    f.render_widget(body, area);
+}
+
+fn render_confirm_exit(f: &mut ratatui::Frame<'_>, yes_selected: bool) {
+    use ratatui::widgets::Clear;
+
+    let area = centered_rect(40, 20, f.area());
+    f.render_widget(Clear, area);
+    let sel = Style::default().add_modifier(Modifier::REVERSED);
+    let unsel = Style::default().add_modifier(Modifier::DIM);
+    let (yes_style, no_style) = if yes_selected {
+        (sel, unsel)
+    } else {
+        (unsel, sel)
+    };
+    let body = Paragraph::new(vec![
+        Line::from("Are you sure to exit?"),
+        Line::raw(""),
+        Line::from(vec![
+            Span::raw("  "),
+            Span::styled(" Yes ", yes_style),
+            Span::raw("    "),
+            Span::styled(" No ", no_style),
+        ]),
+        Line::raw(""),
+        Line::from("↵ confirm   ←/→ switch   y / n / Esc"),
+    ])
+    .block(Block::default().borders(Borders::ALL).title(" Exit "));
     f.render_widget(body, area);
 }
 
