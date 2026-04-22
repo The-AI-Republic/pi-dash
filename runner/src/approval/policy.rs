@@ -59,12 +59,11 @@ impl<'a> Policy<'a> {
         }
         match kind {
             ApprovalKind::FileChange => {
-                if self.config.auto_approve_workspace_writes {
-                    if let Some(path) = payload.get("path").and_then(|v| v.as_str()) {
-                        if path_under_workspace(path, self.workspace_root) {
-                            return Decision::AutoAccept;
-                        }
-                    }
+                if self.config.auto_approve_workspace_writes
+                    && let Some(path) = payload.get("path").and_then(|v| v.as_str())
+                    && path_under_workspace(path, self.workspace_root)
+                {
+                    return Decision::AutoAccept;
                 }
                 Decision::Ask
             }

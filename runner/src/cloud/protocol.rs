@@ -187,7 +187,17 @@ pub enum FailureReason {
     WorkspaceSetup,
     GitAuth,
     Network,
+    /// Codex subprocess crashed or exited abnormally. Kept agent-specific so
+    /// pre-existing dashboards filtering on `"codex_crash"` keep matching.
     CodexCrash,
+    /// Non-Codex agent subprocess crashed or exited abnormally. Introduced
+    /// with the Claude Code agent so its failures don't conflate with Codex
+    /// failures in telemetry.
+    AgentCrash,
+    /// Agent hit its turn/step budget (e.g. Claude `error_max_turns`). Not
+    /// the same as an internal bug: the run was deliberately bounded and
+    /// ran out of room to complete.
+    MaxTurns,
     Timeout,
     Internal,
     Cancelled,

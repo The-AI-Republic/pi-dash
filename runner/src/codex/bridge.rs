@@ -5,6 +5,10 @@ use std::path::Path;
 use std::time::Duration;
 use uuid::Uuid;
 
+// Re-export the shared types under their legacy `codex::bridge::` path so
+// existing integration tests and any downstream callers that imported them
+// from here keep compiling. The canonical definitions live in `agent::`.
+pub use crate::agent::{BridgeEvent, RunPayload};
 use crate::cloud::protocol::{ApprovalDecision, ApprovalKind, FailureReason};
 use crate::codex::app_server::AppServer;
 use crate::codex::jsonrpc::{self, Incoming};
@@ -12,48 +16,6 @@ use crate::codex::schema::{
     ApprovalResponseParams, ClientInfo, InitializeParams, NotificationKind, ThreadResumeParams,
     ThreadStartParams, TurnInputItem, TurnStartParams,
 };
-
-/// Events the bridge surfaces to the daemon's state machine.
-#[derive(Debug, Clone)]
-pub enum BridgeEvent {
-    RunStarted {
-        run_id: Uuid,
-        thread_id: String,
-    },
-    Raw {
-        run_id: Uuid,
-        method: String,
-        params: serde_json::Value,
-    },
-    ApprovalRequest {
-        run_id: Uuid,
-        approval_id: String,
-        kind: ApprovalKind,
-        payload: serde_json::Value,
-        reason: Option<String>,
-    },
-    AwaitingReauth {
-        run_id: Uuid,
-        detail: Option<String>,
-    },
-    Completed {
-        run_id: Uuid,
-        done_payload: serde_json::Value,
-    },
-    Failed {
-        run_id: Uuid,
-        reason: FailureReason,
-        detail: Option<String>,
-    },
-}
-
-#[derive(Debug, Clone)]
-pub struct RunPayload {
-    pub run_id: Uuid,
-    pub prompt: String,
-    pub model: Option<String>,
-    pub resume_thread_id: Option<String>,
-}
 
 pub struct Bridge {
     pub server: AppServer,

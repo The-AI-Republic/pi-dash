@@ -71,7 +71,7 @@ pub async fn run_connection(
                 match msg {
                     Some(frame) => {
                         let text = serde_json::to_string(&frame)?;
-                        conn.stream.send(Message::Text(text.into())).await?;
+                        conn.stream.send(Message::Text(text)).await?;
                     }
                     None => {
                         let _ = conn.stream.close(None).await;

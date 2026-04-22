@@ -3,14 +3,14 @@ use chrono::Utc;
 use std::time::Duration;
 use tokio::sync::{mpsc, oneshot};
 
+use crate::agent::{AgentBridge, AgentCursor, BridgeEvent, RunPayload};
 use crate::approval::policy::Policy;
 use crate::approval::router::{ApprovalRecord, ApprovalRouter, ApprovalStatus, DecisionSource};
 use crate::cloud::protocol::{
     ClientMsg, Envelope, FailureReason, RunnerStatus, ServerMsg, WIRE_VERSION, WorkspaceState,
 };
 use crate::cloud::ws::ConnectionLoop;
-use crate::codex::bridge::{Bridge, BridgeCursor, BridgeEvent, RunPayload};
-use crate::config::schema::{Config, Credentials};
+use crate::config::schema::{AgentKind, Config, Credentials};
 use crate::daemon::state::StateHandle;
 use crate::history::index::{RunSummary, RunsIndex};
 use crate::history::jsonl::{HistoryEntry, HistoryWriter};
@@ -273,7 +273,13 @@ impl RunnerLoop {
                             cancel,
                         };
                         if let Err(e) = worker
-                            .run(run_id, prompt, repo_url, git_work_branch, expected_codex_model)
+                            .run(
+                                run_id,
+                                prompt,
+                                repo_url,
+                                git_work_branch,
+                                expected_codex_model,
+                            )
                             .await
                         {
                             tracing::error!("run {run_id} failed: {e:#}");
@@ -380,6 +386,18 @@ struct AssignWorker {
 }
 
 impl AssignWorker {
+    /// Pick the right `FailureReason` when the agent subprocess crashes or
+    /// exits abnormally. Codex stays on `CodexCrash` so dashboards that
+    /// already filter on `"codex_crash"` keep working; Claude (and any
+    /// future non-Codex agent) surfaces as the agent-neutral `AgentCrash`
+    /// so the two aren't conflated in telemetry.
+    fn crash_reason(&self) -> FailureReason {
+        match self.config.agent.kind {
+            AgentKind::Codex => FailureReason::CodexCrash,
+            AgentKind::ClaudeCode => FailureReason::AgentCrash,
+        }
+    }
+
     async fn run(
         &mut self,
         run_id: uuid::Uuid,
@@ -388,8 +406,14 @@ impl AssignWorker {
         git_work_branch: Option<String>,
         expected_codex_model: Option<String>,
     ) -> Result<()> {
-        self.handle_assign(run_id, prompt, repo_url, git_work_branch, expected_codex_model)
-            .await
+        self.handle_assign(
+            run_id,
+            prompt,
+            repo_url,
+            git_work_branch,
+            expected_codex_model,
+        )
+        .await
     }
 
     async fn handle_assign(
@@ -481,11 +505,13 @@ impl AssignWorker {
             }))
             .await;
 
-        // Bridge to Codex.
-        let mut bridge = match Bridge::spawn(
-            &self.config.codex.binary,
+        // Bridge to the configured agent (Codex or Claude Code). `AgentBridge`
+        // hides which CLI is actually being driven from the rest of this
+        // worker; the event flow below is identical for both.
+        let mut bridge = match AgentBridge::spawn_from_config(
+            &self.config,
             &workspace_path,
-            self.config.codex.model_default.clone(),
+            expected_codex_model.clone(),
         )
         .await
         {
@@ -499,9 +525,10 @@ impl AssignWorker {
                 })
                 .await
                 .ok();
+                let reason = self.crash_reason();
                 self.send(ClientMsg::RunFailed {
                     run_id,
-                    reason: FailureReason::CodexCrash,
+                    reason,
                     detail: Some(format!("{e:#}")),
                     ended_at: Utc::now(),
                 })
@@ -527,9 +554,10 @@ impl AssignWorker {
                 })
                 .await
                 .ok();
+                let reason = self.crash_reason();
                 self.send(ClientMsg::RunFailed {
                     run_id,
-                    reason: FailureReason::CodexCrash,
+                    reason,
                     detail: Some(format!("{e:#}")),
                     ended_at: Utc::now(),
                 })
@@ -540,14 +568,14 @@ impl AssignWorker {
         };
         self.send(ClientMsg::RunStarted {
             run_id,
-            thread_id: cursor.thread_id.clone(),
+            thread_id: cursor.thread_id().to_string(),
             started_at: Utc::now(),
         })
         .await;
         hist.append(&HistoryEntry::Lifecycle {
             ts: Utc::now(),
             state: "started".to_string(),
-            detail: Some(cursor.thread_id.clone()),
+            detail: Some(cursor.thread_id().to_string()),
         })
         .await?;
 
@@ -556,7 +584,7 @@ impl AssignWorker {
             .pump_events(&mut bridge, &mut cursor, &mut hist, &workspace_path)
             .await?;
 
-        bridge.server.shutdown(Duration::from_secs(5)).await.ok();
+        bridge.shutdown(Duration::from_secs(5)).await.ok();
 
         let summary = RunSummary {
             run_id,
@@ -576,8 +604,8 @@ impl AssignWorker {
 
     async fn pump_events(
         &mut self,
-        bridge: &mut Bridge,
-        cursor: &mut BridgeCursor,
+        bridge: &mut AgentBridge,
+        cursor: &mut AgentCursor,
         hist: &mut HistoryWriter,
         workspace_root: &std::path::Path,
     ) -> Result<Outcome> {
@@ -594,7 +622,7 @@ impl AssignWorker {
                 _ = cancel.notified(), if !cancelled => {
                     bridge.interrupt().await.ok();
                     let _ = self.out.send(Envelope::new(ClientMsg::RunCancelled {
-                        run_id: cursor.run_id,
+                        run_id: cursor.run_id(),
                         cancelled_at: Utc::now(),
                     })).await;
                     hist.append(&HistoryEntry::Lifecycle {
@@ -602,31 +630,31 @@ impl AssignWorker {
                         state: "cancelled".into(),
                         detail: None,
                     }).await.ok();
-                    // Give Codex a short grace to wind down; if it doesn't, we
-                    // exit and rely on the Bridge's shutdown to SIGKILL.
+                    // Give the agent a short grace to wind down; if it doesn't, we
+                    // exit and rely on the bridge's shutdown to SIGKILL.
                     let _ = tokio::time::timeout(
                         Duration::from_secs(10),
-                        bridge.next_frame(),
+                        bridge.next_events(cursor),
                     ).await;
                     return Ok(Outcome { status_label: "cancelled".into() });
                 }
-                frame = bridge.next_frame() => {
-                    let Some(frame) = frame else {
+                events = bridge.next_events(cursor) => {
+                    let Some(events) = events else {
+                        let reason = self.crash_reason();
                         self.send(ClientMsg::RunFailed {
-                            run_id: cursor.run_id,
-                            reason: FailureReason::CodexCrash,
-                            detail: Some("codex stdout closed".to_string()),
+                            run_id: cursor.run_id(),
+                            reason,
+                            detail: Some("agent stdout closed".to_string()),
                             ended_at: Utc::now(),
                         }).await;
                         hist.append(&HistoryEntry::Footer {
                             ts: Utc::now(),
                             final_status: "failed".into(),
                             done_payload: None,
-                            error: Some("codex stdout closed".into()),
+                            error: Some("agent stdout closed".into()),
                         }).await?;
                         return Ok(Outcome { status_label: "failed".into() });
                     };
-                    let events = cursor.translate(frame);
                     for ev in events {
                         if let Some(out) = self
                             .handle_bridge_event(ev, bridge, hist, workspace_root)
@@ -643,7 +671,7 @@ impl AssignWorker {
     async fn handle_bridge_event(
         &mut self,
         ev: BridgeEvent,
-        bridge: &mut Bridge,
+        bridge: &mut AgentBridge,
         hist: &mut HistoryWriter,
         workspace_root: &std::path::Path,
     ) -> Result<Option<Outcome>> {
@@ -663,7 +691,7 @@ impl AssignWorker {
                 .await
                 .ok();
                 // Only lifecycle-ish events are mirrored to cloud; raw deltas stay local.
-                tracing::trace!(%run_id, method, "codex event");
+                tracing::trace!(%run_id, method, "agent event");
                 Ok(None)
             }
             BridgeEvent::ApprovalRequest {

@@ -213,6 +213,8 @@ async fn register_and_advance(state: &mut Wizard) {
                     working_dir: state.paths.default_working_dir(),
                 },
                 codex: Default::default(),
+                claude_code: Default::default(),
+                agent: Default::default(),
                 approval_policy: Default::default(),
                 logging: Default::default(),
             };
@@ -466,10 +468,10 @@ fn mask(s: &str) -> String {
 }
 
 fn default_hostname() -> Option<String> {
-    if let Ok(h) = std::env::var("HOSTNAME") {
-        if !h.is_empty() {
-            return Some(h);
-        }
+    if let Ok(h) = std::env::var("HOSTNAME")
+        && !h.is_empty()
+    {
+        return Some(h);
     }
     nix::unistd::gethostname()
         .ok()

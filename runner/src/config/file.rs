@@ -116,6 +116,8 @@ mod tests {
                 working_dir: tmp.path().join("wd"),
             },
             codex: Default::default(),
+            claude_code: Default::default(),
+            agent: Default::default(),
             approval_policy: Default::default(),
             logging: Default::default(),
         };
