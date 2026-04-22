@@ -46,6 +46,7 @@ pub struct AppState {
     pub runs: Vec<crate::history::index::RunSummary>,
     pub approvals: Vec<crate::approval::router::ApprovalRecord>,
     pub config_blob: Option<serde_json::Value>,
+    pub config_error: Option<String>,
     pub error: Option<String>,
     pub quit: bool,
     pub selected: usize,
@@ -67,6 +68,7 @@ pub async fn run(paths: Paths) -> Result<()> {
         runs: Vec::new(),
         approvals: Vec::new(),
         config_blob: None,
+        config_error: None,
         error: None,
         quit: false,
         selected: 0,
@@ -154,11 +156,15 @@ async fn refresh(state: &mut AppState) {
                 state.runs = v;
             }
         }
-        Tab::Config => {
-            if let Ok(v) = state.ipc.config().await {
+        Tab::Config => match state.ipc.config().await {
+            Ok(v) => {
                 state.config_blob = Some(v);
+                state.config_error = None;
             }
-        }
+            Err(e) => {
+                state.config_error = Some(format!("{e:#}"));
+            }
+        },
         _ => {}
     }
 }
@@ -200,24 +206,48 @@ async fn handle_event(ev: Event, state: &mut AppState) {
             (KeyCode::Char('1'), _) => {
                 state.tab = Tab::Status;
                 state.selected = 0;
+                refresh(state).await;
             }
             (KeyCode::Char('2'), _) => {
                 state.tab = Tab::Runs;
                 state.selected = 0;
+                refresh(state).await;
             }
             (KeyCode::Char('3'), _) => {
                 state.tab = Tab::Config;
                 state.selected = 0;
+                refresh(state).await;
             }
             (KeyCode::Char('4'), _) => {
                 state.tab = Tab::Approvals;
                 state.selected = 0;
+                refresh(state).await;
             }
             (KeyCode::Char('j') | KeyCode::Down, _) => {
                 state.selected = state.selected.saturating_add(1);
             }
             (KeyCode::Char('k') | KeyCode::Up, _) => {
                 state.selected = state.selected.saturating_sub(1);
+            }
+            (KeyCode::Char('h') | KeyCode::Left, _) => {
+                state.tab = match state.tab {
+                    Tab::Status => Tab::Approvals,
+                    Tab::Runs => Tab::Status,
+                    Tab::Config => Tab::Runs,
+                    Tab::Approvals => Tab::Config,
+                };
+                state.selected = 0;
+                refresh(state).await;
+            }
+            (KeyCode::Char('l') | KeyCode::Right, _) => {
+                state.tab = match state.tab {
+                    Tab::Status => Tab::Runs,
+                    Tab::Runs => Tab::Config,
+                    Tab::Config => Tab::Approvals,
+                    Tab::Approvals => Tab::Status,
+                };
+                state.selected = 0;
+                refresh(state).await;
             }
             (KeyCode::Char('r'), _) => refresh(state).await,
             (KeyCode::Char('a'), _) if state.tab == Tab::Approvals => {
@@ -286,7 +316,7 @@ fn draw(f: &mut ratatui::Frame<'_>, state: &AppState) {
     }
 
     let hint = Line::from(Span::styled(
-        " [1]Status [2]Runs [3]Config [4]Approvals  j/k move  r refresh  ?help  q quit  Q stop daemon ",
+        " [1-4]tab  h/l ←/→ switch  j/k ↑/↓ move  r refresh  ?help  q quit  Q stop daemon ",
         Style::default().add_modifier(Modifier::DIM),
     ));
     f.render_widget(Paragraph::new(hint), layout[2]);
@@ -307,8 +337,9 @@ fn render_help(f: &mut ratatui::Frame<'_>) {
     let body = Paragraph::new(vec![
         Line::from("Pi Dash Runner — TUI help"),
         Line::raw(""),
-        Line::from("1–4   switch views"),
-        Line::from("j/k   move selection"),
+        Line::from("1–4       jump to view"),
+        Line::from("h/l ←/→   prev/next view"),
+        Line::from("j/k ↑/↓   move selection"),
         Line::from("↵     open detail"),
         Line::from("r     force refresh"),
         Line::from("a     accept approval (once)"),
