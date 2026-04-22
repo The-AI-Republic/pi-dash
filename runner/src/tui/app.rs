@@ -92,7 +92,6 @@ pub struct AppState {
     pub error: Option<String>,
     pub quit: bool,
     pub selected: usize,
-    pub onboarding_needed: bool,
     pub show_help: bool,
     pub confirm_stop: bool,
     pub confirm_exit: bool,
@@ -104,10 +103,54 @@ pub struct AppState {
     /// Transient banner shown on the Runner tab after a start/stop action:
     /// e.g. "starting service…" or "stop failed: …". Cleared on next refresh.
     pub service_action_msg: Option<String>,
+    /// Inline registration form shown in the Config tab whenever `config.toml`
+    /// is missing — replaces the old standalone onboarding wizard. Cleared
+    /// after a successful register call.
+    pub register_form: Option<RegisterForm>,
+}
+
+/// Three-field form (URL / token / name) plus a Register button. Focus is
+/// an index 0..=3. All text input goes to whichever field is focused;
+/// Up/Down or Tab moves focus; Enter advances focus for text fields and
+/// submits when focus lands on the button.
+#[derive(Debug, Clone)]
+pub struct RegisterForm {
+    pub cloud_url: String,
+    pub token: String,
+    pub name: String,
+    /// 0 = cloud_url, 1 = token, 2 = name, 3 = Register button.
+    pub focus: u8,
+    pub busy: bool,
+    pub error: Option<String>,
+}
+
+impl RegisterForm {
+    pub fn new(default_name: String) -> Self {
+        Self {
+            cloud_url: "https://cloud.pidash.so".to_string(),
+            token: String::new(),
+            name: default_name,
+            focus: 0,
+            busy: false,
+            error: None,
+        }
+    }
+
+    pub fn field_count() -> u8 {
+        4
+    }
+
+    pub fn current_buffer_mut(&mut self) -> Option<&mut String> {
+        match self.focus {
+            0 => Some(&mut self.cloud_url),
+            1 => Some(&mut self.token),
+            2 => Some(&mut self.name),
+            _ => None,
+        }
+    }
 }
 
 pub async fn run(paths: Paths, initial_tab: Tab) -> Result<()> {
-    let onboarding_needed = !paths.config_path().exists();
     let ipc = TuiIpc {
         socket: paths.ipc_socket_path(),
     };
@@ -127,7 +170,6 @@ pub async fn run(paths: Paths, initial_tab: Tab) -> Result<()> {
         error: None,
         quit: false,
         selected: 0,
-        onboarding_needed,
         show_help: false,
         confirm_stop: false,
         confirm_exit: false,
@@ -135,6 +177,7 @@ pub async fn run(paths: Paths, initial_tab: Tab) -> Result<()> {
         last_approval_count: 0,
         service_state: None,
         service_action_msg: None,
+        register_form: None,
     };
 
     enable_raw_mode()?;
@@ -242,6 +285,10 @@ async fn refresh(state: &mut AppState) {
                     state.config_loaded = None;
                     state.config_working = None;
                     state.config_error = None;
+                    // Fresh machine — show the inline register form.
+                    if state.register_form.is_none() {
+                        state.register_form = Some(RegisterForm::new(default_hostname()));
+                    }
                 }
                 Err(e) => {
                     state.config_loaded = None;
@@ -307,6 +354,80 @@ async fn handle_event(ev: Event, state: &mut AppState) {
             }
             return;
         }
+        // Config tab: inline Register form when there's no config yet.
+        // This form covers what the old full-screen onboarding wizard did.
+        // We intercept text / nav / submit keys but leave global shortcuts
+        // (Ctrl+C to quit, 1–4 / h / l to switch tabs) to the main match
+        // so the user can always escape.
+        if state.tab == Tab::Config
+            && state.register_form.is_some()
+            && state.config_working.is_none()
+        {
+            match (key.code, key.modifiers) {
+                (KeyCode::Char('c'), KeyModifiers::CONTROL) => {
+                    state.confirm_exit = true;
+                    state.confirm_exit_yes = true;
+                    return;
+                }
+                (KeyCode::Char('1') | KeyCode::Char('2') | KeyCode::Char('3') | KeyCode::Char('4'), _)
+                | (KeyCode::Char('h') | KeyCode::Char('l') | KeyCode::Left | KeyCode::Right, _) => {
+                    // Fall through to the global tab switcher so the user
+                    // can leave the register screen without completing it.
+                }
+                (KeyCode::Up, _) | (KeyCode::BackTab, _) => {
+                    if let Some(f) = state.register_form.as_mut() {
+                        register_form_advance_focus(f, false);
+                    }
+                    return;
+                }
+                (KeyCode::Down, _) | (KeyCode::Tab, _) => {
+                    if let Some(f) = state.register_form.as_mut() {
+                        register_form_advance_focus(f, true);
+                    }
+                    return;
+                }
+                (KeyCode::Enter, _) => {
+                    let submit = matches!(
+                        state.register_form.as_ref().map(|f| f.focus),
+                        Some(3)
+                    );
+                    if submit {
+                        submit_register_form(state).await;
+                    } else if let Some(f) = state.register_form.as_mut() {
+                        register_form_advance_focus(f, true);
+                    }
+                    return;
+                }
+                (KeyCode::Esc, _) => {
+                    // Esc on the register form clears the in-flight error
+                    // (so the user can re-attempt) but doesn't cancel the
+                    // whole screen — there's nothing to cancel to, the
+                    // machine has no config yet.
+                    if let Some(f) = state.register_form.as_mut() {
+                        f.error = None;
+                    }
+                    return;
+                }
+                (KeyCode::Backspace, _) => {
+                    if let Some(f) = state.register_form.as_mut()
+                        && let Some(buf) = f.current_buffer_mut()
+                    {
+                        buf.pop();
+                    }
+                    return;
+                }
+                (KeyCode::Char(c), mods) if !mods.contains(KeyModifiers::CONTROL) => {
+                    if let Some(f) = state.register_form.as_mut()
+                        && let Some(buf) = f.current_buffer_mut()
+                    {
+                        buf.push(c);
+                    }
+                    return;
+                }
+                _ => return,
+            }
+        }
+
         // Config tab edit-buffer mode consumes all key input: while the
         // user is typing into a text field, every keystroke edits that
         // buffer and nothing else (no tab nav, no quit shortcuts). Enter
@@ -516,6 +637,131 @@ async fn save_config(state: &mut AppState) {
     state.reload_outcome = Some(crate::service::reload::restart_and_verify(&state.paths).await);
     // Pull a fresh view of everything else now that the daemon restarted.
     refresh(state).await;
+}
+
+fn register_form_advance_focus(form: &mut RegisterForm, forward: bool) {
+    let n = RegisterForm::field_count();
+    form.focus = if forward {
+        (form.focus + 1) % n
+    } else if form.focus == 0 {
+        n - 1
+    } else {
+        form.focus - 1
+    };
+}
+
+/// Submit the registration form. On success, writes config + credentials,
+/// installs the service unit, and kicks the daemon — same end state as
+/// `pidash configure --url ... --token ...` on the CLI.
+async fn submit_register_form(state: &mut AppState) {
+    let Some(form) = state.register_form.as_mut() else {
+        return;
+    };
+    // Field-level validation first so we don't waste a cloud round trip.
+    let cloud_url = form.cloud_url.trim().to_string();
+    let token = form.token.trim().to_string();
+    let name = form.name.trim().to_string();
+    if let Err(e) = crate::cli::configure::validate_cloud_url(&cloud_url) {
+        form.error = Some(format!("{e}"));
+        return;
+    }
+    if token.is_empty() {
+        form.error = Some("registration token is required".into());
+        return;
+    }
+    if name.is_empty() {
+        form.error = Some("runner name is required".into());
+        return;
+    }
+    if let Err(e) = crate::util::runner_name::validate(&name) {
+        form.error = Some(format!("invalid runner name: {e}"));
+        return;
+    }
+    form.busy = true;
+    form.error = None;
+
+    let req = crate::cloud::register::RegisterRequest {
+        runner_name: name.clone(),
+        os: std::env::consts::OS.to_string(),
+        arch: std::env::consts::ARCH.to_string(),
+        version: crate::RUNNER_VERSION.to_string(),
+        protocol_version: crate::PROTOCOL_VERSION,
+    };
+    let resp = match crate::cloud::register::register(&cloud_url, &token, &req).await {
+        Ok(r) => r,
+        Err(e) => {
+            if let Some(form) = state.register_form.as_mut() {
+                form.busy = false;
+                form.error = Some(format!("register failed: {e:#}"));
+            }
+            return;
+        }
+    };
+
+    // Write config + credentials (same shape as cli::configure::execute's
+    // happy path, minus the `extras` apply since the TUI form doesn't
+    // collect advanced fields — user edits them in the Config tab after).
+    let cfg = crate::config::schema::Config {
+        version: 1,
+        runner: crate::config::schema::RunnerSection {
+            name: name.clone(),
+            cloud_url: cloud_url.clone(),
+            workspace_slug: resp.workspace_slug.clone(),
+        },
+        workspace: crate::config::schema::WorkspaceSection {
+            working_dir: state.paths.default_working_dir(),
+        },
+        codex: Default::default(),
+        claude_code: Default::default(),
+        agent: Default::default(),
+        approval_policy: Default::default(),
+        logging: Default::default(),
+    };
+    if let Err(e) = crate::config::file::write_config(&state.paths, &cfg) {
+        if let Some(form) = state.register_form.as_mut() {
+            form.busy = false;
+            form.error = Some(format!("writing config.toml: {e:#}"));
+        }
+        return;
+    }
+    let creds = crate::config::schema::Credentials {
+        runner_id: resp.runner_id,
+        runner_secret: resp.runner_secret,
+        api_token: resp.api_token,
+        issued_at: chrono::Utc::now(),
+    };
+    if let Err(e) = crate::config::file::write_credentials(&state.paths, &creds) {
+        if let Some(form) = state.register_form.as_mut() {
+            form.busy = false;
+            form.error = Some(format!("writing credentials.toml: {e:#}"));
+        }
+        return;
+    }
+
+    // Install + start the service so the runner actually runs after
+    // registering. If this fails we still clear the form — the files are
+    // written and the user can recover with `pidash install` manually.
+    let svc = crate::service::detect();
+    let _ = svc.write_unit(&state.paths).await;
+    state.reload_outcome = Some(crate::service::reload::restart_and_verify(&state.paths).await);
+
+    // Transition out of register mode: the next refresh() will pick up
+    // config.toml from disk and populate config_working.
+    state.register_form = None;
+    state.config_loaded = Some(cfg.clone());
+    state.config_working = Some(cfg);
+}
+
+fn default_hostname() -> String {
+    if let Ok(h) = std::env::var("HOSTNAME")
+        && !h.is_empty()
+    {
+        return h;
+    }
+    nix::unistd::gethostname()
+        .ok()
+        .and_then(|os| os.into_string().ok())
+        .unwrap_or_else(|| "runner".to_string())
 }
 
 async fn run_service_action(state: &mut AppState, action: ServiceAction) {

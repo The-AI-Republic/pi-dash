@@ -297,11 +297,11 @@ pub fn render(f: &mut ratatui::Frame<'_>, area: Rect, state: &AppState) {
             f.render_widget(p, chunks[0]);
         }
         (None, _) => {
-            let p = Paragraph::new(missing_config_lines())
+            let p = Paragraph::new(register_form_lines(state))
                 .block(
                     Block::default()
                         .borders(Borders::ALL)
-                        .title(" Configuration "),
+                        .title(" Register with cloud "),
                 )
                 .wrap(Wrap { trim: false });
             f.render_widget(p, chunks[0]);
@@ -311,25 +311,101 @@ pub fn render(f: &mut ratatui::Frame<'_>, area: Rect, state: &AppState) {
     f.render_widget(footer(state), chunks[1]);
 }
 
-fn missing_config_lines() -> Vec<Line<'static>> {
-    vec![
+fn register_form_lines(state: &AppState) -> Vec<Line<'static>> {
+    let Some(form) = state.register_form.as_ref() else {
+        // No form yet — refresh() will seed one next tick; show a hint.
+        return vec![
+            Line::from(Span::styled(
+                "Loading…",
+                Style::default().add_modifier(Modifier::DIM),
+            )),
+        ];
+    };
+    let mut lines = vec![
         Line::from(Span::styled(
-            "No runner configured yet.",
+            "This runner isn't registered yet.",
             Style::default()
                 .fg(Color::Yellow)
                 .add_modifier(Modifier::BOLD),
         )),
+        Line::from("Fill in the form below and press [Register] to connect."),
         Line::raw(""),
-        Line::from("Register this runner with Pi Dash cloud to create a config."),
-        Line::raw(""),
-        Line::from("From another terminal, run:"),
-        Line::from(Span::styled(
-            "  pidash configure --url <CLOUD_URL> --token <ONE_TIME_TOKEN>",
-            Style::default().fg(Color::Cyan),
-        )),
-        Line::raw(""),
-        Line::from("Then return here — the Config tab will populate automatically."),
-    ]
+    ];
+
+    lines.push(form_field_line("Cloud URL", &form.cloud_url, form.focus == 0, false));
+    lines.push(form_field_line("Token", &mask_token(&form.token), form.focus == 1, true));
+    lines.push(form_field_line("Runner name", &form.name, form.focus == 2, false));
+    lines.push(Line::raw(""));
+    lines.push(form_button_line(form.focus == 3, form.busy));
+    lines.push(Line::raw(""));
+    lines.push(Line::from(Span::styled(
+        "Tab/↑↓ move   type to edit   ↵ advance / submit",
+        Style::default().add_modifier(Modifier::DIM),
+    )));
+    lines.push(Line::from(Span::styled(
+        "Tokens are generated in the Pi Dash web UI: Workspace → Runners → Mint code",
+        Style::default().add_modifier(Modifier::DIM),
+    )));
+
+    if let Some(e) = &form.error {
+        lines.push(Line::raw(""));
+        lines.push(Line::from(Span::styled(
+            e.clone(),
+            Style::default().fg(Color::Red),
+        )));
+    }
+    if form.busy {
+        lines.push(Line::raw(""));
+        lines.push(Line::from(Span::styled(
+            "contacting cloud…",
+            Style::default().fg(Color::Yellow),
+        )));
+    }
+    lines
+}
+
+fn form_field_line(label: &str, value: &str, focused: bool, _masked: bool) -> Line<'static> {
+    let marker = if focused { "▶" } else { " " };
+    let value_style = if focused {
+        Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(Color::White)
+    };
+    let cursor = if focused { "▊" } else { "" };
+    Line::from(vec![
+        Span::styled(
+            format!(" {marker} "),
+            Style::default()
+                .fg(if focused { Color::Cyan } else { Color::DarkGray })
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::raw(format!("{label:<14} ")),
+        Span::styled(format!("{value}{cursor}"), value_style),
+    ])
+}
+
+fn form_button_line(focused: bool, busy: bool) -> Line<'static> {
+    let label = if busy { " Registering… " } else { " Register " };
+    let style = if focused {
+        Style::default()
+            .fg(Color::Black)
+            .bg(Color::Green)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)
+    };
+    Line::from(vec![
+        Span::raw("   "),
+        Span::styled(label.to_string(), style),
+    ])
+}
+
+fn mask_token(raw: &str) -> String {
+    if raw.len() <= 4 {
+        "*".repeat(raw.len())
+    } else {
+        format!("{}…{}", &raw[..2], &raw[raw.len() - 2..])
+    }
 }
 
 fn editable_lines(

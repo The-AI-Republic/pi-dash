@@ -663,7 +663,7 @@ async fn run_doctor_with_auth_gate(paths: &Paths, agent_kind: AgentKind) -> Resu
 /// Refuse `http://` URLs that point at non-localhost hosts. Sending the
 /// registration token + receiving the runner secret over cleartext to the
 /// internet would silently leak credentials. Localhost is allowed for dev.
-fn validate_cloud_url(url: &str) -> Result<()> {
+pub(crate) fn validate_cloud_url(url: &str) -> Result<()> {
     let lower = url.to_ascii_lowercase();
     if lower.starts_with("https://") {
         return Ok(());
