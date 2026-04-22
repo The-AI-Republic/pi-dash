@@ -180,6 +180,7 @@ async fn refresh(state: &mut AppState) {
                 state.daemon_offline = false;
             }
             Err(e) => {
+                state.config_blob = None;
                 if is_daemon_offline(&e) {
                     state.daemon_offline = true;
                     state.config_error = None;
@@ -210,6 +211,7 @@ async fn handle_event(ev: Event, state: &mut AppState) {
         }
         if state.confirm_exit {
             match (key.code, key.modifiers) {
+                (KeyCode::Char('c'), KeyModifiers::CONTROL) => state.quit = true,
                 (KeyCode::Enter, _) => {
                     if state.confirm_exit_yes {
                         state.quit = true;
@@ -366,7 +368,7 @@ fn draw(f: &mut ratatui::Frame<'_>, state: &AppState) {
     }
 
     let hint = Line::from(Span::styled(
-        " [1-4]tab  h/l ←/→ switch  j/k ↑/↓ move  r refresh  ?help  q quit  Q stop daemon ",
+        " [1-4]tab  h/l ←/→ switch  j/k ↑/↓ move  r refresh  ?help  q exit  Q stop daemon ",
         Style::default().add_modifier(Modifier::DIM),
     ));
     f.render_widget(Paragraph::new(hint), layout[2]);
