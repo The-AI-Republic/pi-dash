@@ -71,6 +71,19 @@ pub struct AppState {
     /// the file is missing (first-run state) — the Config tab switches into
     /// "Register with cloud" mode when that happens.
     pub config_loaded: Option<crate::config::schema::Config>,
+    /// Working copy users edit in the Config tab. Kicked off as a clone of
+    /// `config_loaded` and mutated in-place as fields get toggled / edited.
+    /// `w` writes this to disk; `Esc` (in browse mode) discards it back to
+    /// `config_loaded`.
+    pub config_working: Option<crate::config::schema::Config>,
+    /// `Some(buffer)` while the user is typing into a Text/U32 field. The
+    /// buffer is seeded with the field's current stringified value; Enter
+    /// commits it, Esc cancels. `None` is browse mode.
+    pub config_edit_buffer: Option<String>,
+    /// Transient single-line error from the last Enter-commit attempt
+    /// (e.g. "expected a non-negative integer"). Cleared on the next
+    /// successful commit or on tab switch.
+    pub config_edit_error: Option<String>,
     pub config_error: Option<String>,
     /// Last `service::reload::restart_and_verify` result after a save. The
     /// Config tab surfaces this so users can see whether their edit broke
@@ -106,6 +119,9 @@ pub async fn run(paths: Paths, initial_tab: Tab) -> Result<()> {
         runs: Vec::new(),
         approvals: Vec::new(),
         config_loaded: None,
+        config_working: None,
+        config_edit_buffer: None,
+        config_edit_error: None,
         config_error: None,
         reload_outcome: None,
         error: None,
@@ -213,11 +229,18 @@ async fn refresh(state: &mut AppState) {
             // sub-widget without an error banner.
             match crate::config::file::load_config_opt(&state.paths) {
                 Ok(Some(cfg)) => {
-                    state.config_loaded = Some(cfg);
+                    state.config_loaded = Some(cfg.clone());
                     state.config_error = None;
+                    // Seed the working copy on first load. Don't clobber if
+                    // the user already has unsaved edits in flight — the
+                    // 500 ms refresh tick shouldn't erase their work.
+                    if state.config_working.is_none() {
+                        state.config_working = Some(cfg);
+                    }
                 }
                 Ok(None) => {
                     state.config_loaded = None;
+                    state.config_working = None;
                     state.config_error = None;
                 }
                 Err(e) => {
@@ -284,6 +307,31 @@ async fn handle_event(ev: Event, state: &mut AppState) {
             }
             return;
         }
+        // Config tab edit-buffer mode consumes all key input: while the
+        // user is typing into a text field, every keystroke edits that
+        // buffer and nothing else (no tab nav, no quit shortcuts). Enter
+        // commits, Esc cancels.
+        if state.tab == Tab::Config && state.config_edit_buffer.is_some() {
+            match key.code {
+                KeyCode::Enter => commit_config_edit(state),
+                KeyCode::Esc => {
+                    state.config_edit_buffer = None;
+                    state.config_edit_error = None;
+                }
+                KeyCode::Backspace => {
+                    if let Some(buf) = state.config_edit_buffer.as_mut() {
+                        buf.pop();
+                    }
+                }
+                KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    if let Some(buf) = state.config_edit_buffer.as_mut() {
+                        buf.push(c);
+                    }
+                }
+                _ => {}
+            }
+            return;
+        }
         match (key.code, key.modifiers) {
             (KeyCode::Char('q'), _) | (KeyCode::Char('c'), KeyModifiers::CONTROL) => {
                 state.confirm_exit = true;
@@ -312,10 +360,28 @@ async fn handle_event(ev: Event, state: &mut AppState) {
                 refresh(state).await;
             }
             (KeyCode::Char('j') | KeyCode::Down, _) => {
-                state.selected = state.selected.saturating_add(1);
+                if state.tab == Tab::Config {
+                    let n = super::views::config::field_count();
+                    if n > 0 {
+                        state.selected = (state.selected + 1) % n;
+                    }
+                } else {
+                    state.selected = state.selected.saturating_add(1);
+                }
             }
             (KeyCode::Char('k') | KeyCode::Up, _) => {
-                state.selected = state.selected.saturating_sub(1);
+                if state.tab == Tab::Config {
+                    let n = super::views::config::field_count();
+                    if n > 0 {
+                        state.selected = if state.selected == 0 {
+                            n - 1
+                        } else {
+                            state.selected - 1
+                        };
+                    }
+                } else {
+                    state.selected = state.selected.saturating_sub(1);
+                }
             }
             (KeyCode::Char('h') | KeyCode::Left, _) => {
                 state.tab = match state.tab {
@@ -344,6 +410,21 @@ async fn handle_event(ev: Event, state: &mut AppState) {
             (KeyCode::Char('x'), _) if state.tab == Tab::RunnerStatus => {
                 run_service_action(state, ServiceAction::Stop).await;
             }
+            (KeyCode::Enter, _) if state.tab == Tab::Config => {
+                start_or_apply_config_field(state);
+            }
+            (KeyCode::Char('w'), _) if state.tab == Tab::Config => {
+                save_config(state).await;
+            }
+            (KeyCode::Esc, _) if state.tab == Tab::Config => {
+                // Discard pending edits — roll working copy back to the
+                // last-loaded snapshot. Leaves reload_outcome alone so the
+                // user can still see whether their previous save succeeded.
+                if let Some(loaded) = state.config_loaded.clone() {
+                    state.config_working = Some(loaded);
+                }
+                state.config_edit_error = None;
+            }
             (KeyCode::Char('a'), _) if state.tab == Tab::Approvals => {
                 accept_selected(state, crate::cloud::protocol::ApprovalDecision::Accept).await;
             }
@@ -366,6 +447,75 @@ async fn handle_event(ev: Event, state: &mut AppState) {
 enum ServiceAction {
     Start,
     Stop,
+}
+
+/// Enter key on the Config tab in browse mode: toggle booleans, cycle enums
+/// in place; open a text-input buffer for Text/U32 fields seeded with the
+/// current stringified value.
+fn start_or_apply_config_field(state: &mut AppState) {
+    use super::views::config as cfg_view;
+    let Some(cfg) = state.config_working.as_mut() else {
+        return;
+    };
+    if cfg_view::field_count() == 0 {
+        return;
+    }
+    let idx = state.selected.min(cfg_view::field_count() - 1);
+    let spec = cfg_view::field_at(idx);
+    state.config_edit_error = None;
+    match spec.kind {
+        cfg_view::FieldKind::Bool => cfg_view::toggle_bool(cfg, spec.id),
+        cfg_view::FieldKind::Enum(_) => cfg_view::cycle_enum(cfg, spec.id),
+        cfg_view::FieldKind::Text | cfg_view::FieldKind::U32 => {
+            state.config_edit_buffer = Some(cfg_view::display_value(cfg, spec.id));
+        }
+    }
+}
+
+/// Commit the pending `config_edit_buffer` to the working config. On parse /
+/// validation failure leave the buffer in place so the user can fix it
+/// without retyping everything.
+fn commit_config_edit(state: &mut AppState) {
+    use super::views::config as cfg_view;
+    let Some(buf) = state.config_edit_buffer.take() else {
+        return;
+    };
+    let Some(cfg) = state.config_working.as_mut() else {
+        return;
+    };
+    if cfg_view::field_count() == 0 {
+        return;
+    }
+    let idx = state.selected.min(cfg_view::field_count() - 1);
+    let spec = cfg_view::field_at(idx);
+    match cfg_view::set_text_value(cfg, spec.id, &buf) {
+        Ok(()) => {
+            state.config_edit_error = None;
+        }
+        Err(e) => {
+            state.config_edit_error = Some(e);
+            state.config_edit_buffer = Some(buf);
+        }
+    }
+}
+
+/// `w` on the Config tab. Write the working copy to `config.toml`, then
+/// run `restart_and_verify` so the user immediately sees whether their
+/// edit broke the daemon. On file-write failure, surface it and leave the
+/// daemon alone (no point restarting with unchanged bytes).
+async fn save_config(state: &mut AppState) {
+    let Some(cfg) = state.config_working.clone() else {
+        return;
+    };
+    if let Err(e) = crate::config::file::write_config(&state.paths, &cfg) {
+        state.config_edit_error = Some(format!("save failed: {e:#}"));
+        return;
+    }
+    state.config_loaded = Some(cfg);
+    state.config_edit_error = None;
+    state.reload_outcome = Some(crate::service::reload::restart_and_verify(&state.paths).await);
+    // Pull a fresh view of everything else now that the daemon restarted.
+    refresh(state).await;
 }
 
 async fn run_service_action(state: &mut AppState, action: ServiceAction) {
@@ -466,6 +616,9 @@ fn render_help(f: &mut ratatui::Frame<'_>) {
         Line::from("r     force refresh"),
         Line::from("s     start runner service  (Runner tab)"),
         Line::from("x     stop runner service   (Runner tab)"),
+        Line::from("↵     edit field / toggle  (Config tab)"),
+        Line::from("w     save + reload daemon (Config tab)"),
+        Line::from("Esc   discard edits       (Config tab)"),
         Line::from("a     accept approval (once)"),
         Line::from("A     accept for session"),
         Line::from("d     decline"),
