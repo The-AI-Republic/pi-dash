@@ -417,6 +417,9 @@ fn editable_lines(
     let selected_idx = state.selected.min(field_count().saturating_sub(1));
 
     // Runner section: name is editable, cloud_url + workspace_slug read-only.
+    // cloud_url gets an extra hint line — since it's bound to the runner's
+    // credentials (minted by that cloud), changing it locally would leave a
+    // broken setup. Point the user at the register flow explicitly.
     lines.push(section_header("Runner"));
     lines.extend(render_editable_row(
         working,
@@ -426,6 +429,9 @@ fn editable_lines(
         index_of(FieldId::RunnerName),
     ));
     lines.push(readonly_row("cloud_url", &working.runner.cloud_url));
+    lines.push(readonly_hint(
+        "to change, generate a new token in the cloud UI and re-run `pidash configure`",
+    ));
     lines.push(readonly_row(
         "workspace_slug",
         working.runner.workspace_slug.as_deref().unwrap_or("-"),
@@ -612,6 +618,20 @@ fn readonly_row(label: &str, value: &str) -> Line<'static> {
         Span::styled(
             "   [read-only]".to_string(),
             Style::default().add_modifier(Modifier::DIM),
+        ),
+    ])
+}
+
+/// Continuation line for a read-only row that needs more explanation than
+/// `[read-only]` conveys. Aligns under the value column for readability.
+fn readonly_hint(msg: &str) -> Line<'static> {
+    Line::from(vec![
+        Span::raw(" ".repeat(3 + 30 + 1)),
+        Span::styled(
+            format!("↳ {msg}"),
+            Style::default()
+                .fg(Color::DarkGray)
+                .add_modifier(Modifier::DIM),
         ),
     ])
 }
