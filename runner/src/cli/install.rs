@@ -121,6 +121,9 @@ fn prompt_for_register_inputs(paths: &Paths) -> Result<crate::cli::configure::Re
         // Install's interactive chain delegates fully to configure — let it
         // write the unit + start the daemon as part of the same flow.
         skip_service: false,
+        // Interactive install doesn't collect advanced field edits — those
+        // can be done later via `pidash configure --<flag>` or the TUI.
+        extras: None,
     })
 }
 

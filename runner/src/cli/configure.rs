@@ -15,28 +15,72 @@ const MAX_AUTO_NAME_RETRIES: u32 = 5;
 
 #[derive(Debug, ClapArgs)]
 pub struct Args {
-    /// Pi Dash cloud base URL (https://cloud.pidash.so).
+    // --- Registration (required together on first setup) ------------------
+    /// Pi Dash cloud base URL. Required (with `--token`) on first setup.
     #[arg(long)]
-    pub url: String,
+    pub url: Option<String>,
 
-    /// Registration token issued by the cloud UI.
+    /// Registration token issued by the cloud UI. Required (with `--url`)
+    /// on first setup; consumed to mint the runner's persistent credential.
     #[arg(long)]
-    pub token: String,
+    pub token: Option<String>,
 
-    /// Optional human-friendly name for this runner.
+    // --- Runner / workspace -----------------------------------------------
+    /// Human-friendly runner name.
     #[arg(long)]
     pub name: Option<String>,
 
-    /// Override the workspace directory.
+    /// Workspace directory the runner clones into.
     #[arg(long)]
     pub working_dir: Option<PathBuf>,
 
-    /// Which AI agent CLI the runner should drive. Omit on a TTY to get the
-    /// arrow-key picker (pre-selects your previous choice, or `codex` on
-    /// first run). Required to run non-interactively with a non-default choice.
+    // --- Agent selection --------------------------------------------------
+    /// Which AI agent CLI the runner drives. Arrow-key picker on a TTY
+    /// during first-setup if omitted; a no-op partial edit if omitted here.
     #[arg(long, value_enum)]
     pub agent: Option<AgentKind>,
 
+    // --- Codex section ----------------------------------------------------
+    /// Override `[codex].binary` (path or command name).
+    #[arg(long)]
+    pub codex_binary: Option<String>,
+
+    /// Override `[codex].model_default`.
+    #[arg(long)]
+    pub codex_model: Option<String>,
+
+    // --- Claude Code section ----------------------------------------------
+    /// Override `[claude_code].binary`.
+    #[arg(long)]
+    pub claude_binary: Option<String>,
+
+    /// Override `[claude_code].model_default`.
+    #[arg(long)]
+    pub claude_model: Option<String>,
+
+    // --- Approval policy (scalars only — list fields live in the TUI) -----
+    /// Toggle `[approval_policy].auto_approve_readonly_shell`.
+    #[arg(long)]
+    pub approval_auto_readonly: Option<bool>,
+
+    /// Toggle `[approval_policy].auto_approve_workspace_writes`.
+    #[arg(long)]
+    pub approval_auto_writes: Option<bool>,
+
+    /// Toggle `[approval_policy].auto_approve_network`.
+    #[arg(long)]
+    pub approval_auto_network: Option<bool>,
+
+    // --- Logging ----------------------------------------------------------
+    /// Override `[logging].level` (trace|debug|info|warn|error).
+    #[arg(long)]
+    pub log_level: Option<String>,
+
+    /// Override `[logging].retention_days`.
+    #[arg(long)]
+    pub log_retention_days: Option<u32>,
+
+    // --- Behaviour flags (not persisted) ----------------------------------
     /// Skip on-install doctor checks (not recommended). Also skips the
     /// auth-gate retry loop, since there's nothing to re-check.
     #[arg(long)]
@@ -44,10 +88,114 @@ pub struct Args {
 
     /// Skip installing / starting the OS service at the end. Use from CI or
     /// Ansible playbooks that manage the daemon lifecycle themselves, or when
-    /// you only want to re-register credentials without bouncing a running
-    /// daemon.
+    /// you only want to write the config files without bouncing a daemon.
     #[arg(long)]
     pub skip_service: bool,
+}
+
+impl Args {
+    /// Returns true if any non-registration flag was set — i.e. the user
+    /// intends to *edit* an existing config rather than register a new one.
+    /// Used to decide whether to bail out or just mutate specific fields.
+    fn has_edit_flags(&self) -> bool {
+        self.name.is_some()
+            || self.working_dir.is_some()
+            || self.agent.is_some()
+            || self.codex_binary.is_some()
+            || self.codex_model.is_some()
+            || self.claude_binary.is_some()
+            || self.claude_model.is_some()
+            || self.approval_auto_readonly.is_some()
+            || self.approval_auto_writes.is_some()
+            || self.approval_auto_network.is_some()
+            || self.log_level.is_some()
+            || self.log_retention_days.is_some()
+    }
+
+    /// Apply every `--<flag>` that was set as a mutation on an existing
+    /// `Config`. Returns `true` if any field actually changed.
+    fn apply_to(&self, cfg: &mut Config) -> bool {
+        let mut changed = false;
+        if let Some(url) = &self.url
+            && cfg.runner.cloud_url != *url
+        {
+            cfg.runner.cloud_url = url.clone();
+            changed = true;
+        }
+        if let Some(name) = &self.name
+            && cfg.runner.name != *name
+        {
+            cfg.runner.name = name.clone();
+            changed = true;
+        }
+        if let Some(wd) = &self.working_dir
+            && cfg.workspace.working_dir != *wd
+        {
+            cfg.workspace.working_dir = wd.clone();
+            changed = true;
+        }
+        if let Some(kind) = self.agent
+            && cfg.agent.kind != kind
+        {
+            cfg.agent.kind = kind;
+            changed = true;
+        }
+        if let Some(b) = &self.codex_binary
+            && cfg.codex.binary != *b
+        {
+            cfg.codex.binary = b.clone();
+            changed = true;
+        }
+        if let Some(m) = &self.codex_model
+            && cfg.codex.model_default.as_ref() != Some(m)
+        {
+            cfg.codex.model_default = Some(m.clone());
+            changed = true;
+        }
+        if let Some(b) = &self.claude_binary
+            && cfg.claude_code.binary != *b
+        {
+            cfg.claude_code.binary = b.clone();
+            changed = true;
+        }
+        if let Some(m) = &self.claude_model
+            && cfg.claude_code.model_default.as_ref() != Some(m)
+        {
+            cfg.claude_code.model_default = Some(m.clone());
+            changed = true;
+        }
+        if let Some(v) = self.approval_auto_readonly
+            && cfg.approval_policy.auto_approve_readonly_shell != v
+        {
+            cfg.approval_policy.auto_approve_readonly_shell = v;
+            changed = true;
+        }
+        if let Some(v) = self.approval_auto_writes
+            && cfg.approval_policy.auto_approve_workspace_writes != v
+        {
+            cfg.approval_policy.auto_approve_workspace_writes = v;
+            changed = true;
+        }
+        if let Some(v) = self.approval_auto_network
+            && cfg.approval_policy.auto_approve_network != v
+        {
+            cfg.approval_policy.auto_approve_network = v;
+            changed = true;
+        }
+        if let Some(lvl) = &self.log_level
+            && cfg.logging.level != *lvl
+        {
+            cfg.logging.level = lvl.clone();
+            changed = true;
+        }
+        if let Some(n) = self.log_retention_days
+            && cfg.logging.retention_days != n
+        {
+            cfg.logging.retention_days = n;
+            changed = true;
+        }
+        changed
+    }
 }
 
 /// Inputs for the core registration flow. `cli::install::run` also builds one
@@ -62,24 +210,101 @@ pub struct RegisterInputs {
     pub agent: Option<AgentKind>,
     pub skip_doctor: bool,
     pub skip_service: bool,
-}
-
-impl From<Args> for RegisterInputs {
-    fn from(a: Args) -> Self {
-        Self {
-            url: a.url,
-            token: a.token,
-            name: a.name,
-            working_dir: a.working_dir,
-            agent: a.agent,
-            skip_doctor: a.skip_doctor,
-            skip_service: a.skip_service,
-        }
-    }
+    /// Full clap Args, if we came from a direct CLI invocation. Lets the
+    /// register path also apply any other `--<flag>` the user passed
+    /// (e.g. `--codex-model gpt-5 --approval-auto-readonly true`) before
+    /// writing the fresh config to disk. `None` when built from the install
+    /// wizard's interactive prompts, which don't collect those extras.
+    pub extras: Option<Args>,
 }
 
 pub async fn run(args: Args, paths: &Paths) -> Result<()> {
-    execute(args.into(), paths).await
+    // Decision tree for `pidash configure`:
+    //
+    // 1. Bare invocation (no flags at all) → drop into the TUI's Config tab.
+    //    The user wants to browse / edit visually, not script.
+    // 2. `--url` + `--token` present → register with the cloud. Any other
+    //    flags on this path take effect as part of the initial config file.
+    // 3. Edit flags only (no `--token`) against an existing config → apply
+    //    a partial mutation and kick the daemon.
+    // 4. Edit flags without an existing config → error. We can't edit a
+    //    file that doesn't exist, and we won't invent credentials.
+    let bare = args.url.is_none()
+        && args.token.is_none()
+        && !args.has_edit_flags()
+        && !args.skip_doctor
+        && !args.skip_service;
+    if bare {
+        return crate::tui::run(paths.clone(), /* no_onboarding = */ false, crate::tui::app::Tab::Config).await;
+    }
+
+    match (args.url.clone(), args.token.clone()) {
+        (Some(url), Some(token)) => {
+            let inputs = RegisterInputs {
+                url,
+                token,
+                name: args.name.clone(),
+                working_dir: args.working_dir.clone(),
+                agent: args.agent,
+                skip_doctor: args.skip_doctor,
+                skip_service: args.skip_service,
+                extras: Some(args),
+            };
+            execute(inputs, paths).await
+        }
+        (Some(_), None) | (None, Some(_)) => {
+            anyhow::bail!(
+                "--url and --token must be used together. Pass both to re-register, \
+                 or omit both to edit specific fields of an existing config."
+            );
+        }
+        (None, None) => partial_edit(args, paths).await,
+    }
+}
+
+/// Partial-edit path: load `config.toml`, apply whatever `--<flag>`s were
+/// set, persist, and restart the daemon. Bails if the config doesn't exist
+/// yet (fresh machines must register first).
+async fn partial_edit(args: Args, paths: &Paths) -> Result<()> {
+    let mut cfg = match crate::config::file::load_config_opt(paths)? {
+        Some(c) => c,
+        None => {
+            anyhow::bail!(
+                "no config found at {}. Run `pidash configure --url <URL> --token <TOKEN>` \
+                 to register this runner first.",
+                paths.config_path().display()
+            );
+        }
+    };
+    if let Some(name) = &args.name {
+        runner_name::validate(name)
+            .with_context(|| format!("invalid --name value {name:?}"))?;
+    }
+    let changed = args.apply_to(&mut cfg);
+    if !changed {
+        println!("No config fields were changed.");
+        return Ok(());
+    }
+    crate::config::file::write_config(paths, &cfg)?;
+    println!("Wrote {}.", paths.config_path().display());
+
+    if args.skip_service {
+        println!("Skipping daemon restart (--skip-service).");
+        return Ok(());
+    }
+
+    println!("Reloading runner daemon…");
+    let outcome = crate::service::reload::restart_and_verify(paths).await;
+    if outcome.ok {
+        println!("✓ {}", outcome.summary);
+        Ok(())
+    } else {
+        eprintln!("✗ {}", outcome.summary);
+        if let Some(detail) = outcome.detail {
+            eprintln!("\n{detail}");
+        }
+        anyhow::bail!("runner failed to come up cleanly after config change");
+    }
 }
 
 /// End-to-end onboarding: register with the cloud, persist `config.toml` +
@@ -182,7 +407,7 @@ pub async fn execute(inputs: RegisterInputs, paths: &Paths) -> Result<()> {
         );
     }
 
-    let config = Config {
+    let mut config = Config {
         version: 1,
         runner: crate::config::schema::RunnerSection {
             name: final_name,
@@ -196,6 +421,13 @@ pub async fn execute(inputs: RegisterInputs, paths: &Paths) -> Result<()> {
         approval_policy: crate::config::schema::ApprovalPolicySection::default(),
         logging: crate::config::schema::LoggingSection::default(),
     };
+    // Apply any advanced field flags the user passed alongside --url/--token.
+    // They're already reflected in `config` for the fields this function
+    // populates directly (name, cloud_url, agent, working_dir); `apply_to`
+    // covers the rest (codex.*, claude_code.*, approval_policy.*, logging.*).
+    if let Some(extras) = inputs.extras.as_ref() {
+        extras.apply_to(&mut config);
+    }
     crate::config::file::write_config(paths, &config)?;
 
     let creds = Credentials {
