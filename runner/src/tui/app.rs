@@ -46,12 +46,16 @@ pub struct AppState {
     pub runs: Vec<crate::history::index::RunSummary>,
     pub approvals: Vec<crate::approval::router::ApprovalRecord>,
     pub config_blob: Option<serde_json::Value>,
+    pub config_error: Option<String>,
+    pub daemon_offline: bool,
     pub error: Option<String>,
     pub quit: bool,
     pub selected: usize,
     pub onboarding_needed: bool,
     pub show_help: bool,
     pub confirm_stop: bool,
+    pub confirm_exit: bool,
+    pub confirm_exit_yes: bool,
     pub last_approval_count: usize,
 }
 
@@ -67,12 +71,16 @@ pub async fn run(paths: Paths) -> Result<()> {
         runs: Vec::new(),
         approvals: Vec::new(),
         config_blob: None,
+        config_error: None,
+        daemon_offline: false,
         error: None,
         quit: false,
         selected: 0,
         onboarding_needed,
         show_help: false,
         confirm_stop: false,
+        confirm_exit: false,
+        confirm_exit_yes: true,
         last_approval_count: 0,
     };
 
@@ -112,6 +120,17 @@ async fn loop_ui(
         }
     }
     Ok(())
+}
+
+fn is_daemon_offline(err: &anyhow::Error) -> bool {
+    err.chain().any(|c| {
+        c.downcast_ref::<std::io::Error>().is_some_and(|io| {
+            matches!(
+                io.kind(),
+                std::io::ErrorKind::NotFound | std::io::ErrorKind::ConnectionRefused
+            )
+        })
+    })
 }
 
 async fn poll_event() -> Option<Event> {
@@ -154,11 +173,23 @@ async fn refresh(state: &mut AppState) {
                 state.runs = v;
             }
         }
-        Tab::Config => {
-            if let Ok(v) = state.ipc.config().await {
+        Tab::Config => match state.ipc.config().await {
+            Ok(v) => {
                 state.config_blob = Some(v);
+                state.config_error = None;
+                state.daemon_offline = false;
             }
-        }
+            Err(e) => {
+                state.config_blob = None;
+                if is_daemon_offline(&e) {
+                    state.daemon_offline = true;
+                    state.config_error = None;
+                } else {
+                    state.daemon_offline = false;
+                    state.config_error = Some(format!("{e:#}"));
+                }
+            }
+        },
         _ => {}
     }
 }
@@ -178,6 +209,30 @@ async fn handle_event(ev: Event, state: &mut AppState) {
             }
             return;
         }
+        if state.confirm_exit {
+            match (key.code, key.modifiers) {
+                (KeyCode::Char('c'), KeyModifiers::CONTROL) => state.quit = true,
+                (KeyCode::Enter, _) => {
+                    if state.confirm_exit_yes {
+                        state.quit = true;
+                    } else {
+                        state.confirm_exit = false;
+                    }
+                }
+                (KeyCode::Char('y') | KeyCode::Char('Y'), _) => state.quit = true,
+                (KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc, _) => {
+                    state.confirm_exit = false;
+                }
+                (
+                    KeyCode::Left | KeyCode::Right | KeyCode::Char('h') | KeyCode::Char('l'),
+                    _,
+                ) => {
+                    state.confirm_exit_yes = !state.confirm_exit_yes;
+                }
+                _ => {}
+            }
+            return;
+        }
         if state.confirm_stop {
             match key.code {
                 KeyCode::Char('y') | KeyCode::Char('Y') => {
@@ -194,30 +249,57 @@ async fn handle_event(ev: Event, state: &mut AppState) {
             return;
         }
         match (key.code, key.modifiers) {
-            (KeyCode::Char('q'), _) => state.quit = true,
+            (KeyCode::Char('q'), _) | (KeyCode::Char('c'), KeyModifiers::CONTROL) => {
+                state.confirm_exit = true;
+                state.confirm_exit_yes = true;
+            }
             (KeyCode::Char('Q'), _) => state.confirm_stop = true,
             (KeyCode::Char('?'), _) => state.show_help = true,
             (KeyCode::Char('1'), _) => {
                 state.tab = Tab::Status;
                 state.selected = 0;
+                refresh(state).await;
             }
             (KeyCode::Char('2'), _) => {
                 state.tab = Tab::Runs;
                 state.selected = 0;
+                refresh(state).await;
             }
             (KeyCode::Char('3'), _) => {
                 state.tab = Tab::Config;
                 state.selected = 0;
+                refresh(state).await;
             }
             (KeyCode::Char('4'), _) => {
                 state.tab = Tab::Approvals;
                 state.selected = 0;
+                refresh(state).await;
             }
             (KeyCode::Char('j') | KeyCode::Down, _) => {
                 state.selected = state.selected.saturating_add(1);
             }
             (KeyCode::Char('k') | KeyCode::Up, _) => {
                 state.selected = state.selected.saturating_sub(1);
+            }
+            (KeyCode::Char('h') | KeyCode::Left, _) => {
+                state.tab = match state.tab {
+                    Tab::Status => Tab::Approvals,
+                    Tab::Runs => Tab::Status,
+                    Tab::Config => Tab::Runs,
+                    Tab::Approvals => Tab::Config,
+                };
+                state.selected = 0;
+                refresh(state).await;
+            }
+            (KeyCode::Char('l') | KeyCode::Right, _) => {
+                state.tab = match state.tab {
+                    Tab::Status => Tab::Runs,
+                    Tab::Runs => Tab::Config,
+                    Tab::Config => Tab::Approvals,
+                    Tab::Approvals => Tab::Status,
+                };
+                state.selected = 0;
+                refresh(state).await;
             }
             (KeyCode::Char('r'), _) => refresh(state).await,
             (KeyCode::Char('a'), _) if state.tab == Tab::Approvals => {
@@ -286,13 +368,15 @@ fn draw(f: &mut ratatui::Frame<'_>, state: &AppState) {
     }
 
     let hint = Line::from(Span::styled(
-        " [1]Status [2]Runs [3]Config [4]Approvals  j/k move  r refresh  ?help  q quit  Q stop daemon ",
+        " [1-4]tab  h/l ←/→ switch  j/k ↑/↓ move  r refresh  ?help  q exit  Q stop daemon ",
         Style::default().add_modifier(Modifier::DIM),
     ));
     f.render_widget(Paragraph::new(hint), layout[2]);
 
     if state.show_help {
         render_help(f);
+    } else if state.confirm_exit {
+        render_confirm_exit(f, state.confirm_exit_yes);
     } else if state.confirm_stop {
         render_confirm_stop(f);
     }
@@ -307,19 +391,48 @@ fn render_help(f: &mut ratatui::Frame<'_>) {
     let body = Paragraph::new(vec![
         Line::from("Pi Dash Runner — TUI help"),
         Line::raw(""),
-        Line::from("1–4   switch views"),
-        Line::from("j/k   move selection"),
+        Line::from("1–4       jump to view"),
+        Line::from("h/l ←/→   prev/next view"),
+        Line::from("j/k ↑/↓   move selection"),
         Line::from("↵     open detail"),
         Line::from("r     force refresh"),
         Line::from("a     accept approval (once)"),
         Line::from("A     accept for session"),
         Line::from("d     decline"),
-        Line::from("q     quit TUI (daemon keeps running)"),
-        Line::from("Q     stop daemon (asks for confirmation)"),
+        Line::from("q / Ctrl+C  quit TUI (asks for confirmation)"),
+        Line::from("Q           stop daemon (asks for confirmation)"),
         Line::from("?     toggle this help"),
     ])
     .alignment(Alignment::Left)
     .block(Block::default().borders(Borders::ALL).title(" Help "));
+    f.render_widget(body, area);
+}
+
+fn render_confirm_exit(f: &mut ratatui::Frame<'_>, yes_selected: bool) {
+    use ratatui::widgets::Clear;
+
+    let area = centered_rect(40, 20, f.area());
+    f.render_widget(Clear, area);
+    let sel = Style::default().add_modifier(Modifier::REVERSED);
+    let unsel = Style::default().add_modifier(Modifier::DIM);
+    let (yes_style, no_style) = if yes_selected {
+        (sel, unsel)
+    } else {
+        (unsel, sel)
+    };
+    let body = Paragraph::new(vec![
+        Line::from("Are you sure to exit?"),
+        Line::raw(""),
+        Line::from(vec![
+            Span::raw("  "),
+            Span::styled(" Yes ", yes_style),
+            Span::raw("    "),
+            Span::styled(" No ", no_style),
+        ]),
+        Line::raw(""),
+        Line::from("↵ confirm   ←/→ switch   y / n / Esc"),
+    ])
+    .block(Block::default().borders(Borders::ALL).title(" Exit "));
     f.render_widget(body, area);
 }
 
