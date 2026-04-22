@@ -89,7 +89,7 @@ pub async fn execute(inputs: RegisterInputs, paths: &Paths, print_next_hint: boo
         .ok()
         .flatten()
         .map(|c| c.agent.kind);
-    let agent_kind = resolve_agent_kind(inputs.agent, existing_kind)?;
+    let agent_kind = resolve_agent_kind(inputs.agent, existing_kind);
 
     // User-supplied names are charset-checked up front; an invalid `--name`
     // is a hard error, not something we try to fix by retrying. Auto-generated
@@ -219,40 +219,79 @@ pub async fn execute(inputs: RegisterInputs, paths: &Paths, print_next_hint: boo
 /// Picks the agent for this run. Precedence:
 /// 1. `--agent` flag (always wins, scriptable).
 /// 2. Interactive TTY prompt, pre-filled with the existing config's kind
-///    if one exists (otherwise `codex`). Enter accepts the default.
+///    if one exists (otherwise `codex`). Enter accepts the default; EOF
+///    also accepts the default (matches `install.rs` prompt conventions).
 /// 3. Non-TTY with no flag: keep the existing config's kind, or Codex.
-fn resolve_agent_kind(flag: Option<AgentKind>, existing: Option<AgentKind>) -> Result<AgentKind> {
+fn resolve_agent_kind(flag: Option<AgentKind>, existing: Option<AgentKind>) -> AgentKind {
     if let Some(k) = flag {
-        return Ok(k);
+        return k;
     }
     if std::io::stdin().is_terminal() {
         return prompt_agent_kind(existing.unwrap_or_default());
     }
-    Ok(existing.unwrap_or_default())
+    existing.unwrap_or_default()
 }
 
-fn prompt_agent_kind(default: AgentKind) -> Result<AgentKind> {
+/// Result of parsing one line of user input at the agent prompt. Kept pure
+/// (no I/O) so the parser can be unit-tested without a terminal.
+#[derive(Debug, PartialEq, Eq)]
+enum AgentInput {
+    /// Empty / whitespace-only input: accept the pre-filled default.
+    UseDefault,
+    /// A recognised agent name.
+    Parsed(AgentKind),
+    /// The input didn't match any known name; caller should re-prompt.
+    Unknown,
+}
+
+/// Accepts the CLI spelling (`codex`, `claude-code`), the config-file
+/// spelling (`claude_code`), and `claude` as a shorthand — so the prompt
+/// forgives whichever a user might type. Case-insensitive.
+fn parse_agent_input(raw: &str) -> AgentInput {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return AgentInput::UseDefault;
+    }
+    match trimmed.to_ascii_lowercase().as_str() {
+        "codex" => AgentInput::Parsed(AgentKind::Codex),
+        "claude-code" | "claude_code" | "claude" => AgentInput::Parsed(AgentKind::ClaudeCode),
+        _ => AgentInput::Unknown,
+    }
+}
+
+/// Reads a single line from stdin, loops on unrecognised input so a typo
+/// doesn't force the user to re-run `pidash configure` (and re-paste the
+/// one-time token). Returns the pre-filled default on empty input or EOF.
+fn prompt_agent_kind(default: AgentKind) -> AgentKind {
     let default_label = match default {
         AgentKind::Codex => "codex",
         AgentKind::ClaudeCode => "claude-code",
     };
-    print!("Choose AI agent [codex/claude-code] (default: {default_label}): ");
-    std::io::stdout().flush()?;
-    let stdin = std::io::stdin();
-    let mut line = String::new();
-    stdin.lock().read_line(&mut line)?;
-    let trimmed = line.trim();
-    if trimmed.is_empty() {
-        return Ok(default);
-    }
-    // Accept both the CLI spelling (`claude-code`) and the config-file
-    // spelling (`claude_code`) so the prompt forgives either.
-    match trimmed.to_ascii_lowercase().as_str() {
-        "codex" => Ok(AgentKind::Codex),
-        "claude-code" | "claude_code" | "claude" => Ok(AgentKind::ClaudeCode),
-        other => anyhow::bail!(
-            "unrecognised agent {other:?}; expected `codex` or `claude-code`"
-        ),
+    loop {
+        // Ignore flush errors: if stdout is broken we can't recover here
+        // anyway, and the read_line below will fail loudly.
+        print!("Choose AI agent [codex/claude-code] (default: {default_label}): ");
+        let _ = std::io::stdout().flush();
+        let mut line = String::new();
+        // EOF on stdin also yields an empty string ⇒ default, matching
+        // the install.rs `prompt_required` convention.
+        match std::io::stdin().lock().read_line(&mut line) {
+            Ok(0) => return default,
+            Ok(_) => {}
+            Err(e) => {
+                eprintln!("warning: could not read agent prompt ({e}); using default");
+                return default;
+            }
+        }
+        match parse_agent_input(&line) {
+            AgentInput::UseDefault => return default,
+            AgentInput::Parsed(k) => return k,
+            AgentInput::Unknown => {
+                eprintln!(
+                    "unrecognised agent; expected `codex` or `claude-code` (or press Enter for the default)."
+                );
+            }
+        }
     }
 }
 
@@ -326,5 +365,70 @@ fn validate_cloud_url(url: &str) -> Result<()> {
         );
     }
     anyhow::bail!("cloud URL must start with https:// (or http:// for localhost), got {url}")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_agent_input_empty_is_default() {
+        assert_eq!(parse_agent_input(""), AgentInput::UseDefault);
+        assert_eq!(parse_agent_input("   "), AgentInput::UseDefault);
+        assert_eq!(parse_agent_input("\n"), AgentInput::UseDefault);
+        assert_eq!(parse_agent_input("  \t\n"), AgentInput::UseDefault);
+    }
+
+    #[test]
+    fn parse_agent_input_codex_variants() {
+        assert_eq!(parse_agent_input("codex"), AgentInput::Parsed(AgentKind::Codex));
+        assert_eq!(parse_agent_input("CODEX"), AgentInput::Parsed(AgentKind::Codex));
+        assert_eq!(parse_agent_input("  Codex\n"), AgentInput::Parsed(AgentKind::Codex));
+    }
+
+    #[test]
+    fn parse_agent_input_claude_variants() {
+        // CLI spelling, config-file spelling, and shorthand — all map to ClaudeCode.
+        assert_eq!(
+            parse_agent_input("claude-code"),
+            AgentInput::Parsed(AgentKind::ClaudeCode)
+        );
+        assert_eq!(
+            parse_agent_input("claude_code"),
+            AgentInput::Parsed(AgentKind::ClaudeCode)
+        );
+        assert_eq!(
+            parse_agent_input("claude"),
+            AgentInput::Parsed(AgentKind::ClaudeCode)
+        );
+        assert_eq!(
+            parse_agent_input("CLAUDE-CODE"),
+            AgentInput::Parsed(AgentKind::ClaudeCode)
+        );
+        assert_eq!(
+            parse_agent_input("  Claude_Code  "),
+            AgentInput::Parsed(AgentKind::ClaudeCode)
+        );
+    }
+
+    #[test]
+    fn parse_agent_input_unknown_values() {
+        // Typos and adjacent names ⇒ Unknown, so the caller can re-prompt
+        // instead of bailing out of `pidash configure`.
+        assert_eq!(parse_agent_input("nope"), AgentInput::Unknown);
+        assert_eq!(parse_agent_input("codexx"), AgentInput::Unknown);
+        assert_eq!(parse_agent_input("anthropic"), AgentInput::Unknown);
+        assert_eq!(parse_agent_input("gpt"), AgentInput::Unknown);
+    }
+
+    #[test]
+    fn resolve_agent_kind_flag_wins_over_existing() {
+        // We can't assert the TTY branch from a unit test, but we can assert
+        // that an explicit `--agent` flag bypasses both the prompt and the
+        // existing-config fallback — which is the important guarantee for
+        // non-interactive callers.
+        let got = resolve_agent_kind(Some(AgentKind::Codex), Some(AgentKind::ClaudeCode));
+        assert_eq!(got, AgentKind::Codex);
+    }
 }
 
