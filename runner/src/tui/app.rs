@@ -62,6 +62,7 @@ impl Tab {
 
 pub struct AppState {
     pub tab: Tab,
+    pub paths: Paths,
     pub ipc: TuiIpc,
     pub status: Option<crate::ipc::protocol::StatusSnapshot>,
     pub runs: Vec<crate::history::index::RunSummary>,
@@ -78,6 +79,12 @@ pub struct AppState {
     pub confirm_exit: bool,
     pub confirm_exit_yes: bool,
     pub last_approval_count: usize,
+    /// Last seen service state (`active`, `inactive`, `failed`, `unknown`).
+    /// Populated by `service::detect().status()` on refresh.
+    pub service_state: Option<String>,
+    /// Transient banner shown on the Runner tab after a start/stop action:
+    /// e.g. "starting service…" or "stop failed: …". Cleared on next refresh.
+    pub service_action_msg: Option<String>,
 }
 
 pub async fn run(paths: Paths, initial_tab: Tab) -> Result<()> {
@@ -87,6 +94,7 @@ pub async fn run(paths: Paths, initial_tab: Tab) -> Result<()> {
     };
     let mut state = AppState {
         tab: initial_tab,
+        paths: paths.clone(),
         ipc,
         status: None,
         runs: Vec::new(),
@@ -103,6 +111,8 @@ pub async fn run(paths: Paths, initial_tab: Tab) -> Result<()> {
         confirm_exit: false,
         confirm_exit_yes: true,
         last_approval_count: 0,
+        service_state: None,
+        service_action_msg: None,
     };
 
     enable_raw_mode()?;
@@ -169,6 +179,14 @@ async fn poll_event() -> Option<Event> {
 }
 
 async fn refresh(state: &mut AppState) {
+    // Service state independent of IPC — the daemon may be down entirely,
+    // in which case we still want to show "inactive" on the Runner tab.
+    state.service_state = match crate::service::detect().status().await {
+        Ok(s) if !s.is_empty() => Some(s),
+        Ok(_) => Some("unknown".to_string()),
+        Err(e) => Some(format!("error: {e}")),
+    };
+
     match state.ipc.status().await {
         Ok(s) => state.status = Some(s),
         Err(e) => {
@@ -323,6 +341,12 @@ async fn handle_event(ev: Event, state: &mut AppState) {
                 refresh(state).await;
             }
             (KeyCode::Char('r'), _) => refresh(state).await,
+            (KeyCode::Char('s'), _) if state.tab == Tab::RunnerStatus => {
+                run_service_action(state, ServiceAction::Start).await;
+            }
+            (KeyCode::Char('x'), _) if state.tab == Tab::RunnerStatus => {
+                run_service_action(state, ServiceAction::Stop).await;
+            }
             (KeyCode::Char('a'), _) if state.tab == Tab::Approvals => {
                 accept_selected(state, crate::cloud::protocol::ApprovalDecision::Accept).await;
             }
@@ -339,6 +363,32 @@ async fn handle_event(ev: Event, state: &mut AppState) {
             _ => {}
         }
     }
+}
+
+#[derive(Debug, Clone, Copy)]
+enum ServiceAction {
+    Start,
+    Stop,
+}
+
+async fn run_service_action(state: &mut AppState, action: ServiceAction) {
+    let svc = crate::service::detect();
+    let (verb_present, verb_past) = match action {
+        ServiceAction::Start => ("starting", "started"),
+        ServiceAction::Stop => ("stopping", "stopped"),
+    };
+    state.service_action_msg = Some(format!("{verb_present} service…"));
+    let result = match action {
+        ServiceAction::Start => svc.start().await,
+        ServiceAction::Stop => svc.stop().await,
+    };
+    state.service_action_msg = Some(match result {
+        Ok(()) => format!("service {verb_past}."),
+        Err(e) => format!("service {verb_present} failed: {e:#}"),
+    });
+    // Pull fresh service/IPC state so the banner isn't contradicted by stale
+    // cells on the next redraw.
+    refresh(state).await;
 }
 
 async fn accept_selected(state: &mut AppState, decision: crate::cloud::protocol::ApprovalDecision) {
@@ -417,6 +467,8 @@ fn render_help(f: &mut ratatui::Frame<'_>) {
         Line::from("j/k ↑/↓   move selection"),
         Line::from("↵     open detail"),
         Line::from("r     force refresh"),
+        Line::from("s     start runner service  (Runner tab)"),
+        Line::from("x     stop runner service   (Runner tab)"),
         Line::from("a     accept approval (once)"),
         Line::from("A     accept for session"),
         Line::from("d     decline"),
