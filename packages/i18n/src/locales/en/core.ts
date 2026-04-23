@@ -26,6 +26,11 @@ export default {
     stickies: "Stickies",
     prompts: "Prompts",
     runners: "Runners",
+    tooltips: {
+      projects: "Browse projects",
+      runners: "Manage your AI Agent connectivities",
+      prompts: "AI Prompt Templates",
+    },
   },
 
   prompts: {

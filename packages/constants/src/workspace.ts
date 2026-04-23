@@ -196,6 +196,7 @@ export interface IWorkspaceSidebarNavigationItem {
   href: string;
   access: EUserWorkspaceRoles[];
   highlight: (pathname: string, url: string) => boolean;
+  tooltipTranslationKey?: string;
 }
 
 export const WORKSPACE_SIDEBAR_DYNAMIC_NAVIGATION_ITEMS: Record<string, IWorkspaceSidebarNavigationItem> = {
@@ -270,6 +271,7 @@ export const WORKSPACE_SIDEBAR_STATIC_NAVIGATION_ITEMS: Record<string, IWorkspac
     href: `/projects/`,
     access: [EUserWorkspaceRoles.ADMIN, EUserWorkspaceRoles.MEMBER, EUserWorkspaceRoles.GUEST],
     highlight: (pathname: string, url: string) => pathname === url,
+    tooltipTranslationKey: "sidebar.tooltips.projects",
   },
   runners: {
     key: "runners",
@@ -277,6 +279,7 @@ export const WORKSPACE_SIDEBAR_STATIC_NAVIGATION_ITEMS: Record<string, IWorkspac
     href: `/runners/`,
     access: [EUserWorkspaceRoles.ADMIN, EUserWorkspaceRoles.MEMBER],
     highlight: (pathname: string, url: string) => pathname.includes(url),
+    tooltipTranslationKey: "sidebar.tooltips.runners",
   },
   prompts: {
     key: "prompts",
@@ -284,6 +287,7 @@ export const WORKSPACE_SIDEBAR_STATIC_NAVIGATION_ITEMS: Record<string, IWorkspac
     href: `/prompts/`,
     access: [EUserWorkspaceRoles.ADMIN, EUserWorkspaceRoles.MEMBER, EUserWorkspaceRoles.GUEST],
     highlight: (pathname: string, url: string) => pathname.includes(url),
+    tooltipTranslationKey: "sidebar.tooltips.prompts",
   },
 };
 
