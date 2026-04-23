@@ -205,9 +205,57 @@ class Runner(models.Model):
         self.save(update_fields=["last_heartbeat_at"])
 
     def revoke(self) -> None:
-        self.status = RunnerStatus.REVOKED
-        self.revoked_at = timezone.now()
-        self.save(update_fields=["status", "revoked_at"])
+        """Mark the runner revoked and synchronously cancel any in-flight runs.
+
+        See ``.ai_design/issue_runner/design.md`` §7.5. Without this, a
+        force-closed runner leaves ``ASSIGNED``/``RUNNING`` rows stranded
+        because ``consumers._finalize_run`` only triggers on runner-sent
+        completion messages that may never arrive after revocation.
+
+        After the transaction commits, the affected pods are re-drained so
+        queued work (if any) attempts to move to remaining online runners in
+        the same pod.
+        """
+        # Imports deferred to avoid a circular dependency (matcher imports
+        # Runner model; Runner.revoke calls into matcher).
+        from django.db import transaction
+        from pi_dash.runner.services.matcher import (
+            NON_TERMINAL_STATUSES,
+            drain_pod_by_id,
+        )
+
+        affected_pod_ids: set = set()
+        with transaction.atomic():
+            now = timezone.now()
+            Runner.objects.filter(pk=self.pk).update(
+                status=RunnerStatus.REVOKED,
+                revoked_at=now,
+            )
+            # Refresh in-memory instance so callers see the new status/timestamp
+            # without an extra query on their side.
+            self.status = RunnerStatus.REVOKED
+            self.revoked_at = now
+
+            active_runs = list(
+                AgentRun.objects.select_for_update()
+                .filter(runner=self, status__in=NON_TERMINAL_STATUSES)
+                .values_list("pk", "pod_id")
+            )
+            if active_runs:
+                AgentRun.objects.filter(
+                    pk__in=[pk for pk, _ in active_runs]
+                ).update(
+                    status=AgentRunStatus.CANCELLED,
+                    ended_at=now,
+                    error="runner revoked",
+                )
+                affected_pod_ids = {pid for _, pid in active_runs if pid is not None}
+
+        # Refire drain for every affected pod once the transaction commits.
+        # Remaining online runners (if any) in the same pod may now pick up
+        # queued work.
+        for pod_id in affected_pod_ids:
+            transaction.on_commit(lambda pid=pod_id: drain_pod_by_id(pid))
 
 
 class RunnerRegistrationToken(models.Model):
