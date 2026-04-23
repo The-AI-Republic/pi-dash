@@ -16,7 +16,7 @@ import json
 import logging
 from collections import OrderedDict
 from typing import Any, Dict, Optional
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from asgiref.sync import sync_to_async
 from channels.generic.websocket import AsyncJsonWebsocketConsumer
@@ -61,6 +61,22 @@ class RunnerConsumer(AsyncJsonWebsocketConsumer):
         # Per-run last-seen seq; used to drop duplicates and log gaps.
         self.last_seq_per_run: Dict[str, int] = {}
 
+    async def _send_envelope(self, payload: Dict[str, Any]) -> None:
+        """Send an outbound frame stamped with the wire envelope.
+
+        The Rust runner's ``Envelope<T>`` requires ``v`` (protocol version)
+        and ``mid`` (per-message UUID for dedupe) on every frame. Callers
+        pass the logical fields (``type`` + type-specific keys); this helper
+        adds the envelope. Any ``v``/``mid`` already in ``payload`` wins so
+        tests can pin exact values if they need to.
+        """
+        frame: Dict[str, Any] = {
+            "v": PROTOCOL_VERSION,
+            "mid": str(uuid4()),
+            **payload,
+        }
+        await self.send_json(frame)
+
     async def connect(self) -> None:
         auth = self._header("authorization")
         if not auth or not auth.lower().startswith("bearer "):
@@ -99,8 +115,7 @@ class RunnerConsumer(AsyncJsonWebsocketConsumer):
         await self.channel_layer.group_add(self.group_name, self.channel_name)
         await self.accept()
         await self._mark_online(runner.id)
-        await self.send_json({
-            "v": 1,
+        await self._send_envelope({
             "type": "welcome",
             "server_time": timezone.now().isoformat(),
             "heartbeat_interval_secs": HEARTBEAT_INTERVAL_SECS,
@@ -253,24 +268,21 @@ class RunnerConsumer(AsyncJsonWebsocketConsumer):
             lambda: AgentRun.objects.filter(id=run_id, runner=runner).first()
         )()
         if run is None:
-            await self.send_json({
-                "v": 1,
+            await self._send_envelope({
                 "type": "cancel",
                 "run_id": run_id,
                 "reason": "unknown_run_on_reconnect",
             })
             return
         if run.is_terminal:
-            await self.send_json({
-                "v": 1,
+            await self._send_envelope({
                 "type": "cancel",
                 "run_id": run_id,
                 "reason": f"run_already_{run.status}",
             })
             return
         last_seq = await sync_to_async(self._last_seq_for_run)(run_id)
-        await self.send_json({
-            "v": 1,
+        await self._send_envelope({
             "type": "resume_ack",
             "run_id": run_id,
             "last_seq": last_seq,
@@ -298,7 +310,7 @@ class RunnerConsumer(AsyncJsonWebsocketConsumer):
     async def runner_send(self, event: Dict[str, Any]) -> None:
         payload = event.get("payload") or {}
         try:
-            await self.send_json(payload)
+            await self._send_envelope(payload)
         except Exception:
             logger.exception("runner %s send failed", self.runner.id if self.runner else "?")
 
