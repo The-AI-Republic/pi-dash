@@ -235,7 +235,12 @@ pub async fn run(args: Args, paths: &Paths) -> Result<()> {
         && !args.skip_doctor
         && !args.skip_service;
     if bare {
-        return crate::tui::run(paths.clone(), /* no_onboarding = */ false, crate::tui::app::Tab::Config).await;
+        return crate::tui::run(
+            paths.clone(),
+            /* no_onboarding = */ false,
+            crate::tui::app::Tab::Config,
+        )
+        .await;
     }
 
     match (args.url.clone(), args.token.clone()) {
@@ -266,6 +271,20 @@ pub async fn run(args: Args, paths: &Paths) -> Result<()> {
 /// set, persist, and restart the daemon. Bails if the config doesn't exist
 /// yet (fresh machines must register first).
 async fn partial_edit(args: Args, paths: &Paths) -> Result<()> {
+    // `--url` is intentionally not a partial-edit field: changing the cloud
+    // URL without also re-minting credentials leaves stale `credentials.toml`
+    // pointing at a URL it was never issued against, and the next restart
+    // silently fails cloud auth. More importantly, blindly writing whatever
+    // URL the user passes is an SSRF surface (e.g. private metadata IPs) —
+    // the validation that guards the register path can't prevent that here
+    // because changing cloud_url is never actually what the user wants. Re-
+    // registering against the new cloud is the only safe way.
+    if args.url.is_some() {
+        anyhow::bail!(
+            "--url can only be changed by re-registering: run `pidash configure --url <URL> --token <TOKEN>`. \
+             Changing cloud_url alone would leave the runner's credentials bound to the old cloud."
+        );
+    }
     let mut cfg = match crate::config::file::load_config_opt(paths)? {
         Some(c) => c,
         None => {
@@ -277,8 +296,10 @@ async fn partial_edit(args: Args, paths: &Paths) -> Result<()> {
         }
     };
     if let Some(name) = &args.name {
-        runner_name::validate(name)
-            .with_context(|| format!("invalid --name value {name:?}"))?;
+        runner_name::validate(name).with_context(|| format!("invalid --name value {name:?}"))?;
+    }
+    if let Some(lvl) = &args.log_level {
+        validate_log_level(lvl).with_context(|| format!("invalid --log-level value {lvl:?}"))?;
     }
     let changed = args.apply_to(&mut cfg);
     if !changed {
@@ -314,6 +335,11 @@ async fn partial_edit(args: Args, paths: &Paths) -> Result<()> {
 /// step for scripted / CI flows that manage supervision themselves.
 pub async fn execute(inputs: RegisterInputs, paths: &Paths) -> Result<()> {
     validate_cloud_url(&inputs.url)?;
+    if let Some(extras) = inputs.extras.as_ref()
+        && let Some(lvl) = &extras.log_level
+    {
+        validate_log_level(lvl).with_context(|| format!("invalid --log-level value {lvl:?}"))?;
+    }
 
     // Pre-load any existing config so we can pre-fill the agent prompt with
     // the user's prior choice. Harmless if the file is absent or garbled —
@@ -329,8 +355,7 @@ pub async fn execute(inputs: RegisterInputs, paths: &Paths) -> Result<()> {
     // names are charset-safe by construction.
     let user_supplied_name = inputs.name.is_some();
     if let Some(n) = &inputs.name {
-        runner_name::validate(n)
-            .with_context(|| format!("invalid --name value {n:?}"))?;
+        runner_name::validate(n).with_context(|| format!("invalid --name value {n:?}"))?;
     }
 
     let os = std::env::consts::OS.to_string();
@@ -517,10 +542,7 @@ fn prompt_agent_kind(default: AgentKind) -> AgentKind {
         (AgentKind::Codex, "codex"),
         (AgentKind::ClaudeCode, "claude-code"),
     ];
-    let mut idx = OPTIONS
-        .iter()
-        .position(|(k, _)| *k == default)
-        .unwrap_or(0);
+    let mut idx = OPTIONS.iter().position(|(k, _)| *k == default).unwrap_or(0);
 
     if !std::io::stdout().is_terminal() {
         return default;
@@ -660,6 +682,20 @@ async fn run_doctor_with_auth_gate(paths: &Paths, agent_kind: AgentKind) -> Resu
     }
 }
 
+/// Accepted values for `[logging].level`. The TUI's editable Config tab
+/// already constrains this via an enum picker; the CLI mirrors the same set
+/// so a script can't silently wedge the daemon with e.g. `--log-level foo`
+/// (EnvFilter would reject it on next restart and the daemon wouldn't come
+/// back up).
+const CLI_LOG_LEVELS: &[&str] = &["trace", "debug", "info", "warn", "error"];
+
+pub(crate) fn validate_log_level(level: &str) -> Result<()> {
+    if CLI_LOG_LEVELS.iter().any(|v| v.eq_ignore_ascii_case(level)) {
+        return Ok(());
+    }
+    anyhow::bail!("log level must be one of: {}", CLI_LOG_LEVELS.join(", "))
+}
+
 /// Refuse `http://` URLs that point at non-localhost hosts. Sending the
 /// registration token + receiving the runner secret over cleartext to the
 /// internet would silently leak credentials. Localhost is allowed for dev.
@@ -694,5 +730,44 @@ mod tests {
         let got = resolve_agent_kind(Some(AgentKind::Codex), Some(AgentKind::ClaudeCode));
         assert_eq!(got, AgentKind::Codex);
     }
-}
 
+    #[test]
+    fn validate_log_level_accepts_canonical_values() {
+        for lvl in ["trace", "debug", "info", "warn", "error"] {
+            assert!(
+                validate_log_level(lvl).is_ok(),
+                "expected {lvl:?} to validate"
+            );
+        }
+    }
+
+    #[test]
+    fn validate_log_level_case_insensitive() {
+        assert!(validate_log_level("DEBUG").is_ok());
+        assert!(validate_log_level("Info").is_ok());
+    }
+
+    #[test]
+    fn validate_log_level_rejects_garbage() {
+        let err = validate_log_level("chatty").unwrap_err().to_string();
+        assert!(
+            err.contains("trace") && err.contains("error"),
+            "error should list allowed values, got: {err}"
+        );
+    }
+
+    #[test]
+    fn validate_cloud_url_rejects_non_localhost_http() {
+        let err = validate_cloud_url("http://evil.example.com")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("cleartext"));
+    }
+
+    #[test]
+    fn validate_cloud_url_allows_https_and_localhost_http() {
+        assert!(validate_cloud_url("https://cloud.pidash.so").is_ok());
+        assert!(validate_cloud_url("http://localhost:3000").is_ok());
+        assert!(validate_cloud_url("http://127.0.0.1:3000").is_ok());
+    }
+}

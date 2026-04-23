@@ -50,5 +50,4 @@ impl TuiIpc {
             other => anyhow::bail!("unexpected: {other:?}"),
         }
     }
-
 }

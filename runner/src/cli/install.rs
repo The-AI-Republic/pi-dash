@@ -83,7 +83,10 @@ fn print_unattended_hint(explicit_opt_out: bool) {
 /// `pidash configure` directly.
 fn prompt_for_register_inputs(paths: &Paths) -> Result<crate::cli::configure::RegisterInputs> {
     println!();
-    println!("No runner config found at {}.", paths.config_path().display());
+    println!(
+        "No runner config found at {}.",
+        paths.config_path().display()
+    );
     println!("Let's register this runner with Pi Dash cloud.");
     println!("(Press Ctrl+C to abort and run `pidash install --no-configure` instead.)");
     println!();

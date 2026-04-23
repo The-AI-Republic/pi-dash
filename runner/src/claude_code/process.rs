@@ -78,10 +78,7 @@ impl ClaudeProcess {
 
     /// Send one JSON line (plus a newline) to Claude's stdin.
     pub async fn send_line(&mut self, line: &str) -> Result<()> {
-        let stdin = self
-            .stdin
-            .as_mut()
-            .context("claude stdin already closed")?;
+        let stdin = self.stdin.as_mut().context("claude stdin already closed")?;
         stdin.write_all(line.as_bytes()).await?;
         stdin.write_all(b"\n").await?;
         stdin.flush().await?;
@@ -112,9 +109,7 @@ impl ClaudeProcess {
                         // Reaped, permission denied, PID-namespace mismatch —
                         // don't pretend the interrupt succeeded. Fall through
                         // to SIGKILL so the caller still gets a best effort.
-                        tracing::warn!(
-                            "claude SIGINT failed ({e}); falling back to SIGKILL"
-                        );
+                        tracing::warn!("claude SIGINT failed ({e}); falling back to SIGKILL");
                     }
                 }
             }

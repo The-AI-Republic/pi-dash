@@ -46,12 +46,7 @@ pub struct Cli {
     pub data_dir: Option<std::path::PathBuf>,
 
     /// Log level filter (trace|debug|info|warn|error).
-    #[arg(
-        long,
-        global = true,
-        env = "PIDASH_LOG",
-        default_value = "info"
-    )]
+    #[arg(long, global = true, env = "PIDASH_LOG", default_value = "info")]
     pub log: String,
 }
 

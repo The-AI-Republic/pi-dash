@@ -6,8 +6,10 @@ use crate::util::paths::Paths;
 
 #[derive(Debug, ClapArgs)]
 pub struct Args {
-    /// Skip splash / onboarding even if no config exists.
-    #[arg(long)]
+    /// Deprecated: onboarding is now inline on the Config tab and there is
+    /// no separate splash screen to skip. Retained as a no-op so existing
+    /// scripts and systemd units don't break.
+    #[arg(long, hide = true)]
     pub no_onboarding: bool,
 
     /// Open directly into the given tab. Accepts the canonical name

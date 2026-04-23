@@ -157,9 +157,10 @@ pub fn display_value(cfg: &Config, id: FieldId) -> String {
         FieldId::ApprovalAutoReadonly => {
             cfg.approval_policy.auto_approve_readonly_shell.to_string()
         }
-        FieldId::ApprovalAutoWrites => {
-            cfg.approval_policy.auto_approve_workspace_writes.to_string()
-        }
+        FieldId::ApprovalAutoWrites => cfg
+            .approval_policy
+            .auto_approve_workspace_writes
+            .to_string(),
         FieldId::ApprovalAutoNetwork => cfg.approval_policy.auto_approve_network.to_string(),
         FieldId::LogLevel => cfg.logging.level.clone(),
         FieldId::LogRetentionDays => cfg.logging.retention_days.to_string(),
@@ -314,12 +315,10 @@ pub fn render(f: &mut ratatui::Frame<'_>, area: Rect, state: &AppState) {
 fn register_form_lines(state: &AppState) -> Vec<Line<'static>> {
     let Some(form) = state.register_form.as_ref() else {
         // No form yet — refresh() will seed one next tick; show a hint.
-        return vec![
-            Line::from(Span::styled(
-                "Loading…",
-                Style::default().add_modifier(Modifier::DIM),
-            )),
-        ];
+        return vec![Line::from(Span::styled(
+            "Loading…",
+            Style::default().add_modifier(Modifier::DIM),
+        ))];
     };
     let mut lines = vec![
         Line::from(Span::styled(
@@ -332,9 +331,18 @@ fn register_form_lines(state: &AppState) -> Vec<Line<'static>> {
         Line::raw(""),
     ];
 
-    lines.push(form_field_line("Cloud URL", &form.cloud_url, form.focus == 0, false));
-    lines.push(form_field_line("Token", &mask_token(&form.token), form.focus == 1, true));
-    lines.push(form_field_line("Runner name", &form.name, form.focus == 2, false));
+    lines.push(form_field_line(
+        "Cloud URL",
+        &form.cloud_url,
+        form.focus == 0,
+    ));
+    // Token is pre-masked here; `form_field_line` is unaware of masking.
+    lines.push(form_field_line(
+        "Token",
+        &mask_token(&form.token),
+        form.focus == 1,
+    ));
+    lines.push(form_field_line("Runner name", &form.name, form.focus == 2));
     lines.push(Line::raw(""));
     lines.push(form_button_line(form.focus == 3, form.busy));
     lines.push(Line::raw(""));
@@ -364,10 +372,12 @@ fn register_form_lines(state: &AppState) -> Vec<Line<'static>> {
     lines
 }
 
-fn form_field_line(label: &str, value: &str, focused: bool, _masked: bool) -> Line<'static> {
+fn form_field_line(label: &str, value: &str, focused: bool) -> Line<'static> {
     let marker = if focused { "▶" } else { " " };
     let value_style = if focused {
-        Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
+        Style::default()
+            .fg(Color::Yellow)
+            .add_modifier(Modifier::BOLD)
     } else {
         Style::default().fg(Color::White)
     };
@@ -376,7 +386,11 @@ fn form_field_line(label: &str, value: &str, focused: bool, _masked: bool) -> Li
         Span::styled(
             format!(" {marker} "),
             Style::default()
-                .fg(if focused { Color::Cyan } else { Color::DarkGray })
+                .fg(if focused {
+                    Color::Cyan
+                } else {
+                    Color::DarkGray
+                })
                 .add_modifier(Modifier::BOLD),
         ),
         Span::raw(format!("{label:<14} ")),
@@ -385,14 +399,20 @@ fn form_field_line(label: &str, value: &str, focused: bool, _masked: bool) -> Li
 }
 
 fn form_button_line(focused: bool, busy: bool) -> Line<'static> {
-    let label = if busy { " Registering… " } else { " Register " };
+    let label = if busy {
+        " Registering… "
+    } else {
+        " Register "
+    };
     let style = if focused {
         Style::default()
             .fg(Color::Black)
             .bg(Color::Green)
             .add_modifier(Modifier::BOLD)
     } else {
-        Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)
+        Style::default()
+            .fg(Color::Green)
+            .add_modifier(Modifier::BOLD)
     };
     Line::from(vec![
         Span::raw("   "),
@@ -553,7 +573,9 @@ fn render_editable_row(
     let value_style = if editing_here {
         Style::default().fg(Color::Yellow)
     } else if is_selected {
-        Style::default().fg(Color::White).add_modifier(Modifier::BOLD)
+        Style::default()
+            .fg(Color::White)
+            .add_modifier(Modifier::BOLD)
     } else {
         match spec.kind {
             FieldKind::Bool => match displayed.as_str() {
@@ -606,15 +628,9 @@ fn render_editable_row(
 
 fn readonly_row(label: &str, value: &str) -> Line<'static> {
     Line::from(vec![
-        Span::styled(
-            "   ".to_string(),
-            Style::default().fg(Color::DarkGray),
-        ),
+        Span::styled("   ".to_string(), Style::default().fg(Color::DarkGray)),
         Span::raw(format!("{label:<30} ")),
-        Span::styled(
-            value.to_string(),
-            Style::default().fg(Color::DarkGray),
-        ),
+        Span::styled(value.to_string(), Style::default().fg(Color::DarkGray)),
         Span::styled(
             "   [read-only]".to_string(),
             Style::default().add_modifier(Modifier::DIM),
@@ -696,16 +712,15 @@ fn footer(state: &AppState) -> Paragraph<'_> {
     }
 
     Paragraph::new(lines)
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title(" Status "),
-        )
+        .block(Block::default().borders(Borders::ALL).title(" Status "))
         .wrap(Wrap { trim: true })
 }
 
 fn index_of(id: FieldId) -> usize {
-    FIELDS.iter().position(|f| f.id == id).expect("FieldId missing from FIELDS table")
+    FIELDS
+        .iter()
+        .position(|f| f.id == id)
+        .expect("FieldId missing from FIELDS table")
 }
 
 fn differs(a: &Config, b: &Config) -> bool {

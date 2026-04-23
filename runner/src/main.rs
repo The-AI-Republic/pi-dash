@@ -1,8 +1,8 @@
 #![forbid(unsafe_code)]
 
 use anyhow::Result;
-use pidash::cli;
 use clap::Parser;
+use pidash::cli;
 
 fn main() -> Result<()> {
     let cli = cli::Cli::parse();

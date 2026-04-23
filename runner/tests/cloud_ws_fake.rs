@@ -2,13 +2,11 @@
 //! runner's `Connection::open` against it, and verify the Hello/Welcome
 //! handshake + a few message round-trips.
 
-use pidash::cloud::protocol::{
-    ClientMsg, Envelope, RunnerStatus, ServerMsg, WIRE_VERSION,
-};
-use pidash::cloud::ws::{Connection, run_connection};
-use pidash::config::schema::Credentials;
 use chrono::Utc;
 use futures_util::{SinkExt, StreamExt};
+use pidash::cloud::protocol::{ClientMsg, Envelope, RunnerStatus, ServerMsg, WIRE_VERSION};
+use pidash::cloud::ws::{Connection, run_connection};
+use pidash::config::schema::Credentials;
 use std::net::SocketAddr;
 use tokio::net::TcpListener;
 use tokio::sync::mpsc;

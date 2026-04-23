@@ -80,4 +80,3 @@ binary = "codex"
         "error should point at `pidash configure`: {msg}",
     );
 }
-

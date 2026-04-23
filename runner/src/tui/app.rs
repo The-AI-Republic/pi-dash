@@ -113,7 +113,7 @@ pub struct AppState {
 /// an index 0..=3. All text input goes to whichever field is focused;
 /// Up/Down or Tab moves focus; Enter advances focus for text fields and
 /// submits when focus lands on the button.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct RegisterForm {
     pub cloud_url: String,
     pub token: String,
@@ -122,6 +122,21 @@ pub struct RegisterForm {
     pub focus: u8,
     pub busy: bool,
     pub error: Option<String>,
+}
+
+// Manual Debug that masks the token so a stray `{:?}` or `tracing::debug!`
+// never prints the one-time registration secret in the clear.
+impl std::fmt::Debug for RegisterForm {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RegisterForm")
+            .field("cloud_url", &self.cloud_url)
+            .field("token", &"[REDACTED]")
+            .field("name", &self.name)
+            .field("focus", &self.focus)
+            .field("busy", &self.busy)
+            .field("error", &self.error)
+            .finish()
+    }
 }
 
 impl RegisterForm {
@@ -329,10 +344,7 @@ async fn handle_event(ev: Event, state: &mut AppState) {
                 (KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc, _) => {
                     state.confirm_exit = false;
                 }
-                (
-                    KeyCode::Left | KeyCode::Right | KeyCode::Char('h') | KeyCode::Char('l'),
-                    _,
-                ) => {
+                (KeyCode::Left | KeyCode::Right | KeyCode::Char('h') | KeyCode::Char('l'), _) => {
                     state.confirm_exit_yes = !state.confirm_exit_yes;
                 }
                 _ => {}
@@ -369,7 +381,13 @@ async fn handle_event(ev: Event, state: &mut AppState) {
                     state.confirm_exit_yes = true;
                     return;
                 }
-                (KeyCode::Char('1') | KeyCode::Char('2') | KeyCode::Char('3') | KeyCode::Char('4'), _)
+                (
+                    KeyCode::Char('1')
+                    | KeyCode::Char('2')
+                    | KeyCode::Char('3')
+                    | KeyCode::Char('4'),
+                    _,
+                )
                 | (KeyCode::Char('h') | KeyCode::Char('l') | KeyCode::Left | KeyCode::Right, _) => {
                     // Fall through to the global tab switcher so the user
                     // can leave the register screen without completing it.
@@ -387,10 +405,7 @@ async fn handle_event(ev: Event, state: &mut AppState) {
                     return;
                 }
                 (KeyCode::Enter, _) => {
-                    let submit = matches!(
-                        state.register_form.as_ref().map(|f| f.focus),
-                        Some(3)
-                    );
+                    let submit = matches!(state.register_form.as_ref().map(|f| f.focus), Some(3));
                     if submit {
                         submit_register_form(state).await;
                     } else if let Some(f) = state.register_form.as_mut() {
@@ -428,11 +443,19 @@ async fn handle_event(ev: Event, state: &mut AppState) {
             }
         }
 
-        // Config tab edit-buffer mode consumes all key input: while the
-        // user is typing into a text field, every keystroke edits that
-        // buffer and nothing else (no tab nav, no quit shortcuts). Enter
-        // commits, Esc cancels.
+        // Config tab edit-buffer mode consumes text input: while the user
+        // is typing into a text field, letters/backspace edit that buffer.
+        // Enter commits, Esc cancels. Ctrl+C remains a universal escape
+        // hatch — otherwise the user can get wedged with no way to quit
+        // the TUI without Esc+q.
         if state.tab == Tab::Config && state.config_edit_buffer.is_some() {
+            if let (KeyCode::Char('c'), m) = (key.code, key.modifiers)
+                && m.contains(KeyModifiers::CONTROL)
+            {
+                state.confirm_exit = true;
+                state.confirm_exit_yes = true;
+                return;
+            }
             match key.code {
                 KeyCode::Enter => commit_config_edit(state),
                 KeyCode::Esc => {
@@ -739,11 +762,36 @@ async fn submit_register_form(state: &mut AppState) {
     }
 
     // Install + start the service so the runner actually runs after
-    // registering. If this fails we still clear the form — the files are
-    // written and the user can recover with `pidash install` manually.
+    // registering. If unit-write fails, surface the error in the form and
+    // keep the user in register mode — files are on disk, but without the
+    // service unit the daemon won't come up, so dismissing the form would
+    // leave the user in a broken state with no obvious retry path.
     let svc = crate::service::detect();
-    let _ = svc.write_unit(&state.paths).await;
-    state.reload_outcome = Some(crate::service::reload::restart_and_verify(&state.paths).await);
+    if let Err(e) = svc.write_unit(&state.paths).await {
+        if let Some(form) = state.register_form.as_mut() {
+            form.busy = false;
+            form.error = Some(format!("writing service unit: {e:#}"));
+        }
+        return;
+    }
+    let outcome = crate::service::reload::restart_and_verify(&state.paths).await;
+    let outcome_ok = outcome.ok;
+    state.reload_outcome = Some(outcome);
+
+    if !outcome_ok {
+        // Files + unit are on disk but the daemon didn't come up cleanly.
+        // Keep the form so the footer banner + form error together tell
+        // the user to re-check credentials or fix the environment; don't
+        // transition to the editable Config view as if we succeeded.
+        if let Some(form) = state.register_form.as_mut() {
+            form.busy = false;
+            form.error = Some(
+                "service did not reach cloud-connected state — check footer banner for detail"
+                    .into(),
+            );
+        }
+        return;
+    }
 
     // Transition out of register mode: the next refresh() will pick up
     // config.toml from disk and populate config_working.

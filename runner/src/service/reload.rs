@@ -95,7 +95,10 @@ pub async fn restart_and_verify(paths: &Paths) -> ReloadOutcome {
         let state = svc.status().await.unwrap_or_else(|_| "unknown".into());
         return ReloadOutcome {
             ok: true,
-            summary: format!("{} — connected to {}", snapshot.runner_name, snapshot.cloud_url),
+            summary: format!(
+                "{} — connected to {}",
+                snapshot.runner_name, snapshot.cloud_url
+            ),
             detail: None,
             service_state: state,
         };

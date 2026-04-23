@@ -106,6 +106,5 @@ pub fn looks_like_uuid(s: &str) -> bool {
         && b[13] == b'-'
         && b[18] == b'-'
         && b[23] == b'-'
-        && s.chars()
-            .all(|c| c == '-' || c.is_ascii_hexdigit())
+        && s.chars().all(|c| c == '-' || c.is_ascii_hexdigit())
 }
