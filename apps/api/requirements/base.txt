@@ -32,12 +32,12 @@ jsonmodels==2.7.0
 django-storages==1.14.2
 # user management
 django-crum==0.7.9
-# web server
-uvicorn==0.29.0
-# WebSocket protocol for uvicorn / gunicorn's UvicornWorker. Without this
-# uvicorn can't upgrade WS requests and silently hands them to Django's
-# HTTP app, so `/ws/runner/` 404s through the URL router.
-websockets==12.0
+# web server. The `[standard]` extra pulls in websockets (required for
+# uvicorn / gunicorn's UvicornWorker to upgrade WS requests — without it
+# `/ws/runner/` 404s through the HTTP URL router), plus httptools, uvloop,
+# and watchfiles (so `--reload` uses the efficient watcher instead of the
+# legacy stat-polling fallback).
+uvicorn[standard]==0.29.0
 # sockets
 channels==4.1.0
 channels-redis==4.2.0
