@@ -12,6 +12,7 @@ import { useParams, usePathname } from "next/navigation";
 import type { IWorkspaceSidebarNavigationItem } from "@pi-dash/constants";
 import { EUserPermissionsLevel } from "@pi-dash/constants";
 import { useTranslation } from "@pi-dash/i18n";
+import { Tooltip } from "@pi-dash/propel/tooltip";
 import { joinUrlPath } from "@pi-dash/utils";
 // components
 import { SidebarNavItem } from "@/components/sidebar/sidebar-navigation";
@@ -68,8 +69,9 @@ export const SidebarItemBase = observer(function SidebarItemBase({
   const itemHref =
     item.key === "your_work" && data?.id ? joinUrlPath(slug, item.href, data?.id) : joinUrlPath(slug, item.href);
   const icon = getSidebarNavigationItemIcon(item.key);
+  const tooltipContent = item.tooltipTranslationKey ? t(item.tooltipTranslationKey) : null;
 
-  return (
+  const link = (
     <Link href={itemHref} onClick={handleLinkClick}>
       <SidebarNavItem isActive={item.highlight(pathname, itemHref)}>
         <div className="flex items-center gap-1.5 py-[1px]">
@@ -80,4 +82,14 @@ export const SidebarItemBase = observer(function SidebarItemBase({
       </SidebarNavItem>
     </Link>
   );
+
+  if (tooltipContent) {
+    return (
+      <Tooltip tooltipContent={tooltipContent} position="right" className="ml-8">
+        {link}
+      </Tooltip>
+    );
+  }
+
+  return link;
 });
