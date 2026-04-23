@@ -10,3 +10,8 @@ class RunnerConfig(AppConfig):
     label = "runner"
     verbose_name = "Pi Dash Runner"
     default_auto_field = "django.db.models.BigAutoField"
+
+    def ready(self):
+        # Import for side effects: registers post_save signal handlers
+        # (workspace auto-pod creation). See runner/signals.py.
+        from pi_dash.runner import signals  # noqa: F401

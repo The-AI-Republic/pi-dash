@@ -177,6 +177,16 @@ class Issue(ProjectBaseModel):
             ),
         ],
     )
+    # Pod this issue's agent runs dispatch to. NULL means "use the workspace
+    # default pod at run time." See .ai_design/issue_runner/design.md §4.4.
+    # PROTECT is safe because pods are soft-deleted, never physically removed.
+    assigned_pod = models.ForeignKey(
+        "runner.Pod",
+        null=True,
+        blank=True,
+        on_delete=models.PROTECT,
+        related_name="assigned_issues",
+    )
 
     issue_objects = IssueManager()
 
