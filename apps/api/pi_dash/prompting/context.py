@@ -14,6 +14,7 @@ from __future__ import annotations
 from typing import Any, Dict
 
 from pi_dash.db.models.issue import Issue
+from pi_dash.db.models.state import State
 from pi_dash.runner.models import AgentRun
 
 
@@ -57,6 +58,14 @@ def build_context(issue: Issue, run: AgentRun) -> Dict[str, Any]:
     assignees = [
         (u.display_name or u.email or "") for u in issue.assignees.all()
     ]
+    project_states = [
+        {
+            "name": s.name,
+            "group": s.group,
+            "description": s.description or "",
+        }
+        for s in State.objects.filter(project=project)
+    ]
 
     attempt = _compute_attempt(issue, run)
 
@@ -73,6 +82,7 @@ def build_context(issue: Issue, run: AgentRun) -> Dict[str, Any]:
             "assignees": assignees,
             "url": _absolute_issue_url(issue),
             "target_date": issue.target_date.isoformat() if issue.target_date else None,
+            "project_states": project_states,
         },
         "workspace": {
             "slug": workspace.slug,
