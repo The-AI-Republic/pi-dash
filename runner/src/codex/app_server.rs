@@ -21,8 +21,7 @@ impl AppServer {
     pub async fn spawn(binary: &str, cwd: &Path) -> Result<Self> {
         // Route through a login bash so the agent binary is found via the
         // user's interactive PATH. See `util::shell::login_shell_command`.
-        let mut cmd = login_shell_command(binary, &["app-server"]);
-        cmd.current_dir(cwd);
+        let cmd = login_shell_command(binary, &["app-server"], Some(cwd));
         Self::spawn_command(cmd).await
     }
 
