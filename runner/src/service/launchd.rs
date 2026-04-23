@@ -20,8 +20,18 @@ pub async fn write_unit(paths: &Paths) -> Result<()> {
     let logs = xml_escape(super::validate_path_for_unit(&logs_dir)?);
     let config = xml_escape(super::validate_path_for_unit(&paths.config_dir)?);
     let data = xml_escape(super::validate_path_for_unit(&paths.data_dir)?);
-    let runtime = xml_escape(super::validate_path_for_unit(&paths.runtime_dir)?);
-    let body = format!(
+    let body = render_plist(&exe_str, &config, &data, &logs);
+    tokio::fs::write(&plist_path, body).await?;
+    println!("installed launchd agent at {}", plist_path.display());
+    Ok(())
+}
+
+/// Render the LaunchAgent plist body. Deliberately does NOT set
+/// `XDG_RUNTIME_DIR`: on macOS `directories::ProjectDirs` ignores it (runtime
+/// dir is derived from `data_dir`), so the env var is a no-op that only
+/// obscures the real path contract between the daemon and the CLI client.
+fn render_plist(exe: &str, config: &str, data: &str, logs: &str) -> String {
+    format!(
         r#"<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -36,7 +46,6 @@ pub async fn write_unit(paths: &Paths) -> Result<()> {
   <dict>
     <key>PIDASH_CONFIG_DIR</key><string>{config}</string>
     <key>PIDASH_DATA_DIR</key><string>{data}</string>
-    <key>XDG_RUNTIME_DIR</key><string>{runtime}</string>
   </dict>
   <key>KeepAlive</key><true/>
   <key>RunAtLoad</key><true/>
@@ -46,11 +55,7 @@ pub async fn write_unit(paths: &Paths) -> Result<()> {
 </plist>
 "#,
         label = LABEL,
-        exe = exe_str,
-    );
-    tokio::fs::write(&plist_path, body).await?;
-    println!("installed launchd agent at {}", plist_path.display());
-    Ok(())
+    )
 }
 
 /// Load the LaunchAgent. `RunAtLoad=true` in the plist means `bootstrap`
@@ -150,4 +155,37 @@ fn xml_escape(s: &str) -> String {
         }
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn plist_body_does_not_set_xdg_runtime_dir() {
+        // On macOS `directories::ProjectDirs` ignores XDG_RUNTIME_DIR — the
+        // env var was a misleading no-op. Keep it out so both backends share
+        // the same runtime-dir contract.
+        let body = render_plist(
+            "/usr/local/bin/pidash",
+            "/Users/user/Library/Application Support/pidash",
+            "/Users/user/Library/Application Support/pidash",
+            "/Users/user/Library/Application Support/pidash/logs",
+        );
+        assert!(
+            !body.contains("XDG_RUNTIME_DIR"),
+            "plist body must not set XDG_RUNTIME_DIR; got:\n{body}"
+        );
+    }
+
+    #[test]
+    fn plist_body_includes_program_args_and_logs() {
+        let body = render_plist("/bin/pidash", "/cfg", "/data", "/logs");
+        assert!(body.contains("<string>/bin/pidash</string>"));
+        assert!(body.contains("<string>__run</string>"));
+        assert!(body.contains("<key>PIDASH_CONFIG_DIR</key><string>/cfg</string>"));
+        assert!(body.contains("<key>PIDASH_DATA_DIR</key><string>/data</string>"));
+        assert!(body.contains("<string>/logs/runner.out.log</string>"));
+        assert!(body.contains("<string>/logs/runner.err.log</string>"));
+    }
 }

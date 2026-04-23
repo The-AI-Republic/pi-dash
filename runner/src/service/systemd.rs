@@ -17,11 +17,23 @@ pub async fn write_unit(paths: &Paths) -> Result<()> {
         tokio::fs::create_dir_all(parent).await?;
     }
     let exe = std::env::current_exe()?;
-    let exe_str = super::validate_path_for_unit(&exe)?.to_string();
-    let config_dir = super::validate_path_for_unit(&paths.config_dir)?.to_string();
-    let data_dir = super::validate_path_for_unit(&paths.data_dir)?.to_string();
-    let runtime_dir = super::validate_path_for_unit(&paths.runtime_dir)?.to_string();
-    let body = format!(
+    let exe_str = super::validate_path_for_unit(&exe)?;
+    let config_dir = super::validate_path_for_unit(&paths.config_dir)?;
+    let data_dir = super::validate_path_for_unit(&paths.data_dir)?;
+    let body = render_unit(exe_str, config_dir, data_dir);
+    tokio::fs::write(&unit_path, body).await?;
+    run_systemctl(&["daemon-reload"]).await?;
+    println!("installed systemd unit at {}", unit_path.display());
+    Ok(())
+}
+
+/// Render the user-unit body. Deliberately does NOT set `XDG_RUNTIME_DIR`:
+/// systemd's user manager already exports it as `/run/user/$UID`, and the
+/// daemon + CLI client both derive the socket path from that via
+/// `ProjectDirs`. Overriding it here once caused a double `pidash/` path
+/// component and left the client unable to reach the daemon.
+fn render_unit(exe: &str, config_dir: &str, data_dir: &str) -> String {
+    format!(
         r#"[Unit]
 Description=Pi Dash Runner
 After=network-online.target
@@ -32,19 +44,13 @@ Type=simple
 ExecStart={exe} __run
 Environment=PIDASH_CONFIG_DIR={config_dir}
 Environment=PIDASH_DATA_DIR={data_dir}
-Environment=XDG_RUNTIME_DIR={runtime_dir}
 Restart=on-failure
 RestartSec=5
 
 [Install]
 WantedBy=default.target
-"#,
-        exe = exe_str,
-    );
-    tokio::fs::write(&unit_path, body).await?;
-    run_systemctl(&["daemon-reload"]).await?;
-    println!("installed systemd unit at {}", unit_path.display());
-    Ok(())
+"#
+    )
 }
 
 /// Enable the unit at boot/login and bring it up. `restart` (not `start`) so
@@ -162,4 +168,34 @@ fn dirs_home() -> Result<PathBuf> {
     std::env::var_os("HOME")
         .map(PathBuf::from)
         .context("HOME not set")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn unit_body_does_not_set_xdg_runtime_dir() {
+        // Regression: setting XDG_RUNTIME_DIR to the project-scoped runtime
+        // dir caused `ProjectDirs::runtime_dir()` inside the daemon to append
+        // `pidash/` a second time, producing a socket path the CLI client
+        // couldn't reach.
+        let body = render_unit(
+            "/home/user/.cargo/bin/pidash",
+            "/home/user/.config/pidash",
+            "/home/user/.local/share/pidash",
+        );
+        assert!(
+            !body.contains("XDG_RUNTIME_DIR"),
+            "unit body must not set XDG_RUNTIME_DIR; got:\n{body}"
+        );
+    }
+
+    #[test]
+    fn unit_body_includes_exec_start_and_dirs() {
+        let body = render_unit("/bin/pidash", "/etc/pidash", "/var/lib/pidash");
+        assert!(body.contains("ExecStart=/bin/pidash __run"));
+        assert!(body.contains("Environment=PIDASH_CONFIG_DIR=/etc/pidash"));
+        assert!(body.contains("Environment=PIDASH_DATA_DIR=/var/lib/pidash"));
+    }
 }
