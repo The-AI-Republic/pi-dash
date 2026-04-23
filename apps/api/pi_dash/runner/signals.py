@@ -37,7 +37,11 @@ def create_default_pod_for_new_workspace(sender, instance: Workspace, created: b
     # Guard against fixtures / seed data that pre-populate pods.
     if Pod.objects.filter(workspace=instance).exists():
         return
-    pod_name = f"{instance.name}-pod"
+    # Pod.name max_length is 128; truncate the workspace name to leave room
+    # for the "-pod" suffix so long workspace names don't raise DataError here
+    # (which the bare except below would swallow, silently violating the
+    # "every workspace has a pod" invariant).
+    pod_name = f"{instance.name[:123]}-pod"
     try:
         Pod.objects.create(
             workspace=instance,

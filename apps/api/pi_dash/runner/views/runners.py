@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 # See the LICENSE file for details.
 
+from django.db import transaction
 from rest_framework import status
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
@@ -93,22 +94,30 @@ class RunnerDetailEndpoint(APIView):
                 )
             runner.name = new_name
             updates.append("name")
+        new_pod_id = request.data.get("pod") if "pod" in request.data else None
+        # Hold the pod lock for the duration of the runner save so a concurrent
+        # pod soft-delete cannot leave the runner pointing at an inactive pod.
         if "pod" in request.data:
-            new_pod_id = request.data.get("pod")
-            new_pod = Pod.objects.filter(pk=new_pod_id).first()
-            if new_pod is None:
-                return Response(
-                    {"error": "pod does not exist or has been deleted"},
-                    status=status.HTTP_400_BAD_REQUEST,
+            with transaction.atomic():
+                new_pod = (
+                    Pod.objects.select_for_update()
+                    .filter(pk=new_pod_id)
+                    .first()
                 )
-            if new_pod.workspace_id != runner.workspace_id:
-                return Response(
-                    {"error": "pod is in a different workspace"},
-                    status=status.HTTP_400_BAD_REQUEST,
-                )
-            runner.pod = new_pod
-            updates.append("pod")
-        if updates:
+                if new_pod is None:
+                    return Response(
+                        {"error": "pod does not exist or has been deleted"},
+                        status=status.HTTP_400_BAD_REQUEST,
+                    )
+                if new_pod.workspace_id != runner.workspace_id:
+                    return Response(
+                        {"error": "pod is in a different workspace"},
+                        status=status.HTTP_400_BAD_REQUEST,
+                    )
+                runner.pod = new_pod
+                updates.append("pod")
+                runner.save(update_fields=list(set(updates + ["updated_at"])))
+        elif updates:
             runner.save(update_fields=list(set(updates + ["updated_at"])))
         return Response(RunnerSerializer(runner).data)
 

@@ -44,7 +44,7 @@ const RunnersListPage = observer(function RunnersListPage() {
     { refreshInterval: 5_000 }
   );
 
-  const { data: pods } = useSWR<IPod[]>(
+  const { data: pods, error: podsError } = useSWR<IPod[]>(
     workspaceId ? ["pods", workspaceId] : null,
     () => podService.list(workspaceId!),
     { refreshInterval: 30_000 }
@@ -200,22 +200,26 @@ const RunnersListPage = observer(function RunnersListPage() {
       <section>
         <div className="mb-2 text-13 font-medium text-primary">{t("runners.pods.title")}</div>
         <div className="mb-2 text-12 text-secondary">{t("runners.pods.help")}</div>
-        <div className="flex flex-wrap gap-2">
-          {(pods ?? []).map((p) => (
-            <div key={p.id} className="rounded-md border border-subtle bg-layer-1 px-3 py-2 text-12">
-              <div className="flex items-center gap-2">
-                <span className="font-medium text-primary">{p.name}</span>
-                {p.is_default && (
-                  <Badge variant="accent-neutral" size="sm">
-                    {t("runners.pods.default_badge")}
-                  </Badge>
-                )}
+        {podsError ? (
+          <div className="text-destructive text-12">{t("runners.pods.load_failed")}</div>
+        ) : (
+          <div className="flex flex-wrap gap-2">
+            {(pods ?? []).map((p) => (
+              <div key={p.id} className="rounded-md border border-subtle bg-layer-1 px-3 py-2 text-12">
+                <div className="flex items-center gap-2">
+                  <span className="font-medium text-primary">{p.name}</span>
+                  {p.is_default && (
+                    <Badge variant="accent-neutral" size="sm">
+                      {t("runners.pods.default_badge")}
+                    </Badge>
+                  )}
+                </div>
+                <div className="text-secondary">{t("runners.pods.runner_count", { count: p.runner_count })}</div>
               </div>
-              <div className="text-secondary">{t("runners.pods.runner_count", { count: p.runner_count })}</div>
-            </div>
-          ))}
-          {(pods ?? []).length === 0 && <div className="text-12 text-secondary">{t("runners.pods.empty")}</div>}
-        </div>
+            ))}
+            {(pods ?? []).length === 0 && <div className="text-12 text-secondary">{t("runners.pods.empty")}</div>}
+          </div>
+        )}
       </section>
 
       <section>

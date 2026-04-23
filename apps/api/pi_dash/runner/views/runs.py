@@ -28,7 +28,14 @@ from pi_dash.runner.services.validation import (
 
 
 def _can_view_run(user, run: AgentRun) -> bool:
-    """View is allowed for the creator, the runner's owner, or a workspace admin."""
+    """View is allowed for the creator, the runner's owner, or a workspace admin.
+
+    Workspace membership is always required first — a user removed from the
+    workspace must not be able to see runs there, even if they still appear as
+    ``runner.owner`` (an admin bond that does not track current membership).
+    """
+    if not is_workspace_member(user, run.workspace_id):
+        return False
     if run.created_by_id == user.id:
         return True
     if run.runner_id is not None and run.runner.owner_id == user.id:
@@ -108,11 +115,14 @@ class AgentRunDetailEndpoint(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request, run_id):
-        run = AgentRun.objects.filter(id=run_id).first()
+        run = (
+            AgentRun.objects.select_related("runner").filter(id=run_id).first()
+        )
         if run is None:
             return Response({"error": "not found"}, status=status.HTTP_404_NOT_FOUND)
         if not _can_view_run(request.user, run):
-            return Response({"error": "forbidden"}, status=status.HTTP_403_FORBIDDEN)
+            # 404 not 403 — do not confirm run existence across workspaces.
+            return Response({"error": "not found"}, status=status.HTTP_404_NOT_FOUND)
         include_events = request.query_params.get("include_events") == "1"
         payload = AgentRunSerializer(run).data
         if include_events:
@@ -126,27 +136,50 @@ class AgentRunCancelEndpoint(APIView):
     permission_classes = [IsAuthenticated]
 
     def post(self, request, run_id):
-        run = AgentRun.objects.filter(id=run_id).first()
+        # Authorization check happens on a non-locked read; re-check terminal
+        # state after acquiring the row lock to avoid racing with
+        # Runner.revoke() (which holds select_for_update on in-flight runs).
+        run = (
+            AgentRun.objects.select_related("runner").filter(id=run_id).first()
+        )
         if run is None:
             return Response({"error": "not found"}, status=status.HTTP_404_NOT_FOUND)
         if not _can_cancel_run(request.user, run):
-            return Response({"error": "forbidden"}, status=status.HTTP_403_FORBIDDEN)
-        if run.is_terminal:
-            return Response(
-                {"error": "run already terminal"},
-                status=status.HTTP_409_CONFLICT,
+            return Response({"error": "not found"}, status=status.HTTP_404_NOT_FOUND)
+
+        runner_id = run.runner_id
+        with transaction.atomic():
+            locked = (
+                AgentRun.objects.select_for_update()
+                .filter(id=run_id)
+                .first()
             )
-        if run.runner_id:
-            send_to_runner(
-                run.runner_id,
-                {
-                    "v": 1,
-                    "type": "cancel",
-                    "run_id": str(run.id),
-                    "reason": request.data.get("reason", ""),
-                },
+            if locked is None:
+                return Response(
+                    {"error": "not found"}, status=status.HTTP_404_NOT_FOUND
+                )
+            if locked.is_terminal:
+                return Response(
+                    {"error": "run already terminal"},
+                    status=status.HTTP_409_CONFLICT,
+                )
+            locked.status = AgentRunStatus.CANCELLED
+            locked.ended_at = timezone.now()
+            locked.save(update_fields=["status", "ended_at"])
+            run = locked
+
+        # Best-effort WS fan-out after commit; runner may already be offline or
+        # revoked, in which case the frame is dropped silently.
+        if runner_id:
+            transaction.on_commit(
+                lambda rid=runner_id, reason=request.data.get("reason", ""): send_to_runner(
+                    rid,
+                    {
+                        "v": 1,
+                        "type": "cancel",
+                        "run_id": str(run_id),
+                        "reason": reason,
+                    },
+                )
             )
-        run.status = AgentRunStatus.CANCELLED
-        run.ended_at = timezone.now()
-        run.save(update_fields=["status", "ended_at"])
         return Response(AgentRunSerializer(run).data)

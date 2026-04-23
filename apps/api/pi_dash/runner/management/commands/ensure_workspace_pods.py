@@ -56,15 +56,26 @@ class Command(BaseCommand):
             self.stdout.write(self.style.WARNING("--dry-run: no changes written."))
             return
 
-        with transaction.atomic():
-            for ws in missing:
-                Pod.objects.create(
+        # Create each pod in its own small transaction and use get_or_create so
+        # a concurrent signal (or a second invocation of this command) races
+        # safely: whoever wins inserts the row, the loser gets the existing
+        # row back and skips. Without this, an IntegrityError in the middle of
+        # the batch would abort the entire atomic block and skip every
+        # workspace after the conflict.
+        created = 0
+        for ws in missing:
+            with transaction.atomic():
+                _, was_created = Pod.objects.get_or_create(
                     workspace=ws,
-                    name=f"{ws.name}-pod",
-                    description="Auto-created default pod by ensure_workspace_pods.",
-                    is_default=True,
-                    created_by=getattr(ws, "owner", None),
+                    name=f"{ws.name[:123]}-pod",
+                    defaults={
+                        "description": "Auto-created default pod by ensure_workspace_pods.",
+                        "is_default": True,
+                        "created_by": getattr(ws, "owner", None),
+                    },
                 )
+                if was_created:
+                    created += 1
         self.stdout.write(
-            self.style.SUCCESS(f"Created {len(missing)} default pod(s).")
+            self.style.SUCCESS(f"Created {created} default pod(s).")
         )

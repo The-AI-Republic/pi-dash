@@ -453,11 +453,17 @@ class RunnerConsumer(AsyncJsonWebsocketConsumer):
         AgentRun.objects.filter(id=run_id, runner=runner).update(**updates)
 
         # The runner just freed up — drain its pod so any QUEUED runs in the
-        # same pod can move to it. See design §6.3 (drain triggers).
+        # same pod can move to it. See design §6.3: drain must fire after the
+        # terminal state commits, otherwise a new assign could race with the
+        # update and the runner would receive work for a run it's finishing.
         if runner.pod_id is not None:
+            from django.db import transaction
+
             from pi_dash.runner.services.matcher import drain_pod_by_id
 
-            drain_pod_by_id(runner.pod_id)
+            transaction.on_commit(
+                lambda pid=runner.pod_id: drain_pod_by_id(pid)
+            )
 
     # ---- misc ----
 

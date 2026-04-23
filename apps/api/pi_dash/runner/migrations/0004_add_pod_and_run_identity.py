@@ -77,7 +77,7 @@ def _backfill_run_identity(apps, schema_editor):
     """
     AgentRun = apps.get_model("runner", "AgentRun")
     Pod = apps.get_model("runner", "Pod")
-    for run in AgentRun.objects.all().iterator(chunk_size=500):
+    for run in AgentRun.objects.all().select_related("runner").iterator(chunk_size=500):
         updates = []
         if run.pod_id is None:
             if run.runner_id is not None and run.runner.pod_id is not None:
@@ -94,6 +94,27 @@ def _backfill_run_identity(apps, schema_editor):
             updates.append("created_by")
         if updates:
             run.save(update_fields=updates)
+
+
+def _assert_no_null_created_by(apps, schema_editor):
+    """Fail loudly before the NOT NULL tighten rather than letting the
+    AlterField raise a cryptic IntegrityError mid-migration.
+
+    Legacy rows where both ``created_by`` and ``owner`` were NULL cannot be
+    backfilled automatically; they must be resolved manually (either deleted
+    or assigned to a synthetic system user) before this migration can run.
+    """
+    AgentRun = apps.get_model("runner", "AgentRun")
+    null_ids = list(
+        AgentRun.objects.filter(created_by__isnull=True).values_list("id", flat=True)[:10]
+    )
+    if null_ids:
+        remaining = AgentRun.objects.filter(created_by__isnull=True).count()
+        raise RuntimeError(
+            f"Cannot tighten AgentRun.created_by to NOT NULL: {remaining} row(s) "
+            f"still have created_by=NULL after backfill (sample IDs: {null_ids}). "
+            f"Resolve these rows manually before retrying the migration."
+        )
 
 
 class Migration(migrations.Migration):
@@ -225,6 +246,12 @@ class Migration(migrations.Migration):
         migrations.RunPython(_ensure_default_pods, reverse_code=migrations.RunPython.noop),
         migrations.RunPython(_backfill_runner_pods, reverse_code=migrations.RunPython.noop),
         migrations.RunPython(_backfill_run_identity, reverse_code=migrations.RunPython.noop),
+        # Preflight: fail clearly if any AgentRun still has created_by=NULL
+        # before the NOT NULL tighten below; otherwise the AlterField raises a
+        # cryptic IntegrityError mid-migration.
+        migrations.RunPython(
+            _assert_no_null_created_by, reverse_code=migrations.RunPython.noop
+        ),
         # --- 5. Tighten Runner.pod / AgentRun.pod / AgentRun.created_by to NOT NULL ---
         migrations.AlterField(
             model_name="runner",

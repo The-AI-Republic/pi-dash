@@ -23,7 +23,7 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from pi_dash.authentication.session import BaseSessionAuthentication
-from pi_dash.runner.models import Pod
+from pi_dash.runner.models import Pod, RunnerStatus
 from pi_dash.runner.serializers import PodSerializer
 from pi_dash.runner.services.matcher import NON_TERMINAL_STATUSES
 from pi_dash.runner.services.permissions import (
@@ -161,42 +161,55 @@ class PodDetailEndpoint(APIView):
         if not _can_manage_pod(request.user, pod):
             return Response({"error": "forbidden"}, status=status.HTTP_403_FORBIDDEN)
 
-        # Pre-deletion guards (§7.2).
-        if pod.runners.count() > 0:
-            return Response(
-                {
-                    "error": "pod has runners; move or revoke them first",
-                    "code": "pod_has_runners",
-                },
-                status=status.HTTP_409_CONFLICT,
-            )
-        if pod.agent_runs.filter(status__in=NON_TERMINAL_STATUSES).exists():
-            return Response(
-                {
-                    "error": "pod has non-terminal runs; cancel or wait",
-                    "code": "pod_has_active_runs",
-                },
-                status=status.HTTP_409_CONFLICT,
-            )
-        # Last-pod guard (invariant #13).
-        sibling_count = Pod.objects.filter(workspace_id=pod.workspace_id).exclude(
-            pk=pod.pk
-        ).count()
-        if sibling_count == 0:
-            return Response(
-                {
-                    "error": "cannot delete the last pod in a workspace; create a replacement first",
-                    "code": "last_pod_in_workspace",
-                },
-                status=status.HTTP_409_CONFLICT,
-            )
-
+        # Run all three §7.2 guards *inside* the transaction with the pod row
+        # locked, so a concurrent runner-move / run-create / sibling-delete
+        # cannot slip past the checks (TOCTOU).
         with transaction.atomic():
-            pod.deleted_at = timezone.now()
-            pod.is_default = False
-            pod.save(update_fields=["deleted_at", "is_default", "updated_at"])
+            locked = (
+                Pod.objects.select_for_update().filter(pk=pod.pk).first()
+            )
+            if locked is None:
+                return Response(
+                    {"error": "not found"}, status=status.HTTP_404_NOT_FOUND
+                )
+            # Revoked runners keep their pod FK but cannot accept work, so they
+            # do not block deletion (matches PodSerializer.get_runner_count).
+            if locked.runners.exclude(status=RunnerStatus.REVOKED).exists():
+                return Response(
+                    {
+                        "error": "pod has runners; move or revoke them first",
+                        "code": "pod_has_runners",
+                    },
+                    status=status.HTTP_409_CONFLICT,
+                )
+            if locked.agent_runs.filter(status__in=NON_TERMINAL_STATUSES).exists():
+                return Response(
+                    {
+                        "error": "pod has non-terminal runs; cancel or wait",
+                        "code": "pod_has_active_runs",
+                    },
+                    status=status.HTTP_409_CONFLICT,
+                )
+            # Last-pod guard (invariant #13).
+            sibling_count = (
+                Pod.objects.filter(workspace_id=locked.workspace_id)
+                .exclude(pk=locked.pk)
+                .count()
+            )
+            if sibling_count == 0:
+                return Response(
+                    {
+                        "error": "cannot delete the last pod in a workspace; create a replacement first",
+                        "code": "last_pod_in_workspace",
+                    },
+                    status=status.HTTP_409_CONFLICT,
+                )
+
+            locked.deleted_at = timezone.now()
+            locked.is_default = False
+            locked.save(update_fields=["deleted_at", "is_default", "updated_at"])
             # Sweep pointing issues.
             from pi_dash.db.models.issue import Issue
 
-            Issue.objects.filter(assigned_pod=pod).update(assigned_pod=None)
+            Issue.objects.filter(assigned_pod=locked).update(assigned_pod=None)
         return Response(status=status.HTTP_204_NO_CONTENT)
