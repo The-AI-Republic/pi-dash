@@ -28,6 +28,27 @@ pub enum Service {
     Launchd,
 }
 
+/// Outcome of `Service::ensure_boot_start`. Only two variants represent a
+/// hard failure mode (`CheckFailed` / `EnableFailed`); the others are normal
+/// and the caller just reports them in post-install hints.
+#[derive(Debug)]
+pub enum BootStartOutcome {
+    /// Linger was already on — nothing to do.
+    AlreadyEnabled,
+    /// We just ran `sudo loginctl enable-linger` successfully.
+    Enabled,
+    /// Platform doesn't need / support a linger-style opt-in (macOS launchd).
+    NotApplicable,
+    /// No TTY available — sudo would hang, so we didn't try.
+    NonInteractive,
+    /// The user explicitly passed `--skip-linger`.
+    Skipped,
+    /// `loginctl show-user` failed; we can't tell whether linger is on.
+    CheckFailed(String),
+    /// The sudo/loginctl call itself exited non-zero (bad password, Ctrl+C, …).
+    EnableFailed(String),
+}
+
 pub fn detect() -> Service {
     if cfg!(target_os = "macos") {
         Service::Launchd
@@ -51,6 +72,17 @@ impl Service {
         match self {
             Service::Systemd => systemd::enable_and_start().await,
             Service::Launchd => launchd::enable_and_start().await,
+        }
+    }
+
+    /// Ensure the daemon keeps running across reboots without a user login.
+    /// On systemd this means `loginctl enable-linger`; on launchd user agents
+    /// the equivalent is just "log in," which we can't automate. Never fails
+    /// — the returned outcome drives post-install messaging.
+    pub async fn ensure_boot_start(&self) -> BootStartOutcome {
+        match self {
+            Service::Systemd => systemd::ensure_linger().await,
+            Service::Launchd => BootStartOutcome::NotApplicable,
         }
     }
 

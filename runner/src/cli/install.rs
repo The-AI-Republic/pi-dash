@@ -28,6 +28,12 @@ pub struct Args {
     /// Use when running from CI / Ansible / Docker builds.
     #[arg(long)]
     pub no_configure: bool,
+
+    /// Skip the `sudo loginctl enable-linger` step (Linux only). Without
+    /// linger the daemon only starts at login, not at boot. Set this in
+    /// CI / unattended installs where a sudo password prompt would hang.
+    #[arg(long)]
+    pub skip_linger: bool,
 }
 
 pub async fn run(args: Args, paths: &Paths) -> Result<()> {
@@ -48,7 +54,7 @@ pub async fn run(args: Args, paths: &Paths) -> Result<()> {
         }
         // Interactive path: configure owns the whole end-to-end flow
         // (register → persist → doctor → write unit → enable + start).
-        let inputs = prompt_for_register_inputs(paths)?;
+        let inputs = prompt_for_register_inputs(paths, args.skip_linger)?;
         crate::cli::configure::execute(inputs, paths).await?;
         return Ok(());
     }
@@ -57,6 +63,11 @@ pub async fn run(args: Args, paths: &Paths) -> Result<()> {
     // the unit (e.g. after a binary upgrade). Rewrite + restart.
     svc.write_unit(paths).await?;
     svc.enable_and_start().await?;
+    if !args.skip_linger {
+        // Idempotent on already-lingering hosts; returns AlreadyEnabled and
+        // makes no sudo call in that case.
+        let _ = svc.ensure_boot_start().await;
+    }
     println!();
     println!("Service unit refreshed and daemon restarted.");
     println!();
@@ -81,7 +92,10 @@ fn print_unattended_hint(explicit_opt_out: bool) {
 /// Interactive prompts for URL + token + optional name. Stays minimal —
 /// anything else (`working_dir`, `skip_doctor`) can be provided by re-running
 /// `pidash configure` directly.
-fn prompt_for_register_inputs(paths: &Paths) -> Result<crate::cli::configure::RegisterInputs> {
+fn prompt_for_register_inputs(
+    paths: &Paths,
+    skip_linger: bool,
+) -> Result<crate::cli::configure::RegisterInputs> {
     println!();
     println!(
         "No runner config found at {}.",
@@ -124,6 +138,7 @@ fn prompt_for_register_inputs(paths: &Paths) -> Result<crate::cli::configure::Re
         // Install's interactive chain delegates fully to configure — let it
         // write the unit + start the daemon as part of the same flow.
         skip_service: false,
+        skip_linger,
         // Interactive install doesn't collect advanced field edits — those
         // can be done later via `pidash configure --<flag>` or the TUI.
         extras: None,

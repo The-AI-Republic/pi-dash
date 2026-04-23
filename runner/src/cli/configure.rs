@@ -91,6 +91,12 @@ pub struct Args {
     /// you only want to write the config files without bouncing a daemon.
     #[arg(long)]
     pub skip_service: bool,
+
+    /// Skip the `sudo loginctl enable-linger` step (Linux only). Without
+    /// linger the daemon only starts at login, not at boot. Set this in
+    /// CI / unattended installs where a sudo password prompt would hang.
+    #[arg(long)]
+    pub skip_linger: bool,
 }
 
 impl Args {
@@ -210,6 +216,7 @@ pub struct RegisterInputs {
     pub agent: Option<AgentKind>,
     pub skip_doctor: bool,
     pub skip_service: bool,
+    pub skip_linger: bool,
     /// Full clap Args, if we came from a direct CLI invocation. Lets the
     /// register path also apply any other `--<flag>` the user passed
     /// (e.g. `--codex-model gpt-5 --approval-auto-readonly true`) before
@@ -233,7 +240,8 @@ pub async fn run(args: Args, paths: &Paths) -> Result<()> {
         && args.token.is_none()
         && !args.has_edit_flags()
         && !args.skip_doctor
-        && !args.skip_service;
+        && !args.skip_service
+        && !args.skip_linger;
     if bare {
         return crate::tui::run(
             paths.clone(),
@@ -253,6 +261,7 @@ pub async fn run(args: Args, paths: &Paths) -> Result<()> {
                 agent: args.agent,
                 skip_doctor: args.skip_doctor,
                 skip_service: args.skip_service,
+                skip_linger: args.skip_linger,
                 extras: Some(args),
             };
             execute(inputs, paths).await
@@ -486,20 +495,50 @@ pub async fn execute(inputs: RegisterInputs, paths: &Paths) -> Result<()> {
     let svc = crate::service::detect();
     svc.write_unit(paths).await?;
     svc.enable_and_start().await?;
-    print_post_install_hints();
+    let boot_outcome = if inputs.skip_linger {
+        crate::service::BootStartOutcome::Skipped
+    } else {
+        svc.ensure_boot_start().await
+    };
+    print_post_install_hints(&boot_outcome);
 
     Ok(())
 }
 
-fn print_post_install_hints() {
+fn print_post_install_hints(boot: &crate::service::BootStartOutcome) {
+    use crate::service::BootStartOutcome::*;
     println!("Service installed and running.");
     if cfg!(target_os = "linux") {
         println!();
-        println!("For the service to start on OS boot (before you log in), run:");
-        println!("  sudo loginctl enable-linger $USER");
-        println!(
-            "Without lingering, the service still starts at every user login and restarts on crash."
-        );
+        match boot {
+            AlreadyEnabled => {
+                println!("Linger is enabled — the service will start automatically at boot.");
+            }
+            Enabled => {
+                println!("Enabled linger — the service will now start automatically at boot.");
+            }
+            NonInteractive => {
+                println!("No TTY available; skipped enabling linger.");
+                println!("To start the service at boot, run:");
+                println!("  sudo loginctl enable-linger $USER");
+            }
+            Skipped => {
+                println!("Skipped `loginctl enable-linger` (--skip-linger).");
+                println!("Without lingering, the service only starts at login.");
+                println!("To enable later, run:  sudo loginctl enable-linger $USER");
+            }
+            CheckFailed(err) => {
+                println!("Couldn't check linger state ({err}).");
+                println!("To start the service at boot, run:");
+                println!("  sudo loginctl enable-linger $USER");
+            }
+            EnableFailed(err) => {
+                println!("Couldn't enable linger ({err}).");
+                println!("The service is running now but won't restart at boot until you run:");
+                println!("  sudo loginctl enable-linger $USER");
+            }
+            NotApplicable => {}
+        }
     }
     println!();
     println!("Useful next commands:");
