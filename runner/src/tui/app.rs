@@ -13,75 +13,186 @@ use std::io;
 use std::time::Duration;
 
 use super::ipc_client::TuiIpc;
-use super::views::{approvals, config as config_view, runs, status};
+use super::views::{approvals, config as config_view, runner_status, runs};
 use crate::util::paths::Paths;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Tab {
-    Status,
-    Runs,
+    /// Daemon health + start/stop controls. First tab so `pidash tui` lands
+    /// here and the user immediately sees whether the runner is up.
+    RunnerStatus,
+    /// Config editor, now the primary reason a user opens the TUI. Moved to
+    /// position 2 because config editing is the most common flow once the
+    /// service is running.
     Config,
+    Runs,
     Approvals,
 }
 
 impl Tab {
     pub fn all() -> [Tab; 4] {
-        [Tab::Status, Tab::Runs, Tab::Config, Tab::Approvals]
+        [Tab::RunnerStatus, Tab::Config, Tab::Runs, Tab::Approvals]
     }
 
     pub fn label(&self) -> &'static str {
         match self {
-            Tab::Status => "Status",
-            Tab::Runs => "Runs",
+            Tab::RunnerStatus => "Runner",
             Tab::Config => "Config",
+            Tab::Runs => "Runs",
             Tab::Approvals => "Approvals",
+        }
+    }
+
+    /// Parse `--tab` values: accepts the canonical name (`runner`, `config`,
+    /// `runs`, `approvals`) or a 1-based index (`1`–`4`). Unknown input
+    /// yields `None` so the caller can surface a clap-style error.
+    pub fn parse_cli(raw: &str) -> Option<Tab> {
+        let s = raw.trim().to_ascii_lowercase();
+        match s.as_str() {
+            "runner" | "runner-status" | "runner_status" | "status" | "1" => {
+                Some(Tab::RunnerStatus)
+            }
+            "config" | "2" => Some(Tab::Config),
+            "runs" | "3" => Some(Tab::Runs),
+            "approvals" | "4" => Some(Tab::Approvals),
+            _ => None,
         }
     }
 }
 
 pub struct AppState {
     pub tab: Tab,
+    pub paths: Paths,
     pub ipc: TuiIpc,
     pub status: Option<crate::ipc::protocol::StatusSnapshot>,
     pub runs: Vec<crate::history::index::RunSummary>,
     pub approvals: Vec<crate::approval::router::ApprovalRecord>,
-    pub config_blob: Option<serde_json::Value>,
+    /// Currently-on-disk config, decoded from `config.toml`. `None` means
+    /// the file is missing (first-run state) — the Config tab switches into
+    /// "Register with cloud" mode when that happens.
+    pub config_loaded: Option<crate::config::schema::Config>,
+    /// Working copy users edit in the Config tab. Kicked off as a clone of
+    /// `config_loaded` and mutated in-place as fields get toggled / edited.
+    /// `w` writes this to disk; `Esc` (in browse mode) discards it back to
+    /// `config_loaded`.
+    pub config_working: Option<crate::config::schema::Config>,
+    /// `Some(buffer)` while the user is typing into a Text/U32 field. The
+    /// buffer is seeded with the field's current stringified value; Enter
+    /// commits it, Esc cancels. `None` is browse mode.
+    pub config_edit_buffer: Option<String>,
+    /// Transient single-line error from the last Enter-commit attempt
+    /// (e.g. "expected a non-negative integer"). Cleared on the next
+    /// successful commit or on tab switch.
+    pub config_edit_error: Option<String>,
     pub config_error: Option<String>,
-    pub daemon_offline: bool,
+    /// Last `service::reload::restart_and_verify` result after a save. The
+    /// Config tab surfaces this so users can see whether their edit broke
+    /// the daemon.
+    pub reload_outcome: Option<crate::service::reload::ReloadOutcome>,
     pub error: Option<String>,
     pub quit: bool,
     pub selected: usize,
-    pub onboarding_needed: bool,
     pub show_help: bool,
     pub confirm_stop: bool,
     pub confirm_exit: bool,
     pub confirm_exit_yes: bool,
     pub last_approval_count: usize,
+    /// Last seen service state (`active`, `inactive`, `failed`, `unknown`).
+    /// Populated by `service::detect().status()` on refresh.
+    pub service_state: Option<String>,
+    /// Transient banner shown on the Runner tab after a start/stop action:
+    /// e.g. "starting service…" or "stop failed: …". Cleared on next refresh.
+    pub service_action_msg: Option<String>,
+    /// Inline registration form shown in the Config tab whenever `config.toml`
+    /// is missing — replaces the old standalone onboarding wizard. Cleared
+    /// after a successful register call.
+    pub register_form: Option<RegisterForm>,
 }
 
-pub async fn run(paths: Paths) -> Result<()> {
-    let onboarding_needed = !paths.config_path().exists();
+/// Three-field form (URL / token / name) plus a Register button. Focus is
+/// an index 0..=3. All text input goes to whichever field is focused;
+/// Up/Down or Tab moves focus; Enter advances focus for text fields and
+/// submits when focus lands on the button.
+#[derive(Clone)]
+pub struct RegisterForm {
+    pub cloud_url: String,
+    pub token: String,
+    pub name: String,
+    /// 0 = cloud_url, 1 = token, 2 = name, 3 = Register button.
+    pub focus: u8,
+    pub busy: bool,
+    pub error: Option<String>,
+}
+
+// Manual Debug that masks the token so a stray `{:?}` or `tracing::debug!`
+// never prints the one-time registration secret in the clear.
+impl std::fmt::Debug for RegisterForm {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RegisterForm")
+            .field("cloud_url", &self.cloud_url)
+            .field("token", &"[REDACTED]")
+            .field("name", &self.name)
+            .field("focus", &self.focus)
+            .field("busy", &self.busy)
+            .field("error", &self.error)
+            .finish()
+    }
+}
+
+impl RegisterForm {
+    pub fn new(default_name: String) -> Self {
+        Self {
+            cloud_url: "https://cloud.pidash.so".to_string(),
+            token: String::new(),
+            name: default_name,
+            focus: 0,
+            busy: false,
+            error: None,
+        }
+    }
+
+    pub fn field_count() -> u8 {
+        4
+    }
+
+    pub fn current_buffer_mut(&mut self) -> Option<&mut String> {
+        match self.focus {
+            0 => Some(&mut self.cloud_url),
+            1 => Some(&mut self.token),
+            2 => Some(&mut self.name),
+            _ => None,
+        }
+    }
+}
+
+pub async fn run(paths: Paths, initial_tab: Tab) -> Result<()> {
     let ipc = TuiIpc {
         socket: paths.ipc_socket_path(),
     };
     let mut state = AppState {
-        tab: Tab::Status,
+        tab: initial_tab,
+        paths: paths.clone(),
         ipc,
         status: None,
         runs: Vec::new(),
         approvals: Vec::new(),
-        config_blob: None,
+        config_loaded: None,
+        config_working: None,
+        config_edit_buffer: None,
+        config_edit_error: None,
         config_error: None,
-        daemon_offline: false,
+        reload_outcome: None,
         error: None,
         quit: false,
         selected: 0,
-        onboarding_needed,
         show_help: false,
         confirm_stop: false,
         confirm_exit: false,
         confirm_exit_yes: true,
         last_approval_count: 0,
+        service_state: None,
+        service_action_msg: None,
+        register_form: None,
     };
 
     enable_raw_mode()?;
@@ -122,17 +233,6 @@ async fn loop_ui(
     Ok(())
 }
 
-fn is_daemon_offline(err: &anyhow::Error) -> bool {
-    err.chain().any(|c| {
-        c.downcast_ref::<std::io::Error>().is_some_and(|io| {
-            matches!(
-                io.kind(),
-                std::io::ErrorKind::NotFound | std::io::ErrorKind::ConnectionRefused
-            )
-        })
-    })
-}
-
 async fn poll_event() -> Option<Event> {
     // Off-thread crossterm poll.
     tokio::task::spawn_blocking(|| {
@@ -148,6 +248,14 @@ async fn poll_event() -> Option<Event> {
 }
 
 async fn refresh(state: &mut AppState) {
+    // Service state independent of IPC — the daemon may be down entirely,
+    // in which case we still want to show "inactive" on the Runner tab.
+    state.service_state = match crate::service::detect().status().await {
+        Ok(s) if !s.is_empty() => Some(s),
+        Ok(_) => Some("unknown".to_string()),
+        Err(e) => Some(format!("error: {e}")),
+    };
+
     match state.ipc.status().await {
         Ok(s) => state.status = Some(s),
         Err(e) => {
@@ -173,23 +281,36 @@ async fn refresh(state: &mut AppState) {
                 state.runs = v;
             }
         }
-        Tab::Config => match state.ipc.config().await {
-            Ok(v) => {
-                state.config_blob = Some(v);
-                state.config_error = None;
-                state.daemon_offline = false;
-            }
-            Err(e) => {
-                state.config_blob = None;
-                if is_daemon_offline(&e) {
-                    state.daemon_offline = true;
+        Tab::Config => {
+            // Direct file I/O — no daemon needed. load_config_opt swallows
+            // NotFound and returns None so we can route into the register
+            // sub-widget without an error banner.
+            match crate::config::file::load_config_opt(&state.paths) {
+                Ok(Some(cfg)) => {
+                    state.config_loaded = Some(cfg.clone());
                     state.config_error = None;
-                } else {
-                    state.daemon_offline = false;
+                    // Seed the working copy on first load. Don't clobber if
+                    // the user already has unsaved edits in flight — the
+                    // 500 ms refresh tick shouldn't erase their work.
+                    if state.config_working.is_none() {
+                        state.config_working = Some(cfg);
+                    }
+                }
+                Ok(None) => {
+                    state.config_loaded = None;
+                    state.config_working = None;
+                    state.config_error = None;
+                    // Fresh machine — show the inline register form.
+                    if state.register_form.is_none() {
+                        state.register_form = Some(RegisterForm::new(default_hostname()));
+                    }
+                }
+                Err(e) => {
+                    state.config_loaded = None;
                     state.config_error = Some(format!("{e:#}"));
                 }
             }
-        },
+        }
         _ => {}
     }
 }
@@ -223,10 +344,7 @@ async fn handle_event(ev: Event, state: &mut AppState) {
                 (KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc, _) => {
                     state.confirm_exit = false;
                 }
-                (
-                    KeyCode::Left | KeyCode::Right | KeyCode::Char('h') | KeyCode::Char('l'),
-                    _,
-                ) => {
+                (KeyCode::Left | KeyCode::Right | KeyCode::Char('h') | KeyCode::Char('l'), _) => {
                     state.confirm_exit_yes = !state.confirm_exit_yes;
                 }
                 _ => {}
@@ -248,6 +366,116 @@ async fn handle_event(ev: Event, state: &mut AppState) {
             }
             return;
         }
+        // Config tab: inline Register form when there's no config yet.
+        // This form covers what the old full-screen onboarding wizard did.
+        // We intercept text / nav / submit keys but leave global shortcuts
+        // (Ctrl+C to quit, 1–4 / h / l to switch tabs) to the main match
+        // so the user can always escape.
+        if state.tab == Tab::Config
+            && state.register_form.is_some()
+            && state.config_working.is_none()
+        {
+            match (key.code, key.modifiers) {
+                (KeyCode::Char('c'), KeyModifiers::CONTROL) => {
+                    state.confirm_exit = true;
+                    state.confirm_exit_yes = true;
+                    return;
+                }
+                (
+                    KeyCode::Char('1')
+                    | KeyCode::Char('2')
+                    | KeyCode::Char('3')
+                    | KeyCode::Char('4'),
+                    _,
+                )
+                | (KeyCode::Char('h') | KeyCode::Char('l') | KeyCode::Left | KeyCode::Right, _) => {
+                    // Fall through to the global tab switcher so the user
+                    // can leave the register screen without completing it.
+                }
+                (KeyCode::Up, _) | (KeyCode::BackTab, _) => {
+                    if let Some(f) = state.register_form.as_mut() {
+                        register_form_advance_focus(f, false);
+                    }
+                    return;
+                }
+                (KeyCode::Down, _) | (KeyCode::Tab, _) => {
+                    if let Some(f) = state.register_form.as_mut() {
+                        register_form_advance_focus(f, true);
+                    }
+                    return;
+                }
+                (KeyCode::Enter, _) => {
+                    let submit = matches!(state.register_form.as_ref().map(|f| f.focus), Some(3));
+                    if submit {
+                        submit_register_form(state).await;
+                    } else if let Some(f) = state.register_form.as_mut() {
+                        register_form_advance_focus(f, true);
+                    }
+                    return;
+                }
+                (KeyCode::Esc, _) => {
+                    // Esc on the register form clears the in-flight error
+                    // (so the user can re-attempt) but doesn't cancel the
+                    // whole screen — there's nothing to cancel to, the
+                    // machine has no config yet.
+                    if let Some(f) = state.register_form.as_mut() {
+                        f.error = None;
+                    }
+                    return;
+                }
+                (KeyCode::Backspace, _) => {
+                    if let Some(f) = state.register_form.as_mut()
+                        && let Some(buf) = f.current_buffer_mut()
+                    {
+                        buf.pop();
+                    }
+                    return;
+                }
+                (KeyCode::Char(c), mods) if !mods.contains(KeyModifiers::CONTROL) => {
+                    if let Some(f) = state.register_form.as_mut()
+                        && let Some(buf) = f.current_buffer_mut()
+                    {
+                        buf.push(c);
+                    }
+                    return;
+                }
+                _ => return,
+            }
+        }
+
+        // Config tab edit-buffer mode consumes text input: while the user
+        // is typing into a text field, letters/backspace edit that buffer.
+        // Enter commits, Esc cancels. Ctrl+C remains a universal escape
+        // hatch — otherwise the user can get wedged with no way to quit
+        // the TUI without Esc+q.
+        if state.tab == Tab::Config && state.config_edit_buffer.is_some() {
+            if let (KeyCode::Char('c'), m) = (key.code, key.modifiers)
+                && m.contains(KeyModifiers::CONTROL)
+            {
+                state.confirm_exit = true;
+                state.confirm_exit_yes = true;
+                return;
+            }
+            match key.code {
+                KeyCode::Enter => commit_config_edit(state),
+                KeyCode::Esc => {
+                    state.config_edit_buffer = None;
+                    state.config_edit_error = None;
+                }
+                KeyCode::Backspace => {
+                    if let Some(buf) = state.config_edit_buffer.as_mut() {
+                        buf.pop();
+                    }
+                }
+                KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    if let Some(buf) = state.config_edit_buffer.as_mut() {
+                        buf.push(c);
+                    }
+                }
+                _ => {}
+            }
+            return;
+        }
         match (key.code, key.modifiers) {
             (KeyCode::Char('q'), _) | (KeyCode::Char('c'), KeyModifiers::CONTROL) => {
                 state.confirm_exit = true;
@@ -256,17 +484,17 @@ async fn handle_event(ev: Event, state: &mut AppState) {
             (KeyCode::Char('Q'), _) => state.confirm_stop = true,
             (KeyCode::Char('?'), _) => state.show_help = true,
             (KeyCode::Char('1'), _) => {
-                state.tab = Tab::Status;
+                state.tab = Tab::RunnerStatus;
                 state.selected = 0;
                 refresh(state).await;
             }
             (KeyCode::Char('2'), _) => {
-                state.tab = Tab::Runs;
+                state.tab = Tab::Config;
                 state.selected = 0;
                 refresh(state).await;
             }
             (KeyCode::Char('3'), _) => {
-                state.tab = Tab::Config;
+                state.tab = Tab::Runs;
                 state.selected = 0;
                 refresh(state).await;
             }
@@ -276,32 +504,71 @@ async fn handle_event(ev: Event, state: &mut AppState) {
                 refresh(state).await;
             }
             (KeyCode::Char('j') | KeyCode::Down, _) => {
-                state.selected = state.selected.saturating_add(1);
+                if state.tab == Tab::Config {
+                    let n = super::views::config::field_count();
+                    if n > 0 {
+                        state.selected = (state.selected + 1) % n;
+                    }
+                } else {
+                    state.selected = state.selected.saturating_add(1);
+                }
             }
             (KeyCode::Char('k') | KeyCode::Up, _) => {
-                state.selected = state.selected.saturating_sub(1);
+                if state.tab == Tab::Config {
+                    let n = super::views::config::field_count();
+                    if n > 0 {
+                        state.selected = if state.selected == 0 {
+                            n - 1
+                        } else {
+                            state.selected - 1
+                        };
+                    }
+                } else {
+                    state.selected = state.selected.saturating_sub(1);
+                }
             }
             (KeyCode::Char('h') | KeyCode::Left, _) => {
                 state.tab = match state.tab {
-                    Tab::Status => Tab::Approvals,
-                    Tab::Runs => Tab::Status,
-                    Tab::Config => Tab::Runs,
-                    Tab::Approvals => Tab::Config,
+                    Tab::RunnerStatus => Tab::Approvals,
+                    Tab::Config => Tab::RunnerStatus,
+                    Tab::Runs => Tab::Config,
+                    Tab::Approvals => Tab::Runs,
                 };
                 state.selected = 0;
                 refresh(state).await;
             }
             (KeyCode::Char('l') | KeyCode::Right, _) => {
                 state.tab = match state.tab {
-                    Tab::Status => Tab::Runs,
-                    Tab::Runs => Tab::Config,
-                    Tab::Config => Tab::Approvals,
-                    Tab::Approvals => Tab::Status,
+                    Tab::RunnerStatus => Tab::Config,
+                    Tab::Config => Tab::Runs,
+                    Tab::Runs => Tab::Approvals,
+                    Tab::Approvals => Tab::RunnerStatus,
                 };
                 state.selected = 0;
                 refresh(state).await;
             }
             (KeyCode::Char('r'), _) => refresh(state).await,
+            (KeyCode::Char('s'), _) if state.tab == Tab::RunnerStatus => {
+                run_service_action(state, ServiceAction::Start).await;
+            }
+            (KeyCode::Char('x'), _) if state.tab == Tab::RunnerStatus => {
+                run_service_action(state, ServiceAction::Stop).await;
+            }
+            (KeyCode::Enter, _) if state.tab == Tab::Config => {
+                start_or_apply_config_field(state);
+            }
+            (KeyCode::Char('w'), _) if state.tab == Tab::Config => {
+                save_config(state).await;
+            }
+            (KeyCode::Esc, _) if state.tab == Tab::Config => {
+                // Discard pending edits — roll working copy back to the
+                // last-loaded snapshot. Leaves reload_outcome alone so the
+                // user can still see whether their previous save succeeded.
+                if let Some(loaded) = state.config_loaded.clone() {
+                    state.config_working = Some(loaded);
+                }
+                state.config_edit_error = None;
+            }
             (KeyCode::Char('a'), _) if state.tab == Tab::Approvals => {
                 accept_selected(state, crate::cloud::protocol::ApprovalDecision::Accept).await;
             }
@@ -318,6 +585,251 @@ async fn handle_event(ev: Event, state: &mut AppState) {
             _ => {}
         }
     }
+}
+
+#[derive(Debug, Clone, Copy)]
+enum ServiceAction {
+    Start,
+    Stop,
+}
+
+/// Enter key on the Config tab in browse mode: toggle booleans, cycle enums
+/// in place; open a text-input buffer for Text/U32 fields seeded with the
+/// current stringified value.
+fn start_or_apply_config_field(state: &mut AppState) {
+    use super::views::config as cfg_view;
+    let Some(cfg) = state.config_working.as_mut() else {
+        return;
+    };
+    if cfg_view::field_count() == 0 {
+        return;
+    }
+    let idx = state.selected.min(cfg_view::field_count() - 1);
+    let spec = cfg_view::field_at(idx);
+    state.config_edit_error = None;
+    match spec.kind {
+        cfg_view::FieldKind::Bool => cfg_view::toggle_bool(cfg, spec.id),
+        cfg_view::FieldKind::Enum(_) => cfg_view::cycle_enum(cfg, spec.id),
+        cfg_view::FieldKind::Text | cfg_view::FieldKind::U32 => {
+            state.config_edit_buffer = Some(cfg_view::display_value(cfg, spec.id));
+        }
+    }
+}
+
+/// Commit the pending `config_edit_buffer` to the working config. On parse /
+/// validation failure leave the buffer in place so the user can fix it
+/// without retyping everything.
+fn commit_config_edit(state: &mut AppState) {
+    use super::views::config as cfg_view;
+    let Some(buf) = state.config_edit_buffer.take() else {
+        return;
+    };
+    let Some(cfg) = state.config_working.as_mut() else {
+        return;
+    };
+    if cfg_view::field_count() == 0 {
+        return;
+    }
+    let idx = state.selected.min(cfg_view::field_count() - 1);
+    let spec = cfg_view::field_at(idx);
+    match cfg_view::set_text_value(cfg, spec.id, &buf) {
+        Ok(()) => {
+            state.config_edit_error = None;
+        }
+        Err(e) => {
+            state.config_edit_error = Some(e);
+            state.config_edit_buffer = Some(buf);
+        }
+    }
+}
+
+/// `w` on the Config tab. Write the working copy to `config.toml`, then
+/// run `restart_and_verify` so the user immediately sees whether their
+/// edit broke the daemon. On file-write failure, surface it and leave the
+/// daemon alone (no point restarting with unchanged bytes).
+async fn save_config(state: &mut AppState) {
+    let Some(cfg) = state.config_working.clone() else {
+        return;
+    };
+    if let Err(e) = crate::config::file::write_config(&state.paths, &cfg) {
+        state.config_edit_error = Some(format!("save failed: {e:#}"));
+        return;
+    }
+    state.config_loaded = Some(cfg);
+    state.config_edit_error = None;
+    state.reload_outcome = Some(crate::service::reload::restart_and_verify(&state.paths).await);
+    // Pull a fresh view of everything else now that the daemon restarted.
+    refresh(state).await;
+}
+
+fn register_form_advance_focus(form: &mut RegisterForm, forward: bool) {
+    let n = RegisterForm::field_count();
+    form.focus = if forward {
+        (form.focus + 1) % n
+    } else if form.focus == 0 {
+        n - 1
+    } else {
+        form.focus - 1
+    };
+}
+
+/// Submit the registration form. On success, writes config + credentials,
+/// installs the service unit, and kicks the daemon — same end state as
+/// `pidash configure --url ... --token ...` on the CLI.
+async fn submit_register_form(state: &mut AppState) {
+    let Some(form) = state.register_form.as_mut() else {
+        return;
+    };
+    // Field-level validation first so we don't waste a cloud round trip.
+    let cloud_url = form.cloud_url.trim().to_string();
+    let token = form.token.trim().to_string();
+    let name = form.name.trim().to_string();
+    if let Err(e) = crate::cli::configure::validate_cloud_url(&cloud_url) {
+        form.error = Some(format!("{e}"));
+        return;
+    }
+    if token.is_empty() {
+        form.error = Some("registration token is required".into());
+        return;
+    }
+    if name.is_empty() {
+        form.error = Some("runner name is required".into());
+        return;
+    }
+    if let Err(e) = crate::util::runner_name::validate(&name) {
+        form.error = Some(format!("invalid runner name: {e}"));
+        return;
+    }
+    form.busy = true;
+    form.error = None;
+
+    let req = crate::cloud::register::RegisterRequest {
+        runner_name: name.clone(),
+        os: std::env::consts::OS.to_string(),
+        arch: std::env::consts::ARCH.to_string(),
+        version: crate::RUNNER_VERSION.to_string(),
+        protocol_version: crate::PROTOCOL_VERSION,
+    };
+    let resp = match crate::cloud::register::register(&cloud_url, &token, &req).await {
+        Ok(r) => r,
+        Err(e) => {
+            if let Some(form) = state.register_form.as_mut() {
+                form.busy = false;
+                form.error = Some(format!("register failed: {e:#}"));
+            }
+            return;
+        }
+    };
+
+    // Write config + credentials (same shape as cli::configure::execute's
+    // happy path, minus the `extras` apply since the TUI form doesn't
+    // collect advanced fields — user edits them in the Config tab after).
+    let cfg = crate::config::schema::Config {
+        version: 1,
+        runner: crate::config::schema::RunnerSection {
+            name: name.clone(),
+            cloud_url: cloud_url.clone(),
+            workspace_slug: resp.workspace_slug.clone(),
+        },
+        workspace: crate::config::schema::WorkspaceSection {
+            working_dir: state.paths.default_working_dir(),
+        },
+        codex: Default::default(),
+        claude_code: Default::default(),
+        agent: Default::default(),
+        approval_policy: Default::default(),
+        logging: Default::default(),
+    };
+    if let Err(e) = crate::config::file::write_config(&state.paths, &cfg) {
+        if let Some(form) = state.register_form.as_mut() {
+            form.busy = false;
+            form.error = Some(format!("writing config.toml: {e:#}"));
+        }
+        return;
+    }
+    let creds = crate::config::schema::Credentials {
+        runner_id: resp.runner_id,
+        runner_secret: resp.runner_secret,
+        api_token: resp.api_token,
+        issued_at: chrono::Utc::now(),
+    };
+    if let Err(e) = crate::config::file::write_credentials(&state.paths, &creds) {
+        if let Some(form) = state.register_form.as_mut() {
+            form.busy = false;
+            form.error = Some(format!("writing credentials.toml: {e:#}"));
+        }
+        return;
+    }
+
+    // Install + start the service so the runner actually runs after
+    // registering. If unit-write fails, surface the error in the form and
+    // keep the user in register mode — files are on disk, but without the
+    // service unit the daemon won't come up, so dismissing the form would
+    // leave the user in a broken state with no obvious retry path.
+    let svc = crate::service::detect();
+    if let Err(e) = svc.write_unit(&state.paths).await {
+        if let Some(form) = state.register_form.as_mut() {
+            form.busy = false;
+            form.error = Some(format!("writing service unit: {e:#}"));
+        }
+        return;
+    }
+    let outcome = crate::service::reload::restart_and_verify(&state.paths).await;
+    let outcome_ok = outcome.ok;
+    state.reload_outcome = Some(outcome);
+
+    if !outcome_ok {
+        // Files + unit are on disk but the daemon didn't come up cleanly.
+        // Keep the form so the footer banner + form error together tell
+        // the user to re-check credentials or fix the environment; don't
+        // transition to the editable Config view as if we succeeded.
+        if let Some(form) = state.register_form.as_mut() {
+            form.busy = false;
+            form.error = Some(
+                "service did not reach cloud-connected state — check footer banner for detail"
+                    .into(),
+            );
+        }
+        return;
+    }
+
+    // Transition out of register mode: the next refresh() will pick up
+    // config.toml from disk and populate config_working.
+    state.register_form = None;
+    state.config_loaded = Some(cfg.clone());
+    state.config_working = Some(cfg);
+}
+
+fn default_hostname() -> String {
+    if let Ok(h) = std::env::var("HOSTNAME")
+        && !h.is_empty()
+    {
+        return h;
+    }
+    nix::unistd::gethostname()
+        .ok()
+        .and_then(|os| os.into_string().ok())
+        .unwrap_or_else(|| "runner".to_string())
+}
+
+async fn run_service_action(state: &mut AppState, action: ServiceAction) {
+    let svc = crate::service::detect();
+    let (verb_present, verb_past) = match action {
+        ServiceAction::Start => ("starting", "started"),
+        ServiceAction::Stop => ("stopping", "stopped"),
+    };
+    state.service_action_msg = Some(format!("{verb_present} service…"));
+    let result = match action {
+        ServiceAction::Start => svc.start().await,
+        ServiceAction::Stop => svc.stop().await,
+    };
+    state.service_action_msg = Some(match result {
+        Ok(()) => format!("service {verb_past}."),
+        Err(e) => format!("service {verb_present} failed: {e:#}"),
+    });
+    // Pull fresh service/IPC state so the banner isn't contradicted by stale
+    // cells on the next redraw.
+    refresh(state).await;
 }
 
 async fn accept_selected(state: &mut AppState, decision: crate::cloud::protocol::ApprovalDecision) {
@@ -345,9 +857,9 @@ fn draw(f: &mut ratatui::Frame<'_>, state: &AppState) {
         .map(|t| Line::from(Span::styled(t.label(), Style::default())))
         .collect();
     let idx = match state.tab {
-        Tab::Status => 0,
-        Tab::Runs => 1,
-        Tab::Config => 2,
+        Tab::RunnerStatus => 0,
+        Tab::Config => 1,
+        Tab::Runs => 2,
         Tab::Approvals => 3,
     };
     let tabs = Tabs::new(titles)
@@ -361,14 +873,14 @@ fn draw(f: &mut ratatui::Frame<'_>, state: &AppState) {
     f.render_widget(tabs, layout[0]);
 
     match state.tab {
-        Tab::Status => status::render(f, layout[1], state),
-        Tab::Runs => runs::render(f, layout[1], state),
+        Tab::RunnerStatus => runner_status::render(f, layout[1], state),
         Tab::Config => config_view::render(f, layout[1], state),
+        Tab::Runs => runs::render(f, layout[1], state),
         Tab::Approvals => approvals::render(f, layout[1], state),
     }
 
     let hint = Line::from(Span::styled(
-        " [1-4]tab  h/l ←/→ switch  j/k ↑/↓ move  r refresh  ?help  q exit  Q stop daemon ",
+        " [1]Runner [2]Config [3]Runs [4]Approvals  h/l switch  j/k move  r refresh  ?help  q exit ",
         Style::default().add_modifier(Modifier::DIM),
     ));
     f.render_widget(Paragraph::new(hint), layout[2]);
@@ -396,6 +908,11 @@ fn render_help(f: &mut ratatui::Frame<'_>) {
         Line::from("j/k ↑/↓   move selection"),
         Line::from("↵     open detail"),
         Line::from("r     force refresh"),
+        Line::from("s     start runner service  (Runner tab)"),
+        Line::from("x     stop runner service   (Runner tab)"),
+        Line::from("↵     edit field / toggle  (Config tab)"),
+        Line::from("w     save + reload daemon (Config tab)"),
+        Line::from("Esc   discard edits       (Config tab)"),
         Line::from("a     accept approval (once)"),
         Line::from("A     accept for session"),
         Line::from("d     decline"),

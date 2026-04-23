@@ -51,23 +51,19 @@ async fn bridge_happy_path_drives_fake_claude_to_completion() {
 
     // run() should consume the init frame and surface its session id as the
     // cursor's thread_id, matching the Codex bridge's contract.
-    let mut cursor = bridge
-        .run(&payload, &cwd)
-        .await
-        .expect("bridge run setup");
+    let mut cursor = bridge.run(&payload, &cwd).await.expect("bridge run setup");
     assert_eq!(cursor.thread_id, "sess_fake_001");
 
     let mut saw_assistant = false;
     let mut saw_completed = false;
     let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
     while tokio::time::Instant::now() < deadline {
-        let Some(events) = tokio::time::timeout(
-            Duration::from_millis(500),
-            bridge.next_events(&mut cursor),
-        )
-        .await
-        .ok()
-        .flatten() else {
+        let Some(events) =
+            tokio::time::timeout(Duration::from_millis(500), bridge.next_events(&mut cursor))
+                .await
+                .ok()
+                .flatten()
+        else {
             break;
         };
         for ev in events {
@@ -121,10 +117,7 @@ async fn bridge_translates_result_error_to_failed() {
         model: None,
         resume_thread_id: None,
     };
-    let mut cursor = bridge
-        .run(&payload, &cwd)
-        .await
-        .expect("bridge run setup");
+    let mut cursor = bridge.run(&payload, &cwd).await.expect("bridge run setup");
 
     let events = tokio::time::timeout(Duration::from_secs(2), bridge.next_events(&mut cursor))
         .await

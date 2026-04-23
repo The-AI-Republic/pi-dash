@@ -144,13 +144,30 @@ pub async fn deregister(
     Ok(())
 }
 
+// Cap the server body we surface in error strings. A misbehaving (or
+// hostile) cloud could echo the registration token back in an error body;
+// the TUI renders this verbatim into `form.error`, so we truncate
+// aggressively. 256 chars is enough to read a typical "unauthorized" /
+// "invalid token" message without leaking a whole token or PII-laden JSON.
+const MAX_ERROR_BODY_CHARS: usize = 256;
+
+fn truncate_body(body: &str) -> String {
+    let s = body.trim();
+    if s.chars().count() <= MAX_ERROR_BODY_CHARS {
+        return s.to_string();
+    }
+    let head: String = s.chars().take(MAX_ERROR_BODY_CHARS).collect();
+    format!("{head}…(truncated)")
+}
+
 /// Translate an HTTP error response into a `RegisterError`. Extracted so
 /// `configure`'s retry decision can be unit-tested without standing up a
 /// fake HTTP server. The cloud-side contract is:
 ///
 /// - `409 {"error": "runner_name_taken"}` → `NameTaken` (retryable for an
 ///   auto-generated name, loud error for a user-supplied one).
-/// - Anything else non-2xx → `Other` with the status + body captured.
+/// - Anything else non-2xx → `Other` with the status + body captured
+///   (truncated to `MAX_ERROR_BODY_CHARS` to avoid leaking echoed tokens).
 fn classify_register_error(status: reqwest::StatusCode, body: &str) -> RegisterError {
     if status == reqwest::StatusCode::CONFLICT
         && let Ok(parsed) = serde_json::from_str::<ErrorBody>(body)
@@ -159,7 +176,8 @@ fn classify_register_error(status: reqwest::StatusCode, body: &str) -> RegisterE
         return RegisterError::NameTaken;
     }
     RegisterError::Other(anyhow::anyhow!(
-        "registration failed: HTTP {status}: {body}"
+        "registration failed: HTTP {status}: {body}",
+        body = truncate_body(body),
     ))
 }
 
@@ -244,5 +262,29 @@ mod tests {
                 "{status} should map to Other, got {err:?}",
             );
         }
+    }
+
+    #[test]
+    fn classify_truncates_large_bodies() {
+        // A misbehaving cloud that echoes a token-length string back in the
+        // error body must not land on screen verbatim. We cap at
+        // MAX_ERROR_BODY_CHARS; the tail is replaced by a marker.
+        let big = "x".repeat(MAX_ERROR_BODY_CHARS * 4);
+        let err = classify_register_error(reqwest::StatusCode::UNAUTHORIZED, &big).to_string();
+        assert!(
+            err.contains("(truncated)"),
+            "expected truncation marker, got: {err}"
+        );
+        assert!(
+            err.len() < big.len(),
+            "error string {} should be shorter than input {}",
+            err.len(),
+            big.len()
+        );
+    }
+
+    #[test]
+    fn truncate_body_preserves_short_strings() {
+        assert_eq!(truncate_body("  invalid token  "), "invalid token");
     }
 }

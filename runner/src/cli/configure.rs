@@ -15,32 +15,187 @@ const MAX_AUTO_NAME_RETRIES: u32 = 5;
 
 #[derive(Debug, ClapArgs)]
 pub struct Args {
-    /// Pi Dash cloud base URL (https://cloud.pidash.so).
+    // --- Registration (required together on first setup) ------------------
+    /// Pi Dash cloud base URL. Required (with `--token`) on first setup.
     #[arg(long)]
-    pub url: String,
+    pub url: Option<String>,
 
-    /// Registration token issued by the cloud UI.
+    /// Registration token issued by the cloud UI. Required (with `--url`)
+    /// on first setup; consumed to mint the runner's persistent credential.
     #[arg(long)]
-    pub token: String,
+    pub token: Option<String>,
 
-    /// Optional human-friendly name for this runner.
+    // --- Runner / workspace -----------------------------------------------
+    /// Human-friendly runner name.
     #[arg(long)]
     pub name: Option<String>,
 
-    /// Override the workspace directory.
+    /// Workspace directory the runner clones into.
     #[arg(long)]
     pub working_dir: Option<PathBuf>,
 
-    /// Which AI agent CLI the runner should drive. Omit on a TTY to be
-    /// prompted (default / Enter = `codex`). Required to run non-interactively
-    /// with a non-default choice.
+    // --- Agent selection --------------------------------------------------
+    /// Which AI agent CLI the runner drives. Arrow-key picker on a TTY
+    /// during first-setup if omitted; a no-op partial edit if omitted here.
     #[arg(long, value_enum)]
     pub agent: Option<AgentKind>,
 
+    // --- Codex section ----------------------------------------------------
+    /// Override `[codex].binary` (path or command name).
+    #[arg(long)]
+    pub codex_binary: Option<String>,
+
+    /// Override `[codex].model_default`.
+    #[arg(long)]
+    pub codex_model: Option<String>,
+
+    // --- Claude Code section ----------------------------------------------
+    /// Override `[claude_code].binary`.
+    #[arg(long)]
+    pub claude_binary: Option<String>,
+
+    /// Override `[claude_code].model_default`.
+    #[arg(long)]
+    pub claude_model: Option<String>,
+
+    // --- Approval policy (scalars only — list fields live in the TUI) -----
+    /// Toggle `[approval_policy].auto_approve_readonly_shell`.
+    #[arg(long)]
+    pub approval_auto_readonly: Option<bool>,
+
+    /// Toggle `[approval_policy].auto_approve_workspace_writes`.
+    #[arg(long)]
+    pub approval_auto_writes: Option<bool>,
+
+    /// Toggle `[approval_policy].auto_approve_network`.
+    #[arg(long)]
+    pub approval_auto_network: Option<bool>,
+
+    // --- Logging ----------------------------------------------------------
+    /// Override `[logging].level` (trace|debug|info|warn|error).
+    #[arg(long)]
+    pub log_level: Option<String>,
+
+    /// Override `[logging].retention_days`.
+    #[arg(long)]
+    pub log_retention_days: Option<u32>,
+
+    // --- Behaviour flags (not persisted) ----------------------------------
     /// Skip on-install doctor checks (not recommended). Also skips the
     /// auth-gate retry loop, since there's nothing to re-check.
     #[arg(long)]
     pub skip_doctor: bool,
+
+    /// Skip installing / starting the OS service at the end. Use from CI or
+    /// Ansible playbooks that manage the daemon lifecycle themselves, or when
+    /// you only want to write the config files without bouncing a daemon.
+    #[arg(long)]
+    pub skip_service: bool,
+}
+
+impl Args {
+    /// Returns true if any non-registration flag was set — i.e. the user
+    /// intends to *edit* an existing config rather than register a new one.
+    /// Used to decide whether to bail out or just mutate specific fields.
+    fn has_edit_flags(&self) -> bool {
+        self.name.is_some()
+            || self.working_dir.is_some()
+            || self.agent.is_some()
+            || self.codex_binary.is_some()
+            || self.codex_model.is_some()
+            || self.claude_binary.is_some()
+            || self.claude_model.is_some()
+            || self.approval_auto_readonly.is_some()
+            || self.approval_auto_writes.is_some()
+            || self.approval_auto_network.is_some()
+            || self.log_level.is_some()
+            || self.log_retention_days.is_some()
+    }
+
+    /// Apply every `--<flag>` that was set as a mutation on an existing
+    /// `Config`. Returns `true` if any field actually changed.
+    fn apply_to(&self, cfg: &mut Config) -> bool {
+        let mut changed = false;
+        if let Some(url) = &self.url
+            && cfg.runner.cloud_url != *url
+        {
+            cfg.runner.cloud_url = url.clone();
+            changed = true;
+        }
+        if let Some(name) = &self.name
+            && cfg.runner.name != *name
+        {
+            cfg.runner.name = name.clone();
+            changed = true;
+        }
+        if let Some(wd) = &self.working_dir
+            && cfg.workspace.working_dir != *wd
+        {
+            cfg.workspace.working_dir = wd.clone();
+            changed = true;
+        }
+        if let Some(kind) = self.agent
+            && cfg.agent.kind != kind
+        {
+            cfg.agent.kind = kind;
+            changed = true;
+        }
+        if let Some(b) = &self.codex_binary
+            && cfg.codex.binary != *b
+        {
+            cfg.codex.binary = b.clone();
+            changed = true;
+        }
+        if let Some(m) = &self.codex_model
+            && cfg.codex.model_default.as_ref() != Some(m)
+        {
+            cfg.codex.model_default = Some(m.clone());
+            changed = true;
+        }
+        if let Some(b) = &self.claude_binary
+            && cfg.claude_code.binary != *b
+        {
+            cfg.claude_code.binary = b.clone();
+            changed = true;
+        }
+        if let Some(m) = &self.claude_model
+            && cfg.claude_code.model_default.as_ref() != Some(m)
+        {
+            cfg.claude_code.model_default = Some(m.clone());
+            changed = true;
+        }
+        if let Some(v) = self.approval_auto_readonly
+            && cfg.approval_policy.auto_approve_readonly_shell != v
+        {
+            cfg.approval_policy.auto_approve_readonly_shell = v;
+            changed = true;
+        }
+        if let Some(v) = self.approval_auto_writes
+            && cfg.approval_policy.auto_approve_workspace_writes != v
+        {
+            cfg.approval_policy.auto_approve_workspace_writes = v;
+            changed = true;
+        }
+        if let Some(v) = self.approval_auto_network
+            && cfg.approval_policy.auto_approve_network != v
+        {
+            cfg.approval_policy.auto_approve_network = v;
+            changed = true;
+        }
+        if let Some(lvl) = &self.log_level
+            && cfg.logging.level != *lvl
+        {
+            cfg.logging.level = lvl.clone();
+            changed = true;
+        }
+        if let Some(n) = self.log_retention_days
+            && cfg.logging.retention_days != n
+        {
+            cfg.logging.retention_days = n;
+            changed = true;
+        }
+        changed
+    }
 }
 
 /// Inputs for the core registration flow. `cli::install::run` also builds one
@@ -54,33 +209,137 @@ pub struct RegisterInputs {
     /// existing config's kind, else Codex."
     pub agent: Option<AgentKind>,
     pub skip_doctor: bool,
-}
-
-impl From<Args> for RegisterInputs {
-    fn from(a: Args) -> Self {
-        Self {
-            url: a.url,
-            token: a.token,
-            name: a.name,
-            working_dir: a.working_dir,
-            agent: a.agent,
-            skip_doctor: a.skip_doctor,
-        }
-    }
+    pub skip_service: bool,
+    /// Full clap Args, if we came from a direct CLI invocation. Lets the
+    /// register path also apply any other `--<flag>` the user passed
+    /// (e.g. `--codex-model gpt-5 --approval-auto-readonly true`) before
+    /// writing the fresh config to disk. `None` when built from the install
+    /// wizard's interactive prompts, which don't collect those extras.
+    pub extras: Option<Args>,
 }
 
 pub async fn run(args: Args, paths: &Paths) -> Result<()> {
-    execute(args.into(), paths, /* print_next_hint = */ true).await
+    // Decision tree for `pidash configure`:
+    //
+    // 1. Bare invocation (no flags at all) → drop into the TUI's Config tab.
+    //    The user wants to browse / edit visually, not script.
+    // 2. `--url` + `--token` present → register with the cloud. Any other
+    //    flags on this path take effect as part of the initial config file.
+    // 3. Edit flags only (no `--token`) against an existing config → apply
+    //    a partial mutation and kick the daemon.
+    // 4. Edit flags without an existing config → error. We can't edit a
+    //    file that doesn't exist, and we won't invent credentials.
+    let bare = args.url.is_none()
+        && args.token.is_none()
+        && !args.has_edit_flags()
+        && !args.skip_doctor
+        && !args.skip_service;
+    if bare {
+        return crate::tui::run(
+            paths.clone(),
+            /* no_onboarding = */ false,
+            crate::tui::app::Tab::Config,
+        )
+        .await;
+    }
+
+    match (args.url.clone(), args.token.clone()) {
+        (Some(url), Some(token)) => {
+            let inputs = RegisterInputs {
+                url,
+                token,
+                name: args.name.clone(),
+                working_dir: args.working_dir.clone(),
+                agent: args.agent,
+                skip_doctor: args.skip_doctor,
+                skip_service: args.skip_service,
+                extras: Some(args),
+            };
+            execute(inputs, paths).await
+        }
+        (Some(_), None) | (None, Some(_)) => {
+            anyhow::bail!(
+                "--url and --token must be used together. Pass both to re-register, \
+                 or omit both to edit specific fields of an existing config."
+            );
+        }
+        (None, None) => partial_edit(args, paths).await,
+    }
 }
 
-/// Core registration flow — hits the cloud register endpoint, persists
-/// `config.toml` + `credentials.toml`, and optionally runs the doctor.
-///
-/// `print_next_hint` controls whether the trailing "Next: …" banner appears.
-/// `pidash configure` sets it true; when `pidash install` chains into this,
-/// it sets false because install itself is doing the "next" step.
-pub async fn execute(inputs: RegisterInputs, paths: &Paths, print_next_hint: bool) -> Result<()> {
+/// Partial-edit path: load `config.toml`, apply whatever `--<flag>`s were
+/// set, persist, and restart the daemon. Bails if the config doesn't exist
+/// yet (fresh machines must register first).
+async fn partial_edit(args: Args, paths: &Paths) -> Result<()> {
+    // `--url` is intentionally not a partial-edit field: changing the cloud
+    // URL without also re-minting credentials leaves stale `credentials.toml`
+    // pointing at a URL it was never issued against, and the next restart
+    // silently fails cloud auth. More importantly, blindly writing whatever
+    // URL the user passes is an SSRF surface (e.g. private metadata IPs) —
+    // the validation that guards the register path can't prevent that here
+    // because changing cloud_url is never actually what the user wants. Re-
+    // registering against the new cloud is the only safe way.
+    if args.url.is_some() {
+        anyhow::bail!(
+            "--url can only be changed by re-registering: run `pidash configure --url <URL> --token <TOKEN>`. \
+             Changing cloud_url alone would leave the runner's credentials bound to the old cloud."
+        );
+    }
+    let mut cfg = match crate::config::file::load_config_opt(paths)? {
+        Some(c) => c,
+        None => {
+            anyhow::bail!(
+                "no config found at {}. Run `pidash configure --url <URL> --token <TOKEN>` \
+                 to register this runner first.",
+                paths.config_path().display()
+            );
+        }
+    };
+    if let Some(name) = &args.name {
+        runner_name::validate(name).with_context(|| format!("invalid --name value {name:?}"))?;
+    }
+    if let Some(lvl) = &args.log_level {
+        validate_log_level(lvl).with_context(|| format!("invalid --log-level value {lvl:?}"))?;
+    }
+    let changed = args.apply_to(&mut cfg);
+    if !changed {
+        println!("No config fields were changed.");
+        return Ok(());
+    }
+    crate::config::file::write_config(paths, &cfg)?;
+    println!("Wrote {}.", paths.config_path().display());
+
+    if args.skip_service {
+        println!("Skipping daemon restart (--skip-service).");
+        return Ok(());
+    }
+
+    println!("Reloading runner daemon…");
+    let outcome = crate::service::reload::restart_and_verify(paths).await;
+    if outcome.ok {
+        println!("✓ {}", outcome.summary);
+        Ok(())
+    } else {
+        eprintln!("✗ {}", outcome.summary);
+        if let Some(detail) = outcome.detail {
+            eprintln!("\n{detail}");
+        }
+        anyhow::bail!("runner failed to come up cleanly after config change");
+    }
+}
+
+/// End-to-end onboarding: register with the cloud, persist `config.toml` +
+/// `credentials.toml`, run the doctor, then (unless `--skip-service`) write
+/// the OS service unit and bring the daemon up. One command covers the
+/// happy path for an interactive user; `--skip-service` peels off the last
+/// step for scripted / CI flows that manage supervision themselves.
+pub async fn execute(inputs: RegisterInputs, paths: &Paths) -> Result<()> {
     validate_cloud_url(&inputs.url)?;
+    if let Some(extras) = inputs.extras.as_ref()
+        && let Some(lvl) = &extras.log_level
+    {
+        validate_log_level(lvl).with_context(|| format!("invalid --log-level value {lvl:?}"))?;
+    }
 
     // Pre-load any existing config so we can pre-fill the agent prompt with
     // the user's prior choice. Harmless if the file is absent or garbled —
@@ -96,8 +355,7 @@ pub async fn execute(inputs: RegisterInputs, paths: &Paths, print_next_hint: boo
     // names are charset-safe by construction.
     let user_supplied_name = inputs.name.is_some();
     if let Some(n) = &inputs.name {
-        runner_name::validate(n)
-            .with_context(|| format!("invalid --name value {n:?}"))?;
+        runner_name::validate(n).with_context(|| format!("invalid --name value {n:?}"))?;
     }
 
     let os = std::env::consts::OS.to_string();
@@ -174,7 +432,7 @@ pub async fn execute(inputs: RegisterInputs, paths: &Paths, print_next_hint: boo
         );
     }
 
-    let config = Config {
+    let mut config = Config {
         version: 1,
         runner: crate::config::schema::RunnerSection {
             name: final_name,
@@ -188,6 +446,13 @@ pub async fn execute(inputs: RegisterInputs, paths: &Paths, print_next_hint: boo
         approval_policy: crate::config::schema::ApprovalPolicySection::default(),
         logging: crate::config::schema::LoggingSection::default(),
     };
+    // Apply any advanced field flags the user passed alongside --url/--token.
+    // They're already reflected in `config` for the fields this function
+    // populates directly (name, cloud_url, agent, working_dir); `apply_to`
+    // covers the rest (codex.*, claude_code.*, approval_policy.*, logging.*).
+    if let Some(extras) = inputs.extras.as_ref() {
+        extras.apply_to(&mut config);
+    }
     crate::config::file::write_config(paths, &config)?;
 
     let creds = Credentials {
@@ -202,25 +467,53 @@ pub async fn execute(inputs: RegisterInputs, paths: &Paths, print_next_hint: boo
         run_doctor_with_auth_gate(paths, agent_kind).await?;
     }
 
-    if print_next_hint {
+    println!(
+        "\nRegistered runner '{}' with id {}.",
+        config.runner.name, creds.runner_id,
+    );
+
+    if inputs.skip_service {
         println!(
-            "\nRegistered runner '{}' with id {}.\nNext: `pidash install` to run as a background service.\n",
-            config.runner.name, creds.runner_id,
+            "\nSkipping service setup (--skip-service). Run `pidash install` later to enable the background daemon.\n"
         );
-    } else {
+        return Ok(());
+    }
+
+    // Happy path: user just ran `pidash configure` on an interactive machine.
+    // Write the user-scoped service unit and bring the daemon up so they
+    // don't also have to type `pidash install`. `enable_and_start` restarts
+    // an already-running daemon so a re-configure picks up fresh creds.
+    let svc = crate::service::detect();
+    svc.write_unit(paths).await?;
+    svc.enable_and_start().await?;
+    print_post_install_hints();
+
+    Ok(())
+}
+
+fn print_post_install_hints() {
+    println!("Service installed and running.");
+    if cfg!(target_os = "linux") {
+        println!();
+        println!("For the service to start on OS boot (before you log in), run:");
+        println!("  sudo loginctl enable-linger $USER");
         println!(
-            "\nRegistered runner '{}' with id {}.",
-            config.runner.name, creds.runner_id,
+            "Without lingering, the service still starts at every user login and restarts on crash."
         );
     }
-    Ok(())
+    println!();
+    println!("Useful next commands:");
+    println!("  pidash status         # service + daemon state");
+    println!("  pidash tui            # interactive UI");
+    println!("  pidash stop           # stop the service");
+    println!();
 }
 
 /// Picks the agent for this run. Precedence:
 /// 1. `--agent` flag (always wins, scriptable).
-/// 2. Interactive TTY prompt, pre-filled with the existing config's kind
-///    if one exists (otherwise `codex`). Enter accepts the default; EOF
-///    also accepts the default (matches `install.rs` prompt conventions).
+/// 2. Interactive TTY arrow-key picker, pre-selecting the existing config's
+///    kind if one exists (otherwise `codex`). Enter confirms, Esc keeps the
+///    default.
 /// 3. Non-TTY with no flag: keep the existing config's kind, or Codex.
 fn resolve_agent_kind(flag: Option<AgentKind>, existing: Option<AgentKind>) -> AgentKind {
     if let Some(k) = flag {
@@ -232,67 +525,110 @@ fn resolve_agent_kind(flag: Option<AgentKind>, existing: Option<AgentKind>) -> A
     existing.unwrap_or_default()
 }
 
-/// Result of parsing one line of user input at the agent prompt. Kept pure
-/// (no I/O) so the parser can be unit-tested without a terminal.
-#[derive(Debug, PartialEq, Eq)]
-enum AgentInput {
-    /// Empty / whitespace-only input: accept the pre-filled default.
-    UseDefault,
-    /// A recognised agent name.
-    Parsed(AgentKind),
-    /// The input didn't match any known name; caller should re-prompt.
-    Unknown,
-}
-
-/// Accepts the CLI spelling (`codex`, `claude-code`), the config-file
-/// spelling (`claude_code`), and `claude` as a shorthand — so the prompt
-/// forgives whichever a user might type. Case-insensitive.
-fn parse_agent_input(raw: &str) -> AgentInput {
-    let trimmed = raw.trim();
-    if trimmed.is_empty() {
-        return AgentInput::UseDefault;
-    }
-    match trimmed.to_ascii_lowercase().as_str() {
-        "codex" => AgentInput::Parsed(AgentKind::Codex),
-        "claude-code" | "claude_code" | "claude" => AgentInput::Parsed(AgentKind::ClaudeCode),
-        _ => AgentInput::Unknown,
-    }
-}
-
-/// Reads a single line from stdin, loops on unrecognised input so a typo
-/// doesn't force the user to re-run `pidash configure` (and re-paste the
-/// one-time token). Returns the pre-filled default on empty input or EOF.
+/// Interactive agent picker. Renders a small list inline; Up/Down move the
+/// cursor, Enter confirms, Esc keeps the pre-filled default. Needs raw mode
+/// on stdout — if stdout isn't a TTY or raw mode can't be engaged we
+/// silently fall back to `default` (resolve_agent_kind only calls us on a
+/// stdin TTY, so this is the only remaining non-TTY path).
 fn prompt_agent_kind(default: AgentKind) -> AgentKind {
-    let default_label = match default {
-        AgentKind::Codex => "codex",
-        AgentKind::ClaudeCode => "claude-code",
+    use crossterm::{
+        cursor,
+        event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers},
+        execute,
+        terminal::{self, ClearType},
     };
-    loop {
-        // Ignore flush errors: if stdout is broken we can't recover here
-        // anyway, and the read_line below will fail loudly.
-        print!("Choose AI agent [codex/claude-code] (default: {default_label}): ");
-        let _ = std::io::stdout().flush();
-        let mut line = String::new();
-        // EOF on stdin also yields an empty string ⇒ default, matching
-        // the install.rs `prompt_required` convention.
-        match std::io::stdin().lock().read_line(&mut line) {
-            Ok(0) => return default,
-            Ok(_) => {}
-            Err(e) => {
-                eprintln!("warning: could not read agent prompt ({e}); using default");
-                return default;
-            }
-        }
-        match parse_agent_input(&line) {
-            AgentInput::UseDefault => return default,
-            AgentInput::Parsed(k) => return k,
-            AgentInput::Unknown => {
-                eprintln!(
-                    "unrecognised agent; expected `codex` or `claude-code` (or press Enter for the default)."
-                );
-            }
+
+    const OPTIONS: [(AgentKind, &str); 2] = [
+        (AgentKind::Codex, "codex"),
+        (AgentKind::ClaudeCode, "claude-code"),
+    ];
+    let mut idx = OPTIONS.iter().position(|(k, _)| *k == default).unwrap_or(0);
+
+    if !std::io::stdout().is_terminal() {
+        return default;
+    }
+
+    // Drop-guard restores cooked mode on every exit path — panic, early
+    // return, normal flow. Without this a crash inside the loop leaves the
+    // user's shell in raw mode and unusable.
+    struct RawGuard;
+    impl Drop for RawGuard {
+        fn drop(&mut self) {
+            let _ = terminal::disable_raw_mode();
         }
     }
+    if terminal::enable_raw_mode().is_err() {
+        return default;
+    }
+    let guard = RawGuard;
+
+    let mut out = std::io::stdout();
+    // \r\n everywhere: raw mode turns off LF→CRLF translation.
+    let _ = write!(
+        out,
+        "Choose AI agent (↑/↓ to move, Enter to confirm, Esc for default):\r\n"
+    );
+    let render = |out: &mut std::io::Stdout, idx: usize| {
+        for (i, (_, label)) in OPTIONS.iter().enumerate() {
+            let marker = if i == idx { ">" } else { " " };
+            let _ = write!(out, "{marker} {label}\r\n");
+        }
+        let _ = out.flush();
+    };
+    render(&mut out, idx);
+
+    let selected = loop {
+        match event::read() {
+            Ok(Event::Key(KeyEvent {
+                code,
+                modifiers,
+                kind: KeyEventKind::Press,
+                ..
+            })) => match code {
+                KeyCode::Up => {
+                    idx = if idx == 0 { OPTIONS.len() - 1 } else { idx - 1 };
+                }
+                KeyCode::Down => {
+                    idx = (idx + 1) % OPTIONS.len();
+                }
+                KeyCode::Enter => break OPTIONS[idx].0,
+                KeyCode::Esc => break default,
+                KeyCode::Char('c') if modifiers.contains(KeyModifiers::CONTROL) => {
+                    // Raw mode disables the kernel's SIGINT translation, so
+                    // Ctrl-C reaches us as a keystroke. Restore cooked mode
+                    // before exiting — `process::exit` doesn't run Drops.
+                    drop(guard);
+                    std::process::exit(130);
+                }
+                _ => continue,
+            },
+            Ok(_) => continue,
+            Err(_) => break default,
+        }
+        let _ = execute!(
+            out,
+            cursor::MoveUp(OPTIONS.len() as u16),
+            terminal::Clear(ClearType::FromCursorDown),
+        );
+        render(&mut out, idx);
+    };
+
+    // Collapse the picker's rendered lines into a single summary so the
+    // scrollback stays tidy regardless of how many arrow presses happened.
+    let selected_label = OPTIONS
+        .iter()
+        .find(|(k, _)| *k == selected)
+        .map(|(_, l)| *l)
+        .unwrap_or("codex");
+    let _ = execute!(
+        out,
+        cursor::MoveUp(OPTIONS.len() as u16 + 1),
+        terminal::Clear(ClearType::FromCursorDown),
+    );
+    let _ = write!(out, "Choose AI agent: {selected_label}\r\n");
+    let _ = out.flush();
+
+    selected
 }
 
 /// Runs the doctor and, on a TTY, loops on a failing agent-auth blocker so
@@ -346,10 +682,24 @@ async fn run_doctor_with_auth_gate(paths: &Paths, agent_kind: AgentKind) -> Resu
     }
 }
 
+/// Accepted values for `[logging].level`. The TUI's editable Config tab
+/// already constrains this via an enum picker; the CLI mirrors the same set
+/// so a script can't silently wedge the daemon with e.g. `--log-level foo`
+/// (EnvFilter would reject it on next restart and the daemon wouldn't come
+/// back up).
+const CLI_LOG_LEVELS: &[&str] = &["trace", "debug", "info", "warn", "error"];
+
+pub(crate) fn validate_log_level(level: &str) -> Result<()> {
+    if CLI_LOG_LEVELS.iter().any(|v| v.eq_ignore_ascii_case(level)) {
+        return Ok(());
+    }
+    anyhow::bail!("log level must be one of: {}", CLI_LOG_LEVELS.join(", "))
+}
+
 /// Refuse `http://` URLs that point at non-localhost hosts. Sending the
 /// registration token + receiving the runner secret over cleartext to the
 /// internet would silently leak credentials. Localhost is allowed for dev.
-fn validate_cloud_url(url: &str) -> Result<()> {
+pub(crate) fn validate_cloud_url(url: &str) -> Result<()> {
     let lower = url.to_ascii_lowercase();
     if lower.starts_with("https://") {
         return Ok(());
@@ -372,56 +722,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn parse_agent_input_empty_is_default() {
-        assert_eq!(parse_agent_input(""), AgentInput::UseDefault);
-        assert_eq!(parse_agent_input("   "), AgentInput::UseDefault);
-        assert_eq!(parse_agent_input("\n"), AgentInput::UseDefault);
-        assert_eq!(parse_agent_input("  \t\n"), AgentInput::UseDefault);
-    }
-
-    #[test]
-    fn parse_agent_input_codex_variants() {
-        assert_eq!(parse_agent_input("codex"), AgentInput::Parsed(AgentKind::Codex));
-        assert_eq!(parse_agent_input("CODEX"), AgentInput::Parsed(AgentKind::Codex));
-        assert_eq!(parse_agent_input("  Codex\n"), AgentInput::Parsed(AgentKind::Codex));
-    }
-
-    #[test]
-    fn parse_agent_input_claude_variants() {
-        // CLI spelling, config-file spelling, and shorthand — all map to ClaudeCode.
-        assert_eq!(
-            parse_agent_input("claude-code"),
-            AgentInput::Parsed(AgentKind::ClaudeCode)
-        );
-        assert_eq!(
-            parse_agent_input("claude_code"),
-            AgentInput::Parsed(AgentKind::ClaudeCode)
-        );
-        assert_eq!(
-            parse_agent_input("claude"),
-            AgentInput::Parsed(AgentKind::ClaudeCode)
-        );
-        assert_eq!(
-            parse_agent_input("CLAUDE-CODE"),
-            AgentInput::Parsed(AgentKind::ClaudeCode)
-        );
-        assert_eq!(
-            parse_agent_input("  Claude_Code  "),
-            AgentInput::Parsed(AgentKind::ClaudeCode)
-        );
-    }
-
-    #[test]
-    fn parse_agent_input_unknown_values() {
-        // Typos and adjacent names ⇒ Unknown, so the caller can re-prompt
-        // instead of bailing out of `pidash configure`.
-        assert_eq!(parse_agent_input("nope"), AgentInput::Unknown);
-        assert_eq!(parse_agent_input("codexx"), AgentInput::Unknown);
-        assert_eq!(parse_agent_input("anthropic"), AgentInput::Unknown);
-        assert_eq!(parse_agent_input("gpt"), AgentInput::Unknown);
-    }
-
-    #[test]
     fn resolve_agent_kind_flag_wins_over_existing() {
         // We can't assert the TTY branch from a unit test, but we can assert
         // that an explicit `--agent` flag bypasses both the prompt and the
@@ -430,5 +730,44 @@ mod tests {
         let got = resolve_agent_kind(Some(AgentKind::Codex), Some(AgentKind::ClaudeCode));
         assert_eq!(got, AgentKind::Codex);
     }
-}
 
+    #[test]
+    fn validate_log_level_accepts_canonical_values() {
+        for lvl in ["trace", "debug", "info", "warn", "error"] {
+            assert!(
+                validate_log_level(lvl).is_ok(),
+                "expected {lvl:?} to validate"
+            );
+        }
+    }
+
+    #[test]
+    fn validate_log_level_case_insensitive() {
+        assert!(validate_log_level("DEBUG").is_ok());
+        assert!(validate_log_level("Info").is_ok());
+    }
+
+    #[test]
+    fn validate_log_level_rejects_garbage() {
+        let err = validate_log_level("chatty").unwrap_err().to_string();
+        assert!(
+            err.contains("trace") && err.contains("error"),
+            "error should list allowed values, got: {err}"
+        );
+    }
+
+    #[test]
+    fn validate_cloud_url_rejects_non_localhost_http() {
+        let err = validate_cloud_url("http://evil.example.com")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("cleartext"));
+    }
+
+    #[test]
+    fn validate_cloud_url_allows_https_and_localhost_http() {
+        assert!(validate_cloud_url("https://cloud.pidash.so").is_ok());
+        assert!(validate_cloud_url("http://localhost:3000").is_ok());
+        assert!(validate_cloud_url("http://127.0.0.1:3000").is_ok());
+    }
+}

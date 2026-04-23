@@ -50,12 +50,4 @@ impl TuiIpc {
             other => anyhow::bail!("unexpected: {other:?}"),
         }
     }
-
-    pub async fn config(&self) -> Result<serde_json::Value> {
-        let mut c = Client::connect(&self.socket).await?;
-        match c.call(Request::ConfigGet).await? {
-            Response::Config(v) => Ok(v),
-            other => anyhow::bail!("unexpected: {other:?}"),
-        }
-    }
 }

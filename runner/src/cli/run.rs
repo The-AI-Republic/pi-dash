@@ -38,8 +38,9 @@ pub async fn run(args: Args, paths: &Paths) -> Result<()> {
         );
     }
 
-    let (config, creds) = crate::config::file::load_all(paths)
-        .context("failed to load runner config; re-run `pidash configure` if the files are corrupt")?;
+    let (config, creds) = crate::config::file::load_all(paths).context(
+        "failed to load runner config; re-run `pidash configure` if the files are corrupt",
+    )?;
     tracing::info!(
         runner = %config.runner.name,
         runner_id = %creds.runner_id,

@@ -46,18 +46,15 @@ pub struct Cli {
     pub data_dir: Option<std::path::PathBuf>,
 
     /// Log level filter (trace|debug|info|warn|error).
-    #[arg(
-        long,
-        global = true,
-        env = "PIDASH_LOG",
-        default_value = "info"
-    )]
+    #[arg(long, global = true, env = "PIDASH_LOG", default_value = "info")]
     pub log: String,
 }
 
 #[derive(Debug, Subcommand)]
 pub enum Command {
-    /// Register with Pi Dash cloud using a one-time token.
+    /// Register with Pi Dash cloud, edit config fields, or open the Config
+    /// tab of `pidash tui`. Aliased as `config` / `c`.
+    #[command(alias = "config", alias = "c")]
     Configure(configure::Args),
 
     /// Install the OS service (systemd user unit / launchd agent).

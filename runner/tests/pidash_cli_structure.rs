@@ -22,14 +22,7 @@ fn subcommand_names() -> Vec<String> {
 #[test]
 fn top_level_service_verbs_are_registered() {
     let names = subcommand_names();
-    for v in [
-        "install",
-        "uninstall",
-        "start",
-        "stop",
-        "restart",
-        "status",
-    ] {
+    for v in ["install", "uninstall", "start", "stop", "restart", "status"] {
         assert!(
             names.contains(&v.to_string()),
             "missing top-level subcommand: {v} (present: {names:?})",

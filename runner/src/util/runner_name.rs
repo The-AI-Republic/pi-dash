@@ -19,8 +19,7 @@ const MAX_LEN: usize = 128;
 /// The 62-char alphabet used for the random suffix. No underscore or dash
 /// because the suffix is cosmetic — keeping it purely alphanumeric avoids
 /// awkward names like `pidash_runner_---`.
-const SUFFIX_CHARSET: &[u8] =
-    b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+const SUFFIX_CHARSET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
 
 const SUFFIX_LEN: usize = 3;
 
@@ -132,10 +131,7 @@ mod tests {
     fn generated_default_has_expected_shape() {
         for _ in 0..100 {
             let name = generate_default();
-            assert!(
-                name.starts_with("pidash_runner_"),
-                "missing prefix: {name}"
-            );
+            assert!(name.starts_with("pidash_runner_"), "missing prefix: {name}");
             assert_eq!(
                 name.len(),
                 "pidash_runner_".len() + SUFFIX_LEN,
@@ -143,12 +139,13 @@ mod tests {
             );
             // Every generated default must pass the validator — otherwise the
             // cloud would reject our own output.
-            assert!(validate(&name).is_ok(), "generated name failed validation: {name}");
+            assert!(
+                validate(&name).is_ok(),
+                "generated name failed validation: {name}"
+            );
             let suffix = &name["pidash_runner_".len()..];
             assert!(
-                suffix
-                    .chars()
-                    .all(|c| c.is_ascii_alphanumeric()),
+                suffix.chars().all(|c| c.is_ascii_alphanumeric()),
                 "suffix must be alphanumeric only: {suffix}"
             );
         }
