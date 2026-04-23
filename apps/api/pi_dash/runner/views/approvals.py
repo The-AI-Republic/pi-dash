@@ -27,8 +27,9 @@ class ApprovalListEndpoint(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
+        # Approvals are routed to the run creator (decision #6, design §5.2).
         qs = (
-            ApprovalRequest.objects.filter(agent_run__owner=request.user)
+            ApprovalRequest.objects.filter(agent_run__created_by=request.user)
             .filter(status=ApprovalStatus.PENDING)
             .order_by("-requested_at")[:200]
         )
@@ -51,7 +52,7 @@ class ApprovalDecideEndpoint(APIView):
                 approval = (
                     ApprovalRequest.objects.select_for_update()
                     .select_related("agent_run", "agent_run__runner")
-                    .get(id=approval_id, agent_run__owner=request.user)
+                    .get(id=approval_id, agent_run__created_by=request.user)
                 )
             except ApprovalRequest.DoesNotExist:
                 return Response(

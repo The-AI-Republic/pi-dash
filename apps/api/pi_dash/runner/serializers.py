@@ -11,6 +11,7 @@ from pi_dash.runner.models import (
     ApprovalKind,
     ApprovalRequest,
     ApprovalStatus,
+    Pod,
     Runner,
     RunnerRegistrationToken,
 )
@@ -27,7 +28,50 @@ RUNNER_NAME_CHARSET = RegexValidator(
 )
 
 
+class PodSerializer(serializers.ModelSerializer):
+    runner_count = serializers.SerializerMethodField()
+
+    class Meta:
+        model = Pod
+        fields = [
+            "id",
+            "name",
+            "description",
+            "is_default",
+            "workspace",
+            "created_by",
+            "runner_count",
+            "created_at",
+            "updated_at",
+        ]
+        read_only_fields = [
+            "id",
+            "is_default",
+            "workspace",
+            "created_by",
+            "runner_count",
+            "created_at",
+            "updated_at",
+        ]
+
+    def get_runner_count(self, pod: Pod) -> int:
+        # `runners` related_name; we count active (non-revoked) runners for
+        # the UI's "N runners" badge.
+        return pod.runners.exclude(status="revoked").count()
+
+
+class PodMiniSerializer(serializers.ModelSerializer):
+    """Compact nested representation of a pod for embedding in other rows."""
+
+    class Meta:
+        model = Pod
+        fields = ["id", "name", "is_default"]
+        read_only_fields = fields
+
+
 class RunnerSerializer(serializers.ModelSerializer):
+    pod_detail = PodMiniSerializer(source="pod", read_only=True)
+
     class Meta:
         model = Runner
         fields = [
@@ -40,10 +84,26 @@ class RunnerSerializer(serializers.ModelSerializer):
             "protocol_version",
             "capabilities",
             "last_heartbeat_at",
+            "owner",
+            "pod",
+            "pod_detail",
             "created_at",
             "updated_at",
         ]
-        read_only_fields = fields
+        read_only_fields = [
+            "id",
+            "status",
+            "os",
+            "arch",
+            "runner_version",
+            "protocol_version",
+            "capabilities",
+            "last_heartbeat_at",
+            "owner",
+            "pod_detail",
+            "created_at",
+            "updated_at",
+        ]
 
 
 class RegistrationTokenSerializer(serializers.ModelSerializer):
@@ -84,6 +144,8 @@ class RegistrationResponseSerializer(serializers.Serializer):
 
 
 class AgentRunSerializer(serializers.ModelSerializer):
+    pod_detail = PodMiniSerializer(source="pod", read_only=True)
+
     class Meta:
         model = AgentRun
         fields = [
@@ -93,6 +155,10 @@ class AgentRunSerializer(serializers.ModelSerializer):
             "thread_id",
             "runner",
             "work_item",
+            "pod",
+            "pod_detail",
+            "created_by",
+            "owner",
             "created_at",
             "assigned_at",
             "started_at",

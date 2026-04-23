@@ -63,9 +63,23 @@ def issue(workspace, project, states, create_user):
 @pytest.fixture(autouse=True)
 def no_runner_dispatch(monkeypatch):
     """Every test in this file exercises orchestration logic, not the runner
-    fan-out. Stub the dispatcher so tests don't need a Redis."""
-    monkeypatch.setattr(service, "_dispatch_to_runner", mock.Mock())
-    return service._dispatch_to_runner
+    fan-out. Stub the post-commit drain so tests don't need a Redis.
+
+    After Phase 3 of the pod design, `_dispatch_to_runner` was replaced with
+    a `transaction.on_commit(drain_pod_by_id)` call inside
+    `_create_and_dispatch_run`. We patch the matcher entry point and also
+    force `transaction.on_commit` to fire immediately so the call is
+    observable to the test.
+    """
+    from pi_dash.runner.services import matcher
+
+    drain_mock = mock.Mock()
+    monkeypatch.setattr(matcher, "drain_pod_by_id", drain_mock)
+    monkeypatch.setattr(
+        "django.db.transaction.on_commit",
+        lambda fn, **kw: fn(),
+    )
+    return drain_mock
 
 
 @pytest.mark.unit

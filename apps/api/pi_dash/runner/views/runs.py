@@ -16,17 +16,44 @@ from pi_dash.runner.serializers import (
     AgentRunSerializer,
 )
 from pi_dash.runner.services import matcher
+from pi_dash.runner.services.permissions import (
+    is_workspace_admin,
+    is_workspace_member,
+)
 from pi_dash.runner.services.pubsub import send_to_runner
+from pi_dash.runner.services.validation import (
+    RunCreationError,
+    validate_run_creation,
+)
+
+
+def _can_view_run(user, run: AgentRun) -> bool:
+    """View is allowed for the creator, the runner's owner, or a workspace admin."""
+    if run.created_by_id == user.id:
+        return True
+    if run.runner_id is not None and run.runner.owner_id == user.id:
+        return True
+    return is_workspace_admin(user, run.workspace_id)
+
+
+def _can_cancel_run(user, run: AgentRun) -> bool:
+    """Cancellation is permitted for the same set as view."""
+    return _can_view_run(user, run)
 
 
 class AgentRunListEndpoint(APIView):
-    """Create a new run from a work item, or list the authenticated user's runs."""
+    """List the caller's runs, or create a new one."""
 
     authentication_classes = [BaseSessionAuthentication]
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
-        qs = AgentRun.objects.filter(owner=request.user).order_by("-created_at")
+        # "My runs" — the runs the caller created. Workspace-scoped views are
+        # available to admins via the workspace listing once we add it; for
+        # MVP, list-by-creator is enough.
+        qs = AgentRun.objects.filter(created_by=request.user).order_by(
+            "-created_at"
+        )
         workspace_id = request.query_params.get("workspace")
         if workspace_id:
             qs = qs.filter(workspace_id=workspace_id)
@@ -35,48 +62,41 @@ class AgentRunListEndpoint(APIView):
     def post(self, request):
         prompt = request.data.get("prompt")
         workspace_id = request.data.get("workspace")
-        if not prompt or not workspace_id:
+        if not prompt:
             return Response(
-                {"error": "prompt and workspace are required"},
+                {"error": "prompt is required"},
                 status=status.HTTP_400_BAD_REQUEST,
             )
-        chosen_id = None
+
+        try:
+            ctx = validate_run_creation(
+                request.user,
+                workspace_id,
+                work_item_id=request.data.get("work_item"),
+                pod_id=request.data.get("pod"),
+            )
+        except RunCreationError as exc:
+            return Response(
+                {"error": exc.message, "code": exc.code},
+                status=exc.status,
+            )
+
         with transaction.atomic():
             run = AgentRun.objects.create(
-                owner=request.user,
-                workspace_id=workspace_id,
+                workspace_id=ctx.workspace_id,
+                created_by=ctx.created_by,
+                pod=ctx.pod,
                 prompt=prompt,
                 run_config=request.data.get("run_config") or {},
                 required_capabilities=request.data.get("required_capabilities") or [],
-                work_item_id=request.data.get("work_item"),
+                work_item_id=ctx.work_item_id,
+                # Owner stays NULL until assignment (design §5.3).
             )
-            chosen = matcher.select_runner_for_run(run)
-            if chosen is not None:
-                run.runner = chosen
-                run.status = AgentRunStatus.ASSIGNED
-                run.assigned_at = timezone.now()
-                run.save(update_fields=["runner", "status", "assigned_at"])
-                chosen_id = chosen.id
-                assign_msg = {
-                    "v": 1,
-                    "type": "assign",
-                    "run_id": str(run.id),
-                    "work_item_id": (
-                        str(run.work_item_id) if run.work_item_id else None
-                    ),
-                    "prompt": run.prompt,
-                    "repo_url": run.run_config.get("repo_url"),
-                    "repo_ref": run.run_config.get("repo_ref"),
-                    "expected_codex_model": run.run_config.get("model"),
-                    "approval_policy_overrides": run.run_config.get(
-                        "approval_policy_overrides"
-                    ),
-                    "deadline": None,
-                }
-        # Push over the WS only after the row is committed — otherwise the
-        # daemon could ack before the DB is visible to other processes.
-        if chosen_id is not None:
-            send_to_runner(chosen_id, assign_msg)
+
+        # Drain the pod's queue — assigns this run (or any predecessor) to
+        # an idle runner if one exists. Non-blocking on commit.
+        matcher.drain_pod(ctx.pod)
+        run.refresh_from_db()
         return Response(
             AgentRunSerializer(run).data,
             status=status.HTTP_201_CREATED,
@@ -88,10 +108,11 @@ class AgentRunDetailEndpoint(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request, run_id):
-        try:
-            run = AgentRun.objects.get(id=run_id, owner=request.user)
-        except AgentRun.DoesNotExist:
+        run = AgentRun.objects.filter(id=run_id).first()
+        if run is None:
             return Response({"error": "not found"}, status=status.HTTP_404_NOT_FOUND)
+        if not _can_view_run(request.user, run):
+            return Response({"error": "forbidden"}, status=status.HTTP_403_FORBIDDEN)
         include_events = request.query_params.get("include_events") == "1"
         payload = AgentRunSerializer(run).data
         if include_events:
@@ -105,10 +126,11 @@ class AgentRunCancelEndpoint(APIView):
     permission_classes = [IsAuthenticated]
 
     def post(self, request, run_id):
-        try:
-            run = AgentRun.objects.get(id=run_id, owner=request.user)
-        except AgentRun.DoesNotExist:
+        run = AgentRun.objects.filter(id=run_id).first()
+        if run is None:
             return Response({"error": "not found"}, status=status.HTTP_404_NOT_FOUND)
+        if not _can_cancel_run(request.user, run):
+            return Response({"error": "forbidden"}, status=status.HTTP_403_FORBIDDEN)
         if run.is_terminal:
             return Response(
                 {"error": "run already terminal"},

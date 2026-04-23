@@ -452,6 +452,13 @@ class RunnerConsumer(AsyncJsonWebsocketConsumer):
             updates["error"] = (msg.get("detail") or "")[:16000]
         AgentRun.objects.filter(id=run_id, runner=runner).update(**updates)
 
+        # The runner just freed up — drain its pod so any QUEUED runs in the
+        # same pod can move to it. See design §6.3 (drain triggers).
+        if runner.pod_id is not None:
+            from pi_dash.runner.services.matcher import drain_pod_by_id
+
+            drain_pod_by_id(runner.pod_id)
+
     # ---- misc ----
 
     def _header(self, name: str) -> Optional[str]:
