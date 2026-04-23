@@ -299,6 +299,15 @@ export default {
         offline: "offline",
         revoked: "revoked",
       },
+      columns_pod: "Pod",
+    },
+    pods: {
+      title: "Pods",
+      help: "Pods group your runners. Issues delegate to a pod, and any free runner inside picks up the work.",
+      empty: "No pods yet — your workspace pod will appear here.",
+      default_badge: "default",
+      runner_count: "{count} runner(s)",
+      load_failed: "Failed to load pods",
     },
     runs: {
       columns: {

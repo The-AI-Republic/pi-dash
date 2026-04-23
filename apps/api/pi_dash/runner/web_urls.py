@@ -12,6 +12,8 @@ from pi_dash.runner.views import (
     AgentRunListEndpoint,
     ApprovalDecideEndpoint,
     ApprovalListEndpoint,
+    PodDetailEndpoint,
+    PodListEndpoint,
     RegistrationTokenCreateEndpoint,
     RunnerDetailEndpoint,
     RunnerListEndpoint,
@@ -35,6 +37,14 @@ urlpatterns = [
         RunnerRevokeEndpoint.as_view(),
         name="runner-revoke",
     ),
+    # Pods
+    path("pods/", PodListEndpoint.as_view(), name="pod-list"),
+    path(
+        "pods/<uuid:pod_id>/",
+        PodDetailEndpoint.as_view(),
+        name="pod-detail",
+    ),
+    # Runs
     path("runs/", AgentRunListEndpoint.as_view(), name="runner-runs"),
     path(
         "runs/<uuid:run_id>/",

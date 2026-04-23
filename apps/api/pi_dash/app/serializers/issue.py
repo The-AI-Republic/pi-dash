@@ -131,6 +131,22 @@ class IssueCreateSerializer(BaseSerializer):
         ):
             raise serializers.ValidationError("Start date cannot exceed target date")
 
+        # assigned_pod must belong to the issue's workspace and be active.
+        # See .ai_design/issue_runner/design.md §4.4 / §8.3.
+        if "assigned_pod" in attrs and attrs["assigned_pod"] is not None:
+            pod = attrs["assigned_pod"]
+            workspace_id = self.context.get("workspace_id")
+            if workspace_id is None and self.instance is not None:
+                workspace_id = self.instance.workspace_id
+            if workspace_id is not None and str(pod.workspace_id) != str(workspace_id):
+                raise serializers.ValidationError(
+                    {"assigned_pod": "pod is in a different workspace"}
+                )
+            if pod.deleted_at is not None:
+                raise serializers.ValidationError(
+                    {"assigned_pod": "pod has been deleted"}
+                )
+
         # Validate description content for security
         if "description_html" in attrs and attrs["description_html"]:
             is_valid, error_msg, sanitized_html = validate_html_content(attrs["description_html"])

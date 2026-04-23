@@ -26,6 +26,14 @@
 >   to reflect soft-delete preconditions; removed vestigial validation bullet
 >   and renamed `_resolve_owner` consistently to `_resolve_fallback_creator`;
 >   added billing-capture and user-deletion tests.
+> - Fresh-install simplification: no production data exists yet, so the
+>   three-stage migration (schema → backfill → tighten) collapses to a
+>   single initial schema migration. Decision #7 (opt-in cooperation) is
+>   removed — there's nothing to migrate from. New decision: every workspace
+>   auto-creates a default pod named `<workspace.name>-pod` on creation, so
+>   the first-run experience requires zero pod setup. Runner registration
+>   and issue creation both default to the workspace pod when unspecified.
+>   Soft-delete now guards against removing the last pod of a workspace.
 
 ## 1. Goal
 
@@ -52,20 +60,21 @@
 
 Carried over from prior conversations; several reframed to match the new model.
 
-| #   | Question                                              | Decision                                                                                                                                                                                                                                                                                                                                                                                    | Source                                     |
-| --- | ----------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------ |
-| 1   | Whose runner pool does "default" draw from?           | Reframed: it's the workspace's default pod. No personal pool.                                                                                                                                                                                                                                                                                                                               | revised                                    |
-| 2   | Pinned pod's runners all busy at run time?            | Queue the run in the pod's queue. Drain on runner completion.                                                                                                                                                                                                                                                                                                                               | earlier "trust the runner to queue"        |
-| 3   | Pod deleted / all runners in pod revoked?             | Pods are **soft-deleted** (see decision #11), so `Issue.assigned_pod` FKs remain valid. On soft-delete, the same transaction explicitly sweeps pointing issues to `assigned_pod=NULL`, re-defaults at next run creation, and notifies creators. No `SET_NULL` FK behavior is relied on.                                                                                                     | earlier revoke policy, reconciled with #11 |
-| 4   | Backfill existing issues?                             | No. `Issue.assigned_pod` nullable, existing rows stay NULL.                                                                                                                                                                                                                                                                                                                                 | earlier                                    |
-| 5   | Billing (who pays for tokens/compute)?                | **Runner owner.** Digital-employee metaphor: each agent has a cost center attached to its operator. Deferred implementation; design keeps the hook explicit.                                                                                                                                                                                                                                | new                                        |
-| 6   | Approvals routing (runner asks before write/network)? | **Run creator** approves per-run. Runner owner retains revoke-any-time as the circuit breaker.                                                                                                                                                                                                                                                                                              | new                                        |
-| 7   | Cross-user runners on upgrade — silent or opt-in?     | **Opt-in.** Migration creates one personal pod per existing runner-owner containing only their runners; a shared workspace pod must be explicitly created. No silent privilege escalation.                                                                                                                                                                                                  | new                                        |
-| 8   | Workspace admin role                                  | Reuse `WorkspaceMember.role=20 (Admin)` at `apps/api/pi_dash/db/models/workspace.py:19`.                                                                                                                                                                                                                                                                                                    | verified                                   |
-| 9   | Run identity — `owner` vs `created_by`?               | Introduce `AgentRun.created_by` as a **non-null** FK to User, set at every creation path. **All permission checks migrate to `created_by`**: list, detail, cancel, approval list/decide. `AgentRun.owner` is retired from permission logic and semantically reinterpreted as "billable party" — populated as `runner.owner` at assignment time (nullable until assigned).                   | codex-feedback                             |
-| 10  | Runner revocation and in-flight runs                  | Revocation must **synchronously finalize** all non-terminal runs belonging to the revoked runner. Current `Runner.revoke()` only flips the runner row; design adds explicit cancellation of active `AgentRun` rows in the same transaction. Without this, runs stay `ASSIGNED/RUNNING` forever after a force-close.                                                                         | codex-feedback                             |
-| 11  | Pod deletion vs. AgentRun history                     | **Soft-delete pods**: add `Pod.deleted_at` + `objects` manager that filters it out. Pod rows are never physically deleted, so `AgentRun.pod` FK stays valid and historical attribution is preserved. Deletion requires (a) zero runners in the pod AND (b) zero non-terminal `AgentRun` rows in the pod. Issues pointing at a soft-deleted pod get their `assigned_pod` cleared (see §7.2). | codex-feedback                             |
-| 12  | Direct run-creation endpoint — workspace validation   | `POST /api/v1/runner/runs/` **must** validate, before creation: (a) caller is a `WorkspaceMember` of `workspace_id` (403 otherwise), (b) `work_item.workspace_id == workspace_id` if `work_item` provided (400), (c) `pod.workspace_id == workspace_id` if pod is derived/passed (400), (d) caller has at least Member role in the workspace.                                               | codex-feedback                             |
+| #   | Question                                              | Decision                                                                                                                                                                                                                                                                                                                                                                                                                | Source                                     |
+| --- | ----------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------ |
+| 1   | Whose runner pool does "default" draw from?           | Reframed: it's the workspace's default pod. No personal pool.                                                                                                                                                                                                                                                                                                                                                           | revised                                    |
+| 2   | Pinned pod's runners all busy at run time?            | Queue the run in the pod's queue. Drain on runner completion.                                                                                                                                                                                                                                                                                                                                                           | earlier "trust the runner to queue"        |
+| 3   | Pod deleted / all runners in pod revoked?             | Pods are **soft-deleted** (see decision #11), so `Issue.assigned_pod` FKs remain valid. On soft-delete, the same transaction explicitly sweeps pointing issues to `assigned_pod=NULL`, re-defaults at next run creation, and notifies creators. No `SET_NULL` FK behavior is relied on.                                                                                                                                 | earlier revoke policy, reconciled with #11 |
+| 4   | Backfill existing issues?                             | No. `Issue.assigned_pod` nullable, existing rows stay NULL.                                                                                                                                                                                                                                                                                                                                                             | earlier                                    |
+| 5   | Billing (who pays for tokens/compute)?                | **Runner owner.** Digital-employee metaphor: each agent has a cost center attached to its operator. Deferred implementation; design keeps the hook explicit.                                                                                                                                                                                                                                                            | new                                        |
+| 6   | Approvals routing (runner asks before write/network)? | **Run creator** approves per-run. Runner owner retains revoke-any-time as the circuit breaker.                                                                                                                                                                                                                                                                                                                          | new                                        |
+| 7   | Fresh-install rollout (no production data exists)     | **Zero-setup default pod.** On workspace creation, the backend auto-creates a pod named `<workspace.name>-pod` with `is_default=True`. Runner registration defaults to the workspace pod when no pod is specified. Issue creation auto-fills `assigned_pod = workspace.default_pod`. First-time users never touch pod UI to get a working delegation flow. No migration of legacy data is required because none exists. | new, supersedes the earlier opt-in plan    |
+| 8   | Workspace admin role                                  | Reuse `WorkspaceMember.role=20 (Admin)` at `apps/api/pi_dash/db/models/workspace.py:19`.                                                                                                                                                                                                                                                                                                                                | verified                                   |
+| 9   | Run identity — `owner` vs `created_by`?               | Introduce `AgentRun.created_by` as a **non-null** FK to User, set at every creation path. **All permission checks migrate to `created_by`**: list, detail, cancel, approval list/decide. `AgentRun.owner` is retired from permission logic and semantically reinterpreted as "billable party" — populated as `runner.owner` at assignment time (nullable until assigned).                                               | codex-feedback                             |
+| 10  | Runner revocation and in-flight runs                  | Revocation must **synchronously finalize** all non-terminal runs belonging to the revoked runner. Current `Runner.revoke()` only flips the runner row; design adds explicit cancellation of active `AgentRun` rows in the same transaction. Without this, runs stay `ASSIGNED/RUNNING` forever after a force-close.                                                                                                     | codex-feedback                             |
+| 11  | Pod deletion vs. AgentRun history                     | **Soft-delete pods**: add `Pod.deleted_at` + `objects` manager that filters it out. Pod rows are never physically deleted, so `AgentRun.pod` FK stays valid and historical attribution is preserved. Deletion requires (a) zero runners in the pod AND (b) zero non-terminal `AgentRun` rows in the pod. Issues pointing at a soft-deleted pod get their `assigned_pod` cleared (see §7.2).                             | codex-feedback                             |
+| 12  | Direct run-creation endpoint — workspace validation   | `POST /api/v1/runner/runs/` **must** validate, before creation: (a) caller is a `WorkspaceMember` of `workspace_id` (403 otherwise), (b) `work_item.workspace_id == workspace_id` if `work_item` provided (400), (c) `pod.workspace_id == workspace_id` if pod is derived/passed (400), (d) caller has at least Member role in the workspace.                                                                           | codex-feedback                             |
+| 13  | Every workspace has at least one pod (invariant)      | Workspace creation auto-creates a default pod (decision #7). Soft-deletion of a pod is blocked if it's the workspace's last active pod — admin must create a replacement first. This invariant lets every downstream code path (issue creation, runner registration, dispatch) assume `workspace.default_pod` is always resolvable without a null-check fallback.                                                       | new                                        |
 
 ## 4. Data Model
 
@@ -143,12 +152,12 @@ pod = models.ForeignKey(
     "runner.Pod",
     on_delete=models.PROTECT,
     related_name="runners",
-    null=True,   # Temporarily nullable for migration. Backfilled then tightened.
+    null=False,   # Every runner belongs to exactly one pod. Enforced at DB level.
 )
 ```
 
-- `on_delete=PROTECT`: deleting a pod with runners requires moving or revoking them first. Prevents accidental orphaning.
-- After the migration completes, set `null=False` in a follow-up migration.
+- `on_delete=PROTECT`: deleting (soft-deleting) a pod with runners is blocked; admin must move or revoke them first.
+- `null=False` from the start — there's no legacy data to backfill. Registration flow resolves a pod before insert (defaulting to `workspace.default_pod` when none is explicitly requested).
 - **`owner` stays** — it continues to mean "responsible human for this specific runner instance" (billing, revoke). It no longer gates usage.
 - Name uniqueness changes from `(workspace, name)` to `(pod, name)` — so two pods in the same workspace can each have a runner named "mac-mini". Tradeoff: human-friendly addressing via `(workspace, name)` is less direct, but pod scope is the natural namespace.
 
@@ -175,7 +184,7 @@ owner = models.ForeignKey(
 pod = models.ForeignKey(
     "runner.Pod",
     on_delete=models.PROTECT,  # See §7.2 — pods are soft-deleted so the FK is always safe.
-    null=True,                 # Nullable only for legacy rows; new rows must resolve a pod before insert.
+    null=False,                # Every run belongs to a pod. Resolved before insert (§6.5).
     related_name="agent_runs",
 )
 
@@ -190,7 +199,7 @@ created_by = models.ForeignKey(
 )
 ```
 
-- `pod` is set at run creation. Derived from `issue.assigned_pod` when the run was triggered by an issue, or from `workspace.default_pod` if the issue has no pin, or from an explicit `pod` parameter when directly POSTed. **Never null for new rows**: if resolution fails, run creation fails and no `AgentRun` row is inserted (see validation §6.5 and orchestration behavior §6.4). `on_delete=PROTECT` is safe because pods are soft-deleted, not physically removed.
+- `pod` is set at run creation. Derived from `issue.assigned_pod` when the run was triggered by an issue, or from `workspace.default_pod` if the issue has no pin, or from an explicit `pod` parameter when directly POSTed. Because every workspace has a default pod (invariant #13), resolution effectively never fails in normal operation — the `no pod available` path in §6.5 remains as a defense-in-depth guard for pathological states (e.g. all workspace pods soft-deleted by an admin, which §7.2 blocks). `on_delete=PROTECT` is safe because pods are soft-deleted, not physically removed.
 - The run's queue position is implicitly `pod` × `status=QUEUED` × `created_at`.
 - `runner` FK is still nullable; it's populated only when a runner actually picks up the run.
 
@@ -220,10 +229,10 @@ assigned_pod = models.ForeignKey(
 )
 ```
 
-- Nullable. NULL means "use the workspace default pod at run time" (or fail with "no pod available" if no default exists).
-- Auto-populated at issue creation to `workspace.default_pod` if one exists. No per-user default logic.
+- Nullable. NULL means "use the workspace default pod at run time."
+- Auto-populated at issue creation to `workspace.default_pod`. Because invariant #13 guarantees every workspace has a default pod, this always resolves to a concrete pod on new issues.
 - User can change on the issue detail page; choice restricted to non-soft-deleted pods in the issue's workspace.
-- When a pinned pod is soft-deleted (see §7.2), pointing issues are swept to `assigned_pod=NULL` in the same transaction as the soft-delete, and their creators are notified.
+- When a pinned pod is soft-deleted (see §7.2), pointing issues are swept to `assigned_pod=NULL` in the same transaction as the soft-delete, and their creators are notified. The next run creation re-resolves to `workspace.default_pod`.
 
 ## 5. Permission Model
 
@@ -275,7 +284,7 @@ def is_workspace_admin(user, workspace_id) -> bool:
 
 - **At creation**: `owner = NULL`. This requires changing the field to `null=True, blank=True`; the field is no longer written by views or the orchestrator.
 - **At assignment (inside `drain_pod`)**: `owner = runner.owner` — the assigned runner's administrative operator, captured for billing attribution. This is set in the same write that sets `run.runner` and `run.status = ASSIGNED` (see §6.3 code block); no background task is involved.
-- **Legacy rows**: a one-time data migration backfills `created_by` from the existing `owner` value (under the old model, `owner` was always the triggering user, so this is an accurate interpretation for historical rows). `owner` on legacy rows is left alone.
+- **Legacy rows**: pi-dash has no production data, so there's no backfill to run. The `AgentRun.created_by` field is `NOT NULL` from migration day 1 because every future row sets it. In an environment with legacy data, a separate data migration would copy `owner → created_by` for historical rows (under the old model, `owner` was always the triggering user, so this would be an accurate interpretation) — out of scope here.
 - **Why not reuse `owner`**: the old `owner` semantic conflated two identities (run creator vs. billable party). Once runners become workspace-shared, these diverge — creator = who typed the prompt; billable party = whose machine ran it. The split is structural, not cosmetic.
 
 > Removed: the earlier draft mentioned a nightly background task as an alternative billing-capture path. Rejected because (a) it doubles the write for every run, (b) it leaves a window where `owner` is NULL and billing is ambiguous, and (c) `drain_pod` already has the transaction and the data. Assignment-time capture is strictly better.
@@ -386,8 +395,22 @@ A shared helper `validate_run_creation(user, workspace_id, work_item_id, pod_id)
 
 ### 7.1 Pod creation
 
-- Admin calls `POST /api/v1/workspaces/<id>/pods/` with `name`, `description`.
-- First created pod in a workspace is marked `is_default=True` automatically. Subsequent pods are non-default unless the admin explicitly toggles.
+Two pod-creation paths:
+
+**Automatic — on workspace creation** (decision #7, invariant #13):
+
+- A `post_save` signal on `Workspace` (or equivalent hook in the workspace-creation view) fires when `created=True`. If the workspace has zero pods, the handler inserts one row:
+  - `name = f"{workspace.name}-pod"`
+  - `description = "Auto-created default pod. Rename or add more pods anytime."`
+  - `is_default = True`
+  - `created_by = workspace.owner` (or the workspace-creator user)
+- The signal is idempotent: if a pod already exists (e.g. fixtures seeded one), the handler no-ops. This makes test setup easy.
+- Pod name is taken verbatim from `workspace.name`. Django `CharField(max_length=128)` accommodates workspace names up to 124 characters (`name + "-pod"` fits comfortably since workspace names are capped shorter in practice). If the user creates a second workspace with the same name in a hypothetical edge case, it's a different workspace row with its own pod — names are unique per-workspace only.
+
+**Manual — via API** (admin / power-user flow):
+
+- Admin calls `POST /api/v1/workspaces/<id>/pods/` with `name` and optional `description`.
+- The new pod is **not** marked default. Existing default pod stays default until the admin explicitly toggles via `PATCH` (see §7.3).
 
 ### 7.2 Pod soft-deletion
 
@@ -397,13 +420,16 @@ Per decision #11, pods are **never physically deleted**. The `DELETE` endpoint s
 
 1. `pod.runners.count() == 0` — all runners must be moved to another pod or revoked first. The UI forces a "move or revoke runners" step.
 2. `pod.agent_runs.filter(status__in=NON_TERMINAL_STATUSES).count() == 0` — no active (QUEUED / ASSIGNED / RUNNING / AWAITING_APPROVAL / AWAITING_REAUTH) runs. Prevents the "silently strand QUEUED runs" failure Codex flagged. Operator must cancel or let them complete first.
+3. **Last-pod guard** (invariant #13) — if this is the workspace's only active (non-soft-deleted) pod, deletion is rejected with `{"error": "cannot delete the last pod in a workspace; create a replacement first"}`. Admin must `POST` a new pod before deleting the old one. Keeps every workspace resolvable to a default pod at all times.
 
 **Soft-delete side effects** (same transaction):
 
-1. Clear `is_default` (so the workspace no longer auto-assigns to this pod).
+1. Clear `is_default` (if this was the default pod; the last-pod guard ensures another pod exists and the admin should promote one).
 2. Sweep all `Issue.assigned_pod = pod` → `assigned_pod = NULL`. These issues will use `workspace.default_pod` at next run creation.
 3. Terminal `AgentRun.pod` FKs are left intact — the row is a tombstone, not gone, so historical analytics still resolve.
 4. Fire notification to each affected issue's creator: "Pod _<name>_ was deleted. Issue _<X>_ has been unassigned."
+
+**Interaction with `is_default`**: if the admin soft-deletes the current default pod (permitted because guard #3 confirms another pod exists), the default flag is cleared. The system does **not** auto-promote another pod. A separate `PATCH` call from the admin is required to mark a replacement as default. During the window, `workspace.default_pod` resolves to NULL — which is fine because the `get_default_pod(workspace)` helper falls back to "any active pod in this workspace, oldest first" as a safety net. The admin should promote a real default promptly via UI nudge.
 
 **Restoration**: not exposed in MVP. The schema supports it (clearing `deleted_at` resurrects the row, subject to the conditional unique constraints) but no API endpoint is provided. Mistaken deletion is recovered via DB fixup. Revisit if product demand appears.
 
@@ -490,41 +516,37 @@ def revoke(self) -> None:
 - `RunnerSerializer` adds: `pod` (UUID) and `pod_detail` (nested `{id, name}`).
 - `IssueSerializer` adds: `assigned_pod` (UUID, writeable) and `assigned_pod_detail` (nested, read-only).
 
-## 9. Migration
+## 9. Migration — Initial schema (no legacy data)
 
-Sequencing matters. Four migrations in order.
+pi-dash has no production data yet, so the three-stage migration (nullable → backfill → tighten) that earlier drafts proposed is unnecessary. The design collapses to **two migrations**, one per Django app, both applying final constraints directly.
 
-### 9.1 Schema migration 1 — add Pod model + nullable FKs + AgentRun.created_by (nullable) + AgentRun.owner nullable
+### 9.1 `apps/api/pi_dash/runner/migrations/0004_add_pod_and_run_identity.py`
 
-- Create `pod` table with `deleted_at`.
-- Alter `agent_run.owner_id` to allow `NULL` (semantic change: billable party is unknown until assignment).
-- Add nullable `runner.pod_id`, `agent_run.pod_id`, `issue.assigned_pod_id`, `agent_run.created_by_id`.
+Single schema migration, no `RunPython` step:
 
-### 9.2 Data migration — backfill (decisions #7 and #9: opt-in cooperation + run identity split)
+- Create `pod` table with `deleted_at`, `PodManager`, conditional unique constraints (§4.1).
+- Add `runner.pod_id` as `NOT NULL` FK with `on_delete=PROTECT`. Because no `Runner` rows exist yet, the NOT NULL constraint is satisfied trivially.
+- Add `agent_run.pod_id` as `NOT NULL` FK with `on_delete=PROTECT`.
+- Add `agent_run.created_by_id` as `NOT NULL` FK to `auth_user` with `on_delete=PROTECT`.
+- Alter `agent_run.owner_id` to `NULL=TRUE`, `on_delete=SET_NULL` (decision #9).
+- Drop unique constraint `(workspace, name)` on `runner`; add `(pod, name)`.
 
-For each **(owner, workspace)** tuple that currently has runners:
+### 9.2 `apps/api/pi_dash/db/migrations/0126_issue_assigned_pod.py`
 
-1. Create a pod named `"<Owner Display Name>'s Agents"` (unique within workspace by appending numeric suffix on collision), `deleted_at=NULL`, `is_default=False`.
-2. Move all runners owned by that user in that workspace into this pod.
+- Add `issue.assigned_pod_id` as nullable FK to `runner.Pod` with `on_delete=PROTECT` (§4.4).
 
-Backfill `AgentRun.created_by` from the existing `AgentRun.owner` value for all historical rows. **Rationale**: under the old ownership model, `owner` was always the user who triggered the run (either directly via `runs.py` POST or via `orchestration.service._resolve_owner` → `issue.created_by`). So for historical rows, `owner == created_by` is the correct interpretation. `owner` is left intact for billing continuity.
+### 9.3 Post-migration setup
 
-Existing `agent_run.pod_id` stays NULL. Terminal rows keep their historical runner FK; the NULL pod is acceptable because analytics can derive pod via `agent_run.runner.pod` for assigned runs.
+Nothing required. When the backend starts, any existing workspaces (none in prod; possibly some in dev/test fixtures) can lazily get their default pods via the `post_save` signal on new workspaces. For dev/test fixtures that create workspaces before the signal is wired in, a management command `pi_dash.runner.management.commands.ensure_workspace_pods` idempotently backfills default pods for any workspace that doesn't have one — run it once after deploy in non-prod environments to be safe.
 
-Existing `issue.assigned_pod_id` stays NULL. No backfill.
+### 9.4 First-run behavior
 
-### 9.3 Schema migration 2 — tighten constraints
+- User creates workspace → signal fires → `<workspace.name>-pod` pod created with `is_default=True`.
+- User generates runner registration token → registers runner → runner lands in `workspace.default_pod`.
+- User creates issue → `issue.assigned_pod = workspace.default_pod`.
+- User moves issue to In Progress → dispatcher resolves `assigned_pod`, finds the runner, dispatches work.
 
-- `runner.pod` set `null=False`.
-- `agent_run.created_by` set `null=False` (after backfill in 9.2 ensures every row is populated).
-- `agent_run.owner` remains nullable by design.
-- Update `runner` name uniqueness constraint from `(workspace, name)` to `(pod, name)`.
-
-### 9.4 Upgrade behavior summary
-
-- Day 0 (pre-upgrade): Alice uses only her runners. Bob uses only his. Permission checks key off `AgentRun.owner`.
-- Day 1 (post-upgrade): same behavior. Alice's runners are in "Alice's Agents" pod; Bob's are in "Bob's Agents" pod. Workspace has no default pod, so new issues don't auto-assign. Permission checks now key off `AgentRun.created_by` (backfilled from `owner`, so no behavior change for historical rows). Alice's issues created via the UI may now fail delegation with `"no pod available"` until an admin creates a default/shared pod — we either (a) require admins to create a shared default pod before turning this on, or (b) gate the dispatcher behind a feature flag. **Recommend (a)** with an in-app nudge for admins.
-- Day N: admin creates "Workspace Agents" pod and marks it default. Moves selected runners into it. Issues now auto-assign to the workspace pod; cooperation starts. New runs created under the cooperation model will have `created_by` = run-trigger user and `owner` = runner-owner-at-assignment (different identities).
+Zero pod-related setup required for the golden path. Pods only become visible in UI when the user explicitly navigates to the pod section or the issue's advanced settings.
 
 ## 10. Tests (pytest — matches `rules/python/testing.md`)
 
@@ -546,6 +568,13 @@ Unit — `tests/unit/runner/test_pod.py`:
 - Soft-deleting a pod with non-terminal runs is blocked (409).
 - Soft-deleting a pod with only terminal runs succeeds; `AgentRun.pod` FKs remain intact.
 - Issues pointing at a soft-deleted pod are swept to `assigned_pod=NULL`.
+- **Last-pod guard**: soft-deleting the workspace's only active pod returns 409; soft-deleting when a second pod exists succeeds.
+
+Unit — `tests/unit/runner/test_workspace_signal.py` **(new)**:
+
+- Creating a new `Workspace` auto-creates one pod named `<workspace.name>-pod` with `is_default=True`.
+- Creating a workspace with pre-existing pods (e.g. via fixture) is a no-op — no duplicate default pod.
+- Signal is idempotent: calling `ensure_workspace_pods` management command on a workspace that already has a default pod creates nothing.
 
 Integration — `tests/integration/runner/test_dispatch.py`:
 
@@ -588,12 +617,12 @@ Integration — `tests/integration/runner/test_revocation.py` **(new)**:
 - Revoking the last runner in a non-empty-queue pod → QUEUED runs remain QUEUED; notification fires to each run's `created_by`.
 - Pod drain is re-invoked after revoke so any remaining runners in the pod pick up the work.
 
-Data migration — `tests/integration/runner/test_migration.py`:
+Schema / fresh-install — `tests/integration/runner/test_fresh_install.py` **(replaces the legacy-migration test)**:
 
-- Pre-existing runners from three users in one workspace → three personal pods created, each runner placed correctly.
-- No default pod created.
-- `AgentRun.created_by` backfilled from `AgentRun.owner` for every historical row.
-- `AgentRun.created_by` constraint tightened to NOT NULL after backfill without violating any row.
+- A brand-new workspace has exactly one pod (`<name>-pod`, `is_default=True`) immediately after creation.
+- Registering a runner with no explicit pod lands it in the workspace default pod.
+- Creating an issue with no explicit pod pins it to the workspace default pod.
+- End-to-end: create workspace → register runner → create issue → move to In Progress → run dispatches to runner. No pod UI touched.
 
 ## 11. Open Questions / Deferred
 
@@ -620,14 +649,17 @@ Data migration — `tests/integration/runner/test_migration.py`:
 - `runner/views/pods.py` — **new** CRUD for pods (soft-delete semantics).
 - `runner/serializers.py` — add `PodSerializer`, extend `RunnerSerializer` with `pod`/`pod_detail`, extend `AgentRunSerializer` with `pod` + `created_by` detail; keep `owner` as billable-party read-only.
 - `runner/consumers.py` — `_finalize_run` triggers `drain_pod(runner.pod)` on completion.
+- `runner/signals.py` — **new** `post_save` handler on `Workspace` that creates `<workspace.name>-pod` with `is_default=True` when `created=True` and the workspace has no pods (§7.1).
+- `runner/apps.py` — wire the signal in `ready()`.
+- `runner/management/commands/ensure_workspace_pods.py` — **new** idempotent backfill for dev/test environments where workspaces may have been created before the signal was wired in.
+- `runner/views/register.py` — runner registration resolves `pod` from the request (or falls back to `workspace.default_pod`) and validates the pod belongs to the workspace.
 - `orchestration/service.py` — `_dispatch_to_runner` rewritten to resolve pod and call `drain_pod`. `_create_and_dispatch_run` sets `AgentRun.created_by = actor` (required). `_resolve_owner` becomes `_resolve_fallback_creator` and is used only when `actor is None` on legacy call sites.
 - `db/models/issue.py` — add `assigned_pod`.
 - `space/views/issue.py` — populate default pod on create; accept `assigned_pod` on PATCH with workspace validation and non-deleted pod check.
 - `space/serializers/issue.py` — expose `assigned_pod` + nested detail.
-- Migrations:
-  - `NNNN_add_pod_model.py` — create `pod`, alter `agent_run.owner` to nullable, add nullable FKs (`runner.pod`, `agent_run.pod`, `agent_run.created_by`, `issue.assigned_pod`).
-  - `NNNN_backfill_pods_and_created_by.py` — per-user pods + `AgentRun.created_by` backfill from `owner`.
-  - `NNNN_tighten_constraints.py` — `runner.pod` and `agent_run.created_by` set `NOT NULL`; move runner name uniqueness from `(workspace, name)` to `(pod, name)`.
+- Migrations (two, both with final constraints applied directly — no backfill ceremony because no production data exists):
+  - `apps/api/pi_dash/runner/migrations/0004_add_pod_and_run_identity.py` — create `pod` table; add `runner.pod` (NOT NULL), `agent_run.pod` (NOT NULL), `agent_run.created_by` (NOT NULL); alter `agent_run.owner` to nullable + `SET_NULL`; replace `(workspace, name)` uniqueness on `runner` with `(pod, name)`.
+  - `apps/api/pi_dash/db/migrations/0126_issue_assigned_pod.py` — add `issue.assigned_pod` (nullable).
 - Tests as listed in §10.
 
 ### Frontend (apps/web)
@@ -647,3 +679,4 @@ Specific files deferred until implementation.
 - No change to the runner authentication / registration handshake.
 - No change to the Rust runner binary in this phase.
 - **No change to `AgentRun.owner` semantics on historical rows.** Legacy rows retain whatever value they had; `owner` on new rows becomes the runner-owner-at-assignment (nullable until assigned). All permission logic moves to `created_by` to sidestep the ambiguity rather than rewriting `owner` in place.
+- **No legacy data migration.** pi-dash has no production data; the initial schema migration applies final constraints directly. No `(owner, workspace)`-based personal-pod creation, no `AgentRun.created_by` backfill, no constraint-tightening stage. If this design is later applied to an environment with real data, a separate migration PR would add those stages.

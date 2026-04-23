@@ -9,6 +9,88 @@ from django.db import models
 from django.utils import timezone
 
 
+class PodManager(models.Manager):
+    """Default manager: excludes soft-deleted pods from routine queries.
+
+    Use ``Pod.all_objects`` to include tombstones in admin / audit views.
+    """
+
+    def get_queryset(self):
+        return super().get_queryset().filter(deleted_at__isnull=True)
+
+
+class Pod(models.Model):
+    """A workspace-scoped group of runners that share a work queue.
+
+    See ``.ai_design/issue_runner/design.md`` §4.1.
+    """
+
+    MAX_PER_WORKSPACE = 20
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    workspace = models.ForeignKey(
+        "db.Workspace",
+        on_delete=models.CASCADE,
+        related_name="pods",
+    )
+    name = models.CharField(max_length=128)
+    description = models.CharField(max_length=512, blank=True, default="")
+    created_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="pods_created",
+    )
+    is_default = models.BooleanField(default=False)
+    deleted_at = models.DateTimeField(null=True, blank=True, db_index=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    objects = PodManager()
+    all_objects = models.Manager()
+
+    class Meta:
+        db_table = "pod"
+        ordering = ("-is_default", "created_at")
+        constraints = [
+            models.UniqueConstraint(
+                fields=["workspace", "name"],
+                condition=models.Q(deleted_at__isnull=True),
+                name="pod_unique_name_per_workspace_when_active",
+            ),
+            models.UniqueConstraint(
+                fields=["workspace"],
+                condition=models.Q(is_default=True) & models.Q(deleted_at__isnull=True),
+                name="pod_one_default_per_workspace_when_active",
+            ),
+        ]
+        indexes = [
+            models.Index(
+                fields=["workspace", "is_default"], name="pod_workspc_is_def_idx"
+            ),
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.name} (ws={self.workspace_id})"
+
+    @classmethod
+    def default_for_workspace(cls, workspace) -> "Pod | None":
+        """Return the active default pod for a workspace, or None.
+
+        Every workspace normally has exactly one default pod (invariant #13 in
+        the design doc). Returns None only during the transient window between
+        workspace creation and the post_save signal firing, or when an admin
+        has soft-deleted the default without promoting a replacement.
+        """
+        return cls.default_for_workspace_id(workspace.id)
+
+    @classmethod
+    def default_for_workspace_id(cls, workspace_id) -> "Pod | None":
+        """Same as :meth:`default_for_workspace` but avoids loading the Workspace."""
+        return cls.objects.filter(workspace_id=workspace_id, is_default=True).first()
+
+
 class RunnerStatus(models.TextChoices):
     ONLINE = "online", "Online"
     OFFLINE = "offline", "Offline"
@@ -60,6 +142,13 @@ class Runner(models.Model):
         on_delete=models.CASCADE,
         related_name="runners",
     )
+    # Every runner belongs to exactly one pod (§4.2). PROTECT because pods are
+    # soft-deleted, not physically removed, so this FK is always valid.
+    pod = models.ForeignKey(
+        Pod,
+        on_delete=models.PROTECT,
+        related_name="runners",
+    )
     name = models.CharField(max_length=128)
     # Runner authenticates over WS with a bearer token; we store only its hash.
     credential_hash = models.CharField(max_length=128, db_index=True)
@@ -83,31 +172,90 @@ class Runner(models.Model):
     class Meta:
         db_table = "runner"
         ordering = ("-last_heartbeat_at", "-created_at")
-        # Per-workspace name uniqueness. `(workspace, name)` is the human key
-        # the CLI uses to address a runner; the UUID `id` is the internal
-        # auth identity. See .ai_design/runner_install_ux/ for the rationale.
+        # Per-pod name uniqueness (§4.2). Pod is the natural namespace; the CLI
+        # still addresses runners by name within a pod. Two pods in the same
+        # workspace can each have a runner named "mac-mini".
         constraints = [
             models.UniqueConstraint(
-                fields=["workspace", "name"],
-                name="runner_unique_name_per_workspace",
+                fields=["pod", "name"],
+                name="runner_unique_name_per_pod",
             ),
         ]
         indexes = [
             models.Index(fields=["owner", "status"]),
             models.Index(fields=["workspace", "status"]),
+            models.Index(fields=["pod", "status"], name="runner_pod_status_idx"),
         ]
 
     def __str__(self) -> str:
         return f"{self.name} ({self.owner_id})"
+
+    def save(self, *args, **kwargs):
+        # Auto-resolve pod to workspace default when not explicitly set.
+        # Safe invariant: every workspace has a default pod (§13).
+        # Explicit pod_id=None with a workspace set triggers resolution.
+        if self.pod_id is None and self.workspace_id is not None:
+            default = Pod.default_for_workspace_id(self.workspace_id)
+            if default is not None:
+                self.pod = default
+        super().save(*args, **kwargs)
 
     def mark_heartbeat(self) -> None:
         self.last_heartbeat_at = timezone.now()
         self.save(update_fields=["last_heartbeat_at"])
 
     def revoke(self) -> None:
-        self.status = RunnerStatus.REVOKED
-        self.revoked_at = timezone.now()
-        self.save(update_fields=["status", "revoked_at"])
+        """Mark the runner revoked and synchronously cancel any in-flight runs.
+
+        See ``.ai_design/issue_runner/design.md`` §7.5. Without this, a
+        force-closed runner leaves ``ASSIGNED``/``RUNNING`` rows stranded
+        because ``consumers._finalize_run`` only triggers on runner-sent
+        completion messages that may never arrive after revocation.
+
+        After the transaction commits, the affected pods are re-drained so
+        queued work (if any) attempts to move to remaining online runners in
+        the same pod.
+        """
+        # Imports deferred to avoid a circular dependency (matcher imports
+        # Runner model; Runner.revoke calls into matcher).
+        from django.db import transaction
+        from pi_dash.runner.services.matcher import (
+            NON_TERMINAL_STATUSES,
+            drain_pod_by_id,
+        )
+
+        affected_pod_ids: set = set()
+        with transaction.atomic():
+            now = timezone.now()
+            Runner.objects.filter(pk=self.pk).update(
+                status=RunnerStatus.REVOKED,
+                revoked_at=now,
+            )
+            # Refresh in-memory instance so callers see the new status/timestamp
+            # without an extra query on their side.
+            self.status = RunnerStatus.REVOKED
+            self.revoked_at = now
+
+            active_runs = list(
+                AgentRun.objects.select_for_update()
+                .filter(runner=self, status__in=NON_TERMINAL_STATUSES)
+                .values_list("pk", "pod_id")
+            )
+            if active_runs:
+                AgentRun.objects.filter(
+                    pk__in=[pk for pk, _ in active_runs]
+                ).update(
+                    status=AgentRunStatus.CANCELLED,
+                    ended_at=now,
+                    error="runner revoked",
+                )
+                affected_pod_ids = {pid for _, pid in active_runs if pid is not None}
+
+        # Refire drain for every affected pod once the transaction commits.
+        # Remaining online runners (if any) in the same pod may now pick up
+        # queued work.
+        for pod_id in affected_pod_ids:
+            transaction.on_commit(lambda pid=pod_id: drain_pod_by_id(pid))
 
 
 class RunnerRegistrationToken(models.Model):
@@ -157,9 +305,28 @@ class AgentRun(models.Model):
         on_delete=models.CASCADE,
         related_name="agent_runs",
     )
+    # `owner` = billable party; populated at assignment from runner.owner (§5.3).
+    # Nullable because it's unknown until a runner is assigned. Legacy rows
+    # that had owner pre-set under the old model are unaffected.
     owner = models.ForeignKey(
         settings.AUTH_USER_MODEL,
-        on_delete=models.CASCADE,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="agent_runs",
+    )
+    # `created_by` = the user who triggered the run. Authoritative principal for
+    # list / detail / cancel / approval permissions (decision #9).
+    created_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.PROTECT,
+        related_name="agent_runs_created",
+        null=False,
+    )
+    # Every run belongs to exactly one pod; resolved before insert (§6.5).
+    pod = models.ForeignKey(
+        "runner.Pod",
+        on_delete=models.PROTECT,
         related_name="agent_runs",
     )
     runner = models.ForeignKey(
@@ -210,7 +377,28 @@ class AgentRun(models.Model):
             models.Index(fields=["owner", "status"]),
             models.Index(fields=["workspace", "status"]),
             models.Index(fields=["work_item", "status"]),
+            models.Index(fields=["pod", "status"], name="agent_run_pod_status_idx"),
+            models.Index(
+                fields=["created_by", "status"], name="agent_run_created_status_idx"
+            ),
         ]
+
+    def save(self, *args, **kwargs):
+        # Auto-resolve pod to workspace default when not explicitly set.
+        # Design §4.3: every new run has a pod, resolved at the view layer; the
+        # fallback here keeps direct-ORM callers (tests, management commands)
+        # working as long as the workspace has a default pod.
+        if self.pod_id is None and self.workspace_id is not None:
+            default = Pod.default_for_workspace_id(self.workspace_id)
+            if default is not None:
+                self.pod = default
+        # Back-compat: legacy call sites that set `owner` but not `created_by`
+        # (to be audited and removed in Phase 3). Mirror owner into created_by
+        # so the NOT NULL constraint holds. The design's interpretation for
+        # historical rows is that owner == created_by under the old model.
+        if self.created_by_id is None and self.owner_id is not None:
+            self.created_by_id = self.owner_id
+        super().save(*args, **kwargs)
 
     @property
     def is_terminal(self) -> bool:

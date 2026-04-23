@@ -6,6 +6,24 @@
 
 export type TRunnerStatus = "online" | "offline" | "busy" | "revoked";
 
+export interface IPodMini {
+  id: string;
+  name: string;
+  is_default: boolean;
+}
+
+export interface IPod {
+  id: string;
+  name: string;
+  description: string;
+  is_default: boolean;
+  workspace: string;
+  created_by: string | null;
+  runner_count: number;
+  created_at: string;
+  updated_at: string;
+}
+
 export interface IRunner {
   id: string;
   name: string;
@@ -16,6 +34,9 @@ export interface IRunner {
   protocol_version: number;
   capabilities: string[];
   last_heartbeat_at: string | null;
+  owner: string | null;
+  pod: string;
+  pod_detail: IPodMini | null;
   created_at: string;
   updated_at: string;
 }
@@ -61,6 +82,12 @@ export interface IAgentRun {
   thread_id: string;
   runner: string | null;
   work_item: string | null;
+  pod: string;
+  pod_detail: IPodMini | null;
+  /** Run creator — the access principal for permission checks. */
+  created_by: string;
+  /** Billable party — the runner's owner once assigned. NULL until assignment. */
+  owner: string | null;
   created_at: string;
   assigned_at: string | null;
   started_at: string | null;

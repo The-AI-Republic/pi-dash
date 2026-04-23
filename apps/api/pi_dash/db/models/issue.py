@@ -177,6 +177,16 @@ class Issue(ProjectBaseModel):
             ),
         ],
     )
+    # Pod this issue's agent runs dispatch to. NULL means "use the workspace
+    # default pod at run time." See .ai_design/issue_runner/design.md §4.4.
+    # PROTECT is safe because pods are soft-deleted, never physically removed.
+    assigned_pod = models.ForeignKey(
+        "runner.Pod",
+        null=True,
+        blank=True,
+        on_delete=models.PROTECT,
+        related_name="assigned_issues",
+    )
 
     issue_objects = IssueManager()
 
@@ -187,6 +197,26 @@ class Issue(ProjectBaseModel):
         ordering = ("-created_at",)
 
     def save(self, *args, **kwargs):
+        # Auto-resolve assigned_pod to workspace default for new issues so the
+        # UI never has to think about pods. See .ai_design/issue_runner/design.md
+        # §4.4 and §7.1. Only fires on creation; PATCH-driven changes are
+        # handled by the serializer's validate_assigned_pod.
+        if self._state.adding and self.assigned_pod_id is None:
+            try:
+                from pi_dash.runner.models import Pod
+
+                workspace_id = self.workspace_id
+                if workspace_id is None and self.project_id is not None:
+                    # workspace is set in ProjectBaseModel.save() before super().save();
+                    # at this stage we may not have it yet, so derive from project.
+                    workspace_id = self.project.workspace_id
+                if workspace_id is not None:
+                    default_pod = Pod.default_for_workspace_id(workspace_id)
+                    if default_pod is not None:
+                        self.assigned_pod = default_pod
+            except ImportError:
+                pass
+
         if self.state is None:
             try:
                 from pi_dash.db.models import State

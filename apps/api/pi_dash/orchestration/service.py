@@ -102,34 +102,71 @@ def handle_issue_state_transition(
 
     parent = _latest_prior_run(issue)
 
-    owner = actor or _resolve_owner(issue)
-    if owner is None:
+    creator = actor or _resolve_fallback_creator(issue)
+    if creator is None:
         logger.warning(
-            "orchestration: no owner for issue %s; skipping run creation",
+            "orchestration: no creator for issue %s; skipping run creation",
             issue.id,
         )
-        return TransitionOutcome(reason="no-owner")
+        return TransitionOutcome(reason="no-creator")
 
-    return _create_and_dispatch_run(issue=issue, parent=parent, owner=owner)
+    pod = _resolve_pod_for_issue(issue)
+    if pod is None:
+        logger.warning(
+            "orchestration: no pod available for workspace %s; "
+            "leaving issue %s unhandled",
+            issue.workspace_id,
+            issue.id,
+        )
+        return TransitionOutcome(reason="no-pod-available")
+
+    return _create_and_dispatch_run(
+        issue=issue, parent=parent, creator=creator, pod=pod
+    )
 
 
-def _resolve_owner(issue: Issue):
-    """Pick the user the run is billed to. Prefer the issue's creator; fall back
-    to the project lead. The runner matcher uses this to pick a runner owned by
-    the same user."""
+def _resolve_fallback_creator(issue: Issue):
+    """Pick a fallback ``created_by`` for legacy callers that don't pass ``actor``.
+
+    Renamed from ``_resolve_owner``: under the new model the returned user
+    becomes ``AgentRun.created_by`` (the access principal), not ``owner``
+    (the billable party).
+
+    Prefer the issue's creator; fall back to the project lead. New call sites
+    must always pass ``actor`` explicitly; this helper is a back-compat shim.
+    """
     if issue.created_by_id:
         return issue.created_by
     project = issue.project
     return project.project_lead or project.default_assignee
 
 
+def _resolve_pod_for_issue(issue: Issue):
+    """Resolve the pod a run for this issue should belong to.
+
+    Priority: ``issue.assigned_pod`` if set and active, else
+    ``workspace.default_pod``. Returns ``None`` only when both are gone (a
+    pathological state since invariant #13 keeps a default pod alive).
+    """
+    from pi_dash.runner.models import Pod
+
+    if issue.assigned_pod_id is not None:
+        pinned = Pod.objects.filter(pk=issue.assigned_pod_id).first()
+        if pinned is not None:
+            return pinned
+    return Pod.default_for_workspace_id(issue.workspace_id)
+
+
 def _create_and_dispatch_run(
-    *, issue: Issue, parent: Optional[AgentRun], owner
+    *, issue: Issue, parent: Optional[AgentRun], creator, pod
 ) -> TransitionOutcome:
+    from pi_dash.runner.services import matcher
+
     with transaction.atomic():
         run = AgentRun.objects.create(
-            owner=owner,
             workspace=issue.workspace,
+            created_by=creator,
+            pod=pod,
             work_item=issue,
             parent_run=parent,
             status=AgentRunStatus.QUEUED,
@@ -139,6 +176,7 @@ def _create_and_dispatch_run(
                 "repo_ref": (issue.project.base_branch or None),
                 "git_work_branch": (issue.git_work_branch or None),
             },
+            # owner stays NULL until assignment captures runner.owner.
         )
         try:
             run.prompt = build_first_turn(issue, run)
@@ -151,53 +189,9 @@ def _create_and_dispatch_run(
             return TransitionOutcome(created_run=run, reason="render-failed")
 
         run.save(update_fields=["prompt"])
-        transaction.on_commit(lambda: _dispatch_to_runner(run.id))
+        # Drain the pod's queue after the run row has landed. drain_pod is
+        # idempotent and uses select_for_update(skip_locked=True), so it's
+        # safe to run unconditionally.
+        transaction.on_commit(lambda: matcher.drain_pod_by_id(pod.id))
 
     return TransitionOutcome(created_run=run, reason="created")
-
-
-def _dispatch_to_runner(run_id) -> None:
-    """Match a runner and forward the Assign envelope.
-
-    Called after commit so the daemon never sees a run that hasn't landed yet.
-    """
-    from pi_dash.runner.services import matcher
-    from pi_dash.runner.services.pubsub import send_to_runner
-
-    with transaction.atomic():
-        try:
-            run = AgentRun.objects.select_for_update().get(id=run_id)
-        except AgentRun.DoesNotExist:
-            logger.warning("orchestration: run %s disappeared before dispatch", run_id)
-            return
-
-        if run.status != AgentRunStatus.QUEUED:
-            return  # someone else already handled it
-
-        chosen = matcher.select_runner_for_run(run)
-        if chosen is None:
-            logger.info("orchestration: no runner available for run %s; leaving queued", run.id)
-            return
-
-        run.runner = chosen
-        run.status = AgentRunStatus.ASSIGNED
-        run.assigned_at = timezone.now()
-        run.save(update_fields=["runner", "status", "assigned_at"])
-        chosen_id = chosen.id
-        assign_msg = {
-            "v": 1,
-            "type": "assign",
-            "run_id": str(run.id),
-            "work_item_id": str(run.work_item_id) if run.work_item_id else None,
-            "prompt": run.prompt,
-            "repo_url": run.run_config.get("repo_url"),
-            "repo_ref": run.run_config.get("repo_ref"),
-            "git_work_branch": run.run_config.get("git_work_branch"),
-            "expected_codex_model": run.run_config.get("model"),
-            "approval_policy_overrides": run.run_config.get(
-                "approval_policy_overrides"
-            ),
-            "deadline": None,
-        }
-
-    send_to_runner(chosen_id, assign_msg)

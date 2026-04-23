@@ -41,6 +41,25 @@ export class RunnerService extends APIService {
       });
   }
 
+  /** Move a runner to a different pod (same workspace). Owner or admin only. */
+  async move(runnerId: string, podId: string, name?: string): Promise<IRunner> {
+    const body: Record<string, unknown> = { pod: podId };
+    if (name !== undefined) body.name = name;
+    return this.patch(`/api/runners/${runnerId}/`, body)
+      .then((r) => r?.data)
+      .catch((e) => {
+        throw e?.response?.data;
+      });
+  }
+
+  async getDetail(runnerId: string): Promise<IRunner> {
+    return this.get(`/api/runners/${runnerId}/`)
+      .then((r) => r?.data)
+      .catch((e) => {
+        throw e?.response?.data;
+      });
+  }
+
   async listTokens(): Promise<IRunnerRegistration[]> {
     return this.get("/api/runners/tokens/")
       .then((r) => r?.data)
@@ -89,6 +108,8 @@ export class RunnerService extends APIService {
     run_config?: Record<string, unknown>;
     required_capabilities?: string[];
     work_item?: string;
+    /** Optional pod override; defaults to issue.assigned_pod or workspace.default_pod. */
+    pod?: string;
   }): Promise<IAgentRun> {
     return this.post("/api/runners/runs/", input)
       .then((r) => r?.data)
