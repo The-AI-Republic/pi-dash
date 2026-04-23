@@ -31,4 +31,8 @@ python manage.py create_bucket
 # Clear Cache before starting to remove stale values
 python manage.py clear_cache
 
-python manage.py runserver 0.0.0.0:8000 --settings=pi_dash.settings.local
+# `runserver` is WSGI-only, which drops Channels WebSocket routes (the runner
+# ↔ cloud link at /ws/runner/ returns 404). Use uvicorn directly so local dev
+# speaks ASGI, matching the gunicorn+UvicornWorker setup in production.
+export DJANGO_SETTINGS_MODULE=pi_dash.settings.local
+exec uvicorn pi_dash.asgi:application --host 0.0.0.0 --port 8000 --reload
