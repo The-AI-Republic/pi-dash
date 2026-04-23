@@ -175,6 +175,7 @@ class IssueSerializer(BaseSerializer):
     issue_attachment = IssueAttachmentSerializer(read_only=True, many=True)
     sub_issues_count = serializers.IntegerField(read_only=True)
     issue_reactions = IssueReactionSerializer(read_only=True, many=True)
+    assigned_pod_detail = serializers.SerializerMethodField()
 
     class Meta:
         model = Issue
@@ -187,6 +188,14 @@ class IssueSerializer(BaseSerializer):
             "created_at",
             "updated_at",
         ]
+
+    def get_assigned_pod_detail(self, obj):
+        # Lazy serializer to avoid circular import at module load.
+        from pi_dash.runner.serializers import PodMiniSerializer
+
+        if obj.assigned_pod_id is None:
+            return None
+        return PodMiniSerializer(obj.assigned_pod).data
 
 
 class IssueFlatSerializer(BaseSerializer):
