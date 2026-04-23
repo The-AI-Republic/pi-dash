@@ -1,7 +1,9 @@
 use anyhow::{Context, Result};
+use std::io::IsTerminal;
 use std::path::PathBuf;
 use tokio::process::Command;
 
+use super::BootStartOutcome;
 use crate::util::paths::Paths;
 
 const UNIT_NAME: &str = "pidash.service";
@@ -72,6 +74,60 @@ pub async fn start() -> Result<()> {
 
 pub async fn stop() -> Result<()> {
     run_systemctl(&["stop", UNIT_NAME]).await
+}
+
+/// Detect whether `loginctl enable-linger` has already been applied to the
+/// current user. Linger is what makes the user-level systemd manager (and
+/// therefore our user unit) start at boot rather than at first login.
+pub async fn is_linger_enabled() -> Result<bool> {
+    let user = std::env::var("USER").context("USER env not set")?;
+    let out = Command::new("loginctl")
+        .args(["show-user", &user, "--property=Linger"])
+        .output()
+        .await
+        .context("invoking loginctl show-user")?;
+    if !out.status.success() {
+        anyhow::bail!(
+            "loginctl show-user {user} failed: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
+    }
+    Ok(String::from_utf8_lossy(&out.stdout).trim() == "Linger=yes")
+}
+
+/// Shell out to `sudo loginctl enable-linger <user>`. sudo runs inline on
+/// the caller's TTY, so any password prompt is surfaced to the user directly
+/// — we don't feed stdin or try to cache credentials ourselves.
+pub async fn enable_linger() -> Result<()> {
+    let user = std::env::var("USER").context("USER env not set")?;
+    let status = Command::new("sudo")
+        .args(["loginctl", "enable-linger", &user])
+        .status()
+        .await
+        .context("invoking sudo loginctl enable-linger")?;
+    if !status.success() {
+        anyhow::bail!("sudo loginctl enable-linger {user} exited with {status}");
+    }
+    Ok(())
+}
+
+/// Best-effort: enable linger so `pidash.service` survives reboot without a
+/// login. Never fails the caller — every branch that can't apply linger maps
+/// to an outcome the caller prints as a hint. Skips the sudo call entirely
+/// when there's no TTY (sudo would hang or fail on non-interactive runs).
+pub async fn ensure_linger() -> BootStartOutcome {
+    match is_linger_enabled().await {
+        Ok(true) => return BootStartOutcome::AlreadyEnabled,
+        Ok(false) => {}
+        Err(e) => return BootStartOutcome::CheckFailed(e.to_string()),
+    }
+    if !std::io::stdin().is_terminal() {
+        return BootStartOutcome::NonInteractive;
+    }
+    match enable_linger().await {
+        Ok(()) => BootStartOutcome::Enabled,
+        Err(e) => BootStartOutcome::EnableFailed(e.to_string()),
+    }
 }
 
 pub async fn status() -> Result<String> {
