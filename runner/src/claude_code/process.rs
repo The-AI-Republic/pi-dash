@@ -10,6 +10,7 @@ use tokio::process::{Child, ChildStdin, Command};
 use tokio::sync::mpsc;
 
 use crate::claude_code::schema::StreamEvent;
+use crate::util::shell::{is_benign_login_shell_warning, login_shell_command};
 
 /// Handles the `claude --print --output-format stream-json` subprocess
 /// lifecycle. Owns stdin (so we can push the user turn + signal EOF) and
@@ -36,20 +37,25 @@ pub struct SpawnArgs<'a> {
 
 impl ClaudeProcess {
     pub async fn spawn(args: SpawnArgs<'_>) -> Result<Self> {
-        let mut cmd = Command::new(args.binary);
-        cmd.current_dir(args.cwd)
-            .arg("--print")
-            .arg("--verbose")
-            .arg("--input-format")
-            .arg("stream-json")
-            .arg("--output-format")
-            .arg("stream-json");
+        // Route through a login bash so the agent binary is found via the
+        // user's interactive PATH (nvm/pyenv/asdf/brew). See
+        // `util::shell::login_shell_command` for why.
+        let mut argv: Vec<&str> = vec![
+            "--print",
+            "--verbose",
+            "--input-format",
+            "stream-json",
+            "--output-format",
+            "stream-json",
+        ];
         if args.bypass_permissions {
-            cmd.arg("--permission-mode").arg("bypassPermissions");
+            argv.extend(["--permission-mode", "bypassPermissions"]);
         }
         if let Some(model) = args.model {
-            cmd.arg("--model").arg(model);
+            argv.extend(["--model", model]);
         }
+        let mut cmd = login_shell_command(args.binary, &argv);
+        cmd.current_dir(args.cwd);
         Self::spawn_command(cmd).await
     }
 
@@ -180,6 +186,10 @@ async fn drain_stderr(stderr: tokio::process::ChildStderr) {
     // logged at `warn!`. Operators still have to dig through logs — a future
     // follow-up can buffer the last N lines into the `Failed` event detail —
     // but at least nothing is silently swallowed.
+    //
+    // The login-shell wrapper (see `util::shell`) always emits two TTY-less
+    // diagnostics before exec'ing claude; suppress those so logs aren't
+    // noisy on every spawn.
     let mut reader = BufReader::new(stderr);
     let mut line = String::new();
     loop {
@@ -188,9 +198,10 @@ async fn drain_stderr(stderr: tokio::process::ChildStderr) {
             Ok(0) => break,
             Ok(_) => {
                 let trimmed = line.trim_end();
-                if !trimmed.is_empty() {
-                    tracing::warn!(target: "claude.stderr", "{trimmed}");
+                if trimmed.is_empty() || is_benign_login_shell_warning(trimmed) {
+                    continue;
                 }
+                tracing::warn!(target: "claude.stderr", "{trimmed}");
             }
             Err(e) => {
                 tracing::warn!("claude stderr read error: {e}");

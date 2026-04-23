@@ -7,6 +7,7 @@ use tokio::process::{Child, ChildStdin, Command};
 use tokio::sync::mpsc;
 
 use crate::codex::jsonrpc::Incoming;
+use crate::util::shell::{is_benign_login_shell_warning, login_shell_command};
 
 /// Handles the `codex app-server` subprocess lifecycle + JSON-RPC wire.
 pub struct AppServer {
@@ -18,8 +19,10 @@ pub struct AppServer {
 
 impl AppServer {
     pub async fn spawn(binary: &str, cwd: &Path) -> Result<Self> {
-        let mut cmd = Command::new(binary);
-        cmd.arg("app-server").current_dir(cwd);
+        // Route through a login bash so the agent binary is found via the
+        // user's interactive PATH. See `util::shell::login_shell_command`.
+        let mut cmd = login_shell_command(binary, &["app-server"]);
+        cmd.current_dir(cwd);
         Self::spawn_command(cmd).await
     }
 
@@ -105,13 +108,22 @@ async fn read_frames(stdout: tokio::process::ChildStdout, tx: mpsc::Sender<Incom
 }
 
 async fn drain_stderr(stderr: tokio::process::ChildStderr) {
+    // The login-shell wrapper (see `util::shell`) always emits two TTY-less
+    // diagnostics before exec'ing codex; suppress those so the debug stream
+    // only carries real codex output.
     let mut reader = BufReader::new(stderr);
     let mut line = String::new();
     loop {
         line.clear();
         match reader.read_line(&mut line).await {
             Ok(0) => break,
-            Ok(_) => tracing::debug!(target: "codex.stderr", "{}", line.trim_end()),
+            Ok(_) => {
+                let trimmed = line.trim_end();
+                if trimmed.is_empty() || is_benign_login_shell_warning(trimmed) {
+                    continue;
+                }
+                tracing::debug!(target: "codex.stderr", "{trimmed}");
+            }
             Err(e) => {
                 tracing::warn!("codex stderr read error: {e}");
                 break;

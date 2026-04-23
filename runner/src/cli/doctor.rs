@@ -6,6 +6,7 @@ use tokio::process::Command;
 
 use crate::config::file;
 use crate::util::paths::Paths;
+use crate::util::shell::login_shell_command;
 
 #[derive(Debug, ClapArgs)]
 pub struct Args {
@@ -177,13 +178,14 @@ pub async fn execute(paths: &Paths) -> Result<Report> {
 
 /// Shared `<binary> --version` check. Works for both `codex` and `claude`
 /// since both print a short version line on stdout and exit 0 on success.
+///
+/// Runs through the same login-shell wrapper the daemon uses so this check
+/// reflects what the daemon will actually see at spawn time — not just
+/// whether the binary is on the caller's interactive `PATH`.
 async fn check_version(binary: &str) -> Result<String> {
-    let out = Command::new(binary)
-        .arg("--version")
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .output()
-        .await?;
+    let mut cmd = login_shell_command(binary, &["--version"]);
+    cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
+    let out = cmd.output().await?;
     if !out.status.success() {
         anyhow::bail!(
             "{binary} --version exited {}: {}",
@@ -200,13 +202,9 @@ async fn check_version(binary: &str) -> Result<String> {
 
 async fn check_codex_auth(binary: &str) -> Result<String> {
     // codex has `account` as a subcommand in newer releases; fall back to `whoami`.
-    let out = Command::new(binary)
-        .args(["account", "status"])
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .output()
-        .await
-        .ok();
+    let mut cmd = login_shell_command(binary, &["account", "status"]);
+    cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
+    let out = cmd.output().await.ok();
     if let Some(o) = out
         && o.status.success()
     {
