@@ -11,14 +11,15 @@ import useSWR from "swr";
 import { API_BASE_URL } from "@pi-dash/constants";
 import { useTranslation } from "@pi-dash/i18n";
 import { TOAST_TYPE, setToast } from "@pi-dash/propel/toast";
-import { RunnerService } from "@pi-dash/services";
-import type { IRunner, TRunnerStatus } from "@pi-dash/types";
+import { PodService, RunnerService } from "@pi-dash/services";
+import type { IPod, IRunner, TRunnerStatus } from "@pi-dash/types";
 import type { TBadgeVariant } from "@pi-dash/ui";
 import { AlertModalCore, Badge, Button, Input, Tooltip } from "@pi-dash/ui";
 import { PageHead } from "@/components/core/page-title";
 import { useWorkspace } from "@/hooks/store/use-workspace";
 
 const service = new RunnerService();
+const podService = new PodService();
 
 const MAX_RUNNERS_PER_USER = 5;
 
@@ -41,6 +42,12 @@ const RunnersListPage = observer(function RunnersListPage() {
     workspaceId ? ["runners", workspaceId] : null,
     () => service.list(workspaceId),
     { refreshInterval: 5_000 }
+  );
+
+  const { data: pods } = useSWR<IPod[]>(
+    workspaceId ? ["pods", workspaceId] : null,
+    () => podService.list(workspaceId!),
+    { refreshInterval: 30_000 }
   );
 
   const [mintedToken, setMintedToken] = useState<string | null>(null);
@@ -191,12 +198,34 @@ const RunnersListPage = observer(function RunnersListPage() {
       </section>
 
       <section>
+        <div className="mb-2 text-13 font-medium text-primary">{t("runners.pods.title")}</div>
+        <div className="mb-2 text-12 text-secondary">{t("runners.pods.help")}</div>
+        <div className="flex flex-wrap gap-2">
+          {(pods ?? []).map((p) => (
+            <div key={p.id} className="rounded-md border border-subtle bg-layer-1 px-3 py-2 text-12">
+              <div className="flex items-center gap-2">
+                <span className="font-medium text-primary">{p.name}</span>
+                {p.is_default && (
+                  <Badge variant="accent-neutral" size="sm">
+                    {t("runners.pods.default_badge")}
+                  </Badge>
+                )}
+              </div>
+              <div className="text-secondary">{t("runners.pods.runner_count", { count: p.runner_count })}</div>
+            </div>
+          ))}
+          {(pods ?? []).length === 0 && <div className="text-12 text-secondary">{t("runners.pods.empty")}</div>}
+        </div>
+      </section>
+
+      <section>
         <div className="mb-2 text-13 font-medium text-primary">{t("runners.list.connected_runners")}</div>
         <div className="overflow-x-auto rounded-md border border-subtle">
           <table className="w-full text-13">
             <thead className="bg-layer-1 text-left text-secondary">
               <tr>
                 <th className="px-3 py-2">{t("runners.list.columns.name")}</th>
+                <th className="px-3 py-2">{t("runners.list.columns_pod")}</th>
                 <th className="px-3 py-2">{t("runners.list.columns.status")}</th>
                 <th className="px-3 py-2">{t("runners.list.columns.os_arch")}</th>
                 <th className="px-3 py-2">{t("runners.list.columns.version")}</th>
@@ -208,6 +237,7 @@ const RunnersListPage = observer(function RunnersListPage() {
               {(runners ?? []).map((r) => (
                 <tr key={r.id} className="border-t border-subtle">
                   <td className="font-mono px-3 py-2 text-11">{r.name}</td>
+                  <td className="px-3 py-2">{r.pod_detail ? r.pod_detail.name : "—"}</td>
                   <td className="px-3 py-2">
                     <Badge variant={STATUS_BADGE_VARIANT[r.status]} size="sm">
                       {t(`runners.list.status.${r.status}`)}
@@ -231,7 +261,7 @@ const RunnersListPage = observer(function RunnersListPage() {
               ))}
               {(runners ?? []).length === 0 && (
                 <tr>
-                  <td colSpan={6} className="px-3 py-8 text-center text-secondary">
+                  <td colSpan={7} className="px-3 py-8 text-center text-secondary">
                     {t("runners.list.empty")}
                   </td>
                 </tr>
