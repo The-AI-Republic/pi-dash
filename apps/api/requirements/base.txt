@@ -34,6 +34,10 @@ django-storages==1.14.2
 django-crum==0.7.9
 # web server
 uvicorn==0.29.0
+# WebSocket protocol for uvicorn / gunicorn's UvicornWorker. Without this
+# uvicorn can't upgrade WS requests and silently hands them to Django's
+# HTTP app, so `/ws/runner/` 404s through the URL router.
+websockets==12.0
 # sockets
 channels==4.1.0
 channels-redis==4.2.0
