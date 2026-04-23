@@ -60,6 +60,10 @@ const SHELL_SCRIPT: &str =
 /// `kill_on_drop` wiring before being spawned.
 pub fn login_shell_command(program: &str, args: &[&str], cwd: Option<&Path>) -> Command {
     let mut cmd = Command::new("bash");
+    // `LC_ALL` overrides every more-specific locale category, so drop it
+    // first; otherwise `LC_MESSAGES=C` would be ignored when the parent
+    // environment exports `LC_ALL=...`.
+    cmd.env_remove("LC_ALL");
     // Pin the message locale so `is_benign_login_shell_warning` matches
     // regardless of the operator's LANG / LC_ALL.
     cmd.env("LC_MESSAGES", "C");
@@ -139,6 +143,17 @@ mod tests {
         // keeps it working under localized hosts.
         let cmd = login_shell_command("claude", &[], None);
         assert_eq!(env_value(&cmd, "LC_MESSAGES"), Some(OsString::from("C")));
+    }
+
+    #[test]
+    fn removes_lc_all_so_lc_messages_takes_effect() {
+        let cmd = login_shell_command("claude", &[], None);
+        let lc_all = cmd
+            .as_std()
+            .get_envs()
+            .find(|(k, _)| *k == "LC_ALL")
+            .map(|(_, v)| v);
+        assert_eq!(lc_all, Some(None));
     }
 
     #[test]
