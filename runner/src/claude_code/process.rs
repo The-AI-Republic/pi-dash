@@ -54,8 +54,7 @@ impl ClaudeProcess {
         if let Some(model) = args.model {
             argv.extend(["--model", model]);
         }
-        let mut cmd = login_shell_command(args.binary, &argv);
-        cmd.current_dir(args.cwd);
+        let cmd = login_shell_command(args.binary, &argv, Some(args.cwd));
         Self::spawn_command(cmd).await
     }
 

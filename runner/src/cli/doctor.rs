@@ -183,7 +183,7 @@ pub async fn execute(paths: &Paths) -> Result<Report> {
 /// reflects what the daemon will actually see at spawn time — not just
 /// whether the binary is on the caller's interactive `PATH`.
 async fn check_version(binary: &str) -> Result<String> {
-    let mut cmd = login_shell_command(binary, &["--version"]);
+    let mut cmd = login_shell_command(binary, &["--version"], None);
     cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
     let out = cmd.output().await?;
     if !out.status.success() {
@@ -202,7 +202,7 @@ async fn check_version(binary: &str) -> Result<String> {
 
 async fn check_codex_auth(binary: &str) -> Result<String> {
     // codex has `account` as a subcommand in newer releases; fall back to `whoami`.
-    let mut cmd = login_shell_command(binary, &["account", "status"]);
+    let mut cmd = login_shell_command(binary, &["account", "status"], None);
     cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
     let out = cmd.output().await.ok();
     if let Some(o) = out
