@@ -9,8 +9,8 @@ from pi_dash.prompting.seed import seed_default_template
 
 class Command(BaseCommand):
     help = (
-        "Refresh the global default PromptTemplate from "
-        "apps/api/pi_dash/prompting/templates/default.j2. Does not touch "
+        "Refresh the global default PromptTemplate from the ordered fragments "
+        "in apps/api/pi_dash/prompting/fragments/. Does not touch "
         "workspace-scoped templates."
     )
 
