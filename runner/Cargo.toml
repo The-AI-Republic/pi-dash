@@ -1,6 +1,6 @@
 [package]
 name = "pidash"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 rust-version = "1.93"
 description = "Pi Dash local runner: connects a dev machine to the Pi Dash cloud and drives Codex for assigned tasks."
