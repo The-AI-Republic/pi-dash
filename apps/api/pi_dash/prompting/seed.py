@@ -5,26 +5,24 @@
 """Default template seed.
 
 The global default `PromptTemplate` (workspace=NULL) is the runtime source of
-truth, but the *initial* body is mirrored in
-``apps/api/pi_dash/prompting/templates/default.j2`` so it can evolve in code
-review. At migrate time we insert the row if it is missing. Operators who want
-to re-sync the default after editing the file call the ``reseed_default_template``
-management command — we never silently clobber a workspace row.
+truth, but the *initial* body is composed from the ordered fragments in
+``apps/api/pi_dash/prompting/fragments/`` so it can evolve in code review a
+section at a time. At migrate time we insert the row if it is missing.
+Operators who want to re-sync the default after editing fragments call the
+``reseed_default_template`` management command — we never silently clobber a
+workspace row.
 """
 
 from __future__ import annotations
 
 import os
-from pathlib import Path
 
-
-DEFAULT_TEMPLATE_FILE = (
-    Path(__file__).resolve().parent / "templates" / "default.j2"
-)
+from pi_dash.prompting.fragments import assemble
 
 
 def read_default_body() -> str:
-    return DEFAULT_TEMPLATE_FILE.read_text(encoding="utf-8")
+    """Return the default prompt body, composed from fragments."""
+    return assemble()
 
 
 def seed_default_template(force: bool = False) -> str:
