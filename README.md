@@ -84,7 +84,13 @@ pnpm dev
 5. Open your browser to http://localhost:3001/god-mode/ and register yourself as instance admin
 6. Open your browser to http://localhost:3000 and log in using the same credentials
 
-For production deployments, see the [`deployments/`](./deployments) directory for Docker Compose and Kubernetes configurations.
+#### Production deployment
+
+For real self-hosted deployments (not local development), pick the path that matches how much you want to manage yourself:
+
+- **[All-in-One Docker image](./deployments/aio/community/README.md)** — one container that bundles every Pi Dash service, managed by `supervisord` internally. Simplest path: a single `docker run` command. Best for demos, homelab setups, evaluation, and small teams. External Postgres / Redis / RabbitMQ / S3-compatible storage are still required.
+- **[Docker Compose / Swarm self-hosting](./deployments/cli/community/README.md)** — the full microservices stack (6 service containers + database + queue + storage). More configuration, but gives you independent scaling and rolling updates per service. Recommended for anything beyond evaluation.
+- **Kubernetes / Helm** — Helm chart publishing is planned but not yet shipped; see [`deployments/kubernetes/community/README.md`](./deployments/kubernetes/community/README.md).
 
 ### 2. Pi Dash CLI & Runner Daemon
 
