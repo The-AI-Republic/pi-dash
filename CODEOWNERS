@@ -1,1 +1,30 @@
-eslint.config.mjs   @lifeiscontent
+# CODEOWNERS for The-AI-Republic/pi-dash
+#
+# This file defines who is automatically requested for review on PRs that
+# touch specific paths. The first matching pattern wins, so put more specific
+# rules at the bottom.
+#
+# Listed owners must have at least Triage on the repo for GitHub to honour
+# the rule.
+#
+# Docs: https://docs.github.com/en/repositories/managing-your-repositorys-settings-and-security/customizing-your-repository/about-code-owners
+
+# ---------------------------------------------------------------------------
+# Default owner for everything not matched by a more specific rule.
+# ---------------------------------------------------------------------------
+*                                  @irichard00
+
+# ---------------------------------------------------------------------------
+# Release infrastructure — extra care; see RELEASING.md for the tag scheme.
+# ---------------------------------------------------------------------------
+/RELEASING.md                      @irichard00
+/.github/workflows/release.yml     @irichard00
+/.github/workflows/build-branch.yml @irichard00
+/.github/actions/build-push/       @irichard00
+
+# ---------------------------------------------------------------------------
+# License + attribution. Per AGPL-3.0 these must remain intact, so changes
+# require explicit owner sign-off rather than a generic reviewer.
+# ---------------------------------------------------------------------------
+/LICENSE.txt                       @irichard00
+/README.md                         @irichard00
