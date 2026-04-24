@@ -8,3 +8,8 @@ node_modules/
 out/
 pnpm-lock.yaml
 storybook-static/
+
+# Prompt fragments contain Jinja2 control tags whose line-leading whitespace
+# is significant at render time (renderer runs with lstrip_blocks=False).
+# Markdown autoformatting breaks them — see apps/api/pi_dash/prompting/fragments/__init__.py.
+apps/api/pi_dash/prompting/fragments/

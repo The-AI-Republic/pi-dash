@@ -22,13 +22,16 @@ attack surface for workspace-admin-editable templates.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import List
 
 FRAGMENTS_DIR = Path(__file__).resolve().parent
-FRAGMENT_GLOB = "*.md"
+
+# Match only files that follow the NN_name.md numeric-prefix convention so a
+# stray README.md / NOTES.md in this directory cannot silently get spliced
+# into the production prompt.
+FRAGMENT_GLOB = "[0-9][0-9]_*.md"
 
 
-def fragment_paths() -> List[Path]:
+def fragment_paths() -> list[Path]:
     """Return fragment files in assembly order (lexical)."""
     return sorted(FRAGMENTS_DIR.glob(FRAGMENT_GLOB))
 

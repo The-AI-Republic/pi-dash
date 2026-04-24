@@ -71,12 +71,11 @@ pidash issue patch {{ issue.identifier }} --state "Done"
 
 {% if issue.project_states %}
 {% for s in issue.project_states %}
-
 - **{{ s.name }}** (group: `{{ s.group }}`) — {{ s.description or "(no description)" }}
-  {% endfor %}
-  {% else %}
-  _(state list unavailable — call `pidash state list` to retrieve it before moving state)_
-  {% endif %}
+{% endfor %}
+{% else %}
+_(state list unavailable — call `pidash state list` to retrieve it before moving state)_
+{% endif %}
 
 Use the list above to pick the correct `--state` value. Match your intent to the state's `group` first (e.g. `completed` for "this work is done", `cancelled` for "this will not be done"), then to the name and description.
 

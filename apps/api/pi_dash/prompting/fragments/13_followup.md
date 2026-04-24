@@ -7,4 +7,4 @@ This is follow-up attempt #{{ run.attempt }} on the same issue. A prior run did 
 1. Read the existing `## Agent Workpad` comment end-to-end and use it as your starting point.
 2. Do not repeat investigation or validation already recorded there unless the repo state has diverged from what the workpad describes.
 3. Do not restart from scratch. Resume from where the prior attempt left off.
-   {% endif %}
+{% endif %}

@@ -13,12 +13,12 @@
 6. Capture a concrete reproduction signal (command output, failing test, screenshot description) in the workpad `Notes` section before changing code.
 7. Before any code edits, sync with the repository:
    - `git fetch origin`
-     {% if repo.work_branch %}
+{% if repo.work_branch %}
    - `git checkout {{ repo.work_branch }}` — this is an existing branch you must operate on directly. If the branch does not exist locally, `git checkout -b {{ repo.work_branch }} origin/{{ repo.work_branch }}`. Do not create a new feature branch.
    - `git pull --rebase origin {{ repo.work_branch }}`.
-     {% else %}
+{% else %}
    - Resolve the base branch: `{% if repo.base_branch %}{{ repo.base_branch }}{% else %}$(git symbolic-ref --short refs/remotes/origin/HEAD | sed 's|^origin/||'){% endif %}` — call this `$BASE`.
    - `git pull --rebase origin $BASE` (or equivalent for your branch strategy).
    - Create a fresh feature branch off `$BASE` for your work.
-     {% endif %}
+{% endif %}
    - Record the resulting `HEAD` short SHA in the workpad `Notes`.
