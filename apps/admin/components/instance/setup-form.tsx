@@ -64,7 +64,9 @@ export function InstanceSetupForm() {
   const lastNameParam = searchParams?.get("last_name") || undefined;
   const companyParam = searchParams?.get("company") || undefined;
   const emailParam = searchParams?.get("email") || undefined;
-  const isTelemetryEnabledParam = searchParams?.get("is_telemetry_enabled") === "True" || true;
+  // Honor the URL param; defaults to true when the param is absent so the
+  // setup form shows telemetry enabled by default.
+  const isTelemetryEnabledParam = searchParams?.get("is_telemetry_enabled") !== "False";
   const errorCode = searchParams?.get("error_code") || undefined;
   const errorMessage = searchParams?.get("error_message") || undefined;
   // state

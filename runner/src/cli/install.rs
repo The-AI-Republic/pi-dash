@@ -105,12 +105,11 @@ fn prompt_for_register_inputs(
     println!("(Press Ctrl+C to abort and run `pidash install --no-configure` instead.)");
     println!();
 
-    let url = prompt_required("Pi Dash cloud URL [http://localhost]: ")?;
-    let url = if url.trim().is_empty() {
-        "http://localhost".to_string()
-    } else {
-        url.trim().to_string()
-    };
+    let url = prompt_required("Pi Dash cloud URL (e.g. https://your-instance.example.com): ")?;
+    let url = url.trim().to_string();
+    if url.is_empty() {
+        anyhow::bail!("cloud URL is required; aborting install");
+    }
 
     let token = prompt_required("One-time registration token: ")?;
     let token = token.trim().to_string();

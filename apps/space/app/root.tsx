@@ -28,7 +28,7 @@ import "@fontsource/material-symbols-rounded";
 import "@fontsource/ibm-plex-mono";
 
 const APP_TITLE = "Pi Dash Publish | Make your Pi Dash boards public with one-click";
-const APP_DESCRIPTION = "Pi Dash Publish is a customer feedback management tool built on top of airepublic.com";
+const APP_DESCRIPTION = "Pi Dash Publish is a customer feedback management tool built with Pi Dash";
 
 export const links: Route.LinksFunction = () => [
   { rel: "apple-touch-icon", sizes: "180x180", href: appleTouchIcon },

@@ -16,8 +16,7 @@ export const TWITTER_USER_NAME = "Pi Dash | Simple, extensible, open-source proj
 // Pi Dash Sites Metadata
 export const SPACE_SITE_NAME = "Pi Dash Publish | Make your Pi Dash boards and roadmaps pubic with just one-click. ";
 export const SPACE_SITE_TITLE = "Pi Dash Publish | Make your Pi Dash boards public with one-click";
-export const SPACE_SITE_DESCRIPTION =
-  "Pi Dash Publish is a customer feedback management tool built on top of airepublic.com";
+export const SPACE_SITE_DESCRIPTION = "Pi Dash Publish is a customer feedback management tool built with Pi Dash";
 export const SPACE_SITE_KEYWORDS =
   "software development, customer feedback, software, accelerate, code management, release management, project management, work items tracking, agile, scrum, kanban, collaboration";
 export const SPACE_SITE_URL = "https://airepublic.com/";
