@@ -34,11 +34,14 @@ def init_tracer():
     # Set as global tracer provider
     trace.set_tracer_provider(tracer_provider)
 
-    # Configure the OTLP exporter
-    otel_endpoint = os.environ.get("OTLP_ENDPOINT", "https://telemetry.pi-dash.so")
-    otlp_exporter = OTLPSpanExporter(endpoint=otel_endpoint)
-    span_processor = BatchSpanProcessor(otlp_exporter)
-    tracer_provider.add_span_processor(span_processor)
+    # Configure the OTLP exporter only if an endpoint is provided. Telemetry
+    # is opt-in for open-source deployments — leave OTLP_ENDPOINT unset to
+    # disable span export entirely.
+    otel_endpoint = os.environ.get("OTLP_ENDPOINT", "").strip()
+    if otel_endpoint:
+        otlp_exporter = OTLPSpanExporter(endpoint=otel_endpoint)
+        span_processor = BatchSpanProcessor(otlp_exporter)
+        tracer_provider.add_span_processor(span_processor)
 
     # Initialize Django instrumentation
     DjangoInstrumentor().instrument()

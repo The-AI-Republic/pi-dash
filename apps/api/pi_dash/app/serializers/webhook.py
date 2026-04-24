@@ -43,7 +43,7 @@ class WebhookSerializer(DynamicBaseSerializer):
 
         # Additional validation for multiple request domains and their subdomains
         request = self.context.get("request")
-        disallowed_domains = ["pi-dash.so"]  # Add your disallowed domains here
+        disallowed_domains = ["airepublic.com"]  # Add your disallowed domains here
         if request:
             request_host = request.get_host().split(":")[0]  # Remove port if present
             disallowed_domains.append(request_host)
@@ -78,7 +78,7 @@ class WebhookSerializer(DynamicBaseSerializer):
 
             # Additional validation for multiple request domains and their subdomains
             request = self.context.get("request")
-            disallowed_domains = ["pi-dash.so"]  # Add your disallowed domains here
+            disallowed_domains = ["airepublic.com"]  # Add your disallowed domains here
             if request:
                 request_host = request.get_host().split(":")[0]  # Remove port if present
                 disallowed_domains.append(request_host)

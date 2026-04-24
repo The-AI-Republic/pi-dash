@@ -7,11 +7,11 @@
 // ui
 import { Button } from "@pi-dash/propel/button";
 
-function ErrorPage() {
-  const handleRetry = () => {
-    window.location.reload();
-  };
+const handleRetry = () => {
+  window.location.reload();
+};
 
+function ErrorPage() {
   return (
     <div className="grid h-screen place-items-center bg-surface-1 p-4">
       <div className="space-y-8 text-center">
@@ -20,12 +20,12 @@ function ErrorPage() {
           <p className="mx-auto text-13 text-secondary md:w-1/2">
             That crashed Pi Dash, pun intended. No worries, though. Our engineers have been notified. If you have more
             details, please write to{" "}
-            <a href="mailto:support@pi-dash.so" className="text-accent-primary">
-              support@pi-dash.so
+            <a href="mailto:support@airepublic.com" className="text-accent-primary">
+              support@airepublic.com
             </a>{" "}
             or on our{" "}
             <a
-              href="https://forum.pi-dash.so"
+              href="https://github.com/The-AI-Republic/pi-dash/discussions"
               target="_blank"
               className="text-accent-primary"
               rel="noopener noreferrer"

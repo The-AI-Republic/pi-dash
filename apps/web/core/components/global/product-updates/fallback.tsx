@@ -16,8 +16,8 @@ export function ProductUpdatesFallback(props: TProductUpdatesFallbackProps) {
   // derived values
   const changelogUrl =
     variant === "cloud"
-      ? "https://pi-dash.so/changelog?category=cloud"
-      : "https://pi-dash.so/changelog?category=self-hosted";
+      ? "https://airepublic.com/changelog?category=cloud"
+      : "https://airepublic.com/changelog?category=self-hosted";
 
   return (
     <div className="py-8">

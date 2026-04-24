@@ -4,7 +4,7 @@ set -e
 
 DIST_DIR=${DIST_DIR:-./dist}
 CPU_ARCH=$(uname -m)
-IMAGE_NAME=${IMAGE_NAME:-makepidash/pi-dash-aio-community}
+IMAGE_NAME=${IMAGE_NAME:-airepublic/pi-dash-aio-community}
 
 
 # loop though all flags and set the variables

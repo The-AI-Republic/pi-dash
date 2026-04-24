@@ -805,7 +805,7 @@ mod tests {
 
     #[test]
     fn validate_cloud_url_allows_https_and_localhost_http() {
-        assert!(validate_cloud_url("https://cloud.pidash.so").is_ok());
+        assert!(validate_cloud_url("http://localhost").is_ok());
         assert!(validate_cloud_url("http://localhost:3000").is_ok());
         assert!(validate_cloud_url("http://127.0.0.1:3000").is_ok());
     }

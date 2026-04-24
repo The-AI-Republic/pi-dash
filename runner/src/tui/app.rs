@@ -142,7 +142,7 @@ impl std::fmt::Debug for RegisterForm {
 impl RegisterForm {
     pub fn new(default_name: String) -> Self {
         Self {
-            cloud_url: "https://cloud.pidash.so".to_string(),
+            cloud_url: "http://localhost".to_string(),
             token: String::new(),
             name: default_name,
             focus: 0,

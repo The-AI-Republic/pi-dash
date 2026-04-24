@@ -21,17 +21,17 @@ import { useInstance, useTheme } from "@/hooks/store";
 const helpOptions = [
   {
     name: "Documentation",
-    href: "https://docs.pi-dash.so/",
+    href: "https://github.com/The-AI-Republic/pi-dash#readme",
     Icon: PageIcon,
   },
   {
     name: "Join our Forum",
-    href: "https://forum.pi-dash.so",
+    href: "https://github.com/The-AI-Republic/pi-dash/discussions",
     Icon: MessageSquare,
   },
   {
     name: "Report a bug",
-    href: "https://github.com/makepidash/pi-dash/issues/new/choose",
+    href: "https://github.com/The-AI-Republic/pi-dash/issues/new/choose",
     Icon: GithubIcon,
   },
 ];

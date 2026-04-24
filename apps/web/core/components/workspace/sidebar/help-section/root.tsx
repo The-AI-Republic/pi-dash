@@ -48,13 +48,13 @@ export const HelpMenuRoot = observer(function HelpMenuRoot() {
         maxHeight="lg"
         closeOnSelect
       >
-        <CustomMenu.MenuItem onClick={() => window.open("https://go.pi-dash.so/p-docs", "_blank")}>
+        <CustomMenu.MenuItem onClick={() => window.open("https://github.com/The-AI-Republic/pi-dash#readme", "_blank")}>
           <div className="flex items-center gap-x-2 rounded-sm text-11">
             <PageIcon className="h-3.5 w-3.5 text-secondary" height={14} width={14} />
             <span className="text-11">{t("documentation")}</span>
           </div>
         </CustomMenu.MenuItem>
-        <CustomMenu.MenuItem onClick={() => window.open("mailto:sales@pi-dash.so", "_blank")}>
+        <CustomMenu.MenuItem onClick={() => window.open("mailto:sales@example.com", "_blank")}>
           <div className="flex items-center gap-x-2 rounded-sm text-11">
             <User className="h-3.5 w-3.5 text-secondary" size={14} />
             <span className="text-11">{t("contact_sales")}</span>
@@ -79,7 +79,11 @@ export const HelpMenuRoot = observer(function HelpMenuRoot() {
             <span className="text-11">{t("whats_new")}</span>
           </button>
         </CustomMenu.MenuItem>
-        <CustomMenu.MenuItem onClick={() => window.open("https://forum.pi-dash.so", "_blank", "noopener,noreferrer")}>
+        <CustomMenu.MenuItem
+          onClick={() =>
+            window.open("https://github.com/The-AI-Republic/pi-dash/discussions", "_blank", "noopener,noreferrer")
+          }
+        >
           <div className="flex items-center gap-x-2 rounded-sm text-11">
             <span className="text-11">Forum</span>
           </div>

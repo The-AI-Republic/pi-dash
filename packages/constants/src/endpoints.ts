@@ -24,10 +24,10 @@ export const WEB_BASE_URL = process.env.VITE_WEB_BASE_URL || "";
 export const WEB_BASE_PATH = process.env.VITE_WEB_BASE_PATH || "";
 export const WEB_URL = encodeURI(`${WEB_BASE_URL}${WEB_BASE_PATH}`);
 // pi dash website url
-export const WEBSITE_URL = process.env.VITE_WEBSITE_URL || "https://pi-dash.so";
+export const WEBSITE_URL = process.env.VITE_WEBSITE_URL || "https://airepublic.com";
 // support email
-export const SUPPORT_EMAIL = process.env.VITE_SUPPORT_EMAIL || "support@pi-dash.so";
+export const SUPPORT_EMAIL = process.env.VITE_SUPPORT_EMAIL || "support@airepublic.com";
 // marketing links
-export const MARKETING_PRICING_PAGE_LINK = "https://pi-dash.so/pricing";
-export const MARKETING_CONTACT_US_PAGE_LINK = "https://pi-dash.so/contact";
-export const MARKETING_PI_DASH_ONE_PAGE_LINK = "https://pi-dash.so/one";
+export const MARKETING_PRICING_PAGE_LINK = "https://airepublic.com/pricing";
+export const MARKETING_CONTACT_US_PAGE_LINK = "https://airepublic.com/contact";
+export const MARKETING_PI_DASH_ONE_PAGE_LINK = "https://airepublic.com";

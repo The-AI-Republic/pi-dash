@@ -1,0 +1,124 @@
+name: Build and Push Docker Image
+description: >-
+  Build a Docker image and push it to Docker Hub with release-aware tagging.
+  Pushes :<release-version> and :latest for final releases; :<release-version>
+  only for prereleases; :<branch-name>-<sha> for non-release builds.
+
+inputs:
+  build-release:
+    description: Whether this is a release build ("true" or "false")
+    required: true
+  build-prerelease:
+    description: Whether this is a prerelease build ("true" or "false")
+    required: true
+  release-version:
+    description: Release version (e.g. v1.2.3) or "latest" for non-release builds
+    required: true
+  dockerhub-username:
+    description: Docker Hub username
+    required: true
+  dockerhub-token:
+    description: Docker Hub access token
+    required: true
+  docker-image-owner:
+    description: Docker Hub namespace (user or org)
+    required: true
+  docker-image-name:
+    description: Image repository name (without namespace)
+    required: true
+  build-context:
+    description: Docker build context path
+    required: true
+  dockerfile-path:
+    description: Path to the Dockerfile
+    required: true
+  buildx-driver:
+    description: Buildx driver (docker-container or cloud)
+    required: true
+  buildx-version:
+    description: Buildx version
+    required: true
+  buildx-platforms:
+    description: Target platforms (e.g. linux/amd64,linux/arm64)
+    required: true
+  buildx-endpoint:
+    description: Buildx endpoint (only used when driver is "cloud")
+    required: false
+    default: ""
+  additional-assets:
+    description: Optional artifact name to download into additional-assets-dir before build
+    required: false
+    default: ""
+  additional-assets-dir:
+    description: Directory to download additional-assets into
+    required: false
+    default: ""
+  build-args:
+    description: Extra build args for docker build-push-action (newline-separated)
+    required: false
+    default: ""
+
+runs:
+  using: composite
+  steps:
+    - name: Download additional assets
+      if: ${{ inputs.additional-assets != '' }}
+      uses: actions/download-artifact@v6
+      with:
+        name: ${{ inputs.additional-assets }}
+        path: ${{ inputs.additional-assets-dir }}
+
+    - name: Log in to Docker Hub
+      uses: docker/login-action@v4
+      with:
+        username: ${{ inputs.dockerhub-username }}
+        password: ${{ inputs.dockerhub-token }}
+
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v4
+      with:
+        driver: ${{ inputs.buildx-driver }}
+        version: ${{ inputs.buildx-version }}
+        endpoint: ${{ inputs.buildx-endpoint }}
+
+    - name: Compute image tags
+      id: tags
+      shell: bash
+      env:
+        BUILD_RELEASE: ${{ inputs.build-release }}
+        BUILD_PRERELEASE: ${{ inputs.build-prerelease }}
+        RELEASE_VERSION: ${{ inputs.release-version }}
+        IMAGE: ${{ inputs.docker-image-owner }}/${{ inputs.docker-image-name }}
+        REF_NAME: ${{ github.ref_name }}
+        SHA: ${{ github.sha }}
+      run: |
+        set -euo pipefail
+
+        SHORT_SHA="${SHA:0:7}"
+        FLAT_REF="$(echo "$REF_NAME" | sed 's/[^a-zA-Z0-9.-]/-/g')"
+
+        TAGS=""
+        if [ "$BUILD_RELEASE" = "true" ]; then
+          # Always push the explicit version tag on release builds.
+          TAGS="${IMAGE}:${RELEASE_VERSION}"
+          if [ "$BUILD_PRERELEASE" != "true" ]; then
+            # Also push :stable and :latest on full releases.
+            TAGS="${TAGS},${IMAGE}:stable,${IMAGE}:latest"
+          fi
+        else
+          # Non-release build: tag by branch and commit.
+          TAGS="${IMAGE}:${FLAT_REF},${IMAGE}:${FLAT_REF}-${SHORT_SHA}"
+        fi
+
+        echo "tags=${TAGS}" >> "$GITHUB_OUTPUT"
+        echo "Computed tags: ${TAGS}"
+
+    - name: Build and push image
+      uses: docker/build-push-action@v7
+      with:
+        context: ${{ inputs.build-context }}
+        file: ${{ inputs.dockerfile-path }}
+        platforms: ${{ inputs.buildx-platforms }}
+        tags: ${{ steps.tags.outputs.tags }}
+        push: true
+        build-args: ${{ inputs.build-args }}

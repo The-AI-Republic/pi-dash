@@ -1236,7 +1236,12 @@ export const PLANS_COMPARISON_LIST: TPlansComparisonDetails[] = [
         description: (
           <>
             Get business-friendly SLAs with higher plans. SLAs are by priority of work item and tiers{" "}
-            <a href="https://pi-dash.so/talk-to-sales" target="_blank" rel="noopener noreferrer" className="underline">
+            <a
+              href="https://airepublic.com/talk-to-sales"
+              target="_blank"
+              rel="noopener noreferrer"
+              className="underline"
+            >
               can be requested
             </a>
             .

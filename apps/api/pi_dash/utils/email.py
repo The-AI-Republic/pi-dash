@@ -4,7 +4,7 @@
 # Licensed under the Pi Dash Commercial License (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
-# https://pi-dash.so/legals/eula
+# https://airepublic.com/eula
 #
 # DO NOT remove or modify this notice.
 # NOTICE: Proprietary and confidential. Unauthorized use or distribution is prohibited.

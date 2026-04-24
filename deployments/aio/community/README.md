@@ -68,7 +68,7 @@ docker run --name pi-dash-aio --rm -it \
     -e AWS_S3_BUCKET_NAME=your-bucket \
     -e SECRET_KEY=$(openssl rand -hex 32) \
     -e LIVE_SERVER_SECRET_KEY=$(openssl rand -hex 32) \
-    makepidash/pi-dash-aio-community:latest
+    airepublic/pi-dash-aio-community:latest
 ```
 
 ### Example with IP Address
@@ -82,14 +82,14 @@ docker run --name myaio --rm -it \
     -e REDIS_URL=redis://${MYIP}:16379 \
     -e AMQP_URL=amqp://pi-dash:pi-dash@${MYIP}:15673/pi-dash \
     -e AWS_REGION=us-east-1 \
-    -e AWS_ACCESS_KEY_ID=5MV45J9NF5TEFZWYCRAX \
-    -e AWS_SECRET_ACCESS_KEY=7xMqAiAHsf2UUjMH+EwICXlyJL9TO30m8leEaDsL \
+    -e AWS_ACCESS_KEY_ID=YOUR_ACCESS_KEY \
+    -e AWS_SECRET_ACCESS_KEY=YOUR_SECRET_KEY \
     -e AWS_S3_BUCKET_NAME=pi-dash-app \
     -e AWS_S3_ENDPOINT_URL=http://${MYIP}:19000 \
     -e FILE_SIZE_LIMIT=10485760 \
     -e SECRET_KEY=$(openssl rand -hex 32) \
     -e LIVE_SERVER_SECRET_KEY=$(openssl rand -hex 32) \
-    makepidash/pi-dash-aio-community:latest
+    airepublic/pi-dash-aio-community:latest
 ```
 
 ## Configuration Options

@@ -117,7 +117,7 @@ export const PI_DASH_COMMUNITY_PRODUCTS: Record<string, IPaymentProduct> = {
 /**
  * URL for the "Talk to Sales" page where users can contact sales team
  */
-export const TALK_TO_SALES_URL = "https://pi-dash.so/talk-to-sales";
+export const TALK_TO_SALES_URL = "https://airepublic.com/contact";
 
 /**
  * Mapping of subscription types to their respective upgrade/redirection URLs based on billing frequency
@@ -133,12 +133,12 @@ export const SUBSCRIPTION_REDIRECTION_URLS: Record<EProductSubscriptionEnum, Rec
     year: TALK_TO_SALES_URL,
   },
   [EProductSubscriptionEnum.PRO]: {
-    month: "https://app.pi-dash.so/upgrade/pro/self-hosted?plan=month",
-    year: "https://app.pi-dash.so/upgrade/pro/self-hosted?plan=year",
+    month: "https://airepublic.com/pricing/pro?plan=month",
+    year: "https://airepublic.com/pricing/pro?plan=year",
   },
   [EProductSubscriptionEnum.BUSINESS]: {
-    month: "https://app.pi-dash.so/upgrade/business/self-hosted?plan=month",
-    year: "https://app.pi-dash.so/upgrade/business/self-hosted?plan=year",
+    month: "https://airepublic.com/pricing/business?plan=month",
+    year: "https://airepublic.com/pricing/business?plan=year",
   },
   [EProductSubscriptionEnum.ENTERPRISE]: {
     month: TALK_TO_SALES_URL,
@@ -153,7 +153,7 @@ export const SUBSCRIPTION_REDIRECTION_URLS: Record<EProductSubscriptionEnum, Rec
 export const SUBSCRIPTION_WEBPAGE_URLS: Record<EProductSubscriptionEnum, string> = {
   [EProductSubscriptionEnum.FREE]: TALK_TO_SALES_URL,
   [EProductSubscriptionEnum.ONE]: TALK_TO_SALES_URL,
-  [EProductSubscriptionEnum.PRO]: "https://pi-dash.so/pro",
-  [EProductSubscriptionEnum.BUSINESS]: "https://pi-dash.so/business",
-  [EProductSubscriptionEnum.ENTERPRISE]: "https://pi-dash.so/business",
+  [EProductSubscriptionEnum.PRO]: "https://airepublic.com/pricing/pro",
+  [EProductSubscriptionEnum.BUSINESS]: "https://airepublic.com/pricing/business",
+  [EProductSubscriptionEnum.ENTERPRISE]: "https://airepublic.com/pricing/business",
 };

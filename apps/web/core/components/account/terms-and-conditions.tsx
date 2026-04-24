@@ -14,8 +14,8 @@ interface TermsAndConditionsProps {
 
 // Constants for better maintainability
 const LEGAL_LINKS = {
-  termsOfService: "https://pi-dash.so/legals/terms-and-conditions",
-  privacyPolicy: "https://pi-dash.so/legals/privacy-policy",
+  termsOfService: "https://airepublic.com/terms",
+  privacyPolicy: "https://airepublic.com/privacy",
 } as const;
 
 const MESSAGES = {

@@ -72,7 +72,7 @@ def test_preview_requires_admin(seeded, api_client, workspace, issue, create_use
     # Non-admin user
     from pi_dash.db.models import User
 
-    other = User.objects.create(email="outsider@pi-dash.so", username="outsider")
+    other = User.objects.create(email="outsider@example.com", username="outsider")
     other.set_password("p"); other.save()
     api_client.force_authenticate(user=other)
     template = PromptTemplate.objects.filter(workspace__isnull=True).first()
@@ -91,7 +91,7 @@ def test_preview_rejects_staff_non_member(seeded, api_client, workspace, issue):
     preview access to any Django-admin user."""
     from pi_dash.db.models import User
 
-    staff = User.objects.create(email="staff@pi-dash.so", username="staff-user", is_staff=True)
+    staff = User.objects.create(email="staff@example.com", username="staff-user", is_staff=True)
     staff.set_password("p"); staff.save()
     api_client.force_authenticate(user=staff)
     template = PromptTemplate.objects.filter(workspace__isnull=True).first()

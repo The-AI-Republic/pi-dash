@@ -112,7 +112,7 @@ export const GeneralConfigurationForm = observer(function GeneralConfigurationFo
                 No PII is collected.This anonymized data is used to understand how you use Pi Dash and build new
                 features in line with{" "}
                 <a
-                  href="https://developers.pi-dash.so/self-hosting/telemetry"
+                  href="https://github.com/The-AI-Republic/pi-dash#readme"
                   target="_blank"
                   className="text-accent-primary hover:underline"
                   rel="noreferrer"

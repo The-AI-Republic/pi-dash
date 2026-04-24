@@ -4,7 +4,7 @@
   "private": true,
   "description": "Open-source project management that unlocks customer value",
   "license": "AGPL-3.0",
-  "repository": "https://github.com/makepidash/pi-dash.git",
+  "repository": "https://github.com/The-AI-Republic/pi-dash.git",
   "scripts": {
     "build": "turbo run build",
     "dev": "turbo run dev --concurrency=18",

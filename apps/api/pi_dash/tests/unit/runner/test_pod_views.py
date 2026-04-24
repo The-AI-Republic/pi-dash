@@ -27,7 +27,7 @@ def member_user(db):
     """A second user with role=Member (15) in the test workspace."""
     unique = uuid4().hex[:8]
     user = User.objects.create(
-        email=f"member-{unique}@pi-dash.so",
+        email=f"member-{unique}@example.com",
         username=f"member_{unique}",
         first_name="M",
         last_name="ember",
@@ -90,7 +90,7 @@ def test_non_member_cannot_list_pods(
     from rest_framework.test import APIClient
 
     other = User.objects.create(
-        email=f"out-{uuid4().hex[:8]}@pi-dash.so",
+        email=f"out-{uuid4().hex[:8]}@example.com",
         username=f"out_{uuid4().hex[:8]}",
     )
     other.set_password("pw")

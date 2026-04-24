@@ -113,7 +113,7 @@ Install does not require root; binary lives in `$HOME/.local/bin/pidash` by defa
 
 ```
 pidash configure \
-  --url https://cloud.pidash.so \
+  --url http://localhost \
   --token <ONE_TIME_CODE> \
   [--name my-laptop]
 ```
@@ -299,7 +299,7 @@ version = 1
 
 [runner]
 name = "my-laptop"
-cloud_url = "https://cloud.pidash.so"
+cloud_url = "http://localhost"
 # runner_id + secret are in credentials.toml
 
 [workspace]
@@ -642,7 +642,7 @@ Tooling: **cargo-dist**.
 
 - `cargo dist init` → `dist/Cargo.dist.toml` describing the targets: `aarch64-apple-darwin`, `x86_64-apple-darwin`, `x86_64-unknown-linux-gnu`.
 - Each tagged release: GitHub Actions matrix builds binaries + generates Homebrew formula, `.deb`, `.tar.gz`, SHA256SUMS.
-- Homebrew tap hosted at `github.com/pi-dash/homebrew-tap`.
+- Homebrew tap hosted at `github.com/The-AI-Republic/homebrew-tap` (to be created).
 - `curl | sh` installer script resolves to the right target triple and drops binary in `$HOME/.local/bin`.
 
 Binary signing:

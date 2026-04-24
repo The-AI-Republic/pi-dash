@@ -5,9 +5,9 @@ SCRIPT_DIR=$PWD
 SERVICE_FOLDER=pi-dash-app
 PI_DASH_INSTALL_DIR=$PWD/$SERVICE_FOLDER
 export APP_RELEASE=stable
-export DOCKERHUB_USER=makepidash
+export DOCKERHUB_USER=airepublic
 export PULL_POLICY=${PULL_POLICY:-if_not_present}
-export GH_REPO=makepidash/pi_dash
+export GH_REPO=The-AI-Republic/pi-dash
 export RELEASE_DOWNLOAD_URL="https://github.com/$GH_REPO/releases/download"
 export FALLBACK_DOWNLOAD_URL="https://raw.githubusercontent.com/$GH_REPO/$BRANCH/deployments/cli/community"
 
@@ -77,7 +77,7 @@ function initialize(){
         return 1
     fi
 
-    local IMAGE_NAME=makepidash/pi-dash-proxy
+    local IMAGE_NAME=airepublic/pi-dash-proxy
     local IMAGE_TAG=${APP_RELEASE}
     docker manifest inspect "${IMAGE_NAME}:${IMAGE_TAG}" | grep -q "\"architecture\": \"${CPU_ARCH}\"" &
     local pid=$!
@@ -731,7 +731,7 @@ if [ -f "$DOCKER_ENV_PATH" ]; then
     CUSTOM_BUILD=$(getEnvValue "CUSTOM_BUILD" "$DOCKER_ENV_PATH")
 
     if [ -z "$DOCKERHUB_USER" ]; then
-        DOCKERHUB_USER=makepidash
+        DOCKERHUB_USER=airepublic
         updateEnvFile "DOCKERHUB_USER" "$DOCKERHUB_USER" "$DOCKER_ENV_PATH"
     fi
 

@@ -66,7 +66,7 @@ cd pi-dash-selfhost
 #### For _Docker Compose_ based setup
 
 ```
-curl -fsSL -o setup.sh https://github.com/makepidash/pi-dash/releases/latest/download/setup.sh
+curl -fsSL -o setup.sh https://github.com/The-AI-Republic/pi-dash/releases/latest/download/setup.sh
 
 chmod +x setup.sh
 ```
@@ -74,7 +74,7 @@ chmod +x setup.sh
 #### For _Docker Swarm_ based setup
 
 ```
-curl -fsSL -o setup.sh https://github.com/makepidash/pi-dash/releases/latest/download/swarm.sh
+curl -fsSL -o setup.sh https://github.com/The-AI-Republic/pi-dash/releases/latest/download/swarm.sh
 
 chmod +x setup.sh
 ```
@@ -497,7 +497,7 @@ When you want to restore the previously backed-up data, follow the instructions 
 1. Download the restore script using the command below. We suggest downloading it in the same folder as `setup.sh`.
 
    ```bash
-   curl -fsSL -o restore.sh https://github.com/makepidash/pi-dash/releases/latest/download/restore.sh
+   curl -fsSL -o restore.sh https://github.com/The-AI-Republic/pi-dash/releases/latest/download/restore.sh
    chmod +x restore.sh
    ```
 
@@ -547,7 +547,7 @@ When you want to restore the previously backed-up data on Pi Dash Commercial Air
 1. Download the restore script using the command below
 
    ```bash
-   curl -fsSL -o restore-airgapped.sh https://github.com/makepidash/pi-dash/releases/latest/download/restore-airgapped.sh
+   curl -fsSL -o restore-airgapped.sh https://github.com/The-AI-Republic/pi-dash/releases/latest/download/restore-airgapped.sh
    chmod +x restore-airgapped.sh
    ```
 
@@ -578,7 +578,7 @@ Begin with downloading the migration script using below command
 
 ```
 
-curl -fsSL -o migrate.sh https://raw.githubusercontent.com/makepidash/pi-dash/master/deploy/selfhost/migration-0.13-0.14.sh
+curl -fsSL -o migrate.sh https://raw.githubusercontent.com/The-AI-Republic/pi-dash/master/deploy/selfhost/migration-0.13-0.14.sh
 
 chmod +x migrate.sh
 

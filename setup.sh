@@ -2,7 +2,7 @@
 
 # Pi Dash Project Setup Script
 # This script prepares the local development environment by setting up all necessary .env files
-# https://github.com/makepidash/pi-dash
+# https://github.com/The-AI-Republic/pi-dash
 
 # Set colors for output messages
 GREEN='\033[0;32m'
@@ -92,6 +92,6 @@ if [ "$success" = true ]; then
     echo -e "\n${GREEN}Happy coding! 🚀${NC}"
 else
     echo -e "${RED}✗${NC} Some issues occurred during setup. Please check the errors above.\n"
-    echo -e "For help, visit: ${BLUE}https://github.com/makepidash/pi-dash${NC}"
+    echo -e "For help, visit: ${BLUE}https://github.com/The-AI-Republic/pi-dash${NC}"
     exit 1
 fi

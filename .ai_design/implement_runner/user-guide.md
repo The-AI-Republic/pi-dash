@@ -20,14 +20,14 @@ Pick one:
 brew install pidash/tap/pidash
 
 # Shell installer
-curl -fsSL https://cloud.pidash.so/install.sh | sh
+curl -fsSL http://localhost/install.sh | sh
 ```
 
 Both drop `pidash` into `$HOME/.local/bin`. Make sure that directory is in your `PATH`.
 
 ## 2. Get a registration code
 
-1. Sign in to `https://cloud.pidash.so` (or your self-hosted URL).
+1. Sign in to `http://localhost` (or your self-hosted URL).
 2. Open your workspace → **Runners** tab.
 3. Click **Mint registration code**.
 4. Copy the code. It's single-use and expires in 1 hour.
@@ -53,7 +53,7 @@ The TUI detects that no config exists and walks you through 4 steps:
 
 ```bash
 pidash configure \
-  --url https://cloud.pidash.so \
+  --url http://localhost \
   --token <PASTE_REGISTRATION_CODE> \
   --name my-laptop
 

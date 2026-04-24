@@ -6,12 +6,12 @@ FROM --platform=$BUILDPLATFORM tonistiigi/binfmt AS binfmt
 # **************************************************
 FROM node:22-alpine AS node
 
-FROM makepidash/pi-dash-frontend:${PI_DASH_VERSION} AS web-img
-FROM makepidash/pi-dash-backend:${PI_DASH_VERSION} AS backend-img
-FROM makepidash/pi-dash-space:${PI_DASH_VERSION} AS space-img
-FROM makepidash/pi-dash-admin:${PI_DASH_VERSION} AS admin-img
-FROM makepidash/pi-dash-live:${PI_DASH_VERSION} AS live-img
-FROM makepidash/pi-dash-proxy:${PI_DASH_VERSION} AS proxy-img
+FROM airepublic/pi-dash-frontend:${PI_DASH_VERSION} AS web-img
+FROM airepublic/pi-dash-backend:${PI_DASH_VERSION} AS backend-img
+FROM airepublic/pi-dash-space:${PI_DASH_VERSION} AS space-img
+FROM airepublic/pi-dash-admin:${PI_DASH_VERSION} AS admin-img
+FROM airepublic/pi-dash-live:${PI_DASH_VERSION} AS live-img
+FROM airepublic/pi-dash-proxy:${PI_DASH_VERSION} AS proxy-img
 
 # **************************************************
 #  STAGE 1: Runner

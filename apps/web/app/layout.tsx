@@ -6,7 +6,8 @@
 
 import Script from "next/script";
 
-// styles
+// styles — side-effect import of global Tailwind/CSS
+// eslint-disable-next-line import/no-unassigned-import
 import "@/styles/globals.css";
 
 import { SITE_DESCRIPTION, SITE_NAME } from "@pi-dash/constants";
@@ -42,14 +43,14 @@ export const meta = () => [
     property: "og:description",
     content: "Open-source project management tool to manage work items, cycles, and product roadmaps easily",
   },
-  { property: "og:url", content: "https://app.pi-dash.so/" },
-  { property: "og:image", content: "https://app.pi-dash.so/og-image.png" },
+  { property: "og:url", content: "https://airepublic.com/" },
+  { property: "og:image", content: "https://airepublic.com/og-image.png" },
   { property: "og:image:width", content: "1200" },
   { property: "og:image:height", content: "630" },
   { property: "og:image:alt", content: "Pi Dash - Modern project management" },
-  { name: "twitter:site", content: "@pidashpowers" },
+  { name: "twitter:site", content: "@ai_republic" },
   { name: "twitter:card", content: "summary_large_image" },
-  { name: "twitter:image", content: "https://app.pi-dash.so/og-image.png" },
+  { name: "twitter:image", content: "https://airepublic.com/og-image.png" },
   { name: "twitter:image:width", content: "1200" },
   { name: "twitter:image:height", content: "630" },
   { name: "twitter:image:alt", content: "Pi Dash - Modern project management" },
