@@ -4,6 +4,14 @@ In this guide, we will walk you through the process of setting up a self-hosted 
 
 We will cover two main options for setting up your self-hosted environment: using a cloud server or using your desktop. For the cloud server, we will use an AWS EC2 instance. For the desktop, we will use Docker to create a local environment.
 
+> **Just want to try Pi Dash quickly?**
+> If you're evaluating Pi Dash or running it on a homelab / small VPS, the
+> [All-in-One Docker image](../aio/community/README.md) is a one-container
+> shortcut — single `docker run` command instead of docker-compose.
+> External Postgres / Redis / RabbitMQ / S3-compatible storage are still
+> required. Come back to this guide when you're ready for a full
+> production deployment with independent service scaling.
+
 Let's get started!
 
 ## Setting up Docker Environment
