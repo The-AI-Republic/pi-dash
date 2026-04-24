@@ -34,6 +34,13 @@ on:
     branches:
       - preview
       - canary
+    tags:
+      # Platform-only release tag scheme. Runner CLI releases use the
+      # `pidash-v*.*.*` pattern handled by .github/workflows/release.yml
+      # (cargo-dist parses that prefix as the `pidash` Cargo package).
+      # `platform-` is intentionally distinct so the two release pipelines
+      # never fire on the same tag.
+      - 'platform-v*.*.*'
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -73,14 +80,36 @@ jobs:
       aio_build: ${{ steps.set_env_variables.outputs.AIO_BUILD }}
 
     steps:
+      - id: tag_release_detect
+        name: Detect tag-triggered release
+        if: ${{ startsWith(github.ref, 'refs/tags/platform-v') }}
+        run: |
+          # Pushing a `platform-v<semver>` tag is interpreted as a Release.
+          # Strip the `platform-` prefix; anything with an alpha suffix
+          # (e.g. -alpha.1, -rc1) is treated as a prerelease.
+          TAG="${GITHUB_REF#refs/tags/}"          # platform-v1.4.0
+          VERSION="${TAG#platform-}"              # v1.4.0
+          echo "BUILD_TYPE=Release" >> $GITHUB_ENV
+          echo "RELEASE_VERSION=${VERSION}" >> $GITHUB_ENV
+          if [[ "$VERSION" =~ -[a-zA-Z] ]]; then
+            echo "IS_PRERELEASE=true" >> $GITHUB_ENV
+          else
+            echo "IS_PRERELEASE=false" >> $GITHUB_ENV
+          fi
+          echo "Tag-triggered release detected: $TAG -> $VERSION"
+
       - id: set_env_variables
         name: Set Environment Variables
         run: |
-          if [ "${{ env.ARM64_BUILD }}" == "true" ] || ([ "${{ env.BUILD_TYPE }}" == "Release" ] && [ "${{ env.IS_PRERELEASE }}" != "true" ]); then
-            echo "BUILDX_DRIVER=cloud" >> $GITHUB_OUTPUT
-            echo "BUILDX_VERSION=lab:latest" >> $GITHUB_OUTPUT
+          # Buildx driver selection. The `cloud` driver requires Docker Build
+          # Cloud (paid) which is not configured for this project; use the
+          # local `docker-container` driver everywhere. Multi-arch on releases
+          # is achieved via QEMU emulation rather than the cloud builder.
+          if [ "${{ env.ARM64_BUILD }}" == "true" ] || [ "${{ env.BUILD_TYPE }}" == "Release" ]; then
+            echo "BUILDX_DRIVER=docker-container" >> $GITHUB_OUTPUT
+            echo "BUILDX_VERSION=latest" >> $GITHUB_OUTPUT
             echo "BUILDX_PLATFORMS=linux/amd64,linux/arm64" >> $GITHUB_OUTPUT
-            echo "BUILDX_ENDPOINT=airepublic/pi-dash-dev" >> $GITHUB_OUTPUT
+            echo "BUILDX_ENDPOINT=" >> $GITHUB_OUTPUT
           else
             echo "BUILDX_DRIVER=docker-container" >> $GITHUB_OUTPUT
             echo "BUILDX_VERSION=latest" >> $GITHUB_OUTPUT

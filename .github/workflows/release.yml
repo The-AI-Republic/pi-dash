@@ -42,7 +42,12 @@ on:
   pull_request:
   push:
     tags:
-      - '**[0-9]+.[0-9]+.[0-9]+*'
+      # Runner-only release tag scheme. The runner Cargo package is named
+      # `pidash`; cargo-dist parses the `pidash-` prefix as the package
+      # selector. Platform / Docker image releases use the
+      # `platform-v*.*.*` pattern handled by build-branch.yml and
+      # intentionally do not match this workflow.
+      - 'pidash-v*.*.*'
 
 jobs:
   # Run 'cargo dist plan' (or host) to determine what tasks we need to do
