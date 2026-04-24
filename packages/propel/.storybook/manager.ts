@@ -10,7 +10,7 @@ import { create } from "storybook/theming";
 const piDashTheme = create({
   base: "dark",
   brandTitle: "Pi Dash UI",
-  brandUrl: "https://pi-dash.so",
+  brandUrl: "https://airepublic.com",
   brandImage: "pi-dash-lockup-light.svg",
   brandTarget: "_self",
 });

@@ -96,7 +96,7 @@ Why:
 
 - The existing `/api/v1/` REST surface already supports everything the agent needs.
 - It removes the previous "cloud parses a fenced payload and applies it" coupling that was never implemented.
-- It matches the approach validated by Symphony (`/home/rich/dev/study/symphony/SPEC.md` §10), which uses a `linear_graphql` tool and treats the tracker as the source of truth.
+- It matches a prior-art pattern where the agent uses a tracker-native tool (analogous to a `linear_graphql` tool) and treats the tracker as the source of truth.
 
 Implication:
 

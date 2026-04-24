@@ -17,7 +17,7 @@ from pi_dash.db.models import (
 
 @pytest.fixture
 def other_user(db):
-    return User.objects.create(email="other@pi-dash.so", first_name="Other", last_name="User")
+    return User.objects.create(email="other@example.com", first_name="Other", last_name="User")
 
 
 @pytest.fixture

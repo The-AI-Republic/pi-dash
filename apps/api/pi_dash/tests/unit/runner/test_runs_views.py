@@ -48,7 +48,7 @@ def test_post_run_validates_workspace_membership(
     db, api_client, second_workspace
 ):
     outsider = User.objects.create(
-        email=f"out-{uuid4().hex[:8]}@pi-dash.so",
+        email=f"out-{uuid4().hex[:8]}@example.com",
         username=f"out_{uuid4().hex[:8]}",
     )
     outsider.set_password("pw")
@@ -103,7 +103,7 @@ def test_post_run_ignores_request_body_created_by(
 ):
     """Caller can't impersonate someone else by passing created_by in the body."""
     spoofed = User.objects.create(
-        email=f"spoof-{uuid4().hex[:8]}@pi-dash.so",
+        email=f"spoof-{uuid4().hex[:8]}@example.com",
         username=f"spoof_{uuid4().hex[:8]}",
     )
     spoofed.set_password("pw")
@@ -132,7 +132,7 @@ def test_get_runs_lists_by_created_by(db, session_client, workspace):
         prompt="mine",
     )
     other = User.objects.create(
-        email=f"o-{uuid4().hex[:8]}@pi-dash.so",
+        email=f"o-{uuid4().hex[:8]}@example.com",
         username=f"o_{uuid4().hex[:8]}",
     )
     other.set_password("pw")

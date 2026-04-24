@@ -16,17 +16,17 @@ SPECTACULAR_SETTINGS = {
     "DESCRIPTION": (
         "The Pi Dash REST API\n\n"
         "Visit our quick start guide and full API documentation at "
-        "[developers.pi-dash.so](https://developers.pi-dash.so/api-reference/introduction)."
+        "[github.com/The-AI-Republic/pi-dash](https://github.com/The-AI-Republic/pi-dash#readme)."
     ),
     "CONTACT": {
         "name": "Pi Dash",
-        "url": "https://pi-dash.so",
-        "email": "support@pi-dash.so",
+        "url": "https://airepublic.com",
+        "email": "support@airepublic.com",
     },
     "VERSION": "0.0.1",
     "LICENSE": {
         "name": "GNU AGPLv3",
-        "url": "https://github.com/makepidash/pi-dash/blob/preview/LICENSE.txt",
+        "url": "https://github.com/The-AI-Republic/pi-dash/blob/preview/LICENSE.txt",
     },
     # ========================================================================
     # Schema Generation Settings
@@ -45,7 +45,7 @@ SPECTACULAR_SETTINGS = {
     # ========================================================================
     "SERVERS": [
         {"url": "http://localhost:8000", "description": "Local"},
-        {"url": "https://api.pi-dash.so", "description": "Production"},
+        {"url": "https://airepublic.com/api", "description": "Production"},
     ],
     # ========================================================================
     # API Tag Definitions

@@ -76,7 +76,7 @@ export function InstanceAIForm(props: IInstanceAIForm) {
           </a>
         </>
       ),
-      placeholder: "sk-asddassdfasdefqsdfasd23das3dasdcasd",
+      placeholder: "sk-...",
       error: Boolean(errors.LLM_API_KEY),
       required: false,
     },
@@ -129,7 +129,7 @@ export function InstanceAIForm(props: IInstanceAIForm) {
           <Lightbulb className="size-4" />
           <div>
             If you have a preferred AI models vendor, please get in{" "}
-            <a className="font-medium underline" href="https://pi-dash.so/contact">
+            <a className="font-medium underline" href="https://airepublic.com/contact">
               touch with us.
             </a>
           </div>

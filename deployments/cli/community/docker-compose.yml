@@ -61,7 +61,7 @@ x-app-env: &app-env
 
 services:
   web:
-    image: makepidash/pi-dash-frontend:${APP_RELEASE:-stable}
+    image: airepublic/pi-dash-frontend:${APP_RELEASE:-stable}
     deploy:
       replicas: ${WEB_REPLICAS:-1}
       restart_policy:
@@ -71,7 +71,7 @@ services:
       - worker
 
   space:
-    image: makepidash/pi-dash-space:${APP_RELEASE:-stable}
+    image: airepublic/pi-dash-space:${APP_RELEASE:-stable}
     deploy:
       replicas: ${SPACE_REPLICAS:-1}
       restart_policy:
@@ -82,7 +82,7 @@ services:
       - web
 
   admin:
-    image: makepidash/pi-dash-admin:${APP_RELEASE:-stable}
+    image: airepublic/pi-dash-admin:${APP_RELEASE:-stable}
     deploy:
       replicas: ${ADMIN_REPLICAS:-1}
       restart_policy:
@@ -92,7 +92,7 @@ services:
       - web
 
   live:
-    image: makepidash/pi-dash-live:${APP_RELEASE:-stable}
+    image: airepublic/pi-dash-live:${APP_RELEASE:-stable}
     environment:
       <<: [*live-env, *redis-env]
     deploy:
@@ -104,7 +104,7 @@ services:
       - web
 
   api:
-    image: makepidash/pi-dash-backend:${APP_RELEASE:-stable}
+    image: airepublic/pi-dash-backend:${APP_RELEASE:-stable}
     command: ./bin/docker-entrypoint-api.sh
     deploy:
       replicas: ${API_REPLICAS:-1}
@@ -120,7 +120,7 @@ services:
       - pi-dash-mq
 
   worker:
-    image: makepidash/pi-dash-backend:${APP_RELEASE:-stable}
+    image: airepublic/pi-dash-backend:${APP_RELEASE:-stable}
     command: ./bin/docker-entrypoint-worker.sh
     deploy:
       replicas: ${WORKER_REPLICAS:-1}
@@ -137,7 +137,7 @@ services:
       - pi-dash-mq
 
   beat-worker:
-    image: makepidash/pi-dash-backend:${APP_RELEASE:-stable}
+    image: airepublic/pi-dash-backend:${APP_RELEASE:-stable}
     command: ./bin/docker-entrypoint-beat.sh
     deploy:
       replicas: ${BEAT_WORKER_REPLICAS:-1}
@@ -154,7 +154,7 @@ services:
       - pi-dash-mq
 
   migrator:
-    image: makepidash/pi-dash-backend:${APP_RELEASE:-stable}
+    image: airepublic/pi-dash-backend:${APP_RELEASE:-stable}
     command: ./bin/docker-entrypoint-migrator.sh
     deploy:
       replicas: 1
@@ -216,7 +216,7 @@ services:
 
   # Comment this if you already have a reverse proxy running
   proxy:
-    image: makepidash/pi-dash-proxy:${APP_RELEASE:-stable}
+    image: airepublic/pi-dash-proxy:${APP_RELEASE:-stable}
     deploy:
       replicas: 1
       restart_policy:

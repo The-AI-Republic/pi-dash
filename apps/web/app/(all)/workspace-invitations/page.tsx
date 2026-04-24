@@ -58,6 +58,7 @@ function WorkspaceInvitationPage() {
         } else {
           router.push("/");
         }
+        return undefined;
       })
       .catch((err: unknown) => console.error(err));
   };
@@ -71,6 +72,7 @@ function WorkspaceInvitationPage() {
       })
       .then(() => {
         router.push("/");
+        return undefined;
       })
       .catch((err: unknown) => console.error(err));
   };
@@ -111,11 +113,11 @@ function WorkspaceInvitationPage() {
               ) : (
                 <EmptySpaceItem Icon={Boxes} title="Continue to home" href="/" />
               )}
-              <EmptySpaceItem Icon={Star} title="Star us on GitHub" href="https://github.com/makepidash" />
+              <EmptySpaceItem Icon={Star} title="Star us on GitHub" href="https://github.com/The-AI-Republic/pi-dash" />
               <EmptySpaceItem
                 Icon={Share2}
                 title="Join our community of active creators"
-                href="https://forum.pi-dash.so"
+                href="https://github.com/The-AI-Republic/pi-dash/discussions"
               />
             </EmptySpace>
           )

@@ -28,7 +28,7 @@ def admin_user(create_user, workspace):
 @pytest.fixture
 def member_user(db, workspace):
     member = User.objects.create(
-        email="member@pi-dash.so", username="member-user"
+        email="member@example.com", username="member-user"
     )
     member.set_password("p")
     member.save()
@@ -41,7 +41,7 @@ def member_user(db, workspace):
 @pytest.fixture
 def outsider(db):
     other = User.objects.create(
-        email="outsider@pi-dash.so", username="outsider-user"
+        email="outsider@example.com", username="outsider-user"
     )
     other.set_password("p")
     other.save()

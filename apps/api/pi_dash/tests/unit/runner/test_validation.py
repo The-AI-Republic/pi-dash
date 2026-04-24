@@ -23,7 +23,7 @@ def other_user(db):
 
     unique = uuid4().hex[:8]
     user = User.objects.create(
-        email=f"other-{unique}@pi-dash.so",
+        email=f"other-{unique}@example.com",
         username=f"other_{unique}",
         first_name="O",
         last_name="Ther",

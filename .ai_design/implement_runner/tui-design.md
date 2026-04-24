@@ -95,7 +95,7 @@ Four primary views. Switch with number keys or tab. Vim-style `j/k/h/l` + arrow 
 ├────────────────────────────────────────────────────────────┤
 │ Preconditions                                              │
 │   ✓ Codex binary     /usr/local/bin/codex  (v0.45.0)       │
-│   ✓ Codex auth       mrc2048@gmail.com (ChatGPT Plus)      │
+│   ✓ Codex auth       user@example.com (ChatGPT Plus)      │
 │   ✓ Git              2.43.0                                 │
 │   ✓ Network          cloud reachable                       │
 ├────────────────────────────────────────────────────────────┤
@@ -144,7 +144,7 @@ Form-style editor. Edits are POSTed to the daemon and applied live.
 │ Identity                                                   │
 │   Runner name     my-laptop                                │
 │   Workspace       acme                                     │
-│   Cloud URL       https://cloud.pidash.so           │
+│   Cloud URL       http://localhost           │
 │                                                             │
 │ Capabilities (labels)                           [e] edit   │
 │   codex, macos, arm64                                      │
@@ -231,7 +231,7 @@ Step 1 of 4: Paste registration code
 Step 2 of 4: Verify Codex
   Checking Codex installation...
     ✓ codex v0.45.0 found at /usr/local/bin/codex
-    ✓ logged in as mrc2048@gmail.com
+    ✓ logged in as user@example.com
 
 Step 3 of 4: Choose labels
   Default labels:  self-hosted, macos, arm64

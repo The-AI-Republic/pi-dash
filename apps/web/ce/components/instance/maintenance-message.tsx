@@ -9,7 +9,7 @@ export function MaintenanceMessage() {
     {
       key: "mail_to",
       label: "Contact Support",
-      value: "mailto:support@pi-dash.so",
+      value: "mailto:support@airepublic.com",
     },
   ];
 

@@ -20,7 +20,7 @@ export function LatestFeatureBlock() {
         <Lightbulb className="mx-3 mr-2 h-7 w-7" />
         <p className="text-left text-13 text-primary">
           Pages gets a facelift! Write anything and use Galileo to help you start.{" "}
-          <Link href="https://pi-dash.so/changelog" target="_blank" rel="noopener noreferrer">
+          <Link href="https://airepublic.com/changelog" target="_blank" rel="noopener noreferrer">
             <span className="text-13 font-medium underline hover:cursor-pointer">Learn more</span>
           </Link>
         </p>

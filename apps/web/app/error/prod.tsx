@@ -17,17 +17,17 @@ const linkMap = [
   {
     key: "mail_to",
     label: "Contact Support",
-    value: "mailto:support@pi-dash.so",
+    value: "mailto:support@airepublic.com",
   },
   {
     key: "status",
     label: "Status Page",
-    value: "https://status.pi-dash.so/",
+    value: "https://airepublic.com/",
   },
   {
     key: "twitter_handle",
-    label: "@pidashpowers",
-    value: "https://x.com/pidashpowers",
+    label: "@ai_republic",
+    value: "https://x.com/ai_republic",
   },
 ];
 

@@ -37,7 +37,7 @@ export const usePowerKHelpCommands = (): TPowerKCommandConfig[] => {
       i18n_title: "power_k.help_actions.open_pi_dash_documentation",
       icon: FileText,
       action: () => {
-        window.open("https://docs.pi-dash.so/", "_blank", "noopener,noreferrer");
+        window.open("https://github.com/The-AI-Republic/pi-dash#readme", "_blank", "noopener,noreferrer");
       },
       isEnabled: () => true,
       isVisible: () => true,
@@ -50,7 +50,7 @@ export const usePowerKHelpCommands = (): TPowerKCommandConfig[] => {
       i18n_title: "power_k.help_actions.join_forum",
       icon: MessageSquare,
       action: () => {
-        window.open("https://forum.pi-dash.so", "_blank", "noopener,noreferrer");
+        window.open("https://github.com/The-AI-Republic/pi-dash/discussions", "_blank", "noopener,noreferrer");
       },
       isEnabled: () => true,
       isVisible: () => true,
@@ -63,7 +63,7 @@ export const usePowerKHelpCommands = (): TPowerKCommandConfig[] => {
       i18n_title: "power_k.help_actions.report_bug",
       icon: GithubIcon,
       action: () => {
-        window.open("https://github.com/makepidash/pi-dash/issues/new/choose", "_blank", "noopener,noreferrer");
+        window.open("https://github.com/The-AI-Republic/pi-dash/issues/new/choose", "_blank", "noopener,noreferrer");
       },
       isEnabled: () => true,
       isVisible: () => true,

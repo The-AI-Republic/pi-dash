@@ -19,7 +19,7 @@ After install:
 
 ```bash
 pidash configure \
-  --url https://cloud.pidash.so \
+  --url http://localhost \
   --token <ONE_TIME_CODE> \
   --name my-laptop
 pidash install   # register a systemd user unit (Linux) or launchd agent (macOS)

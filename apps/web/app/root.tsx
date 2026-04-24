@@ -27,10 +27,13 @@ import { LogoSpinner } from "@/components/common/logo-spinner";
 // local
 import { CustomErrorComponent } from "./error";
 import { AppProvider } from "./provider";
-// fonts
+// fonts — side-effect imports that register font-face CSS; no binding to assign
+// eslint-disable-next-line import/no-unassigned-import
 import "@fontsource-variable/inter";
 import interVariableWoff2 from "@fontsource-variable/inter/files/inter-latin-wght-normal.woff2?url";
+// eslint-disable-next-line import/no-unassigned-import
 import "@fontsource/material-symbols-rounded";
+// eslint-disable-next-line import/no-unassigned-import
 import "@fontsource/ibm-plex-mono";
 
 const APP_TITLE = "Pi Dash | Simple, extensible, open-source project management tool.";
@@ -102,7 +105,7 @@ export const meta: Route.MetaFunction = () => [
     property: "og:description",
     content: "Open-source project management tool to manage work items, cycles, and product roadmaps easily",
   },
-  { property: "og:url", content: "https://app.pi-dash.so/" },
+  { property: "og:url", content: "https://airepublic.com/" },
   { property: "og:image", content: ogImage },
   { property: "og:image:width", content: "1200" },
   { property: "og:image:height", content: "630" },
@@ -112,7 +115,7 @@ export const meta: Route.MetaFunction = () => [
     content:
       "software development, plan, ship, software, accelerate, code management, release management, project management, work item tracking, agile, scrum, kanban, collaboration",
   },
-  { name: "twitter:site", content: "@pidashpowers" },
+  { name: "twitter:site", content: "@ai_republic" },
   { name: "twitter:card", content: "summary_large_image" },
   { name: "twitter:image", content: ogImage },
   { name: "twitter:image:width", content: "1200" },

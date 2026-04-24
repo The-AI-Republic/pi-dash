@@ -111,7 +111,7 @@ export const EstimateRoot = observer(function EstimateRoot(props: TEstimateRoot)
                     Estimates have gone through a change, these are the estimates you had in your older versions which
                     were not in use. Read more about them&nbsp;
                     <a
-                      href={"https://docs.pi-dash.so/core-concepts/projects/run-project#estimate"}
+                      href={"https://github.com/The-AI-Republic/pi-dash#readme"}
                       target="_blank"
                       className="text-accent-primary/80 hover:text-accent-primary"
                       rel="noreferrer"
@@ -137,15 +137,15 @@ export const EstimateRoot = observer(function EstimateRoot(props: TEstimateRoot)
       <UpdateEstimateModal
         workspaceSlug={workspaceSlug}
         projectId={projectId}
-        estimateId={estimateToUpdate ? estimateToUpdate : undefined}
-        isOpen={estimateToUpdate ? true : false}
+        estimateId={estimateToUpdate || undefined}
+        isOpen={Boolean(estimateToUpdate)}
         handleClose={() => setEstimateToUpdate(undefined)}
       />
       <DeleteEstimateModal
         workspaceSlug={workspaceSlug}
         projectId={projectId}
-        estimateId={estimateToDelete ? estimateToDelete : undefined}
-        isOpen={estimateToDelete ? true : false}
+        estimateId={estimateToDelete || undefined}
+        isOpen={Boolean(estimateToDelete)}
         handleClose={() => setEstimateToDelete(undefined)}
       />
     </>
