@@ -98,6 +98,14 @@ def test_build_first_turn_uses_default_template(seeded_default, issue, run):
 
 
 @pytest.mark.unit
-def test_build_continuation_not_implemented(seeded_default, issue, run):
-    with pytest.raises(NotImplementedError):
-        build_continuation(issue, run)
+def test_build_continuation_falls_back_to_first_turn_when_no_parent(
+    seeded_default, issue, run
+):
+    """Without a parent run with a started_at, build_continuation should
+    fall back to the full first-turn template rather than emitting a
+    bare 'no new input' placeholder.
+    """
+    out = build_continuation(issue, run)
+    # Same shape as build_first_turn — issue context, not just a
+    # placeholder string.
+    assert "Pi Dash issue" in out

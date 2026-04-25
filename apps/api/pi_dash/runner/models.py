@@ -252,6 +252,22 @@ class Runner(models.Model):
                 )
                 affected_pod_ids = {pid for _, pid in active_runs if pid is not None}
 
+            # Pinned QUEUED runs (follow-ups waiting for this runner) don't
+            # get cancelled — they still represent legitimate user intent.
+            # Drop the pin so they flow back into the pod's general queue
+            # and any remaining online runner can take them with a fresh
+            # session. See §5.7 of .ai_design/issue_run_improve/design.md.
+            pinned_pod_ids = list(
+                AgentRun.objects.filter(
+                    pinned_runner=self, status=AgentRunStatus.QUEUED
+                ).values_list("pod_id", flat=True)
+            )
+            if pinned_pod_ids:
+                AgentRun.objects.filter(
+                    pinned_runner=self, status=AgentRunStatus.QUEUED
+                ).update(pinned_runner=None)
+                affected_pod_ids.update(pid for pid in pinned_pod_ids if pid is not None)
+
         # Refire drain for every affected pod once the transaction commits.
         # Remaining online runners (if any) in the same pod may now pick up
         # queued work.

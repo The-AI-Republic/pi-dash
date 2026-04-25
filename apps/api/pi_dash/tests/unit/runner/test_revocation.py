@@ -170,3 +170,45 @@ def test_revoke_is_noop_when_no_in_flight_runs(
     r.revoke()
     r.refresh_from_db()
     assert r.status == RunnerStatus.REVOKED
+
+
+# ---------------------------------------------------------------------------
+# Pin release on revoke (§5.7 of the design doc).
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+def test_revoke_releases_pinned_queued_runs(
+    db, create_user, workspace
+):
+    from django.utils import timezone
+
+    from pi_dash.runner.models import AgentRun, AgentRunStatus, Pod, Runner, RunnerStatus
+
+    pod = Pod.default_for_workspace(workspace)
+    runner = Runner.objects.create(
+        owner=create_user,
+        workspace=workspace,
+        pod=pod,
+        name="agentX",
+        credential_hash="hX",
+        credential_fingerprint="X" * 12,
+        status=RunnerStatus.ONLINE,
+        last_heartbeat_at=timezone.now(),
+    )
+    pinned_queued = AgentRun.objects.create(
+        owner=create_user,
+        workspace=workspace,
+        pod=pod,
+        prompt="waiting for agentX",
+        status=AgentRunStatus.QUEUED,
+        pinned_runner=runner,
+    )
+
+    runner.revoke()
+
+    pinned_queued.refresh_from_db()
+    # Pin dropped, but the run stays QUEUED so the pod can dispatch it
+    # to anyone with a fresh-context fallback.
+    assert pinned_queued.status == AgentRunStatus.QUEUED
+    assert pinned_queued.pinned_runner_id is None

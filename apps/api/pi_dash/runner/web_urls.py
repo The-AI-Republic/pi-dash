@@ -10,6 +10,7 @@ from pi_dash.runner.views import (
     AgentRunCancelEndpoint,
     AgentRunDetailEndpoint,
     AgentRunListEndpoint,
+    AgentRunReleasePinEndpoint,
     ApprovalDecideEndpoint,
     ApprovalListEndpoint,
     PodDetailEndpoint,
@@ -55,6 +56,11 @@ urlpatterns = [
         "runs/<uuid:run_id>/cancel/",
         AgentRunCancelEndpoint.as_view(),
         name="runner-run-cancel",
+    ),
+    path(
+        "runs/<uuid:run_id>/release-pin/",
+        AgentRunReleasePinEndpoint.as_view(),
+        name="runner-run-release-pin",
     ),
     path(
         "approvals/",
