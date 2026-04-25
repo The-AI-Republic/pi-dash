@@ -39,12 +39,18 @@ HEARTBEAT_GRACE = timedelta(seconds=90)
 # Runs in these statuses occupy a runner slot or a queue position. Used to
 # exclude busy runners from matching and to block pod deletion while work is
 # outstanding.
+#
+# PAUSED_AWAITING_INPUT is non-terminal (the run will resume on a comment) so
+# it gates pod deletion — but it is NOT in BUSY_STATUSES because the runner
+# is free to take other pod work while waiting for human reply. See §4.3 of
+# .ai_design/issue_run_improve/design.md.
 NON_TERMINAL_STATUSES = (
     AgentRunStatus.QUEUED,
     AgentRunStatus.ASSIGNED,
     AgentRunStatus.RUNNING,
     AgentRunStatus.AWAITING_APPROVAL,
     AgentRunStatus.AWAITING_REAUTH,
+    AgentRunStatus.PAUSED_AWAITING_INPUT,
 )
 
 # Statuses that indicate a runner is currently serving a run.

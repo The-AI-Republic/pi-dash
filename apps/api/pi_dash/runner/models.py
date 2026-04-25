@@ -104,6 +104,7 @@ class AgentRunStatus(models.TextChoices):
     RUNNING = "running", "Running"
     AWAITING_APPROVAL = "awaiting_approval", "Awaiting Approval"
     AWAITING_REAUTH = "awaiting_reauth", "Awaiting Reauth"
+    PAUSED_AWAITING_INPUT = "paused_awaiting_input", "Paused — Awaiting Input"
     BLOCKED = "blocked", "Blocked"
     COMPLETED = "completed", "Completed"
     FAILED = "failed", "Failed"
@@ -335,6 +336,18 @@ class AgentRun(models.Model):
         null=True,
         blank=True,
         related_name="agent_runs",
+    )
+    # Soft affinity: when set, dispatch routes this QUEUED run only to this
+    # runner. Used by comment-triggered continuations so a follow-up resumes
+    # on the same runner that holds the prior session on disk. Cleared when
+    # the runner is revoked or by an operator escape hatch (see §5.7 of
+    # .ai_design/issue_run_improve/design.md).
+    pinned_runner = models.ForeignKey(
+        Runner,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="pinned_agent_runs",
     )
     work_item = models.ForeignKey(
         "db.Issue",
