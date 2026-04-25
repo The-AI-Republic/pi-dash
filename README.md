@@ -158,7 +158,7 @@ Feel free to ask questions, report bugs, participate in discussions, share ideas
 
 If you discover a security vulnerability in Pi Dash, please report it responsibly instead of opening a public issue. See [SECURITY.md](./SECURITY.md) for more info.
 
-To disclose any security issues, please email us at [security@airepublic.com](mailto:security@airepublic.com).
+To disclose any security issues, please email us at [privacy_security@airepublic.com](mailto:privacy_security@airepublic.com).
 
 ## 🤝 Contributing
 
