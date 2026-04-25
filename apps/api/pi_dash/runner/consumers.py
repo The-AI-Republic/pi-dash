@@ -452,18 +452,39 @@ class RunnerConsumer(AsyncJsonWebsocketConsumer):
             updates["error"] = (msg.get("detail") or "")[:16000]
         AgentRun.objects.filter(id=run_id, runner=runner).update(**updates)
 
-        # The runner just freed up — drain its pod so any QUEUED runs in the
-        # same pod can move to it. See design §6.3: drain must fire after the
-        # terminal state commits, otherwise a new assign could race with the
-        # update and the runner would receive work for a run it's finishing.
-        if runner.pod_id is not None:
-            from django.db import transaction
+        # The runner just freed up. Two follow-up actions, both gated on
+        # the terminal state having committed (otherwise a new assign
+        # would race with the update):
+        #
+        # 1. Sweep for non-bot comments that arrived while this run was
+        #    active. ``post_save(IssueComment)`` skipped them with
+        #    reason='prior-run-active'; this is where they get picked up.
+        # 2. Drain the pod (and prefer this just-freed runner) so any
+        #    QUEUED work — including a follow-up R_next created by the
+        #    sweep above — can dispatch.
+        from django.db import transaction
 
-            from pi_dash.runner.services.matcher import drain_pod_by_id
+        from pi_dash.orchestration.service import maybe_continue_after_terminate
+        from pi_dash.runner.services.matcher import (
+            drain_for_runner_by_id,
+            drain_pod_by_id,
+        )
 
-            transaction.on_commit(
-                lambda pid=runner.pod_id: drain_pod_by_id(pid)
-            )
+        def _sweep_and_drain(rid=run_id, runner_id=runner.id, pod_id=runner.pod_id):
+            run = AgentRun.objects.filter(pk=rid).first()
+            if run is not None:
+                try:
+                    maybe_continue_after_terminate(run)
+                except Exception:
+                    logger.exception(
+                        "orchestration.error: terminate sweep failed for run %s",
+                        rid,
+                    )
+            drain_for_runner_by_id(runner_id)
+            if pod_id is not None:
+                drain_pod_by_id(pod_id)
+
+        transaction.on_commit(_sweep_and_drain)
 
     # ---- misc ----
 

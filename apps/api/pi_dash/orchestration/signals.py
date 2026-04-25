@@ -17,9 +17,12 @@ import logging
 from django.db.models.signals import post_save, pre_save
 from django.dispatch import receiver
 
-from pi_dash.db.models.issue import Issue
+from pi_dash.db.models.issue import Issue, IssueComment
 from pi_dash.db.models.state import State
-from pi_dash.orchestration.service import handle_issue_state_transition
+from pi_dash.orchestration.service import (
+    handle_issue_comment,
+    handle_issue_state_transition,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -82,3 +85,32 @@ def _lookup_state(state_id) -> State | None:
         return State.all_state_objects.get(pk=state_id)
     except State.DoesNotExist:
         return None
+
+
+@receiver(post_save, sender=IssueComment, dispatch_uid="orchestration.comment_postsave")
+def fire_comment_continuation(sender, instance: IssueComment, created: bool, **kwargs) -> None:
+    """Wake the agent on a new (non-bot) comment to an in-progress issue.
+
+    See :func:`pi_dash.orchestration.service.handle_issue_comment` for the
+    decision logic. Catches and logs every exception so a broken trigger
+    can't crash IssueComment writes.
+    """
+    if not created:
+        return
+    try:
+        outcome = handle_issue_comment(instance)
+    except Exception:  # noqa: BLE001 — never let orchestration crash comment save
+        global orchestration_error_count
+        orchestration_error_count += 1
+        logger.exception(
+            "orchestration.error: handle_issue_comment failed for "
+            "comment=%s issue=%s (total_errors=%d)",
+            instance.pk,
+            instance.issue_id,
+            orchestration_error_count,
+        )
+        return
+    logger.info(
+        "orchestration.continuation: comment=%s issue=%s reason=%s",
+        instance.pk, instance.issue_id, outcome.reason,
+    )

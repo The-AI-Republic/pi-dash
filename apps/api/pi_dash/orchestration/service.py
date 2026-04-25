@@ -21,11 +21,11 @@ from typing import Optional
 from django.db import transaction
 from django.utils import timezone
 
-from pi_dash.db.models.issue import Issue
+from pi_dash.db.models.issue import Issue, IssueComment
 from pi_dash.db.models.state import State, StateGroup
-from pi_dash.prompting.composer import build_first_turn
+from pi_dash.prompting.composer import build_continuation, build_first_turn
 from pi_dash.prompting.renderer import PromptRenderError
-from pi_dash.runner.models import AgentRun, AgentRunStatus
+from pi_dash.runner.models import AgentRun, AgentRunStatus, Runner, RunnerStatus
 
 logger = logging.getLogger(__name__)
 
@@ -39,6 +39,15 @@ class TransitionOutcome:
     """What `handle_issue_state_transition` decided to do."""
 
     created_run: Optional[AgentRun] = None
+    reason: str = ""
+
+
+@dataclass
+class ContinuationOutcome:
+    """What ``handle_issue_comment`` decided to do."""
+
+    created_run: Optional[AgentRun] = None
+    coalesced_into: Optional[AgentRun] = None
     reason: str = ""
 
 
@@ -155,6 +164,176 @@ def _resolve_pod_for_issue(issue: Issue):
         if pinned is not None:
             return pinned
     return Pod.default_for_workspace_id(issue.workspace_id)
+
+
+#: Issue state groups in which a comment is allowed to wake the agent.
+#: Backlog/Unstarted are owned by the state-transition trigger; Completed/
+#: Cancelled require the user to re-open the issue. See §5.2 of
+#: .ai_design/issue_run_improve/design.md.
+CONTINUATION_ELIGIBLE_GROUPS = (StateGroup.STARTED.value,)
+
+
+def handle_issue_comment(comment: IssueComment) -> ContinuationOutcome:
+    """React to a comment on an issue. Maybe wake the agent.
+
+    The flow:
+    1. Skip if the comment was authored by a bot (the agent's own workpad
+       updates would otherwise trigger continuation in a loop).
+    2. Skip when the issue's state group disallows continuation (see
+       :data:`CONTINUATION_ELIGIBLE_GROUPS`).
+    3. Coalesce: if a QUEUED follow-up already exists for the issue,
+       leave it alone — the prompt builder will pick up the new comment
+       at dispatch time via :func:`build_continuation`.
+    4. Skip if the latest run is itself ``is_active`` (RUNNING / ASSIGNED
+       / AWAITING_*). The terminate-side sweep will pick the comment up
+       when that run finishes.
+    5. Otherwise create R_next, pin it to the prior runner when eligible,
+       and trigger drain.
+    """
+    if comment.actor_id is None:
+        logger.info("orchestration.continuation: skip comment=%s reason=no-actor", comment.pk)
+        return ContinuationOutcome(reason="no-actor")
+    if comment.actor.is_bot:
+        logger.info("orchestration.continuation: skip comment=%s reason=bot-comment", comment.pk)
+        return ContinuationOutcome(reason="bot-comment")
+
+    issue = comment.issue
+    state_group = issue.state.group if issue.state else None
+    if state_group not in CONTINUATION_ELIGIBLE_GROUPS:
+        logger.info(
+            "orchestration.continuation: skip issue=%s reason=state-not-eligible group=%s",
+            issue.pk, state_group,
+        )
+        return ContinuationOutcome(reason="state-not-eligible")
+
+    prior = _latest_prior_run(issue)
+    if prior is None:
+        logger.info("orchestration.continuation: skip issue=%s reason=no-prior-run", issue.pk)
+        return ContinuationOutcome(reason="no-prior-run")
+
+    # Coalesce against an already-queued follow-up. The prompt builder
+    # rebuilds the continuation prompt from comments at dispatch time.
+    queued_follow_up = (
+        AgentRun.objects.filter(
+            work_item=issue, status=AgentRunStatus.QUEUED
+        )
+        .order_by("-created_at")
+        .first()
+    )
+    if queued_follow_up is not None:
+        return ContinuationOutcome(
+            coalesced_into=queued_follow_up, reason="coalesced"
+        )
+
+    # Don't wake while a run is already in flight; terminate sweep handles it.
+    if prior.is_active:
+        return ContinuationOutcome(reason="prior-run-active")
+
+    pod = _resolve_pod_for_issue(issue)
+    if pod is None:
+        logger.warning(
+            "orchestration.continuation: no pod for workspace %s; "
+            "leaving issue %s unhandled",
+            issue.workspace_id,
+            issue.id,
+        )
+        return ContinuationOutcome(reason="no-pod-available")
+
+    return _create_continuation_run(
+        issue=issue,
+        parent=prior,
+        creator=comment.actor,
+        pod=pod,
+    )
+
+
+def maybe_continue_after_terminate(run: AgentRun) -> ContinuationOutcome:
+    """Sweep for non-bot comments that arrived while ``run`` was active.
+
+    Called from the runner Channels consumer when a run terminates
+    (completed / failed / paused). Without this hook, comments left
+    while the run was RUNNING would never trigger a follow-up — the
+    ``post_save(IssueComment)`` receiver explicitly skips them
+    (`reason='prior-run-active'`).
+
+    Storage is the existing ``IssueComment`` table; the "queue" is
+    the timestamp range ``created_at > run.started_at``.
+    """
+    if run.work_item_id is None or run.started_at is None:
+        return ContinuationOutcome(reason="no-issue-or-not-started")
+    issue = run.work_item
+    pending = (
+        IssueComment.objects.filter(
+            issue=issue,
+            actor__is_bot=False,
+            created_at__gt=run.started_at,
+        )
+        .order_by("created_at")
+        .first()
+    )
+    if pending is None:
+        return ContinuationOutcome(reason="no-pending-comments")
+    return handle_issue_comment(pending)
+
+
+def _create_continuation_run(
+    *, issue: Issue, parent: AgentRun, creator, pod
+) -> ContinuationOutcome:
+    """Create R_next as a continuation of ``parent`` with optional pin."""
+    from pi_dash.runner.services import matcher
+
+    pinned_runner = _pinned_runner_for(parent)
+
+    with transaction.atomic():
+        run = AgentRun.objects.create(
+            workspace=issue.workspace,
+            created_by=creator,
+            pod=pod,
+            work_item=issue,
+            parent_run=parent,
+            pinned_runner=pinned_runner,
+            status=AgentRunStatus.QUEUED,
+            prompt="",
+            run_config={
+                "repo_url": (issue.project.repo_url or None),
+                "repo_ref": (issue.project.base_branch or None),
+                "git_work_branch": (issue.git_work_branch or None),
+            },
+        )
+        try:
+            run.prompt = build_continuation(issue, run)
+        except PromptRenderError as exc:
+            run.status = AgentRunStatus.FAILED
+            run.error = f"prompt render failed: {exc}"
+            run.ended_at = timezone.now()
+            run.save(update_fields=["status", "error", "ended_at"])
+            logger.exception(
+                "orchestration.continuation: prompt render failed for issue %s",
+                issue.id,
+            )
+            return ContinuationOutcome(created_run=run, reason="render-failed")
+        run.save(update_fields=["prompt"])
+        transaction.on_commit(lambda: matcher.drain_pod_by_id(pod.id))
+
+    return ContinuationOutcome(created_run=run, reason="created")
+
+
+def _pinned_runner_for(parent: AgentRun) -> Optional[Runner]:
+    """Return the runner to pin a follow-up to, or None.
+
+    Pin only when the parent has a session id we can resume against and
+    its runner is still online-eligible. Otherwise leave the new run
+    unpinned so any runner in the pod can take it (with a fresh-context
+    fallback).
+    """
+    if not parent.thread_id or parent.runner_id is None:
+        return None
+    runner = parent.runner
+    if runner is None:
+        return None
+    if runner.status == RunnerStatus.REVOKED:
+        return None
+    return runner
 
 
 def _create_and_dispatch_run(
