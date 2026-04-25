@@ -6,7 +6,7 @@
 >
 > **Scope:** how an issue continues across more than one `AgentRun` when the
 > first run yields without finishing — and what that implies for run lifecycle,
-> conversation continuity, dispatch routing, and user UX.
+> dispatch routing, and conversation continuity.
 >
 > **Related work**
 >
@@ -24,132 +24,235 @@ Today, on `main` (commit `a99e736`):
 - The runner spawns a fresh `claude --print …` (or codex equivalent) for every
   run. Each run is a brand-new agent session.
 - When that run terminates — for any reason — the agent's working memory is
-  gone. There is no native session resume, no transcript replay, no thread
-  continuation across runs.
-- A user comment on an issue is **not** a signal: nothing wakes the agent, no
-  follow-up run is created.
+  gone. There is no resume path consumed by the cloud, no follow-up trigger
+  on user comments, no notion of a "paused" run.
+- A user comment on an issue is **not** a signal: nothing wakes the agent.
 
 The data model already partially supports continuation:
 
 - `AgentRun.thread_id` (`runner/models.py:363`) stores the provider's session
-  id (Claude `session_id` / Codex `thread_id`) when the runner reports it
-  via `run_started` (`consumers.py:374-379`).
+  id (Claude `session_id` / Codex `thread_id`) when the runner reports it via
+  `run_started` (`consumers.py:374-379`).
 - `AgentRun.parent_run` (`runner/models.py:346-352`) chains follow-up runs.
   `orchestration/service.py:103` sets it to the latest prior run when a new
   run is created for an issue that already has one.
 - The runner `RunPayload` struct has a `resume_thread_id: Option<String>` field
-  (`agent/mod.rs:54`) but the cloud never populates it.
-- Codex bridge supports `resume_thread()` (`runner/src/codex/bridge.rs:61-69`).
-  The Claude Code path has no `--resume` plumbing.
+  (`runner/src/agent/mod.rs:54`) and the **Codex bridge already consumes it**
+  (`runner/src/codex/bridge.rs:61-72`) — calling `thread/resume` when set,
+  `thread/start` otherwise. The Claude Code path explicitly skips resume
+  (`runner/src/claude_code/mod.rs:10`: "Single-turn runs only: no `--resume`").
+- The `Assign` wire envelope (`runner/src/cloud/protocol.rs:109-123`) does not
+  carry `resume_thread_id`, and the supervisor hardcodes `resume_thread_id:
+None` at `runner/src/daemon/supervisor.rs:544` regardless.
 
-So everything is wired *for storage* but nothing *consumes* it. This doc
-proposes how to wire the consumption side.
+So everything is wired _for storage_ and partially _for runner consumption_,
+but nothing on the cloud side ever populates the resume hint. This doc
+proposes how to wire the consumption side, and the dispatch model that lets
+it work without sacrificing throughput.
 
 ## 2. Goal
 
 For an issue whose work spans multiple agent runs, give the agent enough
 context on each follow-up run that it can continue meaningfully — while
-keeping the dispatch model (workspace pod queue, fair scheduling, runner
-ownership) intact.
+keeping the agent it ran on, when possible, so native session resume gives us
+correctness for free.
+
+The shape we want:
+
+```
+T0: issue001 dispatched to agentA → runs → yields → PAUSED
+T1: agentA picks issue002 from pod queue → BUSY on issue002
+T2: human comments on issue001 → run001b created, pinned to agentA → QUEUED
+T3: agentA finishes issue002 → idle → picks run001b from its personal queue
+T4: agentA resumes issue001's session natively (claude --resume / thread/resume)
+```
+
+The key property: agentA is never blocked. While issue001 is paused waiting
+for human input (potentially hours), agentA serves other issues from the pod
+queue. When the human finally responds, run001b is waiting in agentA's
+personal queue and gets picked up the moment agentA frees up.
 
 Non-goals:
 
 - Multi-agent collaboration on the same issue (one conversation per chain).
-- Cross-issue memory (a runner's recall of issue A is not available on issue
-  B; that's a separate, larger problem).
+- Cross-issue memory (a runner's recall of issue A is not available on
+  issue B; that's a separate, larger problem).
 - Long-term memory beyond a single issue's lifecycle.
 
-## 3. The Three Sub-Problems
+## 3. The three sub-problems
 
-This problem decomposes cleanly into three independent decisions. Each can be
-chosen separately; each has its own MVP/full-featured spectrum.
-
-| #   | Question                                                          | Where the design lives |
-| --- | ----------------------------------------------------------------- | ---------------------- |
-| A   | What does it mean for a run to "yield" instead of "finish"?       | §4 — Run Lifecycle     |
-| B   | What triggers a follow-up run?                                    | §5 — Continuation Triggers |
-| C   | How does the follow-up run inherit the prior run's context?       | §6 — Conversation Continuity |
-
-A separate question — whether to introduce an `IssueConversation` entity that
-owns the thread of runs — is covered in §7.
+| #   | Question                                                      | Section                      |
+| --- | ------------------------------------------------------------- | ---------------------------- |
+| A   | What does it mean for a run to "yield" instead of "finish"?   | §4 — Run Lifecycle           |
+| B   | What triggers a follow-up run, and where does it dispatch to? | §5 — Continuation & Dispatch |
+| C   | How does the follow-up run resume the prior run's context?    | §6 — Conversation Continuity |
 
 ## 4. Run Lifecycle: Yield vs. Finish
 
-### 4.1 Today's terminal states
+### 4.1 Today's status surface
 
-`AgentRunStatus` (`runner/models.py:101`) currently distinguishes
-`QUEUED → ASSIGNED → RUNNING → SUCCEEDED | FAILED | CANCELLED | TIMED_OUT`.
-All four terminals are flat: "done, don't expect more."
+`AgentRunStatus` (`apps/api/pi_dash/runner/models.py:101-110`) actually has:
+`QUEUED, ASSIGNED, RUNNING, AWAITING_APPROVAL, AWAITING_REAUTH, BLOCKED,
+COMPLETED, FAILED, CANCELLED`. Not the simpler enum sketched in earlier
+drafts — `BLOCKED` is already present and load-bearing.
 
-This is too coarse. An agent can stop without having finished, in several
-materially different ways:
+And there are **multiple independent classifiers**, not just two:
 
-| Termination kind          | What it means                                              | Should follow-up auto-trigger? |
-| ------------------------- | ---------------------------------------------------------- | ------------------------------ |
-| Completed cleanly         | Agent reports done; the work is finished                   | No                             |
-| Yielded — needs input     | Agent emits a structured "I need X from the human" signal  | Yes, when the human responds   |
-| Yielded — needs approval  | Agent paused on an approval gate                           | Yes, when approval resolves    |
-| Hit budget cap            | Run exceeded a token / wall-clock budget                   | Optional — policy decision     |
-| Crashed / disconnected    | Runner died, lease expired, network gone                   | Maybe — recovery is intra-run  |
-| User cancelled            | A human stopped the run                                    | No                             |
+| Classifier                                         | Where                           | Members today                                                 |
+| -------------------------------------------------- | ------------------------------- | ------------------------------------------------------------- |
+| `BUSY_STATUSES` (matcher excludes these runners)   | `runner/services/matcher.py:51` | ASSIGNED, RUNNING, AWAITING_APPROVAL, AWAITING_REAUTH         |
+| `NON_TERMINAL_STATUSES` (gates pod deletion)       | `runner/services/matcher.py:42` | QUEUED + the four BUSY                                        |
+| `AgentRun.is_terminal`                             | `runner/models.py:403-410`      | COMPLETED, FAILED, CANCELLED, **BLOCKED**                     |
+| `AgentRun.is_active` (single-active-run guardrail) | `runner/models.py:412-421`      | QUEUED, ASSIGNED, RUNNING, AWAITING_APPROVAL, AWAITING_REAUTH |
+| `ACTIVE_RUN_STATUSES` (Prom metrics)               | `runner/views/metrics.py:39`    | ASSIGNED, RUNNING, AWAITING_APPROVAL, AWAITING_REAUTH         |
 
-### 4.2 Proposed lifecycle additions
+Any new status has to be placed in **all five**. Treating `BUSY_STATUSES`
+alone is incomplete — `is_active` in particular is what `_active_run_for`
+(`orchestration/service.py:45`) consults to enforce the single-active-run
+guardrail per issue, which directly affects whether comment-triggered
+continuation can create a follow-up.
 
-Introduce an explicit **paused / awaiting** state distinct from terminal:
+### 4.2 Reconciling with the existing `BLOCKED` contract
 
-- `PAUSED_AWAITING_INPUT` — agent yielded cleanly with a question for the
-  human; no further dispatch until a continuation trigger fires.
-- `PAUSED_AWAITING_APPROVAL` — already partially modeled via the approvals
-  table; promote to a first-class run status so the matcher's "non-terminal"
-  predicate is honest.
+`BLOCKED` already terminates a run when the agent emits the
+`pi-dash-done` fenced block with `status: "blocked"`
+(`apps/api/pi_dash/orchestration/done_signal.py:32, 154-159`). The agent
+populates `autonomy.question_for_human` and `blockers[]` in the same
+payload. So today, "agent has a question" is already representable — but it
+goes to **terminal** BLOCKED, with no resume path.
 
-`PAUSED_*` is **not terminal**. The run holds its lease, retains its
-`thread_id`, and is the natural attachment point for the follow-up.
+We have two options:
 
-### 4.3 The "I'm yielding" protocol
+**Option A — `"blocked"` becomes resumable.** Change `done_signal.py:154-159`
+so the agent's `"blocked"` status maps to `PAUSED_AWAITING_INPUT` (the new
+status) when `autonomy.question_for_human` is set, and to terminal `BLOCKED`
+otherwise. One agent contract, two cloud outcomes.
 
-For `PAUSED_AWAITING_INPUT` to exist, the *agent* needs a way to emit a clean
-yield. Three options, in increasing order of integration cost:
+- _Pro:_ no agent-side change; existing prompts continue to work.
+- _Con:_ the "BLOCKED is terminal" invariant some code already assumes
+  becomes "BLOCKED is sometimes terminal" — must audit callers.
 
-1. **Heuristic on output** — sniff the agent's final stdout for "needs input"
-   markers. Cheap, brittle, fights the model.
-2. **Tool call** — give the agent a `request_user_input` tool. The runner sees
-   the tool call and reports it as a yield to the cloud. Aligned with how
-   approvals already work.
-3. **Prompt protocol** — instruct the agent (in the system prompt) to end its
-   final turn with a structured JSON envelope (`{"status": "yielded",
-   "reason": "...", "question": "..."}`). The runner parses it.
+**Option B — add a distinct `"paused"` agent status.** Extend
+`VALID_STATUSES = {"completed", "blocked", "noop", "paused"}`; agent emits
+`"paused"` when it can resume on reply, `"blocked"` when it has genuinely
+given up. Cloud maps `"paused"` → `PAUSED_AWAITING_INPUT`.
 
-Recommendation: **(2) tool call**. It piggybacks on the approval path's
-existing event plumbing, and tool calls are naturally first-class in both
-Claude Code and Codex SDKs.
+- _Pro:_ preserves the BLOCKED-is-terminal invariant; clearer agent intent.
+- _Con:_ requires updating the agent system prompt and any prompts that
+  document the done-signal schema; coordination across all agent paths.
 
-## 5. Continuation Triggers
+**Recommendation: Option B.** The audit cost in Option A is unbounded
+(every code path reading BLOCKED would need re-checking), and the prompt-
+side change is the smaller surface. We update the system prompt's done-
+signal schema once and the runtime contract stays clean.
+
+### 4.3 New status: `PAUSED_AWAITING_INPUT`
+
+Add `PAUSED_AWAITING_INPUT` to `AgentRunStatus` and place it in the
+classifiers as follows:
+
+| Classifier              | PAUSED_AWAITING_INPUT in? | Why                                                                               |
+| ----------------------- | ------------------------- | --------------------------------------------------------------------------------- |
+| `BUSY_STATUSES`         | **No**                    | Runner is free to take other pod work while paused (§5.3 interleaving)            |
+| `NON_TERMINAL_STATUSES` | Yes                       | Pod can't be deleted while a paused run exists (must drain first)                 |
+| `is_terminal`           | No                        | Run can resume; it isn't "done"                                                   |
+| `is_active`             | **No**                    | Single-active-run guardrail must allow a fresh follow-up to be created (see §5.2) |
+| `ACTIVE_RUN_STATUSES`   | No                        | Operational metric tracks runs occupying runner capacity; paused doesn't          |
+
+The `is_active` exclusion is the subtle one. Today `_active_run_for`
+prevents creating a new run when one already exists in `is_active` for the
+same issue. If PAUSED_AWAITING_INPUT were in `is_active`, the comment
+trigger could never create a follow-up — the paused run would block its own
+successor. So PAUSED is explicitly outside `is_active`, and the comment-
+trigger path additionally coalesces (§5.7) to avoid creating two parallel
+followers.
+
+(One subtle implication of PAUSED ∈ `NON_TERMINAL_STATUSES` but PAUSED ∉
+`BUSY_STATUSES`: the matcher won't avoid a pod with paused runs, but the
+pod-deletion path will refuse to drop the pod until those paused runs are
+drained. That's the intended behavior — paused runs hold cloud-side state
+that we want to preserve until explicitly resolved.)
+
+### 4.4 The "I'm yielding" protocol
+
+For `PAUSED_AWAITING_INPUT` to exist, the agent needs a clean way to emit a
+yield. The mechanism diverges per agent because today's plumbing is
+materially different:
+
+**Codex.** Approvals are wired (`runner/src/codex/bridge.rs` accepts
+`ApprovalResponseParams`; the JSON-RPC tool surface is live), and
+`thread/resume` works end-to-end. Add a `request_user_input` tool. The
+runner sees the tool call, sends `ClientMsg::RunPaused { ... }` to cloud,
+and lets the Codex thread idle on disk for later resume. This is the
+"piggyback the approval path" plan — and it works _for Codex_.
+
+**Claude Code.** Two limitations block the same approach:
+`runner/src/claude_code/mod.rs:6-10` documents that approvals are bypassed
+(`--permission-mode bypassPermissions`) and that resume is not wired.
+`runner/src/claude_code/bridge.rs:122-128` explicitly fails fast if an
+approval is routed in, because the MCP permission-prompt bridge isn't
+built. There is no tool-call surface to piggyback on.
+
+For Claude, the pragmatic path reuses the existing `pi-dash-done` channel:
+
+1. Extend `done_signal.py:VALID_STATUSES` to include `"paused"` (Option B
+   above). Add an optional `next_steps_if_resumed` field to the payload
+   schema.
+2. The system prompt instructs Claude to emit `status: "paused"` (instead
+   of `"blocked"`) when it has a question and can resume.
+3. Cloud's `done_signal.ingest_into_run` maps `"paused"` →
+   `PAUSED_AWAITING_INPUT` and stores the payload on `done_payload`.
+4. No runner-side bridge change; the runner already forwards Claude's
+   final stdout, and `done_signal.py` already parses it.
+5. **Resume-side** for Claude still requires the `--resume` plumbing
+   (§7.4 / §8.2 item 2). The yield path and the resume path are
+   independent changes; both must land for Claude continuation to work.
+
+**Heuristic on output** (sniffing for "needs input" markers) and
+**fully-untyped prompt protocol** are still rejected — too brittle. The
+above is two structured paths, one per agent, both grounded in existing
+plumbing.
+
+When the runner sees the yield (Codex tool call OR Claude done-signal
+parse):
+
+- Cloud transitions run to `PAUSED_AWAITING_INPUT`, stores the payload.
+- Runner reports completion (Codex: tool-call observed and ack'd; Claude:
+  process exits cleanly after emitting the fence) and returns to idle,
+  then triggers `drain_for_runner` (§5.6).
+
+When the runner sees the yield:
+
+- Reports `RunPaused { run_id, payload, ... }` to cloud.
+- Cloud transitions run to `PAUSED_AWAITING_INPUT`, stores the payload.
+- Runner returns to idle and triggers `drain_for_runner` (see §5.6).
+
+The yield tool's payload should be structured as a handoff (see §6.4) —
+question for the human plus enough state for a fresh agent to continue if
+native resume fails.
+
+## 5. Continuation Triggers and Dispatch
 
 ### 5.1 Candidate triggers
 
-| Trigger                                       | Carries new info? | UX feel             | Implementation cost                 |
-| --------------------------------------------- | ----------------- | ------------------- | ----------------------------------- |
-| User comment on the issue                     | Yes               | Conversational      | New `IssueComment` post_save signal |
-| Issue state transition back to In Progress    | No                | Coarse, button-y    | Already wired                       |
-| Explicit "Continue" / "Reply" action          | Optional          | Explicit, button-y  | New endpoint + UI                   |
-| Approval grant (resumes paused run)           | No                | Invisible           | Already partially wired             |
-| Scheduled retry after timeout                 | No                | System-driven       | New scheduler                       |
+| Trigger                                    | Carries new info? | UX feel            | Implementation cost                 |
+| ------------------------------------------ | ----------------- | ------------------ | ----------------------------------- |
+| User comment on the issue                  | Yes               | Conversational     | New `IssueComment` post_save signal |
+| Issue state transition back to In Progress | No                | Coarse, button-y   | Already wired                       |
+| Explicit "Continue" / "Reply" action       | Optional          | Explicit, button-y | New endpoint + UI                   |
+| Approval grant (resumes paused run)        | No                | Invisible          | Already partially wired             |
 
-### 5.2 Recommendation
+**Recommendation**: comment-triggered continuation as the primary path
+(matches the user's mental model: "I leave a comment, the agent reads it"),
+with explicit "Continue" as a secondary path for cases where the user has
+nothing to add but wants the agent to keep going.
 
-Make **comment-triggered continuation** the primary user path. It maps to the
-mental model the user already has ("I just leave a comment and the agent will
-read it"), and it carries the new information (the comment body) inline.
+### 5.2 Comment-triggered flow
 
-Add **explicit "Continue"** as a secondary path for cases where the user has
-nothing to add but wants the agent to keep going (e.g., agent yielded on a
-budget cap; user accepts the additional spend).
-
-Treat **approval grant** as intra-run, not a new run — the run was holding its
-lease the whole time. This is already most of the way there.
-
-### 5.3 Comment-triggered flow (sketch)
+Today, run creation is triggered exclusively by issue state transitions
+(`apps/api/pi_dash/orchestration/signals.py:48` →
+`handle_issue_state_transition`). Comments are inert. This proposal adds a
+second trigger via a `post_save(IssueComment)` receiver.
 
 ```
 User adds comment to Issue I
@@ -157,234 +260,454 @@ User adds comment to Issue I
         ▼
 post_save(IssueComment)
         │
-        ├─► Skip if author is a runner / agent (avoid self-trigger loops)
+        ├─► Skip if comment.actor.is_bot (excludes pi_dash_agent workpad bot — see workpad.py)
         ├─► Skip if no prior AgentRun for I (no conversation to continue)
+        ├─► Skip if issue.state.group ∈ frozen-states (see gating below)
+        ├─► Coalesce: if a QUEUED follow-up already exists for I, append to its prompt and stop
         ├─► Find latest AgentRun R_prev for I
         │     │
-        │     ├─► R_prev is PAUSED_*    → create R_next with parent_run=R_prev
-        │     ├─► R_prev is terminal    → create R_next with parent_run=R_prev (resume a finished issue)
-        │     └─► R_prev is RUNNING     → append comment to live run via WS frame, do NOT create R_next
+        │     ├─► R_prev is PAUSED_AWAITING_INPUT → create R_next, pin to R_prev.runner
+        │     ├─► R_prev is is_terminal           → create R_next, pin to R_prev.runner
+        │     └─► R_prev is is_active             → queue comment for delivery on terminate
+        │                                            (RUNNING / ASSIGNED / AWAITING_*)
         │
         ▼
-R_next dispatched through normal pod queue
+R_next dispatched through normal pod queue (with personal-queue priority)
 ```
 
-### 5.4 Race conditions to think about
+**Bot filter.** The `pi_dash_agent` bot user
+(`apps/api/pi_dash/orchestration/workpad.py:27-70`) authors the agent's
+workpad comments with `is_bot=True`. The trigger MUST filter
+`comment.actor.is_bot` — not a vague "skip runner/agent" — otherwise the
+agent's own workpad updates would re-trigger continuation in a loop.
 
-- **Two comments before R_next dispatches.** Coalesce: the dispatcher reads
-  *all* comments since `R_prev.completed_at` at dispatch time. Don't create
-  one R_next per comment.
-- **Comment arrives while R_prev is still RUNNING.** Don't queue a new run.
-  Either (a) push the comment to the live run as an inbound user message via
-  the WS bridge, or (b) hold the comment until the run terminates and then
-  dispatch. Option (a) is closer to the desired UX but requires runner-side
-  support for mid-run inbound messages.
-- **Agent comments on its own issue.** Filter by author type: if the comment
-  is an agent-authored comment (logged on behalf of an `AgentRun`), do not
-  re-trigger.
+**State gating.** The comment trigger should respect the issue's lifecycle:
+
+- If `issue.state.group ∈ {COMPLETED, CANCELLED}` (terminal groups): do not
+  dispatch. The user should re-open the issue to resume work.
+- If `issue.state.group ∈ {BACKLOG, UNSTARTED}`: do not dispatch. State-
+  transition path owns starting work; the comment trigger only continues
+  in-progress work.
+- If `issue.state.group = STARTED` (default "In Progress"): dispatch.
+- Custom workspace state groups: defer to the workspace's policy; for MVP
+  treat anything not in the above set as "no dispatch" (conservative).
+
+**Guardrail interaction.** The existing single-active-run guardrail in
+`_active_run_for` (`orchestration/service.py:45-59`) blocks new runs when
+one is already `is_active` for the issue. With PAUSED_AWAITING_INPUT
+explicitly _outside_ `is_active` (§4.3), a paused run does not block the
+follow-up — which is what we want. But two distinct comments arriving in
+quick succession could both observe "no active run" and create two
+QUEUED follow-ups for the same issue. The **coalesce step above** handles
+this: before creating R_next, the trigger checks for an existing QUEUED
+run with `parent_run = R_prev` (or the same chain) and appends the new
+comment text to that run's prompt instead of creating a duplicate. This
+keeps the chain linear.
+
+### 5.3 Pinning model: strict pin with interleaving
+
+When R_next is created from a comment-trigger, set
+`pinned_runner_id = R_prev.runner_id`. This is **strict pin** — only the
+original runner picks it up. Resume affinity is preserved and we get cheap,
+high-fidelity native resume on every continuation.
+
+Strict pin works without blocking the runner because of §4.2 — paused runs
+don't make the runner busy, so the runner stays available for fresh pod work.
+The pin just means "when that runner is next idle, this is what it takes."
+
+This is the central design choice. Earlier sketches (soft pin with replay
+fallback, no pin with replay always) gave up on native resume in the common
+case. Strict-pin-with-interleaving keeps native resume as the primary
+mechanism while still letting agentA do useful work during human latency.
+
+### 5.4 Two queues, one table
+
+Each runner now has, conceptually, two queues feeding it:
+
+1. **Personal queue**: runs `pinned_runner_id = me`. Strict pin.
+2. **Pod general queue**: runs with `pinned_runner_id IS NULL`.
+
+But this is **one `AgentRun` table, two filters** — not a new table or a new
+data structure. The matcher's per-runner query becomes:
+
+```sql
+SELECT FROM agent_run
+WHERE pod = <runner.pod>
+  AND status = QUEUED
+  AND (pinned_runner_id = <runner.id> OR pinned_runner_id IS NULL)
+ORDER BY (pinned_runner_id = <runner.id>) DESC, created_at ASC
+LIMIT 1
+FOR UPDATE SKIP LOCKED
+```
+
+Pinned-to-me runs come first; otherwise FIFO over unpinned. Pinned-to-someone-
+else runs are excluded entirely.
+
+### 5.5 Dispatch loop: runner-first
+
+Today's `drain_pod` is run-first — pick a QUEUED run, then a runner. With
+pinning, runner-first is cleaner (avoids head-of-line blocking when the head
+QUEUED run is pinned to a busy runner):
+
+```python
+def drain_pod(pod):
+    assignments = []
+    with transaction.atomic():
+        for runner in idle_runners_in_pod_locked(pod):
+            run = next_for_runner_locked(runner)  # the SQL above
+            if run is None:
+                continue
+            assign(run, runner)
+            assignments.append((runner, run))
+    for runner, run in assignments:
+        on_commit(lambda: send_to_runner(runner.id, build_assign_msg(run)))
+```
+
+`drain_for_runner(runner)` is `drain_pod` narrowed to one runner — same
+query, same locking, same `on_commit` send.
+
+### 5.6 Drain triggers
+
+Drain is invoked at three moments:
+
+1. **New run enqueued** (existing) — `transaction.on_commit(matcher.drain_pod_by_id(pod.id))` in `orchestration/service.py:195`. Already wired.
+2. **Run terminates** (SUCCEEDED / FAILED / PAUSED) → runner becomes idle → `drain_for_runner(runner)`. **New**, lives in the Channels consumer where run state is updated. Without this, agentA never picks up its own pinned run after finishing issue002.
+3. **Runner reconnects** → `drain_for_runner(runner)` in the consumer's connect handler. **New**, covers the case where pinned runs were enqueued while the runner was offline.
+
+### 5.7 Edge cases
+
+- **Two comments before R_next dispatches.** Coalesce: at run-creation time,
+  if there's already a QUEUED R_next for the issue, append the new comment
+  to its prompt instead of creating a second run.
+- **Comment arrives while R_prev is RUNNING.** Don't queue a new run yet.
+  Either (a) push the comment to the live run as an inbound user message
+  (out of MVP scope; needs runner-side support for mid-run inbound), or
+  (b) hold the comment until terminate and dispatch then. Start with (b).
+- **Agent comments on its own issue.** Filter by author type; agent-authored
+  comments do not re-trigger.
+- **Pinned runner offline / revoked.** The pinned run sits in QUEUED forever
+  unless we intervene. Two mitigations:
+  - On `Runner.status = REVOKED` transition, release pinned QUEUED runs:
+    `UPDATE AgentRun SET pinned_runner=NULL WHERE pinned_runner=R.id AND status=QUEUED`. They fall back to the pod general queue.
+  - **Operator escape hatch in UI**: a "release pin" button on the run row
+    that sets `pinned_runner_id = NULL`. The MVP-correct answer is operator-
+    driven, not a TTL — TTLs silently lose the resume benefit and are easy
+    to misconfigure.
+- **Multiple paused conversations on the same agent.** issue001, issue003 both
+  paused on agentA, both get human comments. R001b and R003b both pin to
+  agentA. When agentA finishes issue002, FIFO by `created_at` of the new run
+  is the obvious order — earliest comment wins.
+- **No thread_id to resume against.** If `R_prev.thread_id IS NULL` (parent
+  crashed before reporting one), pinning buys nothing — there's no session
+  to resume. Skip the pin; the new run goes to the pod general queue and any
+  runner takes it.
 
 ## 6. Conversation Continuity
 
-This is the hardest of the three sub-problems. The follow-up run needs the
-prior run's context. Three mechanisms.
+### 6.1 Primary mechanism: native session resume
 
-### 6.1 Mechanism A — Native provider-side resume
+When R_next is dispatched:
 
-`claude --resume <session_id>` (Claude Code) and `resume_thread(...)` (Codex)
-let the provider runtime re-attach to a previous session.
+- Cloud sets `resume_thread_id = R_prev.thread_id` on the `Assign` envelope.
+- Runner passes it through to the agent CLI:
+  - **Codex**: already wired — `runner/src/codex/bridge.rs:61-72` calls
+    `thread/resume` when `resume_thread_id` is set.
+  - **Claude Code**: not yet wired — `runner/src/claude_code/mod.rs:10`
+    explicitly says "single-turn only." Needs `--resume <session_id>`
+    plumbing.
 
-**Pros**
+The agent CLI looks up its own on-disk session and reattaches:
 
-- Zero token overhead — no transcript replay.
-- Perfect memory — the agent has its full prior turn-by-turn state.
-- Simplest semantics; trivially supports tool/file state if the provider
-  supports it.
+- Claude Code: `~/.claude/projects/<workspace>/sessions/<session_id>.jsonl`
+- Codex: its own data directory, keyed by thread id
 
-**Cons**
+### 6.2 The runner is stateless about past runs
 
-- **Locality.** Claude Code stores its session on the local disk of the runner
-  process. The follow-up run *must* hit the same runner, and that runner's
-  session storage must still be intact (no restart, no GC, no reinstall).
-- **Couples runs to runner identity** — fights the pod queue's "any runner in
-  the pod" model.
-- **Provider-specific.** Codex resume works differently; cross-provider runs
-  on the same conversation are out of scope.
+The runner does **not** maintain any (issue → session_id) index. The cloud is
+authoritative. The runner is a pass-through:
 
-### 6.2 Mechanism B — Cloud transcript replay
+- `RunsIndex` (`runner/src/history/index.rs`) stores recents for the TUI but
+  has no `thread_id` field.
+- `HistoryWriter` (`runner/src/history/jsonl.rs`) writes per-run JSONL but
+  doesn't index by session.
+- `StateHandle` (`runner/src/daemon/state.rs`) is in-memory only; the
+  `current_run.thread_id` field is wiped on terminate.
 
-We already capture every meaningful event into `AgentRunEvent`
-(`runner/models.py:424`). On a follow-up run we synthesize a system-prompt
-preamble that summarizes — or replays — the prior run's user/assistant turns,
-and start a *fresh* provider session.
+No new runner-side persistence is required for resume to work. The runner
+just receives `Assign { resume_thread_id }` and passes the id to the agent
+CLI's resume function. The agent CLI's own on-disk session store is the
+artifact that matters.
 
-**Pros**
+(Optional observability: add `thread_id` to `RunSummary` in `RunsIndex` so
+the TUI's Runs view can show "issue X, last session Y, on disk: ✓/✗" for
+operator sanity-checks. Not on the dispatch critical path.)
 
-- Provider-agnostic.
-- Runner-agnostic — the follow-up can land on any idle runner in the pod.
-- Durable — the cloud is the source of truth.
-- Auditable — the same transcript drives both replay and human review.
+### 6.3 What if native resume fails?
 
-**Cons**
+Resume can fail for legitimate reasons: agent CLI was reinstalled, session
+file was manually deleted, host disk was wiped, the agent CLI's session
+store rotated. The runner detects this when the agent CLI returns an error
+on the resume call.
 
-- Token cost on every continuation. For long conversations this compounds.
-- Tool/file state not perfectly restored. The agent "remembers" what it did
-  but doesn't have the same in-memory caches, file handles, etc.
-- Replay quality is sensitive to how we summarize. Naive concat of all events
-  blows the context window quickly.
+The runner reports `RunFailed { reason: ResumeUnavailable, ... }` to cloud.
+Cloud's options:
 
-### 6.3 Mechanism C — Hybrid
+1. **Re-dispatch as fresh-context** (recommended default). Drop the pin,
+   drop the `resume_thread_id`, re-queue R_next. Whichever runner picks it
+   up starts a fresh session, with the issue body + comments + the prior
+   handoff (§6.4) as its context.
+2. **Mark the issue as needing human attention.** Surface in UI: "the agent's
+   prior session is no longer available; reply to start over." Right answer
+   when the chain is so long that fresh-context-from-issue would be lossy
+   enough to be misleading.
 
-Try (A) first; fall back to (B) when (A) is unavailable.
+Option 1 is the default. Option 2 is an upgrade we may want later.
 
+### 6.4 Agent-authored handoffs (the "free" fallback)
+
+The yield tool (§4.3) requires a structured handoff payload, e.g.:
+
+```json
+{
+  "question": "Should I keep the legacy export endpoint or remove it?",
+  "summary_so_far": "Migrated /export/v1 to /export/v2; legacy still mounted; tests passing on v2.",
+  "next_steps_if_resumed": "Either remove legacy mount in api/urls.py, or add a deprecation header."
+}
 ```
-follow-up run dispatched
-        │
-        ▼
-Was R_prev assigned to a runner that is still online & in the pod?
-        ├─ Yes → set resume_thread_id on RunPayload; runner attempts native resume
-        │           ├─ Native resume succeeds → done
-        │           └─ Native resume fails    → fall back to replay path
-        └─ No  → skip native; use replay path
+
+The cloud stores this in `R_prev.done_payload` (or a dedicated field) and
+posts it as an issue comment so it's human-visible. When fallback fresh-
+context-from-issue happens (§6.3 option 1), the new agent reads the handoff
+like any other comment and picks up.
+
+This means even when native resume fails, a well-disciplined yield produces
+enough state for a fresh agent to continue meaningfully — without any
+transcript-replay machinery.
+
+### 6.5 Why we're not building a transcript-replay path
+
+An earlier sketch proposed reconstructing prior turns from `AgentRunEvent`
+into a system-prompt preamble and starting a fresh provider session on every
+follow-up. We're explicitly **not** building this for v1, because:
+
+- Native resume covers the common case (same runner, same agent CLI, session
+  on disk). It's cheaper (no token replay), higher-fidelity (real session
+  state), and trivially correct.
+- For the uncommon case where native resume fails, the issue body + comments
+  - agent-authored handoff (§6.4) + branch state are already a durable,
+    human-readable handoff. Replay competes with this for no clear win.
+- Replay quality is sensitive to summarization. A poor preamble produces a
+  worse continuation than just letting a fresh agent re-read the issue.
+
+If observation later shows that fresh-context-from-issue is dropping too much
+fidelity, replay can be added as a second fallback layer. It's not on the v1
+critical path.
+
+## 7. Wire Protocol Changes
+
+### 7.1 `Assign` envelope (`runner/src/cloud/protocol.rs:109-123`)
+
+Add one optional field:
+
+```rust
+Assign {
+    run_id: Uuid,
+    work_item_id: Option<Uuid>,
+    prompt: String,
+    repo_url: Option<String>,
+    repo_ref: Option<String>,
+    git_work_branch: Option<String>,
+    expected_codex_model: Option<String>,
+    approval_policy_overrides: Option<BTreeMap<String, serde_json::Value>>,
+    deadline: Option<DateTime<Utc>>,
+    #[serde(default)]
+    resume_thread_id: Option<String>,  // NEW
+}
 ```
 
-This is what we should ship for v1. It captures the cheap-and-fast common case
-(same runner is still around) without sacrificing correctness when the runner
-is gone.
+`#[serde(default)]` keeps it backward-compatible with older runners — a
+field-only addition, so `protocol_version` does not need to be bumped.
 
-### 6.4 Pinning policy
+### 7.2 Runner-to-cloud yield message (Codex only)
 
-Hybrid raises a real scheduling question: how hard do we *try* to keep the
-follow-up on the same runner?
+Add a new variant to `ClientMsg` for the Codex tool-call yield path:
 
-Three positions:
+```rust
+RunPaused {
+    run_id: Uuid,
+    reason: PauseReason,            // AwaitingInput | AwaitingApproval | …
+    payload: serde_json::Value,     // the handoff struct from §6.4
+    paused_at: DateTime<Utc>,
+}
+```
 
-- **Strict pin.** Follow-up run is exclusively dispatchable to the original
-  runner. If that runner is busy, the run waits. Maximum native-resume hit
-  rate; worst queue fairness; users wait longer.
-- **Soft pin (recommended).** Prefer the original runner; wait up to N seconds
-  (e.g., 30s) for it to free up; then release the pin and dispatch to any
-  runner using the replay path. Tunable knob.
-- **No pin.** Always dispatch to whoever is free; native resume is just a
-  performance hint that succeeds opportunistically. Best fairness; loses the
-  native-resume benefit when runners are busy.
+Cloud needs a matching `on_run_paused` handler in
+`apps/api/pi_dash/runner/consumers.py` (next to `on_run_completed` /
+`on_run_failed` at line 236). The handler transitions the run to
+`PAUSED_AWAITING_INPUT`, stores the payload on `done_payload`, and
+triggers `drain_for_runner(runner)` so the runner picks up its next
+queued work immediately.
 
-Soft pin is the right default because it aligns with the digital-employee
-model: "I'd like the same person who worked on this last time, but I'd rather
-make progress than wait forever."
+**Claude does not use this path.** Claude's yield rides the existing
+`pi-dash-done` fenced-block channel (§4.4); cloud's
+`done_signal.ingest_into_run` is the entry point, with the new `"paused"`
+status mapping to `PAUSED_AWAITING_INPUT`. No new `ClientMsg` variant is
+needed for Claude.
 
-### 6.5 Where the resume hint lives
+### 7.3 Resume-failure reporting
 
-Two storage options:
-
-1. Read at dispatch time from `parent_run.thread_id` and `parent_run.runner_id`.
-2. Promote to a first-class field on the new run: `resume_thread_id`,
-   `pinned_runner_id`.
-
-Option 1 keeps the model lean (no new columns), at the cost of always walking
-the chain. Option 2 lets us snapshot the resume hint once and stop caring
-about whether it's still derivable later (e.g., if `parent_run.runner_id` was
-nulled out for some reason).
-
-Recommendation: **Option 1 for MVP**, promote to Option 2 if we find ourselves
-patching the same data lookup in three places.
-
-## 7. Optional: An `IssueConversation` Entity
-
-Today, "the conversation on an issue" is implicit — it's the chain of
-`AgentRun` rows whose `parent_run` walks back to a root.
-
-A first-class `IssueConversation` (or `WorkThread`) model could own:
-
-- `issue_id` — the issue this conversation is about.
-- `native_session_id` — the canonical provider session id (latest non-empty
-  `thread_id` in the chain).
-- `pinned_runner_id` — soft affinity for native-resume.
-- `head_run_id` — the latest run in the chain.
-- `status` — `active` (work continuing), `closed` (done), `abandoned`.
-
-### 7.1 Why we'd add it
-
-- **Multiple conversations per issue.** "I want to start over" or "let me ask a
-  side question" become natural — each gets its own conversation. The walk-
-  the-parent_run-chain model has no place for branching.
-- **Cleaner ownership.** Pinning, transcript caching, and the resume hint all
-  live in one place instead of being recomputed from the chain.
-- **Cleaner permissions.** Conversation-level subscribe / mute / reassign
-  actions become possible.
-
-### 7.2 Why we'd skip it (for now)
-
-- The chain model is sufficient for one-conversation-per-issue. Promoting now
-  is speculative.
-- New entity = new migrations, new permission rules, new API surface.
-
-Recommendation: **defer.** Walk-the-chain works for v1. Promote to
-`IssueConversation` only if the multi-thread-per-issue use case becomes real.
+When the agent CLI returns "no such session" or equivalent on a resume call,
+the runner reports it via `RunFailed` with a new
+`FailureReason::ResumeUnavailable`. Cloud's reaction is described in §6.3.
 
 ## 8. Recommended MVP Shape
 
-This is the minimum coherent slice that delivers the user-visible benefit.
+### 8.1 Cloud (Django)
 
-1. **Run lifecycle** (§4)
-   - Add `AgentRunStatus.PAUSED_AWAITING_INPUT` (and `PAUSED_AWAITING_APPROVAL`
-     if not already represented as a status).
-   - Define the `request_user_input` tool that the agent calls to yield.
-   - Runner reports the yield to the cloud; cloud transitions `R_prev` to
-     `PAUSED_AWAITING_INPUT` and stores the agent's question in `R_prev.done_payload`.
+1. **Status enum + classifiers**: add `PAUSED_AWAITING_INPUT` to
+   `AgentRunStatus`. Update **all five** classifiers consistently per the
+   table in §4.3:
+   - Out of: `BUSY_STATUSES`, `is_terminal`, `is_active`,
+     `ACTIVE_RUN_STATUSES`.
+   - In: `NON_TERMINAL_STATUSES`.
+2. **Done-signal contract** (`apps/api/pi_dash/orchestration/done_signal.py`):
+   add `"paused"` to `VALID_STATUSES`. In `ingest_into_run`, map
+   `"paused"` → `PAUSED_AWAITING_INPUT` (non-terminal); leave `"blocked"`
+   → `BLOCKED` unchanged. Leave `done_payload` populated so the handoff
+   is preserved across resume.
+3. **Schema**: add `pinned_runner_id` (FK to `Runner`, nullable) on
+   `AgentRun`. Field-only migration.
+4. **Comment trigger**: `post_save` on `IssueComment`:
+   - Filter `comment.actor.is_bot` (excludes `pi_dash_agent` workpad bot).
+   - Apply state gating per §5.2 (only continue when issue.state.group is
+     STARTED).
+   - Coalesce duplicate triggers: if a QUEUED follow-up already exists for
+     the chain, append the comment to its prompt rather than creating a
+     second run.
+   - Create R_next with `pinned_runner_id = R_prev.runner_id` (only when
+     `R_prev.thread_id` is not null and `R_prev.runner` is online-eligible).
+5. **Matcher**: rewrite `drain_pod` to be runner-first; introduce
+   `next_for_runner` with the personal-then-pod query from §5.4.
+6. **Drain triggers**: add `drain_for_runner` calls in the Channels consumer
+   on `run_completed`, `run_failed`, on the new `run_paused` handler, and
+   on `on_hello` connect (after `_resume_run`). Also from
+   `done_signal.ingest_into_run` when status becomes
+   `PAUSED_AWAITING_INPUT` (Claude path).
+7. **`on_run_paused` consumer handler** (`runner/consumers.py:236` neighborhood):
+   transition the run, persist `done_payload`, post the handoff as an
+   issue comment (§6.4), and trigger drain.
+8. **Assign payload**: include `resume_thread_id = R.parent_run.thread_id`
+   when set; `pinned_runner_id` does not need to be on the wire.
+9. **Pin release on revoke**: on `Runner` REVOKED transition, null out
+   pinned QUEUED runs. Trigger drain on the affected pod.
+10. **Operator pin-release**: a UI/API affordance to manually clear
+    `pinned_runner_id` on a stuck QUEUED run.
 
-2. **Continuation trigger** (§5)
-   - Add `post_save` on `IssueComment`:
-     - Skip agent-authored comments.
-     - Find latest `AgentRun` for the issue.
-     - If `RUNNING`: forward the comment to the live run via WS (out of MVP
-       scope — okay to defer and queue instead).
-     - If `PAUSED_*` or terminal: create a new `AgentRun` with `parent_run`
-       set, dispatch through the normal pod queue.
-   - Add `POST /api/v1/runner/runs/<id>/continue/` endpoint as the explicit
-     button-driven path.
+### 8.2 Runner (Rust)
 
-3. **Conversation continuity — hybrid** (§6)
-   - At dispatch, the cloud computes `resume_thread_id = parent_run.thread_id`
-     and `preferred_runner_id = parent_run.runner_id`.
-   - Matcher implements **soft pin**: prefer `preferred_runner_id`, wait up to
-     `RUN_PIN_GRACE_SECONDS` (default 30), then release.
-   - Runner side: if `resume_thread_id` is set, attempt native resume first
-     (Claude Code: pass `--resume`; Codex: call `resume_thread()`). On failure,
-     fall back to replay.
-   - Replay path: load `R_prev` events, render a transcript preamble
-     (compact format — user turns, assistant turns, key tool calls, dropping
-     internal scratchpad), prepend to the new run's prompt.
+1. **Supervisor**: read `resume_thread_id` from the incoming `Assign`
+   message and plumb it into `RunPayload` instead of the hardcoded `None`
+   at `runner/src/daemon/supervisor.rs:544`.
+2. **Claude Code resume**: lift the "single-turn only" restriction in
+   `runner/src/claude_code/mod.rs:10`; pass `--resume <session_id>` when
+   `resume_thread_id` is set. Detect "no such session" failure and bubble
+   it up as `RunFailed { reason: ResumeUnavailable }`.
+3. **Codex resume**: already wired in `runner/src/codex/bridge.rs:61-72`.
+   Verify that `RunPaused` paths leave the Codex thread state intact on
+   disk and that subsequent `thread/resume` works.
+4. **Codex yield tool**: expose `request_user_input` via the Codex
+   JSON-RPC tool surface. On tool call, send `ClientMsg::RunPaused { ... }`
+   and return runner to idle.
+5. **Claude yield**: no runner-side change. Claude emits the existing
+   `pi-dash-done` fenced block with the new `"paused"` status; the runner
+   already forwards Claude's terminal output and cloud parses it.
+6. **Resume-failure detection**: when the bridge's resume call fails
+   because the session is missing, report `RunFailed { reason:
+ResumeUnavailable }`.
 
-4. **Defer**
-   - `IssueConversation` entity (§7).
-   - Mid-run inbound user messages (forwarding a comment into a `RUNNING`
-     run). Workaround: queue the comment, dispatch on terminate.
-   - Cross-issue / cross-conversation memory.
+### 8.3 Prerequisite for Claude continuation
+
+Claude approvals are bypassed today (`runner/src/claude_code/mod.rs:6-10`,
+`runner/src/claude_code/bridge.rs:122-128` fails fast on approval routing).
+This is **not a blocker for the yield path** above — Claude yields via
+done-signal, not via tool-call/approval — but it does mean Claude
+continuation lacks the structured tool-yield UX Codex gets. Wiring the
+permission-prompt MCP bridge is tracked separately in `claude_code/mod.rs`'s
+MVP-limitations comment; if/when it lands, Claude can adopt the same
+tool-call yield mechanism Codex uses, and the done-signal `"paused"` path
+becomes a fallback rather than the primary mechanism.
+
+### 8.3 Defer
+
+- Mid-run inbound user messages (forwarding a comment into a `RUNNING` run).
+  Workaround: hold the comment, dispatch on terminate.
+- Transcript-replay fallback (§6.5).
+- `IssueConversation` entity (one-thread-per-issue is sufficient for v1).
+- TTL-based pin release (§5.7) — operator-driven is enough for v1.
+- Cross-issue / cross-conversation memory.
+- Smarter prompt for fresh-context-from-issue beyond "read the issue + the
+  prior handoff comment."
 
 ## 9. Open Questions
 
-| #   | Question                                                                                                                                         |
-| --- | ------------------------------------------------------------------------------------------------------------------------------------------------ |
-| Q1  | What's the right TTL on a `PAUSED_AWAITING_INPUT` run? After 7 days with no comment, do we GC it to terminal?                                    |
-| Q2  | Replay format: full turn-by-turn vs. summarize-the-prior-run? At what conversation length do we switch?                                          |
-| Q3  | Can we forward an inline comment into a `RUNNING` run without making the runner stateful in dangerous ways? Or do we always wait for terminate? |
-| Q4  | Soft-pin grace window: 30s reasonable? Tunable per pod?                                                                                          |
-| Q5  | If native resume succeeds but the resumed agent's working directory was wiped (runner reinstalled), the agent has memory but no files. How do we detect and handle? |
-| Q6  | Do we expose conversation history (the run chain) as a first-class API for the UI's issue panel, or keep it as `issue.agent_runs.order_by(...)`? |
-| Q7  | Billing: a follow-up run costs tokens; who pays? Same `runner.owner` semantics as the primary run, or attribute to the comment author?           |
-| Q8  | If `IssueComment` triggers a run but the issue is no longer in `In Progress` (user moved it back to Backlog), do we still dispatch? Probably not — define the gating rule. |
+| #   | Question                                                                                                                                                                                            |
+| --- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Q1  | What's the right TTL on a `PAUSED_AWAITING_INPUT` run? After 7 days with no comment, do we GC it to terminal?                                                                                       |
+| Q2  | If R_prev terminated SUCCEEDED but a comment still arrives weeks later, do we resume? Probably yes, but the agent CLI's session may have been cleaned up.                                           |
+| Q3  | Workspace persistence on the runner: when agentA pauses issue001 and switches to issue002 (different workspace path), can issue001's workspace be left dirty? Or do we require commit-before-yield? |
+| Q4  | If the issue is no longer in `In Progress` (user moved it back to Backlog), do we still dispatch on comment? Probably not — define the gating rule.                                                 |
+| Q5  | Billing: a follow-up run costs tokens; same `runner.owner` semantics as the primary run, or attribute to the comment author?                                                                        |
+| Q6  | Do we expose conversation history (the run chain) as a first-class API for the UI's issue panel, or keep it derived (`issue.agent_runs.order_by(...)`)?                                             |
+| Q7  | The handoff payload schema (§6.4) — minimal viable shape, or richer fields (file-level annotations, follow-up checklist)?                                                                           |
+| Q8  | Pinned-runner failure UX: when run sits QUEUED because the pinned runner is offline, what does the user see? Silent wait, or a "stuck on agentA" indicator with a release button?                   |
 
-## 10. Summary of Tradeoffs
+## 10. Summary of Decisions
 
-The central tradeoff is **runner affinity vs. queue fairness**. Native resume
-is dramatically cheaper and higher-fidelity, but it ties a run to a specific
-runner; the pod queue's whole point is that any runner can pick up any work.
+The original framing put the central tradeoff as **runner affinity vs. queue
+fairness**, and recommended soft pin with replay fallback. After working
+through interleaving and where state lives, the decisions tighten:
 
-Soft pin with replay fallback is the pragmatic middle: we capture the common-
-case win (the original runner is usually still around) and degrade
-gracefully when it isn't.
+1. **Strict pin, not soft pin.** Comment-triggered runs go back to the same
+   runner. No grace window, no fallback to "anyone." Native resume is the
+   correctness path; everything else is recovery from a real failure.
+2. **Paused is not busy _or_ active.** Add `PAUSED_AWAITING_INPUT` to the
+   status enum and place it correctly across all five classifiers
+   (`BUSY_STATUSES`, `NON_TERMINAL_STATUSES`, `is_terminal`, `is_active`,
+   `ACTIVE_RUN_STATUSES`) — not just the two named in earlier drafts.
+   Excluding it from `is_active` is what lets the comment trigger create
+   a follow-up; excluding it from `BUSY_STATUSES` is what lets the runner
+   keep working other issues while paused.
+3. **`"paused"` is a new agent done-signal status, distinct from `"blocked"`.**
+   The existing `"blocked"` → terminal `BLOCKED` contract stays intact.
+   Adding `"paused"` extends the done-signal grammar without disturbing
+   anything that already reads BLOCKED.
+4. **Yield mechanism diverges per agent.** Codex uses a `request_user_input`
+   tool call and a new `RunPaused` `ClientMsg` (the approval path is wired,
+   tool calls are first-class). Claude rides the existing `pi-dash-done`
+   fenced block with the new `"paused"` status because Claude approvals
+   are bypassed and there's no tool-call surface to piggyback. Both paths
+   converge on the cloud-side `PAUSED_AWAITING_INPUT` state.
+5. **One table, two filters.** No new queue, no new data structure — just
+   `pinned_runner_id` on `AgentRun` and a smarter `ORDER BY`.
+6. **Runner-first dispatch.** When a runner becomes idle, ask "what should
+   you take?" rather than "is there work that fits you?". Eliminates
+   head-of-line blocking on pinned runs and serves personal-queue work the
+   moment the runner frees up.
+7. **Cloud is authoritative; runner is stateless about past runs.** No new
+   runner-side index. The agent CLI's own session store is the on-disk
+   resume artifact.
+8. **Handoff comments, not transcript replay.** When native resume fails,
+   fresh-context-from-issue carries it — _if_ the yield protocol forces a
+   structured handoff. This sidesteps the entire replay-quality problem.
+9. **Comment trigger has explicit gates.** Bot filter on `actor.is_bot`
+   (the `pi_dash_agent` workpad bot is the concrete blocker), state-group
+   gating to STARTED, and coalesce on duplicate QUEUED followers. Without
+   these, the trigger conflicts with the existing single-active-run
+   guardrail and the workpad bot self-triggers a loop.
 
-The other meaningful tradeoff is **trigger surface**. Comment-triggered
-continuation matches user intent best but introduces an implicit dispatch
-path, which is harder to reason about than an explicit button. Shipping both
-gives users a fallback for surprising cases.
+The cost of this design: roughly ~200 lines of cloud Python (status +
+classifiers, column, done-signal extension, matcher rewrite, consumer
+hooks, comment signal with gates), one wire-protocol field addition,
+one new `ClientMsg` variant for Codex yield, and two runner-side changes
+(Claude `--resume` plumbing, Codex yield tool). No new tables, no new
+services, no new background workers.
