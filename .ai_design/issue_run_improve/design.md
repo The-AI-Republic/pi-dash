@@ -773,3 +773,178 @@ hooks, comment signal with gates), one wire-protocol field addition,
 one new `ClientMsg` variant for Codex yield, and two runner-side changes
 (Claude `--resume` plumbing, Codex yield tool). No new tables, no new
 services, no new background workers.
+
+## 11. Expected Behavior
+
+This section captures the user-visible and system-level behavior the
+implementation must produce. Each scenario maps to an integration-test
+candidate in §11.5.
+
+### 11.1 Happy paths
+
+**A1. Issue completes in one run.** Unchanged from today. State → In
+Progress, run dispatched, agent emits `pi-dash-done` with
+`status: "completed"`, run terminates COMPLETED. No continuation.
+
+**A2. Issue takes two runs (clean continuation).**
+
+1. Issue → In Progress; run R1 dispatched to agentA.
+2. Agent yields with a question. R1 → `PAUSED_AWAITING_INPUT`. The
+   handoff payload is posted as an issue comment so the human can read
+   the question.
+3. AgentA returns to idle. Pod treats it as available (paused ≠ busy).
+   User-visible: "Run paused — agent has a question."
+4. User comments with their answer.
+5. Cloud creates R2 pinned to agentA, with
+   `resume_thread_id = R1.thread_id`. R2 lands in agentA's personal
+   queue.
+6. AgentA picks R2 up the next time it's idle (immediately if no other
+   work; after current run if busy with another issue).
+   User-visible: "Run resumed."
+7. Agent continues the same Codex/Claude session, finishes, R2 →
+   COMPLETED.
+
+**A3. Three-way interleave.** This is the canonical scenario the design
+is built around.
+
+1. R1 paused on agentA after a yield.
+2. AgentA picks issue002's R3 from pod queue → busy on R3.
+3. User comments on issue001 → R2 created, pinned to agentA, sits
+   QUEUED.
+4. AgentA finishes R3 → `drain_for_runner` checks personal queue
+   first → picks R2 → resumes.
+5. From the user's POV: their comment didn't get an immediate response,
+   but the moment agentA freed up it picked up where it left off — with
+   full session memory, not a re-read of the issue.
+
+### 11.2 Timing expectations
+
+| Event                                   | Expected latency                                                  |
+| --------------------------------------- | ----------------------------------------------------------------- |
+| Yield → handoff comment visible         | Sub-second (posted in `on_run_paused` / done-signal ingest)       |
+| Comment → dispatch (idle pinned runner) | Sub-second (`on_commit(drain_for_runner)`)                        |
+| Comment → dispatch (busy pinned runner) | As long as the runner's current run takes; no fallback timeout    |
+| Comment during RUNNING → dispatch       | At terminate of R_prev (no extra delay beyond terminate handling) |
+
+### 11.3 Coalescing & ordering
+
+- **Two comments before R2 dispatches.** Appended into a single R2
+  prompt. User does not get two parallel runs.
+- **Multiple paused issues on agentA.** When agentA frees up, FIFO by
+  `R_next.created_at` (the follow-up's creation time, not the
+  original's). Earliest comment-trigger wins.
+- **Bot comments.** Filtered by `actor.is_bot`. The `pi_dash_agent`
+  workpad updates never trigger continuation.
+
+### 11.4 State-gating outcomes
+
+| Issue state when comment arrives | Expected behavior                                              |
+| -------------------------------- | -------------------------------------------------------------- |
+| STARTED ("In Progress")          | Comment triggers continuation (the main path)                  |
+| BACKLOG / UNSTARTED              | Ignored. State-transition path is what starts work             |
+| COMPLETED / CANCELLED            | Ignored. User must move issue back to In Progress to re-engage |
+| Custom workspace state group     | Ignored (conservative MVP); revisit per Q4                     |
+
+### 11.5 Failure-mode behavior
+
+**B1. Pinned runner offline.** R2 sits QUEUED with
+`pinned_runner = agentA` indefinitely. UI surfaces a "stuck on agentA —
+release pin?" indicator. Operator clicks "release pin" →
+`pinned_runner_id = NULL` → drain places R2 on whichever runner is
+free → resume fails on a different runner → `ResumeUnavailable` → R2
+re-queued without `resume_thread_id` → fresh-context dispatch using the
+issue + handoff comment.
+
+**B2. AgentA revoked while R2 is pinned.** Automatic. The
+`Runner.status = REVOKED` transition nulls `pinned_runner_id` on QUEUED
+runs in the affected pod and triggers drain. R2 falls into the pod
+general queue. Same fresh-context fallback as B1.
+
+**B3. Resume fails (session evicted from disk).** AgentA online, R2
+dispatched to it, `claude --resume <id>` (or Codex `thread/resume`)
+returns "no such session." Runner reports
+`RunFailed { reason: ResumeUnavailable }`. Cloud drops the pin and the
+resume hint, re-queues R2. Picked up fresh by any runner — possibly
+agentA itself — with the handoff comment as context.
+
+**B4. AgentA's host was reinstalled.** Same as B3; session store was
+wiped, detected the same way.
+
+**B5. Yield with malformed handoff payload.** Existing
+`done_signal.ingest_into_run` returns FAILED on parse error. For the
+new `"paused"` status, validation must additionally reject when the
+required handoff fields (e.g., `autonomy.question_for_human`) are
+absent. Run terminates as FAILED, not PAUSED.
+
+### 11.6 Invariants the implementation must preserve
+
+1. **PAUSED status placement** across all five classifiers per §4.3:
+   out of `BUSY_STATUSES`, `is_terminal`, `is_active`,
+   `ACTIVE_RUN_STATUSES`; in `NON_TERMINAL_STATUSES`.
+2. **Single-active-run guardrail.** `_active_run_for` continues to
+   block creation of two `is_active` runs for the same issue. A paused
+   run + one QUEUED follow-up is allowed (paused is not active); two
+   QUEUED followers are not (coalesce step).
+3. **Pin only when resume is meaningful.** Set `pinned_runner_id` only
+   when `R_prev.thread_id IS NOT NULL` and `R_prev.runner` is
+   online-eligible. Otherwise leave NULL so any runner can take R_next.
+4. **Pod deletion respects paused runs.** Pod deletion path refuses
+   while any non-terminal run (including PAUSED) exists in the pod.
+   The drain process must explicitly resolve paused runs (cancel or
+   re-route) before the pod can be removed.
+5. **Bot self-trigger immunity.** No agent-authored comment can
+   produce a new run. Filter must be on `actor.is_bot=True`, not on
+   string match or username.
+
+### 11.7 What does NOT change
+
+- The pod queue model. Fresh issues still dispatch to whoever's free
+  in the pod.
+- Runner identity exposure. No new "this run is pinned to that runner"
+  UI beyond the stuck-pin indicator from B1.
+- Existing terminal statuses (`COMPLETED`, `FAILED`, `CANCELLED`,
+  `BLOCKED`). `BLOCKED` keeps its terminal contract; `"paused"` is the
+  new agent status that produces the new non-terminal
+  `PAUSED_AWAITING_INPUT`.
+- Runner-side persistence model. No new index, no new cache, no new
+  per-issue state on the runner.
+
+### 11.8 Integration test scenarios
+
+These map directly to acceptance criteria for the implementation:
+
+1. **Yield → comment → resume on idle runner.** A2 end-to-end with
+   agentA being the only runner in the pod.
+2. **Yield → other-issue dispatch → comment → resume after current
+   run.** A3 end-to-end. Verify R2 sits QUEUED while agentA works on
+   issue002 and dispatches the moment R3 terminates.
+3. **Coalesce two comments into one follow-up.** Send two comments in
+   rapid succession before R2 dispatches; assert only one new
+   `AgentRun` row exists and its prompt contains both comments.
+4. **Bot comment does not trigger continuation.** Workpad update from
+   `pi_dash_agent`; assert no new `AgentRun` is created.
+5. **State gating.** Comment on a BACKLOG / COMPLETED issue produces
+   no new run.
+6. **Comment during RUNNING.** Comment arrives mid-run; assert the
+   terminate-side sweep picks it up and dispatches R_next when R_prev
+   terminates.
+7. **Stuck pin → operator release → fresh-context fallback.** Take
+   pinned runner offline, simulate operator release, assert R2 routes
+   to another runner without `resume_thread_id`.
+8. **Resume failure → automatic fallback.** Mock the agent CLI's
+   resume call to fail; assert cloud drops the pin and re-queues
+   without resume hint.
+9. **Status classifier coverage.** Unit test asserting
+   `PAUSED_AWAITING_INPUT` membership in each of the five
+   classifiers per §4.3.
+10. **Pod deletion blocked by paused runs.** Attempt to delete a pod
+    with a `PAUSED_AWAITING_INPUT` run; assert it's refused until the
+    run is resolved.
+11. **Multiple paused issues on one agent, FIFO by follow-up
+    creation.** Pause issue001 then issue003 on agentA; comment on
+    issue003 first, then issue001; assert R3-next dispatches before
+    R1-next when agentA frees up.
+12. **PAUSED + state transition back to In Progress.** With a paused
+    run on the issue, move the issue to In Progress manually; assert
+    the resulting run is pinned to the prior runner with
+    `resume_thread_id` set (per Q-style edge case from §11.6 #2).
