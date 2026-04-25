@@ -213,23 +213,33 @@ For Claude, the pragmatic path reuses the existing `pi-dash-done` channel:
 above is two structured paths, one per agent, both grounded in existing
 plumbing.
 
-When the runner sees the yield (Codex tool call OR Claude done-signal
-parse):
+**Codex yield path** (tool call):
 
-- Cloud transitions run to `PAUSED_AWAITING_INPUT`, stores the payload.
-- Runner reports completion (Codex: tool-call observed and ack'd; Claude:
-  process exits cleanly after emitting the fence) and returns to idle,
-  then triggers `drain_for_runner` (§5.6).
+- Runner observes the `request_user_input` tool call from Codex.
+- Runner sends `ClientMsg::RunPaused { run_id, payload, paused_at }` to
+  cloud (new variant — see §7.2).
+- Cloud's `on_run_paused` consumer handler transitions the run to
+  `PAUSED_AWAITING_INPUT`, persists the payload to `done_payload`, and
+  triggers `drain_for_runner` (§5.6).
+- Runner ack's the tool call to Codex (so the thread parks cleanly on
+  disk for later resume) and returns to idle.
 
-When the runner sees the yield:
+**Claude yield path** (done-signal fenced block):
 
-- Reports `RunPaused { run_id, payload, ... }` to cloud.
-- Cloud transitions run to `PAUSED_AWAITING_INPUT`, stores the payload.
-- Runner returns to idle and triggers `drain_for_runner` (see §5.6).
+- Claude emits its terminal `pi-dash-done` fence with `status: "paused"`
+  and a `done_payload` containing the question + handoff fields.
+- Runner forwards Claude's terminal output verbatim (no bridge change)
+  and reports run completion via the existing `RunCompleted` /
+  done-signal flow.
+- Cloud's `done_signal.ingest_into_run` parses the fence, sees
+  `"paused"`, transitions the run to `PAUSED_AWAITING_INPUT` instead of
+  terminal `BLOCKED`, and triggers `drain_for_runner`.
+- No new `ClientMsg` variant is needed for Claude.
 
-The yield tool's payload should be structured as a handoff (see §6.4) —
-question for the human plus enough state for a fresh agent to continue if
-native resume fails.
+Both paths converge on `PAUSED_AWAITING_INPUT` with a populated
+`done_payload`. The payload schema (§6.4) is shared — question for the
+human plus enough state for a fresh agent to continue if native resume
+fails.
 
 ## 5. Continuation Triggers and Dispatch
 
@@ -268,12 +278,51 @@ post_save(IssueComment)
         │     │
         │     ├─► R_prev is PAUSED_AWAITING_INPUT → create R_next, pin to R_prev.runner
         │     ├─► R_prev is is_terminal           → create R_next, pin to R_prev.runner
-        │     └─► R_prev is is_active             → queue comment for delivery on terminate
-        │                                            (RUNNING / ASSIGNED / AWAITING_*)
+        │     └─► R_prev is is_active             → no-op here; terminate-side
+        │                                            sweep picks it up (see below)
         │
         ▼
 R_next dispatched through normal pod queue (with personal-queue priority)
 ```
+
+**Comments-during-active-run.** When R_prev is still `is_active`
+(RUNNING / ASSIGNED / AWAITING_APPROVAL / AWAITING_REAUTH), the
+`post_save` receiver does **not** create R_next, and the comment is
+**not** held in any side table or queue. Instead, the comment lives
+exactly where every comment lives — in `IssueComment` — and is
+discovered later by a **timestamp sweep** in the terminate handlers:
+
+```
+on_run_completed / on_run_failed / on_run_paused (consumers.py)
+        │
+        │ (existing run-state update + drain trigger)
+        ▼
+maybe_continue_after_terminate(R):
+    if R.work_item_id is None: return
+    pending = IssueComment.objects.filter(
+        issue=R.work_item,
+        actor__is_bot=False,
+        created_at__gt=R.started_at,
+    ).exists()
+    if not pending: return
+    invoke comment-trigger flow on R.work_item
+        (which reads the same comments to compose R_next.prompt
+         and applies the same gating + pinning rules above)
+```
+
+This means there is no "pending comment" model field, no separate
+queue, no new persistence. The storage is `IssueComment` itself; the
+"queue" is implicit via the timestamp range
+`created_at > R_prev.started_at`. The prompt builder for R_next reads
+all unconsumed comments in that range and composes them into the
+prompt — naturally coalescing multiple comments arriving during the
+active run.
+
+(One subtle detail: the sweep filter must use `R.started_at` rather
+than `R.assigned_at` so comments left between assignment and the
+agent actually starting work are included. Also worth scoping by
+`R.created_by` or excluding the trigger comment itself depending on
+intended semantics — see Q9.)
 
 **Bot filter.** The `pi_dash_agent` bot user
 (`apps/api/pi_dash/orchestration/workpad.py:27-70`) authors the agent's
@@ -294,8 +343,8 @@ agent's own workpad updates would re-trigger continuation in a loop.
 
 **Guardrail interaction.** The existing single-active-run guardrail in
 `_active_run_for` (`orchestration/service.py:45-59`) blocks new runs when
-one is already `is_active` for the issue. With PAUSED_AWAITING_INPUT
-explicitly _outside_ `is_active` (§4.3), a paused run does not block the
+one is already `is_active` for the issue. With PAUSED*AWAITING_INPUT
+explicitly \_outside* `is_active` (§4.3), a paused run does not block the
 follow-up — which is what we want. But two distinct comments arriving in
 quick succession could both observe "no active run" and create two
 QUEUED follow-ups for the same issue. The **coalesce step above** handles
@@ -380,9 +429,12 @@ Drain is invoked at three moments:
   if there's already a QUEUED R_next for the issue, append the new comment
   to its prompt instead of creating a second run.
 - **Comment arrives while R_prev is RUNNING.** Don't queue a new run yet.
-  Either (a) push the comment to the live run as an inbound user message
-  (out of MVP scope; needs runner-side support for mid-run inbound), or
-  (b) hold the comment until terminate and dispatch then. Start with (b).
+  Two future options: (a) push the comment to the live run as an inbound
+  user message (out of MVP scope; needs runner-side support for mid-run
+  inbound). For MVP, take (b) — the terminate-side timestamp sweep in
+  §5.2 picks up any non-bot comments with `created_at > R.started_at`
+  when the run terminates, and runs the comment-trigger logic. No
+  separate "pending comment" storage is needed.
 - **Agent comments on its own issue.** Filter by author type; agent-authored
   comments do not re-trigger.
 - **Pinned runner offline / revoked.** The pinned run sits in QUEUED forever
@@ -596,11 +648,18 @@ the runner reports it via `RunFailed` with a new
 7. **`on_run_paused` consumer handler** (`runner/consumers.py:236` neighborhood):
    transition the run, persist `done_payload`, post the handoff as an
    issue comment (§6.4), and trigger drain.
-8. **Assign payload**: include `resume_thread_id = R.parent_run.thread_id`
+8. **Terminate-side comment sweep** (`runner/consumers.py` terminate handlers):
+   in `on_run_completed`, `on_run_failed`, and `on_run_paused`, after
+   updating run state, check for non-bot `IssueComment`s with
+   `created_at > R.started_at` on the run's issue. If any exist, invoke
+   the comment-trigger flow (§5.2) to create R_next. No new model field
+   or pending-comment table — `IssueComment` + the timestamp range is
+   the storage.
+9. **Assign payload**: include `resume_thread_id = R.parent_run.thread_id`
    when set; `pinned_runner_id` does not need to be on the wire.
-9. **Pin release on revoke**: on `Runner` REVOKED transition, null out
-   pinned QUEUED runs. Trigger drain on the affected pod.
-10. **Operator pin-release**: a UI/API affordance to manually clear
+10. **Pin release on revoke**: on `Runner` REVOKED transition, null out
+    pinned QUEUED runs. Trigger drain on the affected pod.
+11. **Operator pin-release**: a UI/API affordance to manually clear
     `pinned_runner_id` on a stuck QUEUED run.
 
 ### 8.2 Runner (Rust)
@@ -640,7 +699,9 @@ becomes a fallback rather than the primary mechanism.
 ### 8.3 Defer
 
 - Mid-run inbound user messages (forwarding a comment into a `RUNNING` run).
-  Workaround: hold the comment, dispatch on terminate.
+  Workaround: the terminate-side timestamp sweep (§5.2) picks up comments
+  with `created_at > R.started_at` once the run finishes, and dispatches
+  R_next normally. No separate pending-comment storage.
 - Transcript-replay fallback (§6.5).
 - `IssueConversation` entity (one-thread-per-issue is sufficient for v1).
 - TTL-based pin release (§5.7) — operator-driven is enough for v1.
@@ -650,16 +711,17 @@ becomes a fallback rather than the primary mechanism.
 
 ## 9. Open Questions
 
-| #   | Question                                                                                                                                                                                            |
-| --- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Q1  | What's the right TTL on a `PAUSED_AWAITING_INPUT` run? After 7 days with no comment, do we GC it to terminal?                                                                                       |
-| Q2  | If R_prev terminated SUCCEEDED but a comment still arrives weeks later, do we resume? Probably yes, but the agent CLI's session may have been cleaned up.                                           |
-| Q3  | Workspace persistence on the runner: when agentA pauses issue001 and switches to issue002 (different workspace path), can issue001's workspace be left dirty? Or do we require commit-before-yield? |
-| Q4  | If the issue is no longer in `In Progress` (user moved it back to Backlog), do we still dispatch on comment? Probably not — define the gating rule.                                                 |
-| Q5  | Billing: a follow-up run costs tokens; same `runner.owner` semantics as the primary run, or attribute to the comment author?                                                                        |
-| Q6  | Do we expose conversation history (the run chain) as a first-class API for the UI's issue panel, or keep it derived (`issue.agent_runs.order_by(...)`)?                                             |
-| Q7  | The handoff payload schema (§6.4) — minimal viable shape, or richer fields (file-level annotations, follow-up checklist)?                                                                           |
-| Q8  | Pinned-runner failure UX: when run sits QUEUED because the pinned runner is offline, what does the user see? Silent wait, or a "stuck on agentA" indicator with a release button?                   |
+| #   | Question                                                                                                                                                                                                                        |
+| --- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Q1  | What's the right TTL on a `PAUSED_AWAITING_INPUT` run? After 7 days with no comment, do we GC it to terminal?                                                                                                                   |
+| Q2  | If R_prev terminated SUCCEEDED but a comment still arrives weeks later, do we resume? Probably yes, but the agent CLI's session may have been cleaned up.                                                                       |
+| Q3  | Workspace persistence on the runner: when agentA pauses issue001 and switches to issue002 (different workspace path), can issue001's workspace be left dirty? Or do we require commit-before-yield?                             |
+| Q4  | If the issue is no longer in `In Progress` (user moved it back to Backlog), do we still dispatch on comment? Probably not — define the gating rule.                                                                             |
+| Q5  | Billing: a follow-up run costs tokens; same `runner.owner` semantics as the primary run, or attribute to the comment author?                                                                                                    |
+| Q6  | Do we expose conversation history (the run chain) as a first-class API for the UI's issue panel, or keep it derived (`issue.agent_runs.order_by(...)`)?                                                                         |
+| Q7  | The handoff payload schema (§6.4) — minimal viable shape, or richer fields (file-level annotations, follow-up checklist)?                                                                                                       |
+| Q8  | Pinned-runner failure UX: when run sits QUEUED because the pinned runner is offline, what does the user see? Silent wait, or a "stuck on agentA" indicator with a release button?                                               |
+| Q9  | Terminate-side comment sweep (§5.2): exact filter semantics. Use `created_at > R.started_at` or `> R.created_at`? Exclude the comment that originally triggered R itself? Cap the lookback for very long-running paused chains? |
 
 ## 10. Summary of Decisions
 
