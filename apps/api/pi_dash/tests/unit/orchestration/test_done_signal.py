@@ -161,3 +161,73 @@ def test_ingest_success_clears_prior_error_and_stamps_ended_at(
     assert run.status == AgentRunStatus.COMPLETED
     assert run.error == ""
     assert run.ended_at is not None
+
+
+# ---------------------------------------------------------------------------
+# Paused status — agent yields with a question, expects a follow-up run.
+# ---------------------------------------------------------------------------
+
+
+PAUSED_BODY = """
+```pi-dash-done
+{
+  "status": "paused",
+  "summary": "stuck on which API surface to expose",
+  "autonomy": {
+    "score": 0,
+    "type": "blocking",
+    "reason": "ambiguous requirement",
+    "question_for_human": "Should this be on /api/v1/ or /api/v2/?",
+    "safe_to_continue": false
+  },
+  "blockers": []
+}
+```
+"""
+
+
+PAUSED_BODY_NO_QUESTION = """
+```pi-dash-done
+{
+  "status": "paused",
+  "summary": "stuck",
+  "autonomy": {"score": 0, "type": "blocking", "reason": "x"},
+  "blockers": []
+}
+```
+"""
+
+
+@pytest.mark.unit
+def test_parse_paused_with_question_succeeds():
+    signal = parse(PAUSED_BODY)
+    assert signal.status == "paused"
+    assert (
+        signal.payload["autonomy"]["question_for_human"]
+        == "Should this be on /api/v1/ or /api/v2/?"
+    )
+
+
+@pytest.mark.unit
+def test_parse_paused_without_question_rejected():
+    with pytest.raises(DoneSignalError, match="question_for_human"):
+        parse(PAUSED_BODY_NO_QUESTION)
+
+
+@pytest.mark.unit
+def test_ingest_paused_transitions_to_paused_awaiting_input(
+    db, create_user, workspace
+):
+    run = AgentRun.objects.create(
+        owner=create_user,
+        workspace=workspace,
+        prompt="x",
+        status=AgentRunStatus.RUNNING,
+    )
+    signal = ingest_into_run(run, PAUSED_BODY)
+    run.refresh_from_db()
+    assert signal is not None
+    assert run.status == AgentRunStatus.PAUSED_AWAITING_INPUT
+    # Paused is non-terminal; ended_at must remain NULL.
+    assert run.ended_at is None
+    assert run.done_payload["autonomy"]["question_for_human"]

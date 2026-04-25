@@ -29,7 +29,7 @@ FENCE_RE = re.compile(
     re.DOTALL | re.MULTILINE,
 )
 
-VALID_STATUSES = {"completed", "blocked", "noop"}
+VALID_STATUSES = {"completed", "blocked", "noop", "paused"}
 
 
 class DoneSignalError(ValueError):
@@ -71,6 +71,18 @@ def parse(text: str) -> DoneSignal:
         raise DoneSignalError(
             f"pi-dash-done.status must be one of {sorted(VALID_STATUSES)}; got {status!r}"
         )
+
+    if status == "paused":
+        # The whole point of pausing instead of blocking is to ask a human
+        # something. A paused signal without a question is malformed — the
+        # cloud has nothing to surface and no signal that a comment will be
+        # actionable.
+        question = (payload.get("autonomy") or {}).get("question_for_human")
+        if not question:
+            raise DoneSignalError(
+                "pi-dash-done.status='paused' requires "
+                "autonomy.question_for_human to be set"
+            )
 
     return DoneSignal(status=status, payload=_normalize(payload))
 
@@ -153,10 +165,17 @@ def ingest_into_run(run, text: str):
     run.error = ""
     if signal.status == "completed":
         run.status = AgentRunStatus.COMPLETED
+        run.ended_at = now
     elif signal.status == "blocked":
         run.status = AgentRunStatus.BLOCKED
+        run.ended_at = now
     elif signal.status == "noop":
         run.status = AgentRunStatus.COMPLETED
-    run.ended_at = now
+        run.ended_at = now
+    elif signal.status == "paused":
+        # Non-terminal: a follow-up run will resume this thread once a
+        # human comments. Leave ended_at NULL so observability tooling
+        # doesn't treat the row as finished.
+        run.status = AgentRunStatus.PAUSED_AWAITING_INPUT
     run.save(update_fields=["done_payload", "error", "status", "ended_at"])
     return signal
