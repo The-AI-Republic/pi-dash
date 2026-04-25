@@ -77,6 +77,16 @@ pub enum ClientMsg {
         done_payload: serde_json::Value,
         ended_at: DateTime<Utc>,
     },
+    /// Agent yielded with a question for the human (Codex tool-call path).
+    /// Cloud transitions the run to PAUSED_AWAITING_INPUT and waits for a
+    /// continuation trigger (typically a non-bot comment on the issue).
+    /// Claude's yield uses the `pi-dash-done` fenced block instead and
+    /// arrives via `RunCompleted` → cloud's done-signal parser.
+    RunPaused {
+        run_id: Uuid,
+        payload: serde_json::Value,
+        paused_at: DateTime<Utc>,
+    },
     RunFailed {
         run_id: Uuid,
         reason: FailureReason,
@@ -120,6 +130,12 @@ pub enum ServerMsg {
         expected_codex_model: Option<String>,
         approval_policy_overrides: Option<BTreeMap<String, serde_json::Value>>,
         deadline: Option<DateTime<Utc>>,
+        /// Provider session id to resume. When set, the runner asks the
+        /// agent CLI to reattach to that session (`thread/resume` for
+        /// Codex, `--resume` for Claude). Field-only addition — backward
+        /// compatible with older clouds that omit it.
+        #[serde(default)]
+        resume_thread_id: Option<String>,
     },
     Cancel {
         run_id: Uuid,
@@ -201,6 +217,12 @@ pub enum FailureReason {
     Timeout,
     Internal,
     Cancelled,
+    /// Native session resume was requested (Assign carried `resume_thread_id`)
+    /// but the agent CLI couldn't find the session on disk — the runner was
+    /// reinstalled, the session store was wiped, or the id is otherwise
+    /// stale. Cloud's response is to drop the pin and re-queue with a fresh
+    /// session.
+    ResumeUnavailable,
 }
 
 #[cfg(test)]
@@ -236,6 +258,7 @@ mod tests {
             expected_codex_model: None,
             approval_policy_overrides: None,
             deadline: None,
+            resume_thread_id: Some("sess_xyz".into()),
         };
         let env = Envelope::new(msg);
         let s = serde_json::to_string(&env).unwrap();

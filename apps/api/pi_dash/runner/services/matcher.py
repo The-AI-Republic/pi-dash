@@ -262,6 +262,13 @@ def _build_assign_msg(run: AgentRun) -> dict:
     ``orchestration/service._dispatch_to_runner``; Phase 3 will point both at
     this helper.
     """
+    # resume_thread_id is set when this run is a continuation of a prior
+    # run that recorded a session id (Codex thread_id / Claude session_id).
+    # The runner uses it to call thread/resume or claude --resume so the
+    # agent re-attaches to its prior in-memory state. Empty/missing on the
+    # wire means "fresh session" — backward compatible with older runners.
+    parent = run.parent_run
+    resume_thread_id = parent.thread_id if (parent and parent.thread_id) else None
     return {
         "v": 1,
         "type": "assign",
@@ -274,6 +281,7 @@ def _build_assign_msg(run: AgentRun) -> dict:
         "expected_codex_model": run.run_config.get("model"),
         "approval_policy_overrides": run.run_config.get("approval_policy_overrides"),
         "deadline": None,
+        "resume_thread_id": resume_thread_id,
     }
 
 

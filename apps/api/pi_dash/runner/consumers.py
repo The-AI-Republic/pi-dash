@@ -242,6 +242,17 @@ class RunnerConsumer(AsyncJsonWebsocketConsumer):
     async def on_run_cancelled(self, runner: Runner, msg: Dict[str, Any]) -> None:
         await sync_to_async(self._finalize_run)(runner, msg, AgentRunStatus.CANCELLED)
 
+    async def on_run_paused(self, runner: Runner, msg: Dict[str, Any]) -> None:
+        """Codex tool-call yield path. Cloud parks the run as
+        PAUSED_AWAITING_INPUT and triggers drain so the runner is free to
+        pick up other pod work while waiting for a human reply.
+
+        Claude's yield arrives via ``on_run_completed`` with a
+        ``pi-dash-done`` fenced block whose status is ``"paused"``; the
+        done-signal parser handles that path separately.
+        """
+        await sync_to_async(self._handle_run_paused)(runner, msg)
+
     async def on_run_awaiting_reauth(
         self, runner: Runner, msg: Dict[str, Any]
     ) -> None:
@@ -431,6 +442,53 @@ class RunnerConsumer(AsyncJsonWebsocketConsumer):
         )
         AgentRun.objects.filter(id=run_id, runner=runner).update(
             status=AgentRunStatus.AWAITING_APPROVAL
+        )
+
+    def _handle_run_paused(
+        self, runner: Runner, msg: Dict[str, Any]
+    ) -> None:
+        run_id = msg.get("run_id")
+        if not run_id:
+            return
+        payload = msg.get("payload") or {}
+        # Park the run; do NOT set ended_at (paused is non-terminal).
+        AgentRun.objects.filter(id=run_id, runner=runner).update(
+            status=AgentRunStatus.PAUSED_AWAITING_INPUT,
+            done_payload=payload,
+        )
+        # Surface the agent's question as an issue comment so the human can
+        # see it and reply (which then re-triggers continuation).
+        try:
+            run = AgentRun.objects.select_related("work_item").get(id=run_id)
+        except AgentRun.DoesNotExist:
+            return
+        if run.work_item_id is not None:
+            from pi_dash.orchestration.workpad import get_agent_system_user
+            from pi_dash.db.models.issue import IssueComment
+
+            question = (payload.get("autonomy") or {}).get("question_for_human")
+            summary = payload.get("summary")
+            body_parts = []
+            if question:
+                body_parts.append(f"<p><strong>Agent paused — question:</strong></p><p>{question}</p>")
+            if summary:
+                body_parts.append(f"<p><em>Summary so far:</em> {summary}</p>")
+            if body_parts:
+                IssueComment.objects.create(
+                    issue=run.work_item,
+                    project=run.work_item.project,
+                    workspace=run.work_item.workspace,
+                    actor=get_agent_system_user(),
+                    comment_html="".join(body_parts),
+                )
+
+        # Runner is now idle — kick the dispatcher.
+        from django.db import transaction
+
+        from pi_dash.runner.services.matcher import drain_for_runner_by_id
+
+        transaction.on_commit(
+            lambda rid=runner.id: drain_for_runner_by_id(rid)
         )
 
     def _finalize_run(

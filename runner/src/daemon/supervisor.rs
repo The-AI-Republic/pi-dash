@@ -242,6 +242,7 @@ impl RunnerLoop {
                     repo_url,
                     git_work_branch,
                     expected_codex_model,
+                    resume_thread_id,
                     ..
                 } => {
                     if self.current_run.is_some() {
@@ -279,6 +280,7 @@ impl RunnerLoop {
                                 repo_url,
                                 git_work_branch,
                                 expected_codex_model,
+                                resume_thread_id,
                             )
                             .await
                         {
@@ -405,6 +407,7 @@ impl AssignWorker {
         repo_url: Option<String>,
         git_work_branch: Option<String>,
         expected_codex_model: Option<String>,
+        resume_thread_id: Option<String>,
     ) -> Result<()> {
         self.handle_assign(
             run_id,
@@ -412,6 +415,7 @@ impl AssignWorker {
             repo_url,
             git_work_branch,
             expected_codex_model,
+            resume_thread_id,
         )
         .await
     }
@@ -423,6 +427,7 @@ impl AssignWorker {
         repo_url: Option<String>,
         git_work_branch: Option<String>,
         expected_codex_model: Option<String>,
+        resume_thread_id: Option<String>,
     ) -> Result<()> {
         // Resolve workspace.
         let wd = self.config.workspace.working_dir.clone();
@@ -541,7 +546,7 @@ impl AssignWorker {
             run_id,
             prompt,
             model: expected_codex_model,
-            resume_thread_id: None,
+            resume_thread_id,
         };
         let mut cursor = match bridge.run(&payload, &workspace_path).await {
             Ok(c) => c,
