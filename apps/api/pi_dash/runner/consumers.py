@@ -444,6 +444,45 @@ class RunnerConsumer(AsyncJsonWebsocketConsumer):
             status=AgentRunStatus.AWAITING_APPROVAL
         )
 
+    def _handle_resume_unavailable(
+        self, runner: Runner, run_id: str
+    ) -> None:
+        """Cloud reaction to a ResumeUnavailable failure (§6.3 of design).
+
+        The agent CLI's session store no longer has the requested thread.
+        Drop the pin so any runner can take it, drop the resume hint by
+        nulling thread_id (so the next dispatch builds it from
+        parent_run.thread_id, which would be the same broken id — instead
+        we walk one level up so the run starts fresh-context-from-issue),
+        re-queue, and trigger drain.
+        """
+        run = AgentRun.objects.filter(id=run_id, runner=runner).first()
+        if run is None:
+            return
+        run.status = AgentRunStatus.QUEUED
+        run.runner = None
+        run.pinned_runner = None
+        run.assigned_at = None
+        # parent_run.thread_id is what _build_assign_msg reads; nulling
+        # this run's thread_id is irrelevant. To prevent the cloud from
+        # handing the same dead session id to the next runner, null the
+        # parent's thread_id too — the parent is paused/terminal, this
+        # is fine. The handoff comment carries the human-readable state.
+        if run.parent_run is not None and run.parent_run.thread_id:
+            run.parent_run.thread_id = ""
+            run.parent_run.save(update_fields=["thread_id"])
+        run.save(
+            update_fields=["status", "runner", "pinned_runner", "assigned_at"]
+        )
+        from django.db import transaction
+
+        from pi_dash.runner.services.matcher import drain_pod_by_id
+
+        if run.pod_id is not None:
+            transaction.on_commit(
+                lambda pid=run.pod_id: drain_pod_by_id(pid)
+            )
+
     def _handle_run_paused(
         self, runner: Runner, msg: Dict[str, Any]
     ) -> None:
@@ -499,6 +538,15 @@ class RunnerConsumer(AsyncJsonWebsocketConsumer):
     ) -> None:
         run_id = msg.get("run_id")
         if not run_id:
+            return
+        # Special-case resume-unavailable: don't terminate the chain, drop
+        # the pin and re-queue without the resume hint so a fresh-context
+        # dispatch can pick it up. See §6.3 of the design doc.
+        if (
+            new_status == AgentRunStatus.FAILED
+            and msg.get("reason") == "resume_unavailable"
+        ):
+            self._handle_resume_unavailable(runner, run_id)
             return
         updates: Dict[str, Any] = {
             "status": new_status,
