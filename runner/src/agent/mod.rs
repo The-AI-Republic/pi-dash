@@ -54,6 +54,18 @@ pub struct RunPayload {
     pub resume_thread_id: Option<String>,
 }
 
+/// Agent-CLI native resume failed because the session id we were given
+/// is not present on this runner's local session store. The supervisor
+/// downcasts to this type to emit `FailureReason::ResumeUnavailable`
+/// rather than the generic agent-crash reason; cloud's reaction is to
+/// drop the pin and re-queue without the resume hint.
+#[derive(Debug, thiserror::Error)]
+#[error("agent CLI could not resume session {thread_id}: {detail}")]
+pub struct ResumeUnavailable {
+    pub thread_id: String,
+    pub detail: String,
+}
+
 /// Enum dispatch over the concrete bridges. Each variant owns the agent's
 /// subprocess; the supervisor treats them uniformly.
 pub enum AgentBridge {
@@ -86,10 +98,16 @@ impl AgentCursor {
 
 impl AgentBridge {
     /// Spawn the agent subprocess selected by the runner's config.
+    ///
+    /// `resume_thread_id` is used at spawn time only by Claude Code (it
+    /// goes to `claude --resume <id>` on the command line). Codex consumes
+    /// the resume hint inside `bridge.run()` via the `RunPayload` field
+    /// instead.
     pub async fn spawn_from_config(
         config: &Config,
         cwd: &Path,
         model_override: Option<String>,
+        resume_thread_id: Option<&str>,
     ) -> Result<Self> {
         match config.agent.kind {
             AgentKind::Codex => {
@@ -106,6 +124,7 @@ impl AgentBridge {
                     &config.claude_code.binary,
                     cwd,
                     selected_model(model_override, config.claude_code.model_default.clone()),
+                    resume_thread_id,
                 )
                 .await?;
                 Ok(AgentBridge::ClaudeCode(b))

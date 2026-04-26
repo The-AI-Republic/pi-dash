@@ -37,7 +37,7 @@ from pi_dash.runner.services.tokens import hash_token
 
 logger = logging.getLogger(__name__)
 
-PROTOCOL_VERSION = 1
+PROTOCOL_VERSION = 2
 HEARTBEAT_INTERVAL_SECS = 25
 OFFLINE_GRACE_SECS = 60
 
@@ -242,6 +242,17 @@ class RunnerConsumer(AsyncJsonWebsocketConsumer):
     async def on_run_cancelled(self, runner: Runner, msg: Dict[str, Any]) -> None:
         await sync_to_async(self._finalize_run)(runner, msg, AgentRunStatus.CANCELLED)
 
+    async def on_run_paused(self, runner: Runner, msg: Dict[str, Any]) -> None:
+        """Codex tool-call yield path. Cloud parks the run as
+        PAUSED_AWAITING_INPUT and triggers drain so the runner is free to
+        pick up other pod work while waiting for a human reply.
+
+        Claude's yield arrives via ``on_run_completed`` with a
+        ``pi-dash-done`` fenced block whose status is ``"paused"``; the
+        done-signal parser handles that path separately.
+        """
+        await sync_to_async(self._handle_run_paused)(runner, msg)
+
     async def on_run_awaiting_reauth(
         self, runner: Runner, msg: Dict[str, Any]
     ) -> None:
@@ -433,6 +444,119 @@ class RunnerConsumer(AsyncJsonWebsocketConsumer):
             status=AgentRunStatus.AWAITING_APPROVAL
         )
 
+    def _handle_resume_unavailable(
+        self, runner: Runner, run_id: str
+    ) -> None:
+        """Cloud reaction to a ResumeUnavailable failure (§6.3 of design).
+
+        The agent CLI's session store no longer has the requested thread.
+        Drop the pin so any runner can take it, drop the resume hint by
+        nulling thread_id (so the next dispatch builds it from
+        parent_run.thread_id, which would be the same broken id — instead
+        we walk one level up so the run starts fresh-context-from-issue),
+        re-queue, and trigger drain.
+        """
+        run = AgentRun.objects.filter(id=run_id, runner=runner).first()
+        if run is None:
+            return
+        run.status = AgentRunStatus.QUEUED
+        run.runner = None
+        run.pinned_runner = None
+        run.assigned_at = None
+        # parent_run.thread_id is what _build_assign_msg reads; nulling
+        # this run's thread_id is irrelevant. To prevent the cloud from
+        # handing the same dead session id to the next runner, null the
+        # parent's thread_id too — the parent is paused/terminal, this
+        # is fine. The handoff comment carries the human-readable state.
+        if run.parent_run is not None and run.parent_run.thread_id:
+            run.parent_run.thread_id = ""
+            run.parent_run.save(update_fields=["thread_id"])
+        run.save(
+            update_fields=["status", "runner", "pinned_runner", "assigned_at"]
+        )
+        from django.db import transaction
+
+        from pi_dash.runner.services.matcher import drain_pod_by_id
+
+        if run.pod_id is not None:
+            transaction.on_commit(
+                lambda pid=run.pod_id: drain_pod_by_id(pid)
+            )
+
+    def _handle_run_paused(
+        self, runner: Runner, msg: Dict[str, Any]
+    ) -> None:
+        run_id = msg.get("run_id")
+        if not run_id:
+            return
+        payload = msg.get("payload") or {}
+        # Park the run; do NOT set ended_at (paused is non-terminal).
+        AgentRun.objects.filter(id=run_id, runner=runner).update(
+            status=AgentRunStatus.PAUSED_AWAITING_INPUT,
+            done_payload=payload,
+        )
+        # Surface the agent's question as an issue comment so the human can
+        # see it and reply (which then re-triggers continuation).
+        try:
+            run = AgentRun.objects.select_related("work_item").get(id=run_id)
+        except AgentRun.DoesNotExist:
+            return
+        if run.work_item_id is not None:
+            from django.utils.html import format_html
+
+            from pi_dash.orchestration.workpad import get_agent_system_user
+            from pi_dash.db.models.issue import IssueComment
+
+            question = (payload.get("autonomy") or {}).get("question_for_human")
+            summary = payload.get("summary")
+            body_parts: list[str] = []
+            # Agent payload is untrusted (the upstream prompt can shape it),
+            # so escape with format_html before persisting to comment_html.
+            if question:
+                body_parts.append(
+                    format_html(
+                        "<p><strong>Agent paused — question:</strong></p><p>{}</p>",
+                        question,
+                    )
+                )
+            if summary:
+                body_parts.append(
+                    format_html("<p><em>Summary so far:</em> {}</p>", summary)
+                )
+            if body_parts:
+                IssueComment.objects.create(
+                    issue=run.work_item,
+                    project=run.work_item.project,
+                    workspace=run.work_item.workspace,
+                    actor=get_agent_system_user(),
+                    comment_html="".join(body_parts),
+                )
+
+        # Two follow-ups: (1) sweep for non-bot comments that arrived while
+        # this run was RUNNING — ``post_save(IssueComment)`` skipped them
+        # with reason='prior-run-active'; pause is the symmetric
+        # opportunity to pick them up. (2) Kick the dispatcher so the now-
+        # idle runner can take other pod work (including any R_next the
+        # sweep just created).
+        from django.db import transaction
+
+        from pi_dash.orchestration.service import maybe_continue_after_terminate
+        from pi_dash.runner.services.matcher import drain_for_runner_by_id
+
+        def _sweep_and_drain(rid=run_id, runner_id=runner.id):
+            paused = AgentRun.objects.filter(pk=rid).first()
+            if paused is not None:
+                try:
+                    maybe_continue_after_terminate(paused)
+                except Exception:
+                    logger.exception(
+                        "orchestration.error: pause sweep failed for run %s",
+                        rid,
+                    )
+            drain_for_runner_by_id(runner_id)
+
+        transaction.on_commit(_sweep_and_drain)
+
     def _finalize_run(
         self,
         runner: Runner,
@@ -441,6 +565,15 @@ class RunnerConsumer(AsyncJsonWebsocketConsumer):
     ) -> None:
         run_id = msg.get("run_id")
         if not run_id:
+            return
+        # Special-case resume-unavailable: don't terminate the chain, drop
+        # the pin and re-queue without the resume hint so a fresh-context
+        # dispatch can pick it up. See §6.3 of the design doc.
+        if (
+            new_status == AgentRunStatus.FAILED
+            and msg.get("reason") == "resume_unavailable"
+        ):
+            self._handle_resume_unavailable(runner, run_id)
             return
         updates: Dict[str, Any] = {
             "status": new_status,
@@ -452,18 +585,39 @@ class RunnerConsumer(AsyncJsonWebsocketConsumer):
             updates["error"] = (msg.get("detail") or "")[:16000]
         AgentRun.objects.filter(id=run_id, runner=runner).update(**updates)
 
-        # The runner just freed up — drain its pod so any QUEUED runs in the
-        # same pod can move to it. See design §6.3: drain must fire after the
-        # terminal state commits, otherwise a new assign could race with the
-        # update and the runner would receive work for a run it's finishing.
-        if runner.pod_id is not None:
-            from django.db import transaction
+        # The runner just freed up. Two follow-up actions, both gated on
+        # the terminal state having committed (otherwise a new assign
+        # would race with the update):
+        #
+        # 1. Sweep for non-bot comments that arrived while this run was
+        #    active. ``post_save(IssueComment)`` skipped them with
+        #    reason='prior-run-active'; this is where they get picked up.
+        # 2. Drain the pod (and prefer this just-freed runner) so any
+        #    QUEUED work — including a follow-up R_next created by the
+        #    sweep above — can dispatch.
+        from django.db import transaction
 
-            from pi_dash.runner.services.matcher import drain_pod_by_id
+        from pi_dash.orchestration.service import maybe_continue_after_terminate
+        from pi_dash.runner.services.matcher import (
+            drain_for_runner_by_id,
+            drain_pod_by_id,
+        )
 
-            transaction.on_commit(
-                lambda pid=runner.pod_id: drain_pod_by_id(pid)
-            )
+        def _sweep_and_drain(rid=run_id, runner_id=runner.id, pod_id=runner.pod_id):
+            run = AgentRun.objects.filter(pk=rid).first()
+            if run is not None:
+                try:
+                    maybe_continue_after_terminate(run)
+                except Exception:
+                    logger.exception(
+                        "orchestration.error: terminate sweep failed for run %s",
+                        rid,
+                    )
+            drain_for_runner_by_id(runner_id)
+            if pod_id is not None:
+                drain_pod_by_id(pod_id)
+
+        transaction.on_commit(_sweep_and_drain)
 
     # ---- misc ----
 

@@ -38,12 +38,18 @@ pub struct Bridge {
 }
 
 impl Bridge {
-    pub async fn spawn(binary: &str, cwd: &Path, model_default: Option<String>) -> Result<Self> {
+    pub async fn spawn(
+        binary: &str,
+        cwd: &Path,
+        model_default: Option<String>,
+        resume_thread_id: Option<&str>,
+    ) -> Result<Self> {
         let proc = ClaudeProcess::spawn(SpawnArgs {
             binary,
             cwd,
             model: model_default.as_deref(),
             bypass_permissions: true,
+            resume_thread_id,
         })
         .await?;
         Ok(Self {

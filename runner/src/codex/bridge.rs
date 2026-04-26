@@ -122,8 +122,20 @@ impl Bridge {
             },
         )?;
         self.server.send_raw(&line).await?;
-        let _ = self.await_response(id, Duration::from_secs(30)).await?;
-        Ok(thread_id.to_string())
+        match self.await_response(id, Duration::from_secs(30)).await {
+            Ok(_) => Ok(thread_id.to_string()),
+            Err(e) => {
+                // The Codex app-server returns an error when the thread id
+                // is unknown locally (session store wiped, runner reinstalled,
+                // id stale). Surface as a typed error so the supervisor can
+                // emit FailureReason::ResumeUnavailable rather than the
+                // generic CodexCrash, and the cloud can drop the pin.
+                Err(anyhow::Error::new(crate::agent::ResumeUnavailable {
+                    thread_id: thread_id.to_string(),
+                    detail: format!("{e:#}"),
+                }))
+            }
+        }
     }
 
     async fn start_turn(&mut self, payload: &RunPayload) -> Result<()> {

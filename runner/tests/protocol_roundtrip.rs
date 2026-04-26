@@ -60,6 +60,7 @@ fn envelope_roundtrips_all_server_variants() {
             expected_codex_model: None,
             approval_policy_overrides: None,
             deadline: None,
+            resume_thread_id: None,
         },
         ServerMsg::Assign {
             run_id: Uuid::new_v4(),
@@ -71,6 +72,7 @@ fn envelope_roundtrips_all_server_variants() {
             expected_codex_model: None,
             approval_policy_overrides: None,
             deadline: None,
+            resume_thread_id: Some("sess_resume".into()),
         },
         ServerMsg::Cancel {
             run_id: Uuid::new_v4(),

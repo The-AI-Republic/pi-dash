@@ -104,6 +104,7 @@ class AgentRunStatus(models.TextChoices):
     RUNNING = "running", "Running"
     AWAITING_APPROVAL = "awaiting_approval", "Awaiting Approval"
     AWAITING_REAUTH = "awaiting_reauth", "Awaiting Reauth"
+    PAUSED_AWAITING_INPUT = "paused_awaiting_input", "Paused — Awaiting Input"
     BLOCKED = "blocked", "Blocked"
     COMPLETED = "completed", "Completed"
     FAILED = "failed", "Failed"
@@ -251,6 +252,22 @@ class Runner(models.Model):
                 )
                 affected_pod_ids = {pid for _, pid in active_runs if pid is not None}
 
+            # Pinned QUEUED runs (follow-ups waiting for this runner) don't
+            # get cancelled — they still represent legitimate user intent.
+            # Drop the pin so they flow back into the pod's general queue
+            # and any remaining online runner can take them with a fresh
+            # session. See §5.7 of .ai_design/issue_run_improve/design.md.
+            pinned_pod_ids = list(
+                AgentRun.objects.filter(
+                    pinned_runner=self, status=AgentRunStatus.QUEUED
+                ).values_list("pod_id", flat=True)
+            )
+            if pinned_pod_ids:
+                AgentRun.objects.filter(
+                    pinned_runner=self, status=AgentRunStatus.QUEUED
+                ).update(pinned_runner=None)
+                affected_pod_ids.update(pid for pid in pinned_pod_ids if pid is not None)
+
         # Refire drain for every affected pod once the transaction commits.
         # Remaining online runners (if any) in the same pod may now pick up
         # queued work.
@@ -335,6 +352,18 @@ class AgentRun(models.Model):
         null=True,
         blank=True,
         related_name="agent_runs",
+    )
+    # Soft affinity: when set, dispatch routes this QUEUED run only to this
+    # runner. Used by comment-triggered continuations so a follow-up resumes
+    # on the same runner that holds the prior session on disk. Cleared when
+    # the runner is revoked or by an operator escape hatch (see §5.7 of
+    # .ai_design/issue_run_improve/design.md).
+    pinned_runner = models.ForeignKey(
+        Runner,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="pinned_agent_runs",
     )
     work_item = models.ForeignKey(
         "db.Issue",
