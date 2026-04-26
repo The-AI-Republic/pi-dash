@@ -472,6 +472,8 @@ pub async fn execute(inputs: RegisterInputs, paths: &Paths) -> Result<()> {
     };
     crate::config::file::write_credentials(paths, &creds)?;
 
+    report_pd_shortcut(crate::util::pd_symlink::try_install());
+
     if !inputs.skip_doctor {
         run_doctor_with_auth_gate(paths, agent_kind).await?;
     }
@@ -503,6 +505,33 @@ pub async fn execute(inputs: RegisterInputs, paths: &Paths) -> Result<()> {
     print_post_install_hints(&boot_outcome);
 
     Ok(())
+}
+
+/// Pretty-print the outcome of trying to install a `pd` shortcut. Stays
+/// silent on the idempotent re-run path (`AlreadyOurs`) so a second
+/// `pidash configure` doesn't redundantly announce a shortcut that was
+/// already there. Skip / failure variants get a single-line note so the
+/// user understands why typing `pd` may not work.
+fn report_pd_shortcut(action: crate::util::pd_symlink::PdAction) {
+    use crate::util::pd_symlink::PdAction;
+    match action {
+        PdAction::Created(p) => {
+            println!(
+                "Installed `pd` shortcut at {}. You can now run `pd <args>` instead of `pidash <args>`.",
+                p.display()
+            );
+        }
+        PdAction::AlreadyOurs(_) => {}
+        PdAction::SkippedTaken { existing } => {
+            eprintln!(
+                "note: `pd` already exists at {}; skipping shortcut. Use `pidash <args>` directly.",
+                existing.display()
+            );
+        }
+        PdAction::SkippedUnsupported(msg) | PdAction::Failed(msg) => {
+            eprintln!("note: could not install `pd` shortcut ({msg}). Use `pidash <args>` directly.");
+        }
+    }
 }
 
 fn print_post_install_hints(boot: &crate::service::BootStartOutcome) {
