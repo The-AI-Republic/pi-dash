@@ -391,3 +391,133 @@ def test_drain_for_runner_returns_false_when_busy(
     )
     _make_run(create_user, workspace, pod, prompt="waiting", pinned_runner=rA)
     assert matcher.drain_for_runner(rA) is False
+
+
+# ---------------------------------------------------------------------------
+# Continuation prompt freshness at dispatch.
+#
+# Coalescing logic in ``handle_issue_comment`` returns ``coalesced`` for a
+# second comment that arrives while R_next is still QUEUED. The contract is
+# that the prompt builder runs again at dispatch time so the runner sees both
+# bodies. These tests pin that contract.
+# ---------------------------------------------------------------------------
+
+
+def _setup_paused_chain(create_user, workspace, pod, project_factory=None):
+    """Create an issue + paused parent run + queued continuation run.
+
+    Returns (issue, parent_run, queued_followup, runner). The parent has
+    a started_at in the past so build_continuation can sweep comments.
+
+    The issue is created in an ``unstarted`` state so the orchestration
+    state-transition signal does not auto-create a competing run that
+    would consume the runner.
+    """
+    from crum import impersonate
+
+    from pi_dash.db.models.issue import Issue
+    from pi_dash.db.models.project import Project
+    from pi_dash.db.models.state import State
+
+    rA = _make_runner(create_user, workspace, pod, "rA")
+    with impersonate(create_user):
+        project = Project.objects.create(
+            name="P", identifier="P", workspace=workspace, created_by=create_user
+        )
+        todo = State.objects.create(
+            name="Todo", project=project, group="unstarted"
+        )
+        issue = Issue.objects.create(
+            name="task",
+            workspace=workspace,
+            project=project,
+            state=todo,
+            created_by=create_user,
+        )
+    parent = AgentRun.objects.create(
+        owner=create_user,
+        workspace=workspace,
+        pod=pod,
+        work_item=issue,
+        runner=rA,
+        thread_id="sess_xyz",
+        status=AgentRunStatus.PAUSED_AWAITING_INPUT,
+        prompt="prior",
+        started_at=timezone.now() - timezone.timedelta(minutes=5),
+    )
+    queued = AgentRun.objects.create(
+        owner=create_user,
+        workspace=workspace,
+        pod=pod,
+        work_item=issue,
+        parent_run=parent,
+        pinned_runner=rA,
+        status=AgentRunStatus.QUEUED,
+        prompt="(stale prompt — only first comment)",
+    )
+    return issue, parent, queued, rA
+
+
+@pytest.mark.unit
+def test_drain_for_runner_rebuilds_continuation_prompt(
+    db, create_user, workspace, pod
+):
+    """Coalesced comment must reach the runner via prompt rebuild on dispatch."""
+    from crum import impersonate
+
+    from pi_dash.db.models.issue import IssueComment
+
+    issue, parent, queued, rA = _setup_paused_chain(create_user, workspace, pod)
+    # Two comments after parent.started_at — the second arrived after the
+    # follow-up was queued but before dispatch (the coalescing case).
+    with impersonate(create_user):
+        IssueComment.objects.create(
+            issue=issue, project=issue.project, workspace=issue.workspace,
+            actor=create_user, comment_html="<p>first</p>",
+        )
+        IssueComment.objects.create(
+            issue=issue, project=issue.project, workspace=issue.workspace,
+            actor=create_user, comment_html="<p>second</p>",
+        )
+
+    assigned = matcher.drain_for_runner(rA)
+    assert assigned is True
+    queued.refresh_from_db()
+    # Both bodies must be present in the dispatched prompt — the stale
+    # at-creation render is replaced.
+    assert "first" in queued.prompt
+    assert "second" in queued.prompt
+
+
+@pytest.mark.unit
+def test_drain_pod_rebuilds_continuation_prompt(
+    db, create_user, workspace, pod
+):
+    """Same contract for the pod-wide drain path."""
+    from crum import impersonate
+
+    from pi_dash.db.models.issue import IssueComment
+
+    issue, parent, queued, rA = _setup_paused_chain(create_user, workspace, pod)
+    with impersonate(create_user):
+        IssueComment.objects.create(
+            issue=issue, project=issue.project, workspace=issue.workspace,
+            actor=create_user, comment_html="<p>late comment</p>",
+        )
+
+    n = matcher.drain_pod(pod)
+    assert n == 1
+    queued.refresh_from_db()
+    assert "late comment" in queued.prompt
+
+
+@pytest.mark.unit
+def test_drain_does_not_rebuild_first_turn_prompt(
+    db, create_user, workspace, pod
+):
+    """A fresh run (parent_run is None) keeps its as-stored prompt."""
+    rA = _make_runner(create_user, workspace, pod, "rA")
+    run = _make_run(create_user, workspace, pod, prompt="original first-turn body")
+    assert matcher.drain_for_runner(rA) is True
+    run.refresh_from_db()
+    assert run.prompt == "original first-turn body"

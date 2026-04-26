@@ -37,7 +37,7 @@ from pi_dash.runner.services.tokens import hash_token
 
 logger = logging.getLogger(__name__)
 
-PROTOCOL_VERSION = 1
+PROTOCOL_VERSION = 2
 HEARTBEAT_INTERVAL_SECS = 25
 OFFLINE_GRACE_SECS = 60
 
@@ -502,16 +502,27 @@ class RunnerConsumer(AsyncJsonWebsocketConsumer):
         except AgentRun.DoesNotExist:
             return
         if run.work_item_id is not None:
+            from django.utils.html import format_html
+
             from pi_dash.orchestration.workpad import get_agent_system_user
             from pi_dash.db.models.issue import IssueComment
 
             question = (payload.get("autonomy") or {}).get("question_for_human")
             summary = payload.get("summary")
-            body_parts = []
+            body_parts: list[str] = []
+            # Agent payload is untrusted (the upstream prompt can shape it),
+            # so escape with format_html before persisting to comment_html.
             if question:
-                body_parts.append(f"<p><strong>Agent paused — question:</strong></p><p>{question}</p>")
+                body_parts.append(
+                    format_html(
+                        "<p><strong>Agent paused — question:</strong></p><p>{}</p>",
+                        question,
+                    )
+                )
             if summary:
-                body_parts.append(f"<p><em>Summary so far:</em> {summary}</p>")
+                body_parts.append(
+                    format_html("<p><em>Summary so far:</em> {}</p>", summary)
+                )
             if body_parts:
                 IssueComment.objects.create(
                     issue=run.work_item,
@@ -521,14 +532,30 @@ class RunnerConsumer(AsyncJsonWebsocketConsumer):
                     comment_html="".join(body_parts),
                 )
 
-        # Runner is now idle — kick the dispatcher.
+        # Two follow-ups: (1) sweep for non-bot comments that arrived while
+        # this run was RUNNING — ``post_save(IssueComment)`` skipped them
+        # with reason='prior-run-active'; pause is the symmetric
+        # opportunity to pick them up. (2) Kick the dispatcher so the now-
+        # idle runner can take other pod work (including any R_next the
+        # sweep just created).
         from django.db import transaction
 
+        from pi_dash.orchestration.service import maybe_continue_after_terminate
         from pi_dash.runner.services.matcher import drain_for_runner_by_id
 
-        transaction.on_commit(
-            lambda rid=runner.id: drain_for_runner_by_id(rid)
-        )
+        def _sweep_and_drain(rid=run_id, runner_id=runner.id):
+            paused = AgentRun.objects.filter(pk=rid).first()
+            if paused is not None:
+                try:
+                    maybe_continue_after_terminate(paused)
+                except Exception:
+                    logger.exception(
+                        "orchestration.error: pause sweep failed for run %s",
+                        rid,
+                    )
+            drain_for_runner_by_id(runner_id)
+
+        transaction.on_commit(_sweep_and_drain)
 
     def _finalize_run(
         self,

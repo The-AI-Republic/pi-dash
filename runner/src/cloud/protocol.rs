@@ -4,7 +4,14 @@ use std::collections::BTreeMap;
 use uuid::Uuid;
 
 /// Wire version — bump on incompatible shape changes.
-pub const WIRE_VERSION: u32 = 1;
+///
+/// v2 added `ClientMsg::RunPaused`, `FailureReason::ResumeUnavailable`, and
+/// the optional `resume_thread_id` field on `ServerMsg::Assign`. The cloud
+/// dispatches inbound messages by `type` string and silently drops unknown
+/// types, so a v2 runner against a v1 cloud loses pause/resume semantics
+/// rather than crashing — the version bump is the visible signal that
+/// rolling forward the cloud first is required.
+pub const WIRE_VERSION: u32 = 2;
 
 /// All frames carry `v`, `type`, `mid` (message id for dedupe).
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -81,7 +81,7 @@ All secrets on disk are written with `0600`. The Unix IPC socket is also `0600`.
 
 ## Protocol
 
-Wire version is `1` — bumped on incompatible shape changes. See `src/cloud/protocol.rs` for exhaustive schemas. Runner authenticates to the cloud with an HTTP `Authorization: Bearer <runner_secret>` header on the WebSocket upgrade request and echoes its UUID in `X-Runner-Id`. The server echoes an accepted `protocol_version` in the `welcome` frame.
+Wire version is `2` — bumped on incompatible shape changes. See `src/cloud/protocol.rs` for exhaustive schemas. Runner authenticates to the cloud with an HTTP `Authorization: Bearer <runner_secret>` header on the WebSocket upgrade request and echoes its UUID in `X-Runner-Id`. The server echoes an accepted `protocol_version` in the `welcome` frame.
 
 ## Test strategy
 

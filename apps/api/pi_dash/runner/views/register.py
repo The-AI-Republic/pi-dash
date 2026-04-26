@@ -28,7 +28,7 @@ from pi_dash.runner.services.pubsub import close_runner_session
 
 
 HEARTBEAT_INTERVAL_SECS = 25
-PROTOCOL_VERSION = 1
+PROTOCOL_VERSION = 2
 
 
 class HealthEndpoint(APIView):

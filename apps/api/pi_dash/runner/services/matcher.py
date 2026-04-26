@@ -128,9 +128,9 @@ def next_for_runner(runner: Runner) -> Optional[AgentRun]:
         .filter(
             Q(pinned_runner=runner) | Q(pinned_runner__isnull=True),
         )
-        # Pinned-to-me sorts before unpinned thanks to NULLS LAST on the
-        # boolean expression. ``BooleanField`` annotated to give us a
-        # stable, indexable sort key without requiring a CASE WHEN.
+        # Pinned-to-me sorts before unpinned via an integer rank: 0 for the
+        # personal queue, 1 for the pod queue. ``order_by`` on the rank then
+        # ``created_at`` gives FIFO inside each tier.
         .annotate(_is_mine=models.Case(
             models.When(pinned_runner=runner, then=models.Value(0)),
             default=models.Value(1),
@@ -139,6 +139,40 @@ def next_for_runner(runner: Runner) -> Optional[AgentRun]:
         .order_by("_is_mine", "created_at")
         .first()
     )
+
+
+def _refresh_continuation_prompt(run: AgentRun) -> bool:
+    """Re-render ``run.prompt`` from current comments if this is a continuation.
+
+    Comment-triggered follow-ups can coalesce: a second comment arriving while
+    R_next is still QUEUED is silently absorbed (`reason='coalesced'`) on the
+    expectation that the prompt builder picks it up at dispatch time. That
+    contract lives here. Returns True when the prompt was rebuilt and the
+    caller must include ``prompt`` in ``save(update_fields=...)``.
+
+    Late import to avoid a top-level cycle through prompting → db.models.
+    """
+    parent = run.parent_run
+    if parent is None:
+        return False
+    from pi_dash.prompting.composer import build_continuation
+    from pi_dash.prompting.renderer import PromptRenderError
+
+    if run.work_item_id is None:
+        return False
+    try:
+        rebuilt = build_continuation(run.work_item, run)
+    except PromptRenderError:
+        logger.exception(
+            "matcher: continuation prompt rebuild failed for run %s; "
+            "keeping prompt as-stored",
+            run.id,
+        )
+        return False
+    if rebuilt == run.prompt:
+        return False
+    run.prompt = rebuilt
+    return True
 
 
 def drain_pod(pod: Pod) -> int:
@@ -176,7 +210,10 @@ def drain_pod(pod: Pod) -> int:
             run.owner_id = runner.owner_id
             run.status = AgentRunStatus.ASSIGNED
             run.assigned_at = timezone.now()
-            run.save(update_fields=["runner", "owner", "status", "assigned_at"])
+            update_fields = ["runner", "owner", "status", "assigned_at"]
+            if _refresh_continuation_prompt(run):
+                update_fields.append("prompt")
+            run.save(update_fields=update_fields)
             assignments.append((runner, run))
 
     for runner, run in assignments:
@@ -234,7 +271,10 @@ def drain_for_runner(runner: Runner) -> bool:
         run.owner_id = locked.owner_id
         run.status = AgentRunStatus.ASSIGNED
         run.assigned_at = timezone.now()
-        run.save(update_fields=["runner", "owner", "status", "assigned_at"])
+        update_fields = ["runner", "owner", "status", "assigned_at"]
+        if _refresh_continuation_prompt(run):
+            update_fields.append("prompt")
+        run.save(update_fields=update_fields)
         assignment = (locked, run)
 
     runner_obj, run = assignment
