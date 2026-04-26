@@ -318,6 +318,11 @@ async fn partial_edit(args: Args, paths: &Paths) -> Result<()> {
     crate::config::file::write_config(paths, &cfg)?;
     println!("Wrote {}.", paths.config_path().display());
 
+    // Idempotent: if a previous `configure` already installed the shortcut
+    // this is a no-op, but it lets users on older binaries pick up `pd`
+    // by re-running configure with any `--<flag>` (no full re-register).
+    report_pd_shortcut(crate::util::pd_symlink::try_install());
+
     if args.skip_service {
         println!("Skipping daemon restart (--skip-service).");
         return Ok(());
