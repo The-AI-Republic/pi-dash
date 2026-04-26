@@ -14,6 +14,10 @@
    - Temporary local proof edits (e.g. hardcoding a value to validate a UI path) are allowed **only** for local verification and must be reverted before commit.
 3. When the task requires a non-trivial technical choice, record the selected approach and rationale in the workpad `Notes`, set the autonomy assessment accordingly, and proceed only if `safe_to_continue` is `true`.
 4. Re-check all acceptance criteria. Close any gaps.
-5. Commit with clear, logical commit messages. Push the branch to the configured remote.
-6. Update the workpad with final checklist status and validation notes. Add a `### Confusions` section at the bottom if anything about the task was genuinely unclear during execution; keep it concise.
-7. Follow the "Ending the run" section to finalize. Update the workpad one last time with final checkpoints, then move the issue to a state in the `completed` group via `pidash issue patch {{ issue.identifier }} --state "<state-name>"`.
+5. Commit with clear, logical commit messages. Push the branch with `git push -u origin "$(git rev-parse --abbrev-ref HEAD)"`.
+6. Open a pull request and link it back to the issue. The PR base is **the same base branch you derived from in Step 1.7** — if the issue has a parent with an implementation branch, target that branch; otherwise target the project base branch:
+   - PR base: {% if parent and parent.work_branch %}`{{ parent.work_branch }}` (parent {{ parent.identifier }}'s implementation branch){% elif repo.base_branch %}`{{ repo.base_branch }}`{% else %}the repository's default branch{% endif %}.
+   - First check whether a PR already exists for this branch: `gh pr view --json url,state -q .url 2>/dev/null`. If one exists and is open, reuse its URL (do not open a duplicate). Otherwise: `gh pr create --base <base> --head "$(git rev-parse --abbrev-ref HEAD)" --title "{{ issue.identifier }} {{ issue.title }}" --body <summary referencing {{ issue.identifier }} and the workpad>`.
+   - Capture the PR URL and post it back to the issue: `pidash comment add {{ issue.identifier }} --body "PR opened: <url>"`. Mark `pr_opened` in the workpad.
+7. Update the workpad with final checklist status and validation notes. Add a `### Confusions` section at the bottom if anything about the task was genuinely unclear during execution; keep it concise.
+8. Follow the "Ending the run" section to finalize. Update the workpad one last time with final checkpoints, then move the issue to a state in the `completed` group via `pidash issue patch {{ issue.identifier }} --state "<state-name>"`.

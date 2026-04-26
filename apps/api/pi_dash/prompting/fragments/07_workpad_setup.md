@@ -14,11 +14,19 @@
 7. Before any code edits, sync with the repository:
    - `git fetch origin`
 {% if repo.work_branch %}
-   - `git checkout {{ repo.work_branch }}` — this is an existing branch you must operate on directly. If the branch does not exist locally, `git checkout -b {{ repo.work_branch }} origin/{{ repo.work_branch }}`. Do not create a new feature branch.
+   - `git checkout {{ repo.work_branch }}` — this is the existing branch for this issue; operate on it directly. If it does not exist locally, `git checkout -b {{ repo.work_branch }} origin/{{ repo.work_branch }}`. Do not create a new feature branch.
    - `git pull --rebase origin {{ repo.work_branch }}`.
 {% else %}
-   - Resolve the base branch: `{% if repo.base_branch %}{{ repo.base_branch }}{% else %}$(git symbolic-ref --short refs/remotes/origin/HEAD | sed 's|^origin/||'){% endif %}` — call this `$BASE`.
-   - `git pull --rebase origin $BASE` (or equivalent for your branch strategy).
-   - Create a fresh feature branch off `$BASE` for your work.
+   - Resolve the **base branch** (what your work branches off of):
+{% if parent and parent.work_branch %}
+     - This issue has a parent ({{ parent.identifier }}) with an active implementation branch. Use the parent's branch as base: `BASE={{ parent.work_branch }}`.
+{% elif parent %}
+     - This issue has a parent ({{ parent.identifier }}) but the parent has no implementation branch yet. Fall back to the project base branch: `BASE={% if repo.base_branch %}{{ repo.base_branch }}{% else %}$(git symbolic-ref --short refs/remotes/origin/HEAD | sed 's|^origin/||'){% endif %}`. Note the fallback in the workpad `Notes`.
+{% else %}
+     - This issue is independent (no parent). Use the project base branch: `BASE={% if repo.base_branch %}{{ repo.base_branch }}{% else %}$(git symbolic-ref --short refs/remotes/origin/HEAD | sed 's|^origin/||'){% endif %}`.
+{% endif %}
+   - `git checkout "$BASE" && git pull --rebase origin "$BASE"`.
+   - Create a derived branch off `$BASE`: `BRANCH="pi-dash/{{ issue.identifier|lower }}"; git checkout -b "$BRANCH"`. Always derive — never commit on `$BASE`.
+   - Persist the branch on the issue so subsequent runs land on it: `pidash issue patch {{ issue.identifier }} --git-work-branch "$BRANCH"`.
 {% endif %}
    - Record the resulting `HEAD` short SHA in the workpad `Notes`.
