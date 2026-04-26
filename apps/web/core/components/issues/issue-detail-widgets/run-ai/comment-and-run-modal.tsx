@@ -38,10 +38,15 @@ export const CommentAndRunModal = observer(function CommentAndRunModal(props: Pr
   const [isPosting, setIsPosting] = useState(false);
   const { triggerRun, isSubmitting: isRunning } = useCreateAgentRun();
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  // Tracks whether the comment for this modal session has already been posted.
+  // Prevents a duplicate post if the user retries after the agent-run step
+  // failed (the comment write succeeded, only the run dispatch failed).
+  const commentPostedRef = useRef(false);
 
   useEffect(() => {
     if (!isOpen) {
       setComment("");
+      commentPostedRef.current = false;
       return;
     }
     // Focus the textarea after the modal mounts. Programmatic focus avoids the
@@ -59,22 +64,25 @@ export const CommentAndRunModal = observer(function CommentAndRunModal(props: Pr
     e.preventDefault();
     if (!canSubmit) return;
 
-    setIsPosting(true);
-    try {
-      await createComment(workspaceSlug, projectId, issueId, {
-        comment_html: buildCommentHtml(trimmed),
-      });
-    } catch (error: unknown) {
-      const message = (error as { error?: string })?.error ?? t("run_ai.comment_failed_message");
-      setToast({
-        type: TOAST_TYPE.ERROR,
-        title: t("run_ai.comment_failed_title"),
-        message,
-      });
+    if (!commentPostedRef.current) {
+      setIsPosting(true);
+      try {
+        await createComment(workspaceSlug, projectId, issueId, {
+          comment_html: buildCommentHtml(trimmed),
+        });
+        commentPostedRef.current = true;
+      } catch (error: unknown) {
+        const message = (error as { error?: string })?.error ?? t("run_ai.comment_failed_message");
+        setToast({
+          type: TOAST_TYPE.ERROR,
+          title: t("run_ai.comment_failed_title"),
+          message,
+        });
+        setIsPosting(false);
+        return;
+      }
       setIsPosting(false);
-      return;
     }
-    setIsPosting(false);
 
     const run = await triggerRun({
       workspaceSlug,
