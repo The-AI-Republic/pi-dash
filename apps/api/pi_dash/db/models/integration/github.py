@@ -38,6 +38,10 @@ class GithubRepositorySync(ProjectBaseModel):
         "db.WorkspaceIntegration", related_name="github_syncs", on_delete=models.CASCADE
     )
     label = models.ForeignKey("db.Label", on_delete=models.SET_NULL, null=True, related_name="repo_syncs")
+    # Sync operational state — see .ai_design/github_sync/design.md §5.
+    is_sync_enabled = models.BooleanField(default=False)
+    last_synced_at = models.DateTimeField(null=True, blank=True)
+    last_sync_error = models.TextField(blank=True, default="")
 
     def __str__(self):
         """Return the repo sync"""
@@ -45,6 +49,13 @@ class GithubRepositorySync(ProjectBaseModel):
 
     class Meta:
         unique_together = ["project", "repository"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["project"],
+                condition=models.Q(deleted_at__isnull=True),
+                name="github_repository_sync_unique_per_project_when_active",
+            ),
+        ]
         verbose_name = "Github Repository Sync"
         verbose_name_plural = "Github Repository Syncs"
         db_table = "github_repository_syncs"
@@ -57,10 +68,19 @@ class GithubIssueSync(ProjectBaseModel):
     issue_url = models.URLField(blank=False)
     issue = models.ForeignKey("db.Issue", related_name="github_syncs", on_delete=models.CASCADE)
     repository_sync = models.ForeignKey("db.GithubRepositorySync", related_name="issue_syncs", on_delete=models.CASCADE)
+    # See .ai_design/github_sync/design.md §5: stores
+    #   - completion_comment_id (idempotency for §6.5)
+    #   - upstream_gone_at (deletion/closure flag, §6.3.1)
+    #   - github_user_login (author identity)
+    metadata = models.JSONField(default=dict)
+    # GitHub-side timestamps. Kept here (not on Issue) because TimeAuditModel
+    # forces auto_now_add/auto_now on Issue.created_at/updated_at.
+    gh_issue_created_at = models.DateTimeField(null=True, blank=True)
+    gh_issue_updated_at = models.DateTimeField(null=True, blank=True)
 
     def __str__(self):
         """Return the github issue sync"""
-        return f"{self.repository.name}-{self.project.name}-{self.issue.name}"
+        return f"{self.repository_sync.repository.name}-{self.project.name}-{self.issue.name}"
 
     class Meta:
         unique_together = ["repository_sync", "issue"]

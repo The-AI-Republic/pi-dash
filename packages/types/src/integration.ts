@@ -39,6 +39,54 @@ export interface IWorkspaceIntegration {
   workspace: string;
 }
 
+// GitHub Issue Sync (.ai_design/github_sync/design.md)
+
+export interface IGithubConnectionStatus {
+  connected: boolean;
+  github_user_login?: string;
+  verified_at?: string;
+}
+
+export interface IGithubConnectRequest {
+  token: string;
+}
+
+export interface IGithubRepoSummary {
+  id: number;
+  owner: string;
+  name: string;
+  full_name: string;
+  default_branch: string;
+  private: boolean;
+}
+
+export interface IGithubReposPage {
+  repos: IGithubRepoSummary[];
+  page: number;
+  has_next_page: boolean;
+}
+
+export interface IGithubProjectBindRequest {
+  repository_id: number;
+  owner: string;
+  name: string;
+  url: string;
+}
+
+export interface IGithubProjectBindingStatus {
+  bound: boolean;
+  id?: string;
+  repository?: {
+    id: number;
+    owner: string;
+    name: string;
+    url: string;
+  };
+  is_sync_enabled?: boolean;
+  last_synced_at?: string | null;
+  last_sync_error?: string;
+}
+
 // slack integration
 export interface ISlackIntegration {
   id: string;

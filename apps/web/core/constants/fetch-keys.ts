@@ -92,7 +92,13 @@ export const WORKSPACE_SIDEBAR_PREFERENCES = (workspaceSlug: string) =>
 export const WORKSPACE_PROJECT_NAVIGATION_PREFERENCES = (workspaceSlug: string) =>
   `WORKSPACE_PROJECT_NAVIGATION_PREFERENCES_${workspaceSlug.toUpperCase()}`;
 
-export const PROJECT_GITHUB_REPOSITORY = (projectId: string) => `PROJECT_GITHUB_REPOSITORY_${projectId.toUpperCase()}`;
+// GitHub Issue Sync (.ai_design/github_sync/design.md)
+export const GITHUB_INTEGRATION_STATUS = (workspaceSlug: string) =>
+  `GITHUB_INTEGRATION_STATUS_${workspaceSlug.toUpperCase()}`;
+export const GITHUB_INTEGRATION_REPOS = (workspaceSlug: string, page: number) =>
+  `GITHUB_INTEGRATION_REPOS_${workspaceSlug.toUpperCase()}_${page}`;
+export const GITHUB_PROJECT_BINDING = (projectId: string) =>
+  `GITHUB_PROJECT_BINDING_${projectId.toUpperCase()}`;
 
 // cycles
 export const WORKSPACE_ACTIVE_CYCLES_LIST = (workspaceSlug: string, cursor: string, per_page: string) =>
