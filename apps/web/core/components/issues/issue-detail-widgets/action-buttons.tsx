@@ -16,6 +16,7 @@ import { WorkItemAdditionalWidgetActionButtons } from "@/pi-dash-web/components/
 import { IssueAttachmentActionButton } from "./attachments";
 import { IssueLinksActionButton } from "./links";
 import { RelationActionButton } from "./relations";
+import { CommentAndRunActionButton, RunAIActionButton } from "./run-ai";
 import { SubIssuesActionButton } from "./sub-issues";
 import { IssueDetailWidgetButton } from "./widget-button";
 
@@ -92,6 +93,14 @@ export function IssueDetailWidgetActionButtons(props: Props) {
           issueServiceType={issueServiceType}
         />
       )}
+      <RunAIActionButton workspaceSlug={workspaceSlug} issueId={issueId} disabled={disabled} />
+      <CommentAndRunActionButton
+        workspaceSlug={workspaceSlug}
+        projectId={projectId}
+        issueId={issueId}
+        issueServiceType={issueServiceType}
+        disabled={disabled}
+      />
       <WorkItemAdditionalWidgetActionButtons
         disabled={disabled}
         hideWidgets={hideWidgets ?? []}
