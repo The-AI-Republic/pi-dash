@@ -7,6 +7,7 @@
 import React, { useState } from "react";
 import { observer } from "mobx-react";
 import { MessageSquarePlus } from "lucide-react";
+import { useTranslation } from "@pi-dash/i18n";
 import { Button } from "@pi-dash/propel/button";
 import type { TIssueServiceType } from "@pi-dash/types";
 // local
@@ -22,6 +23,7 @@ type Props = {
 
 export const CommentAndRunActionButton = observer(function CommentAndRunActionButton(props: Props) {
   const { workspaceSlug, projectId, issueId, issueServiceType, disabled = false } = props;
+  const { t } = useTranslation();
   const [isOpen, setIsOpen] = useState(false);
 
   const handleClick = (e: React.MouseEvent<HTMLButtonElement>) => {
@@ -34,7 +36,7 @@ export const CommentAndRunActionButton = observer(function CommentAndRunActionBu
     <>
       <Button variant="primary" size="lg" onClick={handleClick} disabled={disabled}>
         <MessageSquarePlus className="h-3.5 w-3.5 flex-shrink-0" strokeWidth={2} />
-        <span className="text-body-xs-medium">Comment & Run</span>
+        <span className="text-body-xs-medium">{t("run_ai.comment_button")}</span>
       </Button>
       <CommentAndRunModal
         isOpen={isOpen}

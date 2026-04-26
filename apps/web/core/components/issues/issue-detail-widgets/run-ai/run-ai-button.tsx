@@ -6,6 +6,7 @@
 
 import React from "react";
 import { observer } from "mobx-react";
+import { useTranslation } from "@pi-dash/i18n";
 import { Button } from "@pi-dash/propel/button";
 import { AiIcon } from "@pi-dash/propel/icons";
 // local
@@ -23,6 +24,7 @@ type Props = {
 
 export const RunAIActionButton = observer(function RunAIActionButton(props: Props) {
   const { workspaceSlug, issueId, disabled = false } = props;
+  const { t } = useTranslation();
   const { triggerRun, isSubmitting } = useCreateAgentRun();
 
   const handleClick = (e: React.MouseEvent<HTMLButtonElement>) => {
@@ -40,7 +42,7 @@ export const RunAIActionButton = observer(function RunAIActionButton(props: Prop
       loading={isSubmitting}
     >
       <AiIcon className="h-3.5 w-3.5 flex-shrink-0" />
-      <span className="text-body-xs-medium">Run AI</span>
+      <span className="text-body-xs-medium">{t("run_ai.run_button")}</span>
     </Button>
   );
 });

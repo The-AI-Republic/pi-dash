@@ -4,14 +4,15 @@
  * See the LICENSE file for details.
  */
 
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import { observer } from "mobx-react";
+import { useTranslation } from "@pi-dash/i18n";
 import { Button } from "@pi-dash/propel/button";
 import { TOAST_TYPE, setToast } from "@pi-dash/propel/toast";
 import type { TIssueServiceType } from "@pi-dash/types";
 import { ModalCore, TextArea } from "@pi-dash/ui";
-// services
-import { IssueCommentService } from "@/services/issue";
+// hooks
+import { useIssueDetail } from "@/hooks/store/use-issue-detail";
 // local
 import { useCreateAgentRun } from "./use-create-agent-run";
 
@@ -31,12 +32,23 @@ function buildCommentHtml(plainText: string): string {
 
 export const CommentAndRunModal = observer(function CommentAndRunModal(props: Props) {
   const { isOpen, onClose, workspaceSlug, projectId, issueId, issueServiceType } = props;
+  const { t } = useTranslation();
+  const { createComment } = useIssueDetail(issueServiceType);
   const [comment, setComment] = useState("");
   const [isPosting, setIsPosting] = useState(false);
   const { triggerRun, isSubmitting: isRunning } = useCreateAgentRun();
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
 
   useEffect(() => {
-    if (!isOpen) setComment("");
+    if (!isOpen) {
+      setComment("");
+      return;
+    }
+    // Focus the textarea after the modal mounts. Programmatic focus avoids the
+    // jsx-a11y/no-autofocus rule while still landing the cursor where the user
+    // is going to type.
+    const handle = window.setTimeout(() => textareaRef.current?.focus(), 0);
+    return () => window.clearTimeout(handle);
   }, [isOpen]);
 
   const isBusy = isPosting || isRunning;
@@ -47,18 +59,16 @@ export const CommentAndRunModal = observer(function CommentAndRunModal(props: Pr
     e.preventDefault();
     if (!canSubmit) return;
 
-    const commentService = new IssueCommentService(issueServiceType);
-
     setIsPosting(true);
     try {
-      await commentService.createIssueComment(workspaceSlug, projectId, issueId, {
+      await createComment(workspaceSlug, projectId, issueId, {
         comment_html: buildCommentHtml(trimmed),
       });
     } catch (error: unknown) {
-      const message = (error as { error?: string })?.error ?? "Failed to post the comment.";
+      const message = (error as { error?: string })?.error ?? t("run_ai.comment_failed_message");
       setToast({
         type: TOAST_TYPE.ERROR,
-        title: "Could not post comment",
+        title: t("run_ai.comment_failed_title"),
         message,
       });
       setIsPosting(false);
@@ -78,24 +88,23 @@ export const CommentAndRunModal = observer(function CommentAndRunModal(props: Pr
     <ModalCore isOpen={isOpen} handleClose={isBusy ? () => {} : onClose}>
       <form onSubmit={handleSubmit}>
         <div className="space-y-4 p-5">
-          <h3 className="text-h4-medium text-secondary">Comment & Run</h3>
-          <p className="text-body-sm-regular text-tertiary">
-            Post a comment on this work item and start an AI agent run with the comment as the prompt.
-          </p>
+          <h3 className="text-h4-medium text-secondary">{t("run_ai.modal_title")}</h3>
+          <p className="text-body-sm-regular text-tertiary">{t("run_ai.modal_description")}</p>
           <TextArea
+            ref={textareaRef}
             value={comment}
             onChange={(e) => setComment(e.target.value)}
-            placeholder="Tell the agent what you want it to do..."
+            placeholder={t("run_ai.placeholder")}
             textAreaSize="md"
             rows={5}
           />
         </div>
         <div className="flex items-center justify-end gap-2 border-t-[0.5px] border-subtle px-5 py-4">
           <Button variant="secondary" size="lg" onClick={onClose} disabled={isBusy} type="button">
-            Cancel
+            {t("common.cancel")}
           </Button>
           <Button variant="primary" size="lg" type="submit" loading={isBusy} disabled={!canSubmit}>
-            {isPosting ? "Posting..." : isRunning ? "Starting run..." : "Comment & Run"}
+            {isPosting ? t("run_ai.posting") : isRunning ? t("run_ai.starting") : t("run_ai.comment_button")}
           </Button>
         </div>
       </form>

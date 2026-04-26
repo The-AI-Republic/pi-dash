@@ -5,6 +5,7 @@
  */
 
 import { useCallback, useState } from "react";
+import { useTranslation } from "@pi-dash/i18n";
 import { TOAST_TYPE, setToast } from "@pi-dash/propel/toast";
 // hooks
 import { useWorkspace } from "@/hooks/store/use-workspace";
@@ -21,6 +22,7 @@ type CreateRunArgs = {
 
 export function useCreateAgentRun() {
   const workspaceStore = useWorkspace();
+  const { t } = useTranslation();
   const [isSubmitting, setIsSubmitting] = useState(false);
 
   const triggerRun = useCallback(
@@ -29,8 +31,8 @@ export function useCreateAgentRun() {
       if (!workspace?.id) {
         setToast({
           type: TOAST_TYPE.ERROR,
-          title: "Could not start agent run",
-          message: "Workspace not found.",
+          title: t("run_ai.failed_workspace_title"),
+          message: t("run_ai.workspace_not_found"),
         });
         return null;
       }
@@ -44,15 +46,15 @@ export function useCreateAgentRun() {
         });
         setToast({
           type: TOAST_TYPE.SUCCESS,
-          title: "Agent run started",
-          message: "The AI agent will pick up this work item shortly.",
+          title: t("run_ai.success_title"),
+          message: t("run_ai.success_message"),
         });
         return run;
       } catch (error: unknown) {
-        const message = (error as { error?: string })?.error ?? "Could not start the agent run. Please try again.";
+        const message = (error as { error?: string })?.error ?? t("run_ai.failed_message");
         setToast({
           type: TOAST_TYPE.ERROR,
-          title: "Failed to start agent run",
+          title: t("run_ai.failed_title"),
           message,
         });
         return null;
@@ -60,7 +62,7 @@ export function useCreateAgentRun() {
         setIsSubmitting(false);
       }
     },
-    [workspaceStore]
+    [workspaceStore, t]
   );
 
   return { triggerRun, isSubmitting };
