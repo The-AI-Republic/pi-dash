@@ -16,7 +16,7 @@ use crate::history::index::{RunSummary, RunsIndex};
 use crate::history::jsonl::{HistoryEntry, HistoryWriter};
 use crate::ipc::protocol::CurrentRunSummary;
 use crate::ipc::server::IpcServer;
-use crate::util::paths::Paths;
+use crate::util::paths::{Paths, RunnerPaths};
 
 pub struct Supervisor {
     pub config: Config,
@@ -57,12 +57,15 @@ impl Supervisor {
             approvals,
         } = self;
         state.set_runner_id(creds.runner_id).await;
+        let runner_paths = paths.for_runner(creds.runner_id);
+        runner_paths.ensure()?;
 
         let ipc = IpcServer {
             path: paths.ipc_socket_path(),
             state: state.clone(),
             approvals: approvals.clone(),
             paths: paths.clone(),
+            runner_paths: runner_paths.clone(),
         };
         let ipc_handle = tokio::spawn(async move {
             if let Err(e) = ipc.run().await {
@@ -140,7 +143,7 @@ impl Supervisor {
 
         // Runner loop — dispatches on inbound ServerMsg.
         let run = RunnerLoop {
-            paths: paths.clone(),
+            runner_paths: runner_paths.clone(),
             config: config.clone(),
             out: out_tx.clone(),
             state: state.clone(),
@@ -182,7 +185,7 @@ impl Supervisor {
 }
 
 struct RunnerLoop {
-    paths: Paths,
+    runner_paths: RunnerPaths,
     config: Config,
     out: mpsc::Sender<Envelope<ClientMsg>>,
     state: StateHandle,
@@ -259,14 +262,14 @@ impl RunnerLoop {
                         cancel: cancel.clone(),
                         done_rx,
                     });
-                    let paths = self.paths.clone();
+                    let runner_paths = self.runner_paths.clone();
                     let config = self.config.clone();
                     let state = self.state.clone();
                     let approvals = self.approvals.clone();
                     let out = self.out.clone();
                     tokio::spawn(async move {
                         let mut worker = AssignWorker {
-                            paths,
+                            runner_paths,
                             config,
                             state,
                             approvals,
@@ -379,7 +382,7 @@ async fn wait_done(current: &mut Option<CurrentRun>) {
 /// message loop stays live and can deliver Cancel / Decide frames to us via
 /// `self.cancel` and `self.approvals`.
 struct AssignWorker {
-    paths: Paths,
+    runner_paths: RunnerPaths,
     config: Config,
     state: StateHandle,
     approvals: ApprovalRouter,
@@ -489,7 +492,7 @@ impl AssignWorker {
         .await;
 
         // History writer.
-        let mut hist = HistoryWriter::open(&self.paths, run_id).await?;
+        let mut hist = HistoryWriter::open(&self.runner_paths, run_id).await?;
         hist.append(&HistoryEntry::Header {
             run_id,
             work_item_id: None,
@@ -563,7 +566,10 @@ impl AssignWorker {
                 // Distinguish "agent CLI couldn't find the session id" from a
                 // generic agent crash. Cloud's reaction differs: drop the pin
                 // and re-queue with no resume hint, vs. mark the run failed.
-                let reason = if e.downcast_ref::<crate::agent::ResumeUnavailable>().is_some() {
+                let reason = if e
+                    .downcast_ref::<crate::agent::ResumeUnavailable>()
+                    .is_some()
+                {
                     FailureReason::ResumeUnavailable
                 } else {
                     self.crash_reason()
@@ -607,9 +613,9 @@ impl AssignWorker {
             ended_at: Some(Utc::now()),
             title: None,
         };
-        let mut idx = RunsIndex::load(&self.paths).unwrap_or_default();
+        let mut idx = RunsIndex::load(&self.runner_paths).unwrap_or_default();
         idx.upsert(summary);
-        idx.save(&self.paths).ok();
+        idx.save(&self.runner_paths).ok();
 
         self.state.set_current_run(None).await;
         Ok(())

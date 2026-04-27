@@ -6,7 +6,7 @@ use tokio::fs::{File, OpenOptions};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use uuid::Uuid;
 
-use crate::util::paths::Paths;
+use crate::util::paths::RunnerPaths;
 
 /// One record per line; lines are append-only.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -49,7 +49,7 @@ pub struct HistoryWriter {
 }
 
 impl HistoryWriter {
-    pub async fn open(paths: &Paths, run_id: Uuid) -> Result<Self> {
+    pub async fn open(paths: &RunnerPaths, run_id: Uuid) -> Result<Self> {
         paths.ensure()?;
         let path = paths.runs_dir().join(format!("{run_id}.jsonl"));
         let file = OpenOptions::new()

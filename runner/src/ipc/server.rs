@@ -14,6 +14,7 @@ pub struct IpcServer {
     pub state: StateHandle,
     pub approvals: ApprovalRouter,
     pub paths: crate::util::paths::Paths,
+    pub runner_paths: crate::util::paths::RunnerPaths,
 }
 
 impl IpcServer {
@@ -121,17 +122,17 @@ impl IpcServer {
                 Ok(Response::Ack)
             }
             Request::RunsList { limit } => {
-                let index = crate::history::index::RunsIndex::load(&self.paths)?;
+                let index = crate::history::index::RunsIndex::load(&self.runner_paths)?;
                 Ok(Response::Runs(index.recent(limit.unwrap_or(100))))
             }
             Request::RunsGet { run_id } => {
-                let index = crate::history::index::RunsIndex::load(&self.paths)?;
+                let index = crate::history::index::RunsIndex::load(&self.runner_paths)?;
                 let summary = index
                     .runs
                     .get(&run_id)
                     .cloned()
                     .ok_or_else(|| anyhow::anyhow!("run not found"))?;
-                let path = self.paths.runs_dir().join(format!("{run_id}.jsonl"));
+                let path = self.runner_paths.runs_dir().join(format!("{run_id}.jsonl"));
                 let events = if path.exists() {
                     crate::history::jsonl::read_all(&path)
                         .await?
