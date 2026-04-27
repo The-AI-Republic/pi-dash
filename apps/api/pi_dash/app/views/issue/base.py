@@ -661,6 +661,16 @@ class IssueViewSet(BaseViewSet):
         if not issue:
             return Response({"error": "Issue not found"}, status=status.HTTP_404_NOT_FOUND)
 
+        # Comment & Run on a Paused issue posts the comment, then transitions
+        # state via this endpoint, then dispatches the run itself. The
+        # state-transition signal must NOT fire its own immediate dispatch
+        # here, or we'd race two dispatches against the single-active-run
+        # guardrail. The client signals "Comment & Run owns dispatch" via
+        # the X-Pi-Dash-Skip-Immediate-Dispatch header. See
+        # ``.ai_design/issue_ticking_system/design.md`` §4.5–§4.6.
+        if request.headers.get("X-Pi-Dash-Skip-Immediate-Dispatch") == "1":
+            setattr(issue, "_orchestration_dispatch_immediate", False)
+
         current_instance = json.dumps(IssueDetailSerializer(issue).data, cls=DjangoJSONEncoder)
 
         requested_data = json.dumps(self.request.data, cls=DjangoJSONEncoder)

@@ -67,6 +67,15 @@ class AgentRunListEndpoint(APIView):
         return Response(AgentRunSerializer(qs[:200], many=True).data)
 
     def post(self, request):
+        triggered_by = (request.data.get("triggered_by") or "").strip()
+
+        # Comment & Run flow — reuse the per-issue continuation pipeline
+        # (parent resolution, runner pinning, drain) instead of creating
+        # a fresh AgentRun from a prompt body. See
+        # ``.ai_design/issue_ticking_system/design.md`` §4.6.
+        if triggered_by == "comment_and_run":
+            return self._post_comment_and_run(request)
+
         prompt = request.data.get("prompt")
         workspace_id = request.data.get("workspace")
         if not prompt:
@@ -104,6 +113,55 @@ class AgentRunListEndpoint(APIView):
         # an idle runner if one exists. Non-blocking on commit.
         matcher.drain_pod(ctx.pod)
         run.refresh_from_db()
+        return Response(
+            AgentRunSerializer(run).data,
+            status=status.HTTP_201_CREATED,
+        )
+
+    def _post_comment_and_run(self, request):
+        """Dispatch a continuation run for an issue (Comment & Run button).
+
+        Body must include ``work_item`` (issue id). The just-posted comment
+        is expected to already exist on the issue (the client posts it
+        before calling this endpoint); the prompt builder picks it up via
+        :func:`pi_dash.prompting.composer.build_continuation`.
+        """
+        from pi_dash.db.models.issue import Issue
+        from pi_dash.orchestration import scheduling
+
+        work_item_id = request.data.get("work_item")
+        if not work_item_id:
+            return Response(
+                {"error": "work_item is required for comment_and_run"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        issue = Issue.all_objects.filter(pk=work_item_id).first()
+        if issue is None:
+            return Response(
+                {"error": "issue not found"}, status=status.HTTP_404_NOT_FOUND
+            )
+        if not is_workspace_member(request.user, issue.workspace_id):
+            return Response(
+                {"error": "issue not found"}, status=status.HTTP_404_NOT_FOUND
+            )
+
+        with transaction.atomic():
+            run = scheduling.dispatch_continuation_run(
+                issue,
+                triggered_by=scheduling.TRIGGER_COMMENT_AND_RUN,
+                actor=request.user,
+            )
+            scheduling.reset_schedule_after_comment_and_run(issue)
+        if run is None:
+            return Response(
+                {
+                    "error": (
+                        "could not dispatch — issue may already have an "
+                        "active run, or no prior run / pod is available"
+                    )
+                },
+                status=status.HTTP_409_CONFLICT,
+            )
         return Response(
             AgentRunSerializer(run).data,
             status=status.HTTP_201_CREATED,

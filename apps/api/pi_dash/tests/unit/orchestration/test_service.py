@@ -253,14 +253,15 @@ def _make_paused_run(issue, runner, *, thread_id="sess_xyz"):
 def test_comment_creates_pinned_continuation(
     seeded, project, issue, states, runner_for_workspace, create_user
 ):
+    """``handle_issue_comment`` is the explicit entry point Comment & Run
+    invokes — comments themselves no longer fire it via post_save."""
     Issue.all_objects.filter(pk=issue.pk).update(state=states["in_progress"])
     issue.refresh_from_db()
     prior = _make_paused_run(issue, runner_for_workspace)
 
-    # post_save(IssueComment) fires the continuation trigger automatically;
-    # we observe its side effects rather than calling handle_issue_comment
-    # explicitly.
-    _make_comment(issue, create_user, "use option B please")
+    comment = _make_comment(issue, create_user, "use option B please")
+    outcome = service.handle_issue_comment(comment)
+    assert outcome.reason == "created"
 
     r_next = (
         AgentRun.objects.filter(work_item=issue, parent_run=prior)
@@ -310,10 +311,11 @@ def test_comment_with_no_prior_run_skipped(
 
 
 @pytest.mark.unit
-def test_comment_during_active_run_held_for_terminate_sweep(
+def test_comment_during_active_run_returns_prior_run_active(
     seeded, project, issue, states, runner_for_workspace, create_user
 ):
-    """Comment arriving while R_prev is RUNNING is not dispatched immediately."""
+    """Even when called explicitly, ``handle_issue_comment`` skips when a
+    prior run is in flight — Comment & Run on a busy issue is a no-op."""
     from django.utils import timezone
 
     Issue.all_objects.filter(pk=issue.pk).update(state=states["in_progress"])
@@ -335,26 +337,6 @@ def test_comment_during_active_run_held_for_terminate_sweep(
 
 
 @pytest.mark.unit
-def test_two_comments_coalesce_into_one_followup(
-    seeded, project, issue, states, runner_for_workspace, create_user
-):
-    Issue.all_objects.filter(pk=issue.pk).update(state=states["in_progress"])
-    issue.refresh_from_db()
-    _make_paused_run(issue, runner_for_workspace)
-
-    # First comment fires the trigger and creates R_next. The second
-    # comment fires the trigger again — but coalesces because R_next is
-    # already QUEUED. Observe via DB state, not return values.
-    _make_comment(issue, create_user, "first")
-    _make_comment(issue, create_user, "second")
-
-    queued = AgentRun.objects.filter(
-        work_item=issue, status=AgentRunStatus.QUEUED
-    )
-    assert queued.count() == 1
-
-
-@pytest.mark.unit
 def test_pin_skipped_when_parent_has_no_thread_id(
     seeded, project, issue, states, runner_for_workspace, create_user
 ):
@@ -364,7 +346,9 @@ def test_pin_skipped_when_parent_has_no_thread_id(
     prior = _make_paused_run(issue, runner_for_workspace, thread_id="")
     assert prior.thread_id == ""
 
-    _make_comment(issue, create_user, "go")
+    comment = _make_comment(issue, create_user, "go")
+    outcome = service.handle_issue_comment(comment)
+    assert outcome.reason == "created"
     r_next = (
         AgentRun.objects.filter(work_item=issue, parent_run=prior)
         .order_by("-created_at")
@@ -372,39 +356,3 @@ def test_pin_skipped_when_parent_has_no_thread_id(
     )
     assert r_next is not None
     assert r_next.pinned_runner_id is None
-
-
-@pytest.mark.unit
-def test_terminate_sweep_picks_up_held_comment(
-    seeded, project, issue, states, runner_for_workspace, create_user
-):
-    """maybe_continue_after_terminate creates R_next from comments after R.started_at."""
-    from django.utils import timezone
-
-    from pi_dash.runner.models import AgentRunStatus
-
-    Issue.all_objects.filter(pk=issue.pk).update(state=states["in_progress"])
-    issue.refresh_from_db()
-    started = timezone.now() - timezone.timedelta(minutes=10)
-    prior = AgentRun.objects.create(
-        workspace=issue.workspace,
-        created_by=create_user,
-        pod=runner_for_workspace.pod,
-        work_item=issue,
-        runner=runner_for_workspace,
-        thread_id="sess_xyz",
-        status=AgentRunStatus.RUNNING,
-        prompt="working",
-        started_at=started,
-    )
-    # Comment arrives mid-run.
-    _make_comment(issue, create_user, "use option B")
-    # Run terminates.
-    prior.status = AgentRunStatus.COMPLETED
-    prior.ended_at = timezone.now()
-    prior.save(update_fields=["status", "ended_at"])
-
-    outcome = service.maybe_continue_after_terminate(prior)
-    assert outcome.reason == "created"
-    assert outcome.created_run is not None
-    assert outcome.created_run.parent_run_id == prior.id

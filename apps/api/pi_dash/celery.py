@@ -86,6 +86,11 @@ app.conf.beat_schedule = {
         "task": "runner.mark_offline_runners",
         "schedule": crontab(minute="*/1"),
     },
+    # Issue ticking — see .ai_design/issue_ticking_system/design.md §6
+    "scan-due-agent-schedules": {
+        "task": "pi_dash.bgtasks.agent_schedule.scan_due_schedules",
+        "schedule": crontab(minute="*"),
+    },
 }
 
 

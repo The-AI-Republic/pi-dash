@@ -17,7 +17,12 @@ const agentRunService = new AgentRunService();
 type CreateRunArgs = {
   workspaceSlug: string;
   issueId: string;
-  prompt: string;
+  /**
+   * Unused since the Comment & Run flow now reuses the continuation
+   * pipeline (the cloud rebuilds the prompt from issue + comments).
+   * Kept on the type so existing callers compile until they update.
+   */
+  prompt?: string;
 };
 
 export function useCreateAgentRun() {
@@ -26,7 +31,7 @@ export function useCreateAgentRun() {
   const [isSubmitting, setIsSubmitting] = useState(false);
 
   const triggerRun = useCallback(
-    async ({ workspaceSlug, issueId, prompt }: CreateRunArgs) => {
+    async ({ workspaceSlug, issueId }: CreateRunArgs) => {
       const workspace = workspaceStore.getWorkspaceBySlug(workspaceSlug);
       if (!workspace?.id) {
         setToast({
@@ -39,10 +44,9 @@ export function useCreateAgentRun() {
 
       setIsSubmitting(true);
       try {
-        const run = await agentRunService.createAgentRun({
+        const run = await agentRunService.commentAndRun({
           workspace: workspace.id,
           work_item: issueId,
-          prompt,
         });
         setToast({
           type: TOAST_TYPE.SUCCESS,

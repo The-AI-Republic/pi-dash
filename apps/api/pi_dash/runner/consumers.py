@@ -532,30 +532,28 @@ class RunnerConsumer(AsyncJsonWebsocketConsumer):
                     comment_html="".join(body_parts),
                 )
 
-        # Two follow-ups: (1) sweep for non-bot comments that arrived while
-        # this run was RUNNING — ``post_save(IssueComment)`` skipped them
-        # with reason='prior-run-active'; pause is the symmetric
-        # opportunity to pick them up. (2) Kick the dispatcher so the now-
-        # idle runner can take other pod work (including any R_next the
-        # sweep just created).
+        # Two follow-ups: (1) apply the deferred cap-hit pause if the
+        # schedule is disarmed and no other active runs remain (§4.4.1
+        # of .ai_design/issue_ticking_system/design.md). (2) Kick the
+        # dispatcher so the now-idle runner can take other pod work.
         from django.db import transaction
 
-        from pi_dash.orchestration.service import maybe_continue_after_terminate
+        from pi_dash.orchestration.scheduling import maybe_apply_deferred_pause
         from pi_dash.runner.services.matcher import drain_for_runner_by_id
 
-        def _sweep_and_drain(rid=run_id, runner_id=runner.id):
+        def _pause_and_drain(rid=run_id, runner_id=runner.id):
             paused = AgentRun.objects.filter(pk=rid).first()
             if paused is not None:
                 try:
-                    maybe_continue_after_terminate(paused)
+                    maybe_apply_deferred_pause(paused)
                 except Exception:
                     logger.exception(
-                        "orchestration.error: pause sweep failed for run %s",
+                        "orchestration.error: deferred-pause failed for run %s",
                         rid,
                     )
             drain_for_runner_by_id(runner_id)
 
-        transaction.on_commit(_sweep_and_drain)
+        transaction.on_commit(_pause_and_drain)
 
     def _finalize_run(
         self,
@@ -589,35 +587,34 @@ class RunnerConsumer(AsyncJsonWebsocketConsumer):
         # the terminal state having committed (otherwise a new assign
         # would race with the update):
         #
-        # 1. Sweep for non-bot comments that arrived while this run was
-        #    active. ``post_save(IssueComment)`` skipped them with
-        #    reason='prior-run-active'; this is where they get picked up.
+        # 1. Apply the deferred cap-hit pause if the schedule for this
+        #    issue has hit its tick cap and no other active runs remain
+        #    (§4.4.1 of .ai_design/issue_ticking_system/design.md).
         # 2. Drain the pod (and prefer this just-freed runner) so any
-        #    QUEUED work — including a follow-up R_next created by the
-        #    sweep above — can dispatch.
+        #    QUEUED work can dispatch.
         from django.db import transaction
 
-        from pi_dash.orchestration.service import maybe_continue_after_terminate
+        from pi_dash.orchestration.scheduling import maybe_apply_deferred_pause
         from pi_dash.runner.services.matcher import (
             drain_for_runner_by_id,
             drain_pod_by_id,
         )
 
-        def _sweep_and_drain(rid=run_id, runner_id=runner.id, pod_id=runner.pod_id):
+        def _pause_and_drain(rid=run_id, runner_id=runner.id, pod_id=runner.pod_id):
             run = AgentRun.objects.filter(pk=rid).first()
             if run is not None:
                 try:
-                    maybe_continue_after_terminate(run)
+                    maybe_apply_deferred_pause(run)
                 except Exception:
                     logger.exception(
-                        "orchestration.error: terminate sweep failed for run %s",
+                        "orchestration.error: deferred-pause failed for run %s",
                         rid,
                     )
             drain_for_runner_by_id(runner_id)
             if pod_id is not None:
                 drain_pod_by_id(pod_id)
 
-        transaction.on_commit(_sweep_and_drain)
+        transaction.on_commit(_pause_and_drain)
 
     # ---- misc ----
 
