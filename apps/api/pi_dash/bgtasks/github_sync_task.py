@@ -16,8 +16,8 @@ from typing import Iterable
 from celery import shared_task
 from django.conf import settings
 from django.core.exceptions import ImproperlyConfigured
-from django.db import transaction
 from django.utils import timezone
+from django.utils.html import escape
 
 from pi_dash.db.models import (
     GithubCommentSync,
@@ -28,6 +28,7 @@ from pi_dash.db.models import (
     State,
 )
 from pi_dash.license.utils.encryption import decrypt_data
+from pi_dash.utils.content_validator import validate_html_content
 from pi_dash.utils.exception_logger import log_exception
 from pi_dash.utils.github_client import (
     GithubAuthError,
@@ -65,16 +66,33 @@ def _project_default_state(project_id) -> State | None:
 
 
 def _markdown_to_html(body: str | None) -> str:
-    """Render markdown to a minimal HTML representation. We don't need a full
-    Markdown engine for issue bodies — paragraph-per-blank-line is enough for
-    MVP and avoids pulling in a new dependency. The user-facing text is the
-    upstream markdown verbatim, wrapped in <p>."""
+    """Render upstream markdown body to a minimal HTML representation, with
+    each paragraph escaped (defense in depth — `validate_html_content` is the
+    second layer). Paragraph-per-blank-line is enough for MVP without a full
+    markdown engine."""
     if not body:
         return "<p></p>"
     paragraphs = [p.strip() for p in body.split("\n\n") if p.strip()]
     if not paragraphs:
         return "<p></p>"
-    return "".join(f"<p>{p.replace(chr(10), '<br/>')}</p>" for p in paragraphs)
+    return "".join(
+        f"<p>{escape(p).replace(chr(10), '<br/>')}</p>" for p in paragraphs
+    )
+
+
+def _safe_render(body: str | None) -> tuple[str, str]:
+    """Render an upstream body to (description_html, description_stripped),
+    sanitized through `validate_html_content` (nh3) so the same allow-list
+    that protects user-written content also protects sync-imported content.
+
+    Falls back to fully-escaped plain text if the sanitizer rejects outright."""
+    rendered = _markdown_to_html(body)
+    is_valid, _err, sanitized = validate_html_content(rendered)
+    if not is_valid:
+        safe_html = f"<p>{escape(body or '').replace(chr(10), '<br/>')}</p>"
+    else:
+        safe_html = sanitized if sanitized is not None else rendered
+    return safe_html, strip_tags(safe_html) or ""
 
 
 def pi_dash_issue_url(issue: Issue) -> str:
@@ -90,36 +108,42 @@ def pi_dash_issue_url(issue: Issue) -> str:
 # --------------------------------------------------------------------- upserts
 
 
-def _upsert_issue(sync: GithubRepositorySync, gh_issue: dict, default_state: State | None) -> Issue:
-    """Create or update the local Issue mirror. `external_source="github"`
-    + `external_id=<issue number>` is the upsert key. See §6.4 for the
-    `[github_<n>]` title prefix."""
+def _upsert_issue(
+    sync: GithubRepositorySync, gh_issue: dict, default_state: State | None
+) -> tuple[Issue, GithubIssueSync]:
+    """Create or update the local Issue mirror plus its GithubIssueSync row.
+
+    `external_source="github"` + `external_id=<issue number>` is the upsert
+    key. Title carries the `[github_<n>]` prefix; description is sanitized
+    via `validate_html_content`. Audit fields (created_by / updated_by) are
+    set to the workspace integration's actor.
+    """
     number = gh_issue["number"]
     title = gh_issue.get("title") or ""
     prefixed_name = f"[github_{number}] {title}"[:255]
-    body = gh_issue.get("body") or ""
-    description_html = _markdown_to_html(body)
-    description_stripped = strip_tags(description_html) if description_html else ""
+    description_html, description_stripped = _safe_render(gh_issue.get("body"))
 
     defaults = {
         "name": prefixed_name,
         "description_html": description_html,
         "description_stripped": description_stripped,
         "description_json": {},
+        "created_by_id": sync.actor_id,
+        "updated_by_id": sync.actor_id,
     }
 
-    issue, created = Issue.objects.update_or_create(
+    issue, _created = Issue.objects.update_or_create(
         project=sync.project,
         external_source="github",
         external_id=str(number),
         defaults=defaults,
     )
+    # Note: Issue.save() auto-resolves a default state for newly-created
+    # rows (see db/models/issue.py); no separate post-create state set is
+    # needed here — the `default_state` parameter is kept on the signature
+    # so callers can pass it in case Issue.save's behavior changes.
+    _ = default_state
 
-    if created and default_state is not None and issue.state_id is None:
-        issue.state = default_state
-        issue.save(update_fields=["state"])
-
-    # Mirror tracking row + GitHub-side timestamps (per §5).
     issue_sync, _ = GithubIssueSync.objects.update_or_create(
         repository_sync=sync,
         issue=issue,
@@ -131,26 +155,33 @@ def _upsert_issue(sync: GithubRepositorySync, gh_issue: dict, default_state: Sta
             "project_id": sync.project_id,
             "gh_issue_created_at": gh_issue.get("created_at"),
             "gh_issue_updated_at": gh_issue.get("updated_at"),
+            "created_by_id": sync.actor_id,
+            "updated_by_id": sync.actor_id,
         },
     )
-    # Preserve metadata flags (completion_comment_id, etc.) — only refresh
-    # the author identity field set by sync.
     user = gh_issue.get("user") or {}
     if user.get("login"):
         issue_sync.metadata["github_user_login"] = user["login"]
         issue_sync.save(update_fields=["metadata"])
 
-    return issue
+    return issue, issue_sync
 
 
-def _upsert_comment(sync: GithubRepositorySync, gh_comment: dict, parent_issue: Issue) -> None:
-    """Create or update a single mirrored comment on a synced issue."""
-    body = gh_comment.get("body") or ""
-    rendered_html = _markdown_to_html(body)
+def _upsert_comment(
+    sync: GithubRepositorySync,
+    gh_comment: dict,
+    parent_issue: Issue,
+    parent_issue_sync: GithubIssueSync,
+) -> None:
+    """Create or update one mirrored comment. The parent's GithubIssueSync is
+    passed in by the caller to avoid an N+1 lookup per comment. Body is
+    sanitized; actor/created_by are set to the workspace integration's
+    actor."""
+    safe_html, safe_stripped = _safe_render(gh_comment.get("body"))
     # See §6.4 — leading paragraph form so multi-paragraph upstream bodies
     # aren't broken by an inline prefix.
-    comment_html = f"<p>[Github] </p>{rendered_html}"
-    comment_stripped = f"[Github] {strip_tags(rendered_html)}".strip()
+    comment_html = f"<p>[Github] </p>{safe_html}"
+    comment_stripped = f"[Github] {safe_stripped}".strip()
 
     comment, _ = IssueComment.objects.update_or_create(
         issue=parent_issue,
@@ -162,15 +193,20 @@ def _upsert_comment(sync: GithubRepositorySync, gh_comment: dict, parent_issue: 
             "comment_json": {},
             "workspace_id": sync.workspace_id,
             "project_id": sync.project_id,
+            "actor_id": sync.actor_id,
+            "created_by_id": sync.actor_id,
+            "updated_by_id": sync.actor_id,
         },
     )
     GithubCommentSync.objects.update_or_create(
-        issue_sync=GithubIssueSync.objects.get(repository_sync=sync, issue=parent_issue),
+        issue_sync=parent_issue_sync,
         comment=comment,
         defaults={
             "repo_comment_id": gh_comment["id"],
             "workspace_id": sync.workspace_id,
             "project_id": sync.project_id,
+            "created_by_id": sync.actor_id,
+            "updated_by_id": sync.actor_id,
         },
     )
 
@@ -228,17 +264,17 @@ def sync_one_repo(self, sync_id: str) -> None:
     owner, name = sync.repository.owner, sync.repository.name
     default_state = _project_default_state(sync.project_id)
     remote_issue_numbers: set[int] = set()
-    issues_by_number: dict[int, Issue] = {}
+    issues_by_number: dict[int, tuple[Issue, GithubIssueSync]] = {}
 
     try:
         # 1. Issues (open, non-PR).
         for gh_issue in client.list_all_open_issues(owner, name):
             if "pull_request" in gh_issue:
                 continue
-            issue = _upsert_issue(sync, gh_issue, default_state)
+            issue, issue_sync = _upsert_issue(sync, gh_issue, default_state)
             number = gh_issue["number"]
             remote_issue_numbers.add(number)
-            issues_by_number[number] = issue
+            issues_by_number[number] = (issue, issue_sync)
 
         # 2. Comments — repo-wide enumeration; skip PR/closed-issue/orphan
         #    comments without a local parent (see §6.3 step 2).
@@ -246,10 +282,11 @@ def sync_one_repo(self, sync_id: str) -> None:
             parent_number = parse_issue_number_from_url(gh_comment.get("issue_url") or "")
             if parent_number is None or parent_number not in remote_issue_numbers:
                 continue
-            parent = issues_by_number.get(parent_number)
-            if parent is None:
+            pair = issues_by_number.get(parent_number)
+            if pair is None:
                 continue
-            _upsert_comment(sync, gh_comment, parent)
+            parent_issue, parent_issue_sync = pair
+            _upsert_comment(sync, gh_comment, parent_issue, parent_issue_sync)
 
         # 3. Diff for upstream-gone (deletion or closure) — §6.3.1.
         _reconcile_upstream_gone(sync, remote_issue_numbers)

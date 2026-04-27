@@ -117,11 +117,14 @@ class TestUpsertIssue:
             "created_at": "2026-01-01T00:00:00Z",
             "updated_at": "2026-01-02T00:00:00Z",
         }
-        issue = _upsert_issue(github_repo_sync, gh_issue, default_state=None)
+        issue, _sync = _upsert_issue(github_repo_sync, gh_issue, default_state=None)
         issue.refresh_from_db()
         assert issue.name.startswith("[github_7] ")
         assert issue.external_source == "github"
         assert issue.external_id == "7"
+        # H1: created_by/updated_by populated from the workspace integration's actor.
+        assert issue.created_by_id == github_repo_sync.actor_id
+        assert issue.updated_by_id == github_repo_sync.actor_id
 
         sync = GithubIssueSync.objects.get(repository_sync=github_repo_sync, issue=issue)
         assert sync.repo_issue_id == 7
@@ -149,12 +152,34 @@ class TestUpsertIssue:
         assert issue.name == "[github_1] Edited Upstream"
         assert "second body" in issue.description_html
 
+    @pytest.mark.django_db
+    def test_xss_in_body_is_sanitized(self, github_repo_sync):
+        """C1 regression: a malicious GitHub body must not land script tags
+        in description_html. The renderer escapes paragraphs and pipes the
+        result through validate_html_content (nh3)."""
+        gh = {
+            "id": 11,
+            "number": 11,
+            "title": "Innocent",
+            "body": "<script>alert('xss')</script>\n\nsecond paragraph",
+            "user": {"login": "attacker"},
+            "html_url": "u",
+            "created_at": "2026-01-01T00:00:00Z",
+            "updated_at": "2026-01-02T00:00:00Z",
+        }
+        issue, _sync = _upsert_issue(github_repo_sync, gh, default_state=None)
+        issue.refresh_from_db()
+        assert "<script>" not in issue.description_html
+        assert "alert(" not in issue.description_html
+        # The literal user text is preserved as escaped content / stripped form.
+        assert "second paragraph" in issue.description_stripped
+
 
 @pytest.mark.unit
 class TestUpsertComment:
     @pytest.mark.django_db
     def test_prefixes_comment_body(self, github_repo_sync):
-        parent = _upsert_issue(
+        parent, parent_sync = _upsert_issue(
             github_repo_sync,
             {
                 "id": 1,
@@ -174,12 +199,44 @@ class TestUpsertComment:
             "user": {"login": "octocat"},
             "issue_url": "https://api.github.com/repos/acme/repo/issues/1",
         }
-        _upsert_comment(github_repo_sync, gh_comment, parent)
+        _upsert_comment(github_repo_sync, gh_comment, parent, parent_sync)
 
         comment = IssueComment.objects.get(issue=parent, external_id="100")
         assert comment.external_source == "github"
         assert "[Github]" in comment.comment_html
         assert comment.comment_stripped.startswith("[Github] ")
+        # H1: actor populated from the workspace integration's actor.
+        assert comment.actor_id == github_repo_sync.actor_id
+        assert comment.created_by_id == github_repo_sync.actor_id
+
+    @pytest.mark.django_db
+    def test_xss_in_comment_body_is_sanitized(self, github_repo_sync):
+        """C1 regression: malicious upstream comment body must not land
+        script tags in comment_html."""
+        parent, parent_sync = _upsert_issue(
+            github_repo_sync,
+            {
+                "id": 2,
+                "number": 2,
+                "title": "Parent",
+                "body": "x",
+                "user": {"login": "a"},
+                "html_url": "u",
+                "created_at": "2026-01-01T00:00:00Z",
+                "updated_at": "2026-01-02T00:00:00Z",
+            },
+            default_state=None,
+        )
+        gh_comment = {
+            "id": 200,
+            "body": "<img src=x onerror=alert(1)>",
+            "user": {"login": "attacker"},
+            "issue_url": "https://api.github.com/repos/acme/repo/issues/2",
+        }
+        _upsert_comment(github_repo_sync, gh_comment, parent, parent_sync)
+        comment = IssueComment.objects.get(issue=parent, external_id="200")
+        assert "onerror" not in comment.comment_html
+        assert "<script" not in comment.comment_html
 
 
 @pytest.mark.unit

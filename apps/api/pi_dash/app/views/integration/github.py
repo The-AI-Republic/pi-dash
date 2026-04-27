@@ -13,7 +13,8 @@ See .ai_design/github_sync/design.md §6.1 and §6.2.
 from __future__ import annotations
 
 from django.conf import settings
-from django.db import transaction
+from django.db import IntegrityError, transaction
+from django.shortcuts import get_object_or_404
 from django.utils import timezone
 from rest_framework import status
 from rest_framework.response import Response
@@ -22,11 +23,9 @@ from pi_dash.app.permissions import ROLE, allow_permission
 from pi_dash.app.views.base import BaseAPIView
 from pi_dash.db.models import (
     APIToken,
-    GithubIssueSync,
     GithubRepository,
     GithubRepositorySync,
     Integration,
-    IssueComment,
     Label,
     Project,
     Workspace,
@@ -106,18 +105,25 @@ class GithubIntegrationConnectEndpoint(BaseAPIView):
             log_exception(e)
             return Response({"error": "Failed to verify GitHub credential"}, status=status.HTTP_502_BAD_GATEWAY)
 
-        workspace = Workspace.objects.get(slug=slug)
+        workspace = get_object_or_404(Workspace, slug=slug)
         integration = _get_or_create_github_integration()
 
         with transaction.atomic():
             wi = WorkspaceIntegration.objects.filter(workspace=workspace, integration=integration).first()
             if wi is None:
+                # The WorkspaceIntegration.api_token FK is required by the
+                # schema, but the real GitHub credential lives encrypted in
+                # `config["token"]`. Mint an INACTIVE token solely to satisfy
+                # the FK — it must not authenticate API requests, since it
+                # would otherwise grant the connecting user's full API surface
+                # to anyone who could read this row. See review of #65.
                 api_token = APIToken.objects.create(
                     user=request.user,
                     workspace=workspace,
                     user_type=1,
+                    is_active=False,
                     label=f"github-integration-{workspace.id}",
-                    description="GitHub integration credential",
+                    description="GitHub integration FK shim — not for auth",
                 )
                 wi = WorkspaceIntegration.objects.create(
                     workspace=workspace,
@@ -157,7 +163,7 @@ class GithubIntegrationDisconnectEndpoint(BaseAPIView):
         if not _feature_enabled():
             return _disabled_response()
 
-        workspace = Workspace.objects.get(slug=slug)
+        workspace = get_object_or_404(Workspace, slug=slug)
         wi = _get_workspace_integration(workspace)
         if wi is None:
             return Response({"connected": False}, status=status.HTTP_200_OK)
@@ -186,7 +192,7 @@ class GithubIntegrationStatusEndpoint(BaseAPIView):
     def get(self, request, slug):
         if not _feature_enabled():
             return _disabled_response()
-        workspace = Workspace.objects.get(slug=slug)
+        workspace = get_object_or_404(Workspace, slug=slug)
         wi = _get_workspace_integration(workspace)
         if wi is None or not (wi.config or {}).get("token"):
             return Response({"connected": False}, status=status.HTTP_200_OK)
@@ -211,7 +217,7 @@ class GithubIntegrationReposEndpoint(BaseAPIView):
     def get(self, request, slug):
         if not _feature_enabled():
             return _disabled_response()
-        workspace = Workspace.objects.get(slug=slug)
+        workspace = get_object_or_404(Workspace, slug=slug)
         wi = _get_workspace_integration(workspace)
         if wi is None:
             return Response({"error": "GitHub not connected"}, status=status.HTTP_404_NOT_FOUND)
@@ -257,29 +263,23 @@ class GithubProjectBindEndpoint(BaseAPIView):
         if not _feature_enabled():
             return _disabled_response()
 
-        # Parse + validate input.
+        # Parse + validate input. The client-supplied `url` is intentionally
+        # ignored — we use whatever GitHub returns from /repos/{owner}/{repo}
+        # to avoid trusting client-controlled persistence (L4).
         try:
             repository_id = int(request.data.get("repository_id"))
         except (TypeError, ValueError):
             return Response({"error": "repository_id (int) is required"}, status=status.HTTP_400_BAD_REQUEST)
         owner = (request.data.get("owner") or "").strip()
         name = (request.data.get("name") or "").strip()
-        url = (request.data.get("url") or "").strip()
         if not owner or not name:
             return Response({"error": "owner and name are required"}, status=status.HTTP_400_BAD_REQUEST)
 
-        workspace = Workspace.objects.get(slug=slug)
-        project = Project.objects.get(pk=project_id, workspace=workspace)
+        workspace = get_object_or_404(Workspace, slug=slug)
+        project = get_object_or_404(Project, pk=project_id, workspace=workspace)
         wi = _get_workspace_integration(workspace)
         if wi is None or not (wi.config or {}).get("token"):
             return Response({"error": "Workspace GitHub integration is not connected"}, status=status.HTTP_409_CONFLICT)
-
-        # Precondition (§6.2): one binding per project.
-        if GithubRepositorySync.objects.filter(project=project).exists():
-            return Response(
-                {"error": "Project already has a GitHub binding; unbind first to change repos"},
-                status=status.HTTP_409_CONFLICT,
-            )
 
         # Verify (owner, name, repository_id) consistency upstream.
         token = decrypt_data(wi.config.get("token") or "")
@@ -299,32 +299,51 @@ class GithubProjectBindEndpoint(BaseAPIView):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        with transaction.atomic():
-            repo, _ = GithubRepository.objects.get_or_create(
-                project=project,
-                repository_id=repository_id,
-                defaults={
-                    "name": name,
-                    "owner": owner,
-                    "url": url or verified.get("html_url") or "",
-                    "workspace_id": workspace.id,
-                    "config": {},
-                },
-            )
-            label, _ = Label.objects.get_or_create(
-                project=project,
-                name="github",
-                defaults={"workspace_id": workspace.id, "color": "#1f2328"},
-            )
-            sync = GithubRepositorySync.objects.create(
-                project=project,
-                workspace_id=workspace.id,
-                repository=repo,
-                workspace_integration=wi,
-                actor=request.user,
-                label=label,
-                credentials={},
-                is_sync_enabled=False,
+        canonical_url = verified.get("html_url") or f"https://github.com/{owner}/{name}"
+
+        try:
+            with transaction.atomic():
+                # Precondition + create together so concurrent binds can't both
+                # pass the existence check. The model's
+                # `github_repository_sync_unique_per_project_when_active`
+                # constraint is the second line of defense (H3).
+                if GithubRepositorySync.objects.filter(project=project).exists():
+                    return Response(
+                        {"error": "Project already has a GitHub binding; unbind first to change repos"},
+                        status=status.HTTP_409_CONFLICT,
+                    )
+                repo, _ = GithubRepository.objects.get_or_create(
+                    project=project,
+                    repository_id=repository_id,
+                    defaults={
+                        "name": name,
+                        "owner": owner,
+                        "url": canonical_url,
+                        "workspace_id": workspace.id,
+                        "config": {},
+                    },
+                )
+                label, _ = Label.objects.get_or_create(
+                    project=project,
+                    name="github",
+                    defaults={"workspace_id": workspace.id, "color": "#1f2328"},
+                )
+                sync = GithubRepositorySync.objects.create(
+                    project=project,
+                    workspace_id=workspace.id,
+                    repository=repo,
+                    workspace_integration=wi,
+                    actor=request.user,
+                    label=label,
+                    credentials={},
+                    is_sync_enabled=False,
+                )
+        except IntegrityError:
+            # A concurrent bind beat us to the unique constraint. Treat as
+            # the same conflict as the precondition fail.
+            return Response(
+                {"error": "Project already has a GitHub binding; unbind first to change repos"},
+                status=status.HTTP_409_CONFLICT,
             )
 
         return Response(
