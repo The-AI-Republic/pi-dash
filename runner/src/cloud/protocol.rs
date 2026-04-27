@@ -194,6 +194,20 @@ pub enum ServerMsg {
     Revoke {
         reason: String,
     },
+    /// Cloud-initiated per-runner removal (UI's "Remove" action on a
+    /// runner row, or `pidash token remove-runner` on a different
+    /// machine). The daemon cancels that runner's in-flight run, drops
+    /// it from `instances`, and deletes its data directory. Connection
+    /// and other runners stay up. See `design.md` §11.4.
+    ///
+    /// Envelope's `runner_id` carries the target — the body's
+    /// `runner_id` is included as a self-contained sanity check so a
+    /// view fed only the body still has the id.
+    RemoveRunner {
+        runner_id: Uuid,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reason: Option<String>,
+    },
     ResumeAck {
         run_id: Uuid,
         last_seq: Option<u64>,

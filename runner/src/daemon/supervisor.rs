@@ -369,6 +369,32 @@ impl RunnerLoop {
                     self.state.shutdown();
                     break;
                 }
+                ServerMsg::RemoveRunner { runner_id, reason } => {
+                    // While the daemon hosts exactly one runner, a
+                    // RemoveRunner targeting that one is functionally
+                    // identical to Revoke: cancel the in-flight run and
+                    // exit the daemon. Multi-runner support (next phase)
+                    // splits this into "remove the matching instance,
+                    // leave others up" by routing on envelope.runner_id
+                    // through the demux task.
+                    if runner_id != self.runner_paths.runner_id {
+                        tracing::warn!(
+                            "received RemoveRunner for {runner_id}, but this daemon hosts \
+                             {}; ignoring",
+                            self.runner_paths.runner_id,
+                        );
+                        continue;
+                    }
+                    tracing::warn!(
+                        "cloud removed runner {runner_id}: {}",
+                        reason.as_deref().unwrap_or("(no reason)"),
+                    );
+                    if let Some(run) = &self.current_run {
+                        run.cancel.notify_waiters();
+                    }
+                    self.state.shutdown();
+                    break;
+                }
             }
         }
         self.state.set_connected(false).await;
