@@ -320,9 +320,9 @@ UNSPLASH_ACCESS_KEY = os.environ.get("UNSPLASH_ACCESS_KEY")
 GITHUB_ACCESS_TOKEN = os.environ.get("GITHUB_ACCESS_TOKEN", False)
 
 # GitHub Issue Sync feature gate. Default on; self-hosters who don't want
-# the integration set GITHUB_SYNC_ENABLED=0. See .ai_design/github_sync/
+# the integration set GITHUB_SYNC_ENABLED=false. See .ai_design/github_sync/
 # design.md §9 Rollout.
-GITHUB_SYNC_ENABLED = int(os.environ.get("GITHUB_SYNC_ENABLED", "1")) == 1
+GITHUB_SYNC_ENABLED = os.environ.get("GITHUB_SYNC_ENABLED", "true").lower() == "true"
 
 # Analytics
 ANALYTICS_SECRET_KEY = os.environ.get("ANALYTICS_SECRET_KEY", False)
