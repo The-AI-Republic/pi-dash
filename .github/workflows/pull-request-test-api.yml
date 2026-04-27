@@ -18,6 +18,9 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+permissions:
+  contents: read
+
 jobs:
   test:
     name: pytest
@@ -46,6 +49,19 @@ jobs:
           --health-interval 5s
           --health-timeout 5s
           --health-retries 10
+      rabbitmq:
+        image: rabbitmq:3.13.6-management-alpine
+        env:
+          RABBITMQ_DEFAULT_USER: pi_dash
+          RABBITMQ_DEFAULT_PASS: pi_dash
+          RABBITMQ_DEFAULT_VHOST: pi_dash
+        ports:
+          - 5672:5672
+        options: >-
+          --health-cmd "rabbitmq-diagnostics -q ping"
+          --health-interval 10s
+          --health-timeout 10s
+          --health-retries 10
     env:
       DJANGO_SETTINGS_MODULE: pi_dash.settings.test
       POSTGRES_USER: pi_dash
@@ -54,6 +70,11 @@ jobs:
       POSTGRES_HOST: localhost
       POSTGRES_PORT: "5432"
       REDIS_URL: redis://localhost:6379/
+      RABBITMQ_HOST: localhost
+      RABBITMQ_PORT: "5672"
+      RABBITMQ_USER: pi_dash
+      RABBITMQ_PASSWORD: pi_dash
+      RABBITMQ_VHOST: pi_dash
     steps:
       - uses: actions/checkout@v6
 
@@ -75,4 +96,4 @@ jobs:
 
       - name: Run pytest
         working-directory: apps/api
-        run: pytest -n auto
+        run: pytest -n auto -m "not slow"

@@ -10,10 +10,20 @@ on:
       - "opened"
       - "synchronize"
       - "reopened"
+    paths:
+      - "apps/**"
+      - "packages/**"
+      - "pnpm-lock.yaml"
+      - "pnpm-workspace.yaml"
+      - "turbo.json"
+      - ".github/workflows/pull-request-test-web-apps.yml"
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
+
+permissions:
+  contents: read
 
 jobs:
   test:
@@ -33,6 +43,8 @@ jobs:
 
       - name: Set up Node.js
         uses: actions/setup-node@v6
+        with:
+          node-version: "22"
 
       - name: Enable Corepack and pnpm
         run: corepack enable pnpm
@@ -63,10 +75,3 @@ jobs:
 
       - name: Run tests
         run: pnpm turbo run test --affected
-
-      - name: Save Turbo cache
-        if: always()
-        uses: actions/cache/save@v5
-        with:
-          path: .turbo
-          key: turbo-${{ runner.os }}-${{ github.event.pull_request.base.sha }}-${{ github.sha }}
