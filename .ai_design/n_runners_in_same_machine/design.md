@@ -404,6 +404,154 @@ Two runners can run different agents (codex vs claude_code), against different r
 
 ## 10. IPC and TUI
 
+### 10.1 User journeys
+
+The runner has one user-facing creation entry point: an **Add Runner** action in the runners view of the cloud UI. It branches into "new connection" (= new machine setup) or "existing connection" (= additional runner on a machine the user already has set up). The CLI is also a valid entry point — invoking it directly bypasses the UI.
+
+Vocabulary in this section:
+- **Connection** = a `Token` row + the WS session it authenticates. One connection per dev machine.
+- **Runner** = a `Runner` row + a `[[runner]]` block in local `config.toml`. N runners per connection.
+
+#### 10.1.1 New connection + first runner (UI-driven)
+
+```
+Cloud UI                         Add Runner modal
+─────────────────────────────────────────────────────────
+                                 ○ New connection
+                                 ◉ Existing connection ▾
+                                 ─────────────────────────
+                                 Connection title:  [_________]   (required)
+                                 Runner name:       [_________]   (default: hostname)
+                                 Working dir:       [_________]   (default: $TMPDIR/.pidash/)
+                                 Agent:             [codex ▾]
+                                 ▸ Approval policy (advanced)
+                                 ─────────────────────────
+                                 [Generate setup script]
+```
+
+User fills the form, clicks **Generate setup script**. Cloud:
+1. Creates a `Token` row with the given title, mints `token_id` + `token_secret`.
+2. Returns a setup script with all the values baked in:
+
+   ```bash
+   curl -fsSL https://get.pidash.so/install.sh | sh -s -- \
+     --token-id    <token_id> \
+     --token-secret <token_secret> \
+     --connection-title "work laptop" \
+     --runner-name "rich-laptop" \
+     --working-dir "/tmp/.pidash" \
+     --agent codex
+   ```
+
+User pastes the script on the dev machine. The script (non-interactive):
+1. Installs `pidash` if not present.
+2. Writes `[token]` block to `credentials.toml` (mode 0600).
+3. Calls `POST /api/v1/runner/register/` (auth `X-Token-Id` + `Bearer token_secret`) to mint the first runner with the user's chosen name + working_dir + agent + approval_policy.
+4. Writes the `[[runner]]` block to `config.toml`.
+5. Installs the systemd/launchd unit (if not already installed).
+6. Starts the daemon.
+
+End state: one connection, one runner, daemon running.
+
+#### 10.1.2 Additional runner on existing connection (UI-driven)
+
+User opens the same Add Runner modal, picks **Existing connection**, selects a connection from a dropdown of their tokens (by title). Form fields are the same minus the connection title:
+
+```
+                                 ○ New connection
+                                 ◉ Existing connection ▾  [work laptop ▾]
+                                 ─────────────────────────
+                                 Runner name:       [_________]   (default: hostname-2)
+                                 Working dir:       [_________]
+                                 Agent:             [codex ▾]
+                                 ▸ Approval policy (advanced)
+                                 ─────────────────────────
+                                 [Generate command]
+```
+
+Cloud generates a CLI invocation (no token credentials needed — the target machine already has them):
+
+```bash
+pidash configure runner \
+  --name "rich-laptop-2" \
+  --working-dir "/home/rich/work/side" \
+  --agent claude_code
+```
+
+User pastes it on the target machine. The CLI:
+1. Calls `POST /api/v1/runner/register/` (auth from the existing `[token]` block) to mint the runner.
+2. Writes the `[[runner]]` block to `config.toml`.
+3. Tells the running daemon over IPC: "load instance `<runner_id>`."
+4. Daemon inserts into `instances`, sends `Hello { runner_id }` over the existing WS, receives `Welcome`, spawns the `RunnerLoop`. No reconnect.
+
+End state: existing connection, +1 runner, daemon kept running throughout.
+
+#### 10.1.3 Additional runner via direct CLI (no UI)
+
+The user can skip the cloud UI entirely and run `pidash configure runner` on the dev machine directly:
+
+```bash
+$ pidash configure runner --name side --working-dir ~/work/side --agent claude_code
+```
+
+Cloud-side and daemon-side effect is identical to §10.1.2 — the only difference is the user typed the command themselves instead of copying it from the UI. Useful for users who live in a terminal or are scripting setup.
+
+If invoked on a TTY with required fields missing, the CLI prompts (matches today's behavior at `runner/src/cli/configure.rs:34-44`). On a non-TTY (e.g. cloud-init scripts), missing fields produce a clear error.
+
+#### 10.1.4 Editing a runner
+
+Three valid paths, all converging on the same daemon-side reload:
+
+- **CLI flag (partial-edit):**
+  ```bash
+  $ pidash configure runner --name main --approval-auto-readonly true
+  > Updated approval_policy.auto_approve_readonly_shell = true for "main".
+  ```
+  Only the flags you pass change. Daemon reloads that runner's config slice in place; no reconnect.
+
+- **TUI:**
+  ```bash
+  $ pidash tui
+  # Pick "main" from the runner picker → Config tab → edit → save.
+  ```
+  Best for list-valued fields like the approval allowlist that are awkward on the CLI.
+
+- **Direct edit + reload:**
+  ```bash
+  $ $EDITOR ~/.config/pidash/config.toml
+  $ pidash configure --reload      # tells daemon to re-read config.toml
+  ```
+  Escape hatch for power users.
+
+Daemon-level fields (`cloud_url`, `heartbeat_interval_secs`, `log_level`) are not editable per-runner. Changing them via direct edit + reload requires a daemon restart for `cloud_url`; the other two can be hot-applied.
+
+#### 10.1.5 Removing
+
+Per-runner removal:
+
+```bash
+$ pidash remove --runner side
+> Cancelling in-flight run for "side"... (none)
+> Deregistering "side" cloud-side... OK.
+> Removed [[runner]] block from config.toml.
+> Deleted /home/rich/.local/share/pidash/runners/9c1b7e.../
+> Daemon dropped the instance.
+```
+
+Full teardown (today's `pidash remove` behavior):
+
+```bash
+$ pidash remove
+> Stopping daemon... OK.
+> Uninstalling service unit... OK.
+> Revoking token cloud-side (cascades to all runners under it)... OK.
+> Deleted config.toml, credentials.toml, data_dir/runners/*.
+```
+
+The two are disambiguated by the `--runner` flag.
+
+### 10.2 CLI verb reference
+
 Every IPC verb that today implicitly addresses the runner gains a `--runner <name|id>` selector, with the rule **"if exactly one instance is configured, the flag is optional"**.
 
 - `pidash status` → lists all instances; `pidash status --runner main` for one.
@@ -414,6 +562,8 @@ Every IPC verb that today implicitly addresses the runner gains a `--runner <nam
 - `pidash tui` → instance picker / multi-pane view.
 - `pidash issue …` / `pidash comment …` etc. that talk to cloud need to know which runner identity to use; default to single instance, require `--runner` otherwise.
 - Approvals over IPC carry `runner_id` (or `runner_name`).
+
+### 10.3 IPC `StatusSnapshot`
 
 `StatusSnapshot` (in `runner/src/ipc/protocol.rs:57`) becomes:
 
