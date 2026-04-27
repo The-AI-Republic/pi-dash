@@ -19,7 +19,7 @@ Each runner still has its own `runner_id` (used as a routing key on the wire and
 - Audit logs name the host doing the work, which is what's actually wanted when investigating an incident.
 - Removes the bootstrap-vs-rest auth asymmetry that an in-band multi-Hello scheme would have.
 
-**Affects**: `design.md` §5 (entirely rewritten as token-only), §8 persistence layout (`token/` directory), §9 config (`[token]` block in `credentials.toml`), §13.2 migration (existing `runner_secret` retired).
+**Affects**: `design.md` §5 (token-only auth model), §8 persistence layout (`token/` directory), §9 config (`[token]` block in `credentials.toml`).
 
 ---
 
@@ -130,27 +130,25 @@ If the need emerges later, the runner-side change is small (it's a CLI selector 
 
 ## Q9 — REST API auth scope
 
-**Question**: today the runner has two distinct credentials — `runner_secret` (used for WS upgrade auth) and `api_token` (used for the `/api/v1/` REST surface via `X-Api-Key`; `runner/src/api_client.rs:142`, `runner/src/config/schema.rs:166`). With WS auth moving to a token, should REST auth also move, or stay on `X-Api-Key`?
+**Question**: the runner has two distinct credentials — `token_secret` (for WS upgrade auth) and `api_token` (for the `/api/v1/` REST surface via `X-Api-Key`; `runner/src/api_client.rs:142`, `runner/src/config/schema.rs:166`). Should both move to one credential, or stay separate?
 
-**Decision**: **WS auth changes; REST auth stays on `X-Api-Key`.** Unifying both surfaces onto one credential is deferred.
+**Decision**: **separate credentials, one per surface.** WS uses `X-Token-Id` + `Bearer token_secret`. REST stays on `X-Api-Key: <api_token>`. Unifying both surfaces onto one credential is deferred.
 
-| Surface | Today | After this change |
+| Surface | Credential | Header |
 |---|---|---|
-| WS (`/ws/runner/`) | `X-Runner-Id` + `Bearer runner_secret` | `X-Token-Id` + `Bearer token_secret` |
-| REST (`/api/v1/...`) | `X-Api-Key: <api_token>` | unchanged — `X-Api-Key: <api_token>` |
+| WS (`/ws/runner/`) | `token_secret` | `X-Token-Id` + `Bearer token_secret` |
+| REST (`/api/v1/...`) | `api_token` | `X-Api-Key: <api_token>` |
 
-`Credentials` therefore carries `token_id`, `token_secret`, `api_token`, and `runner_id` post-migration. `runner_secret` is retired.
-
-**Rationale**: an earlier draft of this decision claimed today's runner uses `runner_secret` for both WS and REST. That was incorrect — REST already uses a separate `api_token` via `X-Api-Key` (it has for some time; see `runner/src/api_client.rs:5-10`). Unifying WS and REST onto one token is a *new* auth-system redesign, not a cleanup of the existing model. Its scope reaches into:
+**Rationale**: unifying WS and REST onto one token is a separate auth-system redesign that reaches into:
 
 - Every `/api/v1/` endpoint and the cloud middleware that validates `X-Api-Key`.
-- The `PIDASH_TOKEN` env-var path in the CLI client.
+- The `PIDASH_TOKEN` env-var path in the CLI client (`runner/src/api_client.rs:8`).
 - Every contract test on the v1 surface (`runner/tests/pidash_cli_contract.rs`).
-- The `pidash login` retrofit flow (`schema.rs:165` notes `api_token` is `None` for older installs and "a follow-up `pidash login` will retrofit them"; that flow would need to be revisited if `api_token` is replaced by `token_secret`).
+- The `pidash login` retrofit flow (`schema.rs:165`).
 
 That work has its own scoping conversation. Punting it lets multi-runner stay focused on the WS-side multiplex; a follow-up can unify both surfaces if and when it's wanted.
 
-**Affects**: `design.md` §5.2.1 (rewritten to reflect today's actual auth split and the chosen narrow scope), §14 file-impact list (no REST client changes).
+**Affects**: `design.md` §5.2.1 (the two-surfaces table).
 
 ---
 
@@ -188,26 +186,3 @@ That work has its own scoping conversation. Punting it lets multi-runner stay fo
 
 **Affects**: `design.md` §4.2 routing table (`ConfigPush` row), §9.2 (new subsection on config scopes).
 
----
-
-## Q13 — How existing v1 installs get a `token_secret`
-
-**Question**: token secrets are "shown once" by design (the cloud stores only the hash). For a fresh install the user creates a token in the UI and pastes the secret into `pidash configure token`. But for a v1 install that already has `runner_id` + `runner_secret` and no token, where does the `token_secret` come from? An auto-mint cloud-side migration cannot deliver it.
-
-**Decision**: **operator-driven migration.** Old installs keep working with v1 auth indefinitely (until the cloud retires v1 at the end of the deprecation window). To migrate, the operator runs `pidash configure token`, which:
-
-1. Prompts for a `token_id` + `token_secret` the operator created in the cloud UI.
-2. Calls a transitional endpoint `POST /api/v1/runner/attach_token/`, authenticated with the existing `runner_secret`, which moves the existing `runner_id` into the named token's `owns` set cloud-side.
-3. Writes the `[token]` block to `credentials.toml` and removes the `runner_secret` field.
-4. On next daemon start, the daemon comes up speaking v2.
-
-Until the operator runs that command, the daemon keeps using v1 auth (`X-Runner-Id` + `Bearer runner_secret`) and v1 frames. Single runner, no multiplex — exactly today's behavior.
-
-**Rationale**: the alternatives are worse:
-- *Cloud auto-mints a Token row and somehow delivers the secret*: violates the "shown once" property and would require a new authenticated delivery channel.
-- *Cloud sets `token_secret = runner_secret`*: muddles the credential rotation story and reuses a secret across two different auth headers.
-- *Daemon does an in-band exchange on first connect ("here's my runner_secret, give me a token_secret")*: better than the above but adds a new transient API surface and silent state mutation that the operator never explicitly authorised.
-
-The chosen path is operator-explicit, doesn't break "shown once," and keeps the back-compat path simple (just keep accepting v1 auth headers during the deprecation window). The cost is the operator has to actively migrate; that cost is acceptable because (a) it's a one-time action, (b) the deprecation warning header in v2 responses surfaces it on every connect, and (c) v1 keeps working until the operator is ready.
-
-**Affects**: `design.md` §13 entirely rewritten to spell out the upgrade path and reject the auto-migration story.

@@ -1,30 +1,26 @@
 # Implementation Plan
 
-Phased rollout. Each phase is independently mergeable and leaves the system in a working state. Phases 1–2 are cloud-side and gate the runner-side work; phases 3–7 are runner-side. Cloud and runner teams ship v2 in coordination (see Q2 in `decisions.md`).
+Phased rollout. Each phase is independently mergeable and leaves the system in a working state. Phases 1–2 are cloud-side and gate the runner-side work; phases 3–7 are runner-side. There is no v1 to maintain (no production runner users yet — see `design.md` §13); the protocol described here is the only one shipped.
 
-## Phase 1 — Cloud: protocol v2 (envelope `runner_id`)
+## Phase 1 — Cloud: wire protocol (envelope `runner_id`)
 
-**Goal**: cloud accepts both v1 and v2 wire frames; v2 frames must carry `runner_id`, v1 frames inherit it from the connection's authenticated identity.
+**Goal**: cloud accepts wire frames with envelope `runner_id` and routes per the §4.2 / §4.3 rules.
 
-- Extend `Envelope` deserialiser to accept optional `runner_id`.
-- Bump server's announced `protocol_version` to `2` in `Welcome`.
-- Routing layer: dispatch frames by `Envelope.runner_id` when present; fall back to "the connection's runner" when not.
-- Outbound: cloud-originated frames `Welcome`, `Assign`, `Cancel`, `Decide`, `RemoveRunner`, per-runner `ConfigPush` set `Envelope.runner_id = Some(id)`. Connection-scoped frames `Ping`, `Bye`, and connection-wide `Revoke` leave it `None`. There is no connection-level `Welcome` — every `Welcome` acks a specific `Hello`. See `design.md` §4.2 / §4.3.
-- v1 runners unaffected: still see one runner per connection.
+- Extend `Envelope` (de)serialiser with `runner_id: Option<Uuid>`.
+- Routing: dispatch frames by `Envelope.runner_id`. Connection-scoped frames (`Ping`, `Bye`, connection-wide `Revoke`) carry `None`; everything else carries `Some(id)`.
+- Outbound: cloud-originated frames `Welcome`, `Assign`, `Cancel`, `Decide`, `RemoveRunner`, per-runner `ConfigPush` set `Envelope.runner_id = Some(id)`. Connection-scoped frames `Ping`, `Bye`, connection-wide `Revoke` leave it `None`. There is no connection-level `Welcome` — every `Welcome` acks a specific `Hello`.
 
-**Done when**: a v1 runner still works end-to-end; integration test confirms a v2 envelope with mismatching `runner_id` is rejected.
+**Done when**: integration test confirms a frame with mismatching or missing `runner_id` (where one is required) is rejected.
 
 ## Phase 2 — Cloud: token (machine credential) entity + UI
 
-**Goal**: introduce `Token` entity, new auth path, registration flow, UI changes for the tokens-vs-runners split.
+**Goal**: introduce `Token` entity, auth path, registration flow, UI changes for the tokens-vs-runners split.
 
-- Schema migration: `tokens` table (`token_id`, `secret_hash`, `title`, `workspace_id`, `created_at`, `last_seen_at`, `revoked_at`); `runners.token_id` FK (nullable for legacy v1 runners that haven't migrated yet).
+- Schema: `tokens` table (`token_id`, `secret_hash`, `title`, `workspace_id`, `created_at`, `last_seen_at`, `revoked_at`); `runners.token_id` FK (NOT NULL — every runner is owned by a token).
 - Auth path: WS upgrade headers carry `X-Token-Id` + `Bearer token_secret`. Validates against the token record; populates the connection's authorised set with the token's `owns`.
-- Back-compat: v1 auth headers (`X-Runner-Id` + `Bearer runner_secret`) continue to be accepted for the deprecation window for runners whose `token_id` is still null. **No auto-mint** — tokens are created exclusively by explicit user action in the UI; the cloud never creates a Token row on a runner's behalf during a connection. See `design.md` §13.3 and `decisions.md` Q13.
-- New registration endpoints: `POST /api/v1/token/register/` (returns `token_id` + secret, secret shown once; created via cloud UI). New runner registration `POST /api/v1/runner/register/` requires a `token_id` parameter; v1's no-token-id path remains during the deprecation window for back-compat with old `pidash configure` flows but is marked deprecated.
-- Transitional endpoint `POST /api/v1/runner/attach_token/` (authenticated with the existing `runner_secret`; takes `token_id` + `token_secret` proof) — moves an existing v1 runner into a token's `owns` set. Triggered by the operator running `pidash configure token` on the dev machine. This is the only path by which a v1 install picks up token-based WS auth. Removed at the end of the deprecation window.
+- Registration endpoints: `POST /api/v1/token/register/` (returns `token_id` + secret, secret shown once; created via cloud UI). `POST /api/v1/runner/register/` requires `token_id`, authenticated with `Bearer token_secret`.
 - Multi-Hello support: server tracks `HashSet<Uuid>` of authorised runner_ids per connection, derived from `Token.owns` at auth time.
-- UI changes: tokens section (lists tokens by title with their associated runners; **Revoke** action on the token) and runners section (per-runner **Remove** action; no Revoke on runner). See `design.md` §5.3.
+- UI changes: tokens section (lists tokens by title with their associated runners; **Revoke** action on the token) and runners section (per-runner **Remove** action; no Revoke on runner). The runners section also exposes the **Add Runner** action, which is the entry point for both new connections and additional runners on existing connections — see `design.md` §5.3 / §10.x.
 
 **Done when**: a daemon authenticated as a Token can send `Hello { runner_id }` for any owned runner and receive `Welcome { runner_id }`; integration test confirms a `Hello` for an unowned runner is rejected with `RemoveRunner` without dropping the connection.
 
@@ -33,14 +29,13 @@ Phased rollout. Each phase is independently mergeable and leaves the system in a
 **Goal**: per-instance directory tree and config shape exist; daemon still hosts exactly one instance.
 
 - `Paths` (`runner/src/util/paths.rs`) gains `runner_dir(runner_id) -> PathBuf` and a `RunnerPaths` newtype carrying a baked-in id.
-- `Config` (`runner/src/config/schema.rs`) splits into `DaemonConfig` (cloud_url, heartbeat, log_level) + `Vec<RunnerConfig>`. `RunnerConfig` owns `agent`, `workspace`, `approval_policy`, `name`, `runner_id`.
-- One-shot config migration on daemon startup: if old top-level `[agent]/[workspace]/[approval_policy]` shape is detected, lift into a single `[[runner]] name="default"` block and rewrite `config.toml`.
-- `Credentials` gains a `[token]` block (`token_id`, `token_secret`, `title`) and a `[[runner]]` array. The existing `runner_id` + `runner_secret` + `api_token` fields are retained during the deprecation window. **No auto-migration**: a v1 install keeps using v1 auth until the operator runs `pidash configure token` (see `design.md` §13.3 and `decisions.md` Q13). Phase 3 only lays the *structural* groundwork — adding the new fields to the schema, supporting both shapes when reading.
-- `HistoryWriter`, `RunsIndex`, log paths take `RunnerPaths` instead of `Paths`. Existing `data_dir/history/...` symlinked or moved to `data_dir/runners/<existing_runner_id>/history/...` on first startup.
+- `Config` (`runner/src/config/schema.rs`) is `DaemonConfig` (cloud_url, heartbeat, log_level) + `Vec<RunnerConfig>`. `RunnerConfig` owns `agent`, `workspace`, `approval_policy`, `name`, `runner_id`.
+- `Credentials` carries a `[token]` block (`token_id`, `token_secret`, `title`), a `[[runner]]` array (each entry just `runner_id` + `name`), and the `api_token` field for REST auth. Daemon refuses to start if `credentials.toml` exists but has no `[token]` block (`design.md` §13.3).
+- `HistoryWriter`, `RunsIndex`, log paths take `RunnerPaths` instead of `Paths`.
 
 Daemon still hosts one instance — `Vec<RunnerConfig>` always has length 1 — but the per-instance plumbing is in place.
 
-**Done when**: a fresh install + a migrated install both produce identical `data_dir/runners/<id>/history/...` layouts and run end-to-end.
+**Done when**: a fresh install produces a `data_dir/runners/<id>/history/...` layout and runs end-to-end.
 
 ## Phase 4 — Runner: per-instance state types
 
@@ -52,9 +47,9 @@ Daemon still hosts one instance — `Vec<RunnerConfig>` always has length 1 — 
 - `RunnerLoop` (the inner loop in `runner/src/daemon/supervisor.rs:184`) takes a `RunnerInstance` instead of supervisor-wide handles.
 - IPC `StatusSnapshot` becomes `{ daemon: DaemonInfo, runners: Vec<RunnerStatusSnapshot> }` with `runners.len() == 1`. TUI and CLI consumers updated to read the new shape.
 
-The wire protocol is still v1 at this point — daemon authenticates as before, sends one `Hello`. The fan-out is internal only.
+The wire is single-runner at this point — the daemon sends one `Hello` and behaves as a single-tenant runner. Demux/mux are not yet introduced; the fan-out is purely internal data structures.
 
-**Done when**: end-to-end run still works; TUI shows the same data as before, just from a list-of-one.
+**Done when**: end-to-end run still works; TUI shows runner data from a list-of-one.
 
 ## Phase 5 — Runner: connection multiplex
 
@@ -64,11 +59,11 @@ The wire protocol is still v1 at this point — daemon authenticates as before, 
 - `RunnerOut` newtype wraps shared `out_tx`; replace every existing `out.send(Envelope::new(…))` site to use it.
 - `Demux` task between `ConnectionLoop`'s inbound mpsc and per-instance mailboxes; supervisor inbox for connection-scoped frames.
 - Heartbeat task iterates `instances` and emits one envelope per instance per tick.
-- Auth (conditional on local credential state): if `credentials.toml` has a `[token]` block, the daemon connects with `X-Token-Id` + `Bearer token_secret` and speaks v2. If only `runner_id` + `runner_secret` are present (un-migrated v1 install), the daemon connects with `X-Runner-Id` + `Bearer runner_secret` and continues to speak v1 wire frames — no multiplex, single-runner behavior preserved. The decision is made at startup based on which credential block exists; operators flip a v1 install to v2 by running `pidash configure token` (`design.md` §13.3).
+- Auth: WS connects with `X-Token-Id` + `Bearer token_secret` from the `[token]` block in `credentials.toml`. No fallback path — daemon refuses to start without a token block (see `design.md` §13.3).
 - `ConnectionLoop` walks `instances` after WS upgrade and sends `Hello { runner_id }` for each.
 - Per-instance `Welcome`, `Reconnecting` flag, `RunResumed` after reconnect.
 
-**Done when**: daemon hosting one instance speaks v2 to a v2 cloud and end-to-end run still works; v1 fallback path verified manually against a v1 cloud.
+**Done when**: daemon hosting one instance multiplexes correctly against the cloud (single Hello, single Welcome, heartbeats arriving with `runner_id`) and end-to-end run still works.
 
 ## Phase 6 — Runner: lift the cap
 
@@ -104,7 +99,7 @@ These don't fit neatly into a single phase but should land alongside the appropr
 - **Metrics**: every metric label set gains `runner_id`. The `instances_count` gauge on the daemon side is new.
 - **Doctor**: `pidash doctor` walks each instance — checks each runner's working_dir, agent installation, and credentials independently.
 - **Backwards compat shim**: `pidash status` (no `--runner`) on a multi-instance daemon prints a friendly error directing the user to `--runner <name>` or `pidash status --all`.
-- **Tests**: `protocol_roundtrip.rs` test already exists for v1; add v2 cases. `cloud_ws_fake.rs` extended to act as a v2 server. New integration test: two-instance daemon, fake cloud, simultaneous assignments.
+- **Tests**: extend `protocol_roundtrip.rs` for the new envelope shape and the new ServerMsg/ClientMsg variants. `cloud_ws_fake.rs` updated to speak the new protocol. New integration test: two-instance daemon, fake cloud, simultaneous assignments.
 
 ---
 
@@ -112,12 +107,10 @@ These don't fit neatly into a single phase but should land alongside the appropr
 
 | Risk | Likelihood | Mitigation |
 |---|---|---|
-| Migration of existing single-runner installations corrupts history | Low | Phase 3 includes a dry-run mode and a backup of the old layout to `data_dir/.pre-multi-runner/`. |
-| Cloud's `runners → token` migration leaves orphan rows or mis-titles tokens | Low | Phase 2 migration runs in two stages: (a) populate `token_id` and `tokens.title` from the runner's existing name; (b) flip auth to require `token_id`. Stage (a) is reversible. |
 | Demux/Mux concurrency bugs (lost frames, wrong-instance routing) | Medium | Phase 5 is the riskiest single PR. Add property-based tests for the demux. Run with `RUST_LOG=trace` against the fake cloud during PR review. |
 | One runner's slow agent backs up the shared `out_tx` and stalls others | Medium | Buffer size 512 (was 128). If still observed, give each instance its own bounded mpsc and `select!` across them at the mux. |
-| Per-instance directory layout breaks IDE tooling that reads `data_dir/history/` | Low | Symlink `data_dir/history -> data_dir/runners/<default_runner_id>/history` for the single-instance case during phase 3 to avoid surprising downstream tools. |
 | User configures > 50 runners and is confused why the daemon won't start | Low | Daemon-side validation message explicitly states the cap and points to `design.md` §16. |
+| Stale dev install on a developer's machine fails to start after upgrade | Low | The "no [token] block" error message names the exact recovery path (delete `credentials.toml` + `data_dir/runners/`, run setup script). Cheap to diagnose. |
 
 ## Estimated scope
 
@@ -126,7 +119,7 @@ Rough order of magnitude per phase, in PRs:
 | Phase | PRs | Notes |
 |---|---|---|
 | 1 | 1–2 | Cloud-side, focused. |
-| 2 | 2–3 | Cloud schema migration is the long pole. |
+| 2 | 2–3 | New cloud entity + UI changes are the long pole. |
 | 3 | 1 | Runner-side, mechanical. |
 | 4 | 1–2 | Mostly type-shuffling; IPC change is the wide one. |
 | 5 | 1 | The risky one. |

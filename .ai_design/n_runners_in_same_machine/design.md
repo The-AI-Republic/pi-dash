@@ -34,7 +34,7 @@ This document supersedes the single-runner-per-process assumption baked into `ru
 
 ### 4.1 Envelope change
 
-Today every frame is implicitly bound to "the runner this WS belongs to" — auth headers (`X-Runner-Id` + `Bearer runner_secret` at `runner/src/cloud/ws.rs:39-40`) pin identity at HTTP-upgrade time. To multiplex, every routed frame must name its target.
+In a single-runner-per-connection model, every frame is implicitly bound to "the runner this WS belongs to" — auth headers pin identity at HTTP-upgrade time and frames carry no `runner_id` discriminator. To multiplex N runners across one WS, every routed frame must name its target.
 
 Add `runner_id` to `Envelope` as an optional top-level field:
 
@@ -80,12 +80,6 @@ The `Welcome` frame deserves a note: it is **per-runner**. There is no connectio
 
 `Ping` is handled exclusively by the connection task: one `Ping` from cloud → one `Heartbeat` reply with `Envelope.runner_id = None` and an empty per-runner status (`status: Idle`, `in_flight_run: None` at the connection level — the per-runner heartbeats already carry the real per-instance status, see §6.6). This is a wire change from v1, where `Ping` was handled inside `RunnerLoop` (`runner/src/daemon/supervisor.rs:327`); in v2 it moves out of the inner loop.
 
-### 4.4 Compatibility
-
-- The cloud must run v2-aware code before any runner ships v2 frames.
-- Old runners (v1) keep working forever: cloud sees one runner per connection, exactly as today.
-- A v2 runner connecting to a v1-only cloud falls back to single-instance mode (sends only the first runner's frames, logs a warning). This is a defensive fallback, not a supported deployment.
-
 ## 5. Auth model
 
 The shared WS authenticates as a **token** (a machine credential), not as any single runner. Each runner has a stable `runner_id` (used as a routing identifier on the wire and a display key in the UI) but no per-runner secret.
@@ -118,27 +112,23 @@ Mental model: **one dev machine == one daemon == one token == one WS connection 
 
 **Tokens are not rotatable.** The supported lifecycle is create + revoke. To "rotate" a token, the user creates a new one in the UI, runs `pidash configure token` to install it, then revokes the old one in the UI. There is no in-place rotation API; the design is deliberately simpler at the cost of a brief overlap window when both tokens exist.
 
-### 5.2.1 Credential scope: WS auth changes; REST auth deferred
+### 5.2.1 Credential scope: two surfaces, two credentials
 
-This design changes WS auth only. REST auth (the `/api/v1/` surface used by `pidash issue`, `pidash comment`, `pidash state`, etc.) is **out of scope for this change** and continues to use the existing `X-Api-Key` header sourced from `Credentials.api_token` (`runner/src/config/schema.rs:166`, `runner/src/api_client.rs:142`).
+The runner has two distinct auth surfaces with separate credentials:
 
-Concretely:
-
-| Surface | Today | After this change |
+| Surface | Credential | Header |
 |---|---|---|
-| WS upgrade (`/ws/runner/`) | `X-Runner-Id` + `Bearer runner_secret` | `X-Token-Id` + `Bearer token_secret` |
-| REST (`/api/v1/...`) | `X-Api-Key: <api_token>` | unchanged — still `X-Api-Key: <api_token>` |
+| WS upgrade (`/ws/runner/`) | `token_secret` | `X-Token-Id` + `Bearer token_secret` |
+| REST (`/api/v1/...`) | `api_token` | `X-Api-Key: <api_token>` |
 
-`Credentials` therefore carries three things on disk during the transition:
-- `token_id` + `token_secret` (new; for WS auth).
-- `api_token` (existing; unchanged; for REST auth).
-- `runner_id` (existing; identifier, not a credential).
+`Credentials` carries:
+- `token_id` + `token_secret` — for WS auth.
+- `api_token` — for REST auth (orthogonal to the WS auth model; already token-based).
+- `runner_id` per runner — identifier only, not a credential.
 
-Runners are no longer credential-bearing on the WS side — `runner_secret` is retired (see §13). The `api_token` field is unchanged because it's already token-based and orthogonal to the WS auth model.
+**Why not unify WS and REST onto one token**: it's a separate auth-system redesign that would touch every `/api/v1/` endpoint, the `PIDASH_TOKEN` env path (`runner/src/api_client.rs:8`), the cloud's API key middleware, and every contract test on the v1 surface. Out of scope here; a follow-up can unify both surfaces if it's wanted.
 
-**Why not unify WS and REST onto one token now**: doing so is a separate auth-system redesign that would touch every `/api/v1/` endpoint, the `PIDASH_TOKEN` env path (`runner/src/api_client.rs:8`), the cloud's API key middleware, and every contract test on the v1 surface. That work has its own scoping conversation. Punting it lets this design stay focused on the WS-side multiplex; a follow-up can unify both surfaces if and when it's wanted.
-
-When a CLI verb addresses a specific runner (e.g. `pidash issue --runner main`), the runner_id is a request parameter on the v1 surface — same as today, since the v1 surface is already runner-aware via `X-Api-Key` scope.
+When a CLI verb addresses a specific runner (e.g. `pidash issue --runner main`), the runner_id is a request parameter on the REST surface; the `api_token` authenticates the call.
 
 ### 5.3 UI surface
 
@@ -151,7 +141,7 @@ This matches the "credential is a security primitive; runner is an operational p
 
 ### 5.4 Why not per-runner secrets
 
-Considered and rejected: keep today's per-runner `runner_secret` model and have the WS authenticate as one runner via headers, then send extra `Hello` frames in-band for additional runners. Rejected because:
+Considered and rejected: a per-runner `runner_secret` model where the WS authenticates as one runner via headers and additional runners send `Hello` frames in-band carrying their own secrets. Rejected because:
 
 - Bootstrap-vs-rest auth asymmetry is awkward (the connection's identity is one specific runner, but it carries traffic for many).
 - Rotating the bootstrap runner's secret would tear down the connection.
@@ -172,8 +162,8 @@ Considered and rejected: keep today's per-runner `runner_secret` model and have 
                      │   └──────────────┘   └─────────┘──►│ mailbox C  │ ──►│ RunnerLoop C
                      │                          ▲                           │
                      │                          └─ supervisor inbox         │
-                     │                             (Welcome, Ping, Bye,     │
-                     │                              connection Revoke)     │
+                     │                             (Ping, Bye,               │
+                     │                              connection Revoke)       │
                      │                                                      │
    outbound (WS) ◄── │   shared out_tx ◄────────── Mux (just an mpsc) ◄─── RunnerOut(A)
                      │                                                  ◄── RunnerOut(B)
@@ -396,6 +386,7 @@ No per-runner secret. The token authenticates the connection; `runner_id`s are r
 - **Duplicate `runner_id`** — refused. Cloud-side state is keyed by runner_id; collisions break routing.
 - **Duplicate `name`** — refused. Names are user-facing; collisions break `--runner <name>` selection.
 - **Instance count > cap (50)** — refused. See §16.
+- **`credentials.toml` exists but has no `[token]` block** — refused. See §13.3 for the message and recovery path.
 - Zero instances configured — *not* an error. Daemon comes up idle and IPC-only, useful for `pidash configure runner` to add the first instance.
 
 ### 9.2 Config scopes and ConfigPush
@@ -511,45 +502,32 @@ Token-level reauth (the `Bearer token_secret` itself becomes invalid) is a diffe
 
 The one explicit cost of shared transport: a WS hiccup briefly stalls *all* instances at once. Acceptable trade-off given the design's other goals; not a blocker.
 
-## 13. Migration
+## 13. Rollout
 
-Cloud and runner ship v2 together (decided; see Q2 in `decisions.md`). The wire protocol bumps once, with a bounded transition window: cloud accepts both v1 (per-runner `X-Runner-Id` + `Bearer runner_secret`) and v2 (token-based `X-Token-Id` + `Bearer token_secret`) auth headers and frame envelopes for a deprecation period (~one release cycle).
-
-The hard problem in migration is that **token secrets are not recoverable** — they're shown once at creation, hashed at rest. There is no cloud-side path to populate `credentials.toml` with a `token_secret` for a runner that already exists. The migration plan must therefore avoid pretending an "auto-mint a Token row → daemon magically picks it up" path is viable.
+Pi Dash has no production runner users yet, so there is no v1→v2 migration story to support. Cloud and runner ship v2 only. v1 auth (`X-Runner-Id` + `Bearer runner_secret`) is not implemented on the cloud side at all.
 
 ### 13.1 Cloud-side
-1. Roll v2 wire protocol (envelope `runner_id`), accepting both v1 and v2 frames. Existing v1 runners unaffected during the deprecation window.
-2. Add `Token` entity (§5.1), registration endpoint, UI tokens section, per-runner Remove action. **Do not auto-create Tokens for existing runners** — see §13.3 for how those runners migrate.
+1. Roll the wire protocol (envelope `runner_id`), `Welcome { runner_id }` per `Hello`, and the `RemoveRunner` variant.
+2. Add `Token` entity (§5.1), registration endpoints, UI tokens section, per-runner Remove action.
 3. Update assigner so `Assign` is keyed by `runner_id` independent of which connection currently holds that runner.
 
-### 13.2 Runner-side (new install path)
-For a fresh install (no pre-existing `credentials.toml`):
-1. User creates a token in the Pi Dash UI, copies `token_id` + `token_secret`.
-2. `pidash configure token` writes both to `credentials.toml`.
-3. `pidash configure runner --name <name>` registers the first runner under the token.
-4. Daemon comes up speaking v2 directly.
+### 13.2 Runner-side (only path)
+1. User creates a token via the cloud UI, which generates a setup script with `token_id` + `token_secret` baked in.
+2. User runs the script on the dev machine. Script installs `pidash` (if needed), writes `[token]` block to `credentials.toml`, creates the first runner with the values the user specified in the UI form, starts the daemon.
+3. Daemon connects with `X-Token-Id` + `Bearer token_secret`, sends `Hello { runner_id }` per configured runner, comes up.
 
-### 13.3 Runner-side (upgrade path for existing v1 installs)
-**Old auth keeps working until the operator opts in.** Concretely:
+See §10.x (user journeys) for the full end-to-end flow.
 
-1. The new daemon binary, when started against an existing `credentials.toml` that has `runner_id` + `runner_secret` but no `[token]` block, falls back to v1 WS auth (`X-Runner-Id` + `Bearer runner_secret`) and v1 wire frames. It runs as today — single runner per daemon, no multiplex. This is the back-compat mode.
-2. To migrate, the operator runs `pidash configure token`. This:
-   - Prompts the user for a `token_id` + `token_secret` they created in the cloud UI (just like the new-install path).
-   - Calls a transitional cloud endpoint `POST /api/v1/runner/attach_token/` authenticated with the *existing* `runner_secret`, which moves the existing `runner_id` into the named token's `owns` set.
-   - Writes the `[token]` block to `credentials.toml`.
-   - Removes `runner_secret` from `credentials.toml` (it's no longer needed for WS auth).
-3. On next daemon start, with both `[token]` and `[[runner]]` populated, the daemon comes up speaking v2.
+### 13.3 Stale-config refusal
+If the daemon starts against a `credentials.toml` that exists but has no `[token]` block (e.g. a stale dev install from before this design), it refuses to start with a clear error:
 
-This means existing installs are never silently switched. Migration is operator-driven and gated on the operator possessing a token secret (which only they can create via the UI). No "shown once" guarantee is broken.
+```
+no token configured: credentials.toml has no [token] block.
+Run 'pidash configure --token-id <id> --token-secret <secret>' (or paste the
+setup script from the cloud UI) to install a token.
+```
 
-Per-instance directory and config layout migrations happen automatically on first start of the new daemon, regardless of whether the operator has migrated to v2 auth yet:
-- `data_dir/history/...` moves to `data_dir/runners/<existing_runner_id>/history/...`.
-- Top-level `[agent]/[workspace]/[approval_policy]` lifts into a single `[[runner]] name="default"` block; `config.toml` rewritten in place.
-
-These layout migrations are independent of the auth migration — they only touch on-disk shape, which is invisible to the cloud.
-
-### 13.4 Deprecation window
-After the cloud rolls v2, v1 auth (`X-Runner-Id` + `Bearer runner_secret`) is accepted but emits a deprecation warning header on each WS upgrade response. After ~one release cycle, v1 auth is removed cloud-side; daemons that haven't migrated will stop connecting and surface a clear error pointing at `pidash configure token`.
+There is no automatic in-place upgrade path. Stale configs are decommissioned by deleting `credentials.toml` (and `data_dir/runners/*` if present) and running fresh setup.
 
 ## 14. Files most affected
 
