@@ -154,9 +154,10 @@ class TestUpsertIssue:
 
     @pytest.mark.django_db
     def test_xss_in_body_is_sanitized(self, github_repo_sync):
-        """C1 regression: a malicious GitHub body must not land script tags
-        in description_html. The renderer escapes paragraphs and pipes the
-        result through validate_html_content (nh3)."""
+        """C1 regression: a malicious GitHub body must not land an executable
+        script tag in description_html. The renderer escapes paragraphs and
+        pipes the result through validate_html_content (nh3); the raw text
+        survives as inert escaped content like `&lt;script&gt;...`."""
         gh = {
             "id": 11,
             "number": 11,
@@ -169,9 +170,12 @@ class TestUpsertIssue:
         }
         issue, _sync = _upsert_issue(github_repo_sync, gh, default_state=None)
         issue.refresh_from_db()
+        # No raw script tag (the security property).
         assert "<script>" not in issue.description_html
-        assert "alert(" not in issue.description_html
-        # The literal user text is preserved as escaped content / stripped form.
+        assert "<script " not in issue.description_html
+        # Escape-then-sanitize converts the angle brackets to entities.
+        assert "&lt;script&gt;" in issue.description_html
+        # Benign content rendered alongside the malicious paragraph survives.
         assert "second paragraph" in issue.description_stripped
 
 
@@ -235,8 +239,10 @@ class TestUpsertComment:
         }
         _upsert_comment(github_repo_sync, gh_comment, parent, parent_sync)
         comment = IssueComment.objects.get(issue=parent, external_id="200")
-        assert "onerror" not in comment.comment_html
-        assert "<script" not in comment.comment_html
+        # No raw img tag (the security property — onerror cannot fire on inert text).
+        assert "<img" not in comment.comment_html
+        # Escape-then-sanitize converts the angle brackets to entities.
+        assert "&lt;img" in comment.comment_html
 
 
 @pytest.mark.unit
