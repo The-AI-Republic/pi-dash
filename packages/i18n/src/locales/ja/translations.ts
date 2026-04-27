@@ -210,6 +210,7 @@ export default {
   timezone: "タイムゾーン",
   avatar: "アバター",
   cover_image: "カバー画像",
+  cover_image_upload_skipped: "Cover image upload skipped — using a default cover.",
   password: "パスワード",
   change_cover: "カバーを変更",
   language: "言語",

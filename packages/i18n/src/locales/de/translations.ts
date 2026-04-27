@@ -213,6 +213,7 @@ export default {
   timezone: "Zeitzone",
   avatar: "Profilbild",
   cover_image: "Titelbild",
+  cover_image_upload_skipped: "Cover image upload skipped — using a default cover.",
   password: "Passwort",
   change_cover: "Titelbild ändern",
   language: "Sprache",

@@ -211,6 +211,7 @@ export default {
   timezone: "Múi giờ",
   avatar: "Ảnh đại diện",
   cover_image: "Ảnh bìa",
+  cover_image_upload_skipped: "Cover image upload skipped — using a default cover.",
   password: "Mật khẩu",
   change_cover: "Thay đổi ảnh bìa",
   language: "Ngôn ngữ",

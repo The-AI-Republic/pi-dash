@@ -209,6 +209,7 @@ export default {
   timezone: "Strefa czasowa",
   avatar: "Zdjęcie profilowe",
   cover_image: "Obraz w tle",
+  cover_image_upload_skipped: "Cover image upload skipped — using a default cover.",
   password: "Hasło",
   change_cover: "Zmień obraz w tle",
   language: "Język",

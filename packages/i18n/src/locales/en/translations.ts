@@ -38,6 +38,7 @@ export default {
   timezone: "Timezone",
   avatar: "Avatar",
   cover_image: "Cover image",
+  cover_image_upload_skipped: "Cover image upload skipped — using a default cover.",
   password: "Password",
   change_cover: "Change cover",
   language: "Language",

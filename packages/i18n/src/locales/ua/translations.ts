@@ -211,6 +211,7 @@ export default {
   timezone: "Часовий пояс",
   avatar: "Аватар",
   cover_image: "Обкладинка",
+  cover_image_upload_skipped: "Cover image upload skipped — using a default cover.",
   password: "Пароль",
   change_cover: "Змінити обкладинку",
   language: "Мова",

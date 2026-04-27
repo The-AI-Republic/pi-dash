@@ -211,6 +211,7 @@ export default {
   timezone: "Zona waktu",
   avatar: "Avatar",
   cover_image: "Gambar sampul",
+  cover_image_upload_skipped: "Cover image upload skipped — using a default cover.",
   password: "Kata sandi",
   change_cover: "Ganti sampul",
   language: "Bahasa",

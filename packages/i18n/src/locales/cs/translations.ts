@@ -210,6 +210,7 @@ export default {
   timezone: "Časové pásmo",
   avatar: "Profilový obrázek",
   cover_image: "Úvodní obrázek",
+  cover_image_upload_skipped: "Cover image upload skipped — using a default cover.",
   password: "Heslo",
   change_cover: "Změnit úvodní obrázek",
   language: "Jazyk",

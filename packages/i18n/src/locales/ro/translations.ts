@@ -211,6 +211,7 @@ export default {
   timezone: "Fus orar",
   avatar: "Imagine de profil",
   cover_image: "Copertă",
+  cover_image_upload_skipped: "Cover image upload skipped — using a default cover.",
   password: "Parolă",
   change_cover: "Schimbă coperta",
   language: "Limbă",

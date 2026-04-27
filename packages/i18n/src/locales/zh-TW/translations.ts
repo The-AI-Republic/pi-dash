@@ -208,6 +208,7 @@ export default {
   timezone: "時區",
   avatar: "大頭貼",
   cover_image: "封面圖片",
+  cover_image_upload_skipped: "Cover image upload skipped — using a default cover.",
   password: "密碼",
   change_cover: "更換封面",
   language: "語言",

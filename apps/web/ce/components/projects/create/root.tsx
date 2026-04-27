@@ -84,9 +84,18 @@ export const CreateProjectForm = observer(function CreateProjectForm(props: TCre
           // form already defaults `cover_image_url` to a random static URL,
           // and that URL is renderable directly. Fall back to using it as
           // the project's `cover_image` instead of rejecting submission.
+          // A non-blocking warning toast surfaces the skipped upload so the
+          // user has a signal when the failure was actually fixable (auth
+          // expired, server rejected the file, etc.) rather than just a
+          // misconfigured local stack.
           console.warn("Cover upload failed; falling back to bundled static URL", error);
           formData.cover_image = coverImage;
           formData.cover_image_asset = null;
+          setToast({
+            type: TOAST_TYPE.WARNING,
+            title: t("warning"),
+            message: t("cover_image_upload_skipped"),
+          });
         }
       } else {
         formData.cover_image = coverImage;
