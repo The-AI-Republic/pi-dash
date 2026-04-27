@@ -86,6 +86,71 @@ def test_context_includes_git_work_branch_when_set(issue, run):
 
 
 @pytest.mark.unit
+def test_context_parent_is_none_when_unset(issue, run):
+    ctx = build_context(issue, run)
+    assert ctx["parent"] is None
+
+
+@pytest.mark.unit
+def test_context_parent_uses_parents_own_project_identifier(
+    workspace, project, state, create_user, run, issue
+):
+    # Parents may live in a different project than their child (the FK is just
+    # a self-reference with no same-project constraint). The rendered parent
+    # identifier must use the *parent's* project identifier, not the child's.
+    other_project = Project.objects.create(
+        name="Other Project",
+        identifier="OP",
+        workspace=workspace,
+        created_by=create_user,
+        repo_url="git@github.com:acme/other.git",
+        base_branch="trunk",
+    )
+    other_state = State.objects.create(
+        name="Todo", project=other_project, group="unstarted"
+    )
+    parent = Issue.objects.create(
+        name="Umbrella epic",
+        workspace=workspace,
+        project=other_project,
+        state=other_state,
+        created_by=create_user,
+        git_work_branch="pi-dash/op-1",
+    )
+    issue.parent = parent
+    issue.save(update_fields=["parent"])
+
+    ctx = build_context(issue, run)
+    assert ctx["parent"] is not None
+    assert ctx["parent"]["identifier"].startswith("OP-"), (
+        f"parent identifier should use parent's project (OP), got "
+        f"{ctx['parent']['identifier']!r}"
+    )
+    assert ctx["parent"]["title"] == "Umbrella epic"
+    assert ctx["parent"]["work_branch"] == "pi-dash/op-1"
+
+
+@pytest.mark.unit
+def test_context_parent_work_branch_empty_surfaces_as_none(
+    workspace, project, state, create_user, run, issue
+):
+    parent = Issue.objects.create(
+        name="Sibling parent",
+        workspace=workspace,
+        project=project,
+        state=state,
+        created_by=create_user,
+        git_work_branch="",
+    )
+    issue.parent = parent
+    issue.save(update_fields=["parent"])
+
+    ctx = build_context(issue, run)
+    assert ctx["parent"] is not None
+    assert ctx["parent"]["work_branch"] is None
+
+
+@pytest.mark.unit
 def test_context_empty_base_branch_surfaces_as_none(workspace, create_user):
     # A project with no base_branch set — empty strings must flow through as
     # ``None`` so the prompt template takes the "auto-detect remote default"

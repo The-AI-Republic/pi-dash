@@ -50,6 +50,7 @@ def build_context(issue: Issue, run: AgentRun) -> Dict[str, Any]:
     project = issue.project
     workspace = issue.workspace
     state = getattr(issue, "state", None)
+    parent = issue.parent
 
     # Plain M2M traversals; if these raise it's a real ORM error and should
     # bubble up to the caller (which already wraps rendering in PromptRenderError
@@ -98,6 +99,15 @@ def build_context(issue: Issue, run: AgentRun) -> Dict[str, Any]:
             "base_branch": (getattr(project, "base_branch", "") or None),
             "work_branch": (getattr(issue, "git_work_branch", "") or None),
         },
+        "parent": (
+            {
+                "identifier": f"{parent.project.identifier}-{parent.sequence_id}",
+                "title": parent.name or "",
+                "work_branch": (getattr(parent, "git_work_branch", "") or None),
+            }
+            if parent is not None
+            else None
+        ),
         "run": {
             "id": str(run.id),
             "attempt": attempt,
