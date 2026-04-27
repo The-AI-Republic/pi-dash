@@ -24,6 +24,7 @@ import logging
 from celery import shared_task
 from django.db import transaction
 from django.db.models import F, Q
+from django.db.models.functions import Coalesce
 from django.utils import timezone
 
 from pi_dash.db.models.issue_agent_schedule import (
@@ -42,16 +43,20 @@ def scan_due_schedules() -> int:
     Returns the number of fan-outs (mostly for logging / tests).
     """
     now = timezone.now()
+    # Effective cap = override if set, else project default. We compute it
+    # via Coalesce so the scanner can filter under-cap rows at the DB level
+    # (instead of fanning out tasks that fire_tick will then have to disarm
+    # on the backstop). ``-1`` means infinite — admit unconditionally.
+    effective_cap = Coalesce(
+        F("max_ticks"), F("issue__project__agent_default_max_ticks")
+    )
     due_ids = list(
         IssueAgentSchedule.objects.filter(
             enabled=True,
             next_run_at__lte=now,
         )
-        .filter(
-            Q(max_ticks=INFINITE_MAX_TICKS)
-            | Q(max_ticks__isnull=True)
-            | Q(tick_count__lt=F("max_ticks"))
-        )
+        .annotate(_cap=effective_cap)
+        .filter(Q(_cap=INFINITE_MAX_TICKS) | Q(tick_count__lt=F("_cap")))
         .order_by("next_run_at")
         .values_list("id", flat=True)
     )
@@ -107,13 +112,22 @@ def fire_tick(sched_id: str) -> bool:
         if issue.state is None or issue.state.name != DELEGATION_STATE_NAME:
             return False
 
-        # Active-run check is also done by dispatch_continuation_run, but
-        # do it here so we don't consume cap budget for a skipped tick.
+        # Pre-claim skips. All three reasons (active run, no prior run,
+        # no pod) leave next_run_at unchanged so the scanner re-checks
+        # next minute. Budget is only consumed when we actually have a
+        # run we can dispatch — otherwise a misconfigured issue would
+        # burn through 24 ticks doing nothing and auto-pause itself.
         from pi_dash.orchestration import service as orchestration_service
 
         if orchestration_service._active_run_for(issue) is not None:
             logger.info(
                 "agent_schedule.fire_tick: skip issue=%s reason=active-run-exists",
+                issue.pk,
+            )
+            return False
+        if orchestration_service._latest_prior_run(issue) is None:
+            logger.info(
+                "agent_schedule.fire_tick: skip issue=%s reason=no-prior-run",
                 issue.pk,
             )
             return False

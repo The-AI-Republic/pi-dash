@@ -20,6 +20,10 @@ PAUSED_NAME = "Paused"
 PAUSED_GROUP = "backlog"
 PAUSED_COLOR = "#DC2626"
 PAUSED_SEQUENCE = 17500
+#: Tag applied to ``State.external_source`` on rows this migration inserts.
+#: Lets the reverse migration scope its delete to those rows only — never
+#: touch a Paused state a user manually created.
+MIGRATION_TAG = "0128_paused_state"
 
 
 def add_paused_state_to_projects(apps, schema_editor):
@@ -33,7 +37,7 @@ def add_paused_state_to_projects(apps, schema_editor):
     Project = apps.get_model("db", "Project")
 
     for project in Project._default_manager.all().iterator():
-        exists = State.objects.filter(
+        exists = State._default_manager.filter(
             project=project,
             name=PAUSED_NAME,
             deleted_at__isnull=True,
@@ -48,16 +52,22 @@ def add_paused_state_to_projects(apps, schema_editor):
             default=False,
             project=project,
             workspace_id=project.workspace_id,
+            external_source=MIGRATION_TAG,
         )
 
 
 def remove_paused_state_from_projects(apps, schema_editor):
-    """Hard-delete the rows we created so the migration is reversible.
+    """Reverse: only delete rows this migration inserted.
 
-    A future re-run of M2 would recreate the state cleanly.
+    Scoped via ``external_source = MIGRATION_TAG`` so a Paused state a user
+    created manually is never touched on rollback.
     """
     State = apps.get_model("db", "State")
-    State._default_manager.filter(name=PAUSED_NAME, group=PAUSED_GROUP).delete()
+    State._default_manager.filter(
+        name=PAUSED_NAME,
+        group=PAUSED_GROUP,
+        external_source=MIGRATION_TAG,
+    ).delete()
 
 
 class Migration(migrations.Migration):

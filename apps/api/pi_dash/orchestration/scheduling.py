@@ -87,34 +87,43 @@ def arm_schedule(
     Honors ``user_disabled`` and project-level ``agent_ticking_enabled``:
     sets ``enabled = False`` when either suppresses ticks.
     """
-    interval = _project_default_interval(issue)
-    next_run_at = _compute_next_run_at(interval)
+    suppress_for_project = not _project_ticking_enabled(issue)
 
     with transaction.atomic():
-        sched, _created = IssueAgentSchedule.objects.select_for_update().get_or_create(
-            issue=issue,
-            defaults={
-                "interval_seconds": None,
-                "max_ticks": None,
-                "user_disabled": False,
-                "next_run_at": next_run_at,
-                "tick_count": 0,
-                "enabled": True,
-            },
+        sched = (
+            IssueAgentSchedule.objects.select_for_update()
+            .filter(issue=issue)
+            .first()
         )
-
-        sched.tick_count = 0
-        sched.next_run_at = _compute_next_run_at(sched.effective_interval_seconds())
-        suppress = sched.user_disabled or not _project_ticking_enabled(issue)
-        sched.enabled = not suppress
-        sched.save(
-            update_fields=[
-                "tick_count",
-                "next_run_at",
-                "enabled",
-                "updated_at",
-            ]
-        )
+        if sched is None:
+            # Brand-new row — single INSERT with the right values. No
+            # follow-up UPDATE needed.
+            interval = _project_default_interval(issue)
+            sched = IssueAgentSchedule.objects.create(
+                issue=issue,
+                interval_seconds=None,
+                max_ticks=None,
+                user_disabled=False,
+                next_run_at=_compute_next_run_at(interval),
+                tick_count=0,
+                enabled=not suppress_for_project,
+            )
+        else:
+            # Existing row — reset clock and re-evaluate enabled.
+            sched.tick_count = 0
+            sched.next_run_at = _compute_next_run_at(
+                sched.effective_interval_seconds()
+            )
+            suppress = sched.user_disabled or suppress_for_project
+            sched.enabled = not suppress
+            sched.save(
+                update_fields=[
+                    "tick_count",
+                    "next_run_at",
+                    "enabled",
+                    "updated_at",
+                ]
+            )
 
     logger.info(
         "agent_schedule: armed issue=%s enabled=%s next_run_at=%s",

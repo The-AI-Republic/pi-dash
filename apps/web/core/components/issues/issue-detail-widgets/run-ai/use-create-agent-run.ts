@@ -17,12 +17,6 @@ const agentRunService = new AgentRunService();
 type CreateRunArgs = {
   workspaceSlug: string;
   issueId: string;
-  /**
-   * Unused since the Comment & Run flow now reuses the continuation
-   * pipeline (the cloud rebuilds the prompt from issue + comments).
-   * Kept on the type so existing callers compile until they update.
-   */
-  prompt?: string;
 };
 
 export function useCreateAgentRun() {

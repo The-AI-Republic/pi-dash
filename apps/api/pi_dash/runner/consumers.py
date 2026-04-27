@@ -542,7 +542,18 @@ class RunnerConsumer(AsyncJsonWebsocketConsumer):
         from pi_dash.runner.services.matcher import drain_for_runner_by_id
 
         def _pause_and_drain(rid=run_id, runner_id=runner.id):
-            paused = AgentRun.objects.filter(pk=rid).first()
+            # Pre-load the FK chain that maybe_apply_deferred_pause walks
+            # (work_item → state, project) so the deferred-pause check
+            # doesn't issue four separate SELECTs on every terminate.
+            paused = (
+                AgentRun.objects.select_related(
+                    "work_item",
+                    "work_item__state",
+                    "work_item__project",
+                )
+                .filter(pk=rid)
+                .first()
+            )
             if paused is not None:
                 try:
                     maybe_apply_deferred_pause(paused)
@@ -601,7 +612,18 @@ class RunnerConsumer(AsyncJsonWebsocketConsumer):
         )
 
         def _pause_and_drain(rid=run_id, runner_id=runner.id, pod_id=runner.pod_id):
-            run = AgentRun.objects.filter(pk=rid).first()
+            # See _handle_run_paused: select_related avoids the FK chain
+            # walk inside maybe_apply_deferred_pause from issuing extra
+            # SELECTs on every terminate event.
+            run = (
+                AgentRun.objects.select_related(
+                    "work_item",
+                    "work_item__state",
+                    "work_item__project",
+                )
+                .filter(pk=rid)
+                .first()
+            )
             if run is not None:
                 try:
                     maybe_apply_deferred_pause(run)
