@@ -101,7 +101,7 @@ def build_context(issue: Issue, run: AgentRun) -> Dict[str, Any]:
         },
         "parent": (
             {
-                "identifier": f"{project.identifier}-{parent.sequence_id}",
+                "identifier": f"{parent.project.identifier}-{parent.sequence_id}",
                 "title": parent.name or "",
                 "work_branch": (getattr(parent, "git_work_branch", "") or None),
             }
