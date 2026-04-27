@@ -297,3 +297,55 @@ def test_resume_unavailable_noop_when_run_unknown(
     _consumer_for(online_runner)._handle_resume_unavailable(
         online_runner, str(uuid.uuid4())
     )
+
+
+# ---------------------------------------------------------------------------
+# _rid_matches — envelope routing discriminator validation (design.md §4.2)
+# ---------------------------------------------------------------------------
+#
+# These tests use a tiny stand-in for ``runner`` (just needs ``.id``) so they
+# don't pay the test-DB setup cost — _rid_matches is a pure UUID-comparison
+# static method.
+
+
+class _StubRunner:
+    def __init__(self, runner_id):
+        self.id = runner_id
+
+
+@pytest.mark.unit
+def test_rid_matches_accepts_frame_without_rid():
+    import uuid
+
+    runner = _StubRunner(uuid.uuid4())
+    # Connection-scoped frames (ping, bye) and legacy v1 traffic carry no
+    # rid; the consumer must still accept them.
+    assert RunnerConsumer._rid_matches(runner, {"type": "heartbeat"})
+
+
+@pytest.mark.unit
+def test_rid_matches_accepts_matching_rid():
+    import uuid
+
+    runner_id = uuid.uuid4()
+    runner = _StubRunner(runner_id)
+    msg = {"type": "heartbeat", "rid": str(runner_id)}
+    assert RunnerConsumer._rid_matches(runner, msg)
+
+
+@pytest.mark.unit
+def test_rid_matches_rejects_mismatching_rid():
+    import uuid
+
+    runner = _StubRunner(uuid.uuid4())
+    msg = {"type": "heartbeat", "rid": str(uuid.uuid4())}
+    assert not RunnerConsumer._rid_matches(runner, msg)
+
+
+@pytest.mark.unit
+def test_rid_matches_rejects_garbage_rid():
+    import uuid
+
+    runner = _StubRunner(uuid.uuid4())
+    msg = {"type": "heartbeat", "rid": "not-a-uuid"}
+    assert not RunnerConsumer._rid_matches(runner, msg)

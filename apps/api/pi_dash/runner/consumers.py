@@ -61,7 +61,12 @@ class RunnerConsumer(AsyncJsonWebsocketConsumer):
         # Per-run last-seen seq; used to drop duplicates and log gaps.
         self.last_seq_per_run: Dict[str, int] = {}
 
-    async def _send_envelope(self, payload: Dict[str, Any]) -> None:
+    async def _send_envelope(
+        self,
+        payload: Dict[str, Any],
+        *,
+        runner_scoped: bool = True,
+    ) -> None:
         """Send an outbound frame stamped with the wire envelope.
 
         The Rust runner's ``Envelope<T>`` requires ``v`` (protocol version)
@@ -69,12 +74,22 @@ class RunnerConsumer(AsyncJsonWebsocketConsumer):
         pass the logical fields (``type`` + type-specific keys); this helper
         adds the envelope. Any ``v``/``mid`` already in ``payload`` wins so
         tests can pin exact values if they need to.
+
+        ``rid`` (per-runner routing discriminator) is added when the frame
+        is bound to a specific runner — i.e. nearly always, while one
+        connection still serves one runner. Connection-scoped frames
+        (``ping``, ``bye``, future connection-wide ``revoke``) pass
+        ``runner_scoped=False`` so the field is omitted, matching the
+        runner's `Envelope::new` (no rid) vs `Envelope::for_runner`
+        (with rid) split — see ``design.md`` §4.2 / §4.3.
         """
         frame: Dict[str, Any] = {
             "v": PROTOCOL_VERSION,
             "mid": str(uuid4()),
-            **payload,
         }
+        if runner_scoped and self.runner is not None and "rid" not in payload:
+            frame["rid"] = str(self.runner.id)
+        frame.update(payload)
         await self.send_json(frame)
 
     async def connect(self) -> None:
@@ -133,6 +148,19 @@ class RunnerConsumer(AsyncJsonWebsocketConsumer):
         runner = self.runner
         if runner is None:
             return
+        # Validate the per-runner routing discriminator if the daemon set
+        # one. While one connection still authenticates as one runner, an
+        # incoming ``rid`` must match the connection's authenticated runner
+        # — anything else suggests a misbehaving daemon and we drop the
+        # frame. Multi-runner support (cloud-side phase 1+2) will replace
+        # this with a HashSet membership check.
+        if not self._rid_matches(runner, content):
+            logger.warning(
+                "runner %s sent frame with mismatched rid %r; dropping",
+                runner.id,
+                content.get("rid"),
+            )
+            return
         if self._is_duplicate(content):
             logger.debug(
                 "runner %s sent duplicate message %s; dropping",
@@ -150,6 +178,20 @@ class RunnerConsumer(AsyncJsonWebsocketConsumer):
             await handler(runner, content)
         except Exception:
             logger.exception("error handling %s from runner %s", mtype, runner.id)
+
+    @staticmethod
+    def _rid_matches(runner: Runner, content: Dict[str, Any]) -> bool:
+        """Validate envelope ``rid`` against the connection's authenticated
+        runner. Frames without an ``rid`` are accepted (legacy / connection-
+        scoped); frames with an ``rid`` must match the connection's runner.
+        """
+        rid = content.get("rid")
+        if rid is None:
+            return True
+        try:
+            return UUID(str(rid)) == runner.id
+        except (ValueError, AttributeError):
+            return False
 
     def _is_duplicate(self, content: Dict[str, Any]) -> bool:
         """LRU-bounded check on the wire ``mid`` so retries are idempotent."""
