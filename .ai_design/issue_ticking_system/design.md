@@ -9,31 +9,43 @@
 > opportunities to make progress, with the agent self-deciding each
 > turn whether to act or back off.
 >
-> **Related work**
+> **What this changes about today's code**
 >
-> - `.ai_design/issue_run_improve/design.md` — multi-run continuation,
->   `PAUSED_AWAITING_INPUT`, runner pinning, drain triggers, comment
->   auto-trigger. This doc **supersedes the comment auto-trigger
->   sections** of that one (§5.2 of that doc and the
->   `maybe_continue_after_terminate` sweep). The PAUSED + pinning +
->   native-resume infrastructure carries over unchanged — only the
->   _what wakes the agent_ changes.
+> The multi-run continuation infrastructure shipped in PR #61 (commit
+> `c4a8711`) — `AgentRunStatus.PAUSED_AWAITING_INPUT`, runner pinning
+> (`AgentRun.pinned_runner_id`), `_create_continuation_run`, drain
+> triggers, native session resume — is **kept unchanged**. Only the
+> trigger model is replaced: the comment auto-trigger
+> (`orchestration/signals.py` post_save on `IssueComment` →
+> `handle_issue_comment`) and the terminate-side sweep
+> (`orchestration/service.py:maybe_continue_after_terminate` and its
+> consumer call sites) are removed. Periodic ticks become the
+> steady-state wake-up source; Comment & Run is the only explicit
+> manual override. The historical context for the removed bits is in
+> `.ai_design/issue_run_improve/design.md`.
 
 ## 1. Problem
 
-Today, transitioning an issue to **In Progress** creates exactly one
-`AgentRun`. If the agent terminates without finishing — most commonly
-emitting `paused` with a question for the human — nothing wakes it
-again on its own. The existing design proposes auto-creating a
-follow-up on every non-bot comment, but that means casual comments
-(thinking out loud, ack-ing, mid-design notes) all spend tokens, and
-forces the user to think about which comments will or won't trigger
-the agent.
+Today the cloud wakes the agent on two events:
 
-We want the cloud to **periodically re-invoke** the agent on
-in-progress issues. Comments are **inert by default**. The user has
-one explicit affordance — a **Comment & Run** button — to fire an
-out-of-band run.
+1. An issue moves to **In Progress**
+   (`orchestration/signals.py` post_save on `Issue` →
+   `orchestration/service.py:handle_issue_state_transition`),
+   creating one `AgentRun`.
+2. A non-bot user comments on an issue with a prior run
+   (`orchestration/signals.py` post_save on `IssueComment` →
+   `orchestration/service.py:handle_issue_comment`), creating a
+   continuation `AgentRun`. The runner consumer's terminate
+   handlers also sweep for late-arriving comments via
+   `orchestration/service.py:maybe_continue_after_terminate`.
+
+The second path costs tokens on every casual comment (thinking out
+loud, ack-ing, mid-design notes) and forces the user to think about
+which comments will or won't fire the agent.
+
+We want comments to be **inert by default**, with **periodic
+re-invocation** as the steady-state wake-up source and an explicit
+**Comment & Run** button as the only manual override.
 
 ## 2. Goal
 
@@ -86,10 +98,11 @@ moves the issue.
 
 - **Paused** (issue state, new in this design) — work is parked, ticking
   is disarmed, user-visible. Set at cap-hit or manually.
-- **PAUSED_AWAITING_INPUT** (AgentRun status, already exists per
-  `.ai_design/issue_run_improve/design.md`) — a single run yielded
-  with a question. Internal. Multiple can occur over an issue's life
-  without ever auto-moving the issue to the new Paused state.
+- **PAUSED_AWAITING_INPUT** (AgentRun status, defined in
+  `apps/api/pi_dash/runner/models.py` `AgentRunStatus`) — a single
+  run yielded with a question. Internal. Multiple can occur over an
+  issue's life without ever auto-moving the issue to the new Paused
+  state.
 
 When this doc says "auto-transition to Paused" it means the **issue
 state**. When it says `PAUSED_AWAITING_INPUT` it means the **run
@@ -502,8 +515,12 @@ The following are **kept**:
 - `_create_continuation_run`, runner pinning, `build_continuation`
   prompt composition, drain — all unchanged.
 - `done_signal.ingest_into_run` — unchanged (see §5).
-- `PAUSED_AWAITING_INPUT` status, `pinned_runner_id`, native session
-  resume — all unchanged from `.ai_design/issue_run_improve/design.md`.
+- `AgentRunStatus.PAUSED_AWAITING_INPUT` (`runner/models.py`),
+  `AgentRun.pinned_runner_id`, the matcher's personal-then-pod
+  query (`runner/services/matcher.py`), and native session resume
+  via `Assign.resume_thread_id` (`runner/src/cloud/protocol.rs`,
+  consumed by `runner/src/codex/bridge.rs` and the Claude bridge) —
+  all unchanged.
 
 ## 10. Open questions
 

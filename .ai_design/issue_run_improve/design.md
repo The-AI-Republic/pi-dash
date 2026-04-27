@@ -2,13 +2,7 @@
 
 > Directory: `.ai_design/issue_run_improve/`
 >
-> **Status:** the comment-auto-trigger sections (notably §5.2 and the
-> terminate-side comment sweep) are **superseded** by
-> `.ai_design/issue_ticking_system/design.md`, which replaces
-> automatic comment-triggered runs with a periodic scheduler + an
-> explicit "Comment & Run" UI button. The PAUSED / pinning /
-> native-resume / drain machinery in this doc carries over unchanged
-> — only the trigger model changes. Read both docs together.
+> **Status:** discussion / pre-implementation. No code changes yet.
 >
 > **Scope:** how an issue continues across more than one `AgentRun` when the
 > first run yields without finishing — and what that implies for run lifecycle,
@@ -19,8 +13,6 @@
 > - `.ai_design/issue_runner/design.md` — pods, runners, the queue model, the
 >   run-identity split (creator vs. billable owner). This doc builds on top of
 >   that one and assumes its decisions.
-> - `.ai_design/issue_ticking_system/design.md` — periodic re-invocation of
->   the agent, replacing this doc's comment-auto-trigger model.
 
 ## 1. Problem
 
