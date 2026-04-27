@@ -26,7 +26,7 @@ This document supersedes the single-runner-per-process assumption baked into `ru
 | Term | Meaning |
 |---|---|
 | **Daemon** | The OS process. Owns the IPC socket, the cloud transport, signal handling, logging, the supervisor task. Cardinality 1 per machine. |
-| **Runner instance** | A logical runner with its own `runner_id`, `runner_secret`, agent config, working directory, approval policy, history dir, and single in-flight slot. Cardinality N per daemon. |
+| **Runner instance** | A logical runner with its own `runner_id`, agent config, working directory, approval policy, history dir, and single in-flight slot. Runners do not own a credential — they're identifiers under a token (see §5). Cardinality N per daemon. |
 | **Token** (a.k.a. machine credential) | A cloud-side entity that authenticates the WS connection and is authorised to act as a declared set of `runner_id`s. Surfaced in the UI as a "token" with a user-supplied title. See §5. |
 | **Shared connection** | The single WebSocket session opened by the daemon, multiplexed across all instances. |
 
@@ -419,7 +419,7 @@ Every IPC verb that today implicitly addresses the runner gains a `--runner <nam
 - `pidash configure` → splits into `pidash configure token` (one-shot per host; pastes in the token + secret created via the cloud UI) and `pidash configure runner --name <name>` (per instance, registers the runner under the active token).
 - `pidash remove` → **two distinct verbs, disambiguated by flag**:
   - `pidash remove` (no flag): full machine teardown, today's behavior (`runner/src/cli/remove.rs`). Stops the service, uninstalls the unit, deregisters the *token* from the cloud (which cascades to all owned runners), deletes `config.toml` + `credentials.toml` + `data_dir/runners/*`. This is the inverse of `install` + `configure` for the whole host.
-  - `pidash remove --runner <name>`: per-instance removal. Cancels that runner's in-flight run, removes it from `[[runner]]` in `config.toml`, deletes `data_dir/runners/<runner_id>/`, sends `Bye { runner_id }` over the existing WS. Connection and other runners stay up.
+  - `pidash remove --runner <name>`: per-instance removal. Cancels that runner's in-flight run, removes it from `[[runner]]` in `config.toml`, deletes `data_dir/runners/<runner_id>/`, and calls a REST endpoint (`POST /api/v1/runner/<runner_id>/deregister/` authenticated with the token) to tell cloud the runner is gone. **No WS frame is emitted** — `Bye` is reserved for connection teardown (§4.2). Future cloud frames for the deregistered `runner_id` (in unlikely race) get dropped by the demux as "unknown runner." Connection and other runners stay up.
 - `pidash tui` → instance picker / multi-pane view.
 - `pidash issue …` / `pidash comment …` etc. that talk to cloud need to know which runner identity to use; default to single instance, require `--runner` otherwise.
 - Approvals over IPC carry `runner_id` (or `runner_name`).
@@ -469,7 +469,8 @@ Either way, the supervisor:
 3. Drops the mailbox.
 4. Frees its working directory binding (the directory itself is left on disk; user can reclaim manually).
 5. **Deletes the runner's local data directory** (`data_dir/runners/<runner_id>/`) — history, logs, identity file. Once removed, the runner's data is gone.
-6. Sends `Bye { runner_id: foo, reason: "removed" }` if the trigger was local.
+
+If the trigger was local (`pidash remove --runner`), the CLI additionally calls `POST /api/v1/runner/<runner_id>/deregister/` over REST (authenticated with the token) before it asks the daemon to remove the instance, so cloud-side `Token.owns` and any in-flight assignments are cleaned up authoritatively. **No `Bye` frame is sent over the WS** — `Bye` is reserved for connection teardown (§4.2). If the trigger was cloud-initiated `RemoveRunner`, no REST call is needed (cloud already initiated the removal).
 
 The connection stays up; other instances and the token are unaffected.
 

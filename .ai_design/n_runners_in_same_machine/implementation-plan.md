@@ -9,7 +9,7 @@ Phased rollout. Each phase is independently mergeable and leaves the system in a
 - Extend `Envelope` deserialiser to accept optional `runner_id`.
 - Bump server's announced `protocol_version` to `2` in `Welcome`.
 - Routing layer: dispatch frames by `Envelope.runner_id` when present; fall back to "the connection's runner" when not.
-- Outbound: cloud-originated frames (`Assign`, `Cancel`, `Decide`, `Ping`, `Welcome`, `Revoke`) start setting `Envelope.runner_id`. Connection-scoped frames (`Welcome` ack of connection itself, `Ping`, `Bye`, kill-switch `Revoke`) leave it `None`.
+- Outbound: cloud-originated frames `Welcome`, `Assign`, `Cancel`, `Decide`, `RemoveRunner`, per-runner `ConfigPush` set `Envelope.runner_id = Some(id)`. Connection-scoped frames `Ping`, `Bye`, and connection-wide `Revoke` leave it `None`. There is no connection-level `Welcome` — every `Welcome` acks a specific `Hello`. See `design.md` §4.2 / §4.3.
 - v1 runners unaffected: still see one runner per connection.
 
 **Done when**: a v1 runner still works end-to-end; integration test confirms a v2 envelope with mismatching `runner_id` is rejected.
@@ -18,11 +18,11 @@ Phased rollout. Each phase is independently mergeable and leaves the system in a
 
 **Goal**: introduce `Token` entity, new auth path, registration flow, UI changes for the tokens-vs-runners split.
 
-- Schema migration: `tokens` table (`token_id`, `secret_hash`, `title`, `workspace_id`, `created_at`, `last_seen_at`, `revoked_at`); `runners.token_id` FK (nullable for legacy during migration).
+- Schema migration: `tokens` table (`token_id`, `secret_hash`, `title`, `workspace_id`, `created_at`, `last_seen_at`, `revoked_at`); `runners.token_id` FK (nullable for legacy v1 runners that haven't migrated yet).
 - Auth path: WS upgrade headers carry `X-Token-Id` + `Bearer token_secret`. Validates against the token record; populates the connection's authorised set with the token's `owns`.
-- Back-compat: existing single-runner connections keep using `X-Runner-Id` + `Bearer runner_secret` for the deprecation window. On first upgrade contact (or via a one-shot migration job), mint a one-runner Token whose title defaults to the runner's name.
-- New registration endpoints: `POST /api/v1/token/register/` (returns `token_id` + secret, secret shown once). Existing `POST /api/v1/runner/register/` gains a required `token_id` parameter for v2; without it, mints a one-runner token for back-compat during the deprecation window.
-- Transitional endpoint `POST /api/v1/runner/attach_token/` (authenticated with `runner_secret`, takes `token_id` + `token_secret` proof) — moves an existing v1 runner into a token's `owns` set. This is the only path by which a v1 install picks up token-based WS auth (see `decisions.md` Q13). Removed at the end of the deprecation window.
+- Back-compat: v1 auth headers (`X-Runner-Id` + `Bearer runner_secret`) continue to be accepted for the deprecation window for runners whose `token_id` is still null. **No auto-mint** — tokens are created exclusively by explicit user action in the UI; the cloud never creates a Token row on a runner's behalf during a connection. See `design.md` §13.3 and `decisions.md` Q13.
+- New registration endpoints: `POST /api/v1/token/register/` (returns `token_id` + secret, secret shown once; created via cloud UI). New runner registration `POST /api/v1/runner/register/` requires a `token_id` parameter; v1's no-token-id path remains during the deprecation window for back-compat with old `pidash configure` flows but is marked deprecated.
+- Transitional endpoint `POST /api/v1/runner/attach_token/` (authenticated with the existing `runner_secret`; takes `token_id` + `token_secret` proof) — moves an existing v1 runner into a token's `owns` set. Triggered by the operator running `pidash configure token` on the dev machine. This is the only path by which a v1 install picks up token-based WS auth. Removed at the end of the deprecation window.
 - Multi-Hello support: server tracks `HashSet<Uuid>` of authorised runner_ids per connection, derived from `Token.owns` at auth time.
 - UI changes: tokens section (lists tokens by title with their associated runners; **Revoke** action on the token) and runners section (per-runner **Remove** action; no Revoke on runner). See `design.md` §5.3.
 
@@ -64,7 +64,7 @@ The wire protocol is still v1 at this point — daemon authenticates as before, 
 - `RunnerOut` newtype wraps shared `out_tx`; replace every existing `out.send(Envelope::new(…))` site to use it.
 - `Demux` task between `ConnectionLoop`'s inbound mpsc and per-instance mailboxes; supervisor inbox for connection-scoped frames.
 - Heartbeat task iterates `instances` and emits one envelope per instance per tick.
-- Auth: switch WS headers to `X-Token-Id` + `Bearer token_secret`. Old `X-Runner-Id` headers retired (cloud still accepts them for the deprecation window).
+- Auth (conditional on local credential state): if `credentials.toml` has a `[token]` block, the daemon connects with `X-Token-Id` + `Bearer token_secret` and speaks v2. If only `runner_id` + `runner_secret` are present (un-migrated v1 install), the daemon connects with `X-Runner-Id` + `Bearer runner_secret` and continues to speak v1 wire frames — no multiplex, single-runner behavior preserved. The decision is made at startup based on which credential block exists; operators flip a v1 install to v2 by running `pidash configure token` (`design.md` §13.3).
 - `ConnectionLoop` walks `instances` after WS upgrade and sends `Hello { runner_id }` for each.
 - Per-instance `Welcome`, `Reconnecting` flag, `RunResumed` after reconnect.
 
@@ -88,7 +88,7 @@ The wire protocol is still v1 at this point — daemon authenticates as before, 
 **Goal**: instances can be added or removed without restarting; cloud can remove one runner without dropping the connection; cloud can revoke the whole token.
 
 - IPC verb `pidash configure runner --name foo` registers via REST under the active token and tells the daemon "load instance foo". Supervisor inserts into `instances`, sends `Hello`, spawns `RunnerLoop`. No reconnect.
-- IPC verb `pidash remove --runner foo` sends `Bye { runner_id: foo, reason: "removed" }`, drops mailbox, removes from `instances`.
+- IPC verb `pidash remove --runner foo`: the CLI calls REST `POST /api/v1/runner/<runner_id>/deregister/` (authenticated with the token) to deregister cloud-side, then asks the daemon over IPC to drop the mailbox, remove from `instances`, and delete `data_dir/runners/<runner_id>/`. **No WS frame is sent** — `Bye` is reserved for connection teardown.
 - Cloud-originated `RemoveRunner { runner_id, reason }` (new wire variant) handled in supervisor: cancel in-flight run for that runner, remove instance, leave connection up. Same end state as the local IPC remove.
 - Connection-scoped `Revoke { reason }` (token revocation; no `runner_id`) tears down the connection and shuts down the daemon — see `design.md` §11.5.
 
