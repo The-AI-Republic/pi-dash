@@ -45,6 +45,12 @@ pub enum TokenCommand {
     /// to `config.toml`. The daemon picks up the new instance on next
     /// start (or via IPC reload, once that lands).
     AddRunner(AddRunnerArgs),
+
+    /// Remove one runner from this machine. Deregisters it cloud-side
+    /// (token-authenticated DELETE/POST), strips its `[[runner]]` block
+    /// from `config.toml`, and deletes its local data directory under
+    /// `data_dir/runners/<runner_id>/`.
+    RemoveRunner(RemoveRunnerArgs),
 }
 
 #[derive(Debug, Args)]
@@ -84,11 +90,20 @@ pub struct AddRunnerArgs {
     pub agent: AgentKind,
 }
 
+#[derive(Debug, Args)]
+pub struct RemoveRunnerArgs {
+    /// Name of the runner to remove. Must match an entry in
+    /// config.toml.
+    #[arg(long)]
+    pub name: String,
+}
+
 pub async fn run(args: TokenArgs, paths: &Paths) -> Result<()> {
     match args.command {
         TokenCommand::Install(install) => run_install(install, paths).await,
         TokenCommand::Show => run_show(paths).await,
         TokenCommand::AddRunner(args) => run_add_runner(args, paths).await,
+        TokenCommand::RemoveRunner(args) => run_remove_runner(args, paths).await,
     }
 }
 
@@ -209,6 +224,70 @@ async fn run_add_runner(args: AddRunnerArgs, paths: &Paths) -> Result<()> {
         token.token_id,
     );
     println!("Restart the daemon to bring the new runner online.");
+    Ok(())
+}
+
+async fn run_remove_runner(args: RemoveRunnerArgs, paths: &Paths) -> Result<()> {
+    let name = args.name.trim();
+    if name.is_empty() {
+        anyhow::bail!("--name cannot be empty");
+    }
+    let mut config = crate::config::file::load_config(paths).context("loading config.toml")?;
+    let creds = crate::config::file::load_credentials(paths).context("loading credentials.toml")?;
+    let token = creds.token.as_ref().ok_or_else(|| {
+        anyhow::anyhow!(
+            "no [token] block in credentials.toml — \
+             per-runner removal requires token auth"
+        )
+    })?;
+
+    let pos = config
+        .runners
+        .iter()
+        .position(|r| r.name == name)
+        .ok_or_else(|| anyhow::anyhow!("no runner named {name:?} in config.toml"))?;
+    let runner_id = config.runners[pos].runner_id;
+
+    let url = format!(
+        "{}/api/v1/runner/{}/deregister/",
+        config.daemon.cloud_url.trim_end_matches('/'),
+        runner_id,
+    );
+    let http = reqwest::Client::builder()
+        .timeout(Duration::from_secs(15))
+        .build()?;
+    let resp = http
+        .post(&url)
+        .header("X-Token-Id", token.token_id.to_string())
+        .header("Authorization", format!("Bearer {}", token.token_secret))
+        .send()
+        .await
+        .with_context(|| format!("POST {url}"))?;
+    let status = resp.status();
+    if !status.is_success() {
+        let text = resp.text().await.unwrap_or_default();
+        anyhow::bail!("deregister failed: HTTP {status}: {text}");
+    }
+
+    // Remove from config.toml.
+    config.runners.remove(pos);
+    crate::config::file::write_config(paths, &config)?;
+
+    // Delete the runner's local data directory (history, logs, identity).
+    // Per design.md §11.4 / decisions.md Q11, removed runners' data is
+    // discarded — keeping orphan history is just disk waste.
+    let runner_dir = paths.runner_dir(runner_id);
+    if runner_dir.exists()
+        && let Err(e) = std::fs::remove_dir_all(&runner_dir)
+    {
+        tracing::warn!(
+            "failed to delete {:?}: {e:#} (file removal is best-effort)",
+            runner_dir,
+        );
+    }
+
+    println!("Removed runner {name:?} (id {runner_id}). Data directory deleted.",);
+    println!("Restart the daemon for the change to take effect.");
     Ok(())
 }
 
