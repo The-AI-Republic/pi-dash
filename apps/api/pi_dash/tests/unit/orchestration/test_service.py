@@ -180,3 +180,231 @@ def test_run_config_empty_git_fields_surface_as_none(seeded, issue, states):
     cfg = outcome.created_run.run_config
     assert cfg["repo_url"] is None
     assert cfg["git_work_branch"] is None
+
+
+# ---------------------------------------------------------------------------
+# Comment-triggered continuation (§5.2 of the design doc).
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def workpad_bot_user(db):
+    from pi_dash.orchestration.workpad import get_agent_system_user
+
+    return get_agent_system_user()
+
+
+@pytest.fixture
+def runner_for_workspace(db, workspace, create_user):
+    from django.utils import timezone
+
+    from pi_dash.runner.models import Pod, Runner, RunnerStatus
+
+    pod = Pod.default_for_workspace(workspace)
+    return Runner.objects.create(
+        owner=create_user,
+        workspace=workspace,
+        pod=pod,
+        name="agentA",
+        credential_hash="h",
+        credential_fingerprint="f" * 12,
+        status=RunnerStatus.ONLINE,
+        last_heartbeat_at=timezone.now(),
+    )
+
+
+def _make_comment(issue, actor, body="please continue"):
+    from pi_dash.db.models.issue import IssueComment
+
+    with impersonate(actor):
+        # IssueComment derives comment_stripped from comment_html on save,
+        # so we must populate the HTML field for the body to survive.
+        return IssueComment.objects.create(
+            issue=issue,
+            project=issue.project,
+            workspace=issue.workspace,
+            actor=actor,
+            comment_html=f"<p>{body}</p>",
+        )
+
+
+def _make_paused_run(issue, runner, *, thread_id="sess_xyz"):
+    from django.utils import timezone
+
+    from pi_dash.runner.models import AgentRun, AgentRunStatus
+
+    return AgentRun.objects.create(
+        workspace=issue.workspace,
+        # AgentRun.save mirrors owner → created_by; anchor on runner.owner
+        # rather than issue.created_by (which a non-impersonated state save
+        # may have cleared).
+        owner=runner.owner,
+        pod=runner.pod,
+        work_item=issue,
+        runner=runner,
+        thread_id=thread_id,
+        status=AgentRunStatus.PAUSED_AWAITING_INPUT,
+        prompt="prior work",
+        started_at=timezone.now() - timezone.timedelta(minutes=5),
+    )
+
+
+@pytest.mark.unit
+def test_comment_creates_pinned_continuation(
+    seeded, project, issue, states, runner_for_workspace, create_user
+):
+    Issue.all_objects.filter(pk=issue.pk).update(state=states["in_progress"])
+    issue.refresh_from_db()
+    prior = _make_paused_run(issue, runner_for_workspace)
+
+    # post_save(IssueComment) fires the continuation trigger automatically;
+    # we observe its side effects rather than calling handle_issue_comment
+    # explicitly.
+    _make_comment(issue, create_user, "use option B please")
+
+    r_next = (
+        AgentRun.objects.filter(work_item=issue, parent_run=prior)
+        .order_by("-created_at")
+        .first()
+    )
+    assert r_next is not None
+    assert r_next.pinned_runner_id == runner_for_workspace.id
+    assert r_next.status == AgentRunStatus.QUEUED
+    assert "option B" in r_next.prompt
+
+
+@pytest.mark.unit
+def test_comment_from_bot_is_ignored(
+    seeded, project, issue, states, runner_for_workspace, workpad_bot_user
+):
+    Issue.all_objects.filter(pk=issue.pk).update(state=states["in_progress"])
+    issue.refresh_from_db()
+    _make_paused_run(issue, runner_for_workspace)
+
+    comment = _make_comment(issue, workpad_bot_user, "## Agent Workpad\n...")
+    outcome = service.handle_issue_comment(comment)
+    assert outcome.reason == "bot-comment"
+    assert outcome.created_run is None
+
+
+@pytest.mark.unit
+def test_comment_on_backlog_issue_is_ignored(
+    seeded, project, issue, states, runner_for_workspace, create_user
+):
+    # Issue.state defaults to states["todo"] (group=unstarted) — backlog-side.
+    _make_paused_run(issue, runner_for_workspace)
+    comment = _make_comment(issue, create_user)
+    outcome = service.handle_issue_comment(comment)
+    assert outcome.reason == "state-not-eligible"
+
+
+@pytest.mark.unit
+def test_comment_with_no_prior_run_skipped(
+    seeded, project, issue, states, create_user
+):
+    Issue.all_objects.filter(pk=issue.pk).update(state=states["in_progress"])
+    issue.refresh_from_db()
+    comment = _make_comment(issue, create_user)
+    outcome = service.handle_issue_comment(comment)
+    assert outcome.reason == "no-prior-run"
+
+
+@pytest.mark.unit
+def test_comment_during_active_run_held_for_terminate_sweep(
+    seeded, project, issue, states, runner_for_workspace, create_user
+):
+    """Comment arriving while R_prev is RUNNING is not dispatched immediately."""
+    from django.utils import timezone
+
+    Issue.all_objects.filter(pk=issue.pk).update(state=states["in_progress"])
+    issue.refresh_from_db()
+    AgentRun.objects.create(
+        workspace=issue.workspace,
+        created_by=create_user,
+        pod=runner_for_workspace.pod,
+        work_item=issue,
+        runner=runner_for_workspace,
+        status=AgentRunStatus.RUNNING,
+        prompt="working",
+        started_at=timezone.now() - timezone.timedelta(minutes=1),
+    )
+    comment = _make_comment(issue, create_user, "fyi")
+    outcome = service.handle_issue_comment(comment)
+    assert outcome.reason == "prior-run-active"
+    assert outcome.created_run is None
+
+
+@pytest.mark.unit
+def test_two_comments_coalesce_into_one_followup(
+    seeded, project, issue, states, runner_for_workspace, create_user
+):
+    Issue.all_objects.filter(pk=issue.pk).update(state=states["in_progress"])
+    issue.refresh_from_db()
+    _make_paused_run(issue, runner_for_workspace)
+
+    # First comment fires the trigger and creates R_next. The second
+    # comment fires the trigger again — but coalesces because R_next is
+    # already QUEUED. Observe via DB state, not return values.
+    _make_comment(issue, create_user, "first")
+    _make_comment(issue, create_user, "second")
+
+    queued = AgentRun.objects.filter(
+        work_item=issue, status=AgentRunStatus.QUEUED
+    )
+    assert queued.count() == 1
+
+
+@pytest.mark.unit
+def test_pin_skipped_when_parent_has_no_thread_id(
+    seeded, project, issue, states, runner_for_workspace, create_user
+):
+    """No thread_id means there's no session to resume against; don't pin."""
+    Issue.all_objects.filter(pk=issue.pk).update(state=states["in_progress"])
+    issue.refresh_from_db()
+    prior = _make_paused_run(issue, runner_for_workspace, thread_id="")
+    assert prior.thread_id == ""
+
+    _make_comment(issue, create_user, "go")
+    r_next = (
+        AgentRun.objects.filter(work_item=issue, parent_run=prior)
+        .order_by("-created_at")
+        .first()
+    )
+    assert r_next is not None
+    assert r_next.pinned_runner_id is None
+
+
+@pytest.mark.unit
+def test_terminate_sweep_picks_up_held_comment(
+    seeded, project, issue, states, runner_for_workspace, create_user
+):
+    """maybe_continue_after_terminate creates R_next from comments after R.started_at."""
+    from django.utils import timezone
+
+    from pi_dash.runner.models import AgentRunStatus
+
+    Issue.all_objects.filter(pk=issue.pk).update(state=states["in_progress"])
+    issue.refresh_from_db()
+    started = timezone.now() - timezone.timedelta(minutes=10)
+    prior = AgentRun.objects.create(
+        workspace=issue.workspace,
+        created_by=create_user,
+        pod=runner_for_workspace.pod,
+        work_item=issue,
+        runner=runner_for_workspace,
+        thread_id="sess_xyz",
+        status=AgentRunStatus.RUNNING,
+        prompt="working",
+        started_at=started,
+    )
+    # Comment arrives mid-run.
+    _make_comment(issue, create_user, "use option B")
+    # Run terminates.
+    prior.status = AgentRunStatus.COMPLETED
+    prior.ended_at = timezone.now()
+    prior.save(update_fields=["status", "ended_at"])
+
+    outcome = service.maybe_continue_after_terminate(prior)
+    assert outcome.reason == "created"
+    assert outcome.created_run is not None
+    assert outcome.created_run.parent_run_id == prior.id

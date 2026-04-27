@@ -33,6 +33,10 @@ pub struct SpawnArgs<'a> {
     /// When `true`, pass `--permission-mode bypassPermissions`. Always `true`
     /// for MVP; wiring a real permission prompt needs an MCP bridge.
     pub bypass_permissions: bool,
+    /// When set, pass `--resume <session_id>` so Claude reattaches to its
+    /// prior on-disk session (`~/.claude/projects/...`). The cloud sets
+    /// this on a continuation run when `parent_run.thread_id` is known.
+    pub resume_thread_id: Option<&'a str>,
 }
 
 impl ClaudeProcess {
@@ -53,6 +57,9 @@ impl ClaudeProcess {
         }
         if let Some(model) = args.model {
             argv.extend(["--model", model]);
+        }
+        if let Some(thread_id) = args.resume_thread_id {
+            argv.extend(["--resume", thread_id]);
         }
         let cmd = login_shell_command(args.binary, &argv, Some(args.cwd));
         Self::spawn_command(cmd).await

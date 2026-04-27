@@ -183,3 +183,67 @@ class AgentRunCancelEndpoint(APIView):
                 )
             )
         return Response(AgentRunSerializer(run).data)
+
+
+class AgentRunReleasePinEndpoint(APIView):
+    """Operator escape hatch: clear ``pinned_runner_id`` on a stuck QUEUED run.
+
+    Used when the pinned runner is offline indefinitely and the human would
+    rather give up native session resume than wait. The run remains QUEUED
+    and falls into the pod's general queue; whichever runner picks it up
+    starts a fresh session, with the issue + handoff comment as context.
+
+    See §5.7 of ``.ai_design/issue_run_improve/design.md``.
+    """
+
+    authentication_classes = [BaseSessionAuthentication]
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, run_id):
+        run = (
+            AgentRun.objects.select_related("runner", "pinned_runner")
+            .filter(id=run_id)
+            .first()
+        )
+        if run is None:
+            return Response({"error": "not found"}, status=status.HTTP_404_NOT_FOUND)
+        if not _can_cancel_run(request.user, run):
+            return Response({"error": "not found"}, status=status.HTTP_404_NOT_FOUND)
+
+        with transaction.atomic():
+            locked = (
+                AgentRun.objects.select_for_update().filter(id=run_id).first()
+            )
+            if locked is None:
+                return Response(
+                    {"error": "not found"}, status=status.HTTP_404_NOT_FOUND
+                )
+            if locked.status != AgentRunStatus.QUEUED:
+                return Response(
+                    {"error": "run not queued"},
+                    status=status.HTTP_409_CONFLICT,
+                )
+            if locked.pinned_runner_id is None:
+                return Response(
+                    {"error": "run not pinned"},
+                    status=status.HTTP_409_CONFLICT,
+                )
+            locked.pinned_runner = None
+            # Also clear parent's stale thread_id so the upcoming dispatch
+            # builds an Assign without a resume hint — the new runner has
+            # no session to resume against. The handoff comment carries
+            # the human-readable state.
+            if (
+                locked.parent_run is not None
+                and locked.parent_run.thread_id
+            ):
+                locked.parent_run.thread_id = ""
+                locked.parent_run.save(update_fields=["thread_id"])
+            locked.save(update_fields=["pinned_runner"])
+            run = locked
+
+        if run.pod_id is not None:
+            transaction.on_commit(
+                lambda pid=run.pod_id: matcher.drain_pod_by_id(pid)
+            )
+        return Response(AgentRunSerializer(run).data)

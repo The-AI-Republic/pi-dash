@@ -18,7 +18,7 @@ import logging
 from datetime import timedelta
 from typing import Optional
 
-from django.db import transaction
+from django.db import models, transaction
 from django.db.models import Q
 from django.utils import timezone
 
@@ -39,12 +39,18 @@ HEARTBEAT_GRACE = timedelta(seconds=90)
 # Runs in these statuses occupy a runner slot or a queue position. Used to
 # exclude busy runners from matching and to block pod deletion while work is
 # outstanding.
+#
+# PAUSED_AWAITING_INPUT is non-terminal (the run will resume on a comment) so
+# it gates pod deletion — but it is NOT in BUSY_STATUSES because the runner
+# is free to take other pod work while waiting for human reply. See §4.3 of
+# .ai_design/issue_run_improve/design.md.
 NON_TERMINAL_STATUSES = (
     AgentRunStatus.QUEUED,
     AgentRunStatus.ASSIGNED,
     AgentRunStatus.RUNNING,
     AgentRunStatus.AWAITING_APPROVAL,
     AgentRunStatus.AWAITING_REAUTH,
+    AgentRunStatus.PAUSED_AWAITING_INPUT,
 )
 
 # Statuses that indicate a runner is currently serving a run.
@@ -83,47 +89,133 @@ def select_runner_in_pod(pod: Pod) -> Optional[Runner]:
 
 
 def next_queued_run_for_pod(pod: Pod) -> Optional[AgentRun]:
-    """Return the oldest QUEUED run in the pod, locked for update.
+    """Return the oldest unpinned QUEUED run in the pod, locked for update.
 
     Must be called inside a ``transaction.atomic()`` block.
+
+    Pinned runs (``pinned_runner_id IS NOT NULL``) are excluded — they belong
+    to a specific runner and are served via :func:`next_for_runner`. This
+    keeps the legacy run-first matcher honest under the new pinning model.
     """
     return (
         AgentRun.objects.select_for_update(skip_locked=True)
-        .filter(pod=pod, status=AgentRunStatus.QUEUED)
+        .filter(
+            pod=pod,
+            status=AgentRunStatus.QUEUED,
+            pinned_runner__isnull=True,
+        )
         .order_by("created_at")
         .first()
     )
 
 
+def next_for_runner(runner: Runner) -> Optional[AgentRun]:
+    """Return the next QUEUED run this runner should take.
+
+    Personal queue first (runs pinned to this runner), then the pod
+    general queue (unpinned runs in the same pod). FIFO by ``created_at``
+    inside each queue. Returns the run row locked
+    ``FOR UPDATE SKIP LOCKED`` so concurrent drains don't double-assign.
+
+    Must be called inside a ``transaction.atomic()`` block.
+    """
+    return (
+        AgentRun.objects.select_for_update(skip_locked=True)
+        .filter(
+            pod=runner.pod,
+            status=AgentRunStatus.QUEUED,
+        )
+        .filter(
+            Q(pinned_runner=runner) | Q(pinned_runner__isnull=True),
+        )
+        # Pinned-to-me sorts before unpinned via an integer rank: 0 for the
+        # personal queue, 1 for the pod queue. ``order_by`` on the rank then
+        # ``created_at`` gives FIFO inside each tier.
+        .annotate(_is_mine=models.Case(
+            models.When(pinned_runner=runner, then=models.Value(0)),
+            default=models.Value(1),
+            output_field=models.IntegerField(),
+        ))
+        .order_by("_is_mine", "created_at")
+        .first()
+    )
+
+
+def _refresh_continuation_prompt(run: AgentRun) -> bool:
+    """Re-render ``run.prompt`` from current comments if this is a continuation.
+
+    Comment-triggered follow-ups can coalesce: a second comment arriving while
+    R_next is still QUEUED is silently absorbed (`reason='coalesced'`) on the
+    expectation that the prompt builder picks it up at dispatch time. That
+    contract lives here. Returns True when the prompt was rebuilt and the
+    caller must include ``prompt`` in ``save(update_fields=...)``.
+
+    Late import to avoid a top-level cycle through prompting → db.models.
+    """
+    parent = run.parent_run
+    if parent is None:
+        return False
+    from pi_dash.prompting.composer import build_continuation
+    from pi_dash.prompting.renderer import PromptRenderError
+
+    if run.work_item_id is None:
+        return False
+    try:
+        rebuilt = build_continuation(run.work_item, run)
+    except PromptRenderError:
+        logger.exception(
+            "matcher: continuation prompt rebuild failed for run %s; "
+            "keeping prompt as-stored",
+            run.id,
+        )
+        return False
+    if rebuilt == run.prompt:
+        return False
+    run.prompt = rebuilt
+    return True
+
+
 def drain_pod(pod: Pod) -> int:
     """Assign as many QUEUED runs in ``pod`` to idle runners as possible.
 
-    Returns the number of runs assigned in this pass. Dispatch messages are
-    sent over the WebSocket ``on_commit`` so receivers never see a run that
-    hasn't landed in the DB.
+    Returns the number of runs assigned in this pass. The loop is
+    runner-first: for each idle runner, pick the best run for it
+    (personal queue > pod queue). This eliminates head-of-line blocking
+    when the head QUEUED run is pinned to a busy runner — other idle
+    runners can still serve unpinned work.
+
+    Dispatch messages are sent over the WebSocket ``on_commit`` so
+    receivers never observe a run that hasn't landed in the DB.
     """
-    # Late import to avoid an import cycle (pubsub imports matcher in no path
-    # I can see today, but this keeps future refactors safe).
     from pi_dash.runner.services.pubsub import send_to_runner
 
+    alive_threshold = timezone.now() - HEARTBEAT_GRACE
     assignments: list[tuple[Runner, AgentRun]] = []
     with transaction.atomic():
-        while True:
-            run = next_queued_run_for_pod(pod)
+        idle_runners = list(
+            Runner.objects.select_for_update(skip_locked=True)
+            .filter(
+                pod=pod,
+                status=RunnerStatus.ONLINE,
+                last_heartbeat_at__gte=alive_threshold,
+            )
+            .exclude(agent_runs__status__in=BUSY_STATUSES)
+            .order_by("-last_heartbeat_at")
+        )
+        for runner in idle_runners:
+            run = next_for_runner(runner)
             if run is None:
-                break
-            runner = select_runner_in_pod(pod)
-            if runner is None:
-                break
+                continue
             run.runner = runner
-            # Capture billable party at assignment (design §5.3).
             run.owner_id = runner.owner_id
             run.status = AgentRunStatus.ASSIGNED
             run.assigned_at = timezone.now()
-            run.save(update_fields=["runner", "owner", "status", "assigned_at"])
+            update_fields = ["runner", "owner", "status", "assigned_at"]
+            if _refresh_continuation_prompt(run):
+                update_fields.append("prompt")
+            run.save(update_fields=update_fields)
             assignments.append((runner, run))
 
-    # Fire WS dispatches after the transaction commits.
     for runner, run in assignments:
         transaction.on_commit(
             lambda r=run, rn=runner: send_to_runner(rn.id, _build_assign_msg(r))
@@ -146,6 +238,63 @@ def drain_pod_by_id(pod_id) -> int:
     return drain_pod(pod)
 
 
+def drain_for_runner(runner: Runner) -> bool:
+    """Try to assign one QUEUED run to ``runner``.
+
+    Used as the immediate-dispatch trigger when a runner becomes idle
+    (a run terminates or pauses) or reconnects with pinned work waiting.
+    Returns True if a run was assigned.
+    """
+    from pi_dash.runner.services.pubsub import send_to_runner
+
+    alive_threshold = timezone.now() - HEARTBEAT_GRACE
+    assignment: Optional[tuple[Runner, AgentRun]] = None
+    with transaction.atomic():
+        # Re-select the runner under lock so two concurrent drain calls
+        # for the same runner can't both assign it.
+        locked = (
+            Runner.objects.select_for_update(skip_locked=True)
+            .filter(
+                pk=runner.pk,
+                status=RunnerStatus.ONLINE,
+                last_heartbeat_at__gte=alive_threshold,
+            )
+            .exclude(agent_runs__status__in=BUSY_STATUSES)
+            .first()
+        )
+        if locked is None:
+            return False
+        run = next_for_runner(locked)
+        if run is None:
+            return False
+        run.runner = locked
+        run.owner_id = locked.owner_id
+        run.status = AgentRunStatus.ASSIGNED
+        run.assigned_at = timezone.now()
+        update_fields = ["runner", "owner", "status", "assigned_at"]
+        if _refresh_continuation_prompt(run):
+            update_fields.append("prompt")
+        run.save(update_fields=update_fields)
+        assignment = (locked, run)
+
+    runner_obj, run = assignment
+    transaction.on_commit(
+        lambda r=run, rn=runner_obj: send_to_runner(rn.id, _build_assign_msg(r))
+    )
+    logger.info(
+        "drain_for_runner: runner=%s assigned run=%s", runner_obj.id, run.id
+    )
+    return True
+
+
+def drain_for_runner_by_id(runner_id) -> bool:
+    """Convenience wrapper for callers that only have a runner id."""
+    runner = Runner.objects.filter(pk=runner_id).first()
+    if runner is None:
+        return False
+    return drain_for_runner(runner)
+
+
 def _build_assign_msg(run: AgentRun) -> dict:
     """Compose the WS ``assign`` envelope sent to a runner daemon.
 
@@ -153,6 +302,13 @@ def _build_assign_msg(run: AgentRun) -> dict:
     ``orchestration/service._dispatch_to_runner``; Phase 3 will point both at
     this helper.
     """
+    # resume_thread_id is set when this run is a continuation of a prior
+    # run that recorded a session id (Codex thread_id / Claude session_id).
+    # The runner uses it to call thread/resume or claude --resume so the
+    # agent re-attaches to its prior in-memory state. Empty/missing on the
+    # wire means "fresh session" — backward compatible with older runners.
+    parent = run.parent_run
+    resume_thread_id = parent.thread_id if (parent and parent.thread_id) else None
     return {
         "v": 1,
         "type": "assign",
@@ -165,6 +321,7 @@ def _build_assign_msg(run: AgentRun) -> dict:
         "expected_codex_model": run.run_config.get("model"),
         "approval_policy_overrides": run.run_config.get("approval_policy_overrides"),
         "deadline": None,
+        "resume_thread_id": resume_thread_id,
     }
 
 

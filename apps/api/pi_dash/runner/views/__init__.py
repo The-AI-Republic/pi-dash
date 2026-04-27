@@ -13,7 +13,12 @@ from .register import (
     RunnerRotateEndpoint,
 )
 from .runners import RunnerDetailEndpoint, RunnerListEndpoint, RunnerRevokeEndpoint
-from .runs import AgentRunCancelEndpoint, AgentRunDetailEndpoint, AgentRunListEndpoint
+from .runs import (
+    AgentRunCancelEndpoint,
+    AgentRunDetailEndpoint,
+    AgentRunListEndpoint,
+    AgentRunReleasePinEndpoint,
+)
 
 __all__ = [
     "ApprovalDecideEndpoint",
@@ -32,4 +37,5 @@ __all__ = [
     "AgentRunCancelEndpoint",
     "AgentRunDetailEndpoint",
     "AgentRunListEndpoint",
+    "AgentRunReleasePinEndpoint",
 ]

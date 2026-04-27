@@ -30,6 +30,14 @@ Use this exact structure for the `## Agent Workpad` comment and keep it updated 
 - Reason: <why this assessment is appropriate>
 - Question for human: <specific question or `null`>
 
+### Analysis
+
+- **Restated problem**: <the work in your own words>
+- **Acceptance criteria**: <extracted from issue/comments, or `missing — see Question for human`>
+- **Proposed approach**: <one or two sentences naming files / areas / components>
+- **Risks / assumptions**: <material risks, scope assumptions, downstream impact>
+- **Decision**: proceed | clarify | split
+
 ### Plan
 
 - [ ] 1. Parent task
