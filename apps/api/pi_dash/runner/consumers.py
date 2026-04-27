@@ -29,6 +29,7 @@ from pi_dash.runner.models import (
     ApprovalKind,
     ApprovalRequest,
     ApprovalStatus,
+    MachineToken,
     Runner,
     RunnerStatus,
 )
@@ -54,6 +55,10 @@ class RunnerConsumer(AsyncJsonWebsocketConsumer):
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         super().__init__(*args, **kwargs)
         self.runner: Optional[Runner] = None
+        # Token (machine credential) authenticating the connection, if any.
+        # Set when the daemon sends `X-Token-Id` + `Bearer <token_secret>`;
+        # remains None on legacy v1 auth (per-runner runner_secret).
+        self.token: Optional[MachineToken] = None
         self.group_name: Optional[str] = None
         # Per-connection dedupe cache of message_ids we've already applied.
         # LRU-bounded so a misbehaving runner can't grow us unboundedly.
@@ -98,10 +103,32 @@ class RunnerConsumer(AsyncJsonWebsocketConsumer):
             await self.close(code=4401)
             return
         raw = auth.split(" ", 1)[1].strip()
-        runner = await self._find_runner(raw)
-        if runner is None:
-            await self.close(code=4401)
-            return
+
+        # Two auth modes:
+        # 1. Token (multi-runner): X-Token-Id + Bearer <token_secret>. The
+        #    daemon authenticates as the machine; runners under it come
+        #    online via Hello frames. We resolve the token to its
+        #    primary runner here for the single-runner-via-token path
+        #    that ships first; multi-Hello support arrives in a later PR
+        #    and replaces the primary-runner shortcut with a
+        #    HashSet<Uuid> of authorised runner_ids.
+        # 2. Legacy (single-runner): Authorization-only with the runner's
+        #    own bearer secret. Existing v1 daemons use this path until
+        #    they migrate.
+        token_id_header = (self._header("x-token-id") or "").strip()
+        if token_id_header:
+            token, runner = await self._authenticate_via_token(
+                token_id_header, raw
+            )
+            if token is None or runner is None:
+                await self.close(code=4401)
+                return
+            self.token = token
+        else:
+            runner = await self._find_runner(raw)
+            if runner is None:
+                await self.close(code=4401)
+                return
         if runner.status == RunnerStatus.REVOKED:
             await self.close(code=4403)
             return
@@ -382,6 +409,47 @@ class RunnerConsumer(AsyncJsonWebsocketConsumer):
         return await sync_to_async(
             lambda: Runner.objects.filter(credential_hash=hashed).first()
         )()
+
+    @staticmethod
+    async def _authenticate_via_token(
+        token_id_raw: str, secret_raw: str
+    ) -> tuple[Optional[MachineToken], Optional[Runner]]:
+        """Look up the MachineToken by id and verify its secret.
+
+        Returns ``(token, primary_runner)`` on success, ``(None, None)``
+        on any failure (unknown id, mismatched secret, revoked token, no
+        runners under it). Constant-time secret comparison via the same
+        ``hash_token`` HMAC scheme used for runner_secret.
+
+        For now we resolve the token to a single "primary runner" — the
+        oldest-created Runner under the token. This keeps the rest of
+        the consumer's per-runner code paths unchanged while phase 1 of
+        cloud token auth ships. Multi-Hello support replaces this with a
+        connection-scoped ``authorised_runner_ids`` set populated from
+        ``token.runners`` and updated as Hello frames arrive.
+        """
+        try:
+            token_id = UUID(token_id_raw)
+        except (ValueError, AttributeError):
+            return None, None
+        secret_hashed = hash_token(secret_raw)
+
+        def _lookup() -> tuple[Optional[MachineToken], Optional[Runner]]:
+            token = MachineToken.objects.filter(
+                id=token_id,
+                secret_hash=secret_hashed,
+                revoked_at__isnull=True,
+            ).first()
+            if token is None:
+                return None, None
+            primary = (
+                Runner.objects.filter(machine_token=token)
+                .order_by("created_at")
+                .first()
+            )
+            return token, primary
+
+        return await sync_to_async(_lookup)()
 
     @staticmethod
     async def _mark_online(runner_id: UUID) -> None:
