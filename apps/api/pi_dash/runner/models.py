@@ -154,6 +154,18 @@ class Runner(models.Model):
     # Runner authenticates over WS with a bearer token; we store only its hash.
     credential_hash = models.CharField(max_length=128, db_index=True)
     credential_fingerprint = models.CharField(max_length=16)
+    # Machine token (multi-runner). When present, the daemon hosting this
+    # runner authenticates as the token rather than presenting the runner's
+    # own credential. NULL on legacy v1 installs that haven't migrated yet
+    # and on the transitional period before phase 2 ships in production.
+    # See ``design.md`` §5.1.
+    machine_token = models.ForeignKey(
+        "MachineToken",
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="runners",
+    )
     capabilities = models.JSONField(default=list, blank=True)
     status = models.CharField(
         max_length=16,
@@ -273,6 +285,81 @@ class Runner(models.Model):
         # queued work.
         for pod_id in affected_pod_ids:
             transaction.on_commit(lambda pid=pod_id: drain_pod_by_id(pid))
+
+
+class MachineToken(models.Model):
+    """Long-lived machine credential — authenticates one dev-machine daemon
+    over WebSocket and authorises it to act as N runners under it.
+
+    See ``.ai_design/n_runners_in_same_machine/design.md`` §5.1. Each
+    daemon process holds exactly one MachineToken; the token's ``owns``
+    set (resolved via ``Runner.machine_token`` FK) is the list of runners
+    the daemon may bring online with ``Hello { runner_id }``.
+
+    Surfaced in the Pi Dash UI as a "connection" with a user-supplied
+    title; revoking the token tears down the daemon's connection on next
+    auth check (synchronous via connection-scoped Revoke when the WS is
+    up; on next reconnect via 401 otherwise) and cascades to all owned
+    runners going offline. Tokens are not rotatable — only create/revoke
+    per decisions.md Q8.
+    """
+
+    id = models.UUIDField(
+        primary_key=True, default=uuid.uuid4, editable=False, db_index=True
+    )
+    workspace = models.ForeignKey(
+        "db.Workspace",
+        on_delete=models.CASCADE,
+        related_name="machine_tokens",
+    )
+    created_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="machine_tokens",
+    )
+    # User-supplied label, shown in the connections section of the UI.
+    title = models.CharField(max_length=128)
+    # Bearer secret hash. Plaintext is shown to the user once at creation
+    # and never persisted server-side.
+    secret_hash = models.CharField(max_length=128, db_index=True)
+    secret_fingerprint = models.CharField(max_length=16)
+    last_seen_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    revoked_at = models.DateTimeField(null=True, blank=True, db_index=True)
+
+    class Meta:
+        db_table = "machine_token"
+        ordering = ("-created_at",)
+        indexes = [
+            models.Index(fields=["workspace", "revoked_at"]),
+            models.Index(fields=["created_by", "revoked_at"]),
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.title} (ws={self.workspace_id})"
+
+    def is_active(self) -> bool:
+        return self.revoked_at is None
+
+    def revoke(self) -> None:
+        """Mark the token revoked and cascade to its owned runners.
+
+        Owned runners are revoked individually (which cancels their
+        in-flight runs via ``Runner.revoke``). The daemon's WS, if up,
+        receives a connection-scoped Revoke and exits; if down, the next
+        reconnect fails the auth check.
+        """
+        from django.db import transaction
+
+        if self.revoked_at is not None:
+            return
+        with transaction.atomic():
+            self.revoked_at = timezone.now()
+            self.save(update_fields=["revoked_at"])
+            # Cascade — revoke each owned runner so its in-flight runs
+            # are cancelled and any pinned queued runs unpinned.
+            for runner in self.runners.filter(revoked_at__isnull=True):
+                runner.revoke()
 
 
 class RunnerRegistrationToken(models.Model):
