@@ -90,7 +90,9 @@ fn write_private(path: &Path, bytes: &[u8]) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::schema::{Credentials, DaemonConfig, RunnerConfig, WorkspaceSection};
+    use crate::config::schema::{
+        Credentials, DaemonConfig, RunnerConfig, TokenCredentials, WorkspaceSection,
+    };
     use tempfile::tempdir;
 
     fn paths_for(root: &std::path::Path) -> Paths {
@@ -182,6 +184,7 @@ model_default = "gpt-5-codex"
         let tmp = tempdir().unwrap();
         let paths = paths_for(tmp.path());
         let creds = Credentials {
+            token: None,
             runner_id: uuid::Uuid::new_v4(),
             runner_secret: "s".into(),
             api_token: Some("pi_dash_api_test".into()),
@@ -263,6 +266,45 @@ binary = "codex"
             msg.contains("cloud_url") || msg.contains("daemon"),
             "error should mention the missing field: {msg}",
         );
+    }
+
+    #[test]
+    fn credentials_with_token_block_round_trips() {
+        let tmp = tempdir().unwrap();
+        let paths = paths_for(tmp.path());
+        let creds = Credentials {
+            token: Some(TokenCredentials {
+                token_id: uuid::Uuid::new_v4(),
+                token_secret: "tok-secret".into(),
+                title: "rich's laptop".into(),
+            }),
+            runner_id: uuid::Uuid::new_v4(),
+            runner_secret: "s".into(),
+            api_token: None,
+            issued_at: chrono::Utc::now(),
+        };
+        write_credentials(&paths, &creds).unwrap();
+        let loaded = load_credentials(&paths).unwrap();
+        let token = loaded.token.expect("token block must round-trip");
+        assert_eq!(token.token_secret, "tok-secret");
+        assert_eq!(token.title, "rich's laptop");
+    }
+
+    #[test]
+    fn credentials_without_token_block_still_parses() {
+        // Legacy credentials.toml (no [token] block) keeps loading; the
+        // daemon falls back to runner_secret-based auth until the cloud
+        // ships v2 and the operator runs `pidash configure token`.
+        let tmp = tempdir().unwrap();
+        let paths = paths_for(tmp.path());
+        std::fs::create_dir_all(&paths.config_dir).unwrap();
+        let body = format!(
+            "runner_id = \"{}\"\nrunner_secret = \"abc\"\nissued_at = \"2026-04-01T00:00:00Z\"\n",
+            uuid::Uuid::new_v4()
+        );
+        std::fs::write(paths.credentials_path(), body).unwrap();
+        let loaded = load_credentials(&paths).unwrap();
+        assert!(loaded.token.is_none());
     }
 
     #[test]

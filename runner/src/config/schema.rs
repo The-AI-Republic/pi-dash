@@ -172,6 +172,13 @@ impl Default for ApprovalPolicySection {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Credentials {
+    /// Token (machine credential) — authenticates the WS connection. The
+    /// design's eventual shape (one token per machine, owns N runners) is
+    /// surfaced as an `Option` here while cloud is still on v1 wire auth;
+    /// it'll become required once cloud ships v2 and the `runner_secret`
+    /// path retires.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token: Option<TokenCredentials>,
     pub runner_id: Uuid,
     pub runner_secret: String,
     /// Public REST API token (`X-Api-Key`) for `/api/v1/`. Issued by the
@@ -181,6 +188,17 @@ pub struct Credentials {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub api_token: Option<String>,
     pub issued_at: DateTime<Utc>,
+}
+
+/// Per-machine token credential. See `design.md` §5.1.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TokenCredentials {
+    pub token_id: Uuid,
+    /// Bearer secret. Mode 0600 on disk; never echoed to logs.
+    pub token_secret: String,
+    /// User-supplied label, shown in `pidash status` and the cloud UI's
+    /// connections list.
+    pub title: String,
 }
 
 impl Config {

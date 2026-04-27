@@ -78,6 +78,7 @@ async fn runner_connects_hello_welcome_and_receives_assign() {
     let (addr, server_handle) = start_fake_cloud().await;
     let cloud_url = format!("http://{}", addr);
     let creds = Credentials {
+        token: None,
         runner_id: uuid::Uuid::new_v4(),
         runner_secret: "apd_rs_testsecret".into(),
         api_token: None,

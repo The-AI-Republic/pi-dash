@@ -752,6 +752,7 @@ async fn submit_register_form(state: &mut AppState) {
         return;
     }
     let creds = crate::config::schema::Credentials {
+        token: None,
         runner_id: resp.runner_id,
         runner_secret: resp.runner_secret,
         api_token: resp.api_token,

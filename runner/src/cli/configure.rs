@@ -473,6 +473,10 @@ pub async fn execute(inputs: RegisterInputs, paths: &Paths) -> Result<()> {
     crate::config::file::write_config(paths, &config)?;
 
     let creds = Credentials {
+        // No token block yet — `pidash configure` (the v1 enrollment flow)
+        // only mints a runner_secret. Token-based auth is set up by
+        // `pidash configure token` once cloud ships v2.
+        token: None,
         runner_id: resp.runner_id,
         runner_secret: resp.runner_secret,
         api_token: resp.api_token,

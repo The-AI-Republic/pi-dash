@@ -16,10 +16,11 @@ pub async fn run(_args: Args, paths: &Paths) -> Result<()> {
     )
     .await?;
     let new_creds = Credentials {
+        // Rotation only re-mints the runner_secret; the token (if present)
+        // and api_token are unaffected, so preserve them across the rotation.
+        token: creds.token.clone(),
         runner_id: resp.runner_id,
         runner_secret: resp.runner_secret,
-        // The rotate endpoint only mints a new runner_secret; the existing
-        // api_token is unaffected, so preserve it across the rotation.
         api_token: creds.api_token.clone(),
         issued_at: chrono::Utc::now(),
     };
