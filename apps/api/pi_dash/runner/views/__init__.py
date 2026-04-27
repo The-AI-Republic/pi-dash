@@ -3,6 +3,10 @@
 # See the LICENSE file for details.
 
 from .approvals import ApprovalDecideEndpoint, ApprovalListEndpoint
+from .machine_tokens import (
+    MachineTokenListCreateEndpoint,
+    MachineTokenRevokeEndpoint,
+)
 from .metrics import MetricsEndpoint
 from .pods import PodDetailEndpoint, PodListEndpoint
 from .register import (
@@ -24,6 +28,8 @@ __all__ = [
     "ApprovalDecideEndpoint",
     "ApprovalListEndpoint",
     "HealthEndpoint",
+    "MachineTokenListCreateEndpoint",
+    "MachineTokenRevokeEndpoint",
     "MetricsEndpoint",
     "PodDetailEndpoint",
     "PodListEndpoint",
