@@ -211,6 +211,7 @@ export default {
   timezone: "Fuso orario",
   avatar: "Avatar",
   cover_image: "Immagine di copertina",
+  cover_image_upload_skipped: "Cover image upload skipped — using a default cover.",
   password: "Password",
   change_cover: "Cambia copertina",
   language: "Lingua",

@@ -208,6 +208,7 @@ export default {
   timezone: "시간대",
   avatar: "아바타",
   cover_image: "커버 이미지",
+  cover_image_upload_skipped: "Cover image upload skipped — using a default cover.",
   password: "비밀번호",
   change_cover: "커버 변경",
   language: "언어",
