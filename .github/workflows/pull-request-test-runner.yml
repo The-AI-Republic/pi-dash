@@ -1,0 +1,50 @@
+name: Test runner
+
+on:
+  workflow_dispatch:
+  pull_request:
+    branches:
+      - "main"
+      - "preview"
+    types:
+      - "opened"
+      - "synchronize"
+      - "reopened"
+    paths:
+      - "runner/**"
+      - ".github/workflows/pull-request-test-runner.yml"
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: cargo test + clippy
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    defaults:
+      run:
+        working-directory: runner
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Rust toolchain (from rust-toolchain.toml)
+        run: rustup show
+
+      - name: Cache cargo
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            runner/target
+          key: cargo-${{ runner.os }}-${{ hashFiles('runner/Cargo.lock', 'runner/rust-toolchain.toml') }}
+          restore-keys: |
+            cargo-${{ runner.os }}-
+
+      - name: Clippy
+        run: cargo clippy --all-targets --locked -- -D warnings
+
+      - name: Test
+        run: cargo test --locked
