@@ -40,8 +40,8 @@ impl StateHandle {
         let (tx_status, rx_status) = watch::channel(RunnerStatus::Idle);
         let (tx_in_flight, rx_in_flight) = watch::channel(None);
         let (tx_heartbeat_secs, rx_heartbeat_secs) = watch::channel(25u64);
-        let name = cfg.runner.name.clone();
-        let cloud_url = cfg.runner.cloud_url.clone();
+        let name = cfg.primary_runner().name.clone();
+        let cloud_url = cfg.daemon.cloud_url.clone();
         Self {
             inner: Arc::new(Inner {
                 cfg: Mutex::new(cfg),

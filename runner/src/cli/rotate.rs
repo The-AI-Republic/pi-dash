@@ -10,7 +10,7 @@ pub struct Args {}
 pub async fn run(_args: Args, paths: &Paths) -> Result<()> {
     let (config, creds) = crate::config::file::load_all(paths)?;
     let resp = crate::cloud::register::rotate(
-        &config.runner.cloud_url,
+        &config.daemon.cloud_url,
         &creds.runner_id,
         &creds.runner_secret,
     )

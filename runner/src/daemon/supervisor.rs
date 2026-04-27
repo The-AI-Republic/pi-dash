@@ -82,7 +82,7 @@ impl Supervisor {
         let (cloud_handle, hb_handle) = if !opts.offline {
             let shutdown_for_loop = state.shutdown_notified();
             let loop_ = ConnectionLoop {
-                cloud_url: config.runner.cloud_url.clone(),
+                cloud_url: config.daemon.cloud_url.clone(),
                 creds: creds.clone(),
                 outbound: out_rx,
                 inbound: in_tx.clone(),
@@ -397,7 +397,7 @@ impl AssignWorker {
     /// future non-Codex agent) surfaces as the agent-neutral `AgentCrash`
     /// so the two aren't conflated in telemetry.
     fn crash_reason(&self) -> FailureReason {
-        match self.config.agent.kind {
+        match self.config.primary_runner().agent.kind {
             AgentKind::Codex => FailureReason::CodexCrash,
             AgentKind::ClaudeCode => FailureReason::AgentCrash,
         }
@@ -433,7 +433,7 @@ impl AssignWorker {
         resume_thread_id: Option<String>,
     ) -> Result<()> {
         // Resolve workspace.
-        let wd = self.config.workspace.working_dir.clone();
+        let wd = self.config.primary_runner().workspace.working_dir.clone();
         let resolution = crate::workspace::resolve(&wd, repo_url.as_deref()).await;
         let workspace_path = match resolution {
             Ok(r) => match r {
@@ -517,7 +517,7 @@ impl AssignWorker {
         // hides which CLI is actually being driven from the rest of this
         // worker; the event flow below is identical for both.
         let mut bridge = match AgentBridge::spawn_from_config(
-            &self.config,
+            self.config.primary_runner(),
             &workspace_path,
             expected_codex_model.clone(),
             resume_thread_id.as_deref(),
@@ -720,7 +720,10 @@ impl AssignWorker {
                 payload,
                 reason,
             } => {
-                let policy = Policy::new(&self.config.approval_policy, workspace_root);
+                let policy = Policy::new(
+                    &self.config.primary_runner().approval_policy,
+                    workspace_root,
+                );
                 let decision = policy.evaluate(kind, &payload);
                 if let Some(auto) = decision.into_cloud() {
                     bridge.send_approval(&approval_id, auto).await.ok();

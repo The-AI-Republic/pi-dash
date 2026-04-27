@@ -90,7 +90,7 @@ fn write_private(path: &Path, bytes: &[u8]) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::schema::{Credentials, RunnerSection, WorkspaceSection};
+    use crate::config::schema::{Credentials, DaemonConfig, RunnerConfig, WorkspaceSection};
     use tempfile::tempdir;
 
     fn paths_for(root: &std::path::Path) -> Paths {
@@ -101,30 +101,39 @@ mod tests {
         }
     }
 
+    fn sample_runner(name: &str, working_dir: std::path::PathBuf) -> RunnerConfig {
+        RunnerConfig {
+            name: name.into(),
+            runner_id: uuid::Uuid::new_v4(),
+            workspace_slug: Some("acme".into()),
+            workspace: WorkspaceSection { working_dir },
+            agent: Default::default(),
+            codex: Default::default(),
+            claude_code: Default::default(),
+            approval_policy: Default::default(),
+        }
+    }
+
     #[test]
     fn writes_and_reads_config_with_0600() {
         let tmp = tempdir().unwrap();
         let paths = paths_for(tmp.path());
         let cfg = Config {
-            version: 1,
-            runner: RunnerSection {
-                name: "t".into(),
+            version: 2,
+            daemon: DaemonConfig {
                 cloud_url: "https://x".into(),
-                workspace_slug: Some("acme".into()),
+                log_level: "info".into(),
+                log_retention_days: 14,
             },
-            workspace: WorkspaceSection {
-                working_dir: tmp.path().join("wd"),
-            },
-            codex: Default::default(),
-            claude_code: Default::default(),
-            agent: Default::default(),
-            approval_policy: Default::default(),
-            logging: Default::default(),
+            runners: vec![sample_runner("t", tmp.path().join("wd"))],
         };
         write_config(&paths, &cfg).unwrap();
         let loaded = load_config(&paths).unwrap();
-        assert_eq!(loaded.runner.name, "t");
-        assert_eq!(loaded.runner.workspace_slug.as_deref(), Some("acme"));
+        assert_eq!(loaded.primary_runner().name, "t");
+        assert_eq!(
+            loaded.primary_runner().workspace_slug.as_deref(),
+            Some("acme")
+        );
         use std::os::unix::fs::PermissionsExt;
         let mode = std::fs::metadata(paths.config_path())
             .unwrap()
@@ -136,42 +145,36 @@ mod tests {
 
     #[test]
     fn config_without_workspace_slug_round_trips_via_serde_default() {
-        // A config.toml written before the workspace_slug field existed
-        // (no `workspace_slug = ...` line under [runner]) must still parse,
-        // with the field defaulting to None. The CRUD subcommands will
-        // detect the None and error with a clear "rerun pidash configure"
-        // message; existing daemon subcommands never read the field.
+        // A config.toml written without a `workspace_slug = ...` line under
+        // [[runner]] must still parse, with the field defaulting to None.
+        // The CRUD subcommands will detect the None and error with a clear
+        // "rerun pidash configure" message.
         let tmp = tempdir().unwrap();
         let paths = paths_for(tmp.path());
         std::fs::create_dir_all(&paths.config_dir).unwrap();
-        let body = r#"
-version = 1
+        let body = format!(
+            r#"
+version = 2
 
-[runner]
-name = "t"
+[daemon]
 cloud_url = "https://x"
 
-[workspace]
+[[runner]]
+name = "t"
+runner_id = "{}"
+
+[runner.workspace]
 working_dir = "/tmp/wd"
 
-[codex]
+[runner.codex]
 binary = "codex"
 model_default = "gpt-5-codex"
-
-[approval_policy]
-auto_approve_readonly_shell = false
-auto_approve_workspace_writes = false
-auto_approve_network = false
-allowlist_commands = []
-denylist_commands = []
-
-[logging]
-level = "info"
-retention_days = 14
-"#;
+"#,
+            uuid::Uuid::new_v4()
+        );
         std::fs::write(paths.config_path(), body).unwrap();
         let loaded = load_config(&paths).unwrap();
-        assert_eq!(loaded.runner.workspace_slug, None);
+        assert_eq!(loaded.primary_runner().workspace_slug, None);
     }
 
     #[test]
@@ -192,60 +195,72 @@ retention_days = 14
 
     #[test]
     fn minimal_config_without_optional_sections_parses_with_defaults() {
-        // A config.toml missing [approval_policy] and [logging] must still
-        // parse — PR 2 adds `#[serde(default)]` on those sections so fresh
-        // installs can ship a leaner toml and still get sensible defaults.
+        // A config.toml missing [runner.approval_policy] and the daemon-level
+        // log fields must still parse — sections with `#[serde(default)]`
+        // fall back to their Default impls.
         let tmp = tempdir().unwrap();
         let paths = paths_for(tmp.path());
         std::fs::create_dir_all(&paths.config_dir).unwrap();
-        let body = r#"
-version = 1
+        let body = format!(
+            r#"
+version = 2
 
-[runner]
-name = "t"
+[daemon]
 cloud_url = "https://x"
 
-[workspace]
+[[runner]]
+name = "t"
+runner_id = "{}"
+
+[runner.workspace]
 working_dir = "/tmp/wd"
 
-[codex]
+[runner.codex]
 binary = "codex"
-"#;
+"#,
+            uuid::Uuid::new_v4()
+        );
         std::fs::write(paths.config_path(), body).unwrap();
         let loaded = load_config(&paths).unwrap();
-        assert_eq!(loaded.runner.name, "t");
-        // Defaults applied to the omitted sections:
-        assert!(!loaded.approval_policy.auto_approve_network);
-        assert_eq!(loaded.logging.level, "info");
-        assert_eq!(loaded.logging.retention_days, 14);
+        assert_eq!(loaded.primary_runner().name, "t");
+        // Defaults applied to the omitted fields:
+        assert!(!loaded.primary_runner().approval_policy.auto_approve_network);
+        assert_eq!(loaded.daemon.log_level, "info");
+        assert_eq!(loaded.daemon.log_retention_days, 14);
         // Optional codex.model_default is allowed to be absent:
-        assert_eq!(loaded.codex.model_default, None);
+        assert_eq!(loaded.primary_runner().codex.model_default, None);
     }
 
     #[test]
     fn config_without_required_field_fails_loudly() {
-        // `runner.cloud_url` is required. A config without it must fail to
+        // `daemon.cloud_url` is required. A config without it must fail to
         // parse so `__run` never boots a half-configured daemon.
         let tmp = tempdir().unwrap();
         let paths = paths_for(tmp.path());
         std::fs::create_dir_all(&paths.config_dir).unwrap();
-        let body = r#"
-version = 1
+        let body = format!(
+            r#"
+version = 2
 
-[runner]
+[daemon]
+
+[[runner]]
 name = "t"
+runner_id = "{}"
 
-[workspace]
+[runner.workspace]
 working_dir = "/tmp/wd"
 
-[codex]
+[runner.codex]
 binary = "codex"
-"#;
+"#,
+            uuid::Uuid::new_v4()
+        );
         std::fs::write(paths.config_path(), body).unwrap();
         let err = load_config(&paths).unwrap_err();
         let msg = format!("{err:#}");
         assert!(
-            msg.contains("cloud_url") || msg.contains("runner"),
+            msg.contains("cloud_url") || msg.contains("daemon"),
             "error should mention the missing field: {msg}",
         );
     }

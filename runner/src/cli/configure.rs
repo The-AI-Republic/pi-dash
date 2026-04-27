@@ -120,84 +120,88 @@ impl Args {
 
     /// Apply every `--<flag>` that was set as a mutation on an existing
     /// `Config`. Returns `true` if any field actually changed.
+    ///
+    /// Targets the primary runner (single-runner mode); a future multi-runner
+    /// `--runner <name>` selector will pick a specific entry instead.
     fn apply_to(&self, cfg: &mut Config) -> bool {
         let mut changed = false;
         if let Some(url) = &self.url
-            && cfg.runner.cloud_url != *url
+            && cfg.daemon.cloud_url != *url
         {
-            cfg.runner.cloud_url = url.clone();
+            cfg.daemon.cloud_url = url.clone();
             changed = true;
         }
+        let runner = cfg.primary_runner_mut();
         if let Some(name) = &self.name
-            && cfg.runner.name != *name
+            && runner.name != *name
         {
-            cfg.runner.name = name.clone();
+            runner.name = name.clone();
             changed = true;
         }
         if let Some(wd) = &self.working_dir
-            && cfg.workspace.working_dir != *wd
+            && runner.workspace.working_dir != *wd
         {
-            cfg.workspace.working_dir = wd.clone();
+            runner.workspace.working_dir = wd.clone();
             changed = true;
         }
         if let Some(kind) = self.agent
-            && cfg.agent.kind != kind
+            && runner.agent.kind != kind
         {
-            cfg.agent.kind = kind;
+            runner.agent.kind = kind;
             changed = true;
         }
         if let Some(b) = &self.codex_binary
-            && cfg.codex.binary != *b
+            && runner.codex.binary != *b
         {
-            cfg.codex.binary = b.clone();
+            runner.codex.binary = b.clone();
             changed = true;
         }
         if let Some(m) = &self.codex_model
-            && cfg.codex.model_default.as_ref() != Some(m)
+            && runner.codex.model_default.as_ref() != Some(m)
         {
-            cfg.codex.model_default = Some(m.clone());
+            runner.codex.model_default = Some(m.clone());
             changed = true;
         }
         if let Some(b) = &self.claude_binary
-            && cfg.claude_code.binary != *b
+            && runner.claude_code.binary != *b
         {
-            cfg.claude_code.binary = b.clone();
+            runner.claude_code.binary = b.clone();
             changed = true;
         }
         if let Some(m) = &self.claude_model
-            && cfg.claude_code.model_default.as_ref() != Some(m)
+            && runner.claude_code.model_default.as_ref() != Some(m)
         {
-            cfg.claude_code.model_default = Some(m.clone());
+            runner.claude_code.model_default = Some(m.clone());
             changed = true;
         }
         if let Some(v) = self.approval_auto_readonly
-            && cfg.approval_policy.auto_approve_readonly_shell != v
+            && runner.approval_policy.auto_approve_readonly_shell != v
         {
-            cfg.approval_policy.auto_approve_readonly_shell = v;
+            runner.approval_policy.auto_approve_readonly_shell = v;
             changed = true;
         }
         if let Some(v) = self.approval_auto_writes
-            && cfg.approval_policy.auto_approve_workspace_writes != v
+            && runner.approval_policy.auto_approve_workspace_writes != v
         {
-            cfg.approval_policy.auto_approve_workspace_writes = v;
+            runner.approval_policy.auto_approve_workspace_writes = v;
             changed = true;
         }
         if let Some(v) = self.approval_auto_network
-            && cfg.approval_policy.auto_approve_network != v
+            && runner.approval_policy.auto_approve_network != v
         {
-            cfg.approval_policy.auto_approve_network = v;
+            runner.approval_policy.auto_approve_network = v;
             changed = true;
         }
         if let Some(lvl) = &self.log_level
-            && cfg.logging.level != *lvl
+            && cfg.daemon.log_level != *lvl
         {
-            cfg.logging.level = lvl.clone();
+            cfg.daemon.log_level = lvl.clone();
             changed = true;
         }
         if let Some(n) = self.log_retention_days
-            && cfg.logging.retention_days != n
+            && cfg.daemon.log_retention_days != n
         {
-            cfg.logging.retention_days = n;
+            cfg.daemon.log_retention_days = n;
             changed = true;
         }
         changed
@@ -356,7 +360,7 @@ pub async fn execute(inputs: RegisterInputs, paths: &Paths) -> Result<()> {
     let existing_kind = crate::config::file::load_config_opt(paths)
         .ok()
         .flatten()
-        .map(|c| c.agent.kind);
+        .and_then(|c| c.runners.first().map(|r| r.agent.kind));
     let agent_kind = resolve_agent_kind(inputs.agent, existing_kind);
 
     // User-supplied names are charset-checked up front; an invalid `--name`
@@ -442,18 +446,22 @@ pub async fn execute(inputs: RegisterInputs, paths: &Paths) -> Result<()> {
     }
 
     let mut config = Config {
-        version: 1,
-        runner: crate::config::schema::RunnerSection {
-            name: final_name,
+        version: 2,
+        daemon: crate::config::schema::DaemonConfig {
             cloud_url: inputs.url.clone(),
-            workspace_slug: resp.workspace_slug.clone(),
+            log_level: "info".to_string(),
+            log_retention_days: 14,
         },
-        workspace: crate::config::schema::WorkspaceSection { working_dir },
-        codex: crate::config::schema::CodexSection::default(),
-        claude_code: crate::config::schema::ClaudeCodeSection::default(),
-        agent: crate::config::schema::AgentSection { kind: agent_kind },
-        approval_policy: crate::config::schema::ApprovalPolicySection::default(),
-        logging: crate::config::schema::LoggingSection::default(),
+        runners: vec![crate::config::schema::RunnerConfig {
+            name: final_name,
+            runner_id: resp.runner_id,
+            workspace_slug: resp.workspace_slug.clone(),
+            workspace: crate::config::schema::WorkspaceSection { working_dir },
+            agent: crate::config::schema::AgentSection { kind: agent_kind },
+            codex: crate::config::schema::CodexSection::default(),
+            claude_code: crate::config::schema::ClaudeCodeSection::default(),
+            approval_policy: crate::config::schema::ApprovalPolicySection::default(),
+        }],
     };
     // Apply any advanced field flags the user passed alongside --url/--token.
     // They're already reflected in `config` for the fields this function
@@ -478,7 +486,8 @@ pub async fn execute(inputs: RegisterInputs, paths: &Paths) -> Result<()> {
 
     println!(
         "\nRegistered runner '{}' with id {}.",
-        config.runner.name, creds.runner_id,
+        config.primary_runner().name,
+        creds.runner_id,
     );
 
     if inputs.skip_service {

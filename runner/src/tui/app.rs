@@ -725,20 +725,24 @@ async fn submit_register_form(state: &mut AppState) {
     // happy path, minus the `extras` apply since the TUI form doesn't
     // collect advanced fields — user edits them in the Config tab after).
     let cfg = crate::config::schema::Config {
-        version: 1,
-        runner: crate::config::schema::RunnerSection {
-            name: name.clone(),
+        version: 2,
+        daemon: crate::config::schema::DaemonConfig {
             cloud_url: cloud_url.clone(),
+            log_level: "info".to_string(),
+            log_retention_days: 14,
+        },
+        runners: vec![crate::config::schema::RunnerConfig {
+            name: name.clone(),
+            runner_id: resp.runner_id,
             workspace_slug: resp.workspace_slug.clone(),
-        },
-        workspace: crate::config::schema::WorkspaceSection {
-            working_dir: state.paths.default_working_dir(),
-        },
-        codex: Default::default(),
-        claude_code: Default::default(),
-        agent: Default::default(),
-        approval_policy: Default::default(),
-        logging: Default::default(),
+            workspace: crate::config::schema::WorkspaceSection {
+                working_dir: state.paths.default_working_dir(),
+            },
+            agent: Default::default(),
+            codex: Default::default(),
+            claude_code: Default::default(),
+            approval_policy: Default::default(),
+        }],
     };
     if let Err(e) = crate::config::file::write_config(&state.paths, &cfg) {
         if let Some(form) = state.register_form.as_mut() {

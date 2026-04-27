@@ -48,7 +48,7 @@ pub async fn run(args: Args, paths: &Paths) -> Result<()> {
         Ok((config, creds)) => {
             if !args.local_only {
                 match crate::cloud::register::deregister(
-                    &config.runner.cloud_url,
+                    &config.daemon.cloud_url,
                     &creds.runner_id,
                     &creds.runner_secret,
                     args.token.as_deref(),

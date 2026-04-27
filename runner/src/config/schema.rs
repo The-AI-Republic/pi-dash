@@ -6,8 +6,56 @@ use uuid::Uuid;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
     pub version: u32,
-    pub runner: RunnerSection,
+    pub daemon: DaemonConfig,
+    /// Per-instance runner configs. Length 1 in the current single-runner
+    /// daemon; will grow once the cap is lifted (design.md §16).
+    #[serde(default, rename = "runner")]
+    pub runners: Vec<RunnerConfig>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DaemonConfig {
+    pub cloud_url: String,
+    #[serde(default = "default_log_level")]
+    pub log_level: String,
+    #[serde(default = "default_retention_days")]
+    pub log_retention_days: u32,
+}
+
+fn default_log_level() -> String {
+    "info".to_string()
+}
+
+fn default_retention_days() -> u32 {
+    14
+}
+
+impl Default for DaemonConfig {
+    fn default() -> Self {
+        Self {
+            cloud_url: String::new(),
+            log_level: default_log_level(),
+            log_retention_days: default_retention_days(),
+        }
+    }
+}
+
+/// One configured runner instance. The daemon currently hosts exactly one
+/// (`Vec<RunnerConfig>` length 1); multi-runner support arrives in a later
+/// phase.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RunnerConfig {
+    pub name: String,
+    pub runner_id: Uuid,
+    /// Slug of the workspace this runner is bound to. Populated from the
+    /// register response at `pidash configure` time. `Option` so an older
+    /// config still parses; new CRUD subcommands hard-error if it's missing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace_slug: Option<String>,
     pub workspace: WorkspaceSection,
+    #[serde(default)]
+    pub agent: AgentSection,
+    #[serde(default)]
     pub codex: CodexSection,
     /// Claude Code agent settings. Missing section falls back to
     /// `ClaudeCodeSection::default()` so existing `config.toml` files
@@ -15,29 +63,10 @@ pub struct Config {
     /// when `agent.kind == claude_code`.
     #[serde(default)]
     pub claude_code: ClaudeCodeSection,
-    /// Which agent CLI the daemon drives for assigned runs. Defaults to
-    /// `codex` so existing deployments are unaffected.
-    #[serde(default)]
-    pub agent: AgentSection,
-    /// Missing section falls back to the `ApprovalPolicySection::default()` so
+    /// Missing section falls back to `ApprovalPolicySection::default()` so
     /// a minimal `config.toml` doesn't have to spell out every knob.
     #[serde(default)]
     pub approval_policy: ApprovalPolicySection,
-    /// Missing section falls back to the `LoggingSection::default()`.
-    #[serde(default)]
-    pub logging: LoggingSection,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RunnerSection {
-    pub name: String,
-    pub cloud_url: String,
-    /// Slug of the workspace this runner is bound to. Populated from the
-    /// register response at `pidash configure` time. `Option` so an older
-    /// `config.toml` (written before this field existed) still parses; new
-    /// CRUD subcommands hard-error if it's missing.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub workspace_slug: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -61,9 +90,10 @@ impl Default for CodexSection {
     }
 }
 
-/// Runner-wide agent selector. Wrapped in its own section (rather than
-/// hoisted onto `RunnerSection`) so the file layout mirrors the per-agent
-/// `[codex]` / `[claude_code]` tables: `[agent]` with `kind = "..."`.
+/// Per-runner agent selector. Wrapped in its own section (rather than
+/// hoisted onto `RunnerConfig`) so the file layout mirrors the per-agent
+/// `[runner.codex]` / `[runner.claude_code]` tables: `[runner.agent]` with
+/// `kind = "..."`.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct AgentSection {
     #[serde(default)]
@@ -141,29 +171,34 @@ impl Default for ApprovalPolicySection {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct LoggingSection {
-    pub level: String,
-    pub retention_days: u32,
-}
-
-impl Default for LoggingSection {
-    fn default() -> Self {
-        Self {
-            level: "info".to_string(),
-            retention_days: 14,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Credentials {
     pub runner_id: Uuid,
     pub runner_secret: String,
     /// Public REST API token (`X-Api-Key`) for `/api/v1/`. Issued by the
-    /// cloud alongside `runner_secret` and used by future `pidash` CRUD
-    /// subcommands. `None` for installs enrolled before the cloud started
-    /// minting these; a follow-up `pidash login` will retrofit them.
+    /// cloud alongside `runner_secret` and used by `pidash` CRUD subcommands.
+    /// `None` for installs enrolled before the cloud started minting these;
+    /// a follow-up `pidash login` will retrofit them.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub api_token: Option<String>,
     pub issued_at: DateTime<Utc>,
+}
+
+impl Config {
+    /// Convenience accessor for the (currently unique) runner config.
+    /// Panics if the runners list is empty — daemon startup validates that
+    /// at least one runner is configured before we get here. Used in
+    /// single-runner code paths that need to read the active runner's
+    /// fields without picking up the multi-runner indexing churn yet.
+    pub fn primary_runner(&self) -> &RunnerConfig {
+        self.runners
+            .first()
+            .expect("config.runners must contain at least one entry")
+    }
+
+    /// Mutable counterpart to [`primary_runner`]. Same panic contract.
+    pub fn primary_runner_mut(&mut self) -> &mut RunnerConfig {
+        self.runners
+            .first_mut()
+            .expect("config.runners must contain at least one entry")
+    }
 }

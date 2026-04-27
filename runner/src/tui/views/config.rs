@@ -143,27 +143,29 @@ pub fn field_at(idx: usize) -> &'static FieldSpec {
 }
 
 pub fn display_value(cfg: &Config, id: FieldId) -> String {
+    let runner = cfg.primary_runner();
     match id {
-        FieldId::RunnerName => cfg.runner.name.clone(),
-        FieldId::WorkspaceWorkingDir => cfg.workspace.working_dir.display().to_string(),
-        FieldId::AgentKind => match cfg.agent.kind {
+        FieldId::RunnerName => runner.name.clone(),
+        FieldId::WorkspaceWorkingDir => runner.workspace.working_dir.display().to_string(),
+        FieldId::AgentKind => match runner.agent.kind {
             AgentKind::Codex => "codex".into(),
             AgentKind::ClaudeCode => "claude-code".into(),
         },
-        FieldId::CodexBinary => cfg.codex.binary.clone(),
-        FieldId::CodexModelDefault => cfg.codex.model_default.clone().unwrap_or_default(),
-        FieldId::ClaudeBinary => cfg.claude_code.binary.clone(),
-        FieldId::ClaudeModelDefault => cfg.claude_code.model_default.clone().unwrap_or_default(),
-        FieldId::ApprovalAutoReadonly => {
-            cfg.approval_policy.auto_approve_readonly_shell.to_string()
-        }
-        FieldId::ApprovalAutoWrites => cfg
+        FieldId::CodexBinary => runner.codex.binary.clone(),
+        FieldId::CodexModelDefault => runner.codex.model_default.clone().unwrap_or_default(),
+        FieldId::ClaudeBinary => runner.claude_code.binary.clone(),
+        FieldId::ClaudeModelDefault => runner.claude_code.model_default.clone().unwrap_or_default(),
+        FieldId::ApprovalAutoReadonly => runner
+            .approval_policy
+            .auto_approve_readonly_shell
+            .to_string(),
+        FieldId::ApprovalAutoWrites => runner
             .approval_policy
             .auto_approve_workspace_writes
             .to_string(),
-        FieldId::ApprovalAutoNetwork => cfg.approval_policy.auto_approve_network.to_string(),
-        FieldId::LogLevel => cfg.logging.level.clone(),
-        FieldId::LogRetentionDays => cfg.logging.retention_days.to_string(),
+        FieldId::ApprovalAutoNetwork => runner.approval_policy.auto_approve_network.to_string(),
+        FieldId::LogLevel => cfg.daemon.log_level.clone(),
+        FieldId::LogRetentionDays => cfg.daemon.log_retention_days.to_string(),
     }
 }
 
@@ -171,25 +173,33 @@ pub fn display_value(cfg: &Config, id: FieldId) -> String {
 /// Bool/Enum fields use `toggle_bool` / `cycle_enum` instead. Returns a
 /// user-facing error message on parse/validation failure.
 pub fn set_text_value(cfg: &mut Config, id: FieldId, s: &str) -> Result<(), String> {
+    if matches!(id, FieldId::LogRetentionDays) {
+        let n: u32 = s
+            .parse()
+            .map_err(|_| format!("expected a non-negative integer, got {s:?}"))?;
+        cfg.daemon.log_retention_days = n;
+        return Ok(());
+    }
+    let runner = cfg.primary_runner_mut();
     match id {
         FieldId::RunnerName => {
             crate::util::runner_name::validate(s).map_err(|e| e.to_string())?;
-            cfg.runner.name = s.to_string();
+            runner.name = s.to_string();
         }
         FieldId::WorkspaceWorkingDir => {
             if s.trim().is_empty() {
                 return Err("working_dir cannot be empty".into());
             }
-            cfg.workspace.working_dir = std::path::PathBuf::from(s);
+            runner.workspace.working_dir = std::path::PathBuf::from(s);
         }
         FieldId::CodexBinary => {
             if s.trim().is_empty() {
                 return Err("binary cannot be empty".into());
             }
-            cfg.codex.binary = s.to_string();
+            runner.codex.binary = s.to_string();
         }
         FieldId::CodexModelDefault => {
-            cfg.codex.model_default = if s.is_empty() {
+            runner.codex.model_default = if s.is_empty() {
                 None
             } else {
                 Some(s.to_string())
@@ -199,26 +209,21 @@ pub fn set_text_value(cfg: &mut Config, id: FieldId, s: &str) -> Result<(), Stri
             if s.trim().is_empty() {
                 return Err("binary cannot be empty".into());
             }
-            cfg.claude_code.binary = s.to_string();
+            runner.claude_code.binary = s.to_string();
         }
         FieldId::ClaudeModelDefault => {
-            cfg.claude_code.model_default = if s.is_empty() {
+            runner.claude_code.model_default = if s.is_empty() {
                 None
             } else {
                 Some(s.to_string())
             };
         }
-        FieldId::LogRetentionDays => {
-            let n: u32 = s
-                .parse()
-                .map_err(|_| format!("expected a non-negative integer, got {s:?}"))?;
-            cfg.logging.retention_days = n;
-        }
         FieldId::AgentKind
         | FieldId::ApprovalAutoReadonly
         | FieldId::ApprovalAutoWrites
         | FieldId::ApprovalAutoNetwork
-        | FieldId::LogLevel => {
+        | FieldId::LogLevel
+        | FieldId::LogRetentionDays => {
             return Err("field is not a text input; use Enter to toggle/cycle instead".into());
         }
     }
@@ -226,17 +231,18 @@ pub fn set_text_value(cfg: &mut Config, id: FieldId, s: &str) -> Result<(), Stri
 }
 
 pub fn toggle_bool(cfg: &mut Config, id: FieldId) {
+    let runner = cfg.primary_runner_mut();
     match id {
         FieldId::ApprovalAutoReadonly => {
-            let v = &mut cfg.approval_policy.auto_approve_readonly_shell;
+            let v = &mut runner.approval_policy.auto_approve_readonly_shell;
             *v = !*v;
         }
         FieldId::ApprovalAutoWrites => {
-            let v = &mut cfg.approval_policy.auto_approve_workspace_writes;
+            let v = &mut runner.approval_policy.auto_approve_workspace_writes;
             *v = !*v;
         }
         FieldId::ApprovalAutoNetwork => {
-            let v = &mut cfg.approval_policy.auto_approve_network;
+            let v = &mut runner.approval_policy.auto_approve_network;
             *v = !*v;
         }
         _ => {}
@@ -246,7 +252,8 @@ pub fn toggle_bool(cfg: &mut Config, id: FieldId) {
 pub fn cycle_enum(cfg: &mut Config, id: FieldId) {
     match id {
         FieldId::AgentKind => {
-            cfg.agent.kind = match cfg.agent.kind {
+            let runner = cfg.primary_runner_mut();
+            runner.agent.kind = match runner.agent.kind {
                 AgentKind::Codex => AgentKind::ClaudeCode,
                 AgentKind::ClaudeCode => AgentKind::Codex,
             };
@@ -254,9 +261,9 @@ pub fn cycle_enum(cfg: &mut Config, id: FieldId) {
         FieldId::LogLevel => {
             let cur = LOG_LEVELS
                 .iter()
-                .position(|s| *s == cfg.logging.level)
+                .position(|s| *s == cfg.daemon.log_level)
                 .unwrap_or(2);
-            cfg.logging.level = LOG_LEVELS[(cur + 1) % LOG_LEVELS.len()].to_string();
+            cfg.daemon.log_level = LOG_LEVELS[(cur + 1) % LOG_LEVELS.len()].to_string();
         }
         _ => {}
     }
@@ -448,13 +455,17 @@ fn editable_lines(
         selected_idx,
         index_of(FieldId::RunnerName),
     ));
-    lines.push(readonly_row("cloud_url", &working.runner.cloud_url));
+    lines.push(readonly_row("cloud_url", &working.daemon.cloud_url));
     lines.push(readonly_hint(
         "to change, generate a new token in the cloud UI and re-run `pidash configure`",
     ));
     lines.push(readonly_row(
         "workspace_slug",
-        working.runner.workspace_slug.as_deref().unwrap_or("-"),
+        working
+            .primary_runner()
+            .workspace_slug
+            .as_deref()
+            .unwrap_or("-"),
     ));
     lines.push(Line::raw(""));
 
@@ -520,14 +531,22 @@ fn editable_lines(
         "allowlist_commands",
         &format!(
             "{} entries (edit via CLI / hand-edit)",
-            working.approval_policy.allowlist_commands.len()
+            working
+                .primary_runner()
+                .approval_policy
+                .allowlist_commands
+                .len()
         ),
     ));
     lines.push(readonly_row(
         "denylist_commands",
         &format!(
             "{} entries (edit via CLI / hand-edit)",
-            working.approval_policy.denylist_commands.len()
+            working
+                .primary_runner()
+                .approval_policy
+                .denylist_commands
+                .len()
         ),
     ));
     lines.push(Line::raw(""));
