@@ -96,7 +96,7 @@ impl Supervisor {
                     tracing::error!("cloud loop exited: {e:#}");
                 }
             });
-            let out_tx_hb = out_tx.clone();
+            let hb_out = RunnerOut::new(creds.runner_id, out_tx.clone());
             let state_hb = state.clone();
             let hb = tokio::spawn(async move {
                 let mut rx_interval = state_hb.rx_heartbeat_secs.clone();
@@ -110,12 +110,18 @@ impl Supervisor {
                             state_hb.set_heartbeat(now).await;
                             let status = { *state_hb.rx_status.borrow() };
                             let in_flight = { *state_hb.rx_in_flight.borrow() };
-                            let frame = Envelope::new(ClientMsg::Heartbeat {
-                                ts: now,
-                                status,
-                                in_flight_run: in_flight,
-                            });
-                            if out_tx_hb.send(frame).await.is_err() {
+                            // Per-runner heartbeat (design.md §6.6). Tag with
+                            // the runner's id; the cloud's per-runner record
+                            // updates last_seen_at off this frame.
+                            if hb_out
+                                .send(ClientMsg::Heartbeat {
+                                    ts: now,
+                                    status,
+                                    in_flight_run: in_flight,
+                                })
+                                .await
+                                .is_err()
+                            {
                                 break;
                             }
                         }
