@@ -8,11 +8,18 @@
 //!
 //! `pidash install` (systemd unit) is unrelated — that's for OS service
 //! lifecycle. `pidash token install` is for credential lifecycle.
+use std::path::PathBuf;
+use std::time::Duration;
+
 use anyhow::{Context, Result};
 use clap::{Args, Subcommand};
+use serde_json::json;
 use uuid::Uuid;
 
-use crate::config::schema::TokenCredentials;
+use crate::config::schema::{
+    AgentKind, AgentSection, ApprovalPolicySection, ClaudeCodeSection, CodexSection, RunnerConfig,
+    TokenCredentials, WorkspaceSection,
+};
 use crate::util::paths::Paths;
 
 #[derive(Debug, Args)]
@@ -31,6 +38,13 @@ pub enum TokenCommand {
     /// Print the configured token's id and title (no secret). Useful as
     /// a sanity check before/after `install`.
     Show,
+
+    /// Register an additional runner under the locally-configured
+    /// token. Calls the cloud's `register-under-token/` endpoint with
+    /// the local token credentials and writes a new `[[runner]]` block
+    /// to `config.toml`. The daemon picks up the new instance on next
+    /// start (or via IPC reload, once that lands).
+    AddRunner(AddRunnerArgs),
 }
 
 #[derive(Debug, Args)]
@@ -52,10 +66,29 @@ pub struct InstallArgs {
     pub title: String,
 }
 
+#[derive(Debug, Args)]
+pub struct AddRunnerArgs {
+    /// Human-friendly runner name. Must be unique across this machine
+    /// and across the token's owns-set cloud-side.
+    #[arg(long)]
+    pub name: String,
+
+    /// Working directory for the new runner. Required because the local
+    /// daemon validates per-runner working_dir uniqueness — every
+    /// runner on this machine must own a disjoint tree.
+    #[arg(long)]
+    pub working_dir: PathBuf,
+
+    /// Agent CLI for the new runner. Defaults to codex.
+    #[arg(long, value_enum, default_value_t = AgentKind::Codex)]
+    pub agent: AgentKind,
+}
+
 pub async fn run(args: TokenArgs, paths: &Paths) -> Result<()> {
     match args.command {
         TokenCommand::Install(install) => run_install(install, paths).await,
         TokenCommand::Show => run_show(paths).await,
+        TokenCommand::AddRunner(args) => run_add_runner(args, paths).await,
     }
 }
 
@@ -83,6 +116,99 @@ async fn run_install(args: InstallArgs, paths: &Paths) -> Result<()> {
         "Installed token {} (\"{}\"). Restart the daemon to use it.",
         args.token_id, title,
     );
+    Ok(())
+}
+
+async fn run_add_runner(args: AddRunnerArgs, paths: &Paths) -> Result<()> {
+    let name = args.name.trim();
+    if name.is_empty() {
+        anyhow::bail!("--name cannot be empty");
+    }
+
+    let mut config = crate::config::file::load_config(paths)
+        .context("loading config.toml — run `pidash configure --url ... --token ...` first")?;
+    let creds = crate::config::file::load_credentials(paths).context("loading credentials.toml")?;
+    let token = creds.token.as_ref().ok_or_else(|| {
+        anyhow::anyhow!("no [token] block in credentials.toml — run `pidash token install` first")
+    })?;
+
+    if config.runners.iter().any(|r| r.name == name) {
+        anyhow::bail!(
+            "a runner named {name:?} already exists on this machine; \
+             pick a different --name"
+        );
+    }
+    if config
+        .runners
+        .iter()
+        .any(|r| r.workspace.working_dir == args.working_dir)
+    {
+        anyhow::bail!(
+            "another runner already uses {:?} as its working_dir; \
+             each runner must have its own tree",
+            args.working_dir,
+        );
+    }
+
+    let url = format!(
+        "{}/api/v1/runner/register-under-token/",
+        config.daemon.cloud_url.trim_end_matches('/'),
+    );
+    let body = json!({
+        "name": name,
+        "os": std::env::consts::OS,
+        "arch": std::env::consts::ARCH,
+        "version": crate::RUNNER_VERSION,
+        "protocol_version": crate::PROTOCOL_VERSION,
+    });
+    let http = reqwest::Client::builder()
+        .timeout(Duration::from_secs(15))
+        .build()?;
+    let resp = http
+        .post(&url)
+        .header("X-Token-Id", token.token_id.to_string())
+        .header("Authorization", format!("Bearer {}", token.token_secret))
+        .json(&body)
+        .send()
+        .await
+        .with_context(|| format!("POST {url}"))?;
+    let status = resp.status();
+    let text = resp.text().await.unwrap_or_default();
+    if !status.is_success() {
+        anyhow::bail!("register-under-token failed: HTTP {status}: {text}");
+    }
+    let resp_json: serde_json::Value = serde_json::from_str(&text)
+        .with_context(|| format!("parsing register-under-token response: {text}"))?;
+    let runner_id_str = resp_json
+        .get("runner_id")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| anyhow::anyhow!("response missing runner_id: {text}"))?;
+    let runner_id: Uuid = runner_id_str
+        .parse()
+        .with_context(|| format!("invalid runner_id from cloud: {runner_id_str}"))?;
+
+    config.runners.push(RunnerConfig {
+        name: name.to_string(),
+        runner_id,
+        workspace_slug: None,
+        workspace: WorkspaceSection {
+            working_dir: args.working_dir,
+        },
+        agent: AgentSection { kind: args.agent },
+        codex: CodexSection::default(),
+        claude_code: ClaudeCodeSection::default(),
+        approval_policy: ApprovalPolicySection::default(),
+    });
+    config
+        .validate()
+        .context("config validation rejected the new runner; check the error message")?;
+    crate::config::file::write_config(paths, &config)?;
+
+    println!(
+        "Registered runner {name:?} (id {runner_id}) under token {}.",
+        token.token_id,
+    );
+    println!("Restart the daemon to bring the new runner online.");
     Ok(())
 }
 
