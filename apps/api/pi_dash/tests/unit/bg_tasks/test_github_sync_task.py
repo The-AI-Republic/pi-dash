@@ -104,6 +104,33 @@ def github_repo_sync(db, workspace, create_user, project, github_integration):
 
 
 @pytest.mark.unit
+@pytest.mark.django_db
+class TestRebindAfterSoftDelete:
+    """Gap B regression: after unbind soft-deletes a GithubRepositorySync,
+    rebinding the same project to the same repository must succeed. The
+    pre-existing unique_together = [project, repository] (without a
+    deleted_at filter) blocked this; migration 0128 drops it in favor of
+    the conditional unique-per-project constraint added in 0127."""
+
+    def test_can_rebind_same_repo_after_soft_delete(self, github_repo_sync):
+        # Soft-delete the existing sync row (mirrors what unbind does).
+        github_repo_sync.delete()
+
+        # Fresh bind with the same (project, repository) pair must NOT
+        # collide with the soft-deleted row.
+        revived = GithubRepositorySync.objects.create(
+            project=github_repo_sync.project,
+            workspace=github_repo_sync.workspace,
+            repository=github_repo_sync.repository,
+            workspace_integration=github_repo_sync.workspace_integration,
+            actor=github_repo_sync.actor,
+            is_sync_enabled=False,
+        )
+        assert revived.id != github_repo_sync.id
+        assert revived.deleted_at is None
+
+
+@pytest.mark.unit
 class TestUpsertIssue:
     @pytest.mark.django_db
     def test_first_import_prefixes_title(self, github_repo_sync):

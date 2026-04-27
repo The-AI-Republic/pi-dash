@@ -23,6 +23,8 @@ from pi_dash.app.permissions import ROLE, allow_permission
 from pi_dash.app.views.base import BaseAPIView
 from pi_dash.db.models import (
     APIToken,
+    GithubCommentSync,
+    GithubIssueSync,
     GithubRepository,
     GithubRepositorySync,
     Integration,
@@ -416,7 +418,15 @@ class GithubProjectStatusEndpoint(BaseAPIView):
         sync = GithubRepositorySync.objects.filter(project_id=project_id, workspace__slug=slug).first()
         if sync is None:
             return Response({"bound": False}, status=status.HTTP_200_OK)
-        # Cascade deletes GithubIssueSync/GithubCommentSync, releasing the §6.8
-        # lock on surviving Issue/IssueComment rows.
-        sync.delete()
+        with transaction.atomic():
+            # Synchronously soft-delete the dependent sync-tracking rows so
+            # the §6.8 lock predicate (which checks GithubIssueSync /
+            # GithubCommentSync existence via the default soft-delete-aware
+            # manager) releases atomically with the unbind. SoftDeleteModel's
+            # cascade is async (queues a Celery task); without this pre-step,
+            # there's a race window where the user just unbound but their
+            # next edit on a freshly-mirrored issue still trips the lock.
+            GithubCommentSync.objects.filter(issue_sync__repository_sync=sync).delete()
+            GithubIssueSync.objects.filter(repository_sync=sync).delete()
+            sync.delete()
         return Response({"bound": False}, status=status.HTTP_200_OK)

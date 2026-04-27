@@ -48,7 +48,11 @@ class GithubRepositorySync(ProjectBaseModel):
         return f"{self.repository.name} <{self.project.name}>"
 
     class Meta:
-        unique_together = ["project", "repository"]
+        # No `unique_together = [project, repository]` — the constraint
+        # below already enforces the operational invariant (one active
+        # binding per project) and is correctly filtered on `deleted_at`
+        # so unbind+rebind to the same repo doesn't collide with the
+        # soft-deleted row. See migration 0128 for context.
         constraints = [
             models.UniqueConstraint(
                 fields=["project"],
