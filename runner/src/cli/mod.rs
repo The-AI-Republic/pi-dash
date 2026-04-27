@@ -15,6 +15,7 @@ mod start;
 mod state;
 mod status;
 mod stop;
+mod token;
 mod tui;
 mod uninstall;
 mod workspace;
@@ -99,6 +100,10 @@ pub enum Command {
     /// Verify the CLI's Pi Dash credentials end-to-end.
     Workspace(workspace::WorkspaceArgs),
 
+    /// Manage the machine token (a.k.a. connection) that authenticates
+    /// the daemon's WebSocket. Subcommands: `install`, `show`.
+    Token(token::TokenArgs),
+
     /// Internal: run the daemon in the foreground. Invoked by systemd/launchd
     /// via the generated unit file. Not a user-facing verb.
     #[command(name = "__run", hide = true)]
@@ -126,6 +131,7 @@ pub async fn run(cli: Cli) -> Result<()> {
         Command::Comment(args) => run_crud(comment::run(args).await),
         Command::State(args) => run_crud(state::run(args).await),
         Command::Workspace(args) => run_crud(workspace::run(args).await),
+        Command::Token(args) => token::run(args, &paths).await,
         Command::Run(args) => run::run(args, &paths).await,
     }
 }
