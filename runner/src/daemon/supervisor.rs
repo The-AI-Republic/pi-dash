@@ -11,6 +11,7 @@ use crate::cloud::protocol::{
 };
 use crate::cloud::ws::ConnectionLoop;
 use crate::config::schema::{AgentKind, Config, Credentials};
+use crate::daemon::runner_out::RunnerOut;
 use crate::daemon::state::StateHandle;
 use crate::history::index::{RunSummary, RunsIndex};
 use crate::history::jsonl::{HistoryEntry, HistoryWriter};
@@ -266,7 +267,7 @@ impl RunnerLoop {
                     let config = self.config.clone();
                     let state = self.state.clone();
                     let approvals = self.approvals.clone();
-                    let out = self.out.clone();
+                    let out = RunnerOut::new(runner_paths.runner_id, self.out.clone());
                     tokio::spawn(async move {
                         let mut worker = AssignWorker {
                             runner_paths,
@@ -290,12 +291,12 @@ impl RunnerLoop {
                             tracing::error!("run {run_id} failed: {e:#}");
                             let _ = worker
                                 .out
-                                .send(Envelope::new(ClientMsg::RunFailed {
+                                .send(ClientMsg::RunFailed {
                                     run_id,
                                     reason: FailureReason::Internal,
                                     detail: Some(format!("{e:#}")),
                                     ended_at: Utc::now(),
-                                }))
+                                })
                                 .await;
                             worker.state.set_current_run(None).await;
                         }
@@ -386,7 +387,7 @@ struct AssignWorker {
     config: Config,
     state: StateHandle,
     approvals: ApprovalRouter,
-    out: mpsc::Sender<Envelope<ClientMsg>>,
+    out: RunnerOut,
     cancel: std::sync::Arc<tokio::sync::Notify>,
 }
 
@@ -640,10 +641,10 @@ impl AssignWorker {
                 }
                 _ = cancel.notified(), if !cancelled => {
                     bridge.interrupt().await.ok();
-                    let _ = self.out.send(Envelope::new(ClientMsg::RunCancelled {
+                    let _ = self.out.send(ClientMsg::RunCancelled {
                         run_id: cursor.run_id(),
                         cancelled_at: Utc::now(),
-                    })).await;
+                    }).await;
                     hist.append(&HistoryEntry::Lifecycle {
                         ts: Utc::now(),
                         state: "cancelled".into(),
@@ -873,7 +874,7 @@ impl AssignWorker {
     }
 
     async fn send(&self, msg: ClientMsg) {
-        let _ = self.out.send(Envelope::new(msg)).await;
+        let _ = self.out.send(msg).await;
     }
 }
 
