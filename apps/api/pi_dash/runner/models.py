@@ -287,6 +287,9 @@ class Runner(models.Model):
             transaction.on_commit(lambda pid=pod_id: drain_pod_by_id(pid))
 
 
+MAX_RUNNERS_PER_MACHINE = 50
+
+
 class MachineToken(models.Model):
     """Long-lived machine credential — authenticates one dev-machine daemon
     over WebSocket and authorises it to act as N runners under it.

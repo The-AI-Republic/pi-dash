@@ -21,7 +21,7 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from pi_dash.authentication.session import BaseSessionAuthentication
-from pi_dash.runner.models import MachineToken
+from pi_dash.runner.models import MachineToken, Runner
 from pi_dash.runner.services import tokens
 
 
@@ -92,6 +92,113 @@ class MachineTokenListCreateEndpoint(APIView):
             )
         )
         return Response(list(qs))
+
+
+class TokenRunnerCreateEndpoint(APIView):
+    """POST /api/v1/runner/register-under-token/.
+
+    Token-authenticated endpoint that registers an *additional* runner
+    under an existing MachineToken. The daemon calls this when a user
+    runs ``pidash configure runner --name <NAME>`` on a machine that
+    already has a token installed.
+
+    Auth headers (same as the WS upgrade):
+        X-Token-Id:    <token_id>
+        Authorization: Bearer <token_secret>
+
+    Body:
+        { "name": "<NAME>", "os": "...", "arch": "...", "version": "..." }
+
+    Response:
+        { "runner_id": "<UUID>", "credential_secret": "<RAW>" }
+
+    The credential_secret is returned for back-compat with the legacy
+    runner_secret auth path; the daemon, once on token auth, can ignore
+    it. A future cleanup may stop minting it for token-auth runners.
+    """
+
+    authentication_classes: list = []
+    permission_classes: list = []
+
+    def post(self, request):
+        token_id_raw = request.headers.get("X-Token-Id", "")
+        auth = request.headers.get("Authorization", "")
+        if not token_id_raw or not auth.lower().startswith("bearer "):
+            return Response(
+                {"error": "missing X-Token-Id or Authorization header"},
+                status=status.HTTP_401_UNAUTHORIZED,
+            )
+        secret_raw = auth.split(" ", 1)[1].strip()
+
+        import uuid as _uuid
+
+        try:
+            token_id = _uuid.UUID(token_id_raw)
+        except (ValueError, AttributeError):
+            return Response(
+                {"error": "invalid X-Token-Id"},
+                status=status.HTTP_401_UNAUTHORIZED,
+            )
+        secret_hash = tokens.hash_token(secret_raw)
+        token = MachineToken.objects.filter(
+            id=token_id, secret_hash=secret_hash, revoked_at__isnull=True
+        ).first()
+        if token is None:
+            return Response(
+                {"error": "invalid or revoked token"},
+                status=status.HTTP_401_UNAUTHORIZED,
+            )
+
+        name = (request.data.get("name") or "").strip()
+        if not name or len(name) > 128:
+            return Response(
+                {"error": "name is required and must be 1..128 chars"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        # Cap check uses the same per-machine limit the daemon enforces
+        # locally (design.md §16). Cloud rejects beyond it as a defence
+        # in depth — a tampered daemon couldn't blow past the cap by
+        # repeating registrations.
+        active_count = Runner.objects.filter(
+            machine_token=token, revoked_at__isnull=True
+        ).count()
+        from pi_dash.runner.models import MAX_RUNNERS_PER_MACHINE
+
+        cap = MAX_RUNNERS_PER_MACHINE
+        if active_count >= cap:
+            return Response(
+                {"error": f"machine token at capacity ({cap} runners)"},
+                status=status.HTTP_409_CONFLICT,
+            )
+
+        minted = tokens.mint_runner_secret()
+        try:
+            runner = Runner.objects.create(
+                owner=token.created_by,
+                workspace=token.workspace,
+                name=name,
+                credential_hash=minted.hashed,
+                credential_fingerprint=minted.fingerprint,
+                machine_token=token,
+                os=(request.data.get("os") or "")[:32],
+                arch=(request.data.get("arch") or "")[:32],
+                runner_version=(request.data.get("version") or "")[:32],
+                protocol_version=int(request.data.get("protocol_version") or 2),
+            )
+        except Exception as exc:  # IntegrityError or otherwise
+            return Response(
+                {"error": f"runner_create_failed: {exc}"},
+                status=status.HTTP_409_CONFLICT,
+            )
+
+        return Response(
+            {
+                "runner_id": str(runner.id),
+                "credential_secret": minted.raw,
+            },
+            status=status.HTTP_201_CREATED,
+        )
 
 
 class MachineTokenRevokeEndpoint(APIView):

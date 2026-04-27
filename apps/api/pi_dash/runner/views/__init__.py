@@ -6,6 +6,7 @@ from .approvals import ApprovalDecideEndpoint, ApprovalListEndpoint
 from .machine_tokens import (
     MachineTokenListCreateEndpoint,
     MachineTokenRevokeEndpoint,
+    TokenRunnerCreateEndpoint,
 )
 from .metrics import MetricsEndpoint
 from .pods import PodDetailEndpoint, PodListEndpoint
@@ -30,6 +31,7 @@ __all__ = [
     "HealthEndpoint",
     "MachineTokenListCreateEndpoint",
     "MachineTokenRevokeEndpoint",
+    "TokenRunnerCreateEndpoint",
     "MetricsEndpoint",
     "PodDetailEndpoint",
     "PodListEndpoint",
