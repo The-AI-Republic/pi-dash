@@ -201,6 +201,11 @@ pub struct TokenCredentials {
     pub title: String,
 }
 
+/// Hard cap on the number of runner instances per daemon. See `design.md`
+/// §16. Both daemon-side validation and cloud-side enforcement use this
+/// number; the cloud rejects `Hello` beyond it as well.
+pub const MAX_RUNNERS_PER_DAEMON: usize = 50;
+
 impl Config {
     /// Convenience accessor for the (currently unique) runner config.
     /// Panics if the runners list is empty — daemon startup validates that
@@ -218,5 +223,255 @@ impl Config {
         self.runners
             .first_mut()
             .expect("config.runners must contain at least one entry")
+    }
+
+    /// Validate the loaded config before the daemon starts. Returns a
+    /// `ConfigError` with a user-facing message on the first violation;
+    /// the daemon refuses to start with this message rather than booting
+    /// into a state that will silently corrupt data later.
+    ///
+    /// See `design.md` §9 for the rule set.
+    pub fn validate(&self) -> Result<(), ConfigError> {
+        if self.runners.is_empty() {
+            return Err(ConfigError::NoRunners);
+        }
+        if self.runners.len() > MAX_RUNNERS_PER_DAEMON {
+            return Err(ConfigError::TooManyRunners {
+                count: self.runners.len(),
+                cap: MAX_RUNNERS_PER_DAEMON,
+            });
+        }
+
+        // Duplicate name / runner_id detection. O(n²) is fine at n≤50.
+        for (i, a) in self.runners.iter().enumerate() {
+            for b in self.runners.iter().skip(i + 1) {
+                if a.name == b.name {
+                    return Err(ConfigError::DuplicateName {
+                        name: a.name.clone(),
+                    });
+                }
+                if a.runner_id == b.runner_id {
+                    return Err(ConfigError::DuplicateRunnerId { id: a.runner_id });
+                }
+            }
+        }
+
+        // Workspace collisions: exact-match and nested-path. Two runners
+        // sharing a working directory will trample each other's git state;
+        // refusing to start at config load is dramatically cheaper than
+        // diagnosing the corrupted runs after the fact.
+        for (i, a) in self.runners.iter().enumerate() {
+            for b in self.runners.iter().skip(i + 1) {
+                let ap = &a.workspace.working_dir;
+                let bp = &b.workspace.working_dir;
+                if ap == bp {
+                    return Err(ConfigError::DuplicateWorkingDir {
+                        runner_a: a.name.clone(),
+                        runner_b: b.name.clone(),
+                        path: ap.display().to_string(),
+                    });
+                }
+                if ap.starts_with(bp) || bp.starts_with(ap) {
+                    return Err(ConfigError::NestedWorkingDir {
+                        runner_a: a.name.clone(),
+                        path_a: ap.display().to_string(),
+                        runner_b: b.name.clone(),
+                        path_b: bp.display().to_string(),
+                    });
+                }
+            }
+        }
+
+        Ok(())
+    }
+}
+
+/// User-facing config validation errors. Each variant's `Display` is the
+/// message printed on stderr when the daemon refuses to start.
+#[derive(Debug)]
+pub enum ConfigError {
+    NoRunners,
+    TooManyRunners {
+        count: usize,
+        cap: usize,
+    },
+    DuplicateName {
+        name: String,
+    },
+    DuplicateRunnerId {
+        id: Uuid,
+    },
+    DuplicateWorkingDir {
+        runner_a: String,
+        runner_b: String,
+        path: String,
+    },
+    NestedWorkingDir {
+        runner_a: String,
+        path_a: String,
+        runner_b: String,
+        path_b: String,
+    },
+}
+
+impl std::fmt::Display for ConfigError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ConfigError::NoRunners => write!(
+                f,
+                "configuration error: no [[runner]] block in config.toml. \
+                 Run `pidash configure` to register a runner."
+            ),
+            ConfigError::TooManyRunners { count, cap } => write!(
+                f,
+                "configuration error: {count} runners configured, but the daemon \
+                 supports at most {cap}. Remove [[runner]] blocks from config.toml \
+                 (see design.md §16)."
+            ),
+            ConfigError::DuplicateName { name } => write!(
+                f,
+                "configuration error: two [[runner]] blocks share the name {name:?}. \
+                 Each runner must have a unique name."
+            ),
+            ConfigError::DuplicateRunnerId { id } => write!(
+                f,
+                "configuration error: two [[runner]] blocks share runner_id {id}. \
+                 Each runner must have a unique runner_id; this usually means \
+                 config.toml was edited incorrectly — re-run `pidash configure runner`."
+            ),
+            ConfigError::DuplicateWorkingDir {
+                runner_a,
+                runner_b,
+                path,
+            } => write!(
+                f,
+                "configuration error: runners {runner_a:?} and {runner_b:?} share \
+                 working_dir {path:?}. Each runner must have its own working \
+                 directory; concurrent git operations on the same tree corrupt \
+                 state silently. Update one of them in config.toml."
+            ),
+            ConfigError::NestedWorkingDir {
+                runner_a,
+                path_a,
+                runner_b,
+                path_b,
+            } => write!(
+                f,
+                "configuration error: runners {runner_a:?} ({path_a:?}) and \
+                 {runner_b:?} ({path_b:?}) have nested working directories. One \
+                 path is a prefix of the other; their git trees will collide. \
+                 Use disjoint working directories."
+            ),
+        }
+    }
+}
+
+impl std::error::Error for ConfigError {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    fn runner(name: &str, working_dir: &str) -> RunnerConfig {
+        RunnerConfig {
+            name: name.into(),
+            runner_id: Uuid::new_v4(),
+            workspace_slug: None,
+            workspace: WorkspaceSection {
+                working_dir: PathBuf::from(working_dir),
+            },
+            agent: Default::default(),
+            codex: Default::default(),
+            claude_code: Default::default(),
+            approval_policy: Default::default(),
+        }
+    }
+
+    fn config_with(runners: Vec<RunnerConfig>) -> Config {
+        Config {
+            version: 2,
+            daemon: DaemonConfig {
+                cloud_url: "https://x".into(),
+                log_level: "info".into(),
+                log_retention_days: 14,
+            },
+            runners,
+        }
+    }
+
+    #[test]
+    fn validate_accepts_single_runner() {
+        let cfg = config_with(vec![runner("main", "/work/main")]);
+        cfg.validate().unwrap();
+    }
+
+    #[test]
+    fn validate_rejects_zero_runners() {
+        let cfg = config_with(vec![]);
+        let err = cfg.validate().unwrap_err();
+        assert!(matches!(err, ConfigError::NoRunners));
+    }
+
+    #[test]
+    fn validate_rejects_too_many_runners() {
+        let runners: Vec<_> = (0..MAX_RUNNERS_PER_DAEMON + 1)
+            .map(|i| runner(&format!("r{i}"), &format!("/work/r{i}")))
+            .collect();
+        let cfg = config_with(runners);
+        let err = cfg.validate().unwrap_err();
+        assert!(matches!(err, ConfigError::TooManyRunners { .. }));
+    }
+
+    #[test]
+    fn validate_rejects_duplicate_name() {
+        let cfg = config_with(vec![runner("main", "/work/a"), runner("main", "/work/b")]);
+        let err = cfg.validate().unwrap_err();
+        match err {
+            ConfigError::DuplicateName { name } => assert_eq!(name, "main"),
+            other => panic!("expected DuplicateName, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn validate_rejects_duplicate_runner_id() {
+        let mut a = runner("a", "/work/a");
+        let mut b = runner("b", "/work/b");
+        let id = Uuid::new_v4();
+        a.runner_id = id;
+        b.runner_id = id;
+        let cfg = config_with(vec![a, b]);
+        let err = cfg.validate().unwrap_err();
+        assert!(matches!(err, ConfigError::DuplicateRunnerId { .. }));
+    }
+
+    #[test]
+    fn validate_rejects_duplicate_working_dir() {
+        let cfg = config_with(vec![
+            runner("a", "/work/shared"),
+            runner("b", "/work/shared"),
+        ]);
+        let err = cfg.validate().unwrap_err();
+        let msg = err.to_string();
+        assert!(matches!(err, ConfigError::DuplicateWorkingDir { .. }));
+        // Error message must name both runners and the shared path so the
+        // operator can find and fix the collision.
+        assert!(msg.contains("\"a\""), "message: {msg}");
+        assert!(msg.contains("\"b\""), "message: {msg}");
+        assert!(msg.contains("/work/shared"), "message: {msg}");
+    }
+
+    #[test]
+    fn validate_rejects_nested_working_dirs() {
+        let cfg = config_with(vec![runner("outer", "/work"), runner("inner", "/work/sub")]);
+        let err = cfg.validate().unwrap_err();
+        assert!(matches!(err, ConfigError::NestedWorkingDir { .. }));
+    }
+
+    #[test]
+    fn validate_accepts_disjoint_sibling_working_dirs() {
+        // Two siblings under the same parent that don't nest are fine.
+        let cfg = config_with(vec![runner("a", "/work/main"), runner("b", "/work/side")]);
+        cfg.validate().unwrap();
     }
 }
