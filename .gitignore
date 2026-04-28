@@ -113,3 +113,6 @@ scripts/
 
 # Rust
 /runner/target/
+
+# Pi Dash agent local artifacts (workpad/env/blocked notes)
+.pidash-*
