@@ -5,7 +5,7 @@
  */
 
 import type { LucideIcon } from "lucide-react";
-import { Users, Zap } from "lucide-react";
+import { Github, Users, Zap } from "lucide-react";
 // pi dash imports
 import type { ISvgIcons } from "@pi-dash/propel/icons";
 import {
@@ -34,4 +34,5 @@ export const PROJECT_SETTINGS_ICONS: Record<TProjectSettingsTabs, LucideIcon | R
   labels: LabelPropertyIcon,
   estimates: EstimatePropertyIcon,
   automations: Zap,
+  github: Github,
 };
