@@ -150,9 +150,17 @@ class IssueCreateSerializer(BaseSerializer):
         state_manager = State.triage_objects if allow_triage else State.objects
 
         # Read-only lock for actively-synced GitHub issues. See .ai_design/
-        # github_sync/design.md §6.8.
+        # github_sync/design.md §6.8. Only block when the *value* actually
+        # changed — the web UI re-PATCHes the full editable set on blur even
+        # if the user only clicked through a synced issue, and rejecting
+        # unchanged values surfaces a misleading "Work item update failed"
+        # toast every time someone navigates a synced issue.
         if self.instance is not None and _issue_is_actively_synced(self.instance):
-            blocked = _LOCKED_ISSUE_FIELDS & set(attrs.keys())
+            blocked = [
+                field
+                for field in _LOCKED_ISSUE_FIELDS & set(attrs.keys())
+                if attrs[field] != getattr(self.instance, field, None)
+            ]
             if blocked:
                 raise serializers.ValidationError(
                     {
@@ -775,9 +783,14 @@ class IssueCommentSerializer(BaseSerializer):
         return _comment_is_actively_synced(obj)
 
     def validate(self, attrs):
-        # Block edits to synced comment bodies. See §6.8.
+        # Block edits to synced comment bodies. See §6.8. Same value-changed
+        # check as the issue serializer above — don't reject no-op PATCHes.
         if self.instance is not None and _comment_is_actively_synced(self.instance):
-            blocked = _LOCKED_COMMENT_FIELDS & set(attrs.keys())
+            blocked = [
+                field
+                for field in _LOCKED_COMMENT_FIELDS & set(attrs.keys())
+                if attrs[field] != getattr(self.instance, field, None)
+            ]
             if blocked:
                 raise serializers.ValidationError(
                     {

@@ -19,6 +19,11 @@ export type TDescriptionVersionEntityInformation = {
   createdByDisplayName: string;
   id: string;
   isRestoreDisabled: boolean;
+  // True when the entity is mirrored from an external source (e.g. PR 65's
+  // GitHub issue sync) and editing the synced fields is therefore blocked
+  // server-side. The dropdown surfaces an "(edit disabled for external
+  // import issue)" annotation so users see *why* the inputs are read-only.
+  isExternallySynced?: boolean;
 };
 
 type Props = {

@@ -140,3 +140,29 @@ def parse_issue_number_from_url(issue_url: str) -> Optional[int]:
         return None
     match = _ISSUE_URL_RE.search(issue_url)
     return int(match.group(1)) if match else None
+
+
+# Accept the two formats users commonly paste:
+#   - HTTPS:  https://github.com/<owner>/<repo>[.git][/]
+#   - SSH:    git@github.com:<owner>/<repo>[.git]
+# Anything else (gitlab, bitbucket, self-hosted, GH enterprise on a different
+# host) deliberately fails — PR 65 only ships github.com.
+_HTTPS_REPO_RE = re.compile(r"^https?://github\.com/(?P<owner>[^/\s]+)/(?P<name>[^/\s]+?)(?:\.git)?/?$")
+_SSH_REPO_RE = re.compile(r"^git@github\.com:(?P<owner>[^/\s]+)/(?P<name>[^/\s]+?)(?:\.git)?$")
+
+
+def parse_github_repo_url(url: str) -> Optional[tuple[str, str]]:
+    """Parse a github.com repo URL into ``(owner, name)``.
+
+    Returns ``None`` if the URL is empty, malformed, or points at a non-github
+    host. ``name`` has any trailing ``.git`` stripped so callers can use it
+    against the REST API directly.
+    """
+    if not url:
+        return None
+    candidate = url.strip()
+    for pattern in (_HTTPS_REPO_RE, _SSH_REPO_RE):
+        match = pattern.match(candidate)
+        if match:
+            return match.group("owner"), match.group("name")
+    return None

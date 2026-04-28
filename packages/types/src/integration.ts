@@ -67,10 +67,7 @@ export interface IGithubReposPage {
 }
 
 export interface IGithubProjectBindRequest {
-  repository_id: number;
-  owner: string;
-  name: string;
-  url: string;
+  repo_url: string;
 }
 
 export interface IGithubProjectBindingStatus {
