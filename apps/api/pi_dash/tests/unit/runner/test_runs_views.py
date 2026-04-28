@@ -267,3 +267,297 @@ def test_release_pin_404_for_run_in_other_workspace(
         f"/api/runners/runs/{run.id}/release-pin/", {}, format="json"
     )
     assert resp.status_code == status.HTTP_404_NOT_FOUND
+
+
+# ---------------------------------------------------------------------------
+# Comment & Run endpoint
+#
+# POST /api/runners/runs/ with ``triggered_by="comment_and_run"`` reuses the
+# continuation pipeline (parent resolution, runner pinning, drain) and
+# resets the issue's ``IssueAgentSchedule``. See
+# ``.ai_design/issue_ticking_system/design.md`` §4.6.
+# ---------------------------------------------------------------------------
+
+
+def _make_in_progress_issue_with_paused_run(workspace):
+    """Build an issue in the literal ``In Progress`` state with a prior
+    ``PAUSED_AWAITING_INPUT`` run — the prerequisites for ``Comment & Run``."""
+    from datetime import timedelta
+
+    from crum import impersonate
+    from django.utils import timezone
+
+    from pi_dash.db.models import Issue, Project, State
+    from pi_dash.runner.models import Runner, RunnerStatus
+
+    pod = Pod.default_for_workspace(workspace)
+    runner = Runner.objects.create(
+        owner=workspace.owner,
+        workspace=workspace,
+        pod=pod,
+        name="carun",
+        credential_hash="h",
+        credential_fingerprint="f" * 12,
+        status=RunnerStatus.ONLINE,
+        last_heartbeat_at=timezone.now(),
+    )
+    with impersonate(workspace.owner):
+        project = Project.objects.create(
+            name="CARun",
+            identifier="CARN",
+            workspace=workspace,
+            created_by=workspace.owner,
+        )
+        in_progress = State.objects.create(
+            name="In Progress", project=project, group="started"
+        )
+        State.objects.create(name="Todo", project=project, group="unstarted")
+        issue = Issue.objects.create(
+            name="Task",
+            workspace=workspace,
+            project=project,
+            state=in_progress,
+            created_by=workspace.owner,
+        )
+    # The state-transition signal auto-creates an immediate-dispatch run
+    # (and the matcher may have flipped it to ASSIGNED). Delete it so the
+    # test's PAUSED parent is the only prior run, with no active-run noise.
+    AgentRun.objects.filter(work_item=issue).delete()
+    parent = AgentRun.objects.create(
+        workspace=workspace,
+        owner=workspace.owner,
+        pod=pod,
+        work_item=issue,
+        runner=runner,
+        thread_id="sess_xyz",
+        status=AgentRunStatus.PAUSED_AWAITING_INPUT,
+        prompt="prior",
+        started_at=timezone.now() - timedelta(minutes=5),
+    )
+    return issue, parent
+
+
+@pytest.mark.unit
+def test_comment_and_run_creates_continuation_with_parent_link(
+    db, session_client, workspace
+):
+    """Happy path: prior PAUSED run exists, ``triggered_by`` routes to the
+    continuation pipeline, ``parent_run`` is wired correctly."""
+    issue, parent = _make_in_progress_issue_with_paused_run(workspace)
+
+    resp = session_client.post(
+        "/api/runners/runs/",
+        {
+            "workspace": str(workspace.id),
+            "work_item": str(issue.id),
+            "triggered_by": "comment_and_run",
+        },
+        format="json",
+    )
+    assert resp.status_code == status.HTTP_201_CREATED, resp.data
+    run = AgentRun.objects.get(id=resp.data["id"])
+    assert run.parent_run_id == parent.id
+    # Status may be QUEUED or ASSIGNED — drain may have flipped it on commit
+    # (the runner_for_workspace fixture is online and idle). The contract
+    # is "continuation row created, linked to the prior run," not a
+    # specific terminal status of the post-commit drain.
+    assert run.status in (AgentRunStatus.QUEUED, AgentRunStatus.ASSIGNED)
+
+
+@pytest.mark.unit
+def test_comment_and_run_resets_schedule(db, session_client, workspace):
+    """The endpoint must reset ``tick_count`` and bump ``next_run_at`` —
+    that's what makes Comment & Run a fresh budget grant per §4.6 step 4."""
+    from datetime import timedelta
+
+    from django.utils import timezone
+
+    from pi_dash.db.models.issue_agent_schedule import IssueAgentSchedule
+
+    issue, _ = _make_in_progress_issue_with_paused_run(workspace)
+    sched = IssueAgentSchedule.objects.get(issue=issue)
+    sched.tick_count = 7
+    stale = timezone.now() + timedelta(hours=2)
+    sched.next_run_at = stale
+    sched.save(update_fields=["tick_count", "next_run_at"])
+
+    resp = session_client.post(
+        "/api/runners/runs/",
+        {
+            "workspace": str(workspace.id),
+            "work_item": str(issue.id),
+            "triggered_by": "comment_and_run",
+        },
+        format="json",
+    )
+    assert resp.status_code == status.HTTP_201_CREATED
+    sched.refresh_from_db()
+    assert sched.tick_count == 0
+    # next_run_at moved off the stale future timestamp toward NOW + interval.
+    assert sched.next_run_at != stale
+
+
+@pytest.mark.unit
+def test_comment_and_run_requires_work_item(db, session_client, workspace):
+    resp = session_client.post(
+        "/api/runners/runs/",
+        {"workspace": str(workspace.id), "triggered_by": "comment_and_run"},
+        format="json",
+    )
+    assert resp.status_code == status.HTTP_400_BAD_REQUEST
+    assert "work_item" in resp.data["error"]
+
+
+@pytest.mark.unit
+def test_comment_and_run_returns_409_when_no_prior_run(
+    db, session_client, workspace
+):
+    """Continuation pipeline can't run with no prior — a Comment & Run
+    on an issue that never had a run is a 409, not a silent no-op."""
+    from crum import impersonate
+
+    from pi_dash.db.models import Issue, Project, State
+
+    with impersonate(workspace.owner):
+        project = Project.objects.create(
+            name="P2", identifier="P2", workspace=workspace,
+            created_by=workspace.owner,
+        )
+        in_progress = State.objects.create(
+            name="In Progress", project=project, group="started"
+        )
+        issue = Issue.objects.create(
+            name="Task", workspace=workspace, project=project,
+            state=in_progress, created_by=workspace.owner,
+        )
+    # Discard the single AgentRun the state-transition signal auto-created
+    # so the endpoint sees no prior.
+    AgentRun.objects.filter(work_item=issue).delete()
+
+    resp = session_client.post(
+        "/api/runners/runs/",
+        {
+            "workspace": str(workspace.id),
+            "work_item": str(issue.id),
+            "triggered_by": "comment_and_run",
+        },
+        format="json",
+    )
+    assert resp.status_code == status.HTTP_409_CONFLICT
+
+
+@pytest.mark.unit
+def test_comment_and_run_404_for_issue_in_other_workspace(
+    db, api_client, workspace, second_workspace
+):
+    issue, _ = _make_in_progress_issue_with_paused_run(workspace)
+    outsider = User.objects.create(
+        email=f"o-{uuid4().hex[:8]}@example.com",
+        username=f"o_{uuid4().hex[:8]}",
+    )
+    outsider.set_password("pw")
+    outsider.save()
+    api_client.force_authenticate(user=outsider)
+    resp = api_client.post(
+        "/api/runners/runs/",
+        {
+            "workspace": str(second_workspace.id),
+            "work_item": str(issue.id),
+            "triggered_by": "comment_and_run",
+        },
+        format="json",
+    )
+    # Outsider isn't a member of the issue's workspace — 404 (not 403)
+    # so existence isn't confirmed across workspaces.
+    assert resp.status_code == status.HTTP_404_NOT_FOUND
+
+
+# ---------------------------------------------------------------------------
+# X-Pi-Dash-Skip-Immediate-Dispatch header path
+#
+# Used by the Comment & Run flow on a Paused issue: the client wants to
+# transition the issue back to In Progress without firing the state-
+# transition signal's own immediate dispatch (Comment & Run owns the
+# dispatch and would race the signal otherwise). See
+# ``.ai_design/issue_ticking_system/design.md`` §4.5–§4.6.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+def test_skip_immediate_dispatch_header_suppresses_run_creation_on_state_change(
+    db, session_client, workspace
+):
+    from crum import impersonate
+
+    from pi_dash.db.models import Issue, Project, State
+    from pi_dash.db.models.issue_agent_schedule import IssueAgentSchedule
+    from pi_dash.prompting.seed import seed_default_template
+
+    seed_default_template()
+    with impersonate(workspace.owner):
+        project = Project.objects.create(
+            name="SkipDisp", identifier="SD", workspace=workspace,
+            created_by=workspace.owner,
+        )
+        todo = State.objects.create(
+            name="Todo", project=project, group="unstarted"
+        )
+        in_progress = State.objects.create(
+            name="In Progress", project=project, group="started"
+        )
+        issue = Issue.objects.create(
+            name="Task", workspace=workspace, project=project,
+            state=todo, created_by=workspace.owner,
+        )
+
+    # PATCH state=In Progress with the skip header — signal must not
+    # create an AgentRun, but must still arm the schedule.
+    resp = session_client.patch(
+        f"/api/workspaces/{workspace.slug}/projects/{project.id}/issues/{issue.id}/",
+        {"state_id": str(in_progress.id)},
+        format="json",
+        HTTP_X_PI_DASH_SKIP_IMMEDIATE_DISPATCH="1",
+    )
+    assert resp.status_code == status.HTTP_204_NO_CONTENT
+    assert AgentRun.objects.filter(work_item=issue).count() == 0
+    # Schedule armed: the steady-state tick source is in place even
+    # though dispatch was deferred to the caller.
+    sched = IssueAgentSchedule.objects.get(issue=issue)
+    assert sched.enabled is True
+
+
+@pytest.mark.unit
+def test_no_skip_header_creates_run_on_state_change(
+    db, session_client, workspace
+):
+    """Sanity: without the header, the existing immediate-dispatch path
+    fires. This guards against accidentally inverting the default."""
+    from crum import impersonate
+
+    from pi_dash.db.models import Issue, Project, State
+    from pi_dash.prompting.seed import seed_default_template
+
+    seed_default_template()
+    with impersonate(workspace.owner):
+        project = Project.objects.create(
+            name="DispDef", identifier="DD", workspace=workspace,
+            created_by=workspace.owner,
+        )
+        todo = State.objects.create(
+            name="Todo", project=project, group="unstarted"
+        )
+        in_progress = State.objects.create(
+            name="In Progress", project=project, group="started"
+        )
+        issue = Issue.objects.create(
+            name="Task", workspace=workspace, project=project,
+            state=todo, created_by=workspace.owner,
+        )
+
+    resp = session_client.patch(
+        f"/api/workspaces/{workspace.slug}/projects/{project.id}/issues/{issue.id}/",
+        {"state_id": str(in_progress.id)},
+        format="json",
+    )
+    assert resp.status_code == status.HTTP_204_NO_CONTENT
+    assert AgentRun.objects.filter(work_item=issue).count() == 1
