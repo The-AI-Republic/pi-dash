@@ -50,6 +50,14 @@ impl Supervisor {
 
     pub async fn run(self) -> Result<()> {
         self.paths.ensure()?;
+        // Re-run config validation here so any future entry path that
+        // bypasses `cli::run` (tests, IPC reload, embedded callers)
+        // still gets the duplicate-name / nested-working-dir / cap
+        // checks before we spawn N RunnerInstances. Cheap (O(n²) over
+        // ≤50 runners) and idempotent with the cli::run gate.
+        self.config
+            .validate()
+            .map_err(|e| anyhow::anyhow!("invalid config: {e}"))?;
         let Supervisor {
             config,
             creds,

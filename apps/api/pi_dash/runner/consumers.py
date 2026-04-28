@@ -294,19 +294,40 @@ class RunnerConsumer(AsyncJsonWebsocketConsumer):
                 self.token.id,
                 body_runner_id,
             )
+            # The body's runner_id is unparseable, so we have no rid
+            # to address an error frame to. Drop silently and rely on
+            # the connection-level Bye/close path if this repeats.
             return
         rid = content.get("rid")
         if rid is not None:
             try:
-                if UUID(str(rid)) != runner_id:
-                    logger.warning(
-                        "token %s sent Hello with mismatched envelope rid %s vs body runner_id %s",
-                        self.token.id,
-                        rid,
-                        runner_id,
-                    )
-                    return
+                rid_uuid = UUID(str(rid))
             except (ValueError, AttributeError):
+                logger.warning(
+                    "token %s sent Hello with malformed envelope rid %r",
+                    self.token.id,
+                    rid,
+                )
+                return
+            if rid_uuid != runner_id:
+                logger.warning(
+                    "token %s sent Hello with mismatched envelope rid %s vs body runner_id %s",
+                    self.token.id,
+                    rid_uuid,
+                    runner_id,
+                )
+                # Surface the inconsistency to the daemon so its
+                # RunnerLoop can drop that instance instead of waiting
+                # forever for a Welcome that will never arrive.
+                await self._send_envelope(
+                    {
+                        "type": "remove_runner",
+                        "rid": str(runner_id),
+                        "runner_id": str(runner_id),
+                        "reason": "hello_rid_mismatch",
+                    },
+                    runner_scoped=False,
+                )
                 return
 
         runner = await self._resolve_token_runner(self.token, runner_id)
@@ -315,6 +336,17 @@ class RunnerConsumer(AsyncJsonWebsocketConsumer):
                 "token %s tried to bring runner %s online but it is not owned/revoked",
                 self.token.id,
                 runner_id,
+            )
+            # Tell the daemon explicitly so its RunnerLoop doesn't sit
+            # waiting for a Welcome that will never arrive.
+            await self._send_envelope(
+                {
+                    "type": "remove_runner",
+                    "rid": str(runner_id),
+                    "runner_id": str(runner_id),
+                    "reason": "not_owned_or_revoked",
+                },
+                runner_scoped=False,
             )
             return
         if runner_id in self.authorised_runners:
@@ -327,6 +359,15 @@ class RunnerConsumer(AsyncJsonWebsocketConsumer):
         self.group_names.append(group)
         await self.channel_layer.group_add(group, self.channel_name)
         await self._mark_online(runner.id)
+        # Persist hello metadata (os/arch/runner_version) the same way
+        # the legacy single-runner path does via on_hello → _apply_hello.
+        # Without this, token-mode Runner rows would never get those
+        # fields populated.
+        await sync_to_async(self._apply_hello)(runner, content)
+        # Bump the token's last_seen_at — the field is surfaced in the
+        # admin and connections list and is otherwise never updated in
+        # token mode.
+        await self._touch_token_seen()
         # Per-runner Welcome — carries the runner's rid so the daemon
         # knows which Hello this is acking.
         await self._send_envelope(
@@ -573,6 +614,22 @@ class RunnerConsumer(AsyncJsonWebsocketConsumer):
                 secret_hash=secret_hashed,
                 revoked_at__isnull=True,
             ).first()
+        )()
+
+    async def _touch_token_seen(self) -> None:
+        """Bump ``MachineToken.last_seen_at`` for the current connection.
+
+        Called on every successful per-runner Hello so the connections
+        list / admin reflects a live token. Cheap (single UPDATE by
+        primary key) and safe to call repeatedly.
+        """
+        if self.token is None:
+            return
+        token_id = self.token.id
+        await sync_to_async(
+            lambda: MachineToken.objects.filter(pk=token_id).update(
+                last_seen_at=timezone.now()
+            )
         )()
 
     @staticmethod

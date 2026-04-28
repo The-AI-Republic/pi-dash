@@ -15,6 +15,9 @@ And per-token:
 
 from __future__ import annotations
 
+import uuid as _uuid
+
+from django.db import IntegrityError
 from rest_framework import status
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
@@ -23,6 +26,7 @@ from rest_framework.views import APIView
 from pi_dash.authentication.session import BaseSessionAuthentication
 from pi_dash.runner.models import MachineToken, Runner
 from pi_dash.runner.services import tokens
+from pi_dash.runner.services.permissions import is_workspace_member
 
 
 class MachineTokenListCreateEndpoint(APIView):
@@ -39,7 +43,7 @@ class MachineTokenListCreateEndpoint(APIView):
 
     def post(self, request):
         title = (request.data.get("title") or "").strip()
-        workspace_id = request.data.get("workspace")
+        workspace_id_raw = request.data.get("workspace")
         if not title:
             return Response(
                 {"error": "title is required"},
@@ -50,10 +54,25 @@ class MachineTokenListCreateEndpoint(APIView):
                 {"error": "title must be at most 128 characters"},
                 status=status.HTTP_400_BAD_REQUEST,
             )
-        if not workspace_id:
+        if not workspace_id_raw:
             return Response(
                 {"error": "workspace is required"},
                 status=status.HTTP_400_BAD_REQUEST,
+            )
+        try:
+            workspace_id = _uuid.UUID(str(workspace_id_raw))
+        except (ValueError, AttributeError):
+            return Response(
+                {"error": "workspace must be a UUID"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        # Authz: only members of the target workspace can mint a token in it.
+        # Without this gate, any authenticated user could mint a token in any
+        # workspace whose UUID they can guess and use it to register runners.
+        if not is_workspace_member(request.user, workspace_id):
+            return Response(
+                {"error": "workspace not found"},
+                status=status.HTTP_404_NOT_FOUND,
             )
 
         minted = tokens.mint_machine_token_secret()
@@ -130,8 +149,6 @@ class TokenRunnerCreateEndpoint(APIView):
             )
         secret_raw = auth.split(" ", 1)[1].strip()
 
-        import uuid as _uuid
-
         try:
             token_id = _uuid.UUID(token_id_raw)
         except (ValueError, AttributeError):
@@ -186,9 +203,12 @@ class TokenRunnerCreateEndpoint(APIView):
                 runner_version=(request.data.get("version") or "")[:32],
                 protocol_version=int(request.data.get("protocol_version") or 2),
             )
-        except Exception as exc:  # IntegrityError or otherwise
+        except IntegrityError:
+            # `UNIQUE(pod, name)` (or another DB-level constraint) collision.
+            # Return a generic message so we don't leak constraint names or
+            # internal exception details to the daemon.
             return Response(
-                {"error": f"runner_create_failed: {exc}"},
+                {"error": "runner_name_taken"},
                 status=status.HTTP_409_CONFLICT,
             )
 
