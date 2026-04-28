@@ -139,6 +139,15 @@ pub struct ConnectionLoop {
     pub status_snapshot: tokio::sync::watch::Receiver<RunnerStatus>,
     pub in_flight: tokio::sync::watch::Receiver<Option<Uuid>>,
     pub shutdown: std::sync::Arc<tokio::sync::Notify>,
+    /// Fired (`notify_one`) every time a fresh WS handshake completes —
+    /// first connect *and* every reconnect after a drop. The supervisor
+    /// watches this notify and re-emits one `Hello` per `RunnerInstance`
+    /// on each fire so the cloud-side `authorised_runners` map is
+    /// rebuilt for the new consumer instance. Without this signal the
+    /// post-reconnect connection is a silent zombie: WS is up, frames
+    /// flow out, but cloud drops every one for unknown rid. See
+    /// `.ai_design/n_runners_in_same_machine/design.md` §6.x.
+    pub connected: std::sync::Arc<tokio::sync::Notify>,
 }
 
 impl ConnectionLoop {
@@ -155,11 +164,17 @@ impl ConnectionLoop {
             match opened {
                 Ok(conn) => {
                     backoff.reset();
+                    // Tell the supervisor a fresh WS is up so it can
+                    // (re-)emit one Hello per RunnerInstance. `notify_one`
+                    // latches a permit if no waiter is currently parked,
+                    // so a startup race where the connect completes
+                    // before the watcher is scheduled still works.
+                    self.connected.notify_one();
                     // Hello is sent by the supervisor (one per
                     // RunnerInstance), not here. ConnectionLoop just
                     // forwards bytes; identity announcements happen
                     // through the same out_tx the supervisor primed
-                    // before this connection task spawned.
+                    // via the `connected` notify above.
                     let (tx_frame, rx_frame) = mpsc::channel(64);
                     let forward = {
                         let tx_frame = tx_frame.clone();

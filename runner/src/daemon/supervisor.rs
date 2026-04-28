@@ -111,7 +111,25 @@ impl Supervisor {
         // Cloud loop + heartbeat are skipped in offline mode. Without a cloud
         // consumer, the heartbeat task would otherwise block forever once the
         // outbound channel filled (~53 min at 25s cadence).
-        let (cloud_handle, hb_handles) = if !opts.offline {
+        let (cloud_handle, hello_handle, hb_handles) = if !opts.offline {
+            // `connected` fires every time the WS handshake completes —
+            // first connect AND every reconnect. The hello-emitter task
+            // waits on it and re-sends one Hello per instance, which is
+            // what tells the cloud to (re-)populate `authorised_runners`
+            // on the new consumer. Without this signal a reconnect
+            // produces a live socket the cloud silently ignores.
+            let connected = std::sync::Arc::new(tokio::sync::Notify::new());
+
+            // Spawn the hello emitter BEFORE ConnectionLoop so we don't
+            // race the first `notify_one` against a not-yet-scheduled
+            // waiter. (`notify_one` latches one permit anyway, but
+            // ordering keeps the code obvious.)
+            let connected_for_hello = connected.clone();
+            let instances_for_hello = instances.clone();
+            let hello_handle = tokio::spawn(async move {
+                hello_emitter(instances_for_hello, connected_for_hello).await;
+            });
+
             let shutdown_for_loop = state.shutdown_notified();
             let loop_ = ConnectionLoop {
                 cloud_url: config.daemon.cloud_url.clone(),
@@ -121,31 +139,13 @@ impl Supervisor {
                 status_snapshot: state.rx_status.clone(),
                 in_flight: state.rx_in_flight.clone(),
                 shutdown: shutdown_for_loop,
+                connected,
             };
             let cloud = tokio::spawn(async move {
                 if let Err(e) = loop_.run().await {
                     tracing::error!("cloud loop exited: {e:#}");
                 }
             });
-
-            // Send a Hello per RunnerInstance over the shared out_tx.
-            // The ConnectionLoop's run-loop drains out_tx and forwards
-            // to the cloud once the WS handshake is up. Hello frames
-            // queue here if the WS isn't ready yet — that's fine, the
-            // mpsc buffer absorbs the burst and ConnectionLoop forwards
-            // them as soon as the upgrade completes.
-            for inst in &instances {
-                let hello = ClientMsg::Hello {
-                    runner_id: inst.runner_id,
-                    version: crate::RUNNER_VERSION.to_string(),
-                    os: std::env::consts::OS.to_string(),
-                    arch: std::env::consts::ARCH.to_string(),
-                    status: *inst.state.rx_status.borrow(),
-                    in_flight_run: *inst.state.rx_in_flight.borrow(),
-                    protocol_version: crate::PROTOCOL_VERSION,
-                };
-                let _ = inst.out.send(hello).await;
-            }
 
             // Heartbeat task per instance — design.md §6.6 says per-runner
             // heartbeats carry rid so the cloud's per-runner record can
@@ -194,11 +194,11 @@ impl Supervisor {
                 });
                 hb_handles.push(h);
             }
-            (Some(cloud), hb_handles)
+            (Some(cloud), Some(hello_handle), hb_handles)
         } else {
             tracing::info!("offline mode: cloud loop + heartbeat disabled");
             drop(out_rx);
-            (None, Vec::new())
+            (None, None, Vec::new())
         };
 
         // Demux task — reads from in_rx (the connection's inbound) and
@@ -316,10 +316,43 @@ impl Supervisor {
         }
         demux.abort();
         ipc_handle.abort();
+        if let Some(h) = hello_handle {
+            h.abort();
+        }
         if let Some(h) = cloud_handle {
             h.abort();
         }
         Ok(())
+    }
+}
+
+/// Watch the `connected` notify and re-emit one `Hello` per `RunnerInstance`
+/// every time it fires. Driven by `ConnectionLoop`, which calls
+/// `notify_one()` after each successful WS handshake (cold start and every
+/// reconnect). Cloud-side `_handle_token_hello` is idempotent on re-Hello,
+/// so a second emission for an already-authorised runner is harmless.
+async fn hello_emitter(
+    instances: Vec<RunnerInstance>,
+    connected: std::sync::Arc<tokio::sync::Notify>,
+) {
+    loop {
+        connected.notified().await;
+        for inst in &instances {
+            let hello = ClientMsg::Hello {
+                runner_id: inst.runner_id,
+                version: crate::RUNNER_VERSION.to_string(),
+                os: std::env::consts::OS.to_string(),
+                arch: std::env::consts::ARCH.to_string(),
+                status: *inst.state.rx_status.borrow(),
+                in_flight_run: *inst.state.rx_in_flight.borrow(),
+                protocol_version: crate::PROTOCOL_VERSION,
+            };
+            // Channel-closed means the cloud loop exited; the next
+            // reconnect will re-fire the notify and we'll retry then.
+            // Best-effort: don't bring down the daemon over a single
+            // failed Hello.
+            let _ = inst.out.send(hello).await;
+        }
     }
 }
 
