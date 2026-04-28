@@ -54,11 +54,28 @@ CLOSE_CODE_ROTATED = 4010
 class RunnerConsumer(AsyncJsonWebsocketConsumer):
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         super().__init__(*args, **kwargs)
+        # Legacy (per-runner-secret) auth: `self.runner` is the connection's
+        # one runner identity for the duration. Token auth leaves it None
+        # and uses `self.authorised_runners` instead — see below.
         self.runner: Optional[Runner] = None
         # Token (machine credential) authenticating the connection, if any.
         # Set when the daemon sends `X-Token-Id` + `Bearer <token_secret>`;
-        # remains None on legacy v1 auth (per-runner runner_secret).
+        # remains None on legacy v1 auth.
         self.token: Optional[MachineToken] = None
+        # Token-mode authorised runner set: keyed by runner_id, populated
+        # as `Hello` frames arrive (one Hello per runner the daemon wants
+        # to bring online). Frame routing — both inbound (`receive_json`'s
+        # `_rid_matches` check) and outbound (`_send_envelope`'s rid
+        # stamping) — picks runners out of this map. Empty in legacy
+        # auth mode; legacy mode keeps using `self.runner` directly.
+        self.authorised_runners: Dict[UUID, Runner] = {}
+        # Each runner has its own pubsub group; a token-mode connection is
+        # joined to N of them. Tracked here so disconnect can leave them
+        # all cleanly. In legacy mode this is a single-element list mirror
+        # of self.group_name.
+        self.group_names: list[str] = []
+        # Legacy single-runner group name. Kept as a separate field so the
+        # existing legacy auth code path is byte-for-byte unchanged.
         self.group_name: Optional[str] = None
         # Per-connection dedupe cache of message_ids we've already applied.
         # LRU-bounded so a misbehaving runner can't grow us unboundedly.
@@ -92,7 +109,17 @@ class RunnerConsumer(AsyncJsonWebsocketConsumer):
             "v": PROTOCOL_VERSION,
             "mid": str(uuid4()),
         }
-        if runner_scoped and self.runner is not None and "rid" not in payload:
+        # Auto-stamp rid in legacy single-runner mode if the caller didn't
+        # set it explicitly. In token mode the caller MUST set rid (the
+        # connection has multiple authorised runners; the helper can't
+        # guess which one this frame is for) — runner_send pulls rid
+        # from the pubsub payload before forwarding.
+        if (
+            runner_scoped
+            and self.runner is not None
+            and self.token is None
+            and "rid" not in payload
+        ):
             frame["rid"] = str(self.runner.id)
         frame.update(payload)
         await self.send_json(frame)
@@ -107,28 +134,27 @@ class RunnerConsumer(AsyncJsonWebsocketConsumer):
         # Two auth modes:
         # 1. Token (multi-runner): X-Token-Id + Bearer <token_secret>. The
         #    daemon authenticates as the machine; runners under it come
-        #    online via Hello frames. We resolve the token to its
-        #    primary runner here for the single-runner-via-token path
-        #    that ships first; multi-Hello support arrives in a later PR
-        #    and replaces the primary-runner shortcut with a
-        #    HashSet<Uuid> of authorised runner_ids.
+        #    online individually via `Hello { rid, runner_id }` frames
+        #    after WS upgrade. The connection authorises any runner that
+        #    arrives via Hello and is in the token's owns-set.
         # 2. Legacy (single-runner): Authorization-only with the runner's
-        #    own bearer secret. Existing v1 daemons use this path until
-        #    they migrate.
+        #    own bearer secret. Existing v1 daemons use this path; one
+        #    connection ↔ one runner, no Hello fan-out.
         token_id_header = (self._header("x-token-id") or "").strip()
         if token_id_header:
-            token, runner = await self._authenticate_via_token(
-                token_id_header, raw
-            )
-            if token is None or runner is None:
+            token = await self._authenticate_token(token_id_header, raw)
+            if token is None:
                 await self.close(code=4401)
                 return
             self.token = token
-        else:
-            runner = await self._find_runner(raw)
-            if runner is None:
-                await self.close(code=4401)
-                return
+            # Accept the WS up front; runners come online via Hello.
+            await self.accept()
+            return
+
+        runner = await self._find_runner(raw)
+        if runner is None:
+            await self.close(code=4401)
+            return
         if runner.status == RunnerStatus.REVOKED:
             await self.close(code=4403)
             return
@@ -154,6 +180,7 @@ class RunnerConsumer(AsyncJsonWebsocketConsumer):
                     )
         self.runner = runner
         self.group_name = runner_group(runner.id)
+        self.group_names = [self.group_name]
         await self.channel_layer.group_add(self.group_name, self.channel_name)
         await self.accept()
         await self._mark_online(runner.id)
@@ -165,29 +192,50 @@ class RunnerConsumer(AsyncJsonWebsocketConsumer):
         })
 
     async def disconnect(self, code: int) -> None:
-        if self.group_name is not None:
-            await self.channel_layer.group_discard(self.group_name, self.channel_name)
-        if self.runner is not None:
+        # Leave every joined pubsub group, regardless of mode. Token mode
+        # has N entries here; legacy has at most one.
+        for group in self.group_names:
+            await self.channel_layer.group_discard(group, self.channel_name)
+        # Mark every runner this connection brought online offline. In
+        # legacy mode that's just `self.runner`; in token mode it's the
+        # full authorised_runners map.
+        if self.token is not None:
+            for runner_id in list(self.authorised_runners.keys()):
+                await self._mark_offline(runner_id)
+        elif self.runner is not None:
             await self._mark_offline(self.runner.id)
 
     async def receive_json(self, content: Dict[str, Any], **_: Any) -> None:
         mtype = content.get("type")
-        runner = self.runner
-        if runner is None:
-            return
-        # Validate the per-runner routing discriminator if the daemon set
-        # one. While one connection still authenticates as one runner, an
-        # incoming ``rid`` must match the connection's authenticated runner
-        # — anything else suggests a misbehaving daemon and we drop the
-        # frame. Multi-runner support (cloud-side phase 1+2) will replace
-        # this with a HashSet membership check.
-        if not self._rid_matches(runner, content):
-            logger.warning(
-                "runner %s sent frame with mismatched rid %r; dropping",
-                runner.id,
-                content.get("rid"),
-            )
-            return
+        # Resolve the target runner.
+        # - Token mode: pull the runner from the rid field. Hello is a
+        #   special case — it's the frame that ADDS to authorised_runners,
+        #   so we route it through `_handle_token_hello` directly.
+        # - Legacy mode: `self.runner` was bound at connect time.
+        if self.token is not None:
+            if mtype == "hello":
+                await self._handle_token_hello(content)
+                return
+            runner = self._resolve_inbound_runner(content)
+            if runner is None:
+                logger.warning(
+                    "token %s sent %s frame with unknown rid %r; dropping",
+                    self.token.id,
+                    mtype,
+                    content.get("rid"),
+                )
+                return
+        else:
+            runner = self.runner
+            if runner is None:
+                return
+            if not self._rid_matches(runner, content):
+                logger.warning(
+                    "runner %s sent frame with mismatched rid %r; dropping",
+                    runner.id,
+                    content.get("rid"),
+                )
+                return
         if self._is_duplicate(content):
             logger.debug(
                 "runner %s sent duplicate message %s; dropping",
@@ -205,6 +253,91 @@ class RunnerConsumer(AsyncJsonWebsocketConsumer):
             await handler(runner, content)
         except Exception:
             logger.exception("error handling %s from runner %s", mtype, runner.id)
+
+    def _resolve_inbound_runner(self, content: Dict[str, Any]) -> Optional[Runner]:
+        """Token mode: pick the target Runner from the frame's ``rid``.
+
+        Returns None if the rid is missing, malformed, or names a runner
+        not in this connection's authorised set. The receive_json caller
+        drops the frame in that case.
+        """
+        rid = content.get("rid")
+        if rid is None:
+            return None
+        try:
+            rid_uuid = UUID(str(rid))
+        except (ValueError, AttributeError):
+            return None
+        return self.authorised_runners.get(rid_uuid)
+
+    async def _handle_token_hello(self, content: Dict[str, Any]) -> None:
+        """Bring a runner online over a token-authenticated connection.
+
+        Steps:
+        1. Parse ``runner_id`` from the body. The wire's envelope ``rid``
+           and the Hello body's ``runner_id`` should agree (sanity-checked
+           below); we use the body field as authoritative since `Hello`
+           is the frame that introduces the runner.
+        2. Verify the runner is owned by this connection's token and not
+           revoked.
+        3. Mark online, join the per-runner pubsub group, store in
+           authorised_runners, send a runner-scoped Welcome.
+        """
+        if self.token is None:
+            return
+        body_runner_id = content.get("runner_id")
+        try:
+            runner_id = UUID(str(body_runner_id))
+        except (ValueError, AttributeError):
+            logger.warning(
+                "token %s sent Hello with invalid runner_id %r",
+                self.token.id,
+                body_runner_id,
+            )
+            return
+        rid = content.get("rid")
+        if rid is not None:
+            try:
+                if UUID(str(rid)) != runner_id:
+                    logger.warning(
+                        "token %s sent Hello with mismatched envelope rid %s vs body runner_id %s",
+                        self.token.id,
+                        rid,
+                        runner_id,
+                    )
+                    return
+            except (ValueError, AttributeError):
+                return
+
+        runner = await self._resolve_token_runner(self.token, runner_id)
+        if runner is None or runner.status == RunnerStatus.REVOKED:
+            logger.warning(
+                "token %s tried to bring runner %s online but it is not owned/revoked",
+                self.token.id,
+                runner_id,
+            )
+            return
+        if runner_id in self.authorised_runners:
+            # Idempotent: a re-Hello after reconnect is fine, we just
+            # don't duplicate the bookkeeping.
+            return
+
+        self.authorised_runners[runner_id] = runner
+        group = runner_group(runner.id)
+        self.group_names.append(group)
+        await self.channel_layer.group_add(group, self.channel_name)
+        await self._mark_online(runner.id)
+        # Per-runner Welcome — carries the runner's rid so the daemon
+        # knows which Hello this is acking.
+        await self._send_envelope(
+            {
+                "type": "welcome",
+                "rid": str(runner.id),
+                "server_time": timezone.now().isoformat(),
+                "heartbeat_interval_secs": HEARTBEAT_INTERVAL_SECS,
+                "protocol_version": PROTOCOL_VERSION,
+            }
+        )
 
     @staticmethod
     def _rid_matches(runner: Runner, content: Dict[str, Any]) -> bool:
@@ -388,11 +521,20 @@ class RunnerConsumer(AsyncJsonWebsocketConsumer):
     # ---- Outbound — delivered via channels group_send ----
 
     async def runner_send(self, event: Dict[str, Any]) -> None:
-        payload = event.get("payload") or {}
+        payload = dict(event.get("payload") or {})
+        # In token mode this consumer is joined to N runner groups; the
+        # event includes which one fired so we can stamp `rid` correctly.
+        # In legacy mode `_send_envelope` falls back to self.runner.id.
+        target_id = event.get("runner_id")
+        if target_id and "rid" not in payload:
+            payload["rid"] = str(target_id)
         try:
             await self._send_envelope(payload)
         except Exception:
-            logger.exception("runner %s send failed", self.runner.id if self.runner else "?")
+            logger.exception(
+                "runner %s send failed",
+                target_id or (self.runner.id if self.runner else "?"),
+            )
 
     async def runner_close(self, event: Dict[str, Any]) -> None:
         """Force-close this WS (e.g. after credential rotation).
@@ -411,45 +553,40 @@ class RunnerConsumer(AsyncJsonWebsocketConsumer):
         )()
 
     @staticmethod
-    async def _authenticate_via_token(
+    async def _authenticate_token(
         token_id_raw: str, secret_raw: str
-    ) -> tuple[Optional[MachineToken], Optional[Runner]]:
-        """Look up the MachineToken by id and verify its secret.
+    ) -> Optional[MachineToken]:
+        """Look up a MachineToken by id and verify its bearer secret.
 
-        Returns ``(token, primary_runner)`` on success, ``(None, None)``
-        on any failure (unknown id, mismatched secret, revoked token, no
-        runners under it). Constant-time secret comparison via the same
-        ``hash_token`` HMAC scheme used for runner_secret.
-
-        For now we resolve the token to a single "primary runner" — the
-        oldest-created Runner under the token. This keeps the rest of
-        the consumer's per-runner code paths unchanged while phase 1 of
-        cloud token auth ships. Multi-Hello support replaces this with a
-        connection-scoped ``authorised_runner_ids`` set populated from
-        ``token.runners`` and updated as Hello frames arrive.
+        Returns the token on success, None on any failure (unknown id,
+        mismatched secret, revoked token). Runners are resolved
+        per-`Hello` after the WS is up — see :meth:`on_hello`.
         """
         try:
             token_id = UUID(token_id_raw)
         except (ValueError, AttributeError):
-            return None, None
+            return None
         secret_hashed = hash_token(secret_raw)
-
-        def _lookup() -> tuple[Optional[MachineToken], Optional[Runner]]:
-            token = MachineToken.objects.filter(
+        return await sync_to_async(
+            lambda: MachineToken.objects.filter(
                 id=token_id,
                 secret_hash=secret_hashed,
                 revoked_at__isnull=True,
             ).first()
-            if token is None:
-                return None, None
-            primary = (
-                Runner.objects.filter(machine_token=token)
-                .order_by("created_at")
-                .first()
-            )
-            return token, primary
+        )()
 
-        return await sync_to_async(_lookup)()
+    @staticmethod
+    async def _resolve_token_runner(token: MachineToken, runner_id: UUID) -> Optional[Runner]:
+        """Validate that ``runner_id`` is owned by ``token`` and not
+        revoked, returning the Runner row or None.
+        """
+        return await sync_to_async(
+            lambda: Runner.objects.filter(
+                id=runner_id,
+                machine_token=token,
+                revoked_at__isnull=True,
+            ).first()
+        )()
 
     @staticmethod
     async def _mark_online(runner_id: UUID) -> None:

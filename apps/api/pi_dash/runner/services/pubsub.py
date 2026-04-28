@@ -31,13 +31,19 @@ def runner_group(runner_id: UUID | str) -> str:
 
 
 def send_to_runner(runner_id: UUID | str, message: Dict[str, Any]) -> None:
-    """Best-effort fire-and-forget send to a runner's current WS process."""
+    """Best-effort fire-and-forget send to a runner's current WS process.
+
+    The ``runner_id`` is stamped onto the channels event so the
+    consumer can tag the outbound envelope's ``rid`` correctly even
+    in multi-runner mode where one consumer serves N runner groups.
+    """
     layer = get_channel_layer()
     if layer is None:
         logger.warning("channel layer not configured; cannot route to %s", runner_id)
         return
     async_to_sync(layer.group_send)(runner_group(runner_id), {
         "type": "runner.send",
+        "runner_id": str(runner_id),
         "payload": message,
     })
 
@@ -49,6 +55,7 @@ async def asend_to_runner(runner_id: UUID | str, message: Dict[str, Any]) -> Non
         return
     await layer.group_send(runner_group(runner_id), {
         "type": "runner.send",
+        "runner_id": str(runner_id),
         "payload": message,
     })
 
