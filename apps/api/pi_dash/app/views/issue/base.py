@@ -714,6 +714,15 @@ class IssueViewSet(BaseViewSet):
     def destroy(self, request, slug, project_id, pk=None):
         issue = Issue.objects.get(workspace__slug=slug, project_id=project_id, pk=pk)
 
+        # Block delete on actively-synced GitHub issues. See .ai_design/
+        # github_sync/design.md §6.8.
+        from pi_dash.db.models import GithubIssueSync
+        if issue.external_source == "github" and GithubIssueSync.objects.filter(issue=issue).exists():
+            return Response(
+                {"error": "This issue is synced from GitHub. Unbind the project's GitHub repository to delete."},
+                status=status.HTTP_409_CONFLICT,
+            )
+
         issue.delete()
         # delete the issue from recent visits
         UserRecentVisit.objects.filter(

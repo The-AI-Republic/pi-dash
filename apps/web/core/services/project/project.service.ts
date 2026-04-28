@@ -6,13 +6,13 @@
 
 import { API_BASE_URL } from "@pi-dash/constants";
 import type {
-  GithubRepositoriesResponse,
   IProjectUserPropertiesResponse,
   ISearchIssueResponse,
   TProjectAnalyticsCount,
   TProjectAnalyticsCountParams,
   TProjectIssuesSearchParams,
 } from "@pi-dash/types";
+import type { IGithubProjectBindRequest, IGithubProjectBindingStatus } from "@pi-dash/types";
 // helpers
 // pi dash web types
 import type { TProject, TPartialProject } from "@/pi-dash-web/types";
@@ -118,42 +118,40 @@ export class ProjectService extends APIService {
       });
   }
 
-  async getGithubRepositories(url: string): Promise<GithubRepositoriesResponse> {
-    return this.request({
-      method: "get",
-      url,
-    })
+  async getGithubBindingStatus(workspaceSlug: string, projectId: string): Promise<IGithubProjectBindingStatus> {
+    return this.get(`/api/workspaces/${workspaceSlug}/projects/${projectId}/github/`)
       .then((response) => response?.data)
       .catch((error) => {
         throw error?.response?.data;
       });
   }
 
-  async syncGithubRepository(
+  async bindGithubRepository(
     workspaceSlug: string,
     projectId: string,
-    workspaceIntegrationId: string,
-    data: {
-      name: string;
-      owner: string;
-      repository_id: string;
-      url: string;
-    }
-  ): Promise<any> {
-    return this.post(
-      `/api/workspaces/${workspaceSlug}/projects/${projectId}/workspace-integrations/${workspaceIntegrationId}/github-repository-sync/`,
-      data
-    )
+    data: IGithubProjectBindRequest
+  ): Promise<IGithubProjectBindingStatus> {
+    return this.post(`/api/workspaces/${workspaceSlug}/projects/${projectId}/github/bind/`, data)
       .then((response) => response?.data)
       .catch((error) => {
         throw error?.response?.data;
       });
   }
 
-  async getProjectGithubRepository(workspaceSlug: string, projectId: string, integrationId: string): Promise<any> {
-    return this.get(
-      `/api/workspaces/${workspaceSlug}/projects/${projectId}/workspace-integrations/${integrationId}/github-repository-sync/`
-    )
+  async setGithubSyncEnabled(
+    workspaceSlug: string,
+    projectId: string,
+    enabled: boolean
+  ): Promise<{ is_sync_enabled: boolean }> {
+    return this.patch(`/api/workspaces/${workspaceSlug}/projects/${projectId}/github/`, { enabled })
+      .then((response) => response?.data)
+      .catch((error) => {
+        throw error?.response?.data;
+      });
+  }
+
+  async unbindGithubRepository(workspaceSlug: string, projectId: string): Promise<{ bound: boolean }> {
+    return this.delete(`/api/workspaces/${workspaceSlug}/projects/${projectId}/github/`)
       .then((response) => response?.data)
       .catch((error) => {
         throw error?.response?.data;

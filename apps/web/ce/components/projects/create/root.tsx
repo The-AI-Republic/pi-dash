@@ -78,13 +78,24 @@ export const CreateProjectForm = observer(function CreateProjectForm(props: TCre
             isUserAsset: false,
           });
         } catch (error) {
-          console.error("Error uploading cover image:", error);
+          // Bundled static covers ship with the web bundle, so a flaky or
+          // misconfigured asset backend (e.g. MinIO unreachable from the
+          // browser) shouldn't block project creation — every new project
+          // form already defaults `cover_image_url` to a random static URL,
+          // and that URL is renderable directly. Fall back to using it as
+          // the project's `cover_image` instead of rejecting submission.
+          // A non-blocking warning toast surfaces the skipped upload so the
+          // user has a signal when the failure was actually fixable (auth
+          // expired, server rejected the file, etc.) rather than just a
+          // misconfigured local stack.
+          console.warn("Cover upload failed; falling back to bundled static URL", error);
+          formData.cover_image = coverImage;
+          formData.cover_image_asset = null;
           setToast({
-            type: TOAST_TYPE.ERROR,
-            title: t("toast.error"),
-            message: error instanceof Error ? error.message : "Failed to upload cover image",
+            type: TOAST_TYPE.WARNING,
+            title: t("warning"),
+            message: t("cover_image_upload_skipped"),
           });
-          return Promise.reject(error);
         }
       } else {
         formData.cover_image = coverImage;
@@ -92,67 +103,65 @@ export const CreateProjectForm = observer(function CreateProjectForm(props: TCre
       }
     }
 
-    return createProject(workspaceSlug.toString(), formData)
-      .then(async (res) => {
-        if (uploadedAssetUrl) {
-          await updateCoverImageStatus(res.id, uploadedAssetUrl);
-          await updateProject(workspaceSlug.toString(), res.id, { cover_image_url: uploadedAssetUrl });
-        } else if (coverImage && coverImage.startsWith("http")) {
-          await updateCoverImageStatus(res.id, coverImage);
-          await updateProject(workspaceSlug.toString(), res.id, { cover_image_url: coverImage });
-        }
-        setToast({
-          type: TOAST_TYPE.SUCCESS,
-          title: t("success"),
-          message: t("project_created_successfully"),
-        });
+    try {
+      const res = await createProject(workspaceSlug.toString(), formData);
+      if (uploadedAssetUrl) {
+        await updateCoverImageStatus(res.id, uploadedAssetUrl);
+        await updateProject(workspaceSlug.toString(), res.id, { cover_image_url: uploadedAssetUrl });
+      } else if (coverImage && coverImage.startsWith("http")) {
+        await updateCoverImageStatus(res.id, coverImage);
+        await updateProject(workspaceSlug.toString(), res.id, { cover_image_url: coverImage });
+      }
+      setToast({
+        type: TOAST_TYPE.SUCCESS,
+        title: t("success"),
+        message: t("project_created_successfully"),
+      });
+      if (setToFavorite) {
+        handleAddToFavorites(res.id);
+      }
+      handleNextStep(res.id);
+    } catch (err) {
+      try {
+        // Handle the new error format where codes are nested in arrays under field names
+        const errorData = (err as { data?: Record<string, string[] | undefined> })?.data ?? {};
 
-        if (setToFavorite) {
-          handleAddToFavorites(res.id);
-        }
-        handleNextStep(res.id);
-      })
-      .catch((err) => {
-        try {
-          // Handle the new error format where codes are nested in arrays under field names
-          const errorData = err?.data ?? {};
+        const nameError = errorData.name?.includes("PROJECT_NAME_ALREADY_EXIST");
+        const identifierError = errorData?.identifier?.includes("PROJECT_IDENTIFIER_ALREADY_EXIST");
 
-          const nameError = errorData.name?.includes("PROJECT_NAME_ALREADY_EXIST");
-          const identifierError = errorData?.identifier?.includes("PROJECT_IDENTIFIER_ALREADY_EXIST");
-
-          if (nameError || identifierError) {
-            if (nameError) {
-              setToast({
-                type: TOAST_TYPE.ERROR,
-                title: t("toast.error"),
-                message: t("project_name_already_taken"),
-              });
-            }
-
-            if (identifierError) {
-              setToast({
-                type: TOAST_TYPE.ERROR,
-                title: t("toast.error"),
-                message: t("project_identifier_already_taken"),
-              });
-            }
-          } else {
+        if (nameError || identifierError) {
+          if (nameError) {
             setToast({
               type: TOAST_TYPE.ERROR,
               title: t("toast.error"),
-              message: t("something_went_wrong"),
+              message: t("project_name_already_taken"),
             });
           }
-        } catch (error) {
-          // Fallback error handling if the error processing fails
-          console.error("Error processing API error:", error);
+
+          if (identifierError) {
+            setToast({
+              type: TOAST_TYPE.ERROR,
+              title: t("toast.error"),
+              message: t("project_identifier_already_taken"),
+            });
+          }
+        } else {
           setToast({
             type: TOAST_TYPE.ERROR,
             title: t("toast.error"),
             message: t("something_went_wrong"),
           });
         }
-      });
+      } catch (error) {
+        // Fallback error handling if the error processing fails
+        console.error("Error processing API error:", error);
+        setToast({
+          type: TOAST_TYPE.ERROR,
+          title: t("toast.error"),
+          message: t("something_went_wrong"),
+        });
+      }
+    }
   };
 
   const handleClose = () => {

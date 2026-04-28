@@ -127,7 +127,7 @@ export const IssueMainContent = observer(function IssueMainContent(props: Props)
           isSubmitting={isSubmitting}
           setIsSubmitting={(value) => setIsSubmitting(value)}
           issueOperations={issueOperations}
-          disabled={isArchived || !isEditable}
+          disabled={isArchived || !isEditable || !!issue.is_synced}
           value={issue.name}
           containerClassName="-ml-3"
         />
@@ -135,7 +135,7 @@ export const IssueMainContent = observer(function IssueMainContent(props: Props)
         <DescriptionInput
           issueSequenceId={issue.sequence_id}
           containerClassName="-ml-6 border-none p-0! pl-6!"
-          disabled={isArchived || !isEditable}
+          disabled={isArchived || !isEditable || !!issue.is_synced}
           editorRef={editorRef}
           entityId={issue.id}
           fileAssetType={EFileAssetType.ISSUE_DESCRIPTION}
@@ -143,6 +143,14 @@ export const IssueMainContent = observer(function IssueMainContent(props: Props)
           key={issue.id}
           onSubmit={async (value, isMigrationUpdate) => {
             if (!issue.id || !issue.project_id) return;
+            // Tiptap fires onUpdate on initial mount and on every internal
+            // transaction, even when `disabled` is true. For
+            // GitHub-mirrored issues the description is locked server-side,
+            // and Tiptap's HTML normalization makes the initial echo
+            // compare unequal to the stored value (whitespace, attribute
+            // order). Short-circuit here so synced issues don't fire a
+            // PATCH that's only ever going to come back as a 400.
+            if (issue.is_synced) return;
             await issueOperations.update(workspaceSlug, issue.project_id, issue.id, {
               description_html: value.description_html,
               ...(isMigrationUpdate ? { skip_activity: "true" } : {}),
@@ -171,13 +179,14 @@ export const IssueMainContent = observer(function IssueMainContent(props: Props)
                 createdAt: issue.created_at ? new Date(issue.created_at) : new Date(),
                 createdByDisplayName: getUserDetails(issue.created_by ?? "")?.display_name ?? "",
                 id: issueId,
-                isRestoreDisabled: !isEditable || isArchived,
+                isRestoreDisabled: !isEditable || isArchived || !!issue.is_synced,
+                isExternallySynced: !!issue.is_synced,
               }}
               fetchHandlers={{
-                listDescriptionVersions: (issueId) =>
-                  workItemVersionService.listDescriptionVersions(workspaceSlug, projectId, issueId),
-                retrieveDescriptionVersion: (issueId, versionId) =>
-                  workItemVersionService.retrieveDescriptionVersion(workspaceSlug, projectId, issueId, versionId),
+                listDescriptionVersions: (entityId) =>
+                  workItemVersionService.listDescriptionVersions(workspaceSlug, projectId, entityId),
+                retrieveDescriptionVersion: (entityId, versionId) =>
+                  workItemVersionService.retrieveDescriptionVersion(workspaceSlug, projectId, entityId, versionId),
               }}
               handleRestore={(descriptionHTML) => editorRef.current?.setEditorValue(descriptionHTML, true)}
               projectId={projectId}
