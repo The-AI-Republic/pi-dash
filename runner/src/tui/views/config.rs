@@ -32,9 +32,7 @@ pub enum FieldId {
     WorkspaceWorkingDir,
     AgentKind,
     CodexBinary,
-    CodexModelDefault,
     ClaudeBinary,
-    ClaudeModelDefault,
     ApprovalAutoReadonly,
     ApprovalAutoWrites,
     ApprovalAutoNetwork,
@@ -85,20 +83,8 @@ pub const FIELDS: &[FieldSpec] = &[
         kind: FieldKind::Text,
     },
     FieldSpec {
-        id: FieldId::CodexModelDefault,
-        label: "model_default",
-        section: "Codex",
-        kind: FieldKind::Text,
-    },
-    FieldSpec {
         id: FieldId::ClaudeBinary,
         label: "binary",
-        section: "Claude Code",
-        kind: FieldKind::Text,
-    },
-    FieldSpec {
-        id: FieldId::ClaudeModelDefault,
-        label: "model_default",
         section: "Claude Code",
         kind: FieldKind::Text,
     },
@@ -151,9 +137,7 @@ pub fn display_value(cfg: &Config, id: FieldId) -> String {
             AgentKind::ClaudeCode => "claude-code".into(),
         },
         FieldId::CodexBinary => cfg.codex.binary.clone(),
-        FieldId::CodexModelDefault => cfg.codex.model_default.clone().unwrap_or_default(),
         FieldId::ClaudeBinary => cfg.claude_code.binary.clone(),
-        FieldId::ClaudeModelDefault => cfg.claude_code.model_default.clone().unwrap_or_default(),
         FieldId::ApprovalAutoReadonly => {
             cfg.approval_policy.auto_approve_readonly_shell.to_string()
         }
@@ -188,25 +172,11 @@ pub fn set_text_value(cfg: &mut Config, id: FieldId, s: &str) -> Result<(), Stri
             }
             cfg.codex.binary = s.to_string();
         }
-        FieldId::CodexModelDefault => {
-            cfg.codex.model_default = if s.is_empty() {
-                None
-            } else {
-                Some(s.to_string())
-            };
-        }
         FieldId::ClaudeBinary => {
             if s.trim().is_empty() {
                 return Err("binary cannot be empty".into());
             }
             cfg.claude_code.binary = s.to_string();
-        }
-        FieldId::ClaudeModelDefault => {
-            cfg.claude_code.model_default = if s.is_empty() {
-                None
-            } else {
-                Some(s.to_string())
-            };
         }
         FieldId::LogRetentionDays => {
             let n: u32 = s
@@ -479,7 +449,7 @@ fn editable_lines(
     lines.push(Line::raw(""));
 
     lines.push(section_header("Codex"));
-    for id in [FieldId::CodexBinary, FieldId::CodexModelDefault] {
+    for id in [FieldId::CodexBinary] {
         lines.extend(render_editable_row(
             working,
             loaded,
@@ -491,7 +461,7 @@ fn editable_lines(
     lines.push(Line::raw(""));
 
     lines.push(section_header("Claude Code"));
-    for id in [FieldId::ClaudeBinary, FieldId::ClaudeModelDefault] {
+    for id in [FieldId::ClaudeBinary] {
         lines.extend(render_editable_row(
             working,
             loaded,

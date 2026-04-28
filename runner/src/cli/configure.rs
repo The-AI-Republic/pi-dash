@@ -45,18 +45,10 @@ pub struct Args {
     #[arg(long)]
     pub codex_binary: Option<String>,
 
-    /// Override `[codex].model_default`.
-    #[arg(long)]
-    pub codex_model: Option<String>,
-
     // --- Claude Code section ----------------------------------------------
     /// Override `[claude_code].binary`.
     #[arg(long)]
     pub claude_binary: Option<String>,
-
-    /// Override `[claude_code].model_default`.
-    #[arg(long)]
-    pub claude_model: Option<String>,
 
     // --- Approval policy (scalars only — list fields live in the TUI) -----
     /// Toggle `[approval_policy].auto_approve_readonly_shell`.
@@ -108,9 +100,7 @@ impl Args {
             || self.working_dir.is_some()
             || self.agent.is_some()
             || self.codex_binary.is_some()
-            || self.codex_model.is_some()
             || self.claude_binary.is_some()
-            || self.claude_model.is_some()
             || self.approval_auto_readonly.is_some()
             || self.approval_auto_writes.is_some()
             || self.approval_auto_network.is_some()
@@ -152,22 +142,10 @@ impl Args {
             cfg.codex.binary = b.clone();
             changed = true;
         }
-        if let Some(m) = &self.codex_model
-            && cfg.codex.model_default.as_ref() != Some(m)
-        {
-            cfg.codex.model_default = Some(m.clone());
-            changed = true;
-        }
         if let Some(b) = &self.claude_binary
             && cfg.claude_code.binary != *b
         {
             cfg.claude_code.binary = b.clone();
-            changed = true;
-        }
-        if let Some(m) = &self.claude_model
-            && cfg.claude_code.model_default.as_ref() != Some(m)
-        {
-            cfg.claude_code.model_default = Some(m.clone());
             changed = true;
         }
         if let Some(v) = self.approval_auto_readonly

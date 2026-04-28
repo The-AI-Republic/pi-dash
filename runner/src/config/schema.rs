@@ -48,15 +48,12 @@ pub struct WorkspaceSection {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CodexSection {
     pub binary: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub model_default: Option<String>,
 }
 
 impl Default for CodexSection {
     fn default() -> Self {
         Self {
             binary: "codex".to_string(),
-            model_default: Some("gpt-5-codex".to_string()),
         }
     }
 }
@@ -86,13 +83,9 @@ pub enum AgentKind {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ClaudeCodeSection {
-    /// Per-field default so a partial `[claude_code]` block (e.g. only
-    /// `model_default = "..."`) still parses. Without this, declaring the
-    /// section at all would require spelling out `binary = "claude"`.
+    /// Per-field default so a partial `[claude_code]` block still parses.
     #[serde(default = "default_claude_binary")]
     pub binary: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub model_default: Option<String>,
 }
 
 fn default_claude_binary() -> String {
@@ -103,7 +96,6 @@ impl Default for ClaudeCodeSection {
     fn default() -> Self {
         Self {
             binary: default_claude_binary(),
-            model_default: None,
         }
     }
 }

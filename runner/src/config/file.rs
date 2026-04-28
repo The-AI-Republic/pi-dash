@@ -156,7 +156,6 @@ working_dir = "/tmp/wd"
 
 [codex]
 binary = "codex"
-model_default = "gpt-5-codex"
 
 [approval_policy]
 auto_approve_readonly_shell = false
@@ -218,8 +217,7 @@ binary = "codex"
         assert!(!loaded.approval_policy.auto_approve_network);
         assert_eq!(loaded.logging.level, "info");
         assert_eq!(loaded.logging.retention_days, 14);
-        // Optional codex.model_default is allowed to be absent:
-        assert_eq!(loaded.codex.model_default, None);
+        assert_eq!(loaded.codex.binary, "codex");
     }
 
     #[test]
