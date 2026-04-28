@@ -11,6 +11,7 @@ use crate::cloud::protocol::{
 };
 use crate::cloud::ws::ConnectionLoop;
 use crate::config::schema::{AgentKind, Config, Credentials};
+use crate::daemon::runner_instance::RunnerInstance;
 use crate::daemon::runner_out::RunnerOut;
 use crate::daemon::state::StateHandle;
 use crate::history::index::{RunSummary, RunsIndex};
@@ -55,18 +56,43 @@ impl Supervisor {
             paths,
             opts,
             state,
-            approvals,
+            approvals: _supervisor_approvals,
         } = self;
         state.set_runner_id(creds.runner_id).await;
-        let runner_paths = paths.for_runner(creds.runner_id);
-        runner_paths.ensure()?;
+
+        let (out_tx, out_rx) = mpsc::channel::<Envelope<ClientMsg>>(128);
+        let (in_tx, in_rx) = mpsc::channel::<Envelope<ServerMsg>>(128);
+
+        // Build one RunnerInstance per [[runner]] entry in config.toml.
+        // Each owns its own paths, state, approvals, and mailbox.
+        let mut instances: Vec<RunnerInstance> = Vec::new();
+        for runner_cfg in &config.runners {
+            let inst = RunnerInstance::new(runner_cfg.clone(), &paths, out_tx.clone());
+            inst.paths.ensure()?;
+            instances.push(inst);
+        }
+        // Map for the demux task to look up by runner_id.
+        let mailboxes: std::collections::HashMap<uuid::Uuid, mpsc::Sender<Envelope<ServerMsg>>> =
+            instances
+                .iter()
+                .map(|i| (i.runner_id, i.mailbox_tx.clone()))
+                .collect();
+
+        // Primary runner = the first configured runner. Used by IPC and
+        // (legacy) heartbeat-status fields that haven't been split per-
+        // instance yet. With one runner this is the only runner; with
+        // many it's the daemon-level "default" view.
+        let primary = instances
+            .first()
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!("config.runners is empty; daemon refuses to start"))?;
 
         let ipc = IpcServer {
             path: paths.ipc_socket_path(),
-            state: state.clone(),
-            approvals: approvals.clone(),
+            state: primary.state.clone(),
+            approvals: primary.approvals.clone(),
             paths: paths.clone(),
-            runner_paths: runner_paths.clone(),
+            runner_paths: primary.paths.clone(),
         };
         let ipc_handle = tokio::spawn(async move {
             if let Err(e) = ipc.run().await {
@@ -74,13 +100,10 @@ impl Supervisor {
             }
         });
 
-        let (out_tx, out_rx) = mpsc::channel::<Envelope<ClientMsg>>(128);
-        let (in_tx, in_rx) = mpsc::channel::<Envelope<ServerMsg>>(128);
-
         // Cloud loop + heartbeat are skipped in offline mode. Without a cloud
         // consumer, the heartbeat task would otherwise block forever once the
         // outbound channel filled (~53 min at 25s cadence).
-        let (cloud_handle, hb_handle) = if !opts.offline {
+        let (cloud_handle, hb_handles) = if !opts.offline {
             let shutdown_for_loop = state.shutdown_notified();
             let loop_ = ConnectionLoop {
                 cloud_url: config.daemon.cloud_url.clone(),
@@ -96,75 +119,172 @@ impl Supervisor {
                     tracing::error!("cloud loop exited: {e:#}");
                 }
             });
-            let hb_out = RunnerOut::new(creds.runner_id, out_tx.clone());
-            let state_hb = state.clone();
-            let hb = tokio::spawn(async move {
-                let mut rx_interval = state_hb.rx_heartbeat_secs.clone();
-                let mut current_secs = (*rx_interval.borrow()).max(1);
-                let mut ticker = tokio::time::interval(Duration::from_secs(current_secs));
-                ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-                loop {
-                    tokio::select! {
-                        _ = ticker.tick() => {
-                            let now = Utc::now();
-                            state_hb.set_heartbeat(now).await;
-                            let status = { *state_hb.rx_status.borrow() };
-                            let in_flight = { *state_hb.rx_in_flight.borrow() };
-                            // Per-runner heartbeat (design.md §6.6). Tag with
-                            // the runner's id; the cloud's per-runner record
-                            // updates last_seen_at off this frame.
-                            if hb_out
-                                .send(ClientMsg::Heartbeat {
-                                    ts: now,
-                                    status,
-                                    in_flight_run: in_flight,
-                                })
-                                .await
-                                .is_err()
-                            {
-                                break;
+
+            // Send a Hello per RunnerInstance over the shared out_tx.
+            // The ConnectionLoop's run-loop drains out_tx and forwards
+            // to the cloud once the WS handshake is up. Hello frames
+            // queue here if the WS isn't ready yet — that's fine, the
+            // mpsc buffer absorbs the burst and ConnectionLoop forwards
+            // them as soon as the upgrade completes.
+            for inst in &instances {
+                let hello = ClientMsg::Hello {
+                    runner_id: inst.runner_id,
+                    version: crate::RUNNER_VERSION.to_string(),
+                    os: std::env::consts::OS.to_string(),
+                    arch: std::env::consts::ARCH.to_string(),
+                    status: *inst.state.rx_status.borrow(),
+                    in_flight_run: *inst.state.rx_in_flight.borrow(),
+                    protocol_version: crate::PROTOCOL_VERSION,
+                };
+                let _ = inst.out.send(hello).await;
+            }
+
+            // Heartbeat task per instance — design.md §6.6 says per-runner
+            // heartbeats carry rid so the cloud's per-runner record can
+            // update last_seen_at independently for each.
+            let mut hb_handles: Vec<tokio::task::JoinHandle<()>> = Vec::new();
+            for inst in &instances {
+                let hb_out = inst.out.clone();
+                let state_hb = inst.state.clone();
+                let h = tokio::spawn(async move {
+                    let mut rx_interval = state_hb.rx_heartbeat_secs.clone();
+                    let mut current_secs = (*rx_interval.borrow()).max(1);
+                    let mut ticker = tokio::time::interval(Duration::from_secs(current_secs));
+                    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+                    loop {
+                        tokio::select! {
+                            _ = ticker.tick() => {
+                                let now = Utc::now();
+                                state_hb.set_heartbeat(now).await;
+                                let status = { *state_hb.rx_status.borrow() };
+                                let in_flight = { *state_hb.rx_in_flight.borrow() };
+                                if hb_out
+                                    .send(ClientMsg::Heartbeat {
+                                        ts: now,
+                                        status,
+                                        in_flight_run: in_flight,
+                                    })
+                                    .await
+                                    .is_err()
+                                {
+                                    break;
+                                }
+                            }
+                            changed = rx_interval.changed() => {
+                                if changed.is_err() { break; }
+                                let next = (*rx_interval.borrow()).max(1);
+                                if next != current_secs {
+                                    current_secs = next;
+                                    ticker = tokio::time::interval(Duration::from_secs(current_secs));
+                                    ticker.set_missed_tick_behavior(
+                                        tokio::time::MissedTickBehavior::Delay,
+                                    );
+                                }
                             }
                         }
-                        changed = rx_interval.changed() => {
-                            if changed.is_err() { break; }
-                            let next = (*rx_interval.borrow()).max(1);
-                            if next != current_secs {
-                                current_secs = next;
-                                ticker = tokio::time::interval(Duration::from_secs(current_secs));
-                                ticker.set_missed_tick_behavior(
-                                    tokio::time::MissedTickBehavior::Delay,
-                                );
+                    }
+                });
+                hb_handles.push(h);
+            }
+            (Some(cloud), hb_handles)
+        } else {
+            tracing::info!("offline mode: cloud loop + heartbeat disabled");
+            drop(out_rx);
+            (None, Vec::new())
+        };
+
+        // Demux task — reads from in_rx (the connection's inbound) and
+        // routes each frame by Envelope.runner_id to the matching
+        // instance mailbox. Frames with rid = None are connection-scoped
+        // (Ping reply, supervisor-driven concerns); we forward them to
+        // every instance so they all see the connection event. With one
+        // instance that's the same as today; with N it lets each runner
+        // react to connection-level signals independently.
+        let demux_state = state.clone();
+        let demux_out = out_tx.clone();
+        let demux = tokio::spawn(async move {
+            let mut in_rx = in_rx;
+            while let Some(env) = in_rx.recv().await {
+                let rid = env.runner_id;
+                match rid {
+                    Some(id) => {
+                        if let Some(tx) = mailboxes.get(&id) {
+                            let _ = tx.send(env).await;
+                        } else {
+                            tracing::warn!(
+                                %id,
+                                "frame for unknown runner; dropping"
+                            );
+                        }
+                    }
+                    None => {
+                        // Connection-scoped frame. Today only Ping +
+                        // connection-wide Revoke land here. Handle
+                        // them inline rather than routing to instances.
+                        match env.body {
+                            ServerMsg::Ping { ts } => {
+                                let status = *demux_state.rx_status.borrow();
+                                let in_flight = *demux_state.rx_in_flight.borrow();
+                                let _ = demux_out
+                                    .send(Envelope::new(ClientMsg::Heartbeat {
+                                        ts,
+                                        status,
+                                        in_flight_run: in_flight,
+                                    }))
+                                    .await;
+                            }
+                            ServerMsg::Revoke { reason } => {
+                                tracing::error!("cloud revoked token: {reason}");
+                                demux_state.shutdown();
+                                break;
+                            }
+                            _ => {
+                                tracing::warn!("unrouted connection-scoped frame: {:?}", env.body);
                             }
                         }
                     }
                 }
-            });
-            (Some(cloud), Some(hb))
-        } else {
-            tracing::info!("offline mode: cloud loop + heartbeat disabled");
-            // Drop out_rx so out_tx.send returns Err immediately rather than
-            // blocking forever once the channel buffer fills.
-            drop(out_rx);
-            (None, None)
-        };
+            }
+        });
 
-        // Runner loop — dispatches on inbound ServerMsg.
-        let run = RunnerLoop {
-            runner_paths: runner_paths.clone(),
-            config: config.clone(),
-            out: out_tx.clone(),
-            state: state.clone(),
-            approvals: approvals.clone(),
-            inbound: in_rx,
-            current_run: None,
-        };
+        // One RunnerLoop per instance. Each consumes from its mailbox.
+        let mut loop_handles: Vec<tokio::task::JoinHandle<()>> = Vec::new();
+        for inst in &instances {
+            let mailbox_rx = match inst.take_mailbox_rx().await {
+                Some(rx) => rx,
+                None => {
+                    tracing::error!(
+                        %inst.runner_id,
+                        "mailbox already taken — refusing to spawn a duplicate RunnerLoop"
+                    );
+                    continue;
+                }
+            };
+            let runner_paths = inst.paths.clone();
+            let runner_config = inst.config.clone();
+            let inst_state = inst.state.clone();
+            let inst_approvals = inst.approvals.clone();
+            let inst_out = inst.out.clone();
+            let h = tokio::spawn(async move {
+                let run = RunnerLoop {
+                    runner_paths,
+                    runner_config,
+                    out: inst_out,
+                    state: inst_state,
+                    approvals: inst_approvals,
+                    inbound: mailbox_rx,
+                    current_run: None,
+                };
+                if let Err(e) = run.run().await {
+                    tracing::error!("runner loop exited: {e:#}");
+                }
+            });
+            loop_handles.push(h);
+        }
 
         let shutdown = state.shutdown_notified();
         let sig = crate::util::signal::shutdown();
         tokio::select! {
-            _ = run.run() => {
-                tracing::info!("runner loop ended");
-            }
             _ = shutdown.notified() => {
                 tracing::info!("shutdown requested via IPC");
             }
@@ -180,9 +300,13 @@ impl Supervisor {
             .await
             .ok();
 
-        if let Some(h) = hb_handle {
+        for h in hb_handles {
             h.abort();
         }
+        for h in loop_handles {
+            h.abort();
+        }
+        demux.abort();
         ipc_handle.abort();
         if let Some(h) = cloud_handle {
             h.abort();
@@ -193,8 +317,8 @@ impl Supervisor {
 
 struct RunnerLoop {
     runner_paths: RunnerPaths,
-    config: Config,
-    out: mpsc::Sender<Envelope<ClientMsg>>,
+    runner_config: crate::config::schema::RunnerConfig,
+    out: RunnerOut,
     state: StateHandle,
     approvals: ApprovalRouter,
     inbound: mpsc::Receiver<Envelope<ServerMsg>>,
@@ -270,14 +394,14 @@ impl RunnerLoop {
                         done_rx,
                     });
                     let runner_paths = self.runner_paths.clone();
-                    let config = self.config.clone();
+                    let runner_config = self.runner_config.clone();
                     let state = self.state.clone();
                     let approvals = self.approvals.clone();
-                    let out = RunnerOut::new(runner_paths.runner_id, self.out.clone());
+                    let out = self.out.clone();
                     tokio::spawn(async move {
                         let mut worker = AssignWorker {
                             runner_paths,
-                            config,
+                            runner_config,
                             state,
                             approvals,
                             out,
@@ -336,17 +460,12 @@ impl RunnerLoop {
                 ServerMsg::ConfigPush { .. } => {
                     tracing::info!("config_push received (deferred)");
                 }
-                ServerMsg::Ping { ts } => {
-                    let status = { *self.state.rx_status.borrow() };
-                    let in_flight = { *self.state.rx_in_flight.borrow() };
-                    let _ = self
-                        .out
-                        .send(Envelope::new(ClientMsg::Heartbeat {
-                            ts,
-                            status,
-                            in_flight_run: in_flight,
-                        }))
-                        .await;
+                ServerMsg::Ping { .. } => {
+                    // Connection-scoped — handled by the supervisor's
+                    // demux task before frames reach the per-runner
+                    // mailbox. Should never fire here; if it does, the
+                    // demux routing rule was violated.
+                    tracing::warn!("Ping arrived at RunnerLoop; demux invariant violated");
                 }
                 ServerMsg::ResumeAck {
                     run_id,
@@ -361,13 +480,11 @@ impl RunnerLoop {
                         "cloud acked run resume"
                     );
                 }
-                ServerMsg::Revoke { reason } => {
-                    tracing::error!("cloud revoked runner: {reason}");
-                    if let Some(run) = &self.current_run {
-                        run.cancel.notify_waiters();
-                    }
-                    self.state.shutdown();
-                    break;
+                ServerMsg::Revoke { .. } => {
+                    // Connection-scoped (token revocation) — supervisor's
+                    // demux handles it. Reaching this arm means the
+                    // demux routed by mistake.
+                    tracing::warn!("Revoke arrived at RunnerLoop; demux invariant violated");
                 }
                 ServerMsg::RemoveRunner { runner_id, reason } => {
                     // While the daemon hosts exactly one runner, a
@@ -416,7 +533,7 @@ async fn wait_done(current: &mut Option<CurrentRun>) {
 /// `self.cancel` and `self.approvals`.
 struct AssignWorker {
     runner_paths: RunnerPaths,
-    config: Config,
+    runner_config: crate::config::schema::RunnerConfig,
     state: StateHandle,
     approvals: ApprovalRouter,
     out: RunnerOut,
@@ -430,7 +547,7 @@ impl AssignWorker {
     /// future non-Codex agent) surfaces as the agent-neutral `AgentCrash`
     /// so the two aren't conflated in telemetry.
     fn crash_reason(&self) -> FailureReason {
-        match self.config.primary_runner().agent.kind {
+        match self.runner_config.agent.kind {
             AgentKind::Codex => FailureReason::CodexCrash,
             AgentKind::ClaudeCode => FailureReason::AgentCrash,
         }
@@ -466,7 +583,7 @@ impl AssignWorker {
         resume_thread_id: Option<String>,
     ) -> Result<()> {
         // Resolve workspace.
-        let wd = self.config.primary_runner().workspace.working_dir.clone();
+        let wd = self.runner_config.workspace.working_dir.clone();
         let resolution = crate::workspace::resolve(&wd, repo_url.as_deref()).await;
         let workspace_path = match resolution {
             Ok(r) => match r {
@@ -550,7 +667,7 @@ impl AssignWorker {
         // hides which CLI is actually being driven from the rest of this
         // worker; the event flow below is identical for both.
         let mut bridge = match AgentBridge::spawn_from_config(
-            self.config.primary_runner(),
+            &self.runner_config,
             &workspace_path,
             expected_codex_model.clone(),
             resume_thread_id.as_deref(),
@@ -753,10 +870,7 @@ impl AssignWorker {
                 payload,
                 reason,
             } => {
-                let policy = Policy::new(
-                    &self.config.primary_runner().approval_policy,
-                    workspace_root,
-                );
+                let policy = Policy::new(&self.runner_config.approval_policy, workspace_root);
                 let decision = policy.evaluate(kind, &payload);
                 if let Some(auto) = decision.into_cloud() {
                     bridge.send_approval(&approval_id, auto).await.ok();

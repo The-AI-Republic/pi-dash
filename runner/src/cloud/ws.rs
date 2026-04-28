@@ -155,18 +155,12 @@ impl ConnectionLoop {
             match opened {
                 Ok(conn) => {
                     backoff.reset();
-                    // Send Hello immediately.
-                    let hello = ClientMsg::Hello {
-                        runner_id: self.creds.runner_id,
-                        version: crate::RUNNER_VERSION.to_string(),
-                        os: std::env::consts::OS.to_string(),
-                        arch: std::env::consts::ARCH.to_string(),
-                        status: *self.status_snapshot.borrow(),
-                        in_flight_run: *self.in_flight.borrow(),
-                        protocol_version: crate::PROTOCOL_VERSION,
-                    };
+                    // Hello is sent by the supervisor (one per
+                    // RunnerInstance), not here. ConnectionLoop just
+                    // forwards bytes; identity announcements happen
+                    // through the same out_tx the supervisor primed
+                    // before this connection task spawned.
                     let (tx_frame, rx_frame) = mpsc::channel(64);
-                    tx_frame.send(Envelope::new(hello)).await.ok();
                     let forward = {
                         let tx_frame = tx_frame.clone();
                         let mut outbound_rx = std::mem::replace(
