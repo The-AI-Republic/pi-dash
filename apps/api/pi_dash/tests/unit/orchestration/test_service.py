@@ -154,6 +154,12 @@ def test_run_config_carries_git_fields_from_issue_and_project(
     project.save(update_fields=["repo_url", "base_branch"])
     issue.git_work_branch = "feat/pinned"
     issue.save(update_fields=["git_work_branch"])
+    # ``BaseModel.save`` pulls ``created_by`` from ``crum.get_current_user()``;
+    # tests run outside a request, so the save above wipes ``created_by``
+    # in memory (DB row is unchanged because ``update_fields`` is scoped).
+    # Reload so the orchestration handler can resolve a fallback creator.
+    issue.refresh_from_db()
+    project.refresh_from_db()
 
     outcome = service.handle_issue_state_transition(
         issue=issue,

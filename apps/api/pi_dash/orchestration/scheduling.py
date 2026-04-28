@@ -36,7 +36,7 @@ from pi_dash.db.models.issue_agent_schedule import (
     jitter_seconds,
 )
 from pi_dash.db.models.state import StateGroup
-from pi_dash.runner.models import AgentRun, AgentRunStatus
+from pi_dash.runner.models import AgentRun
 
 logger = logging.getLogger(__name__)
 

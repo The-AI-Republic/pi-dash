@@ -15,7 +15,6 @@ from django.utils import timezone
 
 from pi_dash.bgtasks.agent_schedule import fire_tick, scan_due_schedules
 from pi_dash.db.models import Issue, Project, State
-from pi_dash.db.models.issue_agent_schedule import IssueAgentSchedule
 from pi_dash.orchestration import scheduling
 from pi_dash.prompting.seed import seed_default_template
 from pi_dash.runner.models import AgentRun, AgentRunStatus

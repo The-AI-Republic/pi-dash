@@ -10,7 +10,6 @@ See ``.ai_design/issue_ticking_system/design.md`` §7.1.
 from __future__ import annotations
 
 import random
-from typing import Optional
 
 from django.db import models
 
