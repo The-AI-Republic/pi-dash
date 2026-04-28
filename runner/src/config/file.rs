@@ -115,8 +115,6 @@ mod tests {
             workspace: WorkspaceSection {
                 working_dir: tmp.path().join("wd"),
             },
-            codex: Default::default(),
-            claude_code: Default::default(),
             agent: Default::default(),
             approval_policy: Default::default(),
             logging: Default::default(),
@@ -153,9 +151,6 @@ cloud_url = "https://x"
 
 [workspace]
 working_dir = "/tmp/wd"
-
-[codex]
-binary = "codex"
 
 [approval_policy]
 auto_approve_readonly_shell = false
@@ -206,9 +201,6 @@ cloud_url = "https://x"
 
 [workspace]
 working_dir = "/tmp/wd"
-
-[codex]
-binary = "codex"
 "#;
         std::fs::write(paths.config_path(), body).unwrap();
         let loaded = load_config(&paths).unwrap();
@@ -217,7 +209,6 @@ binary = "codex"
         assert!(!loaded.approval_policy.auto_approve_network);
         assert_eq!(loaded.logging.level, "info");
         assert_eq!(loaded.logging.retention_days, 14);
-        assert_eq!(loaded.codex.binary, "codex");
     }
 
     #[test]
@@ -235,9 +226,6 @@ name = "t"
 
 [workspace]
 working_dir = "/tmp/wd"
-
-[codex]
-binary = "codex"
 "#;
         std::fs::write(paths.config_path(), body).unwrap();
         let err = load_config(&paths).unwrap_err();

@@ -11,6 +11,9 @@ use uuid::Uuid;
 use crate::cloud::protocol::{ApprovalDecision, ApprovalKind, FailureReason};
 use crate::config::schema::{AgentKind, Config};
 
+const CODEX_BINARY: &str = "codex";
+const CLAUDE_BINARY: &str = "claude";
+
 /// Events the bridge surfaces to the daemon's state machine. Agent-agnostic:
 /// Codex and Claude both translate their native protocols into this shape.
 #[derive(Debug, Clone)]
@@ -111,16 +114,13 @@ impl AgentBridge {
     ) -> Result<Self> {
         match config.agent.kind {
             AgentKind::Codex => {
-                let b = crate::codex::bridge::Bridge::spawn(&config.codex.binary, cwd).await?;
+                let b = crate::codex::bridge::Bridge::spawn(CODEX_BINARY, cwd).await?;
                 Ok(AgentBridge::Codex(b))
             }
             AgentKind::ClaudeCode => {
-                let b = crate::claude_code::bridge::Bridge::spawn(
-                    &config.claude_code.binary,
-                    cwd,
-                    resume_thread_id,
-                )
-                .await?;
+                let b =
+                    crate::claude_code::bridge::Bridge::spawn(CLAUDE_BINARY, cwd, resume_thread_id)
+                        .await?;
                 let _ = model_override;
                 Ok(AgentBridge::ClaudeCode(b))
             }

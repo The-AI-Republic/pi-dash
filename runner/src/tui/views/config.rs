@@ -31,8 +31,6 @@ pub enum FieldId {
     RunnerName,
     WorkspaceWorkingDir,
     AgentKind,
-    CodexBinary,
-    ClaudeBinary,
     ApprovalAutoReadonly,
     ApprovalAutoWrites,
     ApprovalAutoNetwork,
@@ -75,18 +73,6 @@ pub const FIELDS: &[FieldSpec] = &[
         label: "kind",
         section: "Agent",
         kind: FieldKind::Enum(AGENT_KINDS),
-    },
-    FieldSpec {
-        id: FieldId::CodexBinary,
-        label: "binary",
-        section: "Codex",
-        kind: FieldKind::Text,
-    },
-    FieldSpec {
-        id: FieldId::ClaudeBinary,
-        label: "binary",
-        section: "Claude Code",
-        kind: FieldKind::Text,
     },
     FieldSpec {
         id: FieldId::ApprovalAutoReadonly,
@@ -136,8 +122,6 @@ pub fn display_value(cfg: &Config, id: FieldId) -> String {
             AgentKind::Codex => "codex".into(),
             AgentKind::ClaudeCode => "claude-code".into(),
         },
-        FieldId::CodexBinary => cfg.codex.binary.clone(),
-        FieldId::ClaudeBinary => cfg.claude_code.binary.clone(),
         FieldId::ApprovalAutoReadonly => {
             cfg.approval_policy.auto_approve_readonly_shell.to_string()
         }
@@ -165,18 +149,6 @@ pub fn set_text_value(cfg: &mut Config, id: FieldId, s: &str) -> Result<(), Stri
                 return Err("working_dir cannot be empty".into());
             }
             cfg.workspace.working_dir = std::path::PathBuf::from(s);
-        }
-        FieldId::CodexBinary => {
-            if s.trim().is_empty() {
-                return Err("binary cannot be empty".into());
-            }
-            cfg.codex.binary = s.to_string();
-        }
-        FieldId::ClaudeBinary => {
-            if s.trim().is_empty() {
-                return Err("binary cannot be empty".into());
-            }
-            cfg.claude_code.binary = s.to_string();
         }
         FieldId::LogRetentionDays => {
             let n: u32 = s
@@ -446,30 +418,6 @@ fn editable_lines(
         selected_idx,
         index_of(FieldId::AgentKind),
     ));
-    lines.push(Line::raw(""));
-
-    lines.push(section_header("Codex"));
-    for id in [FieldId::CodexBinary] {
-        lines.extend(render_editable_row(
-            working,
-            loaded,
-            state,
-            selected_idx,
-            index_of(id),
-        ));
-    }
-    lines.push(Line::raw(""));
-
-    lines.push(section_header("Claude Code"));
-    for id in [FieldId::ClaudeBinary] {
-        lines.extend(render_editable_row(
-            working,
-            loaded,
-            state,
-            selected_idx,
-            index_of(id),
-        ));
-    }
     lines.push(Line::raw(""));
 
     lines.push(section_header("Approval policy"));

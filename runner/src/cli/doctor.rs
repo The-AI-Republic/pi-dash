@@ -8,6 +8,9 @@ use crate::config::file;
 use crate::util::paths::Paths;
 use crate::util::shell::login_shell_command;
 
+const CODEX_BINARY: &str = "codex";
+const CLAUDE_BINARY: &str = "claude";
+
 #[derive(Debug, ClapArgs)]
 pub struct Args {
     /// Emit a machine-readable JSON report.
@@ -72,10 +75,7 @@ pub async fn execute(paths: &Paths) -> Result<Report> {
         .unwrap_or(crate::config::schema::AgentKind::Codex);
     match agent_kind {
         crate::config::schema::AgentKind::Codex => {
-            let codex_binary = cfg
-                .as_ref()
-                .map(|c| c.codex.binary.clone())
-                .unwrap_or_else(|| "codex".to_string());
+            let codex_binary = CODEX_BINARY.to_string();
             match check_version(&codex_binary).await {
                 Ok(detail) => checks.push(Check {
                     name: "codex".to_string(),
@@ -106,10 +106,7 @@ pub async fn execute(paths: &Paths) -> Result<Report> {
             }
         }
         crate::config::schema::AgentKind::ClaudeCode => {
-            let claude_binary = cfg
-                .as_ref()
-                .map(|c| c.claude_code.binary.clone())
-                .unwrap_or_else(|| "claude".to_string());
+            let claude_binary = CLAUDE_BINARY.to_string();
             match check_version(&claude_binary).await {
                 Ok(detail) => checks.push(Check {
                     name: "claude".to_string(),

@@ -8,13 +8,6 @@ pub struct Config {
     pub version: u32,
     pub runner: RunnerSection,
     pub workspace: WorkspaceSection,
-    pub codex: CodexSection,
-    /// Claude Code agent settings. Missing section falls back to
-    /// `ClaudeCodeSection::default()` so existing `config.toml` files
-    /// (written before Claude Code support) still parse. Only consulted
-    /// when `agent.kind == claude_code`.
-    #[serde(default)]
-    pub claude_code: ClaudeCodeSection,
     /// Which agent CLI the daemon drives for assigned runs. Defaults to
     /// `codex` so existing deployments are unaffected.
     #[serde(default)]
@@ -45,22 +38,9 @@ pub struct WorkspaceSection {
     pub working_dir: PathBuf,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CodexSection {
-    pub binary: String,
-}
-
-impl Default for CodexSection {
-    fn default() -> Self {
-        Self {
-            binary: "codex".to_string(),
-        }
-    }
-}
-
 /// Runner-wide agent selector. Wrapped in its own section (rather than
-/// hoisted onto `RunnerSection`) so the file layout mirrors the per-agent
-/// `[codex]` / `[claude_code]` tables: `[agent]` with `kind = "..."`.
+/// hoisted onto `RunnerSection`) so the file layout stays explicit:
+/// `[agent]` with `kind = "..."`.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct AgentSection {
     #[serde(default)]
@@ -79,25 +59,6 @@ pub enum AgentKind {
     Codex,
     /// Anthropic Claude Code via `claude --print --output-format stream-json`.
     ClaudeCode,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ClaudeCodeSection {
-    /// Per-field default so a partial `[claude_code]` block still parses.
-    #[serde(default = "default_claude_binary")]
-    pub binary: String,
-}
-
-fn default_claude_binary() -> String {
-    "claude".to_string()
-}
-
-impl Default for ClaudeCodeSection {
-    fn default() -> Self {
-        Self {
-            binary: default_claude_binary(),
-        }
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
