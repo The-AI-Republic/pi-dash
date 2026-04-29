@@ -6,12 +6,16 @@ use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
 use crate::tui::app::AppState;
 
 pub fn render(f: &mut ratatui::Frame<'_>, area: Rect, state: &AppState) {
+    // Identity card grows to fit the runner list (one row per runner
+    // plus a couple of hint lines); current-run sticks to a fixed
+    // height so it doesn't squeeze the runner list when nothing is
+    // running.
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(5),
-            Constraint::Length(7),
-            Constraint::Min(0),
+            Constraint::Min(8),
+            Constraint::Length(8),
             Constraint::Length(3),
         ])
         .split(area);
@@ -82,6 +86,7 @@ fn identity_card(state: &AppState) -> Paragraph<'_> {
                 ]),
                 Line::from(format!("Cloud: {}", s.daemon.cloud_url)),
                 Line::from(format!("Uptime: {}s", s.daemon.uptime_secs)),
+                Line::raw(""),
             ];
             if s.runners.is_empty() {
                 lines.push(Line::from(Span::styled(
@@ -97,6 +102,20 @@ fn identity_card(state: &AppState) -> Paragraph<'_> {
                     )));
                 }
             }
+            // Always show the "add a runner" hint — it's how users
+            // discover that this daemon can host more than one. The
+            // TUI doesn't have an in-tab "add" action; multi-runner
+            // add is CLI-driven on purpose (it requires a one-time
+            // registration token minted in the cloud UI).
+            lines.push(Line::raw(""));
+            lines.push(Line::from(Span::styled(
+                "Add a runner: pidash token add-runner --name <NAME> --project <SLUG>",
+                Style::default().fg(Color::Cyan).add_modifier(Modifier::DIM),
+            )));
+            lines.push(Line::from(Span::styled(
+                "Mint a registration code in the web UI: Workspace → Runners → Add a runner",
+                Style::default().add_modifier(Modifier::DIM),
+            )));
             lines
         }
         None => vec![Line::from(Span::styled(
@@ -105,7 +124,7 @@ fn identity_card(state: &AppState) -> Paragraph<'_> {
         ))],
     };
     Paragraph::new(lines)
-        .block(Block::default().borders(Borders::ALL).title(" Identity "))
+        .block(Block::default().borders(Borders::ALL).title(" Runners "))
         .wrap(Wrap { trim: true })
 }
 

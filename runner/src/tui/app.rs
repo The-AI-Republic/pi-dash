@@ -36,20 +36,26 @@ impl Tab {
 
     pub fn label(&self) -> &'static str {
         match self {
-            Tab::RunnerStatus => "Runner",
+            // "Runners" (plural) honours the multi-runner shape of the
+            // tab — one daemon may host many runners, and this tab lists
+            // every one of them. Keep the enum variant `RunnerStatus`
+            // to minimise diff against existing code paths.
+            Tab::RunnerStatus => "Runners",
             Tab::Config => "Config",
             Tab::Runs => "Runs",
             Tab::Approvals => "Approvals",
         }
     }
 
-    /// Parse `--tab` values: accepts the canonical name (`runner`, `config`,
-    /// `runs`, `approvals`) or a 1-based index (`1`–`4`). Unknown input
-    /// yields `None` so the caller can surface a clap-style error.
+    /// Parse `--tab` values: accepts the canonical name (`runners`,
+    /// `config`, `runs`, `approvals`) or a 1-based index (`1`–`4`).
+    /// `runner` (singular) is kept as an alias for back-compat with
+    /// scripts that already use the old label. Unknown input yields
+    /// `None` so the caller can surface a clap-style error.
     pub fn parse_cli(raw: &str) -> Option<Tab> {
         let s = raw.trim().to_ascii_lowercase();
         match s.as_str() {
-            "runner" | "runner-status" | "runner_status" | "status" | "1" => {
+            "runners" | "runner" | "runner-status" | "runner_status" | "status" | "1" => {
                 Some(Tab::RunnerStatus)
             }
             "config" | "2" => Some(Tab::Config),
@@ -1039,7 +1045,7 @@ fn draw(f: &mut ratatui::Frame<'_>, state: &AppState) {
     }
 
     let hint = Line::from(Span::styled(
-        " [1]Runner [2]Config [3]Runs [4]Approvals  h/l switch  j/k move  </> runner  r refresh  ?help  q exit ",
+        " [1]Runners [2]Config [3]Runs [4]Approvals  h/l switch  j/k move  </> runner  r refresh  ?help  q exit ",
         Style::default().add_modifier(Modifier::DIM),
     ));
     f.render_widget(Paragraph::new(hint), layout[hint_idx]);
