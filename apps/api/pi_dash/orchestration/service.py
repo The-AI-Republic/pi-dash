@@ -99,14 +99,14 @@ def handle_issue_state_transition(
     transition matches the MVP trigger rule (``Todo -> In Progress``) and the
     single-active-run guardrail allows it.
 
-    Also arms/disarms the per-issue ticking schedule:
+    Also arms/disarms the per-issue ticker:
 
-    - Entering the literal "In Progress" state arms the schedule (or
+    - Entering the literal "In Progress" state arms the ticker (or
       re-arms it on Paused → In Progress).
-    - Leaving the Started group disarms the schedule.
+    - Leaving the Started group disarms the ticker.
 
     ``dispatch_immediate=False`` lets a caller (e.g., the Comment & Run
-    flow re-opening a Paused issue) arm the schedule without firing the
+    flow re-opening a Paused issue) arm the ticker without firing the
     state-transition's own immediate dispatch — the caller will dispatch
     its own run.
     """
@@ -120,15 +120,15 @@ def handle_issue_state_transition(
         from_group == StateGroup.STARTED.value
         and to_group != StateGroup.STARTED.value
     ):
-        scheduling.disarm_schedule(issue)
+        scheduling.disarm_ticker(issue)
 
     if not _is_delegation_trigger(to_state):
         return TransitionOutcome(reason="not-a-trigger-state")
 
     # Arming is independent of whether the immediate dispatch is fired by
-    # this handler or by the caller — the schedule is the steady-state
-    # tick source either way.
-    scheduling.arm_schedule(issue, dispatch_immediate=dispatch_immediate)
+    # this handler or by the caller — the ticker is the steady-state tick
+    # source either way.
+    scheduling.arm_ticker(issue, dispatch_immediate=dispatch_immediate)
 
     if not dispatch_immediate:
         return TransitionOutcome(reason="dispatch-deferred-to-caller")

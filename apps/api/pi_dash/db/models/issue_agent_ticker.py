@@ -2,7 +2,13 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 # See the LICENSE file for details.
 
-"""Per-issue agent ticking schedule.
+"""Per-issue agent ticker.
+
+The continuation clock that re-invokes the agent on a single in-progress
+issue. Distinct from ``Scheduler`` / ``SchedulerBinding`` (project-level
+periodic jobs); this is internal lifecycle machinery, not a user-authored
+periodic task. Renamed from ``IssueAgentSchedule`` to free the word
+"scheduler" for the project-level concept.
 
 See ``.ai_design/issue_ticking_system/design.md`` §7.1.
 """
@@ -26,7 +32,7 @@ JITTER_FRACTION = 0.1
 def jitter_seconds(interval_seconds: int) -> float:
     """Uniform random offset in ``[0, interval × JITTER_FRACTION)``.
 
-    Spreads out scheduled fires so that bulk transitions (e.g. sprint planning
+    Spreads out tick fires so that bulk transitions (e.g. sprint planning
     moving 50 issues to In Progress at once) do not re-cluster every cycle.
     """
     if interval_seconds <= 0:
@@ -34,7 +40,7 @@ def jitter_seconds(interval_seconds: int) -> float:
     return random.uniform(0, interval_seconds * JITTER_FRACTION)
 
 
-class IssueAgentSchedule(BaseModel):
+class IssueAgentTicker(BaseModel):
     """The clock that drives periodic agent re-invocation for one issue.
 
     Exactly one row per issue (``issue`` is unique). Arming, disarming, and
@@ -45,7 +51,7 @@ class IssueAgentSchedule(BaseModel):
     issue = models.OneToOneField(
         Issue,
         on_delete=models.CASCADE,
-        related_name="agent_schedule",
+        related_name="agent_ticker",
     )
 
     # User-configured overrides. ``null`` means "inherit from project".
@@ -60,18 +66,18 @@ class IssueAgentSchedule(BaseModel):
     enabled = models.BooleanField(default=True)
 
     class Meta:
-        db_table = "issue_agent_schedule"
-        verbose_name = "Issue Agent Schedule"
-        verbose_name_plural = "Issue Agent Schedules"
+        db_table = "issue_agent_ticker"
+        verbose_name = "Issue Agent Ticker"
+        verbose_name_plural = "Issue Agent Tickers"
         indexes = [
             models.Index(
                 fields=["enabled", "next_run_at"],
-                name="iasched_enabled_next_run_idx",
+                name="iaticker_enabled_next_run_idx",
             ),
         ]
 
     def __str__(self) -> str:
-        return f"IssueAgentSchedule(issue={self.issue_id}, enabled={self.enabled})"
+        return f"IssueAgentTicker(issue={self.issue_id}, enabled={self.enabled})"
 
     # ------------------------------------------------------------------
     # Effective values (override-or-project-default)
@@ -92,7 +98,7 @@ class IssueAgentSchedule(BaseModel):
         return getattr(project, "agent_default_max_ticks", DEFAULT_MAX_TICKS)
 
     def cap_reached(self) -> bool:
-        """Has this schedule already exhausted its tick budget?"""
+        """Has this ticker already exhausted its tick budget?"""
         cap = self.effective_max_ticks()
         if cap == INFINITE_MAX_TICKS:
             return False

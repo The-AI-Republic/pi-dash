@@ -206,15 +206,15 @@ def paused_state(project, create_user):
 def test_state_transition_arms_schedule_on_in_progress_entry(
     seeded, issue, states
 ):
-    from pi_dash.db.models.issue_agent_schedule import IssueAgentSchedule
+    from pi_dash.db.models.issue_agent_ticker import IssueAgentTicker
 
-    assert IssueAgentSchedule.objects.filter(issue=issue).exists() is False
+    assert IssueAgentTicker.objects.filter(issue=issue).exists() is False
     service.handle_issue_state_transition(
         issue=issue,
         from_state=states["todo"],
         to_state=states["in_progress"],
     )
-    sched = IssueAgentSchedule.objects.get(issue=issue)
+    sched = IssueAgentTicker.objects.get(issue=issue)
     assert sched.enabled is True
     assert sched.tick_count == 0
     assert sched.next_run_at is not None
@@ -224,7 +224,7 @@ def test_state_transition_arms_schedule_on_in_progress_entry(
 def test_state_transition_disarms_schedule_on_started_exit(
     seeded, issue, states, paused_state
 ):
-    from pi_dash.db.models.issue_agent_schedule import IssueAgentSchedule
+    from pi_dash.db.models.issue_agent_ticker import IssueAgentTicker
 
     # Seed an active schedule by transitioning into In Progress.
     service.handle_issue_state_transition(
@@ -232,7 +232,7 @@ def test_state_transition_disarms_schedule_on_started_exit(
         from_state=states["todo"],
         to_state=states["in_progress"],
     )
-    assert IssueAgentSchedule.objects.get(issue=issue).enabled is True
+    assert IssueAgentTicker.objects.get(issue=issue).enabled is True
 
     # Now leave Started — schedule must disarm.
     service.handle_issue_state_transition(
@@ -240,7 +240,7 @@ def test_state_transition_disarms_schedule_on_started_exit(
         from_state=states["in_progress"],
         to_state=paused_state,
     )
-    assert IssueAgentSchedule.objects.get(issue=issue).enabled is False
+    assert IssueAgentTicker.objects.get(issue=issue).enabled is False
 
 
 @pytest.mark.unit
@@ -249,7 +249,7 @@ def test_state_transition_dispatch_immediate_false_skips_run_creation(
 ):
     """Comment & Run on Paused issue path: caller arms schedule via the
     transition but owns the dispatch separately."""
-    from pi_dash.db.models.issue_agent_schedule import IssueAgentSchedule
+    from pi_dash.db.models.issue_agent_ticker import IssueAgentTicker
 
     outcome = service.handle_issue_state_transition(
         issue=issue,
@@ -261,7 +261,7 @@ def test_state_transition_dispatch_immediate_false_skips_run_creation(
     assert outcome.created_run is None
     assert AgentRun.objects.filter(work_item=issue).count() == 0
     # Schedule still armed — the caller will dispatch its own run.
-    assert IssueAgentSchedule.objects.get(issue=issue).enabled is True
+    assert IssueAgentTicker.objects.get(issue=issue).enabled is True
 
 
 # ---------------------------------------------------------------------------

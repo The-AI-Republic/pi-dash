@@ -2,11 +2,15 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 # See the LICENSE file for details.
 
-"""Periodic agent ticking — scheduling primitives.
+"""Periodic agent ticking — primitives for the per-issue ticker clock.
 
-This module owns the per-issue ``IssueAgentSchedule`` row: when to arm it,
+This module owns the per-issue ``IssueAgentTicker`` row: when to arm it,
 when to disarm it, when to reset it, how to dispatch a continuation run on
 a tick, and how to apply the deferred cap-hit pause.
+
+Distinct from ``pi_dash.db.models.Scheduler`` (project-level user-authored
+periodic jobs); this is internal continuation-cadence machinery, system-
+armed on Issue state transitions.
 
 See ``.ai_design/issue_ticking_system/design.md`` for the full design;
 quick links:
@@ -28,11 +32,11 @@ from django.db import transaction
 from django.utils import timezone
 
 from pi_dash.db.models.issue import Issue
-from pi_dash.db.models.issue_agent_schedule import (
+from pi_dash.db.models.issue_agent_ticker import (
     DEFAULT_INTERVAL_SECONDS,
     DEFAULT_MAX_TICKS,
     INFINITE_MAX_TICKS,
-    IssueAgentSchedule,
+    IssueAgentTicker,
     jitter_seconds,
 )
 from pi_dash.db.models.state import StateGroup
@@ -70,12 +74,12 @@ def _compute_next_run_at(interval_seconds: int, *, base=None):
     return base + timedelta(seconds=interval_seconds + jitter_seconds(interval_seconds))
 
 
-def arm_schedule(
+def arm_ticker(
     issue: Issue,
     *,
     dispatch_immediate: bool = True,  # noqa: ARG001 — caller-only signal
-) -> IssueAgentSchedule:
-    """Create or reset the schedule for an issue entering Started/In Progress.
+) -> IssueAgentTicker:
+    """Create or reset the ticker for an issue entering Started/In Progress.
 
     ``dispatch_immediate`` does not affect the schedule itself — arming
     *never* fires a run. The flag exists only to document the caller's
@@ -91,7 +95,7 @@ def arm_schedule(
 
     with transaction.atomic():
         sched = (
-            IssueAgentSchedule.objects.select_for_update()
+            IssueAgentTicker.objects.select_for_update()
             .filter(issue=issue)
             .first()
         )
@@ -99,7 +103,7 @@ def arm_schedule(
             # Brand-new row — single INSERT with the right values. No
             # follow-up UPDATE needed.
             interval = _project_default_interval(issue)
-            sched = IssueAgentSchedule.objects.create(
+            sched = IssueAgentTicker.objects.create(
                 issue=issue,
                 interval_seconds=None,
                 max_ticks=None,
@@ -126,7 +130,7 @@ def arm_schedule(
             )
 
     logger.info(
-        "agent_schedule: armed issue=%s enabled=%s next_run_at=%s",
+        "agent_ticker: armed issue=%s enabled=%s next_run_at=%s",
         issue.pk,
         sched.enabled,
         sched.next_run_at,
@@ -134,7 +138,7 @@ def arm_schedule(
     return sched
 
 
-def disarm_schedule(issue: Issue) -> Optional[IssueAgentSchedule]:
+def disarm_ticker(issue: Issue) -> Optional[IssueAgentTicker]:
     """Set ``enabled = False``. Idempotent.
 
     Called when issue leaves Started, on cap hit, on terminal done-signal,
@@ -143,7 +147,7 @@ def disarm_schedule(issue: Issue) -> Optional[IssueAgentSchedule]:
     """
     with transaction.atomic():
         sched = (
-            IssueAgentSchedule.objects.select_for_update()
+            IssueAgentTicker.objects.select_for_update()
             .filter(issue=issue)
             .first()
         )
@@ -152,11 +156,11 @@ def disarm_schedule(issue: Issue) -> Optional[IssueAgentSchedule]:
         if sched.enabled:
             sched.enabled = False
             sched.save(update_fields=["enabled", "updated_at"])
-    logger.info("agent_schedule: disarmed issue=%s", issue.pk)
+    logger.info("agent_ticker: disarmed issue=%s", issue.pk)
     return sched
 
 
-def reset_schedule_after_comment_and_run(issue: Issue) -> Optional[IssueAgentSchedule]:
+def reset_ticker_after_comment_and_run(issue: Issue) -> Optional[IssueAgentTicker]:
     """Reset ``tick_count = 0`` and ``next_run_at = NOW() + interval + jitter``.
 
     Called by the Comment & Run handler after the run is dispatched
@@ -165,7 +169,7 @@ def reset_schedule_after_comment_and_run(issue: Issue) -> Optional[IssueAgentSch
     """
     with transaction.atomic():
         sched = (
-            IssueAgentSchedule.objects.select_for_update()
+            IssueAgentTicker.objects.select_for_update()
             .filter(issue=issue)
             .first()
         )
@@ -186,7 +190,7 @@ def reset_schedule_after_comment_and_run(issue: Issue) -> Optional[IssueAgentSch
             ]
         )
     logger.info(
-        "agent_schedule: reset issue=%s next_run_at=%s",
+        "agent_ticker: reset issue=%s next_run_at=%s",
         issue.pk,
         sched.next_run_at,
     )
@@ -246,7 +250,7 @@ def dispatch_continuation_run(
 
     if orchestration_service._active_run_for(issue) is not None:
         logger.info(
-            "agent_schedule: skip dispatch issue=%s reason=active-run-exists triggered_by=%s",
+            "agent_ticker: skip dispatch issue=%s reason=active-run-exists triggered_by=%s",
             issue.pk,
             triggered_by,
         )
@@ -255,7 +259,7 @@ def dispatch_continuation_run(
     parent = orchestration_service._latest_prior_run(issue)
     if parent is None:
         logger.info(
-            "agent_schedule: skip dispatch issue=%s reason=no-prior-run triggered_by=%s",
+            "agent_ticker: skip dispatch issue=%s reason=no-prior-run triggered_by=%s",
             issue.pk,
             triggered_by,
         )
@@ -266,7 +270,7 @@ def dispatch_continuation_run(
     )
     if creator is None:
         logger.warning(
-            "agent_schedule: skip dispatch issue=%s reason=no-creator triggered_by=%s",
+            "agent_ticker: skip dispatch issue=%s reason=no-creator triggered_by=%s",
             issue.pk,
             triggered_by,
         )
@@ -275,7 +279,7 @@ def dispatch_continuation_run(
     pod = _resolve_pod_for_issue(issue)
     if pod is None:
         logger.warning(
-            "agent_schedule: skip dispatch issue=%s reason=no-pod triggered_by=%s",
+            "agent_ticker: skip dispatch issue=%s reason=no-pod triggered_by=%s",
             issue.pk,
             triggered_by,
         )
@@ -310,7 +314,7 @@ def maybe_apply_deferred_pause(run: AgentRun) -> bool:
         return False
 
     issue = run.work_item
-    sched = IssueAgentSchedule.objects.filter(issue=issue).first()
+    sched = IssueAgentTicker.objects.filter(issue=issue).first()
     if sched is None or sched.enabled:
         return False
 
@@ -340,7 +344,7 @@ def maybe_apply_deferred_pause(run: AgentRun) -> bool:
     )
     if paused_state is None:
         logger.warning(
-            "agent_schedule: cannot auto-pause issue=%s — no Paused state in project",
+            "agent_ticker: cannot auto-pause issue=%s — no Paused state in project",
             issue.pk,
         )
         return False
@@ -351,11 +355,11 @@ def maybe_apply_deferred_pause(run: AgentRun) -> bool:
     with transaction.atomic():
         # Re-fetch the schedule under a row lock so the disarmed-check we
         # made above stays valid for the rest of this transaction. Without
-        # this, a concurrent ``arm_schedule`` (e.g. user manually re-starts
+        # this, a concurrent ``arm_ticker`` (e.g. user manually re-starts
         # the issue between the unlocked read on line ~314 and here) can
         # re-enable the schedule while we auto-pause its issue.
         locked_sched = (
-            IssueAgentSchedule.objects.select_for_update()
+            IssueAgentTicker.objects.select_for_update()
             .filter(pk=sched.pk)
             .first()
         )
@@ -377,7 +381,7 @@ def maybe_apply_deferred_pause(run: AgentRun) -> bool:
         locked.save(update_fields=["state", "updated_at"])
 
     logger.info(
-        "agent_schedule: auto-paused issue=%s after cap hit",
+        "agent_ticker: auto-paused issue=%s after cap hit",
         issue.pk,
     )
     return True
@@ -390,9 +394,9 @@ __all__ = [
     "PAUSED_STATE_NAME",
     "TRIGGER_COMMENT_AND_RUN",
     "TRIGGER_TICK",
-    "arm_schedule",
-    "disarm_schedule",
+    "arm_ticker",
+    "disarm_ticker",
     "dispatch_continuation_run",
     "maybe_apply_deferred_pause",
-    "reset_schedule_after_comment_and_run",
+    "reset_ticker_after_comment_and_run",
 ]

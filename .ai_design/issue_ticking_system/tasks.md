@@ -16,13 +16,13 @@ Goal:
 
 Scope:
 
-- add `IssueAgentSchedule` model in `apps/api/pi_dash/db/models/issue_agent_schedule.py` (fields per design §7.1)
+- add `IssueAgentTicker` model in `apps/api/pi_dash/db/models/issue_agent_ticker.py` (fields per design §7.1)
 - add three fields to `Project`: `agent_default_interval_seconds`, `agent_default_max_ticks`, `agent_ticking_enabled`
-- migration M1: `CreateModel(IssueAgentSchedule)` + `AddField × 3` on `Project`, plus the `(enabled, next_run_at)` index
+- migration M1: `CreateModel(IssueAgentTicker)` + `AddField × 3` on `Project`, plus the `(enabled, next_run_at)` index
 - update `apps/api/pi_dash/seeds/data/states.json` to include a `Paused` entry in the `backlog` group
 - migration M2: `RunPython` data migration backfilling a `Paused` state in every existing project that lacks one (idempotent)
-- migration M3: `RunPython` data migration backfilling `IssueAgentSchedule` rows for every issue currently in the literal "In Progress" state, with `next_run_at = NOW() + project_default_interval + jitter`
-- register `IssueAgentSchedule` in Django admin (read-only is fine; primarily for ops)
+- migration M3: `RunPython` data migration backfilling `IssueAgentTicker` rows for every issue currently in the literal "In Progress" state, with `next_run_at = NOW() + project_default_interval + jitter`
+- register `IssueAgentTicker` in Django admin (read-only is fine; primarily for ops)
 
 Why first:
 
@@ -38,15 +38,15 @@ Goal:
 Scope:
 
 - create `apps/api/pi_dash/orchestration/scheduling.py` with:
-  - `arm_schedule(issue, *, dispatch_immediate=True)`
-  - `disarm_schedule(issue)`
-  - `reset_schedule_after_comment_and_run(issue)`
+  - `arm_ticker(issue, *, dispatch_immediate=True)`
+  - `disarm_ticker(issue)`
+  - `reset_ticker_after_comment_and_run(issue)`
   - `dispatch_continuation_run(issue, *, triggered_by)`
   - `maybe_apply_deferred_pause(run)`
-- add `effective_interval()` and `effective_max_ticks()` model methods on `IssueAgentSchedule`
+- add `effective_interval()` and `effective_max_ticks()` model methods on `IssueAgentTicker`
 - add `jitter(interval_seconds)` helper
-- wire `arm_schedule` into `handle_issue_state_transition` after the existing immediate-dispatch path
-- wire `disarm_schedule` into the same handler for transitions out of Started
+- wire `arm_ticker` into `handle_issue_state_transition` after the existing immediate-dispatch path
+- wire `disarm_ticker` into the same handler for transitions out of Started
 - tests per design §12.3
 
 Why second:
@@ -62,16 +62,16 @@ Goal:
 
 Scope:
 
-- create `apps/api/pi_dash/bgtasks/agent_schedule.py` with:
-  - `scan_due_schedules` (Celery beat target; fans out `fire_tick` per due row)
+- create `apps/api/pi_dash/bgtasks/agent_ticker.py` with:
+  - `scan_due_tickers` (Celery beat target; fans out `fire_tick` per due row)
   - `fire_tick(sched_id)` (atomic claim + dispatch per design §6.1, including the literal "In Progress" name check)
-- add `CELERY_BEAT_SCHEDULE` entry: `scan-due-agent-schedules` runs `crontab(minute="*")`
+- add `CELERY_BEAT_SCHEDULE` entry: `scan-due-agent-tickers` runs `crontab(minute="*")`
 - verify Beat is deployed as a singleton (check `docker-compose-local.yml` and beat entrypoint)
 - remove `orchestration/signals.py:fire_comment_continuation` (the `post_save(IssueComment)` receiver)
 - remove `orchestration/service.py:maybe_continue_after_terminate`
 - replace the `transaction.on_commit(...)` calls to `maybe_continue_after_terminate` at `runner/consumers.py:550` (`_handle_run_paused`) and `:610` (`_finalize_run`) with calls to `maybe_apply_deferred_pause(run)`
 - delete or convert tests per design §12.3
-- add new test modules: `tests/unit/orchestration/test_scheduling.py`, `tests/unit/bgtasks/test_agent_schedule.py`
+- add new test modules: `tests/unit/orchestration/test_scheduling.py`, `tests/unit/bgtasks/test_agent_ticker.py`
 
 Why third:
 
@@ -93,7 +93,7 @@ Scope:
 - "no cap" label + running tick count when `max_ticks = -1`
 - project create / edit page: new "AI agent ticking" section with three controls (enabled, default cadence, max ticks)
 - issue settings: per-issue overrides for the same three fields (cadence, max ticks, "disable ticking for this issue")
-- server: route `POST /api/runners/runs/` through `dispatch_continuation_run(issue, triggered_by="comment_and_run")` + `reset_schedule_after_comment_and_run(issue)` in one transaction
+- server: route `POST /api/runners/runs/` through `dispatch_continuation_run(issue, triggered_by="comment_and_run")` + `reset_ticker_after_comment_and_run(issue)` in one transaction
 - server: when the state-transition view is invoked as part of a Comment & Run flow on a Paused issue, arm with `dispatch_immediate=False` so Comment & Run owns the single dispatch
 
 Why fourth:
@@ -123,35 +123,35 @@ Why optional:
 
 ### Schema + migrations
 
-- [ ] `apps/api/pi_dash/db/models/issue_agent_schedule.py` (new file): model class with fields per design §7.1
+- [ ] `apps/api/pi_dash/db/models/issue_agent_ticker.py` (new file): model class with fields per design §7.1
 - [ ] `apps/api/pi_dash/db/models/__init__.py`: export the new model
-- [ ] M1 migration: `CreateModel(IssueAgentSchedule)` + `AddField × 3` on `Project` + `Index(fields=['enabled', 'next_run_at'])`
+- [ ] M1 migration: `CreateModel(IssueAgentTicker)` + `AddField × 3` on `Project` + `Index(fields=['enabled', 'next_run_at'])`
 - [ ] Update `apps/api/pi_dash/seeds/data/states.json`: add `Paused` entry, `"group": "backlog"`, distinct color and sequence
 - [ ] M2 migration: `RunPython` backfilling `Paused` state for every existing project that lacks one. Idempotent — skip projects that already have it.
-- [ ] M3 migration: `RunPython` backfilling `IssueAgentSchedule` rows for issues currently in literal "In Progress" state. `next_run_at = NOW() + project_default_interval + jitter`, `tick_count = 0`, `enabled = NOT user_disabled`.
+- [ ] M3 migration: `RunPython` backfilling `IssueAgentTicker` rows for issues currently in literal "In Progress" state. `next_run_at = NOW() + project_default_interval + jitter`, `tick_count = 0`, `enabled = NOT user_disabled`.
 - [ ] Verify all three migrations are reversible (M1 drops the model + fields; M2/M3 delete the inserted rows)
 
 ### Orchestration scheduling primitives — `orchestration/scheduling.py`
 
-- [ ] `arm_schedule(issue, *, dispatch_immediate=True)` — idempotent; honors `user_disabled` and project `agent_ticking_enabled`; sets `enabled = false` when either suppresses ticks
-- [ ] `disarm_schedule(issue)` — idempotent; sets `enabled = false`
-- [ ] `reset_schedule_after_comment_and_run(issue)` — uses `select_for_update` to serialize against `fire_tick`; resets `tick_count = 0` and `next_run_at = NOW() + interval + jitter`
+- [ ] `arm_ticker(issue, *, dispatch_immediate=True)` — idempotent; honors `user_disabled` and project `agent_ticking_enabled`; sets `enabled = false` when either suppresses ticks
+- [ ] `disarm_ticker(issue)` — idempotent; sets `enabled = false`
+- [ ] `reset_ticker_after_comment_and_run(issue)` — uses `select_for_update` to serialize against `fire_tick`; resets `tick_count = 0` and `next_run_at = NOW() + interval + jitter`
 - [ ] `dispatch_continuation_run(issue, *, triggered_by)` — resolves parent (latest prior run), creator (system bot for ticks; comment author for Comment & Run), pod; calls `_create_continuation_run`; returns the created run or `None` when blocked by `_active_run_for`
 - [ ] `maybe_apply_deferred_pause(run)` — implements design §4.4.1: when schedule disarmed AND issue still in Started AND no other active runs, transition issue In Progress → Paused with the `pi_dash_agent` bot as actor
-- [ ] `IssueAgentSchedule.effective_interval()` and `effective_max_ticks()` model methods returning override-or-project-default
+- [ ] `IssueAgentTicker.effective_interval()` and `effective_max_ticks()` model methods returning override-or-project-default
 - [ ] `jitter(interval_seconds)` helper — uniform `random(0, interval × 0.1)`
 
 ### Wiring into existing orchestration
 
-- [ ] `handle_issue_state_transition` (`orchestration/service.py:88`): after the immediate-dispatch path, call `arm_schedule(issue, dispatch_immediate=True)`
-- [ ] `handle_issue_state_transition`: on transitions out of Started, call `disarm_schedule(issue)`
+- [ ] `handle_issue_state_transition` (`orchestration/service.py:88`): after the immediate-dispatch path, call `arm_ticker(issue, dispatch_immediate=True)`
+- [ ] `handle_issue_state_transition`: on transitions out of Started, call `disarm_ticker(issue)`
 - [ ] When the Comment & Run flow drives a Paused → In Progress transition, the view should arm with `dispatch_immediate=False` so Comment & Run owns the single dispatch
 
-### Background tasks — `bgtasks/agent_schedule.py`
+### Background tasks — `bgtasks/agent_ticker.py`
 
-- [ ] `scan_due_schedules` Celery Beat task: query enabled, due, under-cap rows; fan out `fire_tick.delay(sched_id)`
+- [ ] `scan_due_tickers` Celery Beat task: query enabled, due, under-cap rows; fan out `fire_tick.delay(sched_id)`
 - [ ] `fire_tick(sched_id)` Celery worker task: open transaction, `select_for_update` the row, re-check, advance `tick_count` + `next_run_at`, run In Progress name check, dispatch via `dispatch_continuation_run(issue, triggered_by="tick")`
-- [ ] Add `CELERY_BEAT_SCHEDULE` entry running `scan_due_schedules` every minute
+- [ ] Add `CELERY_BEAT_SCHEDULE` entry running `scan_due_tickers` every minute
 - [ ] Verify Beat is deployed as a singleton
 
 ### Removal of auto-trigger
@@ -162,7 +162,7 @@ Why optional:
 
 ### Comment & Run server flow
 
-- [ ] Server handler for `POST /api/runners/runs/` routes through `dispatch_continuation_run(issue, triggered_by="comment_and_run")` + `reset_schedule_after_comment_and_run(issue)` in a single transaction
+- [ ] Server handler for `POST /api/runners/runs/` routes through `dispatch_continuation_run(issue, triggered_by="comment_and_run")` + `reset_ticker_after_comment_and_run(issue)` in a single transaction
 - [ ] State-transition view detects "this transition is part of a Comment & Run on a Paused issue" (header / query flag / explicit endpoint) and arms with `dispatch_immediate=False`
 
 ### UI (apps/web)
@@ -191,23 +191,23 @@ In `apps/api/pi_dash/tests/unit/orchestration/test_service.py`:
 
 ### Delete
 
-- [ ] `test_comment_during_active_run_held_for_terminate_sweep` (line 313) — sweep is removed; replace with a tick-side equivalent in `test_agent_schedule.py`
+- [ ] `test_comment_during_active_run_held_for_terminate_sweep` (line 313) — sweep is removed; replace with a tick-side equivalent in `test_agent_ticker.py`
 - [ ] `test_two_comments_coalesce_into_one_followup` (line 338) — comments no longer create QUEUED follow-ups on their own
 - [ ] `test_terminate_sweep_picks_up_held_comment` (line 378) — sweep removed
 - [ ] Any test asserting on `orchestration_error_count` from the `fire_comment_continuation` signal receiver (the receiver is gone)
 
 ### New — `tests/unit/orchestration/test_scheduling.py`
 
-- [ ] `arm_schedule` honors `user_disabled` and project `agent_ticking_enabled`
-- [ ] `arm_schedule(dispatch_immediate=False)` does not call into run dispatch
-- [ ] `disarm_schedule` is idempotent
-- [ ] `reset_schedule_after_comment_and_run` resets `tick_count` and `next_run_at`; serializes against concurrent `fire_tick`
+- [ ] `arm_ticker` honors `user_disabled` and project `agent_ticking_enabled`
+- [ ] `arm_ticker(dispatch_immediate=False)` does not call into run dispatch
+- [ ] `disarm_ticker` is idempotent
+- [ ] `reset_ticker_after_comment_and_run` resets `tick_count` and `next_run_at`; serializes against concurrent `fire_tick`
 - [ ] `dispatch_continuation_run` resolves parent, creator, pod correctly and returns `None` when blocked by `_active_run_for`
 - [ ] `maybe_apply_deferred_pause` only transitions when (schedule disarmed) AND (no active runs) AND (issue still in Started)
 
-### New — `tests/unit/bgtasks/test_agent_schedule.py`
+### New — `tests/unit/bgtasks/test_agent_ticker.py`
 
-- [ ] `scan_due_schedules` selects only enabled, due, under-cap rows
+- [ ] `scan_due_tickers` selects only enabled, due, under-cap rows
 - [ ] `fire_tick` re-checks under lock and skips when conditions changed
 - [ ] `fire_tick` increments `tick_count` and advances `next_run_at`
 - [ ] `fire_tick` sets `enabled = false` on cap hit but does NOT auto-transition state (deferred pause)

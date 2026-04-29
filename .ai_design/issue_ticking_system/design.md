@@ -140,7 +140,7 @@ When an issue enters that specific In Progress state:
 1. Immediate dispatch fires via the existing
    `_create_and_dispatch_run` path (today's behavior preserved —
    the user clicks In Progress, the agent starts immediately).
-2. Create or reset the `IssueAgentSchedule` row:
+2. Create or reset the `IssueAgentTicker` row:
    - `interval_seconds` = issue override if set, else project default
      (3h).
    - `max_ticks` = issue override if set, else project default (24).
@@ -299,10 +299,10 @@ process** (one scheduler instance) — running multiple beat workers
 duplicates the scan. This is standard Celery deployment hygiene.
 
 ```python
-def scan_due_schedules():
+def scan_due_tickers():
     """Fan out fire_tick tasks. The actual claim happens in fire_tick."""
     due_ids = list(
-        IssueAgentSchedule.objects
+        IssueAgentTicker.objects
         .filter(enabled=True, next_run_at__lte=timezone.now())
         .filter(Q(max_ticks=-1) | Q(tick_count__lt=F('max_ticks')))
         .order_by('next_run_at')
@@ -322,7 +322,7 @@ double-fire the same schedule:
 def fire_tick(sched_id):
     with transaction.atomic():
         sched = (
-            IssueAgentSchedule.objects
+            IssueAgentTicker.objects
             .select_for_update()
             .get(pk=sched_id)
         )
@@ -399,9 +399,9 @@ minute) would re-cluster every cycle.
 
 ## 7. Schema
 
-### 7.1 New model `IssueAgentSchedule`
+### 7.1 New model `IssueAgentTicker`
 
-Lives in `apps/api/pi_dash/db/models/issue_agent_schedule.py`
+Lives in `apps/api/pi_dash/db/models/issue_agent_ticker.py`
 (co-located with other issue-adjacent models — orchestration is a
 service layer with no `models.py` of its own). Migrations land in
 `apps/api/pi_dash/db/migrations/`.
@@ -424,7 +424,7 @@ created_at, updated_at
 ```
 
 Constraint: `issue` is unique. There is exactly one
-`IssueAgentSchedule` row per issue; arming, disarming, and changing
+`IssueAgentTicker` row per issue; arming, disarming, and changing
 overrides mutate that row in place rather than creating additional
 schedule rows.
 
@@ -462,7 +462,7 @@ agent integration from the project (different feature, out of
 scope for this design).
 
 When `agent_ticking_enabled = false` at the project level: arming
-logic creates the `IssueAgentSchedule` row but sets `enabled = false`
+logic creates the `IssueAgentTicker` row but sets `enabled = false`
 (so the scanner skips it). Re-enabling the project setting flips
 schedules back to `enabled = true` for issues currently in Started
 that don't have `user_disabled = true`.
@@ -518,7 +518,7 @@ New section "AI agent ticking":
 
 ### 8.3 Issue settings
 
-Per-issue overrides, written to `IssueAgentSchedule`:
+Per-issue overrides, written to `IssueAgentTicker`:
 
 | UI field                       | DB field           | Semantics                                                                                                                |
 | ------------------------------ | ------------------ | ------------------------------------------------------------------------------------------------------------------------ |
@@ -563,20 +563,20 @@ The following are **kept**:
 All v1 decisions are pinned below. Anything genuinely open lives in
 the §12 implementation plan as concrete tasks, not as ambiguity.
 
-| #   | Question                                                                                    | Decision                                                                                                                                                                                                                                                                                                                 |
-| --- | ------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| Q1  | Migration for existing In Progress issues — retroactive backfill?                           | **Yes.** Data migration (§12.1) iterates issues whose state is in `StateGroup.STARTED` AND named "In Progress" and creates an `IssueAgentSchedule` row for each, with `next_run_at = NOW() + project default interval + jitter` (so the first tick fires roughly an interval after deploy, not all at once on start-up). |
-| Q2  | "Paused" state — global template vs. per-workspace opt-in?                                  | **Global template.** Added to `seeds/data/states.json` (Backlog group) plus a one-time data migration that backfills every existing project that doesn't already have a "Paused" state. New projects pick it up via the existing seed path.                                                                              |
-| Q3  | Actor on system-driven In Progress → Paused transition?                                     | **The existing `pi_dash_agent` bot user** (`orchestration/workpad.py:get_agent_system_user()`). It already authors workpad comments; reusing it for the system-pause activity entry keeps a single "agent/system" actor in the activity feed. If we later need to distinguish, a separate bot user is a small addition.  |
-| Q4  | Custom Started-group state names — does ticking apply?                                      | **No, for v1.** Ticking inherits the same strictness as `_is_delegation_trigger`: only the state literally named "In Progress" arms or fires a schedule (see §4.2 and the name check in §6.1's `fire_tick`). Generalizing to "any STARTED state" is tracked outside this design.                                         |
-| Q5  | Quiet hours / business-hours awareness?                                                     | **Out of scope for v1.** Not blocking; can be added as an additional gate inside `fire_tick` later.                                                                                                                                                                                                                      |
-| Q6  | User **manually** moves issue to Paused while a run is `RUNNING` — cancel or let it finish? | **Let the run finish.** Schedule disarms immediately (no future ticks); the active run completes naturally; no auto-resume until the user explicitly moves the issue back to In Progress. Matches the deferred cap-hit behavior and avoids implicit cancellation semantics.                                              |
-| Q7  | UI for `max_ticks = -1` (infinite)?                                                         | **"No cap"** label plus the running tick count, e.g. `"42 ticks · no cap"`. Cap-hit copy in §8.1 only applies when `max_ticks > 0`.                                                                                                                                                                                      |
+| #   | Question                                                                                    | Decision                                                                                                                                                                                                                                                                                                                |
+| --- | ------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Q1  | Migration for existing In Progress issues — retroactive backfill?                           | **Yes.** Data migration (§12.1) iterates issues whose state is in `StateGroup.STARTED` AND named "In Progress" and creates an `IssueAgentTicker` row for each, with `next_run_at = NOW() + project default interval + jitter` (so the first tick fires roughly an interval after deploy, not all at once on start-up).  |
+| Q2  | "Paused" state — global template vs. per-workspace opt-in?                                  | **Global template.** Added to `seeds/data/states.json` (Backlog group) plus a one-time data migration that backfills every existing project that doesn't already have a "Paused" state. New projects pick it up via the existing seed path.                                                                             |
+| Q3  | Actor on system-driven In Progress → Paused transition?                                     | **The existing `pi_dash_agent` bot user** (`orchestration/workpad.py:get_agent_system_user()`). It already authors workpad comments; reusing it for the system-pause activity entry keeps a single "agent/system" actor in the activity feed. If we later need to distinguish, a separate bot user is a small addition. |
+| Q4  | Custom Started-group state names — does ticking apply?                                      | **No, for v1.** Ticking inherits the same strictness as `_is_delegation_trigger`: only the state literally named "In Progress" arms or fires a schedule (see §4.2 and the name check in §6.1's `fire_tick`). Generalizing to "any STARTED state" is tracked outside this design.                                        |
+| Q5  | Quiet hours / business-hours awareness?                                                     | **Out of scope for v1.** Not blocking; can be added as an additional gate inside `fire_tick` later.                                                                                                                                                                                                                     |
+| Q6  | User **manually** moves issue to Paused while a run is `RUNNING` — cancel or let it finish? | **Let the run finish.** Schedule disarms immediately (no future ticks); the active run completes naturally; no auto-resume until the user explicitly moves the issue back to In Progress. Matches the deferred cap-hit behavior and avoids implicit cancellation semantics.                                             |
+| Q7  | UI for `max_ticks = -1` (infinite)?                                                         | **"No cap"** label plus the running tick count, e.g. `"42 ticks · no cap"`. Cap-hit copy in §8.1 only applies when `max_ticks > 0`.                                                                                                                                                                                     |
 
 ## 11. Summary of decisions
 
 1. **Scanner-based periodic ticking.** Celery Beat runs every minute,
-   queries `IssueAgentSchedule`, fans out `fire_tick` tasks per due row.
+   queries `IssueAgentTicker`, fans out `fire_tick` tasks per due row.
 2. **Default 3h cadence, default 24-tick hard cap** (= 3 days at 3h
    cadence). Configurable at project + issue level. `-1` means
    infinite.
@@ -619,14 +619,14 @@ the §12 implementation plan as concrete tasks, not as ambiguity.
     single dispatch; the Paused → In Progress state transition
     arms the schedule but does not fire its own dispatch (§4.5).
     Avoids two-dispatch race against `_active_run_for`.
-15. **One schedule row per issue.** `IssueAgentSchedule.issue` is
+15. **One schedule row per issue.** `IssueAgentTicker.issue` is
     unique; override edits and arm/disarm events mutate the same row.
 16. **In Progress name strictness.** Ticking arms and fires only on
     the literal "In Progress" state name, mirroring
     `_is_delegation_trigger` in v1. Custom Started-group state names
     are deferred.
 17. **Schedule model lives in `db/`, not `orchestration/`.**
-    `apps/api/pi_dash/db/models/issue_agent_schedule.py`,
+    `apps/api/pi_dash/db/models/issue_agent_ticker.py`,
     migrations under `apps/api/pi_dash/db/migrations/`. Orchestration
     stays a service layer.
 
@@ -639,9 +639,9 @@ the §12 implementation plan as concrete tasks, not as ambiguity.
 Three migrations, in order, all under
 `apps/api/pi_dash/db/migrations/`:
 
-**M1 — schema.** `0NNN_issue_agent_schedule.py`
+**M1 — schema.** `0NNN_issue_agent_ticker.py`
 
-- `CreateModel(IssueAgentSchedule)` with the fields in §7.1.
+- `CreateModel(IssueAgentTicker)` with the fields in §7.1.
 - `AddField` × 3 on `Project`: `agent_default_interval_seconds`
   (int, default 10800), `agent_default_max_ticks` (int, default 24),
   `agent_ticking_enabled` (bool, default true).
@@ -664,7 +664,7 @@ Three migrations, in order, all under
   - Resolve each project's effective default interval.
   - For every Issue whose `state.group == STARTED` AND
     `state.name == "In Progress"`, `get_or_create` an
-    `IssueAgentSchedule` row with `next_run_at = NOW() +
+    `IssueAgentTicker` row with `next_run_at = NOW() +
 project_default_interval + jitter`, `tick_count = 0`,
     `enabled = NOT user_disabled`.
   - Setting `next_run_at = NOW() + interval + jitter` (not `NOW()`)
@@ -685,8 +685,8 @@ detail is in the lifecycle sections.
 #### orchestration/scheduling.py (new module)
 
 ```python
-def arm_schedule(issue: Issue, *, dispatch_immediate: bool = True) -> None:
-    """Create or reset the IssueAgentSchedule for an issue entering
+def arm_ticker(issue: Issue, *, dispatch_immediate: bool = True) -> None:
+    """Create or reset the IssueAgentTicker for an issue entering
     Started/In Progress.
 
     - dispatch_immediate=True (default): caller wants the immediate
@@ -699,12 +699,12 @@ def arm_schedule(issue: Issue, *, dispatch_immediate: bool = True) -> None:
     sets `enabled = false` when either suppresses ticks.
     """
 
-def disarm_schedule(issue: Issue) -> None:
+def disarm_ticker(issue: Issue) -> None:
     """Set enabled=false. Idempotent. Called when issue leaves
     Started, on cap hit, on terminal done-signal, and when the user
     toggles `user_disabled = true` mid-flight."""
 
-def reset_schedule_after_comment_and_run(issue: Issue) -> None:
+def reset_ticker_after_comment_and_run(issue: Issue) -> None:
     """Reset tick_count=0 and next_run_at = NOW() + interval + jitter.
     Called by the Comment & Run handler after the run is dispatched
     (§4.6 step 4). Uses select_for_update to serialize against
@@ -722,11 +722,11 @@ def dispatch_continuation_run(
     when the single-active-run guardrail blocks creation."""
 ```
 
-#### bgtasks/agent_schedule.py (new module)
+#### bgtasks/agent_ticker.py (new module)
 
 ```python
 @shared_task
-def scan_due_schedules() -> None:
+def scan_due_tickers() -> None:
     """Celery Beat target. Runs every minute. Fans out fire_tick
     tasks for due schedules. The actual claim happens inside
     fire_tick under select_for_update."""
@@ -743,8 +743,8 @@ Add to the existing `CELERY_BEAT_SCHEDULE` (in
 configured today):
 
 ```python
-"scan-due-agent-schedules": {
-    "task": "pi_dash.bgtasks.agent_schedule.scan_due_schedules",
+"scan-due-agent-tickers": {
+    "task": "pi_dash.bgtasks.agent_ticker.scan_due_tickers",
     "schedule": crontab(minute="*"),
 },
 ```
@@ -773,7 +773,7 @@ No new endpoints required. The existing
 `POST /api/runners/runs/` (consumed today by `apps/web/core/services/runner/agent-run.service.ts`)
 becomes the path Comment & Run hits; its server-side handler routes
 to `dispatch_continuation_run` plus
-`reset_schedule_after_comment_and_run`.
+`reset_ticker_after_comment_and_run`.
 
 The Paused-issue confirmation flow (§4.6) is client-side: the UI
 shows the dialog, then on Confirm makes three sequential calls in
@@ -784,7 +784,7 @@ this order:
    (existing endpoint; the state-transition handler arms the
    schedule with `dispatch_immediate=False` because the caller
    tags this transition as "comment-and-run-driven" — see
-   `arm_schedule` semantics above)
+   `arm_ticker` semantics above)
 3. `POST /api/runners/runs/` (Comment & Run dispatch)
 
 The state-transition handler needs a way to know "Comment & Run is
@@ -835,20 +835,20 @@ loses its `fire_comment_continuation` receiver entirely.
 Create `apps/api/pi_dash/tests/unit/orchestration/test_scheduling.py`
 covering:
 
-- `arm_schedule` honors `user_disabled` and project `agent_ticking_enabled`.
-- `arm_schedule(dispatch_immediate=False)` does not call into run dispatch.
-- `disarm_schedule` is idempotent.
-- `reset_schedule_after_comment_and_run` resets tick_count and
+- `arm_ticker` honors `user_disabled` and project `agent_ticking_enabled`.
+- `arm_ticker(dispatch_immediate=False)` does not call into run dispatch.
+- `disarm_ticker` is idempotent.
+- `reset_ticker_after_comment_and_run` resets tick_count and
   next_run_at; serializes against concurrent fire_tick.
 - `dispatch_continuation_run` resolves parent, creator, pod
   correctly and returns None when blocked by `_active_run_for`.
 - `maybe_apply_deferred_pause` only transitions when (schedule
   disarmed) AND (no active runs) AND (issue still in Started).
 
-Create `apps/api/pi_dash/tests/unit/bgtasks/test_agent_schedule.py`
+Create `apps/api/pi_dash/tests/unit/bgtasks/test_agent_ticker.py`
 covering:
 
-- `scan_due_schedules` selects only enabled, due, under-cap rows.
+- `scan_due_tickers` selects only enabled, due, under-cap rows.
 - `fire_tick` re-checks under lock and skips when conditions changed.
 - `fire_tick` increments tick_count and advances next_run_at.
 - `fire_tick` sets `enabled = false` on cap hit but does NOT auto-
@@ -876,17 +876,17 @@ Project field additions. No behavior change yet (no scanner, no
 auto-trigger removal). Easy to review.
 
 **PR B — orchestration scheduling primitives.**
-`orchestration/scheduling.py` with `arm_schedule`,
-`disarm_schedule`, `reset_schedule_after_comment_and_run`,
+`orchestration/scheduling.py` with `arm_ticker`,
+`disarm_ticker`, `reset_ticker_after_comment_and_run`,
 `dispatch_continuation_run`, `maybe_apply_deferred_pause`. Wire
-`arm_schedule` into the state-transition handler (called after the
-existing immediate dispatch). Wire `disarm_schedule` into the same
+`arm_ticker` into the state-transition handler (called after the
+existing immediate dispatch). Wire `disarm_ticker` into the same
 handler for Started → non-Started transitions. Tests for each.
 Comment auto-trigger and terminate sweep are still live; they just
 now coexist with the new schedule rows.
 
 **PR C — scanner + auto-trigger removal.**
-`bgtasks/agent_schedule.py` with `scan_due_schedules` and
+`bgtasks/agent_ticker.py` with `scan_due_tickers` and
 `fire_tick`. Beat schedule config. **Remove**:
 
 - `orchestration/signals.py:fire_comment_continuation` (the
@@ -919,7 +919,7 @@ A concrete trace. Cadence 3h, cap 24, no jitter shown for clarity.
 ```
 T=0     issue A → In Progress
         immediate dispatch: AgentRun A1 created, fired
-        IssueAgentSchedule(A): tick_count=0, next_run_at=T+3h
+        IssueAgentTicker(A): tick_count=0, next_run_at=T+3h
 T+15m   user adds plain comment. Schedule untouched. Agent unaware.
 T+30m   A1 emits paused (question), goes PAUSED_AWAITING_INPUT
         is_active(A) = false (PAUSED is not active)
