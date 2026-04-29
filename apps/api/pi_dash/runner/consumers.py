@@ -59,6 +59,31 @@ CLOSE_CODE_HELLO_TIMEOUT = 4408
 HELLO_DEADLINE_SECS = 30
 
 
+def _update_scheduler_binding_on_terminate(run: AgentRun) -> None:
+    """Update ``SchedulerBinding.last_error`` after a project-scoped run
+    reaches a terminal state.
+
+    ``binding.last_run`` already points at this run (set at dispatch
+    time), so ``last_run.status`` is the operator-facing source of truth
+    for "did the last tick succeed." This helper only writes the
+    short-circuit ``last_error`` string for terminal-failure runs.
+
+    See ``.ai_design/project_scheduler/design.md`` §6.5.
+    """
+    binding = run.scheduler_binding
+    if binding is None:
+        return
+    if run.status == AgentRunStatus.COMPLETED:
+        if binding.last_error:
+            binding.last_error = ""
+            binding.save(update_fields=["last_error", "updated_at"])
+    elif run.status in (AgentRunStatus.FAILED, AgentRunStatus.CANCELLED):
+        msg = (run.error or run.status)[:1000]
+        if binding.last_error != msg:
+            binding.last_error = msg
+            binding.save(update_fields=["last_error", "updated_at"])
+
+
 class RunnerConsumer(AsyncJsonWebsocketConsumer):
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         super().__init__(*args, **kwargs)
@@ -896,6 +921,7 @@ class RunnerConsumer(AsyncJsonWebsocketConsumer):
                     "work_item",
                     "work_item__state",
                     "work_item__project",
+                    "scheduler_binding",
                 )
                 .filter(pk=rid)
                 .first()
@@ -908,6 +934,21 @@ class RunnerConsumer(AsyncJsonWebsocketConsumer):
                         "orchestration.error: deferred-pause failed for run %s",
                         rid,
                     )
+                # Scheduler-driven run finished: write last_error on the
+                # binding so operators can see why a scheduler tick failed
+                # without drilling into the AgentRun. ``binding.last_run``
+                # was set at dispatch time and already points at this run,
+                # so its `.status` is the source of truth — we only update
+                # the short-circuit error string here.
+                # See .ai_design/project_scheduler/design.md §6.5.
+                if run.scheduler_binding_id is not None:
+                    try:
+                        _update_scheduler_binding_on_terminate(run)
+                    except Exception:
+                        logger.exception(
+                            "scheduler.terminate_hook: failed for run %s",
+                            rid,
+                        )
             drain_for_runner_by_id(runner_id)
             if pod_id is not None:
                 drain_pod_by_id(pod_id)

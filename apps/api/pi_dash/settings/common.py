@@ -324,6 +324,11 @@ GITHUB_ACCESS_TOKEN = os.environ.get("GITHUB_ACCESS_TOKEN", False)
 # design.md §9 Rollout.
 GITHUB_SYNC_ENABLED = os.environ.get("GITHUB_SYNC_ENABLED", "true").lower() == "true"
 
+# Project Scheduler feature gate. Default on; self-hosters who don't want
+# periodic agent ticks against projects set SCHEDULER_ENABLED=false. See
+# .ai_design/project_scheduler/design.md §10 Rollout.
+SCHEDULER_ENABLED = os.environ.get("SCHEDULER_ENABLED", "true").lower() == "true"
+
 # Analytics
 ANALYTICS_SECRET_KEY = os.environ.get("ANALYTICS_SECRET_KEY", False)
 ANALYTICS_BASE_API = os.environ.get("ANALYTICS_BASE_API", False)

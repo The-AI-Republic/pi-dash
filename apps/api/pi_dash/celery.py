@@ -96,6 +96,11 @@ app.conf.beat_schedule = {
         "task": "pi_dash.bgtasks.github_sync_task.sync_all_repos",
         "schedule": crontab(minute=0, hour="*/4"),
     },
+    # Project Scheduler scanner — see .ai_design/project_scheduler/design.md §6.1.
+    "scan-due-scheduler-bindings": {
+        "task": "pi_dash.bgtasks.scheduler.scan_due_bindings",
+        "schedule": crontab(minute="*"),
+    },
 }
 
 
