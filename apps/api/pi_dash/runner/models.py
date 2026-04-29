@@ -381,13 +381,14 @@ class MachineToken(models.Model):
                 owned_runner_ids.append(runner.id)
 
         # After the DB transaction commits, tell the daemon (if connected)
-        # to shut down via a wire-level Revoke frame. Sending to one
-        # owned runner is enough — the consumer is joined to all groups
-        # for this token. Defence in depth: also force-close every
-        # group, so a consumer that drops the Revoke for any reason
-        # still loses the socket.
-        if owned_runner_ids:
-            send_token_revoke(owned_runner_ids[0], reason="token revoked")
+        # to shut down via a wire-level Revoke frame. Broadcast to every
+        # owned runner group rather than assuming any one runner is
+        # definitely online on the live connection — some may be stale,
+        # offline, or no longer Hello-authorised on this daemon. Defence
+        # in depth: also force-close every group, so a consumer that
+        # drops the Revoke for any reason still loses the socket.
+        for runner_id in owned_runner_ids:
+            send_token_revoke(runner_id, reason="token revoked")
         for runner_id in owned_runner_ids:
             close_runner_session(runner_id)
 

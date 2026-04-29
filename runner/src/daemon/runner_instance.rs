@@ -10,7 +10,7 @@
 
 use std::sync::Arc;
 
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, watch};
 use uuid::Uuid;
 
 use crate::approval::router::ApprovalRouter;
@@ -37,12 +37,11 @@ pub struct RunnerInstance {
     pub out: RunnerOut,
     pub mailbox_tx: mpsc::Sender<Envelope<ServerMsg>>,
     pub mailbox_rx: Arc<tokio::sync::Mutex<Option<mpsc::Receiver<Envelope<ServerMsg>>>>>,
-    /// Notified by the `RunnerLoop` when this instance is being torn
-    /// down (today: only on `ServerMsg::RemoveRunner`). Per-instance
-    /// background tasks — heartbeat in particular — watch this and
-    /// exit, preventing zombie traffic for a runner whose cloud-side
-    /// row no longer exists. See `design.md` §11.4.
-    pub remove_signal: Arc<tokio::sync::Notify>,
+    /// Latched when this instance is being torn down (today: only on
+    /// `ServerMsg::RemoveRunner`). Background tasks subscribe and exit
+    /// even if they weren't parked at the exact moment the signal was
+    /// sent, preventing zombie heartbeats after per-runner teardown.
+    pub remove_tx: watch::Sender<bool>,
 }
 
 impl RunnerInstance {
@@ -69,6 +68,7 @@ impl RunnerInstance {
         let approvals = ApprovalRouter::new();
         let out = RunnerOut::new(runner_id, out_tx);
         let (mailbox_tx, mailbox_rx) = mpsc::channel(INSTANCE_MAILBOX_DEPTH);
+        let (remove_tx, _remove_rx) = watch::channel(false);
         Self {
             runner_id,
             name,
@@ -79,7 +79,7 @@ impl RunnerInstance {
             out,
             mailbox_tx,
             mailbox_rx: Arc::new(tokio::sync::Mutex::new(Some(mailbox_rx))),
-            remove_signal: Arc::new(tokio::sync::Notify::new()),
+            remove_tx,
         }
     }
 

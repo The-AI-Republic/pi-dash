@@ -193,10 +193,11 @@ def test_revoke_token_closes_ws_for_each_owned_runner(
     assert closed_ids == {r1.id, r2.id}, closed_ids
     # Defence in depth: a wire-level Revoke frame is also pushed so the
     # daemon's supervisor calls state.shutdown() rather than
-    # reconnect-with-401-loop forever.
-    mock_send_revoke.assert_called_once()
-    revoke_target = mock_send_revoke.call_args.args[0]
-    assert revoke_target in {r1.id, r2.id}
+    # reconnect-with-401-loop forever. Broadcast to every owned runner
+    # group so the live consumer sees it even if some owned runners are
+    # stale/offline on this daemon.
+    revoke_targets = {call.args[0] for call in mock_send_revoke.call_args_list}
+    assert revoke_targets == {r1.id, r2.id}
 
 
 @pytest.mark.unit
@@ -224,10 +225,7 @@ def test_revoke_token_emits_revoke_frame_when_runners_present(
     ) as mock_send_revoke:
         token.revoke()
 
-    mock_send_revoke.assert_called_once()
-    target_id, kwargs = mock_send_revoke.call_args.args[0], mock_send_revoke.call_args.kwargs
-    assert target_id == r1.id
-    assert kwargs.get("reason") == "token revoked"
+    mock_send_revoke.assert_called_once_with(r1.id, reason="token revoked")
 
 
 @pytest.mark.unit
