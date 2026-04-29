@@ -22,19 +22,6 @@ from pi_dash.runner.models import MachineToken, Pod, Runner
 from pi_dash.runner.services import tokens
 
 
-@pytest.fixture(autouse=True)
-def _on_commit_immediate(db):
-    """Existing pattern in test_machine_tokens.py — mirror so post-commit
-    work fires inline. Keeps this module self-contained.
-    """
-    from unittest.mock import patch
-
-    with patch(
-        "django.db.transaction.on_commit", side_effect=lambda fn, **kw: fn()
-    ):
-        yield
-
-
 def _make_token(workspace, user, title="laptop"):
     minted = tokens.mint_machine_token_secret()
     token = MachineToken.objects.create(

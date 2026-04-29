@@ -422,7 +422,7 @@ async fn run_list_projects(paths: &Paths) -> Result<()> {
         );
         return Ok(());
     }
-    println!("{:<24} {:<32} {:<10} {}", "IDENTIFIER", "NAME", "PODS", "DEFAULT_POD_ID");
+    println!("{:<24} {:<32} {:<10} DEFAULT_POD_ID", "IDENTIFIER", "NAME", "PODS");
     for p in projects {
         let identifier = p.get("identifier").and_then(|v| v.as_str()).unwrap_or("?");
         let name = p.get("name").and_then(|v| v.as_str()).unwrap_or("?");

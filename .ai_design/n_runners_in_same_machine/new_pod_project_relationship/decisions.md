@@ -133,3 +133,28 @@ Each has different implications for the issue-create form, the orchestration cod
 **Why not pod-level**: it's a different problem (config inheritance / templating) that complicates an already significant refactor. Punted; if the pattern emerges, a pod-level config layer can be added with each-runner-overrides-pod semantics, without changing today's schema.
 
 **Affects**: design.md §3 (non-goals).
+
+---
+
+## Q10 — Single-project workspace fallback in `Runner.save()` / `AgentRun.save()`
+
+**Question**: the design specifies that pod is always set explicitly at runner registration (§7.3) and that there is no workspace-wide pod (§3 non-goal). After the refactor, direct-ORM callers (tests, management commands, fixtures) that create runners or agent runs without supplying a pod hit a NOT NULL violation. Do we keep production code strict and update every direct-ORM caller, or accept a narrow fallback?
+
+**Decision**: **narrow fallback in `Runner.save()` and `AgentRun.save()`** — when `pod_id` is omitted _and_ the workspace has exactly one project, auto-resolve to that project's default pod. Multi-project workspaces continue to require explicit pod selection.
+
+This does **not** reintroduce the workspace-wide pod (which would require allowing a pod to exist outside any project). The fallback always resolves to a project-scoped pod; it just disambiguates the "which project" question for the special case where the answer is unique.
+
+**Why this is acceptable**:
+
+- Production registration paths (`/api/v1/runner/register/`, `/api/v1/runner/register-under-token/`) already supply the pod explicitly. The fallback never fires in production traffic.
+- The fallback fires only for direct-ORM callers (existing test fixtures, management commands), and only in single-project workspaces. The strict-design behavior — fail-fast on missing pod — would have required rewriting ~30 test files to thread a `project` fixture through every `Runner.objects.create(workspace=...)` call site.
+- Multi-project workspaces (the case the refactor exists to support) get the strict behavior: `pod_id is None` with multiple projects raises a NOT NULL violation, so the operator is forced to pick a project explicitly.
+- The same fallback lives in `services/validation.py:_resolve_pod` so the runs-create REST endpoint behaves identically for callers that don't yet pass a `work_item_id`.
+
+**Where the fallback lives**:
+
+- `apps/api/pi_dash/runner/models.py:Runner.save` — runner creation.
+- `apps/api/pi_dash/runner/models.py:AgentRun.save` — agent-run creation when no `work_item` is set.
+- `apps/api/pi_dash/runner/services/validation.py:_resolve_pod` — REST run-creation path.
+
+**Affects**: design.md §3 (the strict reading is the spec; the fallback is a documented compromise). If a follow-up tightens this — by rewriting all direct-ORM callers and dropping the fallback — that's a clean change with no schema implication.

@@ -252,10 +252,15 @@ async fn connection_loop_fires_connected_notify_on_each_handshake() {
     );
 }
 
-/// Two-runner Hello fan-out: a fake cloud collects the Hello frames sent
-/// after the connection comes up and asserts both project_slugs are
-/// present and distinct. Mirrors the "machine A serves projects P + Q"
-/// scenario from the new_pod_project_relationship design doc.
+/// Wire-format check: drive two manually-constructed Hello envelopes
+/// through the connection layer and verify the fake cloud sees both
+/// distinct ``project_slug`` values. This exercises ``Envelope`` /
+/// ``ClientMsg::Hello`` serialization and ``run_connection``'s framing
+/// — it does **not** exercise ``Supervisor::run`` or
+/// ``hello_emitter``. The supervisor-side fan-out is covered by the
+/// in-module unit test
+/// ``hello_emitter_emits_one_hello_per_instance_with_project_slug``
+/// in ``runner/src/daemon/supervisor.rs``.
 async fn start_two_hello_collector(
     expected_count: usize,
 ) -> (SocketAddr, tokio::task::JoinHandle<Vec<ClientMsg>>) {
@@ -293,10 +298,14 @@ async fn start_two_hello_collector(
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn two_hellos_carry_distinct_project_slugs() {
-    // Drive the connection layer manually: send two Hello frames with
-    // different project_slugs, and the fake cloud verifies both arrive
-    // and carry the per-runner project routing key.
+async fn two_hellos_serialize_with_distinct_project_slugs_on_the_wire() {
+    // Wire-format check, NOT a Supervisor integration test. This sends
+    // two Hello frames manually through ``out_tx`` to verify
+    // serialization + ``run_connection``'s framing handles distinct
+    // per-runner project_slug values correctly. The supervisor's
+    // ``hello_emitter`` fan-out (which is what production uses to
+    // construct these frames) is covered by an in-module unit test
+    // in ``runner/src/daemon/supervisor.rs``.
     let (addr, server_handle) = start_two_hello_collector(2).await;
     let cloud_url = format!("http://{}", addr);
 

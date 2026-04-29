@@ -389,7 +389,23 @@ class RunnerConsumer(AsyncJsonWebsocketConsumer):
         body_project_slug = content.get("project_slug")
         if body_project_slug is not None:
             expected_slug = await self._resolve_runner_project_slug(runner)
-            if expected_slug is not None and str(body_project_slug) != expected_slug:
+            if expected_slug is None:
+                # Runner row exists and is owned by the token (we passed
+                # ``_resolve_token_runner`` above), but its pod / project
+                # chain doesn't yield an identifier. That means the
+                # cloud-side row is in a half-set-up state — fail open
+                # so the daemon can come online while an operator
+                # diagnoses, but log so the silent acceptance is
+                # observable.
+                logger.debug(
+                    "token %s Hello for runner %s claimed project_slug %r "
+                    "but cloud could not resolve runner.pod.project; "
+                    "skipping cross-check",
+                    self.token.id,
+                    runner_id,
+                    body_project_slug,
+                )
+            elif str(body_project_slug) != expected_slug:
                 logger.warning(
                     "token %s Hello for runner %s claimed project %r but cloud has %r",
                     self.token.id,

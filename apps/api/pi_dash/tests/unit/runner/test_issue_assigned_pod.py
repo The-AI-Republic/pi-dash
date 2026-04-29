@@ -96,26 +96,33 @@ def test_issue_create_serializer_rejects_cross_project_pod(
 def test_issue_create_serializer_accepts_same_project_pod(
     db, project, state, create_user
 ):
-    """Same-project pod IS acceptable — sanity for the happy path."""
+    """Same-project pod IS acceptable — full happy path.
+
+    A complete payload is constructed so ``is_valid()`` should be
+    strictly True. A regression that flips the project guard to fire on
+    same-project pods is caught here — the previous "soft" form
+    (assert no `different project` error) would have silently passed
+    if any unrelated field also failed.
+    """
     same_pod = Pod.default_for_project(project)
 
-    serializer = IssueCreateSerializer(
-        data={
-            "name": "An issue",
-            "project": str(project.id),
-            "state": str(state.id),
-            "assigned_pod": str(same_pod.id),
-        },
-        context={
-            "project_id": str(project.id),
-            "workspace_id": str(project.workspace_id),
-        },
-    )
-    valid = serializer.is_valid()
-    # `is_valid()` may surface other unrelated field errors (e.g.
-    # required-fields the test isn't filling in); we only assert that
-    # the cross-project guard didn't flag anything.
-    if not valid and "assigned_pod" in serializer.errors:
-        # Guarantee the failure isn't *our* validator firing.
-        for e in serializer.errors["assigned_pod"]:
-            assert "different project" not in str(e), serializer.errors
+    # ``crum.impersonate`` populates the user that ``BaseSerializer``
+    # injects into ``created_by`` / ``updated_by`` during validation;
+    # without it ``is_valid()`` fails on those fields and the test
+    # can't tell apart "guard didn't fire" from "other field failed."
+    from crum import impersonate
+
+    with impersonate(create_user):
+        serializer = IssueCreateSerializer(
+            data={
+                "name": "An issue",
+                "project": str(project.id),
+                "state": str(state.id),
+                "assigned_pod": str(same_pod.id),
+            },
+            context={
+                "project_id": str(project.id),
+                "workspace_id": str(project.workspace_id),
+            },
+        )
+        assert serializer.is_valid(), serializer.errors
