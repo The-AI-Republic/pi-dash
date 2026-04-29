@@ -107,6 +107,12 @@ pub struct AppState {
     /// is missing — replaces the old standalone onboarding wizard. Cleared
     /// after a successful register call.
     pub register_form: Option<RegisterForm>,
+    /// Index into `config_working.runners` for the currently-focused runner
+    /// in tabs that show per-runner data (Runs / Approvals / Config). Bare
+    /// `pidash tui` on a single-runner install pins this to 0; multi-runner
+    /// installs cycle with `<` / `>` or jump with digit keys. Clamped to
+    /// `len() - 1` whenever the config reloads.
+    pub runner_picker_idx: usize,
 }
 
 /// Three-field form (URL / token / name) plus a Register button. Focus is
@@ -198,6 +204,7 @@ pub async fn run(paths: Paths, initial_tab: Tab) -> Result<()> {
         service_state: None,
         service_action_msg: None,
         register_form: None,
+        runner_picker_idx: 0,
     };
 
     enable_raw_mode()?;
@@ -252,6 +259,67 @@ async fn poll_event() -> Option<Event> {
     .flatten()
 }
 
+/// Push the picker selection through to the IPC layer so per-runner read
+/// endpoints (`runs`, `approvals`) scope to the focused runner. Looks up
+/// the runner's *name* from the working config — the IPC selector is by
+/// name, not by index. Falls back to `None` (daemon-default) when no
+/// config is loaded yet, or if the index is out of bounds for a stale
+/// configuration.
+fn sync_picker_to_ipc(state: &mut AppState) {
+    let total = state
+        .config_working
+        .as_ref()
+        .map(|c| c.runners.len())
+        .unwrap_or(0);
+    if total == 0 {
+        state.ipc.selected_runner = None;
+        return;
+    }
+    if state.runner_picker_idx >= total {
+        state.runner_picker_idx = total - 1;
+    }
+    state.ipc.selected_runner = state
+        .config_working
+        .as_ref()
+        .and_then(|c| c.runners.get(state.runner_picker_idx))
+        .map(|r| r.name.clone());
+}
+
+/// Move the runner picker by `delta` (signed), wrapping at ends. No-op when
+/// only one runner is configured. Pushes the new selection into the IPC
+/// scope and triggers a refresh so per-runner views update immediately.
+async fn move_picker(state: &mut AppState, delta: isize) {
+    let total = state
+        .config_working
+        .as_ref()
+        .map(|c| c.runners.len())
+        .unwrap_or(0);
+    if total <= 1 {
+        return;
+    }
+    let cur = state.runner_picker_idx as isize;
+    let next = ((cur + delta).rem_euclid(total as isize)) as usize;
+    state.runner_picker_idx = next;
+    sync_picker_to_ipc(state);
+    refresh(state).await;
+}
+
+/// Jump straight to runner index `idx` (0-based). Used by the digit-key
+/// shortcuts in the picker bar. No-op when `idx` is out of range.
+async fn jump_picker(state: &mut AppState, idx: usize) {
+    let total = state
+        .config_working
+        .as_ref()
+        .map(|c| c.runners.len())
+        .unwrap_or(0);
+    if total <= 1 || idx >= total {
+        return;
+    }
+    state.runner_picker_idx = idx;
+    sync_picker_to_ipc(state);
+    refresh(state).await;
+}
+
 async fn refresh(state: &mut AppState) {
     // Service state independent of IPC — the daemon may be down entirely,
     // in which case we still want to show "inactive" on the Runner tab.
@@ -300,6 +368,9 @@ async fn refresh(state: &mut AppState) {
                     if state.config_working.is_none() {
                         state.config_working = Some(cfg);
                     }
+                    // Clamp the picker into the now-known runner count and
+                    // make sure the IPC selector matches the picked name.
+                    sync_picker_to_ipc(state);
                 }
                 Ok(None) => {
                     state.config_loaded = None;
@@ -574,6 +645,28 @@ async fn handle_event(ev: Event, state: &mut AppState) {
                 }
                 state.config_edit_error = None;
             }
+            // Runner picker: `<` and `>` cycle, digit keys jump (1-based in
+            // the UI, 0-based internally). Skip on the Config tab while a
+            // text input is active — that path is handled earlier and
+            // returned. The picker is global so the user can switch runners
+            // from any per-runner tab.
+            (KeyCode::Char('<') | KeyCode::Char(','), _)
+                if matches!(state.tab, Tab::Config | Tab::Runs | Tab::Approvals) =>
+            {
+                move_picker(state, -1).await;
+            }
+            (KeyCode::Char('>') | KeyCode::Char('.'), _)
+                if matches!(state.tab, Tab::Config | Tab::Runs | Tab::Approvals) =>
+            {
+                move_picker(state, 1).await;
+            }
+            (KeyCode::Char(c @ '1'..='9'), KeyModifiers::ALT)
+                if matches!(state.tab, Tab::Config | Tab::Runs | Tab::Approvals) =>
+            {
+                if let Some(d) = c.to_digit(10) {
+                    jump_picker(state, (d as usize).saturating_sub(1)).await;
+                }
+            }
             (KeyCode::Char('a'), _) if state.tab == Tab::Approvals => {
                 accept_selected(state, crate::cloud::protocol::ApprovalDecision::Accept).await;
             }
@@ -612,11 +705,13 @@ fn start_or_apply_config_field(state: &mut AppState) {
     let idx = state.selected.min(cfg_view::field_count() - 1);
     let spec = cfg_view::field_at(idx);
     state.config_edit_error = None;
+    let runner_idx = state.runner_picker_idx;
     match spec.kind {
-        cfg_view::FieldKind::Bool => cfg_view::toggle_bool(cfg, spec.id),
-        cfg_view::FieldKind::Enum(_) => cfg_view::cycle_enum(cfg, spec.id),
+        cfg_view::FieldKind::Bool => cfg_view::toggle_bool(cfg, spec.id, runner_idx),
+        cfg_view::FieldKind::Enum(_) => cfg_view::cycle_enum(cfg, spec.id, runner_idx),
         cfg_view::FieldKind::Text | cfg_view::FieldKind::U32 => {
-            state.config_edit_buffer = Some(cfg_view::display_value(cfg, spec.id));
+            state.config_edit_buffer =
+                Some(cfg_view::display_value(cfg, spec.id, runner_idx));
         }
     }
 }
@@ -637,7 +732,7 @@ fn commit_config_edit(state: &mut AppState) {
     }
     let idx = state.selected.min(cfg_view::field_count() - 1);
     let spec = cfg_view::field_at(idx);
-    match cfg_view::set_text_value(cfg, spec.id, &buf) {
+    match cfg_view::set_text_value(cfg, spec.id, &buf, state.runner_picker_idx) {
         Ok(()) => {
             state.config_edit_error = None;
         }
@@ -863,14 +958,41 @@ async fn accept_selected(state: &mut AppState, decision: crate::cloud::protocol:
 }
 
 fn draw(f: &mut ratatui::Frame<'_>, state: &AppState) {
-    let layout = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
+    // Picker bar is only shown when there's more than one runner AND the
+    // active tab is a per-runner tab (Config / Runs / Approvals). The
+    // Runner-status tab already lists all runners inline so a picker would
+    // be redundant.
+    let show_picker = state
+        .config_working
+        .as_ref()
+        .map(|c| c.runners.len() > 1)
+        .unwrap_or(false)
+        && matches!(state.tab, Tab::Config | Tab::Runs | Tab::Approvals);
+
+    let constraints: Vec<Constraint> = if show_picker {
+        vec![
+            Constraint::Length(3),
             Constraint::Length(3),
             Constraint::Min(0),
             Constraint::Length(1),
-        ])
+        ]
+    } else {
+        vec![
+            Constraint::Length(3),
+            Constraint::Min(0),
+            Constraint::Length(1),
+        ]
+    };
+    let layout = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints(constraints)
         .split(f.area());
+
+    let (tabs_idx, picker_idx, body_idx, hint_idx) = if show_picker {
+        (0usize, Some(1usize), 2usize, 3usize)
+    } else {
+        (0, None, 1, 2)
+    };
 
     let titles: Vec<Line<'_>> = Tab::all()
         .iter()
@@ -890,20 +1012,24 @@ fn draw(f: &mut ratatui::Frame<'_>, state: &AppState) {
         )
         .select(idx)
         .highlight_style(Style::default().add_modifier(Modifier::BOLD | Modifier::REVERSED));
-    f.render_widget(tabs, layout[0]);
+    f.render_widget(tabs, layout[tabs_idx]);
+
+    if let Some(pi) = picker_idx {
+        f.render_widget(config_view::runner_picker_bar(state), layout[pi]);
+    }
 
     match state.tab {
-        Tab::RunnerStatus => runner_status::render(f, layout[1], state),
-        Tab::Config => config_view::render(f, layout[1], state),
-        Tab::Runs => runs::render(f, layout[1], state),
-        Tab::Approvals => approvals::render(f, layout[1], state),
+        Tab::RunnerStatus => runner_status::render(f, layout[body_idx], state),
+        Tab::Config => config_view::render(f, layout[body_idx], state),
+        Tab::Runs => runs::render(f, layout[body_idx], state),
+        Tab::Approvals => approvals::render(f, layout[body_idx], state),
     }
 
     let hint = Line::from(Span::styled(
-        " [1]Runner [2]Config [3]Runs [4]Approvals  h/l switch  j/k move  r refresh  ?help  q exit ",
+        " [1]Runner [2]Config [3]Runs [4]Approvals  h/l switch  j/k move  </> runner  r refresh  ?help  q exit ",
         Style::default().add_modifier(Modifier::DIM),
     ));
-    f.render_widget(Paragraph::new(hint), layout[2]);
+    f.render_widget(Paragraph::new(hint), layout[hint_idx]);
 
     if state.show_help {
         render_help(f);
@@ -936,6 +1062,11 @@ fn render_help(f: &mut ratatui::Frame<'_>) {
         Line::from("a     accept approval (once)"),
         Line::from("A     accept for session"),
         Line::from("d     decline"),
+        Line::raw(""),
+        Line::from("Multi-runner picker (Config / Runs / Approvals):"),
+        Line::from("</,    previous runner"),
+        Line::from(">/.    next runner"),
+        Line::from("Alt+N  jump to runner N (1–9)"),
         Line::from("q / Ctrl+C  quit TUI (asks for confirmation)"),
         Line::from("Q           stop daemon (asks for confirmation)"),
         Line::from("?     toggle this help"),
