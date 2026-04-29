@@ -212,6 +212,10 @@ class RunnerConsumer(AsyncJsonWebsocketConsumer):
 
     async def on_hello(self, runner: Runner, msg: Dict[str, Any]) -> None:
         await sync_to_async(self._apply_hello)(runner, msg)
+        # Reconcile zombie BUSY runs on every reconnect. A daemon that died
+        # mid-assignment will reconnect with in_flight_run=None even though
+        # the cloud still has rows marked ASSIGNED for this runner.
+        await sync_to_async(self._reap_stale_busy_runs)(runner, msg)
         in_flight = msg.get("in_flight_run")
         if in_flight:
             await self._resume_run(runner, str(in_flight))
@@ -368,6 +372,104 @@ class RunnerConsumer(AsyncJsonWebsocketConsumer):
 
     def _apply_heartbeat(self, runner: Runner, msg: Dict[str, Any]) -> None:
         runner.mark_heartbeat()
+        self._reap_stale_busy_runs(runner, msg)
+
+    def _reap_stale_busy_runs(self, runner: Runner, msg: Dict[str, Any]) -> None:
+        """Reconcile cloud's view of runner's in-flight work against the
+        runner's own report.
+
+        The runner is the source of truth about which run it is currently
+        executing. If the cloud has runs marked BUSY (assigned/running/etc.)
+        for this runner that the runner does NOT report as in-flight, those
+        rows are zombies — typically left over from a daemon restart that
+        killed the agent subprocess between assign and the first lifecycle
+        ack. Reap them so the runner can pick up new work.
+
+        Race guard: only reap runs whose ``assigned_at`` predates the
+        heartbeat's ``ts``. A heartbeat sent before a fresh assignment was
+        written must not reap that assignment.
+        """
+        from datetime import datetime, timedelta
+
+        from django.db import transaction
+
+        from pi_dash.runner.services.matcher import (
+            BUSY_STATUSES,
+            drain_for_runner_by_id,
+            drain_pod_by_id,
+        )
+
+        # The runner is untrusted: a malicious or buggy daemon could send
+        # ``ts`` far in the future (matching every BUSY row) or far in the
+        # past (matching nothing). Clamp to a server-side window before
+        # using as a SQL cutoff:
+        #   upper bound = now            (no future timestamps)
+        #   lower bound = now - GRACE    (don't reach beyond the dead-runner
+        #                                 detection window)
+        now = timezone.now()
+        ts_raw = msg.get("ts")
+        try:
+            heartbeat_ts = (
+                datetime.fromisoformat(ts_raw.replace("Z", "+00:00"))
+                if isinstance(ts_raw, str)
+                else now
+            )
+        except (ValueError, AttributeError):
+            heartbeat_ts = now
+        heartbeat_ts = min(heartbeat_ts, now)
+        heartbeat_ts = max(heartbeat_ts, now - timedelta(seconds=OFFLINE_GRACE_SECS))
+
+        in_flight = msg.get("in_flight_run")
+        # Validate UUID format before interpolating into error strings or
+        # using as an exclusion key — runner-supplied content otherwise lands
+        # in ``AgentRun.error`` which is surfaced to the UI.
+        in_flight_id: Optional[str] = None
+        if in_flight:
+            try:
+                in_flight_id = str(UUID(str(in_flight)))
+            except (ValueError, AttributeError):
+                in_flight_id = None
+
+        stale = AgentRun.objects.filter(
+            runner=runner,
+            status__in=BUSY_STATUSES,
+            assigned_at__lt=heartbeat_ts,
+        )
+        if in_flight_id:
+            stale = stale.exclude(id=in_flight_id)
+
+        reaped = list(stale.values_list("id", "pod_id"))
+        if not reaped:
+            return
+
+        AgentRun.objects.filter(id__in=[rid for rid, _ in reaped]).update(
+            status=AgentRunStatus.FAILED,
+            ended_at=now,
+            error=(
+                "reaped by heartbeat: runner reported in_flight_run="
+                f"{in_flight_id or '(none)'} "
+                "but cloud had this run marked busy"
+            ),
+        )
+
+        logger.info(
+            "consumer.heartbeat_reap: runner=%s reaped %d stale run(s)",
+            runner.id,
+            len(reaped),
+        )
+
+        # Free the runner downstream — drain the pod and prefer this runner
+        # so any QUEUED work can dispatch right away. Same on_commit pattern
+        # used by _finalize_run.
+        pod_ids = {pid for _, pid in reaped if pid is not None}
+        runner_id = runner.id
+
+        def _drain_after_commit(rid=runner_id, pids=pod_ids):
+            drain_for_runner_by_id(rid)
+            for pid in pids:
+                drain_pod_by_id(pid)
+
+        transaction.on_commit(_drain_after_commit)
 
     def _apply_lifecycle(
         self,
@@ -532,30 +634,39 @@ class RunnerConsumer(AsyncJsonWebsocketConsumer):
                     comment_html="".join(body_parts),
                 )
 
-        # Two follow-ups: (1) sweep for non-bot comments that arrived while
-        # this run was RUNNING — ``post_save(IssueComment)`` skipped them
-        # with reason='prior-run-active'; pause is the symmetric
-        # opportunity to pick them up. (2) Kick the dispatcher so the now-
-        # idle runner can take other pod work (including any R_next the
-        # sweep just created).
+        # Two follow-ups: (1) apply the deferred cap-hit pause if the
+        # schedule is disarmed and no other active runs remain (§4.4.1
+        # of .ai_design/issue_ticking_system/design.md). (2) Kick the
+        # dispatcher so the now-idle runner can take other pod work.
         from django.db import transaction
 
-        from pi_dash.orchestration.service import maybe_continue_after_terminate
+        from pi_dash.orchestration.scheduling import maybe_apply_deferred_pause
         from pi_dash.runner.services.matcher import drain_for_runner_by_id
 
-        def _sweep_and_drain(rid=run_id, runner_id=runner.id):
-            paused = AgentRun.objects.filter(pk=rid).first()
+        def _pause_and_drain(rid=run_id, runner_id=runner.id):
+            # Pre-load the FK chain that maybe_apply_deferred_pause walks
+            # (work_item → state, project) so the deferred-pause check
+            # doesn't issue four separate SELECTs on every terminate.
+            paused = (
+                AgentRun.objects.select_related(
+                    "work_item",
+                    "work_item__state",
+                    "work_item__project",
+                )
+                .filter(pk=rid)
+                .first()
+            )
             if paused is not None:
                 try:
-                    maybe_continue_after_terminate(paused)
+                    maybe_apply_deferred_pause(paused)
                 except Exception:
                     logger.exception(
-                        "orchestration.error: pause sweep failed for run %s",
+                        "orchestration.error: deferred-pause failed for run %s",
                         rid,
                     )
             drain_for_runner_by_id(runner_id)
 
-        transaction.on_commit(_sweep_and_drain)
+        transaction.on_commit(_pause_and_drain)
 
     def _finalize_run(
         self,
@@ -589,35 +700,45 @@ class RunnerConsumer(AsyncJsonWebsocketConsumer):
         # the terminal state having committed (otherwise a new assign
         # would race with the update):
         #
-        # 1. Sweep for non-bot comments that arrived while this run was
-        #    active. ``post_save(IssueComment)`` skipped them with
-        #    reason='prior-run-active'; this is where they get picked up.
+        # 1. Apply the deferred cap-hit pause if the schedule for this
+        #    issue has hit its tick cap and no other active runs remain
+        #    (§4.4.1 of .ai_design/issue_ticking_system/design.md).
         # 2. Drain the pod (and prefer this just-freed runner) so any
-        #    QUEUED work — including a follow-up R_next created by the
-        #    sweep above — can dispatch.
+        #    QUEUED work can dispatch.
         from django.db import transaction
 
-        from pi_dash.orchestration.service import maybe_continue_after_terminate
+        from pi_dash.orchestration.scheduling import maybe_apply_deferred_pause
         from pi_dash.runner.services.matcher import (
             drain_for_runner_by_id,
             drain_pod_by_id,
         )
 
-        def _sweep_and_drain(rid=run_id, runner_id=runner.id, pod_id=runner.pod_id):
-            run = AgentRun.objects.filter(pk=rid).first()
+        def _pause_and_drain(rid=run_id, runner_id=runner.id, pod_id=runner.pod_id):
+            # See _handle_run_paused: select_related avoids the FK chain
+            # walk inside maybe_apply_deferred_pause from issuing extra
+            # SELECTs on every terminate event.
+            run = (
+                AgentRun.objects.select_related(
+                    "work_item",
+                    "work_item__state",
+                    "work_item__project",
+                )
+                .filter(pk=rid)
+                .first()
+            )
             if run is not None:
                 try:
-                    maybe_continue_after_terminate(run)
+                    maybe_apply_deferred_pause(run)
                 except Exception:
                     logger.exception(
-                        "orchestration.error: terminate sweep failed for run %s",
+                        "orchestration.error: deferred-pause failed for run %s",
                         rid,
                     )
             drain_for_runner_by_id(runner_id)
             if pod_id is not None:
                 drain_pod_by_id(pod_id)
 
-        transaction.on_commit(_sweep_and_drain)
+        transaction.on_commit(_pause_and_drain)
 
     # ---- misc ----
 

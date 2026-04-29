@@ -10,7 +10,7 @@
 
 Pi Dash already has the data shape for GitHub mirroring (`GithubRepository`, `GithubRepositorySync`, `GithubIssueSync`, `GithubCommentSync`, plus `Issue.external_source` / `external_id`), but no fetch loop, no working UI to connect a repo, and no per-project toggle. Users currently have no way to mirror GitHub issues into a Pi Dash project.
 
-There is leftover Plane-era client code (see §6.0) that *looks* like a working integration but points at backend routes that were never ported into `apps/api`. The MVP supersedes those stubs and ships the missing backend, a working UI, and the sync loop.
+There is leftover Plane-era client code (see §6.0) that _looks_ like a working integration but points at backend routes that were never ported into `apps/api`. The MVP supersedes those stubs and ships the missing backend, a working UI, and the sync loop.
 
 We want a minimum-viable, one-directional sync: GitHub issues become Pi Dash issues on a fixed cadence; when a Pi Dash issue is completed, a single comment is posted back to GitHub to notify the original reporter. No state changes on the GitHub side.
 
@@ -32,19 +32,19 @@ We want a minimum-viable, one-directional sync: GitHub issues become Pi Dash iss
 - No backfill UI. Every run is a full scan (see §6.3); the first run is just the steady-state shape with an empty local mirror.
 - No conflict resolution. Synced fields (issue title/description, comment bodies) are **read-only in Pi Dash** — the serializer rejects edits and the UI hides the affordances; see §6.8. GitHub is authoritative; the sync task always rewrites those fields from upstream. Workflow fields (state, priority, assignees, labels, cycle, module) remain user-editable.
 - No multi-repo per project. One `GithubRepositorySync` per project (already enforced by `unique_together = [project, repository]`).
-- **Upstream deletion is *detected* but not propagated as a Pi Dash delete.** Mirrors of upstream-deleted (or upstream-closed) issues are flagged via `GithubIssueSync.metadata["upstream_gone_at"]` and stop syncing; the Pi Dash row is preserved so users don't lose work or comments. UI can render a "no longer on GitHub" badge.
-- No upstream→Pi Dash propagation of *state* changes (open/closed). A GitHub closure surfaces in the same diff that detects deletions, but we leave the Pi Dash issue's state alone — the user's workflow lane is theirs.
+- **Upstream deletion is _detected_ but not propagated as a Pi Dash delete.** Mirrors of upstream-deleted (or upstream-closed) issues are flagged via `GithubIssueSync.metadata["upstream_gone_at"]` and stop syncing; the Pi Dash row is preserved so users don't lose work or comments. UI can render a "no longer on GitHub" badge.
+- No upstream→Pi Dash propagation of _state_ changes (open/closed). A GitHub closure surfaces in the same diff that detects deletions, but we leave the Pi Dash issue's state alone — the user's workflow lane is theirs.
 - No rate-limit handling beyond exponential backoff on 403 secondary limits.
 
 ## 4. Key Concepts
 
-| Concept | Where it lives | Lifecycle |
-|---|---|---|
-| **GitHub credential** | `WorkspaceIntegration.config` (workspace-scoped) | Created once per workspace; reused across all projects in that workspace. |
-| **Repo binding** | `GithubRepositorySync` (project-scoped) | Created on `bind`; deleted on `unbind`. Sync is independently turned on/off via the `is_sync_enabled` flag — toggling does **not** create or destroy the binding. |
-| **Issue mirror** | `GithubIssueSync` row + `Issue` row (`external_source="github"`, `external_id=<gh issue number>`) | Created on first sight; updated on every poll. |
-| **Comment mirror** | `GithubCommentSync` row + `IssueComment` row | Same lifecycle as issue mirror. |
-| **Sync cadence** | Single Celery Beat entry, fixed 4h | Iterates every `GithubRepositorySync` with `is_sync_enabled=True`. |
+| Concept               | Where it lives                                                                                    | Lifecycle                                                                                                                                                         |
+| --------------------- | ------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **GitHub credential** | `WorkspaceIntegration.config` (workspace-scoped)                                                  | Created once per workspace; reused across all projects in that workspace.                                                                                         |
+| **Repo binding**      | `GithubRepositorySync` (project-scoped)                                                           | Created on `bind`; deleted on `unbind`. Sync is independently turned on/off via the `is_sync_enabled` flag — toggling does **not** create or destroy the binding. |
+| **Issue mirror**      | `GithubIssueSync` row + `Issue` row (`external_source="github"`, `external_id=<gh issue number>`) | Created on first sight; updated on every poll.                                                                                                                    |
+| **Comment mirror**    | `GithubCommentSync` row + `IssueComment` row                                                      | Same lifecycle as issue mirror.                                                                                                                                   |
+| **Sync cadence**      | Single Celery Beat entry, fixed 4h                                                                | Iterates every `GithubRepositorySync` with `is_sync_enabled=True`.                                                                                                |
 
 The split between workspace-level credential and project-level binding is what satisfies "link once." The existing `WorkspaceIntegration` model with `unique_together = [workspace, integration]` already enforces one credential per `(workspace, "github")` pair; we lean on it.
 
@@ -151,13 +151,13 @@ The token field is encrypted at rest using `pi_dash.license.utils.encryption` (`
 
 These files exist and look like a GitHub integration, but call backend routes that were never ported into `apps/api`. They are dead UI. The MVP **deletes** them and replaces them with the new components in §6.6.
 
-| File | Disposition |
-| --- | --- |
-| `apps/web/core/components/project/integration-card.tsx` | Delete. Replaced by `apps/web/core/components/project/settings/github-sync.tsx` (§6.6). |
-| `apps/web/core/components/integration/github/select-repository.tsx` | Delete. Replaced by the repo picker inside the new project-settings component. |
-| `apps/web/core/services/integrations/github.service.ts` | **Rewrite.** Drop `listAllRepositories`, `getGithubRepoInfo`, `createGithubServiceImport` (all hit unported routes). Replace with `connectWorkspace`, `listRepos`, `disconnectWorkspace` per §6.7. |
-| `apps/web/core/services/project/project.service.ts` — `syncGithubRepository`, `getProjectGithubRepository` methods | Drop those two methods (unported routes). Add `bindGithubRepository`, `setGithubSyncEnabled`, `removeGithubBinding` per §6.7 in the same file. |
-| `apps/web/core/constants/fetch-keys` — `PROJECT_GITHUB_REPOSITORY` | Delete the constant; nothing else uses it. |
+| File                                                                                                               | Disposition                                                                                                                                                                                        |
+| ------------------------------------------------------------------------------------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `apps/web/core/components/project/integration-card.tsx`                                                            | Delete. Replaced by `apps/web/core/components/project/settings/github-sync.tsx` (§6.6).                                                                                                            |
+| `apps/web/core/components/integration/github/select-repository.tsx`                                                | Delete. Replaced by the repo picker inside the new project-settings component.                                                                                                                     |
+| `apps/web/core/services/integrations/github.service.ts`                                                            | **Rewrite.** Drop `listAllRepositories`, `getGithubRepoInfo`, `createGithubServiceImport` (all hit unported routes). Replace with `connectWorkspace`, `listRepos`, `disconnectWorkspace` per §6.7. |
+| `apps/web/core/services/project/project.service.ts` — `syncGithubRepository`, `getProjectGithubRepository` methods | Drop those two methods (unported routes). Add `bindGithubRepository`, `setGithubSyncEnabled`, `removeGithubBinding` per §6.7 in the same file.                                                     |
+| `apps/web/core/constants/fetch-keys` — `PROJECT_GITHUB_REPOSITORY`                                                 | Delete the constant; nothing else uses it.                                                                                                                                                         |
 
 **Why supersede rather than complete the stubs:** the existing client is per-project ("paste a repo into each project") and offers no workspace-level credential model. Our requirement is link-once-per-workspace; that doesn't fit the existing route shape, so a clean replacement is simpler than retrofitting.
 
@@ -173,7 +173,7 @@ These files exist and look like a GitHub integration, but call backend routes th
 - Single mode: `GET /user/repos?affiliation=owner,collaborator,organization_member&per_page=100&sort=updated&page=<n>`. The `affiliation` filter is **required** — without it, GitHub omits org repos the user can read but doesn't directly own/collaborate on, surprising users with "I have access to this repo, why isn't it listed?". Returns the most recently updated 100 repos per page; the picker pages on demand.
 - Returns `{ repos: [{ id, owner, name, full_name, default_branch, private }, ...], has_next_page: bool }` (the `has_next_page` flag is derived from GitHub's `Link` response header).
 - The picker filters loaded results client-side by substring match on `full_name` for typeahead. If the user can't find their repo within the first few pages of `sort=updated`, they keep paging.
-- **Why no `/search/repositories` mode:** the search endpoint's `user:<login>` qualifier scopes to repos *owned* by the named account (a common misconception is that it scopes to "repos visible to the authenticated token"). For users who primarily work in org repos, `user:<login>` would silently hide most of their repos. A correct search mode would have to enumerate the user's orgs (`GET /user/orgs`) and emit one `org:<name>` qualifier per org, plus `user:<login>` — feasible but complex enough that paginated browse is the simpler MVP choice. Adding a proper search mode is a follow-up.
+- **Why no `/search/repositories` mode:** the search endpoint's `user:<login>` qualifier scopes to repos _owned_ by the named account (a common misconception is that it scopes to "repos visible to the authenticated token"). For users who primarily work in org repos, `user:<login>` would silently hide most of their repos. A correct search mode would have to enumerate the user's orgs (`GET /user/orgs`) and emit one `org:<name>` qualifier per org, plus `user:<login>` — feasible but complex enough that paginated browse is the simpler MVP choice. Adding a proper search mode is a follow-up.
 - Used by the project-settings UI when the user picks which repo to bind.
 
 **Endpoint** — `POST /api/workspaces/<slug>/integrations/github/disconnect/` (soft disconnect)
@@ -297,16 +297,16 @@ def reconcile_upstream_gone(sync, remote_issue_numbers):
             ghi.save(update_fields=["metadata"])
 ```
 
-| Aspect | Behavior |
-| --- | --- |
-| **Why a set diff is sufficient** | Deletions don't appear in any list endpoint (the issue's row is gone — no `updated_at` to filter on). Closures don't appear in `state=open`. Both surface as "absent from this run's listing." We don't try to distinguish them. |
+| Aspect                           | Behavior                                                                                                                                                                                                                                |
+| -------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Why a set diff is sufficient** | Deletions don't appear in any list endpoint (the issue's row is gone — no `updated_at` to filter on). Closures don't appear in `state=open`. Both surface as "absent from this run's listing." We don't try to distinguish them.        |
 | **What "gone" means in Pi Dash** | The `Issue` row stays. Future sync runs skip mirroring updates onto it (the upsert path is keyed on the GitHub-side issue still being in the listing). The issue becomes effectively a Pi Dash-native record with frozen synced fields. |
-| **UI** | Render a "no longer on GitHub" badge / muted styling on issues with `metadata["upstream_gone_at"]` set, sourced via the `GithubIssueSync` join. Optional in MVP — at minimum the field is queryable for admins. |
-| **Reopen / transfer-back** | If an upstream-gone issue reappears in a later run (e.g. an admin restored it, or a transfer was reverted), the flag is cleared and normal sync resumes. |
-| **Hard delete on Pi Dash side** | Out of scope. Users who want the mirror gone can soft-delete the `Issue` manually. |
-| **PR filtering** | GitHub returns PRs alongside issues from the `/issues` endpoint; we filter via the `pull_request` field. `remote_issue_numbers` therefore only contains real issues — a PR's number won't accidentally cause a flag clear. |
-| **Closed-on-GitHub items** | Treated identically to deleted items (both absent from the `state=open` listing). MVP intentionally does not mirror state changes back to Pi Dash (see §3) — the user keeps their workflow lane. |
-| **Failure resume** | On exception, no flags are written; the next run computes the diff from scratch. Idempotent. |
+| **UI**                           | Render a "no longer on GitHub" badge / muted styling on issues with `metadata["upstream_gone_at"]` set, sourced via the `GithubIssueSync` join. Optional in MVP — at minimum the field is queryable for admins.                         |
+| **Reopen / transfer-back**       | If an upstream-gone issue reappears in a later run (e.g. an admin restored it, or a transfer was reverted), the flag is cleared and normal sync resumes.                                                                                |
+| **Hard delete on Pi Dash side**  | Out of scope. Users who want the mirror gone can soft-delete the `Issue` manually.                                                                                                                                                      |
+| **PR filtering**                 | GitHub returns PRs alongside issues from the `/issues` endpoint; we filter via the `pull_request` field. `remote_issue_numbers` therefore only contains real issues — a PR's number won't accidentally cause a flag clear.              |
+| **Closed-on-GitHub items**       | Treated identically to deleted items (both absent from the `state=open` listing). MVP intentionally does not mirror state changes back to Pi Dash (see §3) — the user keeps their workflow lane.                                        |
+| **Failure resume**               | On exception, no flags are written; the next run computes the diff from scratch. Idempotent.                                                                                                                                            |
 
 **Upsert keying**:
 
@@ -346,18 +346,18 @@ This mirrors only comments on open non-PR issues (the only ones with local paren
 
 **Field mapping** (issue):
 
-| GitHub | Pi Dash |
-|---|---|
-| `title` | `name` (with `[github_<number>] ` prefix prepended — see §6.4) |
-| `body` (markdown) | `description_html` (rendered), `description_stripped` (plain) — reuse existing markdown→HTML helper |
-| `user.login` | record in `GithubIssueSync.metadata["github_user_login"]`; **created_by** is set to the workspace integration's `actor` (the bot user), not a real Pi Dash user |
+| GitHub                | Pi Dash                                                                                                                                                                                                                                                                                                                    |
+| --------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `title`               | `name` (with `[github_<number>] ` prefix prepended — see §6.4)                                                                                                                                                                                                                                                             |
+| `body` (markdown)     | `description_html` (rendered), `description_stripped` (plain) — reuse existing markdown→HTML helper                                                                                                                                                                                                                        |
+| `user.login`          | record in `GithubIssueSync.metadata["github_user_login"]`; **created_by** is set to the workspace integration's `actor` (the bot user), not a real Pi Dash user                                                                                                                                                            |
 | `state` (open/closed) | We list `state=open` only, so closed issues never enter the local set. On first import, state = project default. Subsequent updates do not change Pi Dash state — see §3 non-goal on state propagation. If an issue closes upstream, it disappears from the listing and is treated identically to a deletion (see §6.3.1). |
-| `labels` (MVP) | not synced |
-| `assignees` (MVP) | not synced |
-| `created_at` | `GithubIssueSync.gh_issue_created_at` (NOT `Issue.created_at`) |
-| `updated_at` | `GithubIssueSync.gh_issue_updated_at` (NOT `Issue.updated_at`) |
+| `labels` (MVP)        | not synced                                                                                                                                                                                                                                                                                                                 |
+| `assignees` (MVP)     | not synced                                                                                                                                                                                                                                                                                                                 |
+| `created_at`          | `GithubIssueSync.gh_issue_created_at` (NOT `Issue.created_at`)                                                                                                                                                                                                                                                             |
+| `updated_at`          | `GithubIssueSync.gh_issue_updated_at` (NOT `Issue.updated_at`)                                                                                                                                                                                                                                                             |
 
-**Why GitHub timestamps don't go on `Issue`:** `Issue` inherits `TimeAuditModel`, where `created_at` uses `auto_now_add=True` and `updated_at` uses `auto_now=True` (`db/mixins.py:19-20`). Both fields are *forced* by Django on every INSERT / UPDATE — passing values is silently ignored. Working around that with a follow-up `Issue.objects.filter(pk=...).update(created_at=...)` is possible but pollutes the audit semantics: `Issue.created_at` should mean "when this Pi Dash record was created," not "when the upstream GitHub issue was filed." Storing the GitHub timestamps on the dedicated `GithubIssueSync.gh_issue_created_at` / `gh_issue_updated_at` fields keeps both meanings clean. The UI can render whichever is appropriate per surface.
+**Why GitHub timestamps don't go on `Issue`:** `Issue` inherits `TimeAuditModel`, where `created_at` uses `auto_now_add=True` and `updated_at` uses `auto_now=True` (`db/mixins.py:19-20`). Both fields are _forced_ by Django on every INSERT / UPDATE — passing values is silently ignored. Working around that with a follow-up `Issue.objects.filter(pk=...).update(created_at=...)` is possible but pollutes the audit semantics: `Issue.created_at` should mean "when this Pi Dash record was created," not "when the upstream GitHub issue was filed." Storing the GitHub timestamps on the dedicated `GithubIssueSync.gh_issue_created_at` / `gh_issue_updated_at` fields keeps both meanings clean. The UI can render whichever is appropriate per surface.
 
 **State on first import**: assign the project's default state (the same one new manual issues get). This avoids importing 5000 closed issues into a "Backlog" lane.
 
@@ -385,7 +385,7 @@ Both mirrored issues and mirrored comments carry a stored prefix so the GitHub o
 
 ### 6.5 Completion comment-back
 
-**Why a plain `post_save` is insufficient:** the receiver only sees the new row state. It can't tell whether `state` *transitioned into* `completed` versus the issue having always been completed (e.g. a save that touched some unrelated field on an already-completed issue). To trigger exactly once per transition, we need previous-value awareness.
+**Why a plain `post_save` is insufficient:** the receiver only sees the new row state. It can't tell whether `state` _transitioned into_ `completed` versus the issue having always been completed (e.g. a save that touched some unrelated field on an already-completed issue). To trigger exactly once per transition, we need previous-value awareness.
 
 **Mechanism:** use the `ChangeTrackerMixin` already on `Issue` (added in §5). The mixin captures field values at `__init__` time, exposes `instance.has_changed("state_id")`, and stashes the change set on `instance._changes_on_save` after `save()` so a `post_save` receiver can read it.
 
@@ -485,6 +485,7 @@ GitHub is authoritative for the fields it syncs. To prevent edits-then-overwrite
 **Lock predicate — actively synced:**
 
 A row is "actively synced" iff a corresponding sync-tracking row exists:
+
 - `Issue` is actively synced iff `GithubIssueSync.objects.filter(issue=instance).exists()`.
 - `IssueComment` is actively synced iff `GithubCommentSync.objects.filter(comment=instance).exists()`.
 
@@ -492,20 +493,21 @@ A row is "actively synced" iff a corresponding sync-tracking row exists:
 
 **Lock matrix** (where "synced" = "actively-synced" per the predicate above):
 
-| Object | Field / action | Editable when... | Why |
-| --- | --- | --- | --- |
-| Synced `Issue` | `name`, `description_html`, `description_json`, `description_stripped` | **Locked while synced** | Mirrored from GitHub each sync; let upstream win. |
-| Synced `Issue` | `state`, `priority`, `assignees`, `labels`, `cycle`, `module`, `start_date`, `target_date`, `point`, `estimate_point`, `parent`, `sort_order` | Editable | Pi Dash workflow fields, never mirrored from GitHub. State change is the trigger for §6.5 completion comment-back. |
-| Synced `Issue` | delete (soft or hard) | **Locked while synced** | Prevents the resurrect-on-next-sync race. To delete a mirrored issue, the user first unbinds the project via §6.2 `DELETE /github/`, which cascade-deletes `GithubIssueSync` and releases the lock. |
-| Unsynced `Issue` (post-unbind, still has `external_source="github"`) | all fields, delete | Editable | Lock predicate no longer matches; row behaves like a native issue with a `[github_<n>]` prefix as a provenance marker. |
-| Synced `IssueComment` | `comment_html`, `comment_json`, `comment_stripped` | **Locked while synced** | Mirrored from GitHub. |
-| Synced `IssueComment` | delete | **Locked while synced** | Same reason. |
-| `IssueComment` with `external_source IS NULL` on any issue | body, delete | Editable | Native Pi Dash discussion, never mirrored, never pushed back to GitHub. |
-| Unsynced `IssueComment` (post-unbind, still has `external_source="github"`) | body, delete | Editable | Same release-on-unbind logic. |
+| Object                                                                      | Field / action                                                                                                                                | Editable when...        | Why                                                                                                                                                                                                 |
+| --------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Synced `Issue`                                                              | `name`, `description_html`, `description_json`, `description_stripped`                                                                        | **Locked while synced** | Mirrored from GitHub each sync; let upstream win.                                                                                                                                                   |
+| Synced `Issue`                                                              | `state`, `priority`, `assignees`, `labels`, `cycle`, `module`, `start_date`, `target_date`, `point`, `estimate_point`, `parent`, `sort_order` | Editable                | Pi Dash workflow fields, never mirrored from GitHub. State change is the trigger for §6.5 completion comment-back.                                                                                  |
+| Synced `Issue`                                                              | delete (soft or hard)                                                                                                                         | **Locked while synced** | Prevents the resurrect-on-next-sync race. To delete a mirrored issue, the user first unbinds the project via §6.2 `DELETE /github/`, which cascade-deletes `GithubIssueSync` and releases the lock. |
+| Unsynced `Issue` (post-unbind, still has `external_source="github"`)        | all fields, delete                                                                                                                            | Editable                | Lock predicate no longer matches; row behaves like a native issue with a `[github_<n>]` prefix as a provenance marker.                                                                              |
+| Synced `IssueComment`                                                       | `comment_html`, `comment_json`, `comment_stripped`                                                                                            | **Locked while synced** | Mirrored from GitHub.                                                                                                                                                                               |
+| Synced `IssueComment`                                                       | delete                                                                                                                                        | **Locked while synced** | Same reason.                                                                                                                                                                                        |
+| `IssueComment` with `external_source IS NULL` on any issue                  | body, delete                                                                                                                                  | Editable                | Native Pi Dash discussion, never mirrored, never pushed back to GitHub.                                                                                                                             |
+| Unsynced `IssueComment` (post-unbind, still has `external_source="github"`) | body, delete                                                                                                                                  | Editable                | Same release-on-unbind logic.                                                                                                                                                                       |
 
 **Implementation — defense in depth:**
 
 1. **Serializer** — `apps/api/pi_dash/app/serializers/issue.py` `IssueSerializer.validate()`:
+
    ```python
    def validate(self, attrs):
        if self.instance and self._is_actively_synced(self.instance):
@@ -522,7 +524,9 @@ A row is "actively synced" iff a corresponding sync-tracking row exists:
        # One DB hit per validate(); GithubIssueSync.issue has an index via the FK.
        return GithubIssueSync.objects.filter(issue=issue).exists()
    ```
+
    Same shape for `IssueCommentSerializer.validate()`, keyed on `GithubCommentSync.objects.filter(comment=instance).exists()`.
+
 2. **ViewSet** — both `IssueViewSet` and `IssueCommentViewSet` override `destroy()` to reject when the instance is actively synced, returning HTTP 409 with a body explaining the unbind step.
 3. **Public API** — same guards on `apps/api/pi_dash/api/serializers/issue.py` and the corresponding viewsets, since the public REST API hits a different serializer set.
 4. **UI** — `apps/web/core/components/issues/issue-modal/form.tsx` and the comment list component check whether the row is actively synced (the API serializer surfaces this as `is_synced: bool` on the issue / comment payload):
@@ -600,7 +604,7 @@ No protocol changes → no runner test impact.
 
 **Risk: rate limits.** A workspace with many synced repos all firing on the 4-hour mark will burst-call GitHub. PAT limit is 5000/hr. With per-page=100, 50 repos × 50 pages worst case = 2500 requests; comfortably under. Mitigation if hit: `Retry-After` honored, exponential backoff via Celery retry.
 
-**Risk: user confusion about read-only synced fields.** Some users will expect to be able to edit a synced issue's title or description in Pi Dash. The lock in §6.8 will reject the change at the API layer and hide the affordance in the UI, but the workflow fields (state, priority, etc.) *are* editable, and the inconsistency may surprise users. Mitigation: a small "synced from GitHub" badge with a tooltip explaining which fields are upstream-managed; the bind flow shows the same explanation before the user enables sync.
+**Risk: user confusion about read-only synced fields.** Some users will expect to be able to edit a synced issue's title or description in Pi Dash. The lock in §6.8 will reject the change at the API layer and hide the affordance in the UI, but the workflow fields (state, priority, etc.) _are_ editable, and the inconsistency may surprise users. Mitigation: a small "synced from GitHub" badge with a tooltip explaining which fields are upstream-managed; the bind flow shows the same explanation before the user enables sync.
 
 **Risk: signal storm on bulk state changes.** A user bulk-completing 100 issues at once would enqueue 100 GitHub POST tasks. Acceptable: GitHub's per-issue comment endpoint is well-behaved; tasks are async and rate-limited by Celery worker count. Watch in production.
 

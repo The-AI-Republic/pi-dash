@@ -3,6 +3,7 @@
 This file turns `design.md` into a concrete MVP implementation checklist.
 
 Related docs:
+
 - `design.md`
 
 ## Suggested rollout
@@ -10,9 +11,11 @@ Related docs:
 ### PR 1 — Schema and model scaffolding
 
 Goal:
+
 - land the database changes and model wiring with minimal runtime behavior change
 
 Scope:
+
 - add `GithubRepositorySync.is_sync_enabled`
 - add `GithubRepositorySync.last_synced_at`
 - add `GithubRepositorySync.last_sync_error`
@@ -23,14 +26,17 @@ Scope:
 - make `Issue` use `ChangeTrackerMixin` with `TRACKED_FIELDS = ["state_id"]`
 
 Why first:
+
 - all later backend and UI work depends on the schema existing
 
 ### PR 2 — GitHub backend client and workspace/project endpoints
 
 Goal:
+
 - make credential connection, repo listing, bind, toggle, and unbind real
 
 Scope:
+
 - implement GitHub API client helpers
 - implement workspace connect endpoint
 - implement workspace repo-list endpoint
@@ -41,14 +47,17 @@ Scope:
 - add shared serializers and permission checks
 
 Why second:
+
 - the web UI and sync worker both need the same GitHub credential and repository plumbing
 
 ### PR 3 — Sync worker and completion comment-back
 
 Goal:
+
 - make repository polling, issue/comment upsert, upstream-gone detection, and completion comments work end to end
 
 Scope:
+
 - add `github_sync_task.py`
 - add Celery beat entry
 - implement issue upsert flow
@@ -58,14 +67,17 @@ Scope:
 - add helper for absolute Pi Dash issue URL
 
 Why third:
+
 - this is the first end-to-end behavior change and should come after the API/model surface is stable
 
 ### PR 4 — Sync locks and web UI
 
 Goal:
+
 - make the feature usable and protect synced content from local edits while bound
 
 Scope:
+
 - replace workspace GitHub integration card behavior
 - add project settings GitHub section
 - remove dead Plane-era GitHub client code
@@ -74,20 +86,24 @@ Scope:
 - hide edit/delete affordances in the web UI for actively-synced rows
 
 Why fourth:
+
 - the UI depends on the backend contract and the lock behavior depends on the sync-tracking rows
 
 ### PR 5 — Hardening and test coverage
 
 Goal:
+
 - close rollout gaps before shipping
 
 Scope:
+
 - unit tests for client, endpoints, worker, locks, and completion comments
 - manual web walkthrough
 - docs cleanup
 - operational notes for reconnect, unbind, and full-scan behavior
 
 Why last:
+
 - once the feature exists, this PR reduces regression and rollout risk
 
 ## Dependency order

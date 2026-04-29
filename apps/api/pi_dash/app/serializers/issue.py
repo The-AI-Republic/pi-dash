@@ -1020,14 +1020,36 @@ class IssueDetailSerializer(IssueSerializer):
     description_html = serializers.CharField()
     is_subscribed = serializers.BooleanField(read_only=True)
     is_intake = serializers.BooleanField(read_only=True)
+    agent_schedule = serializers.SerializerMethodField()
 
     class Meta(IssueSerializer.Meta):
         fields = IssueSerializer.Meta.fields + [
             "description_html",
             "is_subscribed",
             "is_intake",
+            "agent_schedule",
         ]
         read_only_fields = fields
+
+    def get_agent_schedule(self, obj):
+        """Surface the per-issue ticking schedule for the issue detail UI.
+
+        Returns ``None`` when no schedule row exists yet (the issue has
+        never been moved to In Progress). See
+        ``.ai_design/issue_ticking_system/design.md`` §8.1.
+        """
+        sched = getattr(obj, "agent_schedule", None)
+        if sched is None:
+            return None
+        return {
+            "enabled": sched.enabled,
+            "user_disabled": sched.user_disabled,
+            "tick_count": sched.tick_count,
+            "max_ticks": sched.effective_max_ticks(),
+            "interval_seconds": sched.effective_interval_seconds(),
+            "next_run_at": sched.next_run_at.isoformat() if sched.next_run_at else None,
+            "last_tick_at": sched.last_tick_at.isoformat() if sched.last_tick_at else None,
+        }
 
 
 class IssuePublicSerializer(BaseSerializer):

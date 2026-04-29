@@ -12,10 +12,7 @@ import type {
   TProjectAnalyticsCountParams,
   TProjectIssuesSearchParams,
 } from "@pi-dash/types";
-import type {
-  IGithubProjectBindRequest,
-  IGithubProjectBindingStatus,
-} from "@pi-dash/types";
+import type { IGithubProjectBindRequest, IGithubProjectBindingStatus } from "@pi-dash/types";
 // helpers
 // pi dash web types
 import type { TProject, TPartialProject } from "@/pi-dash-web/types";

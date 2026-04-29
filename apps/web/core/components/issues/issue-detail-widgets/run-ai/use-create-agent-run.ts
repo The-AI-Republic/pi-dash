@@ -17,7 +17,12 @@ const agentRunService = new AgentRunService();
 type CreateRunArgs = {
   workspaceSlug: string;
   issueId: string;
-  prompt: string;
+  /** When provided, dispatches a fresh prompted run via ``createAgentRun``
+   * (the "Run AI" button path). When omitted, falls through to
+   * ``commentAndRun`` which reuses the per-issue continuation pipeline
+   * and rebuilds the prompt from issue + comments server-side (the
+   * "Comment & Run" modal path). */
+  prompt?: string;
 };
 
 export function useCreateAgentRun() {
@@ -39,11 +44,16 @@ export function useCreateAgentRun() {
 
       setIsSubmitting(true);
       try {
-        const run = await agentRunService.createAgentRun({
-          workspace: workspace.id,
-          work_item: issueId,
-          prompt,
-        });
+        const run = prompt
+          ? await agentRunService.createAgentRun({
+              workspace: workspace.id,
+              work_item: issueId,
+              prompt,
+            })
+          : await agentRunService.commentAndRun({
+              workspace: workspace.id,
+              work_item: issueId,
+            });
         setToast({
           type: TOAST_TYPE.SUCCESS,
           title: t("run_ai.success_title"),

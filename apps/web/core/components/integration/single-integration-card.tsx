@@ -100,6 +100,7 @@ export const SingleIntegrationCard = observer(function SingleIntegrationCard({ i
           title: "Deleted successfully!",
           message: `${integration.title} integration deleted successfully.`,
         });
+        return;
       })
       .catch(() => {
         setDeletingIntegration(false);

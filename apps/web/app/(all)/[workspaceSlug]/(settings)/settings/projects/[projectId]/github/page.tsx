@@ -20,10 +20,7 @@ function GithubSettingsPage() {
 
   const pageTitle = currentProjectDetails?.name ? `${currentProjectDetails.name} - GitHub` : undefined;
 
-  const canManage = allowPermissions(
-    [EUserPermissions.ADMIN, EUserPermissions.MEMBER],
-    EUserPermissionsLevel.PROJECT
-  );
+  const canManage = allowPermissions([EUserPermissions.ADMIN, EUserPermissions.MEMBER], EUserPermissionsLevel.PROJECT);
 
   if (workspaceUserInfo && !canManage) {
     return <NotAuthorizedView section="settings" isProjectView className="h-auto" />;

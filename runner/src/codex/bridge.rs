@@ -19,7 +19,6 @@ use crate::codex::schema::{
 
 pub struct Bridge {
     pub server: AppServer,
-    pub model_default: Option<String>,
     /// Notifications that arrived while we were waiting for an RPC response
     /// (e.g. an early `account/reauthRequired` during `initialize`). Drained
     /// by [`Bridge::next_frame`] before reading from the live stream so the
@@ -28,21 +27,19 @@ pub struct Bridge {
 }
 
 impl Bridge {
-    pub async fn spawn(binary: &str, cwd: &Path, model_default: Option<String>) -> Result<Self> {
+    pub async fn spawn(binary: &str, cwd: &Path) -> Result<Self> {
         let server = AppServer::spawn(binary, cwd).await?;
         Ok(Self {
             server,
-            model_default,
             pending: std::collections::VecDeque::new(),
         })
     }
 
     /// Bridge that speaks to an already-constructed AppServer. Used in
     /// integration tests to substitute a fake process.
-    pub fn from_server(server: AppServer, model_default: Option<String>) -> Self {
+    pub fn from_server(server: AppServer) -> Self {
         Self {
             server,
-            model_default,
             pending: std::collections::VecDeque::new(),
         }
     }
@@ -63,7 +60,7 @@ impl Bridge {
         } else {
             self.start_thread(cwd).await?
         };
-        self.start_turn(payload).await?;
+        self.start_turn(&thread_id, payload).await?;
         Ok(BridgeCursor {
             run_id: payload.run_id,
             thread_id,
@@ -98,7 +95,7 @@ impl Bridge {
             "thread/start",
             &ThreadStartParams {
                 cwd: cwd.to_string_lossy().to_string(),
-                model: self.model_default.clone(),
+                model: None,
                 sandbox_policy: "workspace-write".into(),
                 approval_policy: "on-request".into(),
             },
@@ -106,6 +103,7 @@ impl Bridge {
         self.server.send_raw(&line).await?;
         let resp = self.await_response(id, Duration::from_secs(30)).await?;
         resp.get("threadId")
+            .or_else(|| resp.get("thread").and_then(|t| t.get("id")))
             .or_else(|| resp.get("thread_id"))
             .and_then(|v| v.as_str())
             .map(|s| s.to_string())
@@ -138,17 +136,18 @@ impl Bridge {
         }
     }
 
-    async fn start_turn(&mut self, payload: &RunPayload) -> Result<()> {
+    async fn start_turn(&mut self, thread_id: &str, payload: &RunPayload) -> Result<()> {
         let id = self.server.alloc_id();
         let line = jsonrpc::request(
             id,
             "turn/start",
             &TurnStartParams {
+                thread_id: thread_id.to_string(),
                 input: vec![TurnInputItem {
-                    role: "user".into(),
-                    content: payload.prompt.clone(),
+                    item_type: "text".into(),
+                    text: payload.prompt.clone(),
                 }],
-                model: payload.model.clone().or_else(|| self.model_default.clone()),
+                model: payload.model.clone(),
                 effort: None,
             },
         )?;

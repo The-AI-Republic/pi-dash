@@ -16,9 +16,7 @@ export function GithubProjectSettingsHeader() {
         <div className="flex items-center gap-2">
           <Breadcrumbs>
             <Breadcrumbs.Item
-              component={
-                <BreadcrumbLink label="GitHub" icon={<Github className="size-4 text-tertiary" />} />
-              }
+              component={<BreadcrumbLink label="GitHub" icon={<Github className="size-4 text-tertiary" />} />}
             />
           </Breadcrumbs>
         </div>

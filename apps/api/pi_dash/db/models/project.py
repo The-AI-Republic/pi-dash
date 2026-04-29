@@ -133,6 +133,11 @@ class Project(BaseModel):
             ),
         ],
     )
+    # Periodic agent re-invocation defaults — see
+    # ``.ai_design/issue_ticking_system/design.md`` §7.2.
+    agent_default_interval_seconds = models.IntegerField(default=10800)
+    agent_default_max_ticks = models.IntegerField(default=24)
+    agent_ticking_enabled = models.BooleanField(default=True)
 
     def __init__(self, *args, **kwargs):
         # Track if timezone is provided, if so, don't override it with the workspace timezone when saving

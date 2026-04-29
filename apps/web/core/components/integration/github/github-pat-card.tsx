@@ -28,8 +28,7 @@ type Props = {
 
 const githubService = new GithubIntegrationService();
 
-const PAT_HELP_URL =
-  "https://github.com/settings/tokens?type=beta&description=Pi+Dash+Issue+Sync&scopes=public_repo";
+const PAT_HELP_URL = "https://github.com/settings/tokens?type=beta&description=Pi+Dash+Issue+Sync&scopes=public_repo";
 
 export function GithubPatCard({ integration }: Props) {
   const { workspaceSlug } = useParams();

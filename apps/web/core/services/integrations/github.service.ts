@@ -5,11 +5,7 @@
  */
 
 import { API_BASE_URL } from "@pi-dash/constants";
-import type {
-  IGithubConnectionStatus,
-  IGithubConnectRequest,
-  IGithubReposPage,
-} from "@pi-dash/types";
+import type { IGithubConnectionStatus, IGithubConnectRequest, IGithubReposPage } from "@pi-dash/types";
 import { APIService } from "@/services/api.service";
 
 export class GithubIntegrationService extends APIService {
