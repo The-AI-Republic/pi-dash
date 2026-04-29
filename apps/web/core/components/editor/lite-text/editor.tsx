@@ -45,6 +45,9 @@ type LiteTextEditorWrapperProps = MakeOptional<
   parentClassName?: string;
   editorClassName?: string;
   submitButtonText?: string;
+  /** Optional content rendered to the LEFT of the submit button inside
+   * the full-variant toolbar. Forwarded to ``IssueCommentToolbar``. */
+  extraToolbarActions?: React.ReactNode;
 } & (
     | {
         editable: false;
@@ -55,6 +58,10 @@ type LiteTextEditorWrapperProps = MakeOptional<
         duplicateFile: TFileHandler["duplicate"];
       }
   );
+
+function isMutableRefObject<T>(value: React.ForwardedRef<T>): value is React.MutableRefObject<T | null> {
+  return !!value && typeof value === "object" && "current" in value;
+}
 
 export const LiteTextEditor = React.forwardRef(function LiteTextEditor(
   props: LiteTextEditorWrapperProps,
@@ -81,6 +88,7 @@ export const LiteTextEditor = React.forwardRef(function LiteTextEditor(
     editorClassName = "",
     showPlaceholderOnEmpty = true,
     submitButtonText = "common.comment",
+    extraToolbarActions,
     ...rest
   } = props;
   // states
@@ -111,9 +119,6 @@ export const LiteTextEditor = React.forwardRef(function LiteTextEditor(
   });
   // editor config
   const { getEditorFileHandlers } = useEditorConfig();
-  function isMutableRefObject<T>(ref: React.ForwardedRef<T>): ref is React.MutableRefObject<T | null> {
-    return !!ref && typeof ref === "object" && "current" in ref;
-  }
   // derived values
   const isEmpty = isCommentEmpty(props.initialValue);
 
@@ -217,6 +222,7 @@ export const LiteTextEditor = React.forwardRef(function LiteTextEditor(
             editorRef={editorRef}
             showSubmitButton={showSubmitButton}
             submitButtonText={submitButtonText}
+            extraToolbarActions={extraToolbarActions}
           />
         </div>
       )}
