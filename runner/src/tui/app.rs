@@ -301,6 +301,7 @@ async fn move_picker(state: &mut AppState, delta: isize) {
     let next = ((cur + delta).rem_euclid(total as isize)) as usize;
     state.runner_picker_idx = next;
     sync_picker_to_ipc(state);
+    suppress_approval_alert_once(state);
     refresh(state).await;
 }
 
@@ -317,7 +318,19 @@ async fn jump_picker(state: &mut AppState, idx: usize) {
     }
     state.runner_picker_idx = idx;
     sync_picker_to_ipc(state);
+    suppress_approval_alert_once(state);
     refresh(state).await;
+}
+
+/// Disable the "new approval arrived" bell + auto-jump for one refresh
+/// tick. We call this right before refreshing after a picker change:
+/// switching from a 0-approval runner to a 5-approval runner would
+/// otherwise look like "5 new approvals arrived" and steal focus to
+/// the Approvals tab. Setting the high-water mark to `usize::MAX`
+/// makes the `v.len() > was` comparison in `refresh` impossible for
+/// this tick; refresh then resets it to the real count.
+fn suppress_approval_alert_once(state: &mut AppState) {
+    state.last_approval_count = usize::MAX;
 }
 
 async fn refresh(state: &mut AppState) {

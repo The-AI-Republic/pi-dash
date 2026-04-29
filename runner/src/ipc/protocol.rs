@@ -27,10 +27,13 @@ pub enum Request {
     StatusSubscribe,
     /// Fetch the configuration (redacted of credentials).
     ConfigGet,
-    /// Push a new config. ``runner`` selects which `[[runner]]` block
-    /// to apply the patch to; daemon-level fields (cloud_url, log_level)
-    /// can be patched without `runner`. Required when N>1 and the patch
-    /// touches a per-runner field.
+    /// Push a new config. The current daemon deep-merges `patch` into
+    /// the on-disk config and reloads the whole thing, so `runner` is
+    /// **reserved / informational** — it has no effect today. The TUI's
+    /// only caller writes the full `config_working`, which is fine
+    /// against this implementation. The field is kept on the wire so
+    /// the future per-runner live-patch flow can opt-in without a
+    /// breaking IPC bump.
     ConfigUpdate {
         patch: serde_json::Value,
         #[serde(default, skip_serializing_if = "Option::is_none")]

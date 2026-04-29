@@ -377,7 +377,7 @@ pub fn runner_picker_bar(state: &AppState) -> Paragraph<'static> {
         spans.push(Span::raw("  "));
     }
     spans.push(Span::styled(
-        "   [<] prev  [>] next  [1-9] jump".to_string(),
+        "   [<] prev  [>] next  [Alt+1..9] jump".to_string(),
         Style::default().add_modifier(Modifier::DIM),
     ));
     Paragraph::new(Line::from(spans)).block(

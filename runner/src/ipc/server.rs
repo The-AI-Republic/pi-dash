@@ -144,9 +144,26 @@ impl IpcServer {
                 Ok(Response::Ack)
             }
             Request::RunsList { limit, runner } => {
-                let inst = self.resolve_runner(runner.as_deref())?;
-                let index = crate::history::index::RunsIndex::load(&inst.paths)?;
-                Ok(Response::Runs(index.recent(limit.unwrap_or(100))))
+                // ``runner = None`` means "union across every configured
+                // runner" — same shape as RunsGet / ApprovalsList. The
+                // TUI relies on this so the Runs tab works before the
+                // picker has been seeded by the Config refresh branch.
+                let candidates: Vec<&RunnerInstance> = match runner.as_deref() {
+                    Some(name) => vec![self.resolve_runner(Some(name))?],
+                    None => self.instances.values().collect(),
+                };
+                let cap = limit.unwrap_or(100);
+                let mut all = Vec::new();
+                for inst in candidates {
+                    let index = crate::history::index::RunsIndex::load(&inst.paths)?;
+                    all.extend(index.recent(cap));
+                }
+                // Newest-first across the union, then trim to the cap so
+                // a 100-row request returns the freshest 100 globally —
+                // not 100 per runner.
+                all.sort_by(|a, b| b.started_at.cmp(&a.started_at));
+                all.truncate(cap);
+                Ok(Response::Runs(all))
             }
             Request::RunsGet { run_id, runner } => {
                 // When a runner is named, scope the lookup to that
