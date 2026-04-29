@@ -4,8 +4,8 @@
 
 """Add ``AgentRun.scheduler_binding`` back-pointer.
 
-Counterpart to ``db.0131_project_scheduler_mvp``. Depends on it so the
-target table (``schedulers_bindings``) exists before the FK is added.
+Counterpart to ``db.0132_project_scheduler_mvp``. Depends on it so the
+target table (``scheduler_bindings``) exists before the FK is added.
 
 Project-scoped runs (scheduler ticks) carry this back-pointer instead of
 ``work_item``. Exactly one of the two is set per run; the dispatcher
