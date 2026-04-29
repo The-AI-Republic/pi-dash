@@ -6,6 +6,11 @@ use crate::ipc::protocol::{Request, Response, StatusSnapshot};
 
 pub struct TuiIpc {
     pub socket: PathBuf,
+    /// When set, scope per-runner read requests (`runs`, `approvals`,
+    /// `decide`) to the named runner. `None` means "let the daemon
+    /// decide" — works on single-runner installs and falls through to
+    /// the union for multi-runner read endpoints.
+    pub selected_runner: Option<String>,
 }
 
 impl TuiIpc {
@@ -19,7 +24,13 @@ impl TuiIpc {
 
     pub async fn runs(&self) -> Result<Vec<crate::history::index::RunSummary>> {
         let mut c = Client::connect(&self.socket).await?;
-        match c.call(Request::RunsList { limit: Some(100) }).await? {
+        match c
+            .call(Request::RunsList {
+                limit: Some(100),
+                runner: self.selected_runner.clone(),
+            })
+            .await?
+        {
             Response::Runs(r) => Ok(r),
             other => anyhow::bail!("unexpected: {other:?}"),
         }
@@ -27,7 +38,12 @@ impl TuiIpc {
 
     pub async fn approvals(&self) -> Result<Vec<crate::approval::router::ApprovalRecord>> {
         let mut c = Client::connect(&self.socket).await?;
-        match c.call(Request::ApprovalsList).await? {
+        match c
+            .call(Request::ApprovalsList {
+                runner: self.selected_runner.clone(),
+            })
+            .await?
+        {
             Response::Approvals(v) => Ok(v),
             other => anyhow::bail!("unexpected: {other:?}"),
         }
@@ -43,6 +59,7 @@ impl TuiIpc {
             .call(Request::ApprovalsDecide {
                 approval_id: approval_id.to_string(),
                 decision,
+                runner: self.selected_runner.clone(),
             })
             .await?
         {

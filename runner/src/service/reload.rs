@@ -91,13 +91,14 @@ pub async fn restart_and_verify(paths: &Paths) -> ReloadOutcome {
     };
 
     // Stage 2: wait for cloud-connected. Already connected? Return now.
-    if snapshot.connected {
+    if snapshot.daemon.connected {
         let state = svc.status().await.unwrap_or_else(|_| "unknown".into());
         return ReloadOutcome {
             ok: true,
             summary: format!(
                 "{} — connected to {}",
-                snapshot.runner_name, snapshot.cloud_url
+                summarize_runners(&snapshot),
+                snapshot.daemon.cloud_url
             ),
             detail: None,
             service_state: state,
@@ -110,7 +111,8 @@ pub async fn restart_and_verify(paths: &Paths) -> ReloadOutcome {
                 ok: true,
                 summary: format!(
                     "{} — connected to {}",
-                    final_snap.runner_name, final_snap.cloud_url
+                    summarize_runners(&final_snap),
+                    final_snap.daemon.cloud_url
                 ),
                 detail: None,
                 service_state: state,
@@ -161,7 +163,7 @@ async fn wait_for_cloud_connected(
     loop {
         if let Ok(mut c) = Client::connect(paths.ipc_socket_path()).await
             && let Ok(Response::Status(s)) = c.call(Request::StatusGet).await
-            && s.connected
+            && s.daemon.connected
         {
             return Some(s);
         }
@@ -179,5 +181,23 @@ async fn capture_service_detail(svc: &crate::service::Service) -> String {
     match svc.status().await {
         Ok(s) => format!("service status:\n{s}"),
         Err(e) => format!("(could not read service status: {e})"),
+    }
+}
+
+/// Render a one-liner of configured-runner names for `pidash install` /
+/// reload outcomes. Single-runner returns the bare name; multi-runner
+/// joins with `, ` and reports the count.
+fn summarize_runners(snap: &crate::ipc::protocol::StatusSnapshot) -> String {
+    match snap.runners.len() {
+        0 => "(no runners)".to_string(),
+        1 => snap.runners[0].name.clone(),
+        n => format!(
+            "{n} runners ({})",
+            snap.runners
+                .iter()
+                .map(|r| r.name.as_str())
+                .collect::<Vec<_>>()
+                .join(", "),
+        ),
     }
 }

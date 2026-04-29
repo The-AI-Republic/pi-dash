@@ -168,6 +168,11 @@ impl RegisterForm {
 pub async fn run(paths: Paths, initial_tab: Tab) -> Result<()> {
     let ipc = TuiIpc {
         socket: paths.ipc_socket_path(),
+        // Multi-runner picker is wired by Phase D.3; until then, leave
+        // the selector empty so reads return the daemon-decided default
+        // (single-runner installs work transparently; multi-runner
+        // returns the union for read endpoints).
+        selected_runner: None,
     };
     let mut state = AppState {
         tab: initial_tab,

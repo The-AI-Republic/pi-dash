@@ -58,33 +58,47 @@ fn service_card(state: &AppState) -> Paragraph<'_> {
 
 fn identity_card(state: &AppState) -> Paragraph<'_> {
     let lines = match &state.status {
-        Some(s) => vec![
-            Line::from(vec![
-                Span::styled(
-                    if s.connected {
-                        "● Cloud connected"
-                    } else {
-                        "○ Cloud offline"
-                    },
-                    Style::default().fg(if s.connected {
-                        Color::Green
-                    } else {
-                        Color::Red
-                    }),
-                ),
-                Span::raw("  "),
-                Span::raw(s.runner_name.clone()),
-            ]),
-            Line::from(format!("Cloud: {}", s.cloud_url)),
-            Line::from(format!(
-                "Runner ID: {}",
-                s.runner_id
-                    .map(|u| u.to_string())
-                    .unwrap_or_else(|| "-".into())
-            )),
-            Line::from(format!("Uptime: {}s", s.uptime_secs)),
-            Line::from(format!("Approvals pending: {}", s.approvals_pending)),
-        ],
+        Some(s) => {
+            let mut lines = vec![
+                Line::from(vec![
+                    Span::styled(
+                        if s.daemon.connected {
+                            "● Cloud connected"
+                        } else {
+                            "○ Cloud offline"
+                        },
+                        Style::default().fg(if s.daemon.connected {
+                            Color::Green
+                        } else {
+                            Color::Red
+                        }),
+                    ),
+                    Span::raw("  "),
+                    Span::raw(format!(
+                        "{} runner{}",
+                        s.runners.len(),
+                        if s.runners.len() == 1 { "" } else { "s" },
+                    )),
+                ]),
+                Line::from(format!("Cloud: {}", s.daemon.cloud_url)),
+                Line::from(format!("Uptime: {}s", s.daemon.uptime_secs)),
+            ];
+            if s.runners.is_empty() {
+                lines.push(Line::from(Span::styled(
+                    "  (no runners configured)",
+                    Style::default().fg(Color::DarkGray),
+                )));
+            } else {
+                for r in &s.runners {
+                    let project = r.project_slug.as_deref().unwrap_or("-");
+                    lines.push(Line::from(format!(
+                        "  • {} (project={}, status={:?}, approvals={})",
+                        r.name, project, r.status, r.approvals_pending,
+                    )));
+                }
+            }
+            lines
+        }
         None => vec![Line::from(Span::styled(
             "Daemon IPC unreachable.",
             Style::default().fg(Color::DarkGray),
@@ -96,18 +110,36 @@ fn identity_card(state: &AppState) -> Paragraph<'_> {
 }
 
 fn current_run_card(state: &AppState) -> Paragraph<'_> {
-    let lines = match state.status.as_ref().and_then(|s| s.current_run.as_ref()) {
-        Some(run) => vec![
-            Line::from(format!("Run: {}", run.run_id)),
-            Line::from(format!(
-                "Thread: {}",
-                run.thread_id.as_deref().unwrap_or("-")
-            )),
-            Line::from(format!("Status: {}", run.status)),
-            Line::from(format!("Events seen: {}", run.events)),
-        ],
-        None => vec![Line::from("No active run.")],
-    };
+    let mut lines: Vec<Line<'_>> = Vec::new();
+    match &state.status {
+        Some(s) => {
+            let mut had_run = false;
+            for r in &s.runners {
+                if let Some(run) = &r.current_run {
+                    had_run = true;
+                    lines.push(Line::from(format!("[{}] Run: {}", r.name, run.run_id)));
+                    lines.push(Line::from(format!(
+                        "[{}] Thread: {}",
+                        r.name,
+                        run.thread_id.as_deref().unwrap_or("-")
+                    )));
+                    lines.push(Line::from(format!(
+                        "[{}] Status: {}  Events: {}",
+                        r.name, run.status, run.events,
+                    )));
+                }
+            }
+            if !had_run {
+                lines.push(Line::from("No active run on any runner."));
+            }
+        }
+        None => {
+            lines.push(Line::from(Span::styled(
+                "Daemon IPC unreachable.",
+                Style::default().fg(Color::DarkGray),
+            )));
+        }
+    }
     Paragraph::new(lines)
         .block(
             Block::default()
