@@ -289,6 +289,17 @@ export const WORKSPACE_SIDEBAR_STATIC_NAVIGATION_ITEMS: Record<string, IWorkspac
     highlight: (pathname: string, url: string) => pathname.includes(url),
     tooltipTranslationKey: "sidebar.tooltips.prompts",
   },
+  // Project Scheduler — sibling of Prompts (not nested). Visible to all
+  // workspace members; the underlying API gates mutation per role.
+  // See .ai_design/project_scheduler/design.md §8.A.
+  schedulers: {
+    key: "schedulers",
+    labelTranslationKey: "sidebar.schedulers",
+    href: `/schedulers/`,
+    access: [EUserWorkspaceRoles.ADMIN, EUserWorkspaceRoles.MEMBER, EUserWorkspaceRoles.GUEST],
+    highlight: (pathname: string, url: string) => pathname.includes(url),
+    tooltipTranslationKey: "sidebar.tooltips.schedulers",
+  },
 };
 
 export const WORKSPACE_SIDEBAR_STATIC_NAVIGATION_ITEMS_LINKS: IWorkspaceSidebarNavigationItem[] = [
@@ -299,6 +310,7 @@ export const WORKSPACE_SIDEBAR_STATIC_PINNED_NAVIGATION_ITEMS_LINKS: IWorkspaceS
   WORKSPACE_SIDEBAR_STATIC_NAVIGATION_ITEMS["projects"],
   WORKSPACE_SIDEBAR_STATIC_NAVIGATION_ITEMS["runners"],
   WORKSPACE_SIDEBAR_STATIC_NAVIGATION_ITEMS["prompts"],
+  WORKSPACE_SIDEBAR_STATIC_NAVIGATION_ITEMS["schedulers"],
 ];
 
 export const IS_FAVORITE_MENU_OPEN = "is_favorite_menu_open";

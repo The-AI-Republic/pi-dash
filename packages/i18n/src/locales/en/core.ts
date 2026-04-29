@@ -25,11 +25,13 @@ export default {
     upgrade: "Upgrade",
     stickies: "Stickies",
     prompts: "Prompts",
+    schedulers: "Schedulers",
     runners: "AI Agents",
     tooltips: {
       projects: "Browse projects",
       runners: "Manage your AI Agent connectivities",
       prompts: "AI Prompt Templates",
+      schedulers: "Recurring AI Agent jobs scoped to projects",
     },
   },
 
