@@ -251,3 +251,119 @@ async fn connection_loop_fires_connected_notify_on_each_handshake() {
          got {final_count} fires"
     );
 }
+
+/// Two-runner Hello fan-out: a fake cloud collects the Hello frames sent
+/// after the connection comes up and asserts both project_slugs are
+/// present and distinct. Mirrors the "machine A serves projects P + Q"
+/// scenario from the new_pod_project_relationship design doc.
+async fn start_two_hello_collector(
+    expected_count: usize,
+) -> (SocketAddr, tokio::task::JoinHandle<Vec<ClientMsg>>) {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let handle = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let ws_stream = tokio_tungstenite::accept_async(stream).await.unwrap();
+        let (mut tx, mut rx) = ws_stream.split();
+        let welcome = Envelope::new(ServerMsg::Welcome {
+            server_time: Utc::now(),
+            heartbeat_interval_secs: 25,
+            protocol_version: WIRE_VERSION,
+        });
+        let _ = tx
+            .send(Message::Text(serde_json::to_string(&welcome).unwrap()))
+            .await;
+        let mut hellos: Vec<ClientMsg> = Vec::new();
+        while hellos.len() < expected_count {
+            let frame = match rx.next().await {
+                Some(Ok(Message::Text(t))) => t,
+                _ => break,
+            };
+            let env: Envelope<ClientMsg> = match serde_json::from_str(&frame) {
+                Ok(e) => e,
+                Err(_) => continue,
+            };
+            if matches!(env.body, ClientMsg::Hello { .. }) {
+                hellos.push(env.body);
+            }
+        }
+        hellos
+    });
+    (addr, handle)
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn two_hellos_carry_distinct_project_slugs() {
+    // Drive the connection layer manually: send two Hello frames with
+    // different project_slugs, and the fake cloud verifies both arrive
+    // and carry the per-runner project routing key.
+    let (addr, server_handle) = start_two_hello_collector(2).await;
+    let cloud_url = format!("http://{}", addr);
+
+    let creds = Credentials {
+        token: None,
+        runner_id: uuid::Uuid::new_v4(),
+        runner_secret: "apd_rs_testsecret".into(),
+        api_token: None,
+        issued_at: Utc::now(),
+    };
+    let conn = Connection::open(&cloud_url, &creds).await.expect("open ws");
+    let (out_tx, out_rx) = mpsc::channel::<Envelope<ClientMsg>>(8);
+    let (in_tx, _in_rx) = mpsc::channel::<Envelope<ServerMsg>>(8);
+
+    let runner_a = uuid::Uuid::new_v4();
+    let runner_b = uuid::Uuid::new_v4();
+    out_tx
+        .send(Envelope::for_runner(
+            runner_a,
+            ClientMsg::Hello {
+                runner_id: runner_a,
+                version: "0.1.0".into(),
+                os: "linux".into(),
+                arch: "x86_64".into(),
+                status: RunnerStatus::Idle,
+                in_flight_run: None,
+                protocol_version: WIRE_VERSION,
+                project_slug: Some("WEB".into()),
+            },
+        ))
+        .await
+        .unwrap();
+    out_tx
+        .send(Envelope::for_runner(
+            runner_b,
+            ClientMsg::Hello {
+                runner_id: runner_b,
+                version: "0.1.0".into(),
+                os: "linux".into(),
+                arch: "x86_64".into(),
+                status: RunnerStatus::Idle,
+                in_flight_run: None,
+                protocol_version: WIRE_VERSION,
+                project_slug: Some("API".into()),
+            },
+        ))
+        .await
+        .unwrap();
+    let loop_handle = tokio::spawn(async move {
+        let _ = run_connection(conn, out_rx, in_tx).await;
+    });
+
+    let hellos = tokio::time::timeout(std::time::Duration::from_secs(3), server_handle)
+        .await
+        .expect("hello collector timed out")
+        .expect("collector panicked");
+    drop(out_tx);
+    let _ = tokio::time::timeout(std::time::Duration::from_secs(1), loop_handle).await;
+
+    assert_eq!(hellos.len(), 2);
+    let mut slugs: Vec<Option<String>> = hellos
+        .into_iter()
+        .map(|m| match m {
+            ClientMsg::Hello { project_slug, .. } => project_slug,
+            _ => None,
+        })
+        .collect();
+    slugs.sort();
+    assert_eq!(slugs, vec![Some("API".into()), Some("WEB".into())]);
+}
