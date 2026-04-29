@@ -78,6 +78,12 @@ export type TBaseIssue = {
   is_epic?: boolean;
   is_intake?: boolean;
 
+  // True when an active GithubIssueSync row exists for this issue (i.e. it
+  // was mirrored from GitHub via PR 65 and the project is still bound).
+  // Populated by the backend serializer; the web UI uses it to disable the
+  // title / description editors and surface the "edit disabled" hint.
+  is_synced?: boolean;
+
   // Optional branch name that pins the agent to an existing remote branch for
   // this work item. Empty string (or missing) = the runner/agent picks the
   // default per project base_branch → remote HEAD.

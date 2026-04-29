@@ -295,6 +295,10 @@ export const coreRoutes: RouteConfigEntry[] = [
             ":workspaceSlug/settings/webhooks/:webhookId",
             "./(all)/[workspaceSlug]/(settings)/settings/(workspace)/webhooks/[webhookId]/page.tsx"
           ),
+          route(
+            ":workspaceSlug/settings/integrations",
+            "./(all)/[workspaceSlug]/(settings)/settings/(workspace)/integrations/page.tsx"
+          ),
         ]),
 
         // --------------------------------------------------------------------
@@ -358,6 +362,11 @@ export const coreRoutes: RouteConfigEntry[] = [
                 "./(all)/[workspaceSlug]/(settings)/settings/projects/[projectId]/automations/page.tsx"
               ),
             ]),
+            // Project GitHub integration (PR 65 follow-up)
+            route(
+              ":workspaceSlug/settings/projects/:projectId/github",
+              "./(all)/[workspaceSlug]/(settings)/settings/projects/[projectId]/github/page.tsx"
+            ),
           ]),
         ]),
       ]),

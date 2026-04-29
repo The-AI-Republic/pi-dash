@@ -466,7 +466,7 @@ pub async fn execute(inputs: RegisterInputs, paths: &Paths) -> Result<()> {
     // Apply any advanced field flags the user passed alongside --url/--token.
     // They're already reflected in `config` for the fields this function
     // populates directly (name, cloud_url, agent, working_dir); `apply_to`
-    // covers the rest (codex.*, claude_code.*, approval_policy.*, logging.*).
+    // covers the rest (approval_policy.*, logging.*).
     if let Some(extras) = inputs.extras.as_ref() {
         extras.apply_to(&mut config);
     }

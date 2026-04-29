@@ -144,6 +144,19 @@ class IssueCommentViewSet(BaseViewSet):
     @allow_permission(allowed_roles=[ROLE.ADMIN], creator=True, model=IssueComment)
     def destroy(self, request, slug, project_id, issue_id, pk):
         issue_comment = IssueComment.objects.get(workspace__slug=slug, project_id=project_id, issue_id=issue_id, pk=pk)
+
+        # Block delete on actively-synced GitHub comments. See .ai_design/
+        # github_sync/design.md §6.8.
+        from pi_dash.db.models import GithubCommentSync
+        if (
+            issue_comment.external_source == "github"
+            and GithubCommentSync.objects.filter(comment=issue_comment).exists()
+        ):
+            return Response(
+                {"error": "This comment is synced from GitHub. Unbind the project's GitHub repository to delete."},
+                status=status.HTTP_409_CONFLICT,
+            )
+
         current_instance = json.dumps(IssueCommentSerializer(issue_comment).data, cls=DjangoJSONEncoder)
         issue_comment.delete()
         issue_activity.delay(

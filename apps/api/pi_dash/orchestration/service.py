@@ -90,15 +90,48 @@ def handle_issue_state_transition(
     from_state: Optional[State],
     to_state: Optional[State],
     actor=None,
+    *,
+    dispatch_immediate: bool = True,
 ) -> TransitionOutcome:
     """React to an issue state change.
 
     Creates an ``AgentRun`` (and dispatches it to the runner) when the
     transition matches the MVP trigger rule (``Todo -> In Progress``) and the
     single-active-run guardrail allows it.
+
+    Also arms/disarms the per-issue ticking schedule:
+
+    - Entering the literal "In Progress" state arms the schedule (or
+      re-arms it on Paused → In Progress).
+    - Leaving the Started group disarms the schedule.
+
+    ``dispatch_immediate=False`` lets a caller (e.g., the Comment & Run
+    flow re-opening a Paused issue) arm the schedule without firing the
+    state-transition's own immediate dispatch — the caller will dispatch
+    its own run.
     """
+    from pi_dash.orchestration import scheduling
+
+    from_group = from_state.group if from_state is not None else None
+    to_group = to_state.group if to_state is not None else None
+
+    # Disarm when leaving the Started group, regardless of where we land.
+    if (
+        from_group == StateGroup.STARTED.value
+        and to_group != StateGroup.STARTED.value
+    ):
+        scheduling.disarm_schedule(issue)
+
     if not _is_delegation_trigger(to_state):
         return TransitionOutcome(reason="not-a-trigger-state")
+
+    # Arming is independent of whether the immediate dispatch is fired by
+    # this handler or by the caller — the schedule is the steady-state
+    # tick source either way.
+    scheduling.arm_schedule(issue, dispatch_immediate=dispatch_immediate)
+
+    if not dispatch_immediate:
+        return TransitionOutcome(reason="dispatch-deferred-to-caller")
 
     existing_active = _active_run_for(issue)
     if existing_active is not None:
@@ -245,35 +278,6 @@ def handle_issue_comment(comment: IssueComment) -> ContinuationOutcome:
         creator=comment.actor,
         pod=pod,
     )
-
-
-def maybe_continue_after_terminate(run: AgentRun) -> ContinuationOutcome:
-    """Sweep for non-bot comments that arrived while ``run`` was active.
-
-    Called from the runner Channels consumer when a run terminates
-    (completed / failed / paused). Without this hook, comments left
-    while the run was RUNNING would never trigger a follow-up — the
-    ``post_save(IssueComment)`` receiver explicitly skips them
-    (`reason='prior-run-active'`).
-
-    Storage is the existing ``IssueComment`` table; the "queue" is
-    the timestamp range ``created_at > run.started_at``.
-    """
-    if run.work_item_id is None or run.started_at is None:
-        return ContinuationOutcome(reason="no-issue-or-not-started")
-    issue = run.work_item
-    pending = (
-        IssueComment.objects.filter(
-            issue=issue,
-            actor__is_bot=False,
-            created_at__gt=run.started_at,
-        )
-        .order_by("created_at")
-        .first()
-    )
-    if pending is None:
-        return ContinuationOutcome(reason="no-pending-comments")
-    return handle_issue_comment(pending)
 
 
 def _create_continuation_run(

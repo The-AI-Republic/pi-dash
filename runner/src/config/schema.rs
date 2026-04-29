@@ -53,6 +53,8 @@ pub struct RunnerConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workspace_slug: Option<String>,
     pub workspace: WorkspaceSection,
+    /// Which agent CLI the daemon drives for assigned runs. Defaults to
+    /// `codex` so existing deployments are unaffected.
     #[serde(default)]
     pub agent: AgentSection,
     #[serde(default)]

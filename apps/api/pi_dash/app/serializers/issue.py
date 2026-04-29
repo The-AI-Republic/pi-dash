@@ -49,6 +49,31 @@ from pi_dash.utils.content_validator import (
 )
 
 
+# Synced (mirrored from GitHub) rows are read-only on synced fields. The lock
+# predicate is "an active GithubIssueSync / GithubCommentSync row exists,"
+# NOT "external_source == github" — see .ai_design/github_sync/design.md §6.8
+# for why. After unbind, the cascade deletes the sync rows and these helpers
+# stop reporting True, releasing the lock.
+_LOCKED_ISSUE_FIELDS = {"name", "description_html", "description_json", "description_stripped", "description_binary"}
+_LOCKED_COMMENT_FIELDS = {"comment_html", "comment_json", "comment_stripped"}
+
+
+def _issue_is_actively_synced(issue) -> bool:
+    if issue is None or issue.external_source != "github":
+        return False
+    from pi_dash.db.models import GithubIssueSync
+
+    return GithubIssueSync.objects.filter(issue=issue).exists()
+
+
+def _comment_is_actively_synced(comment) -> bool:
+    if comment is None or comment.external_source != "github":
+        return False
+    from pi_dash.db.models import GithubCommentSync
+
+    return GithubCommentSync.objects.filter(comment=comment).exists()
+
+
 class IssueFlatSerializer(BaseSerializer):
     ## Contain only flat fields
 
@@ -123,6 +148,27 @@ class IssueCreateSerializer(BaseSerializer):
     def validate(self, attrs):
         allow_triage = self.context.get("allow_triage_state", False)
         state_manager = State.triage_objects if allow_triage else State.objects
+
+        # Read-only lock for actively-synced GitHub issues. See .ai_design/
+        # github_sync/design.md §6.8. Only block when the *value* actually
+        # changed — the web UI re-PATCHes the full editable set on blur even
+        # if the user only clicked through a synced issue, and rejecting
+        # unchanged values surfaces a misleading "Work item update failed"
+        # toast every time someone navigates a synced issue.
+        if self.instance is not None and _issue_is_actively_synced(self.instance):
+            blocked = [
+                field
+                for field in _LOCKED_ISSUE_FIELDS & set(attrs.keys())
+                if attrs[field] != getattr(self.instance, field, None)
+            ]
+            if blocked:
+                raise serializers.ValidationError(
+                    {
+                        f: "This field is synced from GitHub and is read-only. "
+                           "Unbind the project's GitHub repository to edit."
+                        for f in blocked
+                    }
+                )
 
         if (
             attrs.get("start_date", None) is not None
@@ -716,6 +762,9 @@ class IssueCommentSerializer(BaseSerializer):
     workspace_detail = WorkspaceLiteSerializer(read_only=True, source="workspace")
     comment_reactions = CommentReactionSerializer(read_only=True, many=True)
     is_member = serializers.BooleanField(read_only=True)
+    # Surfaced so the UI can hide edit/delete affordances on synced rows
+    # (.ai_design/github_sync/design.md §6.8).
+    is_synced = serializers.SerializerMethodField()
 
     class Meta:
         model = IssueComment
@@ -729,6 +778,28 @@ class IssueCommentSerializer(BaseSerializer):
             "created_at",
             "updated_at",
         ]
+
+    def get_is_synced(self, obj) -> bool:
+        return _comment_is_actively_synced(obj)
+
+    def validate(self, attrs):
+        # Block edits to synced comment bodies. See §6.8. Same value-changed
+        # check as the issue serializer above — don't reject no-op PATCHes.
+        if self.instance is not None and _comment_is_actively_synced(self.instance):
+            blocked = [
+                field
+                for field in _LOCKED_COMMENT_FIELDS & set(attrs.keys())
+                if attrs[field] != getattr(self.instance, field, None)
+            ]
+            if blocked:
+                raise serializers.ValidationError(
+                    {
+                        f: "This comment is synced from GitHub and is read-only. "
+                           "Unbind the project's GitHub repository to edit."
+                        for f in blocked
+                    }
+                )
+        return attrs
 
 
 class IssueStateFlatSerializer(BaseSerializer):
@@ -787,6 +858,10 @@ class IssueSerializer(DynamicBaseSerializer):
     attachment_count = serializers.IntegerField(read_only=True)
     link_count = serializers.IntegerField(read_only=True)
 
+    # Surfaced so the UI can hide title/description edit affordances on
+    # actively-synced GitHub issues (.ai_design/github_sync/design.md §6.8).
+    is_synced = serializers.SerializerMethodField()
+
     class Meta:
         model = Issue
         fields = [
@@ -815,8 +890,12 @@ class IssueSerializer(DynamicBaseSerializer):
             "link_count",
             "is_draft",
             "archived_at",
+            "is_synced",
         ]
         read_only_fields = fields
+
+    def get_is_synced(self, obj) -> bool:
+        return _issue_is_actively_synced(obj)
 
     def validate(self, data):
         if (
@@ -941,14 +1020,36 @@ class IssueDetailSerializer(IssueSerializer):
     description_html = serializers.CharField()
     is_subscribed = serializers.BooleanField(read_only=True)
     is_intake = serializers.BooleanField(read_only=True)
+    agent_schedule = serializers.SerializerMethodField()
 
     class Meta(IssueSerializer.Meta):
         fields = IssueSerializer.Meta.fields + [
             "description_html",
             "is_subscribed",
             "is_intake",
+            "agent_schedule",
         ]
         read_only_fields = fields
+
+    def get_agent_schedule(self, obj):
+        """Surface the per-issue ticking schedule for the issue detail UI.
+
+        Returns ``None`` when no schedule row exists yet (the issue has
+        never been moved to In Progress). See
+        ``.ai_design/issue_ticking_system/design.md`` §8.1.
+        """
+        sched = getattr(obj, "agent_schedule", None)
+        if sched is None:
+            return None
+        return {
+            "enabled": sched.enabled,
+            "user_disabled": sched.user_disabled,
+            "tick_count": sched.tick_count,
+            "max_ticks": sched.effective_max_ticks(),
+            "interval_seconds": sched.effective_interval_seconds(),
+            "next_run_at": sched.next_run_at.isoformat() if sched.next_run_at else None,
+            "last_tick_at": sched.last_tick_at.isoformat() if sched.last_tick_at else None,
+        }
 
 
 class IssuePublicSerializer(BaseSerializer):

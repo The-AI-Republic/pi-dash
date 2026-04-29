@@ -489,30 +489,6 @@ fn editable_lines(
     ));
     lines.push(Line::raw(""));
 
-    lines.push(section_header("Codex"));
-    for id in [FieldId::CodexBinary, FieldId::CodexModelDefault] {
-        lines.extend(render_editable_row(
-            working,
-            loaded,
-            state,
-            selected_idx,
-            index_of(id),
-        ));
-    }
-    lines.push(Line::raw(""));
-
-    lines.push(section_header("Claude Code"));
-    for id in [FieldId::ClaudeBinary, FieldId::ClaudeModelDefault] {
-        lines.extend(render_editable_row(
-            working,
-            loaded,
-            state,
-            selected_idx,
-            index_of(id),
-        ));
-    }
-    lines.push(Line::raw(""));
-
     lines.push(section_header("Approval policy"));
     for id in [
         FieldId::ApprovalAutoReadonly,

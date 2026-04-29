@@ -126,7 +126,7 @@ export const PeekOverviewIssueDetails = observer(function PeekOverviewIssueDetai
         isSubmitting={isSubmitting}
         setIsSubmitting={(value) => setIsSubmitting(value)}
         issueOperations={issueOperations}
-        disabled={disabled || isArchived}
+        disabled={disabled || isArchived || !!issue.is_synced}
         value={issue.name}
         containerClassName="-ml-3"
       />
@@ -134,7 +134,7 @@ export const PeekOverviewIssueDetails = observer(function PeekOverviewIssueDetai
       <DescriptionInput
         issueSequenceId={issue.sequence_id}
         containerClassName="-ml-3 border-none"
-        disabled={disabled || isArchived}
+        disabled={disabled || isArchived || !!issue.is_synced}
         editorRef={editorRef}
         entityId={issue.id}
         fileAssetType={EFileAssetType.ISSUE_DESCRIPTION}
@@ -142,6 +142,12 @@ export const PeekOverviewIssueDetails = observer(function PeekOverviewIssueDetai
         key={issue.id}
         onSubmit={async (value, isMigrationUpdate) => {
           if (!issue.id || !issue.project_id) return;
+          // Tiptap fires onUpdate on initial mount + every internal
+          // transaction even when `disabled`. Synced issues are locked
+          // server-side and Tiptap's HTML normalization makes the initial
+          // echo compare unequal to the stored value, so the PATCH always
+          // comes back as 400. Short-circuit here.
+          if (issue.is_synced) return;
           await issueOperations.update(workspaceSlug, issue.project_id, issue.id, {
             description_html: value.description_html,
             ...(isMigrationUpdate ? { skip_activity: "true" } : {}),
@@ -169,20 +175,21 @@ export const PeekOverviewIssueDetails = observer(function PeekOverviewIssueDetai
               createdAt: issue.created_at ? new Date(issue.created_at) : new Date(),
               createdByDisplayName: getUserDetails(issue.created_by ?? "")?.display_name ?? "",
               id: issueId,
-              isRestoreDisabled: disabled || isArchived,
+              isRestoreDisabled: disabled || isArchived || !!issue.is_synced,
+              isExternallySynced: !!issue.is_synced,
             }}
             fetchHandlers={{
-              listDescriptionVersions: (issueId) =>
+              listDescriptionVersions: (entityId) =>
                 workItemVersionService.listDescriptionVersions(
                   workspaceSlug,
                   issue.project_id?.toString() ?? "",
-                  issueId
+                  entityId
                 ),
-              retrieveDescriptionVersion: (issueId, versionId) =>
+              retrieveDescriptionVersion: (entityId, versionId) =>
                 workItemVersionService.retrieveDescriptionVersion(
                   workspaceSlug,
                   issue.project_id?.toString() ?? "",
-                  issueId,
+                  entityId,
                   versionId
                 ),
             }}

@@ -28,6 +28,8 @@ import useIntegrationPopup from "@/hooks/use-integration-popup";
 import { usePlatformOS } from "@/hooks/use-platform-os";
 // services
 import { IntegrationService } from "@/services/integrations";
+// github (PAT-based) flow
+import { GithubPatCard } from "@/components/integration/github/github-pat-card";
 
 type Props = {
   integration: IAppIntegration;
@@ -50,6 +52,12 @@ const integrationDetails: { [key: string]: any } = {
 const integrationService = new IntegrationService();
 
 export const SingleIntegrationCard = observer(function SingleIntegrationCard({ integration }: Props) {
+  // GitHub uses a PAT-based connect flow, not OAuth — branch out before the
+  // legacy OAuth-popup logic. See .ai_design/github_sync/design.md §6.6.
+  if (integration.provider === "github") {
+    return <GithubPatCard integration={integration} />;
+  }
+
   // states
   const [deletingIntegration, setDeletingIntegration] = useState(false);
   // router
@@ -92,6 +100,7 @@ export const SingleIntegrationCard = observer(function SingleIntegrationCard({ i
           title: "Deleted successfully!",
           message: `${integration.title} integration deleted successfully.`,
         });
+        return;
       })
       .catch(() => {
         setDeletingIntegration(false);

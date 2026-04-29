@@ -63,7 +63,7 @@ impl Bridge {
         } else {
             self.start_thread(cwd).await?
         };
-        self.start_turn(payload).await?;
+        self.start_turn(&thread_id, payload).await?;
         Ok(BridgeCursor {
             run_id: payload.run_id,
             thread_id,
@@ -106,6 +106,7 @@ impl Bridge {
         self.server.send_raw(&line).await?;
         let resp = self.await_response(id, Duration::from_secs(30)).await?;
         resp.get("threadId")
+            .or_else(|| resp.get("thread").and_then(|t| t.get("id")))
             .or_else(|| resp.get("thread_id"))
             .and_then(|v| v.as_str())
             .map(|s| s.to_string())
@@ -138,15 +139,16 @@ impl Bridge {
         }
     }
 
-    async fn start_turn(&mut self, payload: &RunPayload) -> Result<()> {
+    async fn start_turn(&mut self, thread_id: &str, payload: &RunPayload) -> Result<()> {
         let id = self.server.alloc_id();
         let line = jsonrpc::request(
             id,
             "turn/start",
             &TurnStartParams {
+                thread_id: thread_id.to_string(),
                 input: vec![TurnInputItem {
-                    role: "user".into(),
-                    content: payload.prompt.clone(),
+                    item_type: "text".into(),
+                    text: payload.prompt.clone(),
                 }],
                 model: payload.model.clone().or_else(|| self.model_default.clone()),
                 effort: None,

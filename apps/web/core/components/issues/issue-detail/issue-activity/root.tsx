@@ -14,9 +14,11 @@ import { useLocalStorage } from "@pi-dash/hooks";
 // i18n
 import { useTranslation } from "@pi-dash/i18n";
 //types
-import type { TFileSignedURLResponse, TIssueComment } from "@pi-dash/types";
+import type { TFileSignedURLResponse, TIssueComment, TIssueServiceType } from "@pi-dash/types";
+import { EIssueServiceType } from "@pi-dash/types";
 // components
 import { CommentCreate } from "@/components/comments/comment-create";
+import { CommentAndRunActionButton } from "@/components/issues/issue-detail-widgets/run-ai";
 // hooks
 import { useIssueDetail } from "@/hooks/store/use-issue-detail";
 import { useProject } from "@/hooks/store/use-project";
@@ -34,6 +36,10 @@ type TIssueActivity = {
   issueId: string;
   disabled?: boolean;
   isIntakeIssue?: boolean;
+  /** Service type the activity composer is acting against. Defaults to
+   * ``ISSUES`` so existing call sites (issue main content, peek overview)
+   * keep working without passing this through. */
+  issueServiceType?: TIssueServiceType;
 };
 
 export type TActivityOperations = {
@@ -44,7 +50,14 @@ export type TActivityOperations = {
 };
 
 export const IssueActivity = observer(function IssueActivity(props: TIssueActivity) {
-  const { workspaceSlug, projectId, issueId, disabled = false, isIntakeIssue = false } = props;
+  const {
+    workspaceSlug,
+    projectId,
+    issueId,
+    disabled = false,
+    isIntakeIssue = false,
+    issueServiceType = EIssueServiceType.ISSUES,
+  } = props;
   // i18n
   const { t } = useTranslation();
   // hooks
@@ -98,9 +111,20 @@ export const IssueActivity = observer(function IssueActivity(props: TIssueActivi
         activityOperations={activityOperations}
         showToolbarInitially
         projectId={projectId}
+        extraToolbarActions={
+          <CommentAndRunActionButton
+            workspaceSlug={workspaceSlug}
+            projectId={projectId}
+            issueId={issueId}
+            issueServiceType={issueServiceType}
+            disabled={disabled}
+            size="base"
+            className="px-2.5 py-1.5 text-11"
+          />
+        }
       />
     ),
-    [workspaceSlug, issueId, activityOperations, projectId]
+    [workspaceSlug, issueId, activityOperations, projectId, issueServiceType, disabled]
   );
   if (!project) return <></>;
 

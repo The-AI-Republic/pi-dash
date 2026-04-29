@@ -1,6 +1,6 @@
 ## Ending the run
 
-There is no fenced `pi-dash-done` block. The cloud does not parse your final turn message. A run ends when Codex exits; Pi Dash learns the outcome by looking at the issue itself. Before your final turn ends you must have already done all of the following via `pidash`:
+There is no fenced `pi-dash-done` block. The cloud does not parse your final turn message. A run ends when the agent process exits; Pi Dash learns the outcome by looking at the issue itself. Before your final turn ends you must have already done all of the following via `pidash`:
 
 1. **If the work completed successfully:**
    - Pushed your branch (if any code changed).

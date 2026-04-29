@@ -3,6 +3,7 @@
 # See the LICENSE file for details.
 
 from django.db import transaction
+from django.db.models import Q
 from django.utils import timezone
 from rest_framework import status
 from rest_framework.permissions import IsAuthenticated
@@ -55,11 +56,38 @@ class AgentRunListEndpoint(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
-        # "My runs" — the runs the caller created. Workspace-scoped views are
-        # available to admins via the workspace listing once we add it; for
-        # MVP, list-by-creator is enough.
-        qs = AgentRun.objects.filter(created_by=request.user).order_by(
-            "-created_at"
+        # "My runs" — runs the caller is involved with. Three involvement
+        # signals are surfaced:
+        #   1. created_by == caller (free-form runs they kicked off)
+        #   2. work_item.created_by == caller (their issues)
+        #   3. work_item.assignees contains caller (issues assigned to them)
+        # Tick-driven runs carry created_by = agent system bot per
+        # ``orchestration/scheduling._resolve_creator_for_trigger``, so a
+        # creator-only filter would hide them from the human owner of the
+        # issue. The OR over (1)+(2)+(3) puts them back in view.
+        # ``distinct()`` guards against duplicates from the assignees join
+        # when the caller satisfies more than one clause.
+        #
+        # Mandatory workspace-membership scope: clause (2) and (3) join
+        # through ``work_item`` whose project lives in some workspace —
+        # without an outer membership constraint a user removed from a
+        # workspace would still see runs there because IssueAssignee /
+        # Issue.created_by survive workspace removal. The subquery uses
+        # the live (non-soft-deleted) WorkspaceMember default manager.
+        from pi_dash.db.models import WorkspaceMember
+
+        member_workspaces = WorkspaceMember.objects.filter(
+            member=request.user
+        ).values("workspace_id")
+        qs = (
+            AgentRun.objects.filter(workspace_id__in=member_workspaces)
+            .filter(
+                Q(created_by=request.user)
+                | Q(work_item__created_by=request.user)
+                | Q(work_item__assignees=request.user)
+            )
+            .distinct()
+            .order_by("-created_at")
         )
         workspace_id = request.query_params.get("workspace")
         if workspace_id:
@@ -67,6 +95,15 @@ class AgentRunListEndpoint(APIView):
         return Response(AgentRunSerializer(qs[:200], many=True).data)
 
     def post(self, request):
+        triggered_by = (request.data.get("triggered_by") or "").strip()
+
+        # Comment & Run flow — reuse the per-issue continuation pipeline
+        # (parent resolution, runner pinning, drain) instead of creating
+        # a fresh AgentRun from a prompt body. See
+        # ``.ai_design/issue_ticking_system/design.md`` §4.6.
+        if triggered_by == "comment_and_run":
+            return self._post_comment_and_run(request)
+
         prompt = request.data.get("prompt")
         workspace_id = request.data.get("workspace")
         if not prompt:
@@ -104,6 +141,62 @@ class AgentRunListEndpoint(APIView):
         # an idle runner if one exists. Non-blocking on commit.
         matcher.drain_pod(ctx.pod)
         run.refresh_from_db()
+        return Response(
+            AgentRunSerializer(run).data,
+            status=status.HTTP_201_CREATED,
+        )
+
+    def _post_comment_and_run(self, request):
+        """Dispatch a continuation run for an issue (Comment & Run button).
+
+        Body must include ``work_item`` (issue id). The just-posted comment
+        is expected to already exist on the issue (the client posts it
+        before calling this endpoint); the prompt builder picks it up via
+        :func:`pi_dash.prompting.composer.build_continuation`.
+        """
+        from pi_dash.db.models.issue import Issue
+        from pi_dash.orchestration import scheduling
+
+        work_item_id = request.data.get("work_item")
+        if not work_item_id:
+            return Response(
+                {"error": "work_item is required for comment_and_run"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        issue = Issue.all_objects.filter(pk=work_item_id).first()
+        if issue is None:
+            return Response(
+                {"error": "issue not found"}, status=status.HTTP_404_NOT_FOUND
+            )
+        if not is_workspace_member(request.user, issue.workspace_id):
+            return Response(
+                {"error": "issue not found"}, status=status.HTTP_404_NOT_FOUND
+            )
+
+        with transaction.atomic():
+            run = scheduling.dispatch_continuation_run(
+                issue,
+                triggered_by=scheduling.TRIGGER_COMMENT_AND_RUN,
+                actor=request.user,
+            )
+            # Only reset the schedule when the dispatch actually committed
+            # a run. Otherwise (active-run-exists / no-prior-run / no-pod
+            # — all of which return None) the user's existing tick_count
+            # and next_run_at must stay intact: they didn't trigger a new
+            # invocation, so the cap budget shouldn't be refunded and the
+            # next-tick clock shouldn't be pushed out.
+            if run is not None:
+                scheduling.reset_schedule_after_comment_and_run(issue)
+        if run is None:
+            return Response(
+                {
+                    "error": (
+                        "could not dispatch — issue may already have an "
+                        "active run, or no prior run / pod is available"
+                    )
+                },
+                status=status.HTTP_409_CONFLICT,
+            )
         return Response(
             AgentRunSerializer(run).data,
             status=status.HTTP_201_CREATED,

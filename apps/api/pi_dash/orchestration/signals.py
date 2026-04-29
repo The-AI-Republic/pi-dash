@@ -8,6 +8,12 @@ We intercept Issue saves with a pre_save snapshot of the prior ``state_id`` and
 compare in post_save. Using signals keeps the trigger out of every writer path
 (REST views, admin, importers) while still routing every transition through
 ``orchestration.service``.
+
+Comments are intentionally inert — there is no ``post_save(IssueComment)``
+receiver here. The agent is woken on a periodic schedule
+(``pi_dash.bgtasks.agent_schedule``) or by the explicit Comment & Run
+button, which calls into ``orchestration.service.handle_issue_comment``
+directly. See ``.ai_design/issue_ticking_system/design.md`` §9.
 """
 
 from __future__ import annotations
@@ -17,16 +23,19 @@ import logging
 from django.db.models.signals import post_save, pre_save
 from django.dispatch import receiver
 
-from pi_dash.db.models.issue import Issue, IssueComment
+from pi_dash.db.models.issue import Issue
 from pi_dash.db.models.state import State
-from pi_dash.orchestration.service import (
-    handle_issue_comment,
-    handle_issue_state_transition,
-)
+from pi_dash.orchestration.service import handle_issue_state_transition
 
 logger = logging.getLogger(__name__)
 
 _PREVIOUS_STATE = "_orchestration_prev_state_id"
+
+#: Per-instance opt-out flag. A view that wants to drive a state
+#: transition without the signal-side immediate dispatch (e.g. Comment &
+#: Run on a Paused issue) sets ``issue._orchestration_dispatch_immediate
+#: = False`` before calling ``Issue.save()``.
+_DISPATCH_IMMEDIATE_ATTR = "_orchestration_dispatch_immediate"
 
 #: Process-local counter of swallowed orchestration errors. We catch and log
 #: every exception in `fire_state_transition` so a broken trigger can't crash
@@ -57,6 +66,9 @@ def fire_state_transition(sender, instance: Issue, created: bool, **kwargs) -> N
 
     from_state = _lookup_state(prev_state_id)
     to_state = instance.state if current_state_id else None
+    dispatch_immediate = bool(
+        getattr(instance, _DISPATCH_IMMEDIATE_ATTR, True)
+    )
 
     try:
         handle_issue_state_transition(
@@ -64,6 +76,7 @@ def fire_state_transition(sender, instance: Issue, created: bool, **kwargs) -> N
             from_state=from_state,
             to_state=to_state,
             actor=None,
+            dispatch_immediate=dispatch_immediate,
         )
     except Exception:  # noqa: BLE001 — never let orchestration crash issue save
         global orchestration_error_count
@@ -85,32 +98,3 @@ def _lookup_state(state_id) -> State | None:
         return State.all_state_objects.get(pk=state_id)
     except State.DoesNotExist:
         return None
-
-
-@receiver(post_save, sender=IssueComment, dispatch_uid="orchestration.comment_postsave")
-def fire_comment_continuation(sender, instance: IssueComment, created: bool, **kwargs) -> None:
-    """Wake the agent on a new (non-bot) comment to an in-progress issue.
-
-    See :func:`pi_dash.orchestration.service.handle_issue_comment` for the
-    decision logic. Catches and logs every exception so a broken trigger
-    can't crash IssueComment writes.
-    """
-    if not created:
-        return
-    try:
-        outcome = handle_issue_comment(instance)
-    except Exception:  # noqa: BLE001 — never let orchestration crash comment save
-        global orchestration_error_count
-        orchestration_error_count += 1
-        logger.exception(
-            "orchestration.error: handle_issue_comment failed for "
-            "comment=%s issue=%s (total_errors=%d)",
-            instance.pk,
-            instance.issue_id,
-            orchestration_error_count,
-        )
-        return
-    logger.info(
-        "orchestration.continuation: comment=%s issue=%s reason=%s",
-        instance.pk, instance.issue_id, outcome.reason,
-    )

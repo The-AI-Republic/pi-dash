@@ -19,7 +19,8 @@ pub struct Notification<P> {
 #[serde(untagged)]
 pub enum Incoming {
     Response {
-        jsonrpc: String,
+        #[serde(default)]
+        jsonrpc: Option<String>,
         id: u64,
         #[serde(default)]
         result: Option<serde_json::Value>,
@@ -27,7 +28,8 @@ pub enum Incoming {
         error: Option<RpcError>,
     },
     Notification {
-        jsonrpc: String,
+        #[serde(default)]
+        jsonrpc: Option<String>,
         method: String,
         #[serde(default)]
         params: serde_json::Value,
