@@ -733,13 +733,18 @@ async fn run_doctor_with_auth_gate(paths: &Paths, agent_kind: AgentKind) -> Resu
     let tty = std::io::stdin().is_terminal();
 
     loop {
-        let report = crate::cli::doctor::execute(paths).await?;
+        let report = crate::cli::doctor::execute(paths, None).await?;
         report.print_compact();
 
-        let auth_failing = report
-            .checks
-            .iter()
-            .any(|c| c.name == auth_check_name && c.blocker && !c.ok);
+        // In multi-runner installs, the doctor tags per-runner checks as
+        // `<base>@<runner-name>` (e.g. `codex-auth@laptop`). Match the
+        // base name as a prefix so we still catch any auth-gated runner.
+        let auth_failing = report.checks.iter().any(|c| {
+            (c.name == auth_check_name
+                || c.name.starts_with(&format!("{auth_check_name}@")))
+                && c.blocker
+                && !c.ok
+        });
 
         if !auth_failing {
             if report.has_blockers() {

@@ -211,9 +211,8 @@ impl IpcServer {
                 anyhow::bail!("approval not found or already resolved");
             }
             Request::DoctorRun { runner } => {
-                let _ = runner; // doctor walks every runner in `Paths`; future
-                                // refactor will scope by runner name.
-                let report = crate::cli::doctor::execute(&self.paths).await?;
+                let report =
+                    crate::cli::doctor::execute(&self.paths, runner.as_deref()).await?;
                 Ok(Response::Doctor(report))
             }
             Request::RunnerReconnect => {

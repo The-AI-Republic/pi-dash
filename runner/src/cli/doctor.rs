@@ -13,6 +13,12 @@ pub struct Args {
     /// Emit a machine-readable JSON report.
     #[arg(long)]
     pub json: bool,
+    /// Restrict per-runner checks (agent binary, agent auth) to the named
+    /// runner. Without it, doctor walks every `[[runner]]` block and tags
+    /// each result with the runner name. Daemon-wide checks (git, cloud
+    /// reachability) always run once.
+    #[arg(long)]
+    pub runner: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -47,7 +53,7 @@ impl Report {
 }
 
 pub async fn run(args: Args, paths: &Paths) -> Result<()> {
-    let report = execute(paths).await?;
+    let report = execute(paths, args.runner.as_deref()).await?;
     if args.json {
         println!("{}", serde_json::to_string_pretty(&report)?);
     } else {
@@ -59,81 +65,55 @@ pub async fn run(args: Args, paths: &Paths) -> Result<()> {
     Ok(())
 }
 
-pub async fn execute(paths: &Paths) -> Result<Report> {
+pub async fn execute(paths: &Paths, runner_filter: Option<&str>) -> Result<Report> {
     let mut checks = Vec::new();
 
-    // Agent binary check — which CLI we verify depends on `agent.kind`.
-    // Runs without a config file fall back to Codex (the historical default)
-    // so `pidash doctor` keeps working pre-`pidash configure`.
+    // Per-runner checks (agent binary, agent auth) walk every configured
+    // runner so multi-runner installs get every agent path verified. With
+    // `--runner <name>`, only that runner is checked. Pre-`configure`
+    // installs (no config on disk) fall through to a single Codex probe so
+    // `pidash doctor` keeps working immediately after install.
     let cfg = file::load_config_opt(paths)?;
-    let primary = cfg.as_ref().and_then(|c| c.runners.first());
-    let agent_kind = primary
-        .map(|r| r.agent.kind)
-        .unwrap_or(crate::config::schema::AgentKind::Codex);
-    match agent_kind {
-        crate::config::schema::AgentKind::Codex => {
-            let codex_binary = primary
-                .map(|r| r.codex.binary.clone())
-                .unwrap_or_else(|| "codex".to_string());
-            match check_version(&codex_binary).await {
-                Ok(detail) => checks.push(Check {
-                    name: "codex".to_string(),
-                    ok: true,
-                    detail,
-                    blocker: true,
-                }),
-                Err(e) => checks.push(Check {
-                    name: "codex".to_string(),
-                    ok: false,
-                    detail: e.to_string(),
-                    blocker: true,
-                }),
-            }
-            match check_codex_auth(&codex_binary).await {
-                Ok(detail) => checks.push(Check {
-                    name: "codex-auth".to_string(),
-                    ok: true,
-                    detail,
-                    blocker: true,
-                }),
-                Err(e) => checks.push(Check {
-                    name: "codex-auth".to_string(),
-                    ok: false,
-                    detail: e.to_string(),
-                    blocker: true,
-                }),
-            }
-        }
-        crate::config::schema::AgentKind::ClaudeCode => {
-            let claude_binary = primary
-                .map(|r| r.claude_code.binary.clone())
-                .unwrap_or_else(|| "claude".to_string());
-            match check_version(&claude_binary).await {
-                Ok(detail) => checks.push(Check {
-                    name: "claude".to_string(),
-                    ok: true,
-                    detail,
-                    blocker: true,
-                }),
-                Err(e) => checks.push(Check {
-                    name: "claude".to_string(),
-                    ok: false,
-                    detail: e.to_string(),
-                    blocker: true,
-                }),
-            }
-            // There's no unattended `claude whoami`; Claude Code assumes the
-            // user is already signed in via the CLI's own onboarding. Surface
-            // a non-blocking note so the operator knows where to look.
-            checks.push(Check {
-                name: "claude-auth".to_string(),
-                ok: true,
-                detail: format!(
-                    "assumed ok (run `{} /login` if runs fail with auth errors)",
-                    claude_binary
-                ),
-                blocker: false,
-            });
+    let runners: Vec<&crate::config::schema::RunnerConfig> = match cfg.as_ref() {
+        Some(c) => match runner_filter {
+            Some(name) => match c.runners.iter().find(|r| r.name == name) {
+                Some(r) => vec![r],
+                None => {
+                    let known: Vec<&str> = c.runners.iter().map(|r| r.name.as_str()).collect();
+                    anyhow::bail!(
+                        "no runner named {name:?} in config; configured: [{}]",
+                        known.join(", ")
+                    );
+                }
+            },
+            None => c.runners.iter().collect(),
+        },
+        None => Vec::new(),
+    };
+
+    let multi = runners.len() > 1;
+    if runners.is_empty() {
+        // No config — historical default. Probe Codex unattended so
+        // operators get useful feedback before `pidash configure` runs.
+        run_agent_checks(
+            &mut checks,
+            None,
+            crate::config::schema::AgentKind::Codex,
+            "codex",
+            "claude",
+        )
+        .await;
+    } else {
+        for r in &runners {
+            let prefix = if multi { Some(r.name.as_str()) } else { None };
+            run_agent_checks(
+                &mut checks,
+                prefix,
+                r.agent.kind,
+                &r.codex.binary,
+                &r.claude_code.binary,
+            )
+            .await;
         }
     }
 
@@ -172,6 +152,80 @@ pub async fn execute(paths: &Paths) -> Result<Report> {
     }
 
     Ok(Report { checks })
+}
+
+/// Run the agent binary + auth checks for one runner. `prefix` is `Some(name)`
+/// in multi-runner installs so the report distinguishes which runner failed
+/// — `codex@laptop` vs `codex@build-box` — and `None` in the single-runner
+/// case to keep output identical to the pre-multi-runner format.
+async fn run_agent_checks(
+    checks: &mut Vec<Check>,
+    prefix: Option<&str>,
+    agent_kind: crate::config::schema::AgentKind,
+    codex_binary: &str,
+    claude_binary: &str,
+) {
+    let tag = |base: &str| match prefix {
+        Some(p) => format!("{base}@{p}"),
+        None => base.to_string(),
+    };
+    match agent_kind {
+        crate::config::schema::AgentKind::Codex => {
+            match check_version(codex_binary).await {
+                Ok(detail) => checks.push(Check {
+                    name: tag("codex"),
+                    ok: true,
+                    detail,
+                    blocker: true,
+                }),
+                Err(e) => checks.push(Check {
+                    name: tag("codex"),
+                    ok: false,
+                    detail: e.to_string(),
+                    blocker: true,
+                }),
+            }
+            match check_codex_auth(codex_binary).await {
+                Ok(detail) => checks.push(Check {
+                    name: tag("codex-auth"),
+                    ok: true,
+                    detail,
+                    blocker: true,
+                }),
+                Err(e) => checks.push(Check {
+                    name: tag("codex-auth"),
+                    ok: false,
+                    detail: e.to_string(),
+                    blocker: true,
+                }),
+            }
+        }
+        crate::config::schema::AgentKind::ClaudeCode => {
+            match check_version(claude_binary).await {
+                Ok(detail) => checks.push(Check {
+                    name: tag("claude"),
+                    ok: true,
+                    detail,
+                    blocker: true,
+                }),
+                Err(e) => checks.push(Check {
+                    name: tag("claude"),
+                    ok: false,
+                    detail: e.to_string(),
+                    blocker: true,
+                }),
+            }
+            checks.push(Check {
+                name: tag("claude-auth"),
+                ok: true,
+                detail: format!(
+                    "assumed ok (run `{} /login` if runs fail with auth errors)",
+                    claude_binary
+                ),
+                blocker: false,
+            });
+        }
+    }
 }
 
 /// Shared `<binary> --version` check. Works for both `codex` and `claude`
