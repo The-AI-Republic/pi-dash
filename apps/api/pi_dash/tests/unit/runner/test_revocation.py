@@ -22,7 +22,7 @@ from pi_dash.runner.models import (
 
 @pytest.fixture
 def pod(workspace):
-    return Pod.default_for_workspace(workspace)
+    return Pod.default_for_project(project)
 
 
 def _make_runner(user, workspace, pod, name="r1"):
@@ -185,7 +185,7 @@ def test_revoke_releases_pinned_queued_runs(
 
     from pi_dash.runner.models import AgentRun, AgentRunStatus, Pod, Runner, RunnerStatus
 
-    pod = Pod.default_for_workspace(workspace)
+    pod = Pod.default_for_project(project)
     runner = Runner.objects.create(
         owner=create_user,
         workspace=workspace,

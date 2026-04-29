@@ -117,32 +117,43 @@ class TokenRunnerCreateEndpoint(APIView):
     """POST /api/v1/runner/register-under-token/.
 
     Token-authenticated endpoint that registers an *additional* runner
-    under an existing MachineToken. The daemon calls this when a user
-    runs ``pidash configure runner --name <NAME>`` on a machine that
-    already has a token installed.
+    under an existing MachineToken, scoped to a specific project (and
+    optionally a specific pod within that project). The daemon calls
+    this when a user runs ``pidash token add-runner --project <SLUG>``.
 
     Auth headers (same as the WS upgrade):
         X-Token-Id:    <token_id>
         Authorization: Bearer <token_secret>
 
     Body:
-        { "name": "<NAME>", "os": "...", "arch": "...",
-          "version": "...", "protocol_version": <int> }
+        {
+          "name": "<RUNNER_NAME>",
+          "project": "<PROJECT_IDENTIFIER>",  # required
+          "pod": "<POD_NAME>",                 # optional; defaults to project's default pod
+          "os": "...",
+          "arch": "...",
+          "version": "...",
+          "protocol_version": <int>
+        }
 
     Response:
-        { "runner_id": "<UUID>" }
+        { "runner_id": "<UUID>", "pod_id": "<UUID>" }
 
     Token-auth runners never present a per-runner bearer secret on the
     wire (the WS auths as the token; runner_id is just a routing key),
-    so no `credential_secret` is minted or returned. Persisted
-    `credential_hash` is a non-empty placeholder so the unique-by-hash
-    legacy path stays well-formed for any future tooling that walks it.
+    so no `credential_secret` is minted or returned.
     """
 
     authentication_classes: list = []
     permission_classes: list = []
 
     def post(self, request):
+        from pi_dash.db.models.project import Project
+        from pi_dash.runner.models import (
+            MAX_RUNNERS_PER_MACHINE,
+            Pod,
+        )
+
         token_id_raw = request.headers.get("X-Token-Id", "")
         auth = request.headers.get("Authorization", "")
         if not token_id_raw or not auth.lower().startswith("bearer "):
@@ -176,19 +187,67 @@ class TokenRunnerCreateEndpoint(APIView):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
+        project_identifier = (request.data.get("project") or "").strip()
+        if not project_identifier:
+            return Response(
+                {"error": "project is required"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        # Project must live in the token's workspace; cross-workspace
+        # registration is the original design's Q7 (still deferred).
+        project = Project.objects.filter(
+            workspace_id=token.workspace_id,
+            identifier=project_identifier,
+        ).first()
+        if project is None:
+            return Response(
+                {"error": "project not found in token's workspace"},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+
+        # Pod selection: explicit by name when provided, default-pod
+        # of the project otherwise. Soft-deleted pods are refused
+        # (a runner attached to a deleted pod has nowhere to live).
+        pod_name = (request.data.get("pod") or "").strip()
+        if pod_name:
+            pod = Pod.objects.filter(
+                project=project, name=pod_name, deleted_at__isnull=True
+            ).first()
+            if pod is None:
+                # Allow the bare suffix too: `--pod beefy` should match
+                # `WEB_beefy` if the user forgot the prefix.
+                pod = Pod.objects.filter(
+                    project=project,
+                    name=f"{project.identifier}_{pod_name}",
+                    deleted_at__isnull=True,
+                ).first()
+            if pod is None:
+                return Response(
+                    {"error": f"pod {pod_name!r} not found in project"},
+                    status=status.HTTP_404_NOT_FOUND,
+                )
+        else:
+            pod = Pod.default_for_project_id(project.id)
+            if pod is None:
+                return Response(
+                    {"error": "project has no default pod"},
+                    status=status.HTTP_409_CONFLICT,
+                )
+
         # Cap check uses the same per-machine limit the daemon enforces
-        # locally (design.md §16). Cloud rejects beyond it as a defence
-        # in depth — a tampered daemon couldn't blow past the cap by
-        # repeating registrations.
+        # locally (parent design.md §16). Cloud rejects beyond it as
+        # defence in depth — a tampered daemon couldn't blow past the
+        # cap by repeating registrations.
         active_count = Runner.objects.filter(
             machine_token=token, revoked_at__isnull=True
         ).count()
-        from pi_dash.runner.models import MAX_RUNNERS_PER_MACHINE
-
-        cap = MAX_RUNNERS_PER_MACHINE
-        if active_count >= cap:
+        if active_count >= MAX_RUNNERS_PER_MACHINE:
             return Response(
-                {"error": f"machine token at capacity ({cap} runners)"},
+                {
+                    "error": (
+                        f"machine token at capacity ({MAX_RUNNERS_PER_MACHINE} runners)"
+                    )
+                },
                 status=status.HTTP_409_CONFLICT,
             )
 
@@ -207,6 +266,7 @@ class TokenRunnerCreateEndpoint(APIView):
                 id=placeholder_runner_id,
                 owner=token.created_by,
                 workspace=token.workspace,
+                pod=pod,
                 name=name,
                 credential_hash=placeholder_hash,
                 credential_fingerprint="token-auth",
@@ -217,16 +277,15 @@ class TokenRunnerCreateEndpoint(APIView):
                 protocol_version=int(request.data.get("protocol_version") or 2),
             )
         except IntegrityError:
-            # `UNIQUE(pod, name)` (or another DB-level constraint) collision.
-            # Return a generic message so we don't leak constraint names or
-            # internal exception details to the daemon.
+            # `UNIQUE(pod, name)` collision or similar. Return a generic
+            # message so we don't leak constraint names to the daemon.
             return Response(
                 {"error": "runner_name_taken"},
                 status=status.HTTP_409_CONFLICT,
             )
 
         return Response(
-            {"runner_id": str(runner.id)},
+            {"runner_id": str(runner.id), "pod_id": str(pod.id)},
             status=status.HTTP_201_CREATED,
         )
 

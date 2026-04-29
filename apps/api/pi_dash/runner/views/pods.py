@@ -4,13 +4,17 @@
 
 """Pod CRUD endpoints (web app, session auth).
 
-See ``.ai_design/issue_runner/design.md`` §8.1.
+See ``.ai_design/n_runners_in_same_machine/new_pod_project_relationship/design.md``
+§6.2 for the project-scoped pod model, and ``.ai_design/issue_runner/design.md``
+§8.1 for the historical workspace-scoped CRUD shape that this replaces.
 
 Permissions:
 - List / detail: any workspace member.
-- Create / rename / toggle default: workspace admin OR the pod's creator.
-- Soft-delete: same as create, plus the §7.2 preconditions (no runners, no
-  non-terminal runs, not the workspace's last active pod).
+- Create / rename: workspace admin OR the pod's creator.
+- Soft-delete: same as create, plus the project-default protection (the
+  default pod cannot be deleted while it is the project's default; you
+  must promote another pod first — that promotion endpoint is deferred
+  per the design's open questions).
 """
 
 from __future__ import annotations
@@ -30,6 +34,7 @@ from pi_dash.runner.services.permissions import (
     is_workspace_admin,
     is_workspace_member,
 )
+from pi_dash.runner.services.pod_naming import validate_user_pod_name
 
 
 def _can_manage_pod(user, pod: Pod) -> bool:
@@ -48,10 +53,27 @@ class PodListEndpoint(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
+        # ``project`` filter wins; ``workspace`` is kept for back-compat
+        # with dashboards that aggregate across all of a workspace's pods.
+        project_id = request.query_params.get("project")
         workspace_id = request.query_params.get("workspace")
+        if project_id:
+            from pi_dash.db.models.project import Project
+
+            project = Project.objects.filter(pk=project_id).first()
+            if project is None:
+                return Response({"error": "project not found"}, status=status.HTTP_404_NOT_FOUND)
+            if not is_workspace_member(request.user, project.workspace_id):
+                return Response(
+                    {"error": "forbidden"}, status=status.HTTP_403_FORBIDDEN
+                )
+            qs = Pod.objects.filter(project=project).order_by(
+                "-is_default", "created_at"
+            )
+            return Response(PodSerializer(qs, many=True).data)
         if not workspace_id:
             return Response(
-                {"error": "workspace is required"},
+                {"error": "project or workspace is required"},
                 status=status.HTTP_400_BAD_REQUEST,
             )
         if not is_workspace_member(request.user, workspace_id):
@@ -64,25 +86,43 @@ class PodListEndpoint(APIView):
         return Response(PodSerializer(qs, many=True).data)
 
     def post(self, request):
-        workspace_id = request.data.get("workspace")
+        from pi_dash.db.models.project import Project
+
+        project_id = request.data.get("project")
         name = (request.data.get("name") or "").strip()
         description = request.data.get("description") or ""
-        if not workspace_id or not name:
+        if not project_id or not name:
             return Response(
-                {"error": "workspace and name are required"},
+                {"error": "project and name are required"},
                 status=status.HTTP_400_BAD_REQUEST,
             )
-        if not is_workspace_admin(request.user, workspace_id):
+        project = Project.objects.filter(pk=project_id).first()
+        if project is None:
+            return Response(
+                {"error": "project not found"},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+        if not is_workspace_admin(request.user, project.workspace_id):
             return Response(
                 {"error": "workspace admin required"},
                 status=status.HTTP_403_FORBIDDEN,
             )
+        # Allow the bare suffix as a convenience: the user can pass either
+        # `WEB_beefy` or just `beefy` — we re-prefix with the project
+        # identifier when the prefix is missing.
+        if not name.startswith(f"{project.identifier}_"):
+            name = f"{project.identifier}_{name}"
+        err = validate_user_pod_name(name, project.identifier)
+        if err is not None:
+            return Response({"error": err}, status=status.HTTP_400_BAD_REQUEST)
         pod = Pod.objects.create(
-            workspace_id=workspace_id,
+            workspace_id=project.workspace_id,
+            project=project,
             name=name,
             description=description,
             created_by=request.user,
-            # Manual pods are not default unless the admin toggles after.
+            # User-created pods are never default; the project's first pod
+            # (auto-created by the post_save signal) holds that flag.
             is_default=False,
         )
         return Response(
@@ -129,6 +169,16 @@ class PodDetailEndpoint(APIView):
                     {"error": "name cannot be empty"},
                     status=status.HTTP_400_BAD_REQUEST,
                 )
+            # Allow the bare suffix here too — re-prefix with the project's
+            # identifier when missing. Then run the rename through the
+            # full validator (rejects collision with the auto-default
+            # suffix and the wrong-prefix case).
+            project_identifier = pod.project.identifier
+            if not new_name.startswith(f"{project_identifier}_"):
+                new_name = f"{project_identifier}_{new_name}"
+            err = validate_user_pod_name(new_name, project_identifier)
+            if err is not None:
+                return Response({"error": err}, status=status.HTTP_400_BAD_REQUEST)
             pod.name = new_name
             updates.append("name")
         if "description" in request.data:
@@ -137,10 +187,11 @@ class PodDetailEndpoint(APIView):
         if "is_default" in request.data:
             wants_default = bool(request.data.get("is_default"))
             if wants_default and not pod.is_default:
-                # Promote: clear any existing default in this workspace first.
+                # Promote: clear any existing default in this *project*
+                # first. (Was: workspace-scoped; now project-scoped.)
                 with transaction.atomic():
                     Pod.objects.filter(
-                        workspace_id=pod.workspace_id, is_default=True
+                        project_id=pod.project_id, is_default=True
                     ).exclude(pk=pod.pk).update(is_default=False)
                     pod.is_default = True
                     updates.append("is_default")
@@ -190,17 +241,18 @@ class PodDetailEndpoint(APIView):
                     },
                     status=status.HTTP_409_CONFLICT,
                 )
-            # Last-pod guard (invariant #13).
-            sibling_count = (
-                Pod.objects.filter(workspace_id=locked.workspace_id)
-                .exclude(pk=locked.pk)
-                .count()
-            )
-            if sibling_count == 0:
+            # Default-pod guard: the project's default pod is undeletable
+            # while it holds the flag (transferring the flag is a future
+            # endpoint). Non-default pods can be deleted freely as long
+            # as the runner / non-terminal-run guards above pass.
+            if locked.is_default:
                 return Response(
                     {
-                        "error": "cannot delete the last pod in a workspace; create a replacement first",
-                        "code": "last_pod_in_workspace",
+                        "error": (
+                            "cannot delete the project's default pod; "
+                            "promote another pod to default first"
+                        ),
+                        "code": "default_pod_undeletable",
                     },
                     status=status.HTTP_409_CONFLICT,
                 )

@@ -75,7 +75,7 @@ def test_post_run_creates_with_workspace_default_pod(
     assert resp.status_code == status.HTTP_201_CREATED
     run_id = resp.data["id"]
     run = AgentRun.objects.get(id=run_id)
-    assert run.pod_id == Pod.default_for_workspace(workspace).id
+    assert run.pod_id == Pod.default_for_project(project).id
     assert run.created_by_id == workspace.owner_id
 
 
@@ -83,7 +83,7 @@ def test_post_run_creates_with_workspace_default_pod(
 def test_post_run_rejects_pod_in_other_workspace(
     db, session_client, workspace, second_workspace
 ):
-    other_pod = Pod.default_for_workspace(second_workspace)
+    other_pod = Pod.default_for_project(second_project)
     resp = session_client.post(
         "/api/runners/runs/",
         {
@@ -131,7 +131,7 @@ def test_get_runs_lists_by_created_by(db, session_client, workspace):
     AgentRun.objects.create(
         workspace=workspace,
         created_by=workspace.owner,
-        pod=Pod.default_for_workspace(workspace),
+        pod=Pod.default_for_project(project),
         prompt="mine",
     )
     other = User.objects.create(
@@ -143,7 +143,7 @@ def test_get_runs_lists_by_created_by(db, session_client, workspace):
     AgentRun.objects.create(
         workspace=workspace,
         created_by=other,
-        pod=Pod.default_for_workspace(workspace),
+        pod=Pod.default_for_project(project),
         prompt="not mine",
     )
     resp = session_client.get("/api/runners/runs/")
@@ -227,7 +227,7 @@ def test_get_runs_includes_tick_runs_on_issue_user_created(db, session_client, w
     AgentRun.objects.create(
         workspace=workspace,
         created_by=other,
-        pod=Pod.default_for_workspace(workspace),
+        pod=Pod.default_for_project(project),
         work_item=issue,
         prompt="tick run on my issue",
     )
@@ -246,7 +246,7 @@ def test_get_runs_includes_tick_runs_on_issue_user_assigned(db, session_client, 
     AgentRun.objects.create(
         workspace=workspace,
         created_by=other,
-        pod=Pod.default_for_workspace(workspace),
+        pod=Pod.default_for_project(project),
         work_item=issue,
         prompt="tick run on assigned issue",
     )
@@ -265,7 +265,7 @@ def test_get_runs_excludes_runs_on_unrelated_issues(db, session_client, workspac
     AgentRun.objects.create(
         workspace=workspace,
         created_by=other,
-        pod=Pod.default_for_workspace(workspace),
+        pod=Pod.default_for_project(project),
         work_item=issue,
         prompt="run on unrelated issue",
     )
@@ -285,7 +285,7 @@ def test_get_runs_does_not_duplicate_when_user_satisfies_multiple_clauses(
     AgentRun.objects.create(
         workspace=workspace,
         created_by=workspace.owner,
-        pod=Pod.default_for_workspace(workspace),
+        pod=Pod.default_for_project(project),
         work_item=issue,
         prompt="multi-match run",
     )
@@ -309,7 +309,7 @@ def _make_pinned_run(workspace, *, parent_thread_id=None):
 
     from pi_dash.runner.models import Runner, RunnerStatus
 
-    pod = Pod.default_for_workspace(workspace)
+    pod = Pod.default_for_project(project)
     runner = Runner.objects.create(
         owner=workspace.owner,
         workspace=workspace,
@@ -435,7 +435,7 @@ def _make_in_progress_issue_with_paused_run(workspace):
     from pi_dash.db.models import Issue, Project, State
     from pi_dash.runner.models import Runner, RunnerStatus
 
-    pod = Pod.default_for_workspace(workspace)
+    pod = Pod.default_for_project(project)
     runner = Runner.objects.create(
         owner=workspace.owner,
         workspace=workspace,

@@ -17,6 +17,7 @@ from pi_dash.runner.views import (
     MachineTokenRevokeEndpoint,
     PodDetailEndpoint,
     PodListEndpoint,
+    ProjectListEndpoint,
     RegistrationTokenCreateEndpoint,
     RunnerDetailEndpoint,
     RunnerListEndpoint,
@@ -58,6 +59,9 @@ urlpatterns = [
         PodDetailEndpoint.as_view(),
         name="pod-detail",
     ),
+    # Projects (read-only, scoped to caller's workspaces). Used by
+    # `pidash token list-projects` and the cloud UI's runner-create form.
+    path("projects/", ProjectListEndpoint.as_view(), name="project-list"),
     # Runs
     path("runs/", AgentRunListEndpoint.as_view(), name="runner-runs"),
     path(

@@ -282,7 +282,7 @@ def runner_for_workspace(db, workspace, create_user):
 
     from pi_dash.runner.models import Pod, Runner, RunnerStatus
 
-    pod = Pod.default_for_workspace(workspace)
+    pod = Pod.default_for_project(project)
     return Runner.objects.create(
         owner=create_user,
         workspace=workspace,

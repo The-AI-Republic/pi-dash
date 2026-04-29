@@ -138,3 +138,26 @@ def workspace(create_user):
     WorkspaceMember.objects.create(workspace=created_workspace, member=create_user, role=20)
 
     return created_workspace
+
+
+@pytest.fixture
+def project(workspace, create_user):
+    """A Project in the test workspace.
+
+    Pods are project-scoped post-refactor (see
+    ``.ai_design/n_runners_in_same_machine/new_pod_project_relationship/``);
+    runner / pod / agent_run tests that previously relied on a workspace-default
+    pod now need a Project to anchor the project-default pod.
+
+    The ``post_save(Project)`` signal in ``runner/signals.py`` auto-creates
+    the project's default pod, so callers can ``Pod.default_for_project(project)``
+    immediately.
+    """
+    from pi_dash.db.models.project import Project
+
+    return Project.objects.create(
+        name="Test Project",
+        identifier="TEST",
+        workspace=workspace,
+        created_by=create_user,
+    )

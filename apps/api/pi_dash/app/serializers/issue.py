@@ -177,16 +177,24 @@ class IssueCreateSerializer(BaseSerializer):
         ):
             raise serializers.ValidationError("Start date cannot exceed target date")
 
-        # assigned_pod must belong to the issue's workspace and be active.
-        # See .ai_design/issue_runner/design.md §4.4 / §8.3.
+        # assigned_pod must belong to the issue's *project* and be active.
+        # See .ai_design/n_runners_in_same_machine/new_pod_project_relationship/
+        # design.md §8.2. Pods are project-scoped now; allowing any pod in
+        # the same workspace would be a cross-project routing escape hatch
+        # — a Project P issue could end up assigned to Project Q's pod and
+        # dispatch would happily route P's runs to Q's runners.
         if "assigned_pod" in attrs and attrs["assigned_pod"] is not None:
             pod = attrs["assigned_pod"]
-            workspace_id = self.context.get("workspace_id")
-            if workspace_id is None and self.instance is not None:
-                workspace_id = self.instance.workspace_id
-            if workspace_id is not None and str(pod.workspace_id) != str(workspace_id):
+            project_id = self.context.get("project_id")
+            if project_id is None and self.instance is not None:
+                project_id = self.instance.project_id
+            # ``project`` may also be present in attrs on issue create.
+            if project_id is None and "project" in attrs and attrs["project"] is not None:
+                proj = attrs["project"]
+                project_id = getattr(proj, "id", proj)
+            if project_id is not None and str(pod.project_id) != str(project_id):
                 raise serializers.ValidationError(
-                    {"assigned_pod": "pod is in a different workspace"}
+                    {"assigned_pod": "pod is in a different project"}
                 )
             if pod.deleted_at is not None:
                 raise serializers.ValidationError(

@@ -379,6 +379,34 @@ class RunnerConsumer(AsyncJsonWebsocketConsumer):
                 runner_scoped=False,
             )
             return
+
+        # Optional project_slug cross-check. The wire field is additive
+        # (older daemons / cloud peers omit it). When the daemon sends
+        # it, we verify it agrees with the runner's pod's project — a
+        # mismatch means the daemon's local config disagrees with the
+        # cloud-side runner row, and we want to surface that loudly
+        # rather than dispatch project-Q work to project-P clones.
+        body_project_slug = content.get("project_slug")
+        if body_project_slug is not None:
+            expected_slug = await self._resolve_runner_project_slug(runner)
+            if expected_slug is not None and str(body_project_slug) != expected_slug:
+                logger.warning(
+                    "token %s Hello for runner %s claimed project %r but cloud has %r",
+                    self.token.id,
+                    runner_id,
+                    body_project_slug,
+                    expected_slug,
+                )
+                await self._send_envelope(
+                    {
+                        "type": "remove_runner",
+                        "rid": str(runner_id),
+                        "runner_id": str(runner_id),
+                        "reason": "project_mismatch",
+                    },
+                    runner_scoped=False,
+                )
+                return
         if runner_id in self.authorised_runners:
             # Idempotent: a re-Hello after reconnect is fine, we just
             # don't duplicate the bookkeeping.
@@ -744,6 +772,27 @@ class RunnerConsumer(AsyncJsonWebsocketConsumer):
                 revoked_at__isnull=True,
             ).first()
         )()
+
+    @staticmethod
+    async def _resolve_runner_project_slug(runner: Runner) -> Optional[str]:
+        """Return ``runner.pod.project.identifier`` or ``None`` if the
+        runner has no pod (shouldn't happen post-refactor) or the
+        project is somehow gone.
+        """
+        def _lookup() -> Optional[str]:
+            r = (
+                Runner.objects.select_related("pod__project")
+                .filter(pk=runner.pk)
+                .first()
+            )
+            if r is None or r.pod_id is None:
+                return None
+            project = r.pod.project
+            if project is None:
+                return None
+            return project.identifier
+
+        return await sync_to_async(_lookup)()
 
     @staticmethod
     async def _mark_online(runner_id: UUID) -> None:

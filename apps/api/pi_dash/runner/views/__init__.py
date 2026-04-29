@@ -10,6 +10,7 @@ from .machine_tokens import (
 )
 from .metrics import MetricsEndpoint
 from .pods import PodDetailEndpoint, PodListEndpoint
+from .projects import ProjectListEndpoint
 from .register import (
     HealthEndpoint,
     RegisterEndpoint,
@@ -36,6 +37,7 @@ __all__ = [
     "MetricsEndpoint",
     "PodDetailEndpoint",
     "PodListEndpoint",
+    "ProjectListEndpoint",
     "RegisterEndpoint",
     "RegistrationTokenCreateEndpoint",
     "RunnerDeregisterEndpoint",

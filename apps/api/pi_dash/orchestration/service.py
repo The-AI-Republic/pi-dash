@@ -196,7 +196,13 @@ def _resolve_pod_for_issue(issue: Issue):
         pinned = Pod.objects.filter(pk=issue.assigned_pod_id).first()
         if pinned is not None:
             return pinned
-    return Pod.default_for_workspace_id(issue.workspace_id)
+    # Pods are project-scoped — fall back to the issue's project default.
+    # An issue without a project (shouldn't exist post-refactor) returns
+    # None; callers surface the error rather than dispatch into a
+    # workspace-wide pod.
+    if issue.project_id is None:
+        return None
+    return Pod.default_for_project_id(issue.project_id)
 
 
 #: Issue state groups in which a comment is allowed to wake the agent.
