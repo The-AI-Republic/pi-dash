@@ -72,7 +72,7 @@ def other_workspace(other_user):
 
 
 @pytest.fixture
-def pod(workspace):
+def pod(project):
     return Pod.default_for_project(project)
 
 

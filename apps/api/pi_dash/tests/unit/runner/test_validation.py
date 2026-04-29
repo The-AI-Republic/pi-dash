@@ -2,7 +2,12 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 # See the LICENSE file for details.
 
-"""Tests for ``validate_run_creation`` (design §6.5)."""
+"""Tests for ``validate_run_creation`` (project-scoped pod resolution).
+
+Covers the rules in
+``.ai_design/n_runners_in_same_machine/new_pod_project_relationship/design.md``
+§8 and ``services/validation.py``.
+"""
 
 from __future__ import annotations
 
@@ -43,18 +48,17 @@ def second_workspace(create_user):
 
 
 @pytest.fixture
-def project(workspace, create_user):
+def second_project(workspace, create_user):
     return Project.objects.create(
-        name="Demo", workspace=workspace, identifier="DEMO"
+        name="Demo2",
+        workspace=workspace,
+        identifier="DEMO2",
+        created_by=create_user,
     )
 
 
 @pytest.fixture
 def issue_in_workspace(db, project, workspace, create_user):
-    # Issue.save() requires a State to be present via its save() override.
-    # For validation tests we only care about workspace/assigned_pod; bypass
-    # state resolution by using .objects.create with project set — the save
-    # override falls back silently if State model has no rows.
     return Issue.objects.create(
         project=project,
         workspace=workspace,
@@ -80,12 +84,30 @@ def test_non_member_rejected_403(db, other_user, workspace):
 
 
 @pytest.mark.unit
-def test_resolves_workspace_default_pod_when_no_pod_given(
+def test_no_work_item_returns_409_no_pod_available(
     db, create_user, workspace
 ):
-    ctx = validate_run_creation(create_user, workspace_id=workspace.id)
-    assert ctx.pod.is_default is True
-    assert ctx.pod.workspace_id == workspace.id
+    """Without a ``work_item``, ``validate_run_creation`` has no project to
+    anchor pod resolution to. Post-refactor it returns 409 instead of
+    silently falling back to a workspace-default pod (which doesn't exist).
+    """
+    with pytest.raises(RunCreationError) as exc:
+        validate_run_creation(create_user, workspace_id=workspace.id)
+    assert exc.value.status == 409
+    assert exc.value.code == "no_pod_available"
+
+
+@pytest.mark.unit
+def test_work_item_resolves_to_project_default_pod(
+    db, create_user, workspace, project, issue_in_workspace
+):
+    ctx = validate_run_creation(
+        create_user,
+        workspace_id=workspace.id,
+        work_item_id=issue_in_workspace.id,
+    )
+    expected = Pod.default_for_project(project)
+    assert ctx.pod.pk == expected.pk
     assert ctx.created_by == create_user
 
 
@@ -93,7 +115,13 @@ def test_resolves_workspace_default_pod_when_no_pod_given(
 def test_explicit_pod_must_belong_to_workspace(
     db, create_user, workspace, second_workspace
 ):
-    other_pod = Pod.default_for_workspace(second_workspace)
+    other_project = Project.objects.create(
+        name="Other",
+        workspace=second_workspace,
+        identifier="OTHER",
+        created_by=create_user,
+    )
+    other_pod = Pod.default_for_project(other_project)
     with pytest.raises(RunCreationError) as exc:
         validate_run_creation(
             create_user, workspace_id=workspace.id, pod_id=other_pod.id
@@ -103,16 +131,33 @@ def test_explicit_pod_must_belong_to_workspace(
 
 
 @pytest.mark.unit
-def test_soft_deleted_pod_rejected(db, create_user, workspace):
+def test_explicit_pod_must_belong_to_issue_project(
+    db, create_user, workspace, project, second_project, issue_in_workspace
+):
+    """Cross-project pod with an explicit pod_id is rejected."""
+    other_pod = Pod.default_for_project(second_project)
+    with pytest.raises(RunCreationError) as exc:
+        validate_run_creation(
+            create_user,
+            workspace_id=workspace.id,
+            work_item_id=issue_in_workspace.id,
+            pod_id=other_pod.id,
+        )
+    assert exc.value.status == 400
+    assert exc.value.code == "pod_project_mismatch"
+
+
+@pytest.mark.unit
+def test_soft_deleted_pod_rejected(db, create_user, project):
     from django.utils import timezone
 
-    pod = Pod.default_for_workspace(workspace)
+    pod = Pod.default_for_project(project)
     pod.deleted_at = timezone.now()
     pod.is_default = False
     pod.save(update_fields=["deleted_at", "is_default"])
     with pytest.raises(RunCreationError) as exc:
         validate_run_creation(
-            create_user, workspace_id=workspace.id, pod_id=pod.id
+            create_user, workspace_id=project.workspace_id, pod_id=pod.id
         )
     assert exc.value.status == 400
     assert exc.value.code == "pod_missing"
@@ -134,11 +179,16 @@ def test_work_item_must_belong_to_workspace(
 
 @pytest.mark.unit
 def test_work_item_picks_assigned_pod_over_default(
-    db, create_user, workspace, issue_in_workspace
+    db, create_user, workspace, project, issue_in_workspace
 ):
-    # Create a second pod, pin the issue to it, and verify resolution prefers it.
+    """An issue's pinned ``assigned_pod`` wins over the project default
+    when the pod is in the same project.
+    """
     second_pod = Pod.objects.create(
-        workspace=workspace, name="special-pod", created_by=create_user
+        workspace=workspace,
+        project=project,
+        name=f"{project.identifier}_special",
+        created_by=create_user,
     )
     issue_in_workspace.assigned_pod = second_pod
     issue_in_workspace.save(update_fields=["assigned_pod"])
@@ -152,15 +202,22 @@ def test_work_item_picks_assigned_pod_over_default(
 
 
 @pytest.mark.unit
-def test_no_pod_available_returns_409(db, create_user, workspace):
-    """When every pod in the workspace is soft-deleted, fall back fails."""
+def test_no_pod_available_when_default_pod_soft_deleted(
+    db, create_user, workspace, project, issue_in_workspace
+):
     from django.utils import timezone
 
-    for pod in Pod.all_objects.filter(workspace=workspace):
+    issue_in_workspace.assigned_pod = None
+    issue_in_workspace.save(update_fields=["assigned_pod"])
+    for pod in Pod.all_objects.filter(project=project):
         pod.deleted_at = timezone.now()
         pod.is_default = False
         pod.save(update_fields=["deleted_at", "is_default"])
     with pytest.raises(RunCreationError) as exc:
-        validate_run_creation(create_user, workspace_id=workspace.id)
+        validate_run_creation(
+            create_user,
+            workspace_id=workspace.id,
+            work_item_id=issue_in_workspace.id,
+        )
     assert exc.value.status == 409
     assert exc.value.code == "no_pod_available"

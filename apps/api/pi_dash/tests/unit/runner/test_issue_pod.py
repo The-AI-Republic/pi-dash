@@ -89,7 +89,7 @@ def test_create_serializer_rejects_pod_in_other_workspace(
 ):
     from pi_dash.app.serializers.issue import IssueCreateSerializer
 
-    other_pod = Pod.default_for_workspace(second_workspace)
+    other_pod = Pod.default_for_project(second_project)
     serializer = IssueCreateSerializer(
         data={
             "name": "Bad",

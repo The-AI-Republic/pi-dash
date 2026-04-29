@@ -27,8 +27,8 @@ from pi_dash.runner.services import matcher
 
 
 @pytest.fixture
-def pod(workspace):
-    return Pod.default_for_workspace(workspace)
+def pod(project):
+    return Pod.default_for_project(project)
 
 
 def _make_runner(user, workspace, pod, name, online=True, heartbeat_ago_s=1):

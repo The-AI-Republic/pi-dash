@@ -260,11 +260,24 @@ class Runner(models.Model):
         return f"{self.name} ({self.owner_id})"
 
     def save(self, *args, **kwargs):
-        # Pod must be set explicitly at runner creation. The earlier
-        # auto-resolution to "the workspace's default pod" is gone:
-        # pods are now project-scoped, and the runner registration
-        # endpoints (register/, register-under-token/) resolve a
-        # specific project's pod before instantiating the Runner.
+        # Production runner registration (`register/`, `register-under-token/`)
+        # resolves a specific project's pod before instantiating the Runner.
+        # As a convenience for direct-ORM callers (tests, management
+        # commands, single-project workspaces), if `pod` is omitted and
+        # the workspace has exactly one project with a default pod, we
+        # auto-resolve to it. Workspaces with multiple projects refuse
+        # to auto-resolve — those callers must pick a project explicitly.
+        if self.pod_id is None and self.workspace_id is not None:
+            from pi_dash.db.models.project import Project
+
+            project_ids = list(
+                Project.objects.filter(workspace_id=self.workspace_id)
+                .values_list("id", flat=True)[:2]
+            )
+            if len(project_ids) == 1:
+                default = Pod.default_for_project_id(project_ids[0])
+                if default is not None:
+                    self.pod = default
         super().save(*args, **kwargs)
 
     @property
@@ -600,13 +613,15 @@ class AgentRun(models.Model):
         ]
 
     def save(self, *args, **kwargs):
-        # Auto-resolve pod to the project's default pod when omitted.
-        # The view layer (orchestration code that creates AgentRun rows)
-        # is the canonical place to set the pod; this fallback keeps
-        # direct-ORM callers (tests, management commands) honest as
-        # long as the run's work_item has a project. The previous
-        # workspace-default lookup is gone — see §8 of the
-        # new_pod_project_relationship design.
+        # Auto-resolve pod when omitted. The view layer (orchestration
+        # code that creates AgentRun rows) is the canonical place to
+        # set this; the fallbacks below keep direct-ORM callers
+        # (tests, management commands) honest. Resolution order:
+        # 1. work_item.project's default pod (post-refactor canonical).
+        # 2. Single-project workspace's only project's default pod
+        #    (back-compat for tests / single-project installs).
+        # The pre-refactor "workspace default pod" lookup is gone — see
+        # §8 of the new_pod_project_relationship design.
         if self.pod_id is None and self.work_item_id is not None:
             project_id = (
                 self.work_item.project_id
@@ -615,6 +630,17 @@ class AgentRun(models.Model):
             )
             if project_id is not None:
                 default = Pod.default_for_project_id(project_id)
+                if default is not None:
+                    self.pod = default
+        if self.pod_id is None and self.workspace_id is not None:
+            from pi_dash.db.models.project import Project
+
+            project_ids = list(
+                Project.objects.filter(workspace_id=self.workspace_id)
+                .values_list("id", flat=True)[:2]
+            )
+            if len(project_ids) == 1:
+                default = Pod.default_for_project_id(project_ids[0])
                 if default is not None:
                     self.pod = default
         # Back-compat: legacy call sites that set `owner` but not `created_by`

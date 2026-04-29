@@ -125,10 +125,20 @@ def pi_dash_server(live_server):
 @pytest.fixture
 def workspace(create_user):
     """
-    Create a new workspace and return the
+    Create a new workspace, a default project, and return the
     corresponding Workspace model instance.
+
+    Pods are project-scoped post-refactor (see
+    ``.ai_design/n_runners_in_same_machine/new_pod_project_relationship/``);
+    runner / pod / agent_run tests that previously relied on a workspace-default
+    pod now need at least one Project so the workspace has a default pod via
+    the project's auto-creation. To keep every existing test working without
+    explicit ``project=`` plumbing, the workspace fixture creates a single
+    Project named "TEST"; tests that need a *second* project should depend on
+    the dedicated ``project`` fixture (and / or create more directly).
     """
-    # Create the workspace using the model
+    from pi_dash.db.models.project import Project
+
     created_workspace = Workspace.objects.create(
         name="Test Workspace",
         owner=create_user,
@@ -137,27 +147,26 @@ def workspace(create_user):
 
     WorkspaceMember.objects.create(workspace=created_workspace, member=create_user, role=20)
 
+    # Create a default Project so the post_save(Project) signal auto-creates
+    # the project's default pod, and any test that creates a Runner with
+    # ``workspace=workspace`` and no explicit pod can fall through
+    # ``Runner.save()``'s single-project auto-resolution.
+    Project.objects.create(
+        name="Test Project",
+        identifier="TEST",
+        workspace=created_workspace,
+        created_by=create_user,
+    )
     return created_workspace
 
 
 @pytest.fixture
 def project(workspace, create_user):
-    """A Project in the test workspace.
+    """The default Project created by the ``workspace`` fixture.
 
-    Pods are project-scoped post-refactor (see
-    ``.ai_design/n_runners_in_same_machine/new_pod_project_relationship/``);
-    runner / pod / agent_run tests that previously relied on a workspace-default
-    pod now need a Project to anchor the project-default pod.
-
-    The ``post_save(Project)`` signal in ``runner/signals.py`` auto-creates
-    the project's default pod, so callers can ``Pod.default_for_project(project)``
-    immediately.
+    Resolved by identifier rather than re-created so multiple fixtures that
+    depend on ``workspace`` see the same Project instance.
     """
     from pi_dash.db.models.project import Project
 
-    return Project.objects.create(
-        name="Test Project",
-        identifier="TEST",
-        workspace=workspace,
-        created_by=create_user,
-    )
+    return Project.objects.get(workspace=workspace, identifier="TEST")

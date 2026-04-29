@@ -911,6 +911,25 @@ class IssueSerializer(DynamicBaseSerializer):
             and not State.objects.filter(project_id=self.context.get("project_id"), pk=data.get("state_id")).exists()
         ):
             raise serializers.ValidationError("State is not valid please pass a valid state_id")
+        # Cross-project assigned_pod guard. Same rule as
+        # IssueCreateSerializer.validate(): a Project P issue cannot be
+        # assigned a pod in Project Q. Without this check, PATCH-driven
+        # changes would silently route runs to the wrong fleet. See
+        # .ai_design/n_runners_in_same_machine/new_pod_project_relationship/design.md
+        # §8.2.
+        if "assigned_pod" in data and data["assigned_pod"] is not None:
+            pod = data["assigned_pod"]
+            project_id = self.context.get("project_id")
+            if project_id is None and self.instance is not None:
+                project_id = self.instance.project_id
+            if project_id is not None and str(pod.project_id) != str(project_id):
+                raise serializers.ValidationError(
+                    {"assigned_pod": "pod is in a different project"}
+                )
+            if pod.deleted_at is not None:
+                raise serializers.ValidationError(
+                    {"assigned_pod": "pod has been deleted"}
+                )
         return data
 
 
