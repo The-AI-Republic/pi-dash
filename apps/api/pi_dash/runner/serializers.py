@@ -141,6 +141,13 @@ class RegistrationResponseSerializer(serializers.Serializer):
     api_token = serializers.CharField()
     heartbeat_interval_secs = serializers.IntegerField()
     protocol_version = serializers.IntegerField()
+    # Project chosen during registration. The daemon persists this in
+    # `config.toml` so Hello frames and CLI CRUD requests can stay scoped to
+    # the project without re-prompting the user.
+    project_identifier = serializers.CharField()
+    # Pod the runner joined at registration time. Optional in the client so
+    # older daemons can ignore it until they understand project-scoped pods.
+    pod_id = serializers.CharField()
 
 
 class AgentRunSerializer(serializers.ModelSerializer):

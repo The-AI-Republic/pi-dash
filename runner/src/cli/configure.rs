@@ -276,14 +276,12 @@ pub async fn run(args: Args, paths: &Paths) -> Result<()> {
 
     match (args.url.clone(), args.token.clone()) {
         (Some(url), Some(token)) => {
-            let project = args
-                .project
-                .clone()
-                .ok_or_else(|| anyhow::anyhow!(
-                    "--project <PROJECT_IDENTIFIER> is required when registering. \
-                     List projects in this workspace with `pidash token list-projects` \
-                     after the daemon is up, or check the cloud's Projects page."
-                ))?;
+            let project = args.project.clone().ok_or_else(|| {
+                anyhow::anyhow!(
+                    "missing --project <PROJECT_IDENTIFIER> for registration. \
+                     Use `pidash token list-projects` or the cloud's Projects page."
+                )
+            })?;
             let inputs = RegisterInputs {
                 url,
                 token,

@@ -187,14 +187,10 @@ class RegisterEndpoint(APIView):
                 "api_token": api_token.token,
                 "heartbeat_interval_secs": HEARTBEAT_INTERVAL_SECS,
                 "protocol_version": PROTOCOL_VERSION,
+                "pod_id": str(pod.id),
+                "project_identifier": project.identifier,
             }
         ).data
-        # `pod_id` is not on the serializer (would need a schema bump to
-        # add). Append it directly so the daemon can stamp it into
-        # config.toml's [[runner]] block. Daemons that ignore the field
-        # keep working.
-        payload["pod_id"] = str(pod.id)
-        payload["project_identifier"] = project.identifier
         return Response(payload, status=status.HTTP_201_CREATED)
 
 

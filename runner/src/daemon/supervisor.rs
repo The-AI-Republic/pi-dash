@@ -31,6 +31,9 @@ pub struct Supervisor {
     pub approvals: ApprovalRouter,
 }
 
+type HelloRunner = (RunnerOut, StateHandle, Option<String>);
+type HelloRunnerMap = HashMap<uuid::Uuid, HelloRunner>;
+
 impl Supervisor {
     pub fn new(
         config: Config,
@@ -101,7 +104,7 @@ impl Supervisor {
                         ),
                     )
                 })
-                .collect::<HashMap<uuid::Uuid, (RunnerOut, StateHandle, Option<String>)>>(),
+                .collect::<HelloRunnerMap>(),
         ));
 
         // Primary runner = the first configured runner. Used by IPC and
@@ -379,13 +382,10 @@ impl Supervisor {
 /// `notify_one()` after each successful WS handshake (cold start and every
 /// reconnect). Cloud-side `_handle_token_hello` is idempotent on re-Hello,
 /// so a second emission for an already-authorised runner is harmless.
-async fn hello_emitter(
-    runners: Arc<RwLock<HashMap<uuid::Uuid, (RunnerOut, StateHandle, Option<String>)>>>,
-    connected: Arc<tokio::sync::Notify>,
-) {
+async fn hello_emitter(runners: Arc<RwLock<HelloRunnerMap>>, connected: Arc<tokio::sync::Notify>) {
     loop {
         connected.notified().await;
-        let current_runners: Vec<(RunnerOut, StateHandle, Option<String>)> =
+        let current_runners: Vec<HelloRunner> =
             { runners.read().await.values().cloned().collect() };
         for (out, state, project_slug) in current_runners {
             let hello = ClientMsg::Hello {
@@ -419,8 +419,7 @@ struct RunnerLoop {
     /// on the signal.
     remove_tx: tokio::sync::watch::Sender<bool>,
     live_mailboxes: Arc<RwLock<HashMap<uuid::Uuid, mpsc::Sender<Envelope<ServerMsg>>>>>,
-    live_hello_runners:
-        Arc<RwLock<HashMap<uuid::Uuid, (RunnerOut, StateHandle, Option<String>)>>>,
+    live_hello_runners: Arc<RwLock<HelloRunnerMap>>,
     /// In-flight run, if any. Replaced on each Assign and cleared as soon as
     /// the worker task signals completion via `done_rx` — driven by
     /// `tokio::select!` so a new Assign isn't rejected while we wait for the
