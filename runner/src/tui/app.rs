@@ -13,33 +13,45 @@ use std::io;
 use std::time::Duration;
 
 use super::ipc_client::TuiIpc;
-use super::views::{approvals, config as config_view, runner_status, runs};
+use super::views::{approvals, config as config_view, general, runner_status, runs};
 use crate::util::paths::Paths;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Tab {
-    /// Daemon health + start/stop controls. First tab so `pidash tui` lands
-    /// here and the user immediately sees whether the runner is up.
+    /// Daemon-level surface: cloud URL, connection state, uptime, log
+    /// settings, and the start/stop service controls. First tab because
+    /// "is the daemon up and connected?" is the most common question
+    /// when opening the TUI.
+    General,
+    /// List of runners hosted by this daemon. Inline `[a]` adds a
+    /// new runner (against the locally-installed machine token);
+    /// `[d]` deregisters one. Selection cycles with `j`/`k`.
     RunnerStatus,
-    /// Config editor, now the primary reason a user opens the TUI. Moved to
-    /// position 2 because config editing is the most common flow once the
-    /// service is running.
+    /// Per-runner config editor. The Runners-tab selection (or the
+    /// picker bar) drives which runner this tab edits.
     Config,
     Runs,
     Approvals,
 }
 
 impl Tab {
-    pub fn all() -> [Tab; 4] {
-        [Tab::RunnerStatus, Tab::Config, Tab::Runs, Tab::Approvals]
+    pub fn all() -> [Tab; 5] {
+        [
+            Tab::General,
+            Tab::RunnerStatus,
+            Tab::Config,
+            Tab::Runs,
+            Tab::Approvals,
+        ]
     }
 
     pub fn label(&self) -> &'static str {
         match self {
+            Tab::General => "General",
             // "Runners" (plural) honours the multi-runner shape of the
-            // tab — one daemon may host many runners, and this tab lists
-            // every one of them. Keep the enum variant `RunnerStatus`
-            // to minimise diff against existing code paths.
+            // tab — one daemon may host many runners. Keep the enum
+            // variant `RunnerStatus` to minimise diff against existing
+            // code paths.
             Tab::RunnerStatus => "Runners",
             Tab::Config => "Config",
             Tab::Runs => "Runs",
@@ -47,20 +59,20 @@ impl Tab {
         }
     }
 
-    /// Parse `--tab` values: accepts the canonical name (`runners`,
-    /// `config`, `runs`, `approvals`) or a 1-based index (`1`–`4`).
-    /// `runner` (singular) is kept as an alias for back-compat with
-    /// scripts that already use the old label. Unknown input yields
-    /// `None` so the caller can surface a clap-style error.
+    /// Parse `--tab` values: accepts the canonical name or a 1-based
+    /// index (`1`–`5`). Old singular `runner` and `status` aliases are
+    /// kept for back-compat with scripts that already use them; the
+    /// canonical token is now `runners`.
     pub fn parse_cli(raw: &str) -> Option<Tab> {
         let s = raw.trim().to_ascii_lowercase();
         match s.as_str() {
-            "runners" | "runner" | "runner-status" | "runner_status" | "status" | "1" => {
+            "general" | "1" => Some(Tab::General),
+            "runners" | "runner" | "runner-status" | "runner_status" | "status" | "2" => {
                 Some(Tab::RunnerStatus)
             }
-            "config" | "2" => Some(Tab::Config),
-            "runs" | "3" => Some(Tab::Runs),
-            "approvals" | "4" => Some(Tab::Approvals),
+            "config" | "3" => Some(Tab::Config),
+            "runs" | "4" => Some(Tab::Runs),
+            "approvals" | "5" => Some(Tab::Approvals),
             _ => None,
         }
     }
@@ -119,6 +131,49 @@ pub struct AppState {
     /// installs cycle with `<` / `>` or jump with digit keys. Clamped to
     /// `len() - 1` whenever the config reloads.
     pub runner_picker_idx: usize,
+    /// Cursor position on the General tab (log level vs log retention).
+    pub tab_general_field: super::views::general::GeneralField,
+    /// Cursor position on the Runners tab (which runner is highlighted).
+    /// Reused for the picker too — when the user selects a runner here,
+    /// the picker on Config/Runs/Approvals stays in sync.
+    pub runners_list_idx: usize,
+    /// Inline add-runner form, shown over the Runners tab when the user
+    /// presses `[a]`. None when not in the add flow.
+    pub add_runner_form: Option<AddRunnerForm>,
+    /// Pending remove-runner confirmation (carries the target name);
+    /// `[y]` runs the deregister, anything else cancels.
+    pub remove_runner_confirm: Option<String>,
+}
+
+/// Multi-step form for adding a runner from inside the TUI. Mirrors
+/// the CLI's `pidash token add-runner` arg shape: name, project (the
+/// identifier, e.g. `PIDASH`), optional pod, working_dir.
+#[derive(Debug, Clone, Default)]
+pub struct AddRunnerForm {
+    pub name: String,
+    pub project: String,
+    pub pod: String,
+    pub working_dir: String,
+    /// 0 = name, 1 = project, 2 = pod, 3 = working_dir, 4 = Submit.
+    pub focus: u8,
+    pub busy: bool,
+    pub error: Option<String>,
+}
+
+impl AddRunnerForm {
+    pub fn field_count() -> u8 {
+        5
+    }
+
+    pub fn current_buffer_mut(&mut self) -> Option<&mut String> {
+        match self.focus {
+            0 => Some(&mut self.name),
+            1 => Some(&mut self.project),
+            2 => Some(&mut self.pod),
+            3 => Some(&mut self.working_dir),
+            _ => None,
+        }
+    }
 }
 
 /// Three-field form (URL / token / name) plus a Register button. Focus is
@@ -211,6 +266,10 @@ pub async fn run(paths: Paths, initial_tab: Tab) -> Result<()> {
         service_action_msg: None,
         register_form: None,
         runner_picker_idx: 0,
+        tab_general_field: super::views::general::GeneralField::default(),
+        runners_list_idx: 0,
+        add_runner_form: None,
+        remove_runner_confirm: None,
     };
 
     enable_raw_mode()?;
@@ -461,6 +520,73 @@ async fn handle_event(ev: Event, state: &mut AppState) {
             }
             return;
         }
+        // Remove-runner confirmation modal: y / Y commits, anything
+        // else cancels. Same shape as confirm_stop above.
+        if state.remove_runner_confirm.is_some() {
+            match key.code {
+                KeyCode::Char('y') | KeyCode::Char('Y') => {
+                    submit_remove_runner(state).await;
+                }
+                _ => state.remove_runner_confirm = None,
+            }
+            return;
+        }
+        // Add-runner form modal (4 text fields + submit). Active on the
+        // Runners tab when the user pressed `[a]`. We intercept all
+        // typed input here so it lands in the focused field instead of
+        // triggering global hotkeys.
+        if state.add_runner_form.is_some() {
+            match (key.code, key.modifiers) {
+                (KeyCode::Char('c'), KeyModifiers::CONTROL) => {
+                    state.confirm_exit = true;
+                    state.confirm_exit_yes = true;
+                    return;
+                }
+                (KeyCode::Esc, _) => {
+                    state.add_runner_form = None;
+                    return;
+                }
+                (KeyCode::Up, _) | (KeyCode::BackTab, _) => {
+                    if let Some(f) = state.add_runner_form.as_mut() {
+                        add_runner_form_advance_focus(f, false);
+                    }
+                    return;
+                }
+                (KeyCode::Down, _) | (KeyCode::Tab, _) => {
+                    if let Some(f) = state.add_runner_form.as_mut() {
+                        add_runner_form_advance_focus(f, true);
+                    }
+                    return;
+                }
+                (KeyCode::Enter, _) => {
+                    let submit =
+                        matches!(state.add_runner_form.as_ref().map(|f| f.focus), Some(4));
+                    if submit {
+                        submit_add_runner_form(state).await;
+                    } else if let Some(f) = state.add_runner_form.as_mut() {
+                        add_runner_form_advance_focus(f, true);
+                    }
+                    return;
+                }
+                (KeyCode::Backspace, _) => {
+                    if let Some(f) = state.add_runner_form.as_mut()
+                        && let Some(buf) = f.current_buffer_mut()
+                    {
+                        buf.pop();
+                    }
+                    return;
+                }
+                (KeyCode::Char(c), mods) if !mods.contains(KeyModifiers::CONTROL) => {
+                    if let Some(f) = state.add_runner_form.as_mut()
+                        && let Some(buf) = f.current_buffer_mut()
+                    {
+                        buf.push(c);
+                    }
+                    return;
+                }
+                _ => return,
+            }
+        }
         // Config tab: inline Register form when there's no config yet.
         // This form covers what the old full-screen onboarding wizard did.
         // We intercept text / nav / submit keys but leave global shortcuts
@@ -480,7 +606,8 @@ async fn handle_event(ev: Event, state: &mut AppState) {
                     KeyCode::Char('1')
                     | KeyCode::Char('2')
                     | KeyCode::Char('3')
-                    | KeyCode::Char('4'),
+                    | KeyCode::Char('4')
+                    | KeyCode::Char('5'),
                     _,
                 )
                 | (KeyCode::Char('h') | KeyCode::Char('l') | KeyCode::Left | KeyCode::Right, _) => {
@@ -579,21 +706,26 @@ async fn handle_event(ev: Event, state: &mut AppState) {
             (KeyCode::Char('Q'), _) => state.confirm_stop = true,
             (KeyCode::Char('?'), _) => state.show_help = true,
             (KeyCode::Char('1'), _) => {
-                state.tab = Tab::RunnerStatus;
+                state.tab = Tab::General;
                 state.selected = 0;
                 refresh(state).await;
             }
             (KeyCode::Char('2'), _) => {
-                state.tab = Tab::Config;
+                state.tab = Tab::RunnerStatus;
                 state.selected = 0;
                 refresh(state).await;
             }
             (KeyCode::Char('3'), _) => {
-                state.tab = Tab::Runs;
+                state.tab = Tab::Config;
                 state.selected = 0;
                 refresh(state).await;
             }
             (KeyCode::Char('4'), _) => {
+                state.tab = Tab::Runs;
+                state.selected = 0;
+                refresh(state).await;
+            }
+            (KeyCode::Char('5'), _) => {
                 state.tab = Tab::Approvals;
                 state.selected = 0;
                 refresh(state).await;
@@ -603,6 +735,18 @@ async fn handle_event(ev: Event, state: &mut AppState) {
                     let n = super::views::config::field_count();
                     if n > 0 {
                         state.selected = (state.selected + 1) % n;
+                    }
+                } else if state.tab == Tab::General {
+                    state.tab_general_field = state.tab_general_field.next();
+                } else if state.tab == Tab::RunnerStatus {
+                    let n = state
+                        .status
+                        .as_ref()
+                        .map(|s| s.runners.len())
+                        .unwrap_or(0);
+                    if n > 0 {
+                        state.runners_list_idx = (state.runners_list_idx + 1) % n;
+                        sync_picker_to_runner_idx(state);
                     }
                 } else {
                     state.selected = state.selected.saturating_add(1);
@@ -618,13 +762,30 @@ async fn handle_event(ev: Event, state: &mut AppState) {
                             state.selected - 1
                         };
                     }
+                } else if state.tab == Tab::General {
+                    state.tab_general_field = state.tab_general_field.prev();
+                } else if state.tab == Tab::RunnerStatus {
+                    let n = state
+                        .status
+                        .as_ref()
+                        .map(|s| s.runners.len())
+                        .unwrap_or(0);
+                    if n > 0 {
+                        state.runners_list_idx = if state.runners_list_idx == 0 {
+                            n - 1
+                        } else {
+                            state.runners_list_idx - 1
+                        };
+                        sync_picker_to_runner_idx(state);
+                    }
                 } else {
                     state.selected = state.selected.saturating_sub(1);
                 }
             }
             (KeyCode::Char('h') | KeyCode::Left, _) => {
                 state.tab = match state.tab {
-                    Tab::RunnerStatus => Tab::Approvals,
+                    Tab::General => Tab::Approvals,
+                    Tab::RunnerStatus => Tab::General,
                     Tab::Config => Tab::RunnerStatus,
                     Tab::Runs => Tab::Config,
                     Tab::Approvals => Tab::Runs,
@@ -634,20 +795,53 @@ async fn handle_event(ev: Event, state: &mut AppState) {
             }
             (KeyCode::Char('l') | KeyCode::Right, _) => {
                 state.tab = match state.tab {
+                    Tab::General => Tab::RunnerStatus,
                     Tab::RunnerStatus => Tab::Config,
                     Tab::Config => Tab::Runs,
                     Tab::Runs => Tab::Approvals,
-                    Tab::Approvals => Tab::RunnerStatus,
+                    Tab::Approvals => Tab::General,
                 };
                 state.selected = 0;
                 refresh(state).await;
             }
             (KeyCode::Char('r'), _) => refresh(state).await,
-            (KeyCode::Char('s'), _) if state.tab == Tab::RunnerStatus => {
+            // Service controls migrated to the General tab. Pressing
+            // `s`/`x` from the Runners tab is now a no-op so the user
+            // can't accidentally start/stop the daemon while focused
+            // on a runner row.
+            (KeyCode::Char('s'), _) if state.tab == Tab::General => {
                 run_service_action(state, ServiceAction::Start).await;
             }
-            (KeyCode::Char('x'), _) if state.tab == Tab::RunnerStatus => {
+            (KeyCode::Char('x'), _) if state.tab == Tab::General => {
                 run_service_action(state, ServiceAction::Stop).await;
+            }
+            // Runners tab: [a] open add-runner form, [d] confirm remove
+            // of the highlighted runner.
+            (KeyCode::Char('a'), _) if state.tab == Tab::RunnerStatus => {
+                state.add_runner_form = Some(AddRunnerForm {
+                    working_dir: default_working_dir_for_new_runner(state),
+                    ..AddRunnerForm::default()
+                });
+            }
+            (KeyCode::Char('d'), _) if state.tab == Tab::RunnerStatus => {
+                if let Some(s) = &state.status
+                    && let Some(r) = s.runners.get(state.runners_list_idx)
+                {
+                    state.remove_runner_confirm = Some(r.name.clone());
+                }
+            }
+            // General tab field nav + edit.
+            (KeyCode::Enter, _) if state.tab == Tab::General => {
+                start_or_apply_general_field(state);
+            }
+            (KeyCode::Char('w'), _) if state.tab == Tab::General => {
+                save_config(state).await;
+            }
+            (KeyCode::Esc, _) if state.tab == Tab::General => {
+                if let Some(loaded) = state.config_loaded.clone() {
+                    state.config_working = Some(loaded);
+                }
+                state.config_edit_error = None;
             }
             (KeyCode::Enter, _) if state.tab == Tab::Config => {
                 start_or_apply_config_field(state);
@@ -778,6 +972,193 @@ async fn save_config(state: &mut AppState) {
     state.config_edit_error = None;
     state.reload_outcome = Some(crate::service::reload::restart_and_verify(&state.paths).await);
     // Pull a fresh view of everything else now that the daemon restarted.
+    refresh(state).await;
+}
+
+fn add_runner_form_advance_focus(form: &mut AddRunnerForm, forward: bool) {
+    let n = AddRunnerForm::field_count();
+    form.focus = if forward {
+        (form.focus + 1) % n
+    } else if form.focus == 0 {
+        n - 1
+    } else {
+        form.focus - 1
+    };
+}
+
+/// Suggest a working_dir for a new runner: the parent of the primary
+/// runner's working_dir, joined with the new runner's name (filled in
+/// once the user types it). Falls back to `~/.pidash/<placeholder>`
+/// when no config exists yet so the field isn't empty.
+fn default_working_dir_for_new_runner(state: &AppState) -> String {
+    if let Some(cfg) = state.config_working.as_ref()
+        && let Some(primary) = cfg.runners.first()
+        && let Some(parent) = primary.workspace.working_dir.parent()
+    {
+        return parent.join("runner-new").display().to_string();
+    }
+    state
+        .paths
+        .default_working_dir()
+        .join("runner-new")
+        .display()
+        .to_string()
+}
+
+/// Sync the runner picker (used by Config / Runs / Approvals) to a
+/// specific row index from the Runners list. Keeps the two cursors
+/// coherent so the user doesn't have to re-pick on every tab switch.
+fn sync_picker_to_runner_idx(state: &mut AppState) {
+    let total = state
+        .config_working
+        .as_ref()
+        .map(|c| c.runners.len())
+        .unwrap_or(0);
+    if total == 0 {
+        return;
+    }
+    let idx = state.runners_list_idx.min(total - 1);
+    state.runner_picker_idx = idx;
+    sync_picker_to_ipc(state);
+}
+
+/// General-tab Enter handler. Cycles the log level enum or opens the
+/// edit buffer for retention_days. Mirrors the Config-tab pattern at
+/// `start_or_apply_config_field`, but typed for the two daemon fields.
+fn start_or_apply_general_field(state: &mut AppState) {
+    let Some(cfg) = state.config_working.as_mut() else {
+        return;
+    };
+    state.config_edit_error = None;
+    match state.tab_general_field {
+        super::views::general::GeneralField::LogLevel => {
+            const LOG_LEVELS: &[&str] = &["trace", "debug", "info", "warn", "error"];
+            let cur = LOG_LEVELS
+                .iter()
+                .position(|s| *s == cfg.daemon.log_level)
+                .unwrap_or(2);
+            cfg.daemon.log_level = LOG_LEVELS[(cur + 1) % LOG_LEVELS.len()].to_string();
+        }
+        super::views::general::GeneralField::LogRetentionDays => {
+            state.config_edit_buffer = Some(cfg.daemon.log_retention_days.to_string());
+        }
+    }
+}
+
+/// Commit the add-runner form. Calls into `cli::token::add_runner`
+/// (the library entry point — no stdout side effects) and then runs
+/// `restart_and_verify` so the daemon picks up the new
+/// `[[runner]]` block immediately. On cloud / validation failure we
+/// keep the form visible with the error attached so the user can
+/// retry without re-typing.
+async fn submit_add_runner_form(state: &mut AppState) {
+    let Some(form) = state.add_runner_form.as_mut() else {
+        return;
+    };
+    let name = form.name.trim().to_string();
+    let project = form.project.trim().to_string();
+    let pod = form.pod.trim().to_string();
+    let working_dir = form.working_dir.trim().to_string();
+
+    if name.is_empty() {
+        form.error = Some("name is required".into());
+        return;
+    }
+    if let Err(e) = crate::util::runner_name::validate(&name) {
+        form.error = Some(format!("invalid name: {e}"));
+        return;
+    }
+    if project.is_empty() {
+        form.error = Some(
+            "project is required (e.g. PIDASH; run `pidash token list-projects` to see options)"
+                .into(),
+        );
+        return;
+    }
+    if working_dir.is_empty() {
+        form.error = Some("working_dir is required".into());
+        return;
+    }
+
+    form.busy = true;
+    form.error = None;
+
+    let args = crate::cli::token::AddRunnerArgs {
+        name,
+        project,
+        pod: if pod.is_empty() { None } else { Some(pod) },
+        working_dir: std::path::PathBuf::from(working_dir),
+        agent: crate::config::schema::AgentKind::Codex,
+    };
+
+    let outcome = match crate::cli::token::add_runner(args, &state.paths).await {
+        Ok(o) => o,
+        Err(e) => {
+            if let Some(f) = state.add_runner_form.as_mut() {
+                f.busy = false;
+                f.error = Some(format!("{e:#}"));
+            }
+            return;
+        }
+    };
+    state.add_runner_form = None;
+    // Restart the daemon so the new RunnerInstance is hosted; outcome
+    // surfaces in the General tab's banner.
+    state.reload_outcome =
+        Some(crate::service::reload::restart_and_verify(&state.paths).await);
+    refresh(state).await;
+    // Aim the picker at the freshly-added runner so Config / Runs land
+    // on it right away.
+    if let Some(cfg) = state.config_working.as_ref()
+        && let Some(idx) = cfg
+            .runners
+            .iter()
+            .position(|r| r.runner_id == outcome.runner_id)
+    {
+        state.runners_list_idx = idx;
+        state.runner_picker_idx = idx;
+        sync_picker_to_ipc(state);
+    }
+}
+
+/// Commit a `remove_runner_confirm` decision. Cleared either way; on
+/// cloud / fs failure we surface the error in `reload_outcome`'s
+/// banner so the user sees what broke without losing the modal flow.
+async fn submit_remove_runner(state: &mut AppState) {
+    let Some(name) = state.remove_runner_confirm.take() else {
+        return;
+    };
+    let args = crate::cli::token::RemoveRunnerArgs { name: name.clone() };
+    match crate::cli::token::remove_runner(args, &state.paths).await {
+        Ok(_) => {
+            state.reload_outcome =
+                Some(crate::service::reload::restart_and_verify(&state.paths).await);
+        }
+        Err(e) => {
+            state.reload_outcome = Some(crate::service::reload::ReloadOutcome {
+                ok: false,
+                summary: format!("remove {name:?} failed"),
+                detail: Some(format!("{e:#}")),
+                service_state: state
+                    .service_state
+                    .clone()
+                    .unwrap_or_else(|| "unknown".into()),
+            });
+        }
+    }
+    // Clamp list index so we don't point past the end of the now
+    // shorter runner list.
+    if let Some(cfg) = state.config_working.as_ref() {
+        let n = cfg.runners.len();
+        if n > 0 {
+            if state.runners_list_idx >= n {
+                state.runners_list_idx = n - 1;
+            }
+            if state.runner_picker_idx >= n {
+                state.runner_picker_idx = n - 1;
+            }
+        }
+    }
     refresh(state).await;
 }
 
@@ -1018,10 +1399,11 @@ fn draw(f: &mut ratatui::Frame<'_>, state: &AppState) {
         .map(|t| Line::from(Span::styled(t.label(), Style::default())))
         .collect();
     let idx = match state.tab {
-        Tab::RunnerStatus => 0,
-        Tab::Config => 1,
-        Tab::Runs => 2,
-        Tab::Approvals => 3,
+        Tab::General => 0,
+        Tab::RunnerStatus => 1,
+        Tab::Config => 2,
+        Tab::Runs => 3,
+        Tab::Approvals => 4,
     };
     let tabs = Tabs::new(titles)
         .block(
@@ -1038,6 +1420,7 @@ fn draw(f: &mut ratatui::Frame<'_>, state: &AppState) {
     }
 
     match state.tab {
+        Tab::General => general::render(f, layout[body_idx], state),
         Tab::RunnerStatus => runner_status::render(f, layout[body_idx], state),
         Tab::Config => config_view::render(f, layout[body_idx], state),
         Tab::Runs => runs::render(f, layout[body_idx], state),
@@ -1045,7 +1428,7 @@ fn draw(f: &mut ratatui::Frame<'_>, state: &AppState) {
     }
 
     let hint = Line::from(Span::styled(
-        " [1]Runners [2]Config [3]Runs [4]Approvals  h/l switch  j/k move  </> runner  r refresh  ?help  q exit ",
+        " [1]General [2]Runners [3]Config [4]Runs [5]Approvals  h/l switch  j/k move  </> runner  r refresh  ?help  q exit ",
         Style::default().add_modifier(Modifier::DIM),
     ));
     f.render_widget(Paragraph::new(hint), layout[hint_idx]);
@@ -1056,7 +1439,145 @@ fn draw(f: &mut ratatui::Frame<'_>, state: &AppState) {
         render_confirm_exit(f, state.confirm_exit_yes);
     } else if state.confirm_stop {
         render_confirm_stop(f);
+    } else if let Some(name) = &state.remove_runner_confirm {
+        render_confirm_remove_runner(f, name);
+    } else if let Some(form) = &state.add_runner_form {
+        render_add_runner_form(f, form);
     }
+}
+
+/// Centered modal for the add-runner form. Drawn over whatever tab the
+/// user pressed `[a]` from. Behaves like a focus-driven 5-field form
+/// (name, project, pod, working_dir, Submit) — same shape as the
+/// existing `RegisterForm` so users get muscle memory.
+fn render_add_runner_form(f: &mut ratatui::Frame<'_>, form: &AddRunnerForm) {
+    use ratatui::widgets::Clear;
+
+    let area = centered_rect(70, 60, f.area());
+    f.render_widget(Clear, area);
+
+    let mut lines: Vec<Line<'_>> = vec![
+        Line::from(Span::styled(
+            "Add a runner to this machine",
+            Style::default()
+                .fg(ratatui::style::Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        )),
+        Line::from(Span::styled(
+            "Uses the locally-installed machine token. Discover projects with `pidash token list-projects`.",
+            Style::default().add_modifier(Modifier::DIM),
+        )),
+        Line::raw(""),
+        modal_field_line("Name        ", &form.name, form.focus == 0),
+        modal_field_line("Project     ", &form.project, form.focus == 1),
+        modal_field_line(
+            "Pod         ",
+            if form.pod.is_empty() {
+                "(default pod for the project)"
+            } else {
+                form.pod.as_str()
+            },
+            form.focus == 2,
+        ),
+        modal_field_line("Working dir ", &form.working_dir, form.focus == 3),
+        Line::raw(""),
+    ];
+    let submit_label = if form.busy {
+        " Adding… "
+    } else {
+        " Submit "
+    };
+    let submit_style = if form.focus == 4 {
+        Style::default()
+            .fg(ratatui::style::Color::Black)
+            .bg(ratatui::style::Color::Green)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default()
+            .fg(ratatui::style::Color::Green)
+            .add_modifier(Modifier::BOLD)
+    };
+    lines.push(Line::from(vec![
+        Span::raw("   "),
+        Span::styled(submit_label.to_string(), submit_style),
+        Span::raw("   "),
+        Span::styled(
+            "Esc cancel",
+            Style::default().add_modifier(Modifier::DIM),
+        ),
+    ]));
+    if let Some(e) = &form.error {
+        lines.push(Line::raw(""));
+        lines.push(Line::from(Span::styled(
+            e.clone(),
+            Style::default().fg(ratatui::style::Color::Red),
+        )));
+    }
+
+    let p = Paragraph::new(lines)
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(" Add runner "),
+        )
+        .wrap(ratatui::widgets::Wrap { trim: false });
+    f.render_widget(p, area);
+}
+
+fn modal_field_line(label: &str, value: &str, focused: bool) -> Line<'static> {
+    let marker = if focused { "▶" } else { " " };
+    let cursor = if focused { "▊" } else { "" };
+    let value_style = if focused {
+        Style::default()
+            .fg(ratatui::style::Color::Yellow)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(ratatui::style::Color::White)
+    };
+    Line::from(vec![
+        Span::styled(
+            format!(" {marker} "),
+            Style::default()
+                .fg(if focused {
+                    ratatui::style::Color::Cyan
+                } else {
+                    ratatui::style::Color::DarkGray
+                })
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::raw(format!("{} ", label)),
+        Span::styled(format!("{value}{cursor}"), value_style),
+    ])
+}
+
+fn render_confirm_remove_runner(f: &mut ratatui::Frame<'_>, name: &str) {
+    use ratatui::widgets::Clear;
+    let area = centered_rect(50, 30, f.area());
+    f.render_widget(Clear, area);
+    let body = Paragraph::new(vec![
+        Line::from(vec![
+            Span::raw("Remove runner "),
+            Span::styled(
+                format!("{name:?}"),
+                Style::default()
+                    .fg(ratatui::style::Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::raw("?"),
+        ]),
+        Line::raw(""),
+        Line::from("Deregisters cloud-side, strips it from config.toml,"),
+        Line::from("and deletes the local data directory. The other"),
+        Line::from("runners on this machine keep running."),
+        Line::raw(""),
+        Line::from("[y] yes     [any other key] cancel"),
+    ])
+    .block(
+        Block::default()
+            .borders(Borders::ALL)
+            .title(" Confirm remove "),
+    );
+    f.render_widget(body, area);
 }
 
 fn render_help(f: &mut ratatui::Frame<'_>) {
@@ -1073,14 +1594,16 @@ fn render_help(f: &mut ratatui::Frame<'_>) {
         Line::from("j/k ↑/↓   move selection"),
         Line::from("↵     open detail"),
         Line::from("r     force refresh"),
-        Line::from("s     start runner service  (Runner tab)"),
-        Line::from("x     stop runner service   (Runner tab)"),
+        Line::from("s     start runner service  (General tab)"),
+        Line::from("x     stop runner service   (General tab)"),
         Line::from("↵     edit field / toggle  (Config tab)"),
         Line::from("w     save + reload daemon (Config tab)"),
         Line::from("Esc   discard edits       (Config tab)"),
-        Line::from("a     accept approval (once)"),
-        Line::from("A     accept for session"),
-        Line::from("d     decline"),
+        Line::from("a     accept approval        (Approvals tab)"),
+        Line::from("a     add a runner           (Runners tab)"),
+        Line::from("A     accept for session     (Approvals tab)"),
+        Line::from("d     decline                (Approvals tab)"),
+        Line::from("d     remove highlighted runner (Runners tab)"),
         Line::raw(""),
         Line::from("Multi-runner picker (Config / Runs / Approvals):"),
         Line::from("</,    previous runner"),

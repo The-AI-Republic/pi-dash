@@ -120,18 +120,9 @@ pub const FIELDS: &[FieldSpec] = &[
         section: "Approval policy",
         kind: FieldKind::Bool,
     },
-    FieldSpec {
-        id: FieldId::LogLevel,
-        label: "level",
-        section: "Logging",
-        kind: FieldKind::Enum(LOG_LEVELS),
-    },
-    FieldSpec {
-        id: FieldId::LogRetentionDays,
-        label: "retention_days",
-        section: "Logging",
-        kind: FieldKind::U32,
-    },
+    // Daemon-level log fields (log_level, log_retention_days) live in
+    // the General tab — they're shared across every runner the daemon
+    // hosts and don't make sense as per-runner edits.
 ];
 
 pub fn field_count() -> usize {
@@ -587,17 +578,10 @@ fn editable_lines(
         ),
     ));
     lines.push(Line::raw(""));
-
-    lines.push(section_header("Logging"));
-    for id in [FieldId::LogLevel, FieldId::LogRetentionDays] {
-        lines.extend(render_editable_row(
-            working,
-            loaded,
-            state,
-            selected_idx,
-            index_of(id),
-        ));
-    }
+    lines.push(Line::from(Span::styled(
+        "Daemon-level fields (log level, log retention) live in the General tab.",
+        Style::default().add_modifier(Modifier::DIM),
+    )));
 
     lines
 }
