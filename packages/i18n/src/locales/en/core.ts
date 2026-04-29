@@ -25,7 +25,7 @@ export default {
     upgrade: "Upgrade",
     stickies: "Stickies",
     prompts: "Prompts",
-    runners: "Runners",
+    runners: "AI Agents",
     tooltips: {
       projects: "Browse projects",
       runners: "Manage your AI Agent connectivities",
@@ -251,13 +251,13 @@ export default {
     },
   },
   runners: {
-    title: "Pi Dash Runner",
-    page_title: "{workspace} - Runners",
+    title: "AI Agents",
+    page_title: "{workspace} - AI Agents",
     toast: {
       error_title: "Error!",
     },
     tabs: {
-      runners: "Runners",
+      runners: "AI Agents",
       runs: "Runs",
       approvals: "Approvals",
     },
