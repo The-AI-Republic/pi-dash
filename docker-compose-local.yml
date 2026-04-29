@@ -95,7 +95,7 @@ services:
       - dev_env
     volumes:
       - ./apps/api:/code
-    command: ./bin/docker-entrypoint-worker.sh
+    command: ./bin/docker-entrypoint-worker-local.sh
     env_file:
       - ./apps/api/.env
     depends_on:
@@ -114,7 +114,7 @@ services:
       - dev_env
     volumes:
       - ./apps/api:/code
-    command: ./bin/docker-entrypoint-beat.sh
+    command: ./bin/docker-entrypoint-beat-local.sh
     env_file:
       - ./apps/api/.env
     depends_on:
