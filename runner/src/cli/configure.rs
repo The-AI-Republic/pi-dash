@@ -269,7 +269,7 @@ pub async fn run(args: Args, paths: &Paths) -> Result<()> {
         return crate::tui::run(
             paths.clone(),
             /* no_onboarding = */ false,
-            crate::tui::app::Tab::Config,
+            crate::tui::app::Tab::RunnerStatus,
         )
         .await;
     }

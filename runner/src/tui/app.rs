@@ -13,7 +13,7 @@ use std::io;
 use std::time::Duration;
 
 use super::ipc_client::TuiIpc;
-use super::views::{approvals, config as config_view, general, runner_status, runs};
+use super::views::{approvals, general, runner_status, runs};
 use crate::util::paths::Paths;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -23,23 +23,22 @@ pub enum Tab {
     /// "is the daemon up and connected?" is the most common question
     /// when opening the TUI.
     General,
-    /// List of runners hosted by this daemon. Inline `[a]` adds a
-    /// new runner (against the locally-installed machine token);
-    /// `[d]` deregisters one. Selection cycles with `j`/`k`.
+    /// List of runners hosted by this daemon plus the per-runner
+    /// settings panel for the highlighted runner. `[a]` adds, `[d]`
+    /// removes, `<`/`>` move runner selection, `j`/`k` move the field
+    /// cursor inside the settings panel. Replaces the old single-runner
+    /// Config tab — every per-runner field that used to live there is
+    /// now shown below the runner list.
     RunnerStatus,
-    /// Per-runner config editor. The Runners-tab selection (or the
-    /// picker bar) drives which runner this tab edits.
-    Config,
     Runs,
     Approvals,
 }
 
 impl Tab {
-    pub fn all() -> [Tab; 5] {
+    pub fn all() -> [Tab; 4] {
         [
             Tab::General,
             Tab::RunnerStatus,
-            Tab::Config,
             Tab::Runs,
             Tab::Approvals,
         ]
@@ -49,30 +48,26 @@ impl Tab {
         match self {
             Tab::General => "General",
             // "Runners" (plural) honours the multi-runner shape of the
-            // tab — one daemon may host many runners. Keep the enum
-            // variant `RunnerStatus` to minimise diff against existing
-            // code paths.
+            // tab — one daemon may host many runners, and the
+            // per-runner settings panel below the list takes the place
+            // of the old Config tab.
             Tab::RunnerStatus => "Runners",
-            Tab::Config => "Config",
             Tab::Runs => "Runs",
             Tab::Approvals => "Approvals",
         }
     }
 
     /// Parse `--tab` values: accepts the canonical name or a 1-based
-    /// index (`1`–`5`). Old singular `runner` and `status` aliases are
-    /// kept for back-compat with scripts that already use them; the
-    /// canonical token is now `runners`.
+    /// index (`1`–`4`). The old `config` alias resolves to
+    /// `runners` since per-runner settings now live there.
     pub fn parse_cli(raw: &str) -> Option<Tab> {
         let s = raw.trim().to_ascii_lowercase();
         match s.as_str() {
             "general" | "1" => Some(Tab::General),
-            "runners" | "runner" | "runner-status" | "runner_status" | "status" | "2" => {
-                Some(Tab::RunnerStatus)
-            }
-            "config" | "3" => Some(Tab::Config),
-            "runs" | "4" => Some(Tab::Runs),
-            "approvals" | "5" => Some(Tab::Approvals),
+            "runners" | "runner" | "runner-status" | "runner_status" | "status"
+            | "config" | "2" => Some(Tab::RunnerStatus),
+            "runs" | "3" => Some(Tab::Runs),
+            "approvals" | "4" => Some(Tab::Approvals),
             _ => None,
         }
     }
@@ -86,13 +81,13 @@ pub struct AppState {
     pub runs: Vec<crate::history::index::RunSummary>,
     pub approvals: Vec<crate::approval::router::ApprovalRecord>,
     /// Currently-on-disk config, decoded from `config.toml`. `None` means
-    /// the file is missing (first-run state) — the Config tab switches into
-    /// "Register with cloud" mode when that happens.
+    /// the file is missing (first-run state) — the Runners tab switches
+    /// into "Register with cloud" mode when that happens.
     pub config_loaded: Option<crate::config::schema::Config>,
-    /// Working copy users edit in the Config tab. Kicked off as a clone of
-    /// `config_loaded` and mutated in-place as fields get toggled / edited.
-    /// `w` writes this to disk; `Esc` (in browse mode) discards it back to
-    /// `config_loaded`.
+    /// Working copy users edit in the Runners tab's settings panel.
+    /// Kicked off as a clone of `config_loaded` and mutated in-place as
+    /// fields get toggled / edited. `w` writes this to disk; `Esc` (in
+    /// browse mode) discards it back to `config_loaded`.
     pub config_working: Option<crate::config::schema::Config>,
     /// `Some(buffer)` while the user is typing into a Text/U32 field. The
     /// buffer is seeded with the field's current stringified value; Enter
@@ -485,46 +480,40 @@ async fn refresh(state: &mut AppState) {
         }
         state.approvals = v;
     }
-    match state.tab {
-        Tab::Runs => {
-            if let Ok(v) = state.ipc.runs().await {
-                state.runs = v;
+    // Config is consumed by every tab now — General displays the
+    // daemon section, Runners renders the per-runner settings panel,
+    // Runs / Approvals lean on the picker. Load it unconditionally.
+    match crate::config::file::load_config_opt(&state.paths) {
+        Ok(Some(cfg)) => {
+            state.config_loaded = Some(cfg.clone());
+            state.config_error = None;
+            // Seed the working copy on first load. Don't clobber if the
+            // user already has unsaved edits in flight — the 500 ms
+            // refresh tick shouldn't erase their work.
+            if state.config_working.is_none() {
+                state.config_working = Some(cfg);
+            }
+            sync_picker_to_ipc(state);
+        }
+        Ok(None) => {
+            state.config_loaded = None;
+            state.config_working = None;
+            state.config_error = None;
+            // Fresh machine — seed the inline register form so the
+            // Runners tab can render it.
+            if state.register_form.is_none() {
+                state.register_form = Some(RegisterForm::new(default_hostname()));
             }
         }
-        Tab::Config => {
-            // Direct file I/O — no daemon needed. load_config_opt swallows
-            // NotFound and returns None so we can route into the register
-            // sub-widget without an error banner.
-            match crate::config::file::load_config_opt(&state.paths) {
-                Ok(Some(cfg)) => {
-                    state.config_loaded = Some(cfg.clone());
-                    state.config_error = None;
-                    // Seed the working copy on first load. Don't clobber if
-                    // the user already has unsaved edits in flight — the
-                    // 500 ms refresh tick shouldn't erase their work.
-                    if state.config_working.is_none() {
-                        state.config_working = Some(cfg);
-                    }
-                    // Clamp the picker into the now-known runner count and
-                    // make sure the IPC selector matches the picked name.
-                    sync_picker_to_ipc(state);
-                }
-                Ok(None) => {
-                    state.config_loaded = None;
-                    state.config_working = None;
-                    state.config_error = None;
-                    // Fresh machine — show the inline register form.
-                    if state.register_form.is_none() {
-                        state.register_form = Some(RegisterForm::new(default_hostname()));
-                    }
-                }
-                Err(e) => {
-                    state.config_loaded = None;
-                    state.config_error = Some(format!("{e:#}"));
-                }
-            }
+        Err(e) => {
+            state.config_loaded = None;
+            state.config_error = Some(format!("{e:#}"));
         }
-        _ => {}
+    }
+    if state.tab == Tab::Runs
+        && let Ok(v) = state.ipc.runs().await
+    {
+        state.runs = v;
     }
 }
 
@@ -670,12 +659,12 @@ async fn handle_event(ev: Event, state: &mut AppState) {
                 _ => return,
             }
         }
-        // Config tab: inline Register form when there's no config yet.
-        // This form covers what the old full-screen onboarding wizard did.
-        // We intercept text / nav / submit keys but leave global shortcuts
-        // (Ctrl+C to quit, 1–4 / h / l to switch tabs) to the main match
-        // so the user can always escape.
-        if state.tab == Tab::Config
+        // Runners tab: inline Register form when there's no config yet.
+        // Replaces the old standalone onboarding wizard. We intercept
+        // text / nav / submit keys but leave global shortcuts (Ctrl+C
+        // to quit, 1–4 / h / l to switch tabs) to the main match so
+        // the user can always escape.
+        if state.tab == Tab::RunnerStatus
             && state.register_form.is_some()
             && state.config_working.is_none()
         {
@@ -689,8 +678,7 @@ async fn handle_event(ev: Event, state: &mut AppState) {
                     KeyCode::Char('1')
                     | KeyCode::Char('2')
                     | KeyCode::Char('3')
-                    | KeyCode::Char('4')
-                    | KeyCode::Char('5'),
+                    | KeyCode::Char('4'),
                     _,
                 )
                 | (KeyCode::Char('h') | KeyCode::Char('l') | KeyCode::Left | KeyCode::Right, _) => {
@@ -753,7 +741,7 @@ async fn handle_event(ev: Event, state: &mut AppState) {
         // Enter commits, Esc cancels. Ctrl+C remains a universal escape
         // hatch — otherwise the user can get wedged with no way to quit
         // the TUI without Esc+q.
-        if state.tab == Tab::Config && state.config_edit_buffer.is_some() {
+        if state.tab == Tab::RunnerStatus && state.config_edit_buffer.is_some() {
             if let (KeyCode::Char('c'), m) = (key.code, key.modifiers)
                 && m.contains(KeyModifiers::CONTROL)
             {
@@ -799,44 +787,34 @@ async fn handle_event(ev: Event, state: &mut AppState) {
                 refresh(state).await;
             }
             (KeyCode::Char('3'), _) => {
-                state.tab = Tab::Config;
-                state.selected = 0;
-                refresh(state).await;
-            }
-            (KeyCode::Char('4'), _) => {
                 state.tab = Tab::Runs;
                 state.selected = 0;
                 refresh(state).await;
             }
-            (KeyCode::Char('5'), _) => {
+            (KeyCode::Char('4'), _) => {
                 state.tab = Tab::Approvals;
                 state.selected = 0;
                 refresh(state).await;
             }
             (KeyCode::Char('j') | KeyCode::Down, _) => {
-                if state.tab == Tab::Config {
+                if state.tab == Tab::General {
+                    state.tab_general_field = state.tab_general_field.next();
+                } else if state.tab == Tab::RunnerStatus {
+                    // On the Runners tab, j/k moves the per-runner field
+                    // cursor (settings panel below the list). The runner
+                    // selection itself moves with `<` / `>` / Alt+N.
                     let n = super::views::config::field_count();
                     if n > 0 {
                         state.selected = (state.selected + 1) % n;
-                    }
-                } else if state.tab == Tab::General {
-                    state.tab_general_field = state.tab_general_field.next();
-                } else if state.tab == Tab::RunnerStatus {
-                    let n = state
-                        .status
-                        .as_ref()
-                        .map(|s| s.runners.len())
-                        .unwrap_or(0);
-                    if n > 0 {
-                        state.runners_list_idx = (state.runners_list_idx + 1) % n;
-                        sync_picker_to_runner_idx(state);
                     }
                 } else {
                     state.selected = state.selected.saturating_add(1);
                 }
             }
             (KeyCode::Char('k') | KeyCode::Up, _) => {
-                if state.tab == Tab::Config {
+                if state.tab == Tab::General {
+                    state.tab_general_field = state.tab_general_field.prev();
+                } else if state.tab == Tab::RunnerStatus {
                     let n = super::views::config::field_count();
                     if n > 0 {
                         state.selected = if state.selected == 0 {
@@ -844,22 +822,6 @@ async fn handle_event(ev: Event, state: &mut AppState) {
                         } else {
                             state.selected - 1
                         };
-                    }
-                } else if state.tab == Tab::General {
-                    state.tab_general_field = state.tab_general_field.prev();
-                } else if state.tab == Tab::RunnerStatus {
-                    let n = state
-                        .status
-                        .as_ref()
-                        .map(|s| s.runners.len())
-                        .unwrap_or(0);
-                    if n > 0 {
-                        state.runners_list_idx = if state.runners_list_idx == 0 {
-                            n - 1
-                        } else {
-                            state.runners_list_idx - 1
-                        };
-                        sync_picker_to_runner_idx(state);
                     }
                 } else {
                     state.selected = state.selected.saturating_sub(1);
@@ -869,8 +831,7 @@ async fn handle_event(ev: Event, state: &mut AppState) {
                 state.tab = match state.tab {
                     Tab::General => Tab::Approvals,
                     Tab::RunnerStatus => Tab::General,
-                    Tab::Config => Tab::RunnerStatus,
-                    Tab::Runs => Tab::Config,
+                    Tab::Runs => Tab::RunnerStatus,
                     Tab::Approvals => Tab::Runs,
                 };
                 state.selected = 0;
@@ -879,8 +840,7 @@ async fn handle_event(ev: Event, state: &mut AppState) {
             (KeyCode::Char('l') | KeyCode::Right, _) => {
                 state.tab = match state.tab {
                     Tab::General => Tab::RunnerStatus,
-                    Tab::RunnerStatus => Tab::Config,
-                    Tab::Config => Tab::Runs,
+                    Tab::RunnerStatus => Tab::Runs,
                     Tab::Runs => Tab::Approvals,
                     Tab::Approvals => Tab::General,
                 };
@@ -929,38 +889,47 @@ async fn handle_event(ev: Event, state: &mut AppState) {
                 }
                 state.config_edit_error = None;
             }
-            (KeyCode::Enter, _) if state.tab == Tab::Config => {
+            // Runners tab settings panel: Enter edits the field at the
+            // j/k cursor (per-runner field of the focused runner). w
+            // saves + reloads. Esc discards pending edits. Same shape
+            // as the old Config tab — these used to live there before
+            // the dissolution.
+            (KeyCode::Enter, _) if state.tab == Tab::RunnerStatus => {
                 start_or_apply_config_field(state);
             }
-            (KeyCode::Char('w'), _) if state.tab == Tab::Config => {
+            (KeyCode::Char('w'), _) if state.tab == Tab::RunnerStatus => {
                 save_config(state).await;
             }
-            (KeyCode::Esc, _) if state.tab == Tab::Config => {
-                // Discard pending edits — roll working copy back to the
-                // last-loaded snapshot. Leaves reload_outcome alone so the
-                // user can still see whether their previous save succeeded.
+            (KeyCode::Esc, _) if state.tab == Tab::RunnerStatus => {
                 if let Some(loaded) = state.config_loaded.clone() {
                     state.config_working = Some(loaded);
                 }
                 state.config_edit_error = None;
             }
-            // Runner picker: `<` and `>` cycle, digit keys jump (1-based in
-            // the UI, 0-based internally). Skip on the Config tab while a
-            // text input is active — that path is handled earlier and
-            // returned. The picker is global so the user can switch runners
-            // from any per-runner tab.
+            // Runner picker: `<` / `>` cycle, Alt+digit jumps. Active
+            // wherever a per-runner cursor matters — that's every tab
+            // except General now.
             (KeyCode::Char('<') | KeyCode::Char(','), _)
-                if matches!(state.tab, Tab::Config | Tab::Runs | Tab::Approvals) =>
+                if matches!(
+                    state.tab,
+                    Tab::RunnerStatus | Tab::Runs | Tab::Approvals
+                ) =>
             {
                 move_picker(state, -1).await;
             }
             (KeyCode::Char('>') | KeyCode::Char('.'), _)
-                if matches!(state.tab, Tab::Config | Tab::Runs | Tab::Approvals) =>
+                if matches!(
+                    state.tab,
+                    Tab::RunnerStatus | Tab::Runs | Tab::Approvals
+                ) =>
             {
                 move_picker(state, 1).await;
             }
             (KeyCode::Char(c @ '1'..='9'), KeyModifiers::ALT)
-                if matches!(state.tab, Tab::Config | Tab::Runs | Tab::Approvals) =>
+                if matches!(
+                    state.tab,
+                    Tab::RunnerStatus | Tab::Runs | Tab::Approvals
+                ) =>
             {
                 if let Some(d) = c.to_digit(10) {
                     jump_picker(state, (d as usize).saturating_sub(1)).await;
@@ -1089,23 +1058,6 @@ fn default_working_dir_for_new_runner(state: &AppState) -> String {
         .join("runner-new")
         .display()
         .to_string()
-}
-
-/// Sync the runner picker (used by Config / Runs / Approvals) to a
-/// specific row index from the Runners list. Keeps the two cursors
-/// coherent so the user doesn't have to re-pick on every tab switch.
-fn sync_picker_to_runner_idx(state: &mut AppState) {
-    let total = state
-        .config_working
-        .as_ref()
-        .map(|c| c.runners.len())
-        .unwrap_or(0);
-    if total == 0 {
-        return;
-    }
-    let idx = state.runners_list_idx.min(total - 1);
-    state.runner_picker_idx = idx;
-    sync_picker_to_ipc(state);
 }
 
 /// General-tab Enter handler. Cycles the log level enum or opens the
@@ -1476,15 +1428,16 @@ async fn accept_selected(state: &mut AppState, decision: crate::cloud::protocol:
 
 fn draw(f: &mut ratatui::Frame<'_>, state: &AppState) {
     // Picker bar is only shown when there's more than one runner AND the
-    // active tab is a per-runner tab (Config / Runs / Approvals). The
-    // Runner-status tab already lists all runners inline so a picker would
-    // be redundant.
+    // Picker bar is shown above per-runner tabs (Runs / Approvals)
+    // when there's more than one runner. The Runners tab itself owns
+    // the picker as part of its top-of-tab list, so we suppress the
+    // global one there to avoid double rendering.
     let show_picker = state
         .config_working
         .as_ref()
         .map(|c| c.runners.len() > 1)
         .unwrap_or(false)
-        && matches!(state.tab, Tab::Config | Tab::Runs | Tab::Approvals);
+        && matches!(state.tab, Tab::Runs | Tab::Approvals);
 
     let constraints: Vec<Constraint> = if show_picker {
         vec![
@@ -1518,9 +1471,8 @@ fn draw(f: &mut ratatui::Frame<'_>, state: &AppState) {
     let idx = match state.tab {
         Tab::General => 0,
         Tab::RunnerStatus => 1,
-        Tab::Config => 2,
-        Tab::Runs => 3,
-        Tab::Approvals => 4,
+        Tab::Runs => 2,
+        Tab::Approvals => 3,
     };
     let tabs = Tabs::new(titles)
         .block(
@@ -1533,19 +1485,18 @@ fn draw(f: &mut ratatui::Frame<'_>, state: &AppState) {
     f.render_widget(tabs, layout[tabs_idx]);
 
     if let Some(pi) = picker_idx {
-        f.render_widget(config_view::runner_picker_bar(state), layout[pi]);
+        f.render_widget(super::views::config::runner_picker_bar(state), layout[pi]);
     }
 
     match state.tab {
         Tab::General => general::render(f, layout[body_idx], state),
         Tab::RunnerStatus => runner_status::render(f, layout[body_idx], state),
-        Tab::Config => config_view::render(f, layout[body_idx], state),
         Tab::Runs => runs::render(f, layout[body_idx], state),
         Tab::Approvals => approvals::render(f, layout[body_idx], state),
     }
 
     let hint = Line::from(Span::styled(
-        " [1]General [2]Runners [3]Config [4]Runs [5]Approvals  h/l switch  j/k move  </> runner  r refresh  ?help  q exit ",
+        " [1]General [2]Runners [3]Runs [4]Approvals  h/l switch  j/k move  </> runner  r refresh  ?help  q exit ",
         Style::default().add_modifier(Modifier::DIM),
     ));
     f.render_widget(Paragraph::new(hint), layout[hint_idx]);
@@ -1736,16 +1687,16 @@ fn render_help(f: &mut ratatui::Frame<'_>) {
         Line::from("r     force refresh"),
         Line::from("s     start runner service  (General tab)"),
         Line::from("x     stop runner service   (General tab)"),
-        Line::from("↵     edit field / toggle  (Config tab)"),
-        Line::from("w     save + reload daemon (Config tab)"),
-        Line::from("Esc   discard edits       (Config tab)"),
+        Line::from("↵     edit field / toggle  (General + Runners settings panel)"),
+        Line::from("w     save + reload daemon (General + Runners)"),
+        Line::from("Esc   discard pending edits (General + Runners)"),
         Line::from("a     accept approval        (Approvals tab)"),
         Line::from("a     add a runner           (Runners tab)"),
         Line::from("A     accept for session     (Approvals tab)"),
         Line::from("d     decline                (Approvals tab)"),
         Line::from("d     remove highlighted runner (Runners tab)"),
         Line::raw(""),
-        Line::from("Multi-runner picker (Config / Runs / Approvals):"),
+        Line::from("Multi-runner picker (Runners / Runs / Approvals):"),
         Line::from("</,    previous runner"),
         Line::from(">/.    next runner"),
         Line::from("Alt+N  jump to runner N (1–9)"),

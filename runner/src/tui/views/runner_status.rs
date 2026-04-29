@@ -1,14 +1,22 @@
-//! Runners tab — list of every runner this daemon hosts.
+//! Runners tab — list of every runner this daemon hosts plus the
+//! per-runner settings panel for the highlighted runner.
 //!
-//! Multi-runner UX entry point: shows one row per `[[runner]]` block in
-//! `config.toml`, the cloud connection summary at the top, and inline
-//! `[a]` / `[d]` shortcuts to add or remove runners. Selection moves
-//! with `j` / `k` and is reused by the picker for per-runner tabs —
-//! whatever runner is highlighted here is the one Config / Runs /
-//! Approvals scope to by default.
+//! Replaces the old single-runner Config tab. Two layout modes:
 //!
-//! Add and remove flows themselves live in `app.rs` (modal forms), but
-//! they hang off this tab's hotkeys.
+//! - **Configured** (config.toml exists): top half is a runner-row
+//!   list ("picker"), bottom half is the editable settings panel for
+//!   whichever runner the picker is on. `j`/`k` moves the field
+//!   cursor inside the panel; `<`/`>` and `Alt+1`–`Alt+9` move the
+//!   runner picker.
+//!
+//! - **Fresh machine** (no config.toml): the runner list is replaced
+//!   by the inline register form (cloud URL + registration token +
+//!   runner name). On submit the daemon comes up and the layout flips
+//!   into the configured mode.
+//!
+//! `[a]` opens the add-runner form (cascaded project / pod picker).
+//! `[d]` confirm-removes the highlighted runner via the cloud's
+//! token-authenticated deregister endpoint.
 
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
@@ -16,59 +24,65 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wrap};
 
 use crate::tui::app::AppState;
+use crate::tui::views::config as fields;
 
 pub fn render(f: &mut ratatui::Frame<'_>, area: Rect, state: &AppState) {
+    if state.config_working.is_none() {
+        render_register_view(f, area, state);
+        return;
+    }
+
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(4),
-            Constraint::Min(0),
-            Constraint::Length(4),
+            // Runner list — height grows with N up to a cap; surplus
+            // goes to the settings panel which is the editing surface.
+            Constraint::Length(runners_list_height(state)),
+            Constraint::Min(8),
             Constraint::Length(3),
         ])
         .split(area);
-    f.render_widget(summary_card(state), chunks[0]);
-    render_runners_list(f, chunks[1], state);
-    f.render_widget(detail_card(state), chunks[2]);
-    f.render_widget(hotkeys_card(), chunks[3]);
+    render_runner_list(f, chunks[0], state);
+    render_settings_panel(f, chunks[1], state);
+    f.render_widget(hotkeys_card(), chunks[2]);
 }
 
-fn summary_card(state: &AppState) -> Paragraph<'_> {
-    let lines = match &state.status {
-        Some(s) => vec![
-            Line::from(vec![
-                Span::styled(
-                    if s.daemon.connected {
-                        "● Cloud connected"
-                    } else {
-                        "○ Cloud offline"
-                    },
-                    Style::default().fg(if s.daemon.connected {
-                        Color::Green
-                    } else {
-                        Color::Red
-                    }),
-                ),
-                Span::raw("  "),
-                Span::raw(format!(
-                    "{} runner{} hosted",
-                    s.runners.len(),
-                    if s.runners.len() == 1 { "" } else { "s" },
-                )),
-            ]),
-            Line::from(format!("Cloud: {}", s.daemon.cloud_url)),
-        ],
-        None => vec![Line::from(Span::styled(
-            "Daemon IPC unreachable.",
-            Style::default().fg(Color::DarkGray),
-        ))],
-    };
-    Paragraph::new(lines)
-        .block(Block::default().borders(Borders::ALL).title(" Daemon "))
-        .wrap(Wrap { trim: true })
+fn runners_list_height(state: &AppState) -> u16 {
+    let n = state
+        .status
+        .as_ref()
+        .map(|s| s.runners.len() as u16)
+        .or_else(|| {
+            state
+                .config_working
+                .as_ref()
+                .map(|c| c.runners.len() as u16)
+        })
+        .unwrap_or(0);
+    // Border (2) + at least one row + cap at 8 visible runners.
+    let rows = n.clamp(1, 8);
+    rows + 2
 }
 
-fn render_runners_list(f: &mut ratatui::Frame<'_>, area: Rect, state: &AppState) {
+fn render_register_view(f: &mut ratatui::Frame<'_>, area: Rect, state: &AppState) {
+    // Two-band layout: register form fills the body, hotkeys at the
+    // bottom for symmetry with the configured mode.
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(0), Constraint::Length(3)])
+        .split(area);
+    let p = Paragraph::new(fields::register_form_lines(state))
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(" Register with cloud "),
+        )
+        .wrap(Wrap { trim: false });
+    f.render_widget(p, chunks[0]);
+    f.render_widget(hotkeys_card_register(), chunks[1]);
+}
+
+fn render_runner_list(f: &mut ratatui::Frame<'_>, area: Rect, state: &AppState) {
     let runners: Vec<&crate::ipc::protocol::RunnerStatusSnapshot> = state
         .status
         .as_ref()
@@ -76,42 +90,35 @@ fn render_runners_list(f: &mut ratatui::Frame<'_>, area: Rect, state: &AppState)
         .unwrap_or_default();
 
     if runners.is_empty() {
-        let empty = Paragraph::new(vec![
-            Line::raw(""),
-            Line::from(Span::styled(
-                "No runners configured on this machine yet.",
-                Style::default().fg(Color::DarkGray),
-            )),
-            Line::raw(""),
-            Line::from("Press [a] to register one against the locally-installed token,"),
-            Line::from(Span::styled(
-                "or run `pidash configure --url ... --token <REG_CODE>` from the CLI",
-                Style::default().add_modifier(Modifier::DIM),
-            )),
-            Line::from(Span::styled(
-                "for a fresh-machine setup.",
-                Style::default().add_modifier(Modifier::DIM),
-            )),
-        ])
+        // Configured but daemon hasn't reported any RunnerStatus yet —
+        // either it's still starting up, or every runner is unhealthy.
+        // Show a placeholder so the layout doesn't collapse.
+        let p = Paragraph::new(vec![Line::from(Span::styled(
+            "Daemon up but no runners reported yet — check the General tab.",
+            Style::default().fg(Color::DarkGray),
+        ))])
         .block(Block::default().borders(Borders::ALL).title(" Runners "))
         .wrap(Wrap { trim: true });
-        f.render_widget(empty, area);
+        f.render_widget(p, area);
         return;
     }
 
+    let picked = state.runner_picker_idx.min(runners.len() - 1);
     let items: Vec<ListItem<'_>> = runners
         .iter()
-        .map(|r| {
+        .enumerate()
+        .map(|(i, r)| {
             let project = r.project_slug.as_deref().unwrap_or("(no project)");
-            let status_label = format!("{:?}", r.status);
             let approvals = if r.approvals_pending > 0 {
                 format!("approvals={}", r.approvals_pending)
             } else {
                 String::new()
             };
+            let prefix = if i == picked { "▶ " } else { "  " };
             let line = Line::from(vec![
+                Span::styled(prefix.to_string(), Style::default().fg(Color::Cyan)),
                 Span::styled(
-                    format!(" {:<24} ", r.name),
+                    format!("{:<24} ", r.name),
                     Style::default()
                         .fg(Color::White)
                         .add_modifier(Modifier::BOLD),
@@ -121,7 +128,7 @@ fn render_runners_list(f: &mut ratatui::Frame<'_>, area: Rect, state: &AppState)
                     Style::default().fg(Color::Cyan),
                 ),
                 Span::styled(
-                    format!("{:<10} ", status_label),
+                    format!("{:<10} ", format!("{:?}", r.status)),
                     match r.status {
                         crate::cloud::protocol::RunnerStatus::Idle => {
                             Style::default().fg(Color::Green)
@@ -140,55 +147,57 @@ fn render_runners_list(f: &mut ratatui::Frame<'_>, area: Rect, state: &AppState)
             ListItem::new(line)
         })
         .collect();
-
+    let total = runners.len();
+    let title = format!(" Runners ({}/{}) ", picked + 1, total);
     let list = List::new(items)
-        .block(Block::default().borders(Borders::ALL).title(" Runners "))
+        .block(Block::default().borders(Borders::ALL).title(title))
         .highlight_style(Style::default().add_modifier(Modifier::REVERSED));
     let mut lstate = ListState::default();
-    lstate.select(Some(state.runners_list_idx.min(runners.len() - 1)));
+    lstate.select(Some(picked));
     f.render_stateful_widget(list, area, &mut lstate);
 }
 
-/// Detail-and-hint card shown below the runner list. Surfaces the
-/// in-flight run for the highlighted runner (if any) plus the
-/// add-runner CLI command so users discover the multi-runner workflow
-/// even at N=1.
-fn detail_card(state: &AppState) -> Paragraph<'_> {
-    let mut lines: Vec<Line<'_>> = Vec::new();
-    if let Some(s) = &state.status
-        && let Some(runner) = s.runners.get(state.runners_list_idx)
-    {
-        if let Some(run) = &runner.current_run {
-            lines.push(Line::from(format!(
-                "[{}] in-flight run {} ({}); events={}",
-                runner.name, run.run_id, run.status, run.events,
-            )));
-        } else {
-            lines.push(Line::from(format!("[{}] idle", runner.name)));
-        }
-    } else if state.status.is_some() {
-        lines.push(Line::from(Span::styled(
-            "Use [a] to register a runner under the locally-installed machine token.",
-            Style::default().fg(Color::Cyan),
-        )));
-    }
-    Paragraph::new(lines)
-        .block(Block::default().borders(Borders::ALL).title(" Selected "))
-        .wrap(Wrap { trim: true })
+fn render_settings_panel(f: &mut ratatui::Frame<'_>, area: Rect, state: &AppState) {
+    let Some(working) = state.config_working.as_ref() else {
+        return;
+    };
+    let loaded = state.config_loaded.clone();
+
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(0), Constraint::Length(5)])
+        .split(area);
+
+    let dirty = loaded
+        .as_ref()
+        .map(|l| fields::differs(l, working))
+        .unwrap_or(true);
+    let title = if dirty {
+        " Settings (selected runner) [unsaved] "
+    } else {
+        " Settings (selected runner) "
+    };
+    let p = Paragraph::new(fields::editable_lines(working, &loaded, state))
+        .block(Block::default().borders(Borders::ALL).title(title))
+        .wrap(Wrap { trim: false });
+    f.render_widget(p, chunks[0]);
+    f.render_widget(fields::footer(state), chunks[1]);
 }
 
 fn hotkeys_card() -> Paragraph<'static> {
     Paragraph::new(Line::from(vec![
-        Span::styled(
-            "[a] add runner",
-            Style::default().fg(Color::Green),
-        ),
+        Span::styled("[a] add", Style::default().fg(Color::Green)),
         Span::raw("   "),
-        Span::styled(
-            "[d] remove runner",
-            Style::default().fg(Color::Red),
-        ),
-        Span::raw("   [j/k ↑↓] move   [r] refresh"),
+        Span::styled("[d] remove", Style::default().fg(Color::Red)),
+        Span::raw("   [j/k ↑↓] field   [</>] runner   [↵] edit   [w] save   [r] refresh"),
     ]))
+    .block(Block::default().borders(Borders::ALL).title(" Controls "))
+}
+
+fn hotkeys_card_register() -> Paragraph<'static> {
+    Paragraph::new(Line::from(vec![Span::styled(
+        "Tab/↑↓ move field   ↵ advance / submit   Esc clears form error",
+        Style::default().add_modifier(Modifier::DIM),
+    )]))
     .block(Block::default().borders(Borders::ALL).title(" Controls "))
 }

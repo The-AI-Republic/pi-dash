@@ -15,7 +15,9 @@
 //! Read-only fields (cloud_url, workspace_slug, list fields) are rendered
 //! but skipped in navigation.
 
-use ratatui::layout::{Constraint, Direction, Layout, Rect};
+// Layout no longer drives the (deleted) full-page Tab::Config render
+// dispatch — the Runners tab composes the `editable_lines` /
+// `footer` / `register_form_lines` helpers itself.
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
@@ -287,57 +289,7 @@ pub fn cycle_enum(cfg: &mut Config, id: FieldId, runner_idx: usize) {
     }
 }
 
-// --- rendering ---------------------------------------------------------------
-
-pub fn render(f: &mut ratatui::Frame<'_>, area: Rect, state: &AppState) {
-    let chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Min(0), Constraint::Length(6)])
-        .split(area);
-    let main_idx = 0;
-    let footer_idx = 1;
-
-    if let Some(err) = &state.config_error {
-        let p = Paragraph::new(format!("Failed to read config.toml:\n\n{err}"))
-            .style(Style::default().fg(Color::Red))
-            .block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .title(" Configuration "),
-            )
-            .wrap(Wrap { trim: false });
-        f.render_widget(p, chunks[main_idx]);
-        f.render_widget(footer(state), chunks[footer_idx]);
-        return;
-    }
-
-    match (&state.config_working, &state.config_loaded) {
-        (Some(working), loaded) => {
-            let dirty = loaded.as_ref().map(|l| differs(l, working)).unwrap_or(true);
-            let title = if dirty {
-                " Configuration [unsaved changes] "
-            } else {
-                " Configuration "
-            };
-            let p = Paragraph::new(editable_lines(working, loaded, state))
-                .block(Block::default().borders(Borders::ALL).title(title))
-                .wrap(Wrap { trim: false });
-            f.render_widget(p, chunks[main_idx]);
-        }
-        (None, _) => {
-            let p = Paragraph::new(register_form_lines(state))
-                .block(
-                    Block::default()
-                        .borders(Borders::ALL)
-                        .title(" Register with cloud "),
-                )
-                .wrap(Wrap { trim: false });
-            f.render_widget(p, chunks[main_idx]);
-        }
-    }
-
-    f.render_widget(footer(state), chunks[footer_idx]);
-}
+// --- rendering helpers, consumed by Runners tab and the global picker -----
 
 /// Top-of-tab picker showing each configured runner as a chip. The
 /// currently-selected runner is highlighted; the bar only renders when
@@ -378,7 +330,7 @@ pub fn runner_picker_bar(state: &AppState) -> Paragraph<'static> {
     )
 }
 
-fn register_form_lines(state: &AppState) -> Vec<Line<'static>> {
+pub fn register_form_lines(state: &AppState) -> Vec<Line<'static>> {
     let Some(form) = state.register_form.as_ref() else {
         // No form yet — refresh() will seed one next tick; show a hint.
         return vec![Line::from(Span::styled(
@@ -494,7 +446,7 @@ fn mask_token(raw: &str) -> String {
     }
 }
 
-fn editable_lines(
+pub fn editable_lines(
     working: &Config,
     loaded: &Option<Config>,
     state: &AppState,
@@ -705,7 +657,7 @@ fn section_header(name: &str) -> Line<'static> {
     ))
 }
 
-fn footer(state: &AppState) -> Paragraph<'_> {
+pub fn footer(state: &AppState) -> Paragraph<'_> {
     let mut lines = Vec::new();
 
     // Action hints — contextual.
@@ -767,7 +719,7 @@ fn index_of(id: FieldId) -> usize {
         .expect("FieldId missing from FIELDS table")
 }
 
-fn differs(a: &Config, b: &Config) -> bool {
+pub fn differs(a: &Config, b: &Config) -> bool {
     // Compare every editable field across every configured runner.
     // Daemon-level fields (LogLevel etc.) are also exercised via
     // ``display_value``; their value is independent of ``runner_idx``,
