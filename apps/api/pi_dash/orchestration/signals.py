@@ -10,8 +10,8 @@ compare in post_save. Using signals keeps the trigger out of every writer path
 ``orchestration.service``.
 
 Comments are intentionally inert — there is no ``post_save(IssueComment)``
-receiver here. The agent is woken on a periodic schedule
-(``pi_dash.bgtasks.agent_schedule``) or by the explicit Comment & Run
+receiver here. The agent is woken by the per-issue ticker
+(``pi_dash.bgtasks.agent_ticker``) or by the explicit Comment & Run
 button, which calls into ``orchestration.service.handle_issue_comment``
 directly. See ``.ai_design/issue_ticking_system/design.md`` §9.
 """

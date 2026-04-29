@@ -419,7 +419,7 @@ def test_release_pin_404_for_run_in_other_workspace(
 #
 # POST /api/runners/runs/ with ``triggered_by="comment_and_run"`` reuses the
 # continuation pipeline (parent resolution, runner pinning, drain) and
-# resets the issue's ``IssueAgentSchedule``. See
+# resets the issue's ``IssueAgentTicker``. See
 # ``.ai_design/issue_ticking_system/design.md`` §4.6.
 # ---------------------------------------------------------------------------
 
@@ -517,10 +517,10 @@ def test_comment_and_run_resets_schedule(db, session_client, workspace):
 
     from django.utils import timezone
 
-    from pi_dash.db.models.issue_agent_schedule import IssueAgentSchedule
+    from pi_dash.db.models.issue_agent_ticker import IssueAgentTicker
 
     issue, _ = _make_in_progress_issue_with_paused_run(workspace)
-    sched = IssueAgentSchedule.objects.get(issue=issue)
+    sched = IssueAgentTicker.objects.get(issue=issue)
     sched.tick_count = 7
     stale = timezone.now() + timedelta(hours=2)
     sched.next_run_at = stale
@@ -635,7 +635,7 @@ def test_skip_immediate_dispatch_header_suppresses_run_creation_on_state_change(
     from crum import impersonate
 
     from pi_dash.db.models import Issue, Project, State
-    from pi_dash.db.models.issue_agent_schedule import IssueAgentSchedule
+    from pi_dash.db.models.issue_agent_ticker import IssueAgentTicker
     from pi_dash.prompting.seed import seed_default_template
 
     seed_default_template()
@@ -667,7 +667,7 @@ def test_skip_immediate_dispatch_header_suppresses_run_creation_on_state_change(
     assert AgentRun.objects.filter(work_item=issue).count() == 0
     # Schedule armed: the steady-state tick source is in place even
     # though dispatch was deferred to the caller.
-    sched = IssueAgentSchedule.objects.get(issue=issue)
+    sched = IssueAgentTicker.objects.get(issue=issue)
     assert sched.enabled is True
 
 

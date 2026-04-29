@@ -186,7 +186,7 @@ class AgentRunListEndpoint(APIView):
             # invocation, so the cap budget shouldn't be refunded and the
             # next-tick clock shouldn't be pushed out.
             if run is not None:
-                scheduling.reset_schedule_after_comment_and_run(issue)
+                scheduling.reset_ticker_after_comment_and_run(issue)
         if run is None:
             return Response(
                 {

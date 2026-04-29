@@ -13,4 +13,4 @@ class BgtasksConfig(AppConfig):
         from pi_dash.bgtasks import github_signals  # noqa: F401
         # Eagerly import task modules that no other startup code imports,
         # so their @shared_task decorators register with Celery at worker boot.
-        from pi_dash.bgtasks import agent_schedule  # noqa: F401
+        from pi_dash.bgtasks import agent_ticker  # noqa: F401

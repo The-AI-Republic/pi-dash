@@ -91,4 +91,4 @@ from .sticky import Sticky
 
 from .description import Description, DescriptionVersion
 
-from .issue_agent_schedule import IssueAgentSchedule
+from .issue_agent_ticker import IssueAgentTicker

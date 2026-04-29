@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 # See the LICENSE file for details.
 
-"""Tests for ``pi_dash.bgtasks.agent_schedule`` (PR C)."""
+"""Tests for ``pi_dash.bgtasks.agent_ticker``."""
 
 from __future__ import annotations
 
@@ -13,7 +13,7 @@ import pytest
 from crum import impersonate
 from django.utils import timezone
 
-from pi_dash.bgtasks.agent_schedule import fire_tick, scan_due_schedules
+from pi_dash.bgtasks.agent_ticker import fire_tick, scan_due_tickers
 from pi_dash.db.models import Issue, Project, State
 from pi_dash.orchestration import scheduling
 from pi_dash.prompting.seed import seed_default_template
@@ -119,7 +119,7 @@ def _make_prior_run(issue, runner):
 
 
 def _make_due_schedule(issue, *, tick_count=0, max_ticks=None):
-    sched = scheduling.arm_schedule(issue)
+    sched = scheduling.arm_ticker(issue)
     sched.next_run_at = timezone.now() - timedelta(seconds=1)
     sched.tick_count = tick_count
     if max_ticks is not None:
@@ -131,7 +131,7 @@ def _make_due_schedule(issue, *, tick_count=0, max_ticks=None):
 
 
 # ---------------------------------------------------------------------------
-# scan_due_schedules
+# scan_due_tickers
 # ---------------------------------------------------------------------------
 
 
@@ -149,18 +149,18 @@ def test_scan_picks_up_only_due_enabled_under_cap_rows(
         state=issue.state, created_by=issue.created_by,
     )
     _make_due_schedule(issue)
-    not_due = scheduling.arm_schedule(issue2)
+    not_due = scheduling.arm_ticker(issue2)
     not_due.next_run_at = timezone.now() + timedelta(hours=2)
     not_due.save(update_fields=["next_run_at"])
-    disabled = scheduling.arm_schedule(issue3)
+    disabled = scheduling.arm_ticker(issue3)
     disabled.next_run_at = timezone.now() - timedelta(seconds=1)
     disabled.enabled = False
     disabled.save(update_fields=["next_run_at", "enabled"])
 
     with mock.patch(
-        "pi_dash.bgtasks.agent_schedule.fire_tick.delay"
+        "pi_dash.bgtasks.agent_ticker.fire_tick.delay"
     ) as fire:
-        count = scan_due_schedules()
+        count = scan_due_tickers()
     assert count == 1
     assert fire.call_count == 1
 
@@ -195,7 +195,7 @@ def test_fire_tick_skips_when_already_advanced(seeded, issue, runner_for_workspa
     """If another fire advances ``next_run_at`` between scan and worker
     pickup, this fire is a no-op."""
     _make_prior_run(issue, runner_for_workspace)
-    sched = scheduling.arm_schedule(issue)
+    sched = scheduling.arm_ticker(issue)
     # next_run_at already in the future — fire_tick must not advance.
     sched.next_run_at = timezone.now() + timedelta(hours=2)
     sched.save(update_fields=["next_run_at"])

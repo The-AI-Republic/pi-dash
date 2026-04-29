@@ -87,8 +87,8 @@ app.conf.beat_schedule = {
         "schedule": crontab(minute="*/1"),
     },
     # Issue ticking — see .ai_design/issue_ticking_system/design.md §6
-    "scan-due-agent-schedules": {
-        "task": "pi_dash.bgtasks.agent_schedule.scan_due_schedules",
+    "scan-due-agent-tickers": {
+        "task": "pi_dash.bgtasks.agent_ticker.scan_due_tickers",
         "schedule": crontab(minute="*"),
     },
     # GitHub Issue Sync — see .ai_design/github_sync/design.md §6.3.

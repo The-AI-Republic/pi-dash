@@ -1020,35 +1020,35 @@ class IssueDetailSerializer(IssueSerializer):
     description_html = serializers.CharField()
     is_subscribed = serializers.BooleanField(read_only=True)
     is_intake = serializers.BooleanField(read_only=True)
-    agent_schedule = serializers.SerializerMethodField()
+    agent_ticker = serializers.SerializerMethodField()
 
     class Meta(IssueSerializer.Meta):
         fields = IssueSerializer.Meta.fields + [
             "description_html",
             "is_subscribed",
             "is_intake",
-            "agent_schedule",
+            "agent_ticker",
         ]
         read_only_fields = fields
 
-    def get_agent_schedule(self, obj):
-        """Surface the per-issue ticking schedule for the issue detail UI.
+    def get_agent_ticker(self, obj):
+        """Surface the per-issue continuation ticker for the issue detail UI.
 
-        Returns ``None`` when no schedule row exists yet (the issue has
+        Returns ``None`` when no ticker row exists yet (the issue has
         never been moved to In Progress). See
         ``.ai_design/issue_ticking_system/design.md`` §8.1.
         """
-        sched = getattr(obj, "agent_schedule", None)
-        if sched is None:
+        ticker = getattr(obj, "agent_ticker", None)
+        if ticker is None:
             return None
         return {
-            "enabled": sched.enabled,
-            "user_disabled": sched.user_disabled,
-            "tick_count": sched.tick_count,
-            "max_ticks": sched.effective_max_ticks(),
-            "interval_seconds": sched.effective_interval_seconds(),
-            "next_run_at": sched.next_run_at.isoformat() if sched.next_run_at else None,
-            "last_tick_at": sched.last_tick_at.isoformat() if sched.last_tick_at else None,
+            "enabled": ticker.enabled,
+            "user_disabled": ticker.user_disabled,
+            "tick_count": ticker.tick_count,
+            "max_ticks": ticker.effective_max_ticks(),
+            "interval_seconds": ticker.effective_interval_seconds(),
+            "next_run_at": ticker.next_run_at.isoformat() if ticker.next_run_at else None,
+            "last_tick_at": ticker.last_tick_at.isoformat() if ticker.last_tick_at else None,
         }
 
 

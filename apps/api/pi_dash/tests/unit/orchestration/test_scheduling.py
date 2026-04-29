@@ -13,7 +13,7 @@ from crum import impersonate
 from django.utils import timezone
 
 from pi_dash.db.models import Issue, Project, State
-from pi_dash.db.models.issue_agent_schedule import IssueAgentSchedule
+from pi_dash.db.models.issue_agent_ticker import IssueAgentTicker
 from pi_dash.orchestration import scheduling
 from pi_dash.prompting.seed import seed_default_template
 from pi_dash.runner.models import AgentRun, AgentRunStatus
@@ -108,14 +108,14 @@ def stub_drain(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# arm_schedule
+# arm_ticker
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.unit
-def test_arm_schedule_creates_row_and_sets_next_run_at(seeded, issue, states):
+def test_arm_ticker_creates_row_and_sets_next_run_at(seeded, issue, states):
     _to_in_progress(issue, states)
-    sched = scheduling.arm_schedule(issue)
+    sched = scheduling.arm_ticker(issue)
     assert sched.tick_count == 0
     assert sched.next_run_at is not None
     assert sched.next_run_at > timezone.now()
@@ -123,82 +123,82 @@ def test_arm_schedule_creates_row_and_sets_next_run_at(seeded, issue, states):
 
 
 @pytest.mark.unit
-def test_arm_schedule_is_idempotent_resets_tick_count(seeded, issue, states):
+def test_arm_ticker_is_idempotent_resets_tick_count(seeded, issue, states):
     _to_in_progress(issue, states)
-    sched = scheduling.arm_schedule(issue)
+    sched = scheduling.arm_ticker(issue)
     sched.tick_count = 5
     sched.save(update_fields=["tick_count"])
-    again = scheduling.arm_schedule(issue)
+    again = scheduling.arm_ticker(issue)
     assert again.tick_count == 0
     assert again.pk == sched.pk  # one row per issue
 
 
 @pytest.mark.unit
-def test_arm_schedule_respects_user_disabled(seeded, issue, states):
+def test_arm_ticker_respects_user_disabled(seeded, issue, states):
     _to_in_progress(issue, states)
-    IssueAgentSchedule.objects.create(issue=issue, user_disabled=True)
-    sched = scheduling.arm_schedule(issue)
+    IssueAgentTicker.objects.create(issue=issue, user_disabled=True)
+    sched = scheduling.arm_ticker(issue)
     assert sched.user_disabled is True
     assert sched.enabled is False
 
 
 @pytest.mark.unit
-def test_arm_schedule_respects_project_disabled(seeded, issue, project, states):
+def test_arm_ticker_respects_project_disabled(seeded, issue, project, states):
     _to_in_progress(issue, states)
     project.agent_ticking_enabled = False
     project.save(update_fields=["agent_ticking_enabled"])
-    sched = scheduling.arm_schedule(issue)
+    sched = scheduling.arm_ticker(issue)
     assert sched.enabled is False
 
 
 @pytest.mark.unit
-def test_arm_schedule_dispatch_immediate_false_does_not_dispatch(
+def test_arm_ticker_dispatch_immediate_false_does_not_dispatch(
     seeded, issue, states, runner_for_workspace
 ):
     """``dispatch_immediate=False`` is a documentation flag — arming itself
     never creates a run regardless of value."""
     _to_in_progress(issue, states)
-    scheduling.arm_schedule(issue, dispatch_immediate=False)
+    scheduling.arm_ticker(issue, dispatch_immediate=False)
     assert AgentRun.objects.filter(work_item=issue).count() == 0
 
 
 # ---------------------------------------------------------------------------
-# disarm_schedule
+# disarm_ticker
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.unit
-def test_disarm_schedule_idempotent(seeded, issue, states):
+def test_disarm_ticker_idempotent(seeded, issue, states):
     _to_in_progress(issue, states)
-    scheduling.arm_schedule(issue)
-    scheduling.disarm_schedule(issue)
-    sched = IssueAgentSchedule.objects.get(issue=issue)
+    scheduling.arm_ticker(issue)
+    scheduling.disarm_ticker(issue)
+    sched = IssueAgentTicker.objects.get(issue=issue)
     assert sched.enabled is False
     # Calling again is a no-op.
-    scheduling.disarm_schedule(issue)
+    scheduling.disarm_ticker(issue)
     sched.refresh_from_db()
     assert sched.enabled is False
 
 
 @pytest.mark.unit
-def test_disarm_schedule_with_no_row_returns_none(seeded, issue):
+def test_disarm_ticker_with_no_row_returns_none(seeded, issue):
     """No state transition has happened, so no schedule row exists yet."""
-    assert IssueAgentSchedule.objects.filter(issue=issue).exists() is False
-    assert scheduling.disarm_schedule(issue) is None
+    assert IssueAgentTicker.objects.filter(issue=issue).exists() is False
+    assert scheduling.disarm_ticker(issue) is None
 
 
 # ---------------------------------------------------------------------------
-# reset_schedule_after_comment_and_run
+# reset_ticker_after_comment_and_run
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.unit
 def test_reset_after_comment_and_run_resets_tick_count(seeded, issue, states):
     _to_in_progress(issue, states)
-    sched = scheduling.arm_schedule(issue)
+    sched = scheduling.arm_ticker(issue)
     sched.tick_count = 17
     sched.save(update_fields=["tick_count"])
-    out = scheduling.reset_schedule_after_comment_and_run(issue)
+    out = scheduling.reset_ticker_after_comment_and_run(issue)
     assert out.tick_count == 0
     assert out.next_run_at > timezone.now()
 
@@ -276,7 +276,7 @@ def test_deferred_pause_skips_when_schedule_still_enabled(
     seeded, issue, states, runner_for_workspace, create_user
 ):
     _to_in_progress(issue, states)
-    scheduling.arm_schedule(issue)
+    scheduling.arm_ticker(issue)
     run = AgentRun.objects.create(
         workspace=issue.workspace,
         created_by=create_user,
@@ -296,7 +296,7 @@ def test_deferred_pause_applies_when_disarmed_and_no_active_runs(
     seeded, issue, states, runner_for_workspace, create_user
 ):
     _to_in_progress(issue, states)
-    sched = scheduling.arm_schedule(issue)
+    sched = scheduling.arm_ticker(issue)
     sched.enabled = False
     sched.save(update_fields=["enabled"])
     run = AgentRun.objects.create(
@@ -318,7 +318,7 @@ def test_deferred_pause_skips_when_other_active_run_exists(
     seeded, issue, states, runner_for_workspace, create_user
 ):
     _to_in_progress(issue, states)
-    sched = scheduling.arm_schedule(issue)
+    sched = scheduling.arm_ticker(issue)
     sched.enabled = False
     sched.save(update_fields=["enabled"])
     AgentRun.objects.create(
