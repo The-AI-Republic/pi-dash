@@ -132,7 +132,17 @@ def fire_tick(sched_id: str) -> bool:
             )
             return False
 
-        # Claim: advance the clock first, then dispatch.
+        # Claim: advance the clock first, then dispatch. We capture the
+        # pre-claim values so we can roll back below if dispatch returns
+        # None for a reason the pre-claim skips didn't catch (no-pod,
+        # no-creator, race-inserted active run between the pre-check and
+        # dispatch's own re-check). Without rollback the tick budget is
+        # silently burned and the schedule may auto-disarm at cap on a
+        # tick that never produced a run.
+        prev_tick_count = sched.tick_count
+        prev_next_run_at = sched.next_run_at
+        prev_enabled = sched.enabled
+
         sched.tick_count = sched.tick_count + 1
         sched.last_tick_at = now
         from pi_dash.db.models.issue_agent_schedule import jitter_seconds
@@ -165,8 +175,30 @@ def fire_tick(sched_id: str) -> bool:
     # actually fires.
     run = dispatch_continuation_run(issue, triggered_by=TRIGGER_TICK)
     if run is None:
+        # Dispatch failed post-claim — restore the schedule so the budget
+        # isn't wasted and any cap-disarm we just applied is undone.
+        # last_tick_at intentionally NOT rolled back: it's an observability
+        # field for "we attempted a tick at this time," not a budget input.
+        with transaction.atomic():
+            rollback = (
+                IssueAgentSchedule.objects.select_for_update()
+                .filter(pk=sched_id)
+                .first()
+            )
+            if rollback is not None:
+                rollback.tick_count = prev_tick_count
+                rollback.next_run_at = prev_next_run_at
+                rollback.enabled = prev_enabled
+                rollback.save(
+                    update_fields=[
+                        "tick_count",
+                        "next_run_at",
+                        "enabled",
+                        "updated_at",
+                    ]
+                )
         logger.info(
-            "agent_schedule.fire_tick: dispatch returned None issue=%s",
+            "agent_schedule.fire_tick: dispatch returned None issue=%s; rolled back claim",
             issue.pk,
         )
         return False

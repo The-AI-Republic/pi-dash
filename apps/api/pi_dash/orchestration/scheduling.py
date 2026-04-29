@@ -200,7 +200,6 @@ def reset_schedule_after_comment_and_run(issue: Issue) -> Optional[IssueAgentSch
 
 TRIGGER_TICK = "tick"
 TRIGGER_COMMENT_AND_RUN = "comment_and_run"
-TRIGGER_STATE_TRANSITION = "state_transition"
 
 
 def _resolve_pod_for_issue(issue: Issue):
@@ -350,8 +349,20 @@ def maybe_apply_deferred_pause(run: AgentRun) -> bool:
 
     bot = get_agent_system_user()
     with transaction.atomic():
-        # Re-fetch under the same transaction to guard against a racing
-        # transition.
+        # Re-fetch the schedule under a row lock so the disarmed-check we
+        # made above stays valid for the rest of this transaction. Without
+        # this, a concurrent ``arm_schedule`` (e.g. user manually re-starts
+        # the issue between the unlocked read on line ~314 and here) can
+        # re-enable the schedule while we auto-pause its issue.
+        locked_sched = (
+            IssueAgentSchedule.objects.select_for_update()
+            .filter(pk=sched.pk)
+            .first()
+        )
+        if locked_sched is None or locked_sched.enabled:
+            return False
+        # Re-fetch the issue under the same transaction to guard against a
+        # racing state transition.
         IssueModel = type(issue)
         locked = (
             IssueModel.all_objects.select_for_update().filter(pk=issue.pk).first()
@@ -378,7 +389,6 @@ __all__ = [
     "INFINITE_MAX_TICKS",
     "PAUSED_STATE_NAME",
     "TRIGGER_COMMENT_AND_RUN",
-    "TRIGGER_STATE_TRANSITION",
     "TRIGGER_TICK",
     "arm_schedule",
     "disarm_schedule",

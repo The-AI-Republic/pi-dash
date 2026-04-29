@@ -389,8 +389,9 @@ class RunnerConsumer(AsyncJsonWebsocketConsumer):
         heartbeat's ``ts``. A heartbeat sent before a fresh assignment was
         written must not reap that assignment.
         """
+        from datetime import datetime, timedelta
+
         from django.db import transaction
-        from datetime import datetime
 
         from pi_dash.runner.services.matcher import (
             BUSY_STATUSES,
@@ -398,18 +399,36 @@ class RunnerConsumer(AsyncJsonWebsocketConsumer):
             drain_pod_by_id,
         )
 
+        # The runner is untrusted: a malicious or buggy daemon could send
+        # ``ts`` far in the future (matching every BUSY row) or far in the
+        # past (matching nothing). Clamp to a server-side window before
+        # using as a SQL cutoff:
+        #   upper bound = now            (no future timestamps)
+        #   lower bound = now - GRACE    (don't reach beyond the dead-runner
+        #                                 detection window)
+        now = timezone.now()
         ts_raw = msg.get("ts")
         try:
             heartbeat_ts = (
                 datetime.fromisoformat(ts_raw.replace("Z", "+00:00"))
                 if isinstance(ts_raw, str)
-                else timezone.now()
+                else now
             )
         except (ValueError, AttributeError):
-            heartbeat_ts = timezone.now()
+            heartbeat_ts = now
+        heartbeat_ts = min(heartbeat_ts, now)
+        heartbeat_ts = max(heartbeat_ts, now - timedelta(seconds=OFFLINE_GRACE_SECS))
 
         in_flight = msg.get("in_flight_run")
-        in_flight_id = str(in_flight) if in_flight else None
+        # Validate UUID format before interpolating into error strings or
+        # using as an exclusion key — runner-supplied content otherwise lands
+        # in ``AgentRun.error`` which is surfaced to the UI.
+        in_flight_id: Optional[str] = None
+        if in_flight:
+            try:
+                in_flight_id = str(UUID(str(in_flight)))
+            except (ValueError, AttributeError):
+                in_flight_id = None
 
         stale = AgentRun.objects.filter(
             runner=runner,
@@ -425,19 +444,18 @@ class RunnerConsumer(AsyncJsonWebsocketConsumer):
 
         AgentRun.objects.filter(id__in=[rid for rid, _ in reaped]).update(
             status=AgentRunStatus.FAILED,
-            ended_at=timezone.now(),
+            ended_at=now,
             error=(
-                "reaped by heartbeat: runner reported "
-                f"in_flight_run={in_flight_id or 'None'} "
+                "reaped by heartbeat: runner reported in_flight_run="
+                f"{in_flight_id or '(none)'} "
                 "but cloud had this run marked busy"
             ),
         )
 
-        logger.warning(
-            "consumer.heartbeat_reap: runner=%s reaped %d stale run(s): %s",
+        logger.info(
+            "consumer.heartbeat_reap: runner=%s reaped %d stale run(s)",
             runner.id,
             len(reaped),
-            [str(rid) for rid, _ in reaped],
         )
 
         # Free the runner downstream — drain the pod and prefer this runner

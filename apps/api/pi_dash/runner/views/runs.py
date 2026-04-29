@@ -67,8 +67,21 @@ class AgentRunListEndpoint(APIView):
         # issue. The OR over (1)+(2)+(3) puts them back in view.
         # ``distinct()`` guards against duplicates from the assignees join
         # when the caller satisfies more than one clause.
+        #
+        # Mandatory workspace-membership scope: clause (2) and (3) join
+        # through ``work_item`` whose project lives in some workspace —
+        # without an outer membership constraint a user removed from a
+        # workspace would still see runs there because IssueAssignee /
+        # Issue.created_by survive workspace removal. The subquery uses
+        # the live (non-soft-deleted) WorkspaceMember default manager.
+        from pi_dash.db.models import WorkspaceMember
+
+        member_workspaces = WorkspaceMember.objects.filter(
+            member=request.user
+        ).values("workspace_id")
         qs = (
-            AgentRun.objects.filter(
+            AgentRun.objects.filter(workspace_id__in=member_workspaces)
+            .filter(
                 Q(created_by=request.user)
                 | Q(work_item__created_by=request.user)
                 | Q(work_item__assignees=request.user)
@@ -166,7 +179,14 @@ class AgentRunListEndpoint(APIView):
                 triggered_by=scheduling.TRIGGER_COMMENT_AND_RUN,
                 actor=request.user,
             )
-            scheduling.reset_schedule_after_comment_and_run(issue)
+            # Only reset the schedule when the dispatch actually committed
+            # a run. Otherwise (active-run-exists / no-prior-run / no-pod
+            # — all of which return None) the user's existing tick_count
+            # and next_run_at must stay intact: they didn't trigger a new
+            # invocation, so the cap budget shouldn't be refunded and the
+            # next-tick clock shouldn't be pushed out.
+            if run is not None:
+                scheduling.reset_schedule_after_comment_and_run(issue)
         if run is None:
             return Response(
                 {
