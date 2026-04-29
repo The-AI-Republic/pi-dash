@@ -125,6 +125,9 @@ def test_post_run_ignores_request_body_created_by(
 
 @pytest.mark.unit
 def test_get_runs_lists_by_created_by(db, session_client, workspace):
+    """Free-form runs (no work_item) are scoped by creator. A run created
+    by another user with no link back to the caller stays invisible.
+    """
     AgentRun.objects.create(
         workspace=workspace,
         created_by=workspace.owner,
@@ -148,6 +151,148 @@ def test_get_runs_lists_by_created_by(db, session_client, workspace):
     prompts = [r["prompt"] for r in resp.data]
     assert "mine" in prompts
     assert "not mine" not in prompts
+
+
+# ---------------------------------------------------------------------------
+# GET /api/runners/runs/ — broadened "involved with" scope.
+#
+# Runs created by the system bot for periodic ticks (``triggered_by=tick``)
+# carry ``created_by = agent system user`` per
+# ``orchestration/scheduling._resolve_creator_for_trigger``. Filtering only
+# by ``created_by = request.user`` would hide every tick-driven run from
+# the human who actually owns the issue. The list endpoint therefore
+# surfaces any run whose ``work_item`` was created by, or is assigned to,
+# the caller — in addition to runs the caller created directly.
+# ---------------------------------------------------------------------------
+
+
+def _make_other_user():
+    user = User.objects.create(
+        email=f"o-{uuid4().hex[:8]}@example.com",
+        username=f"o_{uuid4().hex[:8]}",
+    )
+    user.set_password("pw")
+    user.save()
+    return user
+
+
+def _make_issue(workspace, *, created_by, assignees=()):
+    """Create a minimal Issue inside the workspace's default-ish project.
+
+    ``IssueAssignee`` (the M2M through model) extends ``ProjectBaseModel``
+    which has a non-null ``created_by`` — so we must create rows
+    explicitly rather than via ``issue.assignees.set(...)``.
+    """
+    from crum import impersonate
+
+    from pi_dash.db.models import Issue, Project, State
+    from pi_dash.db.models.issue import IssueAssignee
+
+    with impersonate(created_by):
+        project = Project.objects.create(
+            name=f"P-{uuid4().hex[:6]}",
+            identifier=f"P{uuid4().hex[:4].upper()}",
+            workspace=workspace,
+            created_by=created_by,
+        )
+        started = State.objects.create(name="In Progress", project=project, group="started")
+        issue = Issue.objects.create(
+            name="task",
+            workspace=workspace,
+            project=project,
+            state=started,
+            created_by=created_by,
+        )
+        for assignee in assignees:
+            IssueAssignee.objects.create(
+                issue=issue,
+                assignee=assignee,
+                workspace=workspace,
+                project=project,
+                created_by=created_by,
+            )
+    # The state-transition signal may auto-create an initial dispatch run;
+    # delete it so each test controls exactly which runs exist.
+    AgentRun.objects.filter(work_item=issue).delete()
+    return issue
+
+
+@pytest.mark.unit
+def test_get_runs_includes_tick_runs_on_issue_user_created(db, session_client, workspace):
+    """An issue I created has a tick-driven run authored by the bot.
+    The run must appear in my list even though I didn't create it.
+    """
+    other = _make_other_user()  # stand-in for the bot
+    issue = _make_issue(workspace, created_by=workspace.owner)
+    AgentRun.objects.create(
+        workspace=workspace,
+        created_by=other,
+        pod=Pod.default_for_workspace(workspace),
+        work_item=issue,
+        prompt="tick run on my issue",
+    )
+    resp = session_client.get("/api/runners/runs/")
+    assert resp.status_code == status.HTTP_200_OK
+    assert "tick run on my issue" in [r["prompt"] for r in resp.data]
+
+
+@pytest.mark.unit
+def test_get_runs_includes_tick_runs_on_issue_user_assigned(db, session_client, workspace):
+    """An issue I'm assigned to (but didn't create) has a tick-driven run
+    authored by the bot. The run must still appear in my list.
+    """
+    other = _make_other_user()
+    issue = _make_issue(workspace, created_by=other, assignees=[workspace.owner])
+    AgentRun.objects.create(
+        workspace=workspace,
+        created_by=other,
+        pod=Pod.default_for_workspace(workspace),
+        work_item=issue,
+        prompt="tick run on assigned issue",
+    )
+    resp = session_client.get("/api/runners/runs/")
+    assert resp.status_code == status.HTTP_200_OK
+    assert "tick run on assigned issue" in [r["prompt"] for r in resp.data]
+
+
+@pytest.mark.unit
+def test_get_runs_excludes_runs_on_unrelated_issues(db, session_client, workspace):
+    """Negative case: an issue I neither created nor am assigned to, with
+    a run also not created by me. Stays invisible.
+    """
+    other = _make_other_user()
+    issue = _make_issue(workspace, created_by=other)
+    AgentRun.objects.create(
+        workspace=workspace,
+        created_by=other,
+        pod=Pod.default_for_workspace(workspace),
+        work_item=issue,
+        prompt="run on unrelated issue",
+    )
+    resp = session_client.get("/api/runners/runs/")
+    assert resp.status_code == status.HTTP_200_OK
+    assert "run on unrelated issue" not in [r["prompt"] for r in resp.data]
+
+
+@pytest.mark.unit
+def test_get_runs_does_not_duplicate_when_user_satisfies_multiple_clauses(
+    db, session_client, workspace
+):
+    """Caller created the issue AND is assigned to it AND created the run.
+    The run still appears exactly once.
+    """
+    issue = _make_issue(workspace, created_by=workspace.owner, assignees=[workspace.owner])
+    AgentRun.objects.create(
+        workspace=workspace,
+        created_by=workspace.owner,
+        pod=Pod.default_for_workspace(workspace),
+        work_item=issue,
+        prompt="multi-match run",
+    )
+    resp = session_client.get("/api/runners/runs/")
+    assert resp.status_code == status.HTTP_200_OK
+    prompts = [r["prompt"] for r in resp.data]
+    assert prompts.count("multi-match run") == 1
 
 
 # ---------------------------------------------------------------------------

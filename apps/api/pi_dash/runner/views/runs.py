@@ -3,6 +3,7 @@
 # See the LICENSE file for details.
 
 from django.db import transaction
+from django.db.models import Q
 from django.utils import timezone
 from rest_framework import status
 from rest_framework.permissions import IsAuthenticated
@@ -55,11 +56,25 @@ class AgentRunListEndpoint(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
-        # "My runs" — the runs the caller created. Workspace-scoped views are
-        # available to admins via the workspace listing once we add it; for
-        # MVP, list-by-creator is enough.
-        qs = AgentRun.objects.filter(created_by=request.user).order_by(
-            "-created_at"
+        # "My runs" — runs the caller is involved with. Three involvement
+        # signals are surfaced:
+        #   1. created_by == caller (free-form runs they kicked off)
+        #   2. work_item.created_by == caller (their issues)
+        #   3. work_item.assignees contains caller (issues assigned to them)
+        # Tick-driven runs carry created_by = agent system bot per
+        # ``orchestration/scheduling._resolve_creator_for_trigger``, so a
+        # creator-only filter would hide them from the human owner of the
+        # issue. The OR over (1)+(2)+(3) puts them back in view.
+        # ``distinct()`` guards against duplicates from the assignees join
+        # when the caller satisfies more than one clause.
+        qs = (
+            AgentRun.objects.filter(
+                Q(created_by=request.user)
+                | Q(work_item__created_by=request.user)
+                | Q(work_item__assignees=request.user)
+            )
+            .distinct()
+            .order_by("-created_at")
         )
         workspace_id = request.query_params.get("workspace")
         if workspace_id:
