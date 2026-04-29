@@ -91,7 +91,11 @@ pub async fn execute(paths: &Paths, runner_filter: Option<&str>) -> Result<Repor
         None => Vec::new(),
     };
 
-    let multi = runners.len() > 1;
+    // Tag check names with `@<runner>` whenever there's any ambiguity:
+    // multiple runners walked, *or* an explicit filter narrowed the walk
+    // (so `pidash doctor --runner beta` clearly shows `codex@beta` rather
+    // than a bare `codex` that hides which runner ran).
+    let multi = runners.len() > 1 || runner_filter.is_some();
     if runners.is_empty() {
         // No config — historical default. Probe Codex unattended so
         // operators get useful feedback before `pidash configure` runs.
@@ -283,4 +287,184 @@ async fn check_cloud(url: &str) -> Result<String> {
     let probe = format!("{}/api/v1/runner/health/", url.trim_end_matches('/'));
     let resp = client.get(&probe).send().await?;
     Ok(format!("{} ({})", resp.status(), probe))
+}
+
+#[cfg(test)]
+mod tests {
+    //! These tests exercise the *check-tagging* logic in `execute`, not
+    //! the underlying binary probes. They use deliberately bogus binary
+    //! names so `check_version` always errs; we then assert that the
+    //! resulting `Check` entries are tagged with the right runner name.
+    //! The actual `git --version` / cloud probe still runs and may pass or
+    //! fail depending on the test environment — we only check that the
+    //! per-runner tags are correct.
+    use super::*;
+    use crate::config::schema::{
+        AgentKind, ClaudeCodeSection, CodexSection, Config, DaemonConfig, RunnerConfig,
+        WorkspaceSection,
+    };
+    use std::path::PathBuf;
+    use uuid::Uuid;
+
+    fn temp_paths() -> (tempfile::TempDir, Paths) {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = Paths {
+            config_dir: dir.path().join("config"),
+            data_dir: dir.path().join("data"),
+            runtime_dir: dir.path().join("runtime"),
+        };
+        paths.ensure().unwrap();
+        (dir, paths)
+    }
+
+    fn runner(name: &str, codex_binary: &str) -> RunnerConfig {
+        RunnerConfig {
+            name: name.to_string(),
+            runner_id: Uuid::new_v4(),
+            workspace_slug: Some("WS".into()),
+            project_slug: Some("PRJ".into()),
+            pod_id: None,
+            workspace: WorkspaceSection {
+                working_dir: PathBuf::from("/tmp/pi-dash-doctor-test"),
+            },
+            agent: Default::default(),
+            codex: CodexSection {
+                binary: codex_binary.to_string(),
+                ..Default::default()
+            },
+            claude_code: ClaudeCodeSection::default(),
+            approval_policy: Default::default(),
+        }
+    }
+
+    fn cfg_with(runners: Vec<RunnerConfig>) -> Config {
+        Config {
+            version: 2,
+            daemon: DaemonConfig {
+                cloud_url: "http://127.0.0.1:1".into(),
+                log_level: "info".into(),
+                log_retention_days: 14,
+            },
+            runners,
+        }
+    }
+
+    #[tokio::test]
+    async fn execute_with_two_runners_tags_each_runner_in_check_names() {
+        let (_dir, paths) = temp_paths();
+        let cfg = cfg_with(vec![
+            // Use deliberately missing binaries so the codex check fails
+            // and we don't depend on whatever's on $PATH in CI.
+            runner("alpha", "codex-not-installed-alpha"),
+            runner("beta", "codex-not-installed-beta"),
+        ]);
+        crate::config::file::write_config(&paths, &cfg).unwrap();
+
+        let report = execute(&paths, None).await.unwrap();
+        let names: Vec<String> = report.checks.iter().map(|c| c.name.clone()).collect();
+        // Both per-runner agent checks must appear, tagged.
+        assert!(
+            names.iter().any(|n| n == "codex@alpha"),
+            "expected codex@alpha in {names:?}",
+        );
+        assert!(
+            names.iter().any(|n| n == "codex@beta"),
+            "expected codex@beta in {names:?}",
+        );
+    }
+
+    #[tokio::test]
+    async fn execute_with_single_runner_keeps_untagged_check_names() {
+        let (_dir, paths) = temp_paths();
+        let cfg = cfg_with(vec![runner("solo", "codex-not-installed")]);
+        crate::config::file::write_config(&paths, &cfg).unwrap();
+
+        let report = execute(&paths, None).await.unwrap();
+        let names: Vec<String> = report.checks.iter().map(|c| c.name.clone()).collect();
+        // Single-runner installs keep the bare name so existing scripts
+        // and snapshots don't break.
+        assert!(
+            names.iter().any(|n| n == "codex"),
+            "expected bare `codex` in {names:?}",
+        );
+        assert!(
+            !names.iter().any(|n| n.starts_with("codex@")),
+            "did not expect tagged names in single-runner: {names:?}",
+        );
+    }
+
+    #[tokio::test]
+    async fn execute_with_runner_filter_restricts_checks_to_that_runner() {
+        let (_dir, paths) = temp_paths();
+        let cfg = cfg_with(vec![
+            runner("alpha", "codex-not-installed-alpha"),
+            runner("beta", "codex-not-installed-beta"),
+        ]);
+        crate::config::file::write_config(&paths, &cfg).unwrap();
+
+        let report = execute(&paths, Some("beta")).await.unwrap();
+        let names: Vec<String> = report.checks.iter().map(|c| c.name.clone()).collect();
+        assert!(
+            names.iter().any(|n| n == "codex@beta"),
+            "expected codex@beta in {names:?}",
+        );
+        // Filter should suppress the other runner entirely. With one
+        // runner remaining, we still tag it (`codex@beta`) because the
+        // filter is the user's explicit selection — disambiguation
+        // matters more than terseness here.
+        assert!(
+            !names.iter().any(|n| n == "codex@alpha"),
+            "did not expect codex@alpha in {names:?}",
+        );
+    }
+
+    #[tokio::test]
+    async fn execute_with_unknown_runner_filter_errors_with_known_names() {
+        let (_dir, paths) = temp_paths();
+        let cfg = cfg_with(vec![
+            runner("alpha", "codex-not-installed-alpha"),
+            runner("beta", "codex-not-installed-beta"),
+        ]);
+        crate::config::file::write_config(&paths, &cfg).unwrap();
+
+        let err = execute(&paths, Some("ghost"))
+            .await
+            .expect_err("expected error for unknown runner");
+        let msg = format!("{err}");
+        assert!(msg.contains("ghost"), "missing requested name: {msg}");
+        assert!(msg.contains("alpha"), "missing known runner alpha: {msg}");
+        assert!(msg.contains("beta"), "missing known runner beta: {msg}");
+    }
+
+    #[test]
+    fn agent_kind_drives_check_set() {
+        // Sanity: switching an agent flips which check tags appear.
+        // We assert via the helper function's tag construction so we
+        // don't have to spawn binaries to see the difference.
+        let mut codex_checks: Vec<Check> = Vec::new();
+        let mut claude_checks: Vec<Check> = Vec::new();
+        // Run synchronously inside a tokio rt for the async helper.
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(run_agent_checks(
+            &mut codex_checks,
+            None,
+            AgentKind::Codex,
+            "codex-missing",
+            "claude-missing",
+        ));
+        rt.block_on(run_agent_checks(
+            &mut claude_checks,
+            None,
+            AgentKind::ClaudeCode,
+            "codex-missing",
+            "claude-missing",
+        ));
+        assert!(codex_checks.iter().any(|c| c.name == "codex"));
+        assert!(codex_checks.iter().any(|c| c.name == "codex-auth"));
+        assert!(claude_checks.iter().any(|c| c.name == "claude"));
+        assert!(claude_checks.iter().any(|c| c.name == "claude-auth"));
+    }
 }
