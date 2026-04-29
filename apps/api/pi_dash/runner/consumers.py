@@ -212,6 +212,10 @@ class RunnerConsumer(AsyncJsonWebsocketConsumer):
 
     async def on_hello(self, runner: Runner, msg: Dict[str, Any]) -> None:
         await sync_to_async(self._apply_hello)(runner, msg)
+        # Reconcile zombie BUSY runs on every reconnect. A daemon that died
+        # mid-assignment will reconnect with in_flight_run=None even though
+        # the cloud still has rows marked ASSIGNED for this runner.
+        await sync_to_async(self._reap_stale_busy_runs)(runner, msg)
         in_flight = msg.get("in_flight_run")
         if in_flight:
             await self._resume_run(runner, str(in_flight))
@@ -368,6 +372,86 @@ class RunnerConsumer(AsyncJsonWebsocketConsumer):
 
     def _apply_heartbeat(self, runner: Runner, msg: Dict[str, Any]) -> None:
         runner.mark_heartbeat()
+        self._reap_stale_busy_runs(runner, msg)
+
+    def _reap_stale_busy_runs(self, runner: Runner, msg: Dict[str, Any]) -> None:
+        """Reconcile cloud's view of runner's in-flight work against the
+        runner's own report.
+
+        The runner is the source of truth about which run it is currently
+        executing. If the cloud has runs marked BUSY (assigned/running/etc.)
+        for this runner that the runner does NOT report as in-flight, those
+        rows are zombies — typically left over from a daemon restart that
+        killed the agent subprocess between assign and the first lifecycle
+        ack. Reap them so the runner can pick up new work.
+
+        Race guard: only reap runs whose ``assigned_at`` predates the
+        heartbeat's ``ts``. A heartbeat sent before a fresh assignment was
+        written must not reap that assignment.
+        """
+        from django.db import transaction
+        from datetime import datetime
+
+        from pi_dash.runner.services.matcher import (
+            BUSY_STATUSES,
+            drain_for_runner_by_id,
+            drain_pod_by_id,
+        )
+
+        ts_raw = msg.get("ts")
+        try:
+            heartbeat_ts = (
+                datetime.fromisoformat(ts_raw.replace("Z", "+00:00"))
+                if isinstance(ts_raw, str)
+                else timezone.now()
+            )
+        except (ValueError, AttributeError):
+            heartbeat_ts = timezone.now()
+
+        in_flight = msg.get("in_flight_run")
+        in_flight_id = str(in_flight) if in_flight else None
+
+        stale = AgentRun.objects.filter(
+            runner=runner,
+            status__in=BUSY_STATUSES,
+            assigned_at__lt=heartbeat_ts,
+        )
+        if in_flight_id:
+            stale = stale.exclude(id=in_flight_id)
+
+        reaped = list(stale.values_list("id", "pod_id"))
+        if not reaped:
+            return
+
+        AgentRun.objects.filter(id__in=[rid for rid, _ in reaped]).update(
+            status=AgentRunStatus.FAILED,
+            ended_at=timezone.now(),
+            error=(
+                "reaped by heartbeat: runner reported "
+                f"in_flight_run={in_flight_id or 'None'} "
+                "but cloud had this run marked busy"
+            ),
+        )
+
+        logger.warning(
+            "consumer.heartbeat_reap: runner=%s reaped %d stale run(s): %s",
+            runner.id,
+            len(reaped),
+            [str(rid) for rid, _ in reaped],
+        )
+
+        # Free the runner downstream — drain the pod and prefer this runner
+        # so any QUEUED work can dispatch right away. Same on_commit pattern
+        # used by _finalize_run.
+        pod_ids = {pid for _, pid in reaped if pid is not None}
+        runner_id = runner.id
+
+        def _drain_after_commit(rid=runner_id, pids=pod_ids):
+            drain_for_runner_by_id(rid)
+            for pid in pids:
+                drain_pod_by_id(pid)
+
+        transaction.on_commit(_drain_after_commit)
 
     def _apply_lifecycle(
         self,
