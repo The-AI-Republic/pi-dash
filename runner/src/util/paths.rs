@@ -52,18 +52,9 @@ impl Paths {
         self.config_dir.join("credentials.toml")
     }
 
-    pub fn history_dir(&self) -> PathBuf {
-        self.data_dir.join("history")
-    }
-
-    pub fn runs_dir(&self) -> PathBuf {
-        self.history_dir().join("runs")
-    }
-
-    pub fn runs_index_path(&self) -> PathBuf {
-        self.history_dir().join("runs_index.json")
-    }
-
+    /// Daemon-level logs directory. Used only for service-supervisor
+    /// stdout/stderr (launchd / systemd unit redirection); per-runner
+    /// logs live under `RunnerPaths::logs_dir()`.
     pub fn logs_dir(&self) -> PathBuf {
         self.data_dir.join("logs")
     }
@@ -101,7 +92,6 @@ impl Paths {
             &self.config_dir,
             &self.data_dir,
             &self.runtime_dir,
-            &self.runs_dir(),
             &self.logs_dir(),
         ] {
             std::fs::create_dir_all(dir).with_context(|| format!("creating {dir:?}"))?;

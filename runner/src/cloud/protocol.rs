@@ -5,12 +5,21 @@ use uuid::Uuid;
 
 /// Wire version — bump on incompatible shape changes.
 ///
-/// v2 added `ClientMsg::RunPaused`, `FailureReason::ResumeUnavailable`, and
-/// the optional `resume_thread_id` field on `ServerMsg::Assign`. The cloud
-/// dispatches inbound messages by `type` string and silently drops unknown
-/// types, so a v2 runner against a v1 cloud loses pause/resume semantics
-/// rather than crashing — the version bump is the visible signal that
-/// rolling forward the cloud first is required.
+/// v2 additions, in order:
+/// - `ClientMsg::RunPaused`, `FailureReason::ResumeUnavailable`, and the
+///   optional `resume_thread_id` field on `ServerMsg::Assign`.
+/// - The optional `Envelope.runner_id` (`rid` on the wire) — additive,
+///   `skip_serializing_if = "Option::is_none"`, so legacy single-runner
+///   traffic is byte-for-byte v1-compatible.
+/// - Multi-Hello: one `Hello` per configured runner, one `Welcome` per
+///   `Hello`. `RemoveRunner { runner_id, reason }` for cloud-initiated
+///   per-runner decommission.
+///
+/// The cloud dispatches inbound messages by `type` string and silently
+/// drops unknown types, so a v2 runner against a v1 cloud loses pause /
+/// resume / multi-runner semantics rather than crashing. The version
+/// constant is the visible signal that rolling forward the cloud first
+/// is required.
 pub const WIRE_VERSION: u32 = 2;
 
 /// All frames carry `v`, `type`, `mid` (message id for dedupe). Multi-runner

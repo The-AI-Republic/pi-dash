@@ -184,11 +184,74 @@ def test_revoke_token_closes_ws_for_each_owned_runner(
 
     with patch(
         "pi_dash.runner.services.pubsub.close_runner_session"
-    ) as mock_close:
+    ) as mock_close, patch(
+        "pi_dash.runner.services.pubsub.send_token_revoke"
+    ) as mock_send_revoke:
         token.revoke()
 
     closed_ids = {call.args[0] for call in mock_close.call_args_list}
     assert closed_ids == {r1.id, r2.id}, closed_ids
+    # Defence in depth: a wire-level Revoke frame is also pushed so the
+    # daemon's supervisor calls state.shutdown() rather than
+    # reconnect-with-401-loop forever.
+    mock_send_revoke.assert_called_once()
+    revoke_target = mock_send_revoke.call_args.args[0]
+    assert revoke_target in {r1.id, r2.id}
+
+
+@pytest.mark.unit
+def test_revoke_token_emits_revoke_frame_when_runners_present(
+    db, create_user, workspace, pod
+):
+    """The connection-scoped Revoke frame is the runner-side signal that
+    triggers a clean daemon shutdown. Without it, the daemon would just
+    see a TCP close and bounce into a reconnect loop where every retry
+    fails the (now-revoked) auth check.
+    """
+    minted = tokens.mint_machine_token_secret()
+    token = MachineToken.objects.create(
+        workspace=workspace,
+        created_by=create_user,
+        title="t",
+        secret_hash=minted.hashed,
+        secret_fingerprint=minted.fingerprint,
+    )
+    r1 = _make_runner(create_user, workspace, pod, token, name="a")
+    with patch(
+        "pi_dash.runner.services.pubsub.close_runner_session"
+    ), patch(
+        "pi_dash.runner.services.pubsub.send_token_revoke"
+    ) as mock_send_revoke:
+        token.revoke()
+
+    mock_send_revoke.assert_called_once()
+    target_id, kwargs = mock_send_revoke.call_args.args[0], mock_send_revoke.call_args.kwargs
+    assert target_id == r1.id
+    assert kwargs.get("reason") == "token revoked"
+
+
+@pytest.mark.unit
+def test_revoke_token_with_no_runners_skips_revoke_frame(
+    db, create_user, workspace
+):
+    """If no runners are owned by the token, there's no consumer group
+    to push the Revoke frame to — skip it cleanly without raising.
+    """
+    minted = tokens.mint_machine_token_secret()
+    token = MachineToken.objects.create(
+        workspace=workspace,
+        created_by=create_user,
+        title="t",
+        secret_hash=minted.hashed,
+        secret_fingerprint=minted.fingerprint,
+    )
+    with patch(
+        "pi_dash.runner.services.pubsub.send_token_revoke"
+    ) as mock_send_revoke:
+        token.revoke()
+    mock_send_revoke.assert_not_called()
+    token.refresh_from_db()
+    assert token.revoked_at is not None
 
 
 @pytest.mark.unit
@@ -214,7 +277,9 @@ def test_revoke_token_marks_revoked_and_cascades(
         prompt="x",
     )
 
-    with patch("pi_dash.runner.services.pubsub.close_runner_session"):
+    with patch("pi_dash.runner.services.pubsub.close_runner_session"), patch(
+        "pi_dash.runner.services.pubsub.send_token_revoke"
+    ):
         token.revoke()
 
     token.refresh_from_db()
@@ -238,10 +303,106 @@ def test_revoke_token_is_idempotent(db, create_user, workspace, pod):
     )
     with patch(
         "pi_dash.runner.services.pubsub.close_runner_session"
-    ) as mock_close:
+    ) as mock_close, patch(
+        "pi_dash.runner.services.pubsub.send_token_revoke"
+    ) as mock_send_revoke:
         token.revoke()
-    # Second revoke is a no-op — no session closes fired.
+    # Second revoke is a no-op — neither pubsub side effect fires.
     mock_close.assert_not_called()
+    mock_send_revoke.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# POST /api/v1/runner/<id>/deregister/  — token-mode emits RemoveRunner
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+def test_deregister_in_token_mode_emits_remove_runner(
+    db, api_client, create_user, workspace, pod
+):
+    """Per-runner deregistration in token mode must NOT close the WS —
+    that would knock every sibling runner under the same token offline.
+    Instead we push a per-runner ``remove_runner`` ServerMsg, leaving
+    the connection up for the rest.
+    """
+    minted = tokens.mint_machine_token_secret()
+    token = MachineToken.objects.create(
+        workspace=workspace,
+        created_by=create_user,
+        title="t",
+        secret_hash=minted.hashed,
+        secret_fingerprint=minted.fingerprint,
+    )
+    runner_minted = tokens.mint_runner_secret()
+    runner = Runner.objects.create(
+        owner=create_user,
+        workspace=workspace,
+        pod=pod,
+        name="r1",
+        credential_hash=runner_minted.hashed,
+        credential_fingerprint=runner_minted.fingerprint,
+        machine_token=token,
+        status=RunnerStatus.ONLINE,
+    )
+
+    api_client.credentials(
+        HTTP_AUTHORIZATION=f"Bearer {minted.raw}",
+        HTTP_X_TOKEN_ID=str(token.id),
+    )
+    with patch(
+        "pi_dash.runner.views.register.send_to_runner"
+    ) as mock_send, patch(
+        "pi_dash.runner.views.register.close_runner_session"
+    ) as mock_close:
+        url = reverse("runner:deregister", args=[runner.id])
+        resp = api_client.post(url)
+
+    assert resp.status_code == 200, resp.content
+    runner.refresh_from_db()
+    assert runner.status == RunnerStatus.REVOKED
+    # Token mode → push remove_runner via pubsub; NEVER force-close.
+    mock_send.assert_called_once()
+    assert mock_send.call_args.args[0] == runner.id
+    payload = mock_send.call_args.args[1]
+    assert payload["type"] == "remove_runner"
+    assert payload["runner_id"] == str(runner.id)
+    mock_close.assert_not_called()
+
+
+@pytest.mark.unit
+def test_deregister_in_legacy_mode_force_closes_ws(
+    db, api_client, create_user, workspace, pod
+):
+    """Legacy single-runner deregister still uses the connection-close
+    path — there's no other runner on this WS to spare.
+    """
+    runner_minted = tokens.mint_runner_secret()
+    runner = Runner.objects.create(
+        owner=create_user,
+        workspace=workspace,
+        pod=pod,
+        name="r1",
+        credential_hash=runner_minted.hashed,
+        credential_fingerprint=runner_minted.fingerprint,
+        status=RunnerStatus.ONLINE,
+    )
+    assert runner.machine_token_id is None
+
+    api_client.credentials(HTTP_AUTHORIZATION=f"Bearer {runner_minted.raw}")
+    with patch(
+        "pi_dash.runner.views.register.send_to_runner"
+    ) as mock_send, patch(
+        "pi_dash.runner.views.register.close_runner_session"
+    ) as mock_close:
+        url = reverse("runner:deregister", args=[runner.id])
+        resp = api_client.post(url)
+
+    assert resp.status_code == 200, resp.content
+    runner.refresh_from_db()
+    assert runner.status == RunnerStatus.REVOKED
+    mock_close.assert_called_once_with(runner.id)
+    mock_send.assert_not_called()
 
 
 # ---------------------------------------------------------------------------

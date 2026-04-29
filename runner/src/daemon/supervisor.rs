@@ -149,11 +149,17 @@ impl Supervisor {
 
             // Heartbeat task per instance — design.md §6.6 says per-runner
             // heartbeats carry rid so the cloud's per-runner record can
-            // update last_seen_at independently for each.
+            // update last_seen_at independently for each. Each task also
+            // watches `remove_signal` so a `ServerMsg::RemoveRunner` can
+            // tear it down without dragging the daemon's other heartbeats
+            // along — preventing zombie heartbeats with rid for a runner
+            // the cloud-side row has already deleted.
             let mut hb_handles: Vec<tokio::task::JoinHandle<()>> = Vec::new();
             for inst in &instances {
                 let hb_out = inst.out.clone();
                 let state_hb = inst.state.clone();
+                let remove_signal = inst.remove_signal.clone();
+                let runner_id = inst.runner_id;
                 let h = tokio::spawn(async move {
                     let mut rx_interval = state_hb.rx_heartbeat_secs.clone();
                     let mut current_secs = (*rx_interval.borrow()).max(1);
@@ -161,6 +167,13 @@ impl Supervisor {
                     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
                     loop {
                         tokio::select! {
+                            _ = remove_signal.notified() => {
+                                tracing::info!(
+                                    %runner_id,
+                                    "heartbeat task exiting after RemoveRunner"
+                                );
+                                return;
+                            }
                             _ = ticker.tick() => {
                                 let now = Utc::now();
                                 state_hb.set_heartbeat(now).await;
@@ -273,6 +286,7 @@ impl Supervisor {
             let inst_state = inst.state.clone();
             let inst_approvals = inst.approvals.clone();
             let inst_out = inst.out.clone();
+            let inst_remove_signal = inst.remove_signal.clone();
             let h = tokio::spawn(async move {
                 let run = RunnerLoop {
                     runner_paths,
@@ -281,6 +295,7 @@ impl Supervisor {
                     state: inst_state,
                     approvals: inst_approvals,
                     inbound: mailbox_rx,
+                    remove_signal: inst_remove_signal,
                     current_run: None,
                 };
                 if let Err(e) = run.run().await {
@@ -363,6 +378,11 @@ struct RunnerLoop {
     state: StateHandle,
     approvals: ApprovalRouter,
     inbound: mpsc::Receiver<Envelope<ServerMsg>>,
+    /// Notified before the loop exits on `ServerMsg::RemoveRunner` so
+    /// the per-instance heartbeat task can stop emitting frames the
+    /// cloud will drop with `unknown rid`. Shared with the
+    /// `RunnerInstance` and the heartbeat task.
+    remove_signal: std::sync::Arc<tokio::sync::Notify>,
     /// In-flight run, if any. Replaced on each Assign and cleared as soon as
     /// the worker task signals completion via `done_rx` — driven by
     /// `tokio::select!` so a new Assign isn't rejected while we wait for the
@@ -548,6 +568,12 @@ impl RunnerLoop {
                     if let Some(run) = &self.current_run {
                         run.cancel.notify_waiters();
                     }
+                    // Tell the heartbeat task to exit before we drop
+                    // out of the loop. Without this it would keep
+                    // emitting frames carrying this runner's id and
+                    // the cloud would drop each one with an
+                    // `unknown rid` warning until the daemon restarts.
+                    self.remove_signal.notify_waiters();
                     // Best-effort cleanup of this runner's local data
                     // dir. The on-disk state is keyed by runner_id and
                     // is dead weight once the cloud-side row is gone.
@@ -560,15 +586,11 @@ impl RunnerLoop {
                             runner_dir,
                         );
                     }
-                    // NOTE: the per-instance heartbeat task and the
-                    // [[runner]] entry in config.toml are not cleaned
-                    // up here — the supervisor doesn't yet expose a
-                    // "tear down instance N" API. Heartbeats for the
-                    // removed runner will keep ticking until the next
-                    // daemon restart; cloud will drop them with
-                    // unknown-rid warnings (logspam, not data loss).
-                    // Operators can run `pidash token remove-runner
-                    // --name <name>` to also strip config.toml.
+                    // NOTE: the [[runner]] entry in config.toml is not
+                    // cleaned up here — operators run
+                    // `pidash token remove-runner --name <name>` to
+                    // also strip config.toml so the next daemon
+                    // restart doesn't re-Hello for this runner_id.
                     break;
                 }
             }

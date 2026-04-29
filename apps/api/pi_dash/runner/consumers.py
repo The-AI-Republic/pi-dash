@@ -606,6 +606,30 @@ class RunnerConsumer(AsyncJsonWebsocketConsumer):
         """
         await self.close(code=int(event.get("code") or CLOSE_CODE_ROTATED))
 
+    async def runner_revoke(self, event: Dict[str, Any]) -> None:
+        """Send a connection-scoped ``Revoke`` frame and close.
+
+        Triggered by ``MachineToken.revoke()``. The frame goes out with
+        ``rid`` omitted so the daemon's demux routes it to the
+        connection consumer (per-design: ``Ping``/``Bye``/``Revoke`` are
+        the only connection-scoped server frames). The daemon's
+        supervisor handler at ``runner/src/daemon/supervisor.rs`` (the
+        ``ServerMsg::Revoke`` arm in the demux) calls
+        ``state.shutdown()`` on receipt — so revocation triggers a
+        clean daemon exit rather than a reconnect-with-401 spin loop.
+        """
+        reason = str(event.get("reason") or "token revoked")
+        try:
+            await self._send_envelope(
+                {"type": "revoke", "reason": reason},
+                runner_scoped=False,
+            )
+        except Exception:
+            # The daemon may have already closed the socket; surface as
+            # a debug log and fall through to close anyway.
+            logger.exception("failed to send revoke frame")
+        await self.close(code=CLOSE_CODE_ROTATED)
+
     # ---- Sync helpers (DB-bound) ----
 
     @staticmethod

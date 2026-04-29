@@ -25,7 +25,7 @@ from pi_dash.runner.serializers import (
 )
 from pi_dash.runner.services import tokens
 from pi_dash.runner.services.matcher import can_register_another
-from pi_dash.runner.services.pubsub import close_runner_session
+from pi_dash.runner.services.pubsub import close_runner_session, send_to_runner
 
 
 HEARTBEAT_INTERVAL_SECS = 25
@@ -148,8 +148,20 @@ class RegisterEndpoint(APIView):
 class RunnerDeregisterEndpoint(APIView):
     """POST /api/v1/runner/<uuid>/deregister/
 
-    Called by the daemon during ``pidash remove``. Authenticated
-    with the runner's own bearer secret; the server marks the runner revoked.
+    Called by the daemon during ``pidash remove`` and ``pidash token
+    remove-runner``. Authenticated with the runner's own bearer secret
+    (legacy single-runner) or with ``X-Token-Id`` + the token's bearer
+    (token / multi-runner). The server marks the runner revoked.
+
+    Connection teardown semantics differ by auth mode:
+
+    - **Legacy** — close the WebSocket. One connection ↔ one runner, so
+      there's nothing else on the socket worth preserving.
+    - **Token mode** — emit ``ServerMsg::RemoveRunner`` so the daemon
+      tears down ONLY this runner's ``RunnerLoop`` while the shared WS
+      and the other runners under this token stay up. Force-closing
+      the connection here would knock every sibling runner offline as
+      a side effect.
     """
 
     authentication_classes = [RunnerBearerAuthentication]
@@ -162,8 +174,19 @@ class RunnerDeregisterEndpoint(APIView):
         runner = getattr(request, "auth_runner", None)
         if runner is None or str(runner.id) != str(runner_id):
             return Response({"error": "forbidden"}, status=status.HTTP_403_FORBIDDEN)
+        in_token_mode = runner.machine_token_id is not None
         runner.revoke()
-        close_runner_session(runner.pk)
+        if in_token_mode:
+            send_to_runner(
+                runner.pk,
+                {
+                    "type": "remove_runner",
+                    "runner_id": str(runner.id),
+                    "reason": "deregistered",
+                },
+            )
+        else:
+            close_runner_session(runner.pk)
         return Response({"ok": True})
 
 

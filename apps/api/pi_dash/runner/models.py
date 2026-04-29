@@ -348,17 +348,24 @@ class MachineToken(models.Model):
         """Mark the token revoked and cascade to its owned runners.
 
         Owned runners are revoked individually (which cancels their
-        in-flight runs via ``Runner.revoke``) and we then force-close
-        any active WebSocket sessions joined to those runners' pubsub
-        groups. In token mode the consumer is joined to N runner groups
-        on one connection, so a close on any one group tears down the
-        whole connection — which is the correct semantic for token
-        revoke. If the WS is already down, the next reconnect fails
-        the auth check (revoked_at is non-null).
+        in-flight runs via ``Runner.revoke``) and we then push a
+        connection-scoped ``Revoke`` frame to the consumer so the
+        daemon shuts down cleanly via its supervisor's
+        ``state.shutdown()`` path. In token mode one consumer is joined
+        to N runner groups on one connection, so a single
+        ``send_token_revoke`` call reaches the consumer once — that's
+        all we need; the daemon then exits and won't reconnect (auth
+        would fail anyway since ``revoked_at`` is non-null).
+
+        If the WS is already down, the message is dropped and the next
+        reconnect fails the auth check.
         """
         from django.db import transaction
 
-        from pi_dash.runner.services.pubsub import close_runner_session
+        from pi_dash.runner.services.pubsub import (
+            close_runner_session,
+            send_token_revoke,
+        )
 
         if self.revoked_at is not None:
             return
@@ -368,14 +375,19 @@ class MachineToken(models.Model):
             self.save(update_fields=["revoked_at"])
             # Cascade — revoke each owned runner so its in-flight runs
             # are cancelled and any pinned queued runs unpinned. Capture
-            # ids for the post-commit WS-close step.
+            # ids for the post-commit notification step.
             for runner in self.runners.filter(revoked_at__isnull=True):
                 runner.revoke()
                 owned_runner_ids.append(runner.id)
 
-        # After the DB transaction commits, force-close any active session
-        # so a daemon authenticated under this token can't keep operating
-        # past the revoke. A no-op for runners with no live consumer.
+        # After the DB transaction commits, tell the daemon (if connected)
+        # to shut down via a wire-level Revoke frame. Sending to one
+        # owned runner is enough — the consumer is joined to all groups
+        # for this token. Defence in depth: also force-close every
+        # group, so a consumer that drops the Revoke for any reason
+        # still loses the socket.
+        if owned_runner_ids:
+            send_token_revoke(owned_runner_ids[0], reason="token revoked")
         for runner_id in owned_runner_ids:
             close_runner_session(runner_id)
 

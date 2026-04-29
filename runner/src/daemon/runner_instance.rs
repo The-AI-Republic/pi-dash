@@ -37,6 +37,12 @@ pub struct RunnerInstance {
     pub out: RunnerOut,
     pub mailbox_tx: mpsc::Sender<Envelope<ServerMsg>>,
     pub mailbox_rx: Arc<tokio::sync::Mutex<Option<mpsc::Receiver<Envelope<ServerMsg>>>>>,
+    /// Notified by the `RunnerLoop` when this instance is being torn
+    /// down (today: only on `ServerMsg::RemoveRunner`). Per-instance
+    /// background tasks — heartbeat in particular — watch this and
+    /// exit, preventing zombie traffic for a runner whose cloud-side
+    /// row no longer exists. See `design.md` §11.4.
+    pub remove_signal: Arc<tokio::sync::Notify>,
 }
 
 impl RunnerInstance {
@@ -73,6 +79,7 @@ impl RunnerInstance {
             out,
             mailbox_tx,
             mailbox_rx: Arc::new(tokio::sync::Mutex::new(Some(mailbox_rx))),
+            remove_signal: Arc::new(tokio::sync::Notify::new()),
         }
     }
 

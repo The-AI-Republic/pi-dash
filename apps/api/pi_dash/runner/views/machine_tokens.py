@@ -126,14 +126,17 @@ class TokenRunnerCreateEndpoint(APIView):
         Authorization: Bearer <token_secret>
 
     Body:
-        { "name": "<NAME>", "os": "...", "arch": "...", "version": "..." }
+        { "name": "<NAME>", "os": "...", "arch": "...",
+          "version": "...", "protocol_version": <int> }
 
     Response:
-        { "runner_id": "<UUID>", "credential_secret": "<RAW>" }
+        { "runner_id": "<UUID>" }
 
-    The credential_secret is returned for back-compat with the legacy
-    runner_secret auth path; the daemon, once on token auth, can ignore
-    it. A future cleanup may stop minting it for token-auth runners.
+    Token-auth runners never present a per-runner bearer secret on the
+    wire (the WS auths as the token; runner_id is just a routing key),
+    so no `credential_secret` is minted or returned. Persisted
+    `credential_hash` is a non-empty placeholder so the unique-by-hash
+    legacy path stays well-formed for any future tooling that walks it.
     """
 
     authentication_classes: list = []
@@ -189,14 +192,24 @@ class TokenRunnerCreateEndpoint(APIView):
                 status=status.HTTP_409_CONFLICT,
             )
 
-        minted = tokens.mint_runner_secret()
+        # Token-auth runners don't carry their own bearer; the WS auths
+        # as the token. We still write a non-empty `credential_hash` so
+        # the column never sees an empty string (it's nullable=False)
+        # and any future legacy-path tooling that scans by hash sees a
+        # well-formed row. The placeholder is salted with the runner_id
+        # so collisions across runners can't happen.
         try:
+            placeholder_runner_id = _uuid.uuid4()
+            placeholder_hash = tokens.hash_token(
+                f"token-auth:{token.id}:{placeholder_runner_id}"
+            )
             runner = Runner.objects.create(
+                id=placeholder_runner_id,
                 owner=token.created_by,
                 workspace=token.workspace,
                 name=name,
-                credential_hash=minted.hashed,
-                credential_fingerprint=minted.fingerprint,
+                credential_hash=placeholder_hash,
+                credential_fingerprint="token-auth",
                 machine_token=token,
                 os=(request.data.get("os") or "")[:32],
                 arch=(request.data.get("arch") or "")[:32],
@@ -213,10 +226,7 @@ class TokenRunnerCreateEndpoint(APIView):
             )
 
         return Response(
-            {
-                "runner_id": str(runner.id),
-                "credential_secret": minted.raw,
-            },
+            {"runner_id": str(runner.id)},
             status=status.HTTP_201_CREATED,
         )
 
