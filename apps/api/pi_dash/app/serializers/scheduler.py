@@ -16,10 +16,24 @@ from pi_dash.app.serializers.base import BaseSerializer
 from pi_dash.db.models.scheduler import Scheduler, SchedulerBinding
 
 
+# Bound `extra_context` so an admin doesn't accidentally (or deliberately)
+# inflate the prompt past what the model and the runner can usefully process.
+# 16 KiB is enough for several pages of project-specific context.
+EXTRA_CONTEXT_MAX_LENGTH = 16 * 1024
+
+
 def _validate_cron_expression(value: str) -> str:
     value = (value or "").strip()
     if not value:
         raise serializers.ValidationError("cron expression is required")
+    # Pin to standard 5-field cron (minute hour dom month dow). croniter
+    # silently accepts 6-field expressions with a seconds component, but
+    # the design and the Beat tick rate (1 minute) make sub-minute
+    # cadence meaningless and confusing to operators.
+    if len(value.split()) != 5:
+        raise serializers.ValidationError(
+            "cron must be a standard 5-field expression (minute hour day month weekday)"
+        )
     try:
         croniter(value)
     except (CroniterBadCronError, ValueError) as e:
@@ -111,3 +125,22 @@ class SchedulerBindingSerializer(BaseSerializer):
 
     def validate_cron(self, value: str) -> str:
         return _validate_cron_expression(value)
+
+    def validate_extra_context(self, value: str) -> str:
+        if value and len(value) > EXTRA_CONTEXT_MAX_LENGTH:
+            raise serializers.ValidationError(
+                f"extra_context must be at most {EXTRA_CONTEXT_MAX_LENGTH} characters"
+            )
+        return value
+
+    def validate(self, attrs):
+        # On update, lock `scheduler` and `project` — the design says swap
+        # via uninstall + reinstall, not in-place repointing (would leave
+        # workspace/project inconsistent with scheduler.workspace).
+        if self.instance is not None:
+            for locked in ("scheduler", "project"):
+                if locked in attrs and attrs[locked] != getattr(self.instance, locked):
+                    raise serializers.ValidationError(
+                        {locked: f"{locked} cannot be changed; uninstall and re-install"}
+                    )
+        return super().validate(attrs)

@@ -95,7 +95,14 @@ class WorkspaceSchedulerDetailEndpoint(BaseAPIView):
         if not _feature_enabled():
             return _disabled_response()
         scheduler = get_object_or_404(
-            Scheduler, pk=scheduler_id, workspace__slug=slug
+            Scheduler.objects.annotate(
+                _active_binding_count=Count(
+                    "bindings",
+                    filter=Q(bindings__deleted_at__isnull=True),
+                )
+            ),
+            pk=scheduler_id,
+            workspace__slug=slug,
         )
         return Response(
             SchedulerSerializer(scheduler).data,
@@ -107,7 +114,14 @@ class WorkspaceSchedulerDetailEndpoint(BaseAPIView):
         if not _feature_enabled():
             return _disabled_response()
         scheduler = get_object_or_404(
-            Scheduler, pk=scheduler_id, workspace__slug=slug
+            Scheduler.objects.annotate(
+                _active_binding_count=Count(
+                    "bindings",
+                    filter=Q(bindings__deleted_at__isnull=True),
+                )
+            ),
+            pk=scheduler_id,
+            workspace__slug=slug,
         )
         serializer = SchedulerSerializer(scheduler, data=request.data, partial=True)
         serializer.is_valid(raise_exception=True)

@@ -33,6 +33,7 @@ from celery import shared_task
 from croniter import croniter, CroniterBadCronError
 from django.conf import settings
 from django.db import transaction
+from django.db.models import Q
 from django.utils import timezone
 
 from pi_dash.db.models.scheduler import SchedulerBinding
@@ -102,37 +103,30 @@ def scan_due_bindings() -> int:
         return 0
 
     now = timezone.now()
+    # NULL next_run_at means "never fired; due immediately." Postgres NULL
+    # semantics exclude rows with NULL from `__lte=`, so the OR clause is
+    # required. Also filter out bindings whose scheduler has been
+    # soft-deleted: the SoftDeleteModel cascade is async (see db/mixins.py
+    # `soft_delete_related_objects.delay`), so there's a real window where
+    # a binding still has deleted_at IS NULL but its parent doesn't.
     due_ids = list(
         SchedulerBinding.objects.filter(
             enabled=True,
             scheduler__is_enabled=True,
+            scheduler__deleted_at__isnull=True,
         )
-        .filter(
-            # next_run_at IS NULL means "never fired; due immediately."
-            # Otherwise honour the scheduled time.
-            next_run_at__lte=now,
-        )
+        .filter(Q(next_run_at__lte=now) | Q(next_run_at__isnull=True))
         .order_by("next_run_at")
         .values_list("id", flat=True)
     )
-    # Treat NULL next_run_at as also due — Postgres won't include NULLs in
-    # next_run_at__lte, so a second pass picks them up.
-    null_ids = list(
-        SchedulerBinding.objects.filter(
-            enabled=True,
-            scheduler__is_enabled=True,
-            next_run_at__isnull=True,
-        ).values_list("id", flat=True)
-    )
-    all_ids = list(due_ids) + list(null_ids)
-    for binding_id in all_ids:
+    for binding_id in due_ids:
         fire_scheduler_binding.delay(str(binding_id))
-    if all_ids:
+    if due_ids:
         logger.info(
             "scheduler.scan: dispatched %d fire_scheduler_binding tasks",
-            len(all_ids),
+            len(due_ids),
         )
-    return len(all_ids)
+    return len(due_ids)
 
 
 @shared_task(
@@ -183,10 +177,16 @@ def fire_scheduler_binding(self, binding_id: str) -> bool:
         nxt = _next_fire_from_cron(binding.cron, now=now)
         if nxt is None:
             # Bad cron — record the error and disable the binding so we
-            # don't re-attempt every minute.
+            # don't re-attempt every minute. Also clear next_run_at so
+            # that if the user later re-enables (without changing cron),
+            # the API path through ProjectSchedulerBindingDetailEndpoint
+            # is the only way back in — and that path validates cron.
             binding.last_error = f"invalid cron expression: {binding.cron!r}"[:1000]
             binding.enabled = False
-            binding.save(update_fields=["last_error", "enabled", "updated_at"])
+            binding.next_run_at = None
+            binding.save(
+                update_fields=["last_error", "enabled", "next_run_at", "updated_at"]
+            )
             return False
 
         prev_next_run_at = binding.next_run_at
@@ -225,11 +225,17 @@ def fire_scheduler_binding(self, binding_id: str) -> bool:
     # ----- Phase 3a: Success — record the run pointer -----
     if run is not None:
         with transaction.atomic():
-            (
+            success = (
                 SchedulerBinding.objects.select_for_update(of=("self",))
                 .filter(pk=binding_pk)
-                .update(last_run=run, last_error="")
+                .first()
             )
+            if success is not None:
+                success.last_run = run
+                success.last_error = ""
+                # Use save() so auto_now on updated_at fires; queryset
+                # .update() bypasses it (`auto_now` is set in pre_save).
+                success.save(update_fields=["last_run", "last_error", "updated_at"])
         logger.info(
             "scheduler.fire: dispatched run=%s binding=%s",
             run.pk,

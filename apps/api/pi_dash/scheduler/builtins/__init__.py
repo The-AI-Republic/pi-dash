@@ -69,38 +69,57 @@ def ensure_builtin_schedulers(workspace, *, builtins: Iterable[BuiltinScheduler]
     file-import time; resolves it via ``apps.get_model`` if needed).
     """
     # Lazy import keeps this module safe to import at migration time.
+    from django.db import IntegrityError, transaction
+
     from pi_dash.db.models.scheduler import Scheduler, SchedulerSource
 
     if builtins is None:
         builtins = BUILTINS
 
+    def _apply_defaults(row: Scheduler, builtin: BuiltinScheduler) -> None:
+        row.name = builtin.name
+        row.description = builtin.description
+        row.prompt = builtin.prompt
+        row.source = SchedulerSource.BUILTIN
+        row.save(update_fields=["name", "description", "prompt", "source", "updated_at"])
+
     touched = 0
     for builtin in builtins:
-        # Manually match on active (non-deleted) rows only — Django's
+        # Manually match on active (non-deleted) rows — Django's
         # update_or_create takes model fields, not filter lookups, so we
-        # can't pass deleted_at__isnull to it. The conditional unique
-        # constraint covers the racing-insert case.
+        # can't pass deleted_at__isnull to it. Two callers (migration +
+        # post_save signal) can race on first deploy; the conditional
+        # unique constraint will reject the second create with
+        # IntegrityError, so wrap the create in a savepoint and retry as
+        # an update on conflict.
         existing = Scheduler.objects.filter(
             workspace=workspace,
             slug=builtin.slug,
             deleted_at__isnull=True,
         ).first()
         if existing is not None:
-            existing.name = builtin.name
-            existing.description = builtin.description
-            existing.prompt = builtin.prompt
-            existing.source = SchedulerSource.BUILTIN
-            existing.save(
-                update_fields=["name", "description", "prompt", "source", "updated_at"]
-            )
+            _apply_defaults(existing, builtin)
         else:
-            Scheduler.objects.create(
-                workspace=workspace,
-                slug=builtin.slug,
-                name=builtin.name,
-                description=builtin.description,
-                prompt=builtin.prompt,
-                source=SchedulerSource.BUILTIN,
-            )
+            try:
+                with transaction.atomic():
+                    Scheduler.objects.create(
+                        workspace=workspace,
+                        slug=builtin.slug,
+                        name=builtin.name,
+                        description=builtin.description,
+                        prompt=builtin.prompt,
+                        source=SchedulerSource.BUILTIN,
+                    )
+            except IntegrityError:
+                # The other caller created it between our SELECT and
+                # INSERT. Re-fetch and apply defaults so both callers
+                # converge to the same state.
+                winner = Scheduler.objects.filter(
+                    workspace=workspace,
+                    slug=builtin.slug,
+                    deleted_at__isnull=True,
+                ).first()
+                if winner is not None:
+                    _apply_defaults(winner, builtin)
         touched += 1
     return touched
