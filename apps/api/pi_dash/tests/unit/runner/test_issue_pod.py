@@ -49,7 +49,7 @@ def second_workspace(create_user):
 
 
 @pytest.mark.unit
-def test_new_issue_auto_fills_assigned_pod_from_workspace_default(
+def test_new_issue_auto_fills_assigned_pod_from_project_default(
     db, create_user, project, state
 ):
     issue = Issue.objects.create(
@@ -58,9 +58,7 @@ def test_new_issue_auto_fills_assigned_pod_from_workspace_default(
         workspace=project.workspace,
         created_by=create_user,
     )
-    assert issue.assigned_pod_id == Pod.default_for_workspace(
-        project.workspace
-    ).id
+    assert issue.assigned_pod_id == Pod.default_for_project(project).id
 
 
 @pytest.mark.unit
@@ -70,7 +68,8 @@ def test_explicit_assigned_pod_preserved_on_create(
     """If the caller passes an explicit pod, the auto-resolve doesn't overwrite it."""
     custom = Pod.objects.create(
         workspace=project.workspace,
-        name="custom-pod",
+        project=project,
+        name=f"{project.identifier}_custom",
         created_by=create_user,
     )
     issue = Issue.objects.create(
@@ -84,12 +83,20 @@ def test_explicit_assigned_pod_preserved_on_create(
 
 
 @pytest.mark.unit
-def test_create_serializer_rejects_pod_in_other_workspace(
-    db, create_user, project, state, second_workspace
+def test_create_serializer_rejects_pod_in_other_project(
+    db, create_user, project, state
 ):
+    """Cross-project pod is rejected. Same-workspace, different-project."""
     from pi_dash.app.serializers.issue import IssueCreateSerializer
+    from pi_dash.db.models.project import Project
 
-    other_pod = Pod.default_for_project(second_project)
+    other_project = Project.objects.create(
+        name="Other",
+        identifier="OTHERPP",
+        workspace=project.workspace,
+        created_by=create_user,
+    )
+    other_pod = Pod.default_for_project(other_project)
     serializer = IssueCreateSerializer(
         data={
             "name": "Bad",
@@ -100,7 +107,6 @@ def test_create_serializer_rejects_pod_in_other_workspace(
             "workspace_id": project.workspace_id,
         },
     )
-    # Should be invalid because the pod belongs to a different workspace.
     assert serializer.is_valid() is False
     assert "assigned_pod" in serializer.errors
 
@@ -115,7 +121,8 @@ def test_create_serializer_rejects_soft_deleted_pod(
 
     extra = Pod.objects.create(
         workspace=project.workspace,
-        name="extra",
+        project=project,
+        name=f"{project.identifier}_extra",
         created_by=create_user,
     )
     extra.deleted_at = timezone.now()
@@ -154,7 +161,9 @@ def test_assigned_pod_detail_method_returns_pod_data(
     data = serializer.get_assigned_pod_detail(issue)
     assert data is not None
     assert data["is_default"] is True
-    assert data["name"] == "Test Workspace-pod"
+    # Pod name now follows project-scoped convention `{identifier}_pod_1`
+    # (was: workspace-name-derived). See Phase A signal change.
+    assert data["name"].endswith("_pod_1")
 
 
 @pytest.mark.unit

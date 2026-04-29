@@ -155,13 +155,25 @@ def _resolve_pod(
             return pod
         # Pinned pod was soft-deleted or stale — fall through.
 
-    # Final fallback: project's default pod. Without a project we can't
-    # resolve a pod (the previous workspace-default fallback is gone — see
-    # .ai_design/n_runners_in_same_machine/new_pod_project_relationship/design.md §8).
+    # Final fallback: project's default pod. Without a project we try
+    # one back-compat path: if the workspace has exactly one project,
+    # use that project's default pod. Multi-project workspaces require
+    # an explicit work_item (with project) or pod_id.
     if project_id is not None:
         default = Pod.default_for_project_id(project_id)
         if default is not None:
             return default
+    if workspace_id is not None:
+        from pi_dash.db.models.project import Project
+
+        project_ids = list(
+            Project.objects.filter(workspace_id=workspace_id)
+            .values_list("id", flat=True)[:2]
+        )
+        if len(project_ids) == 1:
+            default = Pod.default_for_project_id(project_ids[0])
+            if default is not None:
+                return default
 
     raise RunCreationError(
         409,

@@ -179,7 +179,7 @@ def test_revoke_is_noop_when_no_in_flight_runs(
 
 @pytest.mark.unit
 def test_revoke_releases_pinned_queued_runs(
-    db, create_user, workspace
+    db, create_user, workspace, project
 ):
     from django.utils import timezone
 

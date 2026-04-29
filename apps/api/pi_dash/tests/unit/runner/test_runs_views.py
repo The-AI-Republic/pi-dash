@@ -64,9 +64,7 @@ def test_post_run_validates_workspace_membership(
 
 
 @pytest.mark.unit
-def test_post_run_creates_with_workspace_default_pod(
-    db, session_client, workspace
-):
+def test_post_run_creates_with_workspace_default_pod(db, session_client, workspace, project):
     resp = session_client.post(
         "/api/runners/runs/",
         {"prompt": "do work", "workspace": str(workspace.id)},
@@ -80,9 +78,15 @@ def test_post_run_creates_with_workspace_default_pod(
 
 
 @pytest.mark.unit
-def test_post_run_rejects_pod_in_other_workspace(
-    db, session_client, workspace, second_workspace
-):
+def test_post_run_rejects_pod_in_other_workspace(db, session_client, workspace, second_workspace, project):
+    from pi_dash.db.models.project import Project
+
+    second_project = Project.objects.create(
+        name="Other",
+        identifier="OTHER",
+        workspace=second_workspace,
+        created_by=workspace.owner,
+    )
     other_pod = Pod.default_for_project(second_project)
     resp = session_client.post(
         "/api/runners/runs/",
@@ -98,9 +102,7 @@ def test_post_run_rejects_pod_in_other_workspace(
 
 
 @pytest.mark.unit
-def test_post_run_ignores_request_body_created_by(
-    db, session_client, workspace
-):
+def test_post_run_ignores_request_body_created_by(db, session_client, workspace, project):
     """Caller can't impersonate someone else by passing created_by in the body."""
     spoofed = User.objects.create(
         email=f"spoof-{uuid4().hex[:8]}@example.com",
@@ -124,7 +126,7 @@ def test_post_run_ignores_request_body_created_by(
 
 
 @pytest.mark.unit
-def test_get_runs_lists_by_created_by(db, session_client, workspace):
+def test_get_runs_lists_by_created_by(db, session_client, workspace, project):
     """Free-form runs (no work_item) are scoped by creator. A run created
     by another user with no link back to the caller stays invisible.
     """
@@ -218,7 +220,7 @@ def _make_issue(workspace, *, created_by, assignees=()):
 
 
 @pytest.mark.unit
-def test_get_runs_includes_tick_runs_on_issue_user_created(db, session_client, workspace):
+def test_get_runs_includes_tick_runs_on_issue_user_created(db, session_client, workspace, project):
     """An issue I created has a tick-driven run authored by the bot.
     The run must appear in my list even though I didn't create it.
     """
@@ -237,7 +239,7 @@ def test_get_runs_includes_tick_runs_on_issue_user_created(db, session_client, w
 
 
 @pytest.mark.unit
-def test_get_runs_includes_tick_runs_on_issue_user_assigned(db, session_client, workspace):
+def test_get_runs_includes_tick_runs_on_issue_user_assigned(db, session_client, workspace, project):
     """An issue I'm assigned to (but didn't create) has a tick-driven run
     authored by the bot. The run must still appear in my list.
     """
@@ -256,7 +258,7 @@ def test_get_runs_includes_tick_runs_on_issue_user_assigned(db, session_client, 
 
 
 @pytest.mark.unit
-def test_get_runs_excludes_runs_on_unrelated_issues(db, session_client, workspace):
+def test_get_runs_excludes_runs_on_unrelated_issues(db, session_client, workspace, project):
     """Negative case: an issue I neither created nor am assigned to, with
     a run also not created by me. Stays invisible.
     """
@@ -275,9 +277,7 @@ def test_get_runs_excludes_runs_on_unrelated_issues(db, session_client, workspac
 
 
 @pytest.mark.unit
-def test_get_runs_does_not_duplicate_when_user_satisfies_multiple_clauses(
-    db, session_client, workspace
-):
+def test_get_runs_does_not_duplicate_when_user_satisfies_multiple_clauses(db, session_client, workspace, project):
     """Caller created the issue AND is assigned to it AND created the run.
     The run still appears exactly once.
     """
@@ -307,8 +307,10 @@ def test_get_runs_does_not_duplicate_when_user_satisfies_multiple_clauses(
 def _make_pinned_run(workspace, *, parent_thread_id=None):
     from django.utils import timezone
 
+    from pi_dash.db.models.project import Project
     from pi_dash.runner.models import Runner, RunnerStatus
 
+    project = Project.objects.filter(workspace=workspace).first()
     pod = Pod.default_for_project(project)
     runner = Runner.objects.create(
         owner=workspace.owner,
@@ -345,9 +347,7 @@ def _make_pinned_run(workspace, *, parent_thread_id=None):
 
 
 @pytest.mark.unit
-def test_release_pin_clears_pin_and_parent_thread_id(
-    db, session_client, workspace
-):
+def test_release_pin_clears_pin_and_parent_thread_id(db, session_client, workspace, project):
     run, parent, runner = _make_pinned_run(
         workspace, parent_thread_id="sess_alive"
     )
@@ -370,9 +370,7 @@ def test_release_pin_clears_pin_and_parent_thread_id(
 
 
 @pytest.mark.unit
-def test_release_pin_returns_409_when_not_queued(
-    db, session_client, workspace
-):
+def test_release_pin_returns_409_when_not_queued(db, session_client, workspace, project):
     run, _, _ = _make_pinned_run(workspace)
     AgentRun.objects.filter(pk=run.pk).update(status=AgentRunStatus.RUNNING)
     resp = session_client.post(
@@ -383,9 +381,7 @@ def test_release_pin_returns_409_when_not_queued(
 
 
 @pytest.mark.unit
-def test_release_pin_returns_409_when_not_pinned(
-    db, session_client, workspace
-):
+def test_release_pin_returns_409_when_not_pinned(db, session_client, workspace, project):
     run, _, _ = _make_pinned_run(workspace)
     AgentRun.objects.filter(pk=run.pk).update(pinned_runner=None)
     resp = session_client.post(
@@ -396,9 +392,7 @@ def test_release_pin_returns_409_when_not_pinned(
 
 
 @pytest.mark.unit
-def test_release_pin_404_for_run_in_other_workspace(
-    db, api_client, workspace, second_workspace
-):
+def test_release_pin_404_for_run_in_other_workspace(db, api_client, workspace, second_workspace, project):
     """A user who isn't authorized for the run must not see it exist."""
     run, _, _ = _make_pinned_run(workspace)
     outsider = User.objects.create(
@@ -435,6 +429,7 @@ def _make_in_progress_issue_with_paused_run(workspace):
     from pi_dash.db.models import Issue, Project, State
     from pi_dash.runner.models import Runner, RunnerStatus
 
+    project = Project.objects.filter(workspace=workspace).first()
     pod = Pod.default_for_project(project)
     runner = Runner.objects.create(
         owner=workspace.owner,
@@ -483,9 +478,7 @@ def _make_in_progress_issue_with_paused_run(workspace):
 
 
 @pytest.mark.unit
-def test_comment_and_run_creates_continuation_with_parent_link(
-    db, session_client, workspace
-):
+def test_comment_and_run_creates_continuation_with_parent_link(db, session_client, workspace, project):
     """Happy path: prior PAUSED run exists, ``triggered_by`` routes to the
     continuation pipeline, ``parent_run`` is wired correctly."""
     issue, parent = _make_in_progress_issue_with_paused_run(workspace)
@@ -510,7 +503,7 @@ def test_comment_and_run_creates_continuation_with_parent_link(
 
 
 @pytest.mark.unit
-def test_comment_and_run_resets_schedule(db, session_client, workspace):
+def test_comment_and_run_resets_schedule(db, session_client, workspace, project):
     """The endpoint must reset ``tick_count`` and bump ``next_run_at`` —
     that's what makes Comment & Run a fresh budget grant per §4.6 step 4."""
     from datetime import timedelta
@@ -543,7 +536,7 @@ def test_comment_and_run_resets_schedule(db, session_client, workspace):
 
 
 @pytest.mark.unit
-def test_comment_and_run_requires_work_item(db, session_client, workspace):
+def test_comment_and_run_requires_work_item(db, session_client, workspace, project):
     resp = session_client.post(
         "/api/runners/runs/",
         {"workspace": str(workspace.id), "triggered_by": "comment_and_run"},
@@ -554,9 +547,7 @@ def test_comment_and_run_requires_work_item(db, session_client, workspace):
 
 
 @pytest.mark.unit
-def test_comment_and_run_returns_409_when_no_prior_run(
-    db, session_client, workspace
-):
+def test_comment_and_run_returns_409_when_no_prior_run(db, session_client, workspace, project):
     """Continuation pipeline can't run with no prior — a Comment & Run
     on an issue that never had a run is a 409, not a silent no-op."""
     from crum import impersonate
@@ -592,9 +583,7 @@ def test_comment_and_run_returns_409_when_no_prior_run(
 
 
 @pytest.mark.unit
-def test_comment_and_run_404_for_issue_in_other_workspace(
-    db, api_client, workspace, second_workspace
-):
+def test_comment_and_run_404_for_issue_in_other_workspace(db, api_client, workspace, second_workspace, project):
     issue, _ = _make_in_progress_issue_with_paused_run(workspace)
     outsider = User.objects.create(
         email=f"o-{uuid4().hex[:8]}@example.com",
@@ -629,9 +618,7 @@ def test_comment_and_run_404_for_issue_in_other_workspace(
 
 
 @pytest.mark.unit
-def test_skip_immediate_dispatch_header_suppresses_run_creation_on_state_change(
-    db, session_client, workspace
-):
+def test_skip_immediate_dispatch_header_suppresses_run_creation_on_state_change(db, session_client, workspace, project):
     from crum import impersonate
 
     from pi_dash.db.models import Issue, Project, State
@@ -672,9 +659,7 @@ def test_skip_immediate_dispatch_header_suppresses_run_creation_on_state_change(
 
 
 @pytest.mark.unit
-def test_no_skip_header_creates_run_on_state_change(
-    db, session_client, workspace
-):
+def test_no_skip_header_creates_run_on_state_change(db, session_client, workspace, project):
     """Sanity: without the header, the existing immediate-dispatch path
     fires. This guards against accidentally inverting the default."""
     from crum import impersonate

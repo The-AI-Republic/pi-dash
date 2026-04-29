@@ -84,12 +84,24 @@ def test_non_member_rejected_403(db, other_user, workspace):
 
 
 @pytest.mark.unit
-def test_no_work_item_returns_409_no_pod_available(
-    db, create_user, workspace
+def test_no_work_item_falls_back_to_only_project_default_pod(
+    db, create_user, workspace, project
 ):
-    """Without a ``work_item``, ``validate_run_creation`` has no project to
-    anchor pod resolution to. Post-refactor it returns 409 instead of
-    silently falling back to a workspace-default pod (which doesn't exist).
+    """Single-project workspace back-compat: when there's exactly one
+    project, ``validate_run_creation`` falls back to its default pod
+    even without a work_item. Multi-project workspaces hit the 409
+    branch (covered in test below).
+    """
+    ctx = validate_run_creation(create_user, workspace_id=workspace.id)
+    assert ctx.pod.pk == Pod.default_for_project(project).pk
+
+
+@pytest.mark.unit
+def test_multi_project_workspace_without_work_item_returns_409(
+    db, create_user, workspace, project, second_project
+):
+    """When the workspace has >1 project and no work_item is provided,
+    we can't disambiguate which pod to use — refuse with 409.
     """
     with pytest.raises(RunCreationError) as exc:
         validate_run_creation(create_user, workspace_id=workspace.id)
