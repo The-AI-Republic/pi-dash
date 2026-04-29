@@ -91,8 +91,17 @@ impl Supervisor {
         let hello_runners = Arc::new(RwLock::new(
             instances
                 .iter()
-                .map(|i| (i.runner_id, (i.out.clone(), i.state.clone())))
-                .collect::<HashMap<uuid::Uuid, (RunnerOut, StateHandle)>>(),
+                .map(|i| {
+                    (
+                        i.runner_id,
+                        (
+                            i.out.clone(),
+                            i.state.clone(),
+                            i.config.project_slug.clone(),
+                        ),
+                    )
+                })
+                .collect::<HashMap<uuid::Uuid, (RunnerOut, StateHandle, Option<String>)>>(),
         ));
 
         // Primary runner = the first configured runner. Used by IPC and
@@ -371,14 +380,14 @@ impl Supervisor {
 /// reconnect). Cloud-side `_handle_token_hello` is idempotent on re-Hello,
 /// so a second emission for an already-authorised runner is harmless.
 async fn hello_emitter(
-    runners: Arc<RwLock<HashMap<uuid::Uuid, (RunnerOut, StateHandle)>>>,
+    runners: Arc<RwLock<HashMap<uuid::Uuid, (RunnerOut, StateHandle, Option<String>)>>>,
     connected: Arc<tokio::sync::Notify>,
 ) {
     loop {
         connected.notified().await;
-        let current_runners: Vec<(RunnerOut, StateHandle)> =
+        let current_runners: Vec<(RunnerOut, StateHandle, Option<String>)> =
             { runners.read().await.values().cloned().collect() };
-        for (out, state) in current_runners {
+        for (out, state, project_slug) in current_runners {
             let hello = ClientMsg::Hello {
                 runner_id: out.runner_id(),
                 version: crate::RUNNER_VERSION.to_string(),
@@ -387,6 +396,7 @@ async fn hello_emitter(
                 status: *state.rx_status.borrow(),
                 in_flight_run: *state.rx_in_flight.borrow(),
                 protocol_version: crate::PROTOCOL_VERSION,
+                project_slug,
             };
             // Channel-closed means the cloud loop exited; the next
             // reconnect will re-fire the notify and we'll retry then.
@@ -409,7 +419,8 @@ struct RunnerLoop {
     /// on the signal.
     remove_tx: tokio::sync::watch::Sender<bool>,
     live_mailboxes: Arc<RwLock<HashMap<uuid::Uuid, mpsc::Sender<Envelope<ServerMsg>>>>>,
-    live_hello_runners: Arc<RwLock<HashMap<uuid::Uuid, (RunnerOut, StateHandle)>>>,
+    live_hello_runners:
+        Arc<RwLock<HashMap<uuid::Uuid, (RunnerOut, StateHandle, Option<String>)>>>,
     /// In-flight run, if any. Replaced on each Assign and cleared as soon as
     /// the worker task signals completion via `done_rx` — driven by
     /// `tokio::select!` so a new Assign isn't rejected while we wait for the

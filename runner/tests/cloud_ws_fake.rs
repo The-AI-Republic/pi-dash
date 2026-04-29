@@ -100,6 +100,7 @@ async fn runner_connects_hello_welcome_and_receives_assign() {
         status: RunnerStatus::Idle,
         in_flight_run: None,
         protocol_version: WIRE_VERSION,
+            project_slug: None,
     });
     out_tx.send(hello).await.unwrap();
 
