@@ -145,16 +145,30 @@ pub struct AppState {
     pub remove_runner_confirm: Option<String>,
 }
 
-/// Multi-step form for adding a runner from inside the TUI. Mirrors
-/// the CLI's `pidash token add-runner` arg shape: name, project (the
-/// identifier, e.g. `PIDASH`), optional pod, working_dir.
+/// Multi-step form for adding a runner from inside the TUI. The
+/// project and pod fields are pickers — the form fetches the projects
+/// (with their pods embedded) on open via `cli::token::list_projects`,
+/// the user cycles selections with ↑/↓ within those fields, and the
+/// pod picker re-anchors to the project's default pod whenever the
+/// project selection changes.
 #[derive(Debug, Clone, Default)]
 pub struct AddRunnerForm {
+    /// Free-text fields.
     pub name: String,
-    pub project: String,
-    pub pod: String,
     pub working_dir: String,
-    /// 0 = name, 1 = project, 2 = pod, 3 = working_dir, 4 = Submit.
+    /// Cloud-fetched project list. `None` while loading; `Some(empty)`
+    /// when the workspace has no projects (form surfaces an error and
+    /// disables Submit).
+    pub projects: Option<Vec<crate::cli::token::ProjectInfo>>,
+    /// Index into `projects` for the highlighted project. Clamped on
+    /// load so empty / single-project workspaces don't break.
+    pub project_idx: usize,
+    /// Index into the picked project's `pods` list. Reset to 0
+    /// (default pod, which the cloud sorts first) on every project
+    /// change.
+    pub pod_idx: usize,
+    /// 0 = name, 1 = project picker, 2 = pod picker, 3 = working_dir,
+    /// 4 = Submit.
     pub focus: u8,
     pub busy: bool,
     pub error: Option<String>,
@@ -165,15 +179,60 @@ impl AddRunnerForm {
         5
     }
 
+    /// Returns the mutable text buffer when focus is on a free-text
+    /// field; `None` for picker / submit fields. The picker fields use
+    /// their own ↑/↓ cycle handler instead.
     pub fn current_buffer_mut(&mut self) -> Option<&mut String> {
         match self.focus {
             0 => Some(&mut self.name),
-            1 => Some(&mut self.project),
-            2 => Some(&mut self.pod),
             3 => Some(&mut self.working_dir),
             _ => None,
         }
     }
+
+    pub fn selected_project(&self) -> Option<&crate::cli::token::ProjectInfo> {
+        self.projects.as_ref()?.get(self.project_idx)
+    }
+
+    pub fn selected_pod(&self) -> Option<&crate::cli::token::PodInfo> {
+        self.selected_project()?.pods.get(self.pod_idx)
+    }
+
+    /// Cycle the picker on the focused picker field. Used when the
+    /// form is in picker focus (project or pod) and the user presses
+    /// ↑/↓ inside the field.
+    pub fn cycle_picker(&mut self, delta: isize) {
+        let projects_len = self
+            .projects
+            .as_ref()
+            .map(|p| p.len())
+            .unwrap_or(0);
+        match self.focus {
+            1 if projects_len > 0 => {
+                self.project_idx = wrap_idx(self.project_idx, delta, projects_len);
+                // Reset pod selection when project changes; cloud
+                // sorts default pod first so 0 is the right anchor.
+                self.pod_idx = 0;
+            }
+            2 => {
+                let pods_len = self
+                    .selected_project()
+                    .map(|p| p.pods.len())
+                    .unwrap_or(0);
+                if pods_len > 0 {
+                    self.pod_idx = wrap_idx(self.pod_idx, delta, pods_len);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Bounded wrap-around for picker indices. `len` is assumed > 0.
+fn wrap_idx(cur: usize, delta: isize, len: usize) -> usize {
+    let n = len as isize;
+    let next = (cur as isize + delta).rem_euclid(n);
+    next as usize
 }
 
 /// Three-field form (URL / token / name) plus a Register button. Focus is
@@ -546,13 +605,37 @@ async fn handle_event(ev: Event, state: &mut AppState) {
                     state.add_runner_form = None;
                     return;
                 }
-                (KeyCode::Up, _) | (KeyCode::BackTab, _) => {
+                // Up/Down on a picker field cycles the choices; on a
+                // text field it falls through to "previous/next field"
+                // (so the existing arrow-key muscle memory still works
+                // when typing). Tab / BackTab always change field.
+                (KeyCode::Up, _) => {
+                    if let Some(f) = state.add_runner_form.as_mut() {
+                        if matches!(f.focus, 1 | 2) {
+                            f.cycle_picker(-1);
+                        } else {
+                            add_runner_form_advance_focus(f, false);
+                        }
+                    }
+                    return;
+                }
+                (KeyCode::Down, _) => {
+                    if let Some(f) = state.add_runner_form.as_mut() {
+                        if matches!(f.focus, 1 | 2) {
+                            f.cycle_picker(1);
+                        } else {
+                            add_runner_form_advance_focus(f, true);
+                        }
+                    }
+                    return;
+                }
+                (KeyCode::BackTab, _) => {
                     if let Some(f) = state.add_runner_form.as_mut() {
                         add_runner_form_advance_focus(f, false);
                     }
                     return;
                 }
-                (KeyCode::Down, _) | (KeyCode::Tab, _) => {
+                (KeyCode::Tab, _) => {
                     if let Some(f) = state.add_runner_form.as_mut() {
                         add_runner_form_advance_focus(f, true);
                     }
@@ -822,6 +905,9 @@ async fn handle_event(ev: Event, state: &mut AppState) {
                     working_dir: default_working_dir_for_new_runner(state),
                     ..AddRunnerForm::default()
                 });
+                // Kick off the project fetch immediately so the picker
+                // is populated by the time the user tabs into it.
+                load_projects_into_form(state).await;
             }
             (KeyCode::Char('d'), _) if state.tab == Tab::RunnerStatus => {
                 if let Some(s) = &state.status
@@ -1045,6 +1131,33 @@ fn start_or_apply_general_field(state: &mut AppState) {
     }
 }
 
+/// Fetch the project list (with pods embedded) into the open add-runner
+/// form. Called once when the form opens so the picker is populated by
+/// the time the user tabs over to it. On error, the form's `error`
+/// field is set and the picker stays empty — the user can retry by
+/// closing and reopening the form (the cloud reachability is the
+/// likely issue, and re-fetching automatically would just spin).
+async fn load_projects_into_form(state: &mut AppState) {
+    if state.add_runner_form.is_none() {
+        return;
+    }
+    match crate::cli::token::list_projects(&state.paths).await {
+        Ok(projects) => {
+            if let Some(f) = state.add_runner_form.as_mut() {
+                f.project_idx = 0;
+                f.pod_idx = 0;
+                f.projects = Some(projects);
+            }
+        }
+        Err(e) => {
+            if let Some(f) = state.add_runner_form.as_mut() {
+                f.projects = Some(Vec::new());
+                f.error = Some(format!("could not fetch projects: {e:#}"));
+            }
+        }
+    }
+}
+
 /// Commit the add-runner form. Calls into `cli::token::add_runner`
 /// (the library entry point — no stdout side effects) and then runs
 /// `restart_and_verify` so the daemon picks up the new
@@ -1056,9 +1169,20 @@ async fn submit_add_runner_form(state: &mut AppState) {
         return;
     };
     let name = form.name.trim().to_string();
-    let project = form.project.trim().to_string();
-    let pod = form.pod.trim().to_string();
     let working_dir = form.working_dir.trim().to_string();
+    // Picker selections — required since the user can't type a project.
+    let Some(project) = form.selected_project().cloned() else {
+        form.error = Some(
+            "no projects available — verify `pidash token list-projects` works."
+                .into(),
+        );
+        return;
+    };
+    // Pod is required-but-defaulted: every project has at least its
+    // auto-created default pod. When the user hasn't moved off the
+    // default we still send it explicitly so the cloud doesn't silently
+    // resolve to a different pod if one is added in the meantime.
+    let pod_name = form.selected_pod().map(|p| p.name.clone());
 
     if name.is_empty() {
         form.error = Some("name is required".into());
@@ -1066,13 +1190,6 @@ async fn submit_add_runner_form(state: &mut AppState) {
     }
     if let Err(e) = crate::util::runner_name::validate(&name) {
         form.error = Some(format!("invalid name: {e}"));
-        return;
-    }
-    if project.is_empty() {
-        form.error = Some(
-            "project is required (e.g. PIDASH; run `pidash token list-projects` to see options)"
-                .into(),
-        );
         return;
     }
     if working_dir.is_empty() {
@@ -1085,8 +1202,8 @@ async fn submit_add_runner_form(state: &mut AppState) {
 
     let args = crate::cli::token::AddRunnerArgs {
         name,
-        project,
-        pod: if pod.is_empty() { None } else { Some(pod) },
+        project: project.identifier.clone(),
+        pod: pod_name,
         working_dir: std::path::PathBuf::from(working_dir),
         agent: crate::config::schema::AgentKind::Codex,
     };
@@ -1447,14 +1564,45 @@ fn draw(f: &mut ratatui::Frame<'_>, state: &AppState) {
 }
 
 /// Centered modal for the add-runner form. Drawn over whatever tab the
-/// user pressed `[a]` from. Behaves like a focus-driven 5-field form
-/// (name, project, pod, working_dir, Submit) — same shape as the
-/// existing `RegisterForm` so users get muscle memory.
+/// user pressed `[a]` from. Five fields: name (text), project (picker
+/// from cloud), pod (picker cascaded by project, default pod
+/// pre-selected), working_dir (text), Submit. The pickers cycle with
+/// ↑/↓ when focused; Tab / BackTab walks between fields.
 fn render_add_runner_form(f: &mut ratatui::Frame<'_>, form: &AddRunnerForm) {
     use ratatui::widgets::Clear;
 
-    let area = centered_rect(70, 60, f.area());
+    let area = centered_rect(72, 65, f.area());
     f.render_widget(Clear, area);
+
+    let project_value = match &form.projects {
+        None => "(loading projects…)".to_string(),
+        Some(list) if list.is_empty() => "(no projects available)".to_string(),
+        Some(list) => {
+            let p = &list[form.project_idx.min(list.len() - 1)];
+            format!(
+                "{} — {}   ({}/{})",
+                p.identifier,
+                p.name,
+                form.project_idx + 1,
+                list.len(),
+            )
+        }
+    };
+    let pod_value = match form.selected_project() {
+        None => "(pick a project first)".to_string(),
+        Some(p) if p.pods.is_empty() => "(no pods on project)".to_string(),
+        Some(p) => {
+            let pod = &p.pods[form.pod_idx.min(p.pods.len() - 1)];
+            let tag = if pod.is_default { "  [default]" } else { "" };
+            format!(
+                "{}{}   ({}/{})",
+                pod.name,
+                tag,
+                form.pod_idx + 1,
+                p.pods.len(),
+            )
+        }
+    };
 
     let mut lines: Vec<Line<'_>> = vec![
         Line::from(Span::styled(
@@ -1464,21 +1612,13 @@ fn render_add_runner_form(f: &mut ratatui::Frame<'_>, form: &AddRunnerForm) {
                 .add_modifier(Modifier::BOLD),
         )),
         Line::from(Span::styled(
-            "Uses the locally-installed machine token. Discover projects with `pidash token list-projects`.",
+            "Project + pod fetched from the cloud. ↑/↓ cycles within picker fields; Tab moves between fields.",
             Style::default().add_modifier(Modifier::DIM),
         )),
         Line::raw(""),
         modal_field_line("Name        ", &form.name, form.focus == 0),
-        modal_field_line("Project     ", &form.project, form.focus == 1),
-        modal_field_line(
-            "Pod         ",
-            if form.pod.is_empty() {
-                "(default pod for the project)"
-            } else {
-                form.pod.as_str()
-            },
-            form.focus == 2,
-        ),
+        modal_field_line("Project     ", &project_value, form.focus == 1),
+        modal_field_line("Pod         ", &pod_value, form.focus == 2),
         modal_field_line("Working dir ", &form.working_dir, form.focus == 3),
         Line::raw(""),
     ];

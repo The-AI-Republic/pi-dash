@@ -441,7 +441,36 @@ async fn run_show(paths: &Paths) -> Result<()> {
     Ok(())
 }
 
-async fn run_list_projects(paths: &Paths) -> Result<()> {
+/// Pod row inside a `ProjectInfo`. Default pod sorts first server-side
+/// so the TUI add-runner form can pre-select it without scanning.
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct PodInfo {
+    pub id: Uuid,
+    pub name: String,
+    pub is_default: bool,
+}
+
+/// Cloud-side project + its pods, returned by `list_projects`. The TUI
+/// uses this for the cascaded add-runner picker — no second round-trip
+/// per project change since pods are embedded.
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct ProjectInfo {
+    pub id: Uuid,
+    pub identifier: String,
+    pub name: String,
+    #[serde(default)]
+    pub default_pod_id: Option<Uuid>,
+    #[serde(default)]
+    pub pod_count: u64,
+    #[serde(default)]
+    pub pods: Vec<PodInfo>,
+}
+
+/// Library entry point for the project listing flow. Calls
+/// `/api/runners/projects/` with the locally-installed token and
+/// returns the parsed `Vec<ProjectInfo>`. The CLI wrapper formats it
+/// for stdout; the TUI feeds the same data into its picker form.
+pub async fn list_projects(paths: &Paths) -> Result<Vec<ProjectInfo>> {
     let config = crate::config::file::load_config(paths).context("loading config.toml")?;
     let creds = crate::config::file::load_credentials(paths).context("loading credentials.toml")?;
     let token = creds.token.as_ref().ok_or_else(|| {
@@ -469,8 +498,12 @@ async fn run_list_projects(paths: &Paths) -> Result<()> {
     if !status.is_success() {
         anyhow::bail!("list-projects failed: HTTP {status}: {text}");
     }
-    let projects: Vec<serde_json::Value> = serde_json::from_str(&text)
-        .with_context(|| format!("parsing list-projects response: {text}"))?;
+    serde_json::from_str(&text)
+        .with_context(|| format!("parsing list-projects response: {text}"))
+}
+
+async fn run_list_projects(paths: &Paths) -> Result<()> {
+    let projects = list_projects(paths).await?;
     if projects.is_empty() {
         println!(
             "no projects in this workspace yet. Create one in the Pi Dash UI \
@@ -480,14 +513,14 @@ async fn run_list_projects(paths: &Paths) -> Result<()> {
     }
     println!("{:<24} {:<32} {:<10} DEFAULT_POD_ID", "IDENTIFIER", "NAME", "PODS");
     for p in projects {
-        let identifier = p.get("identifier").and_then(|v| v.as_str()).unwrap_or("?");
-        let name = p.get("name").and_then(|v| v.as_str()).unwrap_or("?");
-        let pod_count = p.get("pod_count").and_then(|v| v.as_u64()).unwrap_or(0);
-        let default_pod_id = p
-            .get("default_pod_id")
-            .and_then(|v| v.as_str())
-            .unwrap_or("(none)");
-        println!("{identifier:<24} {name:<32} {pod_count:<10} {default_pod_id}");
+        let default = p
+            .default_pod_id
+            .map(|u| u.to_string())
+            .unwrap_or_else(|| "(none)".to_string());
+        println!(
+            "{:<24} {:<32} {:<10} {}",
+            p.identifier, p.name, p.pod_count, default,
+        );
     }
     Ok(())
 }
