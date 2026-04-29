@@ -454,10 +454,11 @@ pub fn editable_lines(
     let mut lines = Vec::new();
     let selected_idx = state.selected.min(field_count().saturating_sub(1));
 
-    // Runner section: name is editable, cloud_url + workspace_slug read-only.
-    // cloud_url gets an extra hint line — since it's bound to the runner's
-    // credentials (minted by that cloud), changing it locally would leave a
-    // broken setup. Point the user at the register flow explicitly.
+    // Runner section: name is editable, workspace_slug + project_slug
+    // are read-only because they're bound at registration. cloud_url
+    // is daemon-level (one URL shared across every runner this daemon
+    // hosts) and lives on the General tab; we don't repeat it here to
+    // avoid the misleading impression that it's a per-runner setting.
     lines.push(section_header("Runner"));
     lines.extend(render_editable_row(
         working,
@@ -465,10 +466,6 @@ pub fn editable_lines(
         state,
         selected_idx,
         index_of(FieldId::RunnerName),
-    ));
-    lines.push(readonly_row("cloud_url", &working.daemon.cloud_url));
-    lines.push(readonly_hint(
-        "to change, generate a new token in the cloud UI and re-run `pidash configure`",
     ));
     let picker_idx = state.runner_picker_idx;
     let picked_runner = runner_at(working, picker_idx);
@@ -479,6 +476,10 @@ pub fn editable_lines(
     if let Some(slug) = picked_runner.project_slug.as_deref() {
         lines.push(readonly_row("project_slug", slug));
     }
+    lines.push(readonly_hint(
+        "workspace + project are bound at registration. Re-register or use \
+         `pidash token add-runner` to change them.",
+    ));
     lines.push(Line::raw(""));
 
     lines.push(section_header("Workspace"));
