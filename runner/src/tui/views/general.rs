@@ -3,11 +3,16 @@
 //! Owns the daemon state that's shared across every runner the daemon
 //! hosts: cloud URL, connection status, uptime, log level, log
 //! retention, plus the OS service controls. Per-runner editing lives
-//! in the Config tab; this tab is for "is the daemon up and behaving."
+//! on the Runners tab; this tab is for "is the daemon up and behaving."
+//!
+//! On a fresh machine (no config.toml) this tab takes over with the
+//! inline register form — it's the cloud-binding step, which is a
+//! daemon-level concern, so it belongs here rather than on the Runners
+//! tab.
 //!
 //! Keys: `[s]` start service, `[x]` stop service, `[r]` refresh.
 //! Daemon-level config editing (log_level, log_retention_days) reuses
-//! the same edit-buffer flow as the Config tab — the host `app.rs`
+//! the same edit-buffer flow as the Runners tab — the host `app.rs`
 //! routes `Enter` / typed keys through the same handlers.
 
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
@@ -16,8 +21,13 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
 
 use crate::tui::app::AppState;
+use crate::tui::views::config as fields;
 
 pub fn render(f: &mut ratatui::Frame<'_>, area: Rect, state: &AppState) {
+    if state.config_working.is_none() {
+        render_register_view(f, area, state);
+        return;
+    }
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -31,6 +41,30 @@ pub fn render(f: &mut ratatui::Frame<'_>, area: Rect, state: &AppState) {
     f.render_widget(connection_card(state), chunks[1]);
     f.render_widget(daemon_settings_card(state), chunks[2]);
     f.render_widget(hotkeys_card(state), chunks[3]);
+}
+
+fn render_register_view(f: &mut ratatui::Frame<'_>, area: Rect, state: &AppState) {
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(0), Constraint::Length(3)])
+        .split(area);
+    let p = Paragraph::new(fields::register_form_lines(state))
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(" Register with cloud "),
+        )
+        .wrap(Wrap { trim: false });
+    f.render_widget(p, chunks[0]);
+    f.render_widget(hotkeys_card_register(), chunks[1]);
+}
+
+fn hotkeys_card_register() -> Paragraph<'static> {
+    Paragraph::new(Line::from(vec![Span::styled(
+        "Tab/↑↓ move field   ↵ advance / submit   Esc clears form error",
+        Style::default().add_modifier(Modifier::DIM),
+    )]))
+    .block(Block::default().borders(Borders::ALL).title(" Controls "))
 }
 
 fn service_card(state: &AppState) -> Paragraph<'_> {
@@ -104,102 +138,98 @@ fn connection_card(state: &AppState) -> Paragraph<'_> {
 }
 
 /// Daemon-level editable settings: log level (cycles) and log retention
-/// days (text). The Config tab covers the per-runner side; here we own
+/// days (text). The Runners tab covers the per-runner side; here we own
 /// the values that are not tied to any single runner.
+///
+/// `render()` short-circuits to the register view when `config_working`
+/// is None, so this card is only invoked with config loaded.
 fn daemon_settings_card(state: &AppState) -> Paragraph<'_> {
     let mut lines: Vec<Line<'_>> = Vec::new();
-    match state.config_working.as_ref() {
-        Some(cfg) => {
-            let editing = state.tab_general_field == GeneralField::LogRetentionDays
-                && state.config_edit_buffer.is_some();
-            let log_level_style = if state.tab_general_field == GeneralField::LogLevel {
-                Style::default()
-                    .fg(Color::White)
-                    .add_modifier(Modifier::BOLD)
-            } else {
-                Style::default().fg(Color::Gray)
-            };
-            let retention_value = if editing {
-                format!(
-                    "{}▊",
-                    state.config_edit_buffer.as_deref().unwrap_or("")
-                )
-            } else {
-                cfg.daemon.log_retention_days.to_string()
-            };
-            let retention_style = if state.tab_general_field == GeneralField::LogRetentionDays {
-                if editing {
-                    Style::default().fg(Color::Yellow)
-                } else {
-                    Style::default()
-                        .fg(Color::White)
-                        .add_modifier(Modifier::BOLD)
-                }
-            } else {
-                Style::default().fg(Color::Gray)
-            };
-            let marker = |on: bool| if on { "▶" } else { " " };
-            lines.push(Line::from(vec![
-                Span::styled(
-                    format!(" {} log_level         ", marker(state.tab_general_field == GeneralField::LogLevel)),
-                    Style::default().fg(Color::Cyan),
-                ),
-                Span::styled(cfg.daemon.log_level.clone(), log_level_style),
-                if state.tab_general_field == GeneralField::LogLevel {
-                    Span::styled(
-                        "   [Enter cycles]".to_string(),
-                        Style::default().add_modifier(Modifier::DIM),
-                    )
-                } else {
-                    Span::raw("")
-                },
-            ]));
-            lines.push(Line::from(vec![
-                Span::styled(
-                    format!(" {} log_retention_days ", marker(state.tab_general_field == GeneralField::LogRetentionDays)),
-                    Style::default().fg(Color::Cyan),
-                ),
-                Span::styled(retention_value, retention_style),
-                if state.tab_general_field == GeneralField::LogRetentionDays && !editing {
-                    Span::styled(
-                        "   [Enter edits]".to_string(),
-                        Style::default().add_modifier(Modifier::DIM),
-                    )
-                } else {
-                    Span::raw("")
-                },
-            ]));
-            lines.push(Line::raw(""));
-            lines.push(Line::from(Span::styled(
-                "[j/k ↑↓] move   [Enter] edit/cycle   [w] save+reload   [Esc] discard",
+    let cfg = state
+        .config_working
+        .as_ref()
+        .expect("daemon_settings_card called without a working config");
+    let editing = state.tab_general_field == GeneralField::LogRetentionDays
+        && state.config_edit_buffer.is_some();
+    let log_level_style = if state.tab_general_field == GeneralField::LogLevel {
+        Style::default()
+            .fg(Color::White)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(Color::Gray)
+    };
+    let retention_value = if editing {
+        format!(
+            "{}▊",
+            state.config_edit_buffer.as_deref().unwrap_or("")
+        )
+    } else {
+        cfg.daemon.log_retention_days.to_string()
+    };
+    let retention_style = if state.tab_general_field == GeneralField::LogRetentionDays {
+        if editing {
+            Style::default().fg(Color::Yellow)
+        } else {
+            Style::default()
+                .fg(Color::White)
+                .add_modifier(Modifier::BOLD)
+        }
+    } else {
+        Style::default().fg(Color::Gray)
+    };
+    let marker = |on: bool| if on { "▶" } else { " " };
+    lines.push(Line::from(vec![
+        Span::styled(
+            format!(" {} log_level         ", marker(state.tab_general_field == GeneralField::LogLevel)),
+            Style::default().fg(Color::Cyan),
+        ),
+        Span::styled(cfg.daemon.log_level.clone(), log_level_style),
+        if state.tab_general_field == GeneralField::LogLevel {
+            Span::styled(
+                "   [Enter cycles]".to_string(),
                 Style::default().add_modifier(Modifier::DIM),
-            )));
-            if let Some(e) = &state.config_edit_error {
-                lines.push(Line::from(Span::styled(
-                    e.clone(),
-                    Style::default().fg(Color::Red),
-                )));
-            }
-            if let Some(out) = &state.reload_outcome {
-                let style = if out.ok {
-                    Style::default().fg(Color::Green)
-                } else {
-                    Style::default().fg(Color::Red)
-                };
-                let mark = if out.ok { "✓" } else { "✗" };
-                lines.push(Line::from(Span::styled(
-                    format!("{mark} {}", out.summary),
-                    style,
-                )));
-            }
-        }
-        None => {
-            lines.push(Line::from(Span::styled(
-                "No config loaded yet — register first via the Runners tab \
-                 or run `pidash configure` from the CLI.",
-                Style::default().fg(Color::DarkGray),
-            )));
-        }
+            )
+        } else {
+            Span::raw("")
+        },
+    ]));
+    lines.push(Line::from(vec![
+        Span::styled(
+            format!(" {} log_retention_days ", marker(state.tab_general_field == GeneralField::LogRetentionDays)),
+            Style::default().fg(Color::Cyan),
+        ),
+        Span::styled(retention_value, retention_style),
+        if state.tab_general_field == GeneralField::LogRetentionDays && !editing {
+            Span::styled(
+                "   [Enter edits]".to_string(),
+                Style::default().add_modifier(Modifier::DIM),
+            )
+        } else {
+            Span::raw("")
+        },
+    ]));
+    lines.push(Line::raw(""));
+    lines.push(Line::from(Span::styled(
+        "[j/k ↑↓] move   [Enter] edit/cycle   [w] save+reload   [Esc] discard",
+        Style::default().add_modifier(Modifier::DIM),
+    )));
+    if let Some(e) = &state.config_edit_error {
+        lines.push(Line::from(Span::styled(
+            e.clone(),
+            Style::default().fg(Color::Red),
+        )));
+    }
+    if let Some(out) = &state.reload_outcome {
+        let style = if out.ok {
+            Style::default().fg(Color::Green)
+        } else {
+            Style::default().fg(Color::Red)
+        };
+        let mark = if out.ok { "✓" } else { "✗" };
+        lines.push(Line::from(Span::styled(
+            format!("{mark} {}", out.summary),
+            style,
+        )));
     }
     Paragraph::new(lines)
         .block(

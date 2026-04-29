@@ -1,7 +1,7 @@
 //! Runners tab — list of every runner this daemon hosts plus the
 //! per-runner settings panel for the highlighted runner.
 //!
-//! Replaces the old single-runner Config tab. Two layout modes:
+//! Replaces the old single-runner Config tab. Layout:
 //!
 //! - **Configured** (config.toml exists): top half is a runner-row
 //!   list ("picker"), bottom half is the editable settings panel for
@@ -9,10 +9,11 @@
 //!   cursor inside the panel; `<`/`>` and `Alt+1`–`Alt+9` move the
 //!   runner picker.
 //!
-//! - **Fresh machine** (no config.toml): the runner list is replaced
-//!   by the inline register form (cloud URL + registration token +
-//!   runner name). On submit the daemon comes up and the layout flips
-//!   into the configured mode.
+//! - **Fresh machine** (no config.toml): renders an empty-state
+//!   placeholder pointing the user at the General tab, where the
+//!   inline register form lives — registration is a daemon-level
+//!   step (binds the whole daemon to a cloud URL), so it doesn't
+//!   belong here.
 //!
 //! `[a]` opens the add-runner form (cascaded project / pod picker).
 //! `[d]` confirm-removes the highlighted runner via the cloud's
@@ -28,7 +29,7 @@ use crate::tui::views::config as fields;
 
 pub fn render(f: &mut ratatui::Frame<'_>, area: Rect, state: &AppState) {
     if state.config_working.is_none() {
-        render_register_view(f, area, state);
+        render_unregistered_placeholder(f, area);
         return;
     }
 
@@ -47,6 +48,24 @@ pub fn render(f: &mut ratatui::Frame<'_>, area: Rect, state: &AppState) {
     f.render_widget(hotkeys_card(), chunks[2]);
 }
 
+fn render_unregistered_placeholder(f: &mut ratatui::Frame<'_>, area: Rect) {
+    let lines = vec![
+        Line::from(Span::styled(
+            "No runners configured yet.",
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        )),
+        Line::raw(""),
+        Line::from("Open the General tab (press [1]) to register this machine with the cloud."),
+        Line::from("Once registered, runners will appear here."),
+    ];
+    let p = Paragraph::new(lines)
+        .block(Block::default().borders(Borders::ALL).title(" Runners "))
+        .wrap(Wrap { trim: true });
+    f.render_widget(p, area);
+}
+
 fn runners_list_height(state: &AppState) -> u16 {
     let n = state
         .status
@@ -62,24 +81,6 @@ fn runners_list_height(state: &AppState) -> u16 {
     // Border (2) + at least one row + cap at 8 visible runners.
     let rows = n.clamp(1, 8);
     rows + 2
-}
-
-fn render_register_view(f: &mut ratatui::Frame<'_>, area: Rect, state: &AppState) {
-    // Two-band layout: register form fills the body, hotkeys at the
-    // bottom for symmetry with the configured mode.
-    let chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Min(0), Constraint::Length(3)])
-        .split(area);
-    let p = Paragraph::new(fields::register_form_lines(state))
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title(" Register with cloud "),
-        )
-        .wrap(Wrap { trim: false });
-    f.render_widget(p, chunks[0]);
-    f.render_widget(hotkeys_card_register(), chunks[1]);
 }
 
 fn render_runner_list(f: &mut ratatui::Frame<'_>, area: Rect, state: &AppState) {
@@ -194,10 +195,3 @@ fn hotkeys_card() -> Paragraph<'static> {
     .block(Block::default().borders(Borders::ALL).title(" Controls "))
 }
 
-fn hotkeys_card_register() -> Paragraph<'static> {
-    Paragraph::new(Line::from(vec![Span::styled(
-        "Tab/↑↓ move field   ↵ advance / submit   Esc clears form error",
-        Style::default().add_modifier(Modifier::DIM),
-    )]))
-    .block(Block::default().borders(Borders::ALL).title(" Controls "))
-}

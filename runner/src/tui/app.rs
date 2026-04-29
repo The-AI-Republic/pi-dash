@@ -81,7 +81,7 @@ pub struct AppState {
     pub runs: Vec<crate::history::index::RunSummary>,
     pub approvals: Vec<crate::approval::router::ApprovalRecord>,
     /// Currently-on-disk config, decoded from `config.toml`. `None` means
-    /// the file is missing (first-run state) — the Runners tab switches
+    /// the file is missing (first-run state) — the General tab switches
     /// into "Register with cloud" mode when that happens.
     pub config_loaded: Option<crate::config::schema::Config>,
     /// Working copy users edit in the Runners tab's settings panel.
@@ -500,7 +500,7 @@ async fn refresh(state: &mut AppState) {
             state.config_working = None;
             state.config_error = None;
             // Fresh machine — seed the inline register form so the
-            // Runners tab can render it.
+            // General tab can render it.
             if state.register_form.is_none() {
                 state.register_form = Some(RegisterForm::new(default_hostname()));
             }
@@ -659,12 +659,12 @@ async fn handle_event(ev: Event, state: &mut AppState) {
                 _ => return,
             }
         }
-        // Runners tab: inline Register form when there's no config yet.
+        // General tab: inline Register form when there's no config yet.
         // Replaces the old standalone onboarding wizard. We intercept
         // text / nav / submit keys but leave global shortcuts (Ctrl+C
         // to quit, 1–4 / h / l to switch tabs) to the main match so
         // the user can always escape.
-        if state.tab == Tab::RunnerStatus
+        if state.tab == Tab::General
             && state.register_form.is_some()
             && state.config_working.is_none()
         {
