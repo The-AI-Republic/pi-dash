@@ -9,9 +9,8 @@ and fans out one ``fire_tick`` task per due ticker row. ``fire_tick``
 performs the atomic claim under ``select_for_update`` and dispatches the
 continuation run.
 
-Distinct from ``pi_dash.bgtasks.scheduler`` which fires user-authored
-project-level schedulers — this module is the per-issue continuation
-clock and is system-armed on state transitions, not user-installed.
+This module is the per-issue continuation clock and is system-armed on
+state transitions; it is not a user-authored periodic job.
 
 See ``.ai_design/issue_ticking_system/design.md`` §6 for the design and
 §11 (item 11) for the atomic-claim invariant.

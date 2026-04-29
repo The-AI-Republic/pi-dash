@@ -4,10 +4,9 @@
 
 """Rename ``IssueAgentSchedule`` to ``IssueAgentTicker``.
 
-Frees the word "scheduler" exclusively for the new project-level
-:class:`Scheduler` / :class:`SchedulerBinding` concept (added in
-``0131_project_scheduler_mvp``). The per-issue continuation clock is
-re-cast as a "ticker" — its existing fields already use that vocabulary
+Frees the word "scheduler" for a future user-authored project-level
+scheduling concept. The per-issue continuation clock is re-cast as a
+"ticker" — its existing fields already use that vocabulary
 (``tick_count``, ``last_tick_at``, ``fire_tick``).
 
 Operations:

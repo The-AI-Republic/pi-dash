@@ -5,10 +5,10 @@
 """Per-issue agent ticker.
 
 The continuation clock that re-invokes the agent on a single in-progress
-issue. Distinct from ``Scheduler`` / ``SchedulerBinding`` (project-level
-periodic jobs); this is internal lifecycle machinery, not a user-authored
-periodic task. Renamed from ``IssueAgentSchedule`` to free the word
-"scheduler" for the project-level concept.
+issue. Internal lifecycle machinery, system-armed on Issue state
+transitions; it is not a user-authored periodic task. Renamed from
+``IssueAgentSchedule`` to free the word "scheduler" for a future
+user-authored project-level scheduling concept.
 
 See ``.ai_design/issue_ticking_system/design.md`` §7.1.
 """

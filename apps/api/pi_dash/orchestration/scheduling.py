@@ -8,9 +8,8 @@ This module owns the per-issue ``IssueAgentTicker`` row: when to arm it,
 when to disarm it, when to reset it, how to dispatch a continuation run on
 a tick, and how to apply the deferred cap-hit pause.
 
-Distinct from ``pi_dash.db.models.Scheduler`` (project-level user-authored
-periodic jobs); this is internal continuation-cadence machinery, system-
-armed on Issue state transitions.
+This is internal continuation-cadence machinery, system-armed on Issue
+state transitions; it is not a user-authored periodic-job system.
 
 See ``.ai_design/issue_ticking_system/design.md`` for the full design;
 quick links:
