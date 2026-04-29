@@ -528,16 +528,14 @@ impl RunnerLoop {
                     tracing::warn!("Revoke arrived at RunnerLoop; demux invariant violated");
                 }
                 ServerMsg::RemoveRunner { runner_id, reason } => {
-                    // While the daemon hosts exactly one runner, a
-                    // RemoveRunner targeting that one is functionally
-                    // identical to Revoke: cancel the in-flight run and
-                    // exit the daemon. Multi-runner support (next phase)
-                    // splits this into "remove the matching instance,
-                    // leave others up" by routing on envelope.runner_id
-                    // through the demux task.
+                    // Per-instance teardown: exit ONLY this RunnerLoop;
+                    // the WS connection and other RunnerInstances stay
+                    // up. The demux already routed by envelope.runner_id
+                    // before we got here, so the rid-mismatch check
+                    // below is defensive.
                     if runner_id != self.runner_paths.runner_id {
                         tracing::warn!(
-                            "received RemoveRunner for {runner_id}, but this daemon hosts \
+                            "received RemoveRunner for {runner_id}, but this loop is \
                              {}; ignoring",
                             self.runner_paths.runner_id,
                         );
@@ -550,7 +548,27 @@ impl RunnerLoop {
                     if let Some(run) = &self.current_run {
                         run.cancel.notify_waiters();
                     }
-                    self.state.shutdown();
+                    // Best-effort cleanup of this runner's local data
+                    // dir. The on-disk state is keyed by runner_id and
+                    // is dead weight once the cloud-side row is gone.
+                    let runner_dir = self.runner_paths.base_dir().to_path_buf();
+                    if runner_dir.exists()
+                        && let Err(e) = std::fs::remove_dir_all(&runner_dir)
+                    {
+                        tracing::warn!(
+                            "failed to delete {:?}: {e:#} (file removal is best-effort)",
+                            runner_dir,
+                        );
+                    }
+                    // NOTE: the per-instance heartbeat task and the
+                    // [[runner]] entry in config.toml are not cleaned
+                    // up here — the supervisor doesn't yet expose a
+                    // "tear down instance N" API. Heartbeats for the
+                    // removed runner will keep ticking until the next
+                    // daemon restart; cloud will drop them with
+                    // unknown-rid warnings (logspam, not data loss).
+                    // Operators can run `pidash token remove-runner
+                    // --name <name>` to also strip config.toml.
                     break;
                 }
             }

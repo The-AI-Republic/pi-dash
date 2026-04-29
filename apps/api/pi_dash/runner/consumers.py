@@ -216,6 +216,14 @@ class RunnerConsumer(AsyncJsonWebsocketConsumer):
             if mtype == "hello":
                 await self._handle_token_hello(content)
                 return
+            # Connection-scoped frames in token mode legitimately omit
+            # rid (e.g. the daemon's `Bye` on shutdown). Dispatch them
+            # straight to their handler instead of trying to resolve a
+            # per-runner mailbox — the rid lookup would otherwise drop
+            # them with a misleading "unknown rid" warning.
+            if mtype == "bye":
+                await self.close()
+                return
             runner = self._resolve_inbound_runner(content)
             if runner is None:
                 logger.warning(
@@ -368,6 +376,9 @@ class RunnerConsumer(AsyncJsonWebsocketConsumer):
         # admin and connections list and is otherwise never updated in
         # token mode.
         await self._touch_token_seen()
+        # Same drain-on-online hook as the legacy path: a runner coming
+        # online with queued pod work waiting should pull it now.
+        await sync_to_async(self._drain_after_online)(runner.id)
         # Per-runner Welcome — carries the runner's rid so the daemon
         # knows which Hello this is acking.
         await self._send_envelope(
@@ -458,6 +469,13 @@ class RunnerConsumer(AsyncJsonWebsocketConsumer):
         in_flight = msg.get("in_flight_run")
         if in_flight:
             await self._resume_run(runner, str(in_flight))
+        else:
+            # Newly-online runner with no in-flight: poke the dispatcher
+            # so any queued pod work that was waiting can land here.
+            # Without this hook a runner that flaps offline/online while
+            # work is queued sits idle until something else (a new run,
+            # an existing run finishing) fires drain. See review C.
+            await sync_to_async(self._drain_after_online)(runner.id)
 
     async def on_heartbeat(self, runner: Runner, msg: Dict[str, Any]) -> None:
         await sync_to_async(self._apply_heartbeat)(runner, msg)
@@ -661,6 +679,20 @@ class RunnerConsumer(AsyncJsonWebsocketConsumer):
             .exclude(status=RunnerStatus.REVOKED)
             .update(status=RunnerStatus.OFFLINE)
         )()
+
+    @staticmethod
+    def _drain_after_online(runner_id: UUID) -> None:
+        """Trigger pod-drain for a runner that just came online so any
+        queued work waiting for capacity can dispatch immediately.
+
+        Defers to on_commit so it doesn't run inside the consumer's
+        request-handling transaction (drain spawns its own).
+        """
+        from django.db import transaction
+
+        from pi_dash.runner.services.matcher import drain_for_runner_by_id
+
+        transaction.on_commit(lambda rid=runner_id: drain_for_runner_by_id(rid))
 
     def _apply_hello(self, runner: Runner, msg: Dict[str, Any]) -> None:
         updates = ["os", "arch", "runner_version", "last_heartbeat_at"]

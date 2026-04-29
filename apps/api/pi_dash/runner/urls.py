@@ -16,6 +16,7 @@ from pi_dash.runner.views import (
     MetricsEndpoint,
     RegisterEndpoint,
     RunnerDeregisterEndpoint,
+    RunnerLinkToTokenEndpoint,
     RunnerRotateEndpoint,
     TokenRunnerCreateEndpoint,
 )
@@ -43,5 +44,13 @@ urlpatterns = [
         "<uuid:runner_id>/rotate/",
         RunnerRotateEndpoint.as_view(),
         name="rotate",
+    ),
+    # Migrate a legacy-registered runner onto a MachineToken so the
+    # daemon can switch to token-auth without re-registering. See
+    # design.md §5.x.
+    path(
+        "<uuid:runner_id>/link-to-token/",
+        RunnerLinkToTokenEndpoint.as_view(),
+        name="link-to-token",
     ),
 ]

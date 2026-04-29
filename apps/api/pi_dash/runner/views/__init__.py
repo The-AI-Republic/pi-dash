@@ -15,6 +15,7 @@ from .register import (
     RegisterEndpoint,
     RegistrationTokenCreateEndpoint,
     RunnerDeregisterEndpoint,
+    RunnerLinkToTokenEndpoint,
     RunnerRotateEndpoint,
 )
 from .runners import RunnerDetailEndpoint, RunnerListEndpoint, RunnerRevokeEndpoint
@@ -38,6 +39,7 @@ __all__ = [
     "RegisterEndpoint",
     "RegistrationTokenCreateEndpoint",
     "RunnerDeregisterEndpoint",
+    "RunnerLinkToTokenEndpoint",
     "RunnerRotateEndpoint",
     "RunnerDetailEndpoint",
     "RunnerListEndpoint",

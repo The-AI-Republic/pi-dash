@@ -242,3 +242,188 @@ def test_revoke_token_is_idempotent(db, create_user, workspace, pod):
         token.revoke()
     # Second revoke is a no-op — no session closes fired.
     mock_close.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# POST /api/v1/runner/<id>/link-to-token/  — migrate legacy runner to token
+# ---------------------------------------------------------------------------
+
+
+def _legacy_runner(user, workspace, pod, name="primary"):
+    """A runner registered via the legacy /register/ flow — no machine_token."""
+    minted = tokens.mint_runner_secret()
+    runner = Runner.objects.create(
+        owner=user,
+        workspace=workspace,
+        pod=pod,
+        name=name,
+        credential_hash=minted.hashed,
+        credential_fingerprint=minted.fingerprint,
+        status=RunnerStatus.OFFLINE,
+    )
+    return runner, minted.raw
+
+
+def _make_token(user, workspace, title="laptop"):
+    minted = tokens.mint_machine_token_secret()
+    token = MachineToken.objects.create(
+        workspace=workspace,
+        created_by=user,
+        title=title,
+        secret_hash=minted.hashed,
+        secret_fingerprint=minted.fingerprint,
+    )
+    return token, minted.raw
+
+
+@pytest.mark.unit
+def test_link_to_token_links_legacy_runner(
+    db, api_client, create_user, workspace, pod
+):
+    """Happy path: a runner registered via the legacy flow can migrate
+    onto a freshly-minted MachineToken using its existing runner_secret.
+    """
+    runner, runner_secret = _legacy_runner(create_user, workspace, pod)
+    assert runner.machine_token_id is None  # Sanity.
+    token, token_secret = _make_token(create_user, workspace)
+
+    api_client.credentials(HTTP_AUTHORIZATION=f"Bearer {runner_secret}")
+    url = reverse("runner:link-to-token", args=[runner.id])
+    resp = api_client.post(
+        url,
+        {"token_id": str(token.id), "token_secret": token_secret},
+        format="json",
+    )
+
+    assert resp.status_code == 200, resp.content
+    runner.refresh_from_db()
+    assert runner.machine_token_id == token.id
+
+
+@pytest.mark.unit
+def test_link_to_token_rejects_wrong_token_secret(
+    db, api_client, create_user, workspace, pod
+):
+    runner, runner_secret = _legacy_runner(create_user, workspace, pod)
+    token, _good_secret = _make_token(create_user, workspace)
+
+    api_client.credentials(HTTP_AUTHORIZATION=f"Bearer {runner_secret}")
+    url = reverse("runner:link-to-token", args=[runner.id])
+    resp = api_client.post(
+        url,
+        {"token_id": str(token.id), "token_secret": "apd_mt_wrongwrong"},
+        format="json",
+    )
+    assert resp.status_code == 401, resp.content
+    runner.refresh_from_db()
+    assert runner.machine_token_id is None  # Unchanged.
+
+
+@pytest.mark.unit
+def test_link_to_token_rejects_revoked_token(
+    db, api_client, create_user, workspace, pod
+):
+    runner, runner_secret = _legacy_runner(create_user, workspace, pod)
+    token, token_secret = _make_token(create_user, workspace)
+    token.revoked_at = timezone.now()
+    token.save(update_fields=["revoked_at"])
+
+    api_client.credentials(HTTP_AUTHORIZATION=f"Bearer {runner_secret}")
+    url = reverse("runner:link-to-token", args=[runner.id])
+    resp = api_client.post(
+        url,
+        {"token_id": str(token.id), "token_secret": token_secret},
+        format="json",
+    )
+    assert resp.status_code == 401
+
+
+@pytest.mark.unit
+def test_link_to_token_rejects_cross_workspace(
+    db, api_client, create_user, workspace, pod, other_user, other_workspace
+):
+    """Runner and token must share a workspace. Cross-workspace linking
+    would let a token mint runners outside its scope.
+    """
+    runner, runner_secret = _legacy_runner(create_user, workspace, pod)
+    other_pod = Pod.default_for_workspace(other_workspace)
+    # Token in the OTHER workspace — runner shouldn't be linkable to it.
+    token, token_secret = _make_token(other_user, other_workspace)
+    # Sanity: the token belongs to a different workspace from the runner.
+    assert token.workspace_id != runner.workspace_id
+    _ = other_pod  # Quiet unused-fixture lint.
+
+    api_client.credentials(HTTP_AUTHORIZATION=f"Bearer {runner_secret}")
+    url = reverse("runner:link-to-token", args=[runner.id])
+    resp = api_client.post(
+        url,
+        {"token_id": str(token.id), "token_secret": token_secret},
+        format="json",
+    )
+    assert resp.status_code == 400, resp.content
+    runner.refresh_from_db()
+    assert runner.machine_token_id is None
+
+
+@pytest.mark.unit
+def test_link_to_token_refuses_relink_to_different_active_token(
+    db, api_client, create_user, workspace, pod
+):
+    """Once a runner is linked to an active token, linking it to a
+    DIFFERENT active token must fail. Otherwise a leaked token's
+    holder could steal a runner that's already bound to someone else.
+    """
+    runner, runner_secret = _legacy_runner(create_user, workspace, pod)
+    first_token, _ = _make_token(create_user, workspace, title="first")
+    Runner.objects.filter(pk=runner.pk).update(machine_token=first_token)
+
+    second_token, second_secret = _make_token(create_user, workspace, title="second")
+    api_client.credentials(HTTP_AUTHORIZATION=f"Bearer {runner_secret}")
+    url = reverse("runner:link-to-token", args=[runner.id])
+    resp = api_client.post(
+        url,
+        {"token_id": str(second_token.id), "token_secret": second_secret},
+        format="json",
+    )
+    assert resp.status_code == 409, resp.content
+    runner.refresh_from_db()
+    assert runner.machine_token_id == first_token.id
+
+
+@pytest.mark.unit
+def test_link_to_token_is_idempotent_to_same_token(
+    db, api_client, create_user, workspace, pod
+):
+    """Calling link-to-token twice with the same token must succeed
+    both times — `pidash token install` should be safe to retry."""
+    runner, runner_secret = _legacy_runner(create_user, workspace, pod)
+    token, token_secret = _make_token(create_user, workspace)
+
+    api_client.credentials(HTTP_AUTHORIZATION=f"Bearer {runner_secret}")
+    url = reverse("runner:link-to-token", args=[runner.id])
+    body = {"token_id": str(token.id), "token_secret": token_secret}
+
+    r1 = api_client.post(url, body, format="json")
+    r2 = api_client.post(url, body, format="json")
+    assert r1.status_code == 200
+    assert r2.status_code == 200
+
+
+@pytest.mark.unit
+def test_link_to_token_without_runner_secret_unauthorized(
+    db, api_client, create_user, workspace, pod
+):
+    runner, _ = _legacy_runner(create_user, workspace, pod)
+    token, token_secret = _make_token(create_user, workspace)
+    # No Authorization header at all.
+    url = reverse("runner:link-to-token", args=[runner.id])
+    resp = api_client.post(
+        url,
+        {"token_id": str(token.id), "token_secret": token_secret},
+        format="json",
+    )
+    # DRF returns 401 when authentication fails for an endpoint that
+    # requires it. (RunnerBearerAuthentication returns None on missing
+    # header, so the auth_runner attr is unset and the view's own
+    # forbidden-check fires with 403.)
+    assert resp.status_code in (401, 403)

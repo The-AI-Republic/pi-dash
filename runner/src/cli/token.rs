@@ -115,22 +115,64 @@ async fn run_install(args: InstallArgs, paths: &Paths) -> Result<()> {
     if title.len() > 128 {
         anyhow::bail!("--title cannot exceed 128 characters");
     }
-    if args.token_secret.trim().is_empty() {
+    let token_secret = args.token_secret.trim().to_string();
+    if token_secret.is_empty() {
         anyhow::bail!("--token-secret cannot be empty");
     }
 
+    let config = crate::config::file::load_config(paths)
+        .context("loading config.toml — run `pidash configure --url ... --token ...` first")?;
     let mut creds = crate::config::file::load_credentials(paths)
         .context("loading credentials.toml — run `pidash configure --url ... --token ...` first")?;
+
+    // Cloud-side step: link the existing primary runner to the new
+    // token BEFORE writing the [token] block locally. Without this,
+    // the daemon would switch to token-auth on next start (because
+    // [token] is present in credentials.toml) but the cloud's
+    // `_resolve_token_runner` would reject the Hello — the runner row
+    // still has `machine_token = NULL`. Sequencing this call first
+    // means a network failure leaves credentials.toml unchanged, so
+    // the daemon stays on legacy auth and keeps working.
+    let url = format!(
+        "{}/api/v1/runner/{}/link-to-token/",
+        config.daemon.cloud_url.trim_end_matches('/'),
+        creds.runner_id,
+    );
+    let body = json!({
+        "token_id": args.token_id.to_string(),
+        "token_secret": &token_secret,
+    });
+    let http = reqwest::Client::builder()
+        .timeout(Duration::from_secs(15))
+        .build()?;
+    let resp = http
+        .post(&url)
+        .header("Authorization", format!("Bearer {}", creds.runner_secret))
+        .json(&body)
+        .send()
+        .await
+        .with_context(|| format!("POST {url}"))?;
+    let status = resp.status();
+    if !status.is_success() {
+        let text = resp.text().await.unwrap_or_default();
+        anyhow::bail!(
+            "link-to-token failed (HTTP {status}): {text}\n\
+             Token NOT installed locally. Verify the token id/secret \
+             and that this runner is in the same workspace as the token."
+        );
+    }
+
     creds.token = Some(TokenCredentials {
         token_id: args.token_id,
-        token_secret: args.token_secret.trim().to_string(),
+        token_secret,
         title: title.to_string(),
     });
     crate::config::file::write_credentials(paths, &creds)?;
     println!(
-        "Installed token {} (\"{}\"). Restart the daemon to use it.",
-        args.token_id, title,
+        "Installed token {} (\"{}\") and linked runner {}.",
+        args.token_id, title, creds.runner_id,
     );
+    println!("Restart the daemon to use the new token.");
     Ok(())
 }
 
