@@ -38,15 +38,33 @@ from pi_dash.runner.services import tokens
 
 
 def _serialize_projects(workspace_id) -> list[dict]:
-    """Return one row per project in ``workspace_id`` with pod counts."""
-    pod_counts: dict = {}
+    """Return one row per project in ``workspace_id`` with pod counts and
+    the embedded pod list.
+
+    The TUI's add-runner form needs the pod list per project so it can
+    render a cascaded picker (project → pod) without a second
+    round-trip on every project change. Pods are tiny (a few per
+    project), so embedding is cheaper than chatty cascade fetches.
+
+    Each project includes a ``pods`` array sorted with the default pod
+    first; ``default_pod_id`` and ``pod_count`` stay on the parent for
+    callers that don't care about the full list.
+    """
+    pods_by_project: dict = {}
     default_pod_ids: dict = {}
     for row in (
         Pod.objects.filter(workspace_id=workspace_id)
-        .values("project_id", "is_default", "id")
+        .values("project_id", "is_default", "id", "name")
+        .order_by("-is_default", "name")
     ):
         pid = row["project_id"]
-        pod_counts[pid] = pod_counts.get(pid, 0) + 1
+        pods_by_project.setdefault(pid, []).append(
+            {
+                "id": str(row["id"]),
+                "name": row["name"],
+                "is_default": bool(row["is_default"]),
+            }
+        )
         if row["is_default"] and pid not in default_pod_ids:
             default_pod_ids[pid] = row["id"]
     return [
@@ -57,7 +75,8 @@ def _serialize_projects(workspace_id) -> list[dict]:
             "default_pod_id": (
                 str(default_pod_ids[p.id]) if p.id in default_pod_ids else None
             ),
-            "pod_count": pod_counts.get(p.id, 0),
+            "pod_count": len(pods_by_project.get(p.id, [])),
+            "pods": pods_by_project.get(p.id, []),
         }
         for p in Project.objects.filter(workspace_id=workspace_id).order_by(
             "identifier"

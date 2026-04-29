@@ -119,6 +119,40 @@ def test_pod_count_reflects_user_created_pods(
 
 
 @pytest.mark.unit
+def test_response_embeds_pod_list_with_default_first(
+    db, api_client, workspace, project, create_user
+):
+    """The TUI add-runner form needs the per-project pod list inline so it
+    can render a cascaded picker without a second round-trip. The default
+    pod must appear first so the picker pre-selects it."""
+    Pod.objects.create(
+        workspace=workspace,
+        project=project,
+        name=f"{project.identifier}_beefy",
+        created_by=create_user,
+    )
+    token, raw = _make_token(workspace, create_user)
+    api_client.credentials(
+        HTTP_AUTHORIZATION=f"Bearer {raw}",
+        HTTP_X_TOKEN_ID=str(token.id),
+    )
+    url = reverse("project-list")
+    body = api_client.get(url).json()
+    proj_row = next(r for r in body if r["identifier"] == project.identifier)
+
+    pods = proj_row["pods"]
+    assert isinstance(pods, list)
+    assert len(pods) == 2
+    # Default pod first; non-default after.
+    assert pods[0]["is_default"] is True
+    assert pods[0]["id"] == proj_row["default_pod_id"]
+    assert any(p["name"].endswith("_beefy") and not p["is_default"] for p in pods)
+    # Each pod entry carries the keys the TUI consumes.
+    for p in pods:
+        assert set(p.keys()) >= {"id", "name", "is_default"}
+
+
+@pytest.mark.unit
 def test_no_auth_returns_401(db, api_client, workspace, project):
     url = reverse("project-list")
     resp = api_client.get(url)
