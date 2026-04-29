@@ -14,3 +14,6 @@ class BgtasksConfig(AppConfig):
         # Eagerly import task modules that no other startup code imports,
         # so their @shared_task decorators register with Celery at worker boot.
         from pi_dash.bgtasks import agent_ticker  # noqa: F401
+        from pi_dash.bgtasks import scheduler  # noqa: F401
+        # Wire the project-scheduler seed-on-workspace-create signal.
+        from pi_dash.scheduler import signals as _scheduler_signals  # noqa: F401
