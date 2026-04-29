@@ -43,8 +43,16 @@ def _null_issue_assigned_pods(apps, schema_editor):
     fallback (``issue.assigned_pod or Pod.default_for_project_id(...)``)
     handles the in-flight case.
     """
+    # ``Issue`` declares its manager as ``issue_objects = IssueManager()``
+    # rather than the conventional ``objects``, which means the historical
+    # model returned by ``apps.get_model`` has no ``objects`` attribute.
+    # Use ``_default_manager`` (Django guarantees this on every historical
+    # model) so the migration is independent of the live model's manager
+    # naming.
     Issue = apps.get_model("db", "Issue")
-    Issue.objects.filter(assigned_pod__isnull=False).update(assigned_pod=None)
+    Issue._default_manager.filter(assigned_pod__isnull=False).update(
+        assigned_pod=None
+    )
 
 
 def _refuse_if_legacy_rows_exist(apps, schema_editor):
@@ -121,6 +129,16 @@ def _noop_reverse(apps, schema_editor):
 
 
 class Migration(migrations.Migration):
+
+    # Run each operation in its own transaction. Django's default
+    # ``atomic = True`` would wrap the whole migration; that fails on
+    # PostgreSQL because the RunPython data steps touch FK-deferred
+    # tables (``Issue.assigned_pod`` is ``ON DELETE PROTECT`` and the
+    # FK is ``DEFERRABLE INITIALLY DEFERRED``) and the subsequent
+    # ``AlterField`` to make ``Pod.project`` NOT NULL hits "cannot
+    # ALTER TABLE because it has pending trigger events". Per-op
+    # transactions let the deferred triggers fire between steps.
+    atomic = False
 
     dependencies = [
         ("db", "0001_initial"),
