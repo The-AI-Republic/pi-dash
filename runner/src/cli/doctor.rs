@@ -436,32 +436,29 @@ mod tests {
         assert!(msg.contains("beta"), "missing known runner beta: {msg}");
     }
 
-    #[test]
-    fn agent_kind_drives_check_set() {
+    #[tokio::test]
+    async fn agent_kind_drives_check_set() {
         // Sanity: switching an agent flips which check tags appear.
         // We assert via the helper function's tag construction so we
         // don't have to spawn binaries to see the difference.
         let mut codex_checks: Vec<Check> = Vec::new();
         let mut claude_checks: Vec<Check> = Vec::new();
-        // Run synchronously inside a tokio rt for the async helper.
-        let rt = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap();
-        rt.block_on(run_agent_checks(
+        run_agent_checks(
             &mut codex_checks,
             None,
             AgentKind::Codex,
             "codex-missing",
             "claude-missing",
-        ));
-        rt.block_on(run_agent_checks(
+        )
+        .await;
+        run_agent_checks(
             &mut claude_checks,
             None,
             AgentKind::ClaudeCode,
             "codex-missing",
             "claude-missing",
-        ));
+        )
+        .await;
         assert!(codex_checks.iter().any(|c| c.name == "codex"));
         assert!(codex_checks.iter().any(|c| c.name == "codex-auth"));
         assert!(claude_checks.iter().any(|c| c.name == "claude"));

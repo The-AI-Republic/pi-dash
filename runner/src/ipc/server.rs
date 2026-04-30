@@ -128,14 +128,12 @@ impl IpcServer {
                 Ok(Response::Config(serde_json::to_value(&cfg)?))
             }
             Request::ConfigUpdate { patch, runner } => {
-                // ``runner`` is informational at the moment — the patch
-                // is applied to the on-disk config which already
-                // contains every `[[runner]]` block, and the daemon's
-                // primary state is reloaded. A future change will
-                // route the patch into a specific instance's state
-                // (e.g. for live approval-policy pushes); for now we
-                // require the selector when the patch obviously
-                // targets a runner so the API is honest.
+                // ``runner`` is reserved / informational — the patch is
+                // deep-merged into the on-disk config (which already
+                // contains every `[[runner]]` block) and the daemon's
+                // primary state is reloaded. The selector is kept on
+                // the wire so a future per-runner live-patch flow can
+                // opt in without bumping IPC version again.
                 let _ = runner;
                 let mut cfg = crate::config::file::load_config(&self.paths)?;
                 merge_json(&mut cfg, patch)?;

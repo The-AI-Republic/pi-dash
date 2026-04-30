@@ -416,9 +416,7 @@ async fn move_picker(state: &mut AppState, delta: isize) {
     if total <= 1 {
         return;
     }
-    let cur = state.runner_picker_idx as isize;
-    let next = ((cur + delta).rem_euclid(total as isize)) as usize;
-    state.runner_picker_idx = next;
+    state.runner_picker_idx = wrap_idx(state.runner_picker_idx, delta, total);
     sync_picker_to_ipc(state);
     suppress_approval_alert_once(state);
     refresh(state).await;
@@ -741,7 +739,9 @@ async fn handle_event(ev: Event, state: &mut AppState) {
         // Enter commits, Esc cancels. Ctrl+C remains a universal escape
         // hatch — otherwise the user can get wedged with no way to quit
         // the TUI without Esc+q.
-        if state.tab == Tab::RunnerStatus && state.config_edit_buffer.is_some() {
+        if matches!(state.tab, Tab::RunnerStatus | Tab::General)
+            && state.config_edit_buffer.is_some()
+        {
             if let (KeyCode::Char('c'), m) = (key.code, key.modifiers)
                 && m.contains(KeyModifiers::CONTROL)
             {
@@ -986,7 +986,10 @@ fn start_or_apply_config_field(state: &mut AppState) {
 
 /// Commit the pending `config_edit_buffer` to the working config. On parse /
 /// validation failure leave the buffer in place so the user can fix it
-/// without retyping everything.
+/// without retyping everything. Dispatches on the active tab — the
+/// General tab edits daemon-level fields (only LogRetentionDays opens a
+/// buffer today); the Runners tab edits the per-runner field at
+/// `state.selected` against the picker-focused runner.
 fn commit_config_edit(state: &mut AppState) {
     use super::views::config as cfg_view;
     let Some(buf) = state.config_edit_buffer.take() else {
@@ -995,12 +998,24 @@ fn commit_config_edit(state: &mut AppState) {
     let Some(cfg) = state.config_working.as_mut() else {
         return;
     };
-    if cfg_view::field_count() == 0 {
-        return;
-    }
-    let idx = state.selected.min(cfg_view::field_count() - 1);
-    let spec = cfg_view::field_at(idx);
-    match cfg_view::set_text_value(cfg, spec.id, &buf, state.runner_picker_idx) {
+    let id = match state.tab {
+        Tab::General => match state.tab_general_field {
+            super::views::general::GeneralField::LogRetentionDays => {
+                cfg_view::FieldId::LogRetentionDays
+            }
+            // LogLevel cycles on Enter and never opens a buffer; if we
+            // somehow get here, drop the buffer rather than misroute.
+            super::views::general::GeneralField::LogLevel => return,
+        },
+        _ => {
+            if cfg_view::field_count() == 0 {
+                return;
+            }
+            let idx = state.selected.min(cfg_view::field_count() - 1);
+            cfg_view::field_at(idx).id
+        }
+    };
+    match cfg_view::set_text_value(cfg, id, &buf, state.runner_picker_idx) {
         Ok(()) => {
             state.config_edit_error = None;
         }
@@ -1070,7 +1085,7 @@ fn start_or_apply_general_field(state: &mut AppState) {
     state.config_edit_error = None;
     match state.tab_general_field {
         super::views::general::GeneralField::LogLevel => {
-            const LOG_LEVELS: &[&str] = &["trace", "debug", "info", "warn", "error"];
+            use super::views::config::LOG_LEVELS;
             let cur = LOG_LEVELS
                 .iter()
                 .position(|s| *s == cfg.daemon.log_level)
@@ -1427,7 +1442,6 @@ async fn accept_selected(state: &mut AppState, decision: crate::cloud::protocol:
 }
 
 fn draw(f: &mut ratatui::Frame<'_>, state: &AppState) {
-    // Picker bar is only shown when there's more than one runner AND the
     // Picker bar is shown above per-runner tabs (Runs / Approvals)
     // when there's more than one runner. The Runners tab itself owns
     // the picker as part of its top-of-tab list, so we suppress the

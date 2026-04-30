@@ -721,10 +721,15 @@ fn index_of(id: FieldId) -> usize {
 }
 
 pub fn differs(a: &Config, b: &Config) -> bool {
-    // Compare every editable field across every configured runner.
-    // Daemon-level fields (LogLevel etc.) are also exercised via
-    // ``display_value``; their value is independent of ``runner_idx``,
-    // so we just inspect them at idx 0 to avoid duplicate work.
+    // Compare every per-runner editable field across every configured
+    // runner. Daemon-level fields (log_level, log_retention_days) are
+    // edited on the General tab and aren't part of `FIELDS` — they
+    // need a separate equality check.
+    if a.daemon.log_level != b.daemon.log_level
+        || a.daemon.log_retention_days != b.daemon.log_retention_days
+    {
+        return true;
+    }
     let n = a.runners.len().max(b.runners.len()).max(1);
     for idx in 0..n {
         for f in FIELDS {
