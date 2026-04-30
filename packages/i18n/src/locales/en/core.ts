@@ -199,6 +199,8 @@ export default {
     actions: {
       edit: "Edit",
       uninstall: "Uninstall",
+      enable: "Enable scheduler",
+      disable: "Disable scheduler",
     },
     list: {
       empty:
@@ -244,6 +246,8 @@ export default {
       installed_message: "It will fire on the configured cron.",
       updated_title: "Install updated",
       updated_message: "Subsequent runs use the new settings.",
+      enabled_message: "Scheduler enabled — it will fire on the next cron tick.",
+      disabled_message: "Scheduler disabled — it will not fire until re-enabled.",
       uninstalled_title: "Scheduler uninstalled",
       uninstalled_message: "It will not fire on this project until reinstalled.",
       error_title: "Something went wrong",

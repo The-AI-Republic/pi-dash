@@ -11,9 +11,10 @@ import useSWR from "swr";
 // pi dash imports
 import { EUserPermissions, EUserPermissionsLevel } from "@pi-dash/constants";
 import { useTranslation } from "@pi-dash/i18n";
+import { TOAST_TYPE, setToast } from "@pi-dash/propel/toast";
 import type { IScheduler, ISchedulerBinding } from "@pi-dash/services";
 import { SchedulerService } from "@pi-dash/services";
-import { Badge, Button } from "@pi-dash/ui";
+import { Button, ToggleSwitch } from "@pi-dash/ui";
 // components
 import { NotAuthorizedView } from "@/components/auth-screens/not-authorized-view";
 import { PageHead } from "@/components/core/page-title";
@@ -99,8 +100,11 @@ const SchedulerBindingsSettingsPage = observer(function SchedulerBindingsSetting
                 <BindingRow
                   key={b.id}
                   binding={b}
+                  workspaceSlug={slug}
+                  projectId={project}
                   onEdit={() => setEditTarget(b)}
                   onUninstall={() => setUninstallTarget(b)}
+                  onToggled={() => mutateBindings()}
                 />
               ))}
               {rows.length === 0 && (
@@ -146,13 +150,45 @@ const SchedulerBindingsSettingsPage = observer(function SchedulerBindingsSetting
 
 type RowProps = {
   binding: ISchedulerBinding;
+  workspaceSlug: string;
+  projectId: string;
   onEdit: () => void;
   onUninstall: () => void;
+  onToggled: () => void;
 };
 
-function BindingRow({ binding, onEdit, onUninstall }: RowProps) {
+function BindingRow({ binding, workspaceSlug, projectId, onEdit, onUninstall, onToggled }: RowProps) {
   const { t } = useTranslation();
+  const [toggling, setToggling] = useState(false);
+
   const formatTs = (ts: string | null) => (ts ? new Date(ts).toLocaleString() : t("scheduler_bindings.list.none_yet"));
+
+  // Inline toggle of the binding's enabled flag. Same PATCH the edit
+  // modal uses, but limited to the one field — saves the user a modal
+  // round-trip for the most common adjustment.
+  const handleToggle = async (next: boolean) => {
+    if (toggling) return;
+    setToggling(true);
+    try {
+      await schedulerService.updateBinding(workspaceSlug, projectId, binding.id, { enabled: next });
+      setToast({
+        type: TOAST_TYPE.SUCCESS,
+        title: t("scheduler_bindings.toast.updated_title"),
+        message: next ? t("scheduler_bindings.toast.enabled_message") : t("scheduler_bindings.toast.disabled_message"),
+      });
+      onToggled();
+    } catch (e: unknown) {
+      const err = e as { error?: string } | null;
+      setToast({
+        type: TOAST_TYPE.ERROR,
+        title: t("scheduler_bindings.toast.error_title"),
+        message: err?.error ?? t("scheduler_bindings.toast.update_failed"),
+      });
+    } finally {
+      setToggling(false);
+    }
+  };
+
   return (
     <tr className="border-t border-subtle">
       <td className="px-3 py-2 font-medium text-primary">
@@ -167,9 +203,19 @@ function BindingRow({ binding, onEdit, onUninstall }: RowProps) {
       <td className="px-3 py-2 text-secondary">{formatTs(binding.next_run_at)}</td>
       <td className="px-3 py-2 text-secondary">{formatTs(binding.last_run_ended_at)}</td>
       <td className="px-3 py-2">
-        <Badge variant={binding.enabled ? "accent-primary" : "accent-neutral"} size="sm">
-          {binding.enabled ? t("scheduler_bindings.status.enabled") : t("scheduler_bindings.status.disabled")}
-        </Badge>
+        <div className="flex items-center gap-2">
+          <ToggleSwitch
+            value={binding.enabled}
+            onChange={handleToggle}
+            disabled={toggling}
+            aria-label={
+              binding.enabled ? t("scheduler_bindings.actions.disable") : t("scheduler_bindings.actions.enable")
+            }
+          />
+          <span className="text-12 text-secondary">
+            {binding.enabled ? t("scheduler_bindings.status.enabled") : t("scheduler_bindings.status.disabled")}
+          </span>
+        </div>
       </td>
       <td className="px-3 py-2 text-secondary">{new Date(binding.updated_at).toLocaleString()}</td>
       <td className="px-3 py-2 text-right">
