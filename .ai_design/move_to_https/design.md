@@ -56,6 +56,45 @@ Non-goals:
 - Changing the runner ↔ codex/claude-code subprocess protocol. Only
   the runner ↔ cloud edge moves.
 
+## 1.1 Architectural layering
+
+This migration is a transport replacement, not a redesign. The
+runner ↔ cloud edge has three planes; only one changes:
+
+1. **Message schema** — the `ClientMsg` / `ServerMsg` enums in
+   `runner/src/cloud/protocol.rs` and their server-side counterparts.
+   These stay as the canonical body schemas. Every data-bearing
+   variant maps 1:1 to an HTTP body shape (§7.5 for daemon→cloud,
+   §7.3 for cloud→daemon). No call site needs new types.
+2. **Call-site API** — `RunnerOut::send(body: ClientMsg)` on the
+   daemon, and the `on_run_started` / `on_run_event` /
+   `on_approval_request` handlers on the cloud. Signatures unchanged.
+   Internal dispatch reroutes to the new transport. See
+   `daemon_module.md` §3 for the daemon-side dispatch table;
+   `tasks.md` §3.3 + §5.2 for the cloud-side service extraction that
+   makes the same handlers callable from both transports.
+3. **Transport** — `runner/src/cloud/ws.rs` and the Channels consumer
+   today; `runner/src/cloud/http.rs` and a set of DRF endpoints after
+   Phase 4. **This plane is what gets replaced.** The WS code stays
+   in the build for future opt-in per-run upgrade streams
+   (decision #2, §7.9).
+
+Four current variants — `Hello`, `Heartbeat`, `Bye`, `Ping` — are
+absorbed into transport primitives rather than preserved as messages.
+Their data still flows (POST attach body, poll-request `status[]`
+vector, `DELETE` session, long-poll's own server timeout) but they
+are no longer `ClientMsg`/`ServerMsg` envelopes after Phase 4. One
+new variant — `force_refresh` (decision #17) — is added at the
+schema layer to support the new auth model; it rides the same poll
+path as every other `ServerMsg`.
+
+This layering is what makes the migration cheap: every business-logic
+call site (run lifecycle, approvals, events) recompiles unchanged;
+only the dispatcher behind `RunnerOut` and the cloud-side handler
+plumbing change. It is also what keeps the door open to bringing the
+WS transport back later for a single per-run stream — the schema
+plane already supports it.
+
 ## 2. Why now
 
 The current design has three structural problems, two of them already
