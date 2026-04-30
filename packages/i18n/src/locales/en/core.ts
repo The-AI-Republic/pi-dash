@@ -102,6 +102,82 @@ export default {
     },
   },
 
+  schedulers: {
+    title: "Schedulers",
+    subtitle:
+      "Reusable scheduler definitions for this workspace. Install one on a project to run its prompt against the project on a cron.",
+    new: "New scheduler",
+    columns: {
+      name: "Name",
+      slug: "Slug",
+      source: "Source",
+      installs: "Installs",
+      status: "Status",
+      updated: "Updated",
+    },
+    source: {
+      builtin: "Built-in",
+      manifest: "Manifest",
+    },
+    status: {
+      enabled: "Enabled",
+      disabled: "Disabled",
+    },
+    actions: {
+      edit: "Edit",
+      delete: "Delete",
+    },
+    list: {
+      empty: "No schedulers in this workspace yet. Click “New scheduler” to create one.",
+      installs_count: "{count, plural, one {# install} other {# installs}}",
+    },
+    form: {
+      create_title: "New scheduler",
+      edit_title: "Edit scheduler",
+      slug_label: "Slug",
+      slug_help: "Lowercase identifier used in URLs. Cannot be changed after creation.",
+      slug_placeholder: "security-audit",
+      name_label: "Name",
+      name_placeholder: "Security audit",
+      description_label: "Description",
+      description_placeholder: "Short summary shown in the install picker.",
+      prompt_label: "Prompt",
+      prompt_help:
+        "The base prompt the agent runs each tick. Per-project context is appended at install time, so keep this prompt project-agnostic.",
+      prompt_placeholder: "Look for outstanding security issues in this project…",
+      enabled_label: "Enabled",
+      enabled_help: "Disabled schedulers cannot be installed on new projects, and existing bindings will not fire.",
+      cancel: "Cancel",
+      save: "Save",
+      create: "Create scheduler",
+      saving: "Saving…",
+      creating: "Creating…",
+      errors: {
+        slug_required: "Slug is required.",
+        name_required: "Name is required.",
+        prompt_required: "Prompt is required.",
+      },
+    },
+    delete: {
+      confirm_title: "Delete scheduler?",
+      confirm_body:
+        "This soft-deletes the scheduler. Any active project bindings will stop firing. The slug becomes available for re-creation.",
+      confirm: "Delete",
+    },
+    toast: {
+      created_title: "Scheduler created",
+      created_message: "Project admins can now install it on their projects.",
+      updated_title: "Scheduler updated",
+      updated_message: "Subsequent runs will use the updated definition.",
+      deleted_title: "Scheduler deleted",
+      deleted_message: "Active bindings have stopped firing.",
+      error_title: "Something went wrong",
+      create_failed: "Could not create the scheduler.",
+      update_failed: "Could not update the scheduler.",
+      delete_failed: "Could not delete the scheduler.",
+    },
+  },
+
   auth: {
     common: {
       email: {
