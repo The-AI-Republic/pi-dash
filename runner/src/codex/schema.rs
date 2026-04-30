@@ -66,6 +66,11 @@ pub struct ClientInfo {
 #[serde(rename_all = "camelCase")]
 pub struct ThreadStartParams {
     pub cwd: String,
+    // Omit when None so codex's app-server falls back to its own
+    // `~/.codex/config.toml` model setting. Serializing `"model": null`
+    // makes codex skip its config and apply an internal default
+    // (`gpt-5-codex`), which is unavailable on ChatGPT-account auth.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
     pub sandbox_policy: String,
     pub approval_policy: String,
@@ -76,7 +81,9 @@ pub struct ThreadStartParams {
 pub struct TurnStartParams {
     pub thread_id: String,
     pub input: Vec<TurnInputItem>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub effort: Option<String>,
 }
 

@@ -68,6 +68,8 @@ impl Bridge {
             run_id: payload.run_id,
             thread_id,
             seq: 0,
+            pending_command: None,
+            pending_command_approval_id: None,
         })
     }
 
@@ -217,6 +219,26 @@ pub struct BridgeCursor {
     pub run_id: Uuid,
     pub thread_id: String,
     pub seq: u64,
+    /// Most recent in-progress `commandExecution` item observed on
+    /// `item/started`. Captured so we can synthesize an `ApprovalRequest`
+    /// when codex sets `thread/status/changed → activeFlags:
+    /// ["waitingOnApproval"]` (codex 0.125.0 stopped firing the legacy
+    /// `item/commandExecution/requestApproval` notification, leaving the
+    /// in-progress item + the flag as the only signal we get).
+    pending_command: Option<PendingCommand>,
+    /// Approval id last opened for `pending_command`. Stored so a stray
+    /// re-fire of the `waitingOnApproval` flag (e.g. status notifications
+    /// sent more than once for the same item) doesn't open duplicate
+    /// approval rows.
+    pending_command_approval_id: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+struct PendingCommand {
+    item_id: String,
+    command: String,
+    cwd: Option<String>,
+    raw: serde_json::Value,
 }
 
 impl BridgeCursor {
@@ -260,30 +282,196 @@ impl BridgeCursor {
                             .map(|s| s.to_string()),
                     }]
                 } else if matches!(kind, NotificationKind::TurnCompleted) {
+                    // Treat success only when codex explicitly says so. Any
+                    // other value (including a missing field) means the turn
+                    // ended without a clean signal — the prior default of
+                    // "success" silently masked codex errors that landed
+                    // a `turn/completed` with no conclusion right after a
+                    // systemError, so the runner reported "completed" on
+                    // 400s from OpenAI.
                     let conclusion = params
                         .get("conclusion")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("success");
-                    if conclusion == "failed" {
+                        .and_then(|v| v.as_str());
+                    if conclusion == Some("success") {
+                        vec![BridgeEvent::Completed {
+                            run_id: self.run_id,
+                            done_payload: params.get("done").cloned().unwrap_or_else(|| {
+                                serde_json::json!({
+                                    "conclusion": "success",
+                                    "ended_at": Utc::now().to_rfc3339(),
+                                })
+                            }),
+                        }]
+                    } else {
                         vec![BridgeEvent::Failed {
                             run_id: self.run_id,
                             reason: FailureReason::Internal,
                             detail: params
                                 .get("error")
                                 .and_then(|v| v.as_str())
-                                .map(|s| s.to_string()),
-                        }]
-                    } else {
-                        vec![BridgeEvent::Completed {
-                            run_id: self.run_id,
-                            done_payload: params.get("done").cloned().unwrap_or_else(|| {
-                                serde_json::json!({
-                                    "conclusion": conclusion,
-                                    "ended_at": Utc::now().to_rfc3339(),
+                                .map(|s| s.to_string())
+                                .or_else(|| {
+                                    conclusion.map(|c| format!("turn ended with conclusion={c:?}"))
                                 })
-                            }),
+                                .or_else(|| Some("turn/completed without conclusion".to_string())),
                         }]
                     }
+                } else if method == "error" {
+                    // Codex emits this for transport / API failures (e.g. a
+                    // 400 from OpenAI saying the model isn't allowed). When
+                    // `willRetry` is false it's terminal, so fail the run
+                    // instead of silently logging it as a Raw event and
+                    // waiting for a `turn/completed` that may or may not
+                    // arrive.
+                    let will_retry = params
+                        .get("willRetry")
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(false);
+                    if will_retry {
+                        vec![BridgeEvent::Raw {
+                            run_id: self.run_id,
+                            method,
+                            params,
+                        }]
+                    } else {
+                        let detail = params
+                            .get("error")
+                            .and_then(|e| e.get("message"))
+                            .and_then(|v| v.as_str())
+                            .map(|s| s.to_string());
+                        vec![BridgeEvent::Failed {
+                            run_id: self.run_id,
+                            reason: FailureReason::Internal,
+                            detail,
+                        }]
+                    }
+                } else if method == "thread/status/changed" {
+                    // Codex 0.125.0+ signals "I'm parked waiting for the
+                    // user to approve a command" by setting this flag,
+                    // *without* firing the legacy
+                    // `item/commandExecution/requestApproval` notification.
+                    // If we don't translate it into an ApprovalRequest, the
+                    // run deadlocks: codex blocks on stdin reading the
+                    // approval response, the runner blocks on stdout
+                    // reading frames that will never arrive.
+                    let waiting = params
+                        .get("status")
+                        .and_then(|s| s.get("activeFlags"))
+                        .and_then(|f| f.as_array())
+                        .map(|arr| {
+                            arr.iter().any(|v| v.as_str() == Some("waitingOnApproval"))
+                        })
+                        .unwrap_or(false);
+                    if waiting && let Some(pending) = self.pending_command.clone() {
+                        // We've already emitted an ApprovalRequest for this
+                        // pending command. Re-emitting here would re-send a
+                        // ClientMsg::ApprovalRequest to the cloud and append
+                        // a fresh "pending" history row — even though the
+                        // ApprovalRouter would self-heal via its HashMap.
+                        // Skip the duplicate; the previous approval is still
+                        // outstanding (or already decided).
+                        if self.pending_command_approval_id.is_some() {
+                            return vec![BridgeEvent::Raw {
+                                run_id: self.run_id,
+                                method,
+                                params,
+                            }];
+                        }
+                        let approval_id = Uuid::new_v4().to_string();
+                        self.pending_command_approval_id = Some(approval_id.clone());
+                        let reason = Some(format!(
+                            "codex requesting approval to run: {}",
+                            pending.command
+                        ));
+                        // Synthesise a payload that downstream consumers
+                        // (cloud-side ApprovalRequest serializer, TUI
+                        // approval card) can render the same way as a real
+                        // codex-fired approval.
+                        let payload = serde_json::json!({
+                            "command": pending.command,
+                            "cwd": pending.cwd,
+                            "item_id": pending.item_id,
+                            "synthesized": true,
+                            "raw": pending.raw,
+                        });
+                        return vec![BridgeEvent::ApprovalRequest {
+                            run_id: self.run_id,
+                            approval_id,
+                            kind: ApprovalKind::CommandExecution,
+                            payload,
+                            reason,
+                        }];
+                    }
+                    vec![BridgeEvent::Raw {
+                        run_id: self.run_id,
+                        method,
+                        params,
+                    }]
+                } else if method == "item/started" {
+                    // Cache the most recent in-progress commandExecution so
+                    // a later `waitingOnApproval` flag can refer to it.
+                    if let Some(item) = params.get("item")
+                        && item.get("type").and_then(|v| v.as_str())
+                            == Some("commandExecution")
+                        && item.get("status").and_then(|v| v.as_str())
+                            == Some("inProgress")
+                    {
+                        let item_id = item
+                            .get("id")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or_default()
+                            .to_string();
+                        let command = item
+                            .get("command")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or_default()
+                            .to_string();
+                        let cwd = item
+                            .get("cwd")
+                            .and_then(|v| v.as_str())
+                            .map(|s| s.to_string());
+                        self.pending_command = Some(PendingCommand {
+                            item_id,
+                            command,
+                            cwd,
+                            raw: item.clone(),
+                        });
+                        // New item-started → previous waitingOnApproval (if any)
+                        // is no longer relevant; allow a fresh approval id next
+                        // time codex reports waiting.
+                        self.pending_command_approval_id = None;
+                    }
+                    vec![BridgeEvent::Raw {
+                        run_id: self.run_id,
+                        method,
+                        params,
+                    }]
+                } else if method == "item/completed" {
+                    // The cached command finished; drop the tracking so a
+                    // late waitingOnApproval doesn't re-open it.
+                    if let Some(item) = params.get("item")
+                        && item.get("type").and_then(|v| v.as_str())
+                            == Some("commandExecution")
+                    {
+                        let same = self
+                            .pending_command
+                            .as_ref()
+                            .and_then(|pc| {
+                                item.get("id")
+                                    .and_then(|v| v.as_str())
+                                    .map(|id| id == pc.item_id)
+                            })
+                            .unwrap_or(false);
+                        if same {
+                            self.pending_command = None;
+                            self.pending_command_approval_id = None;
+                        }
+                    }
+                    vec![BridgeEvent::Raw {
+                        run_id: self.run_id,
+                        method,
+                        params,
+                    }]
                 } else {
                     vec![BridgeEvent::Raw {
                         run_id: self.run_id,
@@ -293,6 +481,275 @@ impl BridgeCursor {
                 }
             }
             Incoming::Response { .. } => Vec::new(),
+        }
+    }
+}
+
+#[cfg(test)]
+mod translate_tests {
+    use super::*;
+    use serde_json::json;
+
+    fn cursor() -> BridgeCursor {
+        BridgeCursor {
+            run_id: Uuid::new_v4(),
+            thread_id: "th_test".into(),
+            seq: 0,
+            pending_command: None,
+            pending_command_approval_id: None,
+        }
+    }
+
+    fn notif(method: &str, params: serde_json::Value) -> Incoming {
+        Incoming::Notification {
+            jsonrpc: Some("2.0".into()),
+            method: method.into(),
+            params,
+        }
+    }
+
+    #[test]
+    fn turn_completed_without_conclusion_fails_run() {
+        // Codex sometimes emits a bare `turn/completed` after a systemError.
+        // The previous default of "success" silently masked those failures.
+        let mut c = cursor();
+        let evs = c.translate(notif("turn/completed", json!({})));
+        assert_eq!(evs.len(), 1);
+        match &evs[0] {
+            BridgeEvent::Failed { detail, .. } => {
+                assert_eq!(
+                    detail.as_deref(),
+                    Some("turn/completed without conclusion")
+                );
+            }
+            other => panic!("expected Failed, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn turn_completed_with_explicit_success_completes_run() {
+        let mut c = cursor();
+        let evs = c.translate(notif("turn/completed", json!({"conclusion": "success"})));
+        assert!(matches!(evs.as_slice(), [BridgeEvent::Completed { .. }]));
+    }
+
+    #[test]
+    fn turn_completed_with_non_success_conclusion_fails_run() {
+        let mut c = cursor();
+        let evs = c.translate(notif("turn/completed", json!({"conclusion": "aborted"})));
+        match evs.as_slice() {
+            [BridgeEvent::Failed { detail, .. }] => {
+                assert_eq!(
+                    detail.as_deref(),
+                    Some("turn ended with conclusion=\"aborted\"")
+                );
+            }
+            other => panic!("expected Failed, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn error_notification_with_will_retry_false_fails_run() {
+        let mut c = cursor();
+        let evs = c.translate(notif(
+            "error",
+            json!({
+                "willRetry": false,
+                "error": {"message": "model not allowed"}
+            }),
+        ));
+        match evs.as_slice() {
+            [BridgeEvent::Failed { detail, .. }] => {
+                assert_eq!(detail.as_deref(), Some("model not allowed"));
+            }
+            other => panic!("expected Failed, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn error_notification_with_will_retry_true_passes_through_as_raw() {
+        let mut c = cursor();
+        let evs = c.translate(notif(
+            "error",
+            json!({
+                "willRetry": true,
+                "error": {"message": "transient"}
+            }),
+        ));
+        assert!(matches!(evs.as_slice(), [BridgeEvent::Raw { .. }]));
+    }
+
+    #[test]
+    fn waiting_on_approval_synthesizes_request_from_pending_command() {
+        let mut c = cursor();
+        // First, codex starts a commandExecution item.
+        let _ = c.translate(notif(
+            "item/started",
+            json!({
+                "item": {
+                    "id": "it_1",
+                    "type": "commandExecution",
+                    "status": "inProgress",
+                    "command": "rm -rf /tmp/x",
+                    "cwd": "/work",
+                }
+            }),
+        ));
+        // Then it parks on `waitingOnApproval` without firing the legacy
+        // requestApproval notification.
+        let evs = c.translate(notif(
+            "thread/status/changed",
+            json!({"status": {"activeFlags": ["waitingOnApproval"]}}),
+        ));
+        match evs.as_slice() {
+            [BridgeEvent::ApprovalRequest {
+                kind,
+                payload,
+                reason,
+                ..
+            }] => {
+                assert!(matches!(kind, ApprovalKind::CommandExecution));
+                assert_eq!(payload.get("command").and_then(|v| v.as_str()), Some("rm -rf /tmp/x"));
+                assert_eq!(payload.get("synthesized").and_then(|v| v.as_bool()), Some(true));
+                assert!(reason.as_deref().unwrap_or("").contains("rm -rf /tmp/x"));
+            }
+            other => panic!("expected ApprovalRequest, got {other:?}"),
+        }
+        assert!(c.pending_command_approval_id.is_some());
+    }
+
+    #[test]
+    fn duplicate_waiting_on_approval_does_not_re_emit() {
+        // Regression: a second `waitingOnApproval` flag for the same pending
+        // command would re-send ClientMsg::ApprovalRequest to the cloud and
+        // append another "pending" history row. Stay quiet (Raw) instead.
+        let mut c = cursor();
+        let _ = c.translate(notif(
+            "item/started",
+            json!({
+                "item": {
+                    "id": "it_1",
+                    "type": "commandExecution",
+                    "status": "inProgress",
+                    "command": "ls",
+                }
+            }),
+        ));
+        let first = c.translate(notif(
+            "thread/status/changed",
+            json!({"status": {"activeFlags": ["waitingOnApproval"]}}),
+        ));
+        assert!(matches!(first.as_slice(), [BridgeEvent::ApprovalRequest { .. }]));
+
+        let second = c.translate(notif(
+            "thread/status/changed",
+            json!({"status": {"activeFlags": ["waitingOnApproval"]}}),
+        ));
+        assert!(
+            matches!(second.as_slice(), [BridgeEvent::Raw { .. }]),
+            "second waitingOnApproval must not re-emit ApprovalRequest, got {second:?}"
+        );
+    }
+
+    #[test]
+    fn waiting_on_approval_without_pending_command_is_raw() {
+        let mut c = cursor();
+        let evs = c.translate(notif(
+            "thread/status/changed",
+            json!({"status": {"activeFlags": ["waitingOnApproval"]}}),
+        ));
+        assert!(matches!(evs.as_slice(), [BridgeEvent::Raw { .. }]));
+    }
+
+    #[test]
+    fn thread_status_without_waiting_flag_is_raw() {
+        let mut c = cursor();
+        let evs = c.translate(notif(
+            "thread/status/changed",
+            json!({"status": {"activeFlags": ["running"]}}),
+        ));
+        assert!(matches!(evs.as_slice(), [BridgeEvent::Raw { .. }]));
+    }
+
+    #[test]
+    fn item_completed_clears_cached_pending_command() {
+        let mut c = cursor();
+        let _ = c.translate(notif(
+            "item/started",
+            json!({
+                "item": {
+                    "id": "it_1",
+                    "type": "commandExecution",
+                    "status": "inProgress",
+                    "command": "ls",
+                }
+            }),
+        ));
+        let _ = c.translate(notif(
+            "thread/status/changed",
+            json!({"status": {"activeFlags": ["waitingOnApproval"]}}),
+        ));
+        assert!(c.pending_command.is_some());
+        assert!(c.pending_command_approval_id.is_some());
+
+        let _ = c.translate(notif(
+            "item/completed",
+            json!({"item": {"id": "it_1", "type": "commandExecution"}}),
+        ));
+        assert!(c.pending_command.is_none());
+        assert!(c.pending_command_approval_id.is_none());
+
+        // A late waitingOnApproval flag must not re-open the cleared command.
+        let evs = c.translate(notif(
+            "thread/status/changed",
+            json!({"status": {"activeFlags": ["waitingOnApproval"]}}),
+        ));
+        assert!(matches!(evs.as_slice(), [BridgeEvent::Raw { .. }]));
+    }
+
+    #[test]
+    fn new_item_started_resets_approval_id_so_next_waiting_mints_fresh_id() {
+        let mut c = cursor();
+        let _ = c.translate(notif(
+            "item/started",
+            json!({
+                "item": {
+                    "id": "it_1",
+                    "type": "commandExecution",
+                    "status": "inProgress",
+                    "command": "ls",
+                }
+            }),
+        ));
+        let _ = c.translate(notif(
+            "thread/status/changed",
+            json!({"status": {"activeFlags": ["waitingOnApproval"]}}),
+        ));
+        let first_id = c.pending_command_approval_id.clone().unwrap();
+
+        // A new commandExecution starts before the previous item completes.
+        let _ = c.translate(notif(
+            "item/started",
+            json!({
+                "item": {
+                    "id": "it_2",
+                    "type": "commandExecution",
+                    "status": "inProgress",
+                    "command": "pwd",
+                }
+            }),
+        ));
+        assert!(c.pending_command_approval_id.is_none());
+
+        let evs = c.translate(notif(
+            "thread/status/changed",
+            json!({"status": {"activeFlags": ["waitingOnApproval"]}}),
+        ));
+        match evs.as_slice() {
+            [BridgeEvent::ApprovalRequest { approval_id, .. }] => {
+                assert_ne!(approval_id, &first_id);
+            }
+            other => panic!("expected fresh ApprovalRequest, got {other:?}"),
         }
     }
 }

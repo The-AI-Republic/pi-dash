@@ -938,10 +938,25 @@ impl AssignWorker {
         hist: &mut HistoryWriter,
         workspace_root: &std::path::Path,
     ) -> Result<Outcome> {
+        // Stall watchdog: if the agent emits no frames for this long AND
+        // no approval is in flight (a human-wait is legitimate silence),
+        // give up and fail the run. Without this, an unrecognised wait —
+        // e.g. a future codex protocol change — leaves the runner blocked
+        // on stdout and the cloud showing "running" indefinitely.
+        const STALL_TIMEOUT: Duration = Duration::from_secs(5 * 60);
+
         let shutdown = self.state.shutdown_notified();
         let cancel = self.cancel.clone();
         let mut cancelled = false;
         loop {
+            // Re-evaluate at every loop entry: an approval that opened on
+            // the previous iteration disarms the watchdog; one that just
+            // resolved re-arms it.
+            let stall_deadline = if self.approvals.list_pending().await.is_empty() {
+                Some(tokio::time::Instant::now() + STALL_TIMEOUT)
+            } else {
+                None
+            };
             tokio::select! {
                 biased;
                 _ = shutdown.notified(), if !cancelled => {
@@ -992,6 +1007,28 @@ impl AssignWorker {
                             return Ok(out);
                         }
                     }
+                }
+                _ = async {
+                    match stall_deadline {
+                        Some(d) => tokio::time::sleep_until(d).await,
+                        None => std::future::pending::<()>().await,
+                    }
+                } => {
+                    let mins = STALL_TIMEOUT.as_secs() / 60;
+                    let detail = format!("no agent frames for {mins} minutes");
+                    self.send(ClientMsg::RunFailed {
+                        run_id: cursor.run_id(),
+                        reason: FailureReason::Timeout,
+                        detail: Some(detail.clone()),
+                        ended_at: Utc::now(),
+                    }).await;
+                    hist.append(&HistoryEntry::Footer {
+                        ts: Utc::now(),
+                        final_status: "failed".into(),
+                        done_payload: None,
+                        error: Some(detail),
+                    }).await?;
+                    return Ok(Outcome { status_label: "failed".into() });
                 }
             }
         }

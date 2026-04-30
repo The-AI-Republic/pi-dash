@@ -9,7 +9,16 @@ use crate::util::paths::Paths;
 pub fn load_config(paths: &Paths) -> Result<Config> {
     let path = paths.config_path();
     let text = fs::read_to_string(&path).with_context(|| format!("reading config at {path:?}"))?;
-    let cfg: Config = toml::from_str(&text).with_context(|| format!("parsing {path:?}"))?;
+    let mut cfg: Config = toml::from_str(&text).with_context(|| format!("parsing {path:?}"))?;
+    // Migrate the prior hardcoded default. `gpt-5-codex` was written into
+    // every config produced by older runner builds; on ChatGPT-account auth
+    // the codex app-server 400s on it. Treat the literal string as a
+    // poisoned default and let codex's own config pick the model.
+    for runner in &mut cfg.runners {
+        if runner.codex.model_default.as_deref() == Some("gpt-5-codex") {
+            runner.codex.model_default = None;
+        }
+    }
     Ok(cfg)
 }
 
@@ -268,6 +277,73 @@ binary = "codex"
             msg.contains("cloud_url") || msg.contains("daemon"),
             "error should mention the missing field: {msg}",
         );
+    }
+
+    #[test]
+    fn legacy_gpt_5_codex_default_is_migrated_to_none() {
+        // Older runner builds wrote `model_default = "gpt-5-codex"` into
+        // every config. That value 400s on ChatGPT-account auth, so on load
+        // we coerce it to None and let codex pick its own default.
+        let tmp = tempdir().unwrap();
+        let paths = paths_for(tmp.path());
+        std::fs::create_dir_all(&paths.config_dir).unwrap();
+        let body = format!(
+            r#"
+version = 2
+
+[daemon]
+cloud_url = "https://x"
+
+[[runner]]
+name = "t"
+runner_id = "{}"
+
+[runner.workspace]
+working_dir = "/tmp/wd"
+
+[runner.codex]
+binary = "codex"
+model_default = "gpt-5-codex"
+"#,
+            uuid::Uuid::new_v4()
+        );
+        std::fs::write(paths.config_path(), body).unwrap();
+        let loaded = load_config(&paths).unwrap();
+        let primary = loaded.primary_runner().expect("runner");
+        assert_eq!(primary.codex.model_default, None);
+    }
+
+    #[test]
+    fn other_model_defaults_are_preserved() {
+        // Migration must only neutralise the poisoned default; an explicitly
+        // chosen model still passes through.
+        let tmp = tempdir().unwrap();
+        let paths = paths_for(tmp.path());
+        std::fs::create_dir_all(&paths.config_dir).unwrap();
+        let body = format!(
+            r#"
+version = 2
+
+[daemon]
+cloud_url = "https://x"
+
+[[runner]]
+name = "t"
+runner_id = "{}"
+
+[runner.workspace]
+working_dir = "/tmp/wd"
+
+[runner.codex]
+binary = "codex"
+model_default = "o4-mini"
+"#,
+            uuid::Uuid::new_v4()
+        );
+        std::fs::write(paths.config_path(), body).unwrap();
+        let loaded = load_config(&paths).unwrap();
+        let primary = loaded.primary_runner().expect("runner");
+        assert_eq!(primary.codex.model_default.as_deref(), Some("o4-mini"));
     }
 
     #[test]
