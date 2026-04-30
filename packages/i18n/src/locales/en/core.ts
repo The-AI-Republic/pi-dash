@@ -278,15 +278,15 @@ export default {
         version: "Version",
         last_heartbeat: "Last heartbeat",
       },
-      revoke: "Revoke",
-      revoke_confirm_title: "Revoke runner?",
-      revoke_confirm_body: "The daemon will be forced offline.",
-      revoke_failed: "Failed to revoke runner",
+      delete: "Delete",
+      delete_confirm_title: "Delete runner?",
+      delete_confirm_body:
+        "The runner row is removed and the daemon is forced offline. Historic runs are preserved with a null runner reference.",
+      delete_failed: "Failed to delete runner",
       status: {
         online: "online",
         busy: "busy",
         offline: "offline",
-        revoked: "revoked",
       },
       columns_pod: "Pod",
       columns_connection: "Connection",
@@ -308,7 +308,6 @@ export default {
       status: {
         pending: "pending enrollment",
         active: "active",
-        revoked: "revoked",
       },
       columns: {
         name: "Name",
@@ -317,10 +316,11 @@ export default {
         runner_count: "Runners",
         last_seen: "Last seen",
       },
-      revoke: "Revoke",
-      revoke_confirm_title: "Revoke connection?",
-      revoke_confirm_body: "The daemon will be forced offline and every runner under it will be revoked.",
-      revoke_failed: "Failed to revoke connection",
+      delete: "Delete",
+      delete_confirm_title: "Delete connection?",
+      delete_confirm_body:
+        "The connection and every runner under it will be removed. Historic runs are preserved with a null runner reference.",
+      delete_failed: "Failed to delete connection",
     },
     pods: {
       title: "Pods",

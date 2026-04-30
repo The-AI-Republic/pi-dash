@@ -33,9 +33,9 @@ export class RunnerService extends APIService {
       });
   }
 
-  async revoke(runnerId: string): Promise<IRunner> {
-    return this.post(`/api/runners/${runnerId}/revoke/`)
-      .then((r) => r?.data)
+  async deleteRunner(runnerId: string): Promise<void> {
+    return this.delete(`/api/runners/${runnerId}/`)
+      .then(() => undefined)
       .catch((e) => {
         throw e?.response?.data;
       });
@@ -89,11 +89,11 @@ export class RunnerService extends APIService {
       });
   }
 
-  /** ``POST /api/runners/connections/<id>/revoke/`` — revoke + cascade
-   * to all runners under it. */
-  async revokeConnection(connectionId: string): Promise<{ connection_id: string; revoked_at: string }> {
-    return this.post(`/api/runners/connections/${connectionId}/revoke/`)
-      .then((r) => r?.data)
+  /** ``DELETE /api/runners/connections/<id>/`` — hard-delete the
+   * connection and cascade to every runner under it. */
+  async deleteConnection(connectionId: string): Promise<void> {
+    return this.delete(`/api/runners/connections/${connectionId}/`)
+      .then(() => undefined)
       .catch((e) => {
         throw e?.response?.data;
       });

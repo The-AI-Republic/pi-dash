@@ -15,13 +15,11 @@ from pi_dash.runner.views import (
     ApprovalListEndpoint,
     ConnectionDetailEndpoint,
     ConnectionListCreateEndpoint,
-    ConnectionRevokeEndpoint,
     PodDetailEndpoint,
     PodListEndpoint,
     ProjectListEndpoint,
     RunnerDetailEndpoint,
     RunnerListEndpoint,
-    RunnerRevokeEndpoint,
 )
 
 urlpatterns = [
@@ -38,19 +36,9 @@ urlpatterns = [
         name="connection-detail",
     ),
     path(
-        "connections/<uuid:connection_id>/revoke/",
-        ConnectionRevokeEndpoint.as_view(),
-        name="connection-revoke",
-    ),
-    path(
         "<uuid:runner_id>/",
         RunnerDetailEndpoint.as_view(),
         name="runner-detail",
-    ),
-    path(
-        "<uuid:runner_id>/revoke/",
-        RunnerRevokeEndpoint.as_view(),
-        name="runner-revoke",
     ),
     # Pods
     path("pods/", PodListEndpoint.as_view(), name="pod-list"),

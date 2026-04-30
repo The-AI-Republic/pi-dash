@@ -4,7 +4,7 @@
  * See the LICENSE file for details.
  */
 
-export type TRunnerStatus = "online" | "offline" | "busy" | "revoked";
+export type TRunnerStatus = "online" | "offline" | "busy";
 
 export interface IPodMini {
   id: string;
@@ -43,7 +43,7 @@ export interface IRunner {
   updated_at: string;
 }
 
-export type TConnectionStatus = "pending" | "active" | "revoked";
+export type TConnectionStatus = "pending" | "active";
 
 export interface IConnection {
   id: string;

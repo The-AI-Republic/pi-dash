@@ -51,7 +51,7 @@ class PodSerializer(serializers.ModelSerializer):
         ]
 
     def get_runner_count(self, pod: Pod) -> int:
-        return pod.runners.exclude(status="revoked").count()
+        return pod.runners.count()
 
 
 class PodMiniSerializer(serializers.ModelSerializer):
@@ -64,8 +64,8 @@ class PodMiniSerializer(serializers.ModelSerializer):
 class ConnectionSerializer(serializers.ModelSerializer):
     """Web-API representation of a Connection.
 
-    The status field is derived from the (revoked_at, enrolled_at) pair —
-    pending / active / revoked. Secret material is never included.
+    The status field is derived from ``enrolled_at`` — pending until the
+    daemon enrolls, active afterwards. Secret material is never included.
     """
 
     status = serializers.CharField(read_only=True)
@@ -101,7 +101,7 @@ class ConnectionSerializer(serializers.ModelSerializer):
         ]
 
     def get_runner_count(self, conn: Connection) -> int:
-        return conn.runners.exclude(status="revoked").count()
+        return conn.runners.count()
 
 
 class RunnerSerializer(serializers.ModelSerializer):

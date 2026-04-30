@@ -121,24 +121,23 @@ class RunnerDetailEndpoint(APIView):
             runner.save(update_fields=list(set(updates + ["updated_at"])))
         return Response(RunnerSerializer(runner).data)
 
-
-class RunnerRevokeEndpoint(APIView):
-    """Revoke a runner. Owner OR workspace admin (widened from owner-only)."""
-
-    authentication_classes = [BaseSessionAuthentication]
-    permission_classes = [IsAuthenticated]
-
-    def post(self, request, runner_id):
+    def delete(self, request, runner_id):
+        """Hard-delete a runner. Cancels in-flight runs first so historic
+        AgentRuns are tombstoned (status=cancelled, ended_at set), then
+        drops the row. AgentRun.runner is ``SET_NULL`` so historic runs
+        survive with a null FK.
+        """
         runner = Runner.objects.filter(pk=runner_id).first()
         if runner is None:
             return Response({"error": "not found"}, status=status.HTTP_404_NOT_FOUND)
         if not _can_manage_runner(request.user, runner):
             return Response({"error": "forbidden"}, status=status.HTTP_403_FORBIDDEN)
+        runner_pk = runner.pk
         runner.revoke()
-        # Fan out a revoke WS message — best-effort; runner may already be offline.
         send_to_runner(
-            runner.id,
-            {"v": 1, "type": "revoke", "reason": "revoked by user"},
+            runner_pk,
+            {"v": 1, "type": "revoke", "reason": "deleted by user"},
         )
-        close_runner_session(runner.id)
-        return Response(RunnerSerializer(runner).data)
+        close_runner_session(runner_pk)
+        Runner.objects.filter(pk=runner_pk).delete()
+        return Response(status=status.HTTP_204_NO_CONTENT)

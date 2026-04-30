@@ -35,13 +35,11 @@ const STATUS_BADGE_VARIANT: Record<TRunnerStatus, TBadgeVariant> = {
   online: "accent-success",
   busy: "accent-primary",
   offline: "accent-neutral",
-  revoked: "accent-destructive",
 };
 
 const CONNECTION_STATUS_BADGE: Record<TConnectionStatus, TBadgeVariant> = {
   pending: "accent-neutral",
   active: "accent-success",
-  revoked: "accent-destructive",
 };
 
 const RunnersListPage = observer(function RunnersListPage() {
@@ -81,9 +79,9 @@ const RunnersListPage = observer(function RunnersListPage() {
   const [connectionName, setConnectionName] = useState("");
   const [creating, setCreating] = useState(false);
   const [snippetProject, setSnippetProject] = useState<string>("");
-  const [revokeRunner, setRevokeRunner] = useState<IRunner | null>(null);
-  const [revokeConnection, setRevokeConnection] = useState<IConnection | null>(null);
-  const [revoking, setRevoking] = useState(false);
+  const [deleteRunner, setDeleteRunner] = useState<IRunner | null>(null);
+  const [deleteConnection, setDeleteConnection] = useState<IConnection | null>(null);
+  const [deleting, setDeleting] = useState(false);
   const [origin, setOrigin] = useState("");
   const [justCopied, setJustCopied] = useState<string | null>(null);
 
@@ -95,9 +93,15 @@ const RunnersListPage = observer(function RunnersListPage() {
   const connectCommand = pendingConnection
     ? `pidash connect --url ${apiOrigin} --token ${pendingConnection.enrollment_token}`
     : "";
-  const runnerAddCommand = snippetProject
-    ? `pidash runner add --name <NAME> --project ${snippetProject}`
-    : "pidash runner add --name <NAME> --project <PROJECT>";
+  const projectArg = snippetProject || "<PROJECT>";
+  const runnerAddCommand = [
+    "pidash runner add \\",
+    `  --project ${projectArg} \\`,
+    "  --name <NAME> \\",
+    "  --pod <POD> \\",
+    "  --working-dir <WORKING_DIR> \\",
+    "  --agent <codex|claude-code>",
+  ].join("\n");
 
   async function copyToClipboard(text: string, key: string) {
     if (!text) return;
@@ -134,31 +138,51 @@ const RunnersListPage = observer(function RunnersListPage() {
     }
   }
 
-  async function confirmRevokeRunner() {
-    if (!revokeRunner) return;
-    setRevoking(true);
+  async function dismissPending() {
+    if (!pendingConnection) return;
+    // If the daemon hasn't enrolled yet, dismissing means "I changed my
+    // mind" — delete the row so a stale pending connection doesn't sit
+    // around forever. Pull a fresh list first so a just-enrolled
+    // connection (status flipped to active between mint and dismiss
+    // within the SWR refresh window) isn't accidentally deleted.
     try {
-      await service.revoke(revokeRunner.id);
-      setRevokeRunner(null);
+      const fresh = await service.listConnections();
+      const latest = fresh.find((c) => c.id === pendingConnection.id);
+      if (latest?.status === "pending") {
+        await service.deleteConnection(pendingConnection.id);
+      }
+    } catch {
+      // Best-effort cleanup; don't block the user from hiding the panel.
+    }
+    setPendingConnection(null);
+    mutateConnections();
+  }
+
+  async function confirmDeleteRunner() {
+    if (!deleteRunner) return;
+    setDeleting(true);
+    try {
+      await service.deleteRunner(deleteRunner.id);
+      setDeleteRunner(null);
       mutateRunners();
     } catch (e: unknown) {
       const err = e as { error?: string } | null;
       setToast({
         type: TOAST_TYPE.ERROR,
         title: t("runners.toast.error_title"),
-        message: err?.error ?? t("runners.list.revoke_failed"),
+        message: err?.error ?? t("runners.list.delete_failed"),
       });
     } finally {
-      setRevoking(false);
+      setDeleting(false);
     }
   }
 
-  async function confirmRevokeConnection() {
-    if (!revokeConnection) return;
-    setRevoking(true);
+  async function confirmDeleteConnection() {
+    if (!deleteConnection) return;
+    setDeleting(true);
     try {
-      await service.revokeConnection(revokeConnection.id);
-      setRevokeConnection(null);
+      await service.deleteConnection(deleteConnection.id);
+      setDeleteConnection(null);
       mutateConnections();
       mutateRunners();
     } catch (e: unknown) {
@@ -166,10 +190,10 @@ const RunnersListPage = observer(function RunnersListPage() {
       setToast({
         type: TOAST_TYPE.ERROR,
         title: t("runners.toast.error_title"),
-        message: err?.error ?? t("runners.connections.revoke_failed"),
+        message: err?.error ?? t("runners.connections.delete_failed"),
       });
     } finally {
-      setRevoking(false);
+      setDeleting(false);
     }
   }
 
@@ -262,7 +286,7 @@ const RunnersListPage = observer(function RunnersListPage() {
             </pre>
 
             <div className="mt-3">
-              <Button variant="outline-primary" size="sm" onClick={() => setPendingConnection(null)}>
+              <Button variant="outline-primary" size="sm" onClick={dismissPending}>
                 {t("runners.connections.dismiss_token")}
               </Button>
             </div>
@@ -294,11 +318,9 @@ const RunnersListPage = observer(function RunnersListPage() {
                   <td className="px-3 py-2">{c.runner_count}</td>
                   <td className="px-3 py-2">{c.last_seen_at ? new Date(c.last_seen_at).toLocaleString() : "—"}</td>
                   <td className="px-3 py-2 text-right">
-                    {c.status !== "revoked" && (
-                      <Button variant="tertiary-danger" size="sm" onClick={() => setRevokeConnection(c)}>
-                        {t("runners.connections.revoke")}
-                      </Button>
-                    )}
+                    <Button variant="tertiary-danger" size="sm" onClick={() => setDeleteConnection(c)}>
+                      {t("runners.connections.delete")}
+                    </Button>
                   </td>
                 </tr>
               ))}
@@ -378,11 +400,9 @@ const RunnersListPage = observer(function RunnersListPage() {
                       {r.last_heartbeat_at ? new Date(r.last_heartbeat_at).toLocaleString() : "—"}
                     </td>
                     <td className="px-3 py-2 text-right">
-                      {r.status !== "revoked" && (
-                        <Button variant="tertiary-danger" size="sm" onClick={() => setRevokeRunner(r)}>
-                          {t("runners.list.revoke")}
-                        </Button>
-                      )}
+                      <Button variant="tertiary-danger" size="sm" onClick={() => setDeleteRunner(r)}>
+                        {t("runners.list.delete")}
+                      </Button>
                     </td>
                   </tr>
                 );
@@ -400,24 +420,24 @@ const RunnersListPage = observer(function RunnersListPage() {
       </section>
 
       <AlertModalCore
-        isOpen={!!revokeRunner}
-        handleClose={() => (revoking ? null : setRevokeRunner(null))}
-        handleSubmit={confirmRevokeRunner}
-        isSubmitting={revoking}
-        title={t("runners.list.revoke_confirm_title")}
-        content={t("runners.list.revoke_confirm_body")}
-        primaryButtonText={{ default: t("runners.list.revoke"), loading: t("runners.list.revoke") }}
+        isOpen={!!deleteRunner}
+        handleClose={() => (deleting ? null : setDeleteRunner(null))}
+        handleSubmit={confirmDeleteRunner}
+        isSubmitting={deleting}
+        title={t("runners.list.delete_confirm_title")}
+        content={t("runners.list.delete_confirm_body")}
+        primaryButtonText={{ default: t("runners.list.delete"), loading: t("runners.list.delete") }}
       />
       <AlertModalCore
-        isOpen={!!revokeConnection}
-        handleClose={() => (revoking ? null : setRevokeConnection(null))}
-        handleSubmit={confirmRevokeConnection}
-        isSubmitting={revoking}
-        title={t("runners.connections.revoke_confirm_title")}
-        content={t("runners.connections.revoke_confirm_body")}
+        isOpen={!!deleteConnection}
+        handleClose={() => (deleting ? null : setDeleteConnection(null))}
+        handleSubmit={confirmDeleteConnection}
+        isSubmitting={deleting}
+        title={t("runners.connections.delete_confirm_title")}
+        content={t("runners.connections.delete_confirm_body")}
         primaryButtonText={{
-          default: t("runners.connections.revoke"),
-          loading: t("runners.connections.revoke"),
+          default: t("runners.connections.delete"),
+          loading: t("runners.connections.delete"),
         }}
       />
     </div>

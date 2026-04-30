@@ -7,7 +7,6 @@ from .connections import (
     ConnectionDetailEndpoint,
     ConnectionEnrollEndpoint,
     ConnectionListCreateEndpoint,
-    ConnectionRevokeEndpoint,
     ConnectionRunnerDeleteEndpoint,
     ConnectionRunnerListCreateEndpoint,
 )
@@ -15,7 +14,7 @@ from .metrics import MetricsEndpoint
 from .pods import PodDetailEndpoint, PodListEndpoint
 from .projects import ProjectListEndpoint
 from .register import HealthEndpoint
-from .runners import RunnerDetailEndpoint, RunnerListEndpoint, RunnerRevokeEndpoint
+from .runners import RunnerDetailEndpoint, RunnerListEndpoint
 from .runs import (
     AgentRunCancelEndpoint,
     AgentRunDetailEndpoint,
@@ -29,7 +28,6 @@ __all__ = [
     "ConnectionDetailEndpoint",
     "ConnectionEnrollEndpoint",
     "ConnectionListCreateEndpoint",
-    "ConnectionRevokeEndpoint",
     "ConnectionRunnerDeleteEndpoint",
     "ConnectionRunnerListCreateEndpoint",
     "HealthEndpoint",
@@ -39,7 +37,6 @@ __all__ = [
     "ProjectListEndpoint",
     "RunnerDetailEndpoint",
     "RunnerListEndpoint",
-    "RunnerRevokeEndpoint",
     "AgentRunCancelEndpoint",
     "AgentRunDetailEndpoint",
     "AgentRunListEndpoint",

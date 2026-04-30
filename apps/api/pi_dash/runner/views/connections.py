@@ -110,7 +110,14 @@ class ConnectionListCreateEndpoint(APIView):
 
 
 class ConnectionDetailEndpoint(APIView):
-    """``GET/PATCH /api/runners/connections/<connection_id>/``"""
+    """``GET/PATCH/DELETE /api/runners/connections/<connection_id>/``
+
+    DELETE hard-removes the connection and every runner under it
+    (``Runner.connection`` is ``on_delete=CASCADE``). It calls ``revoke()``
+    first so the daemon receives a wire-level Revoke + in-flight runs
+    are cancelled, then drops the row. AgentRuns hold ``runner`` as
+    ``SET_NULL`` so historic rows survive the cascade with a null FK.
+    """
 
     authentication_classes = [BaseSessionAuthentication]
     permission_classes = [IsAuthenticated]
@@ -147,40 +154,23 @@ class ConnectionDetailEndpoint(APIView):
             )
         return Response(ConnectionSerializer(connection).data)
 
-    @staticmethod
-    def _lookup(user, connection_id) -> Optional[Connection]:
-        return Connection.objects.filter(
-            id=connection_id, created_by=user
-        ).first()
-
-
-class ConnectionRevokeEndpoint(APIView):
-    """``POST /api/runners/connections/<connection_id>/revoke/``"""
-
-    authentication_classes = [BaseSessionAuthentication]
-    permission_classes = [IsAuthenticated]
-
-    def post(self, request, connection_id):
-        connection = Connection.objects.filter(
-            id=connection_id, created_by=request.user
-        ).first()
+    def delete(self, request, connection_id):
+        connection = self._lookup(request.user, connection_id)
         if connection is None:
             return Response(
                 {"error": "connection not found"},
                 status=status.HTTP_404_NOT_FOUND,
             )
-        if not connection.is_active():
-            return Response(
-                {"error": "connection already revoked"},
-                status=status.HTTP_409_CONFLICT,
-            )
-        connection.revoke()
-        return Response(
-            {
-                "connection_id": str(connection.id),
-                "revoked_at": connection.revoked_at.isoformat(),
-            }
-        )
+        if connection.is_active():
+            connection.revoke()
+        Connection.objects.filter(pk=connection.pk).delete()
+        return Response(status=status.HTTP_204_NO_CONTENT)
+
+    @staticmethod
+    def _lookup(user, connection_id) -> Optional[Connection]:
+        return Connection.objects.filter(
+            id=connection_id, created_by=user
+        ).first()
 
 
 class ConnectionEnrollEndpoint(APIView):
