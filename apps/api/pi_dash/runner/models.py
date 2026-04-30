@@ -124,9 +124,24 @@ class Pod(models.Model):
 
     def save(self, *args, **kwargs):
         # Auto-fill workspace from project so callers don't have to set
-        # both. clean() rejects mismatches.
-        if self.project_id is not None and self.workspace_id is None:
-            self.workspace_id = self.project.workspace_id
+        # both, and enforce the denorm invariant directly here. Django's
+        # save() doesn't invoke clean(), and no Pod call site runs
+        # full_clean(), so the equality check has to live on the
+        # persistence path or it's purely advisory.
+        if self.project_id is not None:
+            project_workspace_id = self.project.workspace_id
+            if self.workspace_id is None:
+                self.workspace_id = project_workspace_id
+            elif self.workspace_id != project_workspace_id:
+                from django.core.exceptions import ValidationError
+
+                raise ValidationError(
+                    {
+                        "workspace": (
+                            "pod.workspace must match pod.project.workspace"
+                        )
+                    }
+                )
         super().save(*args, **kwargs)
 
     @classmethod

@@ -221,3 +221,20 @@ def test_pod_save_auto_fills_workspace_from_project(db, project, create_user):
         created_by=create_user,
     )
     assert pod.workspace_id == project.workspace_id
+
+
+@pytest.mark.unit
+def test_pod_create_rejects_workspace_project_mismatch(
+    db, project, project_in_other_workspace, create_user
+):
+    """Pod.objects.create() with conflicting workspace/project raises
+    immediately; clean() is advisory because Django's save() doesn't
+    invoke it, so the persistence path enforces the invariant directly.
+    """
+    with pytest.raises(ValidationError):
+        Pod.objects.create(
+            workspace=project_in_other_workspace.workspace,  # wrong workspace
+            project=project,
+            name="TEST_drifty_create",
+            created_by=create_user,
+        )

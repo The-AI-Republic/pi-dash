@@ -171,12 +171,17 @@ class Migration(migrations.Migration):
                 to="db.project",
             ),
         ),
-        # 3. NULL out issue→pod FKs. Must precede the pod wipe in step
-        # 4 because the FK is PROTECT.
-        migrations.RunPython(_null_issue_assigned_pods, _noop_reverse),
-        # 4. Refuse to proceed if any legacy pod / runner / agent_run
-        # rows survive. Operator wipes manually then reruns.
+        # 3. Refuse to proceed if any legacy pod / runner / agent_run
+        # rows survive. Runs *before* any state mutation so a failed
+        # apply leaves the database byte-for-byte identical to the
+        # pre-migration state — operator wipes manually and reruns.
         migrations.RunPython(_refuse_if_legacy_rows_exist, _noop_reverse),
+        # 4. NULL out issue→pod FKs. Must precede the pod wipe (which
+        # the operator now performs out-of-band, since step 3 above
+        # ensures we only get here on an empty DB) because
+        # ``Issue.assigned_pod`` is PROTECT. Idempotent no-op when no
+        # issues reference any pods.
+        migrations.RunPython(_null_issue_assigned_pods, _noop_reverse),
         # 5. Backfill a default pod for every existing Project. Empty
         # DB → no-op. Pre-populated DB → one pod per project.
         migrations.RunPython(_backfill_default_pod_per_project, _noop_reverse),

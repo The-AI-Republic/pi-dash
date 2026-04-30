@@ -395,9 +395,10 @@ class RunnerConsumer(AsyncJsonWebsocketConsumer):
                 # chain doesn't yield an identifier. That means the
                 # cloud-side row is in a half-set-up state — fail open
                 # so the daemon can come online while an operator
-                # diagnoses, but log so the silent acceptance is
-                # observable.
-                logger.debug(
+                # diagnoses, but log loudly: this state shouldn't exist
+                # post-refactor and silent acceptance would mask the
+                # data-integrity issue.
+                logger.warning(
                     "token %s Hello for runner %s claimed project_slug %r "
                     "but cloud could not resolve runner.pod.project; "
                     "skipping cross-check",
