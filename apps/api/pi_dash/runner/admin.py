@@ -8,6 +8,7 @@ from pi_dash.runner.models import (
     AgentRun,
     AgentRunEvent,
     ApprovalRequest,
+    MachineToken,
     Runner,
     RunnerRegistrationToken,
 )
@@ -15,7 +16,14 @@ from pi_dash.runner.models import (
 
 @admin.register(Runner)
 class RunnerAdmin(admin.ModelAdmin):
-    list_display = ("name", "owner", "workspace", "status", "last_heartbeat_at")
+    list_display = (
+        "name",
+        "owner",
+        "workspace",
+        "status",
+        "machine_token",
+        "last_heartbeat_at",
+    )
     list_filter = ("status", "workspace")
     search_fields = ("name", "owner__email")
 
@@ -24,6 +32,21 @@ class RunnerAdmin(admin.ModelAdmin):
 class RegistrationTokenAdmin(admin.ModelAdmin):
     list_display = ("id", "workspace", "created_by", "expires_at", "consumed_at")
     list_filter = ("workspace",)
+
+
+@admin.register(MachineToken)
+class MachineTokenAdmin(admin.ModelAdmin):
+    list_display = (
+        "title",
+        "workspace",
+        "created_by",
+        "created_at",
+        "last_seen_at",
+        "revoked_at",
+    )
+    list_filter = ("workspace",)
+    search_fields = ("title", "created_by__email")
+    readonly_fields = ("secret_hash", "secret_fingerprint", "created_at")
 
 
 @admin.register(AgentRun)

@@ -24,6 +24,7 @@ REGISTRATION_TTL = timedelta(hours=1)
 # Display prefixes so users can visually distinguish token kinds.
 REGISTRATION_PREFIX = "apd_reg_"
 RUNNER_SECRET_PREFIX = "apd_rs_"
+MACHINE_TOKEN_PREFIX = "apd_mt_"
 
 
 def _pepper() -> bytes:
@@ -67,6 +68,27 @@ class MintedRunnerSecret:
 def mint_runner_secret() -> MintedRunnerSecret:
     raw = RUNNER_SECRET_PREFIX + secrets.token_urlsafe(32)
     return MintedRunnerSecret(
+        raw=raw,
+        hashed=hash_token(raw),
+        fingerprint=fingerprint(raw),
+    )
+
+
+@dataclass(frozen=True)
+class MintedMachineSecret:
+    """A freshly-minted MachineToken bearer secret. The plaintext ``raw``
+    is shown to the user once at creation and never persisted; the cloud
+    keeps only ``hashed`` and ``fingerprint``.
+    """
+
+    raw: str
+    hashed: str
+    fingerprint: str
+
+
+def mint_machine_token_secret() -> MintedMachineSecret:
+    raw = MACHINE_TOKEN_PREFIX + secrets.token_urlsafe(32)
+    return MintedMachineSecret(
         raw=raw,
         hashed=hash_token(raw),
         fingerprint=fingerprint(raw),

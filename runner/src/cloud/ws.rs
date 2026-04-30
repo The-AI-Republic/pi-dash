@@ -25,7 +25,12 @@ impl Connection {
     pub async fn open(cloud_url: &str, creds: &Credentials) -> Result<Self> {
         let ws_url = http_to_ws(cloud_url)?;
         let full = format!("{}/ws/runner/", ws_url.trim_end_matches('/'));
-        let req = Request::builder()
+
+        // Two auth modes: token (when [token] block is configured) or
+        // legacy per-runner (runner_secret + X-Runner-Id). The cloud
+        // accepts either; choosing token-based when available is the path
+        // forward toward multi-runner. See `design.md` §5.2.
+        let mut req_builder = Request::builder()
             .method("GET")
             .uri(&full)
             .header("Host", host_of(&full).unwrap_or_default())
@@ -36,9 +41,19 @@ impl Connection {
                 "Sec-WebSocket-Key",
                 tokio_tungstenite::tungstenite::handshake::client::generate_key(),
             )
-            .header("Authorization", format!("Bearer {}", creds.runner_secret))
-            .header("X-Runner-Id", creds.runner_id.to_string())
-            .header("X-Runner-Protocol", crate::PROTOCOL_VERSION.to_string())
+            .header("X-Runner-Protocol", crate::PROTOCOL_VERSION.to_string());
+
+        if let Some(token) = &creds.token {
+            req_builder = req_builder
+                .header("Authorization", format!("Bearer {}", token.token_secret))
+                .header("X-Token-Id", token.token_id.to_string());
+        } else {
+            req_builder = req_builder
+                .header("Authorization", format!("Bearer {}", creds.runner_secret))
+                .header("X-Runner-Id", creds.runner_id.to_string());
+        }
+
+        let req = req_builder
             .body(())
             .context("building WS upgrade request")?;
         let (stream, resp) = tokio::time::timeout(
@@ -124,6 +139,15 @@ pub struct ConnectionLoop {
     pub status_snapshot: tokio::sync::watch::Receiver<RunnerStatus>,
     pub in_flight: tokio::sync::watch::Receiver<Option<Uuid>>,
     pub shutdown: std::sync::Arc<tokio::sync::Notify>,
+    /// Fired (`notify_one`) every time a fresh WS handshake completes —
+    /// first connect *and* every reconnect after a drop. The supervisor
+    /// watches this notify and re-emits one `Hello` per `RunnerInstance`
+    /// on each fire so the cloud-side `authorised_runners` map is
+    /// rebuilt for the new consumer instance. Without this signal the
+    /// post-reconnect connection is a silent zombie: WS is up, frames
+    /// flow out, but cloud drops every one for unknown rid. See
+    /// `.ai_design/n_runners_in_same_machine/design.md` §6.x.
+    pub connected: std::sync::Arc<tokio::sync::Notify>,
 }
 
 impl ConnectionLoop {
@@ -140,18 +164,18 @@ impl ConnectionLoop {
             match opened {
                 Ok(conn) => {
                     backoff.reset();
-                    // Send Hello immediately.
-                    let hello = ClientMsg::Hello {
-                        runner_id: self.creds.runner_id,
-                        version: crate::RUNNER_VERSION.to_string(),
-                        os: std::env::consts::OS.to_string(),
-                        arch: std::env::consts::ARCH.to_string(),
-                        status: *self.status_snapshot.borrow(),
-                        in_flight_run: *self.in_flight.borrow(),
-                        protocol_version: crate::PROTOCOL_VERSION,
-                    };
+                    // Tell the supervisor a fresh WS is up so it can
+                    // (re-)emit one Hello per RunnerInstance. `notify_one`
+                    // latches a permit if no waiter is currently parked,
+                    // so a startup race where the connect completes
+                    // before the watcher is scheduled still works.
+                    self.connected.notify_one();
+                    // Hello is sent by the supervisor (one per
+                    // RunnerInstance), not here. ConnectionLoop just
+                    // forwards bytes; identity announcements happen
+                    // through the same out_tx the supervisor primed
+                    // via the `connected` notify above.
                     let (tx_frame, rx_frame) = mpsc::channel(64);
-                    tx_frame.send(Envelope::new(hello)).await.ok();
                     let forward = {
                         let tx_frame = tx_frame.clone();
                         let mut outbound_rx = std::mem::replace(

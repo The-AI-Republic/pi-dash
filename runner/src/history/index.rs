@@ -5,7 +5,7 @@ use std::collections::BTreeMap;
 use std::fs;
 use uuid::Uuid;
 
-use crate::util::paths::Paths;
+use crate::util::paths::RunnerPaths;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RunSummary {
@@ -24,7 +24,7 @@ pub struct RunsIndex {
 }
 
 impl RunsIndex {
-    pub fn load(paths: &Paths) -> Result<Self> {
+    pub fn load(paths: &RunnerPaths) -> Result<Self> {
         let path = paths.runs_index_path();
         if !path.exists() {
             return Ok(Self::default());
@@ -33,7 +33,7 @@ impl RunsIndex {
         Ok(serde_json::from_str(&text)?)
     }
 
-    pub fn save(&self, paths: &Paths) -> Result<()> {
+    pub fn save(&self, paths: &RunnerPaths) -> Result<()> {
         paths.ensure()?;
         let path = paths.runs_index_path();
         let tmp = path.with_extension("tmp");

@@ -300,6 +300,268 @@ def test_resume_unavailable_noop_when_run_unknown(
 
 
 # ---------------------------------------------------------------------------
+# _rid_matches — envelope routing discriminator validation (design.md §4.2)
+# ---------------------------------------------------------------------------
+#
+# These tests use a tiny stand-in for ``runner`` (just needs ``.id``) so they
+# don't pay the test-DB setup cost — _rid_matches is a pure UUID-comparison
+# static method.
+
+
+class _StubRunner:
+    def __init__(self, runner_id):
+        self.id = runner_id
+
+
+@pytest.mark.unit
+def test_rid_matches_accepts_frame_without_rid():
+    import uuid
+
+    runner = _StubRunner(uuid.uuid4())
+    # Connection-scoped frames (ping, bye) and legacy v1 traffic carry no
+    # rid; the consumer must still accept them.
+    assert RunnerConsumer._rid_matches(runner, {"type": "heartbeat"})
+
+
+@pytest.mark.unit
+def test_rid_matches_accepts_matching_rid():
+    import uuid
+
+    runner_id = uuid.uuid4()
+    runner = _StubRunner(runner_id)
+    msg = {"type": "heartbeat", "rid": str(runner_id)}
+    assert RunnerConsumer._rid_matches(runner, msg)
+
+
+@pytest.mark.unit
+def test_rid_matches_rejects_mismatching_rid():
+    import uuid
+
+    runner = _StubRunner(uuid.uuid4())
+    msg = {"type": "heartbeat", "rid": str(uuid.uuid4())}
+    assert not RunnerConsumer._rid_matches(runner, msg)
+
+
+@pytest.mark.unit
+def test_rid_matches_rejects_garbage_rid():
+    import uuid
+
+    runner = _StubRunner(uuid.uuid4())
+    msg = {"type": "heartbeat", "rid": "not-a-uuid"}
+    assert not RunnerConsumer._rid_matches(runner, msg)
+
+
+# ---------------------------------------------------------------------------
+# _handle_token_hello — token-mode rejection paths (consumers.py)
+# ---------------------------------------------------------------------------
+#
+# Token-mode brings runners online over a shared WS via per-runner Hello
+# frames. The rejection branches all surface a connection-scoped
+# `RemoveRunner` frame so the daemon's RunnerLoop can drop the instance
+# instead of waiting for a Welcome that will never arrive. These tests
+# exercise the branches that don't need a live channel layer.
+
+
+def _token_consumer():
+    """Build a RunnerConsumer wired up for token-mode unit tests.
+
+    `_send_envelope` and `close` are replaced with AsyncMocks so test
+    bodies can assert on what would have gone over the wire without
+    standing up a Channels test client.
+    """
+    from unittest.mock import AsyncMock
+
+    consumer = RunnerConsumer()
+    consumer._send_envelope = AsyncMock()
+    consumer.close = AsyncMock()
+    return consumer
+
+
+@pytest.mark.unit
+def test_handle_token_hello_rejects_runner_not_owned(db, create_user, workspace):
+    """Hello for a runner_id that's valid UUID but not in the token's
+    owns-set must trigger a connection-scoped RemoveRunner so the
+    daemon stops waiting for a Welcome — and must NOT add the runner
+    to authorised_runners (security: prevents a leaked token from
+    impersonating a runner under a different token).
+    """
+    import uuid
+
+    from asgiref.sync import async_to_sync
+
+    from pi_dash.runner.models import MachineToken
+    from pi_dash.runner.services import tokens
+
+    minted = tokens.mint_machine_token_secret()
+    token = MachineToken.objects.create(
+        workspace=workspace,
+        created_by=create_user,
+        title="t",
+        secret_hash=minted.hashed,
+        secret_fingerprint=minted.fingerprint,
+    )
+    consumer = _token_consumer()
+    consumer.token = token
+
+    fake_runner_id = uuid.uuid4()
+    async_to_sync(consumer._handle_token_hello)(
+        {
+            "type": "hello",
+            "runner_id": str(fake_runner_id),
+            "rid": str(fake_runner_id),
+        }
+    )
+
+    assert consumer.authorised_runners == {}
+    payloads = [c.args[0] for c in consumer._send_envelope.call_args_list]
+    assert any(
+        p.get("type") == "remove_runner"
+        and p.get("reason") == "not_owned_or_revoked"
+        and p.get("runner_id") == str(fake_runner_id)
+        for p in payloads
+    ), payloads
+
+
+@pytest.mark.unit
+def test_handle_token_hello_rejects_envelope_rid_mismatch(db, create_user, workspace):
+    """If envelope ``rid`` and Hello body ``runner_id`` disagree, the
+    consumer must refuse — both because the daemon may have a routing
+    bug and because the sane response is to ask it to drop that
+    instance via RemoveRunner.
+    """
+    import uuid
+
+    from asgiref.sync import async_to_sync
+
+    from pi_dash.runner.models import MachineToken
+    from pi_dash.runner.services import tokens
+
+    minted = tokens.mint_machine_token_secret()
+    token = MachineToken.objects.create(
+        workspace=workspace,
+        created_by=create_user,
+        title="t",
+        secret_hash=minted.hashed,
+        secret_fingerprint=minted.fingerprint,
+    )
+    consumer = _token_consumer()
+    consumer.token = token
+
+    body_id = uuid.uuid4()
+    envelope_id = uuid.uuid4()
+    async_to_sync(consumer._handle_token_hello)(
+        {
+            "type": "hello",
+            "runner_id": str(body_id),
+            "rid": str(envelope_id),
+        }
+    )
+
+    assert consumer.authorised_runners == {}
+    payloads = [c.args[0] for c in consumer._send_envelope.call_args_list]
+    assert any(
+        p.get("type") == "remove_runner" and p.get("reason") == "hello_rid_mismatch"
+        for p in payloads
+    ), payloads
+
+
+@pytest.mark.unit
+def test_handle_token_hello_drops_silently_on_unparseable_runner_id(
+    db, create_user, workspace
+):
+    """A Hello whose body runner_id is unparseable has no rid we can
+    address an error frame to. The handler must drop without raising
+    and without sending anything.
+    """
+    from asgiref.sync import async_to_sync
+
+    from pi_dash.runner.models import MachineToken
+    from pi_dash.runner.services import tokens
+
+    minted = tokens.mint_machine_token_secret()
+    token = MachineToken.objects.create(
+        workspace=workspace,
+        created_by=create_user,
+        title="t",
+        secret_hash=minted.hashed,
+        secret_fingerprint=minted.fingerprint,
+    )
+    consumer = _token_consumer()
+    consumer.token = token
+
+    async_to_sync(consumer._handle_token_hello)(
+        {"type": "hello", "runner_id": "not-a-uuid"}
+    )
+    assert consumer.authorised_runners == {}
+    consumer._send_envelope.assert_not_called()
+
+
+@pytest.mark.unit
+def test_handle_token_hello_no_token_is_noop():
+    """Defensive: _handle_token_hello called outside token mode must
+    return immediately without touching state. The receive_json
+    dispatcher only routes here when self.token is set, but the guard
+    in the handler is the second line of defence.
+    """
+    import uuid
+
+    from asgiref.sync import async_to_sync
+
+    consumer = _token_consumer()
+    assert consumer.token is None
+
+    async_to_sync(consumer._handle_token_hello)(
+        {"type": "hello", "runner_id": str(uuid.uuid4())}
+    )
+    consumer._send_envelope.assert_not_called()
+    assert consumer.authorised_runners == {}
+
+
+# ---------------------------------------------------------------------------
+# runner_revoke — connection-scoped Revoke frame + close (consumers.py)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+def test_runner_revoke_sends_revoke_frame_then_closes():
+    """The cascade-revoke pubsub event must produce one connection-scoped
+    Revoke frame (rid omitted) and then close the WebSocket. Without
+    this, the daemon's supervisor never sees the wire-level signal and
+    bounces into a reconnect-with-401 loop instead of exiting cleanly.
+    """
+    from asgiref.sync import async_to_sync
+
+    from pi_dash.runner.consumers import CLOSE_CODE_ROTATED
+
+    consumer = _token_consumer()
+    async_to_sync(consumer.runner_revoke)({"reason": "token revoked"})
+
+    consumer._send_envelope.assert_called_once()
+    call = consumer._send_envelope.call_args
+    payload = call.args[0]
+    assert payload == {"type": "revoke", "reason": "token revoked"}
+    assert call.kwargs.get("runner_scoped") is False
+    consumer.close.assert_called_once_with(code=CLOSE_CODE_ROTATED)
+
+
+@pytest.mark.unit
+def test_runner_revoke_closes_even_when_send_raises():
+    """The daemon may have already dropped the socket; the send may
+    fail. The consumer must still call close() so pubsub bookkeeping
+    eventually settles.
+    """
+    from asgiref.sync import async_to_sync
+
+    from pi_dash.runner.consumers import CLOSE_CODE_ROTATED
+
+    consumer = _token_consumer()
+    consumer._send_envelope.side_effect = RuntimeError("socket already gone")
+    async_to_sync(consumer.runner_revoke)({"reason": "token revoked"})
+
+    consumer.close.assert_called_once_with(code=CLOSE_CODE_ROTATED)
+
+
+# ---------------------------------------------------------------------------
 # _apply_heartbeat — reap stale BUSY runs when runner reports it isn't
 # actually working on them. Closes the zombie-run gap where a daemon restart
 # leaves cloud thinking the runner is busy with an ASSIGNED run forever.

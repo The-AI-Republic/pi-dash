@@ -13,6 +13,8 @@ from pi_dash.runner.views import (
     AgentRunReleasePinEndpoint,
     ApprovalDecideEndpoint,
     ApprovalListEndpoint,
+    MachineTokenListCreateEndpoint,
+    MachineTokenRevokeEndpoint,
     PodDetailEndpoint,
     PodListEndpoint,
     RegistrationTokenCreateEndpoint,
@@ -27,6 +29,17 @@ urlpatterns = [
         "tokens/",
         RegistrationTokenCreateEndpoint.as_view(),
         name="runner-tokens",
+    ),
+    # Machine tokens (multi-runner connections). See design.md §5.3.
+    path(
+        "machine-tokens/",
+        MachineTokenListCreateEndpoint.as_view(),
+        name="machine-token-list",
+    ),
+    path(
+        "machine-tokens/<uuid:token_id>/revoke/",
+        MachineTokenRevokeEndpoint.as_view(),
+        name="machine-token-revoke",
     ),
     path(
         "<uuid:runner_id>/",

@@ -43,7 +43,7 @@ async fn bridge_happy_path_drives_fake_codex_to_completion() {
     let server = AppServer::spawn_command(cmd)
         .await
         .expect("spawn fake codex");
-    let mut bridge = Bridge::from_server(server);
+    let mut bridge = Bridge::from_server(server, None);
 
     let cwd = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let payload = RunPayload {
@@ -94,7 +94,7 @@ async fn bridge_reports_codex_crash_on_early_exit() {
     let mut cmd = Command::new("sh");
     cmd.arg("-c").arg("exit 0");
     let server = AppServer::spawn_command(cmd).await.expect("spawn");
-    let mut bridge = Bridge::from_server(server);
+    let mut bridge = Bridge::from_server(server, None);
 
     let cwd = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let payload = RunPayload {
@@ -126,7 +126,7 @@ async fn bridge_forwards_approval_request_event() {
     let mut cmd = Command::new("sh");
     cmd.arg("-c").arg(script);
     let server = AppServer::spawn_command(cmd).await.expect("spawn");
-    let mut bridge = Bridge::from_server(server);
+    let mut bridge = Bridge::from_server(server, None);
     let cwd = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let payload = RunPayload {
         run_id: Uuid::new_v4(),

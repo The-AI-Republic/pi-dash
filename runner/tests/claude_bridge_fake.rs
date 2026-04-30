@@ -39,7 +39,7 @@ async fn bridge_happy_path_drives_fake_claude_to_completion() {
     let proc = ClaudeProcess::spawn_command(cmd)
         .await
         .expect("spawn fake claude");
-    let mut bridge = Bridge::from_process(proc);
+    let mut bridge = Bridge::from_process(proc, None);
 
     let cwd = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let payload = RunPayload {
@@ -108,7 +108,7 @@ async fn bridge_translates_result_error_to_failed() {
     let proc = ClaudeProcess::spawn_command(cmd)
         .await
         .expect("spawn fake claude");
-    let mut bridge = Bridge::from_process(proc);
+    let mut bridge = Bridge::from_process(proc, None);
 
     let cwd = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let payload = RunPayload {

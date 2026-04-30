@@ -41,12 +41,13 @@ impl Bridge {
     pub async fn spawn(
         binary: &str,
         cwd: &Path,
+        model_default: Option<String>,
         resume_thread_id: Option<&str>,
     ) -> Result<Self> {
         let proc = ClaudeProcess::spawn(SpawnArgs {
             binary,
             cwd,
-            model: None,
+            model: model_default.as_deref(),
             bypass_permissions: true,
             resume_thread_id,
         })
@@ -59,7 +60,8 @@ impl Bridge {
 
     /// Test-friendly constructor that wraps an already-built `ClaudeProcess`
     /// (typically a shell-script fake).
-    pub fn from_process(proc: ClaudeProcess) -> Self {
+    pub fn from_process(proc: ClaudeProcess, model_default: Option<String>) -> Self {
+        let _ = model_default;
         Self {
             proc,
             pending: VecDeque::new(),

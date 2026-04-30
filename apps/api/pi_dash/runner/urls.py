@@ -16,7 +16,9 @@ from pi_dash.runner.views import (
     MetricsEndpoint,
     RegisterEndpoint,
     RunnerDeregisterEndpoint,
+    RunnerLinkToTokenEndpoint,
     RunnerRotateEndpoint,
+    TokenRunnerCreateEndpoint,
 )
 
 app_name = "runner"
@@ -25,6 +27,14 @@ urlpatterns = [
     path("health/", HealthEndpoint.as_view(), name="health"),
     path("metrics/", MetricsEndpoint.as_view(), name="metrics"),
     path("register/", RegisterEndpoint.as_view(), name="register"),
+    # Token-authenticated runner registration. Used by `pidash configure
+    # runner --name <NAME>` to add an additional runner under an
+    # existing token without re-running the one-time enrolment flow.
+    path(
+        "register-under-token/",
+        TokenRunnerCreateEndpoint.as_view(),
+        name="register-under-token",
+    ),
     path(
         "<uuid:runner_id>/deregister/",
         RunnerDeregisterEndpoint.as_view(),
@@ -34,5 +44,13 @@ urlpatterns = [
         "<uuid:runner_id>/rotate/",
         RunnerRotateEndpoint.as_view(),
         name="rotate",
+    ),
+    # Migrate a legacy-registered runner onto a MachineToken so the
+    # daemon can switch to token-auth without re-registering. See
+    # design.md §5.x.
+    path(
+        "<uuid:runner_id>/link-to-token/",
+        RunnerLinkToTokenEndpoint.as_view(),
+        name="link-to-token",
     ),
 ]

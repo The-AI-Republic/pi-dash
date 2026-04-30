@@ -6,31 +6,69 @@ use uuid::Uuid;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
     pub version: u32,
-    pub runner: RunnerSection,
+    pub daemon: DaemonConfig,
+    /// Per-instance runner configs. Length 1 in the current single-runner
+    /// daemon; will grow once the cap is lifted (design.md §16).
+    #[serde(default, rename = "runner")]
+    pub runners: Vec<RunnerConfig>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DaemonConfig {
+    pub cloud_url: String,
+    #[serde(default = "default_log_level")]
+    pub log_level: String,
+    #[serde(default = "default_retention_days")]
+    pub log_retention_days: u32,
+}
+
+fn default_log_level() -> String {
+    "info".to_string()
+}
+
+fn default_retention_days() -> u32 {
+    14
+}
+
+impl Default for DaemonConfig {
+    fn default() -> Self {
+        Self {
+            cloud_url: String::new(),
+            log_level: default_log_level(),
+            log_retention_days: default_retention_days(),
+        }
+    }
+}
+
+/// One configured runner instance. The daemon currently hosts exactly one
+/// (`Vec<RunnerConfig>` length 1); multi-runner support arrives in a later
+/// phase.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RunnerConfig {
+    pub name: String,
+    pub runner_id: Uuid,
+    /// Slug of the workspace this runner is bound to. Populated from the
+    /// register response at `pidash configure` time. `Option` so an older
+    /// config still parses; new CRUD subcommands hard-error if it's missing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace_slug: Option<String>,
     pub workspace: WorkspaceSection,
     /// Which agent CLI the daemon drives for assigned runs. Defaults to
     /// `codex` so existing deployments are unaffected.
     #[serde(default)]
     pub agent: AgentSection,
-    /// Missing section falls back to the `ApprovalPolicySection::default()` so
+    #[serde(default)]
+    pub codex: CodexSection,
+    /// Claude Code agent settings. Missing section falls back to
+    /// `ClaudeCodeSection::default()` so existing `config.toml` files
+    /// (written before Claude Code support) still parse. Only consulted
+    /// when `agent.kind == claude_code`.
+    #[serde(default)]
+    pub claude_code: ClaudeCodeSection,
+    /// Missing section falls back to `ApprovalPolicySection::default()` so
     /// a minimal `config.toml` doesn't have to spell out every knob.
     #[serde(default)]
     pub approval_policy: ApprovalPolicySection,
-    /// Missing section falls back to the `LoggingSection::default()`.
-    #[serde(default)]
-    pub logging: LoggingSection,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RunnerSection {
-    pub name: String,
-    pub cloud_url: String,
-    /// Slug of the workspace this runner is bound to. Populated from the
-    /// register response at `pidash configure` time. `Option` so an older
-    /// `config.toml` (written before this field existed) still parses; new
-    /// CRUD subcommands hard-error if it's missing.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub workspace_slug: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -38,9 +76,29 @@ pub struct WorkspaceSection {
     pub working_dir: PathBuf,
 }
 
-/// Runner-wide agent selector. Wrapped in its own section (rather than
-/// hoisted onto `RunnerSection`) so the file layout stays explicit:
-/// `[agent]` with `kind = "..."`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CodexSection {
+    pub binary: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_default: Option<String>,
+}
+
+impl Default for CodexSection {
+    fn default() -> Self {
+        // model_default stays None — the runner must not pin a model and
+        // let codex pick its own default. Hardcoding one (even a "good"
+        // one) breaks accounts whose tier doesn't carry that model.
+        Self {
+            binary: "codex".to_string(),
+            model_default: None,
+        }
+    }
+}
+
+/// Per-runner agent selector. Wrapped in its own section (rather than
+/// hoisted onto `RunnerConfig`) so the file layout mirrors the per-agent
+/// `[runner.codex]` / `[runner.claude_code]` tables: `[runner.agent]` with
+/// `kind = "..."`.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct AgentSection {
     #[serde(default)]
@@ -59,6 +117,30 @@ pub enum AgentKind {
     Codex,
     /// Anthropic Claude Code via `claude --print --output-format stream-json`.
     ClaudeCode,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ClaudeCodeSection {
+    /// Per-field default so a partial `[claude_code]` block (e.g. only
+    /// `model_default = "..."`) still parses. Without this, declaring the
+    /// section at all would require spelling out `binary = "claude"`.
+    #[serde(default = "default_claude_binary")]
+    pub binary: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_default: Option<String>,
+}
+
+fn default_claude_binary() -> String {
+    "claude".to_string()
+}
+
+impl Default for ClaudeCodeSection {
+    fn default() -> Self {
+        Self {
+            binary: default_claude_binary(),
+            model_default: None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -94,29 +176,307 @@ impl Default for ApprovalPolicySection {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct LoggingSection {
-    pub level: String,
-    pub retention_days: u32,
+pub struct Credentials {
+    /// Token (machine credential) — authenticates the WS connection. The
+    /// design's eventual shape (one token per machine, owns N runners) is
+    /// surfaced as an `Option` here while cloud is still on v1 wire auth;
+    /// it'll become required once cloud ships v2 and the `runner_secret`
+    /// path retires.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token: Option<TokenCredentials>,
+    pub runner_id: Uuid,
+    pub runner_secret: String,
+    /// Public REST API token (`X-Api-Key`) for `/api/v1/`. Issued by the
+    /// cloud alongside `runner_secret` and used by `pidash` CRUD subcommands.
+    /// `None` for installs enrolled before the cloud started minting these;
+    /// a follow-up `pidash login` will retrofit them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub api_token: Option<String>,
+    pub issued_at: DateTime<Utc>,
 }
 
-impl Default for LoggingSection {
-    fn default() -> Self {
-        Self {
-            level: "info".to_string(),
-            retention_days: 14,
+/// Per-machine token credential. See `design.md` §5.1.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TokenCredentials {
+    pub token_id: Uuid,
+    /// Bearer secret. Mode 0600 on disk; never echoed to logs.
+    pub token_secret: String,
+    /// User-supplied label, shown in `pidash status` and the cloud UI's
+    /// connections list.
+    pub title: String,
+}
+
+/// Hard cap on the number of runner instances per daemon. See `design.md`
+/// §16. Both daemon-side validation and cloud-side enforcement use this
+/// number; the cloud rejects `Hello` beyond it as well.
+pub const MAX_RUNNERS_PER_DAEMON: usize = 50;
+
+impl Config {
+    /// Convenience accessor for the (currently unique) runner config.
+    /// Panics if the runners list is empty — daemon startup validates that
+    /// at least one runner is configured before we get here. Used in
+    /// single-runner code paths that need to read the active runner's
+    /// fields without picking up the multi-runner indexing churn yet.
+    pub fn primary_runner(&self) -> &RunnerConfig {
+        self.runners
+            .first()
+            .expect("config.runners must contain at least one entry")
+    }
+
+    /// Mutable counterpart to [`primary_runner`]. Same panic contract.
+    pub fn primary_runner_mut(&mut self) -> &mut RunnerConfig {
+        self.runners
+            .first_mut()
+            .expect("config.runners must contain at least one entry")
+    }
+
+    /// Validate the loaded config before the daemon starts. Returns a
+    /// `ConfigError` with a user-facing message on the first violation;
+    /// the daemon refuses to start with this message rather than booting
+    /// into a state that will silently corrupt data later.
+    ///
+    /// See `design.md` §9 for the rule set.
+    pub fn validate(&self) -> Result<(), ConfigError> {
+        if self.runners.is_empty() {
+            return Err(ConfigError::NoRunners);
+        }
+        if self.runners.len() > MAX_RUNNERS_PER_DAEMON {
+            return Err(ConfigError::TooManyRunners {
+                count: self.runners.len(),
+                cap: MAX_RUNNERS_PER_DAEMON,
+            });
+        }
+
+        // Duplicate name / runner_id detection. O(n²) is fine at n≤50.
+        for (i, a) in self.runners.iter().enumerate() {
+            for b in self.runners.iter().skip(i + 1) {
+                if a.name == b.name {
+                    return Err(ConfigError::DuplicateName {
+                        name: a.name.clone(),
+                    });
+                }
+                if a.runner_id == b.runner_id {
+                    return Err(ConfigError::DuplicateRunnerId { id: a.runner_id });
+                }
+            }
+        }
+
+        // Workspace collisions: exact-match and nested-path. Two runners
+        // sharing a working directory will trample each other's git state;
+        // refusing to start at config load is dramatically cheaper than
+        // diagnosing the corrupted runs after the fact.
+        for (i, a) in self.runners.iter().enumerate() {
+            for b in self.runners.iter().skip(i + 1) {
+                let ap = &a.workspace.working_dir;
+                let bp = &b.workspace.working_dir;
+                if ap == bp {
+                    return Err(ConfigError::DuplicateWorkingDir {
+                        runner_a: a.name.clone(),
+                        runner_b: b.name.clone(),
+                        path: ap.display().to_string(),
+                    });
+                }
+                if ap.starts_with(bp) || bp.starts_with(ap) {
+                    return Err(ConfigError::NestedWorkingDir {
+                        runner_a: a.name.clone(),
+                        path_a: ap.display().to_string(),
+                        runner_b: b.name.clone(),
+                        path_b: bp.display().to_string(),
+                    });
+                }
+            }
+        }
+
+        Ok(())
+    }
+}
+
+/// User-facing config validation errors. Each variant's `Display` is the
+/// message printed on stderr when the daemon refuses to start.
+#[derive(Debug)]
+pub enum ConfigError {
+    NoRunners,
+    TooManyRunners {
+        count: usize,
+        cap: usize,
+    },
+    DuplicateName {
+        name: String,
+    },
+    DuplicateRunnerId {
+        id: Uuid,
+    },
+    DuplicateWorkingDir {
+        runner_a: String,
+        runner_b: String,
+        path: String,
+    },
+    NestedWorkingDir {
+        runner_a: String,
+        path_a: String,
+        runner_b: String,
+        path_b: String,
+    },
+}
+
+impl std::fmt::Display for ConfigError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ConfigError::NoRunners => write!(
+                f,
+                "configuration error: no [[runner]] block in config.toml. \
+                 Run `pidash configure` to register a runner."
+            ),
+            ConfigError::TooManyRunners { count, cap } => write!(
+                f,
+                "configuration error: {count} runners configured, but the daemon \
+                 supports at most {cap}. Remove [[runner]] blocks from config.toml \
+                 (see design.md §16)."
+            ),
+            ConfigError::DuplicateName { name } => write!(
+                f,
+                "configuration error: two [[runner]] blocks share the name {name:?}. \
+                 Each runner must have a unique name."
+            ),
+            ConfigError::DuplicateRunnerId { id } => write!(
+                f,
+                "configuration error: two [[runner]] blocks share runner_id {id}. \
+                 Each runner must have a unique runner_id; this usually means \
+                 config.toml was edited incorrectly — re-run `pidash configure runner`."
+            ),
+            ConfigError::DuplicateWorkingDir {
+                runner_a,
+                runner_b,
+                path,
+            } => write!(
+                f,
+                "configuration error: runners {runner_a:?} and {runner_b:?} share \
+                 working_dir {path:?}. Each runner must have its own working \
+                 directory; concurrent git operations on the same tree corrupt \
+                 state silently. Update one of them in config.toml."
+            ),
+            ConfigError::NestedWorkingDir {
+                runner_a,
+                path_a,
+                runner_b,
+                path_b,
+            } => write!(
+                f,
+                "configuration error: runners {runner_a:?} ({path_a:?}) and \
+                 {runner_b:?} ({path_b:?}) have nested working directories. One \
+                 path is a prefix of the other; their git trees will collide. \
+                 Use disjoint working directories."
+            ),
         }
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Credentials {
-    pub runner_id: Uuid,
-    pub runner_secret: String,
-    /// Public REST API token (`X-Api-Key`) for `/api/v1/`. Issued by the
-    /// cloud alongside `runner_secret` and used by future `pidash` CRUD
-    /// subcommands. `None` for installs enrolled before the cloud started
-    /// minting these; a follow-up `pidash login` will retrofit them.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub api_token: Option<String>,
-    pub issued_at: DateTime<Utc>,
+impl std::error::Error for ConfigError {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    fn runner(name: &str, working_dir: &str) -> RunnerConfig {
+        RunnerConfig {
+            name: name.into(),
+            runner_id: Uuid::new_v4(),
+            workspace_slug: None,
+            workspace: WorkspaceSection {
+                working_dir: PathBuf::from(working_dir),
+            },
+            agent: Default::default(),
+            codex: Default::default(),
+            claude_code: Default::default(),
+            approval_policy: Default::default(),
+        }
+    }
+
+    fn config_with(runners: Vec<RunnerConfig>) -> Config {
+        Config {
+            version: 2,
+            daemon: DaemonConfig {
+                cloud_url: "https://x".into(),
+                log_level: "info".into(),
+                log_retention_days: 14,
+            },
+            runners,
+        }
+    }
+
+    #[test]
+    fn validate_accepts_single_runner() {
+        let cfg = config_with(vec![runner("main", "/work/main")]);
+        cfg.validate().unwrap();
+    }
+
+    #[test]
+    fn validate_rejects_zero_runners() {
+        let cfg = config_with(vec![]);
+        let err = cfg.validate().unwrap_err();
+        assert!(matches!(err, ConfigError::NoRunners));
+    }
+
+    #[test]
+    fn validate_rejects_too_many_runners() {
+        let runners: Vec<_> = (0..MAX_RUNNERS_PER_DAEMON + 1)
+            .map(|i| runner(&format!("r{i}"), &format!("/work/r{i}")))
+            .collect();
+        let cfg = config_with(runners);
+        let err = cfg.validate().unwrap_err();
+        assert!(matches!(err, ConfigError::TooManyRunners { .. }));
+    }
+
+    #[test]
+    fn validate_rejects_duplicate_name() {
+        let cfg = config_with(vec![runner("main", "/work/a"), runner("main", "/work/b")]);
+        let err = cfg.validate().unwrap_err();
+        match err {
+            ConfigError::DuplicateName { name } => assert_eq!(name, "main"),
+            other => panic!("expected DuplicateName, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn validate_rejects_duplicate_runner_id() {
+        let mut a = runner("a", "/work/a");
+        let mut b = runner("b", "/work/b");
+        let id = Uuid::new_v4();
+        a.runner_id = id;
+        b.runner_id = id;
+        let cfg = config_with(vec![a, b]);
+        let err = cfg.validate().unwrap_err();
+        assert!(matches!(err, ConfigError::DuplicateRunnerId { .. }));
+    }
+
+    #[test]
+    fn validate_rejects_duplicate_working_dir() {
+        let cfg = config_with(vec![
+            runner("a", "/work/shared"),
+            runner("b", "/work/shared"),
+        ]);
+        let err = cfg.validate().unwrap_err();
+        let msg = err.to_string();
+        assert!(matches!(err, ConfigError::DuplicateWorkingDir { .. }));
+        // Error message must name both runners and the shared path so the
+        // operator can find and fix the collision.
+        assert!(msg.contains("\"a\""), "message: {msg}");
+        assert!(msg.contains("\"b\""), "message: {msg}");
+        assert!(msg.contains("/work/shared"), "message: {msg}");
+    }
+
+    #[test]
+    fn validate_rejects_nested_working_dirs() {
+        let cfg = config_with(vec![runner("outer", "/work"), runner("inner", "/work/sub")]);
+        let err = cfg.validate().unwrap_err();
+        assert!(matches!(err, ConfigError::NestedWorkingDir { .. }));
+    }
+
+    #[test]
+    fn validate_accepts_disjoint_sibling_working_dirs() {
+        // Two siblings under the same parent that don't nest are fine.
+        let cfg = config_with(vec![runner("a", "/work/main"), runner("b", "/work/side")]);
+        cfg.validate().unwrap();
+    }
 }

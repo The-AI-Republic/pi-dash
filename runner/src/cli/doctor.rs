@@ -8,9 +8,6 @@ use crate::config::file;
 use crate::util::paths::Paths;
 use crate::util::shell::login_shell_command;
 
-const CODEX_BINARY: &str = "codex";
-const CLAUDE_BINARY: &str = "claude";
-
 #[derive(Debug, ClapArgs)]
 pub struct Args {
     /// Emit a machine-readable JSON report.
@@ -69,13 +66,15 @@ pub async fn execute(paths: &Paths) -> Result<Report> {
     // Runs without a config file fall back to Codex (the historical default)
     // so `pidash doctor` keeps working pre-`pidash configure`.
     let cfg = file::load_config_opt(paths)?;
-    let agent_kind = cfg
-        .as_ref()
-        .map(|c| c.agent.kind)
+    let primary = cfg.as_ref().and_then(|c| c.runners.first());
+    let agent_kind = primary
+        .map(|r| r.agent.kind)
         .unwrap_or(crate::config::schema::AgentKind::Codex);
     match agent_kind {
         crate::config::schema::AgentKind::Codex => {
-            let codex_binary = CODEX_BINARY.to_string();
+            let codex_binary = primary
+                .map(|r| r.codex.binary.clone())
+                .unwrap_or_else(|| "codex".to_string());
             match check_version(&codex_binary).await {
                 Ok(detail) => checks.push(Check {
                     name: "codex".to_string(),
@@ -106,7 +105,9 @@ pub async fn execute(paths: &Paths) -> Result<Report> {
             }
         }
         crate::config::schema::AgentKind::ClaudeCode => {
-            let claude_binary = CLAUDE_BINARY.to_string();
+            let claude_binary = primary
+                .map(|r| r.claude_code.binary.clone())
+                .unwrap_or_else(|| "claude".to_string());
             match check_version(&claude_binary).await {
                 Ok(detail) => checks.push(Check {
                     name: "claude".to_string(),
@@ -154,7 +155,7 @@ pub async fn execute(paths: &Paths) -> Result<Report> {
 
     // Cloud reachability (if we have config).
     if let Some(cfg) = cfg.as_ref() {
-        match check_cloud(&cfg.runner.cloud_url).await {
+        match check_cloud(&cfg.daemon.cloud_url).await {
             Ok(detail) => checks.push(Check {
                 name: "network".to_string(),
                 ok: true,

@@ -41,8 +41,11 @@ pub async fn run(args: Args, paths: &Paths) -> Result<()> {
     let (config, creds) = crate::config::file::load_all(paths).context(
         "failed to load runner config; re-run `pidash configure` if the files are corrupt",
     )?;
+    config
+        .validate()
+        .context("config.toml failed validation; refusing to start the daemon")?;
     tracing::info!(
-        runner = %config.runner.name,
+        runner = %config.primary_runner().name,
         runner_id = %creds.runner_id,
         "starting daemon"
     );

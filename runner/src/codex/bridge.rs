@@ -19,6 +19,7 @@ use crate::codex::schema::{
 
 pub struct Bridge {
     pub server: AppServer,
+    pub model_default: Option<String>,
     /// Notifications that arrived while we were waiting for an RPC response
     /// (e.g. an early `account/reauthRequired` during `initialize`). Drained
     /// by [`Bridge::next_frame`] before reading from the live stream so the
@@ -27,19 +28,21 @@ pub struct Bridge {
 }
 
 impl Bridge {
-    pub async fn spawn(binary: &str, cwd: &Path) -> Result<Self> {
+    pub async fn spawn(binary: &str, cwd: &Path, model_default: Option<String>) -> Result<Self> {
         let server = AppServer::spawn(binary, cwd).await?;
         Ok(Self {
             server,
+            model_default,
             pending: std::collections::VecDeque::new(),
         })
     }
 
     /// Bridge that speaks to an already-constructed AppServer. Used in
     /// integration tests to substitute a fake process.
-    pub fn from_server(server: AppServer) -> Self {
+    pub fn from_server(server: AppServer, model_default: Option<String>) -> Self {
         Self {
             server,
+            model_default,
             pending: std::collections::VecDeque::new(),
         }
     }
@@ -95,7 +98,7 @@ impl Bridge {
             "thread/start",
             &ThreadStartParams {
                 cwd: cwd.to_string_lossy().to_string(),
-                model: None,
+                model: self.model_default.clone(),
                 sandbox_policy: "workspace-write".into(),
                 approval_policy: "on-request".into(),
             },
@@ -147,7 +150,7 @@ impl Bridge {
                     item_type: "text".into(),
                     text: payload.prompt.clone(),
                 }],
-                model: payload.model.clone(),
+                model: payload.model.clone().or_else(|| self.model_default.clone()),
                 effort: None,
             },
         )?;

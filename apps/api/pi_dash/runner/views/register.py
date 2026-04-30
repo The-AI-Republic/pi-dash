@@ -13,6 +13,7 @@ from pi_dash.authentication.session import BaseSessionAuthentication
 from pi_dash.db.models import APIToken
 from pi_dash.runner.authentication import RunnerBearerAuthentication
 from pi_dash.runner.models import (
+    MachineToken,
     Runner,
     RunnerRegistrationToken,
     RunnerStatus,
@@ -24,7 +25,7 @@ from pi_dash.runner.serializers import (
 )
 from pi_dash.runner.services import tokens
 from pi_dash.runner.services.matcher import can_register_another
-from pi_dash.runner.services.pubsub import close_runner_session
+from pi_dash.runner.services.pubsub import close_runner_session, send_to_runner
 
 
 HEARTBEAT_INTERVAL_SECS = 25
@@ -147,8 +148,20 @@ class RegisterEndpoint(APIView):
 class RunnerDeregisterEndpoint(APIView):
     """POST /api/v1/runner/<uuid>/deregister/
 
-    Called by the daemon during ``pidash remove``. Authenticated
-    with the runner's own bearer secret; the server marks the runner revoked.
+    Called by the daemon during ``pidash remove`` and ``pidash token
+    remove-runner``. Authenticated with the runner's own bearer secret
+    (legacy single-runner) or with ``X-Token-Id`` + the token's bearer
+    (token / multi-runner). The server marks the runner revoked.
+
+    Connection teardown semantics differ by auth mode:
+
+    - **Legacy** — close the WebSocket. One connection ↔ one runner, so
+      there's nothing else on the socket worth preserving.
+    - **Token mode** — emit ``ServerMsg::RemoveRunner`` so the daemon
+      tears down ONLY this runner's ``RunnerLoop`` while the shared WS
+      and the other runners under this token stay up. Force-closing
+      the connection here would knock every sibling runner offline as
+      a side effect.
     """
 
     authentication_classes = [RunnerBearerAuthentication]
@@ -161,9 +174,104 @@ class RunnerDeregisterEndpoint(APIView):
         runner = getattr(request, "auth_runner", None)
         if runner is None or str(runner.id) != str(runner_id):
             return Response({"error": "forbidden"}, status=status.HTTP_403_FORBIDDEN)
+        in_token_mode = runner.machine_token_id is not None
         runner.revoke()
-        close_runner_session(runner.pk)
+        if in_token_mode:
+            send_to_runner(
+                runner.pk,
+                {
+                    "type": "remove_runner",
+                    "runner_id": str(runner.id),
+                    "reason": "deregistered",
+                },
+            )
+        else:
+            close_runner_session(runner.pk)
         return Response({"ok": True})
+
+
+class RunnerLinkToTokenEndpoint(APIView):
+    """POST /api/v1/runner/<uuid>/link-to-token/
+
+    Migrate a runner registered via the legacy ``/register/`` flow onto a
+    MachineToken so its daemon can switch to token-auth without
+    re-registering. Called by ``pidash token install`` after the user
+    creates a token in the cloud UI.
+
+    Auth: the runner's existing ``runner_secret`` (legacy bearer). At
+    this point the daemon has NOT yet written the ``[token]`` block to
+    ``credentials.toml``, so this is the only credential it can present.
+    The body carries the new token's id + secret, which we verify
+    server-side before writing the FK.
+
+    Body:
+        { "token_id": "<UUID>", "token_secret": "<RAW>" }
+
+    Failure modes (all 4xx, runner stays unlinked, client should not
+    write the [token] block):
+    - 400 if token_id isn't a UUID
+    - 401 if token_secret doesn't match a non-revoked token
+    - 400 if the token belongs to a different workspace than the runner
+    - 409 if the runner is revoked, or already linked to a different
+      non-revoked token (operator must revoke the old link first; we
+      refuse silent re-binding because it would let a compromised
+      token's owner steal a runner from another machine)
+    """
+
+    authentication_classes = [RunnerBearerAuthentication]
+    permission_classes = []
+    throttle_classes: list = []
+
+    def post(self, request, runner_id):
+        import uuid as _uuid
+
+        runner = getattr(request, "auth_runner", None)
+        if runner is None or str(runner.id) != str(runner_id):
+            return Response({"error": "forbidden"}, status=status.HTTP_403_FORBIDDEN)
+        if runner.status == RunnerStatus.REVOKED:
+            return Response(
+                {"error": "runner is revoked"}, status=status.HTTP_409_CONFLICT
+            )
+        token_id_raw = request.data.get("token_id") or ""
+        token_secret_raw = request.data.get("token_secret") or ""
+        if not token_id_raw or not token_secret_raw:
+            return Response(
+                {"error": "token_id and token_secret are required"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        try:
+            token_id = _uuid.UUID(str(token_id_raw))
+        except (ValueError, AttributeError):
+            return Response(
+                {"error": "invalid token_id"}, status=status.HTTP_400_BAD_REQUEST
+            )
+        secret_hash = tokens.hash_token(str(token_secret_raw))
+        token = MachineToken.objects.filter(
+            id=token_id, secret_hash=secret_hash, revoked_at__isnull=True
+        ).first()
+        if token is None:
+            return Response(
+                {"error": "invalid or revoked token"},
+                status=status.HTTP_401_UNAUTHORIZED,
+            )
+        if token.workspace_id != runner.workspace_id:
+            return Response(
+                {"error": "token belongs to a different workspace"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if (
+            runner.machine_token_id is not None
+            and runner.machine_token_id != token.id
+            and MachineToken.objects.filter(
+                id=runner.machine_token_id, revoked_at__isnull=True
+            ).exists()
+        ):
+            return Response(
+                {"error": "runner already linked to a different active token"},
+                status=status.HTTP_409_CONFLICT,
+            )
+        Runner.objects.filter(pk=runner.pk).update(machine_token=token)
+        return Response({"ok": True, "token_id": str(token.id)})
 
 
 class RunnerRotateEndpoint(APIView):

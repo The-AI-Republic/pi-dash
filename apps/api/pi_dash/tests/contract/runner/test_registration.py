@@ -42,14 +42,14 @@ def test_register_exchanges_token_for_secret(api_client, registration):
         "os": "linux",
         "arch": "x86_64",
         "version": "0.1.0",
-        "protocol_version": 1,
+        "protocol_version": 2,
     }
     resp = api_client.post(url, payload, format="json")
     assert resp.status_code == 201
     body = resp.json()
     assert body["runner_secret"].startswith("apd_rs_")
     assert body["api_token"].startswith("pi_dash_api_")
-    assert body["protocol_version"] == 1
+    assert body["protocol_version"] == 2
     # Runner enrollment is workspace-scoped; the CLI relies on this slug to
     # build `/api/v1/workspaces/<slug>/...` URLs without asking the user.
     assert body["workspace_slug"] == record.workspace.slug
