@@ -118,6 +118,11 @@ export const coreRoutes: RouteConfigEntry[] = [
           route(":workspaceSlug/prompts/:promptId", "./(all)/[workspaceSlug]/prompts/[promptId]/page.tsx"),
         ]),
 
+        // Schedulers (workspace-scoped scheduler definitions: project admins install on projects)
+        layout("./(all)/[workspaceSlug]/schedulers/layout.tsx", [
+          route(":workspaceSlug/schedulers", "./(all)/[workspaceSlug]/schedulers/page.tsx"),
+        ]),
+
         // Workspace Views
         layout("./(all)/[workspaceSlug]/(projects)/workspace-views/layout.tsx", [
           route(":workspaceSlug/workspace-views", "./(all)/[workspaceSlug]/(projects)/workspace-views/page.tsx"),
