@@ -330,32 +330,69 @@ unchanged, so per-instance handlers (`Welcome`, `Assign`, `Cancel`,
 `Decide`, `ConfigPush`, `RemoveRunner`, `ResumeAck`) all keep
 working without modification.
 
-## 8. Acks
+## 8. Acks (ack-on-handle, per design.md decision #21)
 
-The new responsibility — acking via the `ack` map on the next poll
-— sits in `HttpLoop`. The simplest correct rule is **ack-on-receive**:
+Acks are per-runner and use the **explicit list** form
+`{runner_id: [stream_id, ...]}`. They go in the next poll's request
+body and translate server-side to
+`XACK runner_stream:{rid} runner-group:{rid} <id1> [<id2> ...]`
+(XACK takes exact ids, not a range — `design.md` §7.4).
 
-- For each `PollResponseEntry` in a poll response, after the
-  envelope has been dispatched into the per-runner mailbox (or
-  handled inline for connection-scoped), record
-  `ack_map.insert(runner_id, stream_id)` keyed by runner.
-- The next poll request includes the resulting map; the cloud
-  `XACK`s those ids.
+**Ack-on-handle**: a stream id enters `HttpLoop`'s `ack_map` only
+after the per-runner handler in `RunnerLoop` has finished processing
+the message — _not_ the moment `HttpLoop` dispatched it into the
+mailbox. This is at-least-once delivery; redelivery is handled by
+per-instance dedupe (below).
 
-This delegates the in-flight-crash safety net to the consumer
-group's PEL, which is exactly what the design intends. If the
-daemon crashes between mailbox dispatch and ack-on-next-poll, the
-message stays in the PEL; on the next session/poll, `XREADGROUP ... 0`
-re-fetches it; application-level `mid` dedupe (which is per-run on
-the cloud side, not on the daemon side) gates double-handling at
-that layer.
+Plumbing:
 
-A more conservative alternative is **ack-on-handle** (instance
-notifies the loop after the mailbox-receiver has processed the
-frame). This requires plumbing an ack-back channel from each
-`RunnerLoop` to `HttpLoop` and is more code. **Recommendation:
-ack-on-receive in v1**; revisit if observability shows in-flight
-loss between mailbox-dispatch and instance-handler.
+```rust
+// Created per RunnerInstance and shared into HttpLoop:
+let (ack_tx, ack_rx) = mpsc::unbounded_channel::<AckEntry>();
+
+struct AckEntry {
+    runner_id: Uuid,
+    stream_id: String,
+}
+
+// HttpLoop owns the receivers and drains them on each poll cycle:
+fn drain_pending_acks(&self) -> AckMap {
+    let mut acks: AckMap = HashMap::new();
+    while let Ok(entry) = self.ack_rx.try_recv() {
+        acks.entry(entry.runner_id).or_default().push(entry.stream_id);
+    }
+    acks
+}
+
+// RunnerLoop: after the inner handler returns successfully:
+async fn handle_one(&mut self, env: Envelope<ServerMsg>) {
+    let stream_id = env.stream_id.clone();
+    if self.inbound_dedupe.seen(&env.message_id) {
+        // Re-delivery from PEL after a prior crash. Ack and skip.
+        let _ = self.ack_tx.send(AckEntry { runner_id: self.runner_id, stream_id });
+        return;
+    }
+    self.dispatch(env.body).await;
+    self.inbound_dedupe.record(env.message_id);
+    let _ = self.ack_tx.send(AckEntry { runner_id: self.runner_id, stream_id });
+}
+```
+
+`InboundDedupe` is a small bounded LRU (capacity ~256, optional TTL
+~5 min) keyed on `Envelope.message_id`. Sized to comfortably exceed
+any realistic in-flight window between fetch and handler completion.
+Per-instance, not shared across runners — distinct runners cannot
+re-deliver each other's messages.
+
+**Connection-scoped messages** handled inline in `HttpLoop` (Revoke,
+ForceRefresh, etc.) ack via the same channel — they are also
+ack-on-handle-completion. For Revoke that means after `state.shutdown()`
+returns; for ForceRefresh after `refresh()` returns successfully.
+
+**Per-stream first poll uses `0`**, subsequent polls use `>` (per
+`design.md` §7.3 step 5). The cloud tracks
+`session_pel_drained:{sid}:{rid}` so the daemon doesn't need to do
+this bookkeeping client-side.
 
 ## 9. Refresh scheduling
 
@@ -477,19 +514,20 @@ pub async fn run(self) -> Result<()> {
 
 Per `design.md` §10, mapped to daemon-side response:
 
-| Wire response                        | `HttpClient` action                                                                                                                                                                                                                                                                                                                    | Visible to `RunnerLoop`?              |
-| ------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------- |
-| 401 `access_token_expired`           | call `refresh()`, retry once. Transparent.                                                                                                                                                                                                                                                                                             | No.                                   |
-| 401 `membership_revoked`             | `state.shutdown()`. Daemon dies.                                                                                                                                                                                                                                                                                                       | Mailbox closes; loops exit.           |
-| 401 `refresh_token_replayed`         | `state.shutdown()`. Daemon dies.                                                                                                                                                                                                                                                                                                       | Mailbox closes; loops exit.           |
-| 409 `session_evicted` on poll        | `state.shutdown()`. Daemon dies.                                                                                                                                                                                                                                                                                                       | Mailbox closes; loops exit.           |
-| 409 `session_evicted` on lifecycle   | Same — fatal. Another daemon owns the connection.                                                                                                                                                                                                                                                                                      | Mailbox closes; loops exit.           |
-| 409 `concurrent_poll`                | Internal logic error. Log + retry once after 100 ms backoff. Persistent failure → shutdown.                                                                                                                                                                                                                                            | No (initially; alert ops on pattern). |
-| 429 `poll_rate_exceeded`             | Backoff to ≥5 s between polls. Recovers.                                                                                                                                                                                                                                                                                               | No.                                   |
-| Network error / 5xx                  | Exponential backoff ≤30 s. Re-poll. If session is stale on recovery, `open_session()` gets a fresh one and `connected.notify_one()`.                                                                                                                                                                                                   | Brief silence; loops continue.        |
-| `force_refresh` ServerMsg            | `force_refresh_inline()`; do not surface to instances.                                                                                                                                                                                                                                                                                 | No.                                   |
-| `Revoke` ServerMsg (connection-wide) | Inline: `state.shutdown()`.                                                                                                                                                                                                                                                                                                            | Mailbox closes; loops exit.           |
-| `RemoveRunner` ServerMsg             | Demux to runner's mailbox. `RunnerLoop` exits its inner loop on this frame (same as today). On exit, the supervisor's join-handler removes the runner from the `mailboxes`, `status_sources`, and `attach_runners` maps and calls `client.detach_runner(runner_id)` to notify cloud. The other runners on the connection keep working. | Yes — same as today.                  |
+| Wire response                        | `HttpClient` action                                                                                                                                                                                                                                                                                                                                                                                                 | Visible to `RunnerLoop`?              |
+| ------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------- |
+| 401 `access_token_expired`           | call `refresh()`, retry once. Transparent.                                                                                                                                                                                                                                                                                                                                                                          | No.                                   |
+| 401 `membership_revoked`             | `state.shutdown()`. Daemon dies.                                                                                                                                                                                                                                                                                                                                                                                    | Mailbox closes; loops exit.           |
+| 401 `refresh_token_replayed`         | `state.shutdown()`. Daemon dies.                                                                                                                                                                                                                                                                                                                                                                                    | Mailbox closes; loops exit.           |
+| 409 `session_evicted` on poll        | `state.shutdown()`. Daemon dies.                                                                                                                                                                                                                                                                                                                                                                                    | Mailbox closes; loops exit.           |
+| 409 `session_evicted` on lifecycle   | Same — fatal. Another daemon owns the connection.                                                                                                                                                                                                                                                                                                                                                                   | Mailbox closes; loops exit.           |
+| 409 `concurrent_poll`                | Internal logic error. Log + retry once after 100 ms backoff. Persistent failure → shutdown.                                                                                                                                                                                                                                                                                                                         | No (initially; alert ops on pattern). |
+| 429 `poll_rate_exceeded`             | Backoff to ≥5 s between polls. Recovers.                                                                                                                                                                                                                                                                                                                                                                            | No.                                   |
+| Network error / 5xx                  | Exponential backoff ≤30 s. Re-poll. If session is stale on recovery, `open_session()` gets a fresh one and `connected.notify_one()`.                                                                                                                                                                                                                                                                                | Brief silence; loops continue.        |
+| `force_refresh` ServerMsg            | `force_refresh_inline()`; do not surface to instances.                                                                                                                                                                                                                                                                                                                                                              | No.                                   |
+| `Revoke` ServerMsg (connection-wide) | Inline: `state.shutdown()`.                                                                                                                                                                                                                                                                                                                                                                                         | Mailbox closes; loops exit.           |
+| `RemoveRunner` ServerMsg             | Demux to runner's mailbox. `RunnerLoop` exits its inner loop on this frame (same as today). On exit, the supervisor's join-handler removes the runner from the `mailboxes`, `status_sources`, and `attach_runners` maps and calls `client.detach_runner(runner_id)` to notify cloud. The other runners on the connection keep working. The RemoveRunner stream id is acked by `RunnerLoop` immediately before exit. | Yes — same as today.                  |
+| Daemon crash mid-handler             | Process killed before `RunnerLoop` could send the ack. Stream id stays in `consumer-{sid}`'s PEL. New session's `attach/` XCLAIMs onto `consumer-{new_sid}`; first poll `XREADGROUP ... 0` redelivers; `InboundDedupe` lets the handler skip if it had partially run.                                                                                                                                               | Yes (re-delivery).                    |
 
 ## 12. Module-level test plan
 
@@ -497,9 +535,20 @@ Per `design.md` §10, mapped to daemon-side response:
   refresh state machine (`expired → refresh → retry`); refresh
   failure modes (`replayed`, `membership_revoked`); session
   open/close; attach/detach.
-- **`HttpLoop` unit tests**: ack accumulation across multiple
-  `PollResponseEntry`s; `force_refresh` triggers inline refresh;
-  `Revoke` triggers shutdown; `concurrent_poll` retry behavior.
+- **`HttpLoop` unit tests**: ack-on-handle accumulation across
+  multiple `PollResponseEntry`s for the same runner (list grows in
+  arrival order; only ids whose handlers completed are present);
+  ack drain happens at next poll, not at receive; `force_refresh`
+  triggers inline refresh; `Revoke` triggers shutdown;
+  `concurrent_poll` retry behavior.
+- **`InboundDedupe` unit tests**: insert-and-seen returns true for
+  same `mid`; LRU evicts oldest when full; distinct `mid` values
+  pass through.
+- **End-to-end ack-on-handle**: dispatch a poll containing 3
+  messages for the same runner; assert that the next poll's
+  `ack[<runner_id>]` only includes ids whose handlers have
+  completed (block one handler in the test and confirm its id is
+  absent).
 - **`RunnerOut::send` dispatch table**: one test per `ClientMsg`
   variant, asserting it lands at the right `HttpClient` method.
   Effectively a `match`-completeness test — keeps future enum

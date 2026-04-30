@@ -115,11 +115,11 @@ How to use this file:
 
 - [ ] `POST /api/v1/runner/connections/<cid>/sessions/<sid>/runners/<rid>/attach/`
       Notes: `design.md` §7.2; mirrors `consumers.py:336-363` (validate runner, validate `project_slug`, populate authorised set, `_apply_hello`, mark online, drain queued runs, resume in-flight).
-- [ ] Per-runner stream materialization (atomic):
-  - [ ] `XGROUP CREATE runner_stream:{sid}:{rid} daemon-{sid} $ MKSTREAM` (idempotent on `BUSYGROUP`).
-  - [ ] PEL claim from prior session's `runner_stream:{old_sid}:{rid}` if non-empty within retention window.
-  - [ ] Drain `runner_offline_stream:{rid}` into the new session's stream; preserve original ids in metadata.
-  - [ ] Return `welcome`, `stream_id`, `starting_id`.
+- [ ] Per-runner stream/group setup (idempotent on `BUSYGROUP`):
+      `XGROUP CREATE runner_stream:{rid} runner-group:{rid} $ MKSTREAM`. The stream and group are persistent across sessions; only the consumer name is per-session.
+- [ ] PEL handoff: `XPENDING runner_stream:{rid} runner-group:{rid} - + COUNT 1000 consumer-{old_sid}` → `XCLAIM runner_stream:{rid} runner-group:{rid} consumer-{new_sid} 0 <id1> <id2> ...` for each pending id from the most-recently-revoked session within retention window.
+- [ ] Drain `runner_offline_stream:{rid}` into `runner_stream:{rid}` oldest-first; preserve original ids in metadata; `XDEL` from offline stream after each successful XADD.
+- [ ] Return `welcome`, the per-runner stream key (`runner_stream:{rid}`), and `starting_id` (`0-0` so the daemon's first `XREADGROUP ... 0` re-fetches PEL + offline-buffer entries).
 - [ ] `DELETE /api/v1/runner/connections/<cid>/sessions/<sid>/runners/<rid>/`
       Notes: marks runner offline within session; runner row unchanged.
 - [ ] On detach: publish `session_attach_change:<sid>` so any in-flight poll for the same session returns immediately with `messages: []` and the daemon's next poll uses the updated attached set (`design.md` §7.2).
@@ -128,22 +128,23 @@ How to use this file:
 ### 2.4. Long-poll endpoint
 
 - [ ] `POST /api/v1/runner/connections/<cid>/sessions/<sid>/poll`
-      Notes: `design.md` §7.3; POST not GET because body carries `ack` map and `status[]` vector.
+      Notes: `design.md` §7.3; POST not GET because body carries `ack` lists and `status[]` vector.
 - [ ] Validate session is active; reject stale `session_id` with `409 session_evicted`.
 - [ ] Update `RunnerSession.last_seen_at`.
 - [ ] For each `status[]` entry: validate runner is attached (`400 unknown_runner_in_status` on miss), update `Runner.last_heartbeat_at`, run `_reap_stale_busy_runs`.
 - [ ] Reject empty `status[]` when session has attached runners (`400 missing_runner_status`).
-- [ ] For each `ack[]` entry: `XACK` the runner's stream consumer group.
-- [ ] `XREADGROUP ... BLOCK 25000 STREAMS ... >` across all attached runners' streams.
+- [ ] For each `ack[<runner_id>]` list: `XACK runner_stream:{rid} runner-group:{rid} <id1> [<id2> ...]` (XACK takes exact id list, not range — `design.md` decision #9 + §7.4).
+- [ ] Per-stream id-marker selection: track `session_pel_drained:{sid}:{rid}` (Redis SET / boolean) — first poll after attach reads with `0`, subsequent polls with `>`.
+- [ ] Issue one `XREADGROUP GROUP runner-group:{rid} consumer-{sid} COUNT 100 BLOCK 25000 STREAMS runner_stream:{rid_a} runner_stream:{rid_b} ... <id_a> <id_b> ...` covering all attached runners.
 - [ ] Return drained entries with `stream_id`, `mid`, `runner_id`, `type`, `body`.
 
 ### 2.5. Outbox helpers
 
 - [ ] `enqueue_for_runner(runner_id, msg)` in `apps/api/pi_dash/runner/services/pubsub.py`
-      Notes: `design.md` §7.4; `XADD` to active-session stream if attached; offline policy if not.
+      Notes: `design.md` §7.4; `XADD runner_stream:{rid}` if the runner is attached to an active session; offline policy if not.
 - [ ] Offline policy: reject `assign|cancel|decide|resume_ack` with `RunnerOfflineError`; queue control msgs in `runner_offline_stream:{rid}` with `MAXLEN ~ 1000`, 24h TTL.
-- [ ] `read_for_session(sid, attached_rids, timeout_ms)` → `XREADGROUP`.
-- [ ] `ack_for_session(sid, ack_map)` → per-runner `XACK`.
+- [ ] `read_for_session(sid, attached_rids, timeout_ms)` → single `XREADGROUP GROUP runner-group:{rid} consumer-{sid} ... BLOCK timeout_ms STREAMS runner_stream:{rid_*} (0|>)*` covering all attached runners.
+- [ ] `ack_for_session(sid, {rid: [stream_id, ...]})` → for each runner: `XACK runner_stream:{rid} runner-group:{rid} <id1> [<id2> ...]` (multi-id form).
 - [ ] Migrate `send_to_runner` to **dual-write** during the transition (Channels group + Redis stream).
 
 ### 2.6. Session-eviction & detach signaling
@@ -167,7 +168,7 @@ How to use this file:
 
 - [ ] `sweep_idle_sessions` every 30s: revoke active sessions whose `last_seen_at` is older than `2 × long_poll_interval_secs` with reason `idle_timeout`; publish `session_eviction:<cid>` for each.
 - [ ] `sweep_stale_runners` every 30s: flip `Runner.status = OFFLINE` for online runners whose `last_heartbeat_at` is older than `runner_offline_threshold_secs` (does not revoke; re-attach revives).
-- [ ] `sweep_old_streams` every 5 min: `XGROUP DESTROY` + `DEL` per-runner streams of revoked sessions older than `2 × access_token_ttl_secs`; delete offline streams idle >24h with `XLEN == 0`.
+- [ ] `sweep_old_streams` every 5 min: for each revoked session older than `2 × access_token_ttl_secs`, `XGROUP DELCONSUMER runner_stream:{rid} runner-group:{rid} consumer-{sid}` for every runner that had been attached. The persistent `runner_stream:{rid}` and `runner-group:{rid}` are NOT destroyed by this sweep. Separately: delete `runner_stream:{rid}` whose runner is revoked or has been idle with `XLEN == 0` for >24h. Delete `runner_offline_stream:{rid}` idle >24h with `XLEN == 0`.
 - [ ] `sweep_run_message_dedupe` daily: delete rows older than `run_message_dedupe_ttl_secs` (7d).
 - [ ] Wire all four to Celery beat (or chosen periodic scheduler); document expected execution time per run.
 
@@ -184,7 +185,7 @@ How to use this file:
 ### 2.10. Tests
 
 - [ ] Open session → attach runner → poll receives queued message → ack via next poll → message gone.
-- [ ] Concurrent session-open evicts prior session; displaced poll returns `409 session_evicted`; new session inherits PEL via `XCLAIM` at attach.
+- [ ] Concurrent session-open evicts prior session; displaced poll returns `409 session_evicted`. New session's per-runner `attach/` XCLAIMs the prior consumer name's PEL onto the new consumer name (within the same persistent stream + group); first poll under new session re-fetches via `XREADGROUP ... 0`.
 - [ ] Per-runner liveness: omit one of two attached runners from `status[]`; sibling continues; omitted runner flips OFFLINE after 50s; stale busy-run reaping fires.
 - [ ] Concurrent poll on same `session_id` → `409 concurrent_poll`.
 - [ ] Offline enqueue rejected for `assign`; accepted for `config_push`; offline stream caps at `MAXLEN`.
@@ -254,8 +255,10 @@ Sub-phases per `daemon_module.md` §13. Each is independently mergeable.
 - [ ] Drop the standalone `demux` task; logic now inside `HttpLoop`.
 - [ ] Recovery on transient errors: exponential backoff ≤30s; on session-stale (network blip, **not** `409`), `open_session()` + `connected.notify_one()`. `409 session_evicted` is fatal and triggers shutdown.
 - [ ] On `RunnerLoop` exit (e.g. due to `RemoveRunner`), the supervisor's join-handler removes the runner from `mailboxes`/`status_sources`/`attach_runners` maps and calls `client.detach_runner(runner_id)` (`daemon_module.md` §11).
-- [ ] Ack-on-receive: track `ack_map` inside `HttpLoop`, submit on next poll.
+- [ ] **Ack-on-handle** (`design.md` decision #21, `daemon_module.md` §8): per-`RunnerInstance` `mpsc::UnboundedSender<AckEntry>` is plumbed from the supervisor into each `RunnerLoop`; `RunnerLoop` sends `(runner_id, stream_id)` after the inner handler completes successfully. `HttpLoop::poll_once` drains all pending acks via `ack_rx.try_recv()` to build `{runner_id: [stream_id, ...]}`.
+- [ ] Per-instance `InboundDedupe` (small bounded LRU keyed on `Envelope.message_id`, capacity ~256, TTL ~5 min) — when a redelivery from PEL arrives, ack-and-skip rather than re-running the handler.
 - [ ] End-to-end integration test: assign → accept → run-event → completed over HTTP.
+- [ ] Ack-on-handle integration test: poll returns 3 messages for the same runner; block one handler; assert next poll's `ack[<runner_id>]` only contains the two completed ids.
 
 ### 4c. Heartbeat → poll-body status folding
 
