@@ -443,6 +443,13 @@ fn sync_picker_to_ipc(state: &mut AppState) {
         .map(|r| r.name.clone());
 }
 
+/// Bounded wrap-around for picker indices. `len` is assumed > 0.
+fn wrap_idx(cur: usize, delta: isize, len: usize) -> usize {
+    let n = len as isize;
+    let next = (cur as isize + delta).rem_euclid(n);
+    next as usize
+}
+
 /// Move the runner picker by `delta` (signed), wrapping at ends. No-op when
 /// only one runner is configured. Pushes the new selection into the IPC
 /// scope and triggers a refresh so per-runner views update immediately.
