@@ -17,5 +17,5 @@ pub mod tui;
 pub mod util;
 pub mod workspace;
 
-pub const PROTOCOL_VERSION: u32 = 2;
+pub const PROTOCOL_VERSION: u32 = 3;
 pub const RUNNER_VERSION: &str = env!("CARGO_PKG_VERSION");

@@ -24,13 +24,11 @@ pub struct StateHandle {
 
 struct Inner {
     cfg: Mutex<Config>,
+    /// Cached from the first runner at construction time so
+    /// ``runner_snapshot()`` doesn't lock ``cfg`` on every poll. Empty
+    /// string when the connection has no runners yet.
     name: String,
-    /// Project identifier this runner serves. Cached at construction
-    /// time so `runner_snapshot()` doesn't need to lock `cfg` on every
-    /// status poll.
     project_slug: Option<String>,
-    /// Pod id assigned by the cloud at registration. Same caching
-    /// rationale as `project_slug`.
     pod_id: Option<Uuid>,
     cloud_url: Mutex<String>,
     started_at: DateTime<Utc>,
@@ -47,10 +45,10 @@ impl StateHandle {
         let (tx_status, rx_status) = watch::channel(RunnerStatus::Idle);
         let (tx_in_flight, rx_in_flight) = watch::channel(None);
         let (tx_heartbeat_secs, rx_heartbeat_secs) = watch::channel(25u64);
-        let primary = cfg.primary_runner();
-        let name = primary.name.clone();
-        let project_slug = primary.project_slug.clone();
-        let pod_id = primary.pod_id;
+        let (name, project_slug, pod_id) = match cfg.primary_runner() {
+            Some(r) => (r.name.clone(), r.project_slug.clone(), r.pod_id),
+            None => (String::new(), None, None),
+        };
         let cloud_url = cfg.daemon.cloud_url.clone();
         Self {
             inner: Arc::new(Inner {

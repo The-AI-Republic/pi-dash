@@ -34,11 +34,11 @@ fn top_level_service_verbs_are_registered() {
 fn non_service_commands_still_present() {
     let names = subcommand_names();
     for v in [
-        "configure",
+        "connect",
+        "runner",
         "tui",
         "doctor",
         "remove",
-        "rotate",
         "issue",
         "comment",
         "state",

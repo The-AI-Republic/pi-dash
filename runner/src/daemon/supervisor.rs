@@ -71,7 +71,9 @@ impl Supervisor {
             state,
             approvals: _supervisor_approvals,
         } = self;
-        state.set_runner_id(creds.runner_id).await;
+        // Daemon-level state has no single runner_id any more — runners
+        // come and go under one connection. Per-instance state still
+        // holds its own runner_id (set in RunnerInstance::new).
 
         let (out_tx, out_rx) = mpsc::channel::<Envelope<ClientMsg>>(128);
         let (in_tx, in_rx) = mpsc::channel::<Envelope<ServerMsg>>(128);
@@ -107,14 +109,11 @@ impl Supervisor {
                 .collect::<HelloRunnerMap>(),
         ));
 
-        // Primary runner = the first configured runner. Used by IPC and
-        // (legacy) heartbeat-status fields that haven't been split per-
-        // instance yet. With one runner this is the only runner; with
-        // many it's the daemon-level "default" view.
-        let primary = instances
-            .first()
-            .cloned()
-            .ok_or_else(|| anyhow::anyhow!("config.runners is empty; daemon refuses to start"))?;
+        // Primary runner for IPC's "default snapshot" — whichever runner
+        // happens to be first in config.toml. None when the connection
+        // has zero runners yet (a freshly enrolled dev machine), in which
+        // case IPC falls back to the daemon-level state.
+        let primary = instances.first().cloned();
 
         // Snapshot of every configured runner the IPC server can
         // route requests to. Built once at startup; runtime add /
@@ -127,7 +126,10 @@ impl Supervisor {
             .collect();
         let ipc = IpcServer {
             path: paths.ipc_socket_path(),
-            primary_state: primary.state.clone(),
+            primary_state: primary
+                .as_ref()
+                .map(|p| p.state.clone())
+                .unwrap_or_else(|| state.clone()),
             paths: paths.clone(),
             instances: Arc::new(ipc_instances),
         };

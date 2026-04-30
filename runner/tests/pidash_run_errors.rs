@@ -38,8 +38,8 @@ async fn run_errors_when_config_missing() {
         "error should mention config.toml: {msg}",
     );
     assert!(
-        msg.contains("pidash configure") || msg.contains("pidash install"),
-        "error should point at `pidash configure` or `pidash install`: {msg}",
+        msg.contains("pidash connect") || msg.contains("pidash install"),
+        "error should point at `pidash connect` or `pidash install`: {msg}",
     );
 }
 
@@ -73,7 +73,7 @@ working_dir = "/tmp/wd"
         "error should mention credentials.toml: {msg}",
     );
     assert!(
-        msg.contains("pidash configure"),
-        "error should point at `pidash configure`: {msg}",
+        msg.contains("pidash connect"),
+        "error should point at `pidash connect`: {msg}",
     );
 }

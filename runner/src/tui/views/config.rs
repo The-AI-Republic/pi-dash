@@ -136,29 +136,39 @@ pub fn field_at(idx: usize) -> &'static FieldSpec {
 }
 
 /// Look up the runner the Config tab's per-runner fields apply to.
-/// Clamps `idx` into bounds so a stale picker index from a freshly
-/// loaded config can't panic. Daemon-level fields (LogLevel etc.)
-/// don't go through this.
-fn runner_at(cfg: &Config, idx: usize) -> &crate::config::schema::RunnerConfig {
-    let n = cfg.runners.len().max(1);
-    let i = idx.min(n - 1);
-    cfg.runners.get(i).unwrap_or_else(|| cfg.primary_runner())
+/// Returns None when the config has no runners — the Config tab should
+/// be skipped from the TUI in that state. Callers in this module that
+/// dispatch on the field id treat None as "no-op" / empty value.
+fn runner_at(cfg: &Config, idx: usize) -> Option<&crate::config::schema::RunnerConfig> {
+    if cfg.runners.is_empty() {
+        return None;
+    }
+    let i = idx.min(cfg.runners.len() - 1);
+    cfg.runners.get(i)
 }
 
 fn runner_at_mut(
     cfg: &mut Config,
     idx: usize,
-) -> &mut crate::config::schema::RunnerConfig {
-    let n = cfg.runners.len().max(1);
-    let i = idx.min(n - 1);
-    if cfg.runners.get(i).is_some() {
-        return &mut cfg.runners[i];
+) -> Option<&mut crate::config::schema::RunnerConfig> {
+    if cfg.runners.is_empty() {
+        return None;
     }
-    cfg.primary_runner_mut()
+    let i = idx.min(cfg.runners.len() - 1);
+    cfg.runners.get_mut(i)
 }
 
 pub fn display_value(cfg: &Config, id: FieldId, runner_idx: usize) -> String {
-    let runner = runner_at(cfg, runner_idx);
+    // Daemon-level fields render even when there are no runners.
+    if let FieldId::LogLevel = id {
+        return cfg.daemon.log_level.clone();
+    }
+    if let FieldId::LogRetentionDays = id {
+        return cfg.daemon.log_retention_days.to_string();
+    }
+    let Some(runner) = runner_at(cfg, runner_idx) else {
+        return String::new();
+    };
     match id {
         FieldId::RunnerName => runner.name.clone(),
         FieldId::WorkspaceWorkingDir => runner.workspace.working_dir.display().to_string(),
@@ -179,8 +189,7 @@ pub fn display_value(cfg: &Config, id: FieldId, runner_idx: usize) -> String {
             .auto_approve_workspace_writes
             .to_string(),
         FieldId::ApprovalAutoNetwork => runner.approval_policy.auto_approve_network.to_string(),
-        FieldId::LogLevel => cfg.daemon.log_level.clone(),
-        FieldId::LogRetentionDays => cfg.daemon.log_retention_days.to_string(),
+        FieldId::LogLevel | FieldId::LogRetentionDays => unreachable!(),
     }
 }
 
@@ -200,7 +209,9 @@ pub fn set_text_value(
         cfg.daemon.log_retention_days = n;
         return Ok(());
     }
-    let runner = runner_at_mut(cfg, runner_idx);
+    let Some(runner) = runner_at_mut(cfg, runner_idx) else {
+        return Err("no runners configured; add one with `pidash runner add` first".into());
+    };
     match id {
         FieldId::RunnerName => {
             crate::util::runner_name::validate(s).map_err(|e| e.to_string())?;
@@ -251,7 +262,9 @@ pub fn set_text_value(
 }
 
 pub fn toggle_bool(cfg: &mut Config, id: FieldId, runner_idx: usize) {
-    let runner = runner_at_mut(cfg, runner_idx);
+    let Some(runner) = runner_at_mut(cfg, runner_idx) else {
+        return;
+    };
     match id {
         FieldId::ApprovalAutoReadonly => {
             let v = &mut runner.approval_policy.auto_approve_readonly_shell;
@@ -272,7 +285,9 @@ pub fn toggle_bool(cfg: &mut Config, id: FieldId, runner_idx: usize) {
 pub fn cycle_enum(cfg: &mut Config, id: FieldId, runner_idx: usize) {
     match id {
         FieldId::AgentKind => {
-            let runner = runner_at_mut(cfg, runner_idx);
+            let Some(runner) = runner_at_mut(cfg, runner_idx) else {
+                return;
+            };
             runner.agent.kind = match runner.agent.kind {
                 AgentKind::Codex => AgentKind::ClaudeCode,
                 AgentKind::ClaudeCode => AgentKind::Codex,
@@ -340,12 +355,12 @@ pub fn register_form_lines(state: &AppState) -> Vec<Line<'static>> {
     };
     let mut lines = vec![
         Line::from(Span::styled(
-            "This runner isn't registered yet.",
+            "This dev machine isn't enrolled yet.",
             Style::default()
                 .fg(Color::Yellow)
                 .add_modifier(Modifier::BOLD),
         )),
-        Line::from("Fill in the form below and press [Register] to connect."),
+        Line::from("Fill in the form below and press [Connect] to enroll."),
         Line::raw(""),
     ];
 
@@ -356,11 +371,11 @@ pub fn register_form_lines(state: &AppState) -> Vec<Line<'static>> {
     ));
     // Token is pre-masked here; `form_field_line` is unaware of masking.
     lines.push(form_field_line(
-        "Token",
+        "Enrollment token",
         &mask_token(&form.token),
         form.focus == 1,
     ));
-    lines.push(form_field_line("Runner name", &form.name, form.focus == 2));
+    lines.push(form_field_line("Host label", &form.name, form.focus == 2));
     lines.push(Line::raw(""));
     lines.push(form_button_line(form.focus == 3, form.busy));
     lines.push(Line::raw(""));
@@ -369,7 +384,7 @@ pub fn register_form_lines(state: &AppState) -> Vec<Line<'static>> {
         Style::default().add_modifier(Modifier::DIM),
     )));
     lines.push(Line::from(Span::styled(
-        "Tokens are generated in the Pi Dash web UI: Workspace → Runners → Mint code",
+        "Get an enrollment token from the Pi Dash web UI: Workspace → Runners → Add connection",
         Style::default().add_modifier(Modifier::DIM),
     )));
 
@@ -418,9 +433,9 @@ fn form_field_line(label: &str, value: &str, focused: bool) -> Line<'static> {
 
 fn form_button_line(focused: bool, busy: bool) -> Line<'static> {
     let label = if busy {
-        " Registering… "
+        " Connecting… "
     } else {
-        " Register "
+        " Connect "
     };
     let style = if focused {
         Style::default()
@@ -468,13 +483,18 @@ pub fn editable_lines(
         index_of(FieldId::RunnerName),
     ));
     let picker_idx = state.runner_picker_idx;
-    let picked_runner = runner_at(working, picker_idx);
-    lines.push(readonly_row(
-        "workspace_slug",
-        picked_runner.workspace_slug.as_deref().unwrap_or("-"),
-    ));
-    if let Some(slug) = picked_runner.project_slug.as_deref() {
-        lines.push(readonly_row("project_slug", slug));
+    if let Some(picked_runner) = runner_at(working, picker_idx) {
+        lines.push(readonly_row(
+            "workspace_slug",
+            picked_runner.workspace_slug.as_deref().unwrap_or("-"),
+        ));
+        if let Some(slug) = picked_runner.project_slug.as_deref() {
+            lines.push(readonly_row("project_slug", slug));
+        }
+    } else {
+        lines.push(readonly_hint(
+            "(no runners configured — add one from the Runners tab)",
+        ));
     }
     lines.push(readonly_hint(
         "workspace + project are bound at registration. Re-register or use \
@@ -516,20 +536,22 @@ pub fn editable_lines(
             index_of(id),
         ));
     }
-    lines.push(readonly_row(
-        "allowlist_commands",
-        &format!(
-            "{} entries (edit via CLI / hand-edit)",
-            picked_runner.approval_policy.allowlist_commands.len()
-        ),
-    ));
-    lines.push(readonly_row(
-        "denylist_commands",
-        &format!(
-            "{} entries (edit via CLI / hand-edit)",
-            picked_runner.approval_policy.denylist_commands.len()
-        ),
-    ));
+    if let Some(picked_runner) = runner_at(working, picker_idx) {
+        lines.push(readonly_row(
+            "allowlist_commands",
+            &format!(
+                "{} entries (edit via CLI / hand-edit)",
+                picked_runner.approval_policy.allowlist_commands.len()
+            ),
+        ));
+        lines.push(readonly_row(
+            "denylist_commands",
+            &format!(
+                "{} entries (edit via CLI / hand-edit)",
+                picked_runner.approval_policy.denylist_commands.len()
+            ),
+        ));
+    }
     lines.push(Line::raw(""));
     lines.push(Line::from(Span::styled(
         "Daemon-level fields (log level, log retention) live in the General tab.",

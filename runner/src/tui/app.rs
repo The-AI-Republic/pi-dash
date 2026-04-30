@@ -154,7 +154,7 @@ pub struct AddRunnerForm {
     /// Cloud-fetched project list. `None` while loading; `Some(empty)`
     /// when the workspace has no projects (form surfaces an error and
     /// disables Submit).
-    pub projects: Option<Vec<crate::cli::token::ProjectInfo>>,
+    pub projects: Option<Vec<crate::cloud::projects::ProjectInfo>>,
     /// Index into `projects` for the highlighted project. Clamped on
     /// load so empty / single-project workspaces don't break.
     pub project_idx: usize,
@@ -185,11 +185,11 @@ impl AddRunnerForm {
         }
     }
 
-    pub fn selected_project(&self) -> Option<&crate::cli::token::ProjectInfo> {
+    pub fn selected_project(&self) -> Option<&crate::cloud::projects::ProjectInfo> {
         self.projects.as_ref()?.get(self.project_idx)
     }
 
-    pub fn selected_pod(&self) -> Option<&crate::cli::token::PodInfo> {
+    pub fn selected_pod(&self) -> Option<&crate::cloud::projects::PodInfo> {
         self.selected_project()?.pods.get(self.pod_idx)
     }
 
@@ -1108,7 +1108,7 @@ async fn load_projects_into_form(state: &mut AppState) {
     if state.add_runner_form.is_none() {
         return;
     }
-    match crate::cli::token::list_projects(&state.paths).await {
+    match crate::cloud::projects::list_projects(&state.paths).await {
         Ok(projects) => {
             if let Some(f) = state.add_runner_form.as_mut() {
                 f.project_idx = 0;
@@ -1140,7 +1140,7 @@ async fn submit_add_runner_form(state: &mut AppState) {
     // Picker selections — required since the user can't type a project.
     let Some(project) = form.selected_project().cloned() else {
         form.error = Some(
-            "no projects available — verify `pidash token list-projects` works."
+            "no projects available — verify the cloud reachable and the connection is enrolled."
                 .into(),
         );
         return;
@@ -1167,15 +1167,15 @@ async fn submit_add_runner_form(state: &mut AppState) {
     form.busy = true;
     form.error = None;
 
-    let args = crate::cli::token::AddRunnerArgs {
-        name,
+    let args = crate::cli::runner::AddArgs {
+        name: Some(name),
         project: project.identifier.clone(),
         pod: pod_name,
-        working_dir: std::path::PathBuf::from(working_dir),
+        working_dir: Some(std::path::PathBuf::from(working_dir)),
         agent: crate::config::schema::AgentKind::Codex,
     };
 
-    let outcome = match crate::cli::token::add_runner(args, &state.paths).await {
+    let outcome = match crate::cli::runner::add(args, &state.paths).await {
         Ok(o) => o,
         Err(e) => {
             if let Some(f) = state.add_runner_form.as_mut() {
@@ -1212,8 +1212,8 @@ async fn submit_remove_runner(state: &mut AppState) {
     let Some(name) = state.remove_runner_confirm.take() else {
         return;
     };
-    let args = crate::cli::token::RemoveRunnerArgs { name: name.clone() };
-    match crate::cli::token::remove_runner(args, &state.paths).await {
+    let args = crate::cli::runner::RemoveArgs { name: name.clone() };
+    match crate::cli::runner::remove(args, &state.paths).await {
         Ok(_) => {
             state.reload_outcome =
                 Some(crate::service::reload::restart_and_verify(&state.paths).await);
@@ -1257,65 +1257,46 @@ fn register_form_advance_focus(form: &mut RegisterForm, forward: bool) {
     };
 }
 
-/// Submit the registration form. On success, writes config + credentials,
-/// installs the service unit, and kicks the daemon — same end state as
-/// `pidash configure --url ... --token ...` on the CLI.
+/// Submit the General-tab enrollment form. Equivalent to running
+/// ``pidash connect --url … --token …`` from the shell: enrolls the
+/// machine as a Connection, writes credentials, installs + starts the
+/// service. Runners are added separately from the Runners tab.
 async fn submit_register_form(state: &mut AppState) {
     let Some(form) = state.register_form.as_mut() else {
         return;
     };
-    // Field-level validation first so we don't waste a cloud round trip.
     let cloud_url = form.cloud_url.trim().to_string();
     let token = form.token.trim().to_string();
-    let name = form.name.trim().to_string();
-    if let Err(e) = crate::cli::configure::validate_cloud_url(&cloud_url) {
+    let host_label = form.name.trim().to_string();
+    if let Err(e) = crate::cli::connect::validate_cloud_url(&cloud_url) {
         form.error = Some(format!("{e}"));
         return;
     }
     if token.is_empty() {
-        form.error = Some("registration token is required".into());
-        return;
-    }
-    if name.is_empty() {
-        form.error = Some("runner name is required".into());
-        return;
-    }
-    if let Err(e) = crate::util::runner_name::validate(&name) {
-        form.error = Some(format!("invalid runner name: {e}"));
+        form.error = Some("enrollment token is required".into());
         return;
     }
     form.busy = true;
     form.error = None;
 
-    // The TUI register form is on hold pending the multi-runner UX
-    // refactor — the project picker hasn't landed yet. We surface the
-    // limitation by sending the request with an empty project string,
-    // which the cloud rejects with a clear "project is required" 400.
-    // Users should run `pidash configure --url ... --token ... --project
-    // <SLUG>` from the CLI for now.
-    let req = crate::cloud::register::RegisterRequest {
-        runner_name: name.clone(),
+    let req = crate::cloud::enroll::EnrollmentRequest {
+        token: token.clone(),
+        host_label: host_label.clone(),
         os: std::env::consts::OS.to_string(),
         arch: std::env::consts::ARCH.to_string(),
         version: crate::RUNNER_VERSION.to_string(),
-        protocol_version: crate::PROTOCOL_VERSION,
-        project: String::new(),
-        pod: None,
     };
-    let resp = match crate::cloud::register::register(&cloud_url, &token, &req).await {
+    let resp = match crate::cloud::enroll::enroll(&cloud_url, &req).await {
         Ok(r) => r,
         Err(e) => {
             if let Some(form) = state.register_form.as_mut() {
                 form.busy = false;
-                form.error = Some(format!("register failed: {e:#}"));
+                form.error = Some(format!("enroll failed: {e:#}"));
             }
             return;
         }
     };
 
-    // Write config + credentials (same shape as cli::configure::execute's
-    // happy path, minus the `extras` apply since the TUI form doesn't
-    // collect advanced fields — user edits them in the Config tab after).
     let cfg = crate::config::schema::Config {
         version: 2,
         daemon: crate::config::schema::DaemonConfig {
@@ -1323,20 +1304,7 @@ async fn submit_register_form(state: &mut AppState) {
             log_level: "info".to_string(),
             log_retention_days: 14,
         },
-        runners: vec![crate::config::schema::RunnerConfig {
-            name: name.clone(),
-            runner_id: resp.runner_id,
-            workspace_slug: resp.workspace_slug.clone(),
-            project_slug: resp.project_identifier.clone(),
-            pod_id: resp.pod_id,
-            workspace: crate::config::schema::WorkspaceSection {
-                working_dir: state.paths.default_working_dir(),
-            },
-            agent: Default::default(),
-            codex: Default::default(),
-            claude_code: Default::default(),
-            approval_policy: Default::default(),
-        }],
+        runners: Vec::new(),
     };
     if let Err(e) = crate::config::file::write_config(&state.paths, &cfg) {
         if let Some(form) = state.register_form.as_mut() {
@@ -1346,10 +1314,10 @@ async fn submit_register_form(state: &mut AppState) {
         return;
     }
     let creds = crate::config::schema::Credentials {
-        token: None,
-        runner_id: resp.runner_id,
-        runner_secret: resp.runner_secret,
-        api_token: resp.api_token,
+        connection_id: resp.connection_id,
+        connection_secret: resp.connection_secret,
+        connection_name: None,
+        api_token: None,
         issued_at: chrono::Utc::now(),
     };
     if let Err(e) = crate::config::file::write_credentials(&state.paths, &creds) {

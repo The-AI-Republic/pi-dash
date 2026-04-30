@@ -26,27 +26,30 @@ pub async fn run(args: Args, paths: &Paths) -> Result<()> {
     if !config_path.exists() {
         anyhow::bail!(
             "no config.toml at {config_path:?}. \
-             Run `pidash configure --url <URL> --token <ONE_TIME_TOKEN>` \
-             (or `pidash install` for a fresh setup)."
+             Run `pidash connect --url <URL> --token <ONE_TIME_TOKEN>` first."
         );
     }
     if !creds_path.exists() {
         anyhow::bail!(
             "no credentials.toml at {creds_path:?}. \
-             Run `pidash configure --url <URL> --token <ONE_TIME_TOKEN>` \
-             to re-register this runner."
+             Run `pidash connect --url <URL> --token <ONE_TIME_TOKEN>` to enroll."
         );
     }
 
     let (config, creds) = crate::config::file::load_all(paths).context(
-        "failed to load runner config; re-run `pidash configure` if the files are corrupt",
+        "failed to load runner config; re-run `pidash connect` if the files are corrupt",
     )?;
     config
         .validate()
         .context("config.toml failed validation; refusing to start the daemon")?;
+    let primary_name = config
+        .primary_runner()
+        .map(|r| r.name.as_str())
+        .unwrap_or("(no runners)");
     tracing::info!(
-        runner = %config.primary_runner().name,
-        runner_id = %creds.runner_id,
+        runner = %primary_name,
+        connection_id = %creds.connection_id,
+        runner_count = config.runners.len(),
         "starting daemon"
     );
     let opts = crate::daemon::Options {
