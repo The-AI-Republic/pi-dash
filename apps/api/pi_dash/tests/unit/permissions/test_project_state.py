@@ -17,7 +17,15 @@ from pi_dash.db.models import (
 
 @pytest.fixture
 def other_user(db):
-    return User.objects.create(email="other@example.com", first_name="Other", last_name="User")
+    # Distinct username so this fixture composes with create_user (which
+    # leaves username at the model default of empty string). Without it,
+    # tests that pull both fixtures collide on users_username_key.
+    return User.objects.create(
+        username="other",
+        email="other@example.com",
+        first_name="Other",
+        last_name="User",
+    )
 
 
 @pytest.fixture
