@@ -98,9 +98,11 @@ pub struct CodexSection {
 
 impl Default for CodexSection {
     fn default() -> Self {
-        // model_default stays None — the runner must not pin a model and
-        // let codex pick its own default. Hardcoding one (even a "good"
-        // one) breaks accounts whose tier doesn't carry that model.
+        // Leave model unset: when `model_default` is None we omit the `model`
+        // field from `thread/start` and `turn/start`, so codex picks its own
+        // default. Hardcoding `gpt-5-codex` here forced every fresh runner
+        // onto a model that's unavailable on ChatGPT-account auth — runs
+        // would 400 from the OpenAI side before doing any work.
         Self {
             binary: "codex".to_string(),
             model_default: None,
