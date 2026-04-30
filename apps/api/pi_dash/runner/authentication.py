@@ -2,21 +2,18 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 # See the LICENSE file for details.
 
-"""DRF authentication for runner daemons using a bearer credential.
+"""DRF authentication for runner-daemon REST traffic.
 
-Runner daemons call ``/api/v1/runner/...`` with ``Authorization: Bearer <secret>``
-in one of two modes:
+Daemons call ``/api/v1/runner/...`` with two headers:
 
-- Legacy / per-runner: Authorization-only. Looks up a Runner by
-  credential_hash. ``request.auth_runner`` is set; ``request.auth_token``
-  is None.
-- Token / multi-runner: ``X-Token-Id`` header in addition to
-  Authorization. Looks up a MachineToken by id, verifies the secret,
-  and resolves the Runner from the request URL or body. ``request.
-  auth_token`` is set; ``request.auth_runner`` is set when a runner_id
-  is identifiable from the request.
+    Authorization: Bearer <connection_secret>
+    X-Connection-Id: <uuid>
 
-The secret is hashed at rest in either case.
+The header pair is verified against an active (``revoked_at IS NULL``,
+``enrolled_at IS NOT NULL``) Connection row. ``request.auth_connection``
+is set on success; if the URL kwargs name a runner_id, that runner is
+verified to belong to the connection and exposed on
+``request.auth_runner``.
 """
 
 from __future__ import annotations
@@ -26,14 +23,14 @@ from uuid import UUID
 
 from rest_framework import authentication, exceptions
 
-from pi_dash.runner.models import MachineToken, Runner, RunnerStatus
+from pi_dash.runner.models import Connection, Runner
 from pi_dash.runner.services.tokens import hash_token
 
 
-class RunnerBearerAuthentication(authentication.BaseAuthentication):
+class ConnectionBearerAuthentication(authentication.BaseAuthentication):
     keyword = "Bearer"
 
-    def authenticate(self, request) -> Optional[Tuple[Runner, None]]:
+    def authenticate(self, request) -> Optional[Tuple[object, None]]:
         header = authentication.get_authorization_header(request)
         if not header:
             return None
@@ -41,54 +38,40 @@ class RunnerBearerAuthentication(authentication.BaseAuthentication):
         if len(parts) != 2 or parts[0].decode().lower() != self.keyword.lower():
             return None
         raw = parts[1].decode()
-        hashed = hash_token(raw)
-
-        # Token mode: X-Token-Id header is present alongside the Bearer.
-        token_id_raw = (request.META.get("HTTP_X_TOKEN_ID") or "").strip()
-        if token_id_raw:
-            try:
-                token_id = UUID(token_id_raw)
-            except (ValueError, AttributeError):
-                raise exceptions.AuthenticationFailed("invalid X-Token-Id")
-            try:
-                token = MachineToken.objects.get(
-                    id=token_id, secret_hash=hashed, revoked_at__isnull=True
-                )
-            except MachineToken.DoesNotExist:
-                raise exceptions.AuthenticationFailed("invalid or revoked token")
-            request.auth_token = token
-            # Resolve the target runner from the URL kwarg if present, so
-            # views like /<runner_id>/deregister/ pick it up automatically.
-            runner_id = (
-                getattr(request, "resolver_match", None)
-                and request.resolver_match.kwargs.get("runner_id")
-            )
-            if runner_id:
-                runner = Runner.objects.filter(
-                    id=runner_id, machine_token=token
-                ).first()
-                if runner is None:
-                    raise exceptions.AuthenticationFailed(
-                        "runner not owned by this token"
-                    )
-                request.auth_runner = runner
-                return (runner, None)
-            # Token-only auth (no runner in URL). Present the token's
-            # creator as the user; views can read request.auth_token.
-            return (token.created_by, None)
-
-        # Legacy per-runner auth.
+        connection_id_raw = (request.META.get("HTTP_X_CONNECTION_ID") or "").strip()
+        if not connection_id_raw:
+            raise exceptions.AuthenticationFailed("missing X-Connection-Id")
         try:
-            runner = Runner.objects.get(credential_hash=hashed)
-        except Runner.DoesNotExist:
-            raise exceptions.AuthenticationFailed("invalid runner credential")
-        if runner.status == RunnerStatus.REVOKED:
-            raise exceptions.AuthenticationFailed("runner is revoked")
-        # Present the runner as the DRF-authenticated entity. Views that need
-        # the owning user should use `request.auth_runner.owner`.
-        request.auth_runner = runner
-        request.auth_token = None
-        return (runner, None)
+            connection_id = UUID(connection_id_raw)
+        except (ValueError, AttributeError):
+            raise exceptions.AuthenticationFailed("invalid X-Connection-Id")
+        secret_hash = hash_token(raw)
+        try:
+            connection = Connection.objects.get(
+                id=connection_id,
+                secret_hash=secret_hash,
+                revoked_at__isnull=True,
+                enrolled_at__isnull=False,
+            )
+        except Connection.DoesNotExist:
+            raise exceptions.AuthenticationFailed("invalid or revoked connection")
+
+        request.auth_connection = connection
+        request.auth_runner = None
+        runner_id = (
+            getattr(request, "resolver_match", None)
+            and request.resolver_match.kwargs.get("runner_id")
+        )
+        if runner_id:
+            runner = Runner.objects.filter(
+                id=runner_id, connection=connection
+            ).first()
+            if runner is None:
+                raise exceptions.AuthenticationFailed(
+                    "runner not owned by this connection"
+                )
+            request.auth_runner = runner
+        return (connection.created_by, None)
 
     def authenticate_header(self, request) -> str:
         return self.keyword

@@ -76,15 +76,17 @@ def close_runner_session(runner_id: UUID | str, code: int = 4010) -> None:
     })
 
 
-def send_token_revoke(runner_id: UUID | str, reason: str = "token revoked") -> None:
+def send_connection_revoke(
+    runner_id: UUID | str, reason: str = "connection revoked"
+) -> None:
     """Send a connection-scoped ``Revoke`` frame to the consumer that
     serves ``runner_id``, then close the WebSocket.
 
-    Used by ``MachineToken.revoke()`` so the daemon receives a wire-level
+    Used by ``Connection.revoke()`` so the daemon receives a wire-level
     Revoke (rid=None) rather than just a TCP close, lets its supervisor
-    initiate ``state.shutdown()`` cleanly, and exits non-zero. In token
-    mode one consumer is joined to N runner groups on one connection;
-    sending to any single owned runner reaches the same consumer once.
+    initiate ``state.shutdown()`` cleanly, and exits non-zero. One
+    consumer is joined to N runner groups on a connection; sending to
+    any single owned runner reaches the same consumer once.
     """
     layer = get_channel_layer()
     if layer is None:

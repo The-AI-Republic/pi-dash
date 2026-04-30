@@ -197,7 +197,13 @@ class ApprovalKind(models.TextChoices):
 
 
 class Runner(models.Model):
-    """A physical dev machine that can execute AgentRuns."""
+    """A logical runner registered under a Connection.
+
+    Runners no longer carry their own bearer credential. The dev machine
+    authenticates as a Connection (``Authorization: Bearer <connection_secret>``
+    + ``X-Connection-Id``) and operates 0..N runners under it; ``runner_id``
+    is just a routing key on the wire.
+    """
 
     MAX_PER_USER = 5
 
@@ -222,19 +228,12 @@ class Runner(models.Model):
         related_name="runners",
     )
     name = models.CharField(max_length=128)
-    # Runner authenticates over WS with a bearer token; we store only its hash.
-    credential_hash = models.CharField(max_length=128, db_index=True)
-    credential_fingerprint = models.CharField(max_length=16)
-    # Machine token (multi-runner). When present, the daemon hosting this
-    # runner authenticates as the token rather than presenting the runner's
-    # own credential. NULL on legacy v1 installs that haven't migrated yet
-    # and on the transitional period before phase 2 ships in production.
-    # See ``design.md`` §5.1.
-    machine_token = models.ForeignKey(
-        "MachineToken",
-        null=True,
-        blank=True,
-        on_delete=models.SET_NULL,
+    # The dev-machine connection that owns this runner. Required: every runner
+    # is registered under exactly one connection. Revoking the connection
+    # cascades to its runners (see ``Connection.revoke``).
+    connection = models.ForeignKey(
+        "Connection",
+        on_delete=models.CASCADE,
         related_name="runners",
     )
     capabilities = models.JSONField(default=list, blank=True)
@@ -389,79 +388,136 @@ class Runner(models.Model):
 MAX_RUNNERS_PER_MACHINE = 50
 
 
-class MachineToken(models.Model):
-    """Long-lived machine credential — authenticates one dev-machine daemon
-    over WebSocket and authorises it to act as N runners under it.
+class ConnectionStatus(models.TextChoices):
+    PENDING = "pending", "Pending Enrollment"
+    ACTIVE = "active", "Active"
+    REVOKED = "revoked", "Revoked"
 
-    See ``.ai_design/n_runners_in_same_machine/design.md`` §5.1. Each
-    daemon process holds exactly one MachineToken; the token's ``owns``
-    set (resolved via ``Runner.machine_token`` FK) is the list of runners
-    the daemon may bring online with ``Hello { runner_id }``.
 
-    Surfaced in the Pi Dash UI as a "connection" with a user-supplied
-    title; revoking the token tears down the daemon's connection on next
-    auth check (synchronous via connection-scoped Revoke when the WS is
-    up; on next reconnect via 401 otherwise) and cascades to all owned
-    runners going offline. Tokens are not rotatable — only create/revoke
-    per decisions.md Q8.
+class Connection(models.Model):
+    """A paired dev machine that may host 0..N runners.
+
+    A connection is created on the cloud (web UI) with a one-time
+    enrollment token. The user runs ``pi-dash-runner connect --url …
+    --token …`` on a dev machine, which exchanges the token for the
+    long-lived ``connection_secret`` used on the WebSocket
+    (``Authorization: Bearer <secret>`` + ``X-Connection-Id``).
+
+    Lifecycle states (derived from field combinations):
+        - PENDING — enrollment token minted, secret not yet exchanged.
+        - ACTIVE  — daemon enrolled, secret in use.
+        - REVOKED — admin or owner ended the connection; runners under
+                    it are revoked too.
     """
 
+    NAME_PREFIX = "connection_"
+
+    # PK already carries an index; explicit db_index=True is redundant.
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     workspace = models.ForeignKey(
         "db.Workspace",
         on_delete=models.CASCADE,
-        related_name="machine_tokens",
+        related_name="connections",
     )
     created_by = models.ForeignKey(
         settings.AUTH_USER_MODEL,
         on_delete=models.CASCADE,
-        related_name="machine_tokens",
+        related_name="connections",
     )
-    # User-supplied label, shown in the connections section of the UI.
-    title = models.CharField(max_length=128)
-    # Bearer secret hash. Plaintext is shown to the user once at creation
-    # and never persisted server-side.
-    secret_hash = models.CharField(max_length=128, db_index=True)
-    secret_fingerprint = models.CharField(max_length=16)
+    # User-editable label. Auto-allocated as ``connection_001`` on save when
+    # blank, monotonic per workspace.
+    name = models.CharField(max_length=128, blank=True, default="")
+    # Free-form host hint reported by the daemon at enrollment time
+    # (e.g. ``mac-mini.local``). Surfaced in the UI alongside ``name``.
+    host_label = models.CharField(max_length=255, blank=True, default="")
+    # One-time enrollment material. Set at creation, cleared once the daemon
+    # exchanges it for ``secret_hash``.
+    enrollment_token_hash = models.CharField(max_length=128, blank=True, default="")
+    enrollment_token_fingerprint = models.CharField(max_length=16, blank=True, default="")
+    # Long-lived bearer the daemon presents on every WS connect. Empty until
+    # the enrollment exchange runs.
+    secret_hash = models.CharField(max_length=128, blank=True, default="", db_index=True)
+    secret_fingerprint = models.CharField(max_length=16, blank=True, default="")
+    enrolled_at = models.DateTimeField(null=True, blank=True)
     last_seen_at = models.DateTimeField(null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
     revoked_at = models.DateTimeField(null=True, blank=True, db_index=True)
 
     class Meta:
-        db_table = "machine_token"
+        db_table = "connection"
         ordering = ("-created_at",)
+        constraints = [
+            models.UniqueConstraint(
+                fields=["workspace", "name"],
+                condition=models.Q(revoked_at__isnull=True),
+                name="connection_unique_name_per_workspace_when_active",
+            ),
+        ]
         indexes = [
             models.Index(fields=["workspace", "revoked_at"]),
             models.Index(fields=["created_by", "revoked_at"]),
         ]
 
     def __str__(self) -> str:
-        return f"{self.title} (ws={self.workspace_id})"
+        return f"{self.name} (ws={self.workspace_id})"
+
+    @property
+    def status(self) -> str:
+        if self.revoked_at is not None:
+            return ConnectionStatus.REVOKED
+        if self.enrolled_at is None:
+            return ConnectionStatus.PENDING
+        return ConnectionStatus.ACTIVE
 
     def is_active(self) -> bool:
         return self.revoked_at is None
 
+    def save(self, *args, **kwargs):
+        # Auto-allocation only fires on insert. A subsequent save with an
+        # empty name (e.g. an update_fields path that touches other fields
+        # while name happens to be blank) must not re-allocate and shift
+        # the row to a different connection_NNN.
+        if self._state.adding and not self.name and self.workspace_id is not None:
+            self.name = self._allocate_default_name(self.workspace_id)
+        super().save(*args, **kwargs)
+
+    @classmethod
+    def _allocate_default_name(cls, workspace_id) -> str:
+        """Return the next ``connection_NNN`` name in the workspace.
+
+        Walks active connection names, finds the highest numeric suffix
+        in use, and returns the next one zero-padded to three digits.
+        Two simultaneous creates may collide on the unique constraint —
+        the caller must retry on IntegrityError.
+        """
+        existing = (
+            cls.objects.filter(workspace_id=workspace_id)
+            .values_list("name", flat=True)
+        )
+        max_n = 0
+        for name in existing:
+            if not name.startswith(cls.NAME_PREFIX):
+                continue
+            tail = name[len(cls.NAME_PREFIX):]
+            if tail.isdigit():
+                max_n = max(max_n, int(tail))
+        return f"{cls.NAME_PREFIX}{max_n + 1:03d}"
+
     def revoke(self) -> None:
-        """Mark the token revoked and cascade to its owned runners.
+        """Mark the connection revoked and cascade to its runners.
 
         Owned runners are revoked individually (which cancels their
-        in-flight runs via ``Runner.revoke``) and we then push a
-        connection-scoped ``Revoke`` frame to the consumer so the
-        daemon shuts down cleanly via its supervisor's
-        ``state.shutdown()`` path. In token mode one consumer is joined
-        to N runner groups on one connection, so a single
-        ``send_token_revoke`` call reaches the consumer once — that's
-        all we need; the daemon then exits and won't reconnect (auth
-        would fail anyway since ``revoked_at`` is non-null).
-
-        If the WS is already down, the message is dropped and the next
-        reconnect fails the auth check.
+        in-flight runs via ``Runner.revoke``); a connection-scoped
+        ``Revoke`` frame is pushed to the consumer so the daemon shuts
+        down cleanly. If the WS is already down, the message is dropped
+        and the next reconnect fails the auth check (revoked_at is
+        non-null).
         """
         from django.db import transaction
 
         from pi_dash.runner.services.pubsub import (
             close_runner_session,
-            send_token_revoke,
+            send_connection_revoke,
         )
 
         if self.revoked_at is not None:
@@ -470,62 +526,14 @@ class MachineToken(models.Model):
         with transaction.atomic():
             self.revoked_at = timezone.now()
             self.save(update_fields=["revoked_at"])
-            # Cascade — revoke each owned runner so its in-flight runs
-            # are cancelled and any pinned queued runs unpinned. Capture
-            # ids for the post-commit notification step.
             for runner in self.runners.filter(revoked_at__isnull=True):
                 runner.revoke()
                 owned_runner_ids.append(runner.id)
 
-        # After the DB transaction commits, tell the daemon (if connected)
-        # to shut down via a wire-level Revoke frame. Broadcast to every
-        # owned runner group rather than assuming any one runner is
-        # definitely online on the live connection — some may be stale,
-        # offline, or no longer Hello-authorised on this daemon. Defence
-        # in depth: also force-close every group, so a consumer that
-        # drops the Revoke for any reason still loses the socket.
         for runner_id in owned_runner_ids:
-            send_token_revoke(runner_id, reason="token revoked")
+            send_connection_revoke(runner_id, reason="connection revoked")
         for runner_id in owned_runner_ids:
             close_runner_session(runner_id)
-
-
-class RunnerRegistrationToken(models.Model):
-    """Short-lived, single-use token used to pair a new runner with the cloud."""
-
-    id = models.UUIDField(
-        primary_key=True, default=uuid.uuid4, editable=False, db_index=True
-    )
-    workspace = models.ForeignKey(
-        "db.Workspace",
-        on_delete=models.CASCADE,
-        related_name="runner_registration_tokens",
-    )
-    created_by = models.ForeignKey(
-        settings.AUTH_USER_MODEL,
-        on_delete=models.CASCADE,
-        related_name="runner_registration_tokens",
-    )
-    token_hash = models.CharField(max_length=128, unique=True)
-    label = models.CharField(max_length=128, blank=True, default="")
-    expires_at = models.DateTimeField()
-    consumed_at = models.DateTimeField(null=True, blank=True)
-    consumed_by_runner = models.ForeignKey(
-        Runner,
-        null=True,
-        blank=True,
-        on_delete=models.SET_NULL,
-        related_name="consumed_registration_tokens",
-    )
-    created_at = models.DateTimeField(auto_now_add=True)
-
-    class Meta:
-        db_table = "runner_registration_token"
-        ordering = ("-created_at",)
-        indexes = [models.Index(fields=["workspace", "consumed_at"])]
-
-    def is_valid(self) -> bool:
-        return self.consumed_at is None and self.expires_at > timezone.now()
 
 
 class AgentRun(models.Model):

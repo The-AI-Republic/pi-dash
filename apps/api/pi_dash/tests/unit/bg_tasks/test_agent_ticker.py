@@ -76,16 +76,23 @@ def issue(workspace, project, states, create_user):
 
 @pytest.fixture
 def runner_for_workspace(db, workspace, project, create_user):
-    from pi_dash.runner.models import Pod, Runner, RunnerStatus
+    from pi_dash.runner.models import Connection, Pod, Runner, RunnerStatus
 
     pod = Pod.default_for_project(project)
+    connection = Connection.objects.create(
+        workspace=workspace,
+        created_by=create_user,
+        name="connection_agentA",
+        secret_hash="sh-agentA",
+        secret_fingerprint="sf-agentA",
+        enrolled_at=timezone.now(),
+    )
     return Runner.objects.create(
         owner=create_user,
         workspace=workspace,
         pod=pod,
+        connection=connection,
         name="agentA",
-        credential_hash="h",
-        credential_fingerprint="f" * 12,
         status=RunnerStatus.ONLINE,
         last_heartbeat_at=timezone.now(),
     )

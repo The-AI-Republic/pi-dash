@@ -4,43 +4,43 @@
 
 """Tests for ``GET /api/runners/projects/``.
 
-Covers both auth modes (token-auth and session-auth) plus the
-default-pod / pod-count fields in the response. See
-``.ai_design/n_runners_in_same_machine/new_pod_project_relationship/design.md``
-§9.3 (CLI surface) and the cloud-side ProjectListEndpoint.
+Covers both auth modes — connection bearer (daemon) and session
+(cloud UI) — plus default-pod / pod-count fields in the response.
 """
 
 from __future__ import annotations
 
 import pytest
 from django.urls import reverse
+from django.utils import timezone
 
 from pi_dash.db.models.project import Project
 from pi_dash.db.models.workspace import Workspace, WorkspaceMember
-from pi_dash.runner.models import MachineToken, Pod
+from pi_dash.runner.models import Connection, Pod
 from pi_dash.runner.services import tokens
 
 
-def _make_token(workspace, user, title="laptop"):
-    minted = tokens.mint_machine_token_secret()
-    token = MachineToken.objects.create(
+def _make_connection(workspace, user, name="connection_test"):
+    secret = tokens.mint_connection_secret()
+    connection = Connection.objects.create(
         workspace=workspace,
         created_by=user,
-        title=title,
-        secret_hash=minted.hashed,
-        secret_fingerprint=minted.fingerprint,
+        name=name,
+        secret_hash=secret.hashed,
+        secret_fingerprint=secret.fingerprint,
+        enrolled_at=timezone.now(),
     )
-    return token, minted.raw
+    return connection, secret.raw
 
 
 @pytest.mark.unit
-def test_token_auth_returns_projects_in_token_workspace(
+def test_connection_auth_returns_projects_in_workspace(
     db, api_client, workspace, project, create_user
 ):
-    token, raw = _make_token(workspace, create_user)
+    connection, raw = _make_connection(workspace, create_user)
     api_client.credentials(
         HTTP_AUTHORIZATION=f"Bearer {raw}",
-        HTTP_X_TOKEN_ID=str(token.id),
+        HTTP_X_CONNECTION_ID=str(connection.id),
     )
     url = reverse("project-list")
     resp = api_client.get(url)
@@ -48,17 +48,15 @@ def test_token_auth_returns_projects_in_token_workspace(
     body = resp.json()
     identifiers = {row["identifier"] for row in body}
     assert project.identifier in identifiers
-    # Default pod auto-created by the post_save(Project) signal.
     proj_row = next(r for r in body if r["identifier"] == project.identifier)
     assert proj_row["default_pod_id"] is not None
     assert proj_row["pod_count"] >= 1
 
 
 @pytest.mark.unit
-def test_token_auth_does_not_leak_other_workspace_projects(
+def test_connection_auth_does_not_leak_other_workspace_projects(
     db, api_client, workspace, project, create_user
 ):
-    """A token in workspace A must not see projects in workspace B."""
     other_ws = Workspace.objects.create(
         name="Other", owner=create_user, slug="other-ws"
     )
@@ -67,10 +65,10 @@ def test_token_auth_does_not_leak_other_workspace_projects(
         name="Hidden", identifier="HID", workspace=other_ws, created_by=create_user
     )
 
-    token, raw = _make_token(workspace, create_user)
+    connection, raw = _make_connection(workspace, create_user)
     api_client.credentials(
         HTTP_AUTHORIZATION=f"Bearer {raw}",
-        HTTP_X_TOKEN_ID=str(token.id),
+        HTTP_X_CONNECTION_ID=str(connection.id),
     )
     url = reverse("project-list")
     resp = api_client.get(url)
@@ -81,15 +79,15 @@ def test_token_auth_does_not_leak_other_workspace_projects(
 
 
 @pytest.mark.unit
-def test_token_auth_rejects_revoked_token(
+def test_connection_auth_rejects_revoked_connection(
     db, api_client, workspace, project, create_user
 ):
-    token, raw = _make_token(workspace, create_user)
-    token.revoked_at = __import__("django").utils.timezone.now()
-    token.save(update_fields=["revoked_at"])
+    connection, raw = _make_connection(workspace, create_user)
+    connection.revoked_at = timezone.now()
+    connection.save(update_fields=["revoked_at"])
     api_client.credentials(
         HTTP_AUTHORIZATION=f"Bearer {raw}",
-        HTTP_X_TOKEN_ID=str(token.id),
+        HTTP_X_CONNECTION_ID=str(connection.id),
     )
     url = reverse("project-list")
     resp = api_client.get(url)
@@ -106,15 +104,14 @@ def test_pod_count_reflects_user_created_pods(
         name=f"{project.identifier}_beefy",
         created_by=create_user,
     )
-    token, raw = _make_token(workspace, create_user)
+    connection, raw = _make_connection(workspace, create_user)
     api_client.credentials(
         HTTP_AUTHORIZATION=f"Bearer {raw}",
-        HTTP_X_TOKEN_ID=str(token.id),
+        HTTP_X_CONNECTION_ID=str(connection.id),
     )
     url = reverse("project-list")
     body = api_client.get(url).json()
     proj_row = next(r for r in body if r["identifier"] == project.identifier)
-    # Default + beefy = 2.
     assert proj_row["pod_count"] == 2
 
 
@@ -122,19 +119,16 @@ def test_pod_count_reflects_user_created_pods(
 def test_response_embeds_pod_list_with_default_first(
     db, api_client, workspace, project, create_user
 ):
-    """The TUI add-runner form needs the per-project pod list inline so it
-    can render a cascaded picker without a second round-trip. The default
-    pod must appear first so the picker pre-selects it."""
     Pod.objects.create(
         workspace=workspace,
         project=project,
         name=f"{project.identifier}_beefy",
         created_by=create_user,
     )
-    token, raw = _make_token(workspace, create_user)
+    connection, raw = _make_connection(workspace, create_user)
     api_client.credentials(
         HTTP_AUTHORIZATION=f"Bearer {raw}",
-        HTTP_X_TOKEN_ID=str(token.id),
+        HTTP_X_CONNECTION_ID=str(connection.id),
     )
     url = reverse("project-list")
     body = api_client.get(url).json()
@@ -143,11 +137,9 @@ def test_response_embeds_pod_list_with_default_first(
     pods = proj_row["pods"]
     assert isinstance(pods, list)
     assert len(pods) == 2
-    # Default pod first; non-default after.
     assert pods[0]["is_default"] is True
     assert pods[0]["id"] == proj_row["default_pod_id"]
     assert any(p["name"].endswith("_beefy") and not p["is_default"] for p in pods)
-    # Each pod entry carries the keys the TUI consumes.
     for p in pods:
         assert set(p.keys()) >= {"id", "name", "is_default"}
 

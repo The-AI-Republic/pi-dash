@@ -188,35 +188,28 @@ impl Default for ApprovalPolicySection {
     }
 }
 
+/// Long-lived credentials a daemon needs to talk to the cloud.
+///
+/// One Connection per dev machine. Set on first ``pidash connect`` and
+/// reused across runner adds/removes. Mode 0600 on disk.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Credentials {
-    /// Token (machine credential) — authenticates the WS connection. The
-    /// design's eventual shape (one token per machine, owns N runners) is
-    /// surfaced as an `Option` here while cloud is still on v1 wire auth;
-    /// it'll become required once cloud ships v2 and the `runner_secret`
-    /// path retires.
+    /// Cloud Connection id. Sent on every WS upgrade in
+    /// ``X-Connection-Id``.
+    pub connection_id: Uuid,
+    /// Long-lived bearer secret presented in
+    /// ``Authorization: Bearer …`` on every WS connect. Never echoed.
+    pub connection_secret: String,
+    /// Editable label echoed by the cloud at enrollment time. Mirrors
+    /// ``Connection.name``; surfaced in ``pidash status`` and the TUI.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub token: Option<TokenCredentials>,
-    pub runner_id: Uuid,
-    pub runner_secret: String,
-    /// Public REST API token (`X-Api-Key`) for `/api/v1/`. Issued by the
-    /// cloud alongside `runner_secret` and used by `pidash` CRUD subcommands.
-    /// `None` for installs enrolled before the cloud started minting these;
-    /// a follow-up `pidash login` will retrofit them.
+    pub connection_name: Option<String>,
+    /// Public REST API token (``X-Api-Key``) for ``/api/v1/`` CRUD
+    /// commands. Optional so a daemon can be enrolled with WS-only access
+    /// today and pick up an api_token via ``pidash login`` later.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub api_token: Option<String>,
     pub issued_at: DateTime<Utc>,
-}
-
-/// Per-machine token credential. See `design.md` §5.1.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct TokenCredentials {
-    pub token_id: Uuid,
-    /// Bearer secret. Mode 0600 on disk; never echoed to logs.
-    pub token_secret: String,
-    /// User-supplied label, shown in `pidash status` and the cloud UI's
-    /// connections list.
-    pub title: String,
 }
 
 /// Hard cap on the number of runner instances per daemon. See `design.md`
@@ -225,22 +218,16 @@ pub struct TokenCredentials {
 pub const MAX_RUNNERS_PER_DAEMON: usize = 50;
 
 impl Config {
-    /// Convenience accessor for the (currently unique) runner config.
-    /// Panics if the runners list is empty — daemon startup validates that
-    /// at least one runner is configured before we get here. Used in
-    /// single-runner code paths that need to read the active runner's
-    /// fields without picking up the multi-runner indexing churn yet.
-    pub fn primary_runner(&self) -> &RunnerConfig {
-        self.runners
-            .first()
-            .expect("config.runners must contain at least one entry")
+    /// First configured runner, or `None` for a freshly enrolled connection
+    /// that has no runners yet. Callers that need a panic-on-absent
+    /// invariant should validate first via [`Config::validate`] which
+    /// surfaces a user-facing error.
+    pub fn primary_runner(&self) -> Option<&RunnerConfig> {
+        self.runners.first()
     }
 
-    /// Mutable counterpart to [`primary_runner`]. Same panic contract.
-    pub fn primary_runner_mut(&mut self) -> &mut RunnerConfig {
-        self.runners
-            .first_mut()
-            .expect("config.runners must contain at least one entry")
+    pub fn primary_runner_mut(&mut self) -> Option<&mut RunnerConfig> {
+        self.runners.first_mut()
     }
 
     /// Validate the loaded config before the daemon starts. Returns a
@@ -249,10 +236,11 @@ impl Config {
     /// into a state that will silently corrupt data later.
     ///
     /// See `design.md` §9 for the rule set.
+    ///
+    /// A zero-runner config is valid: a freshly enrolled connection may
+    /// hold the WS open before any runners have been added. The daemon
+    /// stays connected and the user runs ``pidash runner add`` later.
     pub fn validate(&self) -> Result<(), ConfigError> {
-        if self.runners.is_empty() {
-            return Err(ConfigError::NoRunners);
-        }
         if self.runners.len() > MAX_RUNNERS_PER_DAEMON {
             return Err(ConfigError::TooManyRunners {
                 count: self.runners.len(),
@@ -360,7 +348,7 @@ impl std::fmt::Display for ConfigError {
             ConfigError::NoRunners => write!(
                 f,
                 "configuration error: no [[runner]] block in config.toml. \
-                 Run `pidash configure` to register a runner."
+                 Run `pidash runner add` to register a runner under this connection."
             ),
             ConfigError::TooManyRunners { count, cap } => write!(
                 f,
@@ -377,15 +365,14 @@ impl std::fmt::Display for ConfigError {
                 f,
                 "configuration error: two [[runner]] blocks share runner_id {id}. \
                  Each runner must have a unique runner_id; this usually means \
-                 config.toml was edited incorrectly — re-run `pidash configure runner`."
+                 config.toml was edited incorrectly — re-run `pidash runner add`."
             ),
             ConfigError::MissingProjectSlug { runner } => write!(
                 f,
                 "configuration error: runner {runner:?} has no project_slug. \
-                 Every runner must declare its project (via `pidash configure \
-                 --project <SLUG>` or `pidash token add-runner --project <SLUG>`); \
-                 dispatch is project-scoped and a runner with no project would \
-                 be unreachable."
+                 Every runner must declare its project (via `pidash runner add \
+                 --project <SLUG>`); dispatch is project-scoped and a runner \
+                 with no project would be unreachable."
             ),
             ConfigError::DuplicateWorkingDir {
                 runner_a,
@@ -457,10 +444,11 @@ mod tests {
     }
 
     #[test]
-    fn validate_rejects_zero_runners() {
+    fn validate_accepts_zero_runners() {
+        // A freshly enrolled connection has no runners yet — the daemon
+        // still needs to come up so the user can `pidash runner add`.
         let cfg = config_with(vec![]);
-        let err = cfg.validate().unwrap_err();
-        assert!(matches!(err, ConfigError::NoRunners));
+        cfg.validate().unwrap();
     }
 
     #[test]

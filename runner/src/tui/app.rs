@@ -132,6 +132,10 @@ pub struct AppState {
     /// Reused for the picker too — when the user selects a runner here,
     /// the picker on Config/Runs/Approvals stays in sync.
     pub runners_list_idx: usize,
+    /// Which card on the Runners tab currently owns j/k / arrow input.
+    /// Tab toggles between the two. Defaults to the runner list so the
+    /// first thing a user navigates is which runner to inspect.
+    pub runner_tab_focus: RunnerTabFocus,
     /// Inline add-runner form, shown over the Runners tab when the user
     /// presses `[a]`. None when not in the add flow.
     pub add_runner_form: Option<AddRunnerForm>,
@@ -140,13 +144,12 @@ pub struct AppState {
     pub remove_runner_confirm: Option<String>,
 }
 
-/// Multi-step form for adding a runner from inside the TUI. The
-/// project and pod fields are pickers — the form fetches the projects
-/// (with their pods embedded) on open via `cli::token::list_projects`,
-/// the user cycles selections with ↑/↓ within those fields, and the
-/// pod picker re-anchors to the project's default pod whenever the
-/// project selection changes.
-#[derive(Debug, Clone, Default)]
+/// Multi-step form for adding a runner from inside the TUI. Project and
+/// pod selection are popup pickers (Enter/→ on the field opens the
+/// picker; type-to-filter, Enter to confirm, Esc to cancel). The form
+/// fetches projects (with pods embedded) on open via
+/// `cloud::projects::list_projects`.
+#[derive(Debug, Default)]
 pub struct AddRunnerForm {
     /// Free-text fields.
     pub name: String,
@@ -154,19 +157,37 @@ pub struct AddRunnerForm {
     /// Cloud-fetched project list. `None` while loading; `Some(empty)`
     /// when the workspace has no projects (form surfaces an error and
     /// disables Submit).
-    pub projects: Option<Vec<crate::cli::token::ProjectInfo>>,
-    /// Index into `projects` for the highlighted project. Clamped on
-    /// load so empty / single-project workspaces don't break.
+    pub projects: Option<Vec<crate::cloud::projects::ProjectInfo>>,
+    /// Index into `projects` for the picked project.
     pub project_idx: usize,
-    /// Index into the picked project's `pods` list. Reset to 0
-    /// (default pod, which the cloud sorts first) on every project
-    /// change.
+    /// Index into the picked project's `pods` list. Reset to 0 (default
+    /// pod — cloud sorts default first) on every project change.
     pub pod_idx: usize,
     /// 0 = name, 1 = project picker, 2 = pod picker, 3 = working_dir,
     /// 4 = Submit.
     pub focus: u8,
     pub busy: bool,
     pub error: Option<String>,
+    /// When Some, the user opened a popup picker on the project (kind
+    /// = Project) or pod (kind = Pod) field. While open, all key events
+    /// route to the picker; Esc closes it without committing.
+    pub active_picker: Option<(PickerKind, super::widgets::picker::Picker)>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PickerKind {
+    Project,
+    Pod,
+}
+
+/// Which card on the Runners tab owns keyboard focus. The list-pane and
+/// settings-pane are siblings in the layout but only one accepts j/k /
+/// arrow input at a time; Tab toggles the focus.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum RunnerTabFocus {
+    #[default]
+    RunnerList,
+    Settings,
 }
 
 impl AddRunnerForm {
@@ -185,49 +206,66 @@ impl AddRunnerForm {
         }
     }
 
-    pub fn selected_project(&self) -> Option<&crate::cli::token::ProjectInfo> {
+    pub fn selected_project(&self) -> Option<&crate::cloud::projects::ProjectInfo> {
         self.projects.as_ref()?.get(self.project_idx)
     }
 
-    pub fn selected_pod(&self) -> Option<&crate::cli::token::PodInfo> {
+    pub fn selected_pod(&self) -> Option<&crate::cloud::projects::PodInfo> {
         self.selected_project()?.pods.get(self.pod_idx)
     }
 
-    /// Cycle the picker on the focused picker field. Used when the
-    /// form is in picker focus (project or pod) and the user presses
-    /// ↑/↓ inside the field.
-    pub fn cycle_picker(&mut self, delta: isize) {
-        let projects_len = self
-            .projects
-            .as_ref()
-            .map(|p| p.len())
-            .unwrap_or(0);
+    /// Open a popup picker over the currently focused picker field.
+    /// No-op if focus isn't on a picker field, or if there's nothing
+    /// to pick from yet (projects still loading / empty).
+    pub fn open_picker_for_focus(&mut self) {
+        use super::widgets::picker::{Picker, PickerRow};
         match self.focus {
-            1 if projects_len > 0 => {
-                self.project_idx = wrap_idx(self.project_idx, delta, projects_len);
-                // Reset pod selection when project changes; cloud
-                // sorts default pod first so 0 is the right anchor.
-                self.pod_idx = 0;
+            1 => {
+                let Some(projects) = self.projects.as_ref() else {
+                    return;
+                };
+                if projects.is_empty() {
+                    return;
+                }
+                let rows: Vec<PickerRow> = projects
+                    .iter()
+                    .map(|p| {
+                        PickerRow::new(format!("{} — {}", p.identifier, p.name))
+                            .with_hint(format!("{} pod(s)", p.pod_count))
+                    })
+                    .collect();
+                self.active_picker = Some((
+                    PickerKind::Project,
+                    Picker::new("Pick a project", rows, self.project_idx),
+                ));
             }
             2 => {
-                let pods_len = self
-                    .selected_project()
-                    .map(|p| p.pods.len())
-                    .unwrap_or(0);
-                if pods_len > 0 {
-                    self.pod_idx = wrap_idx(self.pod_idx, delta, pods_len);
+                let Some(project) = self.selected_project() else {
+                    return;
+                };
+                if project.pods.is_empty() {
+                    return;
                 }
+                let rows: Vec<PickerRow> = project
+                    .pods
+                    .iter()
+                    .map(|pod| {
+                        let row = PickerRow::new(pod.name.clone());
+                        if pod.is_default {
+                            row.with_hint("default")
+                        } else {
+                            row
+                        }
+                    })
+                    .collect();
+                self.active_picker = Some((
+                    PickerKind::Pod,
+                    Picker::new("Pick a pod", rows, self.pod_idx),
+                ));
             }
             _ => {}
         }
     }
-}
-
-/// Bounded wrap-around for picker indices. `len` is assumed > 0.
-fn wrap_idx(cur: usize, delta: isize, len: usize) -> usize {
-    let n = len as isize;
-    let next = (cur as isize + delta).rem_euclid(n);
-    next as usize
 }
 
 /// Three-field form (URL / token / name) plus a Register button. Focus is
@@ -322,6 +360,7 @@ pub async fn run(paths: Paths, initial_tab: Tab) -> Result<()> {
         runner_picker_idx: 0,
         tab_general_field: super::views::general::GeneralField::default(),
         runners_list_idx: 0,
+        runner_tab_focus: RunnerTabFocus::default(),
         add_runner_form: None,
         remove_runner_confirm: None,
     };
@@ -348,7 +387,7 @@ async fn loop_ui(
     let mut ticker = tokio::time::interval(Duration::from_millis(500));
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     loop {
-        terminal.draw(|f| draw(f, state))?;
+        terminal.draw(|f| draw(f, &mut *state))?;
         tokio::select! {
             _ = ticker.tick() => refresh(state).await,
             maybe = poll_event() => {
@@ -402,6 +441,13 @@ fn sync_picker_to_ipc(state: &mut AppState) {
         .as_ref()
         .and_then(|c| c.runners.get(state.runner_picker_idx))
         .map(|r| r.name.clone());
+}
+
+/// Bounded wrap-around for picker indices. `len` is assumed > 0.
+fn wrap_idx(cur: usize, delta: isize, len: usize) -> usize {
+    let n = len as isize;
+    let next = (cur as isize + delta).rem_euclid(n);
+    next as usize
 }
 
 /// Move the runner picker by `delta` (signed), wrapping at ends. No-op when
@@ -582,6 +628,54 @@ async fn handle_event(ev: Event, state: &mut AppState) {
         // typed input here so it lands in the focused field instead of
         // triggering global hotkeys.
         if state.add_runner_form.is_some() {
+            // Active popup picker takes precedence: route every key
+            // through it until it confirms or cancels.
+            let picker_open = state
+                .add_runner_form
+                .as_ref()
+                .is_some_and(|f| f.active_picker.is_some());
+            if picker_open {
+                if key.code == KeyCode::Char('c')
+                    && key.modifiers.contains(KeyModifiers::CONTROL)
+                {
+                    state.confirm_exit = true;
+                    state.confirm_exit_yes = true;
+                    return;
+                }
+                let outcome = state
+                    .add_runner_form
+                    .as_mut()
+                    .and_then(|f| f.active_picker.as_mut().map(|(_, p)| p.handle_key(key)));
+                if let Some(out) = outcome {
+                    use crate::tui::widgets::picker::PickerOutcome;
+                    if let Some(form) = state.add_runner_form.as_mut() {
+                        match out {
+                            PickerOutcome::Confirmed(idx) => {
+                                let kind = form.active_picker.as_ref().map(|(k, _)| *k);
+                                form.active_picker = None;
+                                match kind {
+                                    Some(PickerKind::Project) => {
+                                        form.project_idx = idx;
+                                        // Reset pod to the default (cloud
+                                        // sorts default first) since the
+                                        // pod list is now a different one.
+                                        form.pod_idx = 0;
+                                    }
+                                    Some(PickerKind::Pod) => {
+                                        form.pod_idx = idx;
+                                    }
+                                    None => {}
+                                }
+                            }
+                            PickerOutcome::Cancelled => {
+                                form.active_picker = None;
+                            }
+                            PickerOutcome::None => {}
+                        }
+                    }
+                }
+                return;
+            }
             match (key.code, key.modifiers) {
                 (KeyCode::Char('c'), KeyModifiers::CONTROL) => {
                     state.confirm_exit = true;
@@ -592,24 +686,27 @@ async fn handle_event(ev: Event, state: &mut AppState) {
                     state.add_runner_form = None;
                     return;
                 }
-                // Up/Down on a picker field cycles the choices; on a
-                // text field it falls through to "previous/next field"
-                // (so the existing arrow-key muscle memory still works
-                // when typing). Tab / BackTab always change field.
-                (KeyCode::Up, _) => {
+                // Field navigation: arrows + Tab all advance focus.
+                // (Picker selection itself happens inside the popup
+                // that Enter / → opens — no in-place cycling.)
+                (KeyCode::Up, _) | (KeyCode::Left, _) => {
                     if let Some(f) = state.add_runner_form.as_mut() {
-                        if matches!(f.focus, 1 | 2) {
-                            f.cycle_picker(-1);
-                        } else {
-                            add_runner_form_advance_focus(f, false);
-                        }
+                        add_runner_form_advance_focus(f, false);
                     }
                     return;
                 }
                 (KeyCode::Down, _) => {
                     if let Some(f) = state.add_runner_form.as_mut() {
+                        add_runner_form_advance_focus(f, true);
+                    }
+                    return;
+                }
+                (KeyCode::Right, _) => {
+                    if let Some(f) = state.add_runner_form.as_mut() {
+                        // On a picker field, Right opens the popup; on
+                        // a text field, Right advances focus.
                         if matches!(f.focus, 1 | 2) {
-                            f.cycle_picker(1);
+                            f.open_picker_for_focus();
                         } else {
                             add_runner_form_advance_focus(f, true);
                         }
@@ -629,10 +726,14 @@ async fn handle_event(ev: Event, state: &mut AppState) {
                     return;
                 }
                 (KeyCode::Enter, _) => {
-                    let submit =
-                        matches!(state.add_runner_form.as_ref().map(|f| f.focus), Some(4));
-                    if submit {
+                    let focus = state.add_runner_form.as_ref().map(|f| f.focus);
+                    if focus == Some(4) {
                         submit_add_runner_form(state).await;
+                    } else if matches!(focus, Some(1) | Some(2)) {
+                        // Open the popup picker for project / pod.
+                        if let Some(f) = state.add_runner_form.as_mut() {
+                            f.open_picker_for_focus();
+                        }
                     } else if let Some(f) = state.add_runner_form.as_mut() {
                         add_runner_form_advance_focus(f, true);
                     }
@@ -800,12 +901,19 @@ async fn handle_event(ev: Event, state: &mut AppState) {
                 if state.tab == Tab::General {
                     state.tab_general_field = state.tab_general_field.next();
                 } else if state.tab == Tab::RunnerStatus {
-                    // On the Runners tab, j/k moves the per-runner field
-                    // cursor (settings panel below the list). The runner
-                    // selection itself moves with `<` / `>` / Alt+N.
-                    let n = super::views::config::field_count();
-                    if n > 0 {
-                        state.selected = (state.selected + 1) % n;
+                    // Runners tab: j/k dispatches by which card owns
+                    // focus. Tab toggles focus between the runner-list
+                    // (left) and the settings panel (right).
+                    match state.runner_tab_focus {
+                        RunnerTabFocus::RunnerList => {
+                            move_picker(state, 1).await;
+                        }
+                        RunnerTabFocus::Settings => {
+                            let n = super::views::config::field_count();
+                            if n > 0 {
+                                state.selected = (state.selected + 1) % n;
+                            }
+                        }
                     }
                 } else {
                     state.selected = state.selected.saturating_add(1);
@@ -815,17 +923,35 @@ async fn handle_event(ev: Event, state: &mut AppState) {
                 if state.tab == Tab::General {
                     state.tab_general_field = state.tab_general_field.prev();
                 } else if state.tab == Tab::RunnerStatus {
-                    let n = super::views::config::field_count();
-                    if n > 0 {
-                        state.selected = if state.selected == 0 {
-                            n - 1
-                        } else {
-                            state.selected - 1
-                        };
+                    match state.runner_tab_focus {
+                        RunnerTabFocus::RunnerList => {
+                            move_picker(state, -1).await;
+                        }
+                        RunnerTabFocus::Settings => {
+                            let n = super::views::config::field_count();
+                            if n > 0 {
+                                state.selected = if state.selected == 0 {
+                                    n - 1
+                                } else {
+                                    state.selected - 1
+                                };
+                            }
+                        }
                     }
                 } else {
                     state.selected = state.selected.saturating_sub(1);
                 }
+            }
+            // Tab toggles which card on the Runners tab owns input.
+            // Shift+Tab does the same flip (only two cards). Anywhere
+            // else it's a no-op so global keys aren't surprised.
+            (KeyCode::Tab, _) | (KeyCode::BackTab, _)
+                if state.tab == Tab::RunnerStatus =>
+            {
+                state.runner_tab_focus = match state.runner_tab_focus {
+                    RunnerTabFocus::RunnerList => RunnerTabFocus::Settings,
+                    RunnerTabFocus::Settings => RunnerTabFocus::RunnerList,
+                };
             }
             (KeyCode::Char('h') | KeyCode::Left, _) => {
                 state.tab = match state.tab {
@@ -1108,7 +1234,7 @@ async fn load_projects_into_form(state: &mut AppState) {
     if state.add_runner_form.is_none() {
         return;
     }
-    match crate::cli::token::list_projects(&state.paths).await {
+    match crate::cloud::projects::list_projects(&state.paths).await {
         Ok(projects) => {
             if let Some(f) = state.add_runner_form.as_mut() {
                 f.project_idx = 0;
@@ -1140,7 +1266,7 @@ async fn submit_add_runner_form(state: &mut AppState) {
     // Picker selections — required since the user can't type a project.
     let Some(project) = form.selected_project().cloned() else {
         form.error = Some(
-            "no projects available — verify `pidash token list-projects` works."
+            "no projects available — verify the cloud reachable and the connection is enrolled."
                 .into(),
         );
         return;
@@ -1167,15 +1293,15 @@ async fn submit_add_runner_form(state: &mut AppState) {
     form.busy = true;
     form.error = None;
 
-    let args = crate::cli::token::AddRunnerArgs {
-        name,
+    let args = crate::cli::runner::AddArgs {
+        name: Some(name),
         project: project.identifier.clone(),
         pod: pod_name,
-        working_dir: std::path::PathBuf::from(working_dir),
+        working_dir: Some(std::path::PathBuf::from(working_dir)),
         agent: crate::config::schema::AgentKind::Codex,
     };
 
-    let outcome = match crate::cli::token::add_runner(args, &state.paths).await {
+    let outcome = match crate::cli::runner::add(args, &state.paths).await {
         Ok(o) => o,
         Err(e) => {
             if let Some(f) = state.add_runner_form.as_mut() {
@@ -1212,8 +1338,8 @@ async fn submit_remove_runner(state: &mut AppState) {
     let Some(name) = state.remove_runner_confirm.take() else {
         return;
     };
-    let args = crate::cli::token::RemoveRunnerArgs { name: name.clone() };
-    match crate::cli::token::remove_runner(args, &state.paths).await {
+    let args = crate::cli::runner::RemoveArgs { name: name.clone() };
+    match crate::cli::runner::remove(args, &state.paths).await {
         Ok(_) => {
             state.reload_outcome =
                 Some(crate::service::reload::restart_and_verify(&state.paths).await);
@@ -1257,65 +1383,46 @@ fn register_form_advance_focus(form: &mut RegisterForm, forward: bool) {
     };
 }
 
-/// Submit the registration form. On success, writes config + credentials,
-/// installs the service unit, and kicks the daemon — same end state as
-/// `pidash configure --url ... --token ...` on the CLI.
+/// Submit the General-tab enrollment form. Equivalent to running
+/// ``pidash connect --url … --token …`` from the shell: enrolls the
+/// machine as a Connection, writes credentials, installs + starts the
+/// service. Runners are added separately from the Runners tab.
 async fn submit_register_form(state: &mut AppState) {
     let Some(form) = state.register_form.as_mut() else {
         return;
     };
-    // Field-level validation first so we don't waste a cloud round trip.
     let cloud_url = form.cloud_url.trim().to_string();
     let token = form.token.trim().to_string();
-    let name = form.name.trim().to_string();
-    if let Err(e) = crate::cli::configure::validate_cloud_url(&cloud_url) {
+    let host_label = form.name.trim().to_string();
+    if let Err(e) = crate::cli::connect::validate_cloud_url(&cloud_url) {
         form.error = Some(format!("{e}"));
         return;
     }
     if token.is_empty() {
-        form.error = Some("registration token is required".into());
-        return;
-    }
-    if name.is_empty() {
-        form.error = Some("runner name is required".into());
-        return;
-    }
-    if let Err(e) = crate::util::runner_name::validate(&name) {
-        form.error = Some(format!("invalid runner name: {e}"));
+        form.error = Some("enrollment token is required".into());
         return;
     }
     form.busy = true;
     form.error = None;
 
-    // The TUI register form is on hold pending the multi-runner UX
-    // refactor — the project picker hasn't landed yet. We surface the
-    // limitation by sending the request with an empty project string,
-    // which the cloud rejects with a clear "project is required" 400.
-    // Users should run `pidash configure --url ... --token ... --project
-    // <SLUG>` from the CLI for now.
-    let req = crate::cloud::register::RegisterRequest {
-        runner_name: name.clone(),
+    let req = crate::cloud::enroll::EnrollmentRequest {
+        token: token.clone(),
+        host_label: host_label.clone(),
         os: std::env::consts::OS.to_string(),
         arch: std::env::consts::ARCH.to_string(),
         version: crate::RUNNER_VERSION.to_string(),
-        protocol_version: crate::PROTOCOL_VERSION,
-        project: String::new(),
-        pod: None,
     };
-    let resp = match crate::cloud::register::register(&cloud_url, &token, &req).await {
+    let resp = match crate::cloud::enroll::enroll(&cloud_url, &req).await {
         Ok(r) => r,
         Err(e) => {
             if let Some(form) = state.register_form.as_mut() {
                 form.busy = false;
-                form.error = Some(format!("register failed: {e:#}"));
+                form.error = Some(format!("enroll failed: {e:#}"));
             }
             return;
         }
     };
 
-    // Write config + credentials (same shape as cli::configure::execute's
-    // happy path, minus the `extras` apply since the TUI form doesn't
-    // collect advanced fields — user edits them in the Config tab after).
     let cfg = crate::config::schema::Config {
         version: 2,
         daemon: crate::config::schema::DaemonConfig {
@@ -1323,20 +1430,7 @@ async fn submit_register_form(state: &mut AppState) {
             log_level: "info".to_string(),
             log_retention_days: 14,
         },
-        runners: vec![crate::config::schema::RunnerConfig {
-            name: name.clone(),
-            runner_id: resp.runner_id,
-            workspace_slug: resp.workspace_slug.clone(),
-            project_slug: resp.project_identifier.clone(),
-            pod_id: resp.pod_id,
-            workspace: crate::config::schema::WorkspaceSection {
-                working_dir: state.paths.default_working_dir(),
-            },
-            agent: Default::default(),
-            codex: Default::default(),
-            claude_code: Default::default(),
-            approval_policy: Default::default(),
-        }],
+        runners: Vec::new(),
     };
     if let Err(e) = crate::config::file::write_config(&state.paths, &cfg) {
         if let Some(form) = state.register_form.as_mut() {
@@ -1346,10 +1440,10 @@ async fn submit_register_form(state: &mut AppState) {
         return;
     }
     let creds = crate::config::schema::Credentials {
-        token: None,
-        runner_id: resp.runner_id,
-        runner_secret: resp.runner_secret,
-        api_token: resp.api_token,
+        connection_id: resp.connection_id,
+        connection_secret: resp.connection_secret,
+        connection_name: None,
+        api_token: None,
         issued_at: chrono::Utc::now(),
     };
     if let Err(e) = crate::config::file::write_credentials(&state.paths, &creds) {
@@ -1441,7 +1535,7 @@ async fn accept_selected(state: &mut AppState, decision: crate::cloud::protocol:
     }
 }
 
-fn draw(f: &mut ratatui::Frame<'_>, state: &AppState) {
+fn draw(f: &mut ratatui::Frame<'_>, state: &mut AppState) {
     // Picker bar is shown above per-runner tabs (Runs / Approvals)
     // when there's more than one runner. The Runners tab itself owns
     // the picker as part of its top-of-tab list, so we suppress the
@@ -1523,8 +1617,19 @@ fn draw(f: &mut ratatui::Frame<'_>, state: &AppState) {
         render_confirm_stop(f);
     } else if let Some(name) = &state.remove_runner_confirm {
         render_confirm_remove_runner(f, name);
-    } else if let Some(form) = &state.add_runner_form {
-        render_add_runner_form(f, form);
+    } else if state.add_runner_form.is_some() {
+        // Borrow immutably for the form, then mutably for the (optional)
+        // popup picker — picker.render() needs &mut self because it
+        // owns ListState::selected.
+        if let Some(form) = state.add_runner_form.as_ref() {
+            render_add_runner_form(f, form);
+        }
+        if let Some(form) = state.add_runner_form.as_mut()
+            && let Some((_, picker)) = form.active_picker.as_mut()
+        {
+            let area = f.area();
+            picker.render(f, area);
+        }
     }
 }
 

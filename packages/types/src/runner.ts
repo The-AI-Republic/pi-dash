@@ -4,7 +4,7 @@
  * See the LICENSE file for details.
  */
 
-export type TRunnerStatus = "online" | "offline" | "busy" | "revoked";
+export type TRunnerStatus = "online" | "offline" | "busy";
 
 export interface IPodMini {
   id: string;
@@ -37,22 +37,35 @@ export interface IRunner {
   owner: string | null;
   pod: string;
   pod_detail: IPodMini | null;
+  /** Connection that owns this runner. Required post-refactor. */
+  connection: string;
   created_at: string;
   updated_at: string;
 }
 
-export interface IRunnerRegistration {
+export type TConnectionStatus = "pending" | "active";
+
+export interface IConnection {
   id: string;
-  label: string;
-  expires_at: string;
-  consumed_at: string | null;
+  name: string;
+  host_label: string;
+  status: TConnectionStatus;
+  workspace: string;
+  created_by: string | null;
+  secret_fingerprint: string;
+  enrolled_at: string | null;
+  last_seen_at: string | null;
   created_at: string;
+  revoked_at: string | null;
+  runner_count: number;
 }
 
-export interface IRegistrationTokenResult {
-  registration: IRunnerRegistration;
-  /** Plaintext code shown ONCE — copy it immediately. */
-  token: string;
+/** ``POST /api/runners/connections/`` returns the row plus a one-time
+ * enrollment token. ``enrollment_token`` is shown to the user exactly
+ * once — there's no way to recover it after dismissal. */
+export interface IConnectionWithToken extends IConnection {
+  enrollment_token: string;
+  enrollment_expires_at: string;
 }
 
 export type TAgentRunStatus =

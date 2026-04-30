@@ -8,9 +8,9 @@ import { API_BASE_URL } from "@pi-dash/constants";
 import type {
   IAgentRun,
   IApprovalRequest,
-  IRegistrationTokenResult,
+  IConnection,
+  IConnectionWithToken,
   IRunner,
-  IRunnerRegistration,
   TApprovalDecision,
 } from "@pi-dash/types";
 import { APIService } from "../api.service";
@@ -33,9 +33,9 @@ export class RunnerService extends APIService {
       });
   }
 
-  async revoke(runnerId: string): Promise<IRunner> {
-    return this.post(`/api/runners/${runnerId}/revoke/`)
-      .then((r) => r?.data)
+  async deleteRunner(runnerId: string): Promise<void> {
+    return this.delete(`/api/runners/${runnerId}/`)
+      .then(() => undefined)
       .catch((e) => {
         throw e?.response?.data;
       });
@@ -60,17 +60,48 @@ export class RunnerService extends APIService {
       });
   }
 
-  async listTokens(): Promise<IRunnerRegistration[]> {
-    return this.get("/api/runners/tokens/")
+  /** ``GET /api/runners/connections/`` — list this user's connections. */
+  async listConnections(): Promise<IConnection[]> {
+    return this.get("/api/runners/connections/")
       .then((r) => r?.data)
       .catch((e) => {
         throw e?.response?.data;
       });
   }
 
-  async mintToken(workspaceId: string, label?: string): Promise<IRegistrationTokenResult> {
-    return this.post("/api/runners/tokens/", { workspace: workspaceId, label: label ?? "" })
+  /** ``POST /api/runners/connections/`` — create a connection in PENDING state.
+   * Response carries the one-time enrollment token; the daemon's
+   * ``pidash connect`` consumes it. */
+  async createConnection(workspaceId: string, name?: string): Promise<IConnectionWithToken> {
+    return this.post("/api/runners/connections/", { workspace: workspaceId, name: name ?? "" })
       .then((r) => r?.data)
+      .catch((e) => {
+        throw e?.response?.data;
+      });
+  }
+
+  /** ``PATCH /api/runners/connections/<id>/`` — rename. */
+  async renameConnection(connectionId: string, name: string): Promise<IConnection> {
+    return this.patch(`/api/runners/connections/${connectionId}/`, { name })
+      .then((r) => r?.data)
+      .catch((e) => {
+        throw e?.response?.data;
+      });
+  }
+
+  /** ``DELETE /api/runners/connections/<id>/`` — hard-delete the
+   * connection and cascade to every runner under it.
+   *
+   * ``onlyIfPending`` adds a server-side guard that refuses the delete
+   * when the connection has already enrolled. Used by the dismiss-token
+   * flow so a daemon that enrolls between the UI's last refresh and the
+   * delete call doesn't get its active connection silently nuked. */
+  async deleteConnection(connectionId: string, onlyIfPending = false): Promise<void> {
+    const url = onlyIfPending
+      ? `/api/runners/connections/${connectionId}/?only_if_pending=true`
+      : `/api/runners/connections/${connectionId}/`;
+    return this.delete(url)
+      .then(() => undefined)
       .catch((e) => {
         throw e?.response?.data;
       });

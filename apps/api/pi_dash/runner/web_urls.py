@@ -13,44 +13,32 @@ from pi_dash.runner.views import (
     AgentRunReleasePinEndpoint,
     ApprovalDecideEndpoint,
     ApprovalListEndpoint,
-    MachineTokenListCreateEndpoint,
-    MachineTokenRevokeEndpoint,
+    ConnectionDetailEndpoint,
+    ConnectionListCreateEndpoint,
     PodDetailEndpoint,
     PodListEndpoint,
     ProjectListEndpoint,
-    RegistrationTokenCreateEndpoint,
     RunnerDetailEndpoint,
     RunnerListEndpoint,
-    RunnerRevokeEndpoint,
 )
 
 urlpatterns = [
     path("", RunnerListEndpoint.as_view(), name="runner-list"),
+    # Connections (paired dev machines).
     path(
-        "tokens/",
-        RegistrationTokenCreateEndpoint.as_view(),
-        name="runner-tokens",
-    ),
-    # Machine tokens (multi-runner connections). See design.md §5.3.
-    path(
-        "machine-tokens/",
-        MachineTokenListCreateEndpoint.as_view(),
-        name="machine-token-list",
+        "connections/",
+        ConnectionListCreateEndpoint.as_view(),
+        name="connection-list",
     ),
     path(
-        "machine-tokens/<uuid:token_id>/revoke/",
-        MachineTokenRevokeEndpoint.as_view(),
-        name="machine-token-revoke",
+        "connections/<uuid:connection_id>/",
+        ConnectionDetailEndpoint.as_view(),
+        name="connection-detail",
     ),
     path(
         "<uuid:runner_id>/",
         RunnerDetailEndpoint.as_view(),
         name="runner-detail",
-    ),
-    path(
-        "<uuid:runner_id>/revoke/",
-        RunnerRevokeEndpoint.as_view(),
-        name="runner-revoke",
     ),
     # Pods
     path("pods/", PodListEndpoint.as_view(), name="pod-list"),
@@ -59,8 +47,7 @@ urlpatterns = [
         PodDetailEndpoint.as_view(),
         name="pod-detail",
     ),
-    # Projects (read-only, scoped to caller's workspaces). Used by
-    # `pidash token list-projects` and the cloud UI's runner-create form.
+    # Projects (read-only, scoped to caller's workspaces).
     path("projects/", ProjectListEndpoint.as_view(), name="project-list"),
     # Runs
     path("runs/", AgentRunListEndpoint.as_view(), name="runner-runs"),

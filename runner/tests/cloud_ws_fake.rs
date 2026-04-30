@@ -80,9 +80,9 @@ async fn runner_connects_hello_welcome_and_receives_assign() {
     let (addr, server_handle) = start_fake_cloud().await;
     let cloud_url = format!("http://{}", addr);
     let creds = Credentials {
-        token: None,
-        runner_id: uuid::Uuid::new_v4(),
-        runner_secret: "apd_rs_testsecret".into(),
+        connection_id: uuid::Uuid::new_v4(),
+        connection_secret: "apd_cs_testsecret".into(),
+        connection_name: None,
         api_token: None,
         issued_at: Utc::now(),
     };
@@ -93,7 +93,7 @@ async fn runner_connects_hello_welcome_and_receives_assign() {
     let conn = Connection::open(&cloud_url, &creds).await.expect("open ws");
     // Send a Hello ourselves since ConnectionLoop normally does it.
     let hello = Envelope::new(ClientMsg::Hello {
-        runner_id: creds.runner_id,
+        runner_id: uuid::Uuid::new_v4(),
         version: "0.1.0".into(),
         os: "linux".into(),
         arch: "x86_64".into(),
@@ -176,9 +176,9 @@ async fn connection_loop_fires_connected_notify_on_each_handshake() {
     let cloud_url = format!("http://{}", addr);
 
     let creds = Credentials {
-        token: None,
-        runner_id: uuid::Uuid::new_v4(),
-        runner_secret: "apd_rs_testsecret".into(),
+        connection_id: uuid::Uuid::new_v4(),
+        connection_secret: "apd_cs_testsecret".into(),
+        connection_name: None,
         api_token: None,
         issued_at: Utc::now(),
     };
@@ -310,9 +310,9 @@ async fn two_hellos_serialize_with_distinct_project_slugs_on_the_wire() {
     let cloud_url = format!("http://{}", addr);
 
     let creds = Credentials {
-        token: None,
-        runner_id: uuid::Uuid::new_v4(),
-        runner_secret: "apd_rs_testsecret".into(),
+        connection_id: uuid::Uuid::new_v4(),
+        connection_secret: "apd_cs_testsecret".into(),
+        connection_name: None,
         api_token: None,
         issued_at: Utc::now(),
     };

@@ -90,9 +90,7 @@ fn write_private(path: &Path, bytes: &[u8]) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::schema::{
-        Credentials, DaemonConfig, RunnerConfig, TokenCredentials, WorkspaceSection,
-    };
+    use crate::config::schema::{Credentials, DaemonConfig, RunnerConfig, WorkspaceSection};
     use tempfile::tempdir;
 
     fn paths_for(root: &std::path::Path) -> Paths {
@@ -133,11 +131,9 @@ mod tests {
         };
         write_config(&paths, &cfg).unwrap();
         let loaded = load_config(&paths).unwrap();
-        assert_eq!(loaded.primary_runner().name, "t");
-        assert_eq!(
-            loaded.primary_runner().workspace_slug.as_deref(),
-            Some("acme")
-        );
+        let primary = loaded.primary_runner().expect("runner present");
+        assert_eq!(primary.name, "t");
+        assert_eq!(primary.workspace_slug.as_deref(), Some("acme"));
         use std::os::unix::fs::PermissionsExt;
         let mode = std::fs::metadata(paths.config_path())
             .unwrap()
@@ -177,10 +173,11 @@ binary = "codex"
         );
         std::fs::write(paths.config_path(), body).unwrap();
         let loaded = load_config(&paths).unwrap();
-        assert_eq!(loaded.primary_runner().workspace_slug, None);
+        let runner = loaded.primary_runner().expect("runner");
+        assert_eq!(runner.workspace_slug, None);
         // model_default must stay absent unless the user opts in; the
         // runner is model-agnostic by design.
-        assert_eq!(loaded.primary_runner().codex.model_default, None);
+        assert_eq!(runner.codex.model_default, None);
     }
 
     #[test]
@@ -188,15 +185,16 @@ binary = "codex"
         let tmp = tempdir().unwrap();
         let paths = paths_for(tmp.path());
         let creds = Credentials {
-            token: None,
-            runner_id: uuid::Uuid::new_v4(),
-            runner_secret: "s".into(),
+            connection_id: uuid::Uuid::new_v4(),
+            connection_secret: "apd_cs_test".into(),
+            connection_name: Some("connection_001".into()),
             api_token: Some("pi_dash_api_test".into()),
             issued_at: chrono::Utc::now(),
         };
         write_credentials(&paths, &creds).unwrap();
         let loaded = load_credentials(&paths).unwrap();
-        assert_eq!(loaded.runner_secret, "s");
+        assert_eq!(loaded.connection_secret, "apd_cs_test");
+        assert_eq!(loaded.connection_name.as_deref(), Some("connection_001"));
         assert_eq!(loaded.api_token.as_deref(), Some("pi_dash_api_test"));
     }
 
@@ -229,13 +227,13 @@ binary = "codex"
         );
         std::fs::write(paths.config_path(), body).unwrap();
         let loaded = load_config(&paths).unwrap();
-        assert_eq!(loaded.primary_runner().name, "t");
+        let primary = loaded.primary_runner().expect("runner");
+        assert_eq!(primary.name, "t");
         // Defaults applied to the omitted fields:
-        assert!(!loaded.primary_runner().approval_policy.auto_approve_network);
+        assert!(!primary.approval_policy.auto_approve_network);
         assert_eq!(loaded.daemon.log_level, "info");
         assert_eq!(loaded.daemon.log_retention_days, 14);
-        // Optional codex.model_default is allowed to be absent:
-        assert_eq!(loaded.primary_runner().codex.model_default, None);
+        assert_eq!(primary.codex.model_default, None);
     }
 
     #[test]
@@ -273,58 +271,19 @@ binary = "codex"
     }
 
     #[test]
-    fn credentials_with_token_block_round_trips() {
-        let tmp = tempdir().unwrap();
-        let paths = paths_for(tmp.path());
-        let creds = Credentials {
-            token: Some(TokenCredentials {
-                token_id: uuid::Uuid::new_v4(),
-                token_secret: "tok-secret".into(),
-                title: "rich's laptop".into(),
-            }),
-            runner_id: uuid::Uuid::new_v4(),
-            runner_secret: "s".into(),
-            api_token: None,
-            issued_at: chrono::Utc::now(),
-        };
-        write_credentials(&paths, &creds).unwrap();
-        let loaded = load_credentials(&paths).unwrap();
-        let token = loaded.token.expect("token block must round-trip");
-        assert_eq!(token.token_secret, "tok-secret");
-        assert_eq!(token.title, "rich's laptop");
-    }
-
-    #[test]
-    fn credentials_without_token_block_still_parses() {
-        // Legacy credentials.toml (no [token] block) keeps loading; the
-        // daemon falls back to runner_secret-based auth until the cloud
-        // ships v2 and the operator runs `pidash configure token`.
+    fn credentials_without_optional_fields_round_trip_via_serde_default() {
+        // A minimal credentials.toml — connection_id + connection_secret +
+        // issued_at — must still parse with optional fields defaulting.
         let tmp = tempdir().unwrap();
         let paths = paths_for(tmp.path());
         std::fs::create_dir_all(&paths.config_dir).unwrap();
         let body = format!(
-            "runner_id = \"{}\"\nrunner_secret = \"abc\"\nissued_at = \"2026-04-01T00:00:00Z\"\n",
+            "connection_id = \"{}\"\nconnection_secret = \"apd_cs_x\"\nissued_at = \"2026-04-01T00:00:00Z\"\n",
             uuid::Uuid::new_v4()
         );
         std::fs::write(paths.credentials_path(), body).unwrap();
         let loaded = load_credentials(&paths).unwrap();
-        assert!(loaded.token.is_none());
-    }
-
-    #[test]
-    fn credentials_without_api_token_round_trip_via_serde_default() {
-        // A credentials file written before the api_token field existed
-        // (no `api_token = ...` line) must still parse, with the field
-        // defaulting to None.
-        let tmp = tempdir().unwrap();
-        let paths = paths_for(tmp.path());
-        std::fs::create_dir_all(&paths.config_dir).unwrap();
-        let body = format!(
-            "runner_id = \"{}\"\nrunner_secret = \"abc\"\nissued_at = \"2026-04-01T00:00:00Z\"\n",
-            uuid::Uuid::new_v4()
-        );
-        std::fs::write(paths.credentials_path(), body).unwrap();
-        let loaded = load_credentials(&paths).unwrap();
-        assert_eq!(loaded.api_token, None);
+        assert!(loaded.api_token.is_none());
+        assert!(loaded.connection_name.is_none());
     }
 }

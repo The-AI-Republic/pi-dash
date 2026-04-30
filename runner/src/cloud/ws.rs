@@ -26,11 +26,10 @@ impl Connection {
         let ws_url = http_to_ws(cloud_url)?;
         let full = format!("{}/ws/runner/", ws_url.trim_end_matches('/'));
 
-        // Two auth modes: token (when [token] block is configured) or
-        // legacy per-runner (runner_secret + X-Runner-Id). The cloud
-        // accepts either; choosing token-based when available is the path
-        // forward toward multi-runner. See `design.md` §5.2.
-        let mut req_builder = Request::builder()
+        // Single auth path (wire v3): the daemon authenticates as a
+        // Connection. Runners come online individually via Hello frames
+        // after the WS is up.
+        let req = Request::builder()
             .method("GET")
             .uri(&full)
             .header("Host", host_of(&full).unwrap_or_default())
@@ -41,19 +40,12 @@ impl Connection {
                 "Sec-WebSocket-Key",
                 tokio_tungstenite::tungstenite::handshake::client::generate_key(),
             )
-            .header("X-Runner-Protocol", crate::PROTOCOL_VERSION.to_string());
-
-        if let Some(token) = &creds.token {
-            req_builder = req_builder
-                .header("Authorization", format!("Bearer {}", token.token_secret))
-                .header("X-Token-Id", token.token_id.to_string());
-        } else {
-            req_builder = req_builder
-                .header("Authorization", format!("Bearer {}", creds.runner_secret))
-                .header("X-Runner-Id", creds.runner_id.to_string());
-        }
-
-        let req = req_builder
+            .header("X-Runner-Protocol", crate::PROTOCOL_VERSION.to_string())
+            .header(
+                "Authorization",
+                format!("Bearer {}", creds.connection_secret),
+            )
+            .header("X-Connection-Id", creds.connection_id.to_string())
             .body(())
             .context("building WS upgrade request")?;
         let (stream, resp) = tokio::time::timeout(

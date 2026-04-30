@@ -13,29 +13,19 @@
 use anyhow::Result;
 use clap::Args as ClapArgs;
 
+use crate::cloud::runners::delete_runner;
 use crate::util::paths::Paths;
 
 #[derive(Debug, ClapArgs)]
 pub struct Args {
-    /// Removal token issued by the cloud UI (optional; if missing we only clean local state).
-    #[arg(long)]
-    pub token: Option<String>,
-
-    /// Delete local state without contacting the cloud.
+    /// Delete local state without contacting the cloud. The connection
+    /// row remains in the cloud UI until the user revokes it there.
     #[arg(long)]
     pub local_only: bool,
 }
 
 pub async fn run(args: Args, paths: &Paths) -> Result<()> {
-    // Step 1 + 2: tear down the service before touching local state, so the
-    // daemon isn't still running against to-be-deleted creds. Both calls are
-    // tolerant: they return Ok even when the service was never installed /
-    // wasn't running, because that's the expected path for a never-installed
-    // or already-cleaned machine.
     let svc = crate::service::detect();
-    // Warn-level so a partial teardown is visible at default log config —
-    // a silent uninstall failure can leave the unit file behind pointing at
-    // about-to-be-deleted creds, recreating the crash-loop on next restart.
     if let Err(e) = svc.stop().await {
         tracing::warn!("service stop failed (ok if not running): {e:#}");
     }
@@ -43,20 +33,33 @@ pub async fn run(args: Args, paths: &Paths) -> Result<()> {
         tracing::warn!("service uninstall failed (ok if not installed): {e:#}");
     }
 
-    // Step 3: deregister with the cloud while we still have creds.
+    // Cloud-side cleanup: best-effort delete each runner under this
+    // connection. Connection itself is left for the user to revoke from
+    // the cloud UI — the daemon doesn't have authority to revoke its own
+    // connection row in the new design (the bearer it holds would
+    // self-defeat at exactly the wrong moment).
     match crate::config::file::load_all(paths) {
         Ok((config, creds)) => {
             if !args.local_only {
-                match crate::cloud::register::deregister(
-                    &config.daemon.cloud_url,
-                    &creds.runner_id,
-                    &creds.runner_secret,
-                    args.token.as_deref(),
-                )
-                .await
-                {
-                    Ok(()) => tracing::info!("cloud deregistration acknowledged"),
-                    Err(e) => tracing::warn!("cloud deregistration failed: {e:#}"),
+                for r in &config.runners {
+                    match delete_runner(
+                        &config.daemon.cloud_url,
+                        &creds.connection_id,
+                        &creds.connection_secret,
+                        &r.runner_id,
+                    )
+                    .await
+                    {
+                        Ok(()) => {
+                            tracing::info!(runner = %r.name, "cloud delete-runner ok");
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                runner = %r.name,
+                                "cloud delete-runner failed: {e:#}"
+                            );
+                        }
+                    }
                 }
             }
         }
@@ -65,8 +68,8 @@ pub async fn run(args: Args, paths: &Paths) -> Result<()> {
         }
     }
 
-    // Step 4: delete local config + creds. Idempotent when files are absent.
     crate::config::file::remove_all(paths)?;
     println!("local runner state removed.");
+    println!("Note: revoke this connection from the cloud UI to end it server-side.");
     Ok(())
 }

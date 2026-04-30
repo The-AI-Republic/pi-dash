@@ -3,23 +3,18 @@
 # See the LICENSE file for details.
 
 from .approvals import ApprovalDecideEndpoint, ApprovalListEndpoint
-from .machine_tokens import (
-    MachineTokenListCreateEndpoint,
-    MachineTokenRevokeEndpoint,
-    TokenRunnerCreateEndpoint,
+from .connections import (
+    ConnectionDetailEndpoint,
+    ConnectionEnrollEndpoint,
+    ConnectionListCreateEndpoint,
+    ConnectionRunnerDeleteEndpoint,
+    ConnectionRunnerListCreateEndpoint,
 )
 from .metrics import MetricsEndpoint
 from .pods import PodDetailEndpoint, PodListEndpoint
 from .projects import ProjectListEndpoint
-from .register import (
-    HealthEndpoint,
-    RegisterEndpoint,
-    RegistrationTokenCreateEndpoint,
-    RunnerDeregisterEndpoint,
-    RunnerLinkToTokenEndpoint,
-    RunnerRotateEndpoint,
-)
-from .runners import RunnerDetailEndpoint, RunnerListEndpoint, RunnerRevokeEndpoint
+from .register import HealthEndpoint
+from .runners import RunnerDetailEndpoint, RunnerListEndpoint
 from .runs import (
     AgentRunCancelEndpoint,
     AgentRunDetailEndpoint,
@@ -30,22 +25,18 @@ from .runs import (
 __all__ = [
     "ApprovalDecideEndpoint",
     "ApprovalListEndpoint",
+    "ConnectionDetailEndpoint",
+    "ConnectionEnrollEndpoint",
+    "ConnectionListCreateEndpoint",
+    "ConnectionRunnerDeleteEndpoint",
+    "ConnectionRunnerListCreateEndpoint",
     "HealthEndpoint",
-    "MachineTokenListCreateEndpoint",
-    "MachineTokenRevokeEndpoint",
-    "TokenRunnerCreateEndpoint",
     "MetricsEndpoint",
     "PodDetailEndpoint",
     "PodListEndpoint",
     "ProjectListEndpoint",
-    "RegisterEndpoint",
-    "RegistrationTokenCreateEndpoint",
-    "RunnerDeregisterEndpoint",
-    "RunnerLinkToTokenEndpoint",
-    "RunnerRotateEndpoint",
     "RunnerDetailEndpoint",
     "RunnerListEndpoint",
-    "RunnerRevokeEndpoint",
     "AgentRunCancelEndpoint",
     "AgentRunDetailEndpoint",
     "AgentRunListEndpoint",

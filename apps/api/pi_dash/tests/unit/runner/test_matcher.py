@@ -8,20 +8,32 @@ from django.utils import timezone
 from pi_dash.runner.models import (
     AgentRun,
     AgentRunStatus,
+    Connection,
     Runner,
     RunnerStatus,
 )
 from pi_dash.runner.services import matcher
 
 
+def _connection(user, workspace, name) -> Connection:
+    return Connection.objects.create(
+        workspace=workspace,
+        created_by=user,
+        name=name,
+        secret_hash=f"sh-{name}",
+        secret_fingerprint=name[:12].ljust(12, "x")[:12],
+        enrolled_at=timezone.now(),
+    )
+
+
 @pytest.fixture
 def online_runner(db, create_user, workspace):
+    connection = _connection(create_user, workspace, name="connection_laptop")
     return Runner.objects.create(
         owner=create_user,
         workspace=workspace,
+        connection=connection,
         name="laptop",
-        credential_hash="h",
-        credential_fingerprint="f",
         status=RunnerStatus.ONLINE,
         last_heartbeat_at=timezone.now(),
     )
@@ -64,12 +76,12 @@ def test_matcher_ignores_busy_runner(db, online_runner, queued_run):
 @pytest.mark.unit
 def test_cap_enforced(db, create_user, workspace):
     for i in range(Runner.MAX_PER_USER):
+        connection = _connection(create_user, workspace, name=f"connection_cap_{i}")
         Runner.objects.create(
             owner=create_user,
             workspace=workspace,
+            connection=connection,
             name=f"r{i}",
-            credential_hash=f"h{i}",
-            credential_fingerprint="f" * 12,
         )
     assert matcher.can_register_another(create_user.id, workspace.id) is False
     assert matcher.count_active(create_user.id, workspace.id) == Runner.MAX_PER_USER

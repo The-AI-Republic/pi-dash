@@ -3,8 +3,8 @@
 //!
 //! Replaces the old single-runner Config tab. Layout:
 //!
-//! - **Configured** (config.toml exists): top half is a runner-row
-//!   list ("picker"), bottom half is the editable settings panel for
+//! - **Configured** (config.toml exists): left pane is the runner-row
+//!   list ("picker"), right pane is the editable settings panel for
 //!   whichever runner the picker is on. `j`/`k` moves the field
 //!   cursor inside the panel; `<`/`>` and `Alt+1`–`Alt+9` move the
 //!   runner picker.
@@ -19,7 +19,7 @@
 //! `[d]` confirm-removes the highlighted runner via the cloud's
 //! token-authenticated deregister endpoint.
 
-use ratatui::layout::{Constraint, Direction, Layout, Rect};
+use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wrap};
@@ -33,19 +33,25 @@ pub fn render(f: &mut ratatui::Frame<'_>, area: Rect, state: &AppState) {
         return;
     }
 
-    let chunks = Layout::default()
+    // Outer vertical split: body row + hotkeys footer. Body is split
+    // horizontally into runner list (left) and settings panel (right).
+    let outer = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([
-            // Runner list — height grows with N up to a cap; surplus
-            // goes to the settings panel which is the editing surface.
-            Constraint::Length(runners_list_height(state)),
-            Constraint::Min(8),
-            Constraint::Length(3),
-        ])
+        .constraints([Constraint::Min(8), Constraint::Length(3)])
         .split(area);
-    render_runner_list(f, chunks[0], state);
-    render_settings_panel(f, chunks[1], state);
-    f.render_widget(hotkeys_card(), chunks[2]);
+    let body = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([
+            // 36 cols is enough for ~30-char runner names + status
+            // markers; surplus width goes to the settings panel which
+            // is the editing surface.
+            Constraint::Length(36),
+            Constraint::Min(40),
+        ])
+        .split(outer[0]);
+    render_runner_list(f, body[0], state);
+    render_settings_panel(f, body[1], state);
+    f.render_widget(hotkeys_card(), outer[1]);
 }
 
 fn render_unregistered_placeholder(f: &mut ratatui::Frame<'_>, area: Rect) {
@@ -64,23 +70,6 @@ fn render_unregistered_placeholder(f: &mut ratatui::Frame<'_>, area: Rect) {
         .block(Block::default().borders(Borders::ALL).title(" Runners "))
         .wrap(Wrap { trim: true });
     f.render_widget(p, area);
-}
-
-fn runners_list_height(state: &AppState) -> u16 {
-    let n = state
-        .status
-        .as_ref()
-        .map(|s| s.runners.len() as u16)
-        .or_else(|| {
-            state
-                .config_working
-                .as_ref()
-                .map(|c| c.runners.len() as u16)
-        })
-        .unwrap_or(0);
-    // Border (2) + at least one row + cap at 8 visible runners.
-    let rows = n.clamp(1, 8);
-    rows + 2
 }
 
 fn render_runner_list(f: &mut ratatui::Frame<'_>, area: Rect, state: &AppState) {
@@ -150,8 +139,22 @@ fn render_runner_list(f: &mut ratatui::Frame<'_>, area: Rect, state: &AppState) 
         .collect();
     let total = runners.len();
     let title = format!(" Runners ({}/{}) ", picked + 1, total);
+    let focused = matches!(
+        state.runner_tab_focus,
+        crate::tui::app::RunnerTabFocus::RunnerList
+    );
+    let block_style = if focused {
+        Style::default().fg(Color::Yellow)
+    } else {
+        Style::default()
+    };
     let list = List::new(items)
-        .block(Block::default().borders(Borders::ALL).title(title))
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(block_style)
+                .title(title),
+        )
         .highlight_style(Style::default().add_modifier(Modifier::REVERSED));
     let mut lstate = ListState::default();
     lstate.select(Some(picked));
@@ -162,6 +165,33 @@ fn render_settings_panel(f: &mut ratatui::Frame<'_>, area: Rect, state: &AppStat
     let Some(working) = state.config_working.as_ref() else {
         return;
     };
+
+    // No runner configured → don't render empty form fields. Show a
+    // centred placeholder pointing at the [a] hotkey instead.
+    if working.runners.is_empty() {
+        let placeholder = Paragraph::new(vec![
+            Line::raw(""),
+            Line::from(Span::styled(
+                "No selected runner",
+                Style::default().add_modifier(Modifier::BOLD),
+            )),
+            Line::raw(""),
+            Line::from(Span::styled(
+                "Press [a] to register a runner under this connection.",
+                Style::default().add_modifier(Modifier::DIM),
+            )),
+        ])
+        .alignment(Alignment::Center)
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(" Settings (selected runner) "),
+        )
+        .wrap(Wrap { trim: false });
+        f.render_widget(placeholder, area);
+        return;
+    }
+
     let loaded = state.config_loaded.clone();
 
     let chunks = Layout::default()
@@ -178,8 +208,22 @@ fn render_settings_panel(f: &mut ratatui::Frame<'_>, area: Rect, state: &AppStat
     } else {
         " Settings (selected runner) "
     };
+    let focused = matches!(
+        state.runner_tab_focus,
+        crate::tui::app::RunnerTabFocus::Settings
+    );
+    let block_style = if focused {
+        Style::default().fg(Color::Yellow)
+    } else {
+        Style::default()
+    };
     let p = Paragraph::new(fields::editable_lines(working, &loaded, state))
-        .block(Block::default().borders(Borders::ALL).title(title))
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(block_style)
+                .title(title),
+        )
         .wrap(Wrap { trim: false });
     f.render_widget(p, chunks[0]);
     f.render_widget(fields::footer(state), chunks[1]);
@@ -190,7 +234,7 @@ fn hotkeys_card() -> Paragraph<'static> {
         Span::styled("[a] add", Style::default().fg(Color::Green)),
         Span::raw("   "),
         Span::styled("[d] remove", Style::default().fg(Color::Red)),
-        Span::raw("   [j/k ↑↓] field   [</>] runner   [↵] edit   [w] save   [r] refresh"),
+        Span::raw("   [Tab] switch card   [j/k ↑↓] move   [</>] runner   [↵] edit   [w] save   [r] refresh"),
     ]))
     .block(Block::default().borders(Borders::ALL).title(" Controls "))
 }

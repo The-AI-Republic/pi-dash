@@ -16,8 +16,22 @@ from pi_dash.db.models import User, Workspace, WorkspaceMember
 from pi_dash.runner.models import (
     AgentRun,
     AgentRunStatus,
+    Connection,
     Pod,
 )
+
+
+def _make_connection(user, workspace, name) -> Connection:
+    from django.utils import timezone
+
+    return Connection.objects.create(
+        workspace=workspace,
+        created_by=user,
+        name=name,
+        secret_hash=f"sh-{name}",
+        secret_fingerprint=name[:12].ljust(12, "x")[:12],
+        enrolled_at=timezone.now(),
+    )
 
 
 @pytest.fixture
@@ -316,9 +330,8 @@ def _make_pinned_run(workspace, *, parent_thread_id=None):
         owner=workspace.owner,
         workspace=workspace,
         pod=pod,
+        connection=_make_connection(workspace.owner, workspace, name="connection_pinR"),
         name="pinR",
-        credential_hash="h",
-        credential_fingerprint="f" * 12,
         status=RunnerStatus.ONLINE,
         last_heartbeat_at=timezone.now(),
     )
@@ -435,9 +448,8 @@ def _make_in_progress_issue_with_paused_run(workspace):
         owner=workspace.owner,
         workspace=workspace,
         pod=pod,
+        connection=_make_connection(workspace.owner, workspace, name="connection_carun"),
         name="carun",
-        credential_hash="h",
-        credential_fingerprint="f" * 12,
         status=RunnerStatus.ONLINE,
         last_heartbeat_at=timezone.now(),
     )

@@ -4,21 +4,19 @@
 
 """External runner-facing API (daemon traffic) — mounted at ``/api/v1/runner/``.
 
-All routes here use the runner's bearer credential for auth except
-``register/`` and ``health/`` which are public (they bootstrap the credential
-itself).
+Health is public; everything else uses ConnectionBearerAuthentication.
+The connection-enroll path lives outside the runner namespace at
+``/api/v1/connections/enroll/`` (see project urls).
 """
 
 from django.urls import path
 
 from pi_dash.runner.views import (
+    ConnectionEnrollEndpoint,
+    ConnectionRunnerDeleteEndpoint,
+    ConnectionRunnerListCreateEndpoint,
     HealthEndpoint,
     MetricsEndpoint,
-    RegisterEndpoint,
-    RunnerDeregisterEndpoint,
-    RunnerLinkToTokenEndpoint,
-    RunnerRotateEndpoint,
-    TokenRunnerCreateEndpoint,
 )
 
 app_name = "runner"
@@ -26,31 +24,22 @@ app_name = "runner"
 urlpatterns = [
     path("health/", HealthEndpoint.as_view(), name="health"),
     path("metrics/", MetricsEndpoint.as_view(), name="metrics"),
-    path("register/", RegisterEndpoint.as_view(), name="register"),
-    # Token-authenticated runner registration. Used by `pidash configure
-    # runner --name <NAME>` to add an additional runner under an
-    # existing token without re-running the one-time enrolment flow.
+    # Connection enrollment + per-connection runner CRUD. These live under
+    # the runner namespace so they share the same /api/v1/runner/ prefix
+    # the daemon already uses.
     path(
-        "register-under-token/",
-        TokenRunnerCreateEndpoint.as_view(),
-        name="register-under-token",
+        "connections/enroll/",
+        ConnectionEnrollEndpoint.as_view(),
+        name="connection-enroll",
     ),
     path(
-        "<uuid:runner_id>/deregister/",
-        RunnerDeregisterEndpoint.as_view(),
-        name="deregister",
+        "connections/<uuid:connection_id>/runners/",
+        ConnectionRunnerListCreateEndpoint.as_view(),
+        name="connection-runners",
     ),
     path(
-        "<uuid:runner_id>/rotate/",
-        RunnerRotateEndpoint.as_view(),
-        name="rotate",
-    ),
-    # Migrate a legacy-registered runner onto a MachineToken so the
-    # daemon can switch to token-auth without re-registering. See
-    # design.md §5.x.
-    path(
-        "<uuid:runner_id>/link-to-token/",
-        RunnerLinkToTokenEndpoint.as_view(),
-        name="link-to-token",
+        "connections/<uuid:connection_id>/runners/<uuid:runner_id>/",
+        ConnectionRunnerDeleteEndpoint.as_view(),
+        name="connection-runner-detail",
     ),
 ]

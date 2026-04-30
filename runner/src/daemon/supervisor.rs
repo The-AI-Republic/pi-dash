@@ -71,7 +71,9 @@ impl Supervisor {
             state,
             approvals: _supervisor_approvals,
         } = self;
-        state.set_runner_id(creds.runner_id).await;
+        // Daemon-level state has no single runner_id any more — runners
+        // come and go under one connection. Per-instance state still
+        // holds its own runner_id (set in RunnerInstance::new).
 
         let (out_tx, out_rx) = mpsc::channel::<Envelope<ClientMsg>>(128);
         let (in_tx, in_rx) = mpsc::channel::<Envelope<ServerMsg>>(128);
@@ -107,14 +109,11 @@ impl Supervisor {
                 .collect::<HelloRunnerMap>(),
         ));
 
-        // Primary runner = the first configured runner. Used by IPC and
-        // (legacy) heartbeat-status fields that haven't been split per-
-        // instance yet. With one runner this is the only runner; with
-        // many it's the daemon-level "default" view.
-        let primary = instances
-            .first()
-            .cloned()
-            .ok_or_else(|| anyhow::anyhow!("config.runners is empty; daemon refuses to start"))?;
+        // Primary runner for IPC's "default snapshot" — whichever runner
+        // happens to be first in config.toml. None when the connection
+        // has zero runners yet (a freshly enrolled dev machine), in which
+        // case IPC falls back to the daemon-level state.
+        let primary = instances.first().cloned();
 
         // Snapshot of every configured runner the IPC server can
         // route requests to. Built once at startup; runtime add /
@@ -127,7 +126,10 @@ impl Supervisor {
             .collect();
         let ipc = IpcServer {
             path: paths.ipc_socket_path(),
-            primary_state: primary.state.clone(),
+            primary_state: primary
+                .as_ref()
+                .map(|p| p.state.clone())
+                .unwrap_or_else(|| state.clone()),
             paths: paths.clone(),
             instances: Arc::new(ipc_instances),
         };
@@ -155,8 +157,9 @@ impl Supervisor {
             // ordering keeps the code obvious.)
             let connected_for_hello = connected.clone();
             let hello_runners_for_task = hello_runners.clone();
+            let state_for_hello = state.clone();
             let hello_handle = tokio::spawn(async move {
-                hello_emitter(hello_runners_for_task, connected_for_hello).await;
+                hello_emitter(hello_runners_for_task, connected_for_hello, state_for_hello).await;
             });
 
             let shutdown_for_loop = state.shutdown_notified();
@@ -390,9 +393,19 @@ impl Supervisor {
 /// `notify_one()` after each successful WS handshake (cold start and every
 /// reconnect). Cloud-side `_handle_token_hello` is idempotent on re-Hello,
 /// so a second emission for an already-authorised runner is harmless.
-async fn hello_emitter(runners: Arc<RwLock<HelloRunnerMap>>, connected: Arc<tokio::sync::Notify>) {
+///
+/// Also flips the daemon-level ``connected`` flag — the per-runner
+/// Welcome handler also sets this on each Welcome, but with zero
+/// runners there's no Hello/Welcome cycle to fall back on, so the
+/// IPC / TUI would otherwise show "cloud offline" forever.
+async fn hello_emitter(
+    runners: Arc<RwLock<HelloRunnerMap>>,
+    connected: Arc<tokio::sync::Notify>,
+    daemon_state: StateHandle,
+) {
     loop {
         connected.notified().await;
+        daemon_state.set_connected(true).await;
         let current_runners: Vec<HelloRunner> =
             { runners.read().await.values().cloned().collect() };
         for (out, state, project_slug) in current_runners {
@@ -1273,8 +1286,16 @@ mod tests {
 
         let connected = Arc::new(Notify::new());
         let connected_for_task = connected.clone();
+        // Daemon-level state handle — the test only cares about Hello
+        // emission, but the emitter signature now takes a StateHandle so
+        // the IPC's connected flag can be flipped on each WS handshake.
+        let daemon_state = StateHandle::new(crate::config::schema::Config {
+            version: 2,
+            daemon: Default::default(),
+            runners: vec![],
+        });
         let task = tokio::spawn(async move {
-            hello_emitter(runners, connected_for_task).await;
+            hello_emitter(runners, connected_for_task, daemon_state).await;
         });
 
         connected.notify_one();
