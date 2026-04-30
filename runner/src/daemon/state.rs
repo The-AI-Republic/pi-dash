@@ -5,7 +5,7 @@ use uuid::Uuid;
 
 use crate::cloud::protocol::RunnerStatus;
 use crate::config::schema::Config;
-use crate::ipc::protocol::{CurrentRunSummary, StatusSnapshot};
+use crate::ipc::protocol::{CurrentRunSummary, RunnerStatusSnapshot};
 
 #[derive(Clone)]
 pub struct StateHandle {
@@ -25,6 +25,13 @@ pub struct StateHandle {
 struct Inner {
     cfg: Mutex<Config>,
     name: String,
+    /// Project identifier this runner serves. Cached at construction
+    /// time so `runner_snapshot()` doesn't need to lock `cfg` on every
+    /// status poll.
+    project_slug: Option<String>,
+    /// Pod id assigned by the cloud at registration. Same caching
+    /// rationale as `project_slug`.
+    pod_id: Option<Uuid>,
     cloud_url: Mutex<String>,
     started_at: DateTime<Utc>,
     connected: Mutex<bool>,
@@ -40,12 +47,17 @@ impl StateHandle {
         let (tx_status, rx_status) = watch::channel(RunnerStatus::Idle);
         let (tx_in_flight, rx_in_flight) = watch::channel(None);
         let (tx_heartbeat_secs, rx_heartbeat_secs) = watch::channel(25u64);
-        let name = cfg.primary_runner().name.clone();
+        let primary = cfg.primary_runner();
+        let name = primary.name.clone();
+        let project_slug = primary.project_slug.clone();
+        let pod_id = primary.pod_id;
         let cloud_url = cfg.daemon.cloud_url.clone();
         Self {
             inner: Arc::new(Inner {
                 cfg: Mutex::new(cfg),
                 name,
+                project_slug,
+                pod_id,
                 cloud_url: Mutex::new(cloud_url),
                 started_at: Utc::now(),
                 connected: Mutex::new(false),
@@ -144,24 +156,36 @@ impl StateHandle {
         self.tick();
     }
 
-    pub async fn snapshot(&self) -> StatusSnapshot {
-        let uptime = (Utc::now() - self.inner.started_at).num_seconds().max(0) as u64;
+    /// Per-runner snapshot. The IPC server aggregates these across
+    /// every configured `RunnerInstance` into the wire-level
+    /// `StatusSnapshot { daemon, runners }`.
+    pub async fn runner_snapshot(&self) -> RunnerStatusSnapshot {
         let status = { *self.rx_status.borrow() };
-        let cloud_url = self.inner.cloud_url.lock().await.clone();
         let runner_id = *self.inner.runner_id.lock().await;
-        let connected = *self.inner.connected.lock().await;
         let last_heartbeat = *self.inner.last_heartbeat.lock().await;
         let current_run = self.inner.current_run.lock().await.clone();
         let approvals_pending = *self.inner.approvals_pending.lock().await;
-        StatusSnapshot {
-            runner_name: self.inner.name.clone(),
-            runner_id,
+        RunnerStatusSnapshot {
+            runner_id: runner_id.unwrap_or_else(Uuid::nil),
+            name: self.inner.name.clone(),
+            project_slug: self.inner.project_slug.clone(),
+            pod_id: self.inner.pod_id,
             status,
-            connected,
-            last_heartbeat,
             current_run,
             approvals_pending,
+            last_heartbeat,
+        }
+    }
+
+    /// Connection-level facts shared across every runner the daemon
+    /// hosts.
+    pub async fn daemon_info(&self) -> crate::ipc::protocol::DaemonInfo {
+        let uptime = (Utc::now() - self.inner.started_at).num_seconds().max(0) as u64;
+        let cloud_url = self.inner.cloud_url.lock().await.clone();
+        let connected = *self.inner.connected.lock().await;
+        crate::ipc::protocol::DaemonInfo {
             cloud_url,
+            connected,
             uptime_secs: uptime,
         }
     }

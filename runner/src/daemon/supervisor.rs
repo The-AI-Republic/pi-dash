@@ -116,12 +116,20 @@ impl Supervisor {
             .cloned()
             .ok_or_else(|| anyhow::anyhow!("config.runners is empty; daemon refuses to start"))?;
 
+        // Snapshot of every configured runner the IPC server can
+        // route requests to. Built once at startup; runtime add /
+        // remove (Phase 7 of the parent design) will mutate this map
+        // when that work lands.
+        let ipc_instances: HashMap<uuid::Uuid, RunnerInstance> = instances
+            .iter()
+            .cloned()
+            .map(|i| (i.runner_id, i))
+            .collect();
         let ipc = IpcServer {
             path: paths.ipc_socket_path(),
-            state: primary.state.clone(),
-            approvals: primary.approvals.clone(),
+            primary_state: primary.state.clone(),
             paths: paths.clone(),
-            runner_paths: primary.paths.clone(),
+            instances: Arc::new(ipc_instances),
         };
         let ipc_handle = tokio::spawn(async move {
             if let Err(e) = ipc.run().await {

@@ -15,7 +15,9 @@ mod start;
 mod state;
 mod status;
 mod stop;
-mod token;
+// `token` is `pub` so the TUI can call its library functions
+// (`add_runner`, `remove_runner`) directly without going through clap.
+pub mod token;
 mod tui;
 mod uninstall;
 mod workspace;

@@ -15,7 +15,9 @@
 //! Read-only fields (cloud_url, workspace_slug, list fields) are rendered
 //! but skipped in navigation.
 
-use ratatui::layout::{Constraint, Direction, Layout, Rect};
+// Layout no longer drives the (deleted) full-page Tab::Config render
+// dispatch — the Runners tab composes the `editable_lines` /
+// `footer` / `register_form_lines` helpers itself.
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
@@ -120,18 +122,9 @@ pub const FIELDS: &[FieldSpec] = &[
         section: "Approval policy",
         kind: FieldKind::Bool,
     },
-    FieldSpec {
-        id: FieldId::LogLevel,
-        label: "level",
-        section: "Logging",
-        kind: FieldKind::Enum(LOG_LEVELS),
-    },
-    FieldSpec {
-        id: FieldId::LogRetentionDays,
-        label: "retention_days",
-        section: "Logging",
-        kind: FieldKind::U32,
-    },
+    // Daemon-level log fields (log_level, log_retention_days) live in
+    // the General tab — they're shared across every runner the daemon
+    // hosts and don't make sense as per-runner edits.
 ];
 
 pub fn field_count() -> usize {
@@ -142,8 +135,30 @@ pub fn field_at(idx: usize) -> &'static FieldSpec {
     &FIELDS[idx.min(FIELDS.len() - 1)]
 }
 
-pub fn display_value(cfg: &Config, id: FieldId) -> String {
-    let runner = cfg.primary_runner();
+/// Look up the runner the Config tab's per-runner fields apply to.
+/// Clamps `idx` into bounds so a stale picker index from a freshly
+/// loaded config can't panic. Daemon-level fields (LogLevel etc.)
+/// don't go through this.
+fn runner_at(cfg: &Config, idx: usize) -> &crate::config::schema::RunnerConfig {
+    let n = cfg.runners.len().max(1);
+    let i = idx.min(n - 1);
+    cfg.runners.get(i).unwrap_or_else(|| cfg.primary_runner())
+}
+
+fn runner_at_mut(
+    cfg: &mut Config,
+    idx: usize,
+) -> &mut crate::config::schema::RunnerConfig {
+    let n = cfg.runners.len().max(1);
+    let i = idx.min(n - 1);
+    if cfg.runners.get(i).is_some() {
+        return &mut cfg.runners[i];
+    }
+    cfg.primary_runner_mut()
+}
+
+pub fn display_value(cfg: &Config, id: FieldId, runner_idx: usize) -> String {
+    let runner = runner_at(cfg, runner_idx);
     match id {
         FieldId::RunnerName => runner.name.clone(),
         FieldId::WorkspaceWorkingDir => runner.workspace.working_dir.display().to_string(),
@@ -172,7 +187,12 @@ pub fn display_value(cfg: &Config, id: FieldId) -> String {
 /// Commit an edited buffer to the config. Only valid for Text/U32 fields;
 /// Bool/Enum fields use `toggle_bool` / `cycle_enum` instead. Returns a
 /// user-facing error message on parse/validation failure.
-pub fn set_text_value(cfg: &mut Config, id: FieldId, s: &str) -> Result<(), String> {
+pub fn set_text_value(
+    cfg: &mut Config,
+    id: FieldId,
+    s: &str,
+    runner_idx: usize,
+) -> Result<(), String> {
     if matches!(id, FieldId::LogRetentionDays) {
         let n: u32 = s
             .parse()
@@ -180,7 +200,7 @@ pub fn set_text_value(cfg: &mut Config, id: FieldId, s: &str) -> Result<(), Stri
         cfg.daemon.log_retention_days = n;
         return Ok(());
     }
-    let runner = cfg.primary_runner_mut();
+    let runner = runner_at_mut(cfg, runner_idx);
     match id {
         FieldId::RunnerName => {
             crate::util::runner_name::validate(s).map_err(|e| e.to_string())?;
@@ -230,8 +250,8 @@ pub fn set_text_value(cfg: &mut Config, id: FieldId, s: &str) -> Result<(), Stri
     Ok(())
 }
 
-pub fn toggle_bool(cfg: &mut Config, id: FieldId) {
-    let runner = cfg.primary_runner_mut();
+pub fn toggle_bool(cfg: &mut Config, id: FieldId, runner_idx: usize) {
+    let runner = runner_at_mut(cfg, runner_idx);
     match id {
         FieldId::ApprovalAutoReadonly => {
             let v = &mut runner.approval_policy.auto_approve_readonly_shell;
@@ -249,10 +269,10 @@ pub fn toggle_bool(cfg: &mut Config, id: FieldId) {
     }
 }
 
-pub fn cycle_enum(cfg: &mut Config, id: FieldId) {
+pub fn cycle_enum(cfg: &mut Config, id: FieldId, runner_idx: usize) {
     match id {
         FieldId::AgentKind => {
-            let runner = cfg.primary_runner_mut();
+            let runner = runner_at_mut(cfg, runner_idx);
             runner.agent.kind = match runner.agent.kind {
                 AgentKind::Codex => AgentKind::ClaudeCode,
                 AgentKind::ClaudeCode => AgentKind::Codex,
@@ -269,57 +289,48 @@ pub fn cycle_enum(cfg: &mut Config, id: FieldId) {
     }
 }
 
-// --- rendering ---------------------------------------------------------------
+// --- rendering helpers, consumed by Runners tab and the global picker -----
 
-pub fn render(f: &mut ratatui::Frame<'_>, area: Rect, state: &AppState) {
-    let chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Min(0), Constraint::Length(6)])
-        .split(area);
-
-    if let Some(err) = &state.config_error {
-        let p = Paragraph::new(format!("Failed to read config.toml:\n\n{err}"))
-            .style(Style::default().fg(Color::Red))
-            .block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .title(" Configuration "),
-            )
-            .wrap(Wrap { trim: false });
-        f.render_widget(p, chunks[0]);
-        f.render_widget(footer(state), chunks[1]);
-        return;
+/// Top-of-tab picker showing each configured runner as a chip. The
+/// currently-selected runner is highlighted; the bar only renders when
+/// there are 2+ runners so single-runner installs see the same UI as
+/// before. Keys: `<`/`>` cycle, `Alt+1`–`Alt+9` jump.
+pub fn runner_picker_bar(state: &AppState) -> Paragraph<'static> {
+    let Some(working) = state.config_working.as_ref() else {
+        return Paragraph::new(Line::raw("")).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(" Runners "),
+        );
+    };
+    let total = working.runners.len();
+    let picked = state.runner_picker_idx.min(total.saturating_sub(1));
+    let mut spans: Vec<Span<'static>> = Vec::new();
+    for (i, r) in working.runners.iter().enumerate() {
+        let label = format!(" {}. {} ", i + 1, r.name);
+        let style = if i == picked {
+            Style::default()
+                .fg(Color::Black)
+                .bg(Color::Cyan)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(Color::Gray)
+        };
+        spans.push(Span::styled(label, style));
+        spans.push(Span::raw("  "));
     }
-
-    match (&state.config_working, &state.config_loaded) {
-        (Some(working), loaded) => {
-            let dirty = loaded.as_ref().map(|l| differs(l, working)).unwrap_or(true);
-            let title = if dirty {
-                " Configuration [unsaved changes] "
-            } else {
-                " Configuration "
-            };
-            let p = Paragraph::new(editable_lines(working, loaded, state))
-                .block(Block::default().borders(Borders::ALL).title(title))
-                .wrap(Wrap { trim: false });
-            f.render_widget(p, chunks[0]);
-        }
-        (None, _) => {
-            let p = Paragraph::new(register_form_lines(state))
-                .block(
-                    Block::default()
-                        .borders(Borders::ALL)
-                        .title(" Register with cloud "),
-                )
-                .wrap(Wrap { trim: false });
-            f.render_widget(p, chunks[0]);
-        }
-    }
-
-    f.render_widget(footer(state), chunks[1]);
+    spans.push(Span::styled(
+        "   [<] prev  [>] next  [Alt+1..9] jump".to_string(),
+        Style::default().add_modifier(Modifier::DIM),
+    ));
+    Paragraph::new(Line::from(spans)).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .title(format!(" Runners ({}/{}) ", picked + 1, total)),
+    )
 }
 
-fn register_form_lines(state: &AppState) -> Vec<Line<'static>> {
+pub fn register_form_lines(state: &AppState) -> Vec<Line<'static>> {
     let Some(form) = state.register_form.as_ref() else {
         // No form yet — refresh() will seed one next tick; show a hint.
         return vec![Line::from(Span::styled(
@@ -435,7 +446,7 @@ fn mask_token(raw: &str) -> String {
     }
 }
 
-fn editable_lines(
+pub fn editable_lines(
     working: &Config,
     loaded: &Option<Config>,
     state: &AppState,
@@ -443,10 +454,11 @@ fn editable_lines(
     let mut lines = Vec::new();
     let selected_idx = state.selected.min(field_count().saturating_sub(1));
 
-    // Runner section: name is editable, cloud_url + workspace_slug read-only.
-    // cloud_url gets an extra hint line — since it's bound to the runner's
-    // credentials (minted by that cloud), changing it locally would leave a
-    // broken setup. Point the user at the register flow explicitly.
+    // Runner section: name is editable, workspace_slug + project_slug
+    // are read-only because they're bound at registration. cloud_url
+    // is daemon-level (one URL shared across every runner this daemon
+    // hosts) and lives on the General tab; we don't repeat it here to
+    // avoid the misleading impression that it's a per-runner setting.
     lines.push(section_header("Runner"));
     lines.extend(render_editable_row(
         working,
@@ -455,17 +467,18 @@ fn editable_lines(
         selected_idx,
         index_of(FieldId::RunnerName),
     ));
-    lines.push(readonly_row("cloud_url", &working.daemon.cloud_url));
-    lines.push(readonly_hint(
-        "to change, generate a new token in the cloud UI and re-run `pidash configure`",
-    ));
+    let picker_idx = state.runner_picker_idx;
+    let picked_runner = runner_at(working, picker_idx);
     lines.push(readonly_row(
         "workspace_slug",
-        working
-            .primary_runner()
-            .workspace_slug
-            .as_deref()
-            .unwrap_or("-"),
+        picked_runner.workspace_slug.as_deref().unwrap_or("-"),
+    ));
+    if let Some(slug) = picked_runner.project_slug.as_deref() {
+        lines.push(readonly_row("project_slug", slug));
+    }
+    lines.push(readonly_hint(
+        "workspace + project are bound at registration. Re-register or use \
+         `pidash token add-runner` to change them.",
     ));
     lines.push(Line::raw(""));
 
@@ -507,36 +520,21 @@ fn editable_lines(
         "allowlist_commands",
         &format!(
             "{} entries (edit via CLI / hand-edit)",
-            working
-                .primary_runner()
-                .approval_policy
-                .allowlist_commands
-                .len()
+            picked_runner.approval_policy.allowlist_commands.len()
         ),
     ));
     lines.push(readonly_row(
         "denylist_commands",
         &format!(
             "{} entries (edit via CLI / hand-edit)",
-            working
-                .primary_runner()
-                .approval_policy
-                .denylist_commands
-                .len()
+            picked_runner.approval_policy.denylist_commands.len()
         ),
     ));
     lines.push(Line::raw(""));
-
-    lines.push(section_header("Logging"));
-    for id in [FieldId::LogLevel, FieldId::LogRetentionDays] {
-        lines.extend(render_editable_row(
-            working,
-            loaded,
-            state,
-            selected_idx,
-            index_of(id),
-        ));
-    }
+    lines.push(Line::from(Span::styled(
+        "Daemon-level fields (log level, log retention) live in the General tab.",
+        Style::default().add_modifier(Modifier::DIM),
+    )));
 
     lines
 }
@@ -551,15 +549,19 @@ fn render_editable_row(
     let spec = &FIELDS[field_idx];
     let is_selected = selected_idx == field_idx;
     let editing_here = is_selected && state.config_edit_buffer.is_some();
+    let runner_idx = state.runner_picker_idx;
     let displayed = if editing_here {
         format!("{}▊", state.config_edit_buffer.as_deref().unwrap_or(""))
     } else {
-        display_value(working, spec.id)
+        display_value(working, spec.id, runner_idx)
     };
 
     let modified = loaded
         .as_ref()
-        .map(|l| display_value(l, spec.id) != display_value(working, spec.id))
+        .map(|l| {
+            display_value(l, spec.id, runner_idx)
+                != display_value(working, spec.id, runner_idx)
+        })
         .unwrap_or(true);
 
     let marker = if is_selected { "▶" } else { " " };
@@ -656,7 +658,7 @@ fn section_header(name: &str) -> Line<'static> {
     ))
 }
 
-fn footer(state: &AppState) -> Paragraph<'_> {
+pub fn footer(state: &AppState) -> Paragraph<'_> {
     let mut lines = Vec::new();
 
     // Action hints — contextual.
@@ -718,8 +720,23 @@ fn index_of(id: FieldId) -> usize {
         .expect("FieldId missing from FIELDS table")
 }
 
-fn differs(a: &Config, b: &Config) -> bool {
-    FIELDS
-        .iter()
-        .any(|f| display_value(a, f.id) != display_value(b, f.id))
+pub fn differs(a: &Config, b: &Config) -> bool {
+    // Compare every per-runner editable field across every configured
+    // runner. Daemon-level fields (log_level, log_retention_days) are
+    // edited on the General tab and aren't part of `FIELDS` — they
+    // need a separate equality check.
+    if a.daemon.log_level != b.daemon.log_level
+        || a.daemon.log_retention_days != b.daemon.log_retention_days
+    {
+        return true;
+    }
+    let n = a.runners.len().max(b.runners.len()).max(1);
+    for idx in 0..n {
+        for f in FIELDS {
+            if display_value(a, f.id, idx) != display_value(b, f.id, idx) {
+                return true;
+            }
+        }
+    }
+    false
 }

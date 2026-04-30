@@ -12,14 +12,16 @@ import { API_BASE_URL } from "@pi-dash/constants";
 import { useTranslation } from "@pi-dash/i18n";
 import { TOAST_TYPE, setToast } from "@pi-dash/propel/toast";
 import { PodService, RunnerService } from "@pi-dash/services";
-import type { IPod, IRunner, TRunnerStatus } from "@pi-dash/types";
+import type { IPod, IRunner, TPartialProject, TRunnerStatus } from "@pi-dash/types";
 import type { TBadgeVariant } from "@pi-dash/ui";
-import { AlertModalCore, Badge, Button, Input, Tooltip } from "@pi-dash/ui";
+import { AlertModalCore, Badge, Button, CustomSelect, Input, Tooltip } from "@pi-dash/ui";
 import { PageHead } from "@/components/core/page-title";
 import { useWorkspace } from "@/hooks/store/use-workspace";
+import { ProjectService } from "@/services/project";
 
 const service = new RunnerService();
 const podService = new PodService();
+const projectService = new ProjectService();
 
 const MAX_RUNNERS_PER_USER = 5;
 
@@ -34,6 +36,7 @@ const RunnersListPage = observer(function RunnersListPage() {
   const { currentWorkspace } = useWorkspace();
   const { t } = useTranslation();
   const workspaceId = currentWorkspace?.id;
+  const workspaceSlug = currentWorkspace?.slug;
   const pageTitle = currentWorkspace?.name
     ? t("runners.page_title", { workspace: currentWorkspace.name })
     : t("runners.title");
@@ -50,8 +53,22 @@ const RunnersListPage = observer(function RunnersListPage() {
     { refreshInterval: 30_000 }
   );
 
+  // Projects feed the picker that decides which project a fresh runner
+  // is bound to. The CLI's `--project` arg and the cloud's
+  // `/api/v1/runner/register/` endpoint both require this — runners are
+  // bound to one project for their lifetime.
+  const { data: projects } = useSWR<TPartialProject[]>(workspaceSlug ? ["projects-lite", workspaceSlug] : null, () =>
+    projectService.getProjectsLite(workspaceSlug!)
+  );
+
   const [mintedToken, setMintedToken] = useState<string | null>(null);
+  // Project identifier captured at mint time. We don't reuse the live
+  // selector value because the user can change it while the
+  // command-pre block is still on-screen, which would silently change
+  // the displayed snippet under them.
+  const [mintedProject, setMintedProject] = useState<string>("");
   const [label, setLabel] = useState("");
+  const [selectedProject, setSelectedProject] = useState<string>("");
   const [minting, setMinting] = useState(false);
   const [revokeTarget, setRevokeTarget] = useState<IRunner | null>(null);
   const [revoking, setRevoking] = useState(false);
@@ -63,7 +80,11 @@ const RunnersListPage = observer(function RunnersListPage() {
   }, []);
 
   const apiOrigin = API_BASE_URL || origin;
-  const configureCommand = mintedToken ? `pidash configure --url ${apiOrigin} --token ${mintedToken}` : "";
+  const configureCommand =
+    mintedToken && mintedProject
+      ? `pidash configure --url ${apiOrigin} --token ${mintedToken} --project ${mintedProject}`
+      : "";
+  const selectedProjectName = projects?.find((p) => p.identifier === selectedProject)?.name;
 
   async function copyToClipboard(text: string, kind: "command" | "token") {
     if (!text) return;
@@ -85,11 +106,24 @@ const RunnersListPage = observer(function RunnersListPage() {
 
   async function mint() {
     if (!workspaceId) return;
+    if (!selectedProject) {
+      setToast({
+        type: TOAST_TYPE.WARNING,
+        title: t("runners.toast.error_title"),
+        message: t("runners.list.project_required"),
+      });
+      return;
+    }
     setMinting(true);
     try {
       const result = await service.mintToken(workspaceId, label || undefined);
       setMintedToken(result.token);
+      // Pin the project against the freshly-minted token so the
+      // displayed snippet matches what the user picked, even if they
+      // change the dropdown afterwards.
+      setMintedProject(selectedProject);
       setLabel("");
+      setSelectedProject("");
       mutate();
     } catch (e: unknown) {
       const err = e as { error?: string } | null;
@@ -160,6 +194,24 @@ const RunnersListPage = observer(function RunnersListPage() {
             placeholder={t("runners.list.label_placeholder")}
             className="flex-1"
           />
+          <CustomSelect
+            value={selectedProject}
+            label={selectedProjectName ?? t("runners.list.project_placeholder")}
+            onChange={(value: string) => setSelectedProject(value)}
+            buttonClassName="border border-subtle min-w-[180px]"
+            input
+            maxHeight="lg"
+            placement="bottom-end"
+            disabled={!projects || projects.length === 0}
+          >
+            <>
+              {(projects ?? []).map((p) => (
+                <CustomSelect.Option key={p.id} value={p.identifier}>
+                  {p.name}
+                </CustomSelect.Option>
+              ))}
+            </>
+          </CustomSelect>
           <Button onClick={mint} disabled={!workspaceId || atCap} loading={minting}>
             {atCap ? t("runners.list.cap_reached") : t("runners.list.mint")}
           </Button>

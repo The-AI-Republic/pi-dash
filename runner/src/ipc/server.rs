@@ -1,20 +1,33 @@
 use anyhow::{Context, Result};
+use std::collections::HashMap;
 use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufStream};
 use tokio::net::{UnixListener, UnixStream};
+use uuid::Uuid;
 
 use super::protocol::{Request, Response, RpcError, StatusSnapshot};
-use crate::approval::router::{ApprovalRouter, DecisionSource};
-use crate::daemon::state::StateHandle;
+use crate::approval::router::DecisionSource;
+use crate::daemon::runner_instance::RunnerInstance;
 
+/// IPC server. Owns the multi-runner instance map and dispatches
+/// per-runner requests to the right `RunnerInstance`'s state /
+/// approvals / paths.
 pub struct IpcServer {
     pub path: PathBuf,
-    pub state: StateHandle,
-    pub approvals: ApprovalRouter,
+    /// Connection-level state. Used for `daemon_info` (cloud_url,
+    /// connected, uptime) and the Status subscribe tick stream. Any of
+    /// the `RunnerInstance` state handles works as a tick driver since
+    /// the supervisor ticks them all together; we keep a dedicated
+    /// "primary" handle for that purpose.
+    pub primary_state: crate::daemon::state::StateHandle,
     pub paths: crate::util::paths::Paths,
-    pub runner_paths: crate::util::paths::RunnerPaths,
+    /// All configured runners, keyed by runner_id. Resolved on every
+    /// per-runner request via the `runner` selector. Wrapped in `Arc`
+    /// so the supervisor can hand it to the IPC task without giving up
+    /// ownership.
+    pub instances: Arc<HashMap<Uuid, RunnerInstance>>,
 }
 
 impl IpcServer {
@@ -101,7 +114,7 @@ impl IpcServer {
         match req {
             Request::StatusGet => Ok(Response::Status(self.status_snapshot().await)),
             Request::StatusSubscribe => {
-                let mut rx = self.state.subscribe();
+                let mut rx = self.primary_state.subscribe();
                 let first = self.status_snapshot().await;
                 write_line(buf, &Response::Status(first)).await?;
                 while rx.changed().await.is_ok() {
@@ -114,70 +127,168 @@ impl IpcServer {
                 let cfg = crate::config::file::load_config(&self.paths)?;
                 Ok(Response::Config(serde_json::to_value(&cfg)?))
             }
-            Request::ConfigUpdate { patch } => {
+            Request::ConfigUpdate { patch, runner } => {
+                // ``runner`` is reserved / informational — the patch is
+                // deep-merged into the on-disk config (which already
+                // contains every `[[runner]]` block) and the daemon's
+                // primary state is reloaded. The selector is kept on
+                // the wire so a future per-runner live-patch flow can
+                // opt in without bumping IPC version again.
+                let _ = runner;
                 let mut cfg = crate::config::file::load_config(&self.paths)?;
                 merge_json(&mut cfg, patch)?;
                 crate::config::file::write_config(&self.paths, &cfg)?;
-                self.state.set_config(cfg.clone()).await;
+                self.primary_state.set_config(cfg.clone()).await;
                 Ok(Response::Ack)
             }
-            Request::RunsList { limit } => {
-                let index = crate::history::index::RunsIndex::load(&self.runner_paths)?;
-                Ok(Response::Runs(index.recent(limit.unwrap_or(100))))
-            }
-            Request::RunsGet { run_id } => {
-                let index = crate::history::index::RunsIndex::load(&self.runner_paths)?;
-                let summary = index
-                    .runs
-                    .get(&run_id)
-                    .cloned()
-                    .ok_or_else(|| anyhow::anyhow!("run not found"))?;
-                let path = self.runner_paths.runs_dir().join(format!("{run_id}.jsonl"));
-                let events = if path.exists() {
-                    crate::history::jsonl::read_all(&path)
-                        .await?
-                        .into_iter()
-                        .map(|e| serde_json::to_value(e).unwrap_or(serde_json::Value::Null))
-                        .collect()
-                } else {
-                    Vec::new()
+            Request::RunsList { limit, runner } => {
+                // ``runner = None`` means "union across every configured
+                // runner" — same shape as RunsGet / ApprovalsList. The
+                // TUI relies on this so the Runs tab works before the
+                // picker has been seeded by the Config refresh branch.
+                let candidates: Vec<&RunnerInstance> = match runner.as_deref() {
+                    Some(name) => vec![self.resolve_runner(Some(name))?],
+                    None => self.instances.values().collect(),
                 };
-                Ok(Response::Run { summary, events })
+                let cap = limit.unwrap_or(100);
+                let mut all = Vec::new();
+                for inst in candidates {
+                    let index = crate::history::index::RunsIndex::load(&inst.paths)?;
+                    all.extend(index.recent(cap));
+                }
+                // Newest-first across the union, then trim to the cap so
+                // a 100-row request returns the freshest 100 globally —
+                // not 100 per runner.
+                all.sort_by(|a, b| b.started_at.cmp(&a.started_at));
+                all.truncate(cap);
+                Ok(Response::Runs(all))
             }
-            Request::ApprovalsList => {
-                let pending = self.approvals.list_pending().await;
-                Ok(Response::Approvals(pending))
+            Request::RunsGet { run_id, runner } => {
+                // When a runner is named, scope the lookup to that
+                // instance's history. Without one, scan every instance
+                // — run IDs are globally unique, so the first match is
+                // authoritative.
+                let candidates: Vec<&RunnerInstance> = match runner.as_deref() {
+                    Some(name) => vec![self.resolve_runner(Some(name))?],
+                    None => self.instances.values().collect(),
+                };
+                for inst in candidates {
+                    let index = crate::history::index::RunsIndex::load(&inst.paths)?;
+                    if let Some(summary) = index.runs.get(&run_id).cloned() {
+                        let path = inst.paths.runs_dir().join(format!("{run_id}.jsonl"));
+                        let events = if path.exists() {
+                            crate::history::jsonl::read_all(&path)
+                                .await?
+                                .into_iter()
+                                .map(|e| serde_json::to_value(e).unwrap_or(serde_json::Value::Null))
+                                .collect()
+                        } else {
+                            Vec::new()
+                        };
+                        return Ok(Response::Run { summary, events });
+                    }
+                }
+                anyhow::bail!("run not found");
+            }
+            Request::ApprovalsList { runner } => {
+                let mut all = Vec::new();
+                let candidates: Vec<&RunnerInstance> = match runner.as_deref() {
+                    Some(name) => vec![self.resolve_runner(Some(name))?],
+                    None => self.instances.values().collect(),
+                };
+                for inst in candidates {
+                    all.extend(inst.approvals.list_pending().await);
+                }
+                Ok(Response::Approvals(all))
             }
             Request::ApprovalsDecide {
                 approval_id,
                 decision,
+                runner,
             } => {
-                let resolved = self
-                    .approvals
-                    .decide(&approval_id, decision, DecisionSource::Local)
-                    .await;
-                if resolved.is_none() {
-                    anyhow::bail!("approval not found or already resolved");
+                // Approval IDs are globally unique. With a `runner`
+                // selector we route to that instance directly; without
+                // one, scan every instance and decide on whichever
+                // owns the approval.
+                let candidates: Vec<&RunnerInstance> = match runner.as_deref() {
+                    Some(name) => vec![self.resolve_runner(Some(name))?],
+                    None => self.instances.values().collect(),
+                };
+                for inst in candidates {
+                    let resolved = inst
+                        .approvals
+                        .decide(&approval_id, decision, DecisionSource::Local)
+                        .await;
+                    if resolved.is_some() {
+                        return Ok(Response::Ack);
+                    }
                 }
-                Ok(Response::Ack)
+                anyhow::bail!("approval not found or already resolved");
             }
-            Request::DoctorRun => {
-                let report = crate::cli::doctor::execute(&self.paths).await?;
+            Request::DoctorRun { runner } => {
+                let report =
+                    crate::cli::doctor::execute(&self.paths, runner.as_deref()).await?;
                 Ok(Response::Doctor(report))
             }
             Request::RunnerReconnect => {
-                self.state.force_reconnect();
+                self.primary_state.force_reconnect();
                 Ok(Response::Ack)
             }
             Request::RunnerDisconnect => {
-                self.state.shutdown();
+                self.primary_state.shutdown();
                 Ok(Response::Ack)
             }
         }
     }
 
+    /// Resolve a runner-name selector to a concrete `RunnerInstance`.
+    /// When `name` is `None` and the daemon has exactly one runner
+    /// (the common single-runner install), return it. When `name` is
+    /// `None` and there are multiple, refuse with a hint listing the
+    /// configured names — the caller must disambiguate.
+    fn resolve_runner(&self, name: Option<&str>) -> Result<&RunnerInstance> {
+        match name {
+            Some(n) => self
+                .instances
+                .values()
+                .find(|i| i.name == n)
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "no runner named {:?}; configured: [{}]",
+                        n,
+                        self.runner_names().join(", ")
+                    )
+                }),
+            None => {
+                if self.instances.len() == 1 {
+                    Ok(self.instances.values().next().unwrap())
+                } else {
+                    anyhow::bail!(
+                        "this daemon hosts {} runners ([{}]); pass --runner <name>",
+                        self.instances.len(),
+                        self.runner_names().join(", "),
+                    )
+                }
+            }
+        }
+    }
+
+    fn runner_names(&self) -> Vec<String> {
+        let mut names: Vec<String> =
+            self.instances.values().map(|i| i.name.clone()).collect();
+        names.sort();
+        names
+    }
+
     async fn status_snapshot(&self) -> StatusSnapshot {
-        self.state.snapshot().await
+        let daemon = self.primary_state.daemon_info().await;
+        let mut runners = Vec::with_capacity(self.instances.len());
+        for inst in self.instances.values() {
+            runners.push(inst.state.runner_snapshot().await);
+        }
+        // Stable order so successive snapshots don't churn rendering.
+        runners.sort_by(|a, b| a.name.cmp(&b.name));
+        StatusSnapshot { daemon, runners }
     }
 }
 

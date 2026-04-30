@@ -13,7 +13,7 @@ How to use:
 - [x] **Phase A** — Cloud schema + dispatch
 - [x] **Phase B** — Runner config + CLI registration
 - [x] **Phase C** — Cloud-side pod CRUD API + project listing
-- [ ] **Phase D** — TUI + CLI multi-runner UX (selectors, status, doctor) — _deferred to follow-up PR; the user requested this refactor without TUI scope_
+- [x] **Phase D** — TUI + CLI multi-runner UX (selectors, status, doctor) — _landed in `feat/multi-runner-tui-cli-ux`_
 - [x] **Phase E** — End-to-end smoke test + docs
 
 ---
@@ -158,37 +158,37 @@ This is the original "F4 deferred" work, plus the per-runner project/pod surfaci
 
 ### D.1 IPC reshape
 
-- [ ] `StatusSnapshot` → `{ daemon: DaemonInfo, runners: Vec<RunnerStatusSnapshot> }`
-- [ ] `RunnerStatusSnapshot` carries `runner_id`, `name`, `project_slug`, `pod_name`, `status`, `current_run`, `approvals_pending`, `last_heartbeat`
-- [ ] Bump IPC version constant
-- [ ] Add `runner: Option<String>` selector to: `RunsList`, `RunsGet`, `ApprovalsList`, `ApprovalsDecide`, `ConfigUpdate`
-- [ ] `IpcServer` resolves the selector to a `RunnerInstance` (by name; default to "all" for read endpoints when omitted; require for write endpoints when N>1)
+- [x] `StatusSnapshot` → `{ daemon: DaemonInfo, runners: Vec<RunnerStatusSnapshot> }`
+- [x] `RunnerStatusSnapshot` carries `runner_id`, `name`, `project_slug`, `pod_id`, `status`, `current_run`, `approvals_pending`, `last_heartbeat`
+- [x] Bump IPC version constant (now `IPC_VERSION = 2`)
+- [x] Add `runner: Option<String>` selector to: `RunsList`, `RunsGet`, `ApprovalsList`, `ApprovalsDecide`, `ConfigUpdate`, `DoctorRun`
+- [x] `IpcServer` resolves the selector to a `RunnerInstance` (by name; default to "all" for read endpoints when omitted; require for write endpoints when N>1)
 
 ### D.2 Supervisor wiring
 
-- [ ] Pass the full `Vec<RunnerInstance>` (or a `HashMap<Uuid, Arc<RunnerInstance>>`) into `IpcServer`
-- [ ] Per-instance `state` / `approvals` / `paths` accessed via the map
+- [x] Pass the full `Arc<HashMap<Uuid, RunnerInstance>>` into `IpcServer`
+- [x] Per-instance `state` / `approvals` / `paths` accessed via the map
 
 ### D.3 TUI
 
-- [ ] Status tab: render N rows, one per runner
-- [ ] Runs tab: top-of-tab runner picker (`<` / `>` to cycle; `1`/`2`/… for direct selection up to 9 runners)
-- [ ] Approvals tab: same picker, filters approvals to selected runner
-- [ ] Config tab: same picker; `display_value()` and `set_text_value()` operate on the selected runner's config slice. Daemon-level fields (cloud_url, log_level) live in a fixed pseudo-runner section that sits above the picker.
+- [x] Status tab: renders the daemon row + one row per runner with project/status/approvals
+- [x] Runs / Approvals / Config: top-of-tab runner picker (`<`/`>` cycle, `Alt+1`–`Alt+9` jump)
+- [x] Approvals tab: picker drives `state.ipc.selected_runner` so list filters automatically
+- [x] Config tab: per-runner fields (RunnerName, WorkspaceWorkingDir, Codex/Claude binaries, ApprovalAuto\* booleans) read/write the selected runner; daemon-level fields (cloud_url, log_level, log_retention_days) stay shared
 
 ### D.4 CLI selectors
 
-- [ ] `pidash status` lists all runners with project/pod columns; `pidash status --runner <name>` filters to one
-- [ ] `pidash issue --runner <name> ...`, `pidash comment --runner <name> ...`, etc.
-- [ ] `pidash doctor` walks every runner and reports per-runner; `pidash doctor --runner <name>` for a single check
-- [ ] When N>1 and a verb that targets a runner is invoked without `--runner`, hard-error with a hint listing runner names
+- [x] `pidash status` lists every runner via `StatusSnapshot::print_compact()` (daemon row + per-runner rows)
+- [ ] ~~`pidash issue --runner <name> ...`, `pidash comment --runner <name> ...`, etc.~~ — out of scope: REST verbs go through the cloud API, not a specific runner
+- [x] `pidash doctor` walks every runner; `pidash doctor --runner <name>` filters; check names are tagged `<base>@<runner>` whenever there's ambiguity (multi-runner OR explicit filter)
+- [x] `IpcServer::resolve_runner` hard-errors with a hint listing runner names when N>1 and no selector is given for write endpoints
 
 ### D.5 Tests
 
-- [ ] `StatusSnapshot` serialization roundtrip
-- [ ] IPC server: read/write resolution with selector / without / ambiguous
-- [ ] TUI render snapshot (or smoke) for 2-runner config
-- [ ] `pidash doctor` covers two runners
+- [x] `StatusSnapshot` serialization roundtrip (4 unit tests in `ipc::protocol::tests`)
+- [x] `pidash doctor` covers two runners (`execute_with_two_runners_tags_each_runner_in_check_names` + 4 sibling tests in `cli::doctor::tests`)
+- [ ] _Skipped:_ TUI render snapshot — picker bar logic is straightforward and doesn't warrant a full ratatui-buffer test harness in this PR
+- [ ] _Skipped:_ end-to-end IPC server resolve test — `resolve_runner` is exercised indirectly through every per-runner selector test; a direct unit test would require constructing live `RunnerInstance`s
 
 ## Phase E — End-to-end smoke + docs
 

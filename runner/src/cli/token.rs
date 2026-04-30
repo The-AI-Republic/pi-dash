@@ -195,7 +195,37 @@ async fn run_install(args: InstallArgs, paths: &Paths) -> Result<()> {
     Ok(())
 }
 
-async fn run_add_runner(args: AddRunnerArgs, paths: &Paths) -> Result<()> {
+/// Outcome of `add_runner` — used by both the CLI wrapper and the TUI
+/// add-runner form to surface what landed without scraping stdout.
+#[derive(Debug, Clone)]
+pub struct AddRunnerOutcome {
+    pub name: String,
+    pub runner_id: Uuid,
+    pub project_slug: String,
+    pub pod_id: Option<Uuid>,
+    pub token_id: Uuid,
+}
+
+/// Outcome of `remove_runner` — surfaces the deleted runner so the TUI
+/// can flash a banner and refresh.
+#[derive(Debug, Clone)]
+pub struct RemoveRunnerOutcome {
+    pub name: String,
+    pub runner_id: Uuid,
+}
+
+/// Library entry point for the add-runner flow. The CLI wrapper
+/// (`run_add_runner`) prints a friendly summary; the TUI calls this
+/// directly and renders the outcome in its own widgets. Side effects:
+///
+/// 1. Calls the cloud's `register-under-token/` endpoint with the
+///    locally-installed machine token and the requested project / pod.
+/// 2. Appends a new `[[runner]]` block to `config.toml`.
+/// 3. Validates the resulting config (working_dir uniqueness, etc).
+///
+/// Caller is responsible for restarting the daemon afterwards
+/// (e.g. via ``service::reload::restart_and_verify``).
+pub async fn add_runner(args: AddRunnerArgs, paths: &Paths) -> Result<AddRunnerOutcome> {
     let name = args.name.trim();
     if name.is_empty() {
         anyhow::bail!("--name cannot be empty");
@@ -299,15 +329,30 @@ async fn run_add_runner(args: AddRunnerArgs, paths: &Paths) -> Result<()> {
         .context("config validation rejected the new runner; check the error message")?;
     crate::config::file::write_config(paths, &config)?;
 
+    Ok(AddRunnerOutcome {
+        name: name.to_string(),
+        runner_id,
+        project_slug: project_slug.to_string(),
+        pod_id,
+        token_id: token.token_id,
+    })
+}
+
+async fn run_add_runner(args: AddRunnerArgs, paths: &Paths) -> Result<()> {
+    let outcome = add_runner(args, paths).await?;
     println!(
-        "Registered runner {name:?} (id {runner_id}) under token {}.",
-        token.token_id,
+        "Registered runner {:?} (id {}) under token {}.",
+        outcome.name, outcome.runner_id, outcome.token_id,
     );
     println!("Restart the daemon to bring the new runner online.");
     Ok(())
 }
 
-async fn run_remove_runner(args: RemoveRunnerArgs, paths: &Paths) -> Result<()> {
+/// Library entry point for the remove-runner flow. Calls the cloud's
+/// `<runner_id>/deregister/` endpoint with the locally-installed token,
+/// strips the `[[runner]]` block from `config.toml`, and deletes the
+/// runner's local data directory. Caller restarts the daemon.
+pub async fn remove_runner(args: RemoveRunnerArgs, paths: &Paths) -> Result<RemoveRunnerOutcome> {
     let name = args.name.trim();
     if name.is_empty() {
         anyhow::bail!("--name cannot be empty");
@@ -366,7 +411,18 @@ async fn run_remove_runner(args: RemoveRunnerArgs, paths: &Paths) -> Result<()> 
         );
     }
 
-    println!("Removed runner {name:?} (id {runner_id}). Data directory deleted.",);
+    Ok(RemoveRunnerOutcome {
+        name: name.to_string(),
+        runner_id,
+    })
+}
+
+async fn run_remove_runner(args: RemoveRunnerArgs, paths: &Paths) -> Result<()> {
+    let outcome = remove_runner(args, paths).await?;
+    println!(
+        "Removed runner {:?} (id {}). Data directory deleted.",
+        outcome.name, outcome.runner_id,
+    );
     println!("Restart the daemon for the change to take effect.");
     Ok(())
 }
@@ -385,7 +441,36 @@ async fn run_show(paths: &Paths) -> Result<()> {
     Ok(())
 }
 
-async fn run_list_projects(paths: &Paths) -> Result<()> {
+/// Pod row inside a `ProjectInfo`. Default pod sorts first server-side
+/// so the TUI add-runner form can pre-select it without scanning.
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct PodInfo {
+    pub id: Uuid,
+    pub name: String,
+    pub is_default: bool,
+}
+
+/// Cloud-side project + its pods, returned by `list_projects`. The TUI
+/// uses this for the cascaded add-runner picker — no second round-trip
+/// per project change since pods are embedded.
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct ProjectInfo {
+    pub id: Uuid,
+    pub identifier: String,
+    pub name: String,
+    #[serde(default)]
+    pub default_pod_id: Option<Uuid>,
+    #[serde(default)]
+    pub pod_count: u64,
+    #[serde(default)]
+    pub pods: Vec<PodInfo>,
+}
+
+/// Library entry point for the project listing flow. Calls
+/// `/api/runners/projects/` with the locally-installed token and
+/// returns the parsed `Vec<ProjectInfo>`. The CLI wrapper formats it
+/// for stdout; the TUI feeds the same data into its picker form.
+pub async fn list_projects(paths: &Paths) -> Result<Vec<ProjectInfo>> {
     let config = crate::config::file::load_config(paths).context("loading config.toml")?;
     let creds = crate::config::file::load_credentials(paths).context("loading credentials.toml")?;
     let token = creds.token.as_ref().ok_or_else(|| {
@@ -413,8 +498,12 @@ async fn run_list_projects(paths: &Paths) -> Result<()> {
     if !status.is_success() {
         anyhow::bail!("list-projects failed: HTTP {status}: {text}");
     }
-    let projects: Vec<serde_json::Value> = serde_json::from_str(&text)
-        .with_context(|| format!("parsing list-projects response: {text}"))?;
+    serde_json::from_str(&text)
+        .with_context(|| format!("parsing list-projects response: {text}"))
+}
+
+async fn run_list_projects(paths: &Paths) -> Result<()> {
+    let projects = list_projects(paths).await?;
     if projects.is_empty() {
         println!(
             "no projects in this workspace yet. Create one in the Pi Dash UI \
@@ -424,14 +513,14 @@ async fn run_list_projects(paths: &Paths) -> Result<()> {
     }
     println!("{:<24} {:<32} {:<10} DEFAULT_POD_ID", "IDENTIFIER", "NAME", "PODS");
     for p in projects {
-        let identifier = p.get("identifier").and_then(|v| v.as_str()).unwrap_or("?");
-        let name = p.get("name").and_then(|v| v.as_str()).unwrap_or("?");
-        let pod_count = p.get("pod_count").and_then(|v| v.as_u64()).unwrap_or(0);
-        let default_pod_id = p
-            .get("default_pod_id")
-            .and_then(|v| v.as_str())
-            .unwrap_or("(none)");
-        println!("{identifier:<24} {name:<32} {pod_count:<10} {default_pod_id}");
+        let default = p
+            .default_pod_id
+            .map(|u| u.to_string())
+            .unwrap_or_else(|| "(none)".to_string());
+        println!(
+            "{:<24} {:<32} {:<10} {}",
+            p.identifier, p.name, p.pod_count, default,
+        );
     }
     Ok(())
 }
