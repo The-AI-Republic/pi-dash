@@ -84,6 +84,9 @@ export const InstallSchedulerBindingModal = observer(function InstallSchedulerBi
     try {
       const binding = await schedulerService.createBinding(workspaceSlug, projectId, {
         scheduler: values.scheduler,
+        // Cloud's serializer.is_valid() requires this even though the
+        // projectId is already in the URL — see scheduler.service.ts.
+        project: projectId,
         cron: values.cron.trim(),
         extra_context: values.extra_context.trim(),
         enabled: values.enabled,
