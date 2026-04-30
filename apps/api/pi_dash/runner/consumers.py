@@ -2,12 +2,16 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 # See the LICENSE file for details.
 
-"""Channels consumer that owns one runner's WebSocket connection.
+"""Channels consumer for a dev-machine WebSocket.
 
-Runners authenticate with an ``Authorization: Bearer <runner_secret>`` header
-on the HTTP upgrade request. The consumer joins a ``runner.<id>`` group so
-other processes can push work via
-:func:`pi_dash.runner.services.pubsub.send_to_runner`.
+The daemon authenticates as a Connection on the upgrade request:
+
+    Authorization: Bearer <connection_secret>
+    X-Connection-Id: <uuid>
+
+After upgrade, individual runners come online with ``Hello { runner_id }``
+frames; the consumer joins ``runner.<id>`` pubsub groups and routes
+inbound/outbound work by ``rid`` on each frame.
 """
 
 from __future__ import annotations
@@ -30,7 +34,7 @@ from pi_dash.runner.models import (
     ApprovalKind,
     ApprovalRequest,
     ApprovalStatus,
-    MachineToken,
+    Connection,
     Runner,
     RunnerStatus,
 )
@@ -39,15 +43,13 @@ from pi_dash.runner.services.tokens import hash_token
 
 logger = logging.getLogger(__name__)
 
-PROTOCOL_VERSION = 2
+PROTOCOL_VERSION = 3
 HEARTBEAT_INTERVAL_SECS = 25
 OFFLINE_GRACE_SECS = 60
 
 
 SEEN_MESSAGE_CACHE_SIZE = 512
 MAX_SEQ_LOOKBACK = 128
-# Upper bound on per-event JSON payload size. A rogue daemon could otherwise
-# fill the DB with arbitrarily large blobs in AgentRunEvent.payload.
 MAX_EVENT_PAYLOAD_BYTES = 64 * 1024
 CLOSE_CODE_ROTATED = 4010
 # Close code for a token-mode connection that opened the WS but never
@@ -60,32 +62,21 @@ HELLO_DEADLINE_SECS = 30
 class RunnerConsumer(AsyncJsonWebsocketConsumer):
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         super().__init__(*args, **kwargs)
-        # Legacy (per-runner-secret) auth: `self.runner` is the connection's
-        # one runner identity for the duration. Token auth leaves it None
-        # and uses `self.authorised_runners` instead — see below.
-        self.runner: Optional[Runner] = None
-        # Token (machine credential) authenticating the connection, if any.
-        # Set when the daemon sends `X-Token-Id` + `Bearer <token_secret>`;
-        # remains None on legacy v1 auth.
-        self.token: Optional[MachineToken] = None
-        # Token-mode authorised runner set: keyed by runner_id, populated
-        # as `Hello` frames arrive (one Hello per runner the daemon wants
-        # to bring online). Frame routing — both inbound (`receive_json`'s
-        # `_rid_matches` check) and outbound (`_send_envelope`'s rid
-        # stamping) — picks runners out of this map. Empty in legacy
-        # auth mode; legacy mode keeps using `self.runner` directly.
+        # The Connection authenticating this WS. Set at connect time and
+        # immutable for the WS lifetime.
+        self.connection: Optional[Connection] = None
+        # Runners brought online via Hello, keyed by runner_id. Frame
+        # routing — both inbound (`receive_json`'s rid lookup) and
+        # outbound (`_send_envelope`'s rid stamping) — picks runners
+        # out of this map.
         self.authorised_runners: Dict[UUID, Runner] = {}
-        # Each runner has its own pubsub group; a token-mode connection is
-        # joined to N of them. Tracked here so disconnect can leave them
-        # all cleanly. In legacy mode this is a single-element list mirror
-        # of self.group_name.
+        # Each authorised runner has its own pubsub group; a connection
+        # is joined to N of them. Tracked so disconnect can leave them
+        # all cleanly.
         self.group_names: list[str] = []
-        # Legacy single-runner group name. Kept as a separate field so the
-        # existing legacy auth code path is byte-for-byte unchanged.
-        self.group_name: Optional[str] = None
-        # Token-mode Hello watchdog — closes the connection if no runner
-        # comes online within HELLO_DEADLINE_SECS. Cancelled on first
-        # successful Hello and on disconnect.
+        # Hello watchdog — closes the connection if no runner comes online
+        # within HELLO_DEADLINE_SECS. Cancelled on first successful Hello
+        # and on disconnect so a half-open daemon doesn't tie up a slot.
         self._hello_deadline_task: Optional[asyncio.Task] = None
         # Per-connection dedupe cache of message_ids we've already applied.
         # LRU-bounded so a misbehaving runner can't grow us unboundedly.
@@ -99,38 +90,18 @@ class RunnerConsumer(AsyncJsonWebsocketConsumer):
         *,
         runner_scoped: bool = True,
     ) -> None:
-        """Send an outbound frame stamped with the wire envelope.
+        """Send an outbound frame with a ``v`` + ``mid`` envelope.
 
         The Rust runner's ``Envelope<T>`` requires ``v`` (protocol version)
         and ``mid`` (per-message UUID for dedupe) on every frame. Callers
-        pass the logical fields (``type`` + type-specific keys); this helper
-        adds the envelope. Any ``v``/``mid`` already in ``payload`` wins so
-        tests can pin exact values if they need to.
-
-        ``rid`` (per-runner routing discriminator) is added when the frame
-        is bound to a specific runner — i.e. nearly always, while one
-        connection still serves one runner. Connection-scoped frames
-        (``ping``, ``bye``, future connection-wide ``revoke``) pass
-        ``runner_scoped=False`` so the field is omitted, matching the
-        runner's `Envelope::new` (no rid) vs `Envelope::for_runner`
-        (with rid) split — see ``design.md`` §4.2 / §4.3.
+        pass logical fields; this helper adds the envelope. Connection-
+        scoped frames (``ping``, ``bye``, ``revoke``) pass
+        ``runner_scoped=False`` so ``rid`` is omitted.
         """
         frame: Dict[str, Any] = {
             "v": PROTOCOL_VERSION,
             "mid": str(uuid4()),
         }
-        # Auto-stamp rid in legacy single-runner mode if the caller didn't
-        # set it explicitly. In token mode the caller MUST set rid (the
-        # connection has multiple authorised runners; the helper can't
-        # guess which one this frame is for) — runner_send pulls rid
-        # from the pubsub payload before forwarding.
-        if (
-            runner_scoped
-            and self.runner is not None
-            and self.token is None
-            and "rid" not in payload
-        ):
-            frame["rid"] = str(self.runner.id)
         frame.update(payload)
         await self.send_json(frame)
 
@@ -140,41 +111,16 @@ class RunnerConsumer(AsyncJsonWebsocketConsumer):
             await self.close(code=4401)
             return
         raw = auth.split(" ", 1)[1].strip()
-
-        # Two auth modes:
-        # 1. Token (multi-runner): X-Token-Id + Bearer <token_secret>. The
-        #    daemon authenticates as the machine; runners under it come
-        #    online individually via `Hello { rid, runner_id }` frames
-        #    after WS upgrade. The connection authorises any runner that
-        #    arrives via Hello and is in the token's owns-set.
-        # 2. Legacy (single-runner): Authorization-only with the runner's
-        #    own bearer secret. Existing v1 daemons use this path; one
-        #    connection ↔ one runner, no Hello fan-out.
-        token_id_header = (self._header("x-token-id") or "").strip()
-        if token_id_header:
-            token = await self._authenticate_token(token_id_header, raw)
-            if token is None:
-                await self.close(code=4401)
-                return
-            self.token = token
-            # Accept the WS up front; runners come online via Hello.
-            await self.accept()
-            # Arm the Hello watchdog. Without this, a daemon that only
-            # completes the upgrade and never sends Hello holds a
-            # consumer slot forever.
-            self._hello_deadline_task = asyncio.create_task(
-                self._enforce_hello_deadline()
-            )
-            return
-
-        runner = await self._find_runner(raw)
-        if runner is None:
+        connection_id_header = (self._header("x-connection-id") or "").strip()
+        if not connection_id_header:
             await self.close(code=4401)
             return
-        if runner.status == RunnerStatus.REVOKED:
-            await self.close(code=4403)
+        connection = await self._authenticate_connection(connection_id_header, raw)
+        if connection is None:
+            await self.close(code=4401)
             return
-        # Protocol check — log on mismatch, but tolerate garbage headers so a
+        self.connection = connection
+        # Protocol check — log on mismatch, but tolerate garbage so a
         # malformed ``X-Runner-Protocol`` doesn't kill the connection.
         proto_raw = (self._header("x-runner-protocol") or "").strip()
         if proto_raw:
@@ -182,30 +128,24 @@ class RunnerConsumer(AsyncJsonWebsocketConsumer):
                 proto_int = int(proto_raw)
             except ValueError:
                 logger.warning(
-                    "runner %s sent non-numeric protocol header %r",
-                    runner.id,
+                    "connection %s sent non-numeric protocol header %r",
+                    connection.id,
                     proto_raw,
                 )
             else:
                 if proto_int != PROTOCOL_VERSION:
                     logger.warning(
-                        "runner %s protocol mismatch (server=%s, client=%s)",
-                        runner.id,
+                        "connection %s protocol mismatch (server=%s, client=%s)",
+                        connection.id,
                         PROTOCOL_VERSION,
                         proto_int,
                     )
-        self.runner = runner
-        self.group_name = runner_group(runner.id)
-        self.group_names = [self.group_name]
-        await self.channel_layer.group_add(self.group_name, self.channel_name)
         await self.accept()
-        await self._mark_online(runner.id)
-        await self._send_envelope({
-            "type": "welcome",
-            "server_time": timezone.now().isoformat(),
-            "heartbeat_interval_secs": HEARTBEAT_INTERVAL_SECS,
-            "protocol_version": PROTOCOL_VERSION,
-        })
+        # Arm the Hello watchdog. Without this, a daemon that completes
+        # the upgrade and never sends Hello holds a consumer slot forever.
+        self._hello_deadline_task = asyncio.create_task(
+            self._enforce_hello_deadline()
+        )
 
     async def disconnect(self, code: int) -> None:
         # Cancel the Hello watchdog if it's still pending — it would
@@ -214,58 +154,30 @@ class RunnerConsumer(AsyncJsonWebsocketConsumer):
         if self._hello_deadline_task is not None:
             self._hello_deadline_task.cancel()
             self._hello_deadline_task = None
-        # Leave every joined pubsub group, regardless of mode. Token mode
-        # has N entries here; legacy has at most one.
         for group in self.group_names:
             await self.channel_layer.group_discard(group, self.channel_name)
-        # Mark every runner this connection brought online offline. In
-        # legacy mode that's just `self.runner`; in token mode it's the
-        # full authorised_runners map.
-        if self.token is not None:
-            for runner_id in list(self.authorised_runners.keys()):
-                await self._mark_offline(runner_id)
-        elif self.runner is not None:
-            await self._mark_offline(self.runner.id)
+        for runner_id in list(self.authorised_runners.keys()):
+            await self._mark_offline(runner_id)
 
     async def receive_json(self, content: Dict[str, Any], **_: Any) -> None:
         mtype = content.get("type")
-        # Resolve the target runner.
-        # - Token mode: pull the runner from the rid field. Hello is a
-        #   special case — it's the frame that ADDS to authorised_runners,
-        #   so we route it through `_handle_token_hello` directly.
-        # - Legacy mode: `self.runner` was bound at connect time.
-        if self.token is not None:
-            if mtype == "hello":
-                await self._handle_token_hello(content)
-                return
-            # Connection-scoped frames in token mode legitimately omit
-            # rid (e.g. the daemon's `Bye` on shutdown). Dispatch them
-            # straight to their handler instead of trying to resolve a
-            # per-runner mailbox — the rid lookup would otherwise drop
-            # them with a misleading "unknown rid" warning.
-            if mtype == "bye":
-                await self.close()
-                return
-            runner = self._resolve_inbound_runner(content)
-            if runner is None:
-                logger.warning(
-                    "token %s sent %s frame with unknown rid %r; dropping",
-                    self.token.id,
-                    mtype,
-                    content.get("rid"),
-                )
-                return
-        else:
-            runner = self.runner
-            if runner is None:
-                return
-            if not self._rid_matches(runner, content):
-                logger.warning(
-                    "runner %s sent frame with mismatched rid %r; dropping",
-                    runner.id,
-                    content.get("rid"),
-                )
-                return
+        if self.connection is None:
+            return
+        if mtype == "hello":
+            await self._handle_hello(content)
+            return
+        if mtype == "bye":
+            await self.close()
+            return
+        runner = self._resolve_inbound_runner(content)
+        if runner is None:
+            logger.warning(
+                "connection %s sent %s frame with unknown rid %r; dropping",
+                self.connection.id,
+                mtype,
+                content.get("rid"),
+            )
+            return
         if self._is_duplicate(content):
             logger.debug(
                 "runner %s sent duplicate message %s; dropping",
@@ -285,12 +197,6 @@ class RunnerConsumer(AsyncJsonWebsocketConsumer):
             logger.exception("error handling %s from runner %s", mtype, runner.id)
 
     def _resolve_inbound_runner(self, content: Dict[str, Any]) -> Optional[Runner]:
-        """Token mode: pick the target Runner from the frame's ``rid``.
-
-        Returns None if the rid is missing, malformed, or names a runner
-        not in this connection's authorised set. The receive_json caller
-        drops the frame in that case.
-        """
         rid = content.get("rid")
         if rid is None:
             return None
@@ -300,33 +206,27 @@ class RunnerConsumer(AsyncJsonWebsocketConsumer):
             return None
         return self.authorised_runners.get(rid_uuid)
 
-    async def _handle_token_hello(self, content: Dict[str, Any]) -> None:
-        """Bring a runner online over a token-authenticated connection.
+    async def _handle_hello(self, content: Dict[str, Any]) -> None:
+        """Bring a runner online over an authenticated connection.
 
         Steps:
-        1. Parse ``runner_id`` from the body. The wire's envelope ``rid``
-           and the Hello body's ``runner_id`` should agree (sanity-checked
-           below); we use the body field as authoritative since `Hello`
-           is the frame that introduces the runner.
-        2. Verify the runner is owned by this connection's token and not
-           revoked.
+        1. Parse ``runner_id`` from the body and sanity-check the envelope's
+           ``rid`` agrees.
+        2. Verify the runner is owned by this connection and not revoked.
         3. Mark online, join the per-runner pubsub group, store in
            authorised_runners, send a runner-scoped Welcome.
         """
-        if self.token is None:
+        if self.connection is None:
             return
         body_runner_id = content.get("runner_id")
         try:
             runner_id = UUID(str(body_runner_id))
         except (ValueError, AttributeError):
             logger.warning(
-                "token %s sent Hello with invalid runner_id %r",
-                self.token.id,
+                "connection %s sent Hello with invalid runner_id %r",
+                self.connection.id,
                 body_runner_id,
             )
-            # The body's runner_id is unparseable, so we have no rid
-            # to address an error frame to. Drop silently and rely on
-            # the connection-level Bye/close path if this repeats.
             return
         rid = content.get("rid")
         if rid is not None:
@@ -334,21 +234,18 @@ class RunnerConsumer(AsyncJsonWebsocketConsumer):
                 rid_uuid = UUID(str(rid))
             except (ValueError, AttributeError):
                 logger.warning(
-                    "token %s sent Hello with malformed envelope rid %r",
-                    self.token.id,
+                    "connection %s sent Hello with malformed envelope rid %r",
+                    self.connection.id,
                     rid,
                 )
                 return
             if rid_uuid != runner_id:
                 logger.warning(
-                    "token %s sent Hello with mismatched envelope rid %s vs body runner_id %s",
-                    self.token.id,
+                    "connection %s sent Hello with mismatched rid %s vs runner_id %s",
+                    self.connection.id,
                     rid_uuid,
                     runner_id,
                 )
-                # Surface the inconsistency to the daemon so its
-                # RunnerLoop can drop that instance instead of waiting
-                # forever for a Welcome that will never arrive.
                 await self._send_envelope(
                     {
                         "type": "remove_runner",
@@ -360,15 +257,13 @@ class RunnerConsumer(AsyncJsonWebsocketConsumer):
                 )
                 return
 
-        runner = await self._resolve_token_runner(self.token, runner_id)
+        runner = await self._resolve_connection_runner(self.connection, runner_id)
         if runner is None or runner.status == RunnerStatus.REVOKED:
             logger.warning(
-                "token %s tried to bring runner %s online but it is not owned/revoked",
-                self.token.id,
+                "connection %s tried to bring runner %s online but it is not owned/revoked",
+                self.connection.id,
                 runner_id,
             )
-            # Tell the daemon explicitly so its RunnerLoop doesn't sit
-            # waiting for a Welcome that will never arrive.
             await self._send_envelope(
                 {
                     "type": "remove_runner",
@@ -380,36 +275,22 @@ class RunnerConsumer(AsyncJsonWebsocketConsumer):
             )
             return
 
-        # Optional project_slug cross-check. The wire field is additive
-        # (older daemons / cloud peers omit it). When the daemon sends
-        # it, we verify it agrees with the runner's pod's project — a
-        # mismatch means the daemon's local config disagrees with the
-        # cloud-side runner row, and we want to surface that loudly
-        # rather than dispatch project-Q work to project-P clones.
         body_project_slug = content.get("project_slug")
         if body_project_slug is not None:
             expected_slug = await self._resolve_runner_project_slug(runner)
             if expected_slug is None:
-                # Runner row exists and is owned by the token (we passed
-                # ``_resolve_token_runner`` above), but its pod / project
-                # chain doesn't yield an identifier. That means the
-                # cloud-side row is in a half-set-up state — fail open
-                # so the daemon can come online while an operator
-                # diagnoses, but log loudly: this state shouldn't exist
-                # post-refactor and silent acceptance would mask the
-                # data-integrity issue.
-                logger.warning(
-                    "token %s Hello for runner %s claimed project_slug %r "
+                logger.debug(
+                    "connection %s Hello for runner %s claimed project_slug %r "
                     "but cloud could not resolve runner.pod.project; "
                     "skipping cross-check",
-                    self.token.id,
+                    self.connection.id,
                     runner_id,
                     body_project_slug,
                 )
             elif str(body_project_slug) != expected_slug:
                 logger.warning(
-                    "token %s Hello for runner %s claimed project %r but cloud has %r",
-                    self.token.id,
+                    "connection %s Hello for runner %s claimed project %r but cloud has %r",
+                    self.connection.id,
                     runner_id,
                     body_project_slug,
                     expected_slug,
@@ -424,9 +305,8 @@ class RunnerConsumer(AsyncJsonWebsocketConsumer):
                     runner_scoped=False,
                 )
                 return
+
         if runner_id in self.authorised_runners:
-            # Idempotent: a re-Hello after reconnect is fine, we just
-            # don't duplicate the bookkeeping.
             return
 
         self.authorised_runners[runner_id] = runner
@@ -439,20 +319,9 @@ class RunnerConsumer(AsyncJsonWebsocketConsumer):
         self.group_names.append(group)
         await self.channel_layer.group_add(group, self.channel_name)
         await self._mark_online(runner.id)
-        # Persist hello metadata (os/arch/runner_version) the same way
-        # the legacy single-runner path does via on_hello → _apply_hello.
-        # Without this, token-mode Runner rows would never get those
-        # fields populated.
         await sync_to_async(self._apply_hello)(runner, content)
-        # Bump the token's last_seen_at — the field is surfaced in the
-        # admin and connections list and is otherwise never updated in
-        # token mode.
-        await self._touch_token_seen()
-        # Same drain-on-online hook as the legacy path: a runner coming
-        # online with queued pod work waiting should pull it now.
+        await self._touch_connection_seen()
         await sync_to_async(self._drain_after_online)(runner.id)
-        # Per-runner Welcome — carries the runner's rid so the daemon
-        # knows which Hello this is acking.
         await self._send_envelope(
             {
                 "type": "welcome",
@@ -462,23 +331,11 @@ class RunnerConsumer(AsyncJsonWebsocketConsumer):
                 "protocol_version": PROTOCOL_VERSION,
             }
         )
-
-    @staticmethod
-    def _rid_matches(runner: Runner, content: Dict[str, Any]) -> bool:
-        """Validate envelope ``rid`` against the connection's authenticated
-        runner. Frames without an ``rid`` are accepted (legacy / connection-
-        scoped); frames with an ``rid`` must match the connection's runner.
-        """
-        rid = content.get("rid")
-        if rid is None:
-            return True
-        try:
-            return UUID(str(rid)) == runner.id
-        except (ValueError, AttributeError):
-            return False
+        in_flight = content.get("in_flight_run")
+        if in_flight:
+            await self._resume_run(runner, str(in_flight))
 
     def _is_duplicate(self, content: Dict[str, Any]) -> bool:
-        """LRU-bounded check on the wire ``mid`` so retries are idempotent."""
         mid = content.get("mid")
         if not mid:
             return False
@@ -492,13 +349,6 @@ class RunnerConsumer(AsyncJsonWebsocketConsumer):
         return False
 
     def _seq_ok(self, runner: Runner, content: Dict[str, Any]) -> bool:
-        """Enforce monotonic ``seq`` for ``run_event`` frames.
-
-        Frames without a ``seq`` or a ``run_id`` pass through. A seq that is
-        not strictly greater than the last-seen value is dropped and logged
-        (duplicate or out-of-order); a gap (skip > 1) is logged but
-        accepted — the transcript will simply be missing those events.
-        """
         if content.get("type") != "run_event":
             return True
         run_id = str(content.get("run_id") or "")
@@ -528,30 +378,11 @@ class RunnerConsumer(AsyncJsonWebsocketConsumer):
                 run_id,
             )
         self.last_seq_per_run[run_id] = seq
-        # Keep the map bounded per-connection.
         if len(self.last_seq_per_run) > MAX_SEQ_LOOKBACK:
-            # Drop the oldest entry (dict preserves insertion order in 3.7+).
             self.last_seq_per_run.pop(next(iter(self.last_seq_per_run)))
         return True
 
     # ---- Inbound handlers ----
-
-    async def on_hello(self, runner: Runner, msg: Dict[str, Any]) -> None:
-        await sync_to_async(self._apply_hello)(runner, msg)
-        # Reconcile zombie BUSY runs on every reconnect. A daemon that died
-        # mid-assignment will reconnect with in_flight_run=None even though
-        # the cloud still has rows marked ASSIGNED for this runner.
-        await sync_to_async(self._reap_stale_busy_runs)(runner, msg)
-        in_flight = msg.get("in_flight_run")
-        if in_flight:
-            await self._resume_run(runner, str(in_flight))
-        else:
-            # Newly-online runner with no in-flight: poke the dispatcher
-            # so any queued pod work that was waiting can land here.
-            # Without this hook a runner that flaps offline/online while
-            # work is queued sits idle until something else (a new run,
-            # an existing run finishing) fires drain. See review C.
-            await sync_to_async(self._drain_after_online)(runner.id)
 
     async def on_heartbeat(self, runner: Runner, msg: Dict[str, Any]) -> None:
         await sync_to_async(self._apply_heartbeat)(runner, msg)
@@ -580,14 +411,6 @@ class RunnerConsumer(AsyncJsonWebsocketConsumer):
         await sync_to_async(self._finalize_run)(runner, msg, AgentRunStatus.CANCELLED)
 
     async def on_run_paused(self, runner: Runner, msg: Dict[str, Any]) -> None:
-        """Codex tool-call yield path. Cloud parks the run as
-        PAUSED_AWAITING_INPUT and triggers drain so the runner is free to
-        pick up other pod work while waiting for a human reply.
-
-        Claude's yield arrives via ``on_run_completed`` with a
-        ``pi-dash-done`` fenced block whose status is ``"paused"``; the
-        done-signal parser handles that path separately.
-        """
         await sync_to_async(self._handle_run_paused)(runner, msg)
 
     async def on_run_awaiting_reauth(
@@ -604,14 +427,6 @@ class RunnerConsumer(AsyncJsonWebsocketConsumer):
             await self._resume_run(runner, str(run_id))
 
     async def _resume_run(self, runner: Runner, run_id: str) -> None:
-        """Acknowledge an in-flight run on reconnect.
-
-        Loads the run, confirms it still belongs to this runner, and sends a
-        ``resume_ack`` with the last seq we persisted so the daemon can avoid
-        re-sending already-stored events. If the run was finalized during the
-        disconnect window we send a ``cancel`` instead so the daemon tears
-        down its local bridge cleanly.
-        """
         run = await sync_to_async(
             lambda: AgentRun.objects.filter(id=run_id, runner=runner).first()
         )()
@@ -638,7 +453,6 @@ class RunnerConsumer(AsyncJsonWebsocketConsumer):
             "thread_id": run.thread_id,
         })
         if last_seq is not None:
-            # Prime the local seq map so dupes of already-persisted events drop.
             self.last_seq_per_run[run_id] = last_seq
 
     @staticmethod
@@ -657,69 +471,45 @@ class RunnerConsumer(AsyncJsonWebsocketConsumer):
 
     async def runner_send(self, event: Dict[str, Any]) -> None:
         payload = dict(event.get("payload") or {})
-        # In token mode this consumer is joined to N runner groups; the
-        # event includes which one fired so we can stamp `rid` correctly.
-        # In legacy mode `_send_envelope` falls back to self.runner.id.
         target_id = event.get("runner_id")
         if target_id and "rid" not in payload:
             payload["rid"] = str(target_id)
         try:
             await self._send_envelope(payload)
         except Exception:
-            logger.exception(
-                "runner %s send failed",
-                target_id or (self.runner.id if self.runner else "?"),
-            )
+            logger.exception("runner %s send failed", target_id or "?")
 
     async def runner_close(self, event: Dict[str, Any]) -> None:
-        """Force-close this WS (e.g. after credential rotation).
-
-        The daemon is expected to reconnect with the new secret.
-        """
         await self.close(code=int(event.get("code") or CLOSE_CODE_ROTATED))
 
     async def runner_revoke(self, event: Dict[str, Any]) -> None:
-        """Send a connection-scoped ``Revoke`` frame and close.
-
-        Triggered by ``MachineToken.revoke()``. The frame goes out with
-        ``rid`` omitted so the daemon's demux routes it to the
-        connection consumer (per-design: ``Ping``/``Bye``/``Revoke`` are
-        the only connection-scoped server frames). The daemon's
-        supervisor handler at ``runner/src/daemon/supervisor.rs`` (the
-        ``ServerMsg::Revoke`` arm in the demux) calls
-        ``state.shutdown()`` on receipt — so revocation triggers a
-        clean daemon exit rather than a reconnect-with-401 spin loop.
-        """
-        reason = str(event.get("reason") or "token revoked")
+        reason = str(event.get("reason") or "connection revoked")
         try:
             await self._send_envelope(
                 {"type": "revoke", "reason": reason},
                 runner_scoped=False,
             )
         except Exception:
-            # The daemon may have already closed the socket; surface as
-            # a debug log and fall through to close anyway.
             logger.exception("failed to send revoke frame")
         await self.close(code=CLOSE_CODE_ROTATED)
 
     async def _enforce_hello_deadline(self) -> None:
-        """Close a token-mode connection that opened the WS but never
-        sent a Hello within ``HELLO_DEADLINE_SECS``.
+        """Close a connection that opened the WS but never sent a Hello
+        within ``HELLO_DEADLINE_SECS``.
 
-        Cleared on first successful Hello (see ``_handle_token_hello``)
-        and on disconnect. Runs only in token mode — legacy mode binds
-        the runner before ``accept()``, so a half-open legacy socket
-        already has identity and isn't relevant here.
+        Cleared on first successful Hello (see ``_handle_hello``) and on
+        disconnect, so a daemon that completes the upgrade and never
+        introduces a runner doesn't tie up a consumer slot indefinitely.
         """
         try:
             await asyncio.sleep(HELLO_DEADLINE_SECS)
         except asyncio.CancelledError:
             return
-        if self.token is None or self.authorised_runners:
+        if self.connection is None or self.authorised_runners:
             return
         logger.warning(
-            "token %s opened WS but sent no Hello in %ds; closing",
-            self.token.id,
+            "connection %s opened WS but sent no Hello in %ds; closing",
+            self.connection.id,
             HELLO_DEADLINE_SECS,
         )
         try:
@@ -732,70 +522,47 @@ class RunnerConsumer(AsyncJsonWebsocketConsumer):
     # ---- Sync helpers (DB-bound) ----
 
     @staticmethod
-    async def _find_runner(raw: str) -> Optional[Runner]:
-        hashed = hash_token(raw)
-        return await sync_to_async(
-            lambda: Runner.objects.filter(credential_hash=hashed).first()
-        )()
-
-    @staticmethod
-    async def _authenticate_token(
-        token_id_raw: str, secret_raw: str
-    ) -> Optional[MachineToken]:
-        """Look up a MachineToken by id and verify its bearer secret.
-
-        Returns the token on success, None on any failure (unknown id,
-        mismatched secret, revoked token). Runners are resolved
-        per-`Hello` after the WS is up — see :meth:`on_hello`.
-        """
+    async def _authenticate_connection(
+        connection_id_raw: str, secret_raw: str
+    ) -> Optional[Connection]:
         try:
-            token_id = UUID(token_id_raw)
+            connection_id = UUID(connection_id_raw)
         except (ValueError, AttributeError):
             return None
         secret_hashed = hash_token(secret_raw)
         return await sync_to_async(
-            lambda: MachineToken.objects.filter(
-                id=token_id,
+            lambda: Connection.objects.filter(
+                id=connection_id,
                 secret_hash=secret_hashed,
                 revoked_at__isnull=True,
+                enrolled_at__isnull=False,
             ).first()
         )()
 
-    async def _touch_token_seen(self) -> None:
-        """Bump ``MachineToken.last_seen_at`` for the current connection.
-
-        Called on every successful per-runner Hello so the connections
-        list / admin reflects a live token. Cheap (single UPDATE by
-        primary key) and safe to call repeatedly.
-        """
-        if self.token is None:
+    async def _touch_connection_seen(self) -> None:
+        if self.connection is None:
             return
-        token_id = self.token.id
+        connection_id = self.connection.id
         await sync_to_async(
-            lambda: MachineToken.objects.filter(pk=token_id).update(
+            lambda: Connection.objects.filter(pk=connection_id).update(
                 last_seen_at=timezone.now()
             )
         )()
 
     @staticmethod
-    async def _resolve_token_runner(token: MachineToken, runner_id: UUID) -> Optional[Runner]:
-        """Validate that ``runner_id`` is owned by ``token`` and not
-        revoked, returning the Runner row or None.
-        """
+    async def _resolve_connection_runner(
+        connection: Connection, runner_id: UUID
+    ) -> Optional[Runner]:
         return await sync_to_async(
             lambda: Runner.objects.filter(
                 id=runner_id,
-                machine_token=token,
+                connection=connection,
                 revoked_at__isnull=True,
             ).first()
         )()
 
     @staticmethod
     async def _resolve_runner_project_slug(runner: Runner) -> Optional[str]:
-        """Return ``runner.pod.project.identifier`` or ``None`` if the
-        runner has no pod (shouldn't happen post-refactor) or the
-        project is somehow gone.
-        """
         def _lookup() -> Optional[str]:
             r = (
                 Runner.objects.select_related("pod__project")
@@ -830,12 +597,6 @@ class RunnerConsumer(AsyncJsonWebsocketConsumer):
 
     @staticmethod
     def _drain_after_online(runner_id: UUID) -> None:
-        """Trigger pod-drain for a runner that just came online so any
-        queued work waiting for capacity can dispatch immediately.
-
-        Defers to on_commit so it doesn't run inside the consumer's
-        request-handling transaction (drain spawns its own).
-        """
         from django.db import transaction
 
         from pi_dash.runner.services.matcher import drain_for_runner_by_id
@@ -849,26 +610,13 @@ class RunnerConsumer(AsyncJsonWebsocketConsumer):
         runner.runner_version = msg.get("version", "") or runner.runner_version
         runner.last_heartbeat_at = timezone.now()
         runner.save(update_fields=updates)
+        self._reap_stale_busy_runs(runner, msg)
 
     def _apply_heartbeat(self, runner: Runner, msg: Dict[str, Any]) -> None:
         runner.mark_heartbeat()
         self._reap_stale_busy_runs(runner, msg)
 
     def _reap_stale_busy_runs(self, runner: Runner, msg: Dict[str, Any]) -> None:
-        """Reconcile cloud's view of runner's in-flight work against the
-        runner's own report.
-
-        The runner is the source of truth about which run it is currently
-        executing. If the cloud has runs marked BUSY (assigned/running/etc.)
-        for this runner that the runner does NOT report as in-flight, those
-        rows are zombies — typically left over from a daemon restart that
-        killed the agent subprocess between assign and the first lifecycle
-        ack. Reap them so the runner can pick up new work.
-
-        Race guard: only reap runs whose ``assigned_at`` predates the
-        heartbeat's ``ts``. A heartbeat sent before a fresh assignment was
-        written must not reap that assignment.
-        """
         from datetime import datetime, timedelta
 
         from django.db import transaction
@@ -879,13 +627,6 @@ class RunnerConsumer(AsyncJsonWebsocketConsumer):
             drain_pod_by_id,
         )
 
-        # The runner is untrusted: a malicious or buggy daemon could send
-        # ``ts`` far in the future (matching every BUSY row) or far in the
-        # past (matching nothing). Clamp to a server-side window before
-        # using as a SQL cutoff:
-        #   upper bound = now            (no future timestamps)
-        #   lower bound = now - GRACE    (don't reach beyond the dead-runner
-        #                                 detection window)
         now = timezone.now()
         ts_raw = msg.get("ts")
         try:
@@ -900,9 +641,6 @@ class RunnerConsumer(AsyncJsonWebsocketConsumer):
         heartbeat_ts = max(heartbeat_ts, now - timedelta(seconds=OFFLINE_GRACE_SECS))
 
         in_flight = msg.get("in_flight_run")
-        # Validate UUID format before interpolating into error strings or
-        # using as an exclusion key — runner-supplied content otherwise lands
-        # in ``AgentRun.error`` which is surfaced to the UI.
         in_flight_id: Optional[str] = None
         if in_flight:
             try:
@@ -938,9 +676,6 @@ class RunnerConsumer(AsyncJsonWebsocketConsumer):
             len(reaped),
         )
 
-        # Free the runner downstream — drain the pod and prefer this runner
-        # so any QUEUED work can dispatch right away. Same on_commit pattern
-        # used by _finalize_run.
         pod_ids = {pid for _, pid in reaped if pid is not None}
         runner_id = runner.id
 
@@ -1029,15 +764,6 @@ class RunnerConsumer(AsyncJsonWebsocketConsumer):
     def _handle_resume_unavailable(
         self, runner: Runner, run_id: str
     ) -> None:
-        """Cloud reaction to a ResumeUnavailable failure (§6.3 of design).
-
-        The agent CLI's session store no longer has the requested thread.
-        Drop the pin so any runner can take it, drop the resume hint by
-        nulling thread_id (so the next dispatch builds it from
-        parent_run.thread_id, which would be the same broken id — instead
-        we walk one level up so the run starts fresh-context-from-issue),
-        re-queue, and trigger drain.
-        """
         run = AgentRun.objects.filter(id=run_id, runner=runner).first()
         if run is None:
             return
@@ -1045,11 +771,6 @@ class RunnerConsumer(AsyncJsonWebsocketConsumer):
         run.runner = None
         run.pinned_runner = None
         run.assigned_at = None
-        # parent_run.thread_id is what _build_assign_msg reads; nulling
-        # this run's thread_id is irrelevant. To prevent the cloud from
-        # handing the same dead session id to the next runner, null the
-        # parent's thread_id too — the parent is paused/terminal, this
-        # is fine. The handoff comment carries the human-readable state.
         if run.parent_run is not None and run.parent_run.thread_id:
             run.parent_run.thread_id = ""
             run.parent_run.save(update_fields=["thread_id"])
@@ -1072,13 +793,10 @@ class RunnerConsumer(AsyncJsonWebsocketConsumer):
         if not run_id:
             return
         payload = msg.get("payload") or {}
-        # Park the run; do NOT set ended_at (paused is non-terminal).
         AgentRun.objects.filter(id=run_id, runner=runner).update(
             status=AgentRunStatus.PAUSED_AWAITING_INPUT,
             done_payload=payload,
         )
-        # Surface the agent's question as an issue comment so the human can
-        # see it and reply (which then re-triggers continuation).
         try:
             run = AgentRun.objects.select_related("work_item").get(id=run_id)
         except AgentRun.DoesNotExist:
@@ -1092,8 +810,6 @@ class RunnerConsumer(AsyncJsonWebsocketConsumer):
             question = (payload.get("autonomy") or {}).get("question_for_human")
             summary = payload.get("summary")
             body_parts: list[str] = []
-            # Agent payload is untrusted (the upstream prompt can shape it),
-            # so escape with format_html before persisting to comment_html.
             if question:
                 body_parts.append(
                     format_html(
@@ -1114,19 +830,12 @@ class RunnerConsumer(AsyncJsonWebsocketConsumer):
                     comment_html="".join(body_parts),
                 )
 
-        # Two follow-ups: (1) apply the deferred cap-hit pause if the
-        # schedule is disarmed and no other active runs remain (§4.4.1
-        # of .ai_design/issue_ticking_system/design.md). (2) Kick the
-        # dispatcher so the now-idle runner can take other pod work.
         from django.db import transaction
 
         from pi_dash.orchestration.scheduling import maybe_apply_deferred_pause
         from pi_dash.runner.services.matcher import drain_for_runner_by_id
 
         def _pause_and_drain(rid=run_id, runner_id=runner.id):
-            # Pre-load the FK chain that maybe_apply_deferred_pause walks
-            # (work_item → state, project) so the deferred-pause check
-            # doesn't issue four separate SELECTs on every terminate.
             paused = (
                 AgentRun.objects.select_related(
                     "work_item",
@@ -1157,9 +866,6 @@ class RunnerConsumer(AsyncJsonWebsocketConsumer):
         run_id = msg.get("run_id")
         if not run_id:
             return
-        # Special-case resume-unavailable: don't terminate the chain, drop
-        # the pin and re-queue without the resume hint so a fresh-context
-        # dispatch can pick it up. See §6.3 of the design doc.
         if (
             new_status == AgentRunStatus.FAILED
             and msg.get("reason") == "resume_unavailable"
@@ -1176,15 +882,6 @@ class RunnerConsumer(AsyncJsonWebsocketConsumer):
             updates["error"] = (msg.get("detail") or "")[:16000]
         AgentRun.objects.filter(id=run_id, runner=runner).update(**updates)
 
-        # The runner just freed up. Two follow-up actions, both gated on
-        # the terminal state having committed (otherwise a new assign
-        # would race with the update):
-        #
-        # 1. Apply the deferred cap-hit pause if the schedule for this
-        #    issue has hit its tick cap and no other active runs remain
-        #    (§4.4.1 of .ai_design/issue_ticking_system/design.md).
-        # 2. Drain the pod (and prefer this just-freed runner) so any
-        #    QUEUED work can dispatch.
         from django.db import transaction
 
         from pi_dash.orchestration.scheduling import maybe_apply_deferred_pause
@@ -1194,9 +891,6 @@ class RunnerConsumer(AsyncJsonWebsocketConsumer):
         )
 
         def _pause_and_drain(rid=run_id, runner_id=runner.id, pod_id=runner.pod_id):
-            # See _handle_run_paused: select_related avoids the FK chain
-            # walk inside maybe_apply_deferred_pause from issuing extra
-            # SELECTs on every terminate event.
             run = (
                 AgentRun.objects.select_related(
                     "work_item",
@@ -1223,7 +917,6 @@ class RunnerConsumer(AsyncJsonWebsocketConsumer):
     # ---- misc ----
 
     def _header(self, name: str) -> Optional[str]:
-        """Extract a header from the scope, case-insensitive."""
         headers = self.scope.get("headers") or []
         for key, value in headers:
             if key.decode().lower() == name:

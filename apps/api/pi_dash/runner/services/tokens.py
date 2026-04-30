@@ -2,11 +2,17 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 # See the LICENSE file for details.
 
-"""Token minting, hashing, and verification for runner auth.
+"""Token minting + hashing for the connection auth flow.
 
-A "registration token" is handed to a user one time and expires in one hour.
-The runner presents it once to obtain a "runner_secret": a long-lived bearer
-credential the daemon stores on disk and sends on every WS connect.
+Two token kinds are minted server-side:
+
+- **Enrollment token** (``apd_en_…``) — short-lived, one-time. Created
+  alongside a Connection row in PENDING state. Shown to the user once
+  in the cloud UI as part of the ``pi-dash-runner connect`` install
+  command. Exchanged by the daemon for a long-lived secret.
+- **Connection secret** (``apd_cs_…``) — long-lived bearer used on
+  every WebSocket connect (``Authorization: Bearer <secret>`` +
+  ``X-Connection-Id``).
 """
 
 from __future__ import annotations
@@ -20,75 +26,50 @@ from datetime import timedelta
 from django.conf import settings
 from django.utils import timezone
 
-REGISTRATION_TTL = timedelta(hours=1)
-# Display prefixes so users can visually distinguish token kinds.
-REGISTRATION_PREFIX = "apd_reg_"
-RUNNER_SECRET_PREFIX = "apd_rs_"
-MACHINE_TOKEN_PREFIX = "apd_mt_"
+ENROLLMENT_TTL = timedelta(hours=1)
+ENROLLMENT_PREFIX = "apd_en_"
+CONNECTION_SECRET_PREFIX = "apd_cs_"
 
 
 def _pepper() -> bytes:
-    # Derived from SECRET_KEY so rotating it invalidates all registration tokens.
     return hashlib.sha256(("runner/pepper/" + settings.SECRET_KEY).encode()).digest()
 
 
 def hash_token(raw: str) -> str:
-    """HMAC-SHA256(pepper, raw) hex — stored alongside runner rows."""
+    """HMAC-SHA256(pepper, raw) hex — stored alongside connection rows."""
     return hmac.new(_pepper(), raw.encode(), hashlib.sha256).hexdigest()
 
 
 def fingerprint(raw: str) -> str:
-    """Short non-secret identifier (for logs / admin UI)."""
+    """Short non-secret identifier for logs / admin UI."""
     return hashlib.sha256(raw.encode()).hexdigest()[:12]
 
 
 @dataclass(frozen=True)
-class MintedRegistration:
+class MintedToken:
     raw: str
     hashed: str
+    fingerprint: str
+
+
+@dataclass(frozen=True)
+class MintedEnrollment(MintedToken):
     expires_at: object
 
 
-def mint_registration_token() -> MintedRegistration:
-    raw = REGISTRATION_PREFIX + secrets.token_urlsafe(24)
-    return MintedRegistration(
-        raw=raw,
-        hashed=hash_token(raw),
-        expires_at=timezone.now() + REGISTRATION_TTL,
-    )
-
-
-@dataclass(frozen=True)
-class MintedRunnerSecret:
-    raw: str
-    hashed: str
-    fingerprint: str
-
-
-def mint_runner_secret() -> MintedRunnerSecret:
-    raw = RUNNER_SECRET_PREFIX + secrets.token_urlsafe(32)
-    return MintedRunnerSecret(
+def mint_enrollment_token() -> MintedEnrollment:
+    raw = ENROLLMENT_PREFIX + secrets.token_urlsafe(24)
+    return MintedEnrollment(
         raw=raw,
         hashed=hash_token(raw),
         fingerprint=fingerprint(raw),
+        expires_at=timezone.now() + ENROLLMENT_TTL,
     )
 
 
-@dataclass(frozen=True)
-class MintedMachineSecret:
-    """A freshly-minted MachineToken bearer secret. The plaintext ``raw``
-    is shown to the user once at creation and never persisted; the cloud
-    keeps only ``hashed`` and ``fingerprint``.
-    """
-
-    raw: str
-    hashed: str
-    fingerprint: str
-
-
-def mint_machine_token_secret() -> MintedMachineSecret:
-    raw = MACHINE_TOKEN_PREFIX + secrets.token_urlsafe(32)
-    return MintedMachineSecret(
+def mint_connection_secret() -> MintedToken:
+    raw = CONNECTION_SECRET_PREFIX + secrets.token_urlsafe(32)
+    return MintedToken(
         raw=raw,
         hashed=hash_token(raw),
         fingerprint=fingerprint(raw),

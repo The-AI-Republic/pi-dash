@@ -6,16 +6,16 @@
 
 Two access modes:
 
-- **Token auth** (``X-Token-Id`` + bearer secret) — used by ``pidash token
-  list-projects`` so the daemon can show a user the projects available for
-  registration without needing a session cookie. Scoped to the token's
-  workspace.
-- **Session auth** — used by the cloud web UI when offering a project picker
-  on a "create runner" or pod-creation form. Scoped to the user's workspace
-  membership.
+- **Connection auth** (``X-Connection-Id`` + bearer secret) — used by
+  the daemon so the CLI / TUI can show a user the projects available
+  for registration without needing a session cookie. Scoped to the
+  connection's workspace.
+- **Session auth** — used by the cloud web UI when offering a project
+  picker on a "create runner" or pod-creation form. Scoped to the
+  user's workspace membership.
 
-This endpoint deliberately surfaces only the fields a runner-side caller
-needs (``id``, ``identifier``, ``name``, ``default_pod_id``, pod count). It is
+This endpoint surfaces only the fields a runner-side caller needs
+(``id``, ``identifier``, ``name``, ``default_pod_id``, pod count). It is
 not a replacement for the project app's full CRUD; for that, see
 ``apps/api/pi_dash/app/views/project/``.
 """
@@ -23,17 +23,15 @@ not a replacement for the project app's full CRUD; for that, see
 from __future__ import annotations
 
 import uuid as _uuid
-from typing import Optional
 
 from rest_framework import status
-from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from pi_dash.authentication.session import BaseSessionAuthentication
 from pi_dash.db.models.project import Project
 from pi_dash.db.models.workspace import WorkspaceMember
-from pi_dash.runner.models import MachineToken, Pod
+from pi_dash.runner.models import Connection, Pod
 from pi_dash.runner.services import tokens
 
 
@@ -88,9 +86,9 @@ class ProjectListEndpoint(APIView):
     """GET /api/runners/projects/
 
     Two auth modes (see module docstring):
-    - ``X-Token-Id`` + ``Authorization: Bearer <token_secret>`` — scoped to
-      the token's workspace. Used by the daemon's ``pidash token
-      list-projects`` verb.
+    - ``X-Connection-Id`` + ``Authorization: Bearer <connection_secret>`` —
+      scoped to the connection's workspace. Used by the daemon's
+      ``pidash runner list-projects`` verb.
     - Session auth (no special headers) — scoped to the calling user's
       workspace membership. ``?workspace=<uuid>`` filters to one workspace.
     """
@@ -99,32 +97,31 @@ class ProjectListEndpoint(APIView):
     permission_classes: list = []
 
     def get(self, request):
-        # 1. Token auth path.
-        token_id_raw = (request.headers.get("X-Token-Id") or "").strip()
+        # 1. Connection auth path (daemon).
+        connection_id_raw = (request.headers.get("X-Connection-Id") or "").strip()
         auth = request.headers.get("Authorization", "")
-        if token_id_raw and auth.lower().startswith("bearer "):
+        if connection_id_raw and auth.lower().startswith("bearer "):
             secret_raw = auth.split(" ", 1)[1].strip()
             try:
-                token_id = _uuid.UUID(token_id_raw)
+                connection_id = _uuid.UUID(connection_id_raw)
             except (ValueError, AttributeError):
                 return Response(
-                    {"error": "invalid X-Token-Id"},
+                    {"error": "invalid X-Connection-Id"},
                     status=status.HTTP_401_UNAUTHORIZED,
                 )
             secret_hash = tokens.hash_token(secret_raw)
-            token: Optional[MachineToken] = (
-                MachineToken.objects.filter(
-                    id=token_id,
-                    secret_hash=secret_hash,
-                    revoked_at__isnull=True,
-                ).first()
-            )
-            if token is None:
+            connection = Connection.objects.filter(
+                id=connection_id,
+                secret_hash=secret_hash,
+                revoked_at__isnull=True,
+                enrolled_at__isnull=False,
+            ).first()
+            if connection is None:
                 return Response(
-                    {"error": "invalid or revoked token"},
+                    {"error": "invalid or revoked connection"},
                     status=status.HTTP_401_UNAUTHORIZED,
                 )
-            return Response(_serialize_projects(token.workspace_id))
+            return Response(_serialize_projects(connection.workspace_id))
 
         # 2. Session auth path.
         if not getattr(request.user, "is_authenticated", False):

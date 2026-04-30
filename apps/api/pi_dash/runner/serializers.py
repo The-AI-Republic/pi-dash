@@ -8,18 +8,14 @@ from rest_framework import serializers
 from pi_dash.runner.models import (
     AgentRun,
     AgentRunEvent,
-    ApprovalKind,
     ApprovalRequest,
-    ApprovalStatus,
+    Connection,
     Pod,
     Runner,
-    RunnerRegistrationToken,
 )
 
 
 # Mirrors the runner-side charset rule in `runner/src/util/runner_name.rs`.
-# Applied on registration so the cloud rejects garbage before it hits the
-# `UNIQUE(workspace_id, name)` constraint. Defense in depth.
 RUNNER_NAME_CHARSET = RegexValidator(
     regex=r"^[A-Za-z0-9_-]+$",
     message=(
@@ -55,18 +51,57 @@ class PodSerializer(serializers.ModelSerializer):
         ]
 
     def get_runner_count(self, pod: Pod) -> int:
-        # `runners` related_name; we count active (non-revoked) runners for
-        # the UI's "N runners" badge.
         return pod.runners.exclude(status="revoked").count()
 
 
 class PodMiniSerializer(serializers.ModelSerializer):
-    """Compact nested representation of a pod for embedding in other rows."""
-
     class Meta:
         model = Pod
         fields = ["id", "name", "is_default"]
         read_only_fields = fields
+
+
+class ConnectionSerializer(serializers.ModelSerializer):
+    """Web-API representation of a Connection.
+
+    The status field is derived from the (revoked_at, enrolled_at) pair —
+    pending / active / revoked. Secret material is never included.
+    """
+
+    status = serializers.CharField(read_only=True)
+    runner_count = serializers.SerializerMethodField()
+
+    class Meta:
+        model = Connection
+        fields = [
+            "id",
+            "name",
+            "host_label",
+            "status",
+            "workspace",
+            "created_by",
+            "secret_fingerprint",
+            "enrolled_at",
+            "last_seen_at",
+            "created_at",
+            "revoked_at",
+            "runner_count",
+        ]
+        read_only_fields = [
+            "id",
+            "status",
+            "workspace",
+            "created_by",
+            "secret_fingerprint",
+            "enrolled_at",
+            "last_seen_at",
+            "created_at",
+            "revoked_at",
+            "runner_count",
+        ]
+
+    def get_runner_count(self, conn: Connection) -> int:
+        return conn.runners.exclude(status="revoked").count()
 
 
 class RunnerSerializer(serializers.ModelSerializer):
@@ -87,6 +122,7 @@ class RunnerSerializer(serializers.ModelSerializer):
             "owner",
             "pod",
             "pod_detail",
+            "connection",
             "created_at",
             "updated_at",
         ]
@@ -101,53 +137,47 @@ class RunnerSerializer(serializers.ModelSerializer):
             "last_heartbeat_at",
             "owner",
             "pod_detail",
+            "connection",
             "created_at",
             "updated_at",
         ]
 
 
-class RegistrationTokenSerializer(serializers.ModelSerializer):
-    class Meta:
-        model = RunnerRegistrationToken
-        fields = ["id", "label", "expires_at", "consumed_at", "created_at"]
-        read_only_fields = fields
+class EnrollmentRequestSerializer(serializers.Serializer):
+    """``POST /api/v1/runner/connections/enroll/`` body."""
 
-
-class RegistrationRequestSerializer(serializers.Serializer):
-    # Minted tokens are ``apd_reg_`` (8) + ~32 chars of entropy. Reject
-    # obvious garbage before we spend a DB round-trip on it.
     token = serializers.CharField(min_length=16, max_length=128)
-    runner_name = serializers.CharField(
-        min_length=1,
-        max_length=128,
-        validators=[RUNNER_NAME_CHARSET],
-    )
-    os = serializers.CharField(max_length=32)
-    arch = serializers.CharField(max_length=32)
-    version = serializers.CharField(max_length=32)
-    protocol_version = serializers.IntegerField(min_value=1, max_value=999)
+    host_label = serializers.CharField(max_length=255, allow_blank=True, default="")
+    os = serializers.CharField(max_length=32, allow_blank=True, default="")
+    arch = serializers.CharField(max_length=32, allow_blank=True, default="")
+    version = serializers.CharField(max_length=32, allow_blank=True, default="")
 
 
-class RegistrationResponseSerializer(serializers.Serializer):
-    runner_id = serializers.UUIDField()
-    runner_secret = serializers.CharField()
-    # Workspace the runner is permanently bound to. The runner persists this
-    # in ``config.toml`` so the pidash CRUD CLI can scope REST requests
-    # without asking the user to type ``--workspace`` every time.
+class EnrollmentResponseSerializer(serializers.Serializer):
+    connection_id = serializers.UUIDField()
+    connection_secret = serializers.CharField()
     workspace_slug = serializers.CharField()
-    # Public REST API token (``X-Api-Key``) issued alongside the runner
-    # secret so the same install can also drive ``/api/v1/`` for work-item
-    # CRUD via the pidash CLI. Independently revocable.
-    api_token = serializers.CharField()
     heartbeat_interval_secs = serializers.IntegerField()
     protocol_version = serializers.IntegerField()
-    # Project chosen during registration. The daemon persists this in
-    # `config.toml` so Hello frames and CLI CRUD requests can stay scoped to
-    # the project without re-prompting the user.
-    project_identifier = serializers.CharField()
-    # Pod the runner joined at registration time. Optional in the client so
-    # older daemons can ignore it until they understand project-scoped pods.
-    pod_id = serializers.CharField()
+
+
+class RunnerCreateRequestSerializer(serializers.Serializer):
+    """``POST /api/v1/runner/connections/<id>/runners/`` body.
+
+    The runner UUID is minted by the daemon (shared util between CLI + TUI)
+    and presented here so cloud and local config agree from the start.
+    """
+
+    runner_id = serializers.UUIDField()
+    name = serializers.CharField(
+        min_length=1, max_length=128, validators=[RUNNER_NAME_CHARSET]
+    )
+    project = serializers.CharField(max_length=128)
+    pod = serializers.CharField(max_length=128, allow_blank=True, default="")
+    os = serializers.CharField(max_length=32, allow_blank=True, default="")
+    arch = serializers.CharField(max_length=32, allow_blank=True, default="")
+    version = serializers.CharField(max_length=32, allow_blank=True, default="")
+    protocol_version = serializers.IntegerField(min_value=1, max_value=999, default=3)
 
 
 class AgentRunSerializer(serializers.ModelSerializer):
