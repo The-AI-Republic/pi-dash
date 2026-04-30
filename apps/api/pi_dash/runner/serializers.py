@@ -156,9 +156,17 @@ class EnrollmentRequestSerializer(serializers.Serializer):
 class EnrollmentResponseSerializer(serializers.Serializer):
     connection_id = serializers.UUIDField()
     connection_secret = serializers.CharField()
+    # Editable label assigned by the cloud (auto-allocated as
+    # ``connection_NNN`` when the user didn't supply one). Echoed so the
+    # daemon can show it in ``pidash status`` / TUI without a follow-up GET.
+    name = serializers.CharField()
     workspace_slug = serializers.CharField()
     heartbeat_interval_secs = serializers.IntegerField()
     protocol_version = serializers.IntegerField()
+    # Public REST API token (``X-Api-Key``) for ``/api/v1/`` CRUD verbs
+    # (``pidash issue`` / ``comment`` / ``state``). Issued at enrollment so
+    # the same install can drive interactive CRUD without a second login.
+    api_token = serializers.CharField()
 
 
 class RunnerCreateRequestSerializer(serializers.Serializer):

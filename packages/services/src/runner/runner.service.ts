@@ -90,9 +90,17 @@ export class RunnerService extends APIService {
   }
 
   /** ``DELETE /api/runners/connections/<id>/`` — hard-delete the
-   * connection and cascade to every runner under it. */
-  async deleteConnection(connectionId: string): Promise<void> {
-    return this.delete(`/api/runners/connections/${connectionId}/`)
+   * connection and cascade to every runner under it.
+   *
+   * ``onlyIfPending`` adds a server-side guard that refuses the delete
+   * when the connection has already enrolled. Used by the dismiss-token
+   * flow so a daemon that enrolls between the UI's last refresh and the
+   * delete call doesn't get its active connection silently nuked. */
+  async deleteConnection(connectionId: string, onlyIfPending = false): Promise<void> {
+    const url = onlyIfPending
+      ? `/api/runners/connections/${connectionId}/?only_if_pending=true`
+      : `/api/runners/connections/${connectionId}/`;
+    return this.delete(url)
       .then(() => undefined)
       .catch((e) => {
         throw e?.response?.data;

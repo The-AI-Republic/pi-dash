@@ -473,7 +473,11 @@ class Connection(models.Model):
         return self.revoked_at is None
 
     def save(self, *args, **kwargs):
-        if not self.name and self.workspace_id is not None:
+        # Auto-allocation only fires on insert. A subsequent save with an
+        # empty name (e.g. an update_fields path that touches other fields
+        # while name happens to be blank) must not re-allocate and shift
+        # the row to a different connection_NNN.
+        if self._state.adding and not self.name and self.workspace_id is not None:
             self.name = self._allocate_default_name(self.workspace_id)
         super().save(*args, **kwargs)
 

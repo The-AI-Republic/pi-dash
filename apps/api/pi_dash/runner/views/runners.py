@@ -134,9 +134,12 @@ class RunnerDetailEndpoint(APIView):
             return Response({"error": "forbidden"}, status=status.HTTP_403_FORBIDDEN)
         runner_pk = runner.pk
         runner.revoke()
+        # Don't stamp ``v`` here — the consumer's ``_send_envelope`` adds the
+        # current PROTOCOL_VERSION on every outbound frame. Hard-coding a
+        # stale value would override that and ship a wrong wire version.
         send_to_runner(
             runner_pk,
-            {"v": 1, "type": "revoke", "reason": "deleted by user"},
+            {"type": "revoke", "reason": "deleted by user"},
         )
         close_runner_session(runner_pk)
         Runner.objects.filter(pk=runner_pk).delete()

@@ -30,6 +30,7 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from pi_dash.authentication.session import BaseSessionAuthentication
+from pi_dash.db.models import APIToken
 from pi_dash.runner.authentication import ConnectionBearerAuthentication
 from pi_dash.runner.models import (
     MAX_RUNNERS_PER_MACHINE,
@@ -90,17 +91,36 @@ class ConnectionListCreateEndpoint(APIView):
             )
         name = (request.data.get("name") or "").strip()[:128]
         enrollment = tokens.mint_enrollment_token()
-        try:
-            connection = Connection.objects.create(
-                workspace_id=workspace_id,
-                created_by=request.user,
-                name=name,
-                enrollment_token_hash=enrollment.hashed,
-                enrollment_token_fingerprint=enrollment.fingerprint,
-            )
-        except IntegrityError:
+        # Two browser tabs creating connections at the same time can both
+        # auto-allocate the same connection_NNN suffix and lose the unique-
+        # name race. When the name was auto-generated, retry a few times
+        # before surfacing the conflict; when the user picked the name
+        # explicitly, fail fast so they can pick another.
+        user_supplied_name = bool(name)
+        max_attempts = 1 if user_supplied_name else 5
+        connection = None
+        for _attempt in range(max_attempts):
+            try:
+                connection = Connection.objects.create(
+                    workspace_id=workspace_id,
+                    created_by=request.user,
+                    name=name,
+                    enrollment_token_hash=enrollment.hashed,
+                    enrollment_token_fingerprint=enrollment.fingerprint,
+                )
+                break
+            except IntegrityError:
+                if user_supplied_name:
+                    return Response(
+                        {"error": "connection name already in use"},
+                        status=status.HTTP_409_CONFLICT,
+                    )
+                # Auto-allocation lost a race; loop and let _allocate_default_name
+                # pick the next free suffix on the retry.
+                continue
+        if connection is None:
             return Response(
-                {"error": "connection name already in use"},
+                {"error": "could not allocate a unique connection name; retry"},
                 status=status.HTTP_409_CONFLICT,
             )
         body = ConnectionSerializer(connection).data
@@ -160,6 +180,20 @@ class ConnectionDetailEndpoint(APIView):
             return Response(
                 {"error": "connection not found"},
                 status=status.HTTP_404_NOT_FOUND,
+            )
+        # ``?only_if_pending=true`` is the dismiss-pending-token path on
+        # the web UI: the user is hiding a never-enrolled invitation
+        # token. If a daemon enrolled between the UI's last refresh and
+        # this DELETE, refuse instead of silently nuking the active
+        # connection. Closes the TOCTOU window between the client-side
+        # status check and the delete call.
+        if (
+            request.query_params.get("only_if_pending", "").lower() == "true"
+            and connection.status != "pending"
+        ):
+            return Response(
+                {"error": "connection is no longer pending"},
+                status=status.HTTP_409_CONFLICT,
             )
         if connection.is_active():
             connection.revoke()
@@ -232,13 +266,33 @@ class ConnectionEnrollEndpoint(APIView):
             ]
         )
 
+        # Mint a public-API token alongside the connection secret so the
+        # same install can drive ``pidash issue`` / ``comment`` / ``state``
+        # against ``/api/v1/`` without a separate login flow. Different
+        # threat model than the connection secret (interactive user
+        # actions vs. background daemon), so kept as its own row that the
+        # user can revoke independently.
+        api_token = APIToken.objects.create(
+            user=connection.created_by,
+            user_type=1 if connection.created_by.is_bot else 0,
+            workspace=connection.workspace,
+            label=f"connection: {connection.name[:96]}",
+            description="Auto-issued at connection enrollment for the pidash CLI.",
+            # Route CLI traffic through the 300/min ServiceTokenRateThrottle
+            # instead of the default 60/min user-key throttle — a single
+            # turn can fan out to dozens of GET/PATCH calls.
+            is_service=True,
+        )
+
         payload = EnrollmentResponseSerializer(
             {
                 "connection_id": connection.id,
                 "connection_secret": secret.raw,
+                "name": connection.name,
                 "workspace_slug": connection.workspace.slug,
                 "heartbeat_interval_secs": HEARTBEAT_INTERVAL_SECS,
                 "protocol_version": PROTOCOL_VERSION,
+                "api_token": api_token.token,
             }
         ).data
         return Response(payload, status=status.HTTP_201_CREATED)

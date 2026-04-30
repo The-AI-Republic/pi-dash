@@ -142,15 +142,12 @@ const RunnersListPage = observer(function RunnersListPage() {
     if (!pendingConnection) return;
     // If the daemon hasn't enrolled yet, dismissing means "I changed my
     // mind" — delete the row so a stale pending connection doesn't sit
-    // around forever. Pull a fresh list first so a just-enrolled
-    // connection (status flipped to active between mint and dismiss
-    // within the SWR refresh window) isn't accidentally deleted.
+    // around forever. Pass ``onlyIfPending=true`` so the server refuses
+    // (409) if a daemon enrolled between this click and the request
+    // landing — closes the TOCTOU window a client-side fetch+check
+    // would otherwise leave open.
     try {
-      const fresh = await service.listConnections();
-      const latest = fresh.find((c) => c.id === pendingConnection.id);
-      if (latest?.status === "pending") {
-        await service.deleteConnection(pendingConnection.id);
-      }
+      await service.deleteConnection(pendingConnection.id, true);
     } catch {
       // Best-effort cleanup; don't block the user from hiding the panel.
     }
