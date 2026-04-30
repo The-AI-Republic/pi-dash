@@ -63,6 +63,8 @@ import type { IPromptTemplateStore } from "./prompt-template.store";
 import { PromptTemplateStore } from "./prompt-template.store";
 import type { IRouterStore } from "./router.store";
 import { RouterStore } from "./router.store";
+import type { ISchedulerStore } from "./scheduler.store";
+import { SchedulerStore } from "./scheduler.store";
 import type { IStickyStore } from "./sticky/sticky.store";
 import { StickyStore } from "./sticky/sticky.store";
 import type { IThemeStore } from "./theme.store";
@@ -104,6 +106,7 @@ export class CoreRootStore {
   workItemFilters: IWorkItemFilterStore;
   powerK: IPowerKStore;
   promptTemplate: IPromptTemplateStore;
+  scheduler: ISchedulerStore;
 
   constructor() {
     this.router = new RouterStore();
@@ -136,6 +139,7 @@ export class CoreRootStore {
     this.workItemFilters = new WorkItemFilterStore();
     this.powerK = new PowerKStore();
     this.promptTemplate = new PromptTemplateStore(this);
+    this.scheduler = new SchedulerStore(this);
   }
 
   resetOnSignOut() {
@@ -170,5 +174,6 @@ export class CoreRootStore {
     this.workItemFilters = new WorkItemFilterStore();
     this.powerK = new PowerKStore();
     this.promptTemplate = new PromptTemplateStore(this);
+    this.scheduler = new SchedulerStore(this);
   }
 }

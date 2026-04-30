@@ -595,6 +595,16 @@ class AgentRun(models.Model):
         blank=True,
         related_name="agent_runs",
     )
+    # Project-scoped runs (scheduler ticks) carry this back-pointer instead of
+    # ``work_item``. Exactly one of ``work_item`` / ``scheduler_binding`` is
+    # set per run; the dispatcher enforces the invariant.
+    scheduler_binding = models.ForeignKey(
+        "db.SchedulerBinding",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="agent_runs",
+    )
     parent_run = models.ForeignKey(
         "self",
         on_delete=models.SET_NULL,

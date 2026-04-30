@@ -25,7 +25,7 @@ from pi_dash.db.models.issue import Issue, IssueComment
 from pi_dash.db.models.state import State, StateGroup
 from pi_dash.prompting.composer import build_continuation, build_first_turn
 from pi_dash.prompting.renderer import PromptRenderError
-from pi_dash.runner.models import AgentRun, AgentRunStatus, Runner, RunnerStatus
+from pi_dash.runner.models import AgentRun, AgentRunStatus, Pod, Runner, RunnerStatus
 
 logger = logging.getLogger(__name__)
 
@@ -384,3 +384,75 @@ def _create_and_dispatch_run(
         transaction.on_commit(lambda: matcher.drain_pod_by_id(pod.id))
 
     return TransitionOutcome(created_run=run, reason="created")
+
+
+# ----------------------------------------------------------------------
+# Project-scoped scheduler dispatch
+#
+# Schedulers are project-bound, not issue-bound. The existing
+# ``_create_continuation_run`` and ``_create_and_dispatch_run`` paths both
+# require an Issue (as ``work_item``), a project repo, and an issue-derived
+# pod — none of which apply to a scheduler tick. This is the parallel path
+# for ``SchedulerBinding``-driven runs.
+#
+# See ``.ai_design/project_scheduler/design.md`` §6.3.
+# ----------------------------------------------------------------------
+
+
+def dispatch_scheduler_run(
+    binding, prompt: str
+) -> tuple[Optional[AgentRun], Optional[str]]:
+    """Create a fresh ``AgentRun`` for one scheduler-binding tick.
+
+    The run is project-scoped: ``work_item=None``, ``parent_run=None``,
+    ``scheduler_binding=binding``. Repo / workspace selection is the
+    runner's problem (the dispatcher does not populate ``run_config``
+    with repo URL / ref).
+
+    Returns ``(run, None)`` on success, or ``(None, reason)`` when the
+    dispatch was short-circuited. The reason string is what the Beat
+    fire path stores on ``binding.last_error`` so operators don't need
+    to grep worker logs to find out why a tick was skipped.
+    """
+    from pi_dash.runner.services import matcher
+
+    pod = Pod.default_for_workspace_id(binding.workspace_id)
+    if pod is None:
+        logger.warning(
+            "scheduler.dispatch: skip binding=%s reason=no-default-pod workspace=%s",
+            binding.pk,
+            binding.workspace_id,
+        )
+        return None, f"no default pod for workspace {binding.workspace_id}"
+
+    creator = binding.actor
+    if creator is None:
+        from pi_dash.orchestration.workpad import get_agent_system_user
+        creator = get_agent_system_user()
+    if creator is None:
+        logger.warning(
+            "scheduler.dispatch: skip binding=%s reason=no-creator", binding.pk
+        )
+        return None, "no creator (binding.actor and system bot both unavailable)"
+
+    with transaction.atomic():
+        run = AgentRun.objects.create(
+            workspace_id=binding.workspace_id,
+            created_by=creator,
+            pod=pod,
+            work_item=None,
+            scheduler_binding=binding,
+            parent_run=None,
+            status=AgentRunStatus.QUEUED,
+            prompt=prompt or "",
+            run_config={},
+        )
+        transaction.on_commit(lambda: matcher.drain_pod_by_id(pod.id))
+
+    logger.info(
+        "scheduler.dispatch: created run=%s binding=%s pod=%s",
+        run.pk,
+        binding.pk,
+        pod.pk,
+    )
+    return run, None
