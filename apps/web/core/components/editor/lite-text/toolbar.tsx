@@ -34,6 +34,10 @@ type Props = {
   showSubmitButton: boolean;
   editorRef: EditorRefApi | null;
   submitButtonText?: string;
+  /** Optional content rendered inline immediately to the LEFT of the
+   * submit button. Used for context-specific actions (e.g. "Comment & Run"
+   * on the issue page) that should sit next to "Comment". */
+  extraToolbarActions?: React.ReactNode;
 };
 
 type TCommentAccessType = {
@@ -70,6 +74,7 @@ export function IssueCommentToolbar(props: Props) {
     showSubmitButton,
     editorRef,
     submitButtonText = "common.comment",
+    extraToolbarActions,
   } = props;
   // State to manage active states of toolbar items
   const [activeStates, setActiveStates] = useState<Record<string, boolean>>({});
@@ -175,18 +180,21 @@ export function IssueCommentToolbar(props: Props) {
             </div>
           ))}
         </div>
-        {showSubmitButton && (
-          <div className="sticky right-1">
-            <Button
-              type="submit"
-              variant="primary"
-              className="px-2.5 py-1.5 text-11"
-              onClick={handleSubmit}
-              disabled={isSubmitButtonDisabled}
-              loading={isSubmitting}
-            >
-              {t(submitButtonText)}
-            </Button>
+        {(extraToolbarActions || showSubmitButton) && (
+          <div className="sticky right-1 flex items-center gap-1.5">
+            {extraToolbarActions}
+            {showSubmitButton && (
+              <Button
+                type="submit"
+                variant="primary"
+                className="px-2.5 py-1.5 text-11"
+                onClick={handleSubmit}
+                disabled={isSubmitButtonDisabled}
+                loading={isSubmitting}
+              >
+                {t(submitButtonText)}
+              </Button>
+            )}
           </div>
         )}
       </div>

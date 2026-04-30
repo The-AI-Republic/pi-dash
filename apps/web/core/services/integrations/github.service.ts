@@ -5,38 +5,40 @@
  */
 
 import { API_BASE_URL } from "@pi-dash/constants";
-import type { IGithubRepoInfo, IGithubServiceImportFormData } from "@pi-dash/types";
+import type { IGithubConnectionStatus, IGithubConnectRequest, IGithubReposPage } from "@pi-dash/types";
 import { APIService } from "@/services/api.service";
-// helpers
-// types
-
-const integrationServiceType: string = "github";
 
 export class GithubIntegrationService extends APIService {
   constructor() {
     super(API_BASE_URL);
   }
 
-  async listAllRepositories(workspaceSlug: string, integrationSlug: string): Promise<any> {
-    return this.get(`/api/workspaces/${workspaceSlug}/workspace-integrations/${integrationSlug}/github-repositories`)
+  async getStatus(workspaceSlug: string): Promise<IGithubConnectionStatus> {
+    return this.get(`/api/workspaces/${workspaceSlug}/integrations/github/`)
       .then((response) => response?.data)
       .catch((error) => {
         throw error?.response?.data;
       });
   }
 
-  async getGithubRepoInfo(workspaceSlug: string, params: { owner: string; repo: string }): Promise<IGithubRepoInfo> {
-    return this.get(`/api/workspaces/${workspaceSlug}/importers/${integrationServiceType}/`, {
-      params,
-    })
+  async connectWorkspace(workspaceSlug: string, data: IGithubConnectRequest): Promise<IGithubConnectionStatus> {
+    return this.post(`/api/workspaces/${workspaceSlug}/integrations/github/connect/`, data)
       .then((response) => response?.data)
       .catch((error) => {
         throw error?.response?.data;
       });
   }
 
-  async createGithubServiceImport(workspaceSlug: string, data: IGithubServiceImportFormData): Promise<any> {
-    return this.post(`/api/workspaces/${workspaceSlug}/projects/importers/${integrationServiceType}/`, data)
+  async disconnectWorkspace(workspaceSlug: string): Promise<IGithubConnectionStatus> {
+    return this.post(`/api/workspaces/${workspaceSlug}/integrations/github/disconnect/`, {})
+      .then((response) => response?.data)
+      .catch((error) => {
+        throw error?.response?.data;
+      });
+  }
+
+  async listRepos(workspaceSlug: string, page: number = 1): Promise<IGithubReposPage> {
+    return this.get(`/api/workspaces/${workspaceSlug}/integrations/github/repos/`, { params: { page } })
       .then((response) => response?.data)
       .catch((error) => {
         throw error?.response?.data;

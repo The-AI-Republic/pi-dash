@@ -86,6 +86,16 @@ app.conf.beat_schedule = {
         "task": "runner.mark_offline_runners",
         "schedule": crontab(minute="*/1"),
     },
+    # Issue ticking — see .ai_design/issue_ticking_system/design.md §6
+    "scan-due-agent-tickers": {
+        "task": "pi_dash.bgtasks.agent_ticker.scan_due_tickers",
+        "schedule": crontab(minute="*"),
+    },
+    # GitHub Issue Sync — see .ai_design/github_sync/design.md §6.3.
+    "github-issue-sync-every-4h": {
+        "task": "pi_dash.bgtasks.github_sync_task.sync_all_repos",
+        "schedule": crontab(minute=0, hour="*/4"),
+    },
 }
 
 

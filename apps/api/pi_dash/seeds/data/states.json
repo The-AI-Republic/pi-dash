@@ -28,6 +28,15 @@
   },
   {
     "id": 4,
+    "name": "Paused",
+    "color": "#DC2626",
+    "sequence": 17500,
+    "group": "backlog",
+    "default": false,
+    "project_id": 1
+  },
+  {
+    "id": 5,
     "name": "Done",
     "color": "#16A34A",
     "sequence": 45000,
@@ -36,7 +45,7 @@
     "project_id": 1
   },
   {
-    "id": 5,
+    "id": 6,
     "name": "Cancelled",
     "color": "#EF4444",
     "sequence": 55000,

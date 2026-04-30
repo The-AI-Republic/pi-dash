@@ -26,6 +26,9 @@ type TCommentCreate = {
   showToolbarInitially?: boolean;
   projectId?: string;
   onSubmitCallback?: (elementId: string) => void;
+  /** Optional content rendered to the LEFT of the toolbar's submit button.
+   * Forwarded to ``LiteTextEditor`` via ``extraToolbarActions``. */
+  extraToolbarActions?: React.ReactNode;
 };
 
 // services
@@ -39,6 +42,7 @@ export const CommentCreate = observer(function CommentCreate(props: TCommentCrea
     showToolbarInitially = false,
     projectId,
     onSubmitCallback,
+    extraToolbarActions,
   } = props;
   // states
   const [uploadedAssetIds, setUploadedAssetIds] = useState<string[]>([]);
@@ -92,6 +96,8 @@ export const CommentCreate = observer(function CommentCreate(props: TCommentCrea
 
   return (
     <div
+      role="group"
+      aria-label="Add comment"
       className={cn("sticky bottom-0 z-[4] bg-surface-1 sm:static")}
       onKeyDown={(e) => {
         if (
@@ -148,6 +154,7 @@ export const CommentCreate = observer(function CommentCreate(props: TCommentCrea
                 displayConfig={{
                   fontSize: "small-font",
                 }}
+                extraToolbarActions={extraToolbarActions}
               />
             )}
           />

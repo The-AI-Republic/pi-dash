@@ -48,6 +48,11 @@ export const DescriptionVersionsDropdown = observer(function DescriptionVersions
             {t("description_versions.last_edited_by")}{" "}
             <span className="font-medium">{lastUpdatedByUserDisplayName ?? t("common.deactivated_user")}</span>{" "}
             {calculateTimeAgo(lastUpdatedAt)}
+            {entityInformation.isExternallySynced ? (
+              <span className="ml-1 text-tertiary">
+                ({t("edit_disabled_for_external_import_issue") || "edit disabled for external import issue"})
+              </span>
+            ) : null}
           </p>
         </div>
       }

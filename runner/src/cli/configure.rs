@@ -40,24 +40,6 @@ pub struct Args {
     #[arg(long, value_enum)]
     pub agent: Option<AgentKind>,
 
-    // --- Codex section ----------------------------------------------------
-    /// Override `[codex].binary` (path or command name).
-    #[arg(long)]
-    pub codex_binary: Option<String>,
-
-    /// Override `[codex].model_default`.
-    #[arg(long)]
-    pub codex_model: Option<String>,
-
-    // --- Claude Code section ----------------------------------------------
-    /// Override `[claude_code].binary`.
-    #[arg(long)]
-    pub claude_binary: Option<String>,
-
-    /// Override `[claude_code].model_default`.
-    #[arg(long)]
-    pub claude_model: Option<String>,
-
     // --- Approval policy (scalars only — list fields live in the TUI) -----
     /// Toggle `[approval_policy].auto_approve_readonly_shell`.
     #[arg(long)]
@@ -107,10 +89,6 @@ impl Args {
         self.name.is_some()
             || self.working_dir.is_some()
             || self.agent.is_some()
-            || self.codex_binary.is_some()
-            || self.codex_model.is_some()
-            || self.claude_binary.is_some()
-            || self.claude_model.is_some()
             || self.approval_auto_readonly.is_some()
             || self.approval_auto_writes.is_some()
             || self.approval_auto_network.is_some()
@@ -144,30 +122,6 @@ impl Args {
             && cfg.agent.kind != kind
         {
             cfg.agent.kind = kind;
-            changed = true;
-        }
-        if let Some(b) = &self.codex_binary
-            && cfg.codex.binary != *b
-        {
-            cfg.codex.binary = b.clone();
-            changed = true;
-        }
-        if let Some(m) = &self.codex_model
-            && cfg.codex.model_default.as_ref() != Some(m)
-        {
-            cfg.codex.model_default = Some(m.clone());
-            changed = true;
-        }
-        if let Some(b) = &self.claude_binary
-            && cfg.claude_code.binary != *b
-        {
-            cfg.claude_code.binary = b.clone();
-            changed = true;
-        }
-        if let Some(m) = &self.claude_model
-            && cfg.claude_code.model_default.as_ref() != Some(m)
-        {
-            cfg.claude_code.model_default = Some(m.clone());
             changed = true;
         }
         if let Some(v) = self.approval_auto_readonly
@@ -449,8 +403,6 @@ pub async fn execute(inputs: RegisterInputs, paths: &Paths) -> Result<()> {
             workspace_slug: resp.workspace_slug.clone(),
         },
         workspace: crate::config::schema::WorkspaceSection { working_dir },
-        codex: crate::config::schema::CodexSection::default(),
-        claude_code: crate::config::schema::ClaudeCodeSection::default(),
         agent: crate::config::schema::AgentSection { kind: agent_kind },
         approval_policy: crate::config::schema::ApprovalPolicySection::default(),
         logging: crate::config::schema::LoggingSection::default(),
@@ -458,7 +410,7 @@ pub async fn execute(inputs: RegisterInputs, paths: &Paths) -> Result<()> {
     // Apply any advanced field flags the user passed alongside --url/--token.
     // They're already reflected in `config` for the fields this function
     // populates directly (name, cloud_url, agent, working_dir); `apply_to`
-    // covers the rest (codex.*, claude_code.*, approval_policy.*, logging.*).
+    // covers the rest (approval_policy.*, logging.*).
     if let Some(extras) = inputs.extras.as_ref() {
         extras.apply_to(&mut config);
     }

@@ -4,7 +4,8 @@
 
 use pidash::codex::app_server::AppServer;
 use pidash::codex::bridge::{Bridge, BridgeEvent, RunPayload};
-use pidash::codex::jsonrpc::Incoming;
+use pidash::codex::jsonrpc::{self, Incoming};
+use pidash::codex::schema::{ClientInfo, InitializeParams, TurnInputItem, TurnStartParams};
 use std::path::PathBuf;
 use std::time::Duration;
 use tokio::process::Command;
@@ -42,7 +43,7 @@ async fn bridge_happy_path_drives_fake_codex_to_completion() {
     let server = AppServer::spawn_command(cmd)
         .await
         .expect("spawn fake codex");
-    let mut bridge = Bridge::from_server(server, None);
+    let mut bridge = Bridge::from_server(server);
 
     let cwd = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let payload = RunPayload {
@@ -93,7 +94,7 @@ async fn bridge_reports_codex_crash_on_early_exit() {
     let mut cmd = Command::new("sh");
     cmd.arg("-c").arg("exit 0");
     let server = AppServer::spawn_command(cmd).await.expect("spawn");
-    let mut bridge = Bridge::from_server(server, None);
+    let mut bridge = Bridge::from_server(server);
 
     let cwd = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let payload = RunPayload {
@@ -125,7 +126,7 @@ async fn bridge_forwards_approval_request_event() {
     let mut cmd = Command::new("sh");
     cmd.arg("-c").arg(script);
     let server = AppServer::spawn_command(cmd).await.expect("spawn");
-    let mut bridge = Bridge::from_server(server, None);
+    let mut bridge = Bridge::from_server(server);
     let cwd = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let payload = RunPayload {
         run_id: Uuid::new_v4(),
@@ -177,4 +178,64 @@ async fn app_server_reads_line_delimited_json() {
         Incoming::Notification { method, .. } => assert_eq!(method, "custom/ping"),
         _ => panic!("expected notification, got {frame:?}"),
     }
+}
+
+#[test]
+fn incoming_parses_frames_without_jsonrpc_field() {
+    let response: Incoming = serde_json::from_str(r#"{"id":1,"result":{"ok":true}}"#)
+        .expect("response without jsonrpc should parse");
+    match response {
+        Incoming::Response { id, result, .. } => {
+            assert_eq!(id, 1);
+            assert_eq!(result.expect("result")["ok"], true);
+        }
+        other => panic!("expected response, got {other:?}"),
+    }
+
+    let notification: Incoming =
+        serde_json::from_str(r#"{"method":"turn/completed","params":{"conclusion":"success"}}"#)
+            .expect("notification without jsonrpc should parse");
+    match notification {
+        Incoming::Notification { method, params, .. } => {
+            assert_eq!(method, "turn/completed");
+            assert_eq!(params["conclusion"], "success");
+        }
+        other => panic!("expected notification, got {other:?}"),
+    }
+}
+
+#[test]
+fn codex_request_params_serialize_in_v2_shape() {
+    let init = jsonrpc::request(
+        1,
+        "initialize",
+        &InitializeParams {
+            client_info: ClientInfo {
+                name: "pidash".into(),
+                version: "0".into(),
+            },
+        },
+    )
+    .expect("serialize initialize");
+    let init: serde_json::Value = serde_json::from_str(&init).unwrap();
+    assert_eq!(init["params"]["clientInfo"]["name"], "pidash");
+
+    let turn = jsonrpc::request(
+        2,
+        "turn/start",
+        &TurnStartParams {
+            thread_id: "thread-123".into(),
+            input: vec![TurnInputItem {
+                item_type: "text".into(),
+                text: "hello".into(),
+            }],
+            model: Some("gpt-5-codex".into()),
+            effort: None,
+        },
+    )
+    .expect("serialize turn/start");
+    let turn: serde_json::Value = serde_json::from_str(&turn).unwrap();
+    assert_eq!(turn["params"]["threadId"], "thread-123");
+    assert_eq!(turn["params"]["input"][0]["type"], "text");
+    assert_eq!(turn["params"]["input"][0]["text"], "hello");
 }

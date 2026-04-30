@@ -734,8 +734,6 @@ async fn submit_register_form(state: &mut AppState) {
         workspace: crate::config::schema::WorkspaceSection {
             working_dir: state.paths.default_working_dir(),
         },
-        codex: Default::default(),
-        claude_code: Default::default(),
         agent: Default::default(),
         approval_policy: Default::default(),
         logging: Default::default(),

@@ -297,3 +297,186 @@ def test_resume_unavailable_noop_when_run_unknown(
     _consumer_for(online_runner)._handle_resume_unavailable(
         online_runner, str(uuid.uuid4())
     )
+
+
+# ---------------------------------------------------------------------------
+# _apply_heartbeat — reap stale BUSY runs when runner reports it isn't
+# actually working on them. Closes the zombie-run gap where a daemon restart
+# leaves cloud thinking the runner is busy with an ASSIGNED run forever.
+# ---------------------------------------------------------------------------
+
+
+def _busy_run(create_user, workspace, pod, runner, issue, *, status, assigned_minutes_ago):
+    return AgentRun.objects.create(
+        owner=create_user,
+        workspace=workspace,
+        pod=pod,
+        work_item=issue,
+        runner=runner,
+        status=status,
+        prompt="x",
+        assigned_at=timezone.now() - timezone.timedelta(minutes=assigned_minutes_ago),
+    )
+
+
+@pytest.mark.unit
+def test_heartbeat_reaps_zombie_run_when_runner_reports_idle(
+    db, create_user, workspace, pod, online_runner, issue_in_progress
+):
+    """Cloud has an ASSIGNED run; runner heartbeats with in_flight_run=None.
+
+    Runner is the source of truth about its own work. The orphaned ASSIGNED
+    row must be reaped so the runner can pick up new ticks.
+    """
+    zombie = _busy_run(
+        create_user, workspace, pod, online_runner, issue_in_progress,
+        status=AgentRunStatus.ASSIGNED, assigned_minutes_ago=10,
+    )
+
+    _consumer_for(online_runner)._apply_heartbeat(
+        online_runner,
+        {"ts": timezone.now().isoformat(), "in_flight_run": None, "status": "online"},
+    )
+
+    zombie.refresh_from_db()
+    assert zombie.status == AgentRunStatus.FAILED
+    assert zombie.ended_at is not None
+    assert "heartbeat" in zombie.error.lower()
+
+
+@pytest.mark.unit
+def test_heartbeat_reaps_running_status_too(
+    db, create_user, workspace, pod, online_runner, issue_in_progress
+):
+    """RUNNING is also a BUSY status — same reaping applies."""
+    zombie = _busy_run(
+        create_user, workspace, pod, online_runner, issue_in_progress,
+        status=AgentRunStatus.RUNNING, assigned_minutes_ago=5,
+    )
+
+    _consumer_for(online_runner)._apply_heartbeat(
+        online_runner,
+        {"ts": timezone.now().isoformat(), "in_flight_run": None, "status": "online"},
+    )
+
+    zombie.refresh_from_db()
+    assert zombie.status == AgentRunStatus.FAILED
+
+
+@pytest.mark.unit
+def test_heartbeat_keeps_run_when_ids_match(
+    db, create_user, workspace, pod, online_runner, issue_in_progress
+):
+    """Runner reports it's working on this exact run — leave it alone."""
+    run = _busy_run(
+        create_user, workspace, pod, online_runner, issue_in_progress,
+        status=AgentRunStatus.RUNNING, assigned_minutes_ago=5,
+    )
+
+    _consumer_for(online_runner)._apply_heartbeat(
+        online_runner,
+        {"ts": timezone.now().isoformat(), "in_flight_run": str(run.id), "status": "busy"},
+    )
+
+    run.refresh_from_db()
+    assert run.status == AgentRunStatus.RUNNING
+
+
+@pytest.mark.unit
+def test_heartbeat_reaps_others_but_keeps_named_in_flight(
+    db, create_user, workspace, pod, online_runner, issue_in_progress
+):
+    """Cloud has 2 BUSY runs on this runner; runner says it's only on one
+    of them. Reap the other; keep the named one.
+    """
+    keeper = _busy_run(
+        create_user, workspace, pod, online_runner, issue_in_progress,
+        status=AgentRunStatus.RUNNING, assigned_minutes_ago=5,
+    )
+    zombie = _busy_run(
+        create_user, workspace, pod, online_runner, issue_in_progress,
+        status=AgentRunStatus.ASSIGNED, assigned_minutes_ago=5,
+    )
+
+    _consumer_for(online_runner)._apply_heartbeat(
+        online_runner,
+        {"ts": timezone.now().isoformat(), "in_flight_run": str(keeper.id), "status": "busy"},
+    )
+
+    keeper.refresh_from_db()
+    zombie.refresh_from_db()
+    assert keeper.status == AgentRunStatus.RUNNING
+    assert zombie.status == AgentRunStatus.FAILED
+
+
+@pytest.mark.unit
+def test_heartbeat_does_not_reap_run_assigned_after_heartbeat_ts(
+    db, create_user, workspace, pod, online_runner, issue_in_progress
+):
+    """Race guard: a heartbeat in flight before the assignment was written
+    must not reap the freshly-assigned run.
+    """
+    fresh = _busy_run(
+        create_user, workspace, pod, online_runner, issue_in_progress,
+        status=AgentRunStatus.ASSIGNED, assigned_minutes_ago=0,
+    )
+    # heartbeat sent 5 minutes ago, before the assignment existed
+    old_ts = (timezone.now() - timezone.timedelta(minutes=5)).isoformat()
+
+    _consumer_for(online_runner)._apply_heartbeat(
+        online_runner,
+        {"ts": old_ts, "in_flight_run": None, "status": "online"},
+    )
+
+    fresh.refresh_from_db()
+    assert fresh.status == AgentRunStatus.ASSIGNED
+
+
+@pytest.mark.unit
+def test_heartbeat_does_not_touch_paused_awaiting_input(
+    db, create_user, workspace, pod, online_runner, issue_in_progress
+):
+    """PAUSED_AWAITING_INPUT is intentionally NOT in BUSY_STATUSES — the
+    runner is free to take other work while a paused run waits for human
+    reply. Heartbeat must not reap paused runs.
+    """
+    paused = AgentRun.objects.create(
+        owner=create_user,
+        workspace=workspace,
+        pod=pod,
+        work_item=issue_in_progress,
+        runner=online_runner,
+        status=AgentRunStatus.PAUSED_AWAITING_INPUT,
+        prompt="x",
+        assigned_at=timezone.now() - timezone.timedelta(minutes=10),
+        started_at=timezone.now() - timezone.timedelta(minutes=8),
+    )
+
+    _consumer_for(online_runner)._apply_heartbeat(
+        online_runner,
+        {"ts": timezone.now().isoformat(), "in_flight_run": None, "status": "online"},
+    )
+
+    paused.refresh_from_db()
+    assert paused.status == AgentRunStatus.PAUSED_AWAITING_INPUT
+
+
+@pytest.mark.unit
+def test_heartbeat_updates_last_heartbeat_at_unconditionally(
+    db, online_runner
+):
+    """Even with no zombies, the existing mark_heartbeat behavior must run."""
+    before = online_runner.last_heartbeat_at
+    # Move the clock-on-row backwards so we can detect an update.
+    Runner.objects.filter(pk=online_runner.pk).update(
+        last_heartbeat_at=timezone.now() - timezone.timedelta(minutes=10),
+    )
+    online_runner.refresh_from_db()
+
+    _consumer_for(online_runner)._apply_heartbeat(
+        online_runner,
+        {"ts": timezone.now().isoformat(), "in_flight_run": None, "status": "online"},
+    )
+
+    online_runner.refresh_from_db()
+    assert online_runner.last_heartbeat_at > before

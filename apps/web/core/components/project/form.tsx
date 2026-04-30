@@ -6,6 +6,7 @@
 
 import { useEffect, useState } from "react";
 import { Controller, useForm } from "react-hook-form";
+import useSWR, { mutate as swrMutate } from "swr";
 import { Info } from "lucide-react";
 import { NETWORK_CHOICES } from "@pi-dash/constants";
 import { useTranslation } from "@pi-dash/i18n";
@@ -27,6 +28,8 @@ import { handleCoverImageChange } from "@/helpers/cover-image.helper";
 // hooks
 import { useProject } from "@/hooks/store/use-project";
 import { usePlatformOS } from "@/hooks/use-platform-os";
+// constants
+import { GITHUB_PROJECT_BINDING } from "@/constants/fetch-keys";
 // services
 import { ProjectService } from "@/services/project";
 // local imports
@@ -142,9 +145,67 @@ export function ProjectDetailsForm(props: IProjectDetailsForm) {
       });
   };
 
+  const [isBinding, setIsBinding] = useState(false);
+
+  // Fetch the current github binding state so the Bind button can flip to a
+  // disabled "Bound" pill when the URL in the input matches what's actually
+  // bound — saves operators from clicking Bind twice on the same URL and
+  // tripping the rebind path for no reason.
+  const bindingFetchKey = projectId ? GITHUB_PROJECT_BINDING(projectId) : null;
+  const { data: githubBinding } = useSWR(bindingFetchKey, () =>
+    workspaceSlug && projectId ? projectService.getGithubBindingStatus(workspaceSlug, projectId) : null
+  );
+  const watchedRepoUrl = watch("repo_url") ?? "";
+  const isAlreadyBound =
+    Boolean(githubBinding?.bound) && (project.repo_url ?? "") === watchedRepoUrl.trim() && watchedRepoUrl.trim() !== "";
+
+  const handleBindRepoUrl = async () => {
+    if (!workspaceSlug || !projectId) return;
+    const url = (getValues("repo_url") ?? "").trim();
+    if (!url) {
+      setToast({
+        type: TOAST_TYPE.ERROR,
+        title: t("toast.error"),
+        message: t("git_repository_url_required") || "Enter a Git repository URL first.",
+      });
+      return;
+    }
+    setIsBinding(true);
+    try {
+      const res = await projectService.bindGithubRepository(workspaceSlug, projectId, { repo_url: url });
+      // Persist the canonical URL back into the project store + form input
+      // so the field reflects what's actually bound (e.g. trailing `.git`
+      // and `git@…` SSH URLs get rewritten to the https html_url).
+      const canonical = res.repo_url ?? url;
+      await updateProject(workspaceSlug, projectId, { repo_url: canonical });
+      setValue("repo_url", canonical, { shouldDirty: false });
+      // Revalidate the binding SWR so the button flips to its "Bound"
+      // disabled state immediately without waiting for the focus-revalidate.
+      if (bindingFetchKey) await swrMutate(bindingFetchKey);
+      setToast({
+        type: TOAST_TYPE.SUCCESS,
+        title: "Repository bound",
+        message: "Toggle sync on in the GitHub tab to start mirroring issues.",
+      });
+    } catch (e: any) {
+      setToast({
+        type: TOAST_TYPE.ERROR,
+        title: "Bind failed",
+        message: e?.error || "Could not bind repository.",
+      });
+    } finally {
+      setIsBinding(false);
+    }
+  };
+
   const onSubmit = async (formData: IProject) => {
     if (!workspaceSlug) return;
     setIsLoading(true);
+    // `repo_url` is intentionally NOT included in the regular save payload.
+    // It's persisted exclusively through the Bind button below, which goes
+    // through the github-bind endpoint (verifies the URL upstream, creates
+    // the binding, and writes the canonical URL back). This keeps the field
+    // and the actual github binding from drifting apart.
     const payload: Partial<IProject> = {
       name: formData.name,
       network: formData.network,
@@ -153,7 +214,6 @@ export function ProjectDetailsForm(props: IProjectDetailsForm) {
 
       logo_props: formData.logo_props,
       timezone: formData.timezone,
-      repo_url: formData.repo_url ?? "",
       base_branch: formData.base_branch ?? "",
     };
 
@@ -320,30 +380,46 @@ export function ProjectDetailsForm(props: IProjectDetailsForm) {
         <div className="grid grid-cols-1 gap-6 md:grid-cols-3">
           <div className="flex flex-col gap-1 md:col-span-2">
             <h4 className="text-13">{t("git_repository_url") || "Git repository URL"}</h4>
-            <Controller
-              name="repo_url"
-              control={control}
-              rules={{
-                maxLength: {
-                  value: 512,
-                  message: t("repo_url_too_long") || "Repository URL is too long",
-                },
-              }}
-              render={({ field: { value, onChange } }) => (
-                <Input
-                  id="repo_url"
-                  name="repo_url"
-                  type="text"
-                  value={value ?? ""}
-                  onChange={onChange}
-                  hasError={Boolean(errors?.repo_url)}
-                  placeholder={t("git_repository_url_placeholder") || "e.g. git@github.com:org/repo.git"}
-                  className="w-full font-medium"
-                  disabled={!isAdmin}
-                />
-              )}
-            />
+            <div className="flex items-stretch gap-2">
+              <Controller
+                name="repo_url"
+                control={control}
+                rules={{
+                  maxLength: {
+                    value: 512,
+                    message: t("repo_url_too_long") || "Repository URL is too long",
+                  },
+                }}
+                render={({ field: { value, onChange } }) => (
+                  <Input
+                    id="repo_url"
+                    name="repo_url"
+                    type="text"
+                    value={value ?? ""}
+                    onChange={onChange}
+                    hasError={Boolean(errors?.repo_url)}
+                    placeholder={t("git_repository_url_placeholder") || "e.g. https://github.com/org/repo"}
+                    className="w-full font-medium"
+                    disabled={!isAdmin}
+                  />
+                )}
+              />
+              <Button
+                variant={isAlreadyBound ? "tertiary" : "primary"}
+                disabled={!isAdmin || isBinding || isAlreadyBound}
+                loading={isBinding}
+                onClick={handleBindRepoUrl}
+                type="button"
+                className="shrink-0"
+              >
+                {isAlreadyBound ? t("bound") || "Bound" : t("bind") || "Bind"}
+              </Button>
+            </div>
             <span className="text-11 text-danger-primary">{errors?.repo_url?.message}</span>
+            <p className="text-11 text-tertiary">
+              {t("git_repository_url_bind_hint") ||
+                "Bind verifies the URL with GitHub and links this project to that repository. Only github.com URLs are supported. The URL is saved only when you click Bind."}
+            </p>
           </div>
           <div className="flex flex-col gap-1">
             <h4 className="text-13">{t("base_branch") || "Base branch"}</h4>

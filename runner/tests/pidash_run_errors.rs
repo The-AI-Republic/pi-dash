@@ -60,9 +60,6 @@ cloud_url = "https://x"
 
 [workspace]
 working_dir = "/tmp/wd"
-
-[codex]
-binary = "codex"
 "#,
     )
     .unwrap();

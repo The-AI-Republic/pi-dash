@@ -3,3 +3,5 @@
 django-debug-toolbar==4.3.0
 # formatter
 ruff==0.9.7
+# watchdog: powers watchmedo auto-restart for celery worker/beat in local dev only
+watchdog==4.0.2

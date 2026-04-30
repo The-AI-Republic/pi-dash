@@ -661,6 +661,16 @@ class IssueViewSet(BaseViewSet):
         if not issue:
             return Response({"error": "Issue not found"}, status=status.HTTP_404_NOT_FOUND)
 
+        # Comment & Run on a Paused issue posts the comment, then transitions
+        # state via this endpoint, then dispatches the run itself. The
+        # state-transition signal must NOT fire its own immediate dispatch
+        # here, or we'd race two dispatches against the single-active-run
+        # guardrail. The client signals "Comment & Run owns dispatch" via
+        # the X-Pi-Dash-Skip-Immediate-Dispatch header. See
+        # ``.ai_design/issue_ticking_system/design.md`` §4.5–§4.6.
+        if request.headers.get("X-Pi-Dash-Skip-Immediate-Dispatch") == "1":
+            setattr(issue, "_orchestration_dispatch_immediate", False)
+
         current_instance = json.dumps(IssueDetailSerializer(issue).data, cls=DjangoJSONEncoder)
 
         requested_data = json.dumps(self.request.data, cls=DjangoJSONEncoder)
@@ -703,6 +713,15 @@ class IssueViewSet(BaseViewSet):
     @allow_permission([ROLE.ADMIN], creator=True, model=Issue)
     def destroy(self, request, slug, project_id, pk=None):
         issue = Issue.objects.get(workspace__slug=slug, project_id=project_id, pk=pk)
+
+        # Block delete on actively-synced GitHub issues. See .ai_design/
+        # github_sync/design.md §6.8.
+        from pi_dash.db.models import GithubIssueSync
+        if issue.external_source == "github" and GithubIssueSync.objects.filter(issue=issue).exists():
+            return Response(
+                {"error": "This issue is synced from GitHub. Unbind the project's GitHub repository to delete."},
+                status=status.HTTP_409_CONFLICT,
+            )
 
         issue.delete()
         # delete the issue from recent visits

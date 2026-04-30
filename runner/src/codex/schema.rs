@@ -50,17 +50,20 @@ impl NotificationKind {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct InitializeParams {
     pub client_info: ClientInfo,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ClientInfo {
     pub name: String,
     pub version: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ThreadStartParams {
     pub cwd: String,
     pub model: Option<String>,
@@ -69,25 +72,31 @@ pub struct ThreadStartParams {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct TurnStartParams {
+    pub thread_id: String,
     pub input: Vec<TurnInputItem>,
     pub model: Option<String>,
     pub effort: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct TurnInputItem {
-    pub role: String,
-    pub content: String,
+    #[serde(rename = "type")]
+    pub item_type: String,
+    pub text: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ApprovalResponseParams {
     pub approval_id: String,
     pub decision: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ThreadResumeParams {
     pub thread_id: String,
 }

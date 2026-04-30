@@ -11,6 +11,9 @@ use uuid::Uuid;
 use crate::cloud::protocol::{ApprovalDecision, ApprovalKind, FailureReason};
 use crate::config::schema::{AgentKind, Config};
 
+const CODEX_BINARY: &str = "codex";
+const CLAUDE_BINARY: &str = "claude";
+
 /// Events the bridge surfaces to the daemon's state machine. Agent-agnostic:
 /// Codex and Claude both translate their native protocols into this shape.
 #[derive(Debug, Clone)]
@@ -111,22 +114,14 @@ impl AgentBridge {
     ) -> Result<Self> {
         match config.agent.kind {
             AgentKind::Codex => {
-                let b = crate::codex::bridge::Bridge::spawn(
-                    &config.codex.binary,
-                    cwd,
-                    selected_model(model_override, config.codex.model_default.clone()),
-                )
-                .await?;
+                let b = crate::codex::bridge::Bridge::spawn(CODEX_BINARY, cwd).await?;
                 Ok(AgentBridge::Codex(b))
             }
             AgentKind::ClaudeCode => {
-                let b = crate::claude_code::bridge::Bridge::spawn(
-                    &config.claude_code.binary,
-                    cwd,
-                    selected_model(model_override, config.claude_code.model_default.clone()),
-                    resume_thread_id,
-                )
-                .await?;
+                let b =
+                    crate::claude_code::bridge::Bridge::spawn(CLAUDE_BINARY, cwd, resume_thread_id)
+                        .await?;
+                let _ = model_override;
                 Ok(AgentBridge::ClaudeCode(b))
             }
         }
@@ -178,41 +173,5 @@ impl AgentBridge {
             AgentBridge::Codex(b) => b.server.shutdown(grace).await,
             AgentBridge::ClaudeCode(b) => b.shutdown(grace).await,
         }
-    }
-}
-
-fn selected_model(
-    model_override: Option<String>,
-    configured_default: Option<String>,
-) -> Option<String> {
-    model_override.or(configured_default)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::selected_model;
-
-    #[test]
-    fn selected_model_prefers_run_override() {
-        assert_eq!(
-            selected_model(
-                Some("claude-override".into()),
-                Some("claude-default".into())
-            ),
-            Some("claude-override".into())
-        );
-    }
-
-    #[test]
-    fn selected_model_falls_back_to_config_default() {
-        assert_eq!(
-            selected_model(None, Some("claude-default".into())),
-            Some("claude-default".into())
-        );
-    }
-
-    #[test]
-    fn selected_model_returns_none_when_unset() {
-        assert_eq!(selected_model(None, None), None);
     }
 }

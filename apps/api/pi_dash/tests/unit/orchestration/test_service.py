@@ -154,6 +154,12 @@ def test_run_config_carries_git_fields_from_issue_and_project(
     project.save(update_fields=["repo_url", "base_branch"])
     issue.git_work_branch = "feat/pinned"
     issue.save(update_fields=["git_work_branch"])
+    # ``BaseModel.save`` pulls ``created_by`` from ``crum.get_current_user()``;
+    # tests run outside a request, so the save above wipes ``created_by``
+    # in memory (DB row is unchanged because ``update_fields`` is scoped).
+    # Reload so the orchestration handler can resolve a fallback creator.
+    issue.refresh_from_db()
+    project.refresh_from_db()
 
     outcome = service.handle_issue_state_transition(
         issue=issue,
@@ -180,6 +186,82 @@ def test_run_config_empty_git_fields_surface_as_none(seeded, issue, states):
     cfg = outcome.created_run.run_config
     assert cfg["repo_url"] is None
     assert cfg["git_work_branch"] is None
+
+
+# ---------------------------------------------------------------------------
+# Schedule arm/disarm side effects of state transitions
+# (.ai_design/issue_ticking_system/design.md §4.1, §4.4).
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def paused_state(project, create_user):
+    with impersonate(create_user):
+        return State.objects.create(
+            name="Paused", project=project, group="backlog"
+        )
+
+
+@pytest.mark.unit
+def test_state_transition_arms_schedule_on_in_progress_entry(
+    seeded, issue, states
+):
+    from pi_dash.db.models.issue_agent_ticker import IssueAgentTicker
+
+    assert IssueAgentTicker.objects.filter(issue=issue).exists() is False
+    service.handle_issue_state_transition(
+        issue=issue,
+        from_state=states["todo"],
+        to_state=states["in_progress"],
+    )
+    sched = IssueAgentTicker.objects.get(issue=issue)
+    assert sched.enabled is True
+    assert sched.tick_count == 0
+    assert sched.next_run_at is not None
+
+
+@pytest.mark.unit
+def test_state_transition_disarms_schedule_on_started_exit(
+    seeded, issue, states, paused_state
+):
+    from pi_dash.db.models.issue_agent_ticker import IssueAgentTicker
+
+    # Seed an active schedule by transitioning into In Progress.
+    service.handle_issue_state_transition(
+        issue=issue,
+        from_state=states["todo"],
+        to_state=states["in_progress"],
+    )
+    assert IssueAgentTicker.objects.get(issue=issue).enabled is True
+
+    # Now leave Started — schedule must disarm.
+    service.handle_issue_state_transition(
+        issue=issue,
+        from_state=states["in_progress"],
+        to_state=paused_state,
+    )
+    assert IssueAgentTicker.objects.get(issue=issue).enabled is False
+
+
+@pytest.mark.unit
+def test_state_transition_dispatch_immediate_false_skips_run_creation(
+    seeded, issue, states
+):
+    """Comment & Run on Paused issue path: caller arms schedule via the
+    transition but owns the dispatch separately."""
+    from pi_dash.db.models.issue_agent_ticker import IssueAgentTicker
+
+    outcome = service.handle_issue_state_transition(
+        issue=issue,
+        from_state=states["todo"],
+        to_state=states["in_progress"],
+        dispatch_immediate=False,
+    )
+    assert outcome.reason == "dispatch-deferred-to-caller"
+    assert outcome.created_run is None
+    assert AgentRun.objects.filter(work_item=issue).count() == 0
+    # Schedule still armed — the caller will dispatch its own run.
+    assert IssueAgentTicker.objects.get(issue=issue).enabled is True
 
 
 # ---------------------------------------------------------------------------
@@ -253,14 +335,15 @@ def _make_paused_run(issue, runner, *, thread_id="sess_xyz"):
 def test_comment_creates_pinned_continuation(
     seeded, project, issue, states, runner_for_workspace, create_user
 ):
+    """``handle_issue_comment`` is the explicit entry point Comment & Run
+    invokes — comments themselves no longer fire it via post_save."""
     Issue.all_objects.filter(pk=issue.pk).update(state=states["in_progress"])
     issue.refresh_from_db()
     prior = _make_paused_run(issue, runner_for_workspace)
 
-    # post_save(IssueComment) fires the continuation trigger automatically;
-    # we observe its side effects rather than calling handle_issue_comment
-    # explicitly.
-    _make_comment(issue, create_user, "use option B please")
+    comment = _make_comment(issue, create_user, "use option B please")
+    outcome = service.handle_issue_comment(comment)
+    assert outcome.reason == "created"
 
     r_next = (
         AgentRun.objects.filter(work_item=issue, parent_run=prior)
@@ -310,10 +393,11 @@ def test_comment_with_no_prior_run_skipped(
 
 
 @pytest.mark.unit
-def test_comment_during_active_run_held_for_terminate_sweep(
+def test_comment_during_active_run_returns_prior_run_active(
     seeded, project, issue, states, runner_for_workspace, create_user
 ):
-    """Comment arriving while R_prev is RUNNING is not dispatched immediately."""
+    """Even when called explicitly, ``handle_issue_comment`` skips when a
+    prior run is in flight — Comment & Run on a busy issue is a no-op."""
     from django.utils import timezone
 
     Issue.all_objects.filter(pk=issue.pk).update(state=states["in_progress"])
@@ -335,26 +419,6 @@ def test_comment_during_active_run_held_for_terminate_sweep(
 
 
 @pytest.mark.unit
-def test_two_comments_coalesce_into_one_followup(
-    seeded, project, issue, states, runner_for_workspace, create_user
-):
-    Issue.all_objects.filter(pk=issue.pk).update(state=states["in_progress"])
-    issue.refresh_from_db()
-    _make_paused_run(issue, runner_for_workspace)
-
-    # First comment fires the trigger and creates R_next. The second
-    # comment fires the trigger again — but coalesces because R_next is
-    # already QUEUED. Observe via DB state, not return values.
-    _make_comment(issue, create_user, "first")
-    _make_comment(issue, create_user, "second")
-
-    queued = AgentRun.objects.filter(
-        work_item=issue, status=AgentRunStatus.QUEUED
-    )
-    assert queued.count() == 1
-
-
-@pytest.mark.unit
 def test_pin_skipped_when_parent_has_no_thread_id(
     seeded, project, issue, states, runner_for_workspace, create_user
 ):
@@ -364,7 +428,9 @@ def test_pin_skipped_when_parent_has_no_thread_id(
     prior = _make_paused_run(issue, runner_for_workspace, thread_id="")
     assert prior.thread_id == ""
 
-    _make_comment(issue, create_user, "go")
+    comment = _make_comment(issue, create_user, "go")
+    outcome = service.handle_issue_comment(comment)
+    assert outcome.reason == "created"
     r_next = (
         AgentRun.objects.filter(work_item=issue, parent_run=prior)
         .order_by("-created_at")
@@ -372,39 +438,3 @@ def test_pin_skipped_when_parent_has_no_thread_id(
     )
     assert r_next is not None
     assert r_next.pinned_runner_id is None
-
-
-@pytest.mark.unit
-def test_terminate_sweep_picks_up_held_comment(
-    seeded, project, issue, states, runner_for_workspace, create_user
-):
-    """maybe_continue_after_terminate creates R_next from comments after R.started_at."""
-    from django.utils import timezone
-
-    from pi_dash.runner.models import AgentRunStatus
-
-    Issue.all_objects.filter(pk=issue.pk).update(state=states["in_progress"])
-    issue.refresh_from_db()
-    started = timezone.now() - timezone.timedelta(minutes=10)
-    prior = AgentRun.objects.create(
-        workspace=issue.workspace,
-        created_by=create_user,
-        pod=runner_for_workspace.pod,
-        work_item=issue,
-        runner=runner_for_workspace,
-        thread_id="sess_xyz",
-        status=AgentRunStatus.RUNNING,
-        prompt="working",
-        started_at=started,
-    )
-    # Comment arrives mid-run.
-    _make_comment(issue, create_user, "use option B")
-    # Run terminates.
-    prior.status = AgentRunStatus.COMPLETED
-    prior.ended_at = timezone.now()
-    prior.save(update_fields=["status", "ended_at"])
-
-    outcome = service.maybe_continue_after_terminate(prior)
-    assert outcome.reason == "created"
-    assert outcome.created_run is not None
-    assert outcome.created_run.parent_run_id == prior.id
