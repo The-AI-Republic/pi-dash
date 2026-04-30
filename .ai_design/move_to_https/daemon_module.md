@@ -80,7 +80,7 @@ pub struct HttpClient {
 /// State that mutates over the daemon's lifetime.
 struct HttpClientInner {
     access_token: Option<AccessToken>,   // self-contained, in-memory only
-    session: Option<SessionState>,       // session_id + server_time + ack cursors
+    session: Option<SessionState>,       // session_id + server_time (the cloud owns PEL-drained state per §8; the daemon does not track it)
 }
 
 /// Long-poll loop. Spawned once by `Supervisor::run`. Replaces the
@@ -332,10 +332,9 @@ working without modification.
 
 ## 8. Acks (ack-on-handle, per design.md decision #21)
 
-Acks are per-runner and use the **explicit list** form
-`{runner_id: [stream_id, ...]}`. They go in the next poll's request
-body and translate server-side to
-`XACK runner_stream:{rid} runner-group:{rid} <id1> [<id2> ...]`
+Acks use the **explicit flat list** form `["<stream_id>", ...]`. They
+go in the next poll's request body and translate server-side to
+`XACK connection_stream:{cid} connection-group:{cid} <id1> [<id2> ...]`
 (XACK takes exact ids, not a range — `design.md` §7.4).
 
 **Ack-on-handle**: a stream id enters `HttpLoop`'s `ack_map` only
@@ -351,15 +350,14 @@ Plumbing:
 let (ack_tx, ack_rx) = mpsc::unbounded_channel::<AckEntry>();
 
 struct AckEntry {
-    runner_id: Uuid,
     stream_id: String,
 }
 
 // HttpLoop owns the receivers and drains them on each poll cycle:
-fn drain_pending_acks(&self) -> AckMap {
-    let mut acks: AckMap = HashMap::new();
+fn drain_pending_acks(&self) -> Vec<String> {
+    let mut acks = Vec::new();
     while let Ok(entry) = self.ack_rx.try_recv() {
-        acks.entry(entry.runner_id).or_default().push(entry.stream_id);
+        acks.push(entry.stream_id);
     }
     acks
 }
@@ -369,12 +367,12 @@ async fn handle_one(&mut self, env: Envelope<ServerMsg>) {
     let stream_id = env.stream_id.clone();
     if self.inbound_dedupe.seen(&env.message_id) {
         // Re-delivery from PEL after a prior crash. Ack and skip.
-        let _ = self.ack_tx.send(AckEntry { runner_id: self.runner_id, stream_id });
+        let _ = self.ack_tx.send(AckEntry { stream_id });
         return;
     }
     self.dispatch(env.body).await;
     self.inbound_dedupe.record(env.message_id);
-    let _ = self.ack_tx.send(AckEntry { runner_id: self.runner_id, stream_id });
+    let _ = self.ack_tx.send(AckEntry { stream_id });
 }
 ```
 
@@ -385,14 +383,15 @@ Per-instance, not shared across runners — distinct runners cannot
 re-deliver each other's messages.
 
 **Connection-scoped messages** handled inline in `HttpLoop` (Revoke,
-ForceRefresh, etc.) ack via the same channel — they are also
-ack-on-handle-completion. For Revoke that means after `state.shutdown()`
-returns; for ForceRefresh after `refresh()` returns successfully.
+ForceRefresh, etc.) use the same ack path because acks are no longer
+runner-keyed. `dispatch_response` records their `stream_id` only after
+the inline handler finishes: for Revoke that means after
+`state.shutdown()` returns; for ForceRefresh after `refresh()`
+returns successfully.
 
-**Per-stream first poll uses `0`**, subsequent polls use `>` (per
-`design.md` §7.3 step 5). The cloud tracks
-`session_pel_drained:{sid}:{rid}` so the daemon doesn't need to do
-this bookkeeping client-side.
+**Session first poll uses `0`**, subsequent polls use `>` (per
+`design.md` §7.3 step 5). The cloud tracks `session_pel_drained:{sid}`
+so the daemon doesn't need to do this bookkeeping client-side.
 
 ## 9. Refresh scheduling
 
@@ -527,7 +526,7 @@ Per `design.md` §10, mapped to daemon-side response:
 | `force_refresh` ServerMsg            | `force_refresh_inline()`; do not surface to instances.                                                                                                                                                                                                                                                                                                                                                              | No.                                   |
 | `Revoke` ServerMsg (connection-wide) | Inline: `state.shutdown()`.                                                                                                                                                                                                                                                                                                                                                                                         | Mailbox closes; loops exit.           |
 | `RemoveRunner` ServerMsg             | Demux to runner's mailbox. `RunnerLoop` exits its inner loop on this frame (same as today). On exit, the supervisor's join-handler removes the runner from the `mailboxes`, `status_sources`, and `attach_runners` maps and calls `client.detach_runner(runner_id)` to notify cloud. The other runners on the connection keep working. The RemoveRunner stream id is acked by `RunnerLoop` immediately before exit. | Yes — same as today.                  |
-| Daemon crash mid-handler             | Process killed before `RunnerLoop` could send the ack. Stream id stays in `consumer-{sid}`'s PEL. New session's `attach/` XCLAIMs onto `consumer-{new_sid}`; first poll `XREADGROUP ... 0` redelivers; `InboundDedupe` lets the handler skip if it had partially run.                                                                                                                                               | Yes (re-delivery).                    |
+| Daemon crash mid-handler             | Process killed before `RunnerLoop` could send the ack. Stream id stays in `consumer-{sid}`'s PEL. New session-open reassigns onto `consumer-{new_sid}` via paginated `XAUTOCLAIM`; first poll `XREADGROUP ... 0` redelivers; `InboundDedupe` lets the handler skip if it had partially run.                                                                                                                         | Yes (re-delivery).                    |
 
 ## 12. Module-level test plan
 
@@ -546,9 +545,8 @@ Per `design.md` §10, mapped to daemon-side response:
   pass through.
 - **End-to-end ack-on-handle**: dispatch a poll containing 3
   messages for the same runner; assert that the next poll's
-  `ack[<runner_id>]` only includes ids whose handlers have
-  completed (block one handler in the test and confirm its id is
-  absent).
+  `ack` list only includes ids whose handlers have completed (block
+  one handler in the test and confirm its id is absent).
 - **`RunnerOut::send` dispatch table**: one test per `ClientMsg`
   variant, asserting it lands at the right `HttpClient` method.
   Effectively a `match`-completeness test — keeps future enum
