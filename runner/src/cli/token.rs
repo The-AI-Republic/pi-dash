@@ -51,6 +51,12 @@ pub enum TokenCommand {
     /// from `config.toml`, and deletes its local data directory under
     /// `data_dir/runners/<runner_id>/`.
     RemoveRunner(RemoveRunnerArgs),
+
+    /// List the projects available under this token's workspace, with
+    /// their identifiers, names, default-pod ids, and pod counts. Use
+    /// the printed identifier as the value for `--project` on
+    /// `pidash configure` or `pidash token add-runner`.
+    ListProjects,
 }
 
 #[derive(Debug, Args)]
@@ -79,6 +85,18 @@ pub struct AddRunnerArgs {
     #[arg(long)]
     pub name: String,
 
+    /// Project identifier this runner serves. Required — every runner
+    /// is bound to one project for its lifetime. Discover available
+    /// projects with `pidash token list-projects`.
+    #[arg(long)]
+    pub project: String,
+
+    /// Pod within the project. Optional; defaults to the project's
+    /// default pod. Bare suffix (e.g. `--pod beefy`) is auto-prefixed
+    /// with the project identifier server-side.
+    #[arg(long)]
+    pub pod: Option<String>,
+
     /// Working directory for the new runner. Required because the local
     /// daemon validates per-runner working_dir uniqueness — every
     /// runner on this machine must own a disjoint tree.
@@ -104,6 +122,7 @@ pub async fn run(args: TokenArgs, paths: &Paths) -> Result<()> {
         TokenCommand::Show => run_show(paths).await,
         TokenCommand::AddRunner(args) => run_add_runner(args, paths).await,
         TokenCommand::RemoveRunner(args) => run_remove_runner(args, paths).await,
+        TokenCommand::ListProjects => run_list_projects(paths).await,
     }
 }
 
@@ -211,13 +230,24 @@ async fn run_add_runner(args: AddRunnerArgs, paths: &Paths) -> Result<()> {
         "{}/api/v1/runner/register-under-token/",
         config.daemon.cloud_url.trim_end_matches('/'),
     );
-    let body = json!({
+    let project_slug = args.project.trim();
+    if project_slug.is_empty() {
+        anyhow::bail!("--project cannot be empty");
+    }
+    let mut body = serde_json::json!({
         "name": name,
+        "project": project_slug,
         "os": std::env::consts::OS,
         "arch": std::env::consts::ARCH,
         "version": crate::RUNNER_VERSION,
         "protocol_version": crate::PROTOCOL_VERSION,
     });
+    if let Some(pod) = args.pod.as_deref() {
+        let pod = pod.trim();
+        if !pod.is_empty() {
+            body["pod"] = serde_json::Value::String(pod.to_string());
+        }
+    }
     let http = reqwest::Client::builder()
         .timeout(Duration::from_secs(15))
         .build()?;
@@ -243,11 +273,19 @@ async fn run_add_runner(args: AddRunnerArgs, paths: &Paths) -> Result<()> {
     let runner_id: Uuid = runner_id_str
         .parse()
         .with_context(|| format!("invalid runner_id from cloud: {runner_id_str}"))?;
+    // pod_id is informational; older servers may omit it. Forward-compat
+    // by parsing if present and storing None otherwise.
+    let pod_id: Option<Uuid> = resp_json
+        .get("pod_id")
+        .and_then(|v| v.as_str())
+        .and_then(|s| s.parse().ok());
 
     config.runners.push(RunnerConfig {
         name: name.to_string(),
         runner_id,
         workspace_slug: None,
+        project_slug: Some(project_slug.to_string()),
+        pod_id,
         workspace: WorkspaceSection {
             working_dir: args.working_dir,
         },
@@ -343,6 +381,57 @@ async fn run_show(paths: &Paths) -> Result<()> {
         None => {
             println!("no token configured. Run `pidash token install` to install one.");
         }
+    }
+    Ok(())
+}
+
+async fn run_list_projects(paths: &Paths) -> Result<()> {
+    let config = crate::config::file::load_config(paths).context("loading config.toml")?;
+    let creds = crate::config::file::load_credentials(paths).context("loading credentials.toml")?;
+    let token = creds.token.as_ref().ok_or_else(|| {
+        anyhow::anyhow!(
+            "no [token] block in credentials.toml — run `pidash token install` first"
+        )
+    })?;
+
+    let url = format!(
+        "{}/api/runners/projects/",
+        config.daemon.cloud_url.trim_end_matches('/'),
+    );
+    let http = reqwest::Client::builder()
+        .timeout(Duration::from_secs(15))
+        .build()?;
+    let resp = http
+        .get(&url)
+        .header("X-Token-Id", token.token_id.to_string())
+        .header("Authorization", format!("Bearer {}", token.token_secret))
+        .send()
+        .await
+        .with_context(|| format!("GET {url}"))?;
+    let status = resp.status();
+    let text = resp.text().await.unwrap_or_default();
+    if !status.is_success() {
+        anyhow::bail!("list-projects failed: HTTP {status}: {text}");
+    }
+    let projects: Vec<serde_json::Value> = serde_json::from_str(&text)
+        .with_context(|| format!("parsing list-projects response: {text}"))?;
+    if projects.is_empty() {
+        println!(
+            "no projects in this workspace yet. Create one in the Pi Dash UI \
+             and rerun this command."
+        );
+        return Ok(());
+    }
+    println!("{:<24} {:<32} {:<10} DEFAULT_POD_ID", "IDENTIFIER", "NAME", "PODS");
+    for p in projects {
+        let identifier = p.get("identifier").and_then(|v| v.as_str()).unwrap_or("?");
+        let name = p.get("name").and_then(|v| v.as_str()).unwrap_or("?");
+        let pod_count = p.get("pod_count").and_then(|v| v.as_u64()).unwrap_or(0);
+        let default_pod_id = p
+            .get("default_pod_id")
+            .and_then(|v| v.as_str())
+            .unwrap_or("(none)");
+        println!("{identifier:<24} {name:<32} {pod_count:<10} {default_pod_id}");
     }
     Ok(())
 }

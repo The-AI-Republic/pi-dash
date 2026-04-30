@@ -23,6 +23,7 @@ fn envelope_roundtrips_all_client_variants() {
             status: RunnerStatus::Idle,
             in_flight_run: Some(Uuid::new_v4()),
             protocol_version: WIRE_VERSION,
+            project_slug: None,
         },
         ClientMsg::Heartbeat {
             ts: chrono::Utc::now(),

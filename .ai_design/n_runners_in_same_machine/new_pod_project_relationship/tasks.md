@@ -10,11 +10,11 @@ How to use:
 
 ## Phases
 
-- [ ] **Phase A** — Cloud schema + dispatch
-- [ ] **Phase B** — Runner config + CLI registration
-- [ ] **Phase C** — Cloud-side pod CRUD API + project listing
-- [ ] **Phase D** — TUI + CLI multi-runner UX (selectors, status, doctor)
-- [ ] **Phase E** — End-to-end smoke test + docs
+- [x] **Phase A** — Cloud schema + dispatch
+- [x] **Phase B** — Runner config + CLI registration
+- [x] **Phase C** — Cloud-side pod CRUD API + project listing
+- [ ] **Phase D** — TUI + CLI multi-runner UX (selectors, status, doctor) — _deferred to follow-up PR; the user requested this refactor without TUI scope_
+- [x] **Phase E** — End-to-end smoke test + docs
 
 ---
 

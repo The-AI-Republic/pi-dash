@@ -212,7 +212,13 @@ def _resolve_pod_for_issue(issue: Issue):
         pinned = Pod.objects.filter(pk=issue.assigned_pod_id).first()
         if pinned is not None:
             return pinned
-    return Pod.default_for_workspace_id(issue.workspace_id)
+    # Pods are project-scoped — fall back to the issue's project default.
+    # Issues without a project (shouldn't exist post-refactor) return None
+    # and the caller surfaces an error rather than silently routing into
+    # a workspace-wide pod.
+    if issue.project_id is None:
+        return None
+    return Pod.default_for_project_id(issue.project_id)
 
 
 def _resolve_creator_for_trigger(issue: Issue, *, triggered_by: str, actor=None):

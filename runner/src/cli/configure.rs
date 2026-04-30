@@ -34,6 +34,19 @@ pub struct Args {
     #[arg(long)]
     pub working_dir: Option<PathBuf>,
 
+    /// Pi Dash project this runner serves. Required when registering
+    /// (via --url + --token). The runner becomes a permanent member of
+    /// the project's default pod (or the explicit --pod when set).
+    /// To discover available projects: `pidash token list-projects`.
+    #[arg(long)]
+    pub project: Option<String>,
+
+    /// Pod within the project. Optional; defaults to the project's
+    /// default pod. The bare suffix (e.g. `--pod beefy`) is auto-prefixed
+    /// with the project identifier so the user doesn't have to repeat it.
+    #[arg(long)]
+    pub pod: Option<String>,
+
     // --- Agent selection --------------------------------------------------
     /// Which AI agent CLI the runner drives. Arrow-key picker on a TTY
     /// during first-setup if omitted; a no-op partial edit if omitted here.
@@ -218,6 +231,12 @@ pub struct RegisterInputs {
     /// Explicit agent choice; `None` means "ask on a TTY, else keep the
     /// existing config's kind, else Codex."
     pub agent: Option<AgentKind>,
+    /// Project identifier this runner serves. Required at registration —
+    /// the runner is bound to one project for its lifetime.
+    pub project: String,
+    /// Optional pod name within the project. Defaults to the project's
+    /// default pod when omitted.
+    pub pod: Option<String>,
     pub skip_doctor: bool,
     pub skip_service: bool,
     pub skip_linger: bool,
@@ -257,12 +276,20 @@ pub async fn run(args: Args, paths: &Paths) -> Result<()> {
 
     match (args.url.clone(), args.token.clone()) {
         (Some(url), Some(token)) => {
+            let project = args.project.clone().ok_or_else(|| {
+                anyhow::anyhow!(
+                    "missing --project <PROJECT_IDENTIFIER> for registration. \
+                     Use `pidash token list-projects` or the cloud's Projects page."
+                )
+            })?;
             let inputs = RegisterInputs {
                 url,
                 token,
                 name: args.name.clone(),
                 working_dir: args.working_dir.clone(),
                 agent: args.agent,
+                project,
+                pod: args.pod.clone(),
                 skip_doctor: args.skip_doctor,
                 skip_service: args.skip_service,
                 skip_linger: args.skip_linger,
@@ -395,6 +422,8 @@ pub async fn execute(inputs: RegisterInputs, paths: &Paths) -> Result<()> {
                 arch: arch.clone(),
                 version: version.clone(),
                 protocol_version: crate::PROTOCOL_VERSION,
+                project: inputs.project.clone(),
+                pod: inputs.pod.clone(),
             };
             match register(&inputs.url, &inputs.token, &req).await {
                 Ok(resp) => break (resp, attempt_name),
@@ -456,6 +485,15 @@ pub async fn execute(inputs: RegisterInputs, paths: &Paths) -> Result<()> {
             name: final_name,
             runner_id: resp.runner_id,
             workspace_slug: resp.workspace_slug.clone(),
+            // Prefer the cloud's echoed project identifier; fall back to
+            // what the user passed (older servers don't echo). Either way
+            // the value is non-empty post-registration.
+            project_slug: Some(
+                resp.project_identifier
+                    .clone()
+                    .unwrap_or_else(|| inputs.project.clone()),
+            ),
+            pod_id: resp.pod_id,
             workspace: crate::config::schema::WorkspaceSection { working_dir },
             agent: crate::config::schema::AgentSection { kind: agent_kind },
             codex: crate::config::schema::CodexSection::default(),

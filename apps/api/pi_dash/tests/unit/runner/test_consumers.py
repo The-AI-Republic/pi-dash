@@ -36,8 +36,8 @@ from pi_dash.runner.models import (
 
 
 @pytest.fixture
-def pod(workspace):
-    return Pod.default_for_workspace(workspace)
+def pod(project):
+    return Pod.default_for_project(project)
 
 
 @pytest.fixture

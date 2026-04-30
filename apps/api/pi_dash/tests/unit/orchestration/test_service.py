@@ -277,12 +277,12 @@ def workpad_bot_user(db):
 
 
 @pytest.fixture
-def runner_for_workspace(db, workspace, create_user):
+def runner_for_workspace(db, workspace, project, create_user):
     from django.utils import timezone
 
     from pi_dash.runner.models import Pod, Runner, RunnerStatus
 
-    pod = Pod.default_for_workspace(workspace)
+    pod = Pod.default_for_project(project)
     return Runner.objects.create(
         owner=create_user,
         workspace=workspace,

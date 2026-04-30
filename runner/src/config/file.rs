@@ -108,6 +108,8 @@ mod tests {
             name: name.into(),
             runner_id: uuid::Uuid::new_v4(),
             workspace_slug: Some("acme".into()),
+            project_slug: Some("TEST".into()),
+            pod_id: None,
             workspace: WorkspaceSection { working_dir },
             agent: Default::default(),
             codex: Default::default(),

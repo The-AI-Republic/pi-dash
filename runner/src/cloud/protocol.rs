@@ -86,6 +86,14 @@ pub enum ClientMsg {
         status: RunnerStatus,
         in_flight_run: Option<Uuid>,
         protocol_version: u32,
+        /// Project identifier this runner serves. Optional purely for
+        /// back-compat with daemons enrolled before the project refactor;
+        /// when present, the cloud cross-checks it against
+        /// `runner.pod.project.identifier` and emits `RemoveRunner` on a
+        /// mismatch. See
+        /// `.ai_design/n_runners_in_same_machine/new_pod_project_relationship/design.md` §7.4.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        project_slug: Option<String>,
     },
     Heartbeat {
         ts: DateTime<Utc>,
@@ -300,6 +308,7 @@ mod tests {
             status: RunnerStatus::Idle,
             in_flight_run: None,
             protocol_version: WIRE_VERSION,
+            project_slug: None,
         };
         let env = Envelope::new(msg);
         let s = serde_json::to_string(&env).unwrap();
@@ -372,6 +381,7 @@ mod tests {
             status: RunnerStatus::Idle,
             in_flight_run: None,
             protocol_version: WIRE_VERSION,
+            project_slug: None,
         };
         let env = Envelope::for_runner(env_id, msg);
         let s = serde_json::to_string(&env).unwrap();

@@ -197,21 +197,21 @@ class Issue(ProjectBaseModel):
         ordering = ("-created_at",)
 
     def save(self, *args, **kwargs):
-        # Auto-resolve assigned_pod to workspace default for new issues so the
-        # UI never has to think about pods. See .ai_design/issue_runner/design.md
-        # §4.4 and §7.1. Only fires on creation; PATCH-driven changes are
+        # Auto-resolve assigned_pod to the *project's* default pod for new
+        # issues so the UI never has to think about pods. See
+        # .ai_design/n_runners_in_same_machine/new_pod_project_relationship/
+        # design.md §8.1. Only fires on creation; PATCH-driven changes are
         # handled by the serializer's validate_assigned_pod.
+        #
+        # The previous lookup was workspace-default, which conflated all
+        # projects in a workspace into one routing target. Pods are now
+        # project-scoped, so the resolution must use the issue's project.
         if self._state.adding and self.assigned_pod_id is None:
             try:
                 from pi_dash.runner.models import Pod
 
-                workspace_id = self.workspace_id
-                if workspace_id is None and self.project_id is not None:
-                    # workspace is set in ProjectBaseModel.save() before super().save();
-                    # at this stage we may not have it yet, so derive from project.
-                    workspace_id = self.project.workspace_id
-                if workspace_id is not None:
-                    default_pod = Pod.default_for_workspace_id(workspace_id)
+                if self.project_id is not None:
+                    default_pod = Pod.default_for_project_id(self.project_id)
                     if default_pod is not None:
                         self.assigned_pod = default_pod
             except ImportError:

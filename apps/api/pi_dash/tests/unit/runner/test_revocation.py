@@ -21,8 +21,8 @@ from pi_dash.runner.models import (
 
 
 @pytest.fixture
-def pod(workspace):
-    return Pod.default_for_workspace(workspace)
+def pod(project):
+    return Pod.default_for_project(project)
 
 
 def _make_runner(user, workspace, pod, name="r1"):
@@ -179,13 +179,13 @@ def test_revoke_is_noop_when_no_in_flight_runs(
 
 @pytest.mark.unit
 def test_revoke_releases_pinned_queued_runs(
-    db, create_user, workspace
+    db, create_user, workspace, project
 ):
     from django.utils import timezone
 
     from pi_dash.runner.models import AgentRun, AgentRunStatus, Pod, Runner, RunnerStatus
 
-    pod = Pod.default_for_workspace(workspace)
+    pod = Pod.default_for_project(project)
     runner = Runner.objects.create(
         owner=create_user,
         workspace=workspace,

@@ -32,6 +32,15 @@ pub struct RegisterRequest {
     pub arch: String,
     pub version: String,
     pub protocol_version: u32,
+    /// Project identifier the runner is registering against. Required
+    /// post-refactor — the runner is bound to one project for its
+    /// lifetime. See
+    /// `.ai_design/n_runners_in_same_machine/new_pod_project_relationship/design.md` §7.
+    pub project: String,
+    /// Optional pod name within the project. Defaults to the project's
+    /// auto-created default pod when omitted.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pod: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -45,6 +54,14 @@ pub struct RegisterResponse {
     /// field yet — on success the server always populates it.
     #[serde(default)]
     pub workspace_slug: Option<String>,
+    /// Project identifier the cloud assigned. Echoed back so the daemon
+    /// can stamp it into `[[runner]]` without re-parsing the request.
+    #[serde(default)]
+    pub project_identifier: Option<String>,
+    /// Pod id the runner was placed in. Optional for forward-compat with
+    /// older servers; when present, persisted to `RunnerConfig.pod_id`.
+    #[serde(default)]
+    pub pod_id: Option<Uuid>,
     /// Public REST API token (`X-Api-Key`) for `/api/v1/`. Optional so a
     /// daemon built against the new server can also enroll against an older
     /// server that hasn't shipped the dual-credential change yet.

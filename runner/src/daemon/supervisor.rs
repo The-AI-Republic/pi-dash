@@ -31,6 +31,9 @@ pub struct Supervisor {
     pub approvals: ApprovalRouter,
 }
 
+type HelloRunner = (RunnerOut, StateHandle, Option<String>);
+type HelloRunnerMap = HashMap<uuid::Uuid, HelloRunner>;
+
 impl Supervisor {
     pub fn new(
         config: Config,
@@ -91,8 +94,17 @@ impl Supervisor {
         let hello_runners = Arc::new(RwLock::new(
             instances
                 .iter()
-                .map(|i| (i.runner_id, (i.out.clone(), i.state.clone())))
-                .collect::<HashMap<uuid::Uuid, (RunnerOut, StateHandle)>>(),
+                .map(|i| {
+                    (
+                        i.runner_id,
+                        (
+                            i.out.clone(),
+                            i.state.clone(),
+                            i.config.project_slug.clone(),
+                        ),
+                    )
+                })
+                .collect::<HelloRunnerMap>(),
         ));
 
         // Primary runner = the first configured runner. Used by IPC and
@@ -370,15 +382,12 @@ impl Supervisor {
 /// `notify_one()` after each successful WS handshake (cold start and every
 /// reconnect). Cloud-side `_handle_token_hello` is idempotent on re-Hello,
 /// so a second emission for an already-authorised runner is harmless.
-async fn hello_emitter(
-    runners: Arc<RwLock<HashMap<uuid::Uuid, (RunnerOut, StateHandle)>>>,
-    connected: Arc<tokio::sync::Notify>,
-) {
+async fn hello_emitter(runners: Arc<RwLock<HelloRunnerMap>>, connected: Arc<tokio::sync::Notify>) {
     loop {
         connected.notified().await;
-        let current_runners: Vec<(RunnerOut, StateHandle)> =
+        let current_runners: Vec<HelloRunner> =
             { runners.read().await.values().cloned().collect() };
-        for (out, state) in current_runners {
+        for (out, state, project_slug) in current_runners {
             let hello = ClientMsg::Hello {
                 runner_id: out.runner_id(),
                 version: crate::RUNNER_VERSION.to_string(),
@@ -387,6 +396,7 @@ async fn hello_emitter(
                 status: *state.rx_status.borrow(),
                 in_flight_run: *state.rx_in_flight.borrow(),
                 protocol_version: crate::PROTOCOL_VERSION,
+                project_slug,
             };
             // Channel-closed means the cloud loop exited; the next
             // reconnect will re-fire the notify and we'll retry then.
@@ -409,7 +419,7 @@ struct RunnerLoop {
     /// on the signal.
     remove_tx: tokio::sync::watch::Sender<bool>,
     live_mailboxes: Arc<RwLock<HashMap<uuid::Uuid, mpsc::Sender<Envelope<ServerMsg>>>>>,
-    live_hello_runners: Arc<RwLock<HashMap<uuid::Uuid, (RunnerOut, StateHandle)>>>,
+    live_hello_runners: Arc<RwLock<HelloRunnerMap>>,
     /// In-flight run, if any. Replaced on each Assign and cleared as soon as
     /// the worker task signals completion via `done_rx` — driven by
     /// `tokio::select!` so a new Assign isn't rejected while we wait for the
@@ -1165,4 +1175,131 @@ fn uuid_or(s: &str) -> uuid::Uuid {
         return u;
     }
     uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_OID, s.as_bytes())
+}
+
+#[cfg(test)]
+mod tests {
+    //! In-module tests: cover the Supervisor's *internal* helpers that
+    //! integration tests in ``runner/tests/`` cannot reach (private
+    //! functions). The wire-format / connection-loop side is covered by
+    //! ``runner/tests/cloud_ws_fake.rs``.
+
+    use super::*;
+    use crate::config::schema::{
+        AgentSection, ApprovalPolicySection, ClaudeCodeSection, CodexSection,
+        RunnerConfig, WorkspaceSection,
+    };
+    use std::path::PathBuf;
+    use tokio::sync::Notify;
+
+    fn paths_for(root: &std::path::Path) -> Paths {
+        Paths {
+            config_dir: root.join("config"),
+            data_dir: root.join("data"),
+            runtime_dir: root.join("runtime"),
+        }
+    }
+
+    fn runner_config(name: &str, project_slug: &str, working_dir: PathBuf) -> RunnerConfig {
+        RunnerConfig {
+            name: name.into(),
+            runner_id: uuid::Uuid::new_v4(),
+            workspace_slug: Some("acme".into()),
+            project_slug: Some(project_slug.into()),
+            pod_id: None,
+            workspace: WorkspaceSection { working_dir },
+            agent: AgentSection::default(),
+            codex: CodexSection::default(),
+            claude_code: ClaudeCodeSection::default(),
+            approval_policy: ApprovalPolicySection::default(),
+        }
+    }
+
+    /// Build the supervisor's ``hello_runners`` map from a list of
+    /// ``RunnerInstance`` exactly the way ``Supervisor::run`` does, then
+    /// drive ``hello_emitter`` once and assert each instance's Hello
+    /// frame carries the correct per-runner ``project_slug``.
+    ///
+    /// This is the integration point the original review asked for:
+    /// production code calls ``hello_emitter`` to construct the frames
+    /// the cloud cross-checks against ``runner.pod.project``. If the
+    /// supervisor were to misroute ``project_slug`` between instances,
+    /// this test catches it. The wire-format-only test in
+    /// ``cloud_ws_fake.rs`` cannot.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn hello_emitter_emits_one_hello_per_instance_with_project_slug() {
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = paths_for(tmp.path());
+        let (out_tx, mut out_rx) = mpsc::channel::<Envelope<ClientMsg>>(8);
+
+        // Two instances, distinct project_slugs and disjoint working_dirs
+        // (`Config::validate()` rejects overlap; we mirror that here).
+        let inst_web = RunnerInstance::new(
+            runner_config("laptop-web", "WEB", tmp.path().join("wd-web")),
+            &paths,
+            out_tx.clone(),
+        );
+        let inst_api = RunnerInstance::new(
+            runner_config("laptop-api", "API", tmp.path().join("wd-api")),
+            &paths,
+            out_tx.clone(),
+        );
+        let runner_web = inst_web.runner_id;
+        let runner_api = inst_api.runner_id;
+
+        let runners: Arc<RwLock<HelloRunnerMap>> = Arc::new(RwLock::new(
+            [&inst_web, &inst_api]
+                .into_iter()
+                .map(|i| {
+                    (
+                        i.runner_id,
+                        (
+                            i.out.clone(),
+                            i.state.clone(),
+                            i.config.project_slug.clone(),
+                        ),
+                    )
+                })
+                .collect(),
+        ));
+
+        let connected = Arc::new(Notify::new());
+        let connected_for_task = connected.clone();
+        let task = tokio::spawn(async move {
+            hello_emitter(runners, connected_for_task).await;
+        });
+
+        connected.notify_one();
+
+        // Collect both Hellos. Supervisor iterates the map; HashMap order
+        // is unspecified so we sort by runner_id before asserting.
+        let mut received: Vec<(uuid::Uuid, Option<String>)> = Vec::new();
+        for _ in 0..2 {
+            let env = tokio::time::timeout(std::time::Duration::from_secs(2), out_rx.recv())
+                .await
+                .expect("timed out waiting for Hello")
+                .expect("channel closed before Hello arrived");
+            assert_eq!(env.runner_id, env.runner_id); // sanity
+            match env.body {
+                ClientMsg::Hello {
+                    runner_id,
+                    project_slug,
+                    ..
+                } => {
+                    received.push((runner_id, project_slug));
+                }
+                other => panic!("expected Hello, got {other:?}"),
+            }
+        }
+
+        task.abort();
+
+        received.sort_by_key(|(id, _)| *id);
+        let mut expected: Vec<(uuid::Uuid, Option<String>)> = vec![
+            (runner_web, Some("WEB".into())),
+            (runner_api, Some("API".into())),
+        ];
+        expected.sort_by_key(|(id, _)| *id);
+        assert_eq!(received, expected);
+    }
 }

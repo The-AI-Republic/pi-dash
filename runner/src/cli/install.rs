@@ -125,6 +125,24 @@ fn prompt_for_register_inputs(
         Some(name.to_string())
     };
 
+    let project = prompt_required(
+        "Project identifier (e.g. WEB; ask the cloud admin if unsure): ",
+    )?;
+    let project = project.trim().to_string();
+    if project.is_empty() {
+        anyhow::bail!("project identifier is required; aborting install");
+    }
+
+    let pod_input = prompt_required(
+        "Pod within the project (blank to use the project's default pod): ",
+    )?;
+    let pod_input = pod_input.trim();
+    let pod = if pod_input.is_empty() {
+        None
+    } else {
+        Some(pod_input.to_string())
+    };
+
     Ok(crate::cli::configure::RegisterInputs {
         url,
         token,
@@ -133,6 +151,8 @@ fn prompt_for_register_inputs(
         // Leave `agent: None` so configure::execute handles the prompt in
         // one place (install is always interactive here).
         agent: None,
+        project,
+        pod,
         skip_doctor: false,
         // Install's interactive chain delegates fully to configure — let it
         // write the unit + start the daemon as part of the same flow.

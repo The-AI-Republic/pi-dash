@@ -703,12 +703,20 @@ async fn submit_register_form(state: &mut AppState) {
     form.busy = true;
     form.error = None;
 
+    // The TUI register form is on hold pending the multi-runner UX
+    // refactor — the project picker hasn't landed yet. We surface the
+    // limitation by sending the request with an empty project string,
+    // which the cloud rejects with a clear "project is required" 400.
+    // Users should run `pidash configure --url ... --token ... --project
+    // <SLUG>` from the CLI for now.
     let req = crate::cloud::register::RegisterRequest {
         runner_name: name.clone(),
         os: std::env::consts::OS.to_string(),
         arch: std::env::consts::ARCH.to_string(),
         version: crate::RUNNER_VERSION.to_string(),
         protocol_version: crate::PROTOCOL_VERSION,
+        project: String::new(),
+        pod: None,
     };
     let resp = match crate::cloud::register::register(&cloud_url, &token, &req).await {
         Ok(r) => r,
@@ -735,6 +743,8 @@ async fn submit_register_form(state: &mut AppState) {
             name: name.clone(),
             runner_id: resp.runner_id,
             workspace_slug: resp.workspace_slug.clone(),
+            project_slug: resp.project_identifier.clone(),
+            pod_id: resp.pod_id,
             workspace: crate::config::schema::WorkspaceSection {
                 working_dir: state.paths.default_working_dir(),
             },

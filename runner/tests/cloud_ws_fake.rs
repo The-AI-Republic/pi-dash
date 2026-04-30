@@ -100,6 +100,7 @@ async fn runner_connects_hello_welcome_and_receives_assign() {
         status: RunnerStatus::Idle,
         in_flight_run: None,
         protocol_version: WIRE_VERSION,
+        project_slug: None,
     });
     out_tx.send(hello).await.unwrap();
 
@@ -249,4 +250,129 @@ async fn connection_loop_fires_connected_notify_on_each_handshake() {
         "expected `connected` notify to fire on cold start AND on reconnect; \
          got {final_count} fires"
     );
+}
+
+/// Wire-format check: drive two manually-constructed Hello envelopes
+/// through the connection layer and verify the fake cloud sees both
+/// distinct ``project_slug`` values. This exercises ``Envelope`` /
+/// ``ClientMsg::Hello`` serialization and ``run_connection``'s framing
+/// — it does **not** exercise ``Supervisor::run`` or
+/// ``hello_emitter``. The supervisor-side fan-out is covered by the
+/// in-module unit test
+/// ``hello_emitter_emits_one_hello_per_instance_with_project_slug``
+/// in ``runner/src/daemon/supervisor.rs``.
+async fn start_two_hello_collector(
+    expected_count: usize,
+) -> (SocketAddr, tokio::task::JoinHandle<Vec<ClientMsg>>) {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let handle = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let ws_stream = tokio_tungstenite::accept_async(stream).await.unwrap();
+        let (mut tx, mut rx) = ws_stream.split();
+        let welcome = Envelope::new(ServerMsg::Welcome {
+            server_time: Utc::now(),
+            heartbeat_interval_secs: 25,
+            protocol_version: WIRE_VERSION,
+        });
+        let _ = tx
+            .send(Message::Text(serde_json::to_string(&welcome).unwrap()))
+            .await;
+        let mut hellos: Vec<ClientMsg> = Vec::new();
+        while hellos.len() < expected_count {
+            let frame = match rx.next().await {
+                Some(Ok(Message::Text(t))) => t,
+                _ => break,
+            };
+            let env: Envelope<ClientMsg> = match serde_json::from_str(&frame) {
+                Ok(e) => e,
+                Err(_) => continue,
+            };
+            if matches!(env.body, ClientMsg::Hello { .. }) {
+                hellos.push(env.body);
+            }
+        }
+        hellos
+    });
+    (addr, handle)
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn two_hellos_serialize_with_distinct_project_slugs_on_the_wire() {
+    // Wire-format check, NOT a Supervisor integration test. This sends
+    // two Hello frames manually through ``out_tx`` to verify
+    // serialization + ``run_connection``'s framing handles distinct
+    // per-runner project_slug values correctly. The supervisor's
+    // ``hello_emitter`` fan-out (which is what production uses to
+    // construct these frames) is covered by an in-module unit test
+    // in ``runner/src/daemon/supervisor.rs``.
+    let (addr, server_handle) = start_two_hello_collector(2).await;
+    let cloud_url = format!("http://{}", addr);
+
+    let creds = Credentials {
+        token: None,
+        runner_id: uuid::Uuid::new_v4(),
+        runner_secret: "apd_rs_testsecret".into(),
+        api_token: None,
+        issued_at: Utc::now(),
+    };
+    let conn = Connection::open(&cloud_url, &creds).await.expect("open ws");
+    let (out_tx, out_rx) = mpsc::channel::<Envelope<ClientMsg>>(8);
+    let (in_tx, _in_rx) = mpsc::channel::<Envelope<ServerMsg>>(8);
+
+    let runner_a = uuid::Uuid::new_v4();
+    let runner_b = uuid::Uuid::new_v4();
+    out_tx
+        .send(Envelope::for_runner(
+            runner_a,
+            ClientMsg::Hello {
+                runner_id: runner_a,
+                version: "0.1.0".into(),
+                os: "linux".into(),
+                arch: "x86_64".into(),
+                status: RunnerStatus::Idle,
+                in_flight_run: None,
+                protocol_version: WIRE_VERSION,
+                project_slug: Some("WEB".into()),
+            },
+        ))
+        .await
+        .unwrap();
+    out_tx
+        .send(Envelope::for_runner(
+            runner_b,
+            ClientMsg::Hello {
+                runner_id: runner_b,
+                version: "0.1.0".into(),
+                os: "linux".into(),
+                arch: "x86_64".into(),
+                status: RunnerStatus::Idle,
+                in_flight_run: None,
+                protocol_version: WIRE_VERSION,
+                project_slug: Some("API".into()),
+            },
+        ))
+        .await
+        .unwrap();
+    let loop_handle = tokio::spawn(async move {
+        let _ = run_connection(conn, out_rx, in_tx).await;
+    });
+
+    let hellos = tokio::time::timeout(std::time::Duration::from_secs(3), server_handle)
+        .await
+        .expect("hello collector timed out")
+        .expect("collector panicked");
+    drop(out_tx);
+    let _ = tokio::time::timeout(std::time::Duration::from_secs(1), loop_handle).await;
+
+    assert_eq!(hellos.len(), 2);
+    let mut slugs: Vec<Option<String>> = hellos
+        .into_iter()
+        .map(|m| match m {
+            ClientMsg::Hello { project_slug, .. } => project_slug,
+            _ => None,
+        })
+        .collect();
+    slugs.sort();
+    assert_eq!(slugs, vec![Some("API".into()), Some("WEB".into())]);
 }

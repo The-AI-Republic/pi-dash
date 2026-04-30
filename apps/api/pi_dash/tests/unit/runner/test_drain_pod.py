@@ -27,8 +27,8 @@ from pi_dash.runner.services import matcher
 
 
 @pytest.fixture
-def pod(workspace):
-    return Pod.default_for_workspace(workspace)
+def pod(project):
+    return Pod.default_for_project(project)
 
 
 def _make_runner(user, workspace, pod, name, online=True, heartbeat_ago_s=1):
@@ -123,16 +123,16 @@ def test_select_runner_in_pod_excludes_busy(db, create_user, workspace, pod):
 
 @pytest.mark.unit
 def test_select_runner_in_pod_excludes_other_pod(
-    db, create_user, workspace
+    db, create_user, workspace, project
 ):
-    """Runners in a different pod in the same workspace are not selected."""
+    """Runners in a different pod within the same project are not selected."""
     from django.db import transaction
 
     pod_a = Pod.objects.create(
-        workspace=workspace, name="a", created_by=create_user
+        project=project, name=f"{project.identifier}_a", created_by=create_user
     )
     pod_b = Pod.objects.create(
-        workspace=workspace, name="b", created_by=create_user
+        project=project, name=f"{project.identifier}_b", created_by=create_user
     )
     _make_runner(create_user, workspace, pod_b, "only-in-b")
     with transaction.atomic():

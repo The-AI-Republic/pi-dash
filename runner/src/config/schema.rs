@@ -52,6 +52,19 @@ pub struct RunnerConfig {
     /// config still parses; new CRUD subcommands hard-error if it's missing.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workspace_slug: Option<String>,
+    /// Identifier of the project this runner serves (e.g. `WEB`,
+    /// `firstdream-API`). Populated from the registration response.
+    /// One runner ↔ one project; cannot be changed without re-registering.
+    /// See `.ai_design/n_runners_in_same_machine/new_pod_project_relationship/design.md`
+    /// §7.3. `Option` for back-compat with configs written before this
+    /// field existed; `Config::validate()` rejects empty values.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project_slug: Option<String>,
+    /// Pod id assigned by the cloud at registration. Informational only —
+    /// the source of truth is the cloud-side runner row. Stamped here so
+    /// `pidash status` can show it without an extra REST call.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pod_id: Option<Uuid>,
     pub workspace: WorkspaceSection,
     /// Which agent CLI the daemon drives for assigned runs. Defaults to
     /// `codex` so existing deployments are unaffected.
@@ -247,6 +260,25 @@ impl Config {
             });
         }
 
+        // Every runner must declare its project. The wire path
+        // (register/, register-under-token/) requires a project at
+        // registration, so an in-memory RunnerConfig that lacks one
+        // means the file was hand-edited or written by a pre-refactor
+        // CLI. Refuse to start so dispatch can't silently route into
+        // the wrong project. See
+        // .ai_design/n_runners_in_same_machine/new_pod_project_relationship/design.md
+        // §7.3.
+        for r in &self.runners {
+            match r.project_slug.as_deref() {
+                Some(s) if !s.trim().is_empty() => {}
+                _ => {
+                    return Err(ConfigError::MissingProjectSlug {
+                        runner: r.name.clone(),
+                    });
+                }
+            }
+        }
+
         // Duplicate name / runner_id detection. O(n²) is fine at n≤50.
         for (i, a) in self.runners.iter().enumerate() {
             for b in self.runners.iter().skip(i + 1) {
@@ -306,6 +338,9 @@ pub enum ConfigError {
     DuplicateRunnerId {
         id: Uuid,
     },
+    MissingProjectSlug {
+        runner: String,
+    },
     DuplicateWorkingDir {
         runner_a: String,
         runner_b: String,
@@ -343,6 +378,14 @@ impl std::fmt::Display for ConfigError {
                 "configuration error: two [[runner]] blocks share runner_id {id}. \
                  Each runner must have a unique runner_id; this usually means \
                  config.toml was edited incorrectly — re-run `pidash configure runner`."
+            ),
+            ConfigError::MissingProjectSlug { runner } => write!(
+                f,
+                "configuration error: runner {runner:?} has no project_slug. \
+                 Every runner must declare its project (via `pidash configure \
+                 --project <SLUG>` or `pidash token add-runner --project <SLUG>`); \
+                 dispatch is project-scoped and a runner with no project would \
+                 be unreachable."
             ),
             ConfigError::DuplicateWorkingDir {
                 runner_a,
@@ -383,6 +426,8 @@ mod tests {
             name: name.into(),
             runner_id: Uuid::new_v4(),
             workspace_slug: None,
+            project_slug: Some("TEST".into()),
+            pod_id: None,
             workspace: WorkspaceSection {
                 working_dir: PathBuf::from(working_dir),
             },
@@ -478,5 +523,26 @@ mod tests {
         // Two siblings under the same parent that don't nest are fine.
         let cfg = config_with(vec![runner("a", "/work/main"), runner("b", "/work/side")]);
         cfg.validate().unwrap();
+    }
+
+    #[test]
+    fn validate_rejects_missing_project_slug() {
+        let mut r = runner("a", "/work/a");
+        r.project_slug = None;
+        let cfg = config_with(vec![r]);
+        let err = cfg.validate().unwrap_err();
+        match err {
+            ConfigError::MissingProjectSlug { runner } => assert_eq!(runner, "a"),
+            other => panic!("expected MissingProjectSlug, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn validate_rejects_empty_project_slug() {
+        let mut r = runner("a", "/work/a");
+        r.project_slug = Some("   ".into());
+        let cfg = config_with(vec![r]);
+        let err = cfg.validate().unwrap_err();
+        assert!(matches!(err, ConfigError::MissingProjectSlug { .. }));
     }
 }

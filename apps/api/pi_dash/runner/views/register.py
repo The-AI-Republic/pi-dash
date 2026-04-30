@@ -58,6 +58,9 @@ class RegisterEndpoint(APIView):
 
     @transaction.atomic
     def post(self, request):
+        from pi_dash.db.models.project import Project
+        from pi_dash.runner.models import Pod
+
         serializer = RegistrationRequestSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         data = serializer.validated_data
@@ -85,11 +88,55 @@ class RegisterEndpoint(APIView):
                 status=status.HTTP_409_CONFLICT,
             )
 
+        # Resolve the project + pod for this runner. ``project`` is
+        # required: the runner is bound to one project for its
+        # lifetime. ``pod`` is optional and defaults to the project's
+        # default pod.
+        project_identifier = (request.data.get("project") or "").strip()
+        if not project_identifier:
+            return Response(
+                {"error": "project is required"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        project = Project.objects.filter(
+            workspace=reg.workspace, identifier=project_identifier
+        ).first()
+        if project is None:
+            return Response(
+                {"error": "project not found in registration's workspace"},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+
+        pod_name = (request.data.get("pod") or "").strip()
+        if pod_name:
+            pod = Pod.objects.filter(
+                project=project, name=pod_name, deleted_at__isnull=True
+            ).first()
+            if pod is None:
+                pod = Pod.objects.filter(
+                    project=project,
+                    name=f"{project.identifier}_{pod_name}",
+                    deleted_at__isnull=True,
+                ).first()
+            if pod is None:
+                return Response(
+                    {"error": f"pod {pod_name!r} not found in project"},
+                    status=status.HTTP_404_NOT_FOUND,
+                )
+        else:
+            pod = Pod.default_for_project_id(project.id)
+            if pod is None:
+                return Response(
+                    {"error": "project has no default pod"},
+                    status=status.HTTP_409_CONFLICT,
+                )
+
         minted = tokens.mint_runner_secret()
         try:
             runner = Runner.objects.create(
                 owner=reg.created_by,
                 workspace=reg.workspace,
+                pod=pod,
                 name=data["runner_name"],
                 credential_hash=minted.hashed,
                 credential_fingerprint=minted.fingerprint,
@@ -140,6 +187,8 @@ class RegisterEndpoint(APIView):
                 "api_token": api_token.token,
                 "heartbeat_interval_secs": HEARTBEAT_INTERVAL_SECS,
                 "protocol_version": PROTOCOL_VERSION,
+                "pod_id": str(pod.id),
+                "project_identifier": project.identifier,
             }
         ).data
         return Response(payload, status=status.HTTP_201_CREATED)

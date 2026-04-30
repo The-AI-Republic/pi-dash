@@ -72,8 +72,8 @@ def other_workspace(other_user):
 
 
 @pytest.fixture
-def pod(workspace):
-    return Pod.default_for_workspace(workspace)
+def pod(project):
+    return Pod.default_for_project(project)
 
 
 @pytest.fixture(autouse=True)
@@ -513,7 +513,7 @@ def test_link_to_token_rejects_cross_workspace(
     would let a token mint runners outside its scope.
     """
     runner, runner_secret = _legacy_runner(create_user, workspace, pod)
-    other_pod = Pod.default_for_workspace(other_workspace)
+    other_pod = Pod.default_for_project(other_project)
     # Token in the OTHER workspace — runner shouldn't be linkable to it.
     token, token_secret = _make_token(other_user, other_workspace)
     # Sanity: the token belongs to a different workspace from the runner.

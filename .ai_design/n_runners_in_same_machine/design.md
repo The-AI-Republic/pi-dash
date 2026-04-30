@@ -1,5 +1,16 @@
 # Multi-Runner Daemon — Design
 
+> **Note (2026-04-29):** the workspace-default-pod assumption originally baked
+> into §4–§6 has been refactored into a project-scoped pod model. Each project
+> now owns at least one pod (the auto-created default); a runner is bound to
+> exactly one project via its pod. The token + WebSocket multiplex layer below
+> is unchanged. See
+> [`new_pod_project_relationship/`](./new_pod_project_relationship/) for the
+> updated data model, schema migration (`runner/migrations/0007_*`), runner
+> registration body shape (`project` / `pod` fields), and CLI surface
+> (`pidash configure --project`, `pidash token add-runner --project`,
+> `pidash token list-projects`).
+
 A single `pidash` daemon process per dev machine hosts **N independently-registered runner instances** that share a single multiplexed WebSocket session to Pi Dash cloud. From the cloud's perspective every runner instance is fully independent: its own `runner_id`, its own assignments, its own status, its own history. The shared transport is a transport-layer optimisation that the cloud's business logic never observes.
 
 This document supersedes the single-runner-per-process assumption baked into `runner-design.md`.
@@ -23,12 +34,12 @@ This document supersedes the single-runner-per-process assumption baked into `ru
 
 ## 3. Vocabulary
 
-| Term | Meaning |
-|---|---|
-| **Daemon** | The OS process. Owns the IPC socket, the cloud transport, signal handling, logging, the supervisor task. Cardinality 1 per machine. |
-| **Runner instance** | A logical runner with its own `runner_id`, agent config, working directory, approval policy, history dir, and single in-flight slot. Runners do not own a credential — they're identifiers under a token (see §5). Cardinality N per daemon. |
-| **Token** (a.k.a. machine credential) | A cloud-side entity that authenticates the WS connection and is authorised to act as a declared set of `runner_id`s. Surfaced in the UI as a "token" with a user-supplied title. See §5. |
-| **Shared connection** | The single WebSocket session opened by the daemon, multiplexed across all instances. |
+| Term                                  | Meaning                                                                                                                                                                                                                                      |
+| ------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Daemon**                            | The OS process. Owns the IPC socket, the cloud transport, signal handling, logging, the supervisor task. Cardinality 1 per machine.                                                                                                          |
+| **Runner instance**                   | A logical runner with its own `runner_id`, agent config, working directory, approval policy, history dir, and single in-flight slot. Runners do not own a credential — they're identifiers under a token (see §5). Cardinality N per daemon. |
+| **Token** (a.k.a. machine credential) | A cloud-side entity that authenticates the WS connection and is authorised to act as a declared set of `runner_id`s. Surfaced in the UI as a "token" with a user-supplied title. See §5.                                                     |
+| **Shared connection**                 | The single WebSocket session opened by the daemon, multiplexed across all instances.                                                                                                                                                         |
 
 ## 4. Wire protocol v2
 
@@ -54,20 +65,20 @@ Bump `WIRE_VERSION = 2`. Cloud accepts both v1 and v2 during migration:
 
 ### 4.2 Routing rules
 
-| Frame | `Envelope.runner_id` | Notes |
-|---|---|---|
-| `Hello` | `Some(id)` | Identifies the runner being authorised. Body still carries `runner_id` to keep `Hello` self-contained. |
-| `Welcome` | `Some(id)` | One `Welcome` per `Hello`. Acks a specific runner, not the connection. |
-| `Heartbeat` | `Some(id)` | One heartbeat envelope per instance per tick. |
-| `Accept` / `RunStarted` / `RunEvent` / `RunCompleted` / `RunFailed` / `RunCancelled` / `RunResumed` | `Some(id)` | Per-runner. |
-| `ApprovalRequest` / `Decide` | `Some(id)` | Per-runner. |
-| `Cancel` | `Some(id)` | Cloud already targets a `run_id`; runner_id picks the destination instance. |
-| `RunAwaitingReauth` | `Some(id)` | Per-runner; no longer flips a global daemon status. |
-| `ConfigPush` | `Some(id)` | Per-runner config push only at this stage — pushes `approval_policy` to one runner. The protocol shape allows `None` for a daemon-wide push, but no daemon-level field is currently remotely-pushable. See §9.2. |
-| `Ping` / response | `None` | Connection-scoped keepalive. |
-| `Bye` | `None` | Connection teardown. |
-| `Revoke` | `None` | The token was revoked. Connection is torn down; daemon shuts down all instances. There is no per-runner Revoke — the cloud-side UI does not surface revocation per runner (see Q4 in `decisions.md`). |
-| `RemoveRunner` | `Some(id)` | Cloud-initiated decommission of one runner. Daemon cancels its in-flight run, removes the instance, drops its mailbox, and frees its working directory. Connection and other instances stay up. |
+| Frame                                                                                               | `Envelope.runner_id` | Notes                                                                                                                                                                                                            |
+| --------------------------------------------------------------------------------------------------- | -------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `Hello`                                                                                             | `Some(id)`           | Identifies the runner being authorised. Body still carries `runner_id` to keep `Hello` self-contained.                                                                                                           |
+| `Welcome`                                                                                           | `Some(id)`           | One `Welcome` per `Hello`. Acks a specific runner, not the connection.                                                                                                                                           |
+| `Heartbeat`                                                                                         | `Some(id)`           | One heartbeat envelope per instance per tick.                                                                                                                                                                    |
+| `Accept` / `RunStarted` / `RunEvent` / `RunCompleted` / `RunFailed` / `RunCancelled` / `RunResumed` | `Some(id)`           | Per-runner.                                                                                                                                                                                                      |
+| `ApprovalRequest` / `Decide`                                                                        | `Some(id)`           | Per-runner.                                                                                                                                                                                                      |
+| `Cancel`                                                                                            | `Some(id)`           | Cloud already targets a `run_id`; runner_id picks the destination instance.                                                                                                                                      |
+| `RunAwaitingReauth`                                                                                 | `Some(id)`           | Per-runner; no longer flips a global daemon status.                                                                                                                                                              |
+| `ConfigPush`                                                                                        | `Some(id)`           | Per-runner config push only at this stage — pushes `approval_policy` to one runner. The protocol shape allows `None` for a daemon-wide push, but no daemon-level field is currently remotely-pushable. See §9.2. |
+| `Ping` / response                                                                                   | `None`               | Connection-scoped keepalive.                                                                                                                                                                                     |
+| `Bye`                                                                                               | `None`               | Connection teardown.                                                                                                                                                                                             |
+| `Revoke`                                                                                            | `None`               | The token was revoked. Connection is torn down; daemon shuts down all instances. There is no per-runner Revoke — the cloud-side UI does not surface revocation per runner (see Q4 in `decisions.md`).            |
+| `RemoveRunner`                                                                                      | `Some(id)`           | Cloud-initiated decommission of one runner. Daemon cancels its in-flight run, removes the instance, drops its mailbox, and frees its working directory. Connection and other instances stay up.                  |
 
 ### 4.3 Demux rule (authoritative)
 
@@ -116,12 +127,13 @@ Mental model: **one dev machine == one daemon == one token == one WS connection 
 
 The runner has two distinct auth surfaces with separate credentials:
 
-| Surface | Credential | Header |
-|---|---|---|
+| Surface                    | Credential     | Header                               |
+| -------------------------- | -------------- | ------------------------------------ |
 | WS upgrade (`/ws/runner/`) | `token_secret` | `X-Token-Id` + `Bearer token_secret` |
-| REST (`/api/v1/...`) | `api_token` | `X-Api-Key: <api_token>` |
+| REST (`/api/v1/...`)       | `api_token`    | `X-Api-Key: <api_token>`             |
 
 `Credentials` carries:
+
 - `token_id` + `token_secret` — for WS auth.
 - `api_token` — for REST auth (orthogonal to the WS auth model; already token-based).
 - `runner_id` per runner — identifier only, not a credential.
@@ -269,6 +281,7 @@ Frames for unknown runner_ids are dropped with a warning rather than tearing dow
 ### 6.5 Connection state machine
 
 `ConnectionStateHandle` tracks:
+
 - `connected: bool` (one TCP+WS, one bool).
 - `last_heartbeat_ack: Option<DateTime<Utc>>`.
 - `authorised_runners: HashSet<Uuid>` — populated as `Welcome { runner_id }` frames arrive (each `Welcome` goes to the matching instance's mailbox, and the instance's handler also notifies the connection state via a watch channel), cleared on disconnect.
@@ -279,25 +292,25 @@ Per-runner status (`RunnerStatus::Idle/Busy/Reconnecting/AwaitingReauth`) lives 
 
 Two distinct streams, both running over the shared connection:
 
-- **Per-runner heartbeats** (one per instance, every `heartbeat_interval_secs`): each instance's heartbeat task emits `Envelope { runner_id: Some(id), body: Heartbeat { ts, status, in_flight_run } }` carrying the instance's real status. This is the cloud's authoritative liveness signal *per runner*.
+- **Per-runner heartbeats** (one per instance, every `heartbeat_interval_secs`): each instance's heartbeat task emits `Envelope { runner_id: Some(id), body: Heartbeat { ts, status, in_flight_run } }` carrying the instance's real status. This is the cloud's authoritative liveness signal _per runner_.
 - **Connection-level pong** (response to cloud's `Ping`): the connection task replies once per `Ping` with `Envelope { runner_id: None, body: Heartbeat { ts, status: Idle, in_flight_run: None } }`. The status fields are carried as zero-values; the cloud treats per-runner heartbeats as the source of truth for per-runner state, and uses the connection-level pong only as a transport-liveness probe.
 
 Cloud-side: per-runner heartbeats update `runners.last_seen_at`; connection-level pongs update `tokens.last_seen_at`.
 
 ## 7. Per-instance state fan-out
 
-| Today (singleton) | Multi-runner shape |
-|---|---|
-| `Credentials` | `TokenCredentials` (one per daemon) + `Vec<RunnerIdentity>` (N; just `runner_id` + `name`, no per-runner secret) |
-| `Config.agent` / `Config.workspace` / `Config.approval_policy` | Fields on `RunnerConfig`, one per instance |
-| `StateHandle.current_run: Mutex<Option<CurrentRunSummary>>` | Per-instance |
-| `StateHandle.tx_in_flight: watch::Sender<Option<Uuid>>` | Per-instance |
-| `StateHandle.approvals_pending` | Per-instance |
-| `StateHandle.runner_id` | Per-instance |
-| `ApprovalRouter` | Per-instance |
-| `HistoryWriter` paths (`data_dir/history/runs/`) | `data_dir/runners/<runner_id>/history/runs/` |
-| `RunsIndex` | Per instance |
-| `RunnerLoop.current_run: Option<CurrentRun>` | Per instance (each is single-tenant — unchanged shape) |
+| Today (singleton)                                              | Multi-runner shape                                                                                               |
+| -------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------- |
+| `Credentials`                                                  | `TokenCredentials` (one per daemon) + `Vec<RunnerIdentity>` (N; just `runner_id` + `name`, no per-runner secret) |
+| `Config.agent` / `Config.workspace` / `Config.approval_policy` | Fields on `RunnerConfig`, one per instance                                                                       |
+| `StateHandle.current_run: Mutex<Option<CurrentRunSummary>>`    | Per-instance                                                                                                     |
+| `StateHandle.tx_in_flight: watch::Sender<Option<Uuid>>`        | Per-instance                                                                                                     |
+| `StateHandle.approvals_pending`                                | Per-instance                                                                                                     |
+| `StateHandle.runner_id`                                        | Per-instance                                                                                                     |
+| `ApprovalRouter`                                               | Per-instance                                                                                                     |
+| `HistoryWriter` paths (`data_dir/history/runs/`)               | `data_dir/runners/<runner_id>/history/runs/`                                                                     |
+| `RunsIndex`                                                    | Per instance                                                                                                     |
+| `RunnerLoop.current_run: Option<CurrentRun>`                   | Per instance (each is single-tenant — unchanged shape)                                                           |
 
 Stays daemon-singleton: IPC socket, PID file, the WS connection, logging, signal watcher, the systemd/launchd unit, `runtime_dir`.
 
@@ -387,16 +400,16 @@ No per-runner secret. The token authenticates the connection; `runner_id`s are r
 - **Duplicate `name`** — refused. Names are user-facing; collisions break `--runner <name>` selection.
 - **Instance count > cap (50)** — refused. See §16.
 - **`credentials.toml` exists but has no `[token]` block** — refused. See §13.3 for the message and recovery path.
-- Zero instances configured — *not* an error. Daemon comes up idle and IPC-only, useful for `pidash configure runner` to add the first instance.
+- Zero instances configured — _not_ an error. Daemon comes up idle and IPC-only, useful for `pidash configure runner` to add the first instance.
 
 ### 9.2 Config scopes and ConfigPush
 
 Two scopes:
 
-| Scope | Fields | Source of truth |
-|---|---|---|
-| **Daemon-level** (one slice) | `cloud_url`, `heartbeat_interval_secs`, `log_level` | Local `config.toml` `[daemon]` block; `heartbeat_interval_secs` is overridden by `Welcome` from the cloud at connection time. |
-| **Runner-level** (per-instance) | `agent`, `workspace`, `approval_policy` | Local `config.toml` `[[runner]]` block; `approval_policy` is overridable by cloud-pushed updates. |
+| Scope                           | Fields                                              | Source of truth                                                                                                               |
+| ------------------------------- | --------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------- |
+| **Daemon-level** (one slice)    | `cloud_url`, `heartbeat_interval_secs`, `log_level` | Local `config.toml` `[daemon]` block; `heartbeat_interval_secs` is overridden by `Welcome` from the cloud at connection time. |
+| **Runner-level** (per-instance) | `agent`, `workspace`, `approval_policy`             | Local `config.toml` `[[runner]]` block; `approval_policy` is overridable by cloud-pushed updates.                             |
 
 Two runners can run different agents (codex vs claude_code), against different repos, with different approval policies. None of them share state.
 
@@ -409,6 +422,7 @@ Two runners can run different agents (codex vs claude_code), against different r
 The runner has one user-facing creation entry point: an **Add Runner** action in the runners view of the cloud UI. It branches into "new connection" (= new machine setup) or "existing connection" (= additional runner on a machine the user already has set up). The CLI is also a valid entry point — invoking it directly bypasses the UI.
 
 Vocabulary in this section:
+
 - **Connection** = a `Token` row + the WS session it authenticates. One connection per dev machine.
 - **Runner** = a `Runner` row + a `[[runner]]` block in local `config.toml`. N runners per connection.
 
@@ -430,6 +444,7 @@ Cloud UI                         Add Runner modal
 ```
 
 User fills the form, clicks **Generate setup script**. Cloud:
+
 1. Creates a `Token` row with the given title, mints `token_id` + `token_secret`.
 2. Returns a setup script with all the values baked in:
 
@@ -444,6 +459,7 @@ User fills the form, clicks **Generate setup script**. Cloud:
    ```
 
 User pastes the script on the dev machine. The script (non-interactive):
+
 1. Installs `pidash` if not present.
 2. Writes `[token]` block to `credentials.toml` (mode 0600).
 3. Calls `POST /api/v1/runner/register/` (auth `X-Token-Id` + `Bearer token_secret`) to mint the first runner with the user's chosen name + working_dir + agent + approval_policy.
@@ -479,6 +495,7 @@ pidash configure runner \
 ```
 
 User pastes it on the target machine. The CLI:
+
 1. Calls `POST /api/v1/runner/register/` (auth from the existing `[token]` block) to mint the runner.
 2. Writes the `[[runner]]` block to `config.toml`.
 3. Tells the running daemon over IPC: "load instance `<runner_id>`."
@@ -503,17 +520,21 @@ If invoked on a TTY with required fields missing, the CLI prompts (matches today
 Three valid paths, all converging on the same daemon-side reload:
 
 - **CLI flag (partial-edit):**
+
   ```bash
   $ pidash configure runner --name main --approval-auto-readonly true
   > Updated approval_policy.auto_approve_readonly_shell = true for "main".
   ```
+
   Only the flags you pass change. Daemon reloads that runner's config slice in place; no reconnect.
 
 - **TUI:**
+
   ```bash
   $ pidash tui
   # Pick "main" from the runner picker → Config tab → edit → save.
   ```
+
   Best for list-valued fields like the approval allowlist that are awkward on the CLI.
 
 - **Direct edit + reload:**
@@ -557,7 +578,7 @@ Every IPC verb that today implicitly addresses the runner gains a `--runner <nam
 - `pidash status` → lists all instances; `pidash status --runner main` for one.
 - `pidash configure` → splits into `pidash configure token` (one-shot per host; pastes in the token + secret created via the cloud UI) and `pidash configure runner --name <name>` (per instance, registers the runner under the active token).
 - `pidash remove` → **two distinct verbs, disambiguated by flag**:
-  - `pidash remove` (no flag): full machine teardown, today's behavior (`runner/src/cli/remove.rs`). Stops the service, uninstalls the unit, deregisters the *token* from the cloud (which cascades to all owned runners), deletes `config.toml` + `credentials.toml` + `data_dir/runners/*`. This is the inverse of `install` + `configure` for the whole host.
+  - `pidash remove` (no flag): full machine teardown, today's behavior (`runner/src/cli/remove.rs`). Stops the service, uninstalls the unit, deregisters the _token_ from the cloud (which cascades to all owned runners), deletes `config.toml` + `credentials.toml` + `data_dir/runners/*`. This is the inverse of `install` + `configure` for the whole host.
   - `pidash remove --runner <name>`: per-instance removal. Cancels that runner's in-flight run, removes it from `[[runner]]` in `config.toml`, deletes `data_dir/runners/<runner_id>/`, and calls a REST endpoint (`POST /api/v1/runner/<runner_id>/deregister/` authenticated with the token) to tell cloud the runner is gone. **No WS frame is emitted** — `Bye` is reserved for connection teardown (§4.2). Future cloud frames for the deregistered `runner_id` (in unlikely race) get dropped by the demux as "unknown runner." Connection and other runners stay up.
 - `pidash tui` → instance picker / multi-pane view.
 - `pidash issue …` / `pidash comment …` etc. that talk to cloud need to know which runner identity to use; default to single instance, require `--runner` otherwise.
@@ -587,24 +608,29 @@ This is a breaking IPC change, but the IPC wire is private — bump the IPC vers
 ## 11. Connection lifecycle
 
 ### 11.1 Cold start
+
 1. Daemon reads config → builds `RunnerInstance` objects (mailboxes, state handles, paths).
 2. `ConnectionLoop` opens WS using `TokenCredentials` (`X-Token-Id` + `Bearer token_secret` headers).
 3. On WS upgrade, supervisor walks `instances` and sends `Hello { runner_id }` for each.
 4. Each instance stays in `Reconnecting` until its `Welcome { runner_id }` arrives, then flips to `Idle`.
 
 ### 11.2 Reconnect
+
 WS dies → supervisor flips every instance to `Reconnecting` → backoff → re-open → re-Hello for everyone. Cloud treats fresh `Hello` on a new connection as "this runner is back" — same as today. In-flight runs are not lost: the per-instance `RunnerLoop` keeps running while the WS is down (`AssignWorker` doesn't depend on connection state to drive the agent, only to send progress frames), and emits `RunResumed` once its `Welcome` arrives.
 
 ### 11.3 Resume
+
 Today the runner sends `RunResumed` after reconnect when it has an in-flight run. With N instances, after reconnect each instance independently emits `RunResumed { runner_id }` (in its envelope) if it has one. The demux is one-way for resumes — outbound only.
 
 ### 11.4 Removing a runner
+
 Two entry points, same effect:
 
 - **Cloud-initiated**: cloud sends `Envelope { runner_id: Some(id), body: RemoveRunner { reason } }` (e.g. user clicked "Remove" in the runners section of the UI).
 - **Locally**: `pidash remove --runner foo` over IPC.
 
 Either way, the supervisor:
+
 1. Cancels that instance's in-flight run (if any) — same hard-cancel path as token revocation (5s grace, then SIGKILL).
 2. Removes the instance from `instances`.
 3. Drops the mailbox.
@@ -616,6 +642,7 @@ If the trigger was local (`pidash remove --runner`), the CLI additionally calls 
 The connection stays up; other instances and the token are unaffected.
 
 ### 11.5 Token revocation
+
 Cloud-initiated, surfaced via the **Revoke** action in the tokens section of the UI. Effect: the token's `secret` is invalidated cloud-side immediately, so the next reconnect (or any auth check) fails.
 
 **One contract, regardless of connection state**: revocation always terminates the daemon. Specifically:
@@ -630,38 +657,42 @@ Once the daemon exits, recovery is: user runs `pidash configure token` to instal
 There is no per-runner Revoke. Revocation is a security action against a credential; if a single runner needs to go away, that's a Remove.
 
 ### 11.6 Adding a runner at runtime
+
 `pidash configure runner --name foo` → CLI registers via REST under the active token → IPC tells daemon "load instance foo" → supervisor inserts into `instances`, sends `Hello { runner_id: foo }` over the existing WS, awaits `Welcome`, spawns the instance's `RunnerLoop`. No reconnect.
 
 ### 11.7 AwaitingReauth
+
 Per-instance, not daemon-global. Today's single global `RunnerStatus` becomes per-instance — only the affected runner's `RunnerStateHandle.status` flips to `AwaitingReauth`, and only that runner's heartbeat reflects it. Sibling runners on the same connection keep working.
 
 Token-level reauth (the `Bearer token_secret` itself becomes invalid) is a different beast — see §11.5.
 
 ## 12. Failure semantics
 
-| Scenario | Behaviour |
-|---|---|
-| WS connection drops | All instances → `Reconnecting`. In-flight runs continue locally. Reconnect re-Hellos for everyone. |
-| One agent subprocess crashes | Only that instance's run fails (`AgentCrash` / `CodexCrash`). Other instances unaffected. |
-| One instance Removed | That instance torn down. Connection and other instances unaffected. |
-| Token Revoked | Connection torn down on next auth check. Daemon shuts down all instances. |
-| Cloud sends frame for unknown `runner_id` | Demux logs a warning and drops. Connection stays up. |
-| `Hello` rejected (token doesn't own that runner) | Cloud sends per-runner `RemoveRunner { runner_id }`. That instance is removed from `instances` with a clear log line; other instances continue. |
-| Two instances configured with the same `working_dir` | Detected at startup, daemon refuses to start with a clear error. |
-| Heartbeat task back-pressure (out_tx full) | Single shared `out_tx` — same buffer (128) as today. Worth raising to ~512 with N instances since heartbeats now multiply. |
+| Scenario                                             | Behaviour                                                                                                                                       |
+| ---------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------- |
+| WS connection drops                                  | All instances → `Reconnecting`. In-flight runs continue locally. Reconnect re-Hellos for everyone.                                              |
+| One agent subprocess crashes                         | Only that instance's run fails (`AgentCrash` / `CodexCrash`). Other instances unaffected.                                                       |
+| One instance Removed                                 | That instance torn down. Connection and other instances unaffected.                                                                             |
+| Token Revoked                                        | Connection torn down on next auth check. Daemon shuts down all instances.                                                                       |
+| Cloud sends frame for unknown `runner_id`            | Demux logs a warning and drops. Connection stays up.                                                                                            |
+| `Hello` rejected (token doesn't own that runner)     | Cloud sends per-runner `RemoveRunner { runner_id }`. That instance is removed from `instances` with a clear log line; other instances continue. |
+| Two instances configured with the same `working_dir` | Detected at startup, daemon refuses to start with a clear error.                                                                                |
+| Heartbeat task back-pressure (out_tx full)           | Single shared `out_tx` — same buffer (128) as today. Worth raising to ~512 with N instances since heartbeats now multiply.                      |
 
-The one explicit cost of shared transport: a WS hiccup briefly stalls *all* instances at once. Acceptable trade-off given the design's other goals; not a blocker.
+The one explicit cost of shared transport: a WS hiccup briefly stalls _all_ instances at once. Acceptable trade-off given the design's other goals; not a blocker.
 
 ## 13. Rollout
 
 Pi Dash has no production runner users yet, so there is no v1→v2 migration story to support. Cloud and runner ship v2 only. v1 auth (`X-Runner-Id` + `Bearer runner_secret`) is not implemented on the cloud side at all.
 
 ### 13.1 Cloud-side
+
 1. Roll the wire protocol (envelope `runner_id`), `Welcome { runner_id }` per `Hello`, and the `RemoveRunner` variant.
 2. Add `Token` entity (§5.1), registration endpoints, UI tokens section, per-runner Remove action.
 3. Update assigner so `Assign` is keyed by `runner_id` independent of which connection currently holds that runner.
 
 ### 13.2 Runner-side (only path)
+
 1. User creates a token via the cloud UI, which generates a setup script with `token_id` + `token_secret` baked in.
 2. User runs the script on the dev machine. Script installs `pidash` (if needed), writes `[token]` block to `credentials.toml`, creates the first runner with the values the user specified in the UI form, starts the daemon.
 3. Daemon connects with `X-Token-Id` + `Bearer token_secret`, sends `Hello { runner_id }` per configured runner, comes up.
@@ -669,6 +700,7 @@ Pi Dash has no production runner users yet, so there is no v1→v2 migration sto
 See §10.x (user journeys) for the full end-to-end flow.
 
 ### 13.3 Stale-config refusal
+
 If the daemon starts against a `credentials.toml` that exists but has no `[token]` block (e.g. a stale dev install from before this design), it refuses to start with a clear error:
 
 ```
@@ -681,32 +713,34 @@ There is no automatic in-place upgrade path. Stale configs are decommissioned by
 
 ## 14. Files most affected
 
-| File | Change |
-|---|---|
-| `runner/src/cloud/protocol.rs` | `Envelope` adds `runner_id`; `WIRE_VERSION = 2`; per-runner-vs-connection-scoped routing rules documented in code. |
-| `runner/src/cloud/ws.rs` | Auth headers switch to `X-Token-Id` + `Bearer token_secret`. Connect→Hello loop iterates instances. Inbound stream feeds Demux instead of a single mpsc consumer. |
-| `runner/src/cloud/register.rs` | Adds token registration (`pidash configure token`); runner registration takes a token context (`token_id` becomes a parameter). |
-| `runner/src/daemon/supervisor.rs` | `Supervisor` owns `instances` map. `RunnerLoop` becomes per-instance, spawned N times. Demux task added. Heartbeat task iterates instances. |
-| `runner/src/daemon/state.rs` | `StateHandle` splits into `ConnectionStateHandle` (per-daemon) and `RunnerStateHandle` (per-instance). |
-| `runner/src/ipc/protocol.rs` | `StatusSnapshot` carries `Vec<RunnerStatusSnapshot>`. IPC verbs gain `runner` selector. Bump IPC version. |
-| `runner/src/ipc/server.rs` | Routes commands by `runner` selector to the right `RunnerInstance`. |
-| `runner/src/config/schema.rs` | Top-level config gains `[daemon]` + `[[runner]]` array. Migration path from v1 shape. |
-| `runner/src/util/paths.rs` | Adds `runner_dir(runner_id)` and per-instance `RunnerPaths`. |
-| `runner/src/cli/configure.rs` | Splits into `configure token` (one-shot per host) and `configure runner --name` (per instance). |
-| `runner/src/cli/{status,issue,comment,tui,remove,doctor}.rs` | All gain a `--runner` selector. |
-| `runner/src/approval/router.rs` | Unchanged shape, just instantiated per instance. |
-| `runner/src/history/{jsonl,index}.rs` | Take `RunnerPaths` instead of a global `Paths`. |
+| File                                                         | Change                                                                                                                                                            |
+| ------------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `runner/src/cloud/protocol.rs`                               | `Envelope` adds `runner_id`; `WIRE_VERSION = 2`; per-runner-vs-connection-scoped routing rules documented in code.                                                |
+| `runner/src/cloud/ws.rs`                                     | Auth headers switch to `X-Token-Id` + `Bearer token_secret`. Connect→Hello loop iterates instances. Inbound stream feeds Demux instead of a single mpsc consumer. |
+| `runner/src/cloud/register.rs`                               | Adds token registration (`pidash configure token`); runner registration takes a token context (`token_id` becomes a parameter).                                   |
+| `runner/src/daemon/supervisor.rs`                            | `Supervisor` owns `instances` map. `RunnerLoop` becomes per-instance, spawned N times. Demux task added. Heartbeat task iterates instances.                       |
+| `runner/src/daemon/state.rs`                                 | `StateHandle` splits into `ConnectionStateHandle` (per-daemon) and `RunnerStateHandle` (per-instance).                                                            |
+| `runner/src/ipc/protocol.rs`                                 | `StatusSnapshot` carries `Vec<RunnerStatusSnapshot>`. IPC verbs gain `runner` selector. Bump IPC version.                                                         |
+| `runner/src/ipc/server.rs`                                   | Routes commands by `runner` selector to the right `RunnerInstance`.                                                                                               |
+| `runner/src/config/schema.rs`                                | Top-level config gains `[daemon]` + `[[runner]]` array. Migration path from v1 shape.                                                                             |
+| `runner/src/util/paths.rs`                                   | Adds `runner_dir(runner_id)` and per-instance `RunnerPaths`.                                                                                                      |
+| `runner/src/cli/configure.rs`                                | Splits into `configure token` (one-shot per host) and `configure runner --name` (per instance).                                                                   |
+| `runner/src/cli/{status,issue,comment,tui,remove,doctor}.rs` | All gain a `--runner` selector.                                                                                                                                   |
+| `runner/src/approval/router.rs`                              | Unchanged shape, just instantiated per instance.                                                                                                                  |
+| `runner/src/history/{jsonl,index}.rs`                        | Take `RunnerPaths` instead of a global `Paths`.                                                                                                                   |
 
 ## 15. ADR — N WebSocket sessions rejected
 
 **Considered**: keep the wire protocol untouched, run N independent `ConnectionLoop`s in one daemon process, each with its own `Credentials`. Cloud sees N independent runners, identical to running N separate daemons today.
 
 **Why rejected**:
+
 - At fleet scale, N idle WSes per dev machine consume cloud-side connection slots and TLS state proportional to N × machines. With shared connection that drops to 1 × machines.
 - Heartbeat traffic to cloud scales N×; with shared connection it still fan-outs to N envelopes per tick but uses one TCP stream's congestion control.
 - N separate auth contexts to rotate, monitor, and audit per host. A `Machine` credential gives the cloud a single host-scoped identity to reason about.
 
 **Why considered (and acknowledged as cheaper to build)**:
+
 - Zero protocol changes. Zero cloud changes. Zero auth-model changes.
 - Better failure isolation: one runner's WS hiccup doesn't stall the others.
 - Could ship in a single PR.

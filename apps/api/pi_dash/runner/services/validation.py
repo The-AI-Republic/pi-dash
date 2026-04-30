@@ -79,7 +79,7 @@ def validate_run_creation(
     if work_item_id is not None:
         issue = (
             Issue.objects.filter(pk=work_item_id)
-            .values("workspace_id", "assigned_pod_id")
+            .values("workspace_id", "assigned_pod_id", "project_id")
             .first()
         )
         if issue is None:
@@ -93,9 +93,14 @@ def validate_run_creation(
     else:
         issue = None
 
-    # 3. Pod resolution and consistency.
+    # 3. Pod resolution and consistency. Project comes from the issue
+    # if available; for run-creation calls without a work_item we don't
+    # have a project to anchor to, so the pod_id (if any) must be
+    # explicit and we cannot fall back to a default.
+    project_id = (issue or {}).get("project_id") if issue else None
     pod = _resolve_pod(
         workspace_id=workspace_id,
+        project_id=project_id,
         pod_id=pod_id,
         issue_assigned_pod_id=(issue or {}).get("assigned_pod_id") if issue else None,
     )
@@ -108,12 +113,20 @@ def validate_run_creation(
     )
 
 
-def _resolve_pod(*, workspace_id, pod_id, issue_assigned_pod_id) -> Pod:
+def _resolve_pod(
+    *, workspace_id, project_id, pod_id, issue_assigned_pod_id
+) -> Pod:
     """Resolve the pod the run belongs to.
 
-    Priority: explicit pod_id > issue.assigned_pod > workspace.default_pod.
+    Priority: explicit pod_id > issue.assigned_pod > project.default_pod.
+
+    Workspace consistency is still enforced (a pod must be in the request's
+    workspace) but the project-equality check is the stronger gate when a
+    project is known: a Project P run cannot land in a Project Q pod even
+    if both are in the same workspace.
     """
-    # Explicit pod: must exist, not be soft-deleted, and belong to the workspace.
+    # Explicit pod: must exist, not be soft-deleted, and belong to the
+    # workspace and the issue's project (when known).
     if pod_id is not None:
         pod = Pod.objects.filter(pk=pod_id).first()
         if pod is None:
@@ -122,23 +135,48 @@ def _resolve_pod(*, workspace_id, pod_id, issue_assigned_pod_id) -> Pod:
             raise RunCreationError(
                 400, "pod does not belong to workspace", "pod_workspace_mismatch"
             )
+        if project_id is not None and str(pod.project_id) != str(project_id):
+            raise RunCreationError(
+                400,
+                "pod does not belong to issue's project",
+                "pod_project_mismatch",
+            )
         return pod
 
-    # Fall back to the issue's pinned pod if one exists.
+    # Fall back to the issue's pinned pod if one exists, with the same
+    # project-equality check.
     if issue_assigned_pod_id is not None:
         pod = Pod.objects.filter(pk=issue_assigned_pod_id).first()
-        if pod is not None and str(pod.workspace_id) == str(workspace_id):
+        if (
+            pod is not None
+            and str(pod.workspace_id) == str(workspace_id)
+            and (project_id is None or str(pod.project_id) == str(project_id))
+        ):
             return pod
-        # Pinned pod was soft-deleted between issue creation and run — fall
-        # through to workspace default.
+        # Pinned pod was soft-deleted or stale — fall through.
 
-    # Final fallback: workspace default pod. Invariant #13 guarantees it exists
-    # in normal operation.
-    default = Pod.default_for_workspace_id(workspace_id)
-    if default is None:
-        raise RunCreationError(
-            409,
-            "no pod available for this workspace; ask an admin to create one",
-            "no_pod_available",
+    # Final fallback: project's default pod. Without a project we try
+    # one back-compat path: if the workspace has exactly one project,
+    # use that project's default pod. Multi-project workspaces require
+    # an explicit work_item (with project) or pod_id.
+    if project_id is not None:
+        default = Pod.default_for_project_id(project_id)
+        if default is not None:
+            return default
+    if workspace_id is not None:
+        from pi_dash.db.models.project import Project
+
+        project_ids = list(
+            Project.objects.filter(workspace_id=workspace_id)
+            .values_list("id", flat=True)[:2]
         )
-    return default
+        if len(project_ids) == 1:
+            default = Pod.default_for_project_id(project_ids[0])
+            if default is not None:
+                return default
+
+    raise RunCreationError(
+        409,
+        "no pod available; ensure the issue has a project with a default pod",
+        "no_pod_available",
+    )

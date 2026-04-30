@@ -20,16 +20,31 @@ class PodManager(models.Manager):
 
 
 class Pod(models.Model):
-    """A workspace-scoped group of runners that share a work queue.
+    """A project-scoped group of runners that share a work queue.
 
-    See ``.ai_design/issue_runner/design.md`` §4.1.
+    See ``.ai_design/n_runners_in_same_machine/new_pod_project_relationship/design.md``
+    §5–§6 for the project-scoped model, and ``.ai_design/issue_runner/design.md``
+    §4.1 for the historical workspace-scoped model that this replaces.
+
+    A pod belongs to exactly one project; one project can own many
+    pods. Each project has exactly one ``is_default=True`` pod,
+    auto-created on Project save (see :mod:`pi_dash.runner.signals`).
+    Non-default pods exist for tier / region / branch separation and
+    are first-class citizens in the data model — but routing rules
+    that send specific issues to non-default pods are deferred (see
+    decisions.md Q7).
     """
 
-    MAX_PER_WORKSPACE = 20
+    MAX_PER_PROJECT = 20
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     workspace = models.ForeignKey(
         "db.Workspace",
+        on_delete=models.CASCADE,
+        related_name="pods",
+    )
+    project = models.ForeignKey(
+        "db.Project",
         on_delete=models.CASCADE,
         related_name="pods",
     )
@@ -54,41 +69,97 @@ class Pod(models.Model):
         db_table = "pod"
         ordering = ("-is_default", "created_at")
         constraints = [
+            # Pod names are unique-per-project, not per-workspace. Two
+            # projects in the same workspace can each have a "WEB_pod_1"
+            # and an "API_pod_1" without colliding.
             models.UniqueConstraint(
-                fields=["workspace", "name"],
+                fields=["project", "name"],
                 condition=models.Q(deleted_at__isnull=True),
-                name="pod_unique_name_per_workspace_when_active",
+                name="pod_unique_name_per_project_when_active",
             ),
+            # Exactly one default pod per project at any time. The
+            # post_save(Project) signal creates the first one; transferring
+            # the default flag to another pod is a future operation.
             models.UniqueConstraint(
-                fields=["workspace"],
+                fields=["project"],
                 condition=models.Q(is_default=True) & models.Q(deleted_at__isnull=True),
-                name="pod_one_default_per_workspace_when_active",
+                name="pod_one_default_per_project_when_active",
             ),
         ]
         indexes = [
+            models.Index(
+                fields=["project", "is_default"], name="pod_project_is_def_idx"
+            ),
             models.Index(
                 fields=["workspace", "is_default"], name="pod_workspc_is_def_idx"
             ),
         ]
 
     def __str__(self) -> str:
-        return f"{self.name} (ws={self.workspace_id})"
+        return f"{self.name} (project={self.project_id})"
 
-    @classmethod
-    def default_for_workspace(cls, workspace) -> "Pod | None":
-        """Return the active default pod for a workspace, or None.
+    def clean(self):
+        """Enforce ``pod.workspace_id == pod.project.workspace_id``.
 
-        Every workspace normally has exactly one default pod (invariant #13 in
-        the design doc). Returns None only during the transient window between
-        workspace creation and the post_save signal firing, or when an admin
-        has soft-deleted the default without promoting a replacement.
+        ``workspace`` is a denormalised convenience used by dashboard
+        queries that don't want to traverse the project FK; the ground
+        truth is ``project.workspace``. Catching the mismatch at clean
+        time keeps the denorm honest.
         """
-        return cls.default_for_workspace_id(workspace.id)
+        super().clean()
+        if self.project_id is not None:
+            if self.workspace_id is None:
+                # Auto-fill from the project on save when omitted.
+                self.workspace_id = self.project.workspace_id
+            elif self.workspace_id != self.project.workspace_id:
+                from django.core.exceptions import ValidationError
+
+                raise ValidationError(
+                    {
+                        "workspace": (
+                            "pod.workspace must match pod.project.workspace"
+                        )
+                    }
+                )
+
+    def save(self, *args, **kwargs):
+        # Auto-fill workspace from project so callers don't have to set
+        # both, and enforce the denorm invariant directly here. Django's
+        # save() doesn't invoke clean(), and no Pod call site runs
+        # full_clean(), so the equality check has to live on the
+        # persistence path or it's purely advisory.
+        if self.project_id is not None:
+            project_workspace_id = self.project.workspace_id
+            if self.workspace_id is None:
+                self.workspace_id = project_workspace_id
+            elif self.workspace_id != project_workspace_id:
+                from django.core.exceptions import ValidationError
+
+                raise ValidationError(
+                    {
+                        "workspace": (
+                            "pod.workspace must match pod.project.workspace"
+                        )
+                    }
+                )
+        super().save(*args, **kwargs)
 
     @classmethod
-    def default_for_workspace_id(cls, workspace_id) -> "Pod | None":
-        """Same as :meth:`default_for_workspace` but avoids loading the Workspace."""
-        return cls.objects.filter(workspace_id=workspace_id, is_default=True).first()
+    def default_for_project(cls, project) -> "Pod | None":
+        """Return the active default pod for a project, or None.
+
+        Every project normally has exactly one default pod (auto-created
+        by :func:`pi_dash.runner.signals.create_default_pod_for_new_project`).
+        Returns None only during the transient window between Project
+        save and the post_save signal firing, or when an admin has
+        soft-deleted the default without promoting a replacement.
+        """
+        return cls.default_for_project_id(project.id)
+
+    @classmethod
+    def default_for_project_id(cls, project_id) -> "Pod | None":
+        """Same as :meth:`default_for_project` but avoids loading the Project."""
+        return cls.objects.filter(project_id=project_id, is_default=True).first()
 
 
 class RunnerStatus(models.TextChoices):
@@ -204,14 +275,42 @@ class Runner(models.Model):
         return f"{self.name} ({self.owner_id})"
 
     def save(self, *args, **kwargs):
-        # Auto-resolve pod to workspace default when not explicitly set.
-        # Safe invariant: every workspace has a default pod (§13).
-        # Explicit pod_id=None with a workspace set triggers resolution.
+        # Production runner registration (`register/`, `register-under-token/`)
+        # resolves a specific project's pod before instantiating the Runner.
+        # As a convenience for direct-ORM callers (tests, management
+        # commands, single-project workspaces), if `pod` is omitted and
+        # the workspace has exactly one project with a default pod, we
+        # auto-resolve to it. Workspaces with multiple projects refuse
+        # to auto-resolve — those callers must pick a project explicitly.
         if self.pod_id is None and self.workspace_id is not None:
-            default = Pod.default_for_workspace_id(self.workspace_id)
-            if default is not None:
-                self.pod = default
+            from pi_dash.db.models.project import Project
+
+            project_ids = list(
+                Project.objects.filter(workspace_id=self.workspace_id)
+                .values_list("id", flat=True)[:2]
+            )
+            if len(project_ids) == 1:
+                default = Pod.default_for_project_id(project_ids[0])
+                if default is not None:
+                    self.pod = default
         super().save(*args, **kwargs)
+
+    @property
+    def project(self):
+        """Convenience accessor — derived from ``runner.pod.project``.
+
+        Not a denorm column. The source of truth is the pod's project FK;
+        adding a direct ``Runner.project`` FK would invite drift (e.g. if
+        a runner's pod is reassigned). Hot-path queries that need the
+        project filter should join via ``runner.pod`` (one indexed join).
+        """
+        return self.pod.project if self.pod_id is not None else None
+
+    @property
+    def project_id(self):
+        if self.pod_id is None:
+            return None
+        return self.pod.project_id
 
     def mark_heartbeat(self) -> None:
         self.last_heartbeat_at = timezone.now()
@@ -529,14 +628,36 @@ class AgentRun(models.Model):
         ]
 
     def save(self, *args, **kwargs):
-        # Auto-resolve pod to workspace default when not explicitly set.
-        # Design §4.3: every new run has a pod, resolved at the view layer; the
-        # fallback here keeps direct-ORM callers (tests, management commands)
-        # working as long as the workspace has a default pod.
+        # Auto-resolve pod when omitted. The view layer (orchestration
+        # code that creates AgentRun rows) is the canonical place to
+        # set this; the fallbacks below keep direct-ORM callers
+        # (tests, management commands) honest. Resolution order:
+        # 1. work_item.project's default pod (post-refactor canonical).
+        # 2. Single-project workspace's only project's default pod
+        #    (back-compat for tests / single-project installs).
+        # The pre-refactor "workspace default pod" lookup is gone — see
+        # §8 of the new_pod_project_relationship design.
+        if self.pod_id is None and self.work_item_id is not None:
+            project_id = (
+                self.work_item.project_id
+                if hasattr(self.work_item, "project_id")
+                else None
+            )
+            if project_id is not None:
+                default = Pod.default_for_project_id(project_id)
+                if default is not None:
+                    self.pod = default
         if self.pod_id is None and self.workspace_id is not None:
-            default = Pod.default_for_workspace_id(self.workspace_id)
-            if default is not None:
-                self.pod = default
+            from pi_dash.db.models.project import Project
+
+            project_ids = list(
+                Project.objects.filter(workspace_id=self.workspace_id)
+                .values_list("id", flat=True)[:2]
+            )
+            if len(project_ids) == 1:
+                default = Pod.default_for_project_id(project_ids[0])
+                if default is not None:
+                    self.pod = default
         # Back-compat: legacy call sites that set `owner` but not `created_by`
         # (to be audited and removed in Phase 3). Mirror owner into created_by
         # so the NOT NULL constraint holds. The design's interpretation for
