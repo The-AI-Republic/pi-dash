@@ -4,7 +4,7 @@
  * See the LICENSE file for details.
  */
 
-import { useEffect, useMemo } from "react";
+import { useEffect, useMemo, useRef } from "react";
 import { observer } from "mobx-react";
 import type { SubmitHandler } from "react-hook-form";
 import { Controller, useForm } from "react-hook-form";
@@ -70,15 +70,26 @@ export const InstallSchedulerBindingModal = observer(function InstallSchedulerBi
     return availableSchedulers.filter((s) => s.is_enabled && !boundIds.has(s.id));
   }, [availableSchedulers, existingBindings]);
 
+  // Track open/closed transitions so the seed-on-open effect doesn't
+  // re-fire when `installable` changes mid-edit. SWR can revalidate the
+  // workspace schedulers query (focus event, background refresh) while
+  // the modal is open; without this guard, the new array reference would
+  // call ``reset`` and wipe whatever the user has typed into cron /
+  // extra_context. We only want to seed defaults on the closed → open
+  // edge.
+  const wasOpen = useRef(false);
   useEffect(() => {
-    if (!isOpen) return;
-    // Pre-select the first installable scheduler so submitting without
-    // touching the picker still produces a valid payload.
-    reset({
-      ...DEFAULT_VALUES,
-      scheduler: installable[0]?.id ?? "",
-    });
-  }, [isOpen, installable, reset]);
+    if (isOpen && !wasOpen.current) {
+      reset({
+        ...DEFAULT_VALUES,
+        scheduler: installable[0]?.id ?? "",
+      });
+    }
+    wasOpen.current = isOpen;
+    // installable is intentionally NOT in deps — a fresh reference from
+    // SWR mid-edit must not re-seed. Only `isOpen` triggers the reset.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isOpen, reset]);
 
   const handleFormSubmit: SubmitHandler<InstallFormValues> = async (values) => {
     try {

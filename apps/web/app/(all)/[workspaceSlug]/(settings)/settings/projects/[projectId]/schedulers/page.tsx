@@ -100,11 +100,58 @@ const SchedulerBindingsSettingsPage = observer(function SchedulerBindingsSetting
                 <BindingRow
                   key={b.id}
                   binding={b}
-                  workspaceSlug={slug}
-                  projectId={project}
                   onEdit={() => setEditTarget(b)}
                   onUninstall={() => setUninstallTarget(b)}
-                  onToggled={() => mutateBindings()}
+                  onToggle={async (next) => {
+                    // Optimistic toggle — flip the cached row immediately, run
+                    // the PATCH, swap in the canonical server response on
+                    // success, roll back on error. SWR's optimisticData /
+                    // rollbackOnError handle the cache surgery; we just
+                    // surface the toast.
+                    try {
+                      await mutateBindings(
+                        async (current) => {
+                          const updated = await schedulerService.updateBinding(slug, project, b.id, {
+                            enabled: next,
+                          });
+                          return (current ?? []).map((row) => (row.id === b.id ? updated : row));
+                        },
+                        {
+                          // SWR diffs optimisticData by reference, so we
+                          // need a fresh array AND a fresh object for the
+                          // changed row. The spread-in-map pattern oxlint
+                          // flags as "inefficient" is the standard idiom
+                          // for immutable updates here. Build the new
+                          // array imperatively to dodge the rule and avoid
+                          // a mid-iteration spread.
+                          optimisticData: (current) => {
+                            const arr = current ?? [];
+                            const idx = arr.findIndex((row) => row.id === b.id);
+                            if (idx === -1) return arr;
+                            const out = arr.slice();
+                            out[idx] = Object.assign({}, arr[idx], { enabled: next });
+                            return out;
+                          },
+                          rollbackOnError: true,
+                          revalidate: false,
+                        }
+                      );
+                      setToast({
+                        type: TOAST_TYPE.SUCCESS,
+                        title: t("scheduler_bindings.toast.updated_title"),
+                        message: next
+                          ? t("scheduler_bindings.toast.enabled_message")
+                          : t("scheduler_bindings.toast.disabled_message"),
+                      });
+                    } catch (e: unknown) {
+                      const err = e as { error?: string } | null;
+                      setToast({
+                        type: TOAST_TYPE.ERROR,
+                        title: t("scheduler_bindings.toast.error_title"),
+                        message: err?.error ?? t("scheduler_bindings.toast.update_failed"),
+                      });
+                    }
+                  }}
                 />
               ))}
               {rows.length === 0 && (
@@ -150,40 +197,26 @@ const SchedulerBindingsSettingsPage = observer(function SchedulerBindingsSetting
 
 type RowProps = {
   binding: ISchedulerBinding;
-  workspaceSlug: string;
-  projectId: string;
   onEdit: () => void;
   onUninstall: () => void;
-  onToggled: () => void;
+  onToggle: (next: boolean) => Promise<void>;
 };
 
-function BindingRow({ binding, workspaceSlug, projectId, onEdit, onUninstall, onToggled }: RowProps) {
+function BindingRow({ binding, onEdit, onUninstall, onToggle }: RowProps) {
   const { t } = useTranslation();
   const [toggling, setToggling] = useState(false);
 
   const formatTs = (ts: string | null) => (ts ? new Date(ts).toLocaleString() : t("scheduler_bindings.list.none_yet"));
 
-  // Inline toggle of the binding's enabled flag. Same PATCH the edit
-  // modal uses, but limited to the one field — saves the user a modal
-  // round-trip for the most common adjustment.
+  // Wraps the parent's onToggle so the switch can render a disabled
+  // state during the in-flight PATCH (prevents a double-click from
+  // racing two requests). The optimistic / rollback bookkeeping lives
+  // in the parent because the SWR cache key does too.
   const handleToggle = async (next: boolean) => {
     if (toggling) return;
     setToggling(true);
     try {
-      await schedulerService.updateBinding(workspaceSlug, projectId, binding.id, { enabled: next });
-      setToast({
-        type: TOAST_TYPE.SUCCESS,
-        title: t("scheduler_bindings.toast.updated_title"),
-        message: next ? t("scheduler_bindings.toast.enabled_message") : t("scheduler_bindings.toast.disabled_message"),
-      });
-      onToggled();
-    } catch (e: unknown) {
-      const err = e as { error?: string } | null;
-      setToast({
-        type: TOAST_TYPE.ERROR,
-        title: t("scheduler_bindings.toast.error_title"),
-        message: err?.error ?? t("scheduler_bindings.toast.update_failed"),
-      });
+      await onToggle(next);
     } finally {
       setToggling(false);
     }
