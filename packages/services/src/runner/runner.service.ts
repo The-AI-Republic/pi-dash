@@ -8,9 +8,9 @@ import { API_BASE_URL } from "@pi-dash/constants";
 import type {
   IAgentRun,
   IApprovalRequest,
-  IRegistrationTokenResult,
+  IConnection,
+  IConnectionWithToken,
   IRunner,
-  IRunnerRegistration,
   TApprovalDecision,
 } from "@pi-dash/types";
 import { APIService } from "../api.service";
@@ -60,16 +60,39 @@ export class RunnerService extends APIService {
       });
   }
 
-  async listTokens(): Promise<IRunnerRegistration[]> {
-    return this.get("/api/runners/tokens/")
+  /** ``GET /api/runners/connections/`` — list this user's connections. */
+  async listConnections(): Promise<IConnection[]> {
+    return this.get("/api/runners/connections/")
       .then((r) => r?.data)
       .catch((e) => {
         throw e?.response?.data;
       });
   }
 
-  async mintToken(workspaceId: string, label?: string): Promise<IRegistrationTokenResult> {
-    return this.post("/api/runners/tokens/", { workspace: workspaceId, label: label ?? "" })
+  /** ``POST /api/runners/connections/`` — create a connection in PENDING state.
+   * Response carries the one-time enrollment token; the daemon's
+   * ``pidash connect`` consumes it. */
+  async createConnection(workspaceId: string, name?: string): Promise<IConnectionWithToken> {
+    return this.post("/api/runners/connections/", { workspace: workspaceId, name: name ?? "" })
+      .then((r) => r?.data)
+      .catch((e) => {
+        throw e?.response?.data;
+      });
+  }
+
+  /** ``PATCH /api/runners/connections/<id>/`` — rename. */
+  async renameConnection(connectionId: string, name: string): Promise<IConnection> {
+    return this.patch(`/api/runners/connections/${connectionId}/`, { name })
+      .then((r) => r?.data)
+      .catch((e) => {
+        throw e?.response?.data;
+      });
+  }
+
+  /** ``POST /api/runners/connections/<id>/revoke/`` — revoke + cascade
+   * to all runners under it. */
+  async revokeConnection(connectionId: string): Promise<{ connection_id: string; revoked_at: string }> {
+    return this.post(`/api/runners/connections/${connectionId}/revoke/`)
       .then((r) => r?.data)
       .catch((e) => {
         throw e?.response?.data;
