@@ -11,7 +11,10 @@ on:
       - "synchronize"
       - "reopened"
     paths:
-      - "apps/**"
+      - "apps/web/**"
+      - "apps/admin/**"
+      - "apps/space/**"
+      - "apps/live/**"
       - "packages/**"
       - "pnpm-lock.yaml"
       - "pnpm-workspace.yaml"
@@ -75,3 +78,10 @@ jobs:
 
       - name: Run tests
         run: pnpm turbo run test --affected
+
+      - name: Save Turbo cache
+        uses: actions/cache/save@v5
+        if: always()
+        with:
+          path: .turbo
+          key: turbo-${{ runner.os }}-${{ github.event.pull_request.base.sha }}-${{ github.sha }}
