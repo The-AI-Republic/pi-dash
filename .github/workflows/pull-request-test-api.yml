@@ -1,0 +1,99 @@
+name: Test API
+
+on:
+  workflow_dispatch:
+  pull_request:
+    branches:
+      - "main"
+      - "preview"
+    types:
+      - "opened"
+      - "synchronize"
+      - "reopened"
+    paths:
+      - "apps/api/**"
+      - ".github/workflows/pull-request-test-api.yml"
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: pytest
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    services:
+      postgres:
+        image: postgres:15.7-alpine
+        env:
+          POSTGRES_USER: pi_dash
+          POSTGRES_PASSWORD: pi_dash
+          POSTGRES_DB: pi_dash
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U pi_dash"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+      redis:
+        image: valkey/valkey:7.2.11-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+      rabbitmq:
+        image: rabbitmq:3.13.6-management-alpine
+        env:
+          RABBITMQ_DEFAULT_USER: pi_dash
+          RABBITMQ_DEFAULT_PASS: pi_dash
+          RABBITMQ_DEFAULT_VHOST: pi_dash
+        ports:
+          - 5672:5672
+        options: >-
+          --health-cmd "rabbitmq-diagnostics -q ping"
+          --health-interval 10s
+          --health-timeout 10s
+          --health-retries 10
+    env:
+      DJANGO_SETTINGS_MODULE: pi_dash.settings.test
+      POSTGRES_USER: pi_dash
+      POSTGRES_PASSWORD: pi_dash
+      POSTGRES_DB: pi_dash
+      POSTGRES_HOST: localhost
+      POSTGRES_PORT: "5432"
+      REDIS_URL: redis://localhost:6379/
+      RABBITMQ_HOST: localhost
+      RABBITMQ_PORT: "5672"
+      RABBITMQ_USER: pi_dash
+      RABBITMQ_PASSWORD: pi_dash
+      RABBITMQ_VHOST: pi_dash
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12.x"
+          cache: pip
+          cache-dependency-path: |
+            apps/api/requirements.txt
+            apps/api/requirements/base.txt
+            apps/api/requirements/test.txt
+
+      - name: Install API dependencies
+        working-directory: apps/api
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements/test.txt
+
+      - name: Run pytest
+        working-directory: apps/api
+        run: pytest -n auto -m "not slow"
