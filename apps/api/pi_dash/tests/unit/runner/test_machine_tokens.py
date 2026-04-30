@@ -41,8 +41,16 @@ from pi_dash.runner.services import tokens
 
 @pytest.fixture
 def other_user(db):
-    """A second user with no membership in the primary `workspace` fixture."""
+    """A second user with no membership in the primary `workspace` fixture.
+
+    Sets ``username`` explicitly so this fixture composes with the shared
+    ``create_user`` fixture (which leaves username at the model default).
+    Without a distinct username the two users collide on the
+    ``users_username_key`` unique constraint when both fixtures run in
+    the same test (cross-workspace tests do exactly that).
+    """
     user = User.objects.create(
+        username="other",
         email="other@example.com",
         first_name="Other",
         last_name="User",
