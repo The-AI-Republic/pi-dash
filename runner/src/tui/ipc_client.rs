@@ -4,6 +4,7 @@ use std::path::PathBuf;
 use crate::ipc::client::Client;
 use crate::ipc::protocol::{Request, Response, StatusSnapshot};
 
+#[derive(Clone)]
 pub struct TuiIpc {
     pub socket: PathBuf,
     /// When set, scope per-runner read requests (`runs`, `approvals`,
