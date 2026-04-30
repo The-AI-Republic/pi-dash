@@ -170,13 +170,15 @@ working_dir = "/tmp/wd"
 
 [runner.codex]
 binary = "codex"
-model_default = "gpt-5-codex"
 "#,
             uuid::Uuid::new_v4()
         );
         std::fs::write(paths.config_path(), body).unwrap();
         let loaded = load_config(&paths).unwrap();
         assert_eq!(loaded.primary_runner().workspace_slug, None);
+        // model_default must stay absent unless the user opts in; the
+        // runner is model-agnostic by design.
+        assert_eq!(loaded.primary_runner().codex.model_default, None);
     }
 
     #[test]

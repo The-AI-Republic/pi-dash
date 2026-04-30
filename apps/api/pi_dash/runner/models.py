@@ -307,9 +307,7 @@ class MachineToken(models.Model):
     per decisions.md Q8.
     """
 
-    id = models.UUIDField(
-        primary_key=True, default=uuid.uuid4, editable=False, db_index=True
-    )
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     workspace = models.ForeignKey(
         "db.Workspace",
         on_delete=models.CASCADE,

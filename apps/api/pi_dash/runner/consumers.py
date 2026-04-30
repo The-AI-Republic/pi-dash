@@ -12,6 +12,7 @@ other processes can push work via
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from collections import OrderedDict
@@ -49,6 +50,11 @@ MAX_SEQ_LOOKBACK = 128
 # fill the DB with arbitrarily large blobs in AgentRunEvent.payload.
 MAX_EVENT_PAYLOAD_BYTES = 64 * 1024
 CLOSE_CODE_ROTATED = 4010
+# Close code for a token-mode connection that opened the WS but never
+# brought any runner online via Hello within HELLO_DEADLINE_SECS. Keeps
+# half-open daemons from holding consumer slots indefinitely.
+CLOSE_CODE_HELLO_TIMEOUT = 4408
+HELLO_DEADLINE_SECS = 30
 
 
 class RunnerConsumer(AsyncJsonWebsocketConsumer):
@@ -77,6 +83,10 @@ class RunnerConsumer(AsyncJsonWebsocketConsumer):
         # Legacy single-runner group name. Kept as a separate field so the
         # existing legacy auth code path is byte-for-byte unchanged.
         self.group_name: Optional[str] = None
+        # Token-mode Hello watchdog — closes the connection if no runner
+        # comes online within HELLO_DEADLINE_SECS. Cancelled on first
+        # successful Hello and on disconnect.
+        self._hello_deadline_task: Optional[asyncio.Task] = None
         # Per-connection dedupe cache of message_ids we've already applied.
         # LRU-bounded so a misbehaving runner can't grow us unboundedly.
         self.seen_messages: "OrderedDict[str, None]" = OrderedDict()
@@ -149,6 +159,12 @@ class RunnerConsumer(AsyncJsonWebsocketConsumer):
             self.token = token
             # Accept the WS up front; runners come online via Hello.
             await self.accept()
+            # Arm the Hello watchdog. Without this, a daemon that only
+            # completes the upgrade and never sends Hello holds a
+            # consumer slot forever.
+            self._hello_deadline_task = asyncio.create_task(
+                self._enforce_hello_deadline()
+            )
             return
 
         runner = await self._find_runner(raw)
@@ -192,6 +208,12 @@ class RunnerConsumer(AsyncJsonWebsocketConsumer):
         })
 
     async def disconnect(self, code: int) -> None:
+        # Cancel the Hello watchdog if it's still pending — it would
+        # otherwise issue a duplicate close on an already-disconnected
+        # consumer.
+        if self._hello_deadline_task is not None:
+            self._hello_deadline_task.cancel()
+            self._hello_deadline_task = None
         # Leave every joined pubsub group, regardless of mode. Token mode
         # has N entries here; legacy has at most one.
         for group in self.group_names:
@@ -363,6 +385,11 @@ class RunnerConsumer(AsyncJsonWebsocketConsumer):
             return
 
         self.authorised_runners[runner_id] = runner
+        # First successful Hello disarms the watchdog — the connection has
+        # proven it's a real daemon, not a half-open socket.
+        if self._hello_deadline_task is not None:
+            self._hello_deadline_task.cancel()
+            self._hello_deadline_task = None
         group = runner_group(runner.id)
         self.group_names.append(group)
         await self.channel_layer.group_add(group, self.channel_name)
@@ -629,6 +656,33 @@ class RunnerConsumer(AsyncJsonWebsocketConsumer):
             # a debug log and fall through to close anyway.
             logger.exception("failed to send revoke frame")
         await self.close(code=CLOSE_CODE_ROTATED)
+
+    async def _enforce_hello_deadline(self) -> None:
+        """Close a token-mode connection that opened the WS but never
+        sent a Hello within ``HELLO_DEADLINE_SECS``.
+
+        Cleared on first successful Hello (see ``_handle_token_hello``)
+        and on disconnect. Runs only in token mode — legacy mode binds
+        the runner before ``accept()``, so a half-open legacy socket
+        already has identity and isn't relevant here.
+        """
+        try:
+            await asyncio.sleep(HELLO_DEADLINE_SECS)
+        except asyncio.CancelledError:
+            return
+        if self.token is None or self.authorised_runners:
+            return
+        logger.warning(
+            "token %s opened WS but sent no Hello in %ds; closing",
+            self.token.id,
+            HELLO_DEADLINE_SECS,
+        )
+        try:
+            await self.close(code=CLOSE_CODE_HELLO_TIMEOUT)
+        except Exception:
+            # close() can race with disconnect; swallow rather than crash
+            # the watchdog task.
+            logger.debug("close after Hello timeout raised", exc_info=True)
 
     # ---- Sync helpers (DB-bound) ----
 

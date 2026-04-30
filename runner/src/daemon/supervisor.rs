@@ -626,6 +626,19 @@ impl RunnerLoop {
                     // `pidash token remove-runner --name <name>` to
                     // also strip config.toml so the next daemon
                     // restart doesn't re-Hello for this runner_id.
+                    // Surface this loudly so the operator notices
+                    // before the next restart turns into a silent
+                    // re-Hello → RemoveRunner loop.
+                    tracing::warn!(
+                        runner = %self.runner_config.name,
+                        runner_id = %runner_id,
+                        "runner removed cloud-side; \
+                         run `pidash token remove-runner --name {}` to \
+                         strip the [[runner]] block from config.toml. \
+                         Otherwise the daemon will re-Hello this id on \
+                         next restart and the cloud will tear it down again.",
+                        self.runner_config.name,
+                    );
                     break;
                 }
             }

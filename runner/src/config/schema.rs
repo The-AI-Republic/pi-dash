@@ -85,9 +85,12 @@ pub struct CodexSection {
 
 impl Default for CodexSection {
     fn default() -> Self {
+        // model_default stays None — the runner must not pin a model and
+        // let codex pick its own default. Hardcoding one (even a "good"
+        // one) breaks accounts whose tier doesn't carry that model.
         Self {
             binary: "codex".to_string(),
-            model_default: Some("gpt-5-codex".to_string()),
+            model_default: None,
         }
     }
 }
