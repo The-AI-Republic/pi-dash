@@ -13,6 +13,7 @@ See ``.ai_design/project_scheduler/design.md`` §7.
 from __future__ import annotations
 
 from django.conf import settings
+from django.db import transaction
 from django.db.models import Count, Q
 from django.shortcuts import get_object_or_404
 from django.utils import timezone
@@ -138,7 +139,21 @@ class WorkspaceSchedulerDetailEndpoint(BaseAPIView):
         scheduler = get_object_or_404(
             Scheduler, pk=scheduler_id, workspace__slug=slug
         )
-        scheduler.delete()  # SoftDeleteModel: sets deleted_at
+        # The SoftDeleteModel cascade is async (see db/mixins.py
+        # ``soft_delete_related_objects``), which leaves a window where
+        # active bindings still point at a soft-deleted parent. The
+        # scanner already filters those out, but they remain addressable
+        # via the bindings list endpoint and would survive a
+        # same-slug recreate as orphans. Soft-delete bindings inline so
+        # the API view of the world is consistent the moment this
+        # response returns.
+        now = timezone.now()
+        with transaction.atomic():
+            SchedulerBinding.objects.filter(
+                scheduler=scheduler,
+                deleted_at__isnull=True,
+            ).update(deleted_at=now)
+            scheduler.delete()  # SoftDeleteModel: sets deleted_at
         return Response(status=status.HTTP_204_NO_CONTENT)
 
 

@@ -399,7 +399,9 @@ def _create_and_dispatch_run(
 # ----------------------------------------------------------------------
 
 
-def dispatch_scheduler_run(binding, prompt: str) -> Optional[AgentRun]:
+def dispatch_scheduler_run(
+    binding, prompt: str
+) -> tuple[Optional[AgentRun], Optional[str]]:
     """Create a fresh ``AgentRun`` for one scheduler-binding tick.
 
     The run is project-scoped: ``work_item=None``, ``parent_run=None``,
@@ -407,8 +409,10 @@ def dispatch_scheduler_run(binding, prompt: str) -> Optional[AgentRun]:
     runner's problem (the dispatcher does not populate ``run_config``
     with repo URL / ref).
 
-    Returns the created ``AgentRun``, or ``None`` if no default pod is
-    available for the binding's workspace.
+    Returns ``(run, None)`` on success, or ``(None, reason)`` when the
+    dispatch was short-circuited. The reason string is what the Beat
+    fire path stores on ``binding.last_error`` so operators don't need
+    to grep worker logs to find out why a tick was skipped.
     """
     from pi_dash.runner.services import matcher
 
@@ -419,7 +423,7 @@ def dispatch_scheduler_run(binding, prompt: str) -> Optional[AgentRun]:
             binding.pk,
             binding.workspace_id,
         )
-        return None
+        return None, f"no default pod for workspace {binding.workspace_id}"
 
     creator = binding.actor
     if creator is None:
@@ -429,7 +433,7 @@ def dispatch_scheduler_run(binding, prompt: str) -> Optional[AgentRun]:
         logger.warning(
             "scheduler.dispatch: skip binding=%s reason=no-creator", binding.pk
         )
-        return None
+        return None, "no creator (binding.actor and system bot both unavailable)"
 
     with transaction.atomic():
         run = AgentRun.objects.create(
@@ -451,4 +455,4 @@ def dispatch_scheduler_run(binding, prompt: str) -> Optional[AgentRun]:
         binding.pk,
         pod.pk,
     )
-    return run
+    return run, None

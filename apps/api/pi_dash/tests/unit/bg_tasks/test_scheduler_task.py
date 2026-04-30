@@ -231,13 +231,14 @@ def test_fire_disables_binding_with_bad_cron_and_clears_next_run_at(binding):
 
 @pytest.mark.unit
 def test_fire_rolls_back_next_run_at_on_dispatch_failure(monkeypatch, binding):
-    """Phase 3b: when dispatch returns None, restore prior next_run_at."""
+    """Phase 3b: when dispatch returns None, restore prior next_run_at
+    and surface the specific reason on ``last_error``."""
     binding.next_run_at = None  # NULL — true "first run, due now"
     binding.save(update_fields=["next_run_at"])
 
     monkeypatch.setattr(
         "pi_dash.bgtasks.scheduler.dispatch_scheduler_run",
-        lambda b, p: None,
+        lambda b, p: (None, "no default pod for workspace test"),
     )
     fired = fire_scheduler_binding.__wrapped__(fire_scheduler_binding, str(binding.pk))
     assert fired is False
@@ -245,6 +246,8 @@ def test_fire_rolls_back_next_run_at_on_dispatch_failure(monkeypatch, binding):
     # Rolled back to NULL — no scheduled time advanced since dispatch failed
     assert binding.next_run_at is None
     assert "dispatch failed" in binding.last_error
+    # Specific reason surfaced through (Codex review: avoid lossy errors)
+    assert "no default pod" in binding.last_error
 
 
 @pytest.mark.unit

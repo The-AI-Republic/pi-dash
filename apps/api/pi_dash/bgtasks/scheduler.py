@@ -36,7 +36,7 @@ from django.db import transaction
 from django.db.models import Q
 from django.utils import timezone
 
-from pi_dash.db.models.scheduler import SchedulerBinding
+from pi_dash.db.models.scheduler import LAST_ERROR_MAX_LEN, SchedulerBinding
 from pi_dash.runner.models import AgentRunStatus
 
 logger = logging.getLogger("pi_dash.worker")
@@ -114,6 +114,10 @@ def scan_due_bindings() -> int:
             enabled=True,
             scheduler__is_enabled=True,
             scheduler__deleted_at__isnull=True,
+            # Same async-cascade window applies to the project FK: when a
+            # project is soft-deleted, the binding's deleted_at flips only
+            # after ``soft_delete_related_objects`` runs.
+            project__deleted_at__isnull=True,
         )
         .filter(Q(next_run_at__lte=now) | Q(next_run_at__isnull=True))
         .order_by("next_run_at")
@@ -181,7 +185,7 @@ def fire_scheduler_binding(self, binding_id: str) -> bool:
             # that if the user later re-enables (without changing cron),
             # the API path through ProjectSchedulerBindingDetailEndpoint
             # is the only way back in — and that path validates cron.
-            binding.last_error = f"invalid cron expression: {binding.cron!r}"[:1000]
+            binding.last_error = f"invalid cron expression: {binding.cron!r}"[:LAST_ERROR_MAX_LEN]
             binding.enabled = False
             binding.next_run_at = None
             binding.save(
@@ -220,7 +224,7 @@ def fire_scheduler_binding(self, binding_id: str) -> bool:
         # Deleted between phases — nothing to roll back to.
         return False
 
-    run = dispatch_scheduler_run(binding_for_dispatch, prompt)
+    run, fail_reason = dispatch_scheduler_run(binding_for_dispatch, prompt)
 
     # ----- Phase 3a: Success — record the run pointer -----
     if run is not None:
@@ -252,12 +256,15 @@ def fire_scheduler_binding(self, binding_id: str) -> bool:
         )
         if rollback_target is not None:
             rollback_target.next_run_at = prev_next_run_at
-            rollback_target.last_error = "dispatch failed (no default pod or no creator)"[:1000]
+            rollback_target.last_error = (
+                f"dispatch failed: {fail_reason}" if fail_reason else "dispatch failed"
+            )[:LAST_ERROR_MAX_LEN]
             rollback_target.save(
                 update_fields=["next_run_at", "last_error", "updated_at"]
             )
     logger.info(
-        "scheduler.fire: dispatch returned None binding=%s; rolled back next_run_at",
+        "scheduler.fire: dispatch returned None binding=%s reason=%s; rolled back next_run_at",
         binding_pk,
+        fail_reason or "(unspecified)",
     )
     return False

@@ -16,6 +16,12 @@ from .base import BaseModel
 from .workspace import WorkspaceBaseModel
 
 
+# Cap on ``SchedulerBinding.last_error`` (and any operator-facing copy of
+# the same field). Truncation lives in one place so the scanner, the
+# dispatch path, and the runner-side terminate hook stay in sync.
+LAST_ERROR_MAX_LEN = 1000
+
+
 class SchedulerSource(models.TextChoices):
     BUILTIN = "builtin", "Builtin"
     MANIFEST = "manifest", "Manifest"
