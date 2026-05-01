@@ -178,6 +178,85 @@ export default {
     },
   },
 
+  scheduler_bindings: {
+    tab_label: "Schedulers",
+    title: "Schedulers",
+    subtitle:
+      "Schedulers installed on this project. Each install fires its prompt against the project on the configured cron.",
+    install: "Install scheduler",
+    columns: {
+      name: "Scheduler",
+      cron: "Schedule",
+      next_run: "Next run",
+      last_run: "Last run",
+      status: "Status",
+      updated: "Updated",
+    },
+    status: {
+      enabled: "Enabled",
+      disabled: "Disabled",
+    },
+    actions: {
+      edit: "Edit",
+      uninstall: "Uninstall",
+      enable: "Enable scheduler",
+      disable: "Disable scheduler",
+    },
+    list: {
+      empty:
+        "No schedulers installed on this project yet. Click “Install scheduler” to add one from the workspace catalog.",
+      none_yet: "(never)",
+    },
+    install_modal: {
+      title: "Install scheduler",
+      scheduler_label: "Scheduler",
+      scheduler_help: "Pick from your workspace's enabled schedulers. Already-installed ones aren't listed.",
+      none_available_title: "No schedulers available",
+      none_available_body:
+        "Either every workspace scheduler is already installed on this project, or your workspace admin hasn't enabled any. Visit Workspace → Schedulers to manage the catalog.",
+      cron_label: "Schedule (cron)",
+      cron_help: "5-field cron expression in UTC, e.g. ``0 9 * * *`` for 09:00 UTC every day.",
+      cron_placeholder: "0 9 * * *",
+      extra_context_label: "Project context (optional)",
+      extra_context_help:
+        "Appended to the scheduler's base prompt at run time. Use it to give project-specific framing the workspace prompt shouldn't carry.",
+      extra_context_placeholder: "Notes specific to this project…",
+      enabled_label: "Enabled",
+      enabled_help: "Disabled installs do not fire on the cron until re-enabled.",
+      install: "Install",
+      installing: "Installing…",
+      cancel: "Cancel",
+      errors: {
+        scheduler_required: "Pick a scheduler.",
+        cron_required: "Cron expression is required.",
+      },
+    },
+    edit_modal: {
+      title: "Edit scheduler install",
+      save: "Save",
+      saving: "Saving…",
+    },
+    uninstall_modal: {
+      title: "Uninstall scheduler?",
+      body: "The scheduler stops firing on this project. The workspace definition is unaffected and can be re-installed later.",
+      confirm: "Uninstall",
+    },
+    toast: {
+      installed_title: "Scheduler installed",
+      installed_message: "It will fire on the configured cron.",
+      updated_title: "Install updated",
+      updated_message: "Subsequent runs use the new settings.",
+      enabled_message: "Scheduler enabled — it will fire on the next cron tick.",
+      disabled_message: "Scheduler disabled — it will not fire until re-enabled.",
+      uninstalled_title: "Scheduler uninstalled",
+      uninstalled_message: "It will not fire on this project until reinstalled.",
+      error_title: "Something went wrong",
+      install_failed: "Could not install the scheduler.",
+      update_failed: "Could not update the install.",
+      uninstall_failed: "Could not uninstall the scheduler.",
+    },
+  },
+
   auth: {
     common: {
       email: {

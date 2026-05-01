@@ -62,7 +62,7 @@ def _noop_reverse(apps, schema_editor):
 class Migration(migrations.Migration):
 
     dependencies = [
-        ("db", "0131_project_scheduler_mvp"),
+        ("db", "0132_project_scheduler_mvp"),
     ]
 
     operations = [
