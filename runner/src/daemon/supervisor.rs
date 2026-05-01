@@ -244,6 +244,23 @@ impl Supervisor {
             }
         }
 
+        // Drain in-flight runs before tearing down: send RunFailed with
+        // DaemonRestart so the cloud transitions each run to FAILED via
+        // a deliberate signal instead of leaving them BUSY for the
+        // heartbeat reaper to clean up after our successor reconnects.
+        // Bounded by a 5s deadline so a slow / unreachable cloud can't
+        // hang the shutdown — systemd's default TimeoutStopSec (90s)
+        // would still SIGKILL us, but losing a clean error message is
+        // better than losing the entire shutdown sequence.
+        if let Err(_elapsed) = tokio::time::timeout(
+            Duration::from_secs(5),
+            drain_in_flight_runs(hello_runners.clone()),
+        )
+        .await
+        {
+            tracing::warn!("drain of in-flight runs timed out at 5s");
+        }
+
         for h in loop_handles {
             h.abort();
         }
@@ -256,6 +273,51 @@ impl Supervisor {
         ipc_handle.abort();
         Ok(())
     }
+}
+
+/// On daemon shutdown, send `RunFailed{DaemonRestart}` for every
+/// runner that currently reports an in-flight run. Without this the
+/// cloud is left guessing — its heartbeat reaper eventually fails the
+/// run with the cryptic ``reaped by heartbeat: ... in_flight_run=
+/// (none)`` message after the daemon restarts and the next session
+/// Hello legitimately reports null. This sends a clean terminal
+/// signal instead.
+///
+/// Returns the count of runs we attempted to fail. Send errors are
+/// logged at warn but do not abort the drain — one runner's
+/// unreachable cloud client must not block another runner's drain.
+async fn drain_in_flight_runs(runners: Arc<RwLock<HelloRunnerMap>>) -> usize {
+    // Snapshot under the read lock so the lock is dropped before any
+    // network I/O; concurrent writers (config reloads, etc.) are not
+    // expected during shutdown but this keeps the contract clean.
+    let snapshot: Vec<(uuid::Uuid, Option<uuid::Uuid>, RunnerOut)> = {
+        let guard = runners.read().await;
+        guard
+            .iter()
+            .map(|(rid, (out, state, _))| (*rid, *state.rx_in_flight.borrow(), out.clone()))
+            .collect()
+    };
+    let now = Utc::now();
+    let mut sent = 0usize;
+    for (runner_id, in_flight, out) in snapshot {
+        let Some(run_id) = in_flight else { continue };
+        let msg = ClientMsg::RunFailed {
+            run_id,
+            reason: FailureReason::DaemonRestart,
+            detail: Some("daemon shutdown requested".to_string()),
+            ended_at: now,
+        };
+        match out.send(msg).await {
+            Ok(()) => {
+                sent += 1;
+                tracing::info!(%runner_id, %run_id, "drained in-flight run on shutdown");
+            }
+            Err(e) => {
+                tracing::warn!(%runner_id, %run_id, "drain send failed: {e:#}");
+            }
+        }
+    }
+    sent
 }
 
 /// Watch the `connected` notify and re-emit one `Hello` per `RunnerInstance`
@@ -1383,5 +1445,119 @@ mod tests {
         ];
         expected.sort_by_key(|(id, _)| *id);
         assert_eq!(received, expected);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn drain_in_flight_runs_sends_run_failed_for_busy_runners_only() {
+        // Two runners; only one has an in-flight run. Drain should
+        // emit RunFailed{DaemonRestart} for that one and skip the idle one.
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = paths_for(tmp.path());
+        let (out_tx, mut out_rx) = mpsc::channel::<Envelope<ClientMsg>>(8);
+
+        let inst_busy = RunnerInstance::new(
+            runner_config("busy-runner", "WEB", tmp.path().join("wd-busy")),
+            &paths,
+            out_tx.clone(),
+        );
+        let inst_idle = RunnerInstance::new(
+            runner_config("idle-runner", "API", tmp.path().join("wd-idle")),
+            &paths,
+            out_tx.clone(),
+        );
+        let busy_runner_id = inst_busy.runner_id;
+        let active_run_id = uuid::Uuid::new_v4();
+
+        // Stamp Some(rid) on the busy instance, leave idle as None.
+        inst_busy
+            .state
+            .set_current_run(Some(CurrentRunSummary {
+                run_id: active_run_id,
+                thread_id: None,
+                status: "running".into(),
+                started_at: Utc::now(),
+                events: 0,
+            }))
+            .await;
+
+        let runners: Arc<RwLock<HelloRunnerMap>> = Arc::new(RwLock::new(
+            [&inst_busy, &inst_idle]
+                .into_iter()
+                .map(|i| {
+                    (
+                        i.runner_id,
+                        (
+                            i.out.clone(),
+                            i.state.clone(),
+                            i.config.project_slug.clone(),
+                        ),
+                    )
+                })
+                .collect(),
+        ));
+
+        let sent = drain_in_flight_runs(runners).await;
+        assert_eq!(sent, 1, "exactly one runner had an in-flight run");
+
+        // Receive the one RunFailed envelope.
+        let env = tokio::time::timeout(std::time::Duration::from_secs(2), out_rx.recv())
+            .await
+            .expect("timed out waiting for RunFailed")
+            .expect("channel closed before RunFailed arrived");
+        assert_eq!(env.runner_id, Some(busy_runner_id));
+        match env.body {
+            ClientMsg::RunFailed {
+                run_id,
+                reason,
+                detail,
+                ..
+            } => {
+                assert_eq!(run_id, active_run_id);
+                assert!(matches!(reason, FailureReason::DaemonRestart));
+                assert_eq!(detail.as_deref(), Some("daemon shutdown requested"));
+            }
+            other => panic!("expected RunFailed, got {other:?}"),
+        }
+
+        // No further messages — the idle runner must not have produced one.
+        let stray =
+            tokio::time::timeout(std::time::Duration::from_millis(100), out_rx.recv()).await;
+        assert!(
+            stray.is_err(),
+            "idle runner unexpectedly produced a frame: {stray:?}"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn drain_in_flight_runs_no_op_when_all_idle() {
+        // Common path: nothing in flight, drain should send nothing.
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = paths_for(tmp.path());
+        let (out_tx, mut out_rx) = mpsc::channel::<Envelope<ClientMsg>>(8);
+        let inst = RunnerInstance::new(
+            runner_config("idle", "WEB", tmp.path().join("wd")),
+            &paths,
+            out_tx,
+        );
+        let runners: Arc<RwLock<HelloRunnerMap>> = Arc::new(RwLock::new(
+            std::iter::once(&inst)
+                .map(|i| {
+                    (
+                        i.runner_id,
+                        (
+                            i.out.clone(),
+                            i.state.clone(),
+                            i.config.project_slug.clone(),
+                        ),
+                    )
+                })
+                .collect(),
+        ));
+
+        let sent = drain_in_flight_runs(runners).await;
+        assert_eq!(sent, 0);
+        let stray =
+            tokio::time::timeout(std::time::Duration::from_millis(100), out_rx.recv()).await;
+        assert!(stray.is_err(), "idle drain produced a stray frame: {stray:?}");
     }
 }

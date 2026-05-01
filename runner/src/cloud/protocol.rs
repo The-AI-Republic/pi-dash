@@ -299,6 +299,12 @@ pub enum FailureReason {
     /// stale. Cloud's response is to drop the pin and re-queue with a fresh
     /// session.
     ResumeUnavailable,
+    /// The daemon process is shutting down (SIGTERM, e.g. `pidash restart`,
+    /// systemd stop, host reboot). The run cannot continue past this point.
+    /// Sent eagerly during the daemon's drain step so the cloud transitions
+    /// the run to FAILED via a deliberate signal instead of inferring it
+    /// from the heartbeat reaper after the next reconnect.
+    DaemonRestart,
 }
 
 #[cfg(test)]
