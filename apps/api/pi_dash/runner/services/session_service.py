@@ -29,6 +29,28 @@ logger = logging.getLogger(__name__)
 
 OFFLINE_GRACE_SECS = 60
 
+# Grace window protecting freshly-assigned runs from the reaper.
+#
+# The reaper runs on every long-poll request (`RunnerSessionPollEndpoint`)
+# *before* the outbox is drained for that same response. So the very poll
+# that's about to deliver an Assign to the runner is the poll where the
+# runner still legitimately reports `in_flight_run=null` (it hasn't seen
+# the Assign yet — it's still in the outbox waiting for delivery).
+# Without this grace, that race kills the run between assignment and
+# delivery: the cloud reaps `assigned_at=now-Xs, status=ASSIGNED`, then
+# hands the doomed Assign to the runner, who processes it normally and
+# only discovers the row is tombstoned when it tries to send RunStarted.
+#
+# Symptom: `started_at > ended_at` on the failed AgentRun row, error
+# "reaped by heartbeat: ... in_flight_run=(none) but cloud had this run
+# marked busy", with no daemon restart in the journal.
+#
+# Sized to cover one full long-poll interval (default 25s) + runner-side
+# processing of the Assign + the runner's *next* poll. 60s is generous
+# without meaningfully delaying real reaps after a daemon crash, since
+# crash detection comes from missing heartbeats anyway.
+ASSIGN_DELIVERY_GRACE_SECS = 60
+
 
 def apply_hello(runner: Runner, body: Dict[str, Any]) -> None:
     """Update runner metadata + reap stale busy runs.
@@ -77,10 +99,18 @@ def reap_stale_busy_runs(runner: Runner, body: Dict[str, Any]) -> None:
         except (ValueError, AttributeError):
             in_flight_id = None
 
+    # Effective cutoff: a run is only stale if it was assigned BOTH
+    # before the runner's reported heartbeat AND more than
+    # ASSIGN_DELIVERY_GRACE_SECS ago. The min() picks the stricter
+    # (earlier) of the two — `assigned_at < cutoff` is satisfied iff
+    # both individual conditions are.
+    assignment_cutoff = now - timedelta(seconds=ASSIGN_DELIVERY_GRACE_SECS)
+    effective_cutoff = min(heartbeat_ts, assignment_cutoff)
+
     stale = AgentRun.objects.filter(
         runner=runner,
         status__in=BUSY_STATUSES,
-        assigned_at__lt=heartbeat_ts,
+        assigned_at__lt=effective_cutoff,
     )
     if in_flight_id:
         stale = stale.exclude(id=in_flight_id)
