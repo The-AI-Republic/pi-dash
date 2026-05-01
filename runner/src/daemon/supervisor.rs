@@ -485,6 +485,27 @@ impl RunnerLoop {
                         cancel: cancel.clone(),
                         done_rx,
                     });
+                    // Stamp ``rx_in_flight = Some(run_id)`` synchronously, before
+                    // the worker does anything slow. The cloud put this run
+                    // into a BUSY status the moment it sent the Assign;
+                    // ``reap_stale_busy_runs`` (services/session_service.py)
+                    // will fail any BUSY run whose runner Hellos with
+                    // ``in_flight_run=null``. Without this early stamp, a
+                    // session reconnect during workspace setup (which can
+                    // take 30s+ for a fresh clone) reports null truthfully
+                    // and the run gets reaped before it ever starts.
+                    // The worker re-stamps a fuller summary at the
+                    // ``set_current_run`` site below; same run_id, so the
+                    // watch channel doesn't toggle in/out of None.
+                    self.state
+                        .set_current_run(Some(CurrentRunSummary {
+                            run_id,
+                            thread_id: None,
+                            status: "preparing".to_string(),
+                            started_at: Utc::now(),
+                            events: 0,
+                        }))
+                        .await;
                     let runner_paths = self.runner_paths.clone();
                     let runner_config = self.runner_config.clone();
                     let state = self.state.clone();
@@ -754,6 +775,11 @@ impl AssignWorker {
                     ended_at: Utc::now(),
                 })
                 .await;
+                // The supervisor stamped ``rx_in_flight = Some(run_id)``
+                // synchronously when the Assign arrived; clear it now so
+                // a session reconnect after the failure doesn't claim a
+                // run that no longer exists.
+                self.state.set_current_run(None).await;
                 return Ok(());
             }
         };
@@ -772,6 +798,8 @@ impl AssignWorker {
                 ended_at: Utc::now(),
             })
             .await;
+            // Same reason as above: clear the early-stamp on failure.
+            self.state.set_current_run(None).await;
             return Ok(());
         }
 
