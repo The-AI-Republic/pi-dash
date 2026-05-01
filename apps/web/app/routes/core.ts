@@ -372,6 +372,13 @@ export const coreRoutes: RouteConfigEntry[] = [
               ":workspaceSlug/settings/projects/:projectId/github",
               "./(all)/[workspaceSlug]/(settings)/settings/projects/[projectId]/github/page.tsx"
             ),
+            // Project Scheduler bindings — install / edit / uninstall
+            // workspace schedulers on this project. See
+            // .ai_design/project_scheduler/design.md §11.
+            route(
+              ":workspaceSlug/settings/projects/:projectId/schedulers",
+              "./(all)/[workspaceSlug]/(settings)/settings/projects/[projectId]/schedulers/page.tsx"
+            ),
           ]),
         ]),
       ]),
