@@ -90,6 +90,19 @@ pub async fn run(args: Args, paths: &Paths) -> Result<()> {
         );
     }
 
+    // Workspace collision check, mirroring Config::validate()'s rules
+    // (see schema.rs §"Workspace collisions"). Two runners sharing — or
+    // nesting under — a working directory will trample each other's git
+    // state. `pidash runner add` runs this through validate() and rolls
+    // back the cloud-side registration on conflict, but the HTTPS-flow
+    // enrollment token is one-time and has no symmetric deregister, so
+    // we have to refuse pre-cloud here. Only meaningful when the
+    // operator passed --working-dir; the per-runner sandbox default is
+    // unique by runner_id.
+    if let (Some(cfg), Some(new_wd)) = (&existing_config, args.working_dir.as_ref()) {
+        assert_no_workspace_collision(&cfg.runners, new_wd)?;
+    }
+
     let host_label = args
         .host_label
         .clone()
@@ -266,6 +279,48 @@ fn hostname() -> Option<String> {
         .filter(|s| !s.is_empty())
 }
 
+/// Refuse to enroll if `new_wd` collides with any already-configured
+/// runner's working_dir — exact match or nesting either direction.
+/// Canonicalize when the path resolves on disk so `./foo` vs
+/// `/abs/foo` and trailing-slash variants compare equal; fall back to
+/// the raw `PathBuf` otherwise (e.g. the operator passed a path that
+/// doesn't exist yet).
+fn assert_no_workspace_collision(
+    existing: &[crate::config::schema::RunnerConfig],
+    new_wd: &std::path::Path,
+) -> Result<()> {
+    let new_canon = std::fs::canonicalize(new_wd).unwrap_or_else(|_| new_wd.to_path_buf());
+    for r in existing {
+        let existing_path = &r.workspace.working_dir;
+        let existing_canon = std::fs::canonicalize(existing_path)
+            .unwrap_or_else(|_| existing_path.clone());
+        if existing_canon == new_canon {
+            anyhow::bail!(
+                "runner {} ({}) already uses --working-dir {} — two runners cannot share \
+                 a working directory (they would trample each other's git state). \
+                 Pick a different --working-dir, or remove that runner first with \
+                 `pidash runner remove {}`.",
+                r.name,
+                r.runner_id,
+                existing_path.display(),
+                r.name,
+            );
+        }
+        if existing_canon.starts_with(&new_canon) || new_canon.starts_with(&existing_canon) {
+            anyhow::bail!(
+                "--working-dir {} is nested with runner {}'s working_dir {} — two runners cannot \
+                 share or nest working directories. Pick a non-overlapping path, or remove that \
+                 runner first with `pidash runner remove {}`.",
+                new_wd.display(),
+                r.name,
+                existing_path.display(),
+                r.name,
+            );
+        }
+    }
+    Ok(())
+}
+
 /// Refuse cleartext http:// to non-localhost hosts (token leak surface).
 pub(crate) fn validate_cloud_url(url: &str) -> Result<()> {
     let lower = url.to_ascii_lowercase();
@@ -302,6 +357,11 @@ fn read_line() -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::schema::{
+        AgentSection, ApprovalPolicySection, ClaudeCodeSection, CodexSection, RunnerConfig,
+        WorkspaceSection,
+    };
+    use std::path::PathBuf;
 
     #[test]
     fn validate_cloud_url_rejects_non_localhost_http() {
@@ -316,5 +376,70 @@ mod tests {
         assert!(validate_cloud_url("http://localhost").is_ok());
         assert!(validate_cloud_url("http://localhost:3000").is_ok());
         assert!(validate_cloud_url("https://pi-dash.example").is_ok());
+    }
+
+    fn runner_with_wd(name: &str, wd: PathBuf) -> RunnerConfig {
+        RunnerConfig {
+            name: name.to_string(),
+            runner_id: uuid::Uuid::new_v4(),
+            workspace_slug: Some("ws".into()),
+            project_slug: Some("p".into()),
+            pod_id: None,
+            workspace: WorkspaceSection { working_dir: wd },
+            agent: AgentSection::default(),
+            codex: CodexSection::default(),
+            claude_code: ClaudeCodeSection::default(),
+            approval_policy: ApprovalPolicySection::default(),
+        }
+    }
+
+    #[test]
+    fn workspace_collision_rejects_exact_dup() {
+        let existing = vec![runner_with_wd("a", PathBuf::from("/tmp/repo"))];
+        let err = assert_no_workspace_collision(&existing, std::path::Path::new("/tmp/repo"))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("cannot share"));
+        assert!(err.contains("a"));
+    }
+
+    #[test]
+    fn workspace_collision_rejects_new_nested_under_existing() {
+        let existing = vec![runner_with_wd("a", PathBuf::from("/tmp/repo"))];
+        let err = assert_no_workspace_collision(
+            &existing,
+            std::path::Path::new("/tmp/repo/subproject"),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("nested"));
+    }
+
+    #[test]
+    fn workspace_collision_rejects_existing_nested_under_new() {
+        let existing = vec![runner_with_wd("a", PathBuf::from("/tmp/repo/subproject"))];
+        let err = assert_no_workspace_collision(&existing, std::path::Path::new("/tmp/repo"))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("nested"));
+    }
+
+    #[test]
+    fn workspace_collision_allows_disjoint_paths() {
+        let existing = vec![
+            runner_with_wd("a", PathBuf::from("/tmp/repo-a")),
+            runner_with_wd("b", PathBuf::from("/tmp/repo-b")),
+        ];
+        assert!(
+            assert_no_workspace_collision(&existing, std::path::Path::new("/tmp/repo-c")).is_ok()
+        );
+    }
+
+    #[test]
+    fn workspace_collision_allows_first_enrollment() {
+        // No existing runners → nothing can collide.
+        assert!(
+            assert_no_workspace_collision(&[], std::path::Path::new("/tmp/repo")).is_ok()
+        );
     }
 }
