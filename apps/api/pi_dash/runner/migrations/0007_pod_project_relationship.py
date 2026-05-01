@@ -141,7 +141,9 @@ class Migration(migrations.Migration):
     atomic = False
 
     dependencies = [
-        ("db", "0001_initial"),
+        # Issue.assigned_pod (added in db.0126) is read by
+        # _null_issue_assigned_pods below, so that field must already exist.
+        ("db", "0126_issue_assigned_pod"),
         ("runner", "0006_machine_token"),
     ]
 
