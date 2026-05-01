@@ -503,6 +503,10 @@ export default {
       host_label_help:
         "Free-form host name baked into the suggested command. The daemon will substitute its actual hostname if you leave the flag off.",
       host_label_placeholder: "my-laptop",
+      working_dir_label: "Working directory (optional)",
+      working_dir_help:
+        "Local path the daemon runs the agent CLI in — usually the project repo on disk. Defaults to a sandbox under the runner's data dir, which is rarely what you want.",
+      working_dir_placeholder: "local dev machine project working dir",
       submit: "Mint enrollment token",
       submitting: "Minting…",
       cancel: "Cancel",

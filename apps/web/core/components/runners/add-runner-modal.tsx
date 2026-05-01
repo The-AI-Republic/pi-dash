@@ -34,6 +34,7 @@ interface FormValues {
   podName: string;
   name: string;
   hostLabel: string;
+  workingDir: string;
 }
 
 const DEFAULT_VALUES: FormValues = {
@@ -41,6 +42,7 @@ const DEFAULT_VALUES: FormValues = {
   podName: "",
   name: "",
   hostLabel: "",
+  workingDir: "",
 };
 
 const runnerService = new RunnerService();
@@ -129,10 +131,20 @@ export const AddRunnerModal = observer(function AddRunnerModal(props: Props) {
   const enrollmentCommand = useMemo(() => {
     if (!invite) return "";
     const hostLabelArg = watch("hostLabel").trim();
+    const workingDirArg = watch("workingDir").trim();
     const lines = [`pidash connect \\`, `  --url ${apiOrigin} \\`, `  --token ${invite.enrollment_token}`];
-    if (hostLabelArg) {
+    // host-label / working-dir are CLI-only flags; they don't go to the
+    // invite endpoint. Append each on its own continuation line so the
+    // generated command stays readable and copy-pasteable.
+    const optionalArgs: string[] = [];
+    if (hostLabelArg) optionalArgs.push(`  --host-label ${hostLabelArg}`);
+    if (workingDirArg) optionalArgs.push(`  --working-dir ${workingDirArg}`);
+    if (optionalArgs.length > 0) {
       lines[lines.length - 1] += " \\";
-      lines.push(`  --host-label ${hostLabelArg}`);
+      for (let i = 0; i < optionalArgs.length; i += 1) {
+        const isLast = i === optionalArgs.length - 1;
+        lines.push(isLast ? optionalArgs[i] : `${optionalArgs[i]} \\`);
+      }
     }
     return lines.join("\n");
   }, [invite, apiOrigin, watch]);
@@ -289,6 +301,24 @@ export const AddRunnerModal = observer(function AddRunnerModal(props: Props) {
               )}
             />
             <p className="text-12 text-secondary">{t("runners.add_modal.host_label_help")}</p>
+          </div>
+
+          <div className="flex flex-col gap-1">
+            <label htmlFor="add-runner-working-dir" className="text-13 font-medium text-primary">
+              {t("runners.add_modal.working_dir_label")}
+            </label>
+            <Controller
+              control={control}
+              name="workingDir"
+              render={({ field }) => (
+                <Input
+                  {...field}
+                  id="add-runner-working-dir"
+                  placeholder={t("runners.add_modal.working_dir_placeholder")}
+                />
+              )}
+            />
+            <p className="text-12 text-secondary">{t("runners.add_modal.working_dir_help")}</p>
           </div>
 
           <div className="flex justify-end gap-2">
