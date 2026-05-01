@@ -65,15 +65,18 @@ def _maybe_mint_machine_token(
     if locked is not None:
         return None
     minted = tokens.mint_machine_token()
-    MachineToken.objects.create(
-        user=user,
-        workspace=workspace,
-        host_label=host_label,
-        token_hash=minted.hashed,
-        token_fingerprint=minted.fingerprint,
-        label=f"machine: {host_label[:96]}",
-        is_service=True,
-    )
+    try:
+        MachineToken.objects.create(
+            user=user,
+            workspace=workspace,
+            host_label=host_label,
+            token_hash=minted.hashed,
+            token_fingerprint=minted.fingerprint,
+            label=f"machine: {host_label[:96]}",
+            is_service=True,
+        )
+    except IntegrityError:
+        return None
     return minted
 
 

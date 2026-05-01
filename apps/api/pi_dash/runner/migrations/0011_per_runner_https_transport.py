@@ -27,7 +27,7 @@ class Migration(migrations.Migration):
 
     dependencies = [
         ("runner", "0010_agentrun_scheduler_binding"),
-        ("db", "0131_project_scheduler_mvp"),
+        ("db", "0132_project_scheduler_mvp"),
     ]
 
     operations = [

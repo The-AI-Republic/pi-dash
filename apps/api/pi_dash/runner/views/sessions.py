@@ -19,14 +19,12 @@ from __future__ import annotations
 import logging
 import time
 import uuid as _uuid
-from datetime import timedelta
 from typing import Any, Dict, List
 
 from django.conf import settings
 from django.db import transaction
 from django.utils import timezone
 from rest_framework import status
-from rest_framework.permissions import AllowAny
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
@@ -35,6 +33,11 @@ from pi_dash.runner.models import RunnerSession, RunnerStatus
 from pi_dash.runner.services import outbox, session_service
 
 logger = logging.getLogger(__name__)
+_POLL_SLICE_MS = 1000
+
+
+class _SessionEvictedDuringPoll(Exception):
+    pass
 
 
 def _check_protocol_header(request) -> Response | None:
@@ -125,7 +128,7 @@ class RunnerSessionOpenEndpoint(APIView):
             # 6. Create the new session row — this commits "I am the
             # live session" before any subsequent step queries the
             # active-session table (design.md §7.1).
-            session_row = RunnerSession.objects.create(
+            RunnerSession.objects.create(
                 id=new_sid,
                 runner=runner,
                 protocol_version=settings.RUNNER_PROTOCOL_VERSION,
@@ -267,13 +270,19 @@ class RunnerSessionPollEndpoint(APIView):
         block_ms = max(
             1, settings.LONG_POLL_INTERVAL_SECS * 1000
         ) if not use_zero else 0
-        messages = outbox.read_for_session(
-            runner_id=runner.id,
-            session_id=sid,
-            block_ms=block_ms,
-            count=100,
-            use_zero=use_zero,
-        )
+        try:
+            messages = self._read_with_eviction_awareness(
+                runner_id=runner.id,
+                session_id=sid,
+                sid=sid,
+                block_ms=block_ms,
+                use_zero=use_zero,
+            )
+        except _SessionEvictedDuringPoll:
+            return Response(
+                {"error": "session_evicted"},
+                status=status.HTTP_409_CONFLICT,
+            )
         if use_zero:
             outbox.mark_pel_drained(sid)
 
@@ -284,3 +293,55 @@ class RunnerSessionPollEndpoint(APIView):
                 "long_poll_interval_secs": settings.LONG_POLL_INTERVAL_SECS,
             }
         )
+
+    def _read_with_eviction_awareness(
+        self,
+        *,
+        runner_id,
+        session_id,
+        sid,
+        block_ms: int,
+        use_zero: bool,
+    ) -> list[dict]:
+        if block_ms <= 0:
+            return outbox.read_for_session(
+                runner_id=runner_id,
+                session_id=session_id,
+                block_ms=0,
+                count=100,
+                use_zero=use_zero,
+            )
+
+        from pi_dash.settings.redis import redis_instance
+
+        client = redis_instance()
+        if client is None:
+            return outbox.read_for_session(
+                runner_id=runner_id,
+                session_id=session_id,
+                block_ms=block_ms,
+                count=100,
+                use_zero=use_zero,
+            )
+
+        pubsub = client.pubsub(ignore_subscribe_messages=True)
+        pubsub.subscribe(outbox.session_eviction_channel(runner_id))
+        deadline = time.monotonic() + (block_ms / 1000.0)
+        try:
+            while True:
+                remaining_ms = max(0, int((deadline - time.monotonic()) * 1000))
+                slice_ms = min(_POLL_SLICE_MS, remaining_ms)
+                messages = outbox.read_for_session(
+                    runner_id=runner_id,
+                    session_id=session_id,
+                    block_ms=slice_ms,
+                    count=100,
+                    use_zero=use_zero,
+                )
+                if messages or remaining_ms <= 0:
+                    return messages
+                use_zero = False
+                if pubsub.get_message(timeout=0) is not None:
+                    raise _SessionEvictedDuringPoll
+        finally:
+            pubsub.close()

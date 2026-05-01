@@ -17,7 +17,7 @@ from __future__ import annotations
 import json
 import logging
 from datetime import timedelta
-from typing import Any, Callable, Dict, Optional
+from typing import Optional
 
 from django.db import IntegrityError, transaction
 from django.utils import timezone
@@ -36,7 +36,6 @@ from pi_dash.runner.models import (
     ApprovalKind,
     ApprovalRequest,
     ApprovalStatus,
-    Runner,
     RunMessageDedupe,
 )
 
@@ -347,22 +346,30 @@ class RunStreamUpgradeEndpoint(_RunEndpointBase):
             import uuid as _uuid
 
             client = redis_instance()
-            if client is not None:
-                ticket = _uuid.uuid4().hex
-                client.set(
-                    f"ws_upgrade_ticket:{ticket}",
-                    json.dumps(
-                        {
-                            "run_id": str(run.id),
-                            "stream": stream,
-                            "runner_id": str(runner.id) if runner else "",
-                            "expires_at": (
-                                timezone.now() + timedelta(seconds=60)
-                            ).isoformat(),
-                        }
-                    ),
-                    ex=60,
+            if client is None:
+                return Response(
+                    {"error": "redis_unavailable"},
+                    status=status.HTTP_503_SERVICE_UNAVAILABLE,
                 )
+            ticket = _uuid.uuid4().hex
+            client.set(
+                f"ws_upgrade_ticket:{ticket}",
+                json.dumps(
+                    {
+                        "run_id": str(run.id),
+                        "stream": stream,
+                        "runner_id": str(runner.id) if runner else "",
+                        "expires_at": (
+                            timezone.now() + timedelta(seconds=60)
+                        ).isoformat(),
+                    }
+                ),
+                ex=60,
+            )
         except Exception:
             logger.exception("failed to mint ws upgrade ticket")
+            return Response(
+                {"error": "redis_unavailable"},
+                status=status.HTTP_503_SERVICE_UNAVAILABLE,
+            )
         return Response({"ticket": ticket, "expires_in_secs": 60})

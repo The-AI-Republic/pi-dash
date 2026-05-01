@@ -13,7 +13,7 @@
 //   forever, and dispatches `ForceRefresh` / `Revoke` inline; everything
 //   else lands in the runner's mailbox.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -595,8 +595,10 @@ impl RunnerCloudClient {
 
     pub async fn dispatch_client_msg(
         &self,
-        msg: ClientMsg,
+        env: Envelope<ClientMsg>,
     ) -> Result<(), TransportError> {
+        let idempotency_key = env.message_id.to_string();
+        let msg = env.body;
         match msg {
             ClientMsg::Hello { .. } | ClientMsg::Heartbeat { .. } | ClientMsg::Bye { .. } => {
                 Err(TransportError::Protocol(
@@ -605,35 +607,94 @@ impl RunnerCloudClient {
                         .into(),
                 ))
             }
-            ClientMsg::Accept { run_id, .. } => {
-                self.post_run_lifecycle(run_id, "accept", serde_json::to_value(&msg).unwrap_or(Json::Null)).await
+            msg @ ClientMsg::Accept { run_id, .. } => {
+                self.post_run_lifecycle(
+                    run_id,
+                    "accept",
+                    serde_json::to_value(&msg).unwrap_or(Json::Null),
+                    &idempotency_key,
+                )
+                .await
             }
-            ClientMsg::RunStarted { run_id, .. } => {
-                self.post_run_lifecycle(run_id, "started", serde_json::to_value(&msg).unwrap_or(Json::Null)).await
+            msg @ ClientMsg::RunStarted { run_id, .. } => {
+                self.post_run_lifecycle(
+                    run_id,
+                    "started",
+                    serde_json::to_value(&msg).unwrap_or(Json::Null),
+                    &idempotency_key,
+                )
+                .await
             }
-            ClientMsg::RunEvent { run_id, .. } => {
-                self.post_run_event(run_id, serde_json::to_value(&msg).unwrap_or(Json::Null)).await
+            msg @ ClientMsg::RunEvent { run_id, .. } => {
+                self.post_run_event(
+                    run_id,
+                    serde_json::to_value(&msg).unwrap_or(Json::Null),
+                    &idempotency_key,
+                )
+                .await
             }
-            ClientMsg::ApprovalRequest { run_id, .. } => {
-                self.post_run_lifecycle(run_id, "approvals", serde_json::to_value(&msg).unwrap_or(Json::Null)).await
+            msg @ ClientMsg::ApprovalRequest { run_id, .. } => {
+                self.post_run_lifecycle(
+                    run_id,
+                    "approvals",
+                    serde_json::to_value(&msg).unwrap_or(Json::Null),
+                    &idempotency_key,
+                )
+                .await
             }
-            ClientMsg::RunAwaitingReauth { run_id, .. } => {
-                self.post_run_lifecycle(run_id, "awaiting-reauth", serde_json::to_value(&msg).unwrap_or(Json::Null)).await
+            msg @ ClientMsg::RunAwaitingReauth { run_id, .. } => {
+                self.post_run_lifecycle(
+                    run_id,
+                    "awaiting-reauth",
+                    serde_json::to_value(&msg).unwrap_or(Json::Null),
+                    &idempotency_key,
+                )
+                .await
             }
-            ClientMsg::RunCompleted { run_id, .. } => {
-                self.post_run_lifecycle(run_id, "complete", serde_json::to_value(&msg).unwrap_or(Json::Null)).await
+            msg @ ClientMsg::RunCompleted { run_id, .. } => {
+                self.post_run_lifecycle(
+                    run_id,
+                    "complete",
+                    serde_json::to_value(&msg).unwrap_or(Json::Null),
+                    &idempotency_key,
+                )
+                .await
             }
-            ClientMsg::RunPaused { run_id, .. } => {
-                self.post_run_lifecycle(run_id, "pause", serde_json::to_value(&msg).unwrap_or(Json::Null)).await
+            msg @ ClientMsg::RunPaused { run_id, .. } => {
+                self.post_run_lifecycle(
+                    run_id,
+                    "pause",
+                    serde_json::to_value(&msg).unwrap_or(Json::Null),
+                    &idempotency_key,
+                )
+                .await
             }
-            ClientMsg::RunFailed { run_id, .. } => {
-                self.post_run_lifecycle(run_id, "fail", serde_json::to_value(&msg).unwrap_or(Json::Null)).await
+            msg @ ClientMsg::RunFailed { run_id, .. } => {
+                self.post_run_lifecycle(
+                    run_id,
+                    "fail",
+                    serde_json::to_value(&msg).unwrap_or(Json::Null),
+                    &idempotency_key,
+                )
+                .await
             }
-            ClientMsg::RunCancelled { run_id, .. } => {
-                self.post_run_lifecycle(run_id, "cancelled", serde_json::to_value(&msg).unwrap_or(Json::Null)).await
+            msg @ ClientMsg::RunCancelled { run_id, .. } => {
+                self.post_run_lifecycle(
+                    run_id,
+                    "cancelled",
+                    serde_json::to_value(&msg).unwrap_or(Json::Null),
+                    &idempotency_key,
+                )
+                .await
             }
-            ClientMsg::RunResumed { run_id, .. } => {
-                self.post_run_lifecycle(run_id, "resumed", serde_json::to_value(&msg).unwrap_or(Json::Null)).await
+            msg @ ClientMsg::RunResumed { run_id, .. } => {
+                self.post_run_lifecycle(
+                    run_id,
+                    "resumed",
+                    serde_json::to_value(&msg).unwrap_or(Json::Null),
+                    &idempotency_key,
+                )
+                .await
             }
         }
     }
@@ -643,6 +704,7 @@ impl RunnerCloudClient {
         run_id: Uuid,
         verb: &str,
         body: Json,
+        idempotency_key: &str,
     ) -> Result<(), TransportError> {
         let url = format!(
             "{}/api/v1/runner/runs/{}/{}/",
@@ -650,17 +712,24 @@ impl RunnerCloudClient {
             run_id,
             verb,
         );
-        self.post_authed_with_retry(&url, body, |_| true).await?;
+        self.post_authed_with_retry(&url, body, idempotency_key, |_| true)
+            .await?;
         Ok(())
     }
 
-    async fn post_run_event(&self, run_id: Uuid, body: Json) -> Result<(), TransportError> {
+    async fn post_run_event(
+        &self,
+        run_id: Uuid,
+        body: Json,
+        idempotency_key: &str,
+    ) -> Result<(), TransportError> {
         let url = format!(
             "{}/api/v1/runner/runs/{}/events/",
             self.inner.transport.cloud_url(),
             run_id,
         );
-        self.post_authed_with_retry(&url, body, |_| true).await?;
+        self.post_authed_with_retry(&url, body, idempotency_key, |_| true)
+            .await?;
         Ok(())
     }
 
@@ -669,6 +738,7 @@ impl RunnerCloudClient {
         &self,
         url: &str,
         body: Json,
+        idempotency_key: &str,
         _accept: F,
     ) -> Result<Json, TransportError> {
         let mut attempt: u8 = 0;
@@ -680,10 +750,7 @@ impl RunnerCloudClient {
                 .http()
                 .post(url)
                 .header(AUTHORIZATION, format!("Bearer {}", token.raw))
-                .header(
-                    "Idempotency-Key",
-                    Envelope::<()>::new(()).message_id.to_string(),
-                );
+                .header("Idempotency-Key", idempotency_key);
             let resp = req
                 .json(&body)
                 .send()
@@ -783,11 +850,13 @@ pub struct PollMessage {
 
 pub struct HttpLoop {
     pub client: RunnerCloudClient,
-    pub mailbox: mpsc::Sender<Envelope<ServerMsg>>,
+    pub mailbox: mpsc::Sender<InboundEnvelope>,
     pub ack_rx: mpsc::UnboundedReceiver<AckEntry>,
-    pub status_rx: watch::Receiver<PollStatus>,
-    pub shutdown_rx: watch::Receiver<bool>,
+    pub status_rx: watch::Receiver<WireStatus>,
+    pub in_flight_rx: watch::Receiver<Option<Uuid>>,
+    pub shutdown: Arc<tokio::sync::Notify>,
     pub attach_body: AttachBody,
+    inline_acks: VecDeque<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -795,7 +864,34 @@ pub struct AckEntry {
     pub stream_id: String,
 }
 
+#[derive(Debug, Clone)]
+pub struct InboundEnvelope {
+    pub stream_id: Option<String>,
+    pub env: Envelope<ServerMsg>,
+}
+
 impl HttpLoop {
+    pub fn new(
+        client: RunnerCloudClient,
+        mailbox: mpsc::Sender<InboundEnvelope>,
+        ack_rx: mpsc::UnboundedReceiver<AckEntry>,
+        status_rx: watch::Receiver<WireStatus>,
+        in_flight_rx: watch::Receiver<Option<Uuid>>,
+        shutdown: Arc<tokio::sync::Notify>,
+        attach_body: AttachBody,
+    ) -> Self {
+        Self {
+            client,
+            mailbox,
+            ack_rx,
+            status_rx,
+            in_flight_rx,
+            shutdown,
+            attach_body,
+            inline_acks: VecDeque::new(),
+        }
+    }
+
     pub async fn run(mut self) -> Result<(), TransportError> {
         // 1. Bootstrap: ensure access token, open session.
         self.client.ensure_access_token().await?;
@@ -809,23 +905,30 @@ impl HttpLoop {
         };
         let _ = self
             .mailbox
-            .send(Envelope::for_runner(self.client.runner_id(), welcome_body))
+            .send(InboundEnvelope {
+                stream_id: None,
+                env: Envelope::for_runner(self.client.runner_id(), welcome_body),
+            })
             .await;
         if let Some(resume_body) = session.resume_ack
             && let Ok(parsed) = serde_json::from_value::<ServerMsg>(resume_body.clone())
         {
             let _ = self
                 .mailbox
-                .send(Envelope::for_runner(self.client.runner_id(), parsed))
+                .send(InboundEnvelope {
+                    stream_id: None,
+                    env: Envelope::for_runner(self.client.runner_id(), parsed),
+                })
                 .await;
         }
 
         let mut backoff_secs = 1u64;
         loop {
-            if *self.shutdown_rx.borrow() {
-                break;
-            }
-            match self.poll_once().await {
+            let shutdown = self.shutdown.clone();
+            match tokio::select! {
+                _ = shutdown.notified() => break,
+                result = self.poll_once() => result,
+            } {
                 Ok(()) => {
                     backoff_secs = 1;
                 }
@@ -855,10 +958,13 @@ impl HttpLoop {
 
     async fn poll_once(&mut self) -> Result<(), TransportError> {
         let mut acks = Vec::new();
+        while let Some(stream_id) = self.inline_acks.pop_front() {
+            acks.push(stream_id);
+        }
         while let Ok(entry) = self.ack_rx.try_recv() {
             acks.push(entry.stream_id);
         }
-        let status = self.status_rx.borrow().clone();
+        let status = PollStatus::from_wire(*self.status_rx.borrow(), *self.in_flight_rx.borrow());
         let resp = self.client.poll(acks, status).await?;
         for msg in resp.messages {
             self.dispatch(msg).await;
@@ -876,16 +982,7 @@ impl HttpLoop {
                 if let Err(e) = self.client.force_refresh_inline().await {
                     tracing::error!(runner = %runner_id, "force_refresh failed: {e}");
                 }
-                // Inline ack; the cloud just delivered this, so we're
-                // done with the stream id once the refresh resolves.
-                self.ack_rx.close();
-                let _ = self
-                    .mailbox
-                    .try_send(Envelope::for_runner(
-                        runner_id,
-                        ServerMsg::Ping { ts: Utc::now() },
-                    ));
-                let _ = self.send_ack(stream_id).await;
+                self.inline_acks.push_back(stream_id);
             }
             Ok(parsed_body) => {
                 let env = Envelope::<ServerMsg> {
@@ -894,13 +991,16 @@ impl HttpLoop {
                     runner_id: Some(runner_id),
                     body: parsed_body,
                 };
-                if let Err(e) = self.mailbox.send(env).await {
+                if let Err(e) = self
+                    .mailbox
+                    .send(InboundEnvelope {
+                        stream_id: Some(stream_id),
+                        env,
+                    })
+                    .await
+                {
                     tracing::warn!(runner = %runner_id, "mailbox send failed: {e}");
                 }
-                // Ack-on-handle: the RunnerLoop sends the ack via its
-                // own ack_tx after the handler completes. We don't
-                // forward an ack here.
-                let _ = stream_id; // silence unused
             }
             Err(err) => {
                 tracing::warn!(
@@ -912,11 +1012,6 @@ impl HttpLoop {
         }
     }
 
-    async fn send_ack(&self, _stream_id: String) -> Result<(), TransportError> {
-        // For inline-handled control messages we ack via the next poll.
-        // The mailbox path handles the rest.
-        Ok(())
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1003,6 +1098,20 @@ pub async fn enroll_runner(
     resp.json::<EnrollResponse>()
         .await
         .map_err(|e| TransportError::Protocol(format!("enroll body: {e}")))
+}
+
+pub async fn write_runner_credentials(
+    path: PathBuf,
+    creds: RunnerCredentials,
+) -> Result<(), TransportError> {
+    let handle = CredentialsHandle::new(path, creds.clone());
+    handle
+        .rotate(
+            creds.refresh_token.clone(),
+            creds.refresh_token_generation,
+        )
+        .await
+        .map_err(|e| TransportError::Network(e.to_string()))
 }
 
 #[derive(Debug, Clone, Deserialize)]

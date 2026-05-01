@@ -9,9 +9,11 @@ use chrono::Utc;
 use clap::Args as ClapArgs;
 use std::io::{BufRead, IsTerminal, Write};
 
-use crate::cloud::enroll::{EnrollmentRequest, enroll};
+use crate::cloud::http::{
+    RunnerCredentials, SharedHttpTransport, enroll_runner, write_runner_credentials,
+};
 use crate::config::file;
-use crate::config::schema::{Config, Credentials, DaemonConfig};
+use crate::config::schema::{Config, Credentials, DaemonConfig, RunnerConfig, WorkspaceSection};
 use crate::util::paths::Paths;
 
 #[derive(Debug, ClapArgs)]
@@ -43,7 +45,7 @@ pub struct Args {
 pub async fn run(args: Args, paths: &Paths) -> Result<()> {
     validate_cloud_url(&args.url)?;
 
-    if file::load_credentials(paths).is_ok() {
+    if paths.config_path().exists() {
         anyhow::bail!(
             "this machine is already enrolled. Run `pidash remove` first if you want to re-enroll."
         );
@@ -54,17 +56,24 @@ pub async fn run(args: Args, paths: &Paths) -> Result<()> {
         .clone()
         .unwrap_or_else(|| hostname().unwrap_or_else(|| "unknown-host".to_string()));
 
-    let req = EnrollmentRequest {
-        token: args.token.clone(),
-        host_label: host_label.clone(),
-        os: std::env::consts::OS.to_string(),
-        arch: std::env::consts::ARCH.to_string(),
-        version: crate::RUNNER_VERSION.to_string(),
-    };
-
-    let resp = enroll(&args.url, &req)
+    let transport = SharedHttpTransport::new(args.url.clone())?;
+    let resp = enroll_runner(&transport, &args.token, &host_label, None)
         .await
         .context("cloud enrollment failed")?;
+
+    let runner_paths = paths.for_runner(resp.runner_id);
+    runner_paths.ensure()?;
+    write_runner_credentials(
+        runner_paths.credentials_path(),
+        RunnerCredentials {
+            runner_id: resp.runner_id,
+            name: resp.runner_name.clone(),
+            refresh_token: resp.refresh_token.clone(),
+            refresh_token_generation: resp.refresh_token_generation,
+        },
+    )
+    .await
+    .context("writing runner credentials failed")?;
 
     let config = Config {
         version: 2,
@@ -73,30 +82,43 @@ pub async fn run(args: Args, paths: &Paths) -> Result<()> {
             log_level: "info".to_string(),
             log_retention_days: 14,
         },
-        runners: Vec::new(),
+        runners: vec![RunnerConfig {
+            name: resp.runner_name.clone(),
+            runner_id: resp.runner_id,
+            workspace_slug: Some(resp.workspace_slug.clone()),
+            project_slug: Some(resp.project_identifier.clone()),
+            pod_id: None,
+            workspace: WorkspaceSection {
+                working_dir: paths.runner_dir(resp.runner_id).join("workspace"),
+            },
+            agent: Default::default(),
+            codex: Default::default(),
+            claude_code: Default::default(),
+            approval_policy: Default::default(),
+        }],
     };
     file::write_config(paths, &config)?;
 
+    // Legacy machine-scoped credentials are no longer used by the
+    // HTTP transport, but a minimal file keeps older CLI surfaces from
+    // crashing while the rest of the migration lands.
     let creds = Credentials {
-        connection_id: resp.connection_id,
-        connection_secret: resp.connection_secret,
-        connection_name: None,
+        connection_id: resp.runner_id,
+        connection_secret: String::new(),
+        connection_name: Some(resp.runner_name.clone()),
         api_token: None,
         issued_at: Utc::now(),
     };
     file::write_credentials(paths, &creds)?;
 
     println!(
-        "Enrolled connection {} (host_label={host_label}).",
-        creds.connection_id
+        "Enrolled runner {} ({}) (host_label={host_label}).",
+        resp.runner_name, resp.runner_id
     );
     println!(
         "Workspace: {}; protocol v{}.",
         resp.workspace_slug, resp.protocol_version
     );
-    println!();
-    println!("Next: add a runner under this connection:");
-    println!("  pidash runner add --name <NAME> --project <PROJECT>");
 
     if args.skip_service {
         println!("\nSkipping service install (--skip-service).");

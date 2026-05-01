@@ -410,10 +410,6 @@ class Runner(models.Model):
             lambda rid=self.pk: schedule_stream_cleanup_for_runner(rid)
         )
 
-
-MAX_RUNNERS_PER_MACHINE = 50
-
-
 class RunnerSession(models.Model):
     """Per-runner cloud session: owns delivery for one runner.
 
