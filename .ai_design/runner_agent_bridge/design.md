@@ -207,121 +207,83 @@ tokens, last event class. Pi-dash's web UI can render the same.
 
 ## 4. Design
 
-### 4.1 Agent lifecycle vocabulary
+The design narrows Symphony's pattern to three things only:
 
-A new enum on the runner side, mirroring the natural states the
-bridge already transitions through:
+1. update a live per-run snapshot on every agent event,
+2. expose that snapshot to operators,
+3. run a server-side stall watchdog independent of the runner's own
+   internal watchdog.
 
-```rust
-// runner/src/agent/lifecycle.rs (new)
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum AgentLifecycle {
-    /// Workspace setup is running; the agent CLI subprocess has not been
-    /// spawned yet. Covers the gap between Assign acceptance and bridge
-    /// spawn (currently the period that triggered bug #2 in PR #94).
-    Preparing,
-    /// Subprocess has been spawned; we have an OS PID; no events yet.
-    Initializing,
-    /// Events are flowing from the subprocess (last_event_at is recent).
-    Streaming,
-    /// Subprocess is alive but has gone quiet (within stall threshold).
-    /// Surfaced separately from Streaming so the UI can render
-    /// "thinking…" without alarming the operator.
-    Thinking,
-    /// Paused on an approval request (cloud or operator approval pending).
-    AwaitingApproval,
-    /// Paused on an agent-side reauth flow.
-    AwaitingReauth,
-    /// No events in [stall_threshold, dead_threshold) — soft warning,
-    /// not yet failed. The cloud's stall watchdog acts on this.
-    Stalled,
-    /// Subprocess emitted Completed; runner is finalising before sending
-    /// RunCompleted to the cloud.
-    Completing,
-    /// Subprocess process has exited but the run hasn't been finalised on
-    /// the cloud yet. Should be brief; if it lingers, it indicates a bug
-    /// in the runner's failure path.
-    Dead,
-    /// Default before any run is in flight.
-    Idle,
-}
-```
+What this design **does not** add:
 
-Drive the state machine from `pump_events`:
+- A synthetic `AgentLifecycle` enum competing with the existing
+  `AgentRunStatus` and `RunnerStatus` enums. The cloud already has
+  authoritative lifecycle transitions via run-lifecycle endpoints
+  (`Accept`, `RunStarted`, `ApprovalRequest`, etc.); a third state
+  machine on the runner that the cloud has to keep coherent with
+  the first two creates more invariants than it pays for. Where the
+  UI wants to render "the agent is thinking" or "the agent stalled,"
+  it derives that from the descriptive scalars below
+  (`last_event_at`, `agent_subprocess_alive`) — they are a
+  presentation concern, not a state-machine concern.
+- A reshape of the `BridgeEvent` API to introduce first-class
+  `TokenUpdate` / `TurnBoundary` variants. The supervisor can
+  opportunistically parse known `Raw.method` values for token
+  deltas without changing the bridge contract, and that's enough
+  for the observability story. (See §4.3.)
+- New fields on session-open `AttachBody`. The snapshot only needs
+  to flow on the poll path, which already runs every 25s. Session
+  open is rare and is about identity + resume, not telemetry.
 
-| Trigger                                                      | New lifecycle      |
-| ------------------------------------------------------------ | ------------------ |
-| Assign accepted, before workspace resolve                    | `Preparing`        |
-| `AgentBridge::spawn_from_config` returns Ok with a child PID | `Initializing`     |
-| First `BridgeEvent::Raw` received from the bridge            | `Streaming`        |
-| > 30s since last event, no approval pending                  | `Thinking`         |
-| `BridgeEvent::ApprovalRequest` (and not yet Decided)         | `AwaitingApproval` |
-| `BridgeEvent::AwaitingReauth`                                | `AwaitingReauth`   |
-| > `STALL_THRESHOLD` (default 180s) since last event          | `Stalled`          |
-| `BridgeEvent::Completed`                                     | `Completing`       |
-| Bridge stdout closes / child exit observed                   | `Dead`             |
-| Run terminated and `set_current_run(None)`                   | `Idle`             |
+### 4.1 Heartbeat snapshot fields
 
-The thresholds (30s for Thinking, 180s for Stalled) are tunable via
-`Config::settings.codex` / `claude_code` sections so they can differ
-per agent kind.
+Descriptive scalars only — no enums, no derived states. Each field
+either has a current value or is `NULL` (unknown / not applicable).
+The UI / watchdog interpret recency from `last_event_at` directly.
 
-### 4.2 Heartbeat schema extension
+| Field                         | Type            | Source on the runner                                                                                                                                 |
+| ----------------------------- | --------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `observed_run_id`             | `Uuid`          | The run id this snapshot describes (= `rx_in_flight`'s current value).                                                                               |
+| `last_event_at`               | `DateTime<Utc>` | Bumped on every `BridgeEvent` received in `pump_events`.                                                                                             |
+| `last_event_kind`             | `String`        | Last frame's method/kind (e.g. `"codex/event/token_count"`, `"approval/request"`, `"turn/started"`); used by UI for status colour. Length-capped 64. |
+| `last_event_summary`          | `String`        | One-line operator hint (e.g. `"tool/exec sh #14 (running 12s)"`). Length-capped 200; never carries prompt or model output content.                   |
+| `agent_pid`                   | `u32`           | OS pid from `Bridge::child_pid()`; cleared on shutdown.                                                                                              |
+| `agent_subprocess_alive`      | `bool`          | Live answer from a parallel `child.wait()` watcher (§4.4).                                                                                           |
+| `approvals_pending`           | `u32`           | Existing `rx_approvals_pending`.                                                                                                                     |
+| `tokens.{input,output,total}` | `u64`           | Optional. Codex only — supervisor opportunistically parses `codex/event/token_count` Raw frames. NULL for Claude (no streaming usage available).     |
+| `turn_count`                  | `u32`           | Optional. Codex only — supervisor opportunistically increments on `turn/started`. NULL for Claude.                                                   |
 
-The runner reports state to the cloud on **two** different HTTP
-shapes today, and the design has to extend both. They are not the
-same envelope — be explicit about which fields go where so
-implementation isn't ambiguous.
+The UI maps these scalars to its presentation:
 
-#### 4.2.1 Session-open `AttachBody` (top-level)
+- `last_event_at` recent → green badge ("active")
+- `last_event_at` 30-180s old, `approvals_pending == 0` → yellow ("thinking")
+- `last_event_at` > 180s old → red ("stalled")
+- `agent_subprocess_alive == false` → red ("dead")
+- `approvals_pending > 0` → blue ("awaiting approval")
 
-`runner/src/cloud/http.rs:265-275`. Sent once per session-open
-(POST `/runners/<rid>/sessions/`); fields are at the top level of
-the JSON body and `apply_hello`
-(`apps/api/pi_dash/runner/services/session_service.py:55`)
-ingests them by calling `body.get("...")` directly:
+These are CSS rules, not server-side state transitions. No
+enum-keeping discipline required.
 
-```rust
-pub struct AttachBody {
-    // existing
-    pub version: String,
-    pub os: String,
-    pub arch: String,
-    pub status: String,
-    pub in_flight_run: Option<Uuid>,
-    pub project_slug: Option<String>,
-    pub host_label: String,
-    pub agent_versions: HashMap<String, String>,
+### 4.2 Where the snapshot rides — poll status only
 
-    // NEW — all optional. Snapshot of the agent's state at the
-    // moment the session opens. Helpful so the cloud can paint
-    // the UI immediately on (re)connect, without waiting for the
-    // first poll.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub agent_state: Option<AgentLifecycle>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub agent_pid: Option<u32>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub last_event_at: Option<DateTime<Utc>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub turn_count: Option<u32>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub tokens: Option<TokenUsage>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub approvals_pending: Option<u32>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub last_event_summary: Option<String>,
-}
-```
+The runner uses two different HTTP envelopes to talk to the cloud
+(`AttachBody` at session-open, `PollStatus` nested under `"status"`
+at every poll). The observability snapshot rides **only on the
+poll**, not on session-open:
 
-#### 4.2.2 Poll-time `PollStatus` (nested under `"status"`)
+- Session-open is rare (one-shot at reconnect) and its job is
+  identity + resume + bringing the runner online. The cloud already
+  ingests it via `apply_hello` (`session_service.py:55`) which only
+  cares about `version`, `os`, `arch`, `in_flight_run`. Mixing
+  observability fields into that path doubles the ingestion surface
+  and gives the cloud no information it doesn't see ~25s later from
+  the next poll.
+- Poll cadence is 25s by default. That is the natural rate for the
+  observability snapshot to refresh — same cadence as the data, one
+  ingestion path, one storage write.
 
-`runner/src/cloud/http.rs:756-785`. Sent on every long-poll (POST
-`/runners/<rid>/sessions/<sid>/poll`). The poll body is `{ "ack":
-[...], "status": <PollStatus> }`, and the cloud extracts it as
-`status_entry = body.get("status") or {}`
-(`apps/api/pi_dash/runner/views/sessions.py:240-242`):
+Concretely, only `PollStatus` (`runner/src/cloud/http.rs:756-785`)
+gains the new optional fields:
 
 ```rust
 pub struct PollStatus {
@@ -330,23 +292,27 @@ pub struct PollStatus {
     pub in_flight_run: Option<Uuid>,
     pub ts: DateTime<Utc>,
 
-    // NEW — same fields as AttachBody's new fields. Ingested on every
-    // poll (default cadence 25s) so the cloud's view is at most one
-    // poll-cycle behind reality.
+    // NEW — observability snapshot. All optional. NULL means
+    // "unknown" / "not applicable" and is rendered as such by the UI
+    // and skipped by the watchdog.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub agent_state: Option<AgentLifecycle>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub agent_pid: Option<u32>,
+    pub observed_run_id: Option<Uuid>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub last_event_at: Option<DateTime<Utc>>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub turn_count: Option<u32>,
+    pub last_event_kind: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub tokens: Option<TokenUsage>,
+    pub last_event_summary: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub agent_pid: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub agent_subprocess_alive: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub approvals_pending: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub last_event_summary: Option<String>,
+    pub tokens: Option<TokenUsage>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub turn_count: Option<u32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -357,182 +323,102 @@ pub struct TokenUsage {
 }
 ```
 
-The two shapes carry the **same set of new fields** for symmetry —
-the cloud applies an identical projection function to either source.
-What differs is the envelope nesting and the ingestion call site
-(see §4.5.1).
+`AttachBody` is **not** extended.
 
-Wire impact: ~150-250 bytes per request. At a 25s poll cadence and
-~60s session-open cadence (current observed behaviour, see PR #94
-follow-up), that is ~10 bytes/sec/runner — negligible.
+Wire impact: ~200 bytes per poll. At a 25s cadence that is
+~8 bytes/sec/runner — negligible.
 
-### 4.3 Source of truth on the runner side
+### 4.3 Runner-side state plumbing
 
 Add fields to `StateHandle::Inner` (`runner/src/daemon/state.rs`)
 and wire watch channels for the volatile fields the transport layer
-reads each poll:
+reads on each poll:
 
 ```rust
 pub struct Inner {
     // ... existing ...
-    agent_lifecycle: Mutex<AgentLifecycle>,
-    agent_pid: Mutex<Option<u32>>,
-    last_event_at: Mutex<Option<DateTime<Utc>>>,
-    turn_count: Mutex<u32>,
-    tokens: Mutex<TokenUsage>,
-}
-
-pub struct StateHandle {
-    // ... existing ...
-    pub tx_agent_lifecycle: watch::Sender<AgentLifecycle>,
-    pub rx_agent_lifecycle: watch::Receiver<AgentLifecycle>,
-    pub tx_last_event_at: watch::Sender<Option<DateTime<Utc>>>,
-    pub rx_last_event_at: watch::Receiver<Option<DateTime<Utc>>>,
-    // ... etc.
+    last_event_at:        Mutex<Option<DateTime<Utc>>>,
+    last_event_kind:      Mutex<Option<String>>,
+    last_event_summary:   Mutex<Option<String>>,
+    agent_pid:            Mutex<Option<u32>>,
+    agent_subprocess_alive: Mutex<Option<bool>>,
+    tokens:               Mutex<Option<TokenUsage>>,
+    turn_count:           Mutex<Option<u32>>,
 }
 ```
 
-Mutating helpers — and crucially a **reset** call invoked from
-`set_current_run(Some(...))`. Because the cloud-side schema is
-per-`AgentRun` (§4.5.1), the runner-side watch state must be reset
-at the moment a new run starts; otherwise the first heartbeat of
-the new run reports the previous run's `tokens` / `turn_count` /
-`last_event_at`, which would re-introduce the inheritance bug we
-just designed away on the cloud side:
+Helper API — designed so call sites stay narrow and there is no
+state machine to keep coherent. Each setter is a small,
+independent write:
 
 ```rust
 impl StateHandle {
-    pub async fn note_agent_event(&self, ts: DateTime<Utc>) {
-        self.tx_last_event_at.send_replace(Some(ts));
-        // Auto-promote Thinking → Streaming on any event.
-        self.tx_agent_lifecycle.send_if_modified(|cur| {
-            if matches!(*cur, AgentLifecycle::Thinking | AgentLifecycle::Initializing) {
-                *cur = AgentLifecycle::Streaming;
-                true
-            } else { false }
-        });
-    }
-    pub async fn set_agent_lifecycle(&self, next: AgentLifecycle) { ... }
+    /// Bump `last_event_at` and stamp `kind`/`summary`. Called from
+    /// `pump_events` on every `BridgeEvent` regardless of variant.
+    pub async fn note_agent_event(&self, ts: DateTime<Utc>, kind: &str, summary: Option<String>) { ... }
+
     pub async fn set_agent_pid(&self, pid: Option<u32>) { ... }
-    pub async fn add_tokens(&self, delta: TokenUsage) { ... }
+    pub async fn set_agent_alive(&self, alive: bool) { ... }
+    pub async fn set_tokens(&self, usage: TokenUsage) { ... }
     pub async fn incr_turn(&self) { ... }
 
-    /// Called from `set_current_run(Some(_))` to wipe per-run state
-    /// before the new run's first heartbeat. Mirrors the cloud's
-    /// per-run row scoping. Lifecycle is reset to `Preparing`
-    /// (the supervisor stamps it synchronously on Assign — §5e6b1c0
-    /// in PR #94 — so this is the natural starting state).
-    pub async fn reset_per_run_state(&self) {
-        self.tx_last_event_at.send_replace(None);
-        self.tx_agent_pid.send_replace(None);
-        *self.inner.tokens.lock().await = TokenUsage::default();
-        *self.inner.turn_count.lock().await = 0;
-        self.tx_agent_lifecycle.send_replace(AgentLifecycle::Preparing);
+    /// Wipe the per-run snapshot before the next run begins.
+    /// Invoked from `set_current_run(Some(_))` so a new run never
+    /// inherits the previous run's `last_event_at`, tokens, turn
+    /// count, or PID. The cloud-side storage keys snapshots by
+    /// `observed_run_id` (§4.5.1), but this reset is still
+    /// required so the runner doesn't *send* a stale snapshot
+    /// whose `observed_run_id` happens to be the new run id.
+    pub async fn reset_run_snapshot(&self) {
+        *self.inner.last_event_at.lock().await = None;
+        *self.inner.last_event_kind.lock().await = None;
+        *self.inner.last_event_summary.lock().await = None;
+        *self.inner.agent_pid.lock().await = None;
+        *self.inner.agent_subprocess_alive.lock().await = None;
+        *self.inner.tokens.lock().await = None;
+        *self.inner.turn_count.lock().await = None;
     }
 }
 ```
 
-The existing `set_current_run(Some(...))` at
-`runner/src/daemon/state.rs:115` becomes the single point where
-`reset_per_run_state()` is invoked. `set_current_run(None)` (run
-finished) leaves the snapshot in place so the final heartbeat can
-still carry the terminal totals; the next `Some(...)` clears them.
+`set_current_run(Some(...))` at `runner/src/daemon/state.rs:115`
+calls `reset_run_snapshot()` first, then proceeds. `set_current_run
+(None)` does not reset — the final heartbeat of a finishing run
+should still carry its last-known values.
 
-Call sites for the cheap signals (lifecycle, PID, last-event
-timestamp, approvals) — these don't depend on agent-internal
-protocol parsing:
+Call sites — a small, mechanical list, with no protocol-detail
+parsing in the supervisor unless the operator wants the optional
+token/turn fields:
 
-- `supervisor.rs::pump_events` — call `note_agent_event(now)` on every
-  `BridgeEvent` received (`Raw`, `RunStarted`, `ApprovalRequest`,
-  etc. — every variant counts as activity).
-- `agent::Bridge::spawn_*` — return the child PID through a new
-  accessor (e.g. `Bridge::child_pid() -> Option<u32>`); supervisor
-  calls `set_agent_pid(Some(pid))` after spawn,
-  `set_agent_pid(None)` on shutdown.
-- `pump_events` — flip lifecycle on the `BridgeEvent` variants it
-  already matches: `RunStarted` → `Streaming`, `ApprovalRequest` →
-  `AwaitingApproval`, `AwaitingReauth` → `AwaitingReauth`,
-  `Completed` → `Completing`, `Failed` / stdout-close → `Dead`.
-- A new tokio interval task in the supervisor checks
-  `now - last_event_at` periodically and flips the lifecycle to
-  `Thinking` / `Stalled` accordingly.
+- `supervisor.rs::pump_events`, on every `BridgeEvent`: call
+  `note_agent_event(Utc::now(), kind_of(&event), summary_of(&event))`.
+  `kind_of` is a small one-line `match` on the `BridgeEvent` variant
+  (and on `Raw.method` when the variant is `Raw`); `summary_of` is
+  similarly a thin formatter.
+- `supervisor.rs`, after `AgentBridge::spawn_*` returns: call
+  `state.set_agent_pid(Some(child_pid))` (a new `Bridge::child_pid()
+-> Option<u32>` accessor). On shutdown, `set_agent_pid(None)`.
+- `supervisor.rs`, on the parallel `child.wait()` watcher described
+  in §4.4: `state.set_agent_alive(false)` when the watcher fires.
+- Optional, opt-in via config flag — token / turn extraction.
+  Today's `BridgeEvent::Raw` carries codex's `codex/event/token_count`
+  and `turn/started` frames inline. The supervisor can match those
+  methods and call `set_tokens` / `incr_turn` without the bridge API
+  changing. This is **opportunistic observability** — when the agent
+  exposes the data we forward it; when it doesn't (e.g. Claude during
+  a run; codex of a future protocol version) we leave the fields
+  NULL. There is no separate `BridgeEvent::TokenUpdate` /
+  `TurnBoundary` variant introduced.
 
-#### 4.3.1 Token / turn extraction — bridge enrichment, not direct mutation
-
-The token count and turn-boundary signals do **not** exist as
-discrete `BridgeEvent` variants today (see §1). To surface them
-without coupling the supervisor to agent-protocol details, this
-design adds new variants to `BridgeEvent`:
-
-```rust
-pub enum BridgeEvent {
-    // ... existing variants ...
-
-    /// Cumulative token usage update from the agent. Codex emits this
-    /// on its `codex/event/token_count` frames; the bridge layer
-    /// promotes them out of `Raw`. Claude does not stream these — it
-    /// only reports usage in the terminal `Result` payload, so the
-    /// Claude bridge emits a single `TokenUpdate` immediately before
-    /// `Completed` (degraded fidelity, but avoids missing the totals).
-    TokenUpdate {
-        run_id: Uuid,
-        usage: TokenUsage,
-    },
-    /// Turn boundary marker. Codex: `turn/started` (or a fresh
-    /// `session_started.thread_id`). Claude: not surfaced (Claude is
-    /// not turn-structured the way Codex is) — `turn_count` stays at
-    /// 1 for Claude runs.
-    TurnBoundary {
-        run_id: Uuid,
-    },
-}
-```
-
-Call sites:
-
-- `runner/src/codex/bridge.rs::BridgeCursor::translate` — when the
-  inbound notification's method matches `codex/event/token_count`,
-  emit `TokenUpdate` instead of (or in addition to) `Raw`. When
-  method matches `turn/started`, emit `TurnBoundary`.
-- `runner/src/claude_code/bridge.rs::translate` — on `StreamEvent::
-Result`, parse usage from the result and emit a final
-  `TokenUpdate` before `Completed`. No `TurnBoundary` for Claude.
-- `supervisor.rs::pump_events` — match the new variants, call
-  `state.add_tokens(...)` and `state.incr_turn()`.
-
-Why this shape rather than supervisor-side `Raw.params` parsing:
-the supervisor is meant to be agent-agnostic. Putting protocol
-knowledge there ("codex emits token_count frames with this shape")
-duplicates what the bridge layer is for. Enriching `BridgeEvent`
-with two new variants keeps the layering intact and makes the
-Claude-degraded story explicit in the bridge code rather than
-hidden in the supervisor.
-
-#### 4.3.2 Claude-agent degraded story (explicit)
-
-Because Claude does not stream token-usage or turn-boundary frames,
-the heartbeat fidelity is lower for Claude runs than for Codex runs:
-
-| Field                | Codex                       | Claude                                       |
-| -------------------- | --------------------------- | -------------------------------------------- |
-| `agent_pid`          | live                        | live                                         |
-| `agent_state`        | live                        | live (state machine driven by `Raw` cadence) |
-| `last_event_at`      | bumped per frame            | bumped per frame                             |
-| `tokens`             | streamed via `TokenUpdate`  | one final `TokenUpdate` at end of run        |
-| `turn_count`         | streamed via `TurnBoundary` | always 1                                     |
-| `last_event_summary` | populated from `Raw.method` | populated from `Raw.method`                  |
-| `approvals_pending`  | live                        | live                                         |
-
-This is acceptable — the most operationally important signals
-(`agent_state`, `last_event_at`, `agent_pid`, `approvals_pending`)
-work uniformly across both agents. The cosmetic ones (token totals
-during a run, turn count) are Codex-only by design. The web UI
-should render `tokens=null` for Claude runs as "—" rather than
-"0", to avoid suggesting zero token usage on a real run.
+The supervisor having a small piece of agent-protocol knowledge
+("if `Raw.method == codex/event/token_count`, parse usage") is
+acceptable for an _observability_ shim. It is not a load-bearing
+control-plane decision; if the parsing fails or the field shape
+changes, we lose a chart pixel, not run correctness.
 
 Heartbeat construction (`PollStatus::from_state(...)`) reads the
-watch receivers — the existing pattern from `current_attach_body()`
-extended to the new fields.
+mutexes — the same pattern as `current_attach_body()` from
+`http.rs`, extended to the new fields.
 
 ### 4.4 Independent process-exit watch
 
@@ -552,102 +438,119 @@ abstraction; we have to wire it explicitly because Tokio doesn't.
 
 ### 4.5 Cloud-side reconciliation
 
-#### 4.5.1 Persist the heartbeat fields — on `AgentRun`, not `Runner`
+#### 4.5.1 Storage — `RunnerLiveState`, keyed to the observed run
 
-Symphony's per-running-entry record lives on the running issue, not
-on the worker. Pi-dash should match: the observability fields are
-**per-run**, not per-runner. Storing them on `Runner` would let a
-finished run's `last_event_at` / `tokens` / `turn_count` carry over
-into a brand-new run on the same worker before the next heartbeat
-arrives, and the watchdog could fail the new run for a stall it
-inherited from the previous one. Per-run scoping makes that class
-of bug unrepresentable.
-
-So the new columns go on `AgentRun`. All nullable, so an old runner
-(or a brand-new run that hasn't received its first heartbeat yet)
-shows as "unknown" rather than the misleading "idle, 0 tokens":
+The cloud stores the snapshot in a dedicated `RunnerLiveState`
+table — **not** on `Runner` (that would let a finished run's
+metrics persist as worker-wide attributes), and **not** on
+`AgentRun` (those columns would imply the data is part of the
+authoritative run record, when it is in fact volatile and may be
+overwritten / set NULL on every poll).
 
 ```python
-# apps/api/pi_dash/runner/models.py — AgentRun extensions
-class AgentRun(BaseModel):
-    # ... existing fields ...
-
-    agent_lifecycle      = models.CharField(max_length=32, null=True, blank=True)
-    agent_pid            = models.IntegerField(null=True, blank=True)
-    last_event_at        = models.DateTimeField(null=True, blank=True)
-    agent_turn_count     = models.PositiveIntegerField(null=True, blank=True)
-    agent_input_tokens   = models.BigIntegerField(null=True, blank=True)
-    agent_output_tokens  = models.BigIntegerField(null=True, blank=True)
-    agent_total_tokens   = models.BigIntegerField(null=True, blank=True)
-    agent_approvals_pending = models.PositiveSmallIntegerField(null=True, blank=True)
-    agent_last_event_summary = models.CharField(max_length=200, null=True, blank=True)
+# apps/api/pi_dash/runner/models.py
+class RunnerLiveState(models.Model):
+    runner = models.OneToOneField(
+        Runner,
+        on_delete=models.CASCADE,
+        primary_key=True,
+        related_name="live_state",
+    )
+    # The run this snapshot describes. NULL when the runner is idle.
+    # The watchdog (§4.5.3) only acts when this matches a running
+    # AgentRun's id — that is what makes the snapshot
+    # unambiguously about the run we'd be failing.
+    observed_run_id    = models.UUIDField(null=True, blank=True)
+    last_event_at      = models.DateTimeField(null=True, blank=True)
+    last_event_kind    = models.CharField(max_length=64,  null=True, blank=True)
+    last_event_summary = models.CharField(max_length=200, null=True, blank=True)
+    agent_pid          = models.IntegerField(null=True, blank=True)
+    agent_subprocess_alive = models.BooleanField(null=True, blank=True)
+    approvals_pending  = models.PositiveSmallIntegerField(null=True, blank=True)
+    input_tokens       = models.BigIntegerField(null=True, blank=True)
+    output_tokens      = models.BigIntegerField(null=True, blank=True)
+    total_tokens       = models.BigIntegerField(null=True, blank=True)
+    updated_at         = models.DateTimeField(auto_now=True)
 
     class Meta:
-        # ... existing ...
         indexes = [
-            # ... existing ...
-            # supports the stall reconcile query in §4.5.2.
-            models.Index(fields=["status", "last_event_at"]),
+            # Watchdog query in §4.5.3 filters on observed_run_id +
+            # last_event_at, then joins to AgentRun.
+            models.Index(fields=["observed_run_id", "last_event_at"]),
         ]
 ```
 
-`NULL` is the canonical "unknown" / "pre-observability" sentinel —
-the watchdog (§4.5.2) excludes NULL via Django's standard `__lt`
-semantics, the UI renders NULL as "—", and the migration is purely
-additive (no backfill).
+Properties this shape gives us:
 
-Ingestion has **two distinct paths** to match the wire shapes
-(§4.2):
+- One row per `Runner` (`OneToOneField`); upserted on every poll.
+  No need to look up the active `AgentRun` on each ingestion.
+- `observed_run_id` is what makes the snapshot
+  **unambiguously about a specific run.** When a new run starts,
+  the next poll overwrites the row with the new run's id, blanking
+  the old run's metrics in one write — so there is no carry-over
+  even though storage isn't physically per-run.
+- `RunnerLiveState` is treated as observability-only. Authoritative
+  run state stays on `AgentRun` (status, assigned_at, started_at,
+  ended_at, error). The two are intentionally not merged.
 
-**Session-open** (`apply_hello`,
-`apps/api/pi_dash/runner/services/session_service.py:55`). The body
-is the top-level `AttachBody`. Identify the active run for this
-runner by querying `AgentRun` where `runner=runner` and
-`status__in=BUSY_STATUSES`, then upsert the new fields on that row.
-If `body["in_flight_run"]` is present, prefer that as the run
-selector to avoid ambiguity. If no active run exists, skip the
-upsert entirely (the runner is idle; no row to update).
+#### 4.5.2 Ingestion — poll handler only
 
-**Poll** (`RunnerSessionPollEndpoint`,
-`apps/api/pi_dash/runner/views/sessions.py:240`). The body is
-`{"ack": ..., "status": status_entry}`. Read `status_entry`, then
-do the same lookup and upsert as the session-open path. The shared
-projection function:
+Per §4.2, the snapshot rides only on `PollStatus`. So the only
+ingestion site is `RunnerSessionPollEndpoint` at
+`apps/api/pi_dash/runner/views/sessions.py:240-260`. `apply_hello`
+does **not** change.
 
 ```python
 # apps/api/pi_dash/runner/services/session_service.py (new helper)
-def apply_agent_state(runner, status_entry, run_id_hint=None):
-    """Upsert agent observability fields on the runner's active run.
+SNAPSHOT_FIELDS = (
+    "observed_run_id", "last_event_at", "last_event_kind",
+    "last_event_summary", "agent_pid", "agent_subprocess_alive",
+    "approvals_pending", "input_tokens", "output_tokens", "total_tokens",
+)
 
-    `status_entry` may be the top-level AttachBody (session-open) or
-    the nested PollStatus (poll-time) — both carry the same set of
-    fields. Missing fields are left as-is on the existing row (i.e.
-    we never NULL out a known good value because of a stale poll).
+def upsert_runner_live_state(runner, status_entry):
+    """Apply the volatile observability snapshot from a poll body.
+
+    `status_entry` is the dict the poll handler reads as
+    body['status']. Missing fields are left as-is on the existing
+    row — a stale poll never NULLs out a known-good value. A poll
+    that carries a different `observed_run_id` than the row's
+    current value overwrites *all* snapshot fields, ensuring no
+    cross-run carryover.
     """
-    run = _resolve_active_run(runner, run_id_hint)
-    if run is None:
+    if not status_entry:
         return
-    # Apply only the fields that are present in this heartbeat.
+    state, _ = RunnerLiveState.objects.get_or_create(runner=runner)
+
+    incoming_run_id = status_entry.get("observed_run_id")
+    if incoming_run_id and state.observed_run_id != incoming_run_id:
+        # New run — wipe the previous run's snapshot in one write.
+        for f in SNAPSHOT_FIELDS:
+            setattr(state, f, None)
+
     update_fields = []
-    for src_key, model_field in AGENT_STATE_FIELD_MAP.items():
-        if src_key in status_entry:
-            setattr(run, model_field, status_entry[src_key])
-            update_fields.append(model_field)
+    for f in SNAPSHOT_FIELDS:
+        if f in status_entry:
+            setattr(state, f, status_entry[f])
+            update_fields.append(f)
     if update_fields:
-        run.save(update_fields=update_fields)
+        state.save(update_fields=update_fields + ["updated_at"])
 ```
 
-Both `apply_hello` and the poll handler call `apply_agent_state`
-with the same projection, but extract the source dict differently
-(top-level vs nested). The runner's `in_flight_run` field — already
-present in both shapes — is the run-id hint that disambiguates
-when the runner has multiple recent BUSY runs from quick-succession
-assignments.
+The poll handler calls `upsert_runner_live_state(runner,
+body.get('status') or {})` after the existing reaper / heartbeat
+update. Pre-observability runners send no snapshot fields and the
+row stays all-NULL.
 
-#### 4.5.2 Server-side stall watchdog
+#### 4.5.3 Server-side stall watchdog — explicit run-id match
 
-A Celery beat task running every 30s — Symphony's
-`reconcile_stalled_running_issues` analogue:
+A Celery beat task running every 30s. The watchdog requires both
+that the snapshot's `observed_run_id` matches the run's id **and**
+that the snapshot's `last_event_at` is older than the threshold.
+That match is the difference from the previous draft and the
+reason a separate `RunnerLiveState` row earns its keep — it makes
+"this snapshot belongs to _this_ run" expressible as a join
+condition, not as an inference.
 
 ```python
 # apps/api/pi_dash/runner/tasks.py
@@ -656,133 +559,169 @@ def reconcile_stalled_runs():
     threshold = settings.RUNNER_AGENT_STALL_THRESHOLD_SECS  # default 300
     cutoff = timezone.now() - timedelta(seconds=threshold)
 
-    # Filters directly on AgentRun.last_event_at (per-run, §4.5.1).
-    # NULL last_event_at — old runners or runs that have never
-    # received their first heartbeat — is excluded by Django's __lt
-    # semantics, so old fleets remain compatible without special
-    # casing.
-    stalled_runs = AgentRun.objects.filter(
-        status__in=BUSY_STATUSES,
-        last_event_at__lt=cutoff,
-    ).exclude(
-        # Don't fail runs that are legitimately paused. AwaitingApproval
-        # and AwaitingReauth runs are *expected* to have no codex frames.
-        status__in=(AgentRunStatus.AWAITING_APPROVAL, AgentRunStatus.AWAITING_REAUTH),
+    # Active BUSY runs whose runner's snapshot:
+    #   (a) currently describes this run (observed_run_id == run.id), AND
+    #   (b) hasn't been refreshed within the threshold.
+    # NULL last_event_at is excluded by __lt; pre-observability
+    # runners are therefore never reaped by this task.
+    stalled = (
+        AgentRun.objects
+        .filter(status__in=BUSY_STATUSES)
+        .exclude(status__in=(
+            AgentRunStatus.AWAITING_APPROVAL,
+            AgentRunStatus.AWAITING_REAUTH,
+        ))
+        .filter(
+            runner__live_state__observed_run_id=models.F("id"),
+            runner__live_state__last_event_at__lt=cutoff,
+        )
     )
-    for run in stalled_runs:
+    for run in stalled.select_related("runner"):
         run_lifecycle.finalize_run_terminal(
             run.runner, run.id, AgentRunStatus.FAILED,
             error_detail=f"agent stalled: no events for >{threshold}s",
         )
 ```
 
-This is independent of the heartbeat reaper. It catches:
+This catches:
 
-- Runner's tokio runtime wedged (heartbeats stop, but reaper has its
-  own offline detection that handles that case).
-- Agent CLI hung in a way that produces no events (this is the
-  _new_ class — today it has to wait for the runner's internal 5min
-  stall watchdog).
+- Runner's tokio runtime wedged (heartbeats stop, but the existing
+  heartbeat reaper handles that via the runner's offline detection).
+- Agent CLI hung in a way that produces no events — the _new_ class
+  this watchdog adds. Today the cloud only learns of these stalls
+  after the runner's own 5-minute internal watchdog fires.
 - Any future failure mode where the runner remains alive but the
-  agent goes silent.
+  agent goes silent on a specific run.
 
-Default threshold: 300s. Configurable via Django settings, also
-overrideable per-run via the agent kind in the run's runner config
-for deployments with intentionally slow agents.
+Pre-observability runners pass through the watchdog cleanly: their
+`live_state` row either doesn't exist or has all NULL fields, so
+the inner `__lt` clause excludes their runs.
 
-#### 4.5.3 Web UI surface
+Default threshold: 300s. Configurable via Django settings,
+overrideable per agent kind on the run's runner config.
 
-`apps/web/core/components/runners/...` gains a per-run detail panel
-(scoped to the active `AgentRun`, not to the worker) reading from
-the new fields. Every NULL value renders as "—" or "unknown",
-never as a hard zero — that's the difference from the previous
-draft and the reason the schema (§4.5.1) is nullable end-to-end.
+#### 4.5.4 Web UI surface — observability only, not a second lifecycle
 
-| UI element        | Source field (on `AgentRun`)    | NULL render | Format                                                                          |
-| ----------------- | ------------------------------- | ----------- | ------------------------------------------------------------------------------- |
-| Agent state badge | `agent_lifecycle`               | "unknown"   | colored chip (green=streaming, yellow=thinking, red=stalled/dead, gray=unknown) |
-| Last activity     | `last_event_at`                 | "—"         | "12s ago", "2m ago"                                                             |
-| Agent PID         | `agent_pid`                     | "—"         | numeric, with copy button                                                       |
-| Turn              | `agent_turn_count` / config max | "—"         | "2 / 5"                                                                         |
-| Tokens            | `agent_total_tokens`            | "—"         | "31.0k"                                                                         |
-| Approvals         | `agent_approvals_pending`       | "0"         | numeric, with link to approvals view                                            |
-| Last event        | `agent_last_event_summary`      | hidden      | tooltip                                                                         |
+`apps/web/core/components/runners/...` gains a per-run detail
+panel reading from `Runner.live_state` (the `RunnerLiveState` row
+described in §4.5.1) joined with the active `AgentRun`. The panel
+treats this data as **observability only** — it never overrides
+the cloud-side `AgentRunStatus` for run lifecycle transitions, and
+the badge it renders is derived from raw scalars, not from a
+synthetic enum that the cloud has to agree with.
+
+| UI element       | Source field                                                                                                   | NULL render      | Format                                                                  |
+| ---------------- | -------------------------------------------------------------------------------------------------------------- | ---------------- | ----------------------------------------------------------------------- |
+| Activity badge   | derived from `last_event_at` + `agent_subprocess_alive` + `approvals_pending` (CSS rule, not server-side enum) | "unknown" (gray) | green=active, yellow=thinking, red=stalled/dead, blue=awaiting approval |
+| Last activity    | `last_event_at`                                                                                                | "—"              | "12s ago", "2m ago"                                                     |
+| Last event kind  | `last_event_kind`                                                                                              | "—"              | small label (e.g. `tool/exec`)                                          |
+| Agent PID        | `agent_pid`                                                                                                    | "—"              | numeric, with copy button                                               |
+| Subprocess alive | `agent_subprocess_alive`                                                                                       | "—"              | "yes" / "no" / "—"                                                      |
+| Approvals        | `approvals_pending`                                                                                            | "0"              | numeric, with link to approvals view                                    |
+| Tokens           | `total_tokens` (and i/o split)                                                                                 | "—"              | "31.0k"                                                                 |
+| Turn             | `turn_count`                                                                                                   | "—"              | numeric                                                                 |
+| Last event       | `last_event_summary`                                                                                           | hidden           | tooltip                                                                 |
+
+The activity badge is the only place the UI synthesises a state
+label, and it does so on the client from the raw scalars. There is
+no server-side `agent_state` enum to keep coherent with
+`AgentRunStatus` and `RunnerStatus`. This is what Codex's review
+of v2 of this doc was pointing at: keep observability descriptive,
+not authoritative.
 
 This is roughly what Symphony's terminal dashboard renders
-(`status_dashboard.ex:590-633`), translated to a web component.
+(`status_dashboard.ex:590-633`), translated to a web component —
+but with the lifecycle classification done on the client side
+rather than persisted as state.
 
 ## 5. Phasing
 
 ### Phase A — Runner-side, no cloud changes
 
-Lands behind a feature flag. Heartbeat carries the new fields if the
-config opts in. Cloud ignores them today.
+Lands behind a feature flag. Heartbeat carries the new fields if
+the config opts in. Cloud ignores them today.
 
-A.1 `AgentLifecycle` enum + watch channel on `StateHandle`.
-A.2 `note_agent_event` / `set_agent_pid` / lifecycle transitions
-wired in `pump_events` and bridge spawn.
-A.3 `tokens` and `turn_count` extracted from codex frames in
-`codex::bridge`.
-A.4 `PollStatus` and `AttachBody` extended with optional fields.
-A.5 Independent process-exit watcher.
-A.6 Unit tests for state transitions.
+A.1 `RunnerLiveState`-style scalar fields on `StateHandle::Inner`
+(no `AgentLifecycle` enum).
+A.2 `note_agent_event(ts, kind, summary)` / `set_agent_pid` /
+`set_agent_alive` wired in `pump_events` and bridge spawn.
+A.3 `PollStatus` extended with the optional snapshot fields
+(`AttachBody` is **not** changed).
+A.4 Independent process-exit watcher (§4.4) drives
+`agent_subprocess_alive`.
+A.5 Optional, opt-in: supervisor-side parsing of
+`codex/event/token_count` and `turn/started` from `Raw.method` to
+populate `tokens` / `turn_count`. No `BridgeEvent` API change.
+A.6 `reset_run_snapshot()` invoked from `set_current_run(Some(_))`
+so a new run never sends stale fields.
+A.7 Unit tests for the snapshot-reset on new-run boundary, the
+process-exit watcher, and PollStatus serialisation.
 
 Ships behind `agent_observability_v1` config flag, default off.
 
 ### Phase B — Cloud-side ingestion
 
-B.1 DB migration: nullable columns on `AgentRun` (per-run, see
-§4.5.1) plus a `(status, last_event_at)` index for the watchdog.
-B.2 Shared `apply_agent_state(runner, status_entry, run_id_hint)`
-helper. `apply_hello` extracts the top-level fields from
-`AttachBody`; the poll handler extracts `body["status"]`. Both call
-the same helper.
-B.3 Server-side stall reconcile Celery task (queries `AgentRun`
-directly; NULL `last_event_at` is auto-skipped by `__lt`).
-B.4 Tests covering: backward compat (old heartbeat shape, NULL
-fields stay NULL), stall detection true positive / false positive,
-awaiting-approval suppression, run-id-hint disambiguation when
-multiple BUSY runs exist for one runner.
+B.1 DB migration: new `RunnerLiveState` table with the
+`(observed_run_id, last_event_at)` index for the watchdog.
+B.2 `upsert_runner_live_state(runner, status_entry)` helper called
+from the poll handler **only** (`apply_hello` is unchanged). The
+helper wipes the snapshot on `observed_run_id` change.
+B.3 Server-side stall reconcile Celery task with the explicit
+`observed_run_id == agent_run.id` join.
+B.4 Tests covering: backward compat (no `live_state` row,
+all-NULL row), `observed_run_id` change wipes prior snapshot,
+stall watchdog requires both run-id match and stale
+`last_event_at`, AwaitingApproval/AwaitingReauth excluded.
 
-When B ships, runners can flip the flag on; old runners continue to
-work without the new fields. Critically, an old run that completes
-on a now-upgraded fleet does **not** poison the next run's metrics
-because the fields are scoped to `AgentRun`, not `Runner`.
+When B ships, runners can flip the flag on; old runners continue
+to work without the new fields. An old run that completes on a
+now-upgraded fleet does **not** poison the next run's metrics
+because `upsert_runner_live_state` wipes the snapshot the moment
+`observed_run_id` changes.
 
 ### Phase C — Operator surface
 
-C.1 Web UI runner detail panel.
+C.1 Web UI per-run detail panel; activity badge derived
+client-side from raw scalars.
 C.2 Optional JSON observability endpoint
-(`GET /api/v1/runners/<rid>/agent-status`) for external dashboards.
-C.3 Status badges in the runs list view (color of last activity).
+(`GET /api/v1/runners/<rid>/live-state`) for external dashboards.
+C.3 Status colour in the runs list view, from `last_event_at`
+recency.
 
 ## 6. Backward and Forward Compatibility
 
-The `AgentRun` columns are nullable end-to-end; `NULL` is the
-canonical "unknown" sentinel and is what the watchdog and UI both
-fall back to. There is no `default="idle"` or `default=0` in the
-schema — those would silently misrepresent old / pre-observability
-runs as "idle, 0 tokens" instead of "unknown."
+`RunnerLiveState` columns are nullable end-to-end; `NULL` is the
+canonical "unknown" sentinel for both the watchdog and the UI.
+There is no `default="idle"` and no `default=0` — those would
+silently misrepresent pre-observability runs as "idle, 0 tokens"
+instead of "unknown."
 
-| Direction                        | Effect                                                                                                                                                               |
-| -------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| New runner → old cloud           | Old cloud ignores unknown fields on both `AttachBody` and `PollStatus`; reaper still works on the existing `in_flight_run`.                                          |
-| Old runner → new cloud           | Heartbeat carries no new fields; columns remain `NULL`; UI renders "—"; stall reconcile skips the run because `__lt` excludes `NULL`.                                |
-| New runner → new cloud, flag off | Heartbeat carries no new fields; behaves identically to the previous row.                                                                                            |
-| Mixed fleet during rollout       | Each `AgentRun` row is independent; no cross-runner state comparison. A new run on the same runner starts with all `NULL`s and is filled by its own first heartbeat. |
+| Direction                        | Effect                                                                                                                                                |
+| -------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------- |
+| New runner → old cloud           | Old cloud ignores unknown fields in `PollStatus`; existing reaper still works on `in_flight_run`. `AttachBody` is unchanged.                          |
+| Old runner → new cloud           | Heartbeat carries no snapshot fields; `live_state` row stays NULL or absent; UI renders "—"; stall watchdog skips the run.                            |
+| New runner → new cloud, flag off | Heartbeat carries no snapshot fields; identical to the previous row.                                                                                  |
+| Mixed fleet during rollout       | Each runner is independent. A new run starts by overwriting the snapshot via `observed_run_id` change, blanking the previous run's data in one write. |
 
 Field stability:
 
-- `AgentLifecycle` is serialized as snake_case strings; new variants
-  may be added; the cloud parses with a default fallback to
-  `"unknown"` so it never crashes on a future variant.
-- `tokens` / `turn_count` are scoped to one `AgentRun` row; resetting
-  is automatic because each new run gets a fresh row. There is no
-  cross-run carry-over to manage.
-- Heartbeats may omit fields (e.g. `tokens` for Claude during a run);
-  ingestion preserves the previous non-NULL value rather than
-  blanking it. See `apply_agent_state`'s "only the fields that are
-  present" semantic in §4.5.1.
+- All snapshot fields are descriptive scalars; there is no
+  enum-typed field whose variant set the cloud has to keep current
+  with the runner. New scalars can be added later without breaking
+  parsing on either side.
+- `tokens` / `turn_count` may be NULL during a run (e.g. Claude has
+  no streaming tokens); ingestion preserves the previous non-NULL
+  value rather than blanking it. The exception is the
+  `observed_run_id`-changed wipe, which clears all snapshot fields
+  in one write.
+- A heartbeat that omits the entire snapshot block (old runner, or
+  new runner with the flag off) leaves the `live_state` row
+  unchanged. The watchdog sees a stale `last_event_at` and would
+  potentially fire — but the row's `observed_run_id` no longer
+  matches any active run id (because the previous run finished
+  before the upgrade), so the run-id-match clause excludes it.
+  This is the load-bearing reason for the explicit run-id match in
+  §4.5.3.
 
 ## 7. Risks and Open Questions
 
@@ -792,39 +731,50 @@ Field stability:
    and tune per agent kind via the `agent.<kind>.stall_threshold_secs`
    config knob.
 
-2. **`Stalled` lifecycle as a soft state vs. hard fail.** The runner's
-   internal watchdog _fails_ the run after 5 minutes; the cloud's
-   reconcile task does the same. Should the runner instead surface
-   `Stalled` and let the cloud decide? Likely yes, because the cloud
-   has policy context (retry budgets, user preferences) the runner
-   does not. This design preserves both — the runner reports the
-   warning state, both sides can independently act.
+2. **Soft warn vs. hard fail when stalls cross the threshold.**
+   The runner's internal watchdog already fails the run at 5
+   minutes, and the cloud's stall reconcile (§4.5.3) also fails it.
+   The runner-side action is the source of truth in the current
+   design; the cloud side is a backstop for cases where the
+   runner-side watchdog can't fire (wedged tokio, OS hang). If we
+   later want to _retry_ stalled runs instead of failing them, the
+   cloud is the right place — it has the retry policy context the
+   runner does not. Out of scope for v1.
 
 3. **Privacy of `last_event_summary`.** Must never include prompt
-   text, model output, or file contents. Sanitiser layer in the
-   runner: only carry method name, item id, duration, exit code.
-   Codex tool args containing user input are out of scope — keep at
-   summary level.
+   text, model output, or file contents. The runner's
+   `summary_of(BridgeEvent)` formatter sanitises by structure: only
+   method name, item id, duration, exit code. Codex tool args
+   containing user input are out of scope — keep at summary level.
 
-4. **PID stability under SSH-driven workers.** Symphony runs codex on
-   remote workers via SSH; the PID it reports is the SSH parent PID,
-   not the codex PID directly. Pi-dash today runs the agent locally,
-   so this isn't an issue. If we add SSH-driven workers later, the
-   PID field needs a host-qualifier.
+4. **PID stability under SSH-driven workers.** Symphony runs codex
+   on remote workers via SSH; the PID it reports is the SSH parent
+   PID, not the codex PID directly. Pi-dash today runs the agent
+   locally, so this isn't an issue. If we add SSH-driven workers
+   later, the PID field needs a host-qualifier.
 
 5. **`approvals_pending` already exists on the runner side
    (`set_approvals_pending`).** Just wire it through the heartbeat;
    no new state needed.
 
-6. **Cloud-side stall reconcile cost.** O(running_runs) per 30s
-   tick. Index on `(status, last_event_at)`. Trivial at expected
-   scale (≤ thousands of concurrent runs); revisit if scale changes.
+6. **Cloud-side stall reconcile cost.** O(active_runs) per 30s
+   tick, with the `(observed_run_id, last_event_at)` index keeping
+   the join cheap. Trivial at expected scale (≤ thousands of
+   concurrent runs); revisit if scale changes.
 
-7. **Should pi-dash also adopt Symphony's `turn_count`-based
-   continuation?** Symphony retries the same issue across multiple
-   codex turns up to a `max_turns` cap; pi-dash today fails the run
-   on first agent termination. Out of scope for this design — flag as
-   a separate exploration.
+7. **Snapshot stalemate when the runner upgrades mid-run.** If a
+   pre-observability runner runs to completion and then upgrades
+   without finishing, its `live_state` row is empty. After upgrade
+   the next run's first poll writes the new `observed_run_id` and
+   the system is healthy. Old completed runs are never re-evaluated
+   by the watchdog because they aren't in `BUSY_STATUSES`. So this
+   case is benign.
+
+8. **Should pi-dash also adopt Symphony's multi-turn continuation?**
+   Symphony retries the same issue across multiple codex turns up
+   to a `max_turns` cap; pi-dash today fails the run on first agent
+   termination. Out of scope for this design — flag as a separate
+   exploration.
 
 ## 8. Open Items for Future Designs
 
@@ -875,19 +825,15 @@ clean fallbacks for mixed fleets.
 
 ## Appendix B — Pi-dash insertion-point index
 
-| Component                | File                                                                      | Change                                                                            |
-| ------------------------ | ------------------------------------------------------------------------- | --------------------------------------------------------------------------------- |
-| Lifecycle enum           | `runner/src/agent/lifecycle.rs` (new)                                     | new module                                                                        |
-| State store              | `runner/src/daemon/state.rs`                                              | add per-run fields + setters; reset all on each `set_current_run(Some)`           |
-| `BridgeEvent` enrichment | `runner/src/agent/mod.rs`                                                 | add `TokenUpdate` and `TurnBoundary` variants                                     |
-| Codex translator         | `runner/src/codex/bridge.rs::BridgeCursor::translate`                     | promote `codex/event/token_count` and `turn/started` out of `Raw`                 |
-| Claude translator        | `runner/src/claude_code/bridge.rs::translate`                             | emit one `TokenUpdate` from the terminal `Result` payload                         |
-| Event ingestion          | `runner/src/daemon/supervisor.rs::pump_events`                            | call `note_agent_event`; handle new variants; drive lifecycle                     |
-| Bridge PID               | `runner/src/agent/mod.rs::AgentBridge`                                    | expose `child_pid() -> Option<u32>`                                               |
-| AttachBody (open)        | `runner/src/cloud/http.rs::AttachBody` (line 265)                         | add new optional **top-level** fields                                             |
-| PollStatus (poll)        | `runner/src/cloud/http.rs::PollStatus` (line 757)                         | add new optional fields (nested under `"status"` in poll body)                    |
-| Hello apply              | `apps/api/pi_dash/runner/services/session_service.py::apply_hello`        | call new `apply_agent_state(runner, body, run_id_hint=body.get("in_flight_run"))` |
-| Poll handler             | `apps/api/pi_dash/runner/views/sessions.py::RunnerSessionPollEndpoint`    | call `apply_agent_state(runner, body.get("status") or {}, run_id_hint=...)`       |
-| Stall reconcile          | `apps/api/pi_dash/runner/tasks.py::reconcile_stalled_runs` (new)          | new Celery task; queries `AgentRun.last_event_at` directly                        |
-| DB migration             | `apps/api/pi_dash/runner/migrations/00XX_agentrun_agent_observability.py` | additive **nullable** columns on `AgentRun` + `(status, last_event_at)` index     |
-| UI panel                 | `apps/web/core/components/runners/RunnerAgentStatusPanel.tsx` (new)       | new React component; renders NULL as "—" / "unknown"                              |
+| Component              | File                                                                   | Change                                                                                                                                     |
+| ---------------------- | ---------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------ |
+| State store            | `runner/src/daemon/state.rs`                                           | add scalar fields (no lifecycle enum); `note_agent_event(ts, kind, summary)`; `reset_run_snapshot` invoked from `set_current_run(Some(_))` |
+| Bridge PID accessor    | `runner/src/agent/mod.rs::AgentBridge`                                 | expose `child_pid() -> Option<u32>`                                                                                                        |
+| Process-exit watcher   | `runner/src/daemon/supervisor.rs`                                      | parallel `tokio::spawn(child.wait())` drives `set_agent_alive(false)` on death                                                             |
+| Event ingestion        | `runner/src/daemon/supervisor.rs::pump_events`                         | call `note_agent_event` on every `BridgeEvent`; opportunistic `Raw.method` matching for tokens / turn (opt-in)                             |
+| PollStatus (poll only) | `runner/src/cloud/http.rs::PollStatus` (line 757)                      | add the optional snapshot fields. **`AttachBody` is unchanged**                                                                            |
+| Poll handler ingestion | `apps/api/pi_dash/runner/views/sessions.py::RunnerSessionPollEndpoint` | call new `upsert_runner_live_state(runner, body.get("status") or {})`                                                                      |
+| Live-state model       | `apps/api/pi_dash/runner/models.py::RunnerLiveState` (new)             | one row per runner, all nullable; keyed to `observed_run_id`; `(observed_run_id, last_event_at)` index                                     |
+| Stall reconcile        | `apps/api/pi_dash/runner/tasks.py::reconcile_stalled_runs` (new)       | Celery beat; explicit `live_state.observed_run_id == agent_run.id` join + `last_event_at < cutoff`                                         |
+| DB migration           | `apps/api/pi_dash/runner/migrations/00XX_runner_live_state.py`         | additive — new table only, no changes to `AgentRun` / `Runner`                                                                             |
+| UI panel               | `apps/web/core/components/runners/RunnerAgentStatusPanel.tsx` (new)    | observability-only; activity badge derived client-side from raw scalars; NULLs render as "—"                                               |
