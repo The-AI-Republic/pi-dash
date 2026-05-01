@@ -600,10 +600,18 @@ impl RunnerLoop {
                     );
                 }
                 ServerMsg::Revoke { .. } => {
-                    // Connection-scoped (token revocation) — supervisor's
-                    // demux handles it. Reaching this arm means the
-                    // demux routed by mistake.
-                    tracing::warn!("Revoke arrived at RunnerLoop; demux invariant violated");
+                    // Per-runner revoke (HTTP transport). The HttpLoop
+                    // already triggered shutdown for this runner, but
+                    // we may receive the frame as a redelivery.
+                    tracing::warn!("runner revoke received; loop will exit");
+                    return Ok(());
+                }
+                ServerMsg::ForceRefresh { .. } => {
+                    // Handled inline in HttpLoop. If we receive it
+                    // here it's a bug or a redelivery; just log.
+                    tracing::debug!(
+                        "ForceRefresh arrived at RunnerLoop; HttpLoop should have handled it"
+                    );
                 }
                 ServerMsg::RemoveRunner { runner_id, reason } => {
                     // Per-instance teardown: exit ONLY this RunnerLoop;

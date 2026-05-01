@@ -197,12 +197,12 @@ class ApprovalKind(models.TextChoices):
 
 
 class Runner(models.Model):
-    """A logical runner registered under a Connection.
+    """First-class trust and worker entity (per-runner HTTPS transport).
 
-    Runners no longer carry their own bearer credential. The dev machine
-    authenticates as a Connection (``Authorization: Bearer <connection_secret>``
-    + ``X-Connection-Id``) and operates 0..N runners under it; ``runner_id``
-    is just a routing key on the wire.
+    Each runner owns its own refresh token, access-token generation, and
+    revocation state. The legacy ``Connection`` row that used to wrap a
+    machine + N runners is gone; a runner is the unit of trust, auth, and
+    delivery ownership. See ``.ai_design/move_to_https/design.md`` §4-§6.
     """
 
     MAX_PER_USER = 5
@@ -228,14 +228,22 @@ class Runner(models.Model):
         related_name="runners",
     )
     name = models.CharField(max_length=128)
-    # The dev-machine connection that owns this runner. Required: every runner
-    # is registered under exactly one connection. Revoking the connection
-    # cascades to its runners (see ``Connection.revoke``).
-    connection = models.ForeignKey(
-        "Connection",
-        on_delete=models.CASCADE,
-        related_name="runners",
-    )
+    # Free-form host hint reported at enrollment time; surfaced in the UI.
+    host_label = models.CharField(max_length=255, blank=True, default="")
+    # Refresh-token hash and rotation state per ``design.md`` §5.3 / §6.1.
+    refresh_token_hash = models.CharField(max_length=128, blank=True, default="", db_index=True)
+    refresh_token_fingerprint = models.CharField(max_length=16, blank=True, default="")
+    refresh_token_generation = models.PositiveIntegerField(default=0)
+    # Single-slot replay-detection window; matches the previous-hash
+    # decision in ``design.md`` §5.3 step 3.
+    previous_refresh_token_hash = models.CharField(max_length=128, blank=True, default="")
+    # Reserved for future Ed25519 / sidecar-verifier rollout.
+    access_token_signing_key_version = models.PositiveIntegerField(default=1)
+    # One-time enrollment token state; cleared once the daemon exchanges
+    # it for the long-lived refresh token.
+    enrollment_token_hash = models.CharField(max_length=128, blank=True, default="")
+    enrollment_token_fingerprint = models.CharField(max_length=16, blank=True, default="")
+    enrolled_at = models.DateTimeField(null=True, blank=True)
     capabilities = models.JSONField(default=list, blank=True)
     status = models.CharField(
         max_length=16,
@@ -251,6 +259,7 @@ class Runner(models.Model):
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
     revoked_at = models.DateTimeField(null=True, blank=True)
+    revoked_reason = models.CharField(max_length=32, blank=True, default="")
 
     class Meta:
         db_table = "runner"
@@ -315,25 +324,30 @@ class Runner(models.Model):
         self.last_heartbeat_at = timezone.now()
         self.save(update_fields=["last_heartbeat_at"])
 
-    def revoke(self) -> None:
-        """Mark the runner revoked and synchronously cancel any in-flight runs.
+    def revoke(self, reason: str = "manual_revoke") -> None:
+        """Mark the runner revoked and cascade to sessions / runs / pins.
 
-        See ``.ai_design/issue_runner/design.md`` §7.5. Without this, a
-        force-closed runner leaves ``ASSIGNED``/``RUNNING`` rows stranded
-        because ``consumers._finalize_run`` only triggers on runner-sent
-        completion messages that may never arrive after revocation.
+        Cascade order (``design.md`` §6.3, §7.8):
 
-        After the transaction commits, the affected pods are re-drained so
-        queued work (if any) attempts to move to remaining online runners in
-        the same pod.
+        1. Revoke any active ``RunnerSession`` for this runner (so the
+           daemon's next poll receives ``409 session_evicted``).
+        2. Cancel non-terminal ``AgentRun`` rows owned by this runner.
+        3. Unpin QUEUED follow-ups so they flow back into the pod queue.
+        4. Schedule delayed Redis stream cleanup once the daemon has had
+           a brief chance to observe shutdown (``design.md`` §7.8).
+
+        The reason string is one of ``manual_revoke``,
+        ``membership_revoked``, ``refresh_token_replayed``, or
+        ``runner_removed``.
         """
-        # Imports deferred to avoid a circular dependency (matcher imports
-        # Runner model; Runner.revoke calls into matcher).
         from django.db import transaction
         from pi_dash.runner.services.matcher import (
             NON_TERMINAL_STATUSES,
             drain_pod_by_id,
         )
+
+        if self.revoked_at is not None:
+            return
 
         affected_pod_ids: set = set()
         with transaction.atomic():
@@ -341,11 +355,20 @@ class Runner(models.Model):
             Runner.objects.filter(pk=self.pk).update(
                 status=RunnerStatus.REVOKED,
                 revoked_at=now,
+                revoked_reason=reason[:32],
             )
-            # Refresh in-memory instance so callers see the new status/timestamp
-            # without an extra query on their side.
             self.status = RunnerStatus.REVOKED
             self.revoked_at = now
+            self.revoked_reason = reason[:32]
+
+            # (1) Revoke any active RunnerSession for this runner. The
+            # next daemon poll on the old session will see the row gone
+            # and react with 409 session_evicted; pub/sub eviction
+            # signaling fires from the eviction sweeper / session-open
+            # path, not here.
+            RunnerSession.objects.filter(
+                runner=self, revoked_at__isnull=True
+            ).update(revoked_at=now, revoked_reason="runner_revoked")
 
             active_runs = list(
                 AgentRun.objects.select_for_update()
@@ -362,11 +385,6 @@ class Runner(models.Model):
                 )
                 affected_pod_ids = {pid for _, pid in active_runs if pid is not None}
 
-            # Pinned QUEUED runs (follow-ups waiting for this runner) don't
-            # get cancelled — they still represent legitimate user intent.
-            # Drop the pin so they flow back into the pod's general queue
-            # and any remaining online runner can take them with a fresh
-            # session. See §5.7 of .ai_design/issue_run_improve/design.md.
             pinned_pod_ids = list(
                 AgentRun.objects.filter(
                     pinned_runner=self, status=AgentRunStatus.QUEUED
@@ -378,162 +396,157 @@ class Runner(models.Model):
                 ).update(pinned_runner=None)
                 affected_pod_ids.update(pid for pid in pinned_pod_ids if pid is not None)
 
-        # Refire drain for every affected pod once the transaction commits.
-        # Remaining online runners (if any) in the same pod may now pick up
-        # queued work.
         for pod_id in affected_pod_ids:
             transaction.on_commit(lambda pid=pod_id: drain_pod_by_id(pid))
+
+        # Schedule delayed stream cleanup. We do not destroy the stream
+        # inline because a still-live daemon may want to drain a final
+        # `revoke` control frame before its session disappears.
+        from pi_dash.runner.services.outbox import (
+            schedule_stream_cleanup_for_runner,
+        )
+
+        transaction.on_commit(
+            lambda rid=self.pk: schedule_stream_cleanup_for_runner(rid)
+        )
 
 
 MAX_RUNNERS_PER_MACHINE = 50
 
 
-class ConnectionStatus(models.TextChoices):
-    PENDING = "pending", "Pending Enrollment"
-    ACTIVE = "active", "Active"
-    REVOKED = "revoked", "Revoked"
+class RunnerSession(models.Model):
+    """Per-runner cloud session: owns delivery for one runner.
 
+    See ``.ai_design/move_to_https/design.md`` §6.3.
 
-class Connection(models.Model):
-    """A paired dev machine that may host 0..N runners.
-
-    A connection is created on the cloud (web UI) with a one-time
-    enrollment token. The user runs ``pi-dash-runner connect --url …
-    --token …`` on a dev machine, which exchanges the token for the
-    long-lived ``connection_secret`` used on the WebSocket
-    (``Authorization: Bearer <secret>`` + ``X-Connection-Id``).
-
-    Lifecycle states (derived from field combinations):
-        - PENDING — enrollment token minted, secret not yet exchanged.
-        - ACTIVE  — daemon enrolled, secret in use.
-        - REVOKED — admin or owner ended the connection; runners under
-                    it are revoked too.
+    A session row is created on ``POST /runners/<rid>/sessions/`` and
+    revoked on session-eviction, idle-timeout, or runner revocation.
+    Exactly one active session per runner is enforced via a partial
+    unique constraint.
     """
 
-    NAME_PREFIX = "connection_"
-
-    # PK already carries an index; explicit db_index=True is redundant.
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
-    workspace = models.ForeignKey(
-        "db.Workspace",
-        on_delete=models.CASCADE,
-        related_name="connections",
+    runner = models.ForeignKey(
+        "Runner", on_delete=models.CASCADE, related_name="sessions"
     )
-    created_by = models.ForeignKey(
-        settings.AUTH_USER_MODEL,
-        on_delete=models.CASCADE,
-        related_name="connections",
-    )
-    # User-editable label. Auto-allocated as ``connection_001`` on save when
-    # blank, monotonic per workspace.
-    name = models.CharField(max_length=128, blank=True, default="")
-    # Free-form host hint reported by the daemon at enrollment time
-    # (e.g. ``mac-mini.local``). Surfaced in the UI alongside ``name``.
-    host_label = models.CharField(max_length=255, blank=True, default="")
-    # One-time enrollment material. Set at creation, cleared once the daemon
-    # exchanges it for ``secret_hash``.
-    enrollment_token_hash = models.CharField(max_length=128, blank=True, default="")
-    enrollment_token_fingerprint = models.CharField(max_length=16, blank=True, default="")
-    # Long-lived bearer the daemon presents on every WS connect. Empty until
-    # the enrollment exchange runs.
-    secret_hash = models.CharField(max_length=128, blank=True, default="", db_index=True)
-    secret_fingerprint = models.CharField(max_length=16, blank=True, default="")
-    enrolled_at = models.DateTimeField(null=True, blank=True)
-    last_seen_at = models.DateTimeField(null=True, blank=True)
+    protocol_version = models.PositiveIntegerField(default=4)
     created_at = models.DateTimeField(auto_now_add=True)
-    revoked_at = models.DateTimeField(null=True, blank=True, db_index=True)
+    last_seen_at = models.DateTimeField(null=True, blank=True)
+    revoked_at = models.DateTimeField(null=True, blank=True)
+    revoked_reason = models.CharField(max_length=32, blank=True, default="")
 
     class Meta:
-        db_table = "connection"
+        db_table = "runner_session"
         ordering = ("-created_at",)
         constraints = [
             models.UniqueConstraint(
-                fields=["workspace", "name"],
+                fields=["runner"],
                 condition=models.Q(revoked_at__isnull=True),
-                name="connection_unique_name_per_workspace_when_active",
+                name="runner_session_one_active_per_runner",
             ),
         ]
         indexes = [
-            models.Index(fields=["workspace", "revoked_at"]),
-            models.Index(fields=["created_by", "revoked_at"]),
+            models.Index(fields=["runner", "revoked_at"]),
+            models.Index(fields=["last_seen_at"]),
         ]
 
-    def __str__(self) -> str:
-        return f"{self.name} (ws={self.workspace_id})"
 
-    @property
-    def status(self) -> str:
-        if self.revoked_at is not None:
-            return ConnectionStatus.REVOKED
-        if self.enrolled_at is None:
-            return ConnectionStatus.PENDING
-        return ConnectionStatus.ACTIVE
+class RunnerForceRefresh(models.Model):
+    """Force-refresh directive for a runner.
 
-    def is_active(self) -> bool:
-        return self.revoked_at is None
+    See ``.ai_design/move_to_https/design.md`` §5.2 / §7.8. While a row
+    exists, the access-token verifier rejects tokens whose
+    ``rtg < min_rtg``. The row is deleted on the runner's next
+    successful refresh.
+    """
 
-    def save(self, *args, **kwargs):
-        # Auto-allocation only fires on insert. A subsequent save with an
-        # empty name (e.g. an update_fields path that touches other fields
-        # while name happens to be blank) must not re-allocate and shift
-        # the row to a different connection_NNN.
-        if self._state.adding and not self.name and self.workspace_id is not None:
-            self.name = self._allocate_default_name(self.workspace_id)
-        super().save(*args, **kwargs)
+    runner = models.OneToOneField(
+        "Runner",
+        on_delete=models.CASCADE,
+        related_name="force_refresh",
+        primary_key=True,
+    )
+    min_rtg = models.PositiveIntegerField(default=0)
+    reason = models.CharField(max_length=64, blank=True, default="")
+    created_at = models.DateTimeField(auto_now_add=True)
 
-    @classmethod
-    def _allocate_default_name(cls, workspace_id) -> str:
-        """Return the next ``connection_NNN`` name in the workspace.
+    class Meta:
+        db_table = "runner_force_refresh"
 
-        Walks active connection names, finds the highest numeric suffix
-        in use, and returns the next one zero-padded to three digits.
-        Two simultaneous creates may collide on the unique constraint —
-        the caller must retry on IntegrityError.
-        """
-        existing = (
-            cls.objects.filter(workspace_id=workspace_id)
-            .values_list("name", flat=True)
-        )
-        max_n = 0
-        for name in existing:
-            if not name.startswith(cls.NAME_PREFIX):
-                continue
-            tail = name[len(cls.NAME_PREFIX):]
-            if tail.isdigit():
-                max_n = max(max_n, int(tail))
-        return f"{cls.NAME_PREFIX}{max_n + 1:03d}"
+
+class RunMessageDedupe(models.Model):
+    """Idempotency record for runner→cloud HTTP run-lifecycle POSTs.
+
+    See ``.ai_design/move_to_https/design.md`` §7.5. Keyed on
+    ``(run, message_id)``: a duplicate POST short-circuits to the
+    cached response status without re-applying the side effects.
+    """
+
+    run = models.ForeignKey(
+        "AgentRun", on_delete=models.CASCADE, related_name="message_dedupes"
+    )
+    message_id = models.CharField(max_length=128)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = "run_message_dedupe"
+        constraints = [
+            models.UniqueConstraint(
+                fields=["run", "message_id"],
+                name="run_message_dedupe_unique",
+            ),
+        ]
+        indexes = [models.Index(fields=["created_at"])]
+
+
+class MachineToken(models.Model):
+    """Machine-scoped CLI credential ("pidash auth login").
+
+    See ``.ai_design/move_to_https/design.md`` §5.6. Independent of
+    runner transport: a machine has at most one active MachineToken
+    per ``(user, workspace, host_label)`` regardless of how many
+    runners it hosts.
+    """
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="machine_tokens",
+    )
+    workspace = models.ForeignKey(
+        "db.Workspace",
+        on_delete=models.CASCADE,
+        related_name="machine_tokens",
+    )
+    host_label = models.CharField(max_length=255)
+    token_hash = models.CharField(max_length=128, db_index=True)
+    token_fingerprint = models.CharField(max_length=16, blank=True, default="")
+    label = models.CharField(max_length=128, blank=True, default="")
+    is_service = models.BooleanField(default=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    last_used_at = models.DateTimeField(null=True, blank=True)
+    revoked_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        db_table = "machine_token"
+        ordering = ("-created_at",)
+        constraints = [
+            models.UniqueConstraint(
+                fields=["user", "workspace", "host_label"],
+                condition=models.Q(revoked_at__isnull=True),
+                name="machine_token_one_active_per_user_ws_host",
+            ),
+        ]
+        indexes = [
+            models.Index(fields=["user", "workspace", "revoked_at"]),
+        ]
 
     def revoke(self) -> None:
-        """Mark the connection revoked and cascade to its runners.
-
-        Owned runners are revoked individually (which cancels their
-        in-flight runs via ``Runner.revoke``); a connection-scoped
-        ``Revoke`` frame is pushed to the consumer so the daemon shuts
-        down cleanly. If the WS is already down, the message is dropped
-        and the next reconnect fails the auth check (revoked_at is
-        non-null).
-        """
-        from django.db import transaction
-
-        from pi_dash.runner.services.pubsub import (
-            close_runner_session,
-            send_connection_revoke,
-        )
-
         if self.revoked_at is not None:
             return
-        owned_runner_ids: list = []
-        with transaction.atomic():
-            self.revoked_at = timezone.now()
-            self.save(update_fields=["revoked_at"])
-            for runner in self.runners.filter(revoked_at__isnull=True):
-                runner.revoke()
-                owned_runner_ids.append(runner.id)
-
-        for runner_id in owned_runner_ids:
-            send_connection_revoke(runner_id, reason="connection revoked")
-        for runner_id in owned_runner_ids:
-            close_runner_session(runner_id)
+        self.revoked_at = timezone.now()
+        self.save(update_fields=["revoked_at"])
 
 
 class AgentRun(models.Model):
