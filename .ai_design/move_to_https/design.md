@@ -186,6 +186,23 @@ Machine token bootstrap:
 - if the enrolling user has no active `MachineToken` for the same
   `(workspace, host_label)`, the cloud also returns a `machine_token`
 - otherwise the enrollment response omits it
+- bootstrap runs inside the enrollment transaction: lock any existing
+  live `MachineToken` row for `(user, workspace, host_label)` first,
+  then mint only if none exists. The unique constraint is the safety
+  net; the lock prevents the steady-state concurrent-enrollment race.
+
+Operator-visible behavior:
+
+- **Every new runner enrollment mints a fresh runner credential set.**
+  Adding runner `R2` after `R1` means `R2` gets its own
+  `refresh_token` + `access_token`; runner credentials are never
+  shared across runners.
+- **The CLI credential is not re-minted for every runner.** The first
+  runner enrolled on a machine bootstraps the machine-scoped
+  `MachineToken`; later runners on the same machine reuse that token.
+- Therefore the system has **two token families** but normally only
+  **one operator step**: enrolling a runner may also bootstrap the CLI
+  token if the machine does not already have one.
 
 Response shape:
 
@@ -201,7 +218,8 @@ Response shape:
   "pod_slug": "...",
   "long_poll_interval_secs": 25,
   "protocol_version": 4,
-  "machine_token": "mt_..."
+  "machine_token": "mt_...",
+  "machine_token_minted": true
 }
 ```
 
@@ -358,6 +376,17 @@ Properties:
 
 This token is not part of the runner transport trust model.
 
+Important distinction from runner enrollment:
+
+- A machine may host N runners, but it should normally have only **one**
+  active `MachineToken` per `(user, workspace, host_label)`.
+- Enrolling runner `R2`, `R3`, ... on the same machine does **not**
+  create additional CLI credentials; each of those enrollments only
+  creates the new runner's transport credentials.
+- If the CLI credential needs to be rotated independently, that is a
+  separate operation (`pidash auth login` / revoke + reissue), not a
+  side effect of adding another runner.
+
 ## 6. Data Model
 
 ### 6.1 Runner gains the trust fields
@@ -413,6 +442,12 @@ Constraint:
 
 - one active session per runner
 
+Cascade rule:
+
+- when `Runner.revoke()` runs, any active `RunnerSession` for that
+  runner is revoked in the same transaction with
+  `revoked_reason = "runner_revoked"`
+
 ### 6.4 RunnerForceRefresh
 
 Per-runner row:
@@ -447,10 +482,11 @@ No new pod ownership model is introduced.
 Single migration sequence:
 
 1. add trust/auth fields to `Runner`
-2. drop `Connection`
-3. rekey `RunnerSession` to `runner`
-4. rekey `RunnerForceRefresh` to `runner`
-5. add `MachineToken`
+2. rekey `RunnerSession` to `runner`
+3. rekey `RunnerForceRefresh` to `runner`
+4. drop `Runner.connection` FK
+5. drop `Connection`
+6. add `MachineToken`
 
 ## 7. Wire Protocol Mapping
 
@@ -511,6 +547,8 @@ only run after we have a live session for the runner.
 
 - clean shutdown for that runner
 - persistent stream/group survive
+- explicitly deletes `session_pel_drained:{sid}` as part of session
+  teardown
 
 ### 7.2 No attach endpoint
 
@@ -549,6 +587,13 @@ Server behavior:
    - first poll after session-open uses `0`
    - later polls use `>`
 7. return `messages[]`
+
+`session_pel_drained:{sid}` lifecycle:
+
+- the marker is set with `EX = 2 * access_token_ttl_secs`
+- `DELETE /sessions/<sid>/` explicitly removes it
+- session eviction explicitly removes the old session's marker
+- expiry is the fallback if the daemon disappears mid-session
 
 Response:
 
@@ -648,6 +693,17 @@ Shared authorization rule:
 - resolve run
 - require `run.runner_id == request.auth_runner.id`
 
+Lifecycle ordering contract:
+
+- for a given `run_id`, `RunnerCloudClient` serializes non-event
+  lifecycle POSTs and awaits each one before issuing the next:
+  `RunStarted`, `RunPaused`, `RunAwaitingReauth`, `RunCompleted`,
+  `RunFailed`, `RunCancelled`, and `RunResumed`
+- different runs may POST concurrently
+- `RunEvent` batching is independent and is not serialized behind
+  lifecycle POSTs, so cloud handlers must tolerate `RunEvent`
+  arriving before `RunStarted` for the same run
+
 ### 7.6 Session fencing
 
 Per runner:
@@ -690,6 +746,14 @@ Daemon:
 - receives `force_refresh`
 - refreshes inline
 - successful refresh clears the DB row
+
+Revocation cleanup note:
+
+- if `Runner.revoke()` runs because of membership loss, replay
+  detection, or operator action, stream/group cleanup is scheduled
+  shortly after the revoke path rather than happening inline
+- this preserves a brief window for the daemon to observe shutdown
+  cleanly while still bounding orphaned Redis resources
 
 ### 7.9 WebSocket reservation
 
@@ -779,21 +843,31 @@ Protocol version check:
 
 ## 10. Failure Modes
 
-| Symptom                                      | Recovery                                                                                                          |
-| -------------------------------------------- | ----------------------------------------------------------------------------------------------------------------- |
-| one runner gets `401 access_token_expired`   | refresh that runner only and retry once                                                                           |
-| one runner gets `401 runner_revoked`         | stop that runner only — server marked `revoked_at` mid-token-life; the per-request revoked check (§5.4) caught it |
-| one runner gets `401 membership_revoked`     | revoke and stop that runner only                                                                                  |
-| one runner gets `401 refresh_token_replayed` | revoke and stop that runner only                                                                                  |
-| one runner sees network error                | retry that runner's poll with backoff                                                                             |
-| one runner gets `409 session_evicted`        | stop that runner; the new session owns delivery                                                                   |
-| one runner receives `force_refresh`          | refresh inline, continue                                                                                          |
-| daemon crashes mid-handle                    | next session reclaims and redelivers from PEL                                                                     |
+| Symptom                                               | Recovery                                                                                                                      |
+| ----------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------- |
+| one runner gets `401 access_token_expired`            | refresh that runner only and retry once                                                                                       |
+| one runner gets `401 runner_revoked`                  | stop that runner only — server marked `revoked_at` mid-token-life; the per-request revoked check (§5.4) caught it             |
+| one runner gets `401 membership_revoked`              | revoke and stop that runner only                                                                                              |
+| one runner gets `401 refresh_token_replayed`          | revoke and stop that runner only                                                                                              |
+| one runner sees network error                         | retry that runner's poll with backoff                                                                                         |
+| one runner gets `409 session_evicted`                 | stop that runner; the new session owns delivery                                                                               |
+| one runner receives `force_refresh`                   | refresh inline, continue                                                                                                      |
+| daemon crashes mid-handle                             | next session reclaims and redelivers from PEL                                                                                 |
+| daemon performs graceful shutdown with in-flight work | stop each runner's agent subprocess best-effort, emit final `RunCancelled` only when auth is still valid, then close sessions |
 
 The key property is isolation: sibling runners on the same machine are
 not transport-coupled.
 
 ## 11. Phased Rollout
+
+Dual-stack invariant:
+
+- during phases 2–4, both the legacy WS control plane and the new HTTP
+  endpoints remain active on the cloud
+- `send_to_runner` dual-writes to the Channels group and the runner's
+  Redis stream during this window
+- daemons continue using WS until Phase 4 flips them to HTTP
+- only Phase 5 retires the WS control plane
 
 ### Phase 1 — Cloud auth and data-model shift
 
@@ -820,6 +894,8 @@ not transport-coupled.
 - create shared daemon-level HTTP transport
 - create one `RunnerCloudClient` and one `HttpLoop` per runner
 - remove shared cloud session / shared demux / attach-emitter ideas
+- implement per-runner single-flight refresh so concurrent refresh
+  triggers collapse to one in-flight refresh operation per runner
 - bump to protocol version 4
 
 ### Phase 5 — Retire WS as control plane

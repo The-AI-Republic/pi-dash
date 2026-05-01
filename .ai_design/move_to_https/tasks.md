@@ -41,9 +41,6 @@ How to use this file:
 
 ### 1.1 Schema migration (single migration, no production data)
 
-- [ ] Drop `Connection` table.
-- [ ] Drop `Runner.connection` FK (the Connection table is going away;
-      `Runner` is now self-sufficient for trust state).
 - [ ] **Use existing `Runner.owner` and `Runner.workspace`** as the
       trust principal and workspace binding (`design.md` §6.1).
       `runner.owner` is already used by `matcher.py`,
@@ -68,6 +65,8 @@ How to use this file:
         `UniqueConstraint(fields=["runner"], condition=Q(revoked_at__isnull=True))`
 - [ ] Re-key `RunnerForceRefresh` from `(connection)` to `(runner)`:
   - [ ] OneToOneField `runner` (replaces `connection`)
+- [ ] Drop `Runner.connection` FK.
+- [ ] Drop `Connection` table.
 - [ ] Add `MachineToken` model (see §1.5).
 
 ### 1.2 Access-token format & key ring
@@ -157,7 +156,9 @@ How to use this file:
       workspace (out-of-scope HTML; just the API endpoint to list +
       revoke is in scope here).
 - [ ] `pidash auth login` flow:
-  - [ ] Web UI mints a one-time ticket bound to `(user, workspace)`.
+  - [ ] Web UI mints a one-time ticket at
+        `POST /api/v1/workspaces/<ws>/machine-tokens/tickets/`,
+        backed by Redis `machine_token_ticket:{uuid}` with `EX 60`.
   - [ ] CLI `pidash auth login <ticket>` calls
         `POST /api/v1/runner/machine-tokens/` to redeem the ticket
         for a MachineToken; daemon writes
@@ -181,6 +182,11 @@ How to use this file:
       matching `(user, workspace, host_label)`. If none, mint one
       and include it in the response under `machine_token`.
       Otherwise omit the field.
+  - [ ] Perform the bootstrap inside the enrollment transaction by
+        locking any existing live `(user, workspace, host_label)` row
+        before deciding to mint. Add `machine_token_minted: true|false`
+        to the response so the daemon knows whether it must write
+        `machine_token.toml`.
 - [ ] Bump new runner's `refresh_token_generation` to 1 on first
       enrollment.
 
@@ -216,6 +222,11 @@ How to use this file:
 
 ### 2.1 Session lifecycle endpoints
 
+- [ ] Before wiring `POST /sessions/`, extract `_apply_hello`,
+      `_resolve_runner` (renamed from `_resolve_connection_runner`),
+      and online/offline transitions from `consumers.py` into a
+      shared service module so the HTTP path and WS path call the same
+      implementation from day one.
 - [ ] `POST /api/v1/runner/runners/<rid>/sessions/`
       Notes: `design.md` §7.1; combines today's session-open and
       per-runner Hello into one step.
@@ -275,8 +286,11 @@ How to use this file:
 - [ ] Per-session id-marker selection: track
       `session_pel_drained:{sid}` (Redis SET / boolean) — first poll
       after session-open reads with `0`, subsequent polls with `>`.
+  - [ ] Set the marker with `EX = 2 * access_token_ttl_secs`.
+  - [ ] Explicitly `DEL` it on `DELETE /sessions/<sid>/` and on
+        session eviction.
 - [ ] Issue one `XREADGROUP GROUP runner-group:{rid} consumer-{sid}
-  COUNT 100 BLOCK 25000 STREAMS runner_stream:{rid} <0|>>`.
+COUNT 100 BLOCK 25000 STREAMS runner_stream:{rid} <0|>>`.
 - [ ] Return drained entries with `stream_id`, `mid`, `type`, `body`.
 
 ### 2.3 Outbox helpers
@@ -293,7 +307,7 @@ How to use this file:
         is safe here.)
 - [ ] `read_for_session(rid, sid, timeout_ms)` →
       `XREADGROUP GROUP runner-group:{rid} consumer-{sid} ... BLOCK
-  timeout_ms STREAMS runner_stream:{rid} (0|>)`.
+timeout_ms STREAMS runner_stream:{rid} (0|>)`.
 - [ ] `ack_for_session(rid, [stream_id, ...])` →
       `XACK runner_stream:{rid} runner-group:{rid} <id1> [<id2> ...]`
       (multi-id form).
@@ -367,6 +381,9 @@ runner-group:{rid} consumer-{sid}`. The persistent
      whose runner is revoked or has been idle with `XLEN == 0` for
      > 24h. Delete `runner_offline_stream:{rid}` idle >24h with
      > `XLEN == 0`.
+- [ ] `Runner.revoke()` schedules delayed cleanup of the revoked
+      runner's stream/group after the revoke path has had a brief
+      chance to be observed by a live daemon.
 - [ ] `sweep_run_message_dedupe` daily: delete rows older than
       `run_message_dedupe_ttl_secs` (7d).
 - [ ] Wire all four to Celery beat (or chosen periodic scheduler);
@@ -388,7 +405,7 @@ runner-group:{rid} consumer-{sid}`. The persistent
 - [ ] `POST /sessions/` reads `X-Runner-Protocol-Version` header;
       missing or `< 4` → `426 Upgrade Required` with body
       `{"error": "protocol_version_unsupported", "minimum": 4,
-  "upgrade_url": "..."}`.
+"upgrade_url": "..."}`.
 - [ ] WS upgrade endpoint: reject `X-Runner-Protocol < 4` with WS
       close code 1008 reason `protocol_version_unsupported`.
 - [ ] Test: v3 daemon hitting `POST /sessions/` gets 426; v3 daemon
@@ -430,6 +447,10 @@ For each of `Accept`, `RunStarted`, `RunEvent`, `ApprovalRequest`,
 - [ ] Body schema mirrors today's WS frame (re-use serializers).
 - [ ] `Idempotency-Key` header → `(run, message_id)` dedupe via
       `RunMessageDedupe`.
+- [ ] Per-run lifecycle ordering rule: for a given `run_id`,
+      non-event lifecycle POSTs are sent serially and awaited in
+      order. `RunEvent` batches remain independent, so handlers must
+      tolerate `RunEvent` arriving before `RunStarted`.
 
 ### 3.2 Run-level authorization
 
@@ -459,7 +480,8 @@ For each of `Accept`, `RunStarted`, `RunEvent`, `ApprovalRequest`,
 - [ ] WS handshake on `wss://.../stream/<ticket>` consumes the
       ticket via `GETDEL`. Reuse → reject. Missing → reject.
 - [ ] v1 ships the endpoint and ticket store but no live consumer
-      (deferred to first real use case per `design.md` §14).
+      (deferred to first real use case per `design.md` §7.9 and the
+      out-of-scope note at the end of this file).
 
 ### 3.5 Tests
 
@@ -497,7 +519,7 @@ mergeable behind `PI_DASH_TRANSPORT=http|ws` until 4d defaults to
 - [ ] Daemon-level `daemon.toml` for shared config (host_label,
       cloud URL).
 - [ ] Daemon-level `machine_token.toml` written by `pidash auth
-  login` flow (read-only as far as the daemon is concerned —
+login` flow (read-only as far as the daemon is concerned —
       MachineToken is for the CLI, not the daemon).
 - [ ] 401 `access_token_expired` → auto-refresh + retry once.
 - [ ] 401 `membership_revoked` / `refresh_token_replayed` /
@@ -505,6 +527,8 @@ mergeable behind `PI_DASH_TRANSPORT=http|ws` until 4d defaults to
       this `RunnerInstance` shuts down (siblings continue).
 - [ ] Integration test against fake cloud: enroll-like flow →
       refresh → open_session → close_session for a single runner.
+- [ ] Single-flight refresh stress test: 10 concurrent callers on one
+      `RunnerCloudClient`, exactly one refresh.
 
 ### 4b. Per-runner `HttpLoop` replaces `ConnectionLoop`
 
@@ -544,6 +568,14 @@ mergeable behind `PI_DASH_TRANSPORT=http|ws` until 4d defaults to
 - [ ] On `RunnerLoop` exit (e.g. due to `RemoveRunner`),
       supervisor's join-handler triggers
       `client.close_session()` for that runner.
+- [ ] Graceful daemon shutdown with in-flight work:
+  - [ ] stop accepting new IPC
+  - [ ] for each runner with an in-flight agent subprocess: signal it
+        to stop, escalate after a short grace period
+  - [ ] if auth is still valid, emit final
+        `RunCancelled(reason="runner_shutdown")`
+  - [ ] drain pending `RunEvent` batches synchronously
+  - [ ] `DELETE /sessions/<sid>/` for each runner before process exit
 - [ ] **Ack-on-handle** (`design.md` decision #21,
       `daemon_module.md` §8): per-`RunnerInstance`
       `mpsc::UnboundedSender<AckEntry>` is plumbed from the
@@ -613,11 +645,10 @@ mergeable behind `PI_DASH_TRANSPORT=http|ws` until 4d defaults to
 
 ### 5.2 Shared service extraction
 
-- [ ] Extract `_apply_hello`, `_resolve_runner` (renamed from
-      `_resolve_connection_runner`), group-add, online/offline
-      transitions from `consumers.py` into a shared service module
-      callable from both the WS consumer (per-run upgrade only) and
-      the HTTP `POST /sessions/` endpoint.
+- [ ] Verify the Phase-2 shared-service extraction is complete and the
+      Channels consumer no longer contains control-plane-only copies of
+      `_apply_hello`, `_resolve_runner`, group-add, or online/offline
+      transition logic.
 
 ### 5.3 Verification
 

@@ -317,6 +317,15 @@ The buffer is per-run and per-runner (each `RunnerCloudClient` has
 its own); concurrent runs on different runners get fully
 independent buffers and POSTs.
 
+Lifecycle ordering contract:
+
+- for a given `run_id`, `RunnerCloudClient` serializes non-event
+  lifecycle POSTs and awaits each before sending the next lifecycle
+  POST for that same run
+- different runs may POST concurrently
+- `RunEvent` batching remains independent, so cloud handlers must
+  tolerate `RunEvent` arriving before `RunStarted`
+
 ## 7. No Demux
 
 The cross-runner Demux from the old design is gone entirely. Each
@@ -573,6 +582,21 @@ recoverable).
 | `RemoveRunner` ServerMsg           | Demux to mailbox. `RunnerLoop` exits its inner loop on this frame (same as today). On exit, the runner's `HttpLoop` calls `client.close_session()` and the supervisor reaps the task tree. The other runners on the daemon keep working.                                                                  | Yes — same as today.                      |
 | Daemon crash mid-handler           | Process killed before `RunnerLoop` could send the ack. Stream id stays in `consumer-{sid}`'s PEL on `runner_stream:{rid}`. New session-open `XAUTOCLAIM`s onto `consumer-{new_sid}` (paginated); first poll `XREADGROUP ... 0` redelivers; `InboundDedupe` lets the handler skip if it had partially run. | Yes (re-delivery).                        |
 
+Runner shutdown with in-flight agent subprocess:
+
+- if a `RunnerInstance` shuts down while an agent subprocess is still
+  running, shutdown order is:
+  1. signal the agent subprocess to stop (best-effort graceful stop,
+     escalate after a short grace period)
+  2. if shutdown is a normal daemon-side shutdown and auth is still
+     valid, send a final `RunCancelled` POST with
+     `reason="runner_shutdown"`
+  3. if shutdown was triggered by `runner_revoked`,
+     `membership_revoked`, or `refresh_token_replayed`, skip the final
+     lifecycle POST because the cloud-side `Runner.revoke()` cascade
+     has already cancelled the run
+  4. stop the `RunnerLoop`
+
 ## 12. Module-level test plan
 
 - **`http.rs::SharedHttpTransport` unit tests**: HTTP/2 negotiation;
@@ -581,6 +605,10 @@ recoverable).
   state machine (`expired → refresh → retry`); single-flight refresh
   under concurrent callers; refresh failure modes (`replayed`,
   `membership_revoked`, `runner_revoked`); session open/close.
+- **Single-flight refresh stress**: force 10 concurrent callers on one
+  `RunnerCloudClient` to hit `401 access_token_expired`
+  simultaneously; assert exactly one refresh occurs and all callers
+  retry with the new token.
 - **`HttpLoop` unit tests**: ack-on-handle accumulation; ack drain
   happens at next poll; `force_refresh` triggers inline refresh;
   `Revoke` triggers `RunnerInstance` shutdown; `concurrent_poll`
