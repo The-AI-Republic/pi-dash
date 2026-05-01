@@ -5,13 +5,13 @@
  */
 
 import Link from "next/link";
-import { PiDashLockup } from "@pi-dash/propel/icons";
+import { PiSymbol } from "@pi-dash/propel/icons";
 
 export function AuthHeader() {
   return (
     <div className="sticky top-0 flex w-full flex-shrink-0 items-center justify-between gap-6">
       <Link href="/">
-        <PiDashLockup height={20} width={95} className="text-primary" />
+        <PiSymbol height={28} width={28} className="text-primary" />
       </Link>
     </div>
   );
