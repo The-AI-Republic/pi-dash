@@ -241,6 +241,23 @@ What this design **does not** add:
   this design only borrows how Symphony supervises and observes an
   active agent process.
 
+### 4.0 Pre-implementation decisions
+
+These decisions are fixed for v1 so implementation does not have to
+re-open the scope boundary:
+
+| Decision                     | v1 choice                                                                                                 | Reason                                                                                                                       |
+| ---------------------------- | --------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------- |
+| Process ownership            | Bridge-owned `AgentProcessHandle { pid, exit_rx }`; process wrappers own `child.wait()`                   | `AppServer` / `ClaudeProcess` already own the child process. The supervisor should observe process state, not own the child. |
+| `observed_run_id` clearing   | When `agent_observability_v1` is enabled, always serialize `observed_run_id`, including `null` while idle | Missing means old/disabled runner; explicit `null` means new runner is idle and the cloud should clear the run binding.      |
+| Cloud stall threshold        | `RUNNER_AGENT_STALL_THRESHOLD_SECS = 360`                                                                 | Slightly longer than the runner's existing 5-minute watchdog, so cloud acts as a backstop rather than racing the runner.     |
+| Snapshot freshness threshold | `RUNNER_AGENT_OBSERVABILITY_STALE_SECS = 90`                                                              | Covers roughly three missed 25s polls; stale live-state rows should not fail active runs.                                    |
+| Cloud stall action           | Mark the run `FAILED` in v1                                                                               | Matches today's runner watchdog behavior. Retry policy is a separate orchestration decision.                                 |
+| Claude token/turn metrics    | Leave streaming token / turn fields `NULL` for Claude unless equivalent stream events are added later     | Claude process health is covered; metric parity is not required for this watchdog.                                           |
+| UI warning state             | Derive activity / thinking / stalled labels client-side from raw scalars                                  | Keeps observability descriptive and avoids a third lifecycle state machine.                                                  |
+| Remote kill / interrupt      | Defer to a future command-channel design                                                                  | Requires authorization, audit logging, runner IPC, and safety controls.                                                      |
+| Symphony-style continuation  | Defer to a separate orchestration design                                                                  | Multi-turn retry / continuation changes work scheduling semantics, not agent-process observability.                          |
+
 ### 4.1 Heartbeat snapshot fields
 
 Descriptive scalars only — no enums, no derived states. Each field
@@ -660,6 +677,18 @@ It also requires a recently-updated `RunnerLiveState.updated_at`, so
 the task only acts on runners that are still actively reporting the
 observability snapshot. This avoids failing a run from a stale row if
 the feature is disabled or a runner downgrades mid-run.
+
+The proactive signal is the difference between two clocks:
+
+- `RunnerLiveState.updated_at` answers "is the runner still polling
+  and reporting this snapshot?"
+- `RunnerLiveState.last_event_at` answers "when did the agent
+  subprocess last produce an event?"
+
+When `updated_at` is fresh but `last_event_at` is stale, the cloud can
+derive "runner alive, agent silent" without waiting for the runner's
+own `STALL_TIMEOUT` branch to emit `RunFailed`.
+
 That match is the difference from the previous draft and the
 reason a separate `RunnerLiveState` row earns its keep — it makes
 "this snapshot belongs to _this_ run" expressible as a join
@@ -847,23 +876,18 @@ Field stability:
   the normal completed-run case where a previous run's snapshot is
   present but no longer describes any active run.
 
-## 7. Risks and Open Questions
+## 7. Risks and Follow-up Questions
 
-1. **Threshold tuning.** A 360s server-side stall threshold may be
-   wrong for slow-agent flows (e.g., a long reasoning model). Start
-   conservative (longer than the runner's own 5min internal watchdog)
-   and tune per agent kind via the `agent.<kind>.stall_threshold_secs`
-   config knob.
+1. **Threshold tuning.** V1 starts with
+   `RUNNER_AGENT_STALL_THRESHOLD_SECS = 360` and
+   `RUNNER_AGENT_OBSERVABILITY_STALE_SECS = 90`. These values may need
+   deployment tuning for slow-agent flows, but they are no longer an
+   implementation blocker.
 
-2. **Soft warn vs. hard fail when stalls cross the threshold.**
-   The runner's internal watchdog already fails the run at 5
-   minutes, and the cloud's stall reconcile (§4.5.3) also fails it.
-   The runner-side action is the source of truth in the current
-   design; the cloud side is a backstop for cases where the
-   runner-side watchdog can't fire (wedged tokio, OS hang). If we
-   later want to _retry_ stalled runs instead of failing them, the
-   cloud is the right place — it has the retry policy context the
-   runner does not. Out of scope for v1.
+2. **Retry instead of fail.** V1 marks cloud-detected stalls
+   `FAILED`, matching the runner's current watchdog behavior. If we
+   later want to retry stalled runs automatically, that belongs in a
+   separate orchestration/retry-policy design.
 
 3. **Privacy of `last_event_summary`.** Must never include prompt
    text, model output, or file contents. The runner's
@@ -894,11 +918,10 @@ Field stability:
    by the watchdog because they aren't in `BUSY_STATUSES`. So this
    case is benign.
 
-8. **Should pi-dash also adopt Symphony's multi-turn continuation?**
-   Symphony retries the same issue across multiple codex turns up
-   to a `max_turns` cap; pi-dash today fails the run on first agent
-   termination. Out of scope for this design — flag as a separate
-   exploration.
+8. **Symphony-style multi-turn continuation.** V1 does not adopt this.
+   Symphony retries the same issue across multiple codex turns up to a
+   `max_turns` cap; pi-dash today treats each assignment as one run.
+   Changing that belongs in a separate orchestration design.
 
 ## 8. Open Items for Future Designs
 
