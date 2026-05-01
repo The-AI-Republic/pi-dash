@@ -357,21 +357,29 @@ fn attach_body_for_instance(inst: &RunnerInstance) -> AttachBody {
 }
 
 async fn refresh_loop(client: RunnerCloudClient, state: StateHandle) {
+    // Acquire the shutdown Notify ONCE and pin it across the whole loop
+    // so a `notify_one()` that fires between iterations isn't dropped on
+    // the floor. Re-acquiring per-iteration would race: each iteration
+    // obtains a fresh `Arc<Notify>` view, so a notify between two
+    // iterations only wakes the previous (already-dropped) waiter.
+    let shutdown = state.shutdown_notified();
+    let shutdown_fut = shutdown.notified();
+    tokio::pin!(shutdown_fut);
     loop {
-        let Some(exp) = client.access_token_exp().await else {
-            tokio::time::sleep(Duration::from_secs(60)).await;
-            continue;
+        let sleep_for = match client.access_token_exp().await {
+            Some(exp) => {
+                let now = Utc::now();
+                let safety = Duration::from_secs(300);
+                exp.signed_duration_since(now)
+                    .to_std()
+                    .unwrap_or_default()
+                    .saturating_sub(safety)
+            }
+            None => Duration::from_secs(60),
         };
-        let now = Utc::now();
-        let safety = Duration::from_secs(300);
-        let sleep_for = exp
-            .signed_duration_since(now)
-            .to_std()
-            .unwrap_or_default()
-            .saturating_sub(safety);
-        let shutdown = state.shutdown_notified();
         tokio::select! {
-            _ = shutdown.notified() => return,
+            biased;
+            _ = &mut shutdown_fut => return,
             _ = tokio::time::sleep(sleep_for) => {}
         }
         if let Err(e) = client.refresh().await {

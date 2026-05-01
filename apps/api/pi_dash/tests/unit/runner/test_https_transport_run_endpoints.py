@@ -154,3 +154,97 @@ def test_complete_endpoint_marks_terminal_and_drains(
     assigned_run.refresh_from_db()
     assert assigned_run.status == AgentRunStatus.COMPLETED
     assert assigned_run.ended_at is not None
+
+
+@pytest.mark.unit
+def test_fail_endpoint_resume_unavailable_requeues_instead_of_terminating(
+    db, api_client, runner_token, assigned_run
+):
+    """Regression guard: a RunFailed{reason: resume_unavailable} must
+    re-queue the run, not stamp it FAILED. Cloud-side recovery for runs
+    that miss their pinned session on disk lives here.
+    """
+    resp = api_client.post(
+        f"/api/v1/runner/runs/{assigned_run.id}/fail/",
+        {"reason": "resume_unavailable", "detail": "session gone"},
+        format="json",
+        HTTP_AUTHORIZATION=f"Bearer {runner_token}",
+    )
+    assert resp.status_code == 200, resp.data
+    assert resp.data.get("rescheduled") is True
+    assigned_run.refresh_from_db()
+    assert assigned_run.status == AgentRunStatus.QUEUED
+    assert assigned_run.runner_id is None
+    assert assigned_run.pinned_runner_id is None
+
+
+@pytest.mark.unit
+def test_paused_endpoint_posts_question_to_issue_thread(
+    db, api_client, runner_token, enrolled_runner, workspace, pod
+):
+    """Regression guard: RunPaused with a question_for_human must
+    surface to the issue's comment thread. Without this, comment-and-run
+    flows lose the agent's pause-question entirely.
+    """
+    from crum import impersonate
+
+    from pi_dash.db.models.issue import Issue, IssueComment
+    from pi_dash.db.models.project import Project
+    from pi_dash.db.models.state import State
+
+    with impersonate(enrolled_runner.owner):
+        project = Project.objects.create(
+            name="P",
+            identifier="P",
+            workspace=workspace,
+            created_by=enrolled_runner.owner,
+        )
+        state = State.objects.create(
+            name="In Progress", project=project, group="started"
+        )
+        issue = Issue.objects.create(
+            name="task",
+            workspace=workspace,
+            project=project,
+            state=state,
+            created_by=enrolled_runner.owner,
+        )
+    paused_run = AgentRun.objects.create(
+        owner=enrolled_runner.owner,
+        created_by=enrolled_runner.owner,
+        workspace=workspace,
+        pod=pod,
+        runner=enrolled_runner,
+        work_item=issue,
+        prompt="x",
+        status=AgentRunStatus.RUNNING,
+        assigned_at=timezone.now(),
+    )
+
+    from unittest.mock import patch
+
+    # Run on_commit callbacks inline so the post-commit drain helpers
+    # don't hold up the assertion.
+    with patch(
+        "django.db.transaction.on_commit", side_effect=lambda fn, **kw: fn()
+    ):
+        resp = api_client.post(
+            f"/api/v1/runner/runs/{paused_run.id}/pause/",
+            {
+                "payload": {
+                    "autonomy": {"question_for_human": "what now?"},
+                    "summary": "made progress",
+                }
+            },
+            format="json",
+            HTTP_AUTHORIZATION=f"Bearer {runner_token}",
+        )
+
+    assert resp.status_code == 200, resp.data
+    paused_run.refresh_from_db()
+    assert paused_run.status == AgentRunStatus.PAUSED_AWAITING_INPUT
+    comments = IssueComment.objects.filter(issue=issue)
+    assert comments.exists(), "pause endpoint must post a comment for question_for_human"
+    body = comments.first().comment_html
+    assert "what now?" in body
+    assert "made progress" in body

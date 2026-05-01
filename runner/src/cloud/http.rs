@@ -599,6 +599,14 @@ impl RunnerCloudClient {
     ) -> Result<(), TransportError> {
         let idempotency_key = env.message_id.to_string();
         let msg = env.body;
+        // Helper to serialize once and propagate errors instead of
+        // silently sending null. A failed serialization indicates a
+        // ClientMsg variant the cloud can't decode — not something to
+        // bury.
+        let to_value = |m: &ClientMsg| -> Result<Json, TransportError> {
+            serde_json::to_value(m)
+                .map_err(|e| TransportError::Protocol(format!("serialize ClientMsg: {e}")))
+        };
         match msg {
             ClientMsg::Hello { .. } | ClientMsg::Heartbeat { .. } | ClientMsg::Bye { .. } => {
                 Err(TransportError::Protocol(
@@ -608,93 +616,44 @@ impl RunnerCloudClient {
                 ))
             }
             msg @ ClientMsg::Accept { run_id, .. } => {
-                self.post_run_lifecycle(
-                    run_id,
-                    "accept",
-                    serde_json::to_value(&msg).unwrap_or(Json::Null),
-                    &idempotency_key,
-                )
-                .await
+                let body = to_value(&msg)?;
+                self.post_run_lifecycle(run_id, "accept", body, &idempotency_key).await
             }
             msg @ ClientMsg::RunStarted { run_id, .. } => {
-                self.post_run_lifecycle(
-                    run_id,
-                    "started",
-                    serde_json::to_value(&msg).unwrap_or(Json::Null),
-                    &idempotency_key,
-                )
-                .await
+                let body = to_value(&msg)?;
+                self.post_run_lifecycle(run_id, "started", body, &idempotency_key).await
             }
             msg @ ClientMsg::RunEvent { run_id, .. } => {
-                self.post_run_event(
-                    run_id,
-                    serde_json::to_value(&msg).unwrap_or(Json::Null),
-                    &idempotency_key,
-                )
-                .await
+                let body = to_value(&msg)?;
+                self.post_run_event(run_id, body, &idempotency_key).await
             }
             msg @ ClientMsg::ApprovalRequest { run_id, .. } => {
-                self.post_run_lifecycle(
-                    run_id,
-                    "approvals",
-                    serde_json::to_value(&msg).unwrap_or(Json::Null),
-                    &idempotency_key,
-                )
-                .await
+                let body = to_value(&msg)?;
+                self.post_run_lifecycle(run_id, "approvals", body, &idempotency_key).await
             }
             msg @ ClientMsg::RunAwaitingReauth { run_id, .. } => {
-                self.post_run_lifecycle(
-                    run_id,
-                    "awaiting-reauth",
-                    serde_json::to_value(&msg).unwrap_or(Json::Null),
-                    &idempotency_key,
-                )
-                .await
+                let body = to_value(&msg)?;
+                self.post_run_lifecycle(run_id, "awaiting-reauth", body, &idempotency_key).await
             }
             msg @ ClientMsg::RunCompleted { run_id, .. } => {
-                self.post_run_lifecycle(
-                    run_id,
-                    "complete",
-                    serde_json::to_value(&msg).unwrap_or(Json::Null),
-                    &idempotency_key,
-                )
-                .await
+                let body = to_value(&msg)?;
+                self.post_run_lifecycle(run_id, "complete", body, &idempotency_key).await
             }
             msg @ ClientMsg::RunPaused { run_id, .. } => {
-                self.post_run_lifecycle(
-                    run_id,
-                    "pause",
-                    serde_json::to_value(&msg).unwrap_or(Json::Null),
-                    &idempotency_key,
-                )
-                .await
+                let body = to_value(&msg)?;
+                self.post_run_lifecycle(run_id, "pause", body, &idempotency_key).await
             }
             msg @ ClientMsg::RunFailed { run_id, .. } => {
-                self.post_run_lifecycle(
-                    run_id,
-                    "fail",
-                    serde_json::to_value(&msg).unwrap_or(Json::Null),
-                    &idempotency_key,
-                )
-                .await
+                let body = to_value(&msg)?;
+                self.post_run_lifecycle(run_id, "fail", body, &idempotency_key).await
             }
             msg @ ClientMsg::RunCancelled { run_id, .. } => {
-                self.post_run_lifecycle(
-                    run_id,
-                    "cancelled",
-                    serde_json::to_value(&msg).unwrap_or(Json::Null),
-                    &idempotency_key,
-                )
-                .await
+                let body = to_value(&msg)?;
+                self.post_run_lifecycle(run_id, "cancelled", body, &idempotency_key).await
             }
             msg @ ClientMsg::RunResumed { run_id, .. } => {
-                self.post_run_lifecycle(
-                    run_id,
-                    "resumed",
-                    serde_json::to_value(&msg).unwrap_or(Json::Null),
-                    &idempotency_key,
-                )
-                .await
+                let body = to_value(&msg)?;
+                self.post_run_lifecycle(run_id, "resumed", body, &idempotency_key).await
             }
         }
     }

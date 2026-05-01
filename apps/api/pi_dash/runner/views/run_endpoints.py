@@ -38,6 +38,7 @@ from pi_dash.runner.models import (
     ApprovalStatus,
     RunMessageDedupe,
 )
+from pi_dash.runner.services import run_lifecycle
 
 logger = logging.getLogger(__name__)
 
@@ -83,43 +84,6 @@ class _RunEndpointBase(APIView):
                 status=status.HTTP_403_FORBIDDEN,
             )
         return run, None
-
-
-def _drain_after_terminal(
-    run_id, runner_id, pod_id, *, scheduler_binding_id=None
-) -> None:
-    from pi_dash.orchestration.scheduling import maybe_apply_deferred_pause
-    from pi_dash.runner.services.matcher import (
-        drain_for_runner_by_id,
-        drain_pod_by_id,
-    )
-
-    run = (
-        AgentRun.objects.select_related(
-            "work_item", "work_item__state", "work_item__project", "scheduler_binding"
-        )
-        .filter(pk=run_id)
-        .first()
-    )
-    if run is not None:
-        try:
-            maybe_apply_deferred_pause(run)
-        except Exception:
-            logger.exception("deferred-pause failed for run %s", run_id)
-        if scheduler_binding_id is not None:
-            try:
-                from pi_dash.runner.services.scheduler_hook import (
-                    update_scheduler_binding_on_terminate,
-                )
-
-                update_scheduler_binding_on_terminate(run)
-            except Exception:
-                logger.exception(
-                    "scheduler binding update failed for run %s", run_id
-                )
-    drain_for_runner_by_id(runner_id)
-    if pod_id is not None:
-        drain_pod_by_id(pod_id)
 
 
 class RunAcceptEndpoint(_RunEndpointBase):
@@ -236,19 +200,14 @@ class RunCompletedEndpoint(_RunEndpointBase):
             return err
         if not _record_dedupe(run, _idempotency_key(request)):
             return Response({"ok": True, "duplicate": True})
-        AgentRun.objects.filter(pk=run.pk).update(
-            status=AgentRunStatus.COMPLETED,
-            ended_at=timezone.now(),
-            done_payload=request.data.get("done_payload"),
-        )
         runner = getattr(request, "auth_runner", None)
-        runner_id = runner.id if runner else None
-        scheduler_binding_id = run.scheduler_binding_id
-        transaction.on_commit(
-            lambda rid=run.pk, rnr=runner_id, pid=run.pod_id, sb=scheduler_binding_id: _drain_after_terminal(
-                rid, rnr, pid, scheduler_binding_id=sb
+        if runner is not None:
+            run_lifecycle.finalize_run_terminal(
+                runner,
+                run.id,
+                AgentRunStatus.COMPLETED,
+                done_payload=request.data.get("done_payload"),
             )
-        )
         return Response({"ok": True})
 
 
@@ -259,11 +218,14 @@ class RunPausedEndpoint(_RunEndpointBase):
             return err
         if not _record_dedupe(run, _idempotency_key(request)):
             return Response({"ok": True, "duplicate": True})
+        runner = getattr(request, "auth_runner", None)
+        if runner is None:
+            return Response({"ok": True})
         payload = request.data.get("payload") or {}
-        AgentRun.objects.filter(pk=run.pk).update(
-            status=AgentRunStatus.PAUSED_AWAITING_INPUT,
-            done_payload=payload,
-        )
+        # Posts the agent's question to the issue thread,
+        # applies deferred-pause workspace transitions, and re-fires
+        # drain. See run_lifecycle.apply_run_paused.
+        run_lifecycle.apply_run_paused(runner, run.id, payload)
         return Response({"ok": True})
 
 
@@ -274,18 +236,21 @@ class RunFailedEndpoint(_RunEndpointBase):
             return err
         if not _record_dedupe(run, _idempotency_key(request)):
             return Response({"ok": True, "duplicate": True})
-        AgentRun.objects.filter(pk=run.pk).update(
-            status=AgentRunStatus.FAILED,
-            ended_at=timezone.now(),
-            error=(request.data.get("detail") or "")[:16000],
-        )
         runner = getattr(request, "auth_runner", None)
-        runner_id = runner.id if runner else None
-        scheduler_binding_id = run.scheduler_binding_id
-        transaction.on_commit(
-            lambda rid=run.pk, rnr=runner_id, pid=run.pod_id, sb=scheduler_binding_id: _drain_after_terminal(
-                rid, rnr, pid, scheduler_binding_id=sb
-            )
+        if runner is None:
+            return Response({"ok": True})
+        # Resume-unavailable is a re-queue, not a terminal failure.
+        # Without this branch, runs that miss their session on disk
+        # fail-stop instead of falling back into the pod's queue with
+        # a fresh session.
+        if (request.data.get("reason") or "") == "resume_unavailable":
+            run_lifecycle.apply_run_resume_unavailable(runner, run.id)
+            return Response({"ok": True, "rescheduled": True})
+        run_lifecycle.finalize_run_terminal(
+            runner,
+            run.id,
+            AgentRunStatus.FAILED,
+            error_detail=request.data.get("detail") or "",
         )
         return Response({"ok": True})
 
@@ -297,17 +262,11 @@ class RunCancelledEndpoint(_RunEndpointBase):
             return err
         if not _record_dedupe(run, _idempotency_key(request)):
             return Response({"ok": True, "duplicate": True})
-        AgentRun.objects.filter(pk=run.pk).update(
-            status=AgentRunStatus.CANCELLED, ended_at=timezone.now()
-        )
         runner = getattr(request, "auth_runner", None)
-        runner_id = runner.id if runner else None
-        scheduler_binding_id = run.scheduler_binding_id
-        transaction.on_commit(
-            lambda rid=run.pk, rnr=runner_id, pid=run.pod_id, sb=scheduler_binding_id: _drain_after_terminal(
-                rid, rnr, pid, scheduler_binding_id=sb
+        if runner is not None:
+            run_lifecycle.finalize_run_terminal(
+                runner, run.id, AgentRunStatus.CANCELLED
             )
-        )
         return Response({"ok": True})
 
 
