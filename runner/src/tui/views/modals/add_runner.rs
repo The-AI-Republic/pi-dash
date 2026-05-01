@@ -6,6 +6,8 @@
 //! into tab switches while editing (Bug-3 invariant carries to the
 //! modal too).
 
+use std::sync::{Arc, Mutex};
+
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
@@ -15,10 +17,12 @@ use ratatui::widgets::{Block, Borders, Clear, Paragraph, Widget, Wrap};
 
 use crate::tui::app::AppData;
 use crate::tui::event::AppEvent;
+use crate::tui::event_sender::AppEventSender;
 use crate::tui::render::Renderable;
 use crate::tui::view::{Cancellation, KeyHandled, View, ViewCompletion, ViewCtx};
 use crate::tui::widgets::picker::{Picker, PickerOutcome, PickerRow};
 use crate::tui::widgets::TextArea;
+use crate::util::paths::Paths;
 
 use super::confirm::centered_rect;
 
@@ -52,10 +56,20 @@ enum PickerKind {
     Pod,
 }
 
+#[derive(Debug, Clone)]
+enum ProjectsState {
+    Loading,
+    Loaded(Vec<crate::cloud::projects::ProjectInfo>),
+    Failed(String),
+}
+
 pub struct AddRunnerView {
     name: TextArea,
     working_dir: TextArea,
-    projects: Option<Vec<crate::cloud::projects::ProjectInfo>>,
+    /// Shared with the project-fetch task spawned in `open()`. Read by
+    /// render and key handlers; written exactly once by the task. The
+    /// `Mutex` is held only briefly — there's no contention concern.
+    projects: Arc<Mutex<ProjectsState>>,
     project_idx: usize,
     pod_idx: usize,
     focus: Focus,
@@ -64,17 +78,28 @@ pub struct AddRunnerView {
     active_picker: Option<(PickerKind, Picker)>,
     complete: bool,
     completion: Option<ViewCompletion>,
-    /// Snapshot of `paths` the modal needs for its own background tasks
-    /// (project list fetch, submit). Cloned at open time.
-    projects_loaded: bool,
 }
 
 impl AddRunnerView {
-    pub fn open(data: &AppData) -> Self {
+    pub fn open(data: &AppData, tx: AppEventSender, paths: Paths) -> Self {
+        let projects = Arc::new(Mutex::new(ProjectsState::Loading));
+        let projects_writer = projects.clone();
+        // Fire-and-forget cloud fetch. On completion, write the result
+        // through the shared Mutex and ping the bus so the modal
+        // re-renders with the loaded list.
+        tokio::spawn(async move {
+            let result = crate::cloud::projects::list_projects(&paths).await;
+            let next = match result {
+                Ok(p) => ProjectsState::Loaded(p),
+                Err(e) => ProjectsState::Failed(format!("{e:#}")),
+            };
+            *projects_writer.lock().expect("projects mutex poisoned") = next;
+            tx.send(AppEvent::Refresh);
+        });
         Self {
             name: TextArea::new().placeholder("runner name"),
             working_dir: TextArea::with_text(default_working_dir(data)),
-            projects: None,
+            projects,
             project_idx: 0,
             pod_idx: 0,
             focus: Focus::Name,
@@ -83,7 +108,6 @@ impl AddRunnerView {
             active_picker: None,
             complete: false,
             completion: None,
-            projects_loaded: false,
         }
     }
 
@@ -108,14 +132,15 @@ impl AddRunnerView {
     }
 
     fn open_picker_for_focus(&mut self) {
+        let projects_guard = self.projects.lock().expect("projects mutex poisoned");
+        let projects = match &*projects_guard {
+            ProjectsState::Loaded(p) if !p.is_empty() => p.clone(),
+            _ => return,
+        };
+        drop(projects_guard);
+
         match self.focus {
             Focus::Project => {
-                let Some(projects) = self.projects.as_ref() else {
-                    return;
-                };
-                if projects.is_empty() {
-                    return;
-                }
                 let rows: Vec<PickerRow> = projects
                     .iter()
                     .map(|p| {
@@ -129,9 +154,6 @@ impl AddRunnerView {
                 ));
             }
             Focus::Pod => {
-                let Some(projects) = self.projects.as_ref() else {
-                    return;
-                };
                 let Some(project) = projects.get(self.project_idx) else {
                     return;
                 };
@@ -174,14 +196,29 @@ impl AddRunnerView {
             self.error = Some("working_dir is required".into());
             return;
         }
-        let Some(projects) = self.projects.as_ref() else {
-            self.error = Some("projects still loading…".into());
-            return;
+
+        let projects_guard = self.projects.lock().expect("projects mutex poisoned");
+        let project = match &*projects_guard {
+            ProjectsState::Loading => {
+                self.error = Some("projects still loading…".into());
+                return;
+            }
+            ProjectsState::Failed(msg) => {
+                self.error = Some(format!("project list unavailable: {msg}"));
+                return;
+            }
+            ProjectsState::Loaded(list) => match list.get(self.project_idx).cloned() {
+                Some(p) => p,
+                None => {
+                    self.error = Some(
+                        "no projects available — verify cloud reachable and connection enrolled."
+                            .into(),
+                    );
+                    return;
+                }
+            },
         };
-        let Some(project) = projects.get(self.project_idx).cloned() else {
-            self.error = Some("no projects available — verify cloud reachable".into());
-            return;
-        };
+        drop(projects_guard);
         let pod_name = project.pods.get(self.pod_idx).map(|p| p.name.clone());
 
         self.busy = true;
@@ -216,33 +253,6 @@ impl AddRunnerView {
             }
         });
     }
-
-    fn ensure_projects_loaded(&mut self, ctx: &mut ViewCtx<'_>) {
-        if self.projects_loaded {
-            return;
-        }
-        self.projects_loaded = true;
-        // The modal can't easily wait async inside handle_key, so we
-        // synchronously fetch via tokio::block_in_place isn't allowed
-        // here either. Instead we fire-and-forget and let the user
-        // open the picker after the result arrives. For simplicity in
-        // this refactor pass we keep the projects field None and the
-        // user can still type into Name / WorkingDir. (A future
-        // improvement: post a load-projects AppEvent that the view
-        // can re-receive via handle_paste-style hook.)
-        let paths = ctx.paths.clone();
-        let projects = std::sync::Arc::new(std::sync::Mutex::new(None::<Vec<crate::cloud::projects::ProjectInfo>>));
-        let projects_clone = projects.clone();
-        tokio::spawn(async move {
-            let result = crate::cloud::projects::list_projects(&paths).await.ok();
-            *projects_clone.lock().unwrap() = result;
-        });
-        // We can't block on the result, so projects stays None until
-        // the user opens the picker (which now retries loading inline).
-        // This is a minor regression vs the legacy form's
-        // `(loading projects…)` hint; acceptable for the refactor pass.
-        let _ = projects;
-    }
 }
 
 impl Renderable for AddRunnerView {
@@ -250,10 +260,12 @@ impl Renderable for AddRunnerView {
         let modal = centered_rect(72, 65, area);
         Clear.render(modal, buf);
 
-        let project_value = match &self.projects {
-            None => "(loading projects…)".to_string(),
-            Some(list) if list.is_empty() => "(no projects available)".to_string(),
-            Some(list) => {
+        let projects_guard = self.projects.lock().expect("projects mutex poisoned");
+        let project_value = match &*projects_guard {
+            ProjectsState::Loading => "(loading projects…)".to_string(),
+            ProjectsState::Failed(msg) => format!("(load failed: {msg})"),
+            ProjectsState::Loaded(list) if list.is_empty() => "(no projects available)".to_string(),
+            ProjectsState::Loaded(list) => {
                 let p = &list[self.project_idx.min(list.len() - 1)];
                 format!(
                     "{} — {}   ({}/{})",
@@ -264,21 +276,25 @@ impl Renderable for AddRunnerView {
                 )
             }
         };
-        let pod_value = match self.projects.as_ref().and_then(|l| l.get(self.project_idx)) {
-            None => "(pick a project first)".to_string(),
-            Some(p) if p.pods.is_empty() => "(no pods on project)".to_string(),
-            Some(p) => {
-                let pod = &p.pods[self.pod_idx.min(p.pods.len() - 1)];
-                let tag = if pod.is_default { "  [default]" } else { "" };
-                format!(
-                    "{}{}   ({}/{})",
-                    pod.name,
-                    tag,
-                    self.pod_idx + 1,
-                    p.pods.len(),
-                )
-            }
+        let pod_value = match &*projects_guard {
+            ProjectsState::Loaded(list) => match list.get(self.project_idx) {
+                None => "(pick a project first)".to_string(),
+                Some(p) if p.pods.is_empty() => "(no pods on project)".to_string(),
+                Some(p) => {
+                    let pod = &p.pods[self.pod_idx.min(p.pods.len() - 1)];
+                    let tag = if pod.is_default { "  [default]" } else { "" };
+                    format!(
+                        "{}{}   ({}/{})",
+                        pod.name,
+                        tag,
+                        self.pod_idx + 1,
+                        p.pods.len(),
+                    )
+                }
+            },
+            _ => "(pick a project first)".to_string(),
         };
+        drop(projects_guard);
 
         let mut lines: Vec<Line<'_>> = vec![
             Line::from(Span::styled(
@@ -288,7 +304,7 @@ impl Renderable for AddRunnerView {
                     .add_modifier(Modifier::BOLD),
             )),
             Line::from(Span::styled(
-                "Project + pod fetched from the cloud. ↑/↓ cycles within picker fields; Tab moves between fields.",
+                "Project + pod fetched from the cloud. Enter / → opens picker; type to filter; Tab moves between fields.",
                 Style::default().add_modifier(Modifier::DIM),
             )),
             Line::raw(""),
@@ -334,31 +350,14 @@ impl Renderable for AddRunnerView {
             )
             .wrap(Wrap { trim: false });
         p.render(modal, buf);
-
-        // The picker submodal renders on top of the form when open.
-        // Picker takes &mut Self, which we can't access through &self
-        // — leave picker rendering to a separate pass via a helper.
-        // For this refactor pass we render a static hint while the
-        // picker is open; the next iteration will route through a
-        // proper Renderable path on Picker.
-        if self.active_picker.is_some() {
-            let hint = Paragraph::new(Line::from(Span::styled(
-                "(picker open — type to filter, Enter to confirm, Esc to cancel)",
-                Style::default().fg(Color::Cyan),
-            )))
-            .block(Block::default().borders(Borders::ALL));
-            let inner = centered_rect(60, 30, area);
-            Clear.render(inner, buf);
-            hint.render(inner, buf);
-        }
+        // The actual picker submodal renders in `render_overlay` below
+        // because `Picker::render` requires `&mut Self` + `&mut Frame`,
+        // which the buffer-only Renderable path doesn't provide.
     }
 }
 
 impl View for AddRunnerView {
     fn handle_key(&mut self, key: KeyEvent, ctx: &mut ViewCtx<'_>) -> KeyHandled {
-        // Prime project list fetch lazily (best-effort).
-        self.ensure_projects_loaded(ctx);
-
         // Picker submodal owns input while open.
         if self.active_picker.is_some() {
             // Ctrl+C remains a global escape hatch.
@@ -435,6 +434,12 @@ impl View for AddRunnerView {
                 KeyHandled::Consumed
             }
             _ => KeyHandled::Consumed,
+        }
+    }
+
+    fn render_overlay(&mut self, frame: &mut ratatui::Frame<'_>, area: Rect) {
+        if let Some((_, picker)) = self.active_picker.as_mut() {
+            picker.render(frame, area);
         }
     }
 

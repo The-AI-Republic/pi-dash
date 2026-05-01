@@ -182,7 +182,11 @@ impl Tab for RunnerStatusTab {
                 KeyHandled::Consumed
             }
             (KeyCode::Char('a'), m) if !m.contains(KeyModifiers::CONTROL) => {
-                let v = super::modals::add_runner::AddRunnerView::open(ctx.data);
+                let v = super::modals::add_runner::AddRunnerView::open(
+                    ctx.data,
+                    ctx.tx.clone(),
+                    ctx.paths.clone(),
+                );
                 ctx.tx.push_view(Box::new(v));
                 KeyHandled::Consumed
             }

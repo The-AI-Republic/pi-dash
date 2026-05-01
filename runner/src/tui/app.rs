@@ -27,7 +27,7 @@
 use std::time::Duration;
 
 use anyhow::Result;
-use crossterm::event::{KeyCode, KeyEvent};
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::layout::{Constraint, Direction, Layout};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
@@ -204,7 +204,7 @@ impl App {
 
     /// Render the whole frame: tabs row + body + hint footer + any
     /// modal on top.
-    pub fn render(&self, frame: &mut ratatui::Frame<'_>) {
+    pub fn render(&mut self, frame: &mut ratatui::Frame<'_>) {
         let area = frame.area();
         let buf = frame.buffer_mut();
 
@@ -272,7 +272,7 @@ impl App {
         ));
         ratatui::widgets::Widget::render(Paragraph::new(hint), layout[hint_idx], buf);
 
-        // Modals on top, in stack order.
+        // Modals on top, in stack order — buffer pass first.
         for view in &self.view_stack {
             view.render(area, buf);
         }
@@ -285,6 +285,13 @@ impl App {
             .or_else(|| self.active_tab().cursor_pos(layout[body_idx], &self.data));
         if let Some((x, y)) = cursor {
             frame.set_cursor_position((x, y));
+        }
+
+        // Overlay pass — for views with `StatefulWidget`-backed
+        // submodals (e.g. the AddRunnerView's filterable picker) that
+        // need a real `&mut Frame` rather than just a `Buffer`.
+        for view in self.view_stack.iter_mut() {
+            view.render_overlay(frame, area);
         }
     }
 
@@ -445,6 +452,34 @@ impl App {
             AppEvent::SubmitRegister => {
                 self.spawn_register_submit();
             }
+            AppEvent::EnrollOutcome { cfg, reload } => {
+                self.data.reload_outcome = Some(reload.clone());
+                if reload.ok {
+                    self.data.config_loaded = Some(cfg.clone());
+                    self.data.config_working = Some(cfg);
+                    self.data.config_error = None;
+                    self.data.sync_picker_to_ipc();
+                    self.general.on_config_present(&self.data);
+                    self.runner_status.reconcile(&self.data);
+                } else {
+                    // Daemon didn't reach cloud-connected state. Keep the
+                    // register form so the user can see the error and
+                    // retry without re-typing.
+                    self.general.set_register_busy(
+                        false,
+                        Some(
+                            "service did not reach cloud-connected state — check footer banner for detail"
+                                .into(),
+                        ),
+                    );
+                }
+                self.event_tx.send(AppEvent::Refresh);
+                self.frame.schedule_frame();
+            }
+            AppEvent::EnrollFailed(msg) => {
+                self.general.set_register_busy(false, Some(msg));
+                self.frame.schedule_frame();
+            }
             AppEvent::SubmitAddRunner => {
                 // The AddRunnerView posts this with its own state via
                 // a separate event path. We never reach here today.
@@ -585,12 +620,11 @@ impl App {
         self.general.set_register_busy(true, None);
         tokio::spawn(async move {
             match super::views::general::submit_register(&paths, form).await {
-                Ok((cfg, outcome)) => {
-                    tx.send(AppEvent::ConfigUpdated(Ok(Some(cfg))));
-                    tx.send(AppEvent::ReloadOutcomeUpdated(outcome));
+                Ok((cfg, reload)) => {
+                    tx.send(AppEvent::EnrollOutcome { cfg, reload });
                 }
                 Err(e) => {
-                    tx.send(AppEvent::ConfigUpdated(Err(e)));
+                    tx.send(AppEvent::EnrollFailed(e));
                 }
             }
         });
@@ -648,9 +682,22 @@ impl App {
                 let comp = view.completion();
                 self.pop_with_completion(comp);
             }
-            // While a modal is on top, never fall through to base
-            // surface — global hotkeys are inert.
-            if matches!(handled, KeyHandled::Consumed) || self.view_stack.last().is_some_and(|v| v.is_modal()) {
+            if matches!(handled, KeyHandled::Consumed) {
+                self.frame.schedule_frame();
+                return;
+            }
+            // While a modal is on top, suppress the base-tab handlers
+            // so global hotkeys remain inert. Ctrl-modified keys still
+            // resolve through Global so Ctrl+C / Ctrl+anything escape
+            // hatches work even when the modal didn't claim them.
+            if self.view_stack.last().is_some_and(|v| v.is_modal()) {
+                if key.modifiers.contains(KeyModifiers::CONTROL) {
+                    let active = vec![Context::Global];
+                    let resolution = keymap::resolve(&key, &active, &self.keymap);
+                    if let Resolution::Match(action) = resolution {
+                        self.dispatch_action(action);
+                    }
+                }
                 self.frame.schedule_frame();
                 return;
             }
@@ -668,14 +715,18 @@ impl App {
 
         // Layer 5: tab + global keymap. The tab's `active_contexts()`
         // already returns `[TextInput]` only when a textarea is focused,
-        // so this layer is structurally inert in that case.
+        // so this layer is structurally inert for plain printable keys
+        // in that case (Bug-3 invariant: digits / `h` / `l` cannot
+        // resolve to tab switches while typing).
         let mut active = self.active_tab().active_contexts();
-        // Append fall-through contexts (Tabs, Global) only when the
-        // focused-child rule allows it — i.e. when TextInput is not
-        // the only active context.
         let text_input_only = active == [Context::TextInput];
         if !text_input_only {
             active.push(Context::Tabs);
+            active.push(Context::Global);
+        } else if key.modifiers.contains(KeyModifiers::CONTROL) {
+            // Ctrl-modified keys still resolve through Global so escape
+            // hatches (Ctrl+C → Quit) work mid-typing. Bare keys remain
+            // swallowed by the textarea.
             active.push(Context::Global);
         }
         let resolution = keymap::resolve(&key, &active, &self.keymap);
@@ -788,7 +839,11 @@ impl App {
             Action::ServiceStart | Action::ServiceStop => { /* inert outside General */ }
 
             Action::OpenAddRunner if matches!(self.tab, TabKind::RunnerStatus) => {
-                let v = super::views::modals::add_runner::AddRunnerView::open(&self.data);
+                let v = super::views::modals::add_runner::AddRunnerView::open(
+                    &self.data,
+                    self.event_tx.clone(),
+                    self.data.paths.clone(),
+                );
                 self.event_tx.push_view(Box::new(v));
             }
             Action::OpenAddRunner => {}
@@ -820,6 +875,9 @@ impl App {
     }
 
     fn set_tab(&mut self, t: TabKind) {
+        if self.tab == t {
+            return;
+        }
         self.tab = t;
         self.with_tab_ctx(|tab, ctx| tab.on_focus(ctx));
         self.event_tx.send(AppEvent::Refresh);

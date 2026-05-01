@@ -1,6 +1,6 @@
 //! Help overlay.
 
-use crossterm::event::{KeyCode, KeyEvent};
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Alignment, Rect};
 use ratatui::text::Line;
@@ -66,10 +66,12 @@ impl Renderable for HelpView {
 
 impl View for HelpView {
     fn handle_key(&mut self, key: KeyEvent, _ctx: &mut ViewCtx<'_>) -> KeyHandled {
-        if matches!(
+        let is_close = matches!(
             key.code,
             KeyCode::Esc | KeyCode::Char('?') | KeyCode::Char('q')
-        ) {
+        ) || (matches!(key.code, KeyCode::Char('c'))
+            && key.modifiers.contains(KeyModifiers::CONTROL));
+        if is_close {
             self.complete = true;
         }
         KeyHandled::Consumed

@@ -86,4 +86,11 @@ pub trait View: Renderable {
     fn on_ctrl_c(&mut self, _ctx: &mut ViewCtx<'_>) -> Cancellation {
         Cancellation::NotHandled
     }
+
+    /// Optional overlay-render pass. Called by `App::render` *after* the
+    /// `Renderable` buffer pass, with a real `Frame` so views with
+    /// `&mut`-state widgets (e.g. ratatui's `StatefulWidget` types like
+    /// the runner picker submodal) can render. Default no-op — most
+    /// modals stick to the buffer-only Renderable path.
+    fn render_overlay(&mut self, _frame: &mut ratatui::Frame<'_>, _area: ratatui::layout::Rect) {}
 }

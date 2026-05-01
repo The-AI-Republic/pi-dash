@@ -76,6 +76,17 @@ pub enum AppEvent {
     /// Submit the current register form. Form contents are pulled
     /// from the GeneralTab at handle time.
     SubmitRegister,
+    /// Result of a successful enroll + service install. The dispatcher
+    /// only clears the register form (and seeds config_loaded /
+    /// config_working) if `reload.ok`; otherwise the form stays so the
+    /// user can retry without re-typing.
+    EnrollOutcome {
+        cfg: Config,
+        reload: ReloadOutcome,
+    },
+    /// Enroll-stage failure (cloud unreachable, validation error, file
+    /// write failure). The form stays visible with the error attached.
+    EnrollFailed(String),
     /// Submit the open AddRunnerView.
     SubmitAddRunner,
     /// Confirm-remove the currently-highlighted runner.
@@ -115,6 +126,10 @@ impl std::fmt::Debug for AppEvent {
             AppEvent::ServiceActionResult(s) => f.debug_tuple("ServiceActionResult").field(s).finish(),
             AppEvent::Refresh => f.write_str("Refresh"),
             AppEvent::SubmitRegister => f.write_str("SubmitRegister"),
+            AppEvent::EnrollOutcome { reload, .. } => {
+                f.debug_struct("EnrollOutcome").field("ok", &reload.ok).finish()
+            }
+            AppEvent::EnrollFailed(s) => f.debug_tuple("EnrollFailed").field(s).finish(),
             AppEvent::SubmitAddRunner => f.write_str("SubmitAddRunner"),
             AppEvent::SubmitRemoveRunner(n) => f.debug_tuple("SubmitRemoveRunner").field(n).finish(),
             AppEvent::SaveConfig => f.write_str("SaveConfig"),
