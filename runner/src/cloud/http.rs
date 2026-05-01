@@ -829,6 +829,19 @@ pub struct InboundEnvelope {
     pub env: Envelope<ServerMsg>,
 }
 
+/// Pure helper used by `HttpLoop::current_attach_body` so the refresh
+/// logic is testable without standing up a full `RunnerCloudClient`.
+fn refresh_attach_body(
+    base: &AttachBody,
+    status: WireStatus,
+    in_flight: Option<Uuid>,
+) -> AttachBody {
+    let mut body = base.clone();
+    body.status = PollStatus::from_wire(status, in_flight).status;
+    body.in_flight_run = in_flight;
+    body
+}
+
 impl HttpLoop {
     pub fn new(
         client: RunnerCloudClient,
@@ -851,10 +864,29 @@ impl HttpLoop {
         }
     }
 
+    /// Build a fresh `AttachBody` snapshotting the current status and
+    /// in-flight run from the watch receivers. The base body (version,
+    /// os/arch, project_slug, host_label, agent_versions) is cloned from
+    /// `self.attach_body`; the volatile `status` + `in_flight_run`
+    /// fields are refreshed on every call.
+    ///
+    /// Without this refresh, session reconnects re-send the snapshot
+    /// captured at daemon startup — when `in_flight_run` was None — and
+    /// the cloud's heartbeat reaper kills any run that was assigned
+    /// after startup but before the reconnect (`session_service.py`
+    /// `reap_stale_busy_runs`).
+    fn current_attach_body(&self) -> AttachBody {
+        refresh_attach_body(
+            &self.attach_body,
+            *self.status_rx.borrow(),
+            *self.in_flight_rx.borrow(),
+        )
+    }
+
     pub async fn run(mut self) -> Result<(), TransportError> {
         // 1. Bootstrap: ensure access token, open session.
         self.client.ensure_access_token().await?;
-        let session = self.client.open_session(self.attach_body.clone()).await?;
+        let session = self.client.open_session(self.current_attach_body()).await?;
         // 2. Hand welcome (and optional resume_ack) to the mailbox so
         //    the existing per-runner handlers ingest them as today.
         let welcome_body = ServerMsg::Welcome {
@@ -901,7 +933,7 @@ impl HttpLoop {
                     backoff_secs = (backoff_secs * 2).min(30);
                     let _ = self
                         .client
-                        .open_session(self.attach_body.clone())
+                        .open_session(self.current_attach_body())
                         .await;
                 }
                 Err(err) => {
@@ -1125,5 +1157,48 @@ mod tests {
         assert!(TransportError::RefreshTokenReplayed.is_fatal_for_runner());
         assert!(TransportError::SessionEvicted { reason: "x".into() }.is_fatal_for_runner());
         assert!(!TransportError::Network("net".into()).is_fatal_for_runner());
+    }
+
+    fn sample_attach_body() -> AttachBody {
+        AttachBody {
+            version: "0.0.0".into(),
+            os: "linux".into(),
+            arch: "x86_64".into(),
+            status: PollStatus::idle().status,
+            in_flight_run: None,
+            project_slug: Some("p".into()),
+            host_label: "h".into(),
+            agent_versions: std::collections::HashMap::new(),
+        }
+    }
+
+    #[test]
+    fn refresh_attach_body_picks_up_live_in_flight_run() {
+        // The bug we're guarding: at startup `attach_body.in_flight_run`
+        // is None; after a run is assigned, the watch channel carries
+        // Some(rid). A reconnect must reflect the live value or the
+        // cloud reaper kills the active run.
+        let base = sample_attach_body();
+        let rid = Uuid::new_v4();
+        let refreshed = refresh_attach_body(&base, WireStatus::Busy, Some(rid));
+        assert_eq!(refreshed.in_flight_run, Some(rid));
+        // Status follows in_flight: non-idle when a run is in progress.
+        assert_ne!(refreshed.status, PollStatus::idle().status);
+        // Non-volatile fields are preserved from the base.
+        assert_eq!(refreshed.version, "0.0.0");
+        assert_eq!(refreshed.host_label, "h");
+        assert_eq!(refreshed.project_slug.as_deref(), Some("p"));
+    }
+
+    #[test]
+    fn refresh_attach_body_clears_in_flight_when_idle() {
+        // After a run completes, in_flight returns to None and the next
+        // reconnect should report Idle to the cloud.
+        let mut base = sample_attach_body();
+        base.in_flight_run = Some(Uuid::new_v4());
+        base.status = PollStatus::from_wire(WireStatus::Busy, base.in_flight_run).status;
+        let refreshed = refresh_attach_body(&base, WireStatus::Idle, None);
+        assert_eq!(refreshed.in_flight_run, None);
+        assert_eq!(refreshed.status, PollStatus::idle().status);
     }
 }
