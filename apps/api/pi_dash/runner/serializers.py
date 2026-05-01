@@ -25,6 +25,13 @@ RUNNER_NAME_CHARSET = RegexValidator(
 
 class PodSerializer(serializers.ModelSerializer):
     runner_count = serializers.SerializerMethodField()
+    # Web's Add Runner picker needs to filter pods to a chosen project,
+    # and to backfill the project field when the user picks a pod first.
+    # ``project_identifier`` is the human-friendly slug; ``project`` is
+    # the FK uuid kept for callers that want it.
+    project_identifier = serializers.CharField(
+        source="project.identifier", read_only=True
+    )
 
     class Meta:
         model = Pod
@@ -34,6 +41,8 @@ class PodSerializer(serializers.ModelSerializer):
             "description",
             "is_default",
             "workspace",
+            "project",
+            "project_identifier",
             "created_by",
             "runner_count",
             "created_at",
@@ -43,6 +52,8 @@ class PodSerializer(serializers.ModelSerializer):
             "id",
             "is_default",
             "workspace",
+            "project",
+            "project_identifier",
             "created_by",
             "runner_count",
             "created_at",
