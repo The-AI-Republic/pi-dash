@@ -99,9 +99,16 @@ class RunnerSessionOpenEndpoint(APIView):
                     status=status.HTTP_409_CONFLICT,
                 )
 
+        # Keep Redis I/O OUT of the atomic() block below: ``select_for_update``
+        # holds a row lock on the prior session for the txn's lifetime, and a
+        # slow XCLAIM inside would leave Postgres ``idle in transaction`` until
+        # Redis returns — observed jamming a row for an hour, blocking every
+        # subsequent poll / open / delete on it.
+        outbox.ensure_stream_group(runner.id)
+
         old_session_id = None
+        new_sid = _uuid.uuid4()
         with transaction.atomic():
-            # 3. Evict any prior active session (mark revoked).
             prior = (
                 RunnerSession.objects.select_for_update()
                 .filter(runner=runner, revoked_at__isnull=True)
@@ -112,22 +119,7 @@ class RunnerSessionOpenEndpoint(APIView):
                 prior.revoked_at = timezone.now()
                 prior.revoked_reason = "evicted_by_new_session"
                 prior.save(update_fields=["revoked_at", "revoked_reason"])
-                outbox.clear_session_marker(prior.id)
 
-            # 4. Ensure stream + group.
-            outbox.ensure_stream_group(runner.id)
-
-            # 5. Generate new sid + reassign prior PEL.
-            new_sid = _uuid.uuid4()
-            outbox.claim_pending_for_new_session(
-                runner_id=runner.id,
-                old_consumer=outbox.consumer_name(old_session_id) if old_session_id else None,
-                new_consumer=outbox.consumer_name(new_sid),
-            )
-
-            # 6. Create the new session row — this commits "I am the
-            # live session" before any subsequent step queries the
-            # active-session table (design.md §7.1).
             RunnerSession.objects.create(
                 id=new_sid,
                 runner=runner,
@@ -135,12 +127,19 @@ class RunnerSessionOpenEndpoint(APIView):
                 last_seen_at=timezone.now(),
             )
 
-            # 7. Apply hello (metadata + stale-busy reaping) + mark ONLINE.
             session_service.apply_hello(runner, body)
             session_service.mark_runner_online(runner.id)
 
-        # 3 (post-tx). Publish session-eviction signal so any in-flight
-        # poll on the old session gets 409 session_evicted.
+        # Post-tx Redis side effects — the new session row is committed and
+        # visible, and the row lock is released, so a Redis hang here can no
+        # longer wedge the database.
+        if old_session_id:
+            outbox.clear_session_marker(_uuid.UUID(old_session_id))
+        outbox.claim_pending_for_new_session(
+            runner_id=runner.id,
+            old_consumer=outbox.consumer_name(old_session_id) if old_session_id else None,
+            new_consumer=outbox.consumer_name(new_sid),
+        )
         outbox.publish_session_eviction(
             runner.id,
             old_session_id=old_session_id,

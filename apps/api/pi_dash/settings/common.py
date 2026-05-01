@@ -161,6 +161,16 @@ else:
         }
     }
 
+# Cap "idle in transaction" at 60s so a stalled in-txn await can't hold row
+# locks indefinitely — Postgres only releases them at COMMIT/ROLLBACK or
+# when the backend dies. Caps idle time only; statement time (incl.
+# migrations) is unaffected.
+DATABASES["default"].setdefault("OPTIONS", {})
+DATABASES["default"]["OPTIONS"]["options"] = (
+    DATABASES["default"]["OPTIONS"].get("options", "")
+    + " -c idle_in_transaction_session_timeout=60000"
+).strip()
+
 
 if os.environ.get("ENABLE_READ_REPLICA", "0") == "1":
     if bool(os.environ.get("DATABASE_READ_REPLICA_URL")):
