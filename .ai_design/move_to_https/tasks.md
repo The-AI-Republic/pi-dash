@@ -42,10 +42,14 @@ How to use this file:
 ### 1.1 Schema migration (single migration, no production data)
 
 - [ ] Drop `Connection` table.
-- [ ] Add to `Runner` (`apps/api/pi_dash/runner/models.py`):
-  - [ ] `created_by` FK → User
-  - [ ] `workspace` FK → Workspace (denormalized from
-        `runner.pod.project.workspace` for fast revocation queries)
+- [ ] Drop `Runner.connection` FK (the Connection table is going away;
+      `Runner` is now self-sufficient for trust state).
+- [ ] **Use existing `Runner.owner` and `Runner.workspace`** as the
+      trust principal and workspace binding (`design.md` §6.1).
+      `runner.owner` is already used by `matcher.py`,
+      `views/runners.py`, `views/runs.py`; do **not** introduce a
+      `created_by` field.
+- [ ] Add new auth fields to `Runner` (`apps/api/pi_dash/runner/models.py`):
   - [ ] `refresh_token_hash` indexed CharField(128)
   - [ ] `refresh_token_fingerprint` CharField(8)
   - [ ] `refresh_token_generation` PositiveIntegerField, default 0
@@ -91,8 +95,10 @@ How to use this file:
         `previous_refresh_token_hash`. Previous-match → call
         `runner.revoke()` and return 401 `refresh_token_replayed`;
         no match in either → 401 `invalid_refresh_token`.
-  - [ ] Live `is_workspace_member(runner.created_by, runner.workspace_id)`
+  - [ ] Live `is_workspace_member(runner.owner, runner.workspace_id)`
         — fail → `runner.revoke()`, 401 `membership_revoked`.
+        (Uses existing `Runner.owner` field; do not introduce
+        `created_by`.)
   - [ ] Atomic rotate: copy current hash → previous, set new hash,
         increment `refresh_token_generation`, mint new access token.
   - [ ] Delete any `RunnerForceRefresh` row for this runner.
@@ -104,6 +110,13 @@ How to use this file:
       `apps/api/pi_dash/runner/authentication.py`:
   - [ ] Bearer JWT, verify by `kid`.
   - [ ] Verify `exp`; on failure → 401 `access_token_expired`.
+  - [ ] Load `Runner` by `sub`; **reject if `revoked_at IS NOT NULL`
+        → 401 `runner_revoked`**. Mirrors today's
+        `revoked_at__isnull=True` predicate at
+        `apps/api/pi_dash/runner/authentication.py:50-55`.
+        `Runner.revoke()` does not bump `rtg`, so without this
+        per-request check an access token issued before revocation
+        survives up to its TTL.
   - [ ] Verify `rtg` against `Runner.refresh_token_generation - 1`.
   - [ ] Apply `RunnerForceRefresh.min_rtg` if a row exists for this
         runner.
@@ -154,6 +167,14 @@ How to use this file:
 
 - [ ] Move `POST /api/v1/runner/connections/enroll/` →
       `POST /api/v1/runner/runners/enroll/`.
+- [ ] Request body fields (`design.md` §5.1):
+  - [ ] `enrollment_token` (one-time bearer)
+  - [ ] `host_label` (required; carries forward today's enrollment
+        request shape at
+        `apps/api/pi_dash/runner/serializers.py:150` /
+        `views/connections.py:254`. Required for MachineToken
+        bootstrap dedupe key `(user, workspace, host_label)`.)
+  - [ ] `name` (optional; daemon-supplied default)
 - [ ] Mint refresh + access tokens for the new `Runner` row;
       response shape per `design.md` §5.1.
 - [ ] **MachineToken bootstrap**: check for a live `MachineToken`
@@ -199,26 +220,36 @@ How to use this file:
       Notes: `design.md` §7.1; combines today's session-open and
       per-runner Hello into one step.
   - [ ] Verify access token; assert `token.sub == rid`.
+  - [ ] Validate `project_slug` matches
+        `runner.pod.project.identifier` if provided. (Done **before**
+        the session row is created, so a project-slug mismatch
+        doesn't leave a phantom session row.)
   - [ ] Evict any prior active session for this runner; publish
         `session_eviction:<rid>` pub/sub.
   - [ ] Ensure `runner_stream:{rid}` + `runner-group:{rid}`:
         `XGROUP CREATE runner_stream:{rid} runner-group:{rid} $ MKSTREAM`
         (ignore `BUSYGROUP`).
-  - [ ] Reassign prior consumer's PEL onto `consumer-{new_sid}` via
-        paginated `XAUTOCLAIM` loop (loop until
-        `next_cursor == "0-0"`; `XPENDING ... COUNT N` is unsafe
-        because PEL may exceed any single page).
-  - [ ] Validate `project_slug` matches
-        `runner.pod.project.identifier` if provided.
+  - [ ] Generate `new_sid`. Reassign prior consumer's PEL onto
+        `consumer-{new_sid}` via paginated `XAUTOCLAIM` loop (loop
+        until `next_cursor == "0-0"`; `XPENDING ... COUNT N` is
+        unsafe because PEL may exceed any single page).
+  - [ ] **Create the `RunnerSession` row with `id=new_sid`.**
+        Order matters: `enqueue_for_runner` (§2.3) decides
+        live-stream vs offline-queue based on
+        `active_session_id_for_runner(rid)`. The session row must
+        exist before the next steps run, otherwise the first
+        drained run goes to the offline buffer instead of the
+        live stream.
   - [ ] Apply `_apply_hello` (metadata + stale-busy reaping).
   - [ ] Mark runner ONLINE.
-  - [ ] Drain queued runs (`drain_for_runner_by_id`).
+  - [ ] Drain queued runs (`drain_for_runner_by_id`) — now routes
+        to the live `runner_stream:{rid}` because the session row
+        from the previous step is live.
   - [ ] Drain `runner_offline_stream:{rid}` into the live stream
         oldest-first.
   - [ ] If `in_flight_run` was set, kick off `_resume_run` and
-        include `resume_ack` in the response.
-  - [ ] Create the `RunnerSession` row.
-  - [ ] Return `welcome` payload (and optional `resume_ack`).
+        prepare a `resume_ack` payload.
+  - [ ] Return `session_id`, `welcome`, optional `resume_ack`.
 - [ ] `DELETE /api/v1/runner/runners/<rid>/sessions/<sid>/`
       Notes: clean shutdown; reaps session row + consumer ownership
       after `2 × access_token_ttl_secs`; persistent stream/group
@@ -245,7 +276,7 @@ How to use this file:
       `session_pel_drained:{sid}` (Redis SET / boolean) — first poll
       after session-open reads with `0`, subsequent polls with `>`.
 - [ ] Issue one `XREADGROUP GROUP runner-group:{rid} consumer-{sid}
-    COUNT 100 BLOCK 25000 STREAMS runner_stream:{rid} <0|>>`.
+  COUNT 100 BLOCK 25000 STREAMS runner_stream:{rid} <0|>>`.
 - [ ] Return drained entries with `stream_id`, `mid`, `type`, `body`.
 
 ### 2.3 Outbox helpers
@@ -253,7 +284,7 @@ How to use this file:
 - [ ] `enqueue_for_runner(runner_id, msg)` in
       `apps/api/pi_dash/runner/services/pubsub.py`:
   - [ ] If runner has active session: `XADD runner_stream:{rid}
-    {...msg}` (no inline `MAXLEN` — see retention contract in
+{...msg}` (no inline `MAXLEN` — see retention contract in
         `design.md` §7.4).
   - [ ] Else: offline policy. Reject `assign|cancel|decide|resume_ack`
         with `RunnerOfflineError`; queue control msgs in
@@ -262,7 +293,7 @@ How to use this file:
         is safe here.)
 - [ ] `read_for_session(rid, sid, timeout_ms)` →
       `XREADGROUP GROUP runner-group:{rid} consumer-{sid} ... BLOCK
-    timeout_ms STREAMS runner_stream:{rid} (0|>)`.
+  timeout_ms STREAMS runner_stream:{rid} (0|>)`.
 - [ ] `ack_for_session(rid, [stream_id, ...])` →
       `XACK runner_stream:{rid} runner-group:{rid} <id1> [<id2> ...]`
       (multi-id form).
@@ -312,12 +343,26 @@ How to use this file:
 runner-group:{rid} consumer-{sid}`. The persistent
      `runner_stream:{rid}` and `runner-group:{rid}` are NOT
      destroyed.
-  2. **PEL-aware trim**: `XPENDING runner_stream:{rid}
-runner-group:{rid}` (summary form) → `min_pending_id`; compute
-     `safe_cutoff = min(time_cutoff_id, min_pending_id - 1)`;
-     `XTRIM runner_stream:{rid} MINID <safe_cutoff>` (exact MINID,
-     not approximate). Skip trim if the resulting cutoff is
-     non-monotonic.
+  2. **PEL+undelivered-aware trim** (`design.md` §7.10):
+     - Read `last_delivered_id` from
+       `XINFO GROUPS runner_stream:{rid} runner-group:{rid}`.
+     - Read `min_pending_id` from
+       `XPENDING runner_stream:{rid} runner-group:{rid}` (summary
+       form). May be `None` if PEL is empty.
+     - If `min_pending_id` is set: `safe_floor = min_pending_id - 1`
+       (protects PEL).
+     - Else: `safe_floor = last_delivered_id` (anything past
+       `last_delivered_id` is undelivered backlog and must be
+       retained).
+     - `safe_cutoff = min(time_cutoff_id, safe_floor)`.
+     - `XTRIM runner_stream:{rid} MINID <safe_cutoff>` (exact MINID,
+       not approximate). Skip trim if the resulting cutoff is
+       non-monotonic.
+     - Why both bounds: `min_pending_id` alone protects only PEL;
+       it leaves undelivered IDs (XADDed but never returned by
+       `XREADGROUP > `) at risk of trim during a daemon-hang or
+       slow-poll window. Bounding by `last_delivered_id`
+       eliminates that gap.
   3. **Orphaned-stream deletion**: delete `runner_stream:{rid}`
      whose runner is revoked or has been idle with `XLEN == 0` for
      > 24h. Delete `runner_offline_stream:{rid}` idle >24h with
@@ -343,7 +388,7 @@ runner-group:{rid}` (summary form) → `min_pending_id`; compute
 - [ ] `POST /sessions/` reads `X-Runner-Protocol-Version` header;
       missing or `< 4` → `426 Upgrade Required` with body
       `{"error": "protocol_version_unsupported", "minimum": 4,
-    "upgrade_url": "..."}`.
+  "upgrade_url": "..."}`.
 - [ ] WS upgrade endpoint: reject `X-Runner-Protocol < 4` with WS
       close code 1008 reason `protocol_version_unsupported`.
 - [ ] Test: v3 daemon hitting `POST /sessions/` gets 426; v3 daemon
@@ -452,7 +497,7 @@ mergeable behind `PI_DASH_TRANSPORT=http|ws` until 4d defaults to
 - [ ] Daemon-level `daemon.toml` for shared config (host_label,
       cloud URL).
 - [ ] Daemon-level `machine_token.toml` written by `pidash auth
-    login` flow (read-only as far as the daemon is concerned —
+  login` flow (read-only as far as the daemon is concerned —
       MachineToken is for the CLI, not the daemon).
 - [ ] 401 `access_token_expired` → auto-refresh + retry once.
 - [ ] 401 `membership_revoked` / `refresh_token_replayed` /
