@@ -49,7 +49,7 @@ class Migration(migrations.Migration):
                 ("agent_subprocess_alive", models.BooleanField(blank=True, null=True)),
                 (
                     "approvals_pending",
-                    models.PositiveSmallIntegerField(blank=True, null=True),
+                    models.PositiveIntegerField(blank=True, null=True),
                 ),
                 ("input_tokens", models.BigIntegerField(blank=True, null=True)),
                 ("output_tokens", models.BigIntegerField(blank=True, null=True)),

@@ -261,8 +261,16 @@ class RunnerSessionPollEndpoint(APIView):
             # Volatile observability snapshot — see
             # `.ai_design/runner_agent_bridge/design.md` §4.5.2.
             # Pre-observability runners send no snapshot fields and the
-            # helper short-circuits.
-            session_service.upsert_runner_live_state(runner, status_entry)
+            # helper short-circuits. Failures here must never break the
+            # poll path: a malformed snapshot or a transient DB error
+            # would otherwise return 500 and spin the runner's retry loop.
+            try:
+                session_service.upsert_runner_live_state(runner, status_entry)
+            except Exception:
+                logger.exception(
+                    "upsert_runner_live_state failed for runner %s",
+                    runner.id,
+                )
 
         # 5. XACK explicit ids.
         if ack_ids:

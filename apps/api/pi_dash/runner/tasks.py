@@ -264,13 +264,23 @@ def reconcile_stalled_runs() -> int:
     for run in stalled:
         if run.runner is None:
             continue
-        run_lifecycle.finalize_run_terminal(
-            run.runner,
-            run.id,
-            AgentRunStatus.FAILED,
-            error_detail=f"agent stalled: no events for >{threshold}s",
-        )
-        reaped += 1
+        # Per-row guard: a single bad finalize (DB constraint, optimistic-
+        # concurrency conflict, scheduler-hook error) must not abort the
+        # whole sweep — the next 30s tick would then re-walk the same poison
+        # row and never reap the rest. Log + continue.
+        try:
+            run_lifecycle.finalize_run_terminal(
+                run.runner,
+                run.id,
+                AgentRunStatus.FAILED,
+                error_detail=f"agent stalled: no events for >{threshold}s",
+            )
+            reaped += 1
+        except Exception:
+            logger.exception(
+                "reconcile_stalled_runs: failed to reap run %s",
+                run.id,
+            )
     if reaped:
         logger.info(
             "reconcile_stalled_runs reaped %s stalled run(s) (threshold=%ss)",

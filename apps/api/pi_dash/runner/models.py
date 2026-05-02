@@ -799,7 +799,11 @@ class RunnerLiveState(models.Model):
     last_event_summary = models.CharField(max_length=200, null=True, blank=True)
     agent_pid = models.PositiveIntegerField(null=True, blank=True)
     agent_subprocess_alive = models.BooleanField(null=True, blank=True)
-    approvals_pending = models.PositiveSmallIntegerField(null=True, blank=True)
+    # PositiveIntegerField, not SmallInteger: the runner serialises this as
+    # u32 with a u32::MAX guard sentinel, which would overflow a SMALLINT
+    # column (max 32767) and raise DataError on save(), 500-ing the poll
+    # path. PositiveInteger covers the full u32 range.
+    approvals_pending = models.PositiveIntegerField(null=True, blank=True)
     input_tokens = models.BigIntegerField(null=True, blank=True)
     output_tokens = models.BigIntegerField(null=True, blank=True)
     total_tokens = models.BigIntegerField(null=True, blank=True)

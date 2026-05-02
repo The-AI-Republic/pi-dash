@@ -8,10 +8,14 @@ use crate::config::schema::Config;
 use crate::daemon::observability::TokenUsage;
 use crate::ipc::protocol::{CurrentRunSummary, RunnerStatusSnapshot};
 
-/// One-shot snapshot of the volatile observability fields that ride on
-/// `PollStatus`. Captured by `StateHandle::observability_snapshot()` once
-/// per poll so the wire builder doesn't hold every Mutex while serialising.
-#[derive(Debug, Clone, Default)]
+/// Volatile observability fields that ride on `PollStatus`. Doubles as
+/// the in-memory storage shape (held under one `Mutex` inside `Inner`)
+/// AND the wire-snapshot returned by `StateHandle::observability_snapshot()`.
+/// Keeping them in one struct means `reset_run_snapshot()` is a single
+/// `Default::default()` assignment and a new field added here is automatically
+/// included in reset, snapshot read, and rid-change wipe — no enumeration to
+/// keep in sync.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ObservabilitySnapshot {
     pub last_event_at: Option<DateTime<Utc>>,
     pub last_event_kind: Option<String>,
@@ -56,19 +60,18 @@ struct Inner {
     current_run: Mutex<Option<CurrentRunSummary>>,
     approvals_pending: Mutex<usize>,
     runner_id: Mutex<Option<Uuid>>,
-    // ----- per-active-run observability snapshot -----
-    // Volatile fields that ride on `PollStatus` when the
-    // `agent_observability_v1` feature is enabled. Each is independently
-    // updated by the supervisor as agent events flow through; they are
-    // collectively wiped by `reset_run_snapshot()` whenever a new run id
-    // takes over so a freshly-assigned run never inherits stale metrics.
-    last_event_at: Mutex<Option<DateTime<Utc>>>,
-    last_event_kind: Mutex<Option<String>>,
-    last_event_summary: Mutex<Option<String>>,
-    agent_pid: Mutex<Option<u32>>,
-    agent_subprocess_alive: Mutex<Option<bool>>,
-    tokens: Mutex<Option<TokenUsage>>,
-    turn_count: Mutex<Option<u32>>,
+    /// Per-active-run observability snapshot. One `Mutex` over the whole
+    /// struct (rather than seven `Mutex<Option<T>>` fields) so that:
+    ///   1. `reset_run_snapshot()` is a single assignment — adding a
+    ///      future field cannot silently leak across run boundaries.
+    ///   2. `note_agent_event` stamps `last_event_at` / `last_event_kind`
+    ///      / `last_event_summary` atomically — no concurrent reader can
+    ///      see a partial update.
+    ///   3. `observability_snapshot()` is one lock + one clone instead
+    ///      of seven independent locks.
+    /// Collectively wiped on rid change in `set_current_run` so a freshly
+    /// assigned run never inherits stale metrics.
+    run_snapshot: Mutex<ObservabilitySnapshot>,
 }
 
 impl StateHandle {
@@ -97,13 +100,7 @@ impl StateHandle {
                 current_run: Mutex::new(None),
                 approvals_pending: Mutex::new(0),
                 runner_id: Mutex::new(None),
-                last_event_at: Mutex::new(None),
-                last_event_kind: Mutex::new(None),
-                last_event_summary: Mutex::new(None),
-                agent_pid: Mutex::new(None),
-                agent_subprocess_alive: Mutex::new(None),
-                tokens: Mutex::new(None),
-                turn_count: Mutex::new(None),
+                run_snapshot: Mutex::new(ObservabilitySnapshot::default()),
             }),
             tx_tick,
             rx_tick,
@@ -191,63 +188,50 @@ impl StateHandle {
     /// `set_current_run` when the in-flight run id changes, and is safe
     /// to call directly from tests.
     pub async fn reset_run_snapshot(&self) {
-        *self.inner.last_event_at.lock().await = None;
-        *self.inner.last_event_kind.lock().await = None;
-        *self.inner.last_event_summary.lock().await = None;
-        *self.inner.agent_pid.lock().await = None;
-        *self.inner.agent_subprocess_alive.lock().await = None;
-        *self.inner.tokens.lock().await = None;
-        *self.inner.turn_count.lock().await = None;
+        *self.inner.run_snapshot.lock().await = ObservabilitySnapshot::default();
         self.tick();
     }
 
-    /// Bump `last_event_at` and stamp `kind` / `summary`. Called from
-    /// `pump_events` on every `BridgeEvent` regardless of variant.
+    /// Bump `last_event_at` and stamp `kind` / `summary` atomically.
+    /// Called from `pump_events` on every `BridgeEvent` regardless of variant.
     pub async fn note_agent_event(&self, ts: DateTime<Utc>, kind: String, summary: Option<String>) {
-        *self.inner.last_event_at.lock().await = Some(ts);
-        *self.inner.last_event_kind.lock().await = Some(kind);
+        let mut snap = self.inner.run_snapshot.lock().await;
+        snap.last_event_at = Some(ts);
+        snap.last_event_kind = Some(kind);
         if let Some(s) = summary {
-            *self.inner.last_event_summary.lock().await = Some(s);
+            snap.last_event_summary = Some(s);
         }
+        drop(snap);
         self.tick();
     }
 
     pub async fn set_agent_pid(&self, pid: Option<u32>) {
-        *self.inner.agent_pid.lock().await = pid;
+        self.inner.run_snapshot.lock().await.agent_pid = pid;
         self.tick();
     }
 
     pub async fn set_agent_alive(&self, alive: bool) {
-        *self.inner.agent_subprocess_alive.lock().await = Some(alive);
+        self.inner.run_snapshot.lock().await.agent_subprocess_alive = Some(alive);
         self.tick();
     }
 
     pub async fn set_tokens(&self, usage: TokenUsage) {
-        *self.inner.tokens.lock().await = Some(usage);
+        self.inner.run_snapshot.lock().await.tokens = Some(usage);
         self.tick();
     }
 
     pub async fn incr_turn(&self) {
-        let mut g = self.inner.turn_count.lock().await;
-        *g = Some(g.unwrap_or(0).saturating_add(1));
-        drop(g);
+        let mut snap = self.inner.run_snapshot.lock().await;
+        snap.turn_count = Some(snap.turn_count.unwrap_or(0).saturating_add(1));
+        drop(snap);
         self.tick();
     }
 
-    /// Snapshot the volatile observability fields for one poll. Locks each
-    /// Mutex independently so the wire builder doesn't have to hold every
-    /// lock at once (and so adding a new field doesn't grow the critical
-    /// section).
+    /// Snapshot the volatile observability fields for one poll. One lock
+    /// + one clone — adding a new field to `ObservabilitySnapshot`
+    /// automatically participates without touching this method.
     pub async fn observability_snapshot(&self) -> ObservabilitySnapshot {
-        ObservabilitySnapshot {
-            last_event_at: *self.inner.last_event_at.lock().await,
-            last_event_kind: self.inner.last_event_kind.lock().await.clone(),
-            last_event_summary: self.inner.last_event_summary.lock().await.clone(),
-            agent_pid: *self.inner.agent_pid.lock().await,
-            agent_subprocess_alive: *self.inner.agent_subprocess_alive.lock().await,
-            tokens: *self.inner.tokens.lock().await,
-            turn_count: *self.inner.turn_count.lock().await,
-        }
+        self.inner.run_snapshot.lock().await.clone()
     }
 
     pub async fn incr_current_run_events(&self) {
@@ -388,18 +372,28 @@ mod tests {
         state.set_agent_pid(Some(1111)).await;
         state.set_agent_alive(true).await;
         state
+            .set_tokens(TokenUsage {
+                input: 1,
+                output: 2,
+                total: 3,
+            })
+            .await;
+        state.incr_turn().await;
+        state
             .note_agent_event(Utc::now(), "raw".into(), Some("a".into()))
             .await;
 
         state.set_current_run(Some(summary(rid_b, "running"))).await;
         let snap = state.observability_snapshot().await;
-        assert!(
-            snap.agent_pid.is_none(),
+        // Whole-struct equality with Default. Any *future* field added to
+        // ObservabilitySnapshot is automatically covered — a new field
+        // can't silently leak across run boundaries without flipping this
+        // test red.
+        assert_eq!(
+            snap,
+            ObservabilitySnapshot::default(),
             "snapshot leaked across run boundary"
         );
-        assert!(snap.agent_subprocess_alive.is_none());
-        assert!(snap.last_event_at.is_none());
-        assert!(snap.last_event_kind.is_none());
     }
 
     #[tokio::test]
