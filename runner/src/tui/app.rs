@@ -1318,7 +1318,10 @@ async fn submit_remove_runner(state: &mut AppState) {
     let Some(name) = state.remove_runner_confirm.take() else {
         return;
     };
-    let args = crate::cli::runner::RemoveArgs { name: name.clone() };
+    let args = crate::cli::runner::RemoveArgs {
+        name: name.clone(),
+        local_only: false,
+    };
     match crate::cli::runner::remove(args, &state.paths).await {
         Ok(_) => {
             state.reload_outcome =
