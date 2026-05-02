@@ -64,7 +64,11 @@ PHASES: dict[str, PhaseConfig] = {
         template_name=PromptTemplate.DEFAULT_NAME,  # "coding-task"
         fresh_session_on_entry=False,
     ),
-    # PR B adds the StateGroup.REVIEW entry for the In Review phase.
+    StateGroup.REVIEW.value: PhaseConfig(
+        state_name="In Review",
+        template_name="review",
+        fresh_session_on_entry=True,
+    ),
 }
 
 

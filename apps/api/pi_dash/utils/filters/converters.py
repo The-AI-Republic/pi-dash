@@ -41,7 +41,7 @@ class LegacyToRichFiltersConverter:
 
     # Default valid choices for choice fields
     DEFAULT_VALID_CHOICES = {
-        "state_group": ["backlog", "unstarted", "started", "completed", "cancelled"],
+        "state_group": ["backlog", "unstarted", "started", "review", "completed", "cancelled"],
         "priority": ["urgent", "high", "medium", "low", "none"],
     }
 

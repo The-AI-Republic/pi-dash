@@ -6,7 +6,7 @@ from django.db.models import Case, CharField, Min, Value, When
 
 # Custom ordering for priority and state
 PRIORITY_ORDER = ["urgent", "high", "medium", "low", "none"]
-STATE_ORDER = ["backlog", "unstarted", "started", "completed", "cancelled"]
+STATE_ORDER = ["backlog", "unstarted", "started", "review", "completed", "cancelled"]
 
 
 def order_issue_queryset(issue_queryset, order_by_param="-created_at"):

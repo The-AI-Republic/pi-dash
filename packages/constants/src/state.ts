@@ -37,6 +37,12 @@ export const STATE_GROUPS: {
     defaultStateName: "In Progress",
     color: "#f59e0b",
   },
+  review: {
+    key: "review",
+    label: "Review",
+    defaultStateName: "In Review",
+    color: "#5b5bd6",
+  },
   completed: {
     key: "completed",
     label: "Completed",
@@ -57,6 +63,7 @@ export const PENDING_STATE_GROUPS = [
   STATE_GROUPS.backlog.key,
   STATE_GROUPS.unstarted.key,
   STATE_GROUPS.started.key,
+  STATE_GROUPS.review.key,
   STATE_GROUPS.cancelled.key,
 ];
 
@@ -75,6 +82,11 @@ export const STATE_DISTRIBUTION = {
     key: STATE_GROUPS.started.key,
     issues: "started_issues",
     points: "started_estimate_points",
+  },
+  [STATE_GROUPS.review.key]: {
+    key: STATE_GROUPS.review.key,
+    issues: "review_issues",
+    points: "review_estimate_points",
   },
   [STATE_GROUPS.completed.key]: {
     key: STATE_GROUPS.completed.key,

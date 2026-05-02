@@ -109,3 +109,89 @@ def test_build_continuation_falls_back_to_first_turn_when_no_parent(
     # Same shape as build_first_turn — issue context, not just a
     # placeholder string.
     assert "Pi Dash issue" in out
+
+
+# ---------------------------------------------------------------------------
+# Phase-aware template selection
+# (.ai_design/create_review_state/design.md §5 / §7.7)
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def seeded_review(db):
+    from pi_dash.prompting.seed import seed_review_template
+
+    seed_review_template(force=False)
+
+
+@pytest.fixture
+def in_review_state(project):
+    return State.objects.create(
+        name="In Review",
+        project=project,
+        group="review",
+    )
+
+
+@pytest.fixture
+def in_progress_state(project):
+    return State.objects.create(
+        name="In Progress",
+        project=project,
+        group="started",
+    )
+
+
+@pytest.mark.unit
+def test_build_first_turn_uses_review_template_for_in_review(
+    db, seeded_default, seeded_review, workspace, project, in_review_state, create_user
+):
+    issue = Issue.objects.create(
+        name="Some review work",
+        workspace=workspace,
+        project=project,
+        state=in_review_state,
+        created_by=create_user,
+    )
+    run = AgentRun.objects.create(
+        owner=create_user,
+        workspace=workspace,
+        prompt="",
+        work_item=issue,
+    )
+    rendered = build_first_turn(issue, run)
+    # The review prompt's distinguishing language — the kind-router
+    # is the load-bearing structural marker.
+    assert "kind of review" in rendered.lower()
+    assert "pr_url" in rendered or "design_doc_paths" in rendered
+
+
+@pytest.mark.unit
+def test_build_first_turn_uses_default_template_for_in_progress(
+    db,
+    seeded_default,
+    seeded_review,
+    workspace,
+    project,
+    in_progress_state,
+    create_user,
+):
+    issue = Issue.objects.create(
+        name="Some impl work",
+        workspace=workspace,
+        project=project,
+        state=in_progress_state,
+        created_by=create_user,
+    )
+    run = AgentRun.objects.create(
+        owner=create_user,
+        workspace=workspace,
+        prompt="",
+        work_item=issue,
+    )
+    rendered = build_first_turn(issue, run)
+    # The default template's distinguishing marker.
+    assert "Pi Dash issue" in rendered
+    # Make sure we didn't accidentally render the review prompt for
+    # an impl-phase issue.
+    assert "kind of review" not in rendered.lower()

@@ -36,6 +36,15 @@
     "project_id": 1
   },
   {
+    "id": 7,
+    "name": "In Review",
+    "color": "#5B5BD6",
+    "sequence": 40000,
+    "group": "review",
+    "default": false,
+    "project_id": 1
+  },
+  {
     "id": 5,
     "name": "Done",
     "color": "#16A34A",

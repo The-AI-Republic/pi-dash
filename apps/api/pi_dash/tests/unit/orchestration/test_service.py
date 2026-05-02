@@ -42,6 +42,9 @@ def states(project, create_user):
             "in_progress": State.objects.create(
                 name="In Progress", project=project, group="started"
             ),
+            "in_review": State.objects.create(
+                name="In Review", project=project, group="review"
+            ),
             "done": State.objects.create(
                 name="Done", project=project, group="completed"
             ),
@@ -606,3 +609,123 @@ def test_comment_on_non_eligible_state_does_not_rearm(
     assert outcome.reason == "state-not-eligible"
     sched.refresh_from_db()
     assert sched.enabled is False
+
+
+# ---------------------------------------------------------------------------
+# In Review phase + cross-phase fresh session
+# (.ai_design/create_review_state/design.md §4.2 / §4.3)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+def test_is_delegation_trigger_true_for_in_review(states):
+    assert service._is_delegation_trigger(states["in_review"]) is True
+
+
+@pytest.mark.unit
+def test_in_progress_to_in_review_dispatches_fresh_session(
+    seeded, issue, states, runner_for_workspace
+):
+    """Cross-phase entry into review must dispatch with parent_run=None
+    and pinned_runner cleared so the ``review`` template body lands as
+    the system prompt of a fresh agent session."""
+    from pi_dash.db.models.issue_agent_ticker import IssueAgentTicker
+
+    Issue.all_objects.filter(pk=issue.pk).update(state=states["in_progress"])
+    issue.refresh_from_db()
+    prior = _make_paused_run(issue, runner_for_workspace)
+
+    outcome = service.handle_issue_state_transition(
+        issue=issue,
+        from_state=states["in_progress"],
+        to_state=states["in_review"],
+    )
+    assert outcome.reason == "created"
+    assert outcome.created_run is not None
+    assert outcome.created_run.parent_run_id is None
+    assert outcome.created_run.pinned_runner_id is None
+    # ``resume_parent_run`` must capture the latest impl run so the
+    # reverse hand-back can resume it.
+    sched = IssueAgentTicker.objects.get(issue=issue)
+    assert sched.resume_parent_run_id == prior.pk
+
+
+@pytest.mark.unit
+def test_in_review_to_in_progress_resumes_pre_review_run(
+    seeded, issue, states, runner_for_workspace
+):
+    """Hand-back transition uses ``resume_parent_run`` (the impl run we
+    stashed on entry to review) as parent — NOT the latest review run.
+    """
+    from pi_dash.db.models.issue_agent_ticker import IssueAgentTicker
+
+    Issue.all_objects.filter(pk=issue.pk).update(state=states["in_progress"])
+    issue.refresh_from_db()
+    impl_run = _make_paused_run(issue, runner_for_workspace, thread_id="impl")
+
+    # Transition to In Review, which captures impl_run on the ticker.
+    service.handle_issue_state_transition(
+        issue=issue,
+        from_state=states["in_progress"],
+        to_state=states["in_review"],
+    )
+    # Sanity: a review run exists and is the latest prior.
+    review_run = (
+        AgentRun.objects.filter(work_item=issue)
+        .order_by("-created_at")
+        .first()
+    )
+    assert review_run is not None
+    assert review_run.id != impl_run.id
+
+    # Now hand back to In Progress.
+    outcome = service.handle_issue_state_transition(
+        issue=issue,
+        from_state=states["in_review"],
+        to_state=states["in_progress"],
+    )
+    assert outcome.reason == "created"
+    # Parent should be the impl_run, NOT the latest review run.
+    assert outcome.created_run.parent_run_id == impl_run.id
+
+
+@pytest.mark.unit
+def test_continuation_eligible_groups_includes_review():
+    assert "review" in service.CONTINUATION_ELIGIBLE_GROUPS
+    assert "started" in service.CONTINUATION_ELIGIBLE_GROUPS
+
+
+@pytest.mark.unit
+def test_comment_on_in_review_wakes_agent(
+    seeded, project, issue, states, runner_for_workspace, create_user
+):
+    Issue.all_objects.filter(pk=issue.pk).update(state=states["in_review"])
+    issue.refresh_from_db()
+    _make_paused_run(issue, runner_for_workspace)
+
+    comment = _make_comment(issue, create_user, "double-check finding #2")
+    outcome = service.handle_issue_comment(comment)
+    assert outcome.reason == "created"
+
+
+@pytest.mark.unit
+def test_state_transition_disarms_on_leaving_review(
+    seeded, issue, states
+):
+    """Review group exits also disarm the ticker (generalized rule)."""
+    from pi_dash.db.models.issue_agent_ticker import IssueAgentTicker
+
+    Issue.all_objects.filter(pk=issue.pk).update(state=states["in_review"])
+    issue.refresh_from_db()
+    # Seed a ticker on the issue.
+    from pi_dash.orchestration import scheduling
+
+    scheduling.arm_ticker(issue)
+    assert IssueAgentTicker.objects.get(issue=issue).enabled is True
+
+    service.handle_issue_state_transition(
+        issue=issue,
+        from_state=states["in_review"],
+        to_state=states["done"],
+    )
+    assert IssueAgentTicker.objects.get(issue=issue).enabled is False

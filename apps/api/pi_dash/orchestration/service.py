@@ -115,12 +115,30 @@ def handle_issue_state_transition(
     state-transition's own immediate dispatch — the caller will dispatch
     its own run.
     """
+    from pi_dash.db.models.issue_agent_ticker import IssueAgentTicker
     from pi_dash.orchestration import scheduling
+
+    # Detect cross-phase transition (both states are ticking but in
+    # different groups). On started → review, capture the latest impl
+    # run as the resume parent so the reverse transition can restore
+    # that exact session. We capture **before** the disarm/re-arm
+    # below so the captured run is genuinely the latest pre-review.
+    cross_phase = (
+        is_ticking_state(from_state)
+        and is_ticking_state(to_state)
+        and from_state.group != to_state.group
+    )
+    if cross_phase and from_state.group == StateGroup.STARTED.value:
+        latest_impl = _latest_prior_run(issue)
+        if latest_impl is not None:
+            IssueAgentTicker.objects.filter(issue=issue).update(
+                resume_parent_run=latest_impl
+            )
 
     # Disarm when leaving a ticking state into anything that isn't the
     # *same* ticking state. Inter-phase transitions (e.g., In Progress
-    # → In Review once PR B lands) intentionally disarm-then-re-arm so
-    # the ticker row's runtime fields land on the new phase's defaults.
+    # → In Review) intentionally disarm-then-re-arm so the ticker row
+    # lands on the new phase's effective cadence.
     if is_ticking_state(from_state) and (
         not is_ticking_state(to_state) or from_state.group != to_state.group
     ):
@@ -146,7 +164,33 @@ def handle_issue_state_transition(
         )
         return TransitionOutcome(reason="active-run-exists")
 
+    # Parent resolution for the dispatched run depends on the phase
+    # transition shape:
+    #
+    # - Cross-phase entry into a phase whose ``fresh_session_on_entry``
+    #   is True (today: review): dispatch with parent_run=None and
+    #   pinned_runner_id cleared. The new phase's prompt template lands
+    #   as the actual system prompt rather than as a user-turn message
+    #   on a resumed session.
+    # - Cross-phase entry into a phase whose ``fresh_session_on_entry``
+    #   is False (today: started, e.g., review → In Progress
+    #   hand-back): use ``ticker.resume_parent_run`` (the impl run we
+    #   stashed on the forward transition) as the parent so the agent
+    #   resumes the original implementation thread instead of
+    #   parenting off a review run.
+    # - Same-phase or first-time entry: today's behavior — parent =
+    #   _latest_prior_run(issue).
+    fresh_session = False
     parent = _latest_prior_run(issue)
+    to_cfg = phase_config_for(to_state)
+    if cross_phase and to_cfg is not None:
+        if to_cfg.fresh_session_on_entry:
+            fresh_session = True
+            parent = None
+        else:
+            ticker = IssueAgentTicker.objects.filter(issue=issue).first()
+            if ticker is not None and ticker.resume_parent_run_id is not None:
+                parent = ticker.resume_parent_run
 
     creator = actor or _resolve_fallback_creator(issue)
     if creator is None:
@@ -167,7 +211,11 @@ def handle_issue_state_transition(
         return TransitionOutcome(reason="no-pod-available")
 
     return _create_and_dispatch_run(
-        issue=issue, parent=parent, creator=creator, pod=pod
+        issue=issue,
+        parent=parent,
+        creator=creator,
+        pod=pod,
+        fresh_session=fresh_session,
     )
 
 
@@ -210,10 +258,11 @@ def _resolve_pod_for_issue(issue: Issue):
 
 
 #: Issue state groups in which a comment is allowed to wake the agent.
-#: Backlog/Unstarted are owned by the state-transition trigger; Completed/
-#: Cancelled require the user to re-open the issue. See §5.2 of
-#: .ai_design/issue_run_improve/design.md.
-CONTINUATION_ELIGIBLE_GROUPS = (StateGroup.STARTED.value,)
+#: Derived from the phase registry — every group that has a registered
+#: ticking phase. Backlog/Unstarted are owned by the state-transition
+#: trigger; Completed/Cancelled require the user to re-open the issue.
+#: See ``.ai_design/create_review_state/design.md`` §7.4.
+CONTINUATION_ELIGIBLE_GROUPS = tuple(PHASES.keys())
 
 
 def handle_issue_comment(comment: IssueComment) -> ContinuationOutcome:
@@ -369,17 +418,38 @@ def _pinned_runner_for(parent: AgentRun) -> Optional[Runner]:
 
 
 def _create_and_dispatch_run(
-    *, issue: Issue, parent: Optional[AgentRun], creator, pod
+    *,
+    issue: Issue,
+    parent: Optional[AgentRun],
+    creator,
+    pod,
+    fresh_session: bool = False,
 ) -> TransitionOutcome:
+    """Create a fresh ``AgentRun`` and dispatch it.
+
+    ``fresh_session=True`` clears ``parent_run`` and ``pinned_runner``
+    so the new phase's template body lands as the system prompt of a
+    brand-new agent session (rather than as a user-turn message on a
+    resumed prior session). Used by cross-phase entry into a phase
+    whose ``fresh_session_on_entry`` is True.
+    """
     from pi_dash.runner.services import matcher
 
     with transaction.atomic():
+        effective_parent = None if fresh_session else parent
+        # Pin the new run to the parent run's runner when eligible.
+        # Skip pinning for fresh sessions — they intentionally drop
+        # session continuity.
+        pinned_runner = None
+        if not fresh_session and effective_parent is not None:
+            pinned_runner = _pinned_runner_for(effective_parent)
         run = AgentRun.objects.create(
             workspace=issue.workspace,
             created_by=creator,
             pod=pod,
             work_item=issue,
-            parent_run=parent,
+            parent_run=effective_parent,
+            pinned_runner=pinned_runner,
             status=AgentRunStatus.QUEUED,
             prompt="",  # populated below before dispatch
             run_config={

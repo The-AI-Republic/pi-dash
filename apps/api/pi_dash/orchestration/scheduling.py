@@ -106,13 +106,22 @@ def arm_ticker(
             .first()
         )
         if sched is None:
-            # Brand-new row — single INSERT with the right values. No
-            # follow-up UPDATE needed.
+            # Brand-new row. We need a sensible ``next_run_at`` before
+            # we can ask for ``effective_interval_seconds`` (which
+            # consults the row), so use the In Progress project default
+            # for the very first compute. arm_ticker is only called
+            # from state-transition entry into a ticking phase, and an
+            # issue's first arm is always In Progress (Review only
+            # triggers via cross-phase transition from In Progress).
+            # Subsequent arms use the row's phase-aware
+            # ``effective_interval_seconds`` directly.
             interval = _project_default_interval(issue)
             sched = IssueAgentTicker.objects.create(
                 issue=issue,
                 interval_seconds=None,
                 max_ticks=None,
+                review_interval_seconds=None,
+                review_max_ticks=None,
                 user_disabled=False,
                 next_run_at=_compute_next_run_at(interval),
                 tick_count=0,
