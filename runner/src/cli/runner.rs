@@ -122,7 +122,14 @@ pub async fn add(args: AddArgs, paths: &Paths) -> Result<RunnerConfig> {
             version: crate::RUNNER_VERSION.to_string(),
             protocol_version: crate::PROTOCOL_VERSION,
         };
-        match register_runner(&cfg.daemon.cloud_url, &creds.connection_id, &creds.connection_secret, &req).await {
+        match register_runner(
+            &cfg.daemon.cloud_url,
+            &creds.connection_id,
+            &creds.connection_secret,
+            &req,
+        )
+        .await
+        {
             Ok(resp) => break (resp, candidate),
             Err(RunnerCrudError::NameTaken)
                 if !user_supplied && attempts < MAX_AUTO_NAME_RETRIES =>

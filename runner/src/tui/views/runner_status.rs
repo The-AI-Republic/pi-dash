@@ -238,4 +238,3 @@ fn hotkeys_card() -> Paragraph<'static> {
     ]))
     .block(Block::default().borders(Borders::ALL).title(" Controls "))
 }
-

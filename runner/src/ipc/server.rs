@@ -226,8 +226,7 @@ impl IpcServer {
                 anyhow::bail!("approval not found or already resolved");
             }
             Request::DoctorRun { runner } => {
-                let report =
-                    crate::cli::doctor::execute(&self.paths, runner.as_deref()).await?;
+                let report = crate::cli::doctor::execute(&self.paths, runner.as_deref()).await?;
                 Ok(Response::Doctor(report))
             }
             Request::RunnerReconnect => {
@@ -274,8 +273,7 @@ impl IpcServer {
     }
 
     fn runner_names(&self) -> Vec<String> {
-        let mut names: Vec<String> =
-            self.instances.values().map(|i| i.name.clone()).collect();
+        let mut names: Vec<String> = self.instances.values().map(|i| i.name.clone()).collect();
         names.sort();
         names
     }

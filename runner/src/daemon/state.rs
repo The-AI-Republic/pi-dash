@@ -5,7 +5,22 @@ use uuid::Uuid;
 
 use crate::cloud::protocol::RunnerStatus;
 use crate::config::schema::Config;
+use crate::daemon::observability::TokenUsage;
 use crate::ipc::protocol::{CurrentRunSummary, RunnerStatusSnapshot};
+
+/// One-shot snapshot of the volatile observability fields that ride on
+/// `PollStatus`. Captured by `StateHandle::observability_snapshot()` once
+/// per poll so the wire builder doesn't hold every Mutex while serialising.
+#[derive(Debug, Clone, Default)]
+pub struct ObservabilitySnapshot {
+    pub last_event_at: Option<DateTime<Utc>>,
+    pub last_event_kind: Option<String>,
+    pub last_event_summary: Option<String>,
+    pub agent_pid: Option<u32>,
+    pub agent_subprocess_alive: Option<bool>,
+    pub tokens: Option<TokenUsage>,
+    pub turn_count: Option<u32>,
+}
 
 #[derive(Clone)]
 pub struct StateHandle {
@@ -30,6 +45,10 @@ struct Inner {
     name: String,
     project_slug: Option<String>,
     pod_id: Option<Uuid>,
+    /// Cached at construction; the daemon doesn't reload `agent_observability_v1`
+    /// at runtime in v1, so reading from `Inner` saves a `Mutex<Config>` lock
+    /// on every poll.
+    agent_observability_v1: bool,
     cloud_url: Mutex<String>,
     started_at: DateTime<Utc>,
     connected: Mutex<bool>,
@@ -37,6 +56,19 @@ struct Inner {
     current_run: Mutex<Option<CurrentRunSummary>>,
     approvals_pending: Mutex<usize>,
     runner_id: Mutex<Option<Uuid>>,
+    // ----- per-active-run observability snapshot -----
+    // Volatile fields that ride on `PollStatus` when the
+    // `agent_observability_v1` feature is enabled. Each is independently
+    // updated by the supervisor as agent events flow through; they are
+    // collectively wiped by `reset_run_snapshot()` whenever a new run id
+    // takes over so a freshly-assigned run never inherits stale metrics.
+    last_event_at: Mutex<Option<DateTime<Utc>>>,
+    last_event_kind: Mutex<Option<String>>,
+    last_event_summary: Mutex<Option<String>>,
+    agent_pid: Mutex<Option<u32>>,
+    agent_subprocess_alive: Mutex<Option<bool>>,
+    tokens: Mutex<Option<TokenUsage>>,
+    turn_count: Mutex<Option<u32>>,
 }
 
 impl StateHandle {
@@ -50,12 +82,14 @@ impl StateHandle {
             None => (String::new(), None, None),
         };
         let cloud_url = cfg.daemon.cloud_url.clone();
+        let agent_observability_v1 = cfg.daemon.agent_observability_v1;
         Self {
             inner: Arc::new(Inner {
                 cfg: Mutex::new(cfg),
                 name,
                 project_slug,
                 pod_id,
+                agent_observability_v1,
                 cloud_url: Mutex::new(cloud_url),
                 started_at: Utc::now(),
                 connected: Mutex::new(false),
@@ -63,6 +97,13 @@ impl StateHandle {
                 current_run: Mutex::new(None),
                 approvals_pending: Mutex::new(0),
                 runner_id: Mutex::new(None),
+                last_event_at: Mutex::new(None),
+                last_event_kind: Mutex::new(None),
+                last_event_summary: Mutex::new(None),
+                agent_pid: Mutex::new(None),
+                agent_subprocess_alive: Mutex::new(None),
+                tokens: Mutex::new(None),
+                turn_count: Mutex::new(None),
             }),
             tx_tick,
             rx_tick,
@@ -79,6 +120,12 @@ impl StateHandle {
 
     pub fn subscribe(&self) -> watch::Receiver<u64> {
         self.rx_tick.clone()
+    }
+
+    /// Whether the runner should serialise the per-active-run observability
+    /// snapshot on its `PollStatus`. Cached at construction.
+    pub fn agent_observability_v1(&self) -> bool {
+        self.inner.agent_observability_v1
     }
 
     pub fn force_reconnect(&self) {
@@ -114,6 +161,21 @@ impl StateHandle {
 
     pub async fn set_current_run(&self, s: Option<CurrentRunSummary>) {
         let next = s.as_ref().map(|r| r.run_id);
+        let prev = *self.tx_in_flight.borrow();
+        // Clear the per-run observability snapshot only on a run-id
+        // *change*. Re-stamping the same run id during startup
+        // (supervisor early-stamp + worker re-stamp at supervisor.rs:803)
+        // must not erase live values.
+        // `set_current_run(None)` on a finished run does NOT reset; the
+        // last-known values remain on the next poll until a new run starts.
+        let must_reset = match (prev, next) {
+            (Some(p), Some(n)) => p != n,
+            (None, Some(_)) => true,
+            _ => false,
+        };
+        if must_reset {
+            self.reset_run_snapshot().await;
+        }
         *self.inner.current_run.lock().await = s;
         let _ = self.tx_in_flight.send(next);
         let status = if next.is_some() {
@@ -123,6 +185,69 @@ impl StateHandle {
         };
         let _ = self.tx_status.send(status);
         self.tick();
+    }
+
+    /// Wipe the per-run observability snapshot. Called by
+    /// `set_current_run` when the in-flight run id changes, and is safe
+    /// to call directly from tests.
+    pub async fn reset_run_snapshot(&self) {
+        *self.inner.last_event_at.lock().await = None;
+        *self.inner.last_event_kind.lock().await = None;
+        *self.inner.last_event_summary.lock().await = None;
+        *self.inner.agent_pid.lock().await = None;
+        *self.inner.agent_subprocess_alive.lock().await = None;
+        *self.inner.tokens.lock().await = None;
+        *self.inner.turn_count.lock().await = None;
+        self.tick();
+    }
+
+    /// Bump `last_event_at` and stamp `kind` / `summary`. Called from
+    /// `pump_events` on every `BridgeEvent` regardless of variant.
+    pub async fn note_agent_event(&self, ts: DateTime<Utc>, kind: String, summary: Option<String>) {
+        *self.inner.last_event_at.lock().await = Some(ts);
+        *self.inner.last_event_kind.lock().await = Some(kind);
+        if let Some(s) = summary {
+            *self.inner.last_event_summary.lock().await = Some(s);
+        }
+        self.tick();
+    }
+
+    pub async fn set_agent_pid(&self, pid: Option<u32>) {
+        *self.inner.agent_pid.lock().await = pid;
+        self.tick();
+    }
+
+    pub async fn set_agent_alive(&self, alive: bool) {
+        *self.inner.agent_subprocess_alive.lock().await = Some(alive);
+        self.tick();
+    }
+
+    pub async fn set_tokens(&self, usage: TokenUsage) {
+        *self.inner.tokens.lock().await = Some(usage);
+        self.tick();
+    }
+
+    pub async fn incr_turn(&self) {
+        let mut g = self.inner.turn_count.lock().await;
+        *g = Some(g.unwrap_or(0).saturating_add(1));
+        drop(g);
+        self.tick();
+    }
+
+    /// Snapshot the volatile observability fields for one poll. Locks each
+    /// Mutex independently so the wire builder doesn't have to hold every
+    /// lock at once (and so adding a new field doesn't grow the critical
+    /// section).
+    pub async fn observability_snapshot(&self) -> ObservabilitySnapshot {
+        ObservabilitySnapshot {
+            last_event_at: *self.inner.last_event_at.lock().await,
+            last_event_kind: self.inner.last_event_kind.lock().await.clone(),
+            last_event_summary: self.inner.last_event_summary.lock().await.clone(),
+            agent_pid: *self.inner.agent_pid.lock().await,
+            agent_subprocess_alive: *self.inner.agent_subprocess_alive.lock().await,
+            tokens: *self.inner.tokens.lock().await,
+            turn_count: *self.inner.turn_count.lock().await,
+        }
     }
 
     pub async fn incr_current_run_events(&self) {
@@ -137,6 +262,11 @@ impl StateHandle {
     pub async fn set_approvals_pending(&self, n: usize) {
         *self.inner.approvals_pending.lock().await = n;
         self.tick();
+    }
+
+    /// Read the cached approvals-pending count for the wire snapshot.
+    pub async fn approvals_pending_value(&self) -> usize {
+        *self.inner.approvals_pending.lock().await
     }
 
     pub async fn set_config(&self, cfg: Config) {
@@ -222,6 +352,92 @@ mod tests {
 
         state.set_current_run(None).await;
         assert_eq!(*state.rx_in_flight.borrow(), None);
+    }
+
+    #[tokio::test]
+    async fn re_stamping_same_run_id_preserves_observability_snapshot() {
+        // Supervisor stamps Some(rid) twice (early + worker re-stamp at
+        // supervisor.rs:803). Live observability fields populated between
+        // those two calls must survive the re-stamp.
+        let state = empty_state();
+        let rid = Uuid::new_v4();
+
+        state.set_current_run(Some(summary(rid, "preparing"))).await;
+        state.set_agent_pid(Some(4242)).await;
+        state.set_agent_alive(true).await;
+        state
+            .note_agent_event(Utc::now(), "raw".into(), Some("test".into()))
+            .await;
+
+        // Same rid → must NOT call reset_run_snapshot.
+        state.set_current_run(Some(summary(rid, "starting"))).await;
+        let snap = state.observability_snapshot().await;
+        assert_eq!(snap.agent_pid, Some(4242));
+        assert_eq!(snap.agent_subprocess_alive, Some(true));
+        assert!(snap.last_event_at.is_some());
+        assert_eq!(snap.last_event_kind.as_deref(), Some("raw"));
+    }
+
+    #[tokio::test]
+    async fn run_id_change_resets_observability_snapshot() {
+        let state = empty_state();
+        let rid_a = Uuid::new_v4();
+        let rid_b = Uuid::new_v4();
+
+        state.set_current_run(Some(summary(rid_a, "running"))).await;
+        state.set_agent_pid(Some(1111)).await;
+        state.set_agent_alive(true).await;
+        state
+            .note_agent_event(Utc::now(), "raw".into(), Some("a".into()))
+            .await;
+
+        state.set_current_run(Some(summary(rid_b, "running"))).await;
+        let snap = state.observability_snapshot().await;
+        assert!(
+            snap.agent_pid.is_none(),
+            "snapshot leaked across run boundary"
+        );
+        assert!(snap.agent_subprocess_alive.is_none());
+        assert!(snap.last_event_at.is_none());
+        assert!(snap.last_event_kind.is_none());
+    }
+
+    #[tokio::test]
+    async fn set_current_run_none_preserves_terminal_snapshot() {
+        // After a run completes, we keep the last-known scalars on the
+        // wire so the cloud can render the terminal state until a new run
+        // arrives. Reset happens only on the next idle→busy transition.
+        let state = empty_state();
+        let rid = Uuid::new_v4();
+
+        state.set_current_run(Some(summary(rid, "running"))).await;
+        state.set_agent_pid(Some(7777)).await;
+
+        state.set_current_run(None).await;
+        let snap = state.observability_snapshot().await;
+        assert_eq!(snap.agent_pid, Some(7777));
+    }
+
+    #[tokio::test]
+    async fn note_agent_event_atomically_stamps_three_fields() {
+        let state = empty_state();
+        let now = Utc::now();
+        state
+            .note_agent_event(now, "tool/exec".into(), Some("running".into()))
+            .await;
+        let snap = state.observability_snapshot().await;
+        assert_eq!(snap.last_event_at, Some(now));
+        assert_eq!(snap.last_event_kind.as_deref(), Some("tool/exec"));
+        assert_eq!(snap.last_event_summary.as_deref(), Some("running"));
+    }
+
+    #[tokio::test]
+    async fn incr_turn_increments_from_none() {
+        let state = empty_state();
+        state.incr_turn().await;
+        assert_eq!(state.observability_snapshot().await.turn_count, Some(1));
+        state.incr_turn().await;
+        assert_eq!(state.observability_snapshot().await.turn_count, Some(2));
     }
 
     #[tokio::test]

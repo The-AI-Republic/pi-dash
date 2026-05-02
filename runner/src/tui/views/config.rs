@@ -147,10 +147,7 @@ fn runner_at(cfg: &Config, idx: usize) -> Option<&crate::config::schema::RunnerC
     cfg.runners.get(i)
 }
 
-fn runner_at_mut(
-    cfg: &mut Config,
-    idx: usize,
-) -> Option<&mut crate::config::schema::RunnerConfig> {
+fn runner_at_mut(cfg: &mut Config, idx: usize) -> Option<&mut crate::config::schema::RunnerConfig> {
     if cfg.runners.is_empty() {
         return None;
     }
@@ -312,11 +309,8 @@ pub fn cycle_enum(cfg: &mut Config, id: FieldId, runner_idx: usize) {
 /// before. Keys: `<`/`>` cycle, `Alt+1`–`Alt+9` jump.
 pub fn runner_picker_bar(state: &AppState) -> Paragraph<'static> {
     let Some(working) = state.config_working.as_ref() else {
-        return Paragraph::new(Line::raw("")).block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title(" Runners "),
-        );
+        return Paragraph::new(Line::raw(""))
+            .block(Block::default().borders(Borders::ALL).title(" Runners "));
     };
     let total = working.runners.len();
     let picked = state.runner_picker_idx.min(total.saturating_sub(1));
@@ -338,11 +332,11 @@ pub fn runner_picker_bar(state: &AppState) -> Paragraph<'static> {
         "   [<] prev  [>] next  [Alt+1..9] jump".to_string(),
         Style::default().add_modifier(Modifier::DIM),
     ));
-    Paragraph::new(Line::from(spans)).block(
-        Block::default()
-            .borders(Borders::ALL)
-            .title(format!(" Runners ({}/{}) ", picked + 1, total)),
-    )
+    Paragraph::new(Line::from(spans)).block(Block::default().borders(Borders::ALL).title(format!(
+        " Runners ({}/{}) ",
+        picked + 1,
+        total
+    )))
 }
 
 pub fn register_form_lines(state: &AppState) -> Vec<Line<'static>> {
@@ -432,11 +426,7 @@ fn form_field_line(label: &str, value: &str, focused: bool) -> Line<'static> {
 }
 
 fn form_button_line(focused: bool, busy: bool) -> Line<'static> {
-    let label = if busy {
-        " Connecting… "
-    } else {
-        " Connect "
-    };
+    let label = if busy { " Connecting… " } else { " Connect " };
     let style = if focused {
         Style::default()
             .fg(Color::Black)
@@ -581,8 +571,7 @@ fn render_editable_row(
     let modified = loaded
         .as_ref()
         .map(|l| {
-            display_value(l, spec.id, runner_idx)
-                != display_value(working, spec.id, runner_idx)
+            display_value(l, spec.id, runner_idx) != display_value(working, spec.id, runner_idx)
         })
         .unwrap_or(true);
 
