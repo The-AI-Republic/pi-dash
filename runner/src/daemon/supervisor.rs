@@ -473,13 +473,19 @@ fn spawn_exit_watch(
     mut exit_rx: tokio::sync::watch::Receiver<Option<crate::agent::ExitSnapshot>>,
 ) {
     tokio::spawn(async move {
-        // Wait for the next change. The initial value is None at spawn
-        // time; the wait task publishes Some(ExitSnapshot) once.
-        if exit_rx.changed().await.is_err() {
-            return;
-        }
-        if exit_rx.borrow().is_none() {
-            return;
+        // A freshly-cloned watch::Receiver marks the current value as
+        // "seen", so changed() only fires on values published *after*
+        // we subscribed. Check borrow() first to catch the case where
+        // the wait task already published Some(ExitSnapshot) before we
+        // got here (e.g. agent binary segfaults on startup).
+        let already_exited = exit_rx.borrow().is_some();
+        if !already_exited {
+            if exit_rx.changed().await.is_err() {
+                return;
+            }
+            if exit_rx.borrow().is_none() {
+                return;
+            }
         }
         // Guard: only stamp alive=false if the in-flight run is still
         // ours. A new run may already have taken over and called

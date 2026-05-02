@@ -201,30 +201,42 @@ async fn wait_task(
                     Some(KillRequest::Force) => {
                         let _ = child.start_kill();
                     }
-                    Some(KillRequest::Graceful) | None => {
+                    Some(KillRequest::Graceful) => {
                         // No-op: wait for natural exit.
+                    }
+                    None => {
+                        // All senders dropped — recv will resolve to None
+                        // synchronously every iteration. Stop polling the
+                        // recv arm and just await natural exit, otherwise
+                        // the biased select! would spin on the closed
+                        // channel without ever polling child.wait().
+                        let res = child.wait().await;
+                        break exit_snapshot_from(res.ok());
                     }
                 }
             }
             res = child.wait() => {
-                let status = res.ok();
-                #[cfg(unix)]
-                let signal = {
-                    use std::os::unix::process::ExitStatusExt;
-                    status.as_ref().and_then(|s| s.signal())
-                };
-                #[cfg(not(unix))]
-                let signal: Option<i32> = None;
-                let status_code = status.as_ref().and_then(|s| s.code());
-                break ExitSnapshot {
-                    status_code,
-                    signal,
-                    observed_at: Utc::now(),
-                };
+                break exit_snapshot_from(res.ok());
             }
         }
     };
     let _ = exit_tx.send(Some(snapshot));
+}
+
+fn exit_snapshot_from(status: Option<std::process::ExitStatus>) -> ExitSnapshot {
+    #[cfg(unix)]
+    let signal = {
+        use std::os::unix::process::ExitStatusExt;
+        status.as_ref().and_then(|s| s.signal())
+    };
+    #[cfg(not(unix))]
+    let signal: Option<i32> = None;
+    let status_code = status.as_ref().and_then(|s| s.code());
+    ExitSnapshot {
+        status_code,
+        signal,
+        observed_at: Utc::now(),
+    }
 }
 
 async fn read_events(stdout: tokio::process::ChildStdout, tx: mpsc::Sender<StreamEvent>) {
