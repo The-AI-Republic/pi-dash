@@ -444,6 +444,7 @@ export default {
         online: "online",
         busy: "busy",
         offline: "offline",
+        revoked: "revoked",
       },
       columns_pod: "Pod",
       columns_connection: "Connection",

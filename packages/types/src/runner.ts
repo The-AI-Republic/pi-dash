@@ -4,7 +4,7 @@
  * See the LICENSE file for details.
  */
 
-export type TRunnerStatus = "online" | "offline" | "busy";
+export type TRunnerStatus = "online" | "offline" | "busy" | "revoked";
 
 export interface IPodMini {
   id: string;
