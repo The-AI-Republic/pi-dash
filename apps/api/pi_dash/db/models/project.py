@@ -134,9 +134,19 @@ class Project(BaseModel):
         ],
     )
     # Periodic agent re-invocation defaults — see
-    # ``.ai_design/issue_ticking_system/design.md`` §7.2.
-    agent_default_interval_seconds = models.IntegerField(default=10800)
-    agent_default_max_ticks = models.IntegerField(default=24)
+    # ``.ai_design/issue_ticking_system/design.md`` §7.2 and
+    # ``.ai_design/create_review_state/design.md`` §6.4 for the
+    # phase split.
+    #
+    # ``agent_default_*`` are the **In Progress phase** defaults.
+    # ``agent_review_default_*`` are the **In Review phase** defaults
+    # (review iterations are bounded shorter — see design §3.2).
+    # ``agent_ticking_enabled`` gates the project globally; both
+    # phases respect it.
+    agent_default_interval_seconds = models.IntegerField(default=10800)  # 3 h
+    agent_default_max_ticks = models.IntegerField(default=24)            # 3 days
+    agent_review_default_interval_seconds = models.IntegerField(default=10800)  # 3 h
+    agent_review_default_max_ticks = models.IntegerField(default=8)             # 24 h window
     agent_ticking_enabled = models.BooleanField(default=True)
 
     def __init__(self, *args, **kwargs):

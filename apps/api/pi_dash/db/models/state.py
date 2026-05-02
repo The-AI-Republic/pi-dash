@@ -15,6 +15,7 @@ class StateGroup(models.TextChoices):
     BACKLOG = "backlog", "Backlog"
     UNSTARTED = "unstarted", "Unstarted"
     STARTED = "started", "Started"
+    REVIEW = "review", "Review"
     COMPLETED = "completed", "Completed"
     CANCELLED = "cancelled", "Cancelled"
     TRIAGE = "triage", "Triage"
@@ -40,6 +41,12 @@ DEFAULT_STATES = [
         "color": "#F59E0B",
         "sequence": 35000,
         "group": StateGroup.STARTED.value,
+    },
+    {
+        "name": "In Review",
+        "color": "#5B5BD6",
+        "sequence": 40000,
+        "group": StateGroup.REVIEW.value,
     },
     {
         "name": "Done",

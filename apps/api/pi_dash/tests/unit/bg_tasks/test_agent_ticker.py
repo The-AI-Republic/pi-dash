@@ -46,6 +46,9 @@ def states(project, create_user):
             "in_progress": State.objects.create(
                 name="In Progress", project=project, group="started"
             ),
+            "in_review": State.objects.create(
+                name="In Review", project=project, group="review"
+            ),
             "paused": State.objects.create(
                 name="Paused", project=project, group="backlog"
             ),
@@ -163,6 +166,96 @@ def test_scan_picks_up_only_due_enabled_under_cap_rows(
     disabled.next_run_at = timezone.now() - timedelta(seconds=1)
     disabled.enabled = False
     disabled.save(update_fields=["next_run_at", "enabled"])
+
+    with mock.patch(
+        "pi_dash.bgtasks.agent_ticker.fire_tick.delay"
+    ) as fire:
+        count = scan_due_tickers()
+    assert count == 1
+    assert fire.call_count == 1
+
+
+@pytest.mark.unit
+def test_scan_uses_review_phase_cap_for_in_review_rows(
+    seeded, project, states, workspace, create_user
+):
+    """The scanner's effective-cap annotation is phase-aware via
+    ``Case/When`` over ``state.group`` (design §7.5). A ticker on an In
+    Review issue must be filtered against the review-phase cap pair,
+    not the In Progress pair — otherwise an In Review ticker at
+    ``tick_count=10`` would be admitted under the impl cap (24) when
+    the review cap (8) should have already disarmed it.
+
+    This test pins both project caps explicitly to keep the assertion
+    independent of any future default tweaks: review_max_ticks=8 vs
+    max_ticks=24.
+    """
+    project.agent_default_max_ticks = 24
+    project.agent_review_default_max_ticks = 8
+    project.save(
+        update_fields=[
+            "agent_default_max_ticks",
+            "agent_review_default_max_ticks",
+        ]
+    )
+
+    # In Review issue at tick_count=10. Above review cap (8), below
+    # impl cap (24). Must be filtered out — the only way the scanner
+    # gets this right is if the Case/When picks the review pair.
+    with impersonate(create_user):
+        review_issue = Issue.objects.create(
+            name="ReviewTask",
+            workspace=workspace,
+            project=project,
+            state=states["todo"],
+            created_by=create_user,
+        )
+    Issue.all_objects.filter(pk=review_issue.pk).update(state=states["in_review"])
+    review_issue.refresh_from_db()
+    sched = scheduling.arm_ticker(review_issue)
+    sched.next_run_at = timezone.now() - timedelta(seconds=1)
+    sched.tick_count = 10
+    sched.save(update_fields=["next_run_at", "tick_count", "updated_at"])
+
+    with mock.patch(
+        "pi_dash.bgtasks.agent_ticker.fire_tick.delay"
+    ) as fire:
+        count = scan_due_tickers()
+    assert count == 0
+    assert fire.call_count == 0
+
+
+@pytest.mark.unit
+def test_scan_admits_in_review_row_under_review_phase_cap(
+    seeded, project, states, workspace, create_user
+):
+    """Inverse of the above: an In Review row whose ``tick_count`` is
+    below the review cap (8) is admitted normally — confirms the
+    Case/When defaults don't accidentally exclude all review rows.
+    """
+    project.agent_default_max_ticks = 24
+    project.agent_review_default_max_ticks = 8
+    project.save(
+        update_fields=[
+            "agent_default_max_ticks",
+            "agent_review_default_max_ticks",
+        ]
+    )
+
+    with impersonate(create_user):
+        review_issue = Issue.objects.create(
+            name="ReviewTask2",
+            workspace=workspace,
+            project=project,
+            state=states["todo"],
+            created_by=create_user,
+        )
+    Issue.all_objects.filter(pk=review_issue.pk).update(state=states["in_review"])
+    review_issue.refresh_from_db()
+    sched = scheduling.arm_ticker(review_issue)
+    sched.next_run_at = timezone.now() - timedelta(seconds=1)
+    sched.tick_count = 5  # < 8
+    sched.save(update_fields=["next_run_at", "tick_count", "updated_at"])
 
     with mock.patch(
         "pi_dash.bgtasks.agent_ticker.fire_tick.delay"

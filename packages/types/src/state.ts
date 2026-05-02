@@ -4,7 +4,7 @@
  * See the LICENSE file for details.
  */
 
-export type TStateGroups = "backlog" | "unstarted" | "started" | "completed" | "cancelled";
+export type TStateGroups = "backlog" | "unstarted" | "started" | "review" | "completed" | "cancelled";
 
 export interface IState {
   readonly id: string;
