@@ -286,8 +286,14 @@ def test_watchdog_reaps_when_all_three_conditions_hold(
         observed_run_id=run.id,
         last_event_at=now - timedelta(seconds=600),
     )
-    state.updated_at = now - timedelta(seconds=10)  # fresh
-    state.save(update_fields=["updated_at"])
+    # `auto_now=True` re-stamps `updated_at` on every save(), so we have
+    # to bypass the ORM with a raw UPDATE to set a deterministic value.
+    # The fresh-row state we want IS roughly "now", but pinning it
+    # avoids the slim race where test setup + the watchdog's `now`
+    # straddle a tick boundary.
+    RunnerLiveState.objects.filter(pk=state.pk).update(
+        updated_at=now - timedelta(seconds=10)
+    )
 
     reaped = reconcile_stalled_runs()
     assert reaped == 1
@@ -377,8 +383,10 @@ def test_watchdog_does_not_reap_awaiting_approval(
         observed_run_id=run.id,
         last_event_at=now - timedelta(seconds=600),
     )
-    state.updated_at = now - timedelta(seconds=10)
-    state.save(update_fields=["updated_at"])
+    # Bypass auto_now=True with a raw UPDATE — see the fresh-row test.
+    RunnerLiveState.objects.filter(pk=state.pk).update(
+        updated_at=now - timedelta(seconds=10)
+    )
 
     reaped = reconcile_stalled_runs()
     assert reaped == 0
@@ -398,7 +406,9 @@ def test_watchdog_does_not_reap_pre_observability_run_with_null_last_event_at(
     state = RunnerLiveState.objects.create(
         runner=runner, observed_run_id=run.id, last_event_at=None
     )
-    state.updated_at = now - timedelta(seconds=5)
-    state.save(update_fields=["updated_at"])
+    # Bypass auto_now=True with a raw UPDATE — see the fresh-row test.
+    RunnerLiveState.objects.filter(pk=state.pk).update(
+        updated_at=now - timedelta(seconds=5)
+    )
     reaped = reconcile_stalled_runs()
     assert reaped == 0

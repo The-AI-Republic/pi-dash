@@ -29,7 +29,6 @@ from pi_dash.runner.models import (
     RunnerStatus,
 )
 from pi_dash.runner.services import outbox, run_lifecycle
-from pi_dash.runner.services.matcher import BUSY_STATUSES
 from pi_dash.runner.services.pubsub import send_to_runner
 
 logger = logging.getLogger(__name__)
@@ -242,14 +241,17 @@ def reconcile_stalled_runs() -> int:
     cutoff = now - timedelta(seconds=threshold)
     snapshot_cutoff = now - timedelta(seconds=snapshot_freshness)
 
+    # AWAITING_APPROVAL / AWAITING_REAUTH are intentionally excluded
+    # from the active-run set: they're operator-driven pauses, not
+    # silence on the agent's part. The runner's snapshot during those
+    # states will look "stalled" by construction; failing the run from
+    # this watchdog would race the user. Filter directly on the two
+    # active states instead of subtracting from BUSY_STATUSES so a
+    # future status added to BUSY_STATUSES doesn't silently sneak past
+    # the exclusion.
+    active_statuses = (AgentRunStatus.ASSIGNED, AgentRunStatus.RUNNING)
     stalled = (
-        AgentRun.objects.filter(status__in=BUSY_STATUSES)
-        .exclude(
-            status__in=(
-                AgentRunStatus.AWAITING_APPROVAL,
-                AgentRunStatus.AWAITING_REAUTH,
-            )
-        )
+        AgentRun.objects.filter(status__in=active_statuses)
         .filter(
             runner__live_state__observed_run_id=models.F("id"),
             runner__live_state__updated_at__gte=snapshot_cutoff,

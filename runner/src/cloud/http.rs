@@ -808,9 +808,17 @@ impl Serialize for PollStatusObservabilityFlag {
         S: serde::Serializer,
     {
         match self {
-            // `skip_serializing_if` should have caught this branch, but
-            // serialising None keeps the impl total.
-            Self::Absent => serializer.serialize_none(),
+            // The struct field carries `skip_serializing_if = "skip"`,
+            // which intercepts `Absent` before serde reaches this impl.
+            // If a future refactor drops that attribute, this branch
+            // would silently start emitting `null` — a wire change that
+            // looks like "feature on, idle" to the cloud, with no
+            // compile-time warning. Treat reaching it as a bug rather
+            // than papering over it.
+            Self::Absent => Err(serde::ser::Error::custom(
+                "PollStatusObservabilityFlag::Absent reached Serialize; \
+                 skip_serializing_if was bypassed",
+            )),
             Self::Present(v) => match v {
                 Some(uuid) => serializer.serialize_some(uuid),
                 None => serializer.serialize_none(),

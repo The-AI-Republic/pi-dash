@@ -462,8 +462,14 @@ async fn refresh_loop(client: RunnerCloudClient, state: StateHandle) {
 /// terminating. Independent of stdout-close detection so a `kill -9`
 /// path that double-forks or otherwise keeps stdout open is still
 /// caught for observability.
+///
+/// Scoped to `run_id`: if a new run has taken over the in-flight slot
+/// by the time this task fires, the alive flag is left alone — the new
+/// run's own watcher owns it. Without this guard, run A's exit could
+/// stamp `alive=false` on run B's snapshot.
 fn spawn_exit_watch(
     state: StateHandle,
+    run_id: uuid::Uuid,
     mut exit_rx: tokio::sync::watch::Receiver<Option<crate::agent::ExitSnapshot>>,
 ) {
     tokio::spawn(async move {
@@ -472,9 +478,16 @@ fn spawn_exit_watch(
         if exit_rx.changed().await.is_err() {
             return;
         }
-        if exit_rx.borrow().is_some() {
-            state.set_agent_alive(false).await;
+        if exit_rx.borrow().is_none() {
+            return;
         }
+        // Guard: only stamp alive=false if the in-flight run is still
+        // ours. A new run may already have taken over and called
+        // set_agent_alive(true); we must not stomp it.
+        if *state.rx_in_flight.borrow() != Some(run_id) {
+            return;
+        }
+        state.set_agent_alive(false).await;
     });
 }
 
@@ -969,7 +982,7 @@ impl AssignWorker {
         let process_handle = bridge.process_handle();
         self.state.set_agent_pid(process_handle.pid).await;
         self.state.set_agent_alive(true).await;
-        spawn_exit_watch(self.state.clone(), process_handle.exit_rx.clone());
+        spawn_exit_watch(self.state.clone(), run_id, process_handle.exit_rx.clone());
 
         let payload = RunPayload {
             run_id,
@@ -1164,7 +1177,9 @@ impl AssignWorker {
         // operators see them on the runner-status panel.
         let kind = crate::daemon::observability::kind_of(&ev);
         let summary = crate::daemon::observability::summary_of(&ev);
-        self.state.note_agent_event(Utc::now(), kind, summary).await;
+        self.state
+            .note_agent_event(Utc::now(), kind, Some(summary))
+            .await;
         if let BridgeEvent::Raw { method, params, .. } = &ev {
             match method.as_str() {
                 "codex/event/token_count" => {

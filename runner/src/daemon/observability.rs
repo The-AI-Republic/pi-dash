@@ -43,7 +43,12 @@ pub fn kind_of(event: &BridgeEvent) -> String {
 /// live-state `last_event_summary` field. This must NEVER include prompt
 /// text, model output, or file content — only method names, ids,
 /// durations, exit codes. Length-capped to `SUMMARY_MAX`.
-pub fn summary_of(event: &BridgeEvent) -> Option<String> {
+///
+/// Returns `String` rather than `Option<String>` because every variant
+/// produces a non-empty summary today; callers that want to defer
+/// stamping (e.g. on a quiet idle tick) should not call this in the
+/// first place.
+pub fn summary_of(event: &BridgeEvent) -> String {
     let raw = match event {
         BridgeEvent::RunStarted { thread_id, .. } => {
             format!("run started thread={thread_id}")
@@ -65,7 +70,7 @@ pub fn summary_of(event: &BridgeEvent) -> Option<String> {
             format!("run failed reason={reason:?}")
         }
     };
-    Some(truncate(&raw, SUMMARY_MAX))
+    truncate(&raw, SUMMARY_MAX)
 }
 
 fn truncate(s: &str, max: usize) -> String {
@@ -83,14 +88,20 @@ fn truncate(s: &str, max: usize) -> String {
 /// Best-effort parser for a Codex `codex/event/token_count` Raw frame's
 /// params. Returns `None` if the params don't match the expected shape.
 /// Failures are non-fatal — the supervisor logs at debug and continues.
+///
+/// Accepts either of the two shapes seen on the wire:
+///   - `{ "usage": { "input_tokens": ..., "output_tokens": ... } }`
+///   - `{ "input_tokens": ..., "output_tokens": ... }` (flat)
+/// Both shapes must additionally surface `total_tokens` to be accepted —
+/// a frame with only `input_tokens`/`output_tokens` and no `total_tokens`
+/// is treated as not-a-token-count to keep the parser narrow. This
+/// avoids false positives on unrelated frames that happen to carry
+/// numeric fields named `input_tokens` / `output_tokens`.
 pub fn parse_codex_token_count(params: &serde_json::Value) -> Option<TokenUsage> {
-    let usage = params.get("usage").or(Some(params))?;
+    let usage = params.get("usage").unwrap_or(params);
     let input = usage.get("input_tokens").and_then(|v| v.as_u64())?;
     let output = usage.get("output_tokens").and_then(|v| v.as_u64())?;
-    let total = usage
-        .get("total_tokens")
-        .and_then(|v| v.as_u64())
-        .unwrap_or(input + output);
+    let total = usage.get("total_tokens").and_then(|v| v.as_u64())?;
     Some(TokenUsage {
         input,
         output,
@@ -140,7 +151,7 @@ mod tests {
             method: "tool/exec".into(),
             params: json!({"prompt": "rm -rf /etc", "output": "secret data"}),
         };
-        let s = summary_of(&ev).unwrap();
+        let s = summary_of(&ev);
         assert!(s.contains("method=tool/exec"));
         assert!(!s.contains("rm -rf"), "summary leaked params content: {s}");
         assert!(
@@ -157,7 +168,7 @@ mod tests {
             method: long,
             params: json!({}),
         };
-        let s = summary_of(&ev).unwrap();
+        let s = summary_of(&ev);
         assert!(s.len() <= SUMMARY_MAX);
     }
 
@@ -168,7 +179,7 @@ mod tests {
             reason: FailureReason::Timeout,
             detail: Some("user-detail".into()),
         };
-        let s = summary_of(&ev).unwrap();
+        let s = summary_of(&ev);
         assert!(s.contains("Timeout"));
         // Detail string carries operator-supplied text; we deliberately
         // do not echo it through, only the classifier.
@@ -184,7 +195,7 @@ mod tests {
             payload: json!({"cmd": "ls"}),
             reason: Some("test".into()),
         };
-        let s = summary_of(&ev).unwrap();
+        let s = summary_of(&ev);
         assert!(s.contains("approval request"));
         assert!(s.contains("kind="));
         assert!(!s.contains("\"cmd\""));
@@ -202,12 +213,25 @@ mod tests {
     }
 
     #[test]
-    fn parse_codex_token_count_accepts_flat_block() {
-        let params = json!({"input_tokens": 10, "output_tokens": 20});
+    fn parse_codex_token_count_accepts_flat_block_with_total() {
+        let params = json!({
+            "input_tokens": 10,
+            "output_tokens": 20,
+            "total_tokens": 30
+        });
         let u = parse_codex_token_count(&params).unwrap();
         assert_eq!(u.input, 10);
         assert_eq!(u.output, 20);
         assert_eq!(u.total, 30);
+    }
+
+    #[test]
+    fn parse_codex_token_count_rejects_flat_without_total() {
+        // Defensive: a frame with only input/output and no total is
+        // ambiguous — could be an unrelated event with a similar
+        // numeric field naming. Stay narrow to avoid false positives.
+        let params = json!({"input_tokens": 10, "output_tokens": 20});
+        assert!(parse_codex_token_count(&params).is_none());
     }
 
     #[test]
