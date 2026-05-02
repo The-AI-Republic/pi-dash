@@ -859,7 +859,10 @@ class RunnerConsumer(AsyncJsonWebsocketConsumer):
 
         from django.db import transaction
 
-        from pi_dash.orchestration.scheduling import maybe_apply_deferred_pause
+        from pi_dash.orchestration.scheduling import (
+            maybe_apply_deferred_pause,
+            maybe_disarm_on_terminal_signal,
+        )
         from pi_dash.runner.services.matcher import drain_for_runner_by_id
 
         def _pause_and_drain(rid=run_id, runner_id=runner.id):
@@ -873,6 +876,20 @@ class RunnerConsumer(AsyncJsonWebsocketConsumer):
                 .first()
             )
             if paused is not None:
+                # Disarm-on-terminal must run before deferred-pause so
+                # the deferred-pause hook sees the latest disarm reason.
+                # Both are safe on PAUSED runs because the payload-status
+                # gate inside maybe_disarm_on_terminal_signal only fires
+                # on completed/blocked, and the CAP_HIT gate inside
+                # maybe_apply_deferred_pause skips terminal-signal
+                # disarms.
+                try:
+                    maybe_disarm_on_terminal_signal(paused)
+                except Exception:
+                    logger.exception(
+                        "orchestration.error: terminal-disarm failed for run %s",
+                        rid,
+                    )
                 try:
                     maybe_apply_deferred_pause(paused)
                 except Exception:
@@ -911,7 +928,10 @@ class RunnerConsumer(AsyncJsonWebsocketConsumer):
 
         from django.db import transaction
 
-        from pi_dash.orchestration.scheduling import maybe_apply_deferred_pause
+        from pi_dash.orchestration.scheduling import (
+            maybe_apply_deferred_pause,
+            maybe_disarm_on_terminal_signal,
+        )
         from pi_dash.runner.services.matcher import (
             drain_for_runner_by_id,
             drain_pod_by_id,
@@ -929,6 +949,15 @@ class RunnerConsumer(AsyncJsonWebsocketConsumer):
                 .first()
             )
             if run is not None:
+                # Disarm-on-terminal must run before deferred-pause so
+                # the deferred-pause hook sees the latest disarm reason.
+                try:
+                    maybe_disarm_on_terminal_signal(run)
+                except Exception:
+                    logger.exception(
+                        "orchestration.error: terminal-disarm failed for run %s",
+                        rid,
+                    )
                 try:
                     maybe_apply_deferred_pause(run)
                 except Exception:

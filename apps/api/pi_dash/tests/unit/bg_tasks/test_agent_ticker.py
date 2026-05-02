@@ -217,6 +217,8 @@ def test_fire_tick_skips_when_already_advanced(seeded, issue, runner_for_workspa
 def test_fire_tick_disarms_on_cap_hit(
     seeded, issue, runner_for_workspace
 ):
+    from pi_dash.db.models.issue_agent_ticker import TickerDisarmReason
+
     _make_prior_run(issue, runner_for_workspace)
     sched = _make_due_schedule(issue, tick_count=23, max_ticks=24)
     fired = fire_tick(str(sched.id))
@@ -225,6 +227,9 @@ def test_fire_tick_disarms_on_cap_hit(
     sched.refresh_from_db()
     assert sched.tick_count == 24
     assert sched.enabled is False
+    # Cap-hit disarm must persist the reason so ``maybe_apply_deferred_pause``
+    # can distinguish it from terminal-signal disarms (PR A §4.5 / §6.3).
+    assert sched.disarm_reason == TickerDisarmReason.CAP_HIT
 
 
 @pytest.mark.unit
