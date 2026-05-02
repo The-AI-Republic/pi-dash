@@ -132,12 +132,20 @@ class IssueAgentTicker(BaseModel):
         """Return ``True`` if the issue's current state is the In
         Review phase. Used to pick the right cadence-field pair.
         """
-        # Local import keeps the model file free of orchestration
+        # Local imports keep the model file free of orchestration
         # imports at module load time (orchestration imports state).
+        from pi_dash.db.models.state import StateGroup
         from pi_dash.orchestration.agent_phases import phase_config_for
 
+        # Require both: a registered ticking state (so a custom
+        # workspace state in the review group does not pick up
+        # phase-aware cadence) AND the review group key. Comparing on
+        # the group enum keeps the cadence resolver decoupled from the
+        # state's display name.
         cfg = phase_config_for(self.issue.state)
-        return cfg is not None and cfg.state_name == "In Review"
+        if cfg is None:
+            return False
+        return self.issue.state.group == StateGroup.REVIEW.value
 
     def effective_interval_seconds(self) -> int:
         """Return the interval to use, picking the In Review pair when

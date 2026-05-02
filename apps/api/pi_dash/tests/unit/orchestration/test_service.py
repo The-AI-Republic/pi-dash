@@ -729,3 +729,34 @@ def test_state_transition_disarms_on_leaving_review(
         to_state=states["done"],
     )
     assert IssueAgentTicker.objects.get(issue=issue).enabled is False
+
+
+@pytest.mark.unit
+def test_review_to_in_progress_with_no_resume_target_uses_fresh_session(
+    seeded, issue, states, runner_for_workspace
+):
+    """Hand-back from In Review to In Progress when there's no captured
+    ``resume_parent_run`` (e.g., the issue skipped the impl phase on
+    the way in: Todo → In Review → In Progress) must dispatch with
+    ``parent_run=None`` and ``pinned_runner=None`` rather than parenting
+    off the most recent prior run, which would be a review run.
+    """
+    # Put the issue directly into In Review without ever having been
+    # In Progress, then make a paused review run as the latest prior.
+    Issue.all_objects.filter(pk=issue.pk).update(state=states["in_review"])
+    issue.refresh_from_db()
+    review_run = _make_paused_run(issue, runner_for_workspace, thread_id="rev")
+
+    # Hand back to In Progress. ticker.resume_parent_run is unset
+    # (the forward gate only captures on STARTED → review).
+    outcome = service.handle_issue_state_transition(
+        issue=issue,
+        from_state=states["in_review"],
+        to_state=states["in_progress"],
+    )
+    assert outcome.reason == "created"
+    assert outcome.created_run is not None
+    # Critical: must NOT parent off the review run.
+    assert outcome.created_run.parent_run_id is None
+    assert outcome.created_run.parent_run_id != review_run.id
+    assert outcome.created_run.pinned_runner_id is None

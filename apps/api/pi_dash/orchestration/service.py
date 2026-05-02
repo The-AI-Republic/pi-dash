@@ -191,6 +191,16 @@ def handle_issue_state_transition(
             ticker = IssueAgentTicker.objects.filter(issue=issue).first()
             if ticker is not None and ticker.resume_parent_run_id is not None:
                 parent = ticker.resume_parent_run
+            else:
+                # No resume target captured. This happens when the
+                # forward path skipped the impl phase (e.g.,
+                # Todo → In Review → In Progress): there's no
+                # implementation session to resume, and the latest
+                # prior run is a review run — wrong parent for an
+                # impl-phase dispatch. Fall back to a fresh session
+                # rather than parenting off the review run.
+                fresh_session = True
+                parent = None
 
     creator = actor or _resolve_fallback_creator(issue)
     if creator is None:

@@ -61,12 +61,37 @@ DELEGATION_STATE_NAME = "In Progress"
 
 
 def _project_default_interval(issue: Issue) -> int:
+    """Project-level default interval for the issue's *current* phase.
+
+    Used for the brand-new ticker row's first ``next_run_at`` compute,
+    where there is no row yet to ask ``effective_interval_seconds``.
+    Subsequent arms read directly from the row's phase-aware
+    ``effective_*`` methods.
+    """
+    from pi_dash.db.models.state import StateGroup
+
     project = issue.project
+    state = getattr(issue, "state", None)
+    if state is not None and state.group == StateGroup.REVIEW.value:
+        return getattr(
+            project,
+            "agent_review_default_interval_seconds",
+            DEFAULT_INTERVAL_SECONDS,
+        )
     return getattr(project, "agent_default_interval_seconds", DEFAULT_INTERVAL_SECONDS)
 
 
 def _project_default_max_ticks(issue: Issue) -> int:
+    from pi_dash.db.models.state import StateGroup
+
     project = issue.project
+    state = getattr(issue, "state", None)
+    if state is not None and state.group == StateGroup.REVIEW.value:
+        return getattr(
+            project,
+            "agent_review_default_max_ticks",
+            DEFAULT_MAX_TICKS,
+        )
     return getattr(project, "agent_default_max_ticks", DEFAULT_MAX_TICKS)
 
 
@@ -108,12 +133,12 @@ def arm_ticker(
         if sched is None:
             # Brand-new row. We need a sensible ``next_run_at`` before
             # we can ask for ``effective_interval_seconds`` (which
-            # consults the row), so use the In Progress project default
-            # for the very first compute. arm_ticker is only called
-            # from state-transition entry into a ticking phase, and an
-            # issue's first arm is always In Progress (Review only
-            # triggers via cross-phase transition from In Progress).
-            # Subsequent arms use the row's phase-aware
+            # consults the row), so use the project default for the
+            # issue's *current* phase. ``_project_default_interval``
+            # picks the review-phase default when the issue's current
+            # state group is REVIEW (e.g., a Todo → In Review path that
+            # skips the impl phase) and the In Progress default
+            # otherwise. Subsequent arms use the row's phase-aware
             # ``effective_interval_seconds`` directly.
             interval = _project_default_interval(issue)
             sched = IssueAgentTicker.objects.create(

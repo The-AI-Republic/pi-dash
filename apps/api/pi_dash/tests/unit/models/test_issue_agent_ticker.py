@@ -162,3 +162,29 @@ def test_zero_or_negative_interval_falls_through(in_progress_issue):
         interval_seconds=0,
     )
     assert sched.effective_interval_seconds() == 10800
+
+
+@pytest.mark.unit
+def test_explicit_zero_max_ticks_is_preserved(in_progress_issue):
+    """``max_ticks`` is preserved at 0 (intentional "no ticks") because
+    the override-validity check uses ``is not None`` rather than
+    ``> 0``. Compare with ``effective_interval_seconds`` where 0 falls
+    through — the asymmetry is intentional: an explicit 0 cap is a
+    valid kill switch, but a 0 interval would fire continuously and is
+    treated as a misconfiguration.
+    """
+    sched = IssueAgentTicker.objects.create(
+        issue=in_progress_issue,
+        max_ticks=0,
+    )
+    assert sched.effective_max_ticks() == 0
+
+
+@pytest.mark.unit
+def test_explicit_zero_review_max_ticks_is_preserved(in_review_issue):
+    """Same kill-switch semantics on the review-phase override pair."""
+    sched = IssueAgentTicker.objects.create(
+        issue=in_review_issue,
+        review_max_ticks=0,
+    )
+    assert sched.effective_max_ticks() == 0
