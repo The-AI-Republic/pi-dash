@@ -31,7 +31,6 @@ def test_phases_contains_started_in_progress():
     assert cfg.state_name == "In Progress"
     assert cfg.template_name == PromptTemplate.DEFAULT_NAME
     assert cfg.fresh_session_on_entry is False
-    assert cfg.disarm_on_completed is True
 
 
 @pytest.mark.unit

@@ -46,16 +46,11 @@ class PhaseConfig:
             ``pinned_runner_id`` so the template body becomes the actual
             system prompt rather than a user-turn message on a resumed
             session. See design §4.3.
-        disarm_on_completed:
-            When ``True``, a terminal ``completed``/``blocked``
-            done-signal disarms the ticker for issues in this phase. v1
-            sets ``True`` for every entry — kept here for explicitness.
     """
 
     state_name: str
     template_name: str
     fresh_session_on_entry: bool
-    disarm_on_completed: bool = True
 
 
 PHASES: dict[str, PhaseConfig] = {

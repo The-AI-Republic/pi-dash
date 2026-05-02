@@ -85,14 +85,15 @@ def arm_ticker(
     *,
     dispatch_immediate: bool = True,  # noqa: ARG001 — caller-only signal
 ) -> IssueAgentTicker:
-    """Create or reset the ticker for an issue entering Started/In Progress.
+    """Create or reset the ticker for an issue entering a ticking state.
 
     ``dispatch_immediate`` does not affect the schedule itself — arming
     *never* fires a run. The flag exists only to document the caller's
-    intent: ``True`` means the state-transition handler is firing the
-    immediate dispatch on its own; ``False`` means another path
-    (Comment & Run on a Paused issue, §4.6) owns the dispatch and arming
-    should not duplicate it.
+    intent: ``True`` means the caller is firing (or expects another
+    immediate dispatch), ``False`` means arming alone is enough — no
+    new run should be inferred from this call. Used by Comment & Run
+    on a Paused issue (§4.6) and by re-arm-on-comment in
+    :func:`pi_dash.orchestration.service.handle_issue_comment`.
 
     Honors ``user_disabled`` and project-level ``agent_ticking_enabled``:
     sets ``enabled = False`` when either suppresses ticks.
@@ -165,6 +166,17 @@ def disarm_ticker(
     triggers ``maybe_apply_deferred_pause`` to auto-Pause the issue.
     Terminal-signal disarms (``completed`` / ``blocked``) leave the
     issue in place for the human to act.
+
+    Note: this helper *overwrites* ``disarm_reason`` even when the
+    ticker is already disabled — callers are expected to know which
+    cause should win. This differs from
+    :func:`maybe_disarm_on_terminal_signal`, which deliberately
+    preserves the prior reason so an opportunistic terminal-signal
+    disarm cannot clobber a pre-existing ``CAP_HIT``. Today the only
+    production caller is the state-transition handler with the
+    default ``LEFT_TICKING_STATE`` reason; future callers passing
+    ``TERMINAL_SIGNAL`` should prefer
+    :func:`maybe_disarm_on_terminal_signal` instead.
     """
     with transaction.atomic():
         sched = (

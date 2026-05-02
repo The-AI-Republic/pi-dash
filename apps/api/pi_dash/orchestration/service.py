@@ -23,11 +23,7 @@ from django.utils import timezone
 
 from pi_dash.db.models.issue import Issue, IssueComment
 from pi_dash.db.models.state import State, StateGroup
-from pi_dash.orchestration.agent_phases import (
-    PHASES,
-    is_ticking_state,
-    phase_config_for,
-)
+from pi_dash.orchestration.agent_phases import is_ticking_state
 from pi_dash.prompting.composer import build_continuation, build_first_turn
 from pi_dash.prompting.renderer import PromptRenderError
 from pi_dash.runner.models import AgentRun, AgentRunStatus, Pod, Runner, RunnerStatus
