@@ -258,6 +258,11 @@ class RunnerSessionPollEndpoint(APIView):
         )
         if status_entry:
             session_service.reap_stale_busy_runs(runner, status_entry)
+            # Volatile observability snapshot — see
+            # `.ai_design/runner_agent_bridge/design.md` §4.5.2.
+            # Pre-observability runners send no snapshot fields and the
+            # helper short-circuits.
+            session_service.upsert_runner_live_state(runner, status_entry)
 
         # 5. XACK explicit ids.
         if ack_ids:

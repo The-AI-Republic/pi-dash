@@ -764,3 +764,59 @@ class ApprovalRequest(models.Model):
         db_table = "agent_run_approval"
         ordering = ("-requested_at",)
         indexes = [models.Index(fields=["agent_run", "status"])]
+
+
+class RunnerLiveState(models.Model):
+    """Volatile per-runner observability snapshot for the active agent run.
+
+    Holds the descriptive scalars the runner emits on every poll
+    (``last_event_at``, ``last_event_kind``, ``last_event_summary``,
+    ``agent_pid``, ``agent_subprocess_alive``, ``approvals_pending``,
+    streaming token counts, ``turn_count``). All fields are nullable;
+    NULL is the canonical "unknown" sentinel for both the watchdog and
+    the UI. See ``.ai_design/runner_agent_bridge/design.md`` §4.5.1.
+
+    Authoritative run state stays on :class:`AgentRun`; this row is
+    overwritten / cleared on each ``observed_run_id`` change. The
+    watchdog (``reconcile_stalled_runs``) only acts when this row's
+    ``observed_run_id`` matches an active ``AgentRun.id`` and
+    ``updated_at`` is fresh.
+    """
+
+    runner = models.OneToOneField(
+        Runner,
+        on_delete=models.CASCADE,
+        primary_key=True,
+        related_name="live_state",
+    )
+    # The run this snapshot describes. NULL when the runner is idle.
+    # The watchdog only acts when this matches a running AgentRun's id —
+    # that join condition is what makes the snapshot unambiguously about
+    # the run we'd otherwise fail.
+    observed_run_id = models.UUIDField(null=True, blank=True)
+    last_event_at = models.DateTimeField(null=True, blank=True)
+    last_event_kind = models.CharField(max_length=64, null=True, blank=True)
+    last_event_summary = models.CharField(max_length=200, null=True, blank=True)
+    agent_pid = models.PositiveIntegerField(null=True, blank=True)
+    agent_subprocess_alive = models.BooleanField(null=True, blank=True)
+    approvals_pending = models.PositiveSmallIntegerField(null=True, blank=True)
+    input_tokens = models.BigIntegerField(null=True, blank=True)
+    output_tokens = models.BigIntegerField(null=True, blank=True)
+    total_tokens = models.BigIntegerField(null=True, blank=True)
+    turn_count = models.PositiveIntegerField(null=True, blank=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "runner_live_state"
+        indexes = [
+            # Watchdog query in reconcile_stalled_runs filters on
+            # observed_run_id (run-id match), updated_at (snapshot fresh),
+            # and last_event_at (agent activity stale).
+            models.Index(
+                fields=["observed_run_id", "updated_at", "last_event_at"],
+                name="runner_live_watchdog_idx",
+            ),
+        ]
+
+    def __str__(self) -> str:
+        return f"RunnerLiveState(runner={self.runner_id} observed_run_id={self.observed_run_id})"

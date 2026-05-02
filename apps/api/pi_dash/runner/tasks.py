@@ -15,7 +15,7 @@ from datetime import timedelta
 
 from celery import shared_task
 from django.conf import settings
-from django.db import transaction
+from django.db import models, transaction
 from django.utils import timezone
 
 from pi_dash.runner.models import (
@@ -28,7 +28,8 @@ from pi_dash.runner.models import (
     RunnerSession,
     RunnerStatus,
 )
-from pi_dash.runner.services import outbox
+from pi_dash.runner.services import outbox, run_lifecycle
+from pi_dash.runner.services.matcher import BUSY_STATUSES
 from pi_dash.runner.services.pubsub import send_to_runner
 
 logger = logging.getLogger(__name__)
@@ -199,3 +200,79 @@ def sweep_run_message_dedupe() -> int:
     if deleted:
         logger.info("sweep_run_message_dedupe deleted %s row(s)", deleted)
     return deleted
+
+
+# ---- Per-active-run agent stall watchdog ---------------------------------
+#
+# Cloud-side backstop for the runner's own internal stall watchdog —
+# see ``.ai_design/runner_agent_bridge/design.md`` §4.5.3. Fires only on
+# runs where the snapshot's ``observed_run_id`` matches the run id (so we
+# never reap a run from a previous-run snapshot), the snapshot row is
+# *fresh* (so we don't reap when the runner stops reporting altogether —
+# heartbeat-staleness is handled by ``mark_offline_runners`` / etc.), and
+# the agent itself has been silent past the threshold.
+
+@shared_task(name="runner.reconcile_stalled_runs")
+def reconcile_stalled_runs() -> int:
+    """Mark BUSY runs FAILED when the agent subprocess has gone silent.
+
+    Three conjuncts must all hold for a run to be reaped:
+
+    1. ``RunnerLiveState.observed_run_id == AgentRun.id`` — the snapshot
+       describes *this* run, not a previous one whose row hasn't been
+       overwritten yet.
+    2. ``RunnerLiveState.updated_at`` is within
+       ``RUNNER_AGENT_OBSERVABILITY_STALE_SECS`` — the runner is still
+       reporting (we're not reacting to a stale row from a downgraded
+       runner).
+    3. ``RunnerLiveState.last_event_at`` is older than
+       ``RUNNER_AGENT_STALL_THRESHOLD_SECS`` — the agent itself has gone
+       silent.
+
+    Runs in ``AWAITING_APPROVAL`` / ``AWAITING_REAUTH`` are excluded so
+    operator-driven pauses are never failed by the watchdog.
+    Pre-observability runners pass cleanly: their ``last_event_at`` is
+    NULL and ``__lt`` excludes NULL.
+    """
+    threshold = int(getattr(settings, "RUNNER_AGENT_STALL_THRESHOLD_SECS", 360))
+    snapshot_freshness = int(
+        getattr(settings, "RUNNER_AGENT_OBSERVABILITY_STALE_SECS", 90)
+    )
+    now = timezone.now()
+    cutoff = now - timedelta(seconds=threshold)
+    snapshot_cutoff = now - timedelta(seconds=snapshot_freshness)
+
+    stalled = (
+        AgentRun.objects.filter(status__in=BUSY_STATUSES)
+        .exclude(
+            status__in=(
+                AgentRunStatus.AWAITING_APPROVAL,
+                AgentRunStatus.AWAITING_REAUTH,
+            )
+        )
+        .filter(
+            runner__live_state__observed_run_id=models.F("id"),
+            runner__live_state__updated_at__gte=snapshot_cutoff,
+            runner__live_state__last_event_at__lt=cutoff,
+        )
+        .select_related("runner")
+    )
+
+    reaped = 0
+    for run in stalled:
+        if run.runner is None:
+            continue
+        run_lifecycle.finalize_run_terminal(
+            run.runner,
+            run.id,
+            AgentRunStatus.FAILED,
+            error_detail=f"agent stalled: no events for >{threshold}s",
+        )
+        reaped += 1
+    if reaped:
+        logger.info(
+            "reconcile_stalled_runs reaped %s stalled run(s) (threshold=%ss)",
+            reaped,
+            threshold,
+        )
+    return reaped
