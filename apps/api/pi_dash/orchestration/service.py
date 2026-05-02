@@ -23,14 +23,16 @@ from django.utils import timezone
 
 from pi_dash.db.models.issue import Issue, IssueComment
 from pi_dash.db.models.state import State, StateGroup
+from pi_dash.orchestration.agent_phases import is_ticking_state
 from pi_dash.prompting.composer import build_continuation, build_first_turn
 from pi_dash.prompting.renderer import PromptRenderError
 from pi_dash.runner.models import AgentRun, AgentRunStatus, Pod, Runner, RunnerStatus
 
 logger = logging.getLogger(__name__)
 
-#: The default state name that triggers delegation. Workspaces with bespoke
-#: state names will need a separate policy pass before this broadens.
+#: Retained for backwards compatibility with imports. New code should use
+#: ``orchestration.agent_phases.is_ticking_state`` /
+#: ``phase_config_for`` instead.
 DELEGATION_STATE_NAME = "In Progress"
 
 
@@ -75,14 +77,13 @@ def _latest_prior_run(issue: Issue) -> Optional[AgentRun]:
 
 
 def _is_delegation_trigger(to_state: Optional[State]) -> bool:
-    """MVP: only the default-named "In Progress" state in the ``started`` group
-    triggers a run. Custom started-group states are deferred.
+    """A state transition triggers a run when ``to_state`` is one of the
+    registered ticking states (see ``orchestration.agent_phases.PHASES``).
+
+    Custom workspace state names within a ticking group still do not
+    trigger — the registry pins the literal state name per group.
     """
-    if to_state is None:
-        return False
-    if to_state.group != StateGroup.STARTED.value:
-        return False
-    return to_state.name == DELEGATION_STATE_NAME
+    return is_ticking_state(to_state)
 
 
 def handle_issue_state_transition(
@@ -112,13 +113,12 @@ def handle_issue_state_transition(
     """
     from pi_dash.orchestration import scheduling
 
-    from_group = from_state.group if from_state is not None else None
-    to_group = to_state.group if to_state is not None else None
-
-    # Disarm when leaving the Started group, regardless of where we land.
-    if (
-        from_group == StateGroup.STARTED.value
-        and to_group != StateGroup.STARTED.value
+    # Disarm when leaving a ticking state into anything that isn't the
+    # *same* ticking state. Inter-phase transitions (e.g., In Progress
+    # → In Review once PR B lands) intentionally disarm-then-re-arm so
+    # the ticker row's runtime fields land on the new phase's defaults.
+    if is_ticking_state(from_state) and (
+        not is_ticking_state(to_state) or from_state.group != to_state.group
     ):
         scheduling.disarm_ticker(issue)
 
@@ -244,6 +244,24 @@ def handle_issue_comment(comment: IssueComment) -> ContinuationOutcome:
             issue.pk, state_group,
         )
         return ContinuationOutcome(reason="state-not-eligible")
+
+    # Re-arm on human comment. Comment is engagement; engagement
+    # restarts automatic ticking (see design §4.6). Honors
+    # ``user_disabled`` via ``arm_ticker``. Done before any of the
+    # coalesce / active-run / no-pod early returns so the ticker
+    # restarts even when this specific comment doesn't dispatch a
+    # new run (the existing run / queued follow-up will pick up the
+    # comment, and the next tick happens automatically).
+    from pi_dash.orchestration import scheduling
+
+    if is_ticking_state(issue.state):
+        try:
+            scheduling.arm_ticker(issue, dispatch_immediate=False)
+        except Exception:
+            logger.exception(
+                "orchestration.continuation: re-arm failed for issue=%s",
+                issue.pk,
+            )
 
     prior = _latest_prior_run(issue)
     if prior is None:

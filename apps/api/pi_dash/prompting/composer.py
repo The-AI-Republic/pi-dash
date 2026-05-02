@@ -58,8 +58,17 @@ def load_template(
 
 
 def build_first_turn(issue: Issue, run: AgentRun) -> str:
-    """Render the first-turn prompt for ``run`` executing ``issue``."""
-    template = load_template(issue.workspace)
+    """Render the first-turn prompt for ``run`` executing ``issue``.
+
+    Selects the prompt template by the issue's current state via the
+    phase registry: the In Progress phase uses the ``coding-task``
+    template; the In Review phase (introduced in PR B) uses the
+    ``review`` template. States outside any registered ticking phase
+    fall back to the default template.
+    """
+    from pi_dash.orchestration.agent_phases import template_name_for
+
+    template = load_template(issue.workspace, name=template_name_for(issue.state))
     context = build_context(issue, run)
     return render(template.body, context)
 

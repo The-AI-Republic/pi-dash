@@ -36,15 +36,22 @@ from pi_dash.db.models.issue_agent_ticker import (
     DEFAULT_MAX_TICKS,
     INFINITE_MAX_TICKS,
     IssueAgentTicker,
+    TickerDisarmReason,
     jitter_seconds,
 )
-from pi_dash.db.models.state import StateGroup
+from pi_dash.orchestration.agent_phases import is_ticking_state
 from pi_dash.runner.models import AgentRun
 
 logger = logging.getLogger(__name__)
 
 
 PAUSED_STATE_NAME = "Paused"
+
+# Retained for backwards compatibility with callers / tests that import
+# the literal. New code should use
+# ``orchestration.agent_phases.is_ticking_state`` /
+# ``phase_config_for`` instead. The literal still names the In Progress
+# phase's state — see ``agent_phases.PHASES``.
 DELEGATION_STATE_NAME = "In Progress"
 
 
@@ -78,14 +85,15 @@ def arm_ticker(
     *,
     dispatch_immediate: bool = True,  # noqa: ARG001 — caller-only signal
 ) -> IssueAgentTicker:
-    """Create or reset the ticker for an issue entering Started/In Progress.
+    """Create or reset the ticker for an issue entering a ticking state.
 
     ``dispatch_immediate`` does not affect the schedule itself — arming
     *never* fires a run. The flag exists only to document the caller's
-    intent: ``True`` means the state-transition handler is firing the
-    immediate dispatch on its own; ``False`` means another path
-    (Comment & Run on a Paused issue, §4.6) owns the dispatch and arming
-    should not duplicate it.
+    intent: ``True`` means the caller is firing (or expects another
+    immediate dispatch), ``False`` means arming alone is enough — no
+    new run should be inferred from this call. Used by Comment & Run
+    on a Paused issue (§4.6) and by re-arm-on-comment in
+    :func:`pi_dash.orchestration.service.handle_issue_comment`.
 
     Honors ``user_disabled`` and project-level ``agent_ticking_enabled``:
     sets ``enabled = False`` when either suppresses ticks.
@@ -110,6 +118,7 @@ def arm_ticker(
                 next_run_at=_compute_next_run_at(interval),
                 tick_count=0,
                 enabled=not suppress_for_project,
+                disarm_reason=TickerDisarmReason.NONE,
             )
         else:
             # Existing row — reset clock and re-evaluate enabled.
@@ -119,11 +128,16 @@ def arm_ticker(
             )
             suppress = sched.user_disabled or suppress_for_project
             sched.enabled = not suppress
+            # Re-arming clears any prior disarm cause; if we end up
+            # disabled because of user_disabled or project-suppress,
+            # the next disarm caller will set the appropriate reason.
+            sched.disarm_reason = TickerDisarmReason.NONE
             sched.save(
                 update_fields=[
                     "tick_count",
                     "next_run_at",
                     "enabled",
+                    "disarm_reason",
                     "updated_at",
                 ]
             )
@@ -137,12 +151,32 @@ def arm_ticker(
     return sched
 
 
-def disarm_ticker(issue: Issue) -> Optional[IssueAgentTicker]:
-    """Set ``enabled = False``. Idempotent.
+def disarm_ticker(
+    issue: Issue,
+    *,
+    reason: str = TickerDisarmReason.LEFT_TICKING_STATE,
+) -> Optional[IssueAgentTicker]:
+    """Set ``enabled = False`` and persist ``disarm_reason``. Idempotent.
 
-    Called when issue leaves Started, on cap hit, on terminal done-signal,
-    and when the user toggles ``user_disabled = True`` mid-flight.
-    Returns the schedule if one exists; ``None`` otherwise.
+    Called when issue leaves a ticking group, on cap hit, on terminal
+    done-signal, and when the user toggles ``user_disabled = True``
+    mid-flight. Returns the schedule if one exists; ``None`` otherwise.
+
+    The ``reason`` argument is **load-bearing**: only ``CAP_HIT``
+    triggers ``maybe_apply_deferred_pause`` to auto-Pause the issue.
+    Terminal-signal disarms (``completed`` / ``blocked``) leave the
+    issue in place for the human to act.
+
+    Note: this helper *overwrites* ``disarm_reason`` even when the
+    ticker is already disabled — callers are expected to know which
+    cause should win. This differs from
+    :func:`maybe_disarm_on_terminal_signal`, which deliberately
+    preserves the prior reason so an opportunistic terminal-signal
+    disarm cannot clobber a pre-existing ``CAP_HIT``. Today the only
+    production caller is the state-transition handler with the
+    default ``LEFT_TICKING_STATE`` reason; future callers passing
+    ``TERMINAL_SIGNAL`` should prefer
+    :func:`maybe_disarm_on_terminal_signal` instead.
     """
     with transaction.atomic():
         sched = (
@@ -152,11 +186,84 @@ def disarm_ticker(issue: Issue) -> Optional[IssueAgentTicker]:
         )
         if sched is None:
             return None
+        # Always update the reason — even when already disabled — so a
+        # later disarm with a different reason (e.g., terminal signal
+        # arriving on an already cap-hit-disabled ticker) does not
+        # incorrectly preserve the older reason. But the rule is that
+        # the *first* terminal cause wins for the auto-pause gate, so
+        # only the first transition flips ``enabled``.
+        changed = False
         if sched.enabled:
             sched.enabled = False
-            sched.save(update_fields=["enabled", "updated_at"])
-    logger.info("agent_ticker: disarmed issue=%s", issue.pk)
+            changed = True
+        if sched.disarm_reason != reason:
+            sched.disarm_reason = reason
+            changed = True
+        if changed:
+            sched.save(
+                update_fields=["enabled", "disarm_reason", "updated_at"]
+            )
+    logger.info(
+        "agent_ticker: disarmed issue=%s reason=%s", issue.pk, reason
+    )
     return sched
+
+
+def maybe_disarm_on_terminal_signal(run: AgentRun) -> bool:
+    """Disarm the ticker if the run's done-payload status is a phase-
+    final signal (``completed`` or ``blocked``).
+
+    Do not disarm on ``noop`` (which currently persists as
+    ``AgentRunStatus.COMPLETED``). The hook inspects
+    ``run.done_payload['status']`` rather than ``run.status`` because
+    ``noop`` and true completion share the same persisted run status.
+
+    **Critical:** only disarm when the ticker is currently *armed*. If
+    the ticker is already disabled, leave the existing
+    ``disarm_reason`` alone — that prior reason (typically ``CAP_HIT``
+    when cap was hit during the same tick that produced this run)
+    determines whether ``maybe_apply_deferred_pause`` will auto-Pause.
+    Overwriting a ``CAP_HIT`` reason with ``TERMINAL_SIGNAL`` would
+    silently drop the auto-pause.
+
+    Closes the gap in the existing issue-ticking design: the spec
+    says terminal completed/blocked should disarm but the existing
+    code only disarms via state transitions. Idempotent. Safe to
+    call alongside ``maybe_apply_deferred_pause``.
+
+    Returns ``True`` when a disarm was applied this call (i.e., the
+    ticker was armed and is now disabled with reason
+    ``TERMINAL_SIGNAL``).
+    """
+    if run.work_item_id is None:
+        return False
+    payload = run.done_payload or {}
+    payload_status = (payload or {}).get("status")
+    if payload_status not in {"completed", "blocked"}:
+        return False
+    issue = run.work_item
+    with transaction.atomic():
+        sched = (
+            IssueAgentTicker.objects.select_for_update()
+            .filter(issue=issue)
+            .first()
+        )
+        if sched is None:
+            return False
+        # Already disabled — preserve the prior reason. See docstring.
+        if not sched.enabled:
+            return False
+        sched.enabled = False
+        sched.disarm_reason = TickerDisarmReason.TERMINAL_SIGNAL
+        sched.save(
+            update_fields=["enabled", "disarm_reason", "updated_at"]
+        )
+    logger.info(
+        "agent_ticker: disarmed-on-terminal issue=%s payload_status=%s",
+        issue.pk,
+        payload_status,
+    )
+    return True
 
 
 def reset_ticker_after_comment_and_run(issue: Issue) -> Optional[IssueAgentTicker]:
@@ -180,11 +287,13 @@ def reset_ticker_after_comment_and_run(issue: Issue) -> Optional[IssueAgentTicke
         # the user has explicitly disabled ticking on this issue.
         suppress = sched.user_disabled or not _project_ticking_enabled(issue)
         sched.enabled = not suppress
+        sched.disarm_reason = TickerDisarmReason.NONE
         sched.save(
             update_fields=[
                 "tick_count",
                 "next_run_at",
                 "enabled",
+                "disarm_reason",
                 "updated_at",
             ]
         )
@@ -305,12 +414,17 @@ def dispatch_continuation_run(
 
 
 def maybe_apply_deferred_pause(run: AgentRun) -> bool:
-    """If the schedule is disarmed, the issue is still in Started, and no
-    other active runs exist on the issue, transition the issue
-    In Progress → Paused.
+    """If the schedule was disarmed by **cap exhaustion**, the issue is
+    still in a ticking state, and no other active runs exist on the
+    issue, transition the issue → Paused.
 
     Idempotent — only the first concurrent terminate event takes effect.
     Returns ``True`` when a transition was applied, ``False`` otherwise.
+
+    Gated on ``disarm_reason == CAP_HIT``: terminal-signal disarms
+    (``completed``/``blocked``) leave the issue in place for the human
+    to act. ``LEFT_TICKING_STATE`` and ``USER_DISABLED`` likewise are
+    not auto-pause causes.
 
     Called from the runner Channels consumer after persisting a terminal
     run status.
@@ -322,13 +436,13 @@ def maybe_apply_deferred_pause(run: AgentRun) -> bool:
     sched = IssueAgentTicker.objects.filter(issue=issue).first()
     if sched is None or sched.enabled:
         return False
+    if sched.disarm_reason != TickerDisarmReason.CAP_HIT:
+        return False
 
     state = issue.state
     if state is None:
         return False
-    if state.group != StateGroup.STARTED.value:
-        return False
-    if state.name != DELEGATION_STATE_NAME:
+    if not is_ticking_state(state):
         return False
 
     # Other active runs (besides the one that just terminated) keep the
@@ -395,6 +509,7 @@ def maybe_apply_deferred_pause(run: AgentRun) -> bool:
 __all__ = [
     "DEFAULT_INTERVAL_SECONDS",
     "DEFAULT_MAX_TICKS",
+    "DELEGATION_STATE_NAME",
     "INFINITE_MAX_TICKS",
     "PAUSED_STATE_NAME",
     "TRIGGER_COMMENT_AND_RUN",
@@ -403,5 +518,6 @@ __all__ = [
     "disarm_ticker",
     "dispatch_continuation_run",
     "maybe_apply_deferred_pause",
+    "maybe_disarm_on_terminal_signal",
     "reset_ticker_after_comment_and_run",
 ]

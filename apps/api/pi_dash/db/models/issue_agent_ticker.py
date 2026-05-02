@@ -29,6 +29,23 @@ INFINITE_MAX_TICKS = -1
 JITTER_FRACTION = 0.1
 
 
+class TickerDisarmReason(models.TextChoices):
+    """Why the ticker is currently disarmed.
+
+    ``maybe_apply_deferred_pause`` only auto-Pauses the issue when
+    ``disarm_reason == CAP_HIT``. Terminal-signal disarms
+    (``completed``/``blocked``) leave the issue in place for the
+    human to act. See ``.ai_design/create_review_state/design.md``
+    §4.5 / §7.3.
+    """
+
+    NONE = "", "None"
+    LEFT_TICKING_STATE = "left_ticking_state", "Left Ticking State"
+    CAP_HIT = "cap_hit", "Cap Hit"
+    TERMINAL_SIGNAL = "terminal_signal", "Terminal Signal"
+    USER_DISABLED = "user_disabled", "User Disabled"
+
+
 def jitter_seconds(interval_seconds: int) -> float:
     """Uniform random offset in ``[0, interval × JITTER_FRACTION)``.
 
@@ -64,6 +81,15 @@ class IssueAgentTicker(BaseModel):
     tick_count = models.IntegerField(default=0)
     last_tick_at = models.DateTimeField(null=True, blank=True)
     enabled = models.BooleanField(default=True)
+    # Why the ticker is currently disarmed. Empty string when armed.
+    # See TickerDisarmReason for semantics; load-bearing for the
+    # cap-hit-only auto-pause gate in ``maybe_apply_deferred_pause``.
+    disarm_reason = models.CharField(
+        max_length=32,
+        blank=True,
+        default="",
+        choices=TickerDisarmReason.choices,
+    )
 
     class Meta:
         db_table = "issue_agent_ticker"
