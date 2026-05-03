@@ -1119,17 +1119,20 @@ impl AssignWorker {
                 events = bridge.next_events(cursor) => {
                     let Some(events) = events else {
                         let reason = self.crash_reason();
+                        let detail = self
+                            .build_failure_detail("agent stdout closed", bridge)
+                            .await;
                         self.send(ClientMsg::RunFailed {
                             run_id: cursor.run_id(),
                             reason,
-                            detail: Some("agent stdout closed".to_string()),
+                            detail: Some(detail.clone()),
                             ended_at: Utc::now(),
                         }).await;
                         hist.append(&HistoryEntry::Footer {
                             ts: Utc::now(),
                             final_status: "failed".into(),
                             done_payload: None,
-                            error: Some("agent stdout closed".into()),
+                            error: Some(detail),
                         }).await?;
                         return Ok(Outcome { status_label: "failed".into() });
                     };
@@ -1149,7 +1152,8 @@ impl AssignWorker {
                     }
                 } => {
                     let mins = STALL_TIMEOUT.as_secs() / 60;
-                    let detail = format!("no agent frames for {mins} minutes");
+                    let base = format!("no agent frames for {mins} minutes");
+                    let detail = self.build_failure_detail(&base, bridge).await;
                     self.send(ClientMsg::RunFailed {
                         run_id: cursor.run_id(),
                         reason: FailureReason::Timeout,
@@ -1166,6 +1170,90 @@ impl AssignWorker {
                 }
             }
         }
+    }
+
+    /// Build a `RunFailed.detail` string that includes whatever local
+    /// context might help the cloud / UI explain what went wrong:
+    /// - the supervisor's own classifier message (e.g. `"no agent frames
+    ///   for 5 minutes"`),
+    /// - the most recent shell command the agent kicked off,
+    /// - the last few lines of agent stderr.
+    ///
+    /// All inputs are optional and the assembly degrades gracefully when
+    /// they're missing — for a healthy code-edit task the result is just
+    /// the base string. The total payload is bounded so a runaway stderr
+    /// dump can't balloon a `RunFailed` body.
+    async fn build_failure_detail(&self, base: &str, bridge: &AgentBridge) -> String {
+        const DETAIL_BYTES_CAP: usize = 4096;
+        const STDERR_TAIL_LINES: usize = 10;
+
+        let last_cmd = self
+            .state
+            .observability_snapshot()
+            .await
+            .last_exec_command;
+        let stderr = bridge.recent_stderr().await;
+
+        let mut parts: Vec<String> = vec![base.to_string()];
+        if let Some(cmd) = last_cmd {
+            let elapsed = (Utc::now() - cmd.started_at).num_seconds().max(0);
+            let cwd = cmd
+                .cwd
+                .as_deref()
+                .map(|c| format!(" in `{c}`"))
+                .unwrap_or_default();
+            parts.push(format!(
+                "last command: `{}`{cwd} (started {elapsed}s ago)",
+                cmd.command
+            ));
+        }
+        // The stderr ring has already filtered codex tracing noise;
+        // `stderr.dropped` is the running count of lines we rejected so
+        // the user has an honest signal of how much was suppressed.
+        // Emit the section if either we have content to show OR a
+        // non-zero dropped count (the latter alone tells the operator
+        // "the agent was emitting noise but no signal").
+        if !stderr.lines.is_empty() || stderr.dropped > 0 {
+            let shown = stderr.lines.len().min(STDERR_TAIL_LINES);
+            let tail = stderr
+                .lines
+                .iter()
+                .rev()
+                .take(STDERR_TAIL_LINES)
+                .rev()
+                .cloned()
+                .collect::<Vec<_>>()
+                .join("\n  ");
+            let suffix = if stderr.dropped > 0 {
+                format!(
+                    " (plus {} noise line(s) filtered from codex tracing)",
+                    stderr.dropped
+                )
+            } else {
+                String::new()
+            };
+            if shown > 0 {
+                parts.push(format!(
+                    "stderr tail ({shown} line(s){suffix}):\n  {tail}"
+                ));
+            } else {
+                // Filter dropped everything — surface that fact alone
+                // rather than emitting an empty stderr block.
+                parts.push(format!("stderr: empty after filtering{suffix}"));
+            }
+        }
+        let mut joined = parts.join("; ");
+        if joined.len() > DETAIL_BYTES_CAP {
+            // Truncate on a char boundary, leaving a sentinel so consumers
+            // can tell the body was clipped.
+            let mut end = DETAIL_BYTES_CAP;
+            while !joined.is_char_boundary(end) && end > 0 {
+                end -= 1;
+            }
+            joined.truncate(end);
+            joined.push_str("…");
+        }
+        joined
     }
 
     async fn handle_bridge_event(
@@ -1197,6 +1285,33 @@ impl AssignWorker {
                 }
                 "turn/started" => {
                     self.state.incr_turn().await;
+                }
+                "item/started" | "assistant/message" => {
+                    // Failure-detail enrichment: capture the most recent
+                    // shell command the agent kicked off. Routing for
+                    // codex (`item/started` → commandExecution) and
+                    // Claude (`assistant/message` → Bash tool_use) lives
+                    // in `extract_exec_command_hint` so it's
+                    // unit-testable without a live bridge — a typo in
+                    // either method name is caught by tests rather than
+                    // by silently absent `last command:` fields in
+                    // production failure details.
+                    if let Some(hint) =
+                        crate::daemon::observability::extract_exec_command_hint(
+                            method.as_str(),
+                            params,
+                        )
+                    {
+                        self.state
+                            .note_exec_command(
+                                crate::daemon::state::ExecCommandSnapshot {
+                                    command: hint.command,
+                                    cwd: hint.cwd,
+                                    started_at: Utc::now(),
+                                },
+                            )
+                            .await;
+                    }
                 }
                 _ => {}
             }
@@ -1353,10 +1468,22 @@ impl AssignWorker {
                 reason,
                 detail,
             } => {
+                // Codex / claude-detected failures (e.g.
+                // "turn/completed without conclusion", `error` notifications
+                // with `willRetry=false`) reach us with whatever bare
+                // string the bridge produced. Run them through the same
+                // enrichment helper the watchdog and stdout-close paths
+                // use so the user sees `last command:` and a stderr
+                // tail in the issue activity comment, not just the
+                // bridge's classifier text.
+                let base = detail
+                    .clone()
+                    .unwrap_or_else(|| "agent reported failure".to_string());
+                let enriched = self.build_failure_detail(&base, bridge).await;
                 self.send(ClientMsg::RunFailed {
                     run_id,
                     reason,
-                    detail: detail.clone(),
+                    detail: Some(enriched.clone()),
                     ended_at: Utc::now(),
                 })
                 .await;
@@ -1364,7 +1491,7 @@ impl AssignWorker {
                     ts: Utc::now(),
                     final_status: "failed".into(),
                     done_payload: None,
-                    error: detail,
+                    error: Some(enriched),
                 })
                 .await
                 .ok();

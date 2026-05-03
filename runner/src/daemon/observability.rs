@@ -109,6 +109,88 @@ pub fn parse_codex_token_count(params: &serde_json::Value) -> Option<TokenUsage>
     })
 }
 
+/// Plain-data extract of a shell command the agent kicked off. Mirrors
+/// `crate::daemon::state::ExecCommandSnapshot`'s shape sans the
+/// timestamp (which the caller stamps with `Utc::now()`). Decoupling
+/// the parser shape from `StateHandle` lets us unit-test the dispatch
+/// logic without any tokio runtime.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExecCommandHint {
+    pub command: String,
+    pub cwd: Option<String>,
+}
+
+/// Single dispatch table for "what shell command did the agent just
+/// kick off?" given a `BridgeEvent::Raw` `(method, params)`. Returns
+/// `Some` only for the methods we know how to extract a command from
+/// today: codex `item/started` (commandExecution items) and Claude
+/// `assistant/message` (Bash tool_use blocks). Unit-testable in
+/// isolation; the supervisor calls this from `handle_bridge_event`
+/// without owning the routing logic itself, so a typo in either method
+/// name is caught by tests rather than by an unrenewable `last
+/// command:` field in production failures.
+pub fn extract_exec_command_hint(
+    method: &str,
+    params: &serde_json::Value,
+) -> Option<ExecCommandHint> {
+    match method {
+        "item/started" => {
+            let item = params.get("item")?;
+            if item.get("type").and_then(|v| v.as_str()) != Some("commandExecution") {
+                return None;
+            }
+            if item.get("status").and_then(|v| v.as_str()) != Some("inProgress") {
+                return None;
+            }
+            let command = item.get("command").and_then(|v| v.as_str())?.trim();
+            if command.is_empty() {
+                return None;
+            }
+            let cwd = item
+                .get("cwd")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
+            Some(ExecCommandHint {
+                command: command.to_string(),
+                cwd,
+            })
+        }
+        "assistant/message" => parse_claude_bash_command(params).map(|cmd| ExecCommandHint {
+            command: cmd,
+            cwd: None,
+        }),
+        _ => None,
+    }
+}
+
+/// Best-effort extractor for a Bash `tool_use` block in a Claude
+/// `assistant/message` Raw frame. Returns `Some(command)` if the message
+/// content array contains a `{"type":"tool_use","name":"Bash"}` block
+/// with a string `input.command`; `None` otherwise. Used to populate
+/// `last_exec_command` for failure-detail enrichment, in parallel with
+/// the codex `item/started` / `commandExecution` capture path.
+///
+/// Other tool_use blocks (Read, Edit, Grep, …) are intentionally ignored
+/// — Bash is the call most likely to hang on network / sandbox issues
+/// and the only one whose `input.command` resembles a shell command we'd
+/// want to surface verbatim. Future tools can be added as new arms if
+/// they prove to be common stall sources.
+pub fn parse_claude_bash_command(message: &serde_json::Value) -> Option<String> {
+    let content = message.get("content")?.as_array()?;
+    for block in content {
+        let is_tool_use = block.get("type").and_then(|v| v.as_str()) == Some("tool_use");
+        let is_bash = block.get("name").and_then(|v| v.as_str()) == Some("Bash");
+        if is_tool_use && is_bash {
+            let cmd = block.get("input")?.get("command")?.as_str()?.trim();
+            if cmd.is_empty() {
+                return None;
+            }
+            return Some(cmd.to_string());
+        }
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -238,5 +320,132 @@ mod tests {
     fn parse_codex_token_count_returns_none_on_garbage() {
         let params = json!({"unrelated": true});
         assert!(parse_codex_token_count(&params).is_none());
+    }
+
+    #[test]
+    fn parse_claude_bash_command_extracts_command() {
+        let msg = json!({
+            "id": "msg_1",
+            "role": "assistant",
+            "content": [
+                {"type": "text", "text": "Let me check."},
+                {
+                    "type": "tool_use",
+                    "id": "tu_1",
+                    "name": "Bash",
+                    "input": {"command": "git fetch origin", "description": "sync"},
+                },
+            ],
+        });
+        assert_eq!(
+            parse_claude_bash_command(&msg),
+            Some("git fetch origin".to_string())
+        );
+    }
+
+    #[test]
+    fn parse_claude_bash_command_ignores_non_bash_tools() {
+        // A Read tool_use should NOT populate last_exec_command — Read
+        // hangs are far rarer than Bash and we want the extractor narrow
+        // to avoid noise in the failure-detail string.
+        let msg = json!({
+            "content": [
+                {
+                    "type": "tool_use",
+                    "name": "Read",
+                    "input": {"file_path": "/tmp/foo"},
+                },
+            ],
+        });
+        assert!(parse_claude_bash_command(&msg).is_none());
+    }
+
+    #[test]
+    fn parse_claude_bash_command_returns_none_when_no_tool_use() {
+        let msg = json!({
+            "content": [{"type": "text", "text": "just thinking"}],
+        });
+        assert!(parse_claude_bash_command(&msg).is_none());
+    }
+
+    #[test]
+    fn parse_claude_bash_command_returns_none_on_empty_command() {
+        let msg = json!({
+            "content": [
+                {"type": "tool_use", "name": "Bash", "input": {"command": "  "}},
+            ],
+        });
+        assert!(parse_claude_bash_command(&msg).is_none());
+    }
+
+    // ---- extract_exec_command_hint dispatch tests ------------------------
+    //
+    // These guard the supervisor's wiring against method-name typos. If
+    // `handle_bridge_event` ever stops passing `"item/started"` /
+    // `"assistant/message"` here, the production code silently degrades to
+    // "no last command" forever — these tests catch that at compile-fixed
+    // string level.
+
+    #[test]
+    fn extract_exec_command_hint_handles_codex_item_started() {
+        let params = json!({
+            "item": {
+                "type": "commandExecution",
+                "status": "inProgress",
+                "command": "git fetch origin",
+                "cwd": "/tmp/x",
+            },
+        });
+        let hint = extract_exec_command_hint("item/started", &params).unwrap();
+        assert_eq!(hint.command, "git fetch origin");
+        assert_eq!(hint.cwd.as_deref(), Some("/tmp/x"));
+    }
+
+    #[test]
+    fn extract_exec_command_hint_skips_codex_completed_items() {
+        // Only `inProgress` items count — completed items shouldn't
+        // overwrite the live `last_exec_command` with a stale one.
+        let params = json!({
+            "item": {
+                "type": "commandExecution",
+                "status": "completed",
+                "command": "git status",
+            },
+        });
+        assert!(extract_exec_command_hint("item/started", &params).is_none());
+    }
+
+    #[test]
+    fn extract_exec_command_hint_skips_non_command_items() {
+        let params = json!({
+            "item": {"type": "fileEdit", "status": "inProgress"},
+        });
+        assert!(extract_exec_command_hint("item/started", &params).is_none());
+    }
+
+    #[test]
+    fn extract_exec_command_hint_handles_claude_assistant_message() {
+        let params = json!({
+            "content": [
+                {
+                    "type": "tool_use",
+                    "name": "Bash",
+                    "input": {"command": "npm install"},
+                },
+            ],
+        });
+        let hint = extract_exec_command_hint("assistant/message", &params).unwrap();
+        assert_eq!(hint.command, "npm install");
+        // Claude tool_use blocks don't carry cwd; the working dir is
+        // implicit from the run's workspace_root.
+        assert!(hint.cwd.is_none());
+    }
+
+    #[test]
+    fn extract_exec_command_hint_returns_none_on_unknown_method() {
+        let params = json!({"anything": true});
+        assert!(extract_exec_command_hint("turn/started", &params).is_none());
+        assert!(extract_exec_command_hint("codex/event/token_count", &params).is_none());
+        assert!(extract_exec_command_hint("totally/made/up", &params).is_none());
     }
 }

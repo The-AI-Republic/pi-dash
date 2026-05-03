@@ -1522,6 +1522,7 @@ mod tests {
                 total: 300,
             }),
             turn_count: Some(2),
+            last_exec_command: None,
         };
         let s = PollStatus::from_state(WireStatus::Busy, Some(rid), true, snap, 1);
         let v = serde_json::to_value(&s).unwrap();

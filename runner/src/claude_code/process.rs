@@ -6,11 +6,14 @@ use anyhow::{Context, Result};
 use chrono::Utc;
 use std::path::Path;
 use std::process::Stdio;
+use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, ChildStdin, Command};
-use tokio::sync::{mpsc, watch};
+use tokio::sync::{Mutex, mpsc, watch};
 
-use crate::agent::{AgentProcessHandle, ExitSnapshot};
+use crate::agent::{
+    AgentProcessHandle, ExitSnapshot, STDERR_RING_LINES, StderrBuffer, StderrRing, StderrSnapshot,
+};
 use crate::claude_code::schema::StreamEvent;
 use crate::util::shell::{is_benign_login_shell_warning, login_shell_command};
 
@@ -31,6 +34,7 @@ pub struct ClaudeProcess {
     pub inbound: mpsc::Receiver<StreamEvent>,
     kill_tx: mpsc::Sender<KillRequest>,
     exit_rx: watch::Receiver<Option<ExitSnapshot>>,
+    stderr_ring: StderrRing,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -95,8 +99,9 @@ impl ClaudeProcess {
         let pid = child.id();
 
         let (tx, rx) = mpsc::channel(128);
+        let stderr_ring: StderrRing = Arc::new(Mutex::new(StderrBuffer::new(STDERR_RING_LINES)));
         tokio::spawn(read_events(stdout, tx.clone()));
-        tokio::spawn(drain_stderr(stderr));
+        tokio::spawn(drain_stderr(stderr, stderr_ring.clone()));
 
         let (kill_tx, kill_rx) = mpsc::channel::<KillRequest>(2);
         let (exit_tx, exit_rx) = watch::channel::<Option<ExitSnapshot>>(None);
@@ -108,7 +113,13 @@ impl ClaudeProcess {
             inbound: rx,
             kill_tx,
             exit_rx,
+            stderr_ring,
         })
+    }
+
+    /// Snapshot the recent stderr lines (mirrors `AppServer::recent_stderr`).
+    pub async fn recent_stderr(&self) -> StderrSnapshot {
+        self.stderr_ring.lock().await.snapshot()
     }
 
     /// Bridge-owned observability handle. PID was captured at spawn time;
@@ -276,12 +287,11 @@ async fn read_events(stdout: tokio::process::ChildStdout, tx: mpsc::Sender<Strea
     }
 }
 
-async fn drain_stderr(stderr: tokio::process::ChildStderr) {
+async fn drain_stderr(stderr: tokio::process::ChildStderr, ring: StderrRing) {
     // Claude surfaces auth, model, and runtime errors here. At the default
     // `info` level these would be invisible, so every non-empty line is
-    // logged at `warn!`. Operators still have to dig through logs — a future
-    // follow-up can buffer the last N lines into the `Failed` event detail —
-    // but at least nothing is silently swallowed.
+    // logged at `warn!` AND buffered into the per-process ring for
+    // RunFailed-detail enrichment.
     //
     // The login-shell wrapper (see `util::shell`) always emits two TTY-less
     // diagnostics before exec'ing claude; suppress those so logs aren't
@@ -298,6 +308,7 @@ async fn drain_stderr(stderr: tokio::process::ChildStderr) {
                     continue;
                 }
                 tracing::warn!(target: "claude.stderr", "{trimmed}");
+                ring.lock().await.push(trimmed);
             }
             Err(e) => {
                 tracing::warn!("claude stderr read error: {e}");
