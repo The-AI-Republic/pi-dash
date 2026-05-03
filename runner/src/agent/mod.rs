@@ -86,12 +86,14 @@ pub type StderrRing = Arc<Mutex<StderrBuffer>>;
 ///    output via `tracing-subscriber`'s default formatter; the escape
 ///    bytes (e.g. `\x1b[2m`) render as literal glyphs (`␛[2m`) in the
 ///    issue comment HTML, making the detail unreadable.
-/// 2. Drop low-level (`INFO` / `DEBUG` / `TRACE`) codex tracing log
-///    lines. These are codex's internal observability stream, not
-///    actual program errors. Surfacing them to the user is pure noise —
-///    every codex turn emits dozens. `WARN` and `ERROR` lines, plus any
-///    unstructured stderr (panics, child-process traces, raw error
-///    messages), pass through unchanged.
+/// 2. Drop codex's own tracing log lines at INFO/DEBUG/TRACE/WARN
+///    levels. These are codex's internal observability stream — every
+///    turn emits dozens of `session_loop{...}: codex.sse_event` INFO
+///    lines and several `codex_core_plugins::manifest: ignoring …` WARN
+///    lines. None are actionable for a human reading the issue thread.
+///    Only `ERROR` tracing lines are kept (real codex failures). Any
+///    unstructured stderr — panics, child-process output, raw error
+///    messages from gh / curl / git / npm — passes through unchanged.
 ///
 /// Returns `None` to mean "drop this line entirely."
 pub fn sanitize_stderr_line(line: &str) -> Option<String> {
@@ -100,7 +102,7 @@ pub fn sanitize_stderr_line(line: &str) -> Option<String> {
     if trimmed.is_empty() {
         return None;
     }
-    if is_low_level_tracing(trimmed) {
+    if is_noisy_tracing(trimmed) {
         return None;
     }
     Some(trimmed.to_string())
@@ -132,25 +134,29 @@ fn strip_ansi_codes(s: &str) -> String {
 }
 
 /// True for lines that match `tracing-subscriber`'s default text
-/// formatter at INFO / DEBUG / TRACE level. Format is roughly
-/// `<RFC3339 timestamp ending in 'Z'>  <LEVEL>  <rest>`. The two-space
-/// gap between timestamp and level + the right-aligned LEVEL field
-/// (`" INFO"`, `"DEBUG"`, `"TRACE"`, `" WARN"`, `"ERROR"`) is what we
-/// match against. Lines without the trailing-`Z` timestamp prefix are
-/// considered real stderr and pass through.
-fn is_low_level_tracing(line: &str) -> bool {
-    // Look for "...Z " somewhere near the start; tracing's default
-    // format places the level immediately after the timestamp + 2 spaces.
+/// formatter at any level **except `ERROR`**. Format is roughly
+/// `<RFC3339 timestamp ending in 'Z'>  <LEVEL>  <rest>`. The
+/// two-space-padded LEVEL field (`" INFO"`, `"DEBUG"`, `"TRACE"`,
+/// `" WARN"`, `"ERROR"`) is what we match against.
+///
+/// `WARN` is treated as noise even though it's not strictly
+/// "low-level": codex's biggest WARN sources (`codex_core_plugins::
+/// manifest` plugin-config warnings, deprecation warnings, etc.) fire
+/// every turn and have nothing to do with run failure. Real run-killing
+/// errors come through either at `ERROR` or as unstructured stderr
+/// (gh CLI errors, curl failures, panic messages) — both pass through.
+///
+/// Lines without the trailing-`Z` timestamp prefix are considered real
+/// stderr and pass through.
+fn is_noisy_tracing(line: &str) -> bool {
     let Some((_ts, rest)) = line.split_once("Z ") else {
         return false;
     };
     let rest = rest.trim_start();
-    // tracing-subscriber pads the level to width 5: " INFO" / "DEBUG" /
-    // "TRACE" / " WARN" / "ERROR". After trim_start, that becomes the
-    // bare level name + space.
     rest.starts_with("INFO ")
         || rest.starts_with("DEBUG ")
         || rest.starts_with("TRACE ")
+        || rest.starts_with("WARN ")
 }
 
 /// Volatile process-handle the bridge surfaces to the supervisor for
@@ -416,8 +422,14 @@ mod tests {
     }
 
     #[test]
-    fn sanitize_drops_debug_and_trace() {
-        for level in ["DEBUG", "TRACE"] {
+    fn sanitize_drops_info_debug_trace_warn() {
+        // INFO/DEBUG/TRACE are noise by definition. WARN is also dropped:
+        // codex's biggest WARN sources (codex_core_plugins::manifest,
+        // deprecation warnings) fire every turn and have nothing to do
+        // with run failure. Observed in real failure comments after the
+        // initial sanitization shipped — WARN noise still buried the
+        // useful diagnostic content.
+        for level in ["INFO", "DEBUG", "TRACE", "WARN"] {
             let input = format!("2026-05-03T07:27:06.636239Z {level} something");
             assert_eq!(
                 sanitize_stderr_line(&input),
@@ -428,13 +440,23 @@ mod tests {
     }
 
     #[test]
-    fn sanitize_keeps_warn_and_error_tracing_lines() {
-        // Real diagnostic content — keep it. (`tracing-subscriber` pads
-        // the level to width 5, so WARN gets a leading space.)
-        let warn = "\x1b[2m2026-05-03T07:27:06.636239Z\x1b[0m  WARN \
-                    something: deprecated foo@1.0.0";
+    fn sanitize_drops_real_codex_plugin_warn() {
+        // Verbatim shape from a production failure comment.
+        let input = "2026-05-03T15:35:11.448580Z  WARN session_loop\
+                     {thread_id=019dee78-85e7-7742-afd8-1fdb9725379f}:\
+                     submission_dispatch{...}:turn{...}: \
+                     codex_core_plugins::manifest: ignoring \
+                     interface.defaultPrompt: prompt must be at most \
+                     128 characters path=/home/rich/.codex/...";
+        assert_eq!(sanitize_stderr_line(input), None);
+    }
+
+    #[test]
+    fn sanitize_keeps_error_tracing_lines() {
+        // ERROR is the one tracing level we keep — codex emits these
+        // on real failures (e.g. session-state corruption). Filter
+        // priority: keep signal, even if it costs a bit of noise.
         let err = "2026-05-03T07:27:06.636239Z ERROR network: timed out";
-        assert!(sanitize_stderr_line(warn).is_some());
         assert!(sanitize_stderr_line(err).is_some());
     }
 
