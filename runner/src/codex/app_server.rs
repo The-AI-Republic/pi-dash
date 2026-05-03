@@ -9,7 +9,7 @@ use tokio::process::{Child, ChildStdin, Command};
 use tokio::sync::{Mutex, mpsc, watch};
 
 use crate::agent::{
-    AgentProcessHandle, ExitSnapshot, STDERR_RING_LINES, StderrBuffer, StderrRing,
+    AgentProcessHandle, ExitSnapshot, STDERR_RING_LINES, StderrBuffer, StderrRing, StderrSnapshot,
 };
 use crate::codex::jsonrpc::Incoming;
 use crate::util::shell::{is_benign_login_shell_warning, login_shell_command};
@@ -82,10 +82,11 @@ impl AppServer {
         })
     }
 
-    /// Snapshot the recent stderr lines (up to `STDERR_RING_LINES`).
-    /// Used by the supervisor when emitting a `RunFailed` so the cloud has
-    /// some chance of telling the user *why* an agent went silent.
-    pub async fn recent_stderr(&self) -> Vec<String> {
+    /// Snapshot the recent stderr lines (up to `STDERR_RING_LINES`)
+    /// plus the running tally of rejected noise lines. Used by the
+    /// supervisor when emitting a `RunFailed` so the cloud has some
+    /// chance of telling the user *why* an agent went silent.
+    pub async fn recent_stderr(&self) -> StderrSnapshot {
         self.stderr_ring.lock().await.snapshot()
     }
 

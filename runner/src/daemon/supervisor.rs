@@ -1192,7 +1192,7 @@ impl AssignWorker {
             .observability_snapshot()
             .await
             .last_exec_command;
-        let stderr_tail = bridge.recent_stderr().await;
+        let stderr = bridge.recent_stderr().await;
 
         let mut parts: Vec<String> = vec![base.to_string()];
         if let Some(cmd) = last_cmd {
@@ -1207,8 +1207,16 @@ impl AssignWorker {
                 cmd.command
             ));
         }
-        if !stderr_tail.is_empty() {
-            let tail = stderr_tail
+        // The stderr ring has already filtered codex tracing noise;
+        // `stderr.dropped` is the running count of lines we rejected so
+        // the user has an honest signal of how much was suppressed.
+        // Emit the section if either we have content to show OR a
+        // non-zero dropped count (the latter alone tells the operator
+        // "the agent was emitting noise but no signal").
+        if !stderr.lines.is_empty() || stderr.dropped > 0 {
+            let shown = stderr.lines.len().min(STDERR_TAIL_LINES);
+            let tail = stderr
+                .lines
                 .iter()
                 .rev()
                 .take(STDERR_TAIL_LINES)
@@ -1216,10 +1224,23 @@ impl AssignWorker {
                 .cloned()
                 .collect::<Vec<_>>()
                 .join("\n  ");
-            parts.push(format!(
-                "stderr tail ({} line(s)):\n  {tail}",
-                stderr_tail.len().min(STDERR_TAIL_LINES)
-            ));
+            let suffix = if stderr.dropped > 0 {
+                format!(
+                    " (plus {} noise line(s) filtered from codex tracing)",
+                    stderr.dropped
+                )
+            } else {
+                String::new()
+            };
+            if shown > 0 {
+                parts.push(format!(
+                    "stderr tail ({shown} line(s){suffix}):\n  {tail}"
+                ));
+            } else {
+                // Filter dropped everything — surface that fact alone
+                // rather than emitting an empty stderr block.
+                parts.push(format!("stderr: empty after filtering{suffix}"));
+            }
         }
         let mut joined = parts.join("; ");
         if joined.len() > DETAIL_BYTES_CAP {

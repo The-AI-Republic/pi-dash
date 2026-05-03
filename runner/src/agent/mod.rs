@@ -31,10 +31,25 @@ pub const STDERR_RING_LINES: usize = 30;
 /// Bounded ring buffer of recent stderr lines from an agent subprocess.
 /// Each agent's `drain_stderr` task pushes here; the supervisor reads
 /// when it needs to enrich a `RunFailed` detail.
+///
+/// The buffer also counts lines rejected by `sanitize_stderr_line`
+/// (codex tracing noise, blank lines, etc.) so the failure-detail
+/// builder can be honest with the user about how much was filtered out.
 #[derive(Debug)]
 pub struct StderrBuffer {
     cap: usize,
     lines: VecDeque<String>,
+    dropped: u64,
+}
+
+/// Result of `StderrBuffer::snapshot`. Carries both the kept lines and
+/// the running tally of rejected lines so the consumer can render a
+/// "(plus N noise lines filtered)" footer instead of silently lying
+/// about completeness.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct StderrSnapshot {
+    pub lines: Vec<String>,
+    pub dropped: u64,
 }
 
 impl StderrBuffer {
@@ -47,11 +62,13 @@ impl StderrBuffer {
         Self {
             cap,
             lines: VecDeque::with_capacity(cap),
+            dropped: 0,
         }
     }
 
     pub fn push(&mut self, line: &str) {
         let Some(sanitized) = sanitize_stderr_line(line) else {
+            self.dropped = self.dropped.saturating_add(1);
             return;
         };
         let truncated = if sanitized.len() > STDERR_LINE_CAP_BYTES {
@@ -72,8 +89,11 @@ impl StderrBuffer {
         self.lines.push_back(truncated);
     }
 
-    pub fn snapshot(&self) -> Vec<String> {
-        self.lines.iter().cloned().collect()
+    pub fn snapshot(&self) -> StderrSnapshot {
+        StderrSnapshot {
+            lines: self.lines.iter().cloned().collect(),
+            dropped: self.dropped,
+        }
     }
 }
 
@@ -357,12 +377,12 @@ impl AgentBridge {
         }
     }
 
-    /// Snapshot the last N lines of agent stderr. Returns `vec![]` if the
-    /// process has emitted nothing on stderr (the common case for healthy
-    /// runs). Used by the supervisor to enrich `RunFailed` details so the
+    /// Snapshot the last N lines of agent stderr **plus** the running
+    /// tally of rejected lines (codex tracing noise, blank lines, etc.).
+    /// Used by the supervisor to enrich `RunFailed` details so the
     /// cloud / UI can tell the user *why* the agent died beyond just
     /// "agent stdout closed" or "no agent frames for 5 minutes".
-    pub async fn recent_stderr(&self) -> Vec<String> {
+    pub async fn recent_stderr(&self) -> StderrSnapshot {
         match self {
             AgentBridge::Codex(b) => b.server.recent_stderr().await,
             AgentBridge::ClaudeCode(b) => b.recent_stderr().await,
@@ -391,7 +411,28 @@ mod tests {
         buf.push("b");
         buf.push("c");
         buf.push("d");
-        assert_eq!(buf.snapshot(), vec!["b", "c", "d"]);
+        let snap = buf.snapshot();
+        assert_eq!(snap.lines, vec!["b", "c", "d"]);
+        assert_eq!(snap.dropped, 0);
+    }
+
+    #[test]
+    fn stderr_buffer_counts_dropped_noise_lines() {
+        // The footer in the failure detail relies on this counter to
+        // tell the user how many lines were filtered. Push a mix of
+        // noise + real content and assert the count matches.
+        let mut buf = StderrBuffer::new(5);
+        buf.push("real error: ENOENT /tmp/missing");
+        buf.push("2026-05-03T07:27:06.636239Z  INFO codex.sse_event"); // dropped
+        buf.push(""); // dropped (empty)
+        buf.push("2026-05-03T15:35:11.448580Z  WARN plugin warning"); // dropped
+        buf.push("another real error");
+        let snap = buf.snapshot();
+        assert_eq!(
+            snap.lines,
+            vec!["real error: ENOENT /tmp/missing", "another real error"]
+        );
+        assert_eq!(snap.dropped, 3, "should count all 3 rejected lines");
     }
 
     #[test]
@@ -485,7 +526,10 @@ mod tests {
         buf.push("\x1b[2m2026-05-03T00:00:00Z\x1b[0m  INFO noise");
         buf.push("real error: ENOENT /tmp/missing");
         buf.push("\x1b[2m2026-05-03T00:00:01Z\x1b[0m DEBUG noise");
-        assert_eq!(buf.snapshot(), vec!["real error: ENOENT /tmp/missing"]);
+        assert_eq!(
+            buf.snapshot().lines,
+            vec!["real error: ENOENT /tmp/missing"]
+        );
     }
 
     #[test]
@@ -494,12 +538,15 @@ mod tests {
         let long = "x".repeat(STDERR_LINE_CAP_BYTES * 2);
         buf.push(&long);
         let snap = buf.snapshot();
-        assert_eq!(snap.len(), 1);
+        assert_eq!(snap.lines.len(), 1);
         // Truncated line ends with a one-char ellipsis sentinel.
-        assert!(snap[0].ends_with('…'), "expected ellipsis sentinel: {snap:?}");
+        assert!(
+            snap.lines[0].ends_with('…'),
+            "expected ellipsis sentinel: {snap:?}"
+        );
         // Truncation respects char-boundary semantics: result fits within cap +
         // the multi-byte ellipsis.
-        assert!(snap[0].len() <= STDERR_LINE_CAP_BYTES + 4);
+        assert!(snap.lines[0].len() <= STDERR_LINE_CAP_BYTES + 4);
     }
 
     #[test]
@@ -512,7 +559,7 @@ mod tests {
         buf.push(&line);
         // Should not panic on truncation (regression: naive byte slicing
         // would split a multi-byte sequence).
-        assert_eq!(buf.snapshot().len(), 1);
+        assert_eq!(buf.snapshot().lines.len(), 1);
     }
 
     #[test]

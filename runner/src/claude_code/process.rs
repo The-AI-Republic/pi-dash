@@ -12,7 +12,7 @@ use tokio::process::{Child, ChildStdin, Command};
 use tokio::sync::{Mutex, mpsc, watch};
 
 use crate::agent::{
-    AgentProcessHandle, ExitSnapshot, STDERR_RING_LINES, StderrBuffer, StderrRing,
+    AgentProcessHandle, ExitSnapshot, STDERR_RING_LINES, StderrBuffer, StderrRing, StderrSnapshot,
 };
 use crate::claude_code::schema::StreamEvent;
 use crate::util::shell::{is_benign_login_shell_warning, login_shell_command};
@@ -118,7 +118,7 @@ impl ClaudeProcess {
     }
 
     /// Snapshot the recent stderr lines (mirrors `AppServer::recent_stderr`).
-    pub async fn recent_stderr(&self) -> Vec<String> {
+    pub async fn recent_stderr(&self) -> StderrSnapshot {
         self.stderr_ring.lock().await.snapshot()
     }
 
