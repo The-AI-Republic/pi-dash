@@ -886,10 +886,56 @@ impl HttpLoop {
         )
     }
 
+    /// Run `ensure_access_token` then `open_session`, retrying transient
+    /// failures with exponential backoff (1s → 30s capped). Returns when
+    /// the session is open OR the loop is shutdown. Only fatal-for-runner
+    /// errors propagate — recoverable / SessionEvicted errors loop until
+    /// success.
+    async fn bootstrap_with_retry(&self) -> Result<OpenSessionResponse, TransportError> {
+        let mut backoff_secs = 1u64;
+        loop {
+            let attempt = async {
+                self.client.ensure_access_token().await?;
+                self.client
+                    .open_session(self.current_attach_body())
+                    .await
+            };
+            let shutdown = self.shutdown.clone();
+            match tokio::select! {
+                _ = shutdown.notified() => {
+                    return Err(TransportError::Network("shutdown during bootstrap".into()));
+                }
+                result = attempt => result,
+            } {
+                Ok(session) => return Ok(session),
+                Err(err) if err.is_fatal_for_runner() => {
+                    tracing::warn!(
+                        runner = %self.client.runner_id(),
+                        "fatal error during bootstrap: {err}",
+                    );
+                    return Err(err);
+                }
+                Err(err) => {
+                    tracing::warn!(
+                        runner = %self.client.runner_id(),
+                        backoff_secs,
+                        "bootstrap failed; retrying: {err}",
+                    );
+                    sleep(Duration::from_secs(backoff_secs)).await;
+                    backoff_secs = (backoff_secs * 2).min(30);
+                }
+            }
+        }
+    }
+
     pub async fn run(mut self) -> Result<(), TransportError> {
-        // 1. Bootstrap: ensure access token, open session.
-        self.client.ensure_access_token().await?;
-        let session = self.client.open_session(self.current_attach_body()).await?;
+        // 1. Bootstrap: ensure access token, open session. Both calls
+        // can hit transient network blips (request timeout, connection
+        // reset, brief 5xx during cloud restart) — retry with backoff
+        // so a single startup glitch doesn't kill the loop forever. Only
+        // genuinely fatal errors (revoked creds, runner_id mismatch)
+        // unwind here.
+        let session = self.bootstrap_with_retry().await?;
         // 2. Hand welcome (and optional resume_ack) to the mailbox so
         //    the existing per-runner handlers ingest them as today.
         let welcome_body = ServerMsg::Welcome {
