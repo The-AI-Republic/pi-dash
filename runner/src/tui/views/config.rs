@@ -1,29 +1,25 @@
-//! Config tab — editable view over `config.toml`.
+//! Per-runner editable-field machinery used by the Runners tab.
 //!
-//! Navigation: ↑/↓ or j/k move between editable fields. Enter edits:
-//!   - Bool fields toggle in place.
-//!   - Enum fields cycle to the next value.
-//!   - Text / path / number fields open an inline text-input buffer;
-//!     Enter commits, Esc cancels.
+//! Splits cleanly into a *data layer* (FieldId / FieldKind / FIELDS,
+//! `display_value`, `set_text_value`, `toggle_bool`, `cycle_enum`,
+//! `differs`) and a small *render layer* used by the Runners tab to
+//! draw the settings panel (`editable_lines`, `footer`,
+//! `runner_picker_bar`).
 //!
-//! `w` writes the working copy to `config.toml` and kicks the daemon via
-//! `service::reload::restart_and_verify`. The outcome (cloud-connected or
-//! detailed failure) shows in the footer so users immediately see whether
-//! their edit broke the runner.
-//!
-//! `Esc` in browse-mode discards pending edits and reloads from disk.
-//! Read-only fields (cloud_url, workspace_slug, list fields) are rendered
-//! but skipped in navigation.
+//! The data layer is purely-functional — it takes a `Config` plus a
+//! runner index. The render layer takes the same data plus the
+//! tab's local pane state (selected field index + optional in-flight
+//! edit buffer). No `AppState`-or-`AppData`-coupled functions
+//! survive: the Runners tab passes its own state explicitly.
 
-// Layout no longer drives the (deleted) full-page Tab::Config render
-// dispatch — the Runners tab composes the `editable_lines` /
-// `footer` / `register_form_lines` helpers itself.
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
 
 use crate::config::schema::{AgentKind, Config};
-use crate::tui::app::AppState;
+use crate::service::reload::ReloadOutcome;
+
+use super::super::app::AppData;
 
 pub const AGENT_KINDS: &[&str] = &["codex", "claude-code"];
 pub const LOG_LEVELS: &[&str] = &["trace", "debug", "info", "warn", "error"];
@@ -59,8 +55,6 @@ pub struct FieldSpec {
     pub kind: FieldKind,
 }
 
-/// Every editable field, in render order. Navigation indices map 1:1 into
-/// this slice, so adding or reordering fields here also reorders the UI.
 pub const FIELDS: &[FieldSpec] = &[
     FieldSpec {
         id: FieldId::RunnerName,
@@ -122,9 +116,6 @@ pub const FIELDS: &[FieldSpec] = &[
         section: "Approval policy",
         kind: FieldKind::Bool,
     },
-    // Daemon-level log fields (log_level, log_retention_days) live in
-    // the General tab — they're shared across every runner the daemon
-    // hosts and don't make sense as per-runner edits.
 ];
 
 pub fn field_count() -> usize {
@@ -135,10 +126,6 @@ pub fn field_at(idx: usize) -> &'static FieldSpec {
     &FIELDS[idx.min(FIELDS.len() - 1)]
 }
 
-/// Look up the runner the Config tab's per-runner fields apply to.
-/// Returns None when the config has no runners — the Config tab should
-/// be skipped from the TUI in that state. Callers in this module that
-/// dispatch on the field id treat None as "no-op" / empty value.
 fn runner_at(cfg: &Config, idx: usize) -> Option<&crate::config::schema::RunnerConfig> {
     if cfg.runners.is_empty() {
         return None;
@@ -159,7 +146,6 @@ fn runner_at_mut(
 }
 
 pub fn display_value(cfg: &Config, id: FieldId, runner_idx: usize) -> String {
-    // Daemon-level fields render even when there are no runners.
     if let FieldId::LogLevel = id {
         return cfg.daemon.log_level.clone();
     }
@@ -179,7 +165,11 @@ pub fn display_value(cfg: &Config, id: FieldId, runner_idx: usize) -> String {
         FieldId::CodexBinary => runner.codex.binary.clone(),
         FieldId::CodexModelDefault => runner.codex.model_default.clone().unwrap_or_default(),
         FieldId::ClaudeBinary => runner.claude_code.binary.clone(),
-        FieldId::ClaudeModelDefault => runner.claude_code.model_default.clone().unwrap_or_default(),
+        FieldId::ClaudeModelDefault => runner
+            .claude_code
+            .model_default
+            .clone()
+            .unwrap_or_default(),
         FieldId::ApprovalAutoReadonly => runner
             .approval_policy
             .auto_approve_readonly_shell
@@ -193,9 +183,6 @@ pub fn display_value(cfg: &Config, id: FieldId, runner_idx: usize) -> String {
     }
 }
 
-/// Commit an edited buffer to the config. Only valid for Text/U32 fields;
-/// Bool/Enum fields use `toggle_bool` / `cycle_enum` instead. Returns a
-/// user-facing error message on parse/validation failure.
 pub fn set_text_value(
     cfg: &mut Config,
     id: FieldId,
@@ -304,14 +291,27 @@ pub fn cycle_enum(cfg: &mut Config, id: FieldId, runner_idx: usize) {
     }
 }
 
-// --- rendering helpers, consumed by Runners tab and the global picker -----
+pub fn differs(a: &Config, b: &Config) -> bool {
+    if a.daemon.log_level != b.daemon.log_level
+        || a.daemon.log_retention_days != b.daemon.log_retention_days
+    {
+        return true;
+    }
+    let n = a.runners.len().max(b.runners.len()).max(1);
+    for idx in 0..n {
+        for f in FIELDS {
+            if display_value(a, f.id, idx) != display_value(b, f.id, idx) {
+                return true;
+            }
+        }
+    }
+    false
+}
 
-/// Top-of-tab picker showing each configured runner as a chip. The
-/// currently-selected runner is highlighted; the bar only renders when
-/// there are 2+ runners so single-runner installs see the same UI as
-/// before. Keys: `<`/`>` cycle, `Alt+1`–`Alt+9` jump.
-pub fn runner_picker_bar(state: &AppState) -> Paragraph<'static> {
-    let Some(working) = state.config_working.as_ref() else {
+// --- rendering helpers — all parameter-driven, no `AppState` access ----------
+
+pub fn runner_picker_bar(data: &AppData) -> Paragraph<'static> {
+    let Some(working) = data.config_working.as_ref() else {
         return Paragraph::new(Line::raw("")).block(
             Block::default()
                 .borders(Borders::ALL)
@@ -319,7 +319,7 @@ pub fn runner_picker_bar(state: &AppState) -> Paragraph<'static> {
         );
     };
     let total = working.runners.len();
-    let picked = state.runner_picker_idx.min(total.saturating_sub(1));
+    let picked = data.runner_picker_idx.min(total.saturating_sub(1));
     let mut spans: Vec<Span<'static>> = Vec::new();
     for (i, r) in working.runners.iter().enumerate() {
         let label = format!(" {}. {} ", i + 1, r.name);
@@ -345,145 +345,26 @@ pub fn runner_picker_bar(state: &AppState) -> Paragraph<'static> {
     )
 }
 
-pub fn register_form_lines(state: &AppState) -> Vec<Line<'static>> {
-    let Some(form) = state.register_form.as_ref() else {
-        // No form yet — refresh() will seed one next tick; show a hint.
-        return vec![Line::from(Span::styled(
-            "Loading…",
-            Style::default().add_modifier(Modifier::DIM),
-        ))];
-    };
-    let mut lines = vec![
-        Line::from(Span::styled(
-            "This dev machine isn't enrolled yet.",
-            Style::default()
-                .fg(Color::Yellow)
-                .add_modifier(Modifier::BOLD),
-        )),
-        Line::from("Fill in the form below and press [Connect] to enroll."),
-        Line::raw(""),
-    ];
-
-    lines.push(form_field_line(
-        "Cloud URL",
-        &form.cloud_url,
-        form.focus == 0,
-    ));
-    // Token is pre-masked here; `form_field_line` is unaware of masking.
-    lines.push(form_field_line(
-        "Enrollment token",
-        &mask_token(&form.token),
-        form.focus == 1,
-    ));
-    lines.push(form_field_line("Host label", &form.name, form.focus == 2));
-    lines.push(Line::raw(""));
-    lines.push(form_button_line(form.focus == 3, form.busy));
-    lines.push(Line::raw(""));
-    lines.push(Line::from(Span::styled(
-        "Tab/↑↓ move   type to edit   ↵ advance / submit",
-        Style::default().add_modifier(Modifier::DIM),
-    )));
-    lines.push(Line::from(Span::styled(
-        "Get an enrollment token from the Pi Dash web UI: Workspace → Runners → Add connection",
-        Style::default().add_modifier(Modifier::DIM),
-    )));
-
-    if let Some(e) = &form.error {
-        lines.push(Line::raw(""));
-        lines.push(Line::from(Span::styled(
-            e.clone(),
-            Style::default().fg(Color::Red),
-        )));
-    }
-    if form.busy {
-        lines.push(Line::raw(""));
-        lines.push(Line::from(Span::styled(
-            "contacting cloud…",
-            Style::default().fg(Color::Yellow),
-        )));
-    }
-    lines
-}
-
-fn form_field_line(label: &str, value: &str, focused: bool) -> Line<'static> {
-    let marker = if focused { "▶" } else { " " };
-    let value_style = if focused {
-        Style::default()
-            .fg(Color::Yellow)
-            .add_modifier(Modifier::BOLD)
-    } else {
-        Style::default().fg(Color::White)
-    };
-    let cursor = if focused { "▊" } else { "" };
-    Line::from(vec![
-        Span::styled(
-            format!(" {marker} "),
-            Style::default()
-                .fg(if focused {
-                    Color::Cyan
-                } else {
-                    Color::DarkGray
-                })
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::raw(format!("{label:<14} ")),
-        Span::styled(format!("{value}{cursor}"), value_style),
-    ])
-}
-
-fn form_button_line(focused: bool, busy: bool) -> Line<'static> {
-    let label = if busy {
-        " Connecting… "
-    } else {
-        " Connect "
-    };
-    let style = if focused {
-        Style::default()
-            .fg(Color::Black)
-            .bg(Color::Green)
-            .add_modifier(Modifier::BOLD)
-    } else {
-        Style::default()
-            .fg(Color::Green)
-            .add_modifier(Modifier::BOLD)
-    };
-    Line::from(vec![
-        Span::raw("   "),
-        Span::styled(label.to_string(), style),
-    ])
-}
-
-fn mask_token(raw: &str) -> String {
-    if raw.len() <= 4 {
-        "*".repeat(raw.len())
-    } else {
-        format!("{}…{}", &raw[..2], &raw[raw.len() - 2..])
-    }
-}
-
 pub fn editable_lines(
     working: &Config,
     loaded: &Option<Config>,
-    state: &AppState,
+    selected_field_idx: usize,
+    runner_idx: usize,
+    edit_buffer: Option<&str>,
 ) -> Vec<Line<'static>> {
     let mut lines = Vec::new();
-    let selected_idx = state.selected.min(field_count().saturating_sub(1));
+    let selected_idx = selected_field_idx.min(field_count().saturating_sub(1));
 
-    // Runner section: name is editable, workspace_slug + project_slug
-    // are read-only because they're bound at registration. cloud_url
-    // is daemon-level (one URL shared across every runner this daemon
-    // hosts) and lives on the General tab; we don't repeat it here to
-    // avoid the misleading impression that it's a per-runner setting.
     lines.push(section_header("Runner"));
     lines.extend(render_editable_row(
         working,
         loaded,
-        state,
         selected_idx,
         index_of(FieldId::RunnerName),
+        runner_idx,
+        edit_buffer,
     ));
-    let picker_idx = state.runner_picker_idx;
-    if let Some(picked_runner) = runner_at(working, picker_idx) {
+    if let Some(picked_runner) = runner_at(working, runner_idx) {
         lines.push(readonly_row(
             "workspace_slug",
             picked_runner.workspace_slug.as_deref().unwrap_or("-"),
@@ -506,9 +387,10 @@ pub fn editable_lines(
     lines.extend(render_editable_row(
         working,
         loaded,
-        state,
         selected_idx,
         index_of(FieldId::WorkspaceWorkingDir),
+        runner_idx,
+        edit_buffer,
     ));
     lines.push(Line::raw(""));
 
@@ -516,9 +398,10 @@ pub fn editable_lines(
     lines.extend(render_editable_row(
         working,
         loaded,
-        state,
         selected_idx,
         index_of(FieldId::AgentKind),
+        runner_idx,
+        edit_buffer,
     ));
     lines.push(Line::raw(""));
 
@@ -531,12 +414,13 @@ pub fn editable_lines(
         lines.extend(render_editable_row(
             working,
             loaded,
-            state,
             selected_idx,
             index_of(id),
+            runner_idx,
+            edit_buffer,
         ));
     }
-    if let Some(picked_runner) = runner_at(working, picker_idx) {
+    if let Some(picked_runner) = runner_at(working, runner_idx) {
         lines.push(readonly_row(
             "allowlist_commands",
             &format!(
@@ -561,19 +445,20 @@ pub fn editable_lines(
     lines
 }
 
+#[allow(clippy::too_many_arguments)]
 fn render_editable_row(
     working: &Config,
     loaded: &Option<Config>,
-    state: &AppState,
     selected_idx: usize,
     field_idx: usize,
+    runner_idx: usize,
+    edit_buffer: Option<&str>,
 ) -> Vec<Line<'static>> {
     let spec = &FIELDS[field_idx];
     let is_selected = selected_idx == field_idx;
-    let editing_here = is_selected && state.config_edit_buffer.is_some();
-    let runner_idx = state.runner_picker_idx;
+    let editing_here = is_selected && edit_buffer.is_some();
     let displayed = if editing_here {
-        format!("{}▊", state.config_edit_buffer.as_deref().unwrap_or(""))
+        format!("{}▊", edit_buffer.unwrap_or(""))
     } else {
         display_value(working, spec.id, runner_idx)
     };
@@ -581,8 +466,7 @@ fn render_editable_row(
     let modified = loaded
         .as_ref()
         .map(|l| {
-            display_value(l, spec.id, runner_idx)
-                != display_value(working, spec.id, runner_idx)
+            display_value(l, spec.id, runner_idx) != display_value(working, spec.id, runner_idx)
         })
         .unwrap_or(true);
 
@@ -657,8 +541,6 @@ fn readonly_row(label: &str, value: &str) -> Line<'static> {
     ])
 }
 
-/// Continuation line for a read-only row that needs more explanation than
-/// `[read-only]` conveys. Aligns under the value column for readability.
 fn readonly_hint(msg: &str) -> Line<'static> {
     Line::from(vec![
         Span::raw(" ".repeat(3 + 30 + 1)),
@@ -680,11 +562,13 @@ fn section_header(name: &str) -> Line<'static> {
     ))
 }
 
-pub fn footer(state: &AppState) -> Paragraph<'_> {
+pub fn footer(
+    edit_in_progress: bool,
+    edit_error: Option<&str>,
+    reload_outcome: Option<&ReloadOutcome>,
+) -> Paragraph<'static> {
     let mut lines = Vec::new();
-
-    // Action hints — contextual.
-    let hint_line = if state.config_edit_buffer.is_some() {
+    let hint_line = if edit_in_progress {
         Line::from(Span::styled(
             "EDIT: [Enter] commit   [Esc] cancel   [Backspace] delete",
             Style::default().fg(Color::Yellow),
@@ -697,29 +581,25 @@ pub fn footer(state: &AppState) -> Paragraph<'_> {
     };
     lines.push(hint_line);
 
-    // Edit-time error (e.g. bad parse).
-    if let Some(e) = &state.config_edit_error {
+    if let Some(e) = edit_error {
         lines.push(Line::from(Span::styled(
-            e.clone(),
+            e.to_string(),
             Style::default().fg(Color::Red),
         )));
     }
 
-    // Last reload outcome.
-    match &state.reload_outcome {
-        Some(out) if out.ok => {
+    if let Some(out) = reload_outcome {
+        if out.ok {
             lines.push(Line::from(Span::styled(
                 format!("✓ {}", out.summary),
                 Style::default().fg(Color::Green),
             )));
-        }
-        Some(out) => {
+        } else {
             lines.push(Line::from(Span::styled(
                 format!("✗ {}", out.summary),
                 Style::default().fg(Color::Red),
             )));
             if let Some(detail) = &out.detail {
-                // First line of detail only, to keep footer compact.
                 let first = detail.lines().next().unwrap_or("").to_string();
                 lines.push(Line::from(Span::styled(
                     first,
@@ -727,7 +607,6 @@ pub fn footer(state: &AppState) -> Paragraph<'_> {
                 )));
             }
         }
-        None => {}
     }
 
     Paragraph::new(lines)
@@ -740,25 +619,4 @@ fn index_of(id: FieldId) -> usize {
         .iter()
         .position(|f| f.id == id)
         .expect("FieldId missing from FIELDS table")
-}
-
-pub fn differs(a: &Config, b: &Config) -> bool {
-    // Compare every per-runner editable field across every configured
-    // runner. Daemon-level fields (log_level, log_retention_days) are
-    // edited on the General tab and aren't part of `FIELDS` — they
-    // need a separate equality check.
-    if a.daemon.log_level != b.daemon.log_level
-        || a.daemon.log_retention_days != b.daemon.log_retention_days
-    {
-        return true;
-    }
-    let n = a.runners.len().max(b.runners.len()).max(1);
-    for idx in 0..n {
-        for f in FIELDS {
-            if display_value(a, f.id, idx) != display_value(b, f.id, idx) {
-                return true;
-            }
-        }
-    }
-    false
 }
