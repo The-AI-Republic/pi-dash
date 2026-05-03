@@ -11,7 +11,7 @@
 4. Write or update the hierarchical plan in the workpad.
 5. Ensure the workpad includes an environment stamp at the top in a `text` fenced block, format: `<host>:<abs-workdir>@<short-sha>`.
 6. Capture a concrete reproduction signal (command output, failing test, screenshot description) in the workpad `Notes` section before changing code.
-7. Before any code edits, sync with the repository:
+7. **If `task_type == code_change`** (per your Step 0.5 analysis), before any code edits, sync with the repository. Skip this entire sub-step for `noncode` tasks — do not run `git fetch`, `git checkout`, or any other git operation here.
    - `git fetch origin`
 {% if repo.work_branch %}
    - `git checkout {{ repo.work_branch }}` — this is the existing branch for this issue; operate on it directly. If it does not exist locally, `git checkout -b {{ repo.work_branch }} origin/{{ repo.work_branch }}`. Do not create a new feature branch.
