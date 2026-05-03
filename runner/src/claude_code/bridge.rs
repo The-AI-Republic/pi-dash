@@ -159,7 +159,7 @@ impl Bridge {
         self.proc.process_handle()
     }
 
-    pub async fn recent_stderr(&self) -> Vec<String> {
+    pub async fn recent_stderr(&self) -> crate::agent::StderrSnapshot {
         self.proc.recent_stderr().await
     }
 }
