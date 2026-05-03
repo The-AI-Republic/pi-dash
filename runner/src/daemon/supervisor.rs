@@ -1266,9 +1266,9 @@ impl AssignWorker {
                     self.state.incr_turn().await;
                 }
                 "item/started" => {
-                    // Track the most recent shell command codex kicked off.
-                    // Used purely to enrich `RunFailed.detail` if the agent
-                    // goes silent — never sent on the steady-state poll.
+                    // Codex side: track the most recent shell command for
+                    // failure-detail enrichment. Never sent on the
+                    // steady-state poll — consumed locally on a stall.
                     if let Some(item) = params.get("item")
                         && item.get("type").and_then(|v| v.as_str()) == Some("commandExecution")
                         && item.get("status").and_then(|v| v.as_str()) == Some("inProgress")
@@ -1293,6 +1293,28 @@ impl AssignWorker {
                                 )
                                 .await;
                         }
+                    }
+                }
+                "assistant/message" => {
+                    // Claude side: assistant messages carry tool_use
+                    // blocks. Extract Bash commands so a stalled Claude
+                    // run gets the same `last command:` enrichment in
+                    // its RunFailed detail that codex already does. Bash
+                    // is the only Claude tool whose hangs are common
+                    // enough to be worth surfacing — Read/Edit/Grep are
+                    // ignored on purpose to keep the parser narrow.
+                    if let Some(cmd) =
+                        crate::daemon::observability::parse_claude_bash_command(params)
+                    {
+                        self.state
+                            .note_exec_command(
+                                crate::daemon::state::ExecCommandSnapshot {
+                                    command: cmd,
+                                    cwd: None,
+                                    started_at: Utc::now(),
+                                },
+                            )
+                            .await;
                     }
                 }
                 _ => {}

@@ -109,6 +109,34 @@ pub fn parse_codex_token_count(params: &serde_json::Value) -> Option<TokenUsage>
     })
 }
 
+/// Best-effort extractor for a Bash `tool_use` block in a Claude
+/// `assistant/message` Raw frame. Returns `Some(command)` if the message
+/// content array contains a `{"type":"tool_use","name":"Bash"}` block
+/// with a string `input.command`; `None` otherwise. Used to populate
+/// `last_exec_command` for failure-detail enrichment, in parallel with
+/// the codex `item/started` / `commandExecution` capture path.
+///
+/// Other tool_use blocks (Read, Edit, Grep, …) are intentionally ignored
+/// — Bash is the call most likely to hang on network / sandbox issues
+/// and the only one whose `input.command` resembles a shell command we'd
+/// want to surface verbatim. Future tools can be added as new arms if
+/// they prove to be common stall sources.
+pub fn parse_claude_bash_command(message: &serde_json::Value) -> Option<String> {
+    let content = message.get("content")?.as_array()?;
+    for block in content {
+        let is_tool_use = block.get("type").and_then(|v| v.as_str()) == Some("tool_use");
+        let is_bash = block.get("name").and_then(|v| v.as_str()) == Some("Bash");
+        if is_tool_use && is_bash {
+            let cmd = block.get("input")?.get("command")?.as_str()?.trim();
+            if cmd.is_empty() {
+                return None;
+            }
+            return Some(cmd.to_string());
+        }
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -238,5 +266,61 @@ mod tests {
     fn parse_codex_token_count_returns_none_on_garbage() {
         let params = json!({"unrelated": true});
         assert!(parse_codex_token_count(&params).is_none());
+    }
+
+    #[test]
+    fn parse_claude_bash_command_extracts_command() {
+        let msg = json!({
+            "id": "msg_1",
+            "role": "assistant",
+            "content": [
+                {"type": "text", "text": "Let me check."},
+                {
+                    "type": "tool_use",
+                    "id": "tu_1",
+                    "name": "Bash",
+                    "input": {"command": "git fetch origin", "description": "sync"},
+                },
+            ],
+        });
+        assert_eq!(
+            parse_claude_bash_command(&msg),
+            Some("git fetch origin".to_string())
+        );
+    }
+
+    #[test]
+    fn parse_claude_bash_command_ignores_non_bash_tools() {
+        // A Read tool_use should NOT populate last_exec_command — Read
+        // hangs are far rarer than Bash and we want the extractor narrow
+        // to avoid noise in the failure-detail string.
+        let msg = json!({
+            "content": [
+                {
+                    "type": "tool_use",
+                    "name": "Read",
+                    "input": {"file_path": "/tmp/foo"},
+                },
+            ],
+        });
+        assert!(parse_claude_bash_command(&msg).is_none());
+    }
+
+    #[test]
+    fn parse_claude_bash_command_returns_none_when_no_tool_use() {
+        let msg = json!({
+            "content": [{"type": "text", "text": "just thinking"}],
+        });
+        assert!(parse_claude_bash_command(&msg).is_none());
+    }
+
+    #[test]
+    fn parse_claude_bash_command_returns_none_on_empty_command() {
+        let msg = json!({
+            "content": [
+                {"type": "tool_use", "name": "Bash", "input": {"command": "  "}},
+            ],
+        });
+        assert!(parse_claude_bash_command(&msg).is_none());
     }
 }
