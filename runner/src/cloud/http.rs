@@ -77,6 +77,10 @@ impl TransportError {
     }
 
     /// True when the server's reply means this runner must shut down.
+    /// `SessionEvicted` is intentionally NOT here — eviction just means
+    /// "another session opened for this runner_id, yours got closed."
+    /// The right response is to reopen and continue, not to give up. The
+    /// run loop has a dedicated arm for it.
     pub fn is_fatal_for_runner(&self) -> bool {
         matches!(
             self,
@@ -85,7 +89,6 @@ impl TransportError {
                 | TransportError::RunnerRevoked
                 | TransportError::RunnerIdMismatch
                 | TransportError::InvalidRefreshToken
-                | TransportError::SessionEvicted { .. }
         )
     }
 }
@@ -914,6 +917,7 @@ impl HttpLoop {
         }
 
         let mut backoff_secs = 1u64;
+        let mut consecutive_evictions = 0u32;
         loop {
             let shutdown = self.shutdown.clone();
             match tokio::select! {
@@ -922,19 +926,48 @@ impl HttpLoop {
             } {
                 Ok(()) => {
                     backoff_secs = 1;
+                    consecutive_evictions = 0;
                 }
                 Err(err) if err.is_fatal_for_runner() => {
                     tracing::warn!(runner = %self.client.runner_id(), "fatal transport error: {err}");
                     return Err(err);
                 }
+                Err(TransportError::SessionEvicted { reason }) => {
+                    // Another session opened for this runner_id and the
+                    // cloud closed ours. Reopen and continue. Back off
+                    // exponentially on repeats so a competing daemon
+                    // doesn't pin us in a thrash loop.
+                    consecutive_evictions = consecutive_evictions.saturating_add(1);
+                    let backoff =
+                        Duration::from_secs((1u64 << consecutive_evictions.min(5)).min(30));
+                    tracing::warn!(
+                        runner = %self.client.runner_id(),
+                        consecutive = consecutive_evictions,
+                        backoff_secs = backoff.as_secs(),
+                        "session evicted ({reason}); reopening",
+                    );
+                    sleep(backoff).await;
+                    if let Err(e) = self
+                        .client
+                        .open_session(self.current_attach_body())
+                        .await
+                    {
+                        tracing::warn!(
+                            runner = %self.client.runner_id(),
+                            "reopen after eviction failed: {e}",
+                        );
+                    }
+                }
                 Err(err) if err.is_recoverable() => {
+                    // Transient: long-poll timeout, transient 5xx, token
+                    // refresh window, etc. Back off and retry on the
+                    // EXISTING session — do NOT reopen, because each
+                    // reopen evicts our own prior session and a long-poll
+                    // already in flight against it would surface as
+                    // SessionEvicted on the next loop iteration.
                     tracing::debug!(runner = %self.client.runner_id(), "recoverable transport error: {err}");
                     sleep(Duration::from_secs(backoff_secs)).await;
                     backoff_secs = (backoff_secs * 2).min(30);
-                    let _ = self
-                        .client
-                        .open_session(self.current_attach_body())
-                        .await;
                 }
                 Err(err) => {
                     tracing::error!(runner = %self.client.runner_id(), "transport error: {err}");
@@ -1155,7 +1188,9 @@ mod tests {
     fn fatal_classification() {
         assert!(TransportError::RunnerRevoked.is_fatal_for_runner());
         assert!(TransportError::RefreshTokenReplayed.is_fatal_for_runner());
-        assert!(TransportError::SessionEvicted { reason: "x".into() }.is_fatal_for_runner());
+        // SessionEvicted is recoverable — the run loop has a dedicated
+        // arm that reopens the session. See `HttpLoop::run`.
+        assert!(!TransportError::SessionEvicted { reason: "x".into() }.is_fatal_for_runner());
         assert!(!TransportError::Network("net".into()).is_fatal_for_runner());
     }
 
