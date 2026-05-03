@@ -27,7 +27,8 @@ Treat ambiguity as a real signal, not a hurdle to power through. The cost of one
 
 6. **Decision gate. Choose exactly one path:**
 
-   - **Proceed** — only if all of the following hold: acceptance criteria are present (extracted from the issue, or sensible defaults documented as assumptions); the work fits one reasonable unit of delivery (one PR for `code_change`, one coherent set of actions/comments for `noncode`); your autonomy assessment is `safe_to_continue=true`. Continue to Step 1. If `task_type == noncode`, you will skip the git sync, branch creation, commit/push, and PR-opening sub-steps in Steps 1 and 2 — go directly from workpad setup to executing the task to the final comment.
+   - **Proceed** — only if all of the following hold: acceptance criteria are present (extracted from the issue, or sensible defaults documented as assumptions); the work fits one reasonable unit of delivery (one PR for `code_change`, one coherent set of actions/comments for `noncode`); your autonomy assessment is `safe_to_continue=true`. Continue to Step 1.
+     - If `task_type == noncode`, skip the git sync, branch creation, commit/push, and PR-opening sub-steps in Steps 1 and 2 — go directly from workpad setup to executing the task to the final comment.
 
    - **Ask for clarification** — if the description leaves a meaningful product, UX, scope, or interface question unanswered. Post a focused comment via `pidash comment add {{ issue.identifier }} --body-file <path>` containing your restated understanding plus the specific question(s); one focused question is better than a wall of text. Then follow "Blocking the run". **Do not create a branch.** A future continuation run, triggered when the human comments back, will re-enter this step with the new context.
 
