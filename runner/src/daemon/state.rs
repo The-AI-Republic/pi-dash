@@ -24,6 +24,18 @@ pub struct ObservabilitySnapshot {
     pub agent_subprocess_alive: Option<bool>,
     pub tokens: Option<TokenUsage>,
     pub turn_count: Option<u32>,
+    /// Last shell command the agent kicked off (for failure-detail enrichment).
+    /// Reset on rid change like the other per-run scalars; not serialised
+    /// onto the wire snapshot — only consumed locally to enrich
+    /// `RunFailed.detail` when the watchdog or stdout-close path fires.
+    pub last_exec_command: Option<ExecCommandSnapshot>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExecCommandSnapshot {
+    pub command: String,
+    pub cwd: Option<String>,
+    pub started_at: DateTime<Utc>,
 }
 
 #[derive(Clone)]
@@ -227,6 +239,15 @@ impl StateHandle {
         self.tick();
     }
 
+    /// Stash the most recent shell command the agent kicked off, for use
+    /// by the `RunFailed` enrichment helper. Called from
+    /// `supervisor.handle_bridge_event` on `item/started` Raw frames whose
+    /// item is a `commandExecution`.
+    pub async fn note_exec_command(&self, snapshot: ExecCommandSnapshot) {
+        self.inner.run_snapshot.lock().await.last_exec_command = Some(snapshot);
+        self.tick();
+    }
+
     /// Snapshot the volatile observability fields for one poll. One lock
     /// + one clone — adding a new field to `ObservabilitySnapshot`
     /// automatically participates without touching this method.
@@ -394,6 +415,31 @@ mod tests {
             ObservabilitySnapshot::default(),
             "snapshot leaked across run boundary"
         );
+    }
+
+    #[tokio::test]
+    async fn note_exec_command_lands_on_snapshot_and_clears_on_rid_change() {
+        let state = empty_state();
+        let rid_a = Uuid::new_v4();
+        state.set_current_run(Some(summary(rid_a, "running"))).await;
+        state
+            .note_exec_command(ExecCommandSnapshot {
+                command: "git fetch origin".into(),
+                cwd: Some("/tmp/x".into()),
+                started_at: Utc::now(),
+            })
+            .await;
+        let snap = state.observability_snapshot().await;
+        let cmd = snap.last_exec_command.expect("snapshot lost the command");
+        assert_eq!(cmd.command, "git fetch origin");
+        assert_eq!(cmd.cwd.as_deref(), Some("/tmp/x"));
+
+        // Rid change wipes per-run scalars including the exec command, so
+        // a stalled-on-foo failure detail can't bleed into a fresh run.
+        let rid_b = Uuid::new_v4();
+        state.set_current_run(Some(summary(rid_b, "running"))).await;
+        let snap = state.observability_snapshot().await;
+        assert!(snap.last_exec_command.is_none());
     }
 
     #[tokio::test]
