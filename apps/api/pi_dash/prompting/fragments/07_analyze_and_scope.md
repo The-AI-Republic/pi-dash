@@ -4,7 +4,7 @@ Before any workpad setup or git work, build your own understanding of the task a
 
 Treat ambiguity as a real signal, not a hurdle to power through. The cost of one round-trip clarification — you ask via comment, the human answers, the next continuation run picks up the answer automatically — is much smaller than the cost of a wrong-direction PR that has to be unwound.
 
-1. **Read the issue thoroughly.** The title and description are already in this prompt context. Pull all prior comments via `pidash comment list {{ issue.identifier }}` and read them in chronological order. Non-bot comments often refine, narrow, or change scope after the original description was written; weight the most recent human comments heavily.
+1. **Read the issue thoroughly.** The title and description are already in this prompt context. Pull all prior comments via `pidash comment list {{ issue.identifier }}` and read them in chronological order. **The comment list is authoritative — do not assume any prior comment is already in your context.** Every run is a fresh agent session with no memory of prior runs; the issue thread, the workpad comment, and the repo are the only sources of cross-run state. Non-bot comments often refine, narrow, or change scope after the original description was written; weight the most recent human comments heavily.
 
 {% if parent %}
 2. **Read the parent issue ({{ parent.identifier }} — "{{ parent.title }}").** This issue belongs to a larger piece of work. Fetch the parent and its comments via `pidash issue get {{ parent.identifier }}` and `pidash comment list {{ parent.identifier }}` to understand the framing this child sits inside. The parent often carries acceptance criteria the child inherits implicitly.
