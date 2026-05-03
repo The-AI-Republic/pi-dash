@@ -15,11 +15,18 @@ use uuid::Uuid;
 use crate::cloud::protocol::{ApprovalDecision, ApprovalKind, FailureReason};
 use crate::config::schema::{AgentKind, RunnerConfig};
 
-/// Per-line cap for stderr lines retained in the ring. Codex / claude can
-/// emit very long lines (stack traces, JSON dumps); without a per-line cap
-/// a single 1 MB line would defeat the line-count cap. 512 chars is enough
-/// to read most error messages without blowing up the failure detail.
-pub const STDERR_LINE_CAP_CHARS: usize = 512;
+/// Per-line cap, **in bytes**, for stderr lines retained in the ring.
+/// Compared against `str::len()` which is byte length, not char count —
+/// 512 bytes accommodates most error lines (and a 200-char line of CJK
+/// would be ~600 bytes and get truncated). Without a per-line cap a
+/// single 1 MB line could defeat the line-count cap.
+pub const STDERR_LINE_CAP_BYTES: usize = 512;
+
+/// How many stderr lines to retain in the per-process ring. 30 lines ×
+/// 512 bytes ≈ 15 KB upper bound; comfortably fits in a `RunFailed.detail`
+/// payload after truncation while still surfacing enough recent context
+/// to diagnose most failures (auth errors, panics, segfaults).
+pub const STDERR_RING_LINES: usize = 30;
 
 /// Bounded ring buffer of recent stderr lines from an agent subprocess.
 /// Each agent's `drain_stderr` task pushes here; the supervisor reads
@@ -31,7 +38,12 @@ pub struct StderrBuffer {
 }
 
 impl StderrBuffer {
+    /// Construct a buffer with capacity `cap`. A `cap` of zero is
+    /// silently clamped to 1 — the eviction logic in `push` only fires
+    /// on `len() == cap`, which would never hold for `cap == 0` after
+    /// the first push, leaving the buffer to grow unboundedly.
     pub fn new(cap: usize) -> Self {
+        let cap = cap.max(1);
         Self {
             cap,
             lines: VecDeque::with_capacity(cap),
@@ -39,9 +51,11 @@ impl StderrBuffer {
     }
 
     pub fn push(&mut self, line: &str) {
-        let truncated = if line.len() > STDERR_LINE_CAP_CHARS {
-            // Truncate on a char boundary.
-            let mut end = STDERR_LINE_CAP_CHARS;
+        let truncated = if line.len() > STDERR_LINE_CAP_BYTES {
+            // Truncate on a char boundary so we never split a multi-byte
+            // sequence; append a single `…` so consumers can tell the
+            // line was clipped.
+            let mut end = STDERR_LINE_CAP_BYTES;
             while !line.is_char_boundary(end) && end > 0 {
                 end -= 1;
             }
@@ -282,7 +296,7 @@ fn selected_model(
 
 #[cfg(test)]
 mod tests {
-    use super::{STDERR_LINE_CAP_CHARS, StderrBuffer, selected_model};
+    use super::{STDERR_LINE_CAP_BYTES, StderrBuffer, selected_model};
 
     #[test]
     fn stderr_buffer_evicts_oldest_when_full() {
@@ -297,7 +311,7 @@ mod tests {
     #[test]
     fn stderr_buffer_truncates_long_lines() {
         let mut buf = StderrBuffer::new(2);
-        let long = "x".repeat(STDERR_LINE_CAP_CHARS * 2);
+        let long = "x".repeat(STDERR_LINE_CAP_BYTES * 2);
         buf.push(&long);
         let snap = buf.snapshot();
         assert_eq!(snap.len(), 1);
@@ -305,7 +319,7 @@ mod tests {
         assert!(snap[0].ends_with('…'), "expected ellipsis sentinel: {snap:?}");
         // Truncation respects char-boundary semantics: result fits within cap +
         // the multi-byte ellipsis.
-        assert!(snap[0].len() <= STDERR_LINE_CAP_CHARS + 4);
+        assert!(snap[0].len() <= STDERR_LINE_CAP_BYTES + 4);
     }
 
     #[test]
@@ -313,7 +327,7 @@ mod tests {
         let mut buf = StderrBuffer::new(1);
         // "ä" is 2 bytes; build a string that crosses the cap mid-character.
         let line: String = std::iter::repeat('ä')
-            .take(STDERR_LINE_CAP_CHARS)
+            .take(STDERR_LINE_CAP_BYTES)
             .collect();
         buf.push(&line);
         // Should not panic on truncation (regression: naive byte slicing

@@ -133,6 +133,22 @@ def apply_run_resume_unavailable(runner: Runner, run_id: UUID | str) -> None:
         )
 
 
+# Detail-string prefixes for failures that aren't actionable by the user
+# (the runner restarted, the cloud watchdog reaped a stalled cluster of
+# runs, etc.). These get a DB row update and nothing else — surfacing a
+# `Run failed: daemon shutdown requested` on the issue thread is noise,
+# not signal. The next continuation will pick the work back up.
+#
+# Strings are intentionally compared as prefixes so the runner / cloud
+# can append context (timestamps, run ids) without breaking the guard.
+# When the remediation-map work lands, this hard-coded list goes away
+# and we route on `FailureReason` instead.
+_INFRA_FAILURE_DETAIL_PREFIXES = (
+    "daemon shutdown requested",
+    "agent stalled: no events for >",
+)
+
+
 def _post_failure_comment(run_id: UUID | str, error_detail: str) -> None:
     """Post a single IssueComment from the agent system user describing
     why a run failed. Mirrors the shape of ``apply_run_paused``'s comment
@@ -144,11 +160,20 @@ def _post_failure_comment(run_id: UUID | str, error_detail: str) -> None:
     root cause we can't prove from telemetry alone. Hidden behind the
     public ``finalize_run_terminal`` entry-point so callers don't have
     to opt in.
+
+    Suppressed for known infrastructure-flavored failures (daemon
+    restart, cloud-side stall reconciler) — see
+    ``_INFRA_FAILURE_DETAIL_PREFIXES``. The DB row still gets the
+    ``error`` field; we just don't pollute the issue thread.
     """
-    from django.utils.html import escape, format_html
+    from django.utils.html import format_html
 
     from pi_dash.db.models.issue import IssueComment
     from pi_dash.orchestration.workpad import get_agent_system_user
+
+    detail = (error_detail or "").strip()
+    if detail.startswith(_INFRA_FAILURE_DETAIL_PREFIXES):
+        return
 
     run = (
         AgentRun.objects.select_related("work_item", "work_item__project")
@@ -158,7 +183,6 @@ def _post_failure_comment(run_id: UUID | str, error_detail: str) -> None:
     if run is None or run.work_item_id is None:
         return
 
-    detail = (error_detail or "").strip()
     if detail:
         body = format_html(
             "<p><strong>Run failed.</strong></p><pre>{}</pre>",
@@ -169,7 +193,7 @@ def _post_failure_comment(run_id: UUID | str, error_detail: str) -> None:
         # silently drop the activity entry.
         body = format_html(
             "<p><strong>Run failed.</strong> {}</p>",
-            escape("(no diagnostic detail)"),
+            "(no diagnostic detail)",
         )
 
     IssueComment.objects.create(
