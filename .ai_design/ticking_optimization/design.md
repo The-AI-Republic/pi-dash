@@ -32,9 +32,10 @@
 >   "pin so the same disk checkout / branch is reused." Still useful, no longer
 >   correctness-critical.
 > - The `parent_run` foreign key on `AgentRun` is kept for lineage / auditing,
->   but stops gating prompt-rendering behavior. The `triggered_by` field
->   (`TRIGGER_COMMENT_AND_RUN` etc.) keeps its scheduler-bookkeeping role and
->   is unaffected.
+>   but stops gating prompt-rendering behavior. The `triggered_by` request /
+>   scheduler parameter (`TRIGGER_TICK`, `TRIGGER_COMMENT_AND_RUN`, etc.;
+>   not an `AgentRun` model field) keeps its bookkeeping role and is
+>   unaffected.
 
 ## 1. Problem
 
@@ -205,7 +206,7 @@ compared to the cost of a single agent turn.
 | `prompting/composer.py`              | Delete `build_continuation`. Keep `build_first_turn` as the sole entrypoint. Optionally rename to `build_run_prompt` to retire the "first turn" framing (deferred to a follow-up).                                                                                                                                                                                                             |
 | `orchestration/service.py`           | `_create_continuation_run` calls `build_first_turn`. Once this lands, it can be merged into `_create_and_dispatch_run` (the bodies become near-identical aside from the `parent_run` field). Consider renaming to `_create_run` and parameterizing `parent_run`.                                                                                                                               |
 | `runner/services/matcher.py`         | Delete `_refresh_continuation_prompt`. The dispatch path no longer needs to rebuild the prompt at dispatch time; the prompt rendered at run-creation time is the final prompt.                                                                                                                                                                                                                 |
-| `runner/views/runs.py`               | The Comment & Run handler (`_post_comment_and_run`) no longer needs to flag the run as a "continuation" for prompt-rendering purposes. The `triggered_by` field is still recorded for telemetry / scheduler bookkeeping.                                                                                                                                                                       |
+| `runner/views/runs.py`               | The Comment & Run handler (`_post_comment_and_run`) no longer needs to flag the run as a "continuation" for prompt-rendering purposes. The `triggered_by` request parameter is still parsed and forwarded for telemetry / scheduler bookkeeping.                                                                                                                                               |
 | `prompting/fragments/14_followup.md` | Folded into fragment 08's workpad reconciliation step (see §4.3). The standalone fragment is removed.                                                                                                                                                                                                                                                                                          |
 | Tests                                | `test_build_continuation_*` tests in `tests/unit/prompting/test_composer.py` are removed. `test_drain_does_not_rebuild_first_turn_prompt` and the matcher tests around `_refresh_continuation_prompt` flip their expectations or are removed. Add a positive test asserting `run.prompt == build_first_turn(issue, run)` after `_create_continuation_run` (or its renamed equivalent) returns. |
 
@@ -252,9 +253,12 @@ tell the agent to read durable state via `pidash` CLI calls. Specific updates:
 - The pinning mechanism (still preferred for repo locality).
 - `parent_run` lineage on `AgentRun` (kept for auditing, no longer drives
   prompt selection).
-- The `triggered_by` field on `AgentRun` (still drives ticker bookkeeping
-  and Comment & Run scheduler resets, neither of which are affected by this
-  change).
+- The `triggered_by` request / scheduler parameter (`TRIGGER_TICK`,
+  `TRIGGER_COMMENT_AND_RUN`, etc., used in `runner/views/runs.py` and
+  `orchestration/scheduling.py`). It still drives ticker bookkeeping and
+  Comment & Run scheduler resets. Trigger source is no longer involved in
+  prompt or session semantics — every trigger results in the same
+  `build_first_turn` render and a fresh agent session.
 - All trigger sources — initial delegation, periodic tick, Comment & Run
   button. They differ in _when_ a new `AgentRun` is created; they no longer
   differ in _how_ it is prompted.
@@ -266,44 +270,60 @@ resumed session at deploy time.
 
 ### 6.0 Phase 0 — Pre-rollout instrumentation (recommended)
 
-Before merging the load-bearing change, add lightweight observability so we
-have a baseline to compare against:
+Before merging the load-bearing change, add lightweight cloud-side
+observability so we have a baseline to compare against. Restrict to fields
+that are cheap to record at dispatch time without round-tripping the runner:
 
 - Per-`AgentRun` log/metric: `(triggered_by, parent_run_id is None,
-pinned_runner_resolved, thread_id_supplied, thread_id_used_by_runner)`.
-  This lets us count how often resume _was_ succeeding vs silently failing.
-- Per-`AgentRun` outcome: did the agent post a new comment? touch the repo?
-  update the workpad? A run that succeeded resume but produced no observable
-  side-effect on a non-noop trigger is a soft signal of context loss.
-- Run for ~3–7 days on the current code before flipping the dispatch path.
-  Capture a baseline rate of "pinned-runner unavailable" and "fresh-context
-  fallback fired."
+pinned_runner_resolved, thread_id_supplied)`. This lets us count how
+  often the cloud expected resume to be possible (`thread_id_supplied`)
+  versus how often the pinned runner was actually available
+  (`pinned_runner_resolved`). The gap between those two is the cloud-side
+  proxy for failover rate.
+- Per-`AgentRun` outcome (post-run): did the agent post a new comment?
+  touch the repo? update the workpad? A run that started after a `paused`
+  parent and produced no observable side-effect is a soft signal of
+  context loss.
+- Whether the runner _actually used_ the resume hint is not cheaply
+  knowable cloud-side today (the runner discovers this by trying resume
+  and reporting `resume_unavailable`). The cloud-side fields above are
+  the affordable proxy; richer telemetry would require a new runner
+  message and is out of scope for this design.
 
-The instrumentation is cheap (one structured log line per dispatch) and
-gives the post-rollout PR a concrete claim ("failover rate was X%, all
-silent; after this change, all X% land on the workpad path explicitly").
-
-In a hurry, this can be skipped — the design's correctness argument does
-not depend on it — but doing so means any future regression debate has no
-numbers to anchor on.
+How long to run in baseline mode is a judgment call, not a correctness
+requirement — even a few days of data is useful for "before/after" claims.
+In a hurry, Phase 0 can be skipped entirely; the design's correctness
+argument does not depend on it. The cost is forfeiting numerical claims
+in any future regression debate.
 
 ### 6.1 Phase 1 — Pi Dash side
 
-Land the Pi Dash changes: `composer.build_continuation` removal,
-`_create_continuation_run` switch to `build_first_turn`, matcher
-simplification, test updates.
+Land the Pi Dash changes:
 
-At this point, **the runner still tries to resume**, but the prompt it sends
-is now self-sufficient. The agent works correctly with or without resume
-succeeding. This is the load-bearing change; the runner change in Phase 2 is
-strictly cleanup.
+1. `composer.build_continuation` removal.
+2. `_create_continuation_run` switches to `build_first_turn`.
+3. **`_build_assign_msg` stops emitting `resume_thread_id` in the WS
+   envelope.** This is the load-bearing safety property of Phase 1: the
+   runner's resume code path can remain intact, but it cannot fire because
+   no thread id is delivered.
+4. `_refresh_continuation_prompt` deletion + dispatch-time call sites cleaned.
+5. Test updates.
+
+The §8.1 "send the full template into a resumed session" hybrid is **not**
+an intermediate state of this rollout, because step 3 above prevents resume
+from happening at all. With `resume_thread_id` absent from `Assign`, the
+runner's `payload.resume_thread_id` deserializes to `None` (via
+`#[serde(default)]`) and both the Codex and Claude bridges fall through to
+their fresh-session paths. Phase 1 is therefore safe to ship without Phase
+2 — the runner's resume code becomes unreachable dead code, not an
+active-but-redundant alternate path.
 
 ### 6.2 Phase 2 — Runner side
 
-Drop `thread/resume` (Codex bridge) and `--resume` (Claude Code bridge).
-Remove the `resume_thread_id` protocol field. This is a no-op for correctness
-because Phase 1 already made the system tolerate resume failing; Phase 2 just
-makes that tolerance the only path.
+Drop `thread/resume` (Codex bridge) and `--resume <session_id>` (Claude
+Code bridge). Remove the `resume_thread_id` field from `ServerMsg::Assign`,
+`RunPayload`, and supervisor plumbing. Pure dead-code removal on top of
+Phase 1.
 
 ### 6.3 Spot-check protocol
 
@@ -430,20 +450,7 @@ visible and resolvable. Fragment 08 step 2 ("reconcile the workpad before
 editing further") is the existing place that handles this; reinforce it
 during the audit in §7.1.
 
-### 7.7 Failover race: a benign side-win
-
-Under the resume model, if the original runner comes back online mid-rebalance
-two runners can briefly both believe they own the issue's session — one with
-the in-context state, one without. The system relies on Pi Dash's pinning
-and dispatch-ordering invariants to prevent observable damage, but the race
-exists.
-
-Under the new model, the race is benign because no runner "owns" any
-cross-run state. Each dispatch is a self-contained read of durable state.
-This is not a justification on its own but is worth noting as a quiet
-correctness simplification.
-
-### 7.8 Rust runner protocol field removal
+### 7.7 Rust runner protocol field removal
 
 Removing `resume_thread_id` from `ServerMsg::Assign` is a wire-format change.
 Pi Dash and the runner must deploy in lockstep, or one side must tolerate the
@@ -483,25 +490,31 @@ everywhere) outweighs the marginal token saving on Comment & Run.
 
 ## 9. PR sequencing
 
-Suggested split. The ordering is **safety-critical**: Phase 1 makes the
-system tolerate resume succeeding _or_ failing, which is what makes Phase 2
-a safe no-op cleanup.
+Suggested split. The ordering is **safety-critical**: Phase 1 must include
+dropping `resume_thread_id` from the assign envelope so the runner cannot
+resume — leaving the runner's resume code paths intact while Pi Dash sends
+the full template would land us in the §8.1 hybrid (template re-sent into a
+resumed session, with instruction-duplication ambiguity and unbroken
+context growth). With Phase 1 dropping the field, Phase 2 is dead-code
+removal on top of an already-correct system.
 
-1. **PR A — Pi Dash side.** Composer cleanup, orchestration switch, matcher
-   simplification, prompt fragment refresh (fold fragment 14 into fragment
-   08, strengthen fragment 04), test updates. Self-contained; behavior
-   change is "every follow-up run now gets a self-sufficient prompt." The
-   runner still does what it does today (tries to resume); when resume
-   succeeds the agent ignores the now-redundant context, when it fails the
-   agent uses the workpad. **This PR alone fixes the prompt-staleness bug.**
-2. **PR B — Runner side.** Drop `thread/resume` (Codex bridge) and
-   `--resume` (Claude Code bridge). Remove the `resume_thread_id` protocol
-   field. Cleanup of session storage. Pure simplification on top of PR A —
-   safe because PR A already made the system correct without resume.
+1. **PR A — Pi Dash side.** Composer cleanup, orchestration switch,
+   matcher simplification (including dropping `resume_thread_id` from
+   `_build_assign_msg`), prompt fragment refresh (fold fragment 14 into
+   fragment 08, strengthen fragment 04), test updates. Self-contained
+   behavior change: every follow-up run now ships a self-sufficient prompt
+   AND no resume hint, so any current runner deserializes
+   `resume_thread_id` to `None` and starts a fresh session. **This PR
+   alone fixes the prompt-staleness bug AND makes Phase 2 pure cleanup.**
+2. **PR B — Runner side.** Delete the now-dead `thread/resume` /
+   `--resume` code paths and the `resume_thread_id` field from
+   `ServerMsg::Assign`, `RunPayload`, and supervisor plumbing.
 
 This PR bundles A and B together since the runner change is small (~60–80
 lines) and the deploy is straightforward when the changes ship together.
-The two-phase framing remains useful as a mental model for what each part
-does and why the order matters.
+The two-phase framing remains useful as a mental model for the safety
+order; the implementation reflects "Phase 1 must include dropping
+`resume_thread_id`" by removing it from the assign builder in the same
+commit as the composer change.
 
 Each commit within the PR is independently revertible.
