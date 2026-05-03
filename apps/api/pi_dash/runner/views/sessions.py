@@ -316,6 +316,10 @@ class RunnerSessionPollEndpoint(APIView):
         use_zero: bool,
     ) -> list[dict]:
         if block_ms <= 0:
+            if not use_zero:
+                return []
+            # The initial PEL replay uses STREAMS ... 0 and must remain
+            # nonblocking. The dangerous Redis case is BLOCK 0 with ">".
             return outbox.read_for_session(
                 runner_id=runner_id,
                 session_id=session_id,
