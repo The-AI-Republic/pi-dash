@@ -147,12 +147,12 @@ class AgentRunListEndpoint(APIView):
         )
 
     def _post_comment_and_run(self, request):
-        """Dispatch a continuation run for an issue (Comment & Run button).
+        """Dispatch a follow-up run for an issue (Comment & Run button).
 
         Body must include ``work_item`` (issue id). The just-posted comment
         is expected to already exist on the issue (the client posts it
-        before calling this endpoint); the prompt builder picks it up via
-        :func:`pi_dash.prompting.composer.build_continuation`.
+        before calling this endpoint); the agent reads it from the comment
+        thread via ``pidash comment list`` when the run executes.
         """
         from pi_dash.db.models.issue import Issue
         from pi_dash.orchestration import scheduling

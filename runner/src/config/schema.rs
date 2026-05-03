@@ -20,6 +20,11 @@ pub struct DaemonConfig {
     pub log_level: String,
     #[serde(default = "default_retention_days")]
     pub log_retention_days: u32,
+    /// Opt into the per-active-run observability snapshot on the poll
+    /// status. Default off; new fields ride only when this is true.
+    /// See `.ai_design/runner_agent_bridge/design.md` §4.2.
+    #[serde(default)]
+    pub agent_observability_v1: bool,
 }
 
 fn default_log_level() -> String {
@@ -36,6 +41,7 @@ impl Default for DaemonConfig {
             cloud_url: String::new(),
             log_level: default_log_level(),
             log_retention_days: default_retention_days(),
+            agent_observability_v1: false,
         }
     }
 }
@@ -434,6 +440,7 @@ mod tests {
                 cloud_url: "https://x".into(),
                 log_level: "info".into(),
                 log_retention_days: 14,
+                agent_observability_v1: false,
             },
             runners,
         }

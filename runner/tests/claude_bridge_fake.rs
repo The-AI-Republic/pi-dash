@@ -46,7 +46,6 @@ async fn bridge_happy_path_drives_fake_claude_to_completion() {
         run_id: Uuid::new_v4(),
         prompt: "hi".into(),
         model: None,
-        resume_thread_id: None,
     };
 
     // run() should consume the init frame and surface its session id as the
@@ -115,7 +114,6 @@ async fn bridge_translates_result_error_to_failed() {
         run_id: Uuid::new_v4(),
         prompt: "will fail".into(),
         model: None,
-        resume_thread_id: None,
     };
     let mut cursor = bridge.run(&payload, &cwd).await.expect("bridge run setup");
 

@@ -3,9 +3,12 @@
 1. Run `pidash comment list {{ issue.identifier }}` and look for a comment whose body begins with `## Agent Workpad`.
    - If found, record its `id` — you will pass it to `pidash comment update {{ issue.identifier }} <id>` for every subsequent workpad edit.
    - If not found, create one with `pidash comment add {{ issue.identifier }} --body-file <path>` using the structure in the "Workpad template" section. Record the returned `id`.
-2. If the workpad existed from a prior run, reconcile it before editing further:
+2. **If the workpad existed from a prior run, treat it as your starting point and reconcile it before editing further.** This is a fresh agent session — none of the prior run's in-memory context carries over. The workpad, the comment thread, and the repo are the only sources of truth. Reconciliation:
+   - Read the existing workpad end-to-end before deciding any next step.
+   - Do not repeat investigation or validation already recorded there unless the repo state has diverged from what the workpad describes.
+   - Do not restart from scratch — pick up where the prior run left off, based on `### Phase`, `### Progress Checkpoints`, and `### Plan`.
    - Check off any items that are already complete based on the current repo state.
-   - Expand the plan to cover any newly-visible scope.
+   - Expand the plan to cover any newly-visible scope (e.g., new comments since the prior run).
    - Ensure `Acceptance Criteria` and `Validation` are current and still make sense.
 3. Set `### Phase` to `investigating` and initialize `### Progress Checkpoints` with all milestone items unchecked unless already completed. If a checkpoint does not apply to this task, mark it as `n/a` in the workpad (e.g. `- [x] pr_opened (n/a)`).
 4. Write or update the hierarchical plan in the workpad.

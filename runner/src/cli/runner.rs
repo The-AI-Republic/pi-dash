@@ -71,6 +71,12 @@ pub struct RemoveArgs {
     /// Name of the runner to remove. Must match a ``[[runner]]`` in
     /// ``config.toml``.
     pub name: String,
+
+    /// Skip the cloud-side delete and only clean up local config +
+    /// data dir. Use this when the runner is already revoked
+    /// cloud-side, or when the cloud is unreachable.
+    #[arg(long)]
+    pub local_only: bool,
 }
 
 pub async fn run(args: RunnerArgs, paths: &Paths) -> Result<()> {
@@ -122,7 +128,14 @@ pub async fn add(args: AddArgs, paths: &Paths) -> Result<RunnerConfig> {
             version: crate::RUNNER_VERSION.to_string(),
             protocol_version: crate::PROTOCOL_VERSION,
         };
-        match register_runner(&cfg.daemon.cloud_url, &creds.connection_id, &creds.connection_secret, &req).await {
+        match register_runner(
+            &cfg.daemon.cloud_url,
+            &creds.connection_id,
+            &creds.connection_secret,
+            &req,
+        )
+        .await
+        {
             Ok(resp) => break (resp, candidate),
             Err(RunnerCrudError::NameTaken)
                 if !user_supplied && attempts < MAX_AUTO_NAME_RETRIES =>
@@ -206,8 +219,6 @@ pub fn list(paths: &Paths) -> Result<()> {
 }
 
 pub async fn remove(args: RemoveArgs, paths: &Paths) -> Result<()> {
-    let creds = file::load_credentials(paths)
-        .context("no credentials.toml — run `pidash connect` first")?;
     let mut cfg = file::load_config(paths)?;
     let idx = cfg
         .runners
@@ -215,21 +226,47 @@ pub async fn remove(args: RemoveArgs, paths: &Paths) -> Result<()> {
         .position(|r| r.name == args.name)
         .ok_or_else(|| anyhow::anyhow!("no runner named {:?} in config.toml", args.name))?;
     let runner_id = cfg.runners[idx].runner_id;
-    delete_runner(
-        &cfg.daemon.cloud_url,
-        &creds.connection_id,
-        &creds.connection_secret,
-        &runner_id,
-    )
-    .await
-    .context("cloud delete-runner failed")?;
+
+    if !args.local_only {
+        // TODO(cloud-endpoint): the per-runner refactor removed the
+        // `connections/<id>/runners/<rid>/` DELETE route this CLI was
+        // calling. Until a runner-scoped delete endpoint is added under
+        // the machine-token auth surface, this call will 404. Surface a
+        // useful hint pointing at --local-only and the web UI.
+        let creds = file::load_credentials(paths)
+            .context("no credentials.toml — run `pidash connect` first, or pass --local-only")?;
+        if let Err(e) = delete_runner(
+            &cfg.daemon.cloud_url,
+            &creds.connection_id,
+            &creds.connection_secret,
+            &runner_id,
+        )
+        .await
+        {
+            eprintln!("cloud delete-runner failed: {e:#}");
+            eprintln!();
+            eprintln!("To remove this runner from the cloud, use the web UI's");
+            eprintln!("\"Delete\" button on the runners page.");
+            eprintln!("To clean up local state only, re-run with --local-only:");
+            eprintln!("  pidash runner remove {} --local-only", args.name);
+            anyhow::bail!("cloud delete-runner failed");
+        }
+    }
+
     cfg.runners.remove(idx);
     file::write_config(paths, &cfg)?;
     let runner_data = paths.runner_dir(runner_id);
     if runner_data.exists() {
         let _ = std::fs::remove_dir_all(&runner_data);
     }
-    println!("Removed runner {}.", args.name);
+    if args.local_only {
+        println!(
+            "Removed runner {} from local config (cloud row not touched).",
+            args.name
+        );
+    } else {
+        println!("Removed runner {}.", args.name);
+    }
     Ok(())
 }
 
@@ -244,5 +281,12 @@ pub async fn remove_by_id(runner_id: &Uuid, paths: &Paths) -> Result<()> {
         .find(|r| r.runner_id == *runner_id)
         .map(|r| r.name.clone())
         .ok_or_else(|| anyhow::anyhow!("no runner with id {runner_id} in config.toml"))?;
-    remove(RemoveArgs { name }, paths).await
+    remove(
+        RemoveArgs {
+            name,
+            local_only: false,
+        },
+        paths,
+    )
+    .await
 }

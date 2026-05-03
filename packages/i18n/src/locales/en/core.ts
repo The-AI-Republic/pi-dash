@@ -419,15 +419,15 @@ export default {
       approvals: "Approvals",
     },
     list: {
-      add_runner: "Add a runner",
+      add_runner: "Add runner",
       how_it_works_title: "How to add a runner",
       how_it_works_body:
-        "1. Create a connection here to pair a dev machine.\n2. On that machine, run the shown `pidash connect` command.\n3. Then run `pidash runner add --name <NAME> --project <PROJECT>` to register a runner under the connection.\n\nPrerequisite: the agent CLI (codex / claude) must already be installed.",
+        '1. Click "Add runner", pick a project + pod and submit. The cloud mints a one-time enrollment token bound to that runner.\n2. On the machine that will host the runner, run the displayed `pidash connect --url ... --token ... --host-label ...` command.\n3. The daemon enrolls and the runner shows online here.\n\nEach runner has its own token. The first runner enrolled on a host also bootstraps a machine token used by the `pidash` CLI for non-runner commands.\n\nPrerequisite: the agent CLI (codex / claude) must already be installed on the host.',
       project_placeholder: "Select a project",
       copied: "Copied!",
       copy_failed: "Could not copy to clipboard",
       connected_runners: "Runners",
-      empty: "No runners yet. Add a connection to pair a dev machine, then run `pidash runner add` on it.",
+      empty: 'No runners yet. Click "Add runner" to mint your first per-runner enrollment token.',
       columns: {
         name: "Name",
         status: "Status",
@@ -444,6 +444,7 @@ export default {
         online: "online",
         busy: "busy",
         offline: "offline",
+        revoked: "revoked",
       },
       columns_pod: "Pod",
       columns_connection: "Connection",
@@ -486,6 +487,46 @@ export default {
       default_badge: "default",
       runner_count: "{count} runner(s)",
       load_failed: "Failed to load pods",
+    },
+    add_modal: {
+      title: "Add runner",
+      subtitle:
+        "Mint a one-time enrollment token for a new runner. You'll run the displayed `pidash connect` command on the machine that will host it.",
+      project_label: "Project",
+      project_help: "The project this runner will work on.",
+      pod_label: "Pod (optional)",
+      pod_help: "Defaults to the project's default pod.",
+      pod_default_option: "(default pod)",
+      name_label: "Name (optional)",
+      name_help: "Auto-assigned if blank, e.g. ``runner_001``.",
+      name_placeholder: "my-laptop-runner",
+      host_label_label: "Host label (optional)",
+      host_label_help:
+        "Free-form host name baked into the suggested command. The daemon will substitute its actual hostname if you leave the flag off.",
+      host_label_placeholder: "my-laptop",
+      working_dir_label: "Working directory (optional)",
+      working_dir_help:
+        "Local path the daemon runs the agent CLI in — usually the project repo on disk. Defaults to a sandbox under the runner's data dir, which is rarely what you want.",
+      working_dir_placeholder: "local dev machine project working dir",
+      submit: "Mint enrollment token",
+      submitting: "Minting…",
+      cancel: "Cancel",
+      done: "Done",
+      token_warning: "Copy this once — the enrollment token will not be shown again.",
+      token_instructions: "Run this on the machine that will host the runner:",
+      copy_command: "Copy command",
+      copied: "Copied!",
+      runner_id_label: "Runner id",
+      errors: {
+        project_required: "Pick a project.",
+        load_projects_failed: "Could not load projects.",
+        load_pods_failed: "Could not load pods.",
+        create_failed: "Could not mint the enrollment token.",
+      },
+    },
+    machine_token_note: {
+      title: "Machine tokens",
+      body: "The first time a runner enrolls on a new host (i.e., a new ``host_label``), the cloud also issues a machine token used by the ``pidash`` CLI for non-runner commands (issue, comment, state). Subsequent runners on the same host reuse that token.",
     },
     runs: {
       columns: {

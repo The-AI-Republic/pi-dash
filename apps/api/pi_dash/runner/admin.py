@@ -8,8 +8,10 @@ from pi_dash.runner.models import (
     AgentRun,
     AgentRunEvent,
     ApprovalRequest,
-    Connection,
+    MachineToken,
     Runner,
+    RunnerForceRefresh,
+    RunnerSession,
 )
 
 
@@ -20,35 +22,58 @@ class RunnerAdmin(admin.ModelAdmin):
         "owner",
         "workspace",
         "status",
-        "connection",
-        "last_heartbeat_at",
-    )
-    list_filter = ("status", "workspace")
-    search_fields = ("name", "owner__email")
-
-
-@admin.register(Connection)
-class ConnectionAdmin(admin.ModelAdmin):
-    list_display = (
-        "name",
         "host_label",
-        "workspace",
-        "created_by",
-        "status",
-        "created_at",
-        "last_seen_at",
+        "refresh_token_generation",
+        "last_heartbeat_at",
         "revoked_at",
     )
-    list_filter = ("workspace",)
-    search_fields = ("name", "host_label", "created_by__email")
+    list_filter = ("status", "workspace")
+    search_fields = ("name", "owner__email", "host_label")
     readonly_fields = (
-        "secret_hash",
-        "secret_fingerprint",
+        "refresh_token_hash",
+        "refresh_token_fingerprint",
+        "previous_refresh_token_hash",
         "enrollment_token_hash",
         "enrollment_token_fingerprint",
         "enrolled_at",
         "created_at",
     )
+
+
+@admin.register(RunnerSession)
+class RunnerSessionAdmin(admin.ModelAdmin):
+    list_display = (
+        "id",
+        "runner",
+        "protocol_version",
+        "created_at",
+        "last_seen_at",
+        "revoked_at",
+        "revoked_reason",
+    )
+    list_filter = ("revoked_reason",)
+
+
+@admin.register(RunnerForceRefresh)
+class RunnerForceRefreshAdmin(admin.ModelAdmin):
+    list_display = ("runner", "min_rtg", "reason", "created_at")
+
+
+@admin.register(MachineToken)
+class MachineTokenAdmin(admin.ModelAdmin):
+    list_display = (
+        "id",
+        "user",
+        "workspace",
+        "host_label",
+        "is_service",
+        "created_at",
+        "last_used_at",
+        "revoked_at",
+    )
+    list_filter = ("is_service",)
+    search_fields = ("user__email", "host_label")
+    readonly_fields = ("token_hash", "token_fingerprint", "created_at")
 
 
 @admin.register(AgentRun)

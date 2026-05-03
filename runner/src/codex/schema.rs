@@ -102,8 +102,3 @@ pub struct ApprovalResponseParams {
     pub decision: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ThreadResumeParams {
-    pub thread_id: String,
-}

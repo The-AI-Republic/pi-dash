@@ -9,9 +9,9 @@ from pi_dash.runner.models import (
     AgentRun,
     AgentRunEvent,
     ApprovalRequest,
-    Connection,
     Pod,
     Runner,
+    RunnerLiveState,
 )
 
 
@@ -26,6 +26,13 @@ RUNNER_NAME_CHARSET = RegexValidator(
 
 class PodSerializer(serializers.ModelSerializer):
     runner_count = serializers.SerializerMethodField()
+    # Web's Add Runner picker needs to filter pods to a chosen project,
+    # and to backfill the project field when the user picks a pod first.
+    # ``project_identifier`` is the human-friendly slug; ``project`` is
+    # the FK uuid kept for callers that want it.
+    project_identifier = serializers.CharField(
+        source="project.identifier", read_only=True
+    )
 
     class Meta:
         model = Pod
@@ -35,6 +42,8 @@ class PodSerializer(serializers.ModelSerializer):
             "description",
             "is_default",
             "workspace",
+            "project",
+            "project_identifier",
             "created_by",
             "runner_count",
             "created_at",
@@ -44,6 +53,8 @@ class PodSerializer(serializers.ModelSerializer):
             "id",
             "is_default",
             "workspace",
+            "project",
+            "project_identifier",
             "created_by",
             "runner_count",
             "created_at",
@@ -54,6 +65,33 @@ class PodSerializer(serializers.ModelSerializer):
         return pod.runners.count()
 
 
+class RunnerLiveStateSerializer(serializers.ModelSerializer):
+    """Per-active-run agent observability snapshot.
+
+    See ``.ai_design/runner_agent_bridge/design.md`` §4.5.4. All fields
+    nullable; the UI renders ``null`` as ``"—"`` and derives the activity
+    badge client-side from raw scalars.
+    """
+
+    class Meta:
+        model = RunnerLiveState
+        fields = [
+            "observed_run_id",
+            "last_event_at",
+            "last_event_kind",
+            "last_event_summary",
+            "agent_pid",
+            "agent_subprocess_alive",
+            "approvals_pending",
+            "input_tokens",
+            "output_tokens",
+            "total_tokens",
+            "turn_count",
+            "updated_at",
+        ]
+        read_only_fields = fields
+
+
 class PodMiniSerializer(serializers.ModelSerializer):
     class Meta:
         model = Pod
@@ -61,51 +99,11 @@ class PodMiniSerializer(serializers.ModelSerializer):
         read_only_fields = fields
 
 
-class ConnectionSerializer(serializers.ModelSerializer):
-    """Web-API representation of a Connection.
-
-    The status field is derived from ``enrolled_at`` — pending until the
-    daemon enrolls, active afterwards. Secret material is never included.
-    """
-
-    status = serializers.CharField(read_only=True)
-    runner_count = serializers.SerializerMethodField()
-
-    class Meta:
-        model = Connection
-        fields = [
-            "id",
-            "name",
-            "host_label",
-            "status",
-            "workspace",
-            "created_by",
-            "secret_fingerprint",
-            "enrolled_at",
-            "last_seen_at",
-            "created_at",
-            "revoked_at",
-            "runner_count",
-        ]
-        read_only_fields = [
-            "id",
-            "status",
-            "workspace",
-            "created_by",
-            "secret_fingerprint",
-            "enrolled_at",
-            "last_seen_at",
-            "created_at",
-            "revoked_at",
-            "runner_count",
-        ]
-
-    def get_runner_count(self, conn: Connection) -> int:
-        return conn.runners.count()
-
-
 class RunnerSerializer(serializers.ModelSerializer):
     pod_detail = PodMiniSerializer(source="pod", read_only=True)
+    # Optional one-to-one observability snapshot. ``None`` when the row
+    # doesn't exist yet (pre-flag runner that has never reported).
+    live_state = RunnerLiveStateSerializer(read_only=True)
 
     class Meta:
         model = Runner
@@ -113,6 +111,7 @@ class RunnerSerializer(serializers.ModelSerializer):
             "id",
             "name",
             "status",
+            "host_label",
             "os",
             "arch",
             "runner_version",
@@ -122,7 +121,10 @@ class RunnerSerializer(serializers.ModelSerializer):
             "owner",
             "pod",
             "pod_detail",
-            "connection",
+            "live_state",
+            "enrolled_at",
+            "revoked_at",
+            "revoked_reason",
             "created_at",
             "updated_at",
         ]
@@ -137,55 +139,42 @@ class RunnerSerializer(serializers.ModelSerializer):
             "last_heartbeat_at",
             "owner",
             "pod_detail",
-            "connection",
+            "live_state",
+            "enrolled_at",
+            "revoked_at",
+            "revoked_reason",
             "created_at",
             "updated_at",
         ]
 
 
-class EnrollmentRequestSerializer(serializers.Serializer):
-    """``POST /api/v1/runner/connections/enroll/`` body."""
+class RunnerEnrollRequestSerializer(serializers.Serializer):
+    """``POST /api/v1/runner/runners/enroll/`` body."""
 
-    token = serializers.CharField(min_length=16, max_length=128)
-    host_label = serializers.CharField(max_length=255, allow_blank=True, default="")
+    enrollment_token = serializers.CharField(min_length=16, max_length=128)
+    host_label = serializers.CharField(max_length=255)
+    name = serializers.CharField(
+        max_length=128,
+        required=False,
+        allow_blank=True,
+        default="",
+        validators=[RUNNER_NAME_CHARSET],
+    )
     os = serializers.CharField(max_length=32, allow_blank=True, default="")
     arch = serializers.CharField(max_length=32, allow_blank=True, default="")
     version = serializers.CharField(max_length=32, allow_blank=True, default="")
 
 
-class EnrollmentResponseSerializer(serializers.Serializer):
-    connection_id = serializers.UUIDField()
-    connection_secret = serializers.CharField()
-    # Editable label assigned by the cloud (auto-allocated as
-    # ``connection_NNN`` when the user didn't supply one). Echoed so the
-    # daemon can show it in ``pidash status`` / TUI without a follow-up GET.
-    name = serializers.CharField()
-    workspace_slug = serializers.CharField()
-    heartbeat_interval_secs = serializers.IntegerField()
-    protocol_version = serializers.IntegerField()
-    # Public REST API token (``X-Api-Key``) for ``/api/v1/`` CRUD verbs
-    # (``pidash issue`` / ``comment`` / ``state``). Issued at enrollment so
-    # the same install can drive interactive CRUD without a second login.
-    api_token = serializers.CharField()
-
-
-class RunnerCreateRequestSerializer(serializers.Serializer):
-    """``POST /api/v1/runner/connections/<id>/runners/`` body.
-
-    The runner UUID is minted by the daemon (shared util between CLI + TUI)
-    and presented here so cloud and local config agree from the start.
-    """
+class RunnerEnrollmentInviteSerializer(serializers.Serializer):
+    """Web-UI response when a workspace admin mints a runner invite."""
 
     runner_id = serializers.UUIDField()
-    name = serializers.CharField(
-        min_length=1, max_length=128, validators=[RUNNER_NAME_CHARSET]
-    )
-    project = serializers.CharField(max_length=128)
-    pod = serializers.CharField(max_length=128, allow_blank=True, default="")
-    os = serializers.CharField(max_length=32, allow_blank=True, default="")
-    arch = serializers.CharField(max_length=32, allow_blank=True, default="")
-    version = serializers.CharField(max_length=32, allow_blank=True, default="")
-    protocol_version = serializers.IntegerField(min_value=1, max_value=999, default=3)
+    name = serializers.CharField()
+    workspace_slug = serializers.CharField()
+    project_identifier = serializers.CharField()
+    pod_id = serializers.UUIDField()
+    enrollment_token = serializers.CharField()
+    enrollment_expires_at = serializers.CharField()
 
 
 class AgentRunSerializer(serializers.ModelSerializer):

@@ -4,12 +4,198 @@
 //! not have to know which underlying CLI is driving a run.
 
 use anyhow::Result;
+use chrono::{DateTime, Utc};
+use std::collections::VecDeque;
 use std::path::Path;
+use std::sync::Arc;
 use std::time::Duration;
+use tokio::sync::{Mutex, watch};
 use uuid::Uuid;
 
 use crate::cloud::protocol::{ApprovalDecision, ApprovalKind, FailureReason};
 use crate::config::schema::{AgentKind, RunnerConfig};
+
+/// Per-line cap, **in bytes**, for stderr lines retained in the ring.
+/// Compared against `str::len()` which is byte length, not char count —
+/// 512 bytes accommodates most error lines (and a 200-char line of CJK
+/// would be ~600 bytes and get truncated). Without a per-line cap a
+/// single 1 MB line could defeat the line-count cap.
+pub const STDERR_LINE_CAP_BYTES: usize = 512;
+
+/// How many stderr lines to retain in the per-process ring. 30 lines ×
+/// 512 bytes ≈ 15 KB upper bound; comfortably fits in a `RunFailed.detail`
+/// payload after truncation while still surfacing enough recent context
+/// to diagnose most failures (auth errors, panics, segfaults).
+pub const STDERR_RING_LINES: usize = 30;
+
+/// Bounded ring buffer of recent stderr lines from an agent subprocess.
+/// Each agent's `drain_stderr` task pushes here; the supervisor reads
+/// when it needs to enrich a `RunFailed` detail.
+///
+/// The buffer also counts lines rejected by `sanitize_stderr_line`
+/// (codex tracing noise, blank lines, etc.) so the failure-detail
+/// builder can be honest with the user about how much was filtered out.
+#[derive(Debug)]
+pub struct StderrBuffer {
+    cap: usize,
+    lines: VecDeque<String>,
+    dropped: u64,
+}
+
+/// Result of `StderrBuffer::snapshot`. Carries both the kept lines and
+/// the running tally of rejected lines so the consumer can render a
+/// "(plus N noise lines filtered)" footer instead of silently lying
+/// about completeness.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct StderrSnapshot {
+    pub lines: Vec<String>,
+    pub dropped: u64,
+}
+
+impl StderrBuffer {
+    /// Construct a buffer with capacity `cap`. A `cap` of zero is
+    /// silently clamped to 1 — the eviction logic in `push` only fires
+    /// on `len() == cap`, which would never hold for `cap == 0` after
+    /// the first push, leaving the buffer to grow unboundedly.
+    pub fn new(cap: usize) -> Self {
+        let cap = cap.max(1);
+        Self {
+            cap,
+            lines: VecDeque::with_capacity(cap),
+            dropped: 0,
+        }
+    }
+
+    pub fn push(&mut self, line: &str) {
+        let Some(sanitized) = sanitize_stderr_line(line) else {
+            self.dropped = self.dropped.saturating_add(1);
+            return;
+        };
+        let truncated = if sanitized.len() > STDERR_LINE_CAP_BYTES {
+            // Truncate on a char boundary so we never split a multi-byte
+            // sequence; append a single `…` so consumers can tell the
+            // line was clipped.
+            let mut end = STDERR_LINE_CAP_BYTES;
+            while !sanitized.is_char_boundary(end) && end > 0 {
+                end -= 1;
+            }
+            format!("{}…", &sanitized[..end])
+        } else {
+            sanitized
+        };
+        if self.lines.len() == self.cap {
+            self.lines.pop_front();
+        }
+        self.lines.push_back(truncated);
+    }
+
+    pub fn snapshot(&self) -> StderrSnapshot {
+        StderrSnapshot {
+            lines: self.lines.iter().cloned().collect(),
+            dropped: self.dropped,
+        }
+    }
+}
+
+pub type StderrRing = Arc<Mutex<StderrBuffer>>;
+
+/// Clean an incoming stderr line for inclusion in the failure-detail
+/// payload that ends up in an issue activity comment. Two responsibilities:
+///
+/// 1. Strip ANSI escape sequences. Codex / claude colorize their tracing
+///    output via `tracing-subscriber`'s default formatter; the escape
+///    bytes (e.g. `\x1b[2m`) render as literal glyphs (`␛[2m`) in the
+///    issue comment HTML, making the detail unreadable.
+/// 2. Drop codex's own tracing log lines at INFO/DEBUG/TRACE/WARN
+///    levels. These are codex's internal observability stream — every
+///    turn emits dozens of `session_loop{...}: codex.sse_event` INFO
+///    lines and several `codex_core_plugins::manifest: ignoring …` WARN
+///    lines. None are actionable for a human reading the issue thread.
+///    Only `ERROR` tracing lines are kept (real codex failures). Any
+///    unstructured stderr — panics, child-process output, raw error
+///    messages from gh / curl / git / npm — passes through unchanged.
+///
+/// Returns `None` to mean "drop this line entirely."
+pub fn sanitize_stderr_line(line: &str) -> Option<String> {
+    let stripped = strip_ansi_codes(line);
+    let trimmed = stripped.trim_end();
+    if trimmed.is_empty() {
+        return None;
+    }
+    if is_noisy_tracing(trimmed) {
+        return None;
+    }
+    Some(trimmed.to_string())
+}
+
+/// Remove ANSI CSI escape sequences (`\x1b[…<letter>`) from `s`. Other
+/// escape forms (OSC, charset selection, etc.) are left alone — they're
+/// vanishingly rare in dev-tool stderr and CSI is what tracing-subscriber
+/// emits.
+fn strip_ansi_codes(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\x1b' && chars.peek() == Some(&'[') {
+            chars.next(); // consume '['
+            // Skip parameters / intermediate bytes, then the final
+            // alphabetic byte that terminates the CSI sequence.
+            while let Some(&p) = chars.peek() {
+                chars.next();
+                if p.is_ascii_alphabetic() {
+                    break;
+                }
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
+/// True for lines that match `tracing-subscriber`'s default text
+/// formatter at any level **except `ERROR`**. Format is roughly
+/// `<RFC3339 timestamp ending in 'Z'>  <LEVEL>  <rest>`. The
+/// two-space-padded LEVEL field (`" INFO"`, `"DEBUG"`, `"TRACE"`,
+/// `" WARN"`, `"ERROR"`) is what we match against.
+///
+/// `WARN` is treated as noise even though it's not strictly
+/// "low-level": codex's biggest WARN sources (`codex_core_plugins::
+/// manifest` plugin-config warnings, deprecation warnings, etc.) fire
+/// every turn and have nothing to do with run failure. Real run-killing
+/// errors come through either at `ERROR` or as unstructured stderr
+/// (gh CLI errors, curl failures, panic messages) — both pass through.
+///
+/// Lines without the trailing-`Z` timestamp prefix are considered real
+/// stderr and pass through.
+fn is_noisy_tracing(line: &str) -> bool {
+    let Some((_ts, rest)) = line.split_once("Z ") else {
+        return false;
+    };
+    let rest = rest.trim_start();
+    rest.starts_with("INFO ")
+        || rest.starts_with("DEBUG ")
+        || rest.starts_with("TRACE ")
+        || rest.starts_with("WARN ")
+}
+
+/// Volatile process-handle the bridge surfaces to the supervisor for
+/// observability. PID is captured at spawn time, `exit_rx` fires once the
+/// child wait task observes termination. See `.ai_design/runner_agent_bridge`
+/// §4.4. The handle carries no ownership of the child — the process wrapper
+/// retains exclusive ownership inside its wait task.
+#[derive(Debug, Clone)]
+pub struct AgentProcessHandle {
+    pub pid: Option<u32>,
+    pub exit_rx: watch::Receiver<Option<ExitSnapshot>>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ExitSnapshot {
+    pub status_code: Option<i32>,
+    pub signal: Option<i32>,
+    pub observed_at: DateTime<Utc>,
+}
 
 /// Events the bridge surfaces to the daemon's state machine. Agent-agnostic:
 /// Codex and Claude both translate their native protocols into this shape.
@@ -51,19 +237,6 @@ pub struct RunPayload {
     pub run_id: Uuid,
     pub prompt: String,
     pub model: Option<String>,
-    pub resume_thread_id: Option<String>,
-}
-
-/// Agent-CLI native resume failed because the session id we were given
-/// is not present on this runner's local session store. The supervisor
-/// downcasts to this type to emit `FailureReason::ResumeUnavailable`
-/// rather than the generic agent-crash reason; cloud's reaction is to
-/// drop the pin and re-queue without the resume hint.
-#[derive(Debug, thiserror::Error)]
-#[error("agent CLI could not resume session {thread_id}: {detail}")]
-pub struct ResumeUnavailable {
-    pub thread_id: String,
-    pub detail: String,
 }
 
 /// Enum dispatch over the concrete bridges. Each variant owns the agent's
@@ -97,17 +270,13 @@ impl AgentCursor {
 }
 
 impl AgentBridge {
-    /// Spawn the agent subprocess selected by the runner's config.
-    ///
-    /// `resume_thread_id` is used at spawn time only by Claude Code (it
-    /// goes to `claude --resume <id>` on the command line). Codex consumes
-    /// the resume hint inside `bridge.run()` via the `RunPayload` field
-    /// instead.
+    /// Spawn the agent subprocess selected by the runner's config. Always
+    /// starts a fresh agent session — see
+    /// `.ai_design/ticking_optimization/design.md`.
     pub async fn spawn_from_config(
         runner: &RunnerConfig,
         cwd: &Path,
         model_override: Option<String>,
-        resume_thread_id: Option<&str>,
     ) -> Result<Self> {
         match runner.agent.kind {
             AgentKind::Codex => {
@@ -124,7 +293,6 @@ impl AgentBridge {
                     &runner.claude_code.binary,
                     cwd,
                     selected_model(model_override, runner.claude_code.model_default.clone()),
-                    resume_thread_id,
                 )
                 .await?;
                 Ok(AgentBridge::ClaudeCode(b))
@@ -179,6 +347,29 @@ impl AgentBridge {
             AgentBridge::ClaudeCode(b) => b.shutdown(grace).await,
         }
     }
+
+    /// Bridge-owned observability handle: the agent subprocess's PID and a
+    /// watch receiver that yields `Some(ExitSnapshot)` once the wait task
+    /// observes termination. Supervisor uses this to drive
+    /// `state.set_agent_pid` / `set_agent_alive`.
+    pub fn process_handle(&self) -> AgentProcessHandle {
+        match self {
+            AgentBridge::Codex(b) => b.server.process_handle(),
+            AgentBridge::ClaudeCode(b) => b.process_handle(),
+        }
+    }
+
+    /// Snapshot the last N lines of agent stderr **plus** the running
+    /// tally of rejected lines (codex tracing noise, blank lines, etc.).
+    /// Used by the supervisor to enrich `RunFailed` details so the
+    /// cloud / UI can tell the user *why* the agent died beyond just
+    /// "agent stdout closed" or "no agent frames for 5 minutes".
+    pub async fn recent_stderr(&self) -> StderrSnapshot {
+        match self {
+            AgentBridge::Codex(b) => b.server.recent_stderr().await,
+            AgentBridge::ClaudeCode(b) => b.recent_stderr().await,
+        }
+    }
 }
 
 fn selected_model(
@@ -190,7 +381,168 @@ fn selected_model(
 
 #[cfg(test)]
 mod tests {
-    use super::selected_model;
+    use super::{
+        STDERR_LINE_CAP_BYTES, StderrBuffer, sanitize_stderr_line, selected_model,
+        strip_ansi_codes,
+    };
+
+    #[test]
+    fn stderr_buffer_evicts_oldest_when_full() {
+        let mut buf = StderrBuffer::new(3);
+        buf.push("a");
+        buf.push("b");
+        buf.push("c");
+        buf.push("d");
+        let snap = buf.snapshot();
+        assert_eq!(snap.lines, vec!["b", "c", "d"]);
+        assert_eq!(snap.dropped, 0);
+    }
+
+    #[test]
+    fn stderr_buffer_counts_dropped_noise_lines() {
+        // The footer in the failure detail relies on this counter to
+        // tell the user how many lines were filtered. Push a mix of
+        // noise + real content and assert the count matches.
+        let mut buf = StderrBuffer::new(5);
+        buf.push("real error: ENOENT /tmp/missing");
+        buf.push("2026-05-03T07:27:06.636239Z  INFO codex.sse_event"); // dropped
+        buf.push(""); // dropped (empty)
+        buf.push("2026-05-03T15:35:11.448580Z  WARN plugin warning"); // dropped
+        buf.push("another real error");
+        let snap = buf.snapshot();
+        assert_eq!(
+            snap.lines,
+            vec!["real error: ENOENT /tmp/missing", "another real error"]
+        );
+        assert_eq!(snap.dropped, 3, "should count all 3 rejected lines");
+    }
+
+    #[test]
+    fn strip_ansi_codes_removes_csi_escapes() {
+        // Real codex tracing output: timestamp + level wrapped in
+        // color CSI sequences. Strip should leave plain text intact.
+        let input = "\x1b[2m2026-05-03T07:27:06.636239Z\x1b[0m \x1b[32m INFO\x1b[0m hello";
+        assert_eq!(
+            strip_ansi_codes(input),
+            "2026-05-03T07:27:06.636239Z  INFO hello"
+        );
+    }
+
+    #[test]
+    fn strip_ansi_codes_passes_plain_text_unchanged() {
+        let input = "permission denied (publickey)";
+        assert_eq!(strip_ansi_codes(input), input);
+    }
+
+    #[test]
+    fn sanitize_drops_codex_info_tracing_lines() {
+        // The exact pattern that flooded the failure-comment field —
+        // codex's per-event INFO log, ANSI-colored. Should be dropped.
+        let input =
+            "\x1b[2m2026-05-03T07:27:06.636239Z\x1b[0m \x1b[32m INFO\x1b[0m \
+             session_loop{thread_id=abc}: codex.sse_event";
+        assert_eq!(sanitize_stderr_line(input), None);
+    }
+
+    #[test]
+    fn sanitize_drops_info_debug_trace_warn() {
+        // INFO/DEBUG/TRACE are noise by definition. WARN is also dropped:
+        // codex's biggest WARN sources (codex_core_plugins::manifest,
+        // deprecation warnings) fire every turn and have nothing to do
+        // with run failure. Observed in real failure comments after the
+        // initial sanitization shipped — WARN noise still buried the
+        // useful diagnostic content.
+        for level in ["INFO", "DEBUG", "TRACE", "WARN"] {
+            let input = format!("2026-05-03T07:27:06.636239Z {level} something");
+            assert_eq!(
+                sanitize_stderr_line(&input),
+                None,
+                "should drop {level}",
+            );
+        }
+    }
+
+    #[test]
+    fn sanitize_drops_real_codex_plugin_warn() {
+        // Verbatim shape from a production failure comment.
+        let input = "2026-05-03T15:35:11.448580Z  WARN session_loop\
+                     {thread_id=019dee78-85e7-7742-afd8-1fdb9725379f}:\
+                     submission_dispatch{...}:turn{...}: \
+                     codex_core_plugins::manifest: ignoring \
+                     interface.defaultPrompt: prompt must be at most \
+                     128 characters path=/home/rich/.codex/...";
+        assert_eq!(sanitize_stderr_line(input), None);
+    }
+
+    #[test]
+    fn sanitize_keeps_error_tracing_lines() {
+        // ERROR is the one tracing level we keep — codex emits these
+        // on real failures (e.g. session-state corruption). Filter
+        // priority: keep signal, even if it costs a bit of noise.
+        let err = "2026-05-03T07:27:06.636239Z ERROR network: timed out";
+        assert!(sanitize_stderr_line(err).is_some());
+    }
+
+    #[test]
+    fn sanitize_keeps_unstructured_stderr() {
+        // Panics, raw error messages, gh CLI output — anything that
+        // doesn't match the tracing format passes through.
+        let panic = "thread 'main' panicked at 'oh no', src/main.rs:42";
+        let gh = "gh: error: HTTP 401: Bad credentials";
+        assert!(sanitize_stderr_line(panic).is_some());
+        assert!(sanitize_stderr_line(gh).is_some());
+    }
+
+    #[test]
+    fn sanitize_drops_empty_lines() {
+        assert_eq!(sanitize_stderr_line(""), None);
+        assert_eq!(sanitize_stderr_line("   "), None);
+        assert_eq!(sanitize_stderr_line("\x1b[0m\x1b[2m"), None);
+    }
+
+    #[test]
+    fn buffer_skips_filtered_lines() {
+        // Integration: if the drain task pushes a noise line, the buffer
+        // shouldn't grow.
+        let mut buf = StderrBuffer::new(5);
+        buf.push("\x1b[2m2026-05-03T00:00:00Z\x1b[0m  INFO noise");
+        buf.push("real error: ENOENT /tmp/missing");
+        buf.push("\x1b[2m2026-05-03T00:00:01Z\x1b[0m DEBUG noise");
+        assert_eq!(
+            buf.snapshot().lines,
+            vec!["real error: ENOENT /tmp/missing"]
+        );
+    }
+
+    #[test]
+    fn stderr_buffer_truncates_long_lines() {
+        let mut buf = StderrBuffer::new(2);
+        let long = "x".repeat(STDERR_LINE_CAP_BYTES * 2);
+        buf.push(&long);
+        let snap = buf.snapshot();
+        assert_eq!(snap.lines.len(), 1);
+        // Truncated line ends with a one-char ellipsis sentinel.
+        assert!(
+            snap.lines[0].ends_with('…'),
+            "expected ellipsis sentinel: {snap:?}"
+        );
+        // Truncation respects char-boundary semantics: result fits within cap +
+        // the multi-byte ellipsis.
+        assert!(snap.lines[0].len() <= STDERR_LINE_CAP_BYTES + 4);
+    }
+
+    #[test]
+    fn stderr_buffer_handles_multibyte_input() {
+        let mut buf = StderrBuffer::new(1);
+        // "ä" is 2 bytes; build a string that crosses the cap mid-character.
+        let line: String = std::iter::repeat('ä')
+            .take(STDERR_LINE_CAP_BYTES)
+            .collect();
+        buf.push(&line);
+        // Should not panic on truncation (regression: naive byte slicing
+        // would split a multi-byte sequence).
+        assert_eq!(buf.snapshot().lines.len(), 1);
+    }
 
     #[test]
     fn selected_model_prefers_run_override() {
