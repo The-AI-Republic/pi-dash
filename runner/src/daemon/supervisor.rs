@@ -577,7 +577,6 @@ impl RunnerLoop {
                     repo_url,
                     git_work_branch,
                     expected_codex_model,
-                    resume_thread_id,
                     ..
                 } => {
                     if self.current_run.is_some() {
@@ -636,7 +635,6 @@ impl RunnerLoop {
                                 repo_url,
                                 git_work_branch,
                                 expected_codex_model,
-                                resume_thread_id,
                             )
                             .await
                         {
@@ -837,7 +835,6 @@ impl AssignWorker {
         repo_url: Option<String>,
         git_work_branch: Option<String>,
         expected_codex_model: Option<String>,
-        resume_thread_id: Option<String>,
     ) -> Result<()> {
         self.handle_assign(
             run_id,
@@ -845,7 +842,6 @@ impl AssignWorker {
             repo_url,
             git_work_branch,
             expected_codex_model,
-            resume_thread_id,
         )
         .await
     }
@@ -857,7 +853,6 @@ impl AssignWorker {
         repo_url: Option<String>,
         git_work_branch: Option<String>,
         expected_codex_model: Option<String>,
-        resume_thread_id: Option<String>,
     ) -> Result<()> {
         // Resolve workspace.
         let wd = self.runner_config.workspace.working_dir.clone();
@@ -954,7 +949,6 @@ impl AssignWorker {
             &self.runner_config,
             &workspace_path,
             expected_codex_model.clone(),
-            resume_thread_id.as_deref(),
         )
         .await
         {
@@ -994,7 +988,6 @@ impl AssignWorker {
             run_id,
             prompt,
             model: expected_codex_model,
-            resume_thread_id,
         };
         let mut cursor = match bridge.run(&payload, &workspace_path).await {
             Ok(c) => c,
@@ -1007,20 +1000,9 @@ impl AssignWorker {
                 })
                 .await
                 .ok();
-                // Distinguish "agent CLI couldn't find the session id" from a
-                // generic agent crash. Cloud's reaction differs: drop the pin
-                // and re-queue with no resume hint, vs. mark the run failed.
-                let reason = if e
-                    .downcast_ref::<crate::agent::ResumeUnavailable>()
-                    .is_some()
-                {
-                    FailureReason::ResumeUnavailable
-                } else {
-                    self.crash_reason()
-                };
                 self.send(ClientMsg::RunFailed {
                     run_id,
-                    reason,
+                    reason: self.crash_reason(),
                     detail: Some(format!("{e:#}")),
                     ended_at: Utc::now(),
                 })

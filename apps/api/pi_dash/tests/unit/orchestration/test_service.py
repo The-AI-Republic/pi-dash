@@ -334,7 +334,15 @@ def test_comment_creates_pinned_continuation(
     seeded, project, issue, states, runner_for_workspace, create_user
 ):
     """``handle_issue_comment`` is the explicit entry point Comment & Run
-    invokes — comments themselves no longer fire it via post_save."""
+    invokes — comments themselves no longer fire it via post_save.
+
+    The follow-up run gets a fresh full-template render — *not* a continuation
+    prompt that embeds the new comment text. The agent reads the comment
+    thread at runtime via ``pidash comment list``. See
+    ``.ai_design/ticking_optimization/design.md``.
+    """
+    from pi_dash.prompting.composer import build_first_turn
+
     Issue.all_objects.filter(pk=issue.pk).update(state=states["in_progress"])
     issue.refresh_from_db()
     prior = _make_paused_run(issue, runner_for_workspace)
@@ -351,7 +359,11 @@ def test_comment_creates_pinned_continuation(
     assert r_next is not None
     assert r_next.pinned_runner_id == runner_for_workspace.id
     assert r_next.status == AgentRunStatus.QUEUED
-    assert "option B" in r_next.prompt
+    # The rendered prompt is the full template — same shape as a fresh
+    # first-turn render — and does not embed the comment body verbatim.
+    assert r_next.prompt == build_first_turn(issue, r_next)
+    assert "option B" not in r_next.prompt
+    assert "Pi Dash issue" in r_next.prompt
 
 
 @pytest.mark.unit
@@ -417,10 +429,14 @@ def test_comment_during_active_run_returns_prior_run_active(
 
 
 @pytest.mark.unit
-def test_pin_skipped_when_parent_has_no_thread_id(
+def test_pin_preserved_even_without_parent_thread_id(
     seeded, project, issue, states, runner_for_workspace, create_user
 ):
-    """No thread_id means there's no session to resume against; don't pin."""
+    """Pinning is now driven by repo locality (same checkout / branch on the
+    same runner), not by session resume. A parent without a thread_id still
+    gets its runner pinned for the follow-up. See
+    ``.ai_design/ticking_optimization/design.md``.
+    """
     Issue.all_objects.filter(pk=issue.pk).update(state=states["in_progress"])
     issue.refresh_from_db()
     prior = _make_paused_run(issue, runner_for_workspace, thread_id="")
@@ -435,4 +451,4 @@ def test_pin_skipped_when_parent_has_no_thread_id(
         .first()
     )
     assert r_next is not None
-    assert r_next.pinned_runner_id is None
+    assert r_next.pinned_runner_id == runner_for_workspace.id

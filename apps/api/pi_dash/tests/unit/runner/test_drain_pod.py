@@ -392,28 +392,28 @@ def test_drain_for_runner_returns_false_when_busy(
 
 
 # ---------------------------------------------------------------------------
-# Continuation prompt freshness at dispatch.
+# Prompt freshness at dispatch.
 #
-# Coalescing logic in ``handle_issue_comment`` returns ``coalesced`` for a
-# second comment that arrives while R_next is still QUEUED. The contract is
-# that the prompt builder runs again at dispatch time so the runner sees both
-# bodies. These tests pin that contract.
+# Every run's prompt is rendered at run-creation time and is *never* rebuilt
+# at dispatch — neither for first-turn runs nor for follow-up runs. The agent
+# reconstructs context (new comments, current workpad, repo state) at runtime
+# via the `pidash` CLI; the dispatcher's job is to deliver, not re-render.
+# See ``.ai_design/ticking_optimization/design.md``.
 # ---------------------------------------------------------------------------
 
 
-def _setup_paused_chain(create_user, workspace, pod, project_factory=None):
-    """Create an issue + paused parent run + queued continuation run.
+@pytest.mark.unit
+def test_drain_for_runner_does_not_rebuild_prompt_for_followup(
+    db, create_user, workspace, pod
+):
+    """Follow-up runs ship the prompt as recorded at creation time.
 
-    Returns (issue, parent_run, queued_followup, runner). The parent has
-    a started_at in the past so build_continuation can sweep comments.
-
-    The issue is created in an ``unstarted`` state so the orchestration
-    state-transition signal does not auto-create a competing run that
-    would consume the runner.
+    A late-arriving comment between run-creation and dispatch is *not* swept
+    into the prompt — the agent reads the comment thread at runtime instead.
     """
     from crum import impersonate
 
-    from pi_dash.db.models.issue import Issue
+    from pi_dash.db.models.issue import Issue, IssueComment
     from pi_dash.db.models.project import Project
     from pi_dash.db.models.state import State
 
@@ -422,9 +422,7 @@ def _setup_paused_chain(create_user, workspace, pod, project_factory=None):
         project = Project.objects.create(
             name="P", identifier="P", workspace=workspace, created_by=create_user
         )
-        todo = State.objects.create(
-            name="Todo", project=project, group="unstarted"
-        )
+        todo = State.objects.create(name="Todo", project=project, group="unstarted")
         issue = Issue.objects.create(
             name="task",
             workspace=workspace,
@@ -451,62 +449,17 @@ def _setup_paused_chain(create_user, workspace, pod, project_factory=None):
         parent_run=parent,
         pinned_runner=rA,
         status=AgentRunStatus.QUEUED,
-        prompt="(stale prompt — only first comment)",
+        prompt="prompt-rendered-at-creation",
     )
-    return issue, parent, queued, rA
-
-
-@pytest.mark.unit
-def test_drain_for_runner_rebuilds_continuation_prompt(
-    db, create_user, workspace, pod
-):
-    """Coalesced comment must reach the runner via prompt rebuild on dispatch."""
-    from crum import impersonate
-
-    from pi_dash.db.models.issue import IssueComment
-
-    issue, parent, queued, rA = _setup_paused_chain(create_user, workspace, pod)
-    # Two comments after parent.started_at — the second arrived after the
-    # follow-up was queued but before dispatch (the coalescing case).
     with impersonate(create_user):
         IssueComment.objects.create(
             issue=issue, project=issue.project, workspace=issue.workspace,
-            actor=create_user, comment_html="<p>first</p>",
-        )
-        IssueComment.objects.create(
-            issue=issue, project=issue.project, workspace=issue.workspace,
-            actor=create_user, comment_html="<p>second</p>",
+            actor=create_user, comment_html="<p>arrived after queue</p>",
         )
 
-    assigned = matcher.drain_for_runner(rA)
-    assert assigned is True
+    assert matcher.drain_for_runner(rA) is True
     queued.refresh_from_db()
-    # Both bodies must be present in the dispatched prompt — the stale
-    # at-creation render is replaced.
-    assert "first" in queued.prompt
-    assert "second" in queued.prompt
-
-
-@pytest.mark.unit
-def test_drain_pod_rebuilds_continuation_prompt(
-    db, create_user, workspace, pod
-):
-    """Same contract for the pod-wide drain path."""
-    from crum import impersonate
-
-    from pi_dash.db.models.issue import IssueComment
-
-    issue, parent, queued, rA = _setup_paused_chain(create_user, workspace, pod)
-    with impersonate(create_user):
-        IssueComment.objects.create(
-            issue=issue, project=issue.project, workspace=issue.workspace,
-            actor=create_user, comment_html="<p>late comment</p>",
-        )
-
-    n = matcher.drain_pod(pod)
-    assert n == 1
-    queued.refresh_from_db()
-    assert "late comment" in queued.prompt
+    assert queued.prompt == "prompt-rendered-at-creation"
 
 
 @pytest.mark.unit

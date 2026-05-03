@@ -141,40 +141,6 @@ def next_for_runner(runner: Runner) -> Optional[AgentRun]:
     )
 
 
-def _refresh_continuation_prompt(run: AgentRun) -> bool:
-    """Re-render ``run.prompt`` from current comments if this is a continuation.
-
-    Comment-triggered follow-ups can coalesce: a second comment arriving while
-    R_next is still QUEUED is silently absorbed (`reason='coalesced'`) on the
-    expectation that the prompt builder picks it up at dispatch time. That
-    contract lives here. Returns True when the prompt was rebuilt and the
-    caller must include ``prompt`` in ``save(update_fields=...)``.
-
-    Late import to avoid a top-level cycle through prompting → db.models.
-    """
-    parent = run.parent_run
-    if parent is None:
-        return False
-    from pi_dash.prompting.composer import build_continuation
-    from pi_dash.prompting.renderer import PromptRenderError
-
-    if run.work_item_id is None:
-        return False
-    try:
-        rebuilt = build_continuation(run.work_item, run)
-    except PromptRenderError:
-        logger.exception(
-            "matcher: continuation prompt rebuild failed for run %s; "
-            "keeping prompt as-stored",
-            run.id,
-        )
-        return False
-    if rebuilt == run.prompt:
-        return False
-    run.prompt = rebuilt
-    return True
-
-
 def drain_pod(pod: Pod) -> int:
     """Assign as many QUEUED runs in ``pod`` to idle runners as possible.
 
@@ -210,10 +176,7 @@ def drain_pod(pod: Pod) -> int:
             run.owner_id = runner.owner_id
             run.status = AgentRunStatus.ASSIGNED
             run.assigned_at = timezone.now()
-            update_fields = ["runner", "owner", "status", "assigned_at"]
-            if _refresh_continuation_prompt(run):
-                update_fields.append("prompt")
-            run.save(update_fields=update_fields)
+            run.save(update_fields=["runner", "owner", "status", "assigned_at"])
             assignments.append((runner, run))
 
     for runner, run in assignments:
@@ -271,10 +234,7 @@ def drain_for_runner(runner: Runner) -> bool:
         run.owner_id = locked.owner_id
         run.status = AgentRunStatus.ASSIGNED
         run.assigned_at = timezone.now()
-        update_fields = ["runner", "owner", "status", "assigned_at"]
-        if _refresh_continuation_prompt(run):
-            update_fields.append("prompt")
-        run.save(update_fields=update_fields)
+        run.save(update_fields=["runner", "owner", "status", "assigned_at"])
         assignment = (locked, run)
 
     runner_obj, run = assignment
@@ -301,14 +261,12 @@ def _build_assign_msg(run: AgentRun) -> dict:
     Mirrors the shape currently inlined in ``runs.py`` POST and
     ``orchestration/service._dispatch_to_runner``; Phase 3 will point both at
     this helper.
+
+    Every assignment now carries a self-sufficient prompt; the runner starts
+    a fresh agent session per run and reconstructs context from the issue's
+    workpad / comments / repo state. See
+    ``.ai_design/ticking_optimization/design.md``.
     """
-    # resume_thread_id is set when this run is a continuation of a prior
-    # run that recorded a session id (Codex thread_id / Claude session_id).
-    # The runner uses it to call thread/resume or claude --resume so the
-    # agent re-attaches to its prior in-memory state. Empty/missing on the
-    # wire means "fresh session" — backward compatible with older runners.
-    parent = run.parent_run
-    resume_thread_id = parent.thread_id if (parent and parent.thread_id) else None
     return {
         "v": 1,
         "type": "assign",
@@ -321,7 +279,6 @@ def _build_assign_msg(run: AgentRun) -> dict:
         "expected_codex_model": run.run_config.get("model"),
         "approval_policy_overrides": run.run_config.get("approval_policy_overrides"),
         "deadline": None,
-        "resume_thread_id": resume_thread_id,
     }
 
 

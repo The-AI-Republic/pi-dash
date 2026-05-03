@@ -8,11 +8,10 @@
 //!   Wiring Claude's `--permission-prompt-tool` into the approval router
 //!   requires a small MCP server bridge; out of scope for the first pass.
 //!
-//! Resume support is wired: when `RunPayload.resume_thread_id` is set,
-//! the runner spawns `claude --resume <session_id>` so Claude reattaches
-//! to its prior on-disk session. The yield path uses the existing
-//! `pi-dash-done` fenced-block channel with `status: "paused"` (cloud
-//! parses it via `done_signal.ingest_into_run`).
+//! Every run starts a fresh Claude session — the runner does not pass
+//! `--resume`. State carries between runs via the issue's workpad comment,
+//! the comment thread, and the repo. See
+//! `.ai_design/ticking_optimization/design.md`.
 
 pub mod bridge;
 pub mod process;

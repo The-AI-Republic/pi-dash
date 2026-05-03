@@ -23,7 +23,7 @@ from django.utils import timezone
 
 from pi_dash.db.models.issue import Issue, IssueComment
 from pi_dash.db.models.state import State, StateGroup
-from pi_dash.prompting.composer import build_continuation, build_first_turn
+from pi_dash.prompting.composer import build_first_turn
 from pi_dash.prompting.renderer import PromptRenderError
 from pi_dash.runner.models import AgentRun, AgentRunStatus, Pod, Runner, RunnerStatus
 
@@ -221,8 +221,9 @@ def handle_issue_comment(comment: IssueComment) -> ContinuationOutcome:
     2. Skip when the issue's state group disallows continuation (see
        :data:`CONTINUATION_ELIGIBLE_GROUPS`).
     3. Coalesce: if a QUEUED follow-up already exists for the issue,
-       leave it alone — the prompt builder will pick up the new comment
-       at dispatch time via :func:`build_continuation`.
+       leave it alone — the next agent run will read the comment thread
+       fresh (via ``pidash comment list``) when it executes, so a duplicate
+       run isn't needed to surface the new comment.
     4. Skip if the latest run is itself ``is_active`` (RUNNING / ASSIGNED
        / AWAITING_*). The terminate-side sweep will pick the comment up
        when that run finishes.
@@ -250,8 +251,9 @@ def handle_issue_comment(comment: IssueComment) -> ContinuationOutcome:
         logger.info("orchestration.continuation: skip issue=%s reason=no-prior-run", issue.pk)
         return ContinuationOutcome(reason="no-prior-run")
 
-    # Coalesce against an already-queued follow-up. The prompt builder
-    # rebuilds the continuation prompt from comments at dispatch time.
+    # Coalesce against an already-queued follow-up. The agent reads the
+    # comment thread fresh on dispatch, so the queued run will pick up
+    # the new comment without needing a separate queued run per comment.
     queued_follow_up = (
         AgentRun.objects.filter(
             work_item=issue, status=AgentRunStatus.QUEUED
@@ -289,7 +291,13 @@ def handle_issue_comment(comment: IssueComment) -> ContinuationOutcome:
 def _create_continuation_run(
     *, issue: Issue, parent: AgentRun, creator, pod
 ) -> ContinuationOutcome:
-    """Create R_next as a continuation of ``parent`` with optional pin."""
+    """Create R_next as a follow-up to ``parent`` with optional pin.
+
+    "Continuation" is a historical name. The new run renders a self-sufficient
+    full prompt and starts a fresh agent session — it does not resume the
+    parent's session. ``parent`` is retained for lineage / pin selection only.
+    See ``.ai_design/ticking_optimization/design.md``.
+    """
     from pi_dash.runner.services import matcher
 
     pinned_runner = _pinned_runner_for(parent)
@@ -311,7 +319,7 @@ def _create_continuation_run(
             },
         )
         try:
-            run.prompt = build_continuation(issue, run)
+            run.prompt = build_first_turn(issue, run)
         except PromptRenderError as exc:
             run.status = AgentRunStatus.FAILED
             run.error = f"prompt render failed: {exc}"
@@ -331,12 +339,14 @@ def _create_continuation_run(
 def _pinned_runner_for(parent: AgentRun) -> Optional[Runner]:
     """Return the runner to pin a follow-up to, or None.
 
-    Pin only when the parent has a session id we can resume against and
-    its runner is still online-eligible. Otherwise leave the new run
-    unpinned so any runner in the pod can take it (with a fresh-context
-    fallback).
+    Prefer the parent's runner when it's still eligible. The motivation is
+    **repo locality**: that runner already has the issue's branch checked
+    out and the workpad context on disk, so the next run avoids re-cloning
+    or re-fetching. Resume is no longer in play
+    (see ``.ai_design/ticking_optimization/design.md``); pinning is best-
+    effort and the run is correct on any runner in the pod.
     """
-    if not parent.thread_id or parent.runner_id is None:
+    if parent.runner_id is None:
         return None
     runner = parent.runner
     if runner is None:
