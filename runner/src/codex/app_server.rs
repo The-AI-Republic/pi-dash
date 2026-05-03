@@ -8,7 +8,9 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, ChildStdin, Command};
 use tokio::sync::{Mutex, mpsc, watch};
 
-use crate::agent::{AgentProcessHandle, ExitSnapshot, StderrBuffer, StderrRing};
+use crate::agent::{
+    AgentProcessHandle, ExitSnapshot, STDERR_RING_LINES, StderrBuffer, StderrRing,
+};
 use crate::codex::jsonrpc::Incoming;
 use crate::util::shell::{is_benign_login_shell_warning, login_shell_command};
 
@@ -106,14 +108,6 @@ impl AppServer {
             pid: self.pid,
             exit_rx: self.exit_rx.clone(),
         }
-    }
-
-    /// Shareable handle to the same stderr ring buffer the drain task feeds.
-    /// The supervisor stashes this so it can read recent stderr at the
-    /// moment of a `RunFailed` even after `self` has been moved into
-    /// `shutdown()`.
-    pub fn stderr_ring(&self) -> StderrRing {
-        self.stderr_ring.clone()
     }
 
     pub async fn shutdown(mut self, grace: std::time::Duration) -> Result<()> {
@@ -221,12 +215,6 @@ async fn read_frames(stdout: tokio::process::ChildStdout, tx: mpsc::Sender<Incom
         }
     }
 }
-
-/// How many stderr lines to retain in the per-process ring. 30 lines × ~200
-/// chars ≈ 6 KB; comfortably fits in a `RunFailed.detail` payload after
-/// truncation while still surfacing enough recent context to diagnose most
-/// failures (auth errors, panics, segfaults).
-pub const STDERR_RING_LINES: usize = 30;
 
 async fn drain_stderr(stderr: tokio::process::ChildStderr, ring: StderrRing) {
     // The login-shell wrapper (see `util::shell`) always emits two TTY-less

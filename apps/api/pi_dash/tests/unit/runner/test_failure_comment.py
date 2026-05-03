@@ -142,6 +142,100 @@ def test_failed_finalize_posts_failure_comment(
 
 
 @pytest.mark.unit
+def test_failed_finalize_renders_multiline_stderr_tail(
+    db, create_user, workspace, pod, issue
+):
+    """Real failure details are multi-line: classifier + last cmd +
+    stderr tail joined with `\\n  `. The whole tail must end up in the
+    rendered comment so the user can see what the agent was complaining
+    about, not just the headline."""
+    runner = _make_runner(create_user, workspace, pod)
+    run = _make_run(create_user, workspace, pod, runner, issue)
+
+    detail = (
+        "no agent frames for 5 minutes; "
+        "last command: `npm install` (started 297s ago); "
+        "stderr tail (3 line(s)):\n"
+        "  npm warn deprecated foo@1.0.0\n"
+        "  npm err! ENOTFOUND registry.npmjs.org\n"
+        "  npm err! exiting with code 1"
+    )
+    finalize_run_terminal(
+        runner, run.id, AgentRunStatus.FAILED, error_detail=detail
+    )
+
+    body = IssueComment.objects.get(issue=issue).comment_html
+    for line in [
+        "npm warn deprecated foo@1.0.0",
+        "npm err! ENOTFOUND registry.npmjs.org",
+        "npm err! exiting with code 1",
+    ]:
+        assert line in body, f"stderr line missing from comment: {line!r}"
+
+
+@pytest.mark.unit
+def test_failure_comment_actor_is_agent_system_user(
+    db, create_user, workspace, pod, issue
+):
+    """Pin the actor identity. If a future refactor sets `actor` to the
+    run's owner instead, the user would see themselves complaining
+    about their own task failing in the activity feed."""
+    from pi_dash.orchestration.workpad import get_agent_system_user
+
+    runner = _make_runner(create_user, workspace, pod)
+    run = _make_run(create_user, workspace, pod, runner, issue)
+    finalize_run_terminal(
+        runner, run.id, AgentRunStatus.FAILED, error_detail="boom"
+    )
+    comment = IssueComment.objects.get(issue=issue)
+    assert comment.actor_id == get_agent_system_user().id
+
+
+@pytest.mark.unit
+def test_daemon_restart_failure_does_not_post_comment(
+    db, create_user, workspace, pod, issue
+):
+    """Infrastructure-flavored failures (the runner went down for
+    SIGTERM) shouldn't surface on the issue thread — there's nothing
+    the user can act on, and the next continuation will pick up the
+    work. The DB row still gets the error stamp."""
+    runner = _make_runner(create_user, workspace, pod)
+    run = _make_run(create_user, workspace, pod, runner, issue)
+
+    finalize_run_terminal(
+        runner,
+        run.id,
+        AgentRunStatus.FAILED,
+        error_detail="daemon shutdown requested",
+    )
+
+    assert IssueComment.objects.filter(issue=issue).count() == 0
+    run.refresh_from_db()
+    assert run.status == AgentRunStatus.FAILED
+    assert run.error == "daemon shutdown requested"
+
+
+@pytest.mark.unit
+def test_cloud_stall_reconciler_failure_does_not_post_comment(
+    db, create_user, workspace, pod, issue
+):
+    """The cloud-side stall watchdog (`reconcile_stalled_runs`) emits
+    `agent stalled: no events for >360s` — same suppression class as
+    daemon-restart."""
+    runner = _make_runner(create_user, workspace, pod)
+    run = _make_run(create_user, workspace, pod, runner, issue)
+
+    finalize_run_terminal(
+        runner,
+        run.id,
+        AgentRunStatus.FAILED,
+        error_detail="agent stalled: no events for >360s",
+    )
+
+    assert IssueComment.objects.filter(issue=issue).count() == 0
+
+
+@pytest.mark.unit
 def test_completed_finalize_does_not_post_comment(
     db, create_user, workspace, pod, issue
 ):

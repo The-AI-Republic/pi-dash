@@ -1265,52 +1265,27 @@ impl AssignWorker {
                 "turn/started" => {
                     self.state.incr_turn().await;
                 }
-                "item/started" => {
-                    // Codex side: track the most recent shell command for
-                    // failure-detail enrichment. Never sent on the
-                    // steady-state poll — consumed locally on a stall.
-                    if let Some(item) = params.get("item")
-                        && item.get("type").and_then(|v| v.as_str()) == Some("commandExecution")
-                        && item.get("status").and_then(|v| v.as_str()) == Some("inProgress")
-                    {
-                        let command = item
-                            .get("command")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or_default()
-                            .to_string();
-                        if !command.is_empty() {
-                            let cwd = item
-                                .get("cwd")
-                                .and_then(|v| v.as_str())
-                                .map(|s| s.to_string());
-                            self.state
-                                .note_exec_command(
-                                    crate::daemon::state::ExecCommandSnapshot {
-                                        command,
-                                        cwd,
-                                        started_at: Utc::now(),
-                                    },
-                                )
-                                .await;
-                        }
-                    }
-                }
-                "assistant/message" => {
-                    // Claude side: assistant messages carry tool_use
-                    // blocks. Extract Bash commands so a stalled Claude
-                    // run gets the same `last command:` enrichment in
-                    // its RunFailed detail that codex already does. Bash
-                    // is the only Claude tool whose hangs are common
-                    // enough to be worth surfacing — Read/Edit/Grep are
-                    // ignored on purpose to keep the parser narrow.
-                    if let Some(cmd) =
-                        crate::daemon::observability::parse_claude_bash_command(params)
+                "item/started" | "assistant/message" => {
+                    // Failure-detail enrichment: capture the most recent
+                    // shell command the agent kicked off. Routing for
+                    // codex (`item/started` → commandExecution) and
+                    // Claude (`assistant/message` → Bash tool_use) lives
+                    // in `extract_exec_command_hint` so it's
+                    // unit-testable without a live bridge — a typo in
+                    // either method name is caught by tests rather than
+                    // by silently absent `last command:` fields in
+                    // production failure details.
+                    if let Some(hint) =
+                        crate::daemon::observability::extract_exec_command_hint(
+                            method.as_str(),
+                            params,
+                        )
                     {
                         self.state
                             .note_exec_command(
                                 crate::daemon::state::ExecCommandSnapshot {
-                                    command: cmd,
-                                    cwd: None,
+                                    command: hint.command,
+                                    cwd: hint.cwd,
                                     started_at: Utc::now(),
                                 },
                             )

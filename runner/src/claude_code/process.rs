@@ -11,9 +11,10 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, ChildStdin, Command};
 use tokio::sync::{Mutex, mpsc, watch};
 
-use crate::agent::{AgentProcessHandle, ExitSnapshot, StderrBuffer, StderrRing};
+use crate::agent::{
+    AgentProcessHandle, ExitSnapshot, STDERR_RING_LINES, StderrBuffer, StderrRing,
+};
 use crate::claude_code::schema::StreamEvent;
-use crate::codex::app_server::STDERR_RING_LINES;
 use crate::util::shell::{is_benign_login_shell_warning, login_shell_command};
 
 /// Handles the `claude --print --output-format stream-json` subprocess
