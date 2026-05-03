@@ -158,6 +158,10 @@ impl Bridge {
     pub fn process_handle(&self) -> crate::agent::AgentProcessHandle {
         self.proc.process_handle()
     }
+
+    pub async fn recent_stderr(&self) -> Vec<String> {
+        self.proc.recent_stderr().await
+    }
 }
 
 /// Per-run translation state. The `system/init` frame is consumed inside

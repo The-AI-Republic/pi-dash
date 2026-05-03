@@ -1119,17 +1119,20 @@ impl AssignWorker {
                 events = bridge.next_events(cursor) => {
                     let Some(events) = events else {
                         let reason = self.crash_reason();
+                        let detail = self
+                            .build_failure_detail("agent stdout closed", bridge)
+                            .await;
                         self.send(ClientMsg::RunFailed {
                             run_id: cursor.run_id(),
                             reason,
-                            detail: Some("agent stdout closed".to_string()),
+                            detail: Some(detail.clone()),
                             ended_at: Utc::now(),
                         }).await;
                         hist.append(&HistoryEntry::Footer {
                             ts: Utc::now(),
                             final_status: "failed".into(),
                             done_payload: None,
-                            error: Some("agent stdout closed".into()),
+                            error: Some(detail),
                         }).await?;
                         return Ok(Outcome { status_label: "failed".into() });
                     };
@@ -1149,7 +1152,8 @@ impl AssignWorker {
                     }
                 } => {
                     let mins = STALL_TIMEOUT.as_secs() / 60;
-                    let detail = format!("no agent frames for {mins} minutes");
+                    let base = format!("no agent frames for {mins} minutes");
+                    let detail = self.build_failure_detail(&base, bridge).await;
                     self.send(ClientMsg::RunFailed {
                         run_id: cursor.run_id(),
                         reason: FailureReason::Timeout,
@@ -1166,6 +1170,69 @@ impl AssignWorker {
                 }
             }
         }
+    }
+
+    /// Build a `RunFailed.detail` string that includes whatever local
+    /// context might help the cloud / UI explain what went wrong:
+    /// - the supervisor's own classifier message (e.g. `"no agent frames
+    ///   for 5 minutes"`),
+    /// - the most recent shell command the agent kicked off,
+    /// - the last few lines of agent stderr.
+    ///
+    /// All inputs are optional and the assembly degrades gracefully when
+    /// they're missing — for a healthy code-edit task the result is just
+    /// the base string. The total payload is bounded so a runaway stderr
+    /// dump can't balloon a `RunFailed` body.
+    async fn build_failure_detail(&self, base: &str, bridge: &AgentBridge) -> String {
+        const DETAIL_BYTES_CAP: usize = 4096;
+        const STDERR_TAIL_LINES: usize = 10;
+
+        let last_cmd = self
+            .state
+            .observability_snapshot()
+            .await
+            .last_exec_command;
+        let stderr_tail = bridge.recent_stderr().await;
+
+        let mut parts: Vec<String> = vec![base.to_string()];
+        if let Some(cmd) = last_cmd {
+            let elapsed = (Utc::now() - cmd.started_at).num_seconds().max(0);
+            let cwd = cmd
+                .cwd
+                .as_deref()
+                .map(|c| format!(" in `{c}`"))
+                .unwrap_or_default();
+            parts.push(format!(
+                "last command: `{}`{cwd} (started {elapsed}s ago)",
+                cmd.command
+            ));
+        }
+        if !stderr_tail.is_empty() {
+            let tail = stderr_tail
+                .iter()
+                .rev()
+                .take(STDERR_TAIL_LINES)
+                .rev()
+                .cloned()
+                .collect::<Vec<_>>()
+                .join("\n  ");
+            parts.push(format!(
+                "stderr tail ({} line(s)):\n  {tail}",
+                stderr_tail.len().min(STDERR_TAIL_LINES)
+            ));
+        }
+        let mut joined = parts.join("; ");
+        if joined.len() > DETAIL_BYTES_CAP {
+            // Truncate on a char boundary, leaving a sentinel so consumers
+            // can tell the body was clipped.
+            let mut end = DETAIL_BYTES_CAP;
+            while !joined.is_char_boundary(end) && end > 0 {
+                end -= 1;
+            }
+            joined.truncate(end);
+            joined.push_str("…");
+        }
+        joined
     }
 
     async fn handle_bridge_event(
@@ -1197,6 +1264,36 @@ impl AssignWorker {
                 }
                 "turn/started" => {
                     self.state.incr_turn().await;
+                }
+                "item/started" => {
+                    // Track the most recent shell command codex kicked off.
+                    // Used purely to enrich `RunFailed.detail` if the agent
+                    // goes silent — never sent on the steady-state poll.
+                    if let Some(item) = params.get("item")
+                        && item.get("type").and_then(|v| v.as_str()) == Some("commandExecution")
+                        && item.get("status").and_then(|v| v.as_str()) == Some("inProgress")
+                    {
+                        let command = item
+                            .get("command")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or_default()
+                            .to_string();
+                        if !command.is_empty() {
+                            let cwd = item
+                                .get("cwd")
+                                .and_then(|v| v.as_str())
+                                .map(|s| s.to_string());
+                            self.state
+                                .note_exec_command(
+                                    crate::daemon::state::ExecCommandSnapshot {
+                                        command,
+                                        cwd,
+                                        started_at: Utc::now(),
+                                    },
+                                )
+                                .await;
+                        }
+                    }
                 }
                 _ => {}
             }

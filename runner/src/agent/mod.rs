@@ -5,13 +5,62 @@
 
 use anyhow::Result;
 use chrono::{DateTime, Utc};
+use std::collections::VecDeque;
 use std::path::Path;
+use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::watch;
+use tokio::sync::{Mutex, watch};
 use uuid::Uuid;
 
 use crate::cloud::protocol::{ApprovalDecision, ApprovalKind, FailureReason};
 use crate::config::schema::{AgentKind, RunnerConfig};
+
+/// Per-line cap for stderr lines retained in the ring. Codex / claude can
+/// emit very long lines (stack traces, JSON dumps); without a per-line cap
+/// a single 1 MB line would defeat the line-count cap. 512 chars is enough
+/// to read most error messages without blowing up the failure detail.
+pub const STDERR_LINE_CAP_CHARS: usize = 512;
+
+/// Bounded ring buffer of recent stderr lines from an agent subprocess.
+/// Each agent's `drain_stderr` task pushes here; the supervisor reads
+/// when it needs to enrich a `RunFailed` detail.
+#[derive(Debug)]
+pub struct StderrBuffer {
+    cap: usize,
+    lines: VecDeque<String>,
+}
+
+impl StderrBuffer {
+    pub fn new(cap: usize) -> Self {
+        Self {
+            cap,
+            lines: VecDeque::with_capacity(cap),
+        }
+    }
+
+    pub fn push(&mut self, line: &str) {
+        let truncated = if line.len() > STDERR_LINE_CAP_CHARS {
+            // Truncate on a char boundary.
+            let mut end = STDERR_LINE_CAP_CHARS;
+            while !line.is_char_boundary(end) && end > 0 {
+                end -= 1;
+            }
+            format!("{}…", &line[..end])
+        } else {
+            line.to_string()
+        };
+        if self.lines.len() == self.cap {
+            self.lines.pop_front();
+        }
+        self.lines.push_back(truncated);
+    }
+
+    pub fn snapshot(&self) -> Vec<String> {
+        self.lines.iter().cloned().collect()
+    }
+}
+
+pub type StderrRing = Arc<Mutex<StderrBuffer>>;
 
 /// Volatile process-handle the bridge surfaces to the supervisor for
 /// observability. PID is captured at spawn time, `exit_rx` fires once the
@@ -210,6 +259,18 @@ impl AgentBridge {
             AgentBridge::ClaudeCode(b) => b.process_handle(),
         }
     }
+
+    /// Snapshot the last N lines of agent stderr. Returns `vec![]` if the
+    /// process has emitted nothing on stderr (the common case for healthy
+    /// runs). Used by the supervisor to enrich `RunFailed` details so the
+    /// cloud / UI can tell the user *why* the agent died beyond just
+    /// "agent stdout closed" or "no agent frames for 5 minutes".
+    pub async fn recent_stderr(&self) -> Vec<String> {
+        match self {
+            AgentBridge::Codex(b) => b.server.recent_stderr().await,
+            AgentBridge::ClaudeCode(b) => b.recent_stderr().await,
+        }
+    }
 }
 
 fn selected_model(
@@ -221,7 +282,44 @@ fn selected_model(
 
 #[cfg(test)]
 mod tests {
-    use super::selected_model;
+    use super::{STDERR_LINE_CAP_CHARS, StderrBuffer, selected_model};
+
+    #[test]
+    fn stderr_buffer_evicts_oldest_when_full() {
+        let mut buf = StderrBuffer::new(3);
+        buf.push("a");
+        buf.push("b");
+        buf.push("c");
+        buf.push("d");
+        assert_eq!(buf.snapshot(), vec!["b", "c", "d"]);
+    }
+
+    #[test]
+    fn stderr_buffer_truncates_long_lines() {
+        let mut buf = StderrBuffer::new(2);
+        let long = "x".repeat(STDERR_LINE_CAP_CHARS * 2);
+        buf.push(&long);
+        let snap = buf.snapshot();
+        assert_eq!(snap.len(), 1);
+        // Truncated line ends with a one-char ellipsis sentinel.
+        assert!(snap[0].ends_with('…'), "expected ellipsis sentinel: {snap:?}");
+        // Truncation respects char-boundary semantics: result fits within cap +
+        // the multi-byte ellipsis.
+        assert!(snap[0].len() <= STDERR_LINE_CAP_CHARS + 4);
+    }
+
+    #[test]
+    fn stderr_buffer_handles_multibyte_input() {
+        let mut buf = StderrBuffer::new(1);
+        // "ä" is 2 bytes; build a string that crosses the cap mid-character.
+        let line: String = std::iter::repeat('ä')
+            .take(STDERR_LINE_CAP_CHARS)
+            .collect();
+        buf.push(&line);
+        // Should not panic on truncation (regression: naive byte slicing
+        // would split a multi-byte sequence).
+        assert_eq!(buf.snapshot().len(), 1);
+    }
 
     #[test]
     fn selected_model_prefers_run_override() {
