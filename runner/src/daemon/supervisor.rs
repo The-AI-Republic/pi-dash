@@ -1468,10 +1468,22 @@ impl AssignWorker {
                 reason,
                 detail,
             } => {
+                // Codex / claude-detected failures (e.g.
+                // "turn/completed without conclusion", `error` notifications
+                // with `willRetry=false`) reach us with whatever bare
+                // string the bridge produced. Run them through the same
+                // enrichment helper the watchdog and stdout-close paths
+                // use so the user sees `last command:` and a stderr
+                // tail in the issue activity comment, not just the
+                // bridge's classifier text.
+                let base = detail
+                    .clone()
+                    .unwrap_or_else(|| "agent reported failure".to_string());
+                let enriched = self.build_failure_detail(&base, bridge).await;
                 self.send(ClientMsg::RunFailed {
                     run_id,
                     reason,
-                    detail: detail.clone(),
+                    detail: Some(enriched.clone()),
                     ended_at: Utc::now(),
                 })
                 .await;
@@ -1479,7 +1491,7 @@ impl AssignWorker {
                     ts: Utc::now(),
                     final_status: "failed".into(),
                     done_payload: None,
-                    error: detail,
+                    error: Some(enriched),
                 })
                 .await
                 .ok();
