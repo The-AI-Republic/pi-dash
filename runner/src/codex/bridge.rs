@@ -289,9 +289,7 @@ impl BridgeCursor {
                     // a `turn/completed` with no conclusion right after a
                     // systemError, so the runner reported "completed" on
                     // 400s from OpenAI.
-                    let conclusion = params
-                        .get("conclusion")
-                        .and_then(|v| v.as_str());
+                    let conclusion = params.get("conclusion").and_then(|v| v.as_str());
                     if conclusion == Some("success") {
                         vec![BridgeEvent::Completed {
                             run_id: self.run_id,
@@ -358,9 +356,7 @@ impl BridgeCursor {
                         .get("status")
                         .and_then(|s| s.get("activeFlags"))
                         .and_then(|f| f.as_array())
-                        .map(|arr| {
-                            arr.iter().any(|v| v.as_str() == Some("waitingOnApproval"))
-                        })
+                        .map(|arr| arr.iter().any(|v| v.as_str() == Some("waitingOnApproval")))
                         .unwrap_or(false);
                     if waiting && let Some(pending) = self.pending_command.clone() {
                         // We've already emitted an ApprovalRequest for this
@@ -411,10 +407,8 @@ impl BridgeCursor {
                     // Cache the most recent in-progress commandExecution so
                     // a later `waitingOnApproval` flag can refer to it.
                     if let Some(item) = params.get("item")
-                        && item.get("type").and_then(|v| v.as_str())
-                            == Some("commandExecution")
-                        && item.get("status").and_then(|v| v.as_str())
-                            == Some("inProgress")
+                        && item.get("type").and_then(|v| v.as_str()) == Some("commandExecution")
+                        && item.get("status").and_then(|v| v.as_str()) == Some("inProgress")
                     {
                         let item_id = item
                             .get("id")
@@ -450,8 +444,7 @@ impl BridgeCursor {
                     // The cached command finished; drop the tracking so a
                     // late waitingOnApproval doesn't re-open it.
                     if let Some(item) = params.get("item")
-                        && item.get("type").and_then(|v| v.as_str())
-                            == Some("commandExecution")
+                        && item.get("type").and_then(|v| v.as_str()) == Some("commandExecution")
                     {
                         let same = self
                             .pending_command
@@ -517,10 +510,7 @@ mod translate_tests {
         assert_eq!(evs.len(), 1);
         match &evs[0] {
             BridgeEvent::Failed { detail, .. } => {
-                assert_eq!(
-                    detail.as_deref(),
-                    Some("turn/completed without conclusion")
-                );
+                assert_eq!(detail.as_deref(), Some("turn/completed without conclusion"));
             }
             other => panic!("expected Failed, got {other:?}"),
         }
@@ -602,15 +592,23 @@ mod translate_tests {
             json!({"status": {"activeFlags": ["waitingOnApproval"]}}),
         ));
         match evs.as_slice() {
-            [BridgeEvent::ApprovalRequest {
-                kind,
-                payload,
-                reason,
-                ..
-            }] => {
+            [
+                BridgeEvent::ApprovalRequest {
+                    kind,
+                    payload,
+                    reason,
+                    ..
+                },
+            ] => {
                 assert!(matches!(kind, ApprovalKind::CommandExecution));
-                assert_eq!(payload.get("command").and_then(|v| v.as_str()), Some("rm -rf /tmp/x"));
-                assert_eq!(payload.get("synthesized").and_then(|v| v.as_bool()), Some(true));
+                assert_eq!(
+                    payload.get("command").and_then(|v| v.as_str()),
+                    Some("rm -rf /tmp/x")
+                );
+                assert_eq!(
+                    payload.get("synthesized").and_then(|v| v.as_bool()),
+                    Some(true)
+                );
                 assert!(reason.as_deref().unwrap_or("").contains("rm -rf /tmp/x"));
             }
             other => panic!("expected ApprovalRequest, got {other:?}"),
@@ -639,7 +637,10 @@ mod translate_tests {
             "thread/status/changed",
             json!({"status": {"activeFlags": ["waitingOnApproval"]}}),
         ));
-        assert!(matches!(first.as_slice(), [BridgeEvent::ApprovalRequest { .. }]));
+        assert!(matches!(
+            first.as_slice(),
+            [BridgeEvent::ApprovalRequest { .. }]
+        ));
 
         let second = c.translate(notif(
             "thread/status/changed",

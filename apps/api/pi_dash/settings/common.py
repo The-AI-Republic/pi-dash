@@ -360,6 +360,21 @@ EVENT_BATCH_MAX_AGE_MS = int(os.environ.get("EVENT_BATCH_MAX_AGE_MS", 250))
 EVENT_BATCH_MAX_BYTES = int(os.environ.get("EVENT_BATCH_MAX_BYTES", 65536))
 RUN_MESSAGE_DEDUPE_TTL_SECS = int(os.environ.get("RUN_MESSAGE_DEDUPE_TTL_SECS", 604800))
 RUNNER_PROTOCOL_VERSION = 4
+
+# Per-active-run agent observability watchdog tunables — see
+# ``.ai_design/runner_agent_bridge/design.md`` §4.5.3.
+# 360s is slightly longer than the runner's own 5-minute internal stall
+# watchdog, so the cloud acts as a backstop rather than racing the runner.
+RUNNER_AGENT_STALL_THRESHOLD_SECS = int(
+    os.environ.get("RUNNER_AGENT_STALL_THRESHOLD_SECS", 360)
+)
+# Snapshot-row freshness guard. The watchdog only acts on runners whose
+# poll-driven `RunnerLiveState.updated_at` is newer than this. Covers
+# roughly three missed 25s polls; stale rows from disabled / downgraded
+# runners age out instead of failing active runs.
+RUNNER_AGENT_OBSERVABILITY_STALE_SECS = int(
+    os.environ.get("RUNNER_AGENT_OBSERVABILITY_STALE_SECS", 90)
+)
 # Access-token signing key ring. Each entry: {kid, secret, status} where
 # status ∈ {"active", "verify_only"}. Exactly one key is active.
 # Default to a deterministic per-instance key derived from SECRET_KEY so

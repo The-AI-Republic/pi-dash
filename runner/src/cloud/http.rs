@@ -163,11 +163,7 @@ impl CredentialsHandle {
     /// updates the in-memory copy after a successful fsync. Caller is
     /// expected to hold the runner-cloud-client lock so two refreshes
     /// don't race the same file.
-    pub async fn rotate(
-        &self,
-        new_token: String,
-        new_generation: u64,
-    ) -> Result<()> {
+    pub async fn rotate(&self, new_token: String, new_generation: u64) -> Result<()> {
         let snapshot = {
             let guard = self.state.lock().await;
             RunnerCredentials {
@@ -331,11 +327,7 @@ impl TransportErrorCode {
 }
 
 impl RunnerCloudClient {
-    pub fn new(
-        runner_id: Uuid,
-        creds: CredentialsHandle,
-        transport: SharedHttpTransport,
-    ) -> Self {
+    pub fn new(runner_id: Uuid, creds: CredentialsHandle, transport: SharedHttpTransport) -> Self {
         Self {
             inner: Arc::new(RunnerCloudClientInner {
                 runner_id,
@@ -373,10 +365,9 @@ impl RunnerCloudClient {
         }
         self.refresh().await?;
         let guard = self.inner.state.lock().await;
-        guard
-            .access_token
-            .clone()
-            .ok_or(TransportError::Protocol("no access token after refresh".into()))
+        guard.access_token.clone().ok_or(TransportError::Protocol(
+            "no access token after refresh".into(),
+        ))
     }
 
     /// Single-flight refresh per `RunnerCloudClient`. Concurrent
@@ -393,9 +384,7 @@ impl RunnerCloudClient {
                 let result = self.do_refresh().await;
                 let outcome = match &result {
                     Ok(()) => RefreshOutcome::Done(Ok(())),
-                    Err(err) => {
-                        RefreshOutcome::Done(Err(TransportErrorCode::from(err)))
-                    }
+                    Err(err) => RefreshOutcome::Done(Err(TransportErrorCode::from(err))),
                 };
                 let _ = tx.send(outcome);
                 let mut guard = self.inner.state.lock().await;
@@ -511,10 +500,7 @@ impl RunnerCloudClient {
         let mut state = self.inner.state.lock().await;
         state.session = Some(SessionState {
             session_id: parsed.session_id,
-            server_time: parsed
-                .welcome
-                .server_time
-                .unwrap_or_else(Utc::now),
+            server_time: parsed.welcome.server_time.unwrap_or_else(Utc::now),
         });
         Ok(parsed)
     }
@@ -620,11 +606,13 @@ impl RunnerCloudClient {
             }
             msg @ ClientMsg::Accept { run_id, .. } => {
                 let body = to_value(&msg)?;
-                self.post_run_lifecycle(run_id, "accept", body, &idempotency_key).await
+                self.post_run_lifecycle(run_id, "accept", body, &idempotency_key)
+                    .await
             }
             msg @ ClientMsg::RunStarted { run_id, .. } => {
                 let body = to_value(&msg)?;
-                self.post_run_lifecycle(run_id, "started", body, &idempotency_key).await
+                self.post_run_lifecycle(run_id, "started", body, &idempotency_key)
+                    .await
             }
             msg @ ClientMsg::RunEvent { run_id, .. } => {
                 let body = to_value(&msg)?;
@@ -632,31 +620,38 @@ impl RunnerCloudClient {
             }
             msg @ ClientMsg::ApprovalRequest { run_id, .. } => {
                 let body = to_value(&msg)?;
-                self.post_run_lifecycle(run_id, "approvals", body, &idempotency_key).await
+                self.post_run_lifecycle(run_id, "approvals", body, &idempotency_key)
+                    .await
             }
             msg @ ClientMsg::RunAwaitingReauth { run_id, .. } => {
                 let body = to_value(&msg)?;
-                self.post_run_lifecycle(run_id, "awaiting-reauth", body, &idempotency_key).await
+                self.post_run_lifecycle(run_id, "awaiting-reauth", body, &idempotency_key)
+                    .await
             }
             msg @ ClientMsg::RunCompleted { run_id, .. } => {
                 let body = to_value(&msg)?;
-                self.post_run_lifecycle(run_id, "complete", body, &idempotency_key).await
+                self.post_run_lifecycle(run_id, "complete", body, &idempotency_key)
+                    .await
             }
             msg @ ClientMsg::RunPaused { run_id, .. } => {
                 let body = to_value(&msg)?;
-                self.post_run_lifecycle(run_id, "pause", body, &idempotency_key).await
+                self.post_run_lifecycle(run_id, "pause", body, &idempotency_key)
+                    .await
             }
             msg @ ClientMsg::RunFailed { run_id, .. } => {
                 let body = to_value(&msg)?;
-                self.post_run_lifecycle(run_id, "fail", body, &idempotency_key).await
+                self.post_run_lifecycle(run_id, "fail", body, &idempotency_key)
+                    .await
             }
             msg @ ClientMsg::RunCancelled { run_id, .. } => {
                 let body = to_value(&msg)?;
-                self.post_run_lifecycle(run_id, "cancelled", body, &idempotency_key).await
+                self.post_run_lifecycle(run_id, "cancelled", body, &idempotency_key)
+                    .await
             }
             msg @ ClientMsg::RunResumed { run_id, .. } => {
                 let body = to_value(&msg)?;
-                self.post_run_lifecycle(run_id, "resumed", body, &idempotency_key).await
+                self.post_run_lifecycle(run_id, "resumed", body, &idempotency_key)
+                    .await
             }
         }
     }
@@ -761,6 +756,95 @@ pub struct PollStatus {
     pub status: String,
     pub in_flight_run: Option<Uuid>,
     pub ts: DateTime<Utc>,
+    // ----- per-active-run observability snapshot -----
+    // Optional; only serialised when `agent_observability_v1` is enabled.
+    // `observed_run_id` is the only field that may serialise as `null` on
+    // the wire — that explicit null tells the cloud "this runner is idle,
+    // clear my live-state row's run binding." All other fields are skipped
+    // when None so a stale poll never NULLs out a known-good cloud value.
+    // See `.ai_design/runner_agent_bridge/design.md` §4.2.
+    /// Always serialised when feature is enabled (including null).
+    #[serde(
+        rename = "observed_run_id",
+        default,
+        skip_serializing_if = "PollStatusObservabilityFlag::skip"
+    )]
+    pub observed_run_id_envelope: PollStatusObservabilityFlag,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_event_at: Option<DateTime<Utc>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_event_kind: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_event_summary: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_pid: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_subprocess_alive: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub approvals_pending: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tokens: Option<TokenUsage>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub turn_count: Option<u32>,
+}
+
+/// Wire-side wrapper used to express the three states of `observed_run_id`:
+/// absent (feature off), present-and-null (feature on, runner idle), and
+/// present-with-value (feature on, runner busy). Default is `Absent`,
+/// which `skip_serializing_if` drops from the JSON entirely.
+#[derive(Debug, Clone, Default)]
+pub enum PollStatusObservabilityFlag {
+    #[default]
+    Absent,
+    Present(Option<Uuid>),
+}
+
+impl PollStatusObservabilityFlag {
+    pub fn skip(&self) -> bool {
+        matches!(self, Self::Absent)
+    }
+}
+
+impl Serialize for PollStatusObservabilityFlag {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        match self {
+            // The struct field carries `skip_serializing_if = "skip"`,
+            // which intercepts `Absent` before serde reaches this impl.
+            // If a future refactor drops that attribute, this branch
+            // would silently start emitting `null` — a wire change that
+            // looks like "feature on, idle" to the cloud, with no
+            // compile-time warning. Treat reaching it as a bug rather
+            // than papering over it.
+            Self::Absent => Err(serde::ser::Error::custom(
+                "PollStatusObservabilityFlag::Absent reached Serialize; \
+                 skip_serializing_if was bypassed",
+            )),
+            Self::Present(v) => match v {
+                Some(uuid) => serializer.serialize_some(uuid),
+                None => serializer.serialize_none(),
+            },
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct TokenUsage {
+    pub input: u64,
+    pub output: u64,
+    pub total: u64,
+}
+
+impl From<crate::daemon::observability::TokenUsage> for TokenUsage {
+    fn from(t: crate::daemon::observability::TokenUsage) -> Self {
+        Self {
+            input: t.input,
+            output: t.output,
+            total: t.total,
+        }
+    }
 }
 
 impl PollStatus {
@@ -769,6 +853,15 @@ impl PollStatus {
             status: "idle".to_string(),
             in_flight_run: None,
             ts: Utc::now(),
+            observed_run_id_envelope: PollStatusObservabilityFlag::Absent,
+            last_event_at: None,
+            last_event_kind: None,
+            last_event_summary: None,
+            agent_pid: None,
+            agent_subprocess_alive: None,
+            approvals_pending: None,
+            tokens: None,
+            turn_count: None,
         }
     }
 
@@ -783,7 +876,45 @@ impl PollStatus {
             status: s.to_string(),
             in_flight_run,
             ts: Utc::now(),
+            observed_run_id_envelope: PollStatusObservabilityFlag::Absent,
+            last_event_at: None,
+            last_event_kind: None,
+            last_event_summary: None,
+            agent_pid: None,
+            agent_subprocess_alive: None,
+            approvals_pending: None,
+            tokens: None,
+            turn_count: None,
         }
+    }
+
+    /// Build a poll status that includes the per-active-run observability
+    /// snapshot when the `agent_observability_v1` flag is enabled. When
+    /// disabled, this is identical to `from_wire`.
+    pub fn from_state(
+        status: WireStatus,
+        in_flight_run: Option<Uuid>,
+        feature_enabled: bool,
+        snapshot: crate::daemon::state::ObservabilitySnapshot,
+        approvals_pending: usize,
+    ) -> Self {
+        let mut me = Self::from_wire(status, in_flight_run);
+        if !feature_enabled {
+            return me;
+        }
+        // observed_run_id is *always* serialised when the feature is on,
+        // including as null when idle. The cloud uses an explicit null to
+        // clear the live-state row's run binding (design §4.5.2).
+        me.observed_run_id_envelope = PollStatusObservabilityFlag::Present(in_flight_run);
+        me.last_event_at = snapshot.last_event_at;
+        me.last_event_kind = snapshot.last_event_kind;
+        me.last_event_summary = snapshot.last_event_summary;
+        me.agent_pid = snapshot.agent_pid;
+        me.agent_subprocess_alive = snapshot.agent_subprocess_alive;
+        me.approvals_pending = Some(u32::try_from(approvals_pending).unwrap_or(u32::MAX));
+        me.tokens = snapshot.tokens.map(TokenUsage::from);
+        me.turn_count = snapshot.turn_count;
+        me
     }
 }
 
@@ -818,6 +949,12 @@ pub struct HttpLoop {
     pub in_flight_rx: watch::Receiver<Option<Uuid>>,
     pub shutdown: Arc<tokio::sync::Notify>,
     pub attach_body: AttachBody,
+    /// Optional handle to the daemon's state. When `Some`, `poll_once`
+    /// builds a `PollStatus::from_state` (carrying the per-active-run
+    /// observability snapshot). When `None`, falls back to `from_wire`,
+    /// which is identical to the v3 wire shape — used by tests and any
+    /// caller that doesn't want to thread state through.
+    pub state: Option<crate::daemon::state::StateHandle>,
     inline_acks: VecDeque<String>,
 }
 
@@ -863,8 +1000,17 @@ impl HttpLoop {
             in_flight_rx,
             shutdown,
             attach_body,
+            state: None,
             inline_acks: VecDeque::new(),
         }
+    }
+
+    /// Attach the daemon's state so `poll_once` can include the
+    /// per-active-run observability snapshot when the
+    /// `agent_observability_v1` flag is enabled.
+    pub fn with_state(mut self, state: crate::daemon::state::StateHandle) -> Self {
+        self.state = Some(state);
+        self
     }
 
     /// Build a fresh `AttachBody` snapshotting the current status and
@@ -1034,7 +1180,16 @@ impl HttpLoop {
         while let Ok(entry) = self.ack_rx.try_recv() {
             acks.push(entry.stream_id);
         }
-        let status = PollStatus::from_wire(*self.status_rx.borrow(), *self.in_flight_rx.borrow());
+        let wire_status = *self.status_rx.borrow();
+        let in_flight = *self.in_flight_rx.borrow();
+        let status = match self.state.as_ref() {
+            Some(state) if state.agent_observability_v1() => {
+                let snapshot = state.observability_snapshot().await;
+                let approvals = state.approvals_pending_value().await;
+                PollStatus::from_state(wire_status, in_flight, true, snapshot, approvals)
+            }
+            _ => PollStatus::from_wire(wire_status, in_flight),
+        };
         let resp = self.client.poll(acks, status).await?;
         for msg in resp.messages {
             self.dispatch(msg).await;
@@ -1081,7 +1236,6 @@ impl HttpLoop {
             }
         }
     }
-
 }
 
 // ---------------------------------------------------------------------------
@@ -1176,10 +1330,7 @@ pub async fn write_runner_credentials(
 ) -> Result<(), TransportError> {
     let handle = CredentialsHandle::new(path, creds.clone());
     handle
-        .rotate(
-            creds.refresh_token.clone(),
-            creds.refresh_token_generation,
-        )
+        .rotate(creds.refresh_token.clone(), creds.refresh_token_generation)
         .await
         .map_err(|e| TransportError::Network(e.to_string()))
 }
@@ -1223,10 +1374,7 @@ mod tests {
     fn auth_error_mapping() {
         let err = map_auth_error(StatusCode::UNAUTHORIZED, "{\"error\":\"runner_revoked\"}");
         assert!(matches!(err, TransportError::RunnerRevoked));
-        let err = map_auth_error(
-            StatusCode::FORBIDDEN,
-            "{\"error\":\"runner_id_mismatch\"}",
-        );
+        let err = map_auth_error(StatusCode::FORBIDDEN, "{\"error\":\"runner_id_mismatch\"}");
         assert!(matches!(err, TransportError::RunnerIdMismatch));
     }
 
@@ -1281,5 +1429,114 @@ mod tests {
         let refreshed = refresh_attach_body(&base, WireStatus::Idle, None);
         assert_eq!(refreshed.in_flight_run, None);
         assert_eq!(refreshed.status, PollStatus::idle().status);
+    }
+
+    #[test]
+    fn attach_body_serialization_unchanged_by_observability_design() {
+        // Regression: AttachBody must NOT carry any observability fields.
+        // The poll path is the single ingestion site for the
+        // per-active-run snapshot; session-open stays a thin
+        // identity/resume body.
+        let body = sample_attach_body();
+        let v = serde_json::to_value(&body).unwrap();
+        let keys: std::collections::BTreeSet<_> = v.as_object().unwrap().keys().cloned().collect();
+        let expected: std::collections::BTreeSet<_> = [
+            "version",
+            "os",
+            "arch",
+            "status",
+            "in_flight_run",
+            "project_slug",
+            "host_label",
+            "agent_versions",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        assert_eq!(
+            keys, expected,
+            "AttachBody serialised key set drifted: {keys:?}"
+        );
+    }
+
+    #[test]
+    fn poll_status_from_wire_omits_observability_fields() {
+        // Pre-observability shape: only status / in_flight_run / ts.
+        let s = PollStatus::from_wire(WireStatus::Idle, None);
+        let v = serde_json::to_value(&s).unwrap();
+        let obj = v.as_object().unwrap();
+        let keys: std::collections::BTreeSet<_> = obj.keys().cloned().collect();
+        let expected: std::collections::BTreeSet<_> = ["status", "in_flight_run", "ts"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        assert_eq!(
+            keys, expected,
+            "PollStatus::from_wire wire shape drifted: {keys:?}"
+        );
+    }
+
+    #[test]
+    fn poll_status_feature_off_matches_legacy_shape() {
+        let snap = crate::daemon::state::ObservabilitySnapshot::default();
+        let s = PollStatus::from_state(WireStatus::Busy, Some(Uuid::nil()), false, snap, 0);
+        let v = serde_json::to_value(&s).unwrap();
+        let obj = v.as_object().unwrap();
+        // No new fields when feature is off — this is the strict back-compat
+        // guarantee.
+        assert!(!obj.contains_key("observed_run_id"));
+        assert!(!obj.contains_key("last_event_at"));
+        assert!(!obj.contains_key("agent_pid"));
+        assert!(!obj.contains_key("approvals_pending"));
+        assert!(!obj.contains_key("tokens"));
+    }
+
+    #[test]
+    fn poll_status_feature_on_idle_serialises_observed_run_id_null() {
+        let snap = crate::daemon::state::ObservabilitySnapshot::default();
+        let s = PollStatus::from_state(WireStatus::Idle, None, true, snap, 0);
+        let v = serde_json::to_value(&s).unwrap();
+        let obj = v.as_object().unwrap();
+        assert!(obj.contains_key("observed_run_id"));
+        assert_eq!(obj.get("observed_run_id"), Some(&serde_json::Value::Null));
+        // approvals_pending is always populated when feature is on.
+        assert_eq!(obj.get("approvals_pending"), Some(&serde_json::json!(0)));
+        // No event has fired yet — descriptive scalars stay absent.
+        assert!(!obj.contains_key("last_event_at"));
+        assert!(!obj.contains_key("agent_pid"));
+    }
+
+    #[test]
+    fn poll_status_feature_on_busy_serialises_populated_fields() {
+        use crate::daemon::observability::TokenUsage as InnerTokenUsage;
+        let rid = Uuid::new_v4();
+        let snap = crate::daemon::state::ObservabilitySnapshot {
+            last_event_at: Some(Utc::now()),
+            last_event_kind: Some("codex/event/token_count".into()),
+            last_event_summary: Some("running".into()),
+            agent_pid: Some(4242),
+            agent_subprocess_alive: Some(true),
+            tokens: Some(InnerTokenUsage {
+                input: 100,
+                output: 200,
+                total: 300,
+            }),
+            turn_count: Some(2),
+        };
+        let s = PollStatus::from_state(WireStatus::Busy, Some(rid), true, snap, 1);
+        let v = serde_json::to_value(&s).unwrap();
+        let obj = v.as_object().unwrap();
+        assert_eq!(obj.get("observed_run_id"), Some(&serde_json::json!(rid)));
+        assert_eq!(obj.get("agent_pid"), Some(&serde_json::json!(4242)));
+        assert_eq!(
+            obj.get("agent_subprocess_alive"),
+            Some(&serde_json::json!(true))
+        );
+        assert_eq!(obj.get("approvals_pending"), Some(&serde_json::json!(1)));
+        assert_eq!(obj.get("turn_count"), Some(&serde_json::json!(2)));
+        let tokens = obj.get("tokens").unwrap().as_object().unwrap();
+        assert_eq!(tokens.get("input"), Some(&serde_json::json!(100)));
+        assert_eq!(tokens.get("output"), Some(&serde_json::json!(200)));
+        assert_eq!(tokens.get("total"), Some(&serde_json::json!(300)));
     }
 }

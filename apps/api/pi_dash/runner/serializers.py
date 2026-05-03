@@ -11,6 +11,7 @@ from pi_dash.runner.models import (
     ApprovalRequest,
     Pod,
     Runner,
+    RunnerLiveState,
 )
 
 
@@ -64,6 +65,33 @@ class PodSerializer(serializers.ModelSerializer):
         return pod.runners.count()
 
 
+class RunnerLiveStateSerializer(serializers.ModelSerializer):
+    """Per-active-run agent observability snapshot.
+
+    See ``.ai_design/runner_agent_bridge/design.md`` §4.5.4. All fields
+    nullable; the UI renders ``null`` as ``"—"`` and derives the activity
+    badge client-side from raw scalars.
+    """
+
+    class Meta:
+        model = RunnerLiveState
+        fields = [
+            "observed_run_id",
+            "last_event_at",
+            "last_event_kind",
+            "last_event_summary",
+            "agent_pid",
+            "agent_subprocess_alive",
+            "approvals_pending",
+            "input_tokens",
+            "output_tokens",
+            "total_tokens",
+            "turn_count",
+            "updated_at",
+        ]
+        read_only_fields = fields
+
+
 class PodMiniSerializer(serializers.ModelSerializer):
     class Meta:
         model = Pod
@@ -73,6 +101,9 @@ class PodMiniSerializer(serializers.ModelSerializer):
 
 class RunnerSerializer(serializers.ModelSerializer):
     pod_detail = PodMiniSerializer(source="pod", read_only=True)
+    # Optional one-to-one observability snapshot. ``None`` when the row
+    # doesn't exist yet (pre-flag runner that has never reported).
+    live_state = RunnerLiveStateSerializer(read_only=True)
 
     class Meta:
         model = Runner
@@ -90,6 +121,7 @@ class RunnerSerializer(serializers.ModelSerializer):
             "owner",
             "pod",
             "pod_detail",
+            "live_state",
             "enrolled_at",
             "revoked_at",
             "revoked_reason",
@@ -107,6 +139,7 @@ class RunnerSerializer(serializers.ModelSerializer):
             "last_heartbeat_at",
             "owner",
             "pod_detail",
+            "live_state",
             "enrolled_at",
             "revoked_at",
             "revoked_reason",

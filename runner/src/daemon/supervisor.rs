@@ -89,8 +89,7 @@ impl Supervisor {
             let inst = if let Some(shared) = &transport {
                 let runner_paths = paths.for_runner(runner_cfg.runner_id);
                 let creds = load_runner_credentials(&runner_paths, &runner_cfg.name).await?;
-                let client =
-                    RunnerCloudClient::new(runner_cfg.runner_id, creds, shared.clone());
+                let client = RunnerCloudClient::new(runner_cfg.runner_id, creds, shared.clone());
                 RunnerInstance::new_http(runner_cfg.clone(), &paths, client)
             } else {
                 RunnerInstance::new_offline(runner_cfg.clone(), &paths)
@@ -217,7 +216,8 @@ impl Supervisor {
                     inst.state.rx_in_flight.clone(),
                     inst.state.shutdown_notified(),
                     attach_body_for_instance(inst),
-                );
+                )
+                .with_state(inst.state.clone());
                 let http_handle = tokio::spawn(async move {
                     if let Err(e) = http_loop.run().await {
                         tracing::error!("http loop exited: {e:#}");
@@ -380,12 +380,16 @@ async fn load_runner_credentials(
         .get("refresh")
         .and_then(|v| v.get("token"))
         .and_then(toml::Value::as_str)
-        .ok_or_else(|| anyhow::anyhow!("runner credentials at {path:?} are missing refresh.token"))?;
+        .ok_or_else(|| {
+            anyhow::anyhow!("runner credentials at {path:?} are missing refresh.token")
+        })?;
     let generation = parsed
         .get("refresh")
         .and_then(|v| v.get("generation"))
         .and_then(toml::Value::as_integer)
-        .ok_or_else(|| anyhow::anyhow!("runner credentials at {path:?} are missing refresh.generation"))?;
+        .ok_or_else(|| {
+            anyhow::anyhow!("runner credentials at {path:?} are missing refresh.generation")
+        })?;
     let runner_id = uuid::Uuid::parse_str(runner_id)
         .map_err(|e| anyhow::anyhow!("invalid runner.id in {path:?}: {e}"))?;
     Ok(CredentialsHandle::new(
@@ -409,8 +413,11 @@ fn attach_body_for_instance(inst: &RunnerInstance) -> AttachBody {
         version: crate::RUNNER_VERSION.to_string(),
         os: std::env::consts::OS.to_string(),
         arch: std::env::consts::ARCH.to_string(),
-        status: PollStatus::from_wire(*inst.state.rx_status.borrow(), *inst.state.rx_in_flight.borrow())
-            .status,
+        status: PollStatus::from_wire(
+            *inst.state.rx_status.borrow(),
+            *inst.state.rx_in_flight.borrow(),
+        )
+        .status,
         in_flight_run: *inst.state.rx_in_flight.borrow(),
         project_slug: inst.config.project_slug.clone(),
         host_label: hostname().unwrap_or_else(|| inst.config.name.clone()),
@@ -448,6 +455,46 @@ async fn refresh_loop(client: RunnerCloudClient, state: StateHandle) {
             tracing::error!(runner_id = %client.runner_id(), "scheduled refresh failed: {e:#}");
         }
     }
+}
+
+/// Spawn a small task that flips `agent_subprocess_alive` to false the
+/// moment the bridge-owned wait task observes the agent subprocess
+/// terminating. Independent of stdout-close detection so a `kill -9`
+/// path that double-forks or otherwise keeps stdout open is still
+/// caught for observability.
+///
+/// Scoped to `run_id`: if a new run has taken over the in-flight slot
+/// by the time this task fires, the alive flag is left alone — the new
+/// run's own watcher owns it. Without this guard, run A's exit could
+/// stamp `alive=false` on run B's snapshot.
+fn spawn_exit_watch(
+    state: StateHandle,
+    run_id: uuid::Uuid,
+    mut exit_rx: tokio::sync::watch::Receiver<Option<crate::agent::ExitSnapshot>>,
+) {
+    tokio::spawn(async move {
+        // A freshly-cloned watch::Receiver marks the current value as
+        // "seen", so changed() only fires on values published *after*
+        // we subscribed. Check borrow() first to catch the case where
+        // the wait task already published Some(ExitSnapshot) before we
+        // got here (e.g. agent binary segfaults on startup).
+        let already_exited = exit_rx.borrow().is_some();
+        if !already_exited {
+            if exit_rx.changed().await.is_err() {
+                return;
+            }
+            if exit_rx.borrow().is_none() {
+                return;
+            }
+        }
+        // Guard: only stamp alive=false if the in-flight run is still
+        // ours. A new run may already have taken over and called
+        // set_agent_alive(true); we must not stomp it.
+        if *state.rx_in_flight.borrow() != Some(run_id) {
+            return;
+        }
+        state.set_agent_alive(false).await;
+    });
 }
 
 fn hostname() -> Option<String> {
@@ -933,6 +980,16 @@ impl AssignWorker {
                 return Ok(());
             }
         };
+        // Capture the bridge-owned process handle now that the subprocess
+        // is spawned. Subscribe to its `exit_rx` so the live-state snapshot
+        // flips `agent_subprocess_alive=false` the moment the wait task
+        // observes termination — independent of stdout-close detection.
+        // See `.ai_design/runner_agent_bridge/design.md` §4.4.
+        let process_handle = bridge.process_handle();
+        self.state.set_agent_pid(process_handle.pid).await;
+        self.state.set_agent_alive(true).await;
+        spawn_exit_watch(self.state.clone(), run_id, process_handle.exit_rx.clone());
+
         let payload = RunPayload {
             run_id,
             prompt,
@@ -1119,6 +1176,31 @@ impl AssignWorker {
         workspace_root: &std::path::Path,
     ) -> Result<Option<Outcome>> {
         self.state.incr_current_run_events().await;
+        // Observability: every bridge event bumps last_event_at + stamps
+        // a structure-only kind/summary. The summary is sanitised inside
+        // `summary_of` — never includes prompt or model output.
+        // Opt-in: extract codex token / turn metrics from Raw frames so
+        // operators see them on the runner-status panel.
+        let kind = crate::daemon::observability::kind_of(&ev);
+        let summary = crate::daemon::observability::summary_of(&ev);
+        self.state
+            .note_agent_event(Utc::now(), kind, Some(summary))
+            .await;
+        if let BridgeEvent::Raw { method, params, .. } = &ev {
+            match method.as_str() {
+                "codex/event/token_count" => {
+                    if let Some(usage) =
+                        crate::daemon::observability::parse_codex_token_count(params)
+                    {
+                        self.state.set_tokens(usage).await;
+                    }
+                }
+                "turn/started" => {
+                    self.state.incr_turn().await;
+                }
+                _ => {}
+            }
+        }
         match ev {
             BridgeEvent::RunStarted { .. } => Ok(None),
             BridgeEvent::Raw {
@@ -1322,8 +1404,8 @@ mod tests {
     use super::*;
     use crate::cloud::protocol::Envelope;
     use crate::config::schema::{
-        AgentSection, ApprovalPolicySection, ClaudeCodeSection, CodexSection,
-        RunnerConfig, WorkspaceSection,
+        AgentSection, ApprovalPolicySection, ClaudeCodeSection, CodexSection, RunnerConfig,
+        WorkspaceSection,
     };
     use std::path::PathBuf;
     use tokio::sync::Notify;
@@ -1558,6 +1640,9 @@ mod tests {
         assert_eq!(sent, 0);
         let stray =
             tokio::time::timeout(std::time::Duration::from_millis(100), out_rx.recv()).await;
-        assert!(stray.is_err(), "idle drain produced a stray frame: {stray:?}");
+        assert!(
+            stray.is_err(),
+            "idle drain produced a stray frame: {stray:?}"
+        );
     }
 }
