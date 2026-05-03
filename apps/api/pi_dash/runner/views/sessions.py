@@ -329,6 +329,21 @@ class RunnerSessionPollEndpoint(APIView):
         try:
             while True:
                 remaining_ms = max(0, int((deadline - time.monotonic()) * 1000))
+                # CRITICAL: bail BEFORE calling Redis when the deadline
+                # has expired. `XREADGROUP BLOCK 0 STREAMS … >` means
+                # "block forever" in Redis (BLOCK 0 is documented as
+                # "block indefinitely"), not "do not block." If we let
+                # `slice_ms` reach 0 and call read_for_session, the
+                # underlying XREADGROUP parks the worker indefinitely —
+                # well beyond the runner's HTTP timeout — and any assign
+                # message that lands later gets claimed by this dead
+                # consumer's PEL where the live session can never see it.
+                # Observed in production: poll handlers stuck for 4+
+                # hours on evicted sessions, blocking gunicorn workers
+                # and reaping unrelated runs whose assigns couldn't
+                # reach the live runner.
+                if remaining_ms <= 0:
+                    return []
                 slice_ms = min(_POLL_SLICE_MS, remaining_ms)
                 messages = outbox.read_for_session(
                     runner_id=runner_id,
@@ -337,7 +352,7 @@ class RunnerSessionPollEndpoint(APIView):
                     count=100,
                     use_zero=use_zero,
                 )
-                if messages or remaining_ms <= 0:
+                if messages:
                     return messages
                 use_zero = False
                 if pubsub.get_message(timeout=0) is not None:
