@@ -4,12 +4,32 @@
 //! not have to know which underlying CLI is driving a run.
 
 use anyhow::Result;
+use chrono::{DateTime, Utc};
 use std::path::Path;
 use std::time::Duration;
+use tokio::sync::watch;
 use uuid::Uuid;
 
 use crate::cloud::protocol::{ApprovalDecision, ApprovalKind, FailureReason};
 use crate::config::schema::{AgentKind, RunnerConfig};
+
+/// Volatile process-handle the bridge surfaces to the supervisor for
+/// observability. PID is captured at spawn time, `exit_rx` fires once the
+/// child wait task observes termination. See `.ai_design/runner_agent_bridge`
+/// §4.4. The handle carries no ownership of the child — the process wrapper
+/// retains exclusive ownership inside its wait task.
+#[derive(Debug, Clone)]
+pub struct AgentProcessHandle {
+    pub pid: Option<u32>,
+    pub exit_rx: watch::Receiver<Option<ExitSnapshot>>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ExitSnapshot {
+    pub status_code: Option<i32>,
+    pub signal: Option<i32>,
+    pub observed_at: DateTime<Utc>,
+}
 
 /// Events the bridge surfaces to the daemon's state machine. Agent-agnostic:
 /// Codex and Claude both translate their native protocols into this shape.
@@ -177,6 +197,17 @@ impl AgentBridge {
         match self {
             AgentBridge::Codex(b) => b.server.shutdown(grace).await,
             AgentBridge::ClaudeCode(b) => b.shutdown(grace).await,
+        }
+    }
+
+    /// Bridge-owned observability handle: the agent subprocess's PID and a
+    /// watch receiver that yields `Some(ExitSnapshot)` once the wait task
+    /// observes termination. Supervisor uses this to drive
+    /// `state.set_agent_pid` / `set_agent_alive`.
+    pub fn process_handle(&self) -> AgentProcessHandle {
+        match self {
+            AgentBridge::Codex(b) => b.server.process_handle(),
+            AgentBridge::ClaudeCode(b) => b.process_handle(),
         }
     }
 }

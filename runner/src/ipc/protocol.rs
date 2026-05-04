@@ -167,10 +167,7 @@ impl StatusSnapshot {
 impl RunnerStatusSnapshot {
     pub fn print_compact(&self) {
         let project = self.project_slug.as_deref().unwrap_or("(no project)");
-        println!(
-            "  {} — {:?} project={}",
-            self.name, self.status, project
-        );
+        println!("  {} — {:?} project={}", self.name, self.status, project);
         if let Some(run) = &self.current_run {
             println!(
                 "    current run: {} ({}); events={}",

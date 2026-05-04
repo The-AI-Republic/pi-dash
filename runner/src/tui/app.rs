@@ -36,12 +36,7 @@ pub enum Tab {
 
 impl Tab {
     pub fn all() -> [Tab; 4] {
-        [
-            Tab::General,
-            Tab::RunnerStatus,
-            Tab::Runs,
-            Tab::Approvals,
-        ]
+        [Tab::General, Tab::RunnerStatus, Tab::Runs, Tab::Approvals]
     }
 
     pub fn label(&self) -> &'static str {
@@ -64,8 +59,8 @@ impl Tab {
         let s = raw.trim().to_ascii_lowercase();
         match s.as_str() {
             "general" | "1" => Some(Tab::General),
-            "runners" | "runner" | "runner-status" | "runner_status" | "status"
-            | "config" | "2" => Some(Tab::RunnerStatus),
+            "runners" | "runner" | "runner-status" | "runner_status" | "status" | "config"
+            | "2" => Some(Tab::RunnerStatus),
             "runs" | "3" => Some(Tab::Runs),
             "approvals" | "4" => Some(Tab::Approvals),
             _ => None,
@@ -635,9 +630,7 @@ async fn handle_event(ev: Event, state: &mut AppState) {
                 .as_ref()
                 .is_some_and(|f| f.active_picker.is_some());
             if picker_open {
-                if key.code == KeyCode::Char('c')
-                    && key.modifiers.contains(KeyModifiers::CONTROL)
-                {
+                if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
                     state.confirm_exit = true;
                     state.confirm_exit_yes = true;
                     return;
@@ -945,9 +938,7 @@ async fn handle_event(ev: Event, state: &mut AppState) {
             // Tab toggles which card on the Runners tab owns input.
             // Shift+Tab does the same flip (only two cards). Anywhere
             // else it's a no-op so global keys aren't surprised.
-            (KeyCode::Tab, _) | (KeyCode::BackTab, _)
-                if state.tab == Tab::RunnerStatus =>
-            {
+            (KeyCode::Tab, _) | (KeyCode::BackTab, _) if state.tab == Tab::RunnerStatus => {
                 state.runner_tab_focus = match state.runner_tab_focus {
                     RunnerTabFocus::RunnerList => RunnerTabFocus::Settings,
                     RunnerTabFocus::Settings => RunnerTabFocus::RunnerList,
@@ -1036,26 +1027,17 @@ async fn handle_event(ev: Event, state: &mut AppState) {
             // wherever a per-runner cursor matters — that's every tab
             // except General now.
             (KeyCode::Char('<') | KeyCode::Char(','), _)
-                if matches!(
-                    state.tab,
-                    Tab::RunnerStatus | Tab::Runs | Tab::Approvals
-                ) =>
+                if matches!(state.tab, Tab::RunnerStatus | Tab::Runs | Tab::Approvals) =>
             {
                 move_picker(state, -1).await;
             }
             (KeyCode::Char('>') | KeyCode::Char('.'), _)
-                if matches!(
-                    state.tab,
-                    Tab::RunnerStatus | Tab::Runs | Tab::Approvals
-                ) =>
+                if matches!(state.tab, Tab::RunnerStatus | Tab::Runs | Tab::Approvals) =>
             {
                 move_picker(state, 1).await;
             }
             (KeyCode::Char(c @ '1'..='9'), KeyModifiers::ALT)
-                if matches!(
-                    state.tab,
-                    Tab::RunnerStatus | Tab::Runs | Tab::Approvals
-                ) =>
+                if matches!(state.tab, Tab::RunnerStatus | Tab::Runs | Tab::Approvals) =>
             {
                 if let Some(d) = c.to_digit(10) {
                     jump_picker(state, (d as usize).saturating_sub(1)).await;
@@ -1104,8 +1086,7 @@ fn start_or_apply_config_field(state: &mut AppState) {
         cfg_view::FieldKind::Bool => cfg_view::toggle_bool(cfg, spec.id, runner_idx),
         cfg_view::FieldKind::Enum(_) => cfg_view::cycle_enum(cfg, spec.id, runner_idx),
         cfg_view::FieldKind::Text | cfg_view::FieldKind::U32 => {
-            state.config_edit_buffer =
-                Some(cfg_view::display_value(cfg, spec.id, runner_idx));
+            state.config_edit_buffer = Some(cfg_view::display_value(cfg, spec.id, runner_idx));
         }
     }
 }
@@ -1314,8 +1295,7 @@ async fn submit_add_runner_form(state: &mut AppState) {
     state.add_runner_form = None;
     // Restart the daemon so the new RunnerInstance is hosted; outcome
     // surfaces in the General tab's banner.
-    state.reload_outcome =
-        Some(crate::service::reload::restart_and_verify(&state.paths).await);
+    state.reload_outcome = Some(crate::service::reload::restart_and_verify(&state.paths).await);
     refresh(state).await;
     // Aim the picker at the freshly-added runner so Config / Runs land
     // on it right away.
@@ -1338,7 +1318,10 @@ async fn submit_remove_runner(state: &mut AppState) {
     let Some(name) = state.remove_runner_confirm.take() else {
         return;
     };
-    let args = crate::cli::runner::RemoveArgs { name: name.clone() };
+    let args = crate::cli::runner::RemoveArgs {
+        name: name.clone(),
+        local_only: false,
+    };
     match crate::cli::runner::remove(args, &state.paths).await {
         Ok(_) => {
             state.reload_outcome =
@@ -1415,13 +1398,7 @@ async fn submit_register_form(state: &mut AppState) {
             return;
         }
     };
-    let resp = match crate::cloud::http::enroll_runner(
-        &transport,
-        &token,
-        &host_label,
-        None,
-    )
-    .await
+    let resp = match crate::cloud::http::enroll_runner(&transport, &token, &host_label, None).await
     {
         Ok(r) => r,
         Err(e) => {
@@ -1439,6 +1416,7 @@ async fn submit_register_form(state: &mut AppState) {
             cloud_url: cloud_url.clone(),
             log_level: "info".to_string(),
             log_retention_days: 14,
+            agent_observability_v1: false,
         },
         runners: vec![crate::config::schema::RunnerConfig {
             name: resp.runner_name.clone(),
@@ -1740,11 +1718,7 @@ fn render_add_runner_form(f: &mut ratatui::Frame<'_>, form: &AddRunnerForm) {
         modal_field_line("Working dir ", &form.working_dir, form.focus == 3),
         Line::raw(""),
     ];
-    let submit_label = if form.busy {
-        " Adding… "
-    } else {
-        " Submit "
-    };
+    let submit_label = if form.busy { " Adding… " } else { " Submit " };
     let submit_style = if form.focus == 4 {
         Style::default()
             .fg(ratatui::style::Color::Black)
@@ -1759,10 +1733,7 @@ fn render_add_runner_form(f: &mut ratatui::Frame<'_>, form: &AddRunnerForm) {
         Span::raw("   "),
         Span::styled(submit_label.to_string(), submit_style),
         Span::raw("   "),
-        Span::styled(
-            "Esc cancel",
-            Style::default().add_modifier(Modifier::DIM),
-        ),
+        Span::styled("Esc cancel", Style::default().add_modifier(Modifier::DIM)),
     ]));
     if let Some(e) = &form.error {
         lines.push(Line::raw(""));
@@ -1773,11 +1744,7 @@ fn render_add_runner_form(f: &mut ratatui::Frame<'_>, form: &AddRunnerForm) {
     }
 
     let p = Paragraph::new(lines)
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title(" Add runner "),
-        )
+        .block(Block::default().borders(Borders::ALL).title(" Add runner "))
         .wrap(ratatui::widgets::Wrap { trim: false });
     f.render_widget(p, area);
 }

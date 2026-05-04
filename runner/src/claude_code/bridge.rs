@@ -154,6 +154,10 @@ impl Bridge {
     pub async fn shutdown(self, grace: Duration) -> Result<()> {
         self.proc.shutdown(grace).await
     }
+
+    pub fn process_handle(&self) -> crate::agent::AgentProcessHandle {
+        self.proc.process_handle()
+    }
 }
 
 /// Per-run translation state. The `system/init` frame is consumed inside
