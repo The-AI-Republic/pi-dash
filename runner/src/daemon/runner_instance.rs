@@ -14,7 +14,8 @@ use tokio::sync::{mpsc, watch};
 use uuid::Uuid;
 
 use crate::approval::router::ApprovalRouter;
-use crate::cloud::protocol::{Envelope, ServerMsg};
+use crate::cloud::http::{AckEntry, InboundEnvelope, RunnerCloudClient};
+use crate::cloud::protocol::Envelope;
 use crate::config::schema::RunnerConfig;
 use crate::daemon::runner_out::RunnerOut;
 use crate::daemon::state::StateHandle;
@@ -34,9 +35,12 @@ pub struct RunnerInstance {
     pub paths: RunnerPaths,
     pub state: StateHandle,
     pub approvals: ApprovalRouter,
+    pub client: Option<RunnerCloudClient>,
     pub out: RunnerOut,
-    pub mailbox_tx: mpsc::Sender<Envelope<ServerMsg>>,
-    pub mailbox_rx: Arc<tokio::sync::Mutex<Option<mpsc::Receiver<Envelope<ServerMsg>>>>>,
+    pub mailbox_tx: mpsc::Sender<InboundEnvelope>,
+    pub mailbox_rx: Arc<tokio::sync::Mutex<Option<mpsc::Receiver<InboundEnvelope>>>>,
+    pub ack_tx: mpsc::UnboundedSender<AckEntry>,
+    pub ack_rx: Arc<tokio::sync::Mutex<Option<mpsc::UnboundedReceiver<AckEntry>>>>,
     /// Latched when this instance is being torn down (today: only on
     /// `ServerMsg::RemoveRunner`). Background tasks subscribe and exit
     /// even if they weren't parked at the exact moment the signal was
@@ -54,6 +58,30 @@ impl RunnerInstance {
         out_tx: mpsc::Sender<Envelope<crate::cloud::protocol::ClientMsg>>,
     ) -> Self {
         let runner_id = config.runner_id;
+        Self::new_with_out(config, paths, RunnerOut::new(runner_id, out_tx), None)
+    }
+
+    pub fn new_http(config: RunnerConfig, paths: &Paths, client: RunnerCloudClient) -> Self {
+        Self::new_with_out(
+            config,
+            paths,
+            RunnerOut::new_http(client.clone()),
+            Some(client),
+        )
+    }
+
+    pub fn new_offline(config: RunnerConfig, paths: &Paths) -> Self {
+        let runner_id = config.runner_id;
+        Self::new_with_out(config, paths, RunnerOut::offline(runner_id), None)
+    }
+
+    fn new_with_out(
+        config: RunnerConfig,
+        paths: &Paths,
+        out: RunnerOut,
+        client: Option<RunnerCloudClient>,
+    ) -> Self {
+        let runner_id = config.runner_id;
         let name = config.name.clone();
         let runner_paths = paths.for_runner(runner_id);
         // Each instance gets its own StateHandle so per-runner status
@@ -66,8 +94,8 @@ impl RunnerInstance {
             runners: vec![config.clone()],
         });
         let approvals = ApprovalRouter::new();
-        let out = RunnerOut::new(runner_id, out_tx);
         let (mailbox_tx, mailbox_rx) = mpsc::channel(INSTANCE_MAILBOX_DEPTH);
+        let (ack_tx, ack_rx) = mpsc::unbounded_channel();
         let (remove_tx, _remove_rx) = watch::channel(false);
         Self {
             runner_id,
@@ -76,9 +104,12 @@ impl RunnerInstance {
             paths: runner_paths,
             state,
             approvals,
+            client,
             out,
             mailbox_tx,
             mailbox_rx: Arc::new(tokio::sync::Mutex::new(Some(mailbox_rx))),
+            ack_tx,
+            ack_rx: Arc::new(tokio::sync::Mutex::new(Some(ack_rx))),
             remove_tx,
         }
     }
@@ -86,7 +117,11 @@ impl RunnerInstance {
     /// Take the mailbox receiver. Called once by the supervisor when it
     /// spawns this instance's `RunnerLoop`. Subsequent calls return None
     /// — the receiver is single-consumer.
-    pub async fn take_mailbox_rx(&self) -> Option<mpsc::Receiver<Envelope<ServerMsg>>> {
+    pub async fn take_mailbox_rx(&self) -> Option<mpsc::Receiver<InboundEnvelope>> {
         self.mailbox_rx.lock().await.take()
+    }
+
+    pub async fn take_ack_rx(&self) -> Option<mpsc::UnboundedReceiver<AckEntry>> {
+        self.ack_rx.lock().await.take()
     }
 }

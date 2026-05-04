@@ -18,6 +18,10 @@ export interface IPod {
   description: string;
   is_default: boolean;
   workspace: string;
+  /** Project FK uuid that owns this pod. */
+  project: string;
+  /** Project's human-friendly identifier (slug), e.g. ``BROWSERXTE``. */
+  project_identifier: string;
   created_by: string | null;
   runner_count: number;
   created_at: string;
@@ -64,6 +68,23 @@ export interface IConnection {
  * enrollment token. ``enrollment_token`` is shown to the user exactly
  * once — there's no way to recover it after dismissal. */
 export interface IConnectionWithToken extends IConnection {
+  enrollment_token: string;
+  enrollment_expires_at: string;
+}
+
+/** ``POST /api/runners/invites/`` response — per-runner enrollment
+ * invite. Each runner gets its own one-time token that the daemon
+ * exchanges for a long-lived refresh token via ``pidash connect``.
+ * The token is shown to the user once; if dismissed it's unrecoverable
+ * and the pending runner row has to be deleted to mint a new one.
+ * See ``.ai_design/move_to_https/design.md`` §5.1.
+ */
+export interface IRunnerInvite {
+  runner_id: string;
+  name: string;
+  workspace_slug: string;
+  project_identifier: string;
+  pod_id: string;
   enrollment_token: string;
   enrollment_expires_at: string;
 }

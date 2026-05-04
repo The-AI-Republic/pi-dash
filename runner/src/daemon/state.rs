@@ -188,3 +188,70 @@ impl StateHandle {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn empty_state() -> StateHandle {
+        StateHandle::new(Config {
+            version: 2,
+            daemon: Default::default(),
+            runners: vec![],
+        })
+    }
+
+    fn summary(run_id: Uuid, status: &str) -> CurrentRunSummary {
+        CurrentRunSummary {
+            run_id,
+            thread_id: None,
+            status: status.to_string(),
+            started_at: Utc::now(),
+            events: 0,
+        }
+    }
+
+    #[tokio::test]
+    async fn set_current_run_propagates_to_rx_in_flight() {
+        let state = empty_state();
+        assert_eq!(*state.rx_in_flight.borrow(), None);
+
+        let rid = Uuid::new_v4();
+        state.set_current_run(Some(summary(rid, "preparing"))).await;
+        assert_eq!(*state.rx_in_flight.borrow(), Some(rid));
+
+        state.set_current_run(None).await;
+        assert_eq!(*state.rx_in_flight.borrow(), None);
+    }
+
+    #[tokio::test]
+    async fn re_stamping_same_run_id_does_not_flicker_through_none() {
+        // Supervisor stamps `Some(rid)` early on Assign; the worker
+        // re-stamps with a richer summary ~30s later. The watch must not
+        // toggle through None in between, otherwise a session-open in
+        // that window would Hello with `in_flight_run=null` and the
+        // cloud reaper would kill the run.
+        let state = empty_state();
+        let rid = Uuid::new_v4();
+
+        state.set_current_run(Some(summary(rid, "preparing"))).await;
+        let mut rx = state.rx_in_flight.clone();
+        assert_eq!(*rx.borrow(), Some(rid));
+
+        state.set_current_run(Some(summary(rid, "starting"))).await;
+        // After the second stamp, the value is still `Some(rid)`. The
+        // watch tx doesn't suppress same-value sends — we only assert
+        // the visible state never went through None, by checking the
+        // borrow is still Some(rid).
+        assert_eq!(*rx.borrow(), Some(rid));
+
+        // And rx_status stays Busy across the re-stamp.
+        assert!(matches!(*state.rx_status.borrow(), RunnerStatus::Busy));
+
+        // Drain any backlog and confirm no None ever showed up.
+        while rx.has_changed().unwrap_or(false) {
+            let v = *rx.borrow_and_update();
+            assert_eq!(v, Some(rid), "rx_in_flight transitioned to None mid-stream");
+        }
+    }
+}

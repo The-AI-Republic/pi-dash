@@ -21,24 +21,10 @@ from pi_dash.db.models.project import Project
 from pi_dash.runner.models import (
     AgentRun,
     AgentRunStatus,
-    Connection,
     Pod,
     Runner,
     RunnerStatus,
 )
-
-
-def _make_connection(user, workspace, name) -> Connection:
-    from django.utils import timezone
-
-    return Connection.objects.create(
-        workspace=workspace,
-        created_by=user,
-        name=name,
-        secret_hash=f"sh-{name}",
-        secret_fingerprint=name[:12].ljust(12, "x")[:12],
-        enrolled_at=timezone.now(),
-    )
 
 
 @pytest.fixture
@@ -280,9 +266,6 @@ def test_delete_blocked_when_pod_has_runners(
         owner=create_user,
         workspace=project.workspace,
         pod=pod,
-        connection=_make_connection(
-            create_user, project.workspace, name="connection_pod_runner"
-        ),
         name="r-in-pod",
     )
     resp = session_client.delete(f"/api/runners/pods/{pod.id}/")

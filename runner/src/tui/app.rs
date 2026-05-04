@@ -1384,9 +1384,9 @@ fn register_form_advance_focus(form: &mut RegisterForm, forward: bool) {
 }
 
 /// Submit the General-tab enrollment form. Equivalent to running
-/// ``pidash connect --url … --token …`` from the shell: enrolls the
-/// machine as a Connection, writes credentials, installs + starts the
-/// service. Runners are added separately from the Runners tab.
+/// ``pidash connect --url … --token …`` from the shell: enrolls one
+/// runner, writes its per-runner credentials, and installs + starts
+/// the service.
 async fn submit_register_form(state: &mut AppState) {
     let Some(form) = state.register_form.as_mut() else {
         return;
@@ -1405,14 +1405,24 @@ async fn submit_register_form(state: &mut AppState) {
     form.busy = true;
     form.error = None;
 
-    let req = crate::cloud::enroll::EnrollmentRequest {
-        token: token.clone(),
-        host_label: host_label.clone(),
-        os: std::env::consts::OS.to_string(),
-        arch: std::env::consts::ARCH.to_string(),
-        version: crate::RUNNER_VERSION.to_string(),
+    let transport = match crate::cloud::http::SharedHttpTransport::new(cloud_url.clone()) {
+        Ok(t) => t,
+        Err(e) => {
+            if let Some(form) = state.register_form.as_mut() {
+                form.busy = false;
+                form.error = Some(format!("transport setup failed: {e:#}"));
+            }
+            return;
+        }
     };
-    let resp = match crate::cloud::enroll::enroll(&cloud_url, &req).await {
+    let resp = match crate::cloud::http::enroll_runner(
+        &transport,
+        &token,
+        &host_label,
+        None,
+    )
+    .await
+    {
         Ok(r) => r,
         Err(e) => {
             if let Some(form) = state.register_form.as_mut() {
@@ -1430,7 +1440,20 @@ async fn submit_register_form(state: &mut AppState) {
             log_level: "info".to_string(),
             log_retention_days: 14,
         },
-        runners: Vec::new(),
+        runners: vec![crate::config::schema::RunnerConfig {
+            name: resp.runner_name.clone(),
+            runner_id: resp.runner_id,
+            workspace_slug: Some(resp.workspace_slug.clone()),
+            project_slug: Some(resp.project_identifier.clone()),
+            pod_id: None,
+            workspace: crate::config::schema::WorkspaceSection {
+                working_dir: state.paths.runner_dir(resp.runner_id).join("workspace"),
+            },
+            agent: Default::default(),
+            codex: Default::default(),
+            claude_code: Default::default(),
+            approval_policy: Default::default(),
+        }],
     };
     if let Err(e) = crate::config::file::write_config(&state.paths, &cfg) {
         if let Some(form) = state.register_form.as_mut() {
@@ -1439,17 +1462,42 @@ async fn submit_register_form(state: &mut AppState) {
         }
         return;
     }
+    let runner_paths = state.paths.for_runner(resp.runner_id);
+    if let Err(e) = runner_paths.ensure() {
+        if let Some(form) = state.register_form.as_mut() {
+            form.busy = false;
+            form.error = Some(format!("creating runner data dir: {e:#}"));
+        }
+        return;
+    }
+    if let Err(e) = crate::cloud::http::write_runner_credentials(
+        runner_paths.credentials_path(),
+        crate::cloud::http::RunnerCredentials {
+            runner_id: resp.runner_id,
+            name: resp.runner_name.clone(),
+            refresh_token: resp.refresh_token.clone(),
+            refresh_token_generation: resp.refresh_token_generation,
+        },
+    )
+    .await
+    {
+        if let Some(form) = state.register_form.as_mut() {
+            form.busy = false;
+            form.error = Some(format!("writing runner credentials.toml: {e:#}"));
+        }
+        return;
+    }
     let creds = crate::config::schema::Credentials {
-        connection_id: resp.connection_id,
-        connection_secret: resp.connection_secret,
-        connection_name: None,
+        connection_id: resp.runner_id,
+        connection_secret: String::new(),
+        connection_name: Some(resp.runner_name.clone()),
         api_token: None,
         issued_at: chrono::Utc::now(),
     };
     if let Err(e) = crate::config::file::write_credentials(&state.paths, &creds) {
         if let Some(form) = state.register_form.as_mut() {
             form.busy = false;
-            form.error = Some(format!("writing credentials.toml: {e:#}"));
+            form.error = Some(format!("writing legacy credentials.toml: {e:#}"));
         }
         return;
     }

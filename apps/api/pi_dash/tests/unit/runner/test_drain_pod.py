@@ -19,7 +19,6 @@ from django.utils import timezone
 from pi_dash.runner.models import (
     AgentRun,
     AgentRunStatus,
-    Connection,
     Pod,
     Runner,
     RunnerStatus,
@@ -32,24 +31,11 @@ def pod(project):
     return Pod.default_for_project(project)
 
 
-def _make_connection(user, workspace, name) -> Connection:
-    return Connection.objects.create(
-        workspace=workspace,
-        created_by=user,
-        name=name,
-        secret_hash=f"sh-{name}",
-        secret_fingerprint=name[:12].ljust(12, "x")[:12],
-        enrolled_at=timezone.now(),
-    )
-
-
 def _make_runner(user, workspace, pod, name, online=True, heartbeat_ago_s=1):
-    connection = _make_connection(user, workspace, name=f"connection_{name}")
     return Runner.objects.create(
         owner=user,
         workspace=workspace,
         pod=pod,
-        connection=connection,
         name=name,
         status=(
             RunnerStatus.ONLINE if online else RunnerStatus.OFFLINE
