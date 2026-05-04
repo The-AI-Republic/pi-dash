@@ -138,6 +138,7 @@ mod tests {
                 agent_observability_v1: false,
             },
             runners: vec![sample_runner("t", tmp.path().join("wd"))],
+            cli: None,
         };
         write_config(&paths, &cfg).unwrap();
         let loaded = load_config(&paths).unwrap();

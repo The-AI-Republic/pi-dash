@@ -92,6 +92,7 @@ impl RunnerInstance {
             version: 2,
             daemon: Default::default(),
             runners: vec![config.clone()],
+            cli: None,
         });
         let approvals = ApprovalRouter::new();
         let (mailbox_tx, mailbox_rx) = mpsc::channel(INSTANCE_MAILBOX_DEPTH);

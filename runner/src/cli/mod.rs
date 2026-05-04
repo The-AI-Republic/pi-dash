@@ -119,10 +119,10 @@ pub async fn run(cli: Cli) -> Result<()> {
         Command::Tui(args) => tui::run(args, &paths).await,
         Command::Doctor(args) => doctor::run(args, &paths).await,
         Command::Remove(args) => remove::run(args, &paths).await,
-        Command::Issue(args) => run_crud(issue::run(args).await),
-        Command::Comment(args) => run_crud(comment::run(args).await),
-        Command::State(args) => run_crud(state::run(args).await),
-        Command::Workspace(args) => run_crud(workspace::run(args).await),
+        Command::Issue(args) => run_crud(issue::run(args, &paths).await),
+        Command::Comment(args) => run_crud(comment::run(args, &paths).await),
+        Command::State(args) => run_crud(state::run(args, &paths).await),
+        Command::Workspace(args) => run_crud(workspace::run(args, &paths).await),
         Command::Run(args) => run::run(args, &paths).await,
     }
 }
