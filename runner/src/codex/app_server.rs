@@ -2,12 +2,15 @@ use anyhow::{Context, Result};
 use chrono::Utc;
 use std::path::Path;
 use std::process::Stdio;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, ChildStdin, Command};
-use tokio::sync::{mpsc, watch};
+use tokio::sync::{Mutex, mpsc, watch};
 
-use crate::agent::{AgentProcessHandle, ExitSnapshot};
+use crate::agent::{
+    AgentProcessHandle, ExitSnapshot, STDERR_RING_LINES, StderrBuffer, StderrRing, StderrSnapshot,
+};
 use crate::codex::jsonrpc::Incoming;
 use crate::util::shell::{is_benign_login_shell_warning, login_shell_command};
 
@@ -26,6 +29,7 @@ pub struct AppServer {
     pub inbound: mpsc::Receiver<Incoming>,
     kill_tx: mpsc::Sender<KillRequest>,
     exit_rx: watch::Receiver<Option<ExitSnapshot>>,
+    stderr_ring: StderrRing,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -59,8 +63,9 @@ impl AppServer {
         let pid = child.id();
 
         let (tx, rx) = mpsc::channel(128);
+        let stderr_ring: StderrRing = Arc::new(Mutex::new(StderrBuffer::new(STDERR_RING_LINES)));
         tokio::spawn(read_frames(stdout, tx.clone()));
-        tokio::spawn(drain_stderr(stderr));
+        tokio::spawn(drain_stderr(stderr, stderr_ring.clone()));
 
         let (kill_tx, kill_rx) = mpsc::channel::<KillRequest>(2);
         let (exit_tx, exit_rx) = watch::channel::<Option<ExitSnapshot>>(None);
@@ -73,7 +78,16 @@ impl AppServer {
             inbound: rx,
             kill_tx,
             exit_rx,
+            stderr_ring,
         })
+    }
+
+    /// Snapshot the recent stderr lines (up to `STDERR_RING_LINES`)
+    /// plus the running tally of rejected noise lines. Used by the
+    /// supervisor when emitting a `RunFailed` so the cloud has some
+    /// chance of telling the user *why* an agent went silent.
+    pub async fn recent_stderr(&self) -> StderrSnapshot {
+        self.stderr_ring.lock().await.snapshot()
     }
 
     pub fn alloc_id(&self) -> u64 {
@@ -203,7 +217,7 @@ async fn read_frames(stdout: tokio::process::ChildStdout, tx: mpsc::Sender<Incom
     }
 }
 
-async fn drain_stderr(stderr: tokio::process::ChildStderr) {
+async fn drain_stderr(stderr: tokio::process::ChildStderr, ring: StderrRing) {
     // The login-shell wrapper (see `util::shell`) always emits two TTY-less
     // diagnostics before exec'ing codex; suppress those so the debug stream
     // only carries real codex output.
@@ -219,6 +233,7 @@ async fn drain_stderr(stderr: tokio::process::ChildStderr) {
                     continue;
                 }
                 tracing::debug!(target: "codex.stderr", "{trimmed}");
+                ring.lock().await.push(trimmed);
             }
             Err(e) => {
                 tracing::warn!("codex stderr read error: {e}");
