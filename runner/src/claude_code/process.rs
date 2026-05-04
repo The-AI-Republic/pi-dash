@@ -3,25 +3,40 @@
 //! instead of JSON-RPC.
 
 use anyhow::{Context, Result};
+use chrono::Utc;
 use std::path::Path;
 use std::process::Stdio;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, ChildStdin, Command};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, watch};
 
+use crate::agent::{AgentProcessHandle, ExitSnapshot};
 use crate::claude_code::schema::StreamEvent;
 use crate::util::shell::{is_benign_login_shell_warning, login_shell_command};
 
 /// Handles the `claude --print --output-format stream-json` subprocess
 /// lifecycle. Owns stdin (so we can push the user turn + signal EOF) and
 /// exposes an mpsc receiver of parsed events coming off stdout.
+///
+/// Mirrors `AppServer`'s child-ownership split: `Child` is owned by an
+/// internal wait task, and `ClaudeProcess` retains side-channels
+/// (`kill_tx`, `exit_rx`). The `pid` is captured at spawn for SIGINT
+/// delivery and observability. See `.ai_design/runner_agent_bridge` §4.4.
 pub struct ClaudeProcess {
-    child: Child,
+    pid: Option<u32>,
     /// `Option` so we can `take()` stdin when the caller wants to half-close
     /// it (signalling end-of-input to Claude, which causes it to process the
     /// queued turn and exit).
     stdin: Option<ChildStdin>,
     pub inbound: mpsc::Receiver<StreamEvent>,
+    kill_tx: mpsc::Sender<KillRequest>,
+    exit_rx: watch::Receiver<Option<ExitSnapshot>>,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum KillRequest {
+    Graceful,
+    Force,
 }
 
 /// Arguments passed to `claude` for a run. The defaults below match the MVP
@@ -77,15 +92,33 @@ impl ClaudeProcess {
         let stdin = child.stdin.take().context("claude stdin missing")?;
         let stdout = child.stdout.take().context("claude stdout missing")?;
         let stderr = child.stderr.take().context("claude stderr missing")?;
+        let pid = child.id();
 
         let (tx, rx) = mpsc::channel(128);
         tokio::spawn(read_events(stdout, tx.clone()));
         tokio::spawn(drain_stderr(stderr));
+
+        let (kill_tx, kill_rx) = mpsc::channel::<KillRequest>(2);
+        let (exit_tx, exit_rx) = watch::channel::<Option<ExitSnapshot>>(None);
+        tokio::spawn(wait_task(child, kill_rx, exit_tx));
+
         Ok(Self {
-            child,
+            pid,
             stdin: Some(stdin),
             inbound: rx,
+            kill_tx,
+            exit_rx,
         })
+    }
+
+    /// Bridge-owned observability handle. PID was captured at spawn time;
+    /// `exit_rx` yields `Some(ExitSnapshot)` once the wait task observes
+    /// termination.
+    pub fn process_handle(&self) -> AgentProcessHandle {
+        AgentProcessHandle {
+            pid: self.pid,
+            exit_rx: self.exit_rx.clone(),
+        }
     }
 
     /// Send one JSON line (plus a newline) to Claude's stdin.
@@ -104,18 +137,18 @@ impl ClaudeProcess {
     }
 
     /// Best-effort interrupt: send SIGINT if we can, otherwise fall back to
-    /// SIGKILL via `start_kill`. Unlike Codex there's no in-protocol
+    /// SIGKILL via the kill channel. Unlike Codex there's no in-protocol
     /// `turn/interrupt` — the only lever we have is the OS.
     pub async fn interrupt(&mut self) -> Result<()> {
         #[cfg(unix)]
         {
             use nix::sys::signal::{Signal, kill};
             use nix::unistd::Pid;
-            if let Some(pid) = self.child.id() {
-                let pid = Pid::from_raw(pid as i32);
+            if let Some(pid) = self.pid {
+                let pid_t = Pid::from_raw(pid as i32);
                 // SIGINT is usually enough; the kill_on_drop on the child
                 // catches any process that ignores it when we later drop.
-                match kill(pid, Signal::SIGINT) {
+                match kill(pid_t, Signal::SIGINT) {
                     Ok(()) => return Ok(()),
                     Err(e) => {
                         // Reaped, permission denied, PID-namespace mismatch —
@@ -127,25 +160,82 @@ impl ClaudeProcess {
             }
         }
         // Non-unix, pid-already-reaped, or SIGINT failure above.
-        self.child
-            .start_kill()
-            .context("failed to kill claude subprocess")?;
+        self.kill_tx
+            .send(KillRequest::Force)
+            .await
+            .context("failed to send kill request to claude wait task")?;
         Ok(())
     }
 
     pub async fn shutdown(mut self, grace: std::time::Duration) -> Result<()> {
         self.close_stdin();
-        match tokio::time::timeout(grace, self.child.wait()).await {
-            Ok(Ok(status)) => {
-                tracing::debug!(?status, "claude exited gracefully");
+        let _ = self.kill_tx.send(KillRequest::Graceful).await;
+        match tokio::time::timeout(grace, self.exit_rx.changed()).await {
+            Ok(Ok(())) => {
+                let snap = self.exit_rx.borrow().clone();
+                tracing::debug!(?snap, "claude exited gracefully");
             }
             _ => {
                 tracing::warn!("claude did not exit within grace; sending SIGKILL");
-                self.child.start_kill().ok();
-                self.child.wait().await.ok();
+                let _ = self.kill_tx.send(KillRequest::Force).await;
+                let _ = self.exit_rx.changed().await;
             }
         }
         Ok(())
+    }
+}
+
+/// Owns the `Child` exclusively. Awaits either a kill request (force-kill
+/// the subprocess) or the child's natural exit, then publishes an
+/// `ExitSnapshot` and terminates.
+async fn wait_task(
+    mut child: Child,
+    mut kill_rx: mpsc::Receiver<KillRequest>,
+    exit_tx: watch::Sender<Option<ExitSnapshot>>,
+) {
+    let snapshot = loop {
+        tokio::select! {
+            biased;
+            req = kill_rx.recv() => {
+                match req {
+                    Some(KillRequest::Force) => {
+                        let _ = child.start_kill();
+                    }
+                    Some(KillRequest::Graceful) => {
+                        // No-op: wait for natural exit.
+                    }
+                    None => {
+                        // All senders dropped — recv will resolve to None
+                        // synchronously every iteration. Stop polling the
+                        // recv arm and just await natural exit, otherwise
+                        // the biased select! would spin on the closed
+                        // channel without ever polling child.wait().
+                        let res = child.wait().await;
+                        break exit_snapshot_from(res.ok());
+                    }
+                }
+            }
+            res = child.wait() => {
+                break exit_snapshot_from(res.ok());
+            }
+        }
+    };
+    let _ = exit_tx.send(Some(snapshot));
+}
+
+fn exit_snapshot_from(status: Option<std::process::ExitStatus>) -> ExitSnapshot {
+    #[cfg(unix)]
+    let signal = {
+        use std::os::unix::process::ExitStatusExt;
+        status.as_ref().and_then(|s| s.signal())
+    };
+    #[cfg(not(unix))]
+    let signal: Option<i32> = None;
+    let status_code = status.as_ref().and_then(|s| s.code());
+    ExitSnapshot {
+        status_code,
+        signal,
+        observed_at: Utc::now(),
     }
 }
 

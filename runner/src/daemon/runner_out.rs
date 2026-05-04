@@ -53,7 +53,9 @@ impl RunnerOut {
                 .send(env)
                 .await
                 .map_err(|e| anyhow!("cloud sender dropped: {e}")),
-            RunnerOutInner::Http(client) => client.dispatch_client_msg(env).await.map_err(Into::into),
+            RunnerOutInner::Http(client) => {
+                client.dispatch_client_msg(env).await.map_err(Into::into)
+            }
             RunnerOutInner::Offline => Ok(()),
         }
     }
@@ -64,9 +66,9 @@ impl RunnerOut {
                 .send(Envelope::new(body))
                 .await
                 .map_err(|e| anyhow!("cloud sender dropped: {e}")),
-            RunnerOutInner::Http(_) => {
-                Err(anyhow!("connection-scoped frames are unsupported on HTTP transport"))
-            }
+            RunnerOutInner::Http(_) => Err(anyhow!(
+                "connection-scoped frames are unsupported on HTTP transport"
+            )),
             RunnerOutInner::Offline => Ok(()),
         }
     }

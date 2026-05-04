@@ -197,7 +197,12 @@ impl Picker {
             ])
             .split(popup);
 
-        let title = format!(" {} ({} of {}) ", self.title, self.filtered.len(), self.rows.len());
+        let title = format!(
+            " {} ({} of {}) ",
+            self.title,
+            self.filtered.len(),
+            self.rows.len()
+        );
         let filter_line = if self.filter.is_empty() {
             Line::from(Span::styled(
                 "type to filter — ↑/↓ move — Enter select — Esc cancel",
@@ -233,10 +238,7 @@ impl Picker {
             })
             .collect();
         let list = List::new(items)
-            .block(
-                Block::default()
-                    .borders(Borders::BOTTOM | Borders::LEFT | Borders::RIGHT),
-            )
+            .block(Block::default().borders(Borders::BOTTOM | Borders::LEFT | Borders::RIGHT))
             // Leading symbol + REVERSED + BOLD so the cursor is
             // unambiguous on every terminal theme — REVERSED-only is
             // hard to spot against some palettes.
