@@ -347,6 +347,7 @@ mod tests {
                 agent_observability_v1: false,
             },
             runners,
+            cli: None,
         }
     }
 
