@@ -27,8 +27,8 @@ pub enum StateCommand {
     },
 }
 
-pub async fn run(args: StateArgs) -> i32 {
-    let env = match CliEnv::from_env() {
+pub async fn run(args: StateArgs, paths: &crate::util::paths::Paths) -> i32 {
+    let env = match CliEnv::resolve(paths) {
         Ok(e) => e,
         Err(e) => return report_error(&e),
     };

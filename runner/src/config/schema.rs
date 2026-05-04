@@ -11,6 +11,31 @@ pub struct Config {
     /// daemon; will grow once the cap is lifted (design.md §16).
     #[serde(default, rename = "runner")]
     pub runners: Vec<RunnerConfig>,
+    /// CLI-side configuration consumed by the `pidash issue/comment/
+    /// state/workspace` subcommands when invoked by the agent (or by the
+    /// operator out-of-band). Optional so older configs still parse;
+    /// missing means "fall back to environment variables".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cli: Option<CliSection>,
+}
+
+/// Top-level `[cli]` table. Holds the auth token the `pidash` CRUD
+/// subcommands present to the cloud. The CLI also reads `cloud_url`
+/// from `[daemon]` and `workspace_slug` from the primary `[[runner]]`
+/// — there's deliberately no duplication of those values here.
+///
+/// For v1 the token is populated manually by the operator (or by a
+/// future `pidash login` flow). A per-run, per-issue scoped token
+/// minted by the cloud is the next step; see
+/// `.ai_design/agent_cli_auth/` (TBD).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct CliSection {
+    /// Auth token presented to the cloud as `Authorization: Bearer …`
+    /// by the CRUD subcommands. Optional so a partial config (URL +
+    /// workspace, no token) still parses; the CLI errors with a clear
+    /// "no token" message when it's missing at command time.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -443,6 +468,7 @@ mod tests {
                 agent_observability_v1: false,
             },
             runners,
+            cli: None,
         }
     }
 

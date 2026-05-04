@@ -333,6 +333,7 @@ mod tests {
             version: 2,
             daemon: Default::default(),
             runners: vec![],
+            cli: None,
         })
     }
 

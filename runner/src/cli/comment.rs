@@ -56,8 +56,8 @@ pub enum CommentCommand {
     },
 }
 
-pub async fn run(args: CommentArgs) -> i32 {
-    let env = match CliEnv::from_env() {
+pub async fn run(args: CommentArgs, paths: &crate::util::paths::Paths) -> i32 {
+    let env = match CliEnv::resolve(paths) {
         Ok(e) => e,
         Err(e) => return report_error(&e),
     };
