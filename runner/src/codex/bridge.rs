@@ -13,8 +13,8 @@ use crate::cloud::protocol::{ApprovalDecision, ApprovalKind, FailureReason};
 use crate::codex::app_server::AppServer;
 use crate::codex::jsonrpc::{self, Incoming};
 use crate::codex::schema::{
-    ApprovalResponseParams, ClientInfo, InitializeParams, NotificationKind, ThreadResumeParams,
-    ThreadStartParams, TurnInputItem, TurnStartParams,
+    ApprovalResponseParams, ClientInfo, InitializeParams, NotificationKind, ThreadStartParams,
+    TurnInputItem, TurnStartParams,
 };
 
 pub struct Bridge {
@@ -58,11 +58,7 @@ impl Bridge {
 
     pub async fn run(&mut self, payload: &RunPayload, cwd: &Path) -> Result<BridgeCursor> {
         self.initialize().await?;
-        let thread_id = if let Some(existing) = &payload.resume_thread_id {
-            self.resume_thread(existing).await?
-        } else {
-            self.start_thread(cwd).await?
-        };
+        let thread_id = self.start_thread(cwd).await?;
         self.start_turn(&thread_id, payload).await?;
         Ok(BridgeCursor {
             run_id: payload.run_id,
@@ -113,32 +109,6 @@ impl Bridge {
             .and_then(|v| v.as_str())
             .map(|s| s.to_string())
             .context("thread/start missing threadId")
-    }
-
-    async fn resume_thread(&mut self, thread_id: &str) -> Result<String> {
-        let id = self.server.alloc_id();
-        let line = jsonrpc::request(
-            id,
-            "thread/resume",
-            &ThreadResumeParams {
-                thread_id: thread_id.to_string(),
-            },
-        )?;
-        self.server.send_raw(&line).await?;
-        match self.await_response(id, Duration::from_secs(30)).await {
-            Ok(_) => Ok(thread_id.to_string()),
-            Err(e) => {
-                // The Codex app-server returns an error when the thread id
-                // is unknown locally (session store wiped, runner reinstalled,
-                // id stale). Surface as a typed error so the supervisor can
-                // emit FailureReason::ResumeUnavailable rather than the
-                // generic CodexCrash, and the cloud can drop the pin.
-                Err(anyhow::Error::new(crate::agent::ResumeUnavailable {
-                    thread_id: thread_id.to_string(),
-                    detail: format!("{e:#}"),
-                }))
-            }
-        }
     }
 
     async fn start_turn(&mut self, thread_id: &str, payload: &RunPayload) -> Result<()> {
