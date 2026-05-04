@@ -20,7 +20,9 @@ pub async fn write_unit(paths: &Paths) -> Result<()> {
     let exe_str = super::validate_path_for_unit(&exe)?;
     let config_dir = super::validate_path_for_unit(&paths.config_dir)?;
     let data_dir = super::validate_path_for_unit(&paths.data_dir)?;
-    let body = render_unit(exe_str, config_dir, data_dir);
+    // See `service::capture_install_time_path` for why we bake $PATH in.
+    let path_env = super::capture_install_time_path();
+    let body = render_unit(exe_str, config_dir, data_dir, path_env.as_deref());
     tokio::fs::write(&unit_path, body).await?;
     run_systemctl(&["daemon-reload"]).await?;
     println!("installed systemd unit at {}", unit_path.display());
@@ -32,7 +34,21 @@ pub async fn write_unit(paths: &Paths) -> Result<()> {
 /// daemon + CLI client both derive the socket path from that via
 /// `ProjectDirs`. Overriding it here once caused a double `pidash/` path
 /// component and left the client unable to reach the daemon.
-fn render_unit(exe: &str, config_dir: &str, data_dir: &str) -> String {
+///
+/// `path_env`, when `Some`, is rendered as an `Environment=PATH=...` line
+/// so the daemon (and every subprocess it forks) inherits the operator's
+/// interactive PATH instead of `systemd --user`'s minimal default. See
+/// `service::capture_install_time_path` for the full rationale.
+fn render_unit(
+    exe: &str,
+    config_dir: &str,
+    data_dir: &str,
+    path_env: Option<&str>,
+) -> String {
+    let path_line = match path_env {
+        Some(p) => format!("\nEnvironment=\"PATH={}\"", systemd_double_quoted_escape(p)),
+        None => String::new(),
+    };
     format!(
         r#"[Unit]
 Description=Pi Dash Runner
@@ -43,7 +59,7 @@ Wants=network-online.target
 Type=simple
 ExecStart={exe} __run
 Environment=PIDASH_CONFIG_DIR={config_dir}
-Environment=PIDASH_DATA_DIR={data_dir}
+Environment=PIDASH_DATA_DIR={data_dir}{path_line}
 Restart=on-failure
 RestartSec=5
 
@@ -51,6 +67,25 @@ RestartSec=5
 WantedBy=default.target
 "#
     )
+}
+
+/// Escape a value to be safe inside a systemd `Environment="KEY=VALUE"`
+/// directive. Per `man systemd.exec`, double-quoted values use C-style
+/// escapes; `"`, `\`, `$`, and backtick are the meaningful specials. Real
+/// PATH entries rarely contain any of these, but we escape them anyway so
+/// a pathological username (e.g. one with a `$`) can't corrupt the unit.
+fn systemd_double_quoted_escape(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    for c in value.chars() {
+        match c {
+            '\\' => out.push_str("\\\\"),
+            '"' => out.push_str("\\\""),
+            '$' => out.push_str("\\$"),
+            '`' => out.push_str("\\`"),
+            other => out.push(other),
+        }
+    }
+    out
 }
 
 /// Enable the unit at boot/login and bring it up. `restart` (not `start`) so
@@ -184,6 +219,7 @@ mod tests {
             "/home/user/.cargo/bin/pidash",
             "/home/user/.config/pidash",
             "/home/user/.local/share/pidash",
+            None,
         );
         assert!(
             !body.contains("XDG_RUNTIME_DIR"),
@@ -193,9 +229,47 @@ mod tests {
 
     #[test]
     fn unit_body_includes_exec_start_and_dirs() {
-        let body = render_unit("/bin/pidash", "/etc/pidash", "/var/lib/pidash");
+        let body = render_unit("/bin/pidash", "/etc/pidash", "/var/lib/pidash", None);
         assert!(body.contains("ExecStart=/bin/pidash __run"));
         assert!(body.contains("Environment=PIDASH_CONFIG_DIR=/etc/pidash"));
         assert!(body.contains("Environment=PIDASH_DATA_DIR=/var/lib/pidash"));
+    }
+
+    #[test]
+    fn unit_body_omits_path_when_not_captured() {
+        let body = render_unit("/bin/pidash", "/etc/pidash", "/var/lib/pidash", None);
+        assert!(
+            !body.contains("Environment=\"PATH=") && !body.contains("Environment=PATH="),
+            "unit body must not declare PATH when path_env is None; got:\n{body}"
+        );
+    }
+
+    #[test]
+    fn unit_body_bakes_in_path_when_provided() {
+        let body = render_unit(
+            "/bin/pidash",
+            "/etc/pidash",
+            "/var/lib/pidash",
+            Some("/home/user/.local/bin:/usr/local/bin:/usr/bin"),
+        );
+        assert!(
+            body.contains(
+                "Environment=\"PATH=/home/user/.local/bin:/usr/local/bin:/usr/bin\""
+            ),
+            "unit body must include captured PATH; got:\n{body}"
+        );
+    }
+
+    #[test]
+    fn systemd_escape_handles_specials() {
+        // Inside `Environment="..."`, systemd treats $, `, ", and \ as
+        // special. Anyone with a `$` in their username (rare but legal on
+        // Unix) would otherwise see systemd try to expand `$Username` in
+        // their PATH and silently mangle it.
+        assert_eq!(systemd_double_quoted_escape("a/b/c"), "a/b/c");
+        assert_eq!(systemd_double_quoted_escape("/foo$bar"), "/foo\\$bar");
+        assert_eq!(systemd_double_quoted_escape("/back`tick"), "/back\\`tick");
+        assert_eq!(systemd_double_quoted_escape("/quo\"ted"), "/quo\\\"ted");
+        assert_eq!(systemd_double_quoted_escape("a\\b"), "a\\\\b");
     }
 }
