@@ -164,6 +164,7 @@ pub async fn run(args: Args, paths: &Paths) -> Result<()> {
                 cloud_url: args.url.clone(),
                 log_level: "info".to_string(),
                 log_retention_days: 14,
+                agent_observability_v1: false,
             },
             runners: vec![new_runner_block],
         },
@@ -207,11 +208,16 @@ pub async fn run(args: Args, paths: &Paths) -> Result<()> {
         if outcome.ok {
             println!("Service restarted ({}).", outcome.summary);
         } else {
-            println!("Service restart did not complete cleanly: {}", outcome.summary);
+            println!(
+                "Service restart did not complete cleanly: {}",
+                outcome.summary
+            );
             if let Some(detail) = outcome.detail {
                 println!("\n{detail}");
             }
-            println!("\nThe runner config was written successfully. Try `pidash restart` manually.");
+            println!(
+                "\nThe runner config was written successfully. Try `pidash restart` manually."
+            );
             // Don't return Err — the cloud-side enrollment + local
             // config write succeeded; the restart hiccup is recoverable
             // by the operator and doesn't undo the work above.
@@ -292,8 +298,8 @@ fn assert_no_workspace_collision(
     let new_canon = std::fs::canonicalize(new_wd).unwrap_or_else(|_| new_wd.to_path_buf());
     for r in existing {
         let existing_path = &r.workspace.working_dir;
-        let existing_canon = std::fs::canonicalize(existing_path)
-            .unwrap_or_else(|_| existing_path.clone());
+        let existing_canon =
+            std::fs::canonicalize(existing_path).unwrap_or_else(|_| existing_path.clone());
         if existing_canon == new_canon {
             anyhow::bail!(
                 "runner {} ({}) already uses --working-dir {} — two runners cannot share \
@@ -406,12 +412,10 @@ mod tests {
     #[test]
     fn workspace_collision_rejects_new_nested_under_existing() {
         let existing = vec![runner_with_wd("a", PathBuf::from("/tmp/repo"))];
-        let err = assert_no_workspace_collision(
-            &existing,
-            std::path::Path::new("/tmp/repo/subproject"),
-        )
-        .unwrap_err()
-        .to_string();
+        let err =
+            assert_no_workspace_collision(&existing, std::path::Path::new("/tmp/repo/subproject"))
+                .unwrap_err()
+                .to_string();
         assert!(err.contains("nested"));
     }
 
@@ -438,8 +442,6 @@ mod tests {
     #[test]
     fn workspace_collision_allows_first_enrollment() {
         // No existing runners → nothing can collide.
-        assert!(
-            assert_no_workspace_collision(&[], std::path::Path::new("/tmp/repo")).is_ok()
-        );
+        assert!(assert_no_workspace_collision(&[], std::path::Path::new("/tmp/repo")).is_ok());
     }
 }

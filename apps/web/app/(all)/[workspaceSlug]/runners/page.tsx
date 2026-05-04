@@ -25,6 +25,7 @@ const STATUS_BADGE_VARIANT: Record<TRunnerStatus, TBadgeVariant> = {
   online: "accent-success",
   busy: "accent-primary",
   offline: "accent-neutral",
+  revoked: "accent-warning",
 };
 
 const RunnersListPage = observer(function RunnersListPage() {

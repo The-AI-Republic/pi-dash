@@ -94,3 +94,40 @@ def test_loop_returns_empty_without_calling_redis_when_deadline_expired():
     assert read_calls == [], (
         f"read_for_session must not be called when block_ms=0; got: {read_calls}"
     )
+
+
+@pytest.mark.unit
+def test_initial_pel_replay_still_reads_with_zero_budget():
+    """`use_zero=True` is a nonblocking PEL replay, not a long poll for `>`."""
+    endpoint = RunnerSessionPollEndpoint()
+    runner_id = "11111111-1111-1111-1111-111111111111"
+    session_id = "22222222-2222-2222-2222-222222222222"
+    replayed = [{"stream_id": "1-0", "type": "assign"}]
+    read_calls: list[dict[str, Any]] = []
+
+    def _spy_read_for_session(**kwargs):
+        read_calls.append(kwargs)
+        return replayed
+
+    with patch(
+        "pi_dash.runner.views.sessions.outbox.read_for_session",
+        side_effect=_spy_read_for_session,
+    ):
+        result = endpoint._read_with_eviction_awareness(
+            runner_id=runner_id,
+            session_id=session_id,
+            sid=session_id,
+            block_ms=0,
+            use_zero=True,
+        )
+
+    assert result == replayed
+    assert read_calls == [
+        {
+            "runner_id": runner_id,
+            "session_id": session_id,
+            "block_ms": 0,
+            "count": 100,
+            "use_zero": True,
+        }
+    ]

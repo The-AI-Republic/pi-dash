@@ -118,10 +118,7 @@ fn connection_card(state: &AppState) -> Paragraph<'_> {
             )]),
             Line::from(format!("Cloud URL: {}", s.daemon.cloud_url)),
             Line::from(format!("Uptime:    {}s", s.daemon.uptime_secs)),
-            Line::from(format!(
-                "Runners:   {} configured",
-                s.runners.len(),
-            )),
+            Line::from(format!("Runners:   {} configured", s.runners.len(),)),
         ],
         None => vec![Line::from(Span::styled(
             "Daemon IPC unreachable.",
@@ -129,11 +126,7 @@ fn connection_card(state: &AppState) -> Paragraph<'_> {
         ))],
     };
     Paragraph::new(lines)
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title(" Connection "),
-        )
+        .block(Block::default().borders(Borders::ALL).title(" Connection "))
         .wrap(Wrap { trim: true })
 }
 
@@ -159,10 +152,7 @@ fn daemon_settings_card(state: &AppState) -> Paragraph<'_> {
         Style::default().fg(Color::Gray)
     };
     let retention_value = if editing {
-        format!(
-            "{}▊",
-            state.config_edit_buffer.as_deref().unwrap_or("")
-        )
+        format!("{}▊", state.config_edit_buffer.as_deref().unwrap_or(""))
     } else {
         cfg.daemon.log_retention_days.to_string()
     };
@@ -180,7 +170,10 @@ fn daemon_settings_card(state: &AppState) -> Paragraph<'_> {
     let marker = |on: bool| if on { "▶" } else { " " };
     lines.push(Line::from(vec![
         Span::styled(
-            format!(" {} log_level         ", marker(state.tab_general_field == GeneralField::LogLevel)),
+            format!(
+                " {} log_level         ",
+                marker(state.tab_general_field == GeneralField::LogLevel)
+            ),
             Style::default().fg(Color::Cyan),
         ),
         Span::styled(cfg.daemon.log_level.clone(), log_level_style),
@@ -195,7 +188,10 @@ fn daemon_settings_card(state: &AppState) -> Paragraph<'_> {
     ]));
     lines.push(Line::from(vec![
         Span::styled(
-            format!(" {} log_retention_days ", marker(state.tab_general_field == GeneralField::LogRetentionDays)),
+            format!(
+                " {} log_retention_days ",
+                marker(state.tab_general_field == GeneralField::LogRetentionDays)
+            ),
             Style::default().fg(Color::Cyan),
         ),
         Span::styled(retention_value, retention_style),
