@@ -1432,6 +1432,7 @@ async fn submit_register_form(state: &mut AppState) {
             claude_code: Default::default(),
             approval_policy: Default::default(),
         }],
+        cli: None,
     };
     if let Err(e) = crate::config::file::write_config(&state.paths, &cfg) {
         if let Some(form) = state.register_form.as_mut() {

@@ -1599,6 +1599,7 @@ mod tests {
             version: 2,
             daemon: Default::default(),
             runners: vec![],
+            cli: None,
         });
         let task = tokio::spawn(async move {
             hello_emitter(runners, connected_for_task, daemon_state).await;

@@ -53,8 +53,8 @@ pub struct PatchArgs {
     pub priority: Option<String>,
 }
 
-pub async fn run(args: IssueArgs) -> i32 {
-    let env = match CliEnv::from_env() {
+pub async fn run(args: IssueArgs, paths: &crate::util::paths::Paths) -> i32 {
+    let env = match CliEnv::resolve(paths) {
         Ok(e) => e,
         Err(e) => return report_error(&e),
     };

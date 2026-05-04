@@ -167,6 +167,7 @@ pub async fn run(args: Args, paths: &Paths) -> Result<()> {
                 agent_observability_v1: false,
             },
             runners: vec![new_runner_block],
+            cli: None,
         },
     };
     file::write_config(paths, &config)?;
