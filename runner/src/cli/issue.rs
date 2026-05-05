@@ -111,6 +111,9 @@ async fn cmd_get(client: &ApiClient, identifier: &str) -> Result<(), CliError> {
 }
 
 async fn cmd_create(client: &ApiClient, args: CreateArgs) -> Result<(), CliError> {
+    if args.project.trim().is_empty() {
+        return Err(CliError::new(EXIT_INVALID, "--project must not be empty"));
+    }
     if args.title.trim().is_empty() {
         return Err(CliError::new(EXIT_INVALID, "--title must not be empty"));
     }
