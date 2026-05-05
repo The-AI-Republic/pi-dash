@@ -172,14 +172,24 @@ class Project(BaseModel):
             uuid.UUID(str(value))
             qs = cls.objects.filter(pk=value, workspace__slug=workspace_slug, deleted_at__isnull=True)
         except (ValueError, AttributeError, TypeError):
+            # `Project.save()` always normalizes `identifier` to upper, so an
+            # equality match on the upper-cased input uses the existing
+            # composite btree index from
+            # `project_unique_identifier_workspace_when_deleted_at_null`.
+            # Avoid `__iexact`: it expands to `UPPER(identifier) = UPPER($1)`
+            # and cannot use the plain btree, forcing a sequential scan on
+            # the hot path of every project-scoped REST request.
             qs = cls.objects.filter(
                 workspace__slug=workspace_slug,
-                identifier__iexact=str(value),
+                identifier=str(value).strip().upper(),
                 deleted_at__isnull=True,
             )
         project = qs.first()
         if project is None:
-            raise Http404(f"Project '{value}' not found in workspace '{workspace_slug}'")
+            # Generic message — DRF's `exception_handler` propagates Http404
+            # args into the response body via `NotFound(*exc.args)`, so do
+            # not echo `value` or `workspace_slug` to clients.
+            raise Http404("Project not found")
         return project
 
     @classmethod

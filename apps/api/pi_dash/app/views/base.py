@@ -52,6 +52,11 @@ def _rewrite_project_kwarg(view, kwargs):
     # pre-permission rewrite.
     from pi_dash.db.models.project import Project
 
+    # Skip resolution for unauthenticated requests — see api/views/base.py
+    # for full rationale (closes the slug-existence oracle).
+    if not view.request.user.is_authenticated:
+        return
+
     workspace_slug = kwargs.get("slug")
     if not workspace_slug:
         return

@@ -57,6 +57,14 @@ def _rewrite_project_kwarg(view, kwargs):
     # `slug` because the `view.workspace_slug` property already does the same.
     from pi_dash.db.models.project import Project
 
+    # Skip resolution for unauthenticated requests so anonymous callers can't
+    # probe slug existence via 404 (slug missing) vs 401 (auth missing).
+    # Accessing `request.user` triggers DRF's lazy authentication; the
+    # subsequent `super().initial()` -> `check_permissions` will still 401
+    # the unauthenticated case before any view code runs.
+    if not view.request.user.is_authenticated:
+        return
+
     workspace_slug = kwargs.get("slug")
     if not workspace_slug:
         return

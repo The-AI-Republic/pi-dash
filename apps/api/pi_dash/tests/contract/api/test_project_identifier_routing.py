@@ -92,12 +92,29 @@ class TestProjectIdentifierRouting:
         assert resp.status_code == status.HTTP_404_NOT_FOUND
 
     def test_mixed_case_slug_resolves(self, api_key_client, workspace, project_member):
-        # `Project.save()` uppercases identifier; resolver uses `__iexact` so
-        # lowercase input from a careless client still hits.
+        # `Project.save()` uppercases identifier; the resolver upper-cases the
+        # input before equality match, so lowercase from a careless client
+        # still hits the same row via the composite uniqueness btree.
         resp = api_key_client.get(
             f"/api/v1/workspaces/{workspace.slug}/projects/{project_member.identifier.lower()}/work-items/"
         )
         assert resp.status_code < 400
+
+    def test_anonymous_slug_returns_401_not_404(
+        self, api_client, workspace, project_member
+    ):
+        # Closes the slug-existence oracle: the kwarg-rewrite hook must skip
+        # resolution for unauthenticated requests so anonymous probes can't
+        # distinguish "slug missing" (404) from "auth missing" (401).
+        # Both a real slug and a known-bogus slug must yield the same 401.
+        real_resp = api_client.get(
+            f"/api/v1/workspaces/{workspace.slug}/projects/{project_member.identifier}/work-items/"
+        )
+        bogus_resp = api_client.get(
+            f"/api/v1/workspaces/{workspace.slug}/projects/ZZZZ/work-items/"
+        )
+        assert real_resp.status_code == status.HTTP_401_UNAUTHORIZED
+        assert bogus_resp.status_code == status.HTTP_401_UNAUTHORIZED
 
     def test_slug_does_not_leak_across_workspaces(
         self, db, api_key_client, workspace, project_member, create_user
