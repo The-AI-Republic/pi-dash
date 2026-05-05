@@ -104,6 +104,26 @@ services:
       args:
         DOCKER_BUILDKIT: 1
     restart: always
+    # Live needs API_BASE_URL + LIVE_SERVER_SECRET_KEY at runtime;
+    # without env_file it crash-loops with "Invalid environment variables".
+    env_file:
+      - ./apps/live/.env
+    # The .env at apps/live/.env points Redis at localhost (works for
+    # `pnpm dev` on the host). Inside docker-compose the actual host is
+    # pi-dash-redis; the explicit environment entries below shadow the
+    # .env values so the container connects to the compose-network
+    # service. API_BASE_URL gets the same docker-aware override so live
+    # talks to the api container, not the host.
+    environment:
+      REDIS_HOST: pi-dash-redis
+      REDIS_PORT: 6379
+      REDIS_URL: redis://pi-dash-redis:6379/
+      API_BASE_URL: http://api:8000
+    # pi-dash-redis lives on the dev_env network defined in
+    # docker-compose-local.yml; without joining it, live's getaddrinfo
+    # for pi-dash-redis fails (EAI_AGAIN).
+    networks:
+      - dev_env
 
   pi-dash-db:
     container_name: pi-dash-db
@@ -164,6 +184,15 @@ services:
     environment:
       FILE_SIZE_LIMIT: ${FILE_SIZE_LIMIT:-5242880}
       BUCKET_NAME: ${AWS_S3_BUCKET_NAME:-uploads}
+      # Caddy substitutes {$SITE_ADDRESS} into the site block address.
+      # Without it, the line collapses to an empty unkeyed block which
+      # Caddy 2.10's parser rejects with "server block without any key
+      # is global configuration, and if used, it must be first".
+      SITE_ADDRESS: ${SITE_ADDRESS:-:80}
+      CERT_EMAIL: ${CERT_EMAIL:-}
+      CERT_ACME_CA: ${CERT_ACME_CA:-https://acme-v02.api.letsencrypt.org/directory}
+      CERT_ACME_DNS: ${CERT_ACME_DNS:-}
+      TRUSTED_PROXIES: ${TRUSTED_PROXIES:-0.0.0.0/0}
     depends_on:
       - web
       - api

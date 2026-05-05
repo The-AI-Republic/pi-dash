@@ -344,8 +344,10 @@ mod tests {
                 cloud_url: "http://127.0.0.1:1".into(),
                 log_level: "info".into(),
                 log_retention_days: 14,
+                agent_observability_v1: false,
             },
             runners,
+            cli: None,
         }
     }
 

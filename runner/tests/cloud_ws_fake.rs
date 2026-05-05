@@ -64,7 +64,6 @@ async fn start_fake_cloud() -> (SocketAddr, tokio::task::JoinHandle<()>) {
             expected_codex_model: None,
             approval_policy_overrides: None,
             deadline: None,
-            resume_thread_id: None,
         });
         tx.send(Message::Text(serde_json::to_string(&assign).unwrap()))
             .await

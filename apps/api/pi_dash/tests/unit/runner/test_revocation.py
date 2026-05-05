@@ -14,7 +14,6 @@ from django.utils import timezone
 from pi_dash.runner.models import (
     AgentRun,
     AgentRunStatus,
-    Connection,
     Pod,
     Runner,
     RunnerStatus,
@@ -26,24 +25,11 @@ def pod(project):
     return Pod.default_for_project(project)
 
 
-def _make_connection(user, workspace, name="connection_test") -> Connection:
-    return Connection.objects.create(
-        workspace=workspace,
-        created_by=user,
-        name=name,
-        secret_hash=f"sh-{name}",
-        secret_fingerprint=name[:12].ljust(12, "x")[:12],
-        enrolled_at=timezone.now(),
-    )
-
-
 def _make_runner(user, workspace, pod, name="r1"):
-    connection = _make_connection(user, workspace, name=f"connection_{name}")
     return Runner.objects.create(
         owner=user,
         workspace=workspace,
         pod=pod,
-        connection=connection,
         name=name,
         status=RunnerStatus.ONLINE,
         last_heartbeat_at=timezone.now(),
@@ -198,12 +184,10 @@ def test_revoke_releases_pinned_queued_runs(
     from pi_dash.runner.models import AgentRun, AgentRunStatus, Pod, Runner, RunnerStatus
 
     pod = Pod.default_for_project(project)
-    connection = _make_connection(create_user, workspace, name="connection_agentX")
     runner = Runner.objects.create(
         owner=create_user,
         workspace=workspace,
         pod=pod,
-        connection=connection,
         name="agentX",
         status=RunnerStatus.ONLINE,
         last_heartbeat_at=timezone.now(),

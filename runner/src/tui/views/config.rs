@@ -134,10 +134,7 @@ fn runner_at(cfg: &Config, idx: usize) -> Option<&crate::config::schema::RunnerC
     cfg.runners.get(i)
 }
 
-fn runner_at_mut(
-    cfg: &mut Config,
-    idx: usize,
-) -> Option<&mut crate::config::schema::RunnerConfig> {
+fn runner_at_mut(cfg: &mut Config, idx: usize) -> Option<&mut crate::config::schema::RunnerConfig> {
     if cfg.runners.is_empty() {
         return None;
     }
@@ -338,11 +335,11 @@ pub fn runner_picker_bar(data: &AppData) -> Paragraph<'static> {
         "   [<] prev  [>] next  [Alt+1..9] jump".to_string(),
         Style::default().add_modifier(Modifier::DIM),
     ));
-    Paragraph::new(Line::from(spans)).block(
-        Block::default()
-            .borders(Borders::ALL)
-            .title(format!(" Runners ({}/{}) ", picked + 1, total)),
-    )
+    Paragraph::new(Line::from(spans)).block(Block::default().borders(Borders::ALL).title(format!(
+        " Runners ({}/{}) ",
+        picked + 1,
+        total
+    )))
 }
 
 pub fn editable_lines(

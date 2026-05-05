@@ -107,6 +107,17 @@ export const PROJECT_SETTINGS: Record<TProjectSettingsTabs, TProjectSettingsItem
     access: [EUserProjectRoles.ADMIN],
     highlight: (pathname: string, baseUrl: string) => pathname === `${baseUrl}/github/`,
   },
+  schedulers: {
+    key: "schedulers",
+    i18n_label: "scheduler_bindings.tab_label",
+    href: `/schedulers`,
+    // Project admin only — matches the github / automations gate. Members
+    // can view the workspace catalog at Workspace → Schedulers; the
+    // per-project install surface adds nothing for non-admins since
+    // every action on it requires admin privileges anyway.
+    access: [EUserProjectRoles.ADMIN],
+    highlight: (pathname: string, baseUrl: string) => pathname === `${baseUrl}/schedulers/`,
+  },
 };
 
 export const PROJECT_SETTINGS_FLAT_MAP: TProjectSettingsItem[] = Object.values(PROJECT_SETTINGS);
@@ -125,5 +136,9 @@ export const GROUPED_PROJECT_SETTINGS: Record<PROJECT_SETTINGS_CATEGORY, TProjec
     PROJECT_SETTINGS["labels"],
     PROJECT_SETTINGS["estimates"],
   ],
-  [PROJECT_SETTINGS_CATEGORY.EXECUTION]: [PROJECT_SETTINGS["automations"], PROJECT_SETTINGS["github"]],
+  [PROJECT_SETTINGS_CATEGORY.EXECUTION]: [
+    PROJECT_SETTINGS["automations"],
+    PROJECT_SETTINGS["github"],
+    PROJECT_SETTINGS["schedulers"],
+  ],
 };

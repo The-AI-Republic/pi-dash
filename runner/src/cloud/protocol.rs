@@ -5,15 +5,18 @@ use uuid::Uuid;
 
 /// Wire version — bump on incompatible shape changes.
 ///
-/// v3 (current): WS auth is per-Connection. The daemon presents
-/// ``Authorization: Bearer <connection_secret>`` + ``X-Connection-Id``
-/// on the upgrade. Runners come online individually via Hello frames
-/// over that connection; runner_id stays purely a routing key.
+/// v4 (current): per-runner HTTPS long-poll transport. Each runner has
+/// its own refresh-token + access-token pair; the daemon opens one
+/// session per runner via ``POST /runners/<rid>/sessions/`` and polls
+/// ``POST /runners/<rid>/sessions/<sid>/poll`` for control-plane
+/// messages. ``Hello``/``Heartbeat``/``Bye``/``Ping`` are folded into
+/// HTTP request/response bodies; ``ForceRefresh`` is a new
+/// cloud→runner control message.
 ///
-/// v2 (retired): introduced multi-runner Hello fan-out + RunPaused +
-/// optional `Envelope.runner_id`. Legacy per-runner-secret auth was
-/// still permitted alongside token-based auth.
-pub const WIRE_VERSION: u32 = 3;
+/// v3 (retired): always-on WebSocket per Connection.
+///
+/// v2 (retired): multi-runner Hello fan-out over WS.
+pub const WIRE_VERSION: u32 = 4;
 
 /// All frames carry `v`, `type`, `mid` (message id for dedupe). Multi-runner
 /// frames also carry `runner_id` so the cloud's demux can route to the right
@@ -178,12 +181,6 @@ pub enum ServerMsg {
         expected_codex_model: Option<String>,
         approval_policy_overrides: Option<BTreeMap<String, serde_json::Value>>,
         deadline: Option<DateTime<Utc>>,
-        /// Provider session id to resume. When set, the runner asks the
-        /// agent CLI to reattach to that session (`thread/resume` for
-        /// Codex, `--resume` for Claude). Field-only addition — backward
-        /// compatible with older clouds that omit it.
-        #[serde(default)]
-        resume_thread_id: Option<String>,
     },
     Cancel {
         run_id: Uuid,
@@ -223,6 +220,17 @@ pub enum ServerMsg {
         last_seq: Option<u64>,
         status: String,
         thread_id: Option<String>,
+    },
+    /// Force the runner to perform an inline refresh before its next
+    /// scheduled refresh window. ``min_rtg`` is the lowest acceptable
+    /// refresh-token generation; the runner must have rotated past
+    /// this value before any access token issued before the rotation
+    /// is accepted server-side. See ``design.md`` §5.2 / §7.8.
+    ForceRefresh {
+        #[serde(default)]
+        reason: Option<String>,
+        #[serde(default)]
+        min_rtg: Option<u64>,
     },
 }
 
@@ -279,12 +287,18 @@ pub enum FailureReason {
     Timeout,
     Internal,
     Cancelled,
-    /// Native session resume was requested (Assign carried `resume_thread_id`)
-    /// but the agent CLI couldn't find the session on disk — the runner was
-    /// reinstalled, the session store was wiped, or the id is otherwise
-    /// stale. Cloud's response is to drop the pin and re-queue with a fresh
-    /// session.
+    /// Legacy: native session resume failed. No longer emitted by current
+    /// runners (resume support was removed; see
+    /// `.ai_design/ticking_optimization/design.md`). Variant is kept so older
+    /// runners can still serialize this reason to a current cloud without
+    /// deserialization errors.
     ResumeUnavailable,
+    /// The daemon process is shutting down (SIGTERM, e.g. `pidash restart`,
+    /// systemd stop, host reboot). The run cannot continue past this point.
+    /// Sent eagerly during the daemon's drain step so the cloud transitions
+    /// the run to FAILED via a deliberate signal instead of inferring it
+    /// from the heartbeat reaper after the next reconnect.
+    DaemonRestart,
 }
 
 #[cfg(test)]
@@ -321,7 +335,6 @@ mod tests {
             expected_codex_model: None,
             approval_policy_overrides: None,
             deadline: None,
-            resume_thread_id: Some("sess_xyz".into()),
         };
         let env = Envelope::new(msg);
         let s = serde_json::to_string(&env).unwrap();

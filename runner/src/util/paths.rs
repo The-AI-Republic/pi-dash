@@ -131,6 +131,11 @@ impl RunnerPaths {
         self.base_dir.join("identity.toml")
     }
 
+    /// `<base>/credentials.toml` — per-runner refresh-token state.
+    pub fn credentials_path(&self) -> PathBuf {
+        self.base_dir.join("credentials.toml")
+    }
+
     /// Create the runner's directory tree on disk.
     pub fn ensure(&self) -> Result<()> {
         for dir in [&self.base_dir, &self.runs_dir(), &self.logs_dir()] {

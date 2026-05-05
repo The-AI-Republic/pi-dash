@@ -70,6 +70,14 @@ export interface ISchedulerBinding {
 
 export interface ISchedulerBindingCreatePayload {
   scheduler: string;
+  /**
+   * Project the binding installs on. Redundant with the projectId already
+   * encoded in the request URL, but the cloud serializer's ``is_valid()``
+   * runs before its view-level ``serializer.save(project=...)`` override
+   * and rejects the body if this isn't present. Until the backend stops
+   * requiring it, the client has to send it.
+   */
+  project: string;
   cron: string;
   extra_context?: string;
   enabled?: boolean;

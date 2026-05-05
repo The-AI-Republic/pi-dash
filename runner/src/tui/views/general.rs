@@ -634,10 +634,7 @@ fn connection_card(data: &AppData) -> Paragraph<'_> {
             )]),
             Line::from(format!("Cloud URL: {}", s.daemon.cloud_url)),
             Line::from(format!("Uptime:    {}s", s.daemon.uptime_secs)),
-            Line::from(format!(
-                "Runners:   {} configured",
-                s.runners.len(),
-            )),
+            Line::from(format!("Runners:   {} configured", s.runners.len(),)),
         ],
         None => vec![Line::from(Span::styled(
             "Daemon IPC unreachable.",
@@ -645,11 +642,7 @@ fn connection_card(data: &AppData) -> Paragraph<'_> {
         ))],
     };
     Paragraph::new(lines)
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title(" Connection "),
-        )
+        .block(Block::default().borders(Borders::ALL).title(" Connection "))
         .wrap(Wrap { trim: true })
 }
 
@@ -747,31 +740,57 @@ pub async fn submit_register(
         return Err("enrollment token is required".into());
     }
 
-    let req = crate::cloud::enroll::EnrollmentRequest {
-        token: token.clone(),
-        host_label: host_label.clone(),
-        os: std::env::consts::OS.to_string(),
-        arch: std::env::consts::ARCH.to_string(),
-        version: crate::RUNNER_VERSION.to_string(),
-    };
-    let resp = crate::cloud::enroll::enroll(&cloud_url, &req)
+    let transport = crate::cloud::http::SharedHttpTransport::new(cloud_url.clone())
+        .map_err(|e| format!("transport: {e:#}"))?;
+    let resp = crate::cloud::http::enroll_runner(&transport, &token, &host_label, None)
         .await
         .map_err(|e| format!("enroll failed: {e:#}"))?;
 
+    let runner_paths = paths.for_runner(resp.runner_id);
+    runner_paths
+        .ensure()
+        .map_err(|e| format!("creating runner dirs: {e:#}"))?;
+    crate::cloud::http::write_runner_credentials(
+        runner_paths.credentials_path(),
+        crate::cloud::http::RunnerCredentials {
+            runner_id: resp.runner_id,
+            name: resp.runner_name.clone(),
+            refresh_token: resp.refresh_token.clone(),
+            refresh_token_generation: resp.refresh_token_generation,
+        },
+    )
+    .await
+    .map_err(|e| format!("writing runner credentials: {e:#}"))?;
+
+    let working_dir = paths.runner_dir(resp.runner_id).join("workspace");
+    let new_runner_block = crate::config::schema::RunnerConfig {
+        name: resp.runner_name.clone(),
+        runner_id: resp.runner_id,
+        workspace_slug: Some(resp.workspace_slug.clone()),
+        project_slug: Some(resp.project_identifier.clone()),
+        pod_id: None,
+        workspace: crate::config::schema::WorkspaceSection { working_dir },
+        agent: Default::default(),
+        codex: Default::default(),
+        claude_code: Default::default(),
+        approval_policy: Default::default(),
+    };
     let cfg = crate::config::schema::Config {
         version: 2,
         daemon: crate::config::schema::DaemonConfig {
             cloud_url: cloud_url.clone(),
             log_level: "info".to_string(),
             log_retention_days: 14,
+            agent_observability_v1: false,
         },
-        runners: Vec::new(),
+        runners: vec![new_runner_block],
+        cli: None,
     };
     crate::config::file::write_config(paths, &cfg).map_err(|e| format!("writing config.toml: {e:#}"))?;
     let creds = crate::config::schema::Credentials {
-        connection_id: resp.connection_id,
-        connection_secret: resp.connection_secret,
-        connection_name: None,
+        connection_id: resp.runner_id,
+        connection_secret: String::new(),
+        connection_name: Some(resp.runner_name.clone()),
         api_token: None,
         issued_at: chrono::Utc::now(),
     };

@@ -634,7 +634,10 @@ impl App {
         let paths = self.data.paths.clone();
         let tx = self.event_tx.clone();
         tokio::spawn(async move {
-            let args = crate::cli::runner::RemoveArgs { name: name.clone() };
+            let args = crate::cli::runner::RemoveArgs {
+                name: name.clone(),
+                local_only: false,
+            };
             let outcome = match crate::cli::runner::remove(args, &paths).await {
                 Ok(_) => crate::service::reload::restart_and_verify(&paths).await,
                 Err(e) => crate::service::reload::ReloadOutcome {

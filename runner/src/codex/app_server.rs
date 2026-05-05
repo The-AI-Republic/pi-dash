@@ -1,20 +1,44 @@
 use anyhow::{Context, Result};
+use chrono::Utc;
 use std::path::Path;
 use std::process::Stdio;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, ChildStdin, Command};
-use tokio::sync::mpsc;
+use tokio::sync::{Mutex, mpsc, watch};
 
+use crate::agent::{
+    AgentProcessHandle, ExitSnapshot, STDERR_RING_LINES, StderrBuffer, StderrRing, StderrSnapshot,
+};
 use crate::codex::jsonrpc::Incoming;
 use crate::util::shell::{is_benign_login_shell_warning, login_shell_command};
 
 /// Handles the `codex app-server` subprocess lifecycle + JSON-RPC wire.
+///
+/// `Child` is owned by an internal wait task spawned in `spawn_command`. The
+/// `AppServer` holds only the side-channels needed to drive it: stdin for
+/// outbound requests, `kill_tx` to request shutdown, and `exit_rx` to observe
+/// exit. This split is required because `tokio::process::Child::wait()` and
+/// `start_kill()` both take `&mut self`, so only one task can hold the child.
+/// See `.ai_design/runner_agent_bridge/design.md` §4.4.
 pub struct AppServer {
-    child: Child,
+    pid: Option<u32>,
     stdin: ChildStdin,
     next_id: AtomicU64,
     pub inbound: mpsc::Receiver<Incoming>,
+    kill_tx: mpsc::Sender<KillRequest>,
+    exit_rx: watch::Receiver<Option<ExitSnapshot>>,
+    stderr_ring: StderrRing,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum KillRequest {
+    /// Polite stdin-drop already happened on the AppServer side; just wait
+    /// for natural exit and force-kill on grace expiry.
+    Graceful,
+    /// Force-kill immediately (used as the grace-window fallback).
+    Force,
 }
 
 impl AppServer {
@@ -36,16 +60,34 @@ impl AppServer {
         let stdin = child.stdin.take().context("codex stdin missing")?;
         let stdout = child.stdout.take().context("codex stdout missing")?;
         let stderr = child.stderr.take().context("codex stderr missing")?;
+        let pid = child.id();
 
         let (tx, rx) = mpsc::channel(128);
+        let stderr_ring: StderrRing = Arc::new(Mutex::new(StderrBuffer::new(STDERR_RING_LINES)));
         tokio::spawn(read_frames(stdout, tx.clone()));
-        tokio::spawn(drain_stderr(stderr));
+        tokio::spawn(drain_stderr(stderr, stderr_ring.clone()));
+
+        let (kill_tx, kill_rx) = mpsc::channel::<KillRequest>(2);
+        let (exit_tx, exit_rx) = watch::channel::<Option<ExitSnapshot>>(None);
+        tokio::spawn(wait_task(child, kill_rx, exit_tx));
+
         Ok(Self {
-            child,
+            pid,
             stdin,
             next_id: AtomicU64::new(1),
             inbound: rx,
+            kill_tx,
+            exit_rx,
+            stderr_ring,
         })
+    }
+
+    /// Snapshot the recent stderr lines (up to `STDERR_RING_LINES`)
+    /// plus the running tally of rejected noise lines. Used by the
+    /// supervisor when emitting a `RunFailed` so the cloud has some
+    /// chance of telling the user *why* an agent went silent.
+    pub async fn recent_stderr(&self) -> StderrSnapshot {
+        self.stderr_ring.lock().await.snapshot()
     }
 
     pub fn alloc_id(&self) -> u64 {
@@ -59,19 +101,88 @@ impl AppServer {
         Ok(())
     }
 
+    /// Bridge-owned observability handle. PID was captured at spawn time;
+    /// `exit_rx` yields `Some(ExitSnapshot)` once the wait task observes
+    /// termination.
+    pub fn process_handle(&self) -> AgentProcessHandle {
+        AgentProcessHandle {
+            pid: self.pid,
+            exit_rx: self.exit_rx.clone(),
+        }
+    }
+
     pub async fn shutdown(mut self, grace: std::time::Duration) -> Result<()> {
+        // Half-close stdin so codex notices end-of-input.
         drop(self.stdin);
-        match tokio::time::timeout(grace, self.child.wait()).await {
-            Ok(Ok(status)) => {
-                tracing::debug!(?status, "codex exited gracefully");
+        // Tell the wait task to wait for natural exit; if the grace expires
+        // we follow up with Force.
+        let _ = self.kill_tx.send(KillRequest::Graceful).await;
+        match tokio::time::timeout(grace, self.exit_rx.changed()).await {
+            Ok(Ok(())) => {
+                let snap = self.exit_rx.borrow().clone();
+                tracing::debug!(?snap, "codex exited gracefully");
             }
             _ => {
                 tracing::warn!("codex did not exit within grace; sending SIGKILL");
-                self.child.start_kill().ok();
-                self.child.wait().await.ok();
+                let _ = self.kill_tx.send(KillRequest::Force).await;
+                let _ = self.exit_rx.changed().await;
             }
         }
         Ok(())
+    }
+}
+
+/// Owns the `Child` exclusively. Awaits either a kill request (force-kill
+/// the subprocess) or the child's natural exit, then publishes an
+/// `ExitSnapshot` and terminates.
+async fn wait_task(
+    mut child: Child,
+    mut kill_rx: mpsc::Receiver<KillRequest>,
+    exit_tx: watch::Sender<Option<ExitSnapshot>>,
+) {
+    let snapshot = loop {
+        tokio::select! {
+            biased;
+            req = kill_rx.recv() => {
+                match req {
+                    Some(KillRequest::Force) => {
+                        let _ = child.start_kill();
+                    }
+                    Some(KillRequest::Graceful) => {
+                        // No-op: wait for natural exit.
+                    }
+                    None => {
+                        // All senders dropped — recv will resolve to None
+                        // synchronously every iteration. Stop polling the
+                        // recv arm and just await natural exit, otherwise
+                        // the biased select! would spin on the closed
+                        // channel without ever polling child.wait().
+                        let res = child.wait().await;
+                        break exit_snapshot_from(res.ok());
+                    }
+                }
+            }
+            res = child.wait() => {
+                break exit_snapshot_from(res.ok());
+            }
+        }
+    };
+    let _ = exit_tx.send(Some(snapshot));
+}
+
+fn exit_snapshot_from(status: Option<std::process::ExitStatus>) -> ExitSnapshot {
+    #[cfg(unix)]
+    let signal = {
+        use std::os::unix::process::ExitStatusExt;
+        status.as_ref().and_then(|s| s.signal())
+    };
+    #[cfg(not(unix))]
+    let signal: Option<i32> = None;
+    let status_code = status.as_ref().and_then(|s| s.code());
+    ExitSnapshot {
+        status_code,
+        signal,
+        observed_at: Utc::now(),
     }
 }
 
@@ -106,7 +217,7 @@ async fn read_frames(stdout: tokio::process::ChildStdout, tx: mpsc::Sender<Incom
     }
 }
 
-async fn drain_stderr(stderr: tokio::process::ChildStderr) {
+async fn drain_stderr(stderr: tokio::process::ChildStderr, ring: StderrRing) {
     // The login-shell wrapper (see `util::shell`) always emits two TTY-less
     // diagnostics before exec'ing codex; suppress those so the debug stream
     // only carries real codex output.
@@ -122,6 +233,7 @@ async fn drain_stderr(stderr: tokio::process::ChildStderr) {
                     continue;
                 }
                 tracing::debug!(target: "codex.stderr", "{trimmed}");
+                ring.lock().await.push(trimmed);
             }
             Err(e) => {
                 tracing::warn!("codex stderr read error: {e}");

@@ -4,7 +4,7 @@ Before any workpad setup or git work, build your own understanding of the task a
 
 Treat ambiguity as a real signal, not a hurdle to power through. The cost of one round-trip clarification — you ask via comment, the human answers, the next continuation run picks up the answer automatically — is much smaller than the cost of a wrong-direction PR that has to be unwound.
 
-1. **Read the issue thoroughly.** The title and description are already in this prompt context. Pull all prior comments via `pidash comment list {{ issue.identifier }}` and read them in chronological order. Non-bot comments often refine, narrow, or change scope after the original description was written; weight the most recent human comments heavily.
+1. **Read the issue thoroughly.** The title and description are already in this prompt context. Pull all prior comments via `pidash comment list {{ issue.identifier }}` and read them in chronological order. **The comment list is authoritative — do not assume any prior comment is already in your context.** Every run is a fresh agent session with no memory of prior runs; the issue thread, the workpad comment, and the repo are the only sources of cross-run state. Non-bot comments often refine, narrow, or change scope after the original description was written; weight the most recent human comments heavily.
 
 {% if parent %}
 2. **Read the parent issue ({{ parent.identifier }} — "{{ parent.title }}").** This issue belongs to a larger piece of work. Fetch the parent and its comments via `pidash issue get {{ parent.identifier }}` and `pidash comment list {{ parent.identifier }}` to understand the framing this child sits inside. The parent often carries acceptance criteria the child inherits implicitly.
@@ -17,16 +17,18 @@ Treat ambiguity as a real signal, not a hurdle to power through. The cost of one
 
 4. **Read the referenced code.** If the issue mentions a feature, file, function, component, or symbol, locate the actual code with `grep` / `find` / your editor before forming a plan. Do not guess paths or names.
 
-5. **Form an analysis.** Draft the following five points; in Step 1 you will record them verbatim in the workpad's `### Analysis` section.
+5. **Form an analysis.** Draft the following six points; in Step 1 you will record them verbatim in the workpad's `### Analysis` section.
    - **Restated problem** — what the work is, in your own words. Not a copy of the description.
    - **Acceptance criteria** — extracted from the description and comments, OR explicitly listed as missing.
-   - **Proposed approach** — one or two sentences naming the files / areas / components you intend to change.
+   - **Proposed approach** — one or two sentences naming the files / areas / components you intend to change (or, for non-coding tasks, the actions you intend to take).
+   - **Task type** — `code_change` if your proposed approach edits files in the repository, otherwise `noncode` (e.g., investigation, status check, CLI-only action, comment-only response). When uncertain, default to `code_change` — the heavier path is the safer default. This classification gates the git, branch, commit/push, and PR steps in Steps 1 and 2.
    - **Risks / assumptions** — anything material to scope, downstream impact, or rework risk.
    - **Autonomy assessment** — `score`, `type`, `safe_to_continue`, per the "Autonomy / escalation model" section.
 
 6. **Decision gate. Choose exactly one path:**
 
-   - **Proceed** — only if all of the following hold: acceptance criteria are present (extracted from the issue, or sensible defaults documented as assumptions); the work fits one reasonable PR; your autonomy assessment is `safe_to_continue=true`. Continue to Step 1.
+   - **Proceed** — only if all of the following hold: acceptance criteria are present (extracted from the issue, or sensible defaults documented as assumptions); the work fits one reasonable unit of delivery (one PR for `code_change`, one coherent set of actions/comments for `noncode`); your autonomy assessment is `safe_to_continue=true`. Continue to Step 1.
+     - If `task_type == noncode`, skip the git sync, branch creation, commit/push, and PR-opening sub-steps in Steps 1 and 2 — go directly from workpad setup to executing the task to the final comment.
 
    - **Ask for clarification** — if the description leaves a meaningful product, UX, scope, or interface question unanswered. Post a focused comment via `pidash comment add {{ issue.identifier }} --body-file <path>` containing your restated understanding plus the specific question(s); one focused question is better than a wall of text. Then follow "Blocking the run". **Do not create a branch.** A future continuation run, triggered when the human comments back, will re-enter this step with the new context.
 
