@@ -23,6 +23,54 @@ pub(crate) fn validate_path_for_unit(path: &Path) -> Result<&str> {
     Ok(s)
 }
 
+/// Snapshot the caller's `$PATH` so the unit/plist we write can hand it to
+/// the daemon at startup. launchd (macOS) and `systemd --user` (Linux) both
+/// give services a minimal default PATH (`/usr/bin:/bin:/usr/sbin:/sbin`)
+/// that excludes nearly every PATH entry the operator added in their shell
+/// rc — `/opt/homebrew/bin`, `~/.local/bin`, `~/.cargo/bin`, anything nvm /
+/// pyenv / asdf injected, etc. The agent dispatch layer wraps subprocesses
+/// in `bash -ilc` to recover that PATH (see `util::shell`), but `bash -i`
+/// only sources `~/.bash_profile`/`~/.profile`/`~/.bashrc` — not the zsh /
+/// fish files where most macOS users actually keep their PATH (zsh is the
+/// default shell since 10.15). The wrapper therefore silently fails on a
+/// stock macOS install: the daemon spawns `claude` and gets `not found`.
+///
+/// `pidash install` runs in the operator's interactive shell, so `$PATH`
+/// here is the one we want. Capture it and bake it into the unit so the
+/// daemon — and every subprocess it forks — inherits it deterministically,
+/// without depending on which shell the operator uses.
+///
+/// Returns `None` (skip writing the env var) when:
+/// - `$PATH` is unset or empty in the install-time environment, or
+/// - the value contains a control char that would corrupt the unit / plist.
+///
+/// Each skip path emits a `tracing::warn!` so the operator can correlate a
+/// later "claude: not found" failure with a known-bad install-time env.
+pub(crate) fn capture_install_time_path() -> Option<String> {
+    let value = match std::env::var("PATH") {
+        Ok(v) if !v.is_empty() => v,
+        Ok(_) => {
+            tracing::warn!(
+                "$PATH is empty at install time; service unit will fall back to the manager's stripped PATH"
+            );
+            return None;
+        }
+        Err(e) => {
+            tracing::warn!(
+                "$PATH could not be read at install time ({e}); service unit will fall back to the manager's stripped PATH"
+            );
+            return None;
+        }
+    };
+    if value.chars().any(|c| c.is_control()) {
+        tracing::warn!(
+            "$PATH contains a control character at install time; not baking into service unit"
+        );
+        return None;
+    }
+    Some(value)
+}
+
 pub enum Service {
     Systemd,
     Launchd,
