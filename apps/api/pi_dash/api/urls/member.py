@@ -13,22 +13,22 @@ from pi_dash.api.views import (
 urlpatterns = [
     # Project members
     path(
-        "workspaces/<str:slug>/projects/<uuid:project_id>/members/",
+        "workspaces/<str:slug>/projects/<str:project_id>/members/",
         ProjectMemberListCreateAPIEndpoint.as_view(http_method_names=["get", "post"]),
         name="project-members",
     ),
     path(
-        "workspaces/<str:slug>/projects/<uuid:project_id>/members/<uuid:pk>/",
+        "workspaces/<str:slug>/projects/<str:project_id>/members/<uuid:pk>/",
         ProjectMemberDetailAPIEndpoint.as_view(http_method_names=["patch", "delete", "get"]),
         name="project-member",
     ),
     path(
-        "workspaces/<str:slug>/projects/<uuid:project_id>/project-members/",
+        "workspaces/<str:slug>/projects/<str:project_id>/project-members/",
         ProjectMemberListCreateAPIEndpoint.as_view(http_method_names=["get", "post"]),
         name="project-members",
     ),
     path(
-        "workspaces/<str:slug>/projects/<uuid:project_id>/project-members/<uuid:pk>/",
+        "workspaces/<str:slug>/projects/<str:project_id>/project-members/<uuid:pk>/",
         ProjectMemberDetailAPIEndpoint.as_view(http_method_names=["patch", "delete", "get"]),
         name="project-member",
     ),

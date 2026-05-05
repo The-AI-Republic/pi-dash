@@ -40,6 +40,9 @@ SPECTACULAR_SETTINGS = {
     "PREPROCESSING_HOOKS": [
         "pi_dash.utils.openapi.hooks.preprocess_filter_api_v1_paths",
     ],
+    "POSTPROCESSING_HOOKS": [
+        "pi_dash.utils.openapi.hooks.postprocess_project_id_dual_form",
+    ],
     # ========================================================================
     # Server Configuration
     # ========================================================================

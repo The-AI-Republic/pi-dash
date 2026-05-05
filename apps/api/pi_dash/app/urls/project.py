@@ -33,7 +33,7 @@ urlpatterns = [
         name="project",
     ),
     path(
-        "workspaces/<str:slug>/projects/<uuid:pk>/",
+        "workspaces/<str:slug>/projects/<str:pk>/",
         ProjectViewSet.as_view(
             {
                 "get": "retrieve",
@@ -50,12 +50,12 @@ urlpatterns = [
         name="project-identifiers",
     ),
     path(
-        "workspaces/<str:slug>/projects/<uuid:project_id>/invitations/",
+        "workspaces/<str:slug>/projects/<str:project_id>/invitations/",
         ProjectInvitationsViewset.as_view({"get": "list", "post": "create"}),
         name="project-member-invite",
     ),
     path(
-        "workspaces/<str:slug>/projects/<uuid:project_id>/invitations/<uuid:pk>/",
+        "workspaces/<str:slug>/projects/<str:project_id>/invitations/<uuid:pk>/",
         ProjectInvitationsViewset.as_view({"get": "retrieve", "delete": "destroy"}),
         name="project-member-invite",
     ),
@@ -70,32 +70,32 @@ urlpatterns = [
         name="user-project-roles",
     ),
     path(
-        "workspaces/<str:slug>/projects/<uuid:project_id>/join/<uuid:pk>/",
+        "workspaces/<str:slug>/projects/<str:project_id>/join/<uuid:pk>/",
         ProjectJoinEndpoint.as_view(),
         name="project-join",
     ),
     path(
-        "workspaces/<str:slug>/projects/<uuid:project_id>/members/",
+        "workspaces/<str:slug>/projects/<str:project_id>/members/",
         ProjectMemberViewSet.as_view({"get": "list", "post": "create"}),
         name="project-member",
     ),
     path(
-        "workspaces/<str:slug>/projects/<uuid:project_id>/members/<uuid:pk>/",
+        "workspaces/<str:slug>/projects/<str:project_id>/members/<uuid:pk>/",
         ProjectMemberViewSet.as_view({"get": "retrieve", "patch": "partial_update", "delete": "destroy"}),
         name="project-member",
     ),
     path(
-        "workspaces/<str:slug>/projects/<uuid:project_id>/members/leave/",
+        "workspaces/<str:slug>/projects/<str:project_id>/members/leave/",
         ProjectMemberViewSet.as_view({"post": "leave"}),
         name="project-member",
     ),
     path(
-        "workspaces/<str:slug>/projects/<uuid:project_id>/project-views/",
+        "workspaces/<str:slug>/projects/<str:project_id>/project-views/",
         ProjectUserViewsEndpoint.as_view(),
         name="project-view",
     ),
     path(
-        "workspaces/<str:slug>/projects/<uuid:project_id>/project-members/me/",
+        "workspaces/<str:slug>/projects/<str:project_id>/project-members/me/",
         ProjectMemberUserEndpoint.as_view(),
         name="project-member-view",
     ),
@@ -105,27 +105,27 @@ urlpatterns = [
         name="project-favorite",
     ),
     path(
-        "workspaces/<str:slug>/user-favorite-projects/<uuid:project_id>/",
+        "workspaces/<str:slug>/user-favorite-projects/<str:project_id>/",
         ProjectFavoritesViewSet.as_view({"delete": "destroy"}),
         name="project-favorite",
     ),
     path(
-        "workspaces/<str:slug>/projects/<uuid:project_id>/project-deploy-boards/",
+        "workspaces/<str:slug>/projects/<str:project_id>/project-deploy-boards/",
         DeployBoardViewSet.as_view({"get": "list", "post": "create"}),
         name="project-deploy-board",
     ),
     path(
-        "workspaces/<str:slug>/projects/<uuid:project_id>/project-deploy-boards/<uuid:pk>/",
+        "workspaces/<str:slug>/projects/<str:project_id>/project-deploy-boards/<uuid:pk>/",
         DeployBoardViewSet.as_view({"get": "retrieve", "patch": "partial_update", "delete": "destroy"}),
         name="project-deploy-board",
     ),
     path(
-        "workspaces/<str:slug>/projects/<uuid:project_id>/archive/",
+        "workspaces/<str:slug>/projects/<str:project_id>/archive/",
         ProjectArchiveUnarchiveEndpoint.as_view(),
         name="project-archive-unarchive",
     ),
     path(
-        "workspaces/<str:slug>/projects/<uuid:project_id>/preferences/member/<uuid:member_id>/",
+        "workspaces/<str:slug>/projects/<str:project_id>/preferences/member/<uuid:member_id>/",
         ProjectMemberPreferenceEndpoint.as_view(),
         name="project-member-preference",
     ),

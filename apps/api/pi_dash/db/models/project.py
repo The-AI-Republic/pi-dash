@@ -4,6 +4,7 @@
 
 # Python imports
 import pytz
+import uuid
 from uuid import uuid4
 from enum import Enum
 
@@ -12,6 +13,7 @@ from django.conf import settings
 from django.core.validators import MaxValueValidator, MinValueValidator, RegexValidator
 from django.db import models
 from django.db.models import Q
+from django.http import Http404
 
 # Module imports
 from pi_dash.db.mixins import AuditModel
@@ -159,6 +161,41 @@ class Project(BaseModel):
     def __str__(self):
         """Return name of the project"""
         return f"{self.name} <{self.workspace.name}>"
+
+    @classmethod
+    def resolve(cls, workspace_slug, value):
+        # Accept either a UUID or a workspace-scoped project identifier (the
+        # short slug like "ENG"). The Django URL converter for project-scoped
+        # routes is `<str:>` so the view kwarg may be either form; this lookup
+        # is the single source of truth that turns it into a Project row.
+        try:
+            uuid.UUID(str(value))
+            qs = cls.objects.filter(pk=value, workspace__slug=workspace_slug, deleted_at__isnull=True)
+        except (ValueError, AttributeError, TypeError):
+            # `Project.save()` always normalizes `identifier` to upper, so an
+            # equality match on the upper-cased input uses the existing
+            # composite btree index from
+            # `project_unique_identifier_workspace_when_deleted_at_null`.
+            # Avoid `__iexact`: it expands to `UPPER(identifier) = UPPER($1)`
+            # and cannot use the plain btree, forcing a sequential scan on
+            # the hot path of every project-scoped REST request.
+            qs = cls.objects.filter(
+                workspace__slug=workspace_slug,
+                identifier=str(value).strip().upper(),
+                deleted_at__isnull=True,
+            )
+        project = qs.first()
+        if project is None:
+            # Generic message — DRF's `exception_handler` propagates Http404
+            # args into the response body via `NotFound(*exc.args)`, so do
+            # not echo `value` or `workspace_slug` to clients.
+            raise Http404("Project not found")
+        return project
+
+    @classmethod
+    def resolve_id(cls, workspace_slug, value):
+        # Convenience wrapper for callers that only need the UUID.
+        return cls.resolve(workspace_slug, value).pk
 
     FORBIDDEN_IDENTIFIER_CHARS_PATTERN = r"^.*[&+,:;$^}{*=?@#|'<>.()%!-].*$"
 
