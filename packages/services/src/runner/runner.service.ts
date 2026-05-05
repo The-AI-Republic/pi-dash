@@ -11,6 +11,7 @@ import type {
   IConnection,
   IConnectionWithToken,
   IRunner,
+  IRunnerInvite,
   TApprovalDecision,
 } from "@pi-dash/types";
 import { APIService } from "../api.service";
@@ -54,6 +55,30 @@ export class RunnerService extends APIService {
 
   async getDetail(runnerId: string): Promise<IRunner> {
     return this.get(`/api/runners/${runnerId}/`)
+      .then((r) => r?.data)
+      .catch((e) => {
+        throw e?.response?.data;
+      });
+  }
+
+  /** ``POST /api/runners/invites/`` — create a per-runner enrollment
+   * invite. Each runner has its own enrollment token; the daemon
+   * exchanges it for a long-lived refresh token via ``pidash connect``.
+   * Replaces the legacy connection-level ``POST /api/runners/connections/``
+   * — see ``.ai_design/move_to_https/design.md`` §5.1.
+   */
+  async createRunnerInvite(input: {
+    workspaceId: string;
+    projectIdentifier: string;
+    podName?: string;
+    name?: string;
+  }): Promise<IRunnerInvite> {
+    return this.post("/api/runners/invites/", {
+      workspace: input.workspaceId,
+      project: input.projectIdentifier,
+      pod: input.podName ?? "",
+      name: input.name ?? "",
+    })
       .then((r) => r?.data)
       .catch((e) => {
         throw e?.response?.data;

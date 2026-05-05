@@ -42,14 +42,12 @@ impl Bridge {
         binary: &str,
         cwd: &Path,
         model_default: Option<String>,
-        resume_thread_id: Option<&str>,
     ) -> Result<Self> {
         let proc = ClaudeProcess::spawn(SpawnArgs {
             binary,
             cwd,
             model: model_default.as_deref(),
             bypass_permissions: true,
-            resume_thread_id,
         })
         .await?;
         Ok(Self {
@@ -153,6 +151,14 @@ impl Bridge {
 
     pub async fn shutdown(self, grace: Duration) -> Result<()> {
         self.proc.shutdown(grace).await
+    }
+
+    pub fn process_handle(&self) -> crate::agent::AgentProcessHandle {
+        self.proc.process_handle()
+    }
+
+    pub async fn recent_stderr(&self) -> crate::agent::StderrSnapshot {
+        self.proc.recent_stderr().await
     }
 }
 

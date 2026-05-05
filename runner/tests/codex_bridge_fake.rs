@@ -50,7 +50,6 @@ async fn bridge_happy_path_drives_fake_codex_to_completion() {
         run_id: Uuid::new_v4(),
         prompt: "hi".into(),
         model: None,
-        resume_thread_id: None,
     };
     let mut cursor = bridge.run(&payload, &cwd).await.expect("bridge run setup");
     assert_eq!(cursor.thread_id, "th_fake_001");
@@ -101,7 +100,6 @@ async fn bridge_reports_codex_crash_on_early_exit() {
         run_id: Uuid::new_v4(),
         prompt: "x".into(),
         model: None,
-        resume_thread_id: None,
     };
     let result = bridge.run(&payload, &cwd).await;
     assert!(
@@ -132,7 +130,6 @@ async fn bridge_forwards_approval_request_event() {
         run_id: Uuid::new_v4(),
         prompt: "do it".into(),
         model: None,
-        resume_thread_id: None,
     };
     let mut cursor = bridge.run(&payload, &cwd).await.unwrap();
     let mut saw = false;
