@@ -92,6 +92,7 @@ fn truncate(s: &str, max: usize) -> String {
 /// Accepts either of the two shapes seen on the wire:
 ///   - `{ "usage": { "input_tokens": ..., "output_tokens": ... } }`
 ///   - `{ "input_tokens": ..., "output_tokens": ... }` (flat)
+///
 /// Both shapes must additionally surface `total_tokens` to be accepted —
 /// a frame with only `input_tokens`/`output_tokens` and no `total_tokens`
 /// is treated as not-a-token-count to keep the parser narrow. This

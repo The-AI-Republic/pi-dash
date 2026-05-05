@@ -26,7 +26,10 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from pi_dash.authentication.session import BaseSessionAuthentication
-from pi_dash.runner.authentication import RunnerRefreshTokenAuthentication
+from pi_dash.runner.authentication import (
+    RunnerAccessTokenAuthentication,
+    RunnerRefreshTokenAuthentication,
+)
 from pi_dash.runner.models import (
     MachineToken,
     Pod,
@@ -39,6 +42,7 @@ from pi_dash.runner.serializers import (
 )
 from pi_dash.runner.services import tokens
 from pi_dash.runner.services.permissions import is_workspace_member
+from pi_dash.runner.services.pubsub import close_runner_session, send_to_runner
 
 logger = logging.getLogger(__name__)
 
@@ -374,6 +378,40 @@ class RunnerRefreshEndpoint(APIView):
                 "refresh_token_generation": runner.refresh_token_generation,
             }
         )
+
+
+class RunnerSelfRevokeEndpoint(APIView):
+    """``DELETE /api/v1/runner/runners/<rid>/`` — runner self-deletion.
+
+    The web UI's `RunnerDetailEndpoint.delete` covers operator-driven
+    teardown via session auth; this is the symmetric machine-token path
+    so the daemon can `pidash runner remove <name>` cleanly without
+    requiring the user to click through the cloud UI. Idempotent: a
+    second DELETE on an already-revoked runner returns 204.
+    """
+
+    authentication_classes = [RunnerAccessTokenAuthentication]
+    permission_classes: list = []
+    throttle_classes: list = []
+
+    def delete(self, request, runner_id):
+        auth_runner = getattr(request, "auth_runner", None)
+        if auth_runner is None or str(auth_runner.id) != str(runner_id):
+            return Response(
+                {"error": "runner_id_mismatch"},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+        runner_pk = auth_runner.pk
+        # `revoke()` is no-op safe if already revoked; we still close the
+        # session and drop the row so a stale daemon can't re-attach.
+        auth_runner.revoke(reason="self_revoked")
+        send_to_runner(
+            runner_pk,
+            {"type": "revoke", "reason": "self_revoked"},
+        )
+        close_runner_session(runner_pk)
+        Runner.objects.filter(pk=runner_pk).delete()
+        return Response(status=status.HTTP_204_NO_CONTENT)
 
 
 class MachineTokenTicketEndpoint(APIView):

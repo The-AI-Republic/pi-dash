@@ -342,6 +342,10 @@ impl RunnerCloudClient {
         self.inner.runner_id
     }
 
+    pub fn transport(&self) -> &SharedHttpTransport {
+        &self.inner.transport
+    }
+
     pub async fn access_token_exp(&self) -> Option<DateTime<Utc>> {
         self.inner
             .state
@@ -1324,6 +1328,46 @@ pub async fn enroll_runner(
         .map_err(|e| TransportError::Protocol(format!("enroll body: {e}")))
 }
 
+/// Read a per-runner `credentials.toml` from disk and return a
+/// `CredentialsHandle` ready for use with `RunnerCloudClient`. Centralised
+/// here so the supervisor and the CLI/TUI remove flow share one parser.
+pub async fn load_runner_credentials_from(
+    path: PathBuf,
+    runner_name: &str,
+) -> Result<CredentialsHandle, TransportError> {
+    let raw = tokio::fs::read_to_string(&path)
+        .await
+        .map_err(|e| TransportError::Network(format!("reading {path:?}: {e}")))?;
+    let parsed: toml::Value = toml::from_str(&raw)
+        .map_err(|e| TransportError::Protocol(format!("parsing {path:?}: {e}")))?;
+    let runner_id = parsed
+        .get("runner")
+        .and_then(|v| v.get("id"))
+        .and_then(toml::Value::as_str)
+        .ok_or_else(|| TransportError::Protocol(format!("{path:?} missing runner.id")))?;
+    let refresh_token = parsed
+        .get("refresh")
+        .and_then(|v| v.get("token"))
+        .and_then(toml::Value::as_str)
+        .ok_or_else(|| TransportError::Protocol(format!("{path:?} missing refresh.token")))?;
+    let generation = parsed
+        .get("refresh")
+        .and_then(|v| v.get("generation"))
+        .and_then(toml::Value::as_integer)
+        .ok_or_else(|| TransportError::Protocol(format!("{path:?} missing refresh.generation")))?;
+    let runner_id = Uuid::parse_str(runner_id)
+        .map_err(|e| TransportError::Protocol(format!("invalid runner.id in {path:?}: {e}")))?;
+    Ok(CredentialsHandle::new(
+        path,
+        RunnerCredentials {
+            runner_id,
+            name: runner_name.to_string(),
+            refresh_token: refresh_token.to_string(),
+            refresh_token_generation: generation as u64,
+        },
+    ))
+}
+
 pub async fn write_runner_credentials(
     path: PathBuf,
     creds: RunnerCredentials,
@@ -1333,6 +1377,36 @@ pub async fn write_runner_credentials(
         .rotate(creds.refresh_token.clone(), creds.refresh_token_generation)
         .await
         .map_err(|e| TransportError::Network(e.to_string()))
+}
+
+/// Self-revoke a runner cloud-side via the machine-token auth surface.
+/// `DELETE /api/v1/runner/runners/<rid>/`. Idempotent on the server:
+/// re-issuing against an already-deleted runner returns 401 (the bearer
+/// no longer resolves), which we map back to `Ok(())` so callers don't
+/// need to special-case the second invocation. Caller is responsible
+/// for cleaning up local state afterwards.
+pub async fn revoke_runner_self(client: &RunnerCloudClient) -> Result<(), TransportError> {
+    let token = client.ensure_access_token().await?;
+    let url = format!(
+        "{}/api/v1/runner/runners/{}/",
+        client.transport().cloud_url(),
+        client.runner_id(),
+    );
+    let resp = client
+        .transport()
+        .http()
+        .delete(&url)
+        .header("Authorization", format!("Bearer {}", token.raw))
+        .send()
+        .await
+        .map_err(|e| TransportError::Network(e.to_string()))?;
+    let status = resp.status();
+    if status.is_success() || status == StatusCode::NOT_FOUND || status == StatusCode::UNAUTHORIZED
+    {
+        return Ok(());
+    }
+    let body = resp.text().await.unwrap_or_default();
+    Err(map_auth_error(status, &body))
 }
 
 #[derive(Debug, Clone, Deserialize)]

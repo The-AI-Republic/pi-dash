@@ -90,6 +90,7 @@ struct Inner {
     ///      see a partial update.
     ///   3. `observability_snapshot()` is one lock + one clone instead
     ///      of seven independent locks.
+    ///
     /// Collectively wiped on rid change in `set_current_run` so a freshly
     /// assigned run never inherits stale metrics.
     run_snapshot: Mutex<ObservabilitySnapshot>,
@@ -259,7 +260,7 @@ impl StateHandle {
 
     /// Snapshot the volatile observability fields for one poll. One lock
     /// + one clone — adding a new field to `ObservabilitySnapshot`
-    /// automatically participates without touching this method.
+    ///   automatically participates without touching this method.
     pub async fn observability_snapshot(&self) -> ObservabilitySnapshot {
         self.inner.run_snapshot.lock().await.clone()
     }

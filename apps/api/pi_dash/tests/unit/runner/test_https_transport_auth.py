@@ -195,6 +195,74 @@ def test_access_token_decode_rejects_revoked_runner(db, pending_runner):
 
 
 @pytest.mark.unit
+def test_self_revoke_deletes_runner_and_is_idempotent(db, api_client, pending_runner):
+    runner, enrollment = pending_runner
+    enroll = api_client.post(
+        "/api/v1/runner/runners/enroll/",
+        {"enrollment_token": enrollment.raw, "host_label": "host"},
+        format="json",
+    )
+    access_token = enroll.data["access_token"]
+    runner_id = enroll.data["runner_id"]
+
+    resp = api_client.delete(
+        f"/api/v1/runner/runners/{runner_id}/",
+        HTTP_AUTHORIZATION=f"Bearer {access_token}",
+    )
+    assert resp.status_code == 204
+    assert not Runner.objects.filter(pk=runner_id).exists()
+
+    # A second DELETE returns 401 (the bearer's `runner_id` no longer
+    # resolves) — equivalent to "the row is gone." Production callers
+    # treat both 204 and 401 here as success.
+    repeat = api_client.delete(
+        f"/api/v1/runner/runners/{runner_id}/",
+        HTTP_AUTHORIZATION=f"Bearer {access_token}",
+    )
+    assert repeat.status_code in (204, 401)
+
+
+@pytest.mark.unit
+def test_self_revoke_rejects_mismatched_runner_id(
+    db, api_client, pending_runner, workspace, create_user, project
+):
+    """Bearer must match the URL runner_id — no cross-runner deletion."""
+    from pi_dash.runner.services import tokens as _tokens
+
+    runner_a, enrollment_a = pending_runner
+    enroll = api_client.post(
+        "/api/v1/runner/runners/enroll/",
+        {"enrollment_token": enrollment_a.raw, "host_label": "host-a"},
+        format="json",
+    )
+    access_a = enroll.data["access_token"]
+
+    pod_b = Pod.default_for_project(project)
+    runner_b_enroll = _tokens.mint_enrollment_token()
+    runner_b = Runner.objects.create(
+        owner=create_user,
+        workspace=workspace,
+        pod=pod_b,
+        name="other-runner",
+        enrollment_token_hash=runner_b_enroll.hashed,
+        enrollment_token_fingerprint=runner_b_enroll.fingerprint,
+    )
+
+    resp = api_client.delete(
+        f"/api/v1/runner/runners/{runner_b.id}/",
+        HTTP_AUTHORIZATION=f"Bearer {access_a}",
+    )
+    # Auth class rejects with 401 when the URL runner_id doesn't match
+    # the bearer's runner claim. (If auth lets the request through, the
+    # view's own check returns 403 with `runner_id_mismatch`.) Either is
+    # acceptable — the requirement is "no cross-runner deletion."
+    assert resp.status_code in (401, 403)
+    runner_b.refresh_from_db()
+    assert runner_b.revoked_at is None
+    assert Runner.objects.filter(pk=runner_b.id).exists()
+
+
+@pytest.mark.unit
 def test_force_refresh_blocks_old_rtg(db, pending_runner):
     runner, _ = pending_runner
     runner.refresh_token_generation = 5

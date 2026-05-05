@@ -29,6 +29,7 @@ from pi_dash.runner.views import (
     RunStreamUpgradeEndpoint,
     RunnerEnrollEndpoint,
     RunnerRefreshEndpoint,
+    RunnerSelfRevokeEndpoint,
     RunnerSessionDeleteEndpoint,
     RunnerSessionOpenEndpoint,
     RunnerSessionPollEndpoint,
@@ -49,6 +50,15 @@ urlpatterns = [
         "runners/<uuid:runner_id>/refresh/",
         RunnerRefreshEndpoint.as_view(),
         name="runner-refresh",
+    ),
+    # Runner self-deletion (machine-token auth). Symmetric to the web
+    # UI's session-auth `/api/runners/<rid>/` DELETE so `pidash runner
+    # remove` and the TUI's remove modal can teardown without forcing
+    # the operator into the cloud UI.
+    path(
+        "runners/<uuid:runner_id>/",
+        RunnerSelfRevokeEndpoint.as_view(),
+        name="runner-self-revoke",
     ),
     # Session lifecycle + poll.
     path(
