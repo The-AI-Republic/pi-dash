@@ -32,6 +32,38 @@ from pi_dash.runner.models import (
 logger = logging.getLogger(__name__)
 
 
+def _apply_terminal_orchestration(run: AgentRun) -> None:
+    """Run the ticker side-effects that follow a terminal/paused run.
+
+    Order matters: terminal-disarm must run before deferred-pause so the
+    deferred-pause hook sees the latest disarm reason. Both helpers are
+    idempotent and safe to call on PAUSED runs — the payload-status gate
+    inside ``maybe_disarm_on_terminal_signal`` only fires on completed/
+    blocked, and the CAP_HIT gate inside ``maybe_apply_deferred_pause``
+    skips terminal-signal disarms.
+
+    Each side-effect is wrapped in its own try/except so a failure in one
+    does not block the other or the surrounding drain.
+    """
+    from pi_dash.orchestration.scheduling import (
+        maybe_apply_deferred_pause,
+        maybe_disarm_on_terminal_signal,
+    )
+
+    try:
+        maybe_disarm_on_terminal_signal(run)
+    except Exception:
+        logger.exception(
+            "orchestration.error: terminal-disarm failed for run %s", run.pk
+        )
+    try:
+        maybe_apply_deferred_pause(run)
+    except Exception:
+        logger.exception(
+            "orchestration.error: deferred-pause failed for run %s", run.pk
+        )
+
+
 def apply_run_paused(
     runner: Runner, run_id: UUID | str, payload: Dict[str, Any]
 ) -> None:
@@ -78,10 +110,6 @@ def apply_run_paused(
                 comment_html="".join(body_parts),
             )
 
-    from pi_dash.orchestration.scheduling import (
-        maybe_apply_deferred_pause,
-        maybe_disarm_on_terminal_signal,
-    )
     from pi_dash.runner.services.matcher import drain_for_runner_by_id
 
     def _pause_and_drain(rid=run_id, runner_id=runner.id):
@@ -95,26 +123,7 @@ def apply_run_paused(
             .first()
         )
         if paused is not None:
-            # Disarm-on-terminal must run before deferred-pause so the
-            # deferred-pause hook sees the latest disarm reason. Both are
-            # safe on PAUSED runs because the payload-status gate inside
-            # maybe_disarm_on_terminal_signal only fires on completed/
-            # blocked, and the CAP_HIT gate inside
-            # maybe_apply_deferred_pause skips terminal-signal disarms.
-            try:
-                maybe_disarm_on_terminal_signal(paused)
-            except Exception:
-                logger.exception(
-                    "orchestration.error: terminal-disarm failed for run %s",
-                    rid,
-                )
-            try:
-                maybe_apply_deferred_pause(paused)
-            except Exception:
-                logger.exception(
-                    "orchestration.error: deferred-pause failed for run %s",
-                    rid,
-                )
+            _apply_terminal_orchestration(paused)
         drain_for_runner_by_id(runner_id)
 
     transaction.on_commit(_pause_and_drain)
@@ -258,10 +267,6 @@ def finalize_run_terminal(
                 run_id,
             )
 
-    from pi_dash.orchestration.scheduling import (
-        maybe_apply_deferred_pause,
-        maybe_disarm_on_terminal_signal,
-    )
     from pi_dash.runner.services.matcher import (
         drain_for_runner_by_id,
         drain_pod_by_id,
@@ -285,20 +290,7 @@ def finalize_run_terminal(
             .first()
         )
         if run is not None:
-            # Disarm-on-terminal must run before deferred-pause so the
-            # deferred-pause hook sees the latest disarm reason.
-            try:
-                maybe_disarm_on_terminal_signal(run)
-            except Exception:
-                logger.exception(
-                    "orchestration.error: terminal-disarm failed for run %s", rid
-                )
-            try:
-                maybe_apply_deferred_pause(run)
-            except Exception:
-                logger.exception(
-                    "orchestration.error: deferred-pause failed for run %s", rid
-                )
+            _apply_terminal_orchestration(run)
             if run.scheduler_binding_id is not None:
                 try:
                     update_scheduler_binding_on_terminate(run)
