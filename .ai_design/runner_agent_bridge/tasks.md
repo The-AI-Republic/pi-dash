@@ -67,7 +67,7 @@ How to use this file:
   - [ ] Removes the existing direct calls to `self.child.wait()` /
         `self.child.start_kill()` at lines 60-72.
 - [ ] Add a unit test that exercises `spawn → kill → exit_rx
-    observed → ExitSnapshot.status_code is Some(<signal-derived>)`.
+  observed → ExitSnapshot.status_code is Some(<signal-derived>)`.
 
 ### 1.3 Claude process refactor — same shape
 
@@ -160,7 +160,7 @@ How to use this file:
 - [ ] **Do not** modify `AttachBody`. Add a regression test that
       asserts `AttachBody`'s serialized field set is unchanged.
 - [ ] Add `PollStatus::from_state(state: &StateHandle, in_flight:
-    Option<Uuid>)` constructor that snapshots the state's
+  Option<Uuid>)` constructor that snapshots the state's
       mutexes once. `observed_run_id` is set from `in_flight` (=
       `rx_in_flight`), not from a separate field.
 - [ ] Update the existing poll-time call site
@@ -173,7 +173,7 @@ How to use this file:
       `null`.
 - [ ] Unit test: feature off → wire bytes match the v3 (pre-this-
       design) shape exactly. Feature on, idle → `observed_run_id:
-    null` is present, other fields absent. Feature on, busy →
+  null` is present, other fields absent. Feature on, busy →
       all populated fields present.
 
 ### 1.8 Phase A roll-out gate
@@ -193,7 +193,7 @@ How to use this file:
 - [ ] Add `RunnerLiveState` model to
       `apps/api/pi_dash/runner/models.py`:
   - [ ] `runner = OneToOneField(Runner, on_delete=CASCADE,
-    primary_key=True, related_name="live_state")`
+primary_key=True, related_name="live_state")`
   - [ ] `observed_run_id = UUIDField(null=True, blank=True)`
   - [ ] `last_event_at = DateTimeField(null=True, blank=True)`
   - [ ] `last_event_kind = CharField(max_length=64, null=True, blank=True)`
@@ -207,7 +207,7 @@ How to use this file:
   - [ ] `turn_count = PositiveIntegerField(null=True, blank=True)`
   - [ ] `updated_at = DateTimeField(auto_now=True)`
   - [ ] `Meta.indexes`: `Index(fields=["observed_run_id",
-    "updated_at", "last_event_at"])`
+"updated_at", "last_event_at"])`
 - [ ] Migration `apps/api/pi_dash/runner/migrations/00XX_runner_live_state.py`:
       additive only, no data migration, no changes to existing
       tables. Depends on the latest existing runner migration.
@@ -244,8 +244,8 @@ How to use this file:
       (every 30s) — add to the project's beat schedule
       configuration.
 - [ ] On stall match, call `run_lifecycle.finalize_run_terminal(
-    run.runner, run.id, AgentRunStatus.FAILED, error_detail=
-    f"agent stalled: no events for >{threshold}s")`. Same
+  run.runner, run.id, AgentRunStatus.FAILED, error_detail=
+  f"agent stalled: no events for >{threshold}s")`. Same
       lifecycle helper used by other terminal transitions.
 
 ### 2.4 Cloud-side tests (`design.md` §5 Phase B.4)
