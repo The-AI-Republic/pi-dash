@@ -4,6 +4,7 @@
 
 # Python imports
 import traceback
+import uuid
 
 import zoneinfo
 from django.conf import settings
@@ -45,6 +46,36 @@ class TimezoneMixin:
             timezone.deactivate()
 
 
+def _rewrite_project_kwarg(view, kwargs):
+    # See `pi_dash/api/views/base.py` for the rationale; the `/app/v1/` URL
+    # tree mirrors the same project-scoped contract so it gets the same
+    # pre-permission rewrite.
+    from pi_dash.db.models.project import Project
+
+    workspace_slug = kwargs.get("slug")
+    if not workspace_slug:
+        return
+
+    target_key = None
+    if "project_id" in kwargs and kwargs["project_id"] is not None:
+        target_key = "project_id"
+    elif kwargs.get("pk") is not None and resolve(view.request.path_info).url_name == "project":
+        target_key = "pk"
+    if target_key is None:
+        return
+
+    raw = kwargs[target_key]
+    try:
+        uuid.UUID(str(raw))
+        return
+    except (ValueError, AttributeError, TypeError):
+        pass
+
+    project = Project.resolve(workspace_slug, raw)
+    kwargs[target_key] = str(project.pk)
+    view.kwargs[target_key] = str(project.pk)
+
+
 class BaseViewSet(TimezoneMixin, ReadReplicaControlMixin, ModelViewSet, BasePaginator):
     model = None
 
@@ -59,6 +90,10 @@ class BaseViewSet(TimezoneMixin, ReadReplicaControlMixin, ModelViewSet, BasePagi
     search_fields = []
 
     use_read_replica = False
+
+    def initial(self, request, *args, **kwargs):
+        _rewrite_project_kwarg(self, kwargs)
+        super().initial(request, *args, **kwargs)
 
     def get_queryset(self):
         try:
@@ -158,6 +193,10 @@ class BaseAPIView(TimezoneMixin, ReadReplicaControlMixin, APIView, BasePaginator
     search_fields = []
 
     use_read_replica = False
+
+    def initial(self, request, *args, **kwargs):
+        _rewrite_project_kwarg(self, kwargs)
+        super().initial(request, *args, **kwargs)
 
     def filter_queryset(self, queryset):
         for backend in list(self.filter_backends):

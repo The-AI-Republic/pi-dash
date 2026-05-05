@@ -3,6 +3,7 @@
 # See the LICENSE file for details.
 
 # Python imports
+import uuid
 import zoneinfo
 import logging
 
@@ -47,12 +48,59 @@ class TimezoneMixin:
             timezone.deactivate()
 
 
+def _rewrite_project_kwarg(view, kwargs):
+    # Rewrite a slug-or-UUID `project_id` (or `pk`, for the project-detail
+    # routes) into the canonical project UUID *before* DRF runs permission
+    # checks. Project permission classes filter `ProjectMember` by
+    # `project_id=view.project_id` and would silently 403 on a slug otherwise.
+    # The lookup is keyed on workspace slug, which we read from the URL kwarg
+    # `slug` because the `view.workspace_slug` property already does the same.
+    from pi_dash.db.models.project import Project
+
+    workspace_slug = kwargs.get("slug")
+    if not workspace_slug:
+        return
+
+    target_key = None
+    if "project_id" in kwargs and kwargs["project_id"] is not None:
+        target_key = "project_id"
+    elif kwargs.get("pk") is not None and resolve(view.request.path_info).url_name == "project":
+        # ProjectDetailAPIEndpoint is registered under url name "project" with
+        # the project itself bound to `<str:pk>`. Resolve here so permissions
+        # and the view body see a UUID. Mirrors the same `resolve(...)` check
+        # used by the existing `BaseAPIView.project_id` property.
+        target_key = "pk"
+    if target_key is None:
+        return
+
+    raw = kwargs[target_key]
+    try:
+        uuid.UUID(str(raw))
+        # Already a UUID — accept it as-is. We deliberately do NOT verify the
+        # project exists at this point: the existing view code already does
+        # `Project.objects.get(pk=...)` or filters by FK and will 404/403 the
+        # same as before. Verifying here would add a query for every request.
+        return
+    except (ValueError, AttributeError, TypeError):
+        pass
+
+    project = Project.resolve(workspace_slug, raw)
+    kwargs[target_key] = str(project.pk)
+    view.kwargs[target_key] = str(project.pk)
+
+
 class BaseAPIView(TimezoneMixin, GenericAPIView, ReadReplicaControlMixin, BasePaginator):
     authentication_classes = [APIKeyAuthentication]
 
     permission_classes = [IsAuthenticated]
 
     use_read_replica = False
+
+    def initial(self, request, *args, **kwargs):
+        # Run BEFORE super().initial() so that DRF's check_permissions sees
+        # the rewritten UUID instead of a slug.
+        _rewrite_project_kwarg(self, kwargs)
+        super().initial(request, *args, **kwargs)
 
     def filter_queryset(self, queryset):
         for backend in list(self.filter_backends):
@@ -172,6 +220,10 @@ class BaseViewSet(TimezoneMixin, ReadReplicaControlMixin, ModelViewSet, BasePagi
         IsAuthenticated,
     ]
     use_read_replica = False
+
+    def initial(self, request, *args, **kwargs):
+        _rewrite_project_kwarg(self, kwargs)
+        super().initial(request, *args, **kwargs)
 
     def get_queryset(self):
         try:
