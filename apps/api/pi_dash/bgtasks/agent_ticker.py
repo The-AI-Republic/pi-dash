@@ -149,6 +149,7 @@ def fire_tick(ticker_id: str) -> bool:
         prev_tick_count = ticker.tick_count
         prev_next_run_at = ticker.next_run_at
         prev_enabled = ticker.enabled
+        prev_disarm_reason = ticker.disarm_reason
 
         ticker.tick_count = ticker.tick_count + 1
         ticker.last_tick_at = now
@@ -198,12 +199,12 @@ def fire_tick(ticker_id: str) -> bool:
                 rollback.tick_count = prev_tick_count
                 rollback.next_run_at = prev_next_run_at
                 rollback.enabled = prev_enabled
-                # Rolling back the claim also rolls back the cap-hit
-                # disarm reason we may have just written. fire_tick
-                # only reaches the claim block on an enabled ticker
-                # (early return at top of function), so the previous
-                # reason is always NONE here.
-                rollback.disarm_reason = TickerDisarmReason.NONE
+                # Restore the captured pre-claim reason. fire_tick only
+                # reaches the claim block on an enabled ticker, so this
+                # is NONE in practice — but capturing keeps the rollback
+                # consistent with the other prev_* fields and survives
+                # any future weakening of that early-return invariant.
+                rollback.disarm_reason = prev_disarm_reason
                 rollback.save(
                     update_fields=[
                         "tick_count",

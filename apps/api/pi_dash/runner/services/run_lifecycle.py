@@ -32,15 +32,20 @@ from pi_dash.runner.models import (
 logger = logging.getLogger(__name__)
 
 
-def _apply_terminal_orchestration(run: AgentRun) -> None:
-    """Run the ticker side-effects that follow a terminal/paused run.
+def _apply_post_run_orchestration(run: AgentRun) -> None:
+    """Run the ticker side-effects that follow a paused or terminal run.
+
+    Called from both ``apply_run_paused`` (PAUSED_AWAITING_INPUT) and
+    ``finalize_run_terminal`` (COMPLETED / FAILED / CANCELLED), hence
+    "post-run" rather than "terminal" — paused runs are not terminal
+    but still need the same hooks.
 
     Order matters: terminal-disarm must run before deferred-pause so the
     deferred-pause hook sees the latest disarm reason. Both helpers are
-    idempotent and safe to call on PAUSED runs — the payload-status gate
-    inside ``maybe_disarm_on_terminal_signal`` only fires on completed/
-    blocked, and the CAP_HIT gate inside ``maybe_apply_deferred_pause``
-    skips terminal-signal disarms.
+    idempotent and safe to call on paused runs — the payload-status
+    gate inside ``maybe_disarm_on_terminal_signal`` only fires on
+    completed/blocked, and the CAP_HIT gate inside
+    ``maybe_apply_deferred_pause`` skips terminal-signal disarms.
 
     Each side-effect is wrapped in its own try/except so a failure in one
     does not block the other or the surrounding drain.
@@ -123,7 +128,7 @@ def apply_run_paused(
             .first()
         )
         if paused is not None:
-            _apply_terminal_orchestration(paused)
+            _apply_post_run_orchestration(paused)
         drain_for_runner_by_id(runner_id)
 
     transaction.on_commit(_pause_and_drain)
@@ -290,7 +295,7 @@ def finalize_run_terminal(
             .first()
         )
         if run is not None:
-            _apply_terminal_orchestration(run)
+            _apply_post_run_orchestration(run)
             if run.scheduler_binding_id is not None:
                 try:
                     update_scheduler_binding_on_terminate(run)

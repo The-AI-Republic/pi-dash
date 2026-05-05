@@ -30,9 +30,11 @@ from pi_dash.runner.models import AgentRun, AgentRunStatus, Pod, Runner, RunnerS
 
 logger = logging.getLogger(__name__)
 
-#: Retained for backwards compatibility with imports. New code should use
+#: DEPRECATED: retained only for backward compatibility with external
+#: importers (tests, integrations). Internal callers must use
 #: ``orchestration.agent_phases.is_ticking_state`` /
-#: ``phase_config_for`` instead.
+#: ``phase_config_for``. Remove this constant once no remaining
+#: imports of ``DELEGATION_STATE_NAME`` exist.
 DELEGATION_STATE_NAME = "In Progress"
 
 
@@ -252,7 +254,10 @@ def handle_issue_comment(comment: IssueComment) -> ContinuationOutcome:
     # coalesce / active-run / no-pod early returns so the ticker
     # restarts even when this specific comment doesn't dispatch a
     # new run (the existing run / queued follow-up will pick up the
-    # comment, and the next tick happens automatically).
+    # comment, and the next tick happens automatically). The
+    # no-prior-run case also re-arms — ``fire_tick`` will still skip
+    # those ticks via its own no-prior-run guard, so the ticker row
+    # is harmless until something else creates a run.
     from pi_dash.orchestration import scheduling
 
     if is_ticking_state(issue.state):

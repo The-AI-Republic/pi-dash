@@ -47,11 +47,12 @@ logger = logging.getLogger(__name__)
 
 PAUSED_STATE_NAME = "Paused"
 
-# Retained for backwards compatibility with callers / tests that import
-# the literal. New code should use
+# DEPRECATED: retained only for backward compatibility with external
+# importers (tests, integrations). Internal callers must use
 # ``orchestration.agent_phases.is_ticking_state`` /
-# ``phase_config_for`` instead. The literal still names the In Progress
-# phase's state — see ``agent_phases.PHASES``.
+# ``phase_config_for`` — the literal still names the In Progress
+# phase's state, see ``agent_phases.PHASES``. Remove once no
+# remaining imports of ``DELEGATION_STATE_NAME`` exist.
 DELEGATION_STATE_NAME = "In Progress"
 
 
@@ -174,10 +175,19 @@ def disarm_ticker(
     preserves the prior reason so an opportunistic terminal-signal
     disarm cannot clobber a pre-existing ``CAP_HIT``. Today the only
     production caller is the state-transition handler with the
-    default ``LEFT_TICKING_STATE`` reason; future callers passing
-    ``TERMINAL_SIGNAL`` should prefer
-    :func:`maybe_disarm_on_terminal_signal` instead.
+    default ``LEFT_TICKING_STATE`` reason. Callers needing the
+    terminal-signal semantics must use
+    :func:`maybe_disarm_on_terminal_signal`; passing
+    ``TERMINAL_SIGNAL`` here raises ``ValueError`` because the
+    overwrite-always behavior would silently clobber a pre-existing
+    ``CAP_HIT`` and skip the auto-pause.
     """
+    if reason == TickerDisarmReason.TERMINAL_SIGNAL:
+        raise ValueError(
+            "disarm_ticker overwrites disarm_reason — use "
+            "maybe_disarm_on_terminal_signal() for TERMINAL_SIGNAL "
+            "to preserve a prior CAP_HIT and the auto-pause it gates."
+        )
     with transaction.atomic():
         sched = (
             IssueAgentTicker.objects.select_for_update()
@@ -483,6 +493,13 @@ def maybe_apply_deferred_pause(run: AgentRun) -> bool:
             .first()
         )
         if locked_sched is None or locked_sched.enabled:
+            return False
+        # Re-check disarm_reason under the lock so a concurrent
+        # ``disarm_ticker`` (e.g., the user moved the issue out of the
+        # ticking state mid-flight, flipping the reason from CAP_HIT to
+        # LEFT_TICKING_STATE) cannot drive an auto-pause off a stale
+        # unlocked read.
+        if locked_sched.disarm_reason != TickerDisarmReason.CAP_HIT:
             return False
         # Re-fetch the issue under the same transaction to guard against a
         # racing state transition.
