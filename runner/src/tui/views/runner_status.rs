@@ -112,8 +112,13 @@ impl Tab for RunnerStatusTab {
             .direction(Direction::Horizontal)
             .constraints([Constraint::Length(36), Constraint::Min(40)])
             .split(outer[0]);
+        let right = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Min(8), Constraint::Length(11)])
+            .split(body[1]);
         self.render_runner_list(body[0], buf, data);
-        self.render_settings_panel(body[1], buf, data);
+        self.render_settings_panel(right[0], buf, data);
+        render_live_state_panel(right[1], buf, data, self.selected_runner_name(data).as_deref());
         hotkeys_card().render(outer[1], buf);
     }
 
@@ -182,11 +187,7 @@ impl Tab for RunnerStatusTab {
                 KeyHandled::Consumed
             }
             (KeyCode::Char('a'), m) if !m.contains(KeyModifiers::CONTROL) => {
-                let v = super::modals::add_runner::AddRunnerView::open(
-                    ctx.data,
-                    ctx.tx.clone(),
-                    ctx.paths.clone(),
-                );
+                let v = super::modals::add_runner::AddRunnerView::open(ctx.data);
                 ctx.tx.push_view(Box::new(v));
                 KeyHandled::Consumed
             }
@@ -470,4 +471,97 @@ fn hotkeys_card() -> Paragraph<'static> {
         Span::raw("   [Tab] switch card   [j/k ↑↓] move   [</>] runner   [↵] edit   [w] save   [r] refresh"),
     ]))
     .block(Block::default().borders(Borders::ALL).title(" Controls "))
+}
+
+fn render_live_state_panel(area: Rect, buf: &mut Buffer, data: &AppData, selected_name: Option<&str>) {
+    let snapshot = selected_name
+        .and_then(|n| data.status.as_ref().and_then(|s| s.runner_by_name(n)));
+    let mut lines: Vec<Line<'static>> = Vec::new();
+    let Some(r) = snapshot else {
+        lines.push(Line::from(Span::styled(
+            "(no live state — daemon idle or runner not yet reported)",
+            Style::default().fg(Color::DarkGray),
+        )));
+        Paragraph::new(lines)
+            .block(Block::default().borders(Borders::ALL).title(" Live state "))
+            .wrap(Wrap { trim: true })
+            .render(area, buf);
+        return;
+    };
+    let pod = r.pod_id.map(|p| p.to_string()).unwrap_or_else(|| "(unassigned)".into());
+    lines.push(field_kv("Pod", &pod));
+    lines.push(field_kv("Heartbeat", &fmt_age(r.last_heartbeat)));
+    let current_run = match &r.current_run {
+        Some(run) => format!("{} ({}) · {} events", run.run_id, run.status, run.events),
+        None => "(idle)".to_string(),
+    };
+    lines.push(field_kv("Current run", &current_run));
+    if let Some(obs) = r.observability.as_ref() {
+        let last_event = match (&obs.last_event_kind, obs.last_event_at) {
+            (Some(k), Some(at)) => format!("{k}  ({})", fmt_age(Some(at))),
+            _ => "(none)".into(),
+        };
+        lines.push(field_kv("Last event", &last_event));
+        if let Some(s) = obs.last_event_summary.as_deref() {
+            lines.push(Line::from(vec![
+                Span::styled("            ", Style::default()),
+                Span::styled(s.to_string(), Style::default().fg(Color::DarkGray)),
+            ]));
+        }
+        let turns = obs
+            .turn_count
+            .map(|n| n.to_string())
+            .unwrap_or_else(|| "—".into());
+        let tokens = obs
+            .tokens
+            .as_ref()
+            .map(|t| format!("in={} out={} total={}", t.input, t.output, t.total))
+            .unwrap_or_else(|| "—".into());
+        lines.push(field_kv("Turns", &turns));
+        lines.push(field_kv("Tokens", &tokens));
+        let agent = match (obs.agent_pid, obs.agent_subprocess_alive) {
+            (Some(pid), Some(true)) => format!("pid {pid} · alive"),
+            (Some(pid), Some(false)) => format!("pid {pid} · exited"),
+            (Some(pid), None) => format!("pid {pid}"),
+            _ => "—".into(),
+        };
+        lines.push(field_kv("Agent", &agent));
+    } else {
+        lines.push(Line::from(Span::styled(
+            "(observability disabled — set agent_observability_v1=true to surface tokens/turns/last event)",
+            Style::default().fg(Color::DarkGray),
+        )));
+    }
+    Paragraph::new(lines)
+        .block(Block::default().borders(Borders::ALL).title(" Live state "))
+        .wrap(Wrap { trim: true })
+        .render(area, buf);
+}
+
+fn field_kv(label: &str, value: &str) -> Line<'static> {
+    Line::from(vec![
+        Span::styled(
+            format!("{label:<11} "),
+            Style::default().fg(Color::Cyan),
+        ),
+        Span::raw(value.to_string()),
+    ])
+}
+
+fn fmt_age(ts: Option<chrono::DateTime<chrono::Utc>>) -> String {
+    match ts {
+        None => "(none)".into(),
+        Some(at) => {
+            let secs = (chrono::Utc::now() - at).num_seconds();
+            if secs < 0 {
+                "in the future?".into()
+            } else if secs < 60 {
+                format!("{secs}s ago")
+            } else if secs < 3600 {
+                format!("{}m {}s ago", secs / 60, secs % 60)
+            } else {
+                format!("{}h{}m ago", secs / 3600, (secs % 3600) / 60)
+            }
+        }
+    }
 }

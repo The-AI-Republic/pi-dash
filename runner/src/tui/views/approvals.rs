@@ -75,9 +75,16 @@ impl Tab for ApprovalsTab {
             .approvals
             .iter()
             .map(|r| {
+                let runner_label = data
+                    .status
+                    .as_ref()
+                    .and_then(|s| s.runners.iter().find(|run| run.runner_id == r.runner_id))
+                    .map(|run| run.name.clone())
+                    .unwrap_or_else(|| "—".into());
                 ListItem::new(format!(
-                    "{}  {:?}",
+                    "{}  [{}]  {:?}",
                     r.requested_at.format("%H:%M:%S"),
+                    runner_label,
                     r.kind
                 ))
             })
@@ -103,9 +110,15 @@ impl Tab for ApprovalsTab {
             .map(|r| {
                 let pretty = serde_json::to_string_pretty(&r.payload).unwrap_or_default();
                 let reason = r.reason.clone().unwrap_or_default();
+                let runner_label = data
+                    .status
+                    .as_ref()
+                    .and_then(|s| s.runners.iter().find(|run| run.runner_id == r.runner_id))
+                    .map(|run| run.name.clone())
+                    .unwrap_or_else(|| r.runner_id.to_string());
                 format!(
-                    "approval_id: {}\nrun_id: {}\nkind: {:?}\nreason: {}\n\npayload:\n{}",
-                    r.approval_id, r.run_id, r.kind, reason, pretty
+                    "approval_id: {}\nrunner: {}\nrun_id: {}\nkind: {:?}\nreason: {}\n\npayload:\n{}",
+                    r.approval_id, runner_label, r.run_id, r.kind, reason, pretty
                 )
             })
             .unwrap_or_else(|| "Select an approval (j/k) to see details.".to_string());
@@ -160,6 +173,7 @@ impl Tab for ApprovalsTab {
                 if let Some(rec) = self.selected_record(ctx.data) {
                     ctx.tx.send(AppEvent::Approval {
                         approval_id: rec.approval_id.clone(),
+                        runner_id: rec.runner_id,
                         decision: crate::cloud::protocol::ApprovalDecision::Accept,
                     });
                 }
@@ -169,6 +183,7 @@ impl Tab for ApprovalsTab {
                 if let Some(rec) = self.selected_record(ctx.data) {
                     ctx.tx.send(AppEvent::Approval {
                         approval_id: rec.approval_id.clone(),
+                        runner_id: rec.runner_id,
                         decision: crate::cloud::protocol::ApprovalDecision::AcceptForSession,
                     });
                 }
@@ -178,6 +193,7 @@ impl Tab for ApprovalsTab {
                 if let Some(rec) = self.selected_record(ctx.data) {
                     ctx.tx.send(AppEvent::Approval {
                         approval_id: rec.approval_id.clone(),
+                        runner_id: rec.runner_id,
                         decision: crate::cloud::protocol::ApprovalDecision::Decline,
                     });
                 }

@@ -429,11 +429,31 @@ impl App {
                 self.frame.schedule_frame();
             }
 
-            AppEvent::Approval { approval_id, decision } => {
+            AppEvent::Approval {
+                approval_id,
+                runner_id,
+                decision,
+            } => {
+                // Resolve the snapshotted runner_id to a name so the
+                // daemon can route the decide call to the right
+                // mailbox. Falling back to `None` (let the daemon scan
+                // every instance) is correct for back-compat records
+                // and for single-runner installs.
+                let target_name = if runner_id.is_nil() {
+                    self.data.ipc.selected_runner.clone()
+                } else {
+                    self.data
+                        .status
+                        .as_ref()
+                        .and_then(|s| s.runners.iter().find(|r| r.runner_id == runner_id))
+                        .map(|r| r.name.clone())
+                };
                 let ipc = self.data.ipc.clone();
                 let tx = self.event_tx.clone();
                 tokio::spawn(async move {
-                    let _ = ipc.decide(&approval_id, decision).await;
+                    let _ = ipc
+                        .decide_for_runner(&approval_id, decision, target_name)
+                        .await;
                     match ipc.approvals().await {
                         Ok(v) => tx.send(AppEvent::ApprovalsUpdated(Ok(v))),
                         Err(e) => tx.send(AppEvent::ApprovalsUpdated(Err(format!("{e:#}")))),
@@ -808,6 +828,7 @@ impl App {
                 if let Some(rec) = self.approvals_tab.selected_record(&self.data) {
                     self.event_tx.send(AppEvent::Approval {
                         approval_id: rec.approval_id.clone(),
+                        runner_id: rec.runner_id,
                         decision: crate::cloud::protocol::ApprovalDecision::Accept,
                     });
                 }
@@ -816,6 +837,7 @@ impl App {
                 if let Some(rec) = self.approvals_tab.selected_record(&self.data) {
                     self.event_tx.send(AppEvent::Approval {
                         approval_id: rec.approval_id.clone(),
+                        runner_id: rec.runner_id,
                         decision: crate::cloud::protocol::ApprovalDecision::AcceptForSession,
                     });
                 }
@@ -824,6 +846,7 @@ impl App {
                 if let Some(rec) = self.approvals_tab.selected_record(&self.data) {
                     self.event_tx.send(AppEvent::Approval {
                         approval_id: rec.approval_id.clone(),
+                        runner_id: rec.runner_id,
                         decision: crate::cloud::protocol::ApprovalDecision::Decline,
                     });
                 }
@@ -842,11 +865,7 @@ impl App {
             Action::ServiceStart | Action::ServiceStop => { /* inert outside General */ }
 
             Action::OpenAddRunner if matches!(self.tab, TabKind::RunnerStatus) => {
-                let v = super::views::modals::add_runner::AddRunnerView::open(
-                    &self.data,
-                    self.event_tx.clone(),
-                    self.data.paths.clone(),
-                );
+                let v = super::views::modals::add_runner::AddRunnerView::open(&self.data);
                 self.event_tx.push_view(Box::new(v));
             }
             Action::OpenAddRunner => {}

@@ -13,6 +13,8 @@
 //! top. This is what makes mutation orderable and lets us hold
 //! `&mut state` inside a single `select!` arm at a time.
 
+use uuid::Uuid;
+
 use crate::approval::router::ApprovalRecord;
 use crate::cloud::protocol::ApprovalDecision;
 use crate::config::schema::Config;
@@ -57,9 +59,15 @@ pub enum AppEvent {
 
     /// Approval decision originated from the Approvals tab. The
     /// dispatcher forwards to `ipc.decide` on a spawned task and then
-    /// re-polls approvals.
+    /// re-polls approvals. `runner_id` is snapshotted from the
+    /// selected `ApprovalRecord` when the hotkey fires, so the decide
+    /// call routes to the correct runner even if the user switched
+    /// the picker between selecting and acting. `Uuid::nil()` means
+    /// "back-compat record without a stamped runner_id" — the
+    /// dispatcher falls back to the picker selector in that case.
     Approval {
         approval_id: String,
+        runner_id: Uuid,
         decision: ApprovalDecision,
     },
 
@@ -118,9 +126,15 @@ impl std::fmt::Debug for AppEvent {
             AppEvent::ConfigUpdated(_) => f.write_str("ConfigUpdated"),
             AppEvent::PushView(_) => f.write_str("PushView"),
             AppEvent::PopView => f.write_str("PopView"),
-            AppEvent::Approval { approval_id, .. } => {
-                f.debug_struct("Approval").field("id", approval_id).finish()
-            }
+            AppEvent::Approval {
+                approval_id,
+                runner_id,
+                ..
+            } => f
+                .debug_struct("Approval")
+                .field("id", approval_id)
+                .field("runner_id", runner_id)
+                .finish(),
             AppEvent::ServiceStart => f.write_str("ServiceStart"),
             AppEvent::ServiceStop => f.write_str("ServiceStop"),
             AppEvent::ServiceActionResult(s) => f.debug_tuple("ServiceActionResult").field(s).finish(),

@@ -1339,6 +1339,7 @@ impl AssignWorker {
                 }
                 let rec = ApprovalRecord {
                     approval_id: approval_id.clone(),
+                    runner_id: self.runner_config.runner_id,
                     run_id,
                     kind,
                     payload: payload.clone(),

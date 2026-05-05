@@ -1,4 +1,5 @@
 use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tokio::sync::{Mutex, watch};
 use uuid::Uuid;
@@ -15,19 +16,27 @@ use crate::ipc::protocol::{CurrentRunSummary, RunnerStatusSnapshot};
 /// `Default::default()` assignment and a new field added here is automatically
 /// included in reset, snapshot read, and rid-change wipe — no enumeration to
 /// keep in sync.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ObservabilitySnapshot {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_event_at: Option<DateTime<Utc>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_event_kind: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_event_summary: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_pid: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_subprocess_alive: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tokens: Option<TokenUsage>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub turn_count: Option<u32>,
     /// Last shell command the agent kicked off (for failure-detail enrichment).
-    /// Reset on rid change like the other per-run scalars; not serialised
-    /// onto the wire snapshot — only consumed locally to enrich
-    /// `RunFailed.detail` when the watchdog or stdout-close path fires.
+    /// Reset on rid change like the other per-run scalars; never serialised
+    /// onto the wire — only consumed locally to enrich `RunFailed.detail`
+    /// when the watchdog or stdout-close path fires.
+    #[serde(skip)]
     pub last_exec_command: Option<ExecCommandSnapshot>,
 }
 
@@ -291,13 +300,21 @@ impl StateHandle {
 
     /// Per-runner snapshot. The IPC server aggregates these across
     /// every configured `RunnerInstance` into the wire-level
-    /// `StatusSnapshot { daemon, runners }`.
+    /// `StatusSnapshot { daemon, runners }`. `observability` is included
+    /// only when the daemon was started with `agent_observability_v1`,
+    /// so a TUI built against an older daemon (or against a daemon with
+    /// observability disabled) sees `None` and renders blanks.
     pub async fn runner_snapshot(&self) -> RunnerStatusSnapshot {
         let status = { *self.rx_status.borrow() };
         let runner_id = *self.inner.runner_id.lock().await;
         let last_heartbeat = *self.inner.last_heartbeat.lock().await;
         let current_run = self.inner.current_run.lock().await.clone();
         let approvals_pending = *self.inner.approvals_pending.lock().await;
+        let observability = if self.inner.agent_observability_v1 {
+            Some(self.inner.run_snapshot.lock().await.clone())
+        } else {
+            None
+        };
         RunnerStatusSnapshot {
             runner_id: runner_id.unwrap_or_else(Uuid::nil),
             name: self.inner.name.clone(),
@@ -307,6 +324,7 @@ impl StateHandle {
             current_run,
             approvals_pending,
             last_heartbeat,
+            observability,
         }
     }
 
