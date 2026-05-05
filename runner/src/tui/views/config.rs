@@ -40,6 +40,44 @@ pub enum FieldId {
     LogRetentionDays,
 }
 
+impl FieldId {
+    /// Stable `&'static str` identifier used by the focus tree.
+    pub fn id_str(self) -> &'static str {
+        match self {
+            FieldId::RunnerName => "field:runner_name",
+            FieldId::WorkspaceWorkingDir => "field:workspace_working_dir",
+            FieldId::AgentKind => "field:agent_kind",
+            FieldId::CodexBinary => "field:codex_binary",
+            FieldId::CodexModelDefault => "field:codex_model_default",
+            FieldId::ClaudeBinary => "field:claude_binary",
+            FieldId::ClaudeModelDefault => "field:claude_model_default",
+            FieldId::ApprovalAutoReadonly => "field:approval_auto_readonly",
+            FieldId::ApprovalAutoWrites => "field:approval_auto_writes",
+            FieldId::ApprovalAutoNetwork => "field:approval_auto_network",
+            FieldId::LogLevel => "field:log_level",
+            FieldId::LogRetentionDays => "field:log_retention_days",
+        }
+    }
+
+    pub fn from_id_str(s: &str) -> Option<Self> {
+        Some(match s {
+            "field:runner_name" => FieldId::RunnerName,
+            "field:workspace_working_dir" => FieldId::WorkspaceWorkingDir,
+            "field:agent_kind" => FieldId::AgentKind,
+            "field:codex_binary" => FieldId::CodexBinary,
+            "field:codex_model_default" => FieldId::CodexModelDefault,
+            "field:claude_binary" => FieldId::ClaudeBinary,
+            "field:claude_model_default" => FieldId::ClaudeModelDefault,
+            "field:approval_auto_readonly" => FieldId::ApprovalAutoReadonly,
+            "field:approval_auto_writes" => FieldId::ApprovalAutoWrites,
+            "field:approval_auto_network" => FieldId::ApprovalAutoNetwork,
+            "field:log_level" => FieldId::LogLevel,
+            "field:log_retention_days" => FieldId::LogRetentionDays,
+            _ => return None,
+        })
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 pub enum FieldKind {
     Text,

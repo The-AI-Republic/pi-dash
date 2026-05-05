@@ -17,8 +17,12 @@ use super::input::keymap::KeymapRegistry;
 use super::render::Renderable;
 use crate::util::paths::Paths;
 
+pub mod focus;
 pub mod tab;
 
+pub use focus::{
+    border_style, breadcrumb, is_focused, is_in_path, CardId, FocusNode, FocusPath, NavDir,
+};
 pub use tab::{Tab as TabView, TabKind};
 
 /// Did the view consume the key, or should we fall through to the

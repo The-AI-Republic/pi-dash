@@ -1,42 +1,36 @@
-//! Approvals tab — pending approvals + a detail pane.
+//! Approvals tab — pending list + detail pane.
 //!
-//! Two panes: a pending list (left) and a detail viewer (right).
-//! Tab toggles focus between them. The list owns a stable
-//! `SelectableList<approval_id>` so selection survives every 500ms
-//! tick (Bug-2 fix).
+//! Two top-level cards on the same row: `pending` (interactive) and
+//! `detail` (read-only). ←/→ swaps focus between them. ↑/↓ on the
+//! pending card moves the internal list cursor. The action hotkeys
+//! `a`/`A`/`d` work whenever focus is anywhere on this tab.
 
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind};
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Modifier, Style};
 use ratatui::text::Line;
 use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph, StatefulWidget, Widget, Wrap};
 
 use super::super::app::AppData;
 use super::super::event::AppEvent;
-use super::super::input::keymap::Context;
+use super::super::view::focus::{border_style, is_focused, FocusNode, FocusPath};
 use super::super::view::tab::{Tab, TabCtx, TabKind};
 use super::super::view::KeyHandled;
 use super::super::widgets::SelectableList;
 use crate::approval::router::ApprovalRecord;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum Pane {
-    #[default]
-    Pending,
-    Detail,
-}
+const CARD_PENDING: &str = "pending";
+const CARD_DETAIL: &str = "detail";
 
 pub struct ApprovalsTab {
     list: SelectableList<String>,
-    pane: Pane,
 }
 
 impl ApprovalsTab {
     pub fn new() -> Self {
         Self {
             list: SelectableList::new(),
-            pane: Pane::Pending,
         }
     }
 
@@ -62,14 +56,28 @@ impl Tab for ApprovalsTab {
         TabKind::Approvals
     }
 
-    fn render(&self, area: Rect, buf: &mut Buffer, data: &AppData) {
+    fn focus_tree(&self, _data: &AppData) -> Vec<FocusNode> {
+        vec![
+            FocusNode::Card {
+                id: CARD_PENDING,
+                interactive: true,
+                row: 0,
+                children: Vec::new(),
+            },
+            FocusNode::Card {
+                id: CARD_DETAIL,
+                interactive: false,
+                row: 0,
+                children: Vec::new(),
+            },
+        ]
+    }
+
+    fn render(&self, area: Rect, buf: &mut Buffer, data: &AppData, focus: &FocusPath) {
         let chunks = Layout::default()
             .direction(Direction::Horizontal)
             .constraints([Constraint::Percentage(40), Constraint::Percentage(60)])
             .split(area);
-
-        let pending_focused = matches!(self.pane, Pane::Pending);
-        let detail_focused = matches!(self.pane, Pane::Detail);
 
         let items: Vec<ListItem<'_>> = data
             .approvals
@@ -93,11 +101,7 @@ impl Tab for ApprovalsTab {
             .block(
                 Block::default()
                     .borders(Borders::ALL)
-                    .border_style(if pending_focused {
-                        Style::default().fg(Color::Yellow)
-                    } else {
-                        Style::default()
-                    })
+                    .border_style(border_style(is_focused(focus, CARD_PENDING)))
                     .title(" Pending "),
             )
             .highlight_style(Style::default().add_modifier(Modifier::REVERSED));
@@ -132,44 +136,50 @@ impl Tab for ApprovalsTab {
             .block(
                 Block::default()
                     .borders(Borders::ALL)
-                    .border_style(if detail_focused {
-                        Style::default().fg(Color::Yellow)
-                    } else {
-                        Style::default()
-                    })
+                    .border_style(border_style(is_focused(focus, CARD_DETAIL)))
                     .title(" Detail "),
             )
             .wrap(Wrap { trim: false });
         detail.render(chunks[1], buf);
     }
 
-    fn handle_key(&mut self, key: KeyEvent, ctx: &mut TabCtx<'_>) -> KeyHandled {
+    fn handle_item_key(
+        &mut self,
+        key: KeyEvent,
+        ctx: &mut TabCtx<'_>,
+        focus: &FocusPath,
+    ) -> KeyHandled {
         if key.kind != KeyEventKind::Press && key.kind != KeyEventKind::Repeat {
-            return KeyHandled::Consumed;
+            return KeyHandled::NotConsumed;
         }
-        let ids: Vec<String> = ctx
-            .data
-            .approvals
-            .iter()
-            .map(|r| r.approval_id.clone())
-            .collect();
-        match (key.code, key.modifiers) {
-            (KeyCode::Tab, _) | (KeyCode::BackTab, _) => {
-                self.pane = match self.pane {
-                    Pane::Pending => Pane::Detail,
-                    Pane::Detail => Pane::Pending,
-                };
-                KeyHandled::Consumed
+        // List cursor only moves while focus is on the pending card —
+        // otherwise ↑/↓ falling through here from the dispatcher means
+        // "no sibling above/below" and we leave it for the legacy
+        // keymap to maybe handle (e.g. RunnerPicker).
+        if focus.current() == Some(CARD_PENDING) {
+            let ids: Vec<String> = ctx
+                .data
+                .approvals
+                .iter()
+                .map(|r| r.approval_id.clone())
+                .collect();
+            match key.code {
+                KeyCode::Char('j') | KeyCode::Down => {
+                    self.list.move_down(&ids);
+                    return KeyHandled::Consumed;
+                }
+                KeyCode::Char('k') | KeyCode::Up => {
+                    self.list.move_up(&ids);
+                    return KeyHandled::Consumed;
+                }
+                _ => {}
             }
-            (KeyCode::Char('j') | KeyCode::Down, _) => {
-                self.list.move_down(&ids);
-                KeyHandled::Consumed
-            }
-            (KeyCode::Char('k') | KeyCode::Up, _) => {
-                self.list.move_up(&ids);
-                KeyHandled::Consumed
-            }
-            (KeyCode::Char('a'), _) => {
+        }
+        // Action hotkeys are tab-wide; they fire regardless of which
+        // card is focused so the user can decide an approval without
+        // first ←/→ to the pending list.
+        match key.code {
+            KeyCode::Char('a') => {
                 if let Some(rec) = self.selected_record(ctx.data) {
                     ctx.tx.send(AppEvent::Approval {
                         approval_id: rec.approval_id.clone(),
@@ -179,7 +189,7 @@ impl Tab for ApprovalsTab {
                 }
                 KeyHandled::Consumed
             }
-            (KeyCode::Char('A'), _) => {
+            KeyCode::Char('A') => {
                 if let Some(rec) = self.selected_record(ctx.data) {
                     ctx.tx.send(AppEvent::Approval {
                         approval_id: rec.approval_id.clone(),
@@ -189,7 +199,7 @@ impl Tab for ApprovalsTab {
                 }
                 KeyHandled::Consumed
             }
-            (KeyCode::Char('d'), _) => {
+            KeyCode::Char('d') => {
                 if let Some(rec) = self.selected_record(ctx.data) {
                     ctx.tx.send(AppEvent::Approval {
                         approval_id: rec.approval_id.clone(),
@@ -203,11 +213,8 @@ impl Tab for ApprovalsTab {
         }
     }
 
-    fn active_contexts(&self) -> Vec<Context> {
-        vec![Context::List]
-    }
-
     fn on_focus(&mut self, ctx: &mut TabCtx<'_>) {
         self.reconcile(ctx.data);
     }
 }
+

@@ -1,17 +1,18 @@
 //! General tab — daemon-level surface.
 //!
-//! Two faces:
-//! 1. **Configured machine**: service card, cloud-connection card,
-//!    daemon settings card (log level + log retention), hotkeys
-//!    footer.
-//! 2. **Fresh machine**: inline register form with three TextArea
-//!    fields (cloud URL, enrollment token, host label) plus a
-//!    Connect button.
+//! Focus tree (configured machine):
 //!
-//! The register form is the bug-3 fix point: each field is a real
-//! `TextArea` widget. While a textarea is focused, the tab returns
-//! `Context::TextInput` *only* from `active_contexts()`, so the
-//! keymap can never resolve digit / `h` / `l` keys as tab switches.
+//!   row 0: `service` (read-only)
+//!   row 1: `connection` (read-only)
+//!   row 2: `daemon_settings` (interactive, children = log_level + log_retention items)
+//!   row 3: `hotkeys` (read-only)
+//!
+//! Fresh machine (no config):
+//!
+//!   row 0: `register` (interactive, children = cloud_url, token, host_label, submit)
+//!
+//! Tab-wide hotkeys (`[s]`/`[x]` service, `[w]` save) work whenever
+//! focus is anywhere on this tab and no edit buffer is open.
 
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use ratatui::buffer::Buffer;
@@ -23,29 +24,26 @@ use ratatui::widgets::{Block, Borders, Paragraph, Widget, Wrap};
 use super::super::app::AppData;
 use super::super::event::AppEvent;
 use super::super::input::keymap::Context;
+use super::super::view::focus::{
+    border_style, is_focused, is_in_path, FocusNode, FocusPath,
+};
 use super::super::view::tab::{Tab, TabCtx, TabKind};
-use super::super::view::KeyHandled;
+use super::super::view::{CardId, KeyHandled};
 use super::super::widgets::TextArea;
 use super::config as fields;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum GeneralField {
-    #[default]
-    LogLevel,
-    LogRetentionDays,
-}
+const CARD_SERVICE: &str = "service";
+const CARD_CONNECTION: &str = "connection";
+const CARD_DAEMON_SETTINGS: &str = "daemon_settings";
+const CARD_HOTKEYS: &str = "hotkeys";
+const ITEM_LOG_LEVEL: &str = "field:log_level";
+const ITEM_LOG_RETENTION: &str = "field:log_retention_days";
 
-impl GeneralField {
-    pub fn next(self) -> Self {
-        match self {
-            GeneralField::LogLevel => GeneralField::LogRetentionDays,
-            GeneralField::LogRetentionDays => GeneralField::LogLevel,
-        }
-    }
-    pub fn prev(self) -> Self {
-        self.next()
-    }
-}
+const CARD_REGISTER: &str = "register";
+const ITEM_REG_CLOUD_URL: &str = "register:cloud_url";
+const ITEM_REG_TOKEN: &str = "register:token";
+const ITEM_REG_HOST_LABEL: &str = "register:host_label";
+const ITEM_REG_SUBMIT: &str = "register:submit";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RegisterFocus {
@@ -55,25 +53,10 @@ pub enum RegisterFocus {
     Submit = 3,
 }
 
-impl RegisterFocus {
-    fn from_idx(i: u8) -> Self {
-        match i {
-            0 => Self::CloudUrl,
-            1 => Self::Token,
-            2 => Self::HostLabel,
-            _ => Self::Submit,
-        }
-    }
-    fn idx(self) -> u8 {
-        self as u8
-    }
-}
-
 pub struct RegisterForm {
     pub cloud_url: TextArea,
     pub token: TextArea,
     pub host_label: TextArea,
-    pub focus: RegisterFocus,
     pub busy: bool,
     pub error: Option<String>,
 }
@@ -84,14 +67,13 @@ impl RegisterForm {
             cloud_url: TextArea::with_text("http://localhost"),
             token: TextArea::new().masked(true).placeholder("paste enrollment token"),
             host_label: TextArea::with_text(default_host),
-            focus: RegisterFocus::CloudUrl,
             busy: false,
             error: None,
         }
     }
 
-    pub fn focused_textarea_mut(&mut self) -> Option<&mut TextArea> {
-        match self.focus {
+    pub fn focused_textarea_mut(&mut self, focus: RegisterFocus) -> Option<&mut TextArea> {
+        match focus {
             RegisterFocus::CloudUrl => Some(&mut self.cloud_url),
             RegisterFocus::Token => Some(&mut self.token),
             RegisterFocus::HostLabel => Some(&mut self.host_label),
@@ -108,10 +90,8 @@ pub struct RegisterFormSnapshot {
 }
 
 pub struct GeneralTab {
-    /// Cursor on the daemon-settings card.
-    field: GeneralField,
-    /// Inline edit-text for `log_retention_days` (only field that
-    /// opens a buffer; LogLevel cycles in place).
+    /// Inline edit-text for `log_retention_days` (only daemon-settings
+    /// field that opens a buffer; `LogLevel` cycles in place).
     edit_buffer: Option<TextArea>,
     /// Lazily seeded the first time we observe `config` is missing.
     register: Option<RegisterForm>,
@@ -120,7 +100,6 @@ pub struct GeneralTab {
 impl GeneralTab {
     pub fn new() -> Self {
         Self {
-            field: GeneralField::default(),
             edit_buffer: None,
             register: None,
         }
@@ -153,17 +132,14 @@ impl GeneralTab {
         }
     }
 
-    fn editing_text_field(&self) -> bool {
-        if self.edit_buffer.is_some() {
-            return true;
-        }
-        if let Some(reg) = &self.register {
-            return matches!(
-                reg.focus,
-                RegisterFocus::CloudUrl | RegisterFocus::Token | RegisterFocus::HostLabel
-            );
-        }
-        false
+    fn register_focus_for_item(item: CardId) -> Option<RegisterFocus> {
+        Some(match item {
+            ITEM_REG_CLOUD_URL => RegisterFocus::CloudUrl,
+            ITEM_REG_TOKEN => RegisterFocus::Token,
+            ITEM_REG_HOST_LABEL => RegisterFocus::HostLabel,
+            ITEM_REG_SUBMIT => RegisterFocus::Submit,
+            _ => return None,
+        })
     }
 }
 
@@ -178,9 +154,78 @@ impl Tab for GeneralTab {
         TabKind::General
     }
 
-    fn render(&self, area: Rect, buf: &mut Buffer, data: &AppData) {
+    fn focus_tree(&self, data: &AppData) -> Vec<FocusNode> {
         if data.config_working.is_none() {
-            self.render_register(area, buf);
+            return vec![FocusNode::Card {
+                id: CARD_REGISTER,
+                interactive: true,
+                row: 0,
+                children: vec![
+                    FocusNode::Item {
+                        id: ITEM_REG_CLOUD_URL,
+                        interactive: true,
+                        row: 0,
+                    },
+                    FocusNode::Item {
+                        id: ITEM_REG_TOKEN,
+                        interactive: true,
+                        row: 1,
+                    },
+                    FocusNode::Item {
+                        id: ITEM_REG_HOST_LABEL,
+                        interactive: true,
+                        row: 2,
+                    },
+                    FocusNode::Item {
+                        id: ITEM_REG_SUBMIT,
+                        interactive: true,
+                        row: 3,
+                    },
+                ],
+            }];
+        }
+        vec![
+            FocusNode::Card {
+                id: CARD_SERVICE,
+                interactive: false,
+                row: 0,
+                children: Vec::new(),
+            },
+            FocusNode::Card {
+                id: CARD_CONNECTION,
+                interactive: false,
+                row: 1,
+                children: Vec::new(),
+            },
+            FocusNode::Card {
+                id: CARD_DAEMON_SETTINGS,
+                interactive: true,
+                row: 2,
+                children: vec![
+                    FocusNode::Item {
+                        id: ITEM_LOG_LEVEL,
+                        interactive: true,
+                        row: 0,
+                    },
+                    FocusNode::Item {
+                        id: ITEM_LOG_RETENTION,
+                        interactive: true,
+                        row: 1,
+                    },
+                ],
+            },
+            FocusNode::Card {
+                id: CARD_HOTKEYS,
+                interactive: false,
+                row: 3,
+                children: Vec::new(),
+            },
+        ]
+    }
+
+    fn render(&self, area: Rect, buf: &mut Buffer, data: &AppData, focus: &FocusPath) {
+        if data.config_working.is_none() {
+            self.render_register(area, buf, focus);
             return;
         }
         let chunks = Layout::default()
@@ -192,50 +237,84 @@ impl Tab for GeneralTab {
                 Constraint::Length(3),
             ])
             .split(area);
-        service_card(data).render(chunks[0], buf);
-        connection_card(data).render(chunks[1], buf);
-        self.daemon_settings_card(data).render(chunks[2], buf);
-        hotkeys_card(data).render(chunks[3], buf);
+        service_card(data, is_focused(focus, CARD_SERVICE)).render(chunks[0], buf);
+        connection_card(data, is_focused(focus, CARD_CONNECTION)).render(chunks[1], buf);
+        self.daemon_settings_card(data, focus).render(chunks[2], buf);
+        hotkeys_card(data, is_focused(focus, CARD_HOTKEYS)).render(chunks[3], buf);
     }
 
-    fn handle_key(&mut self, key: KeyEvent, ctx: &mut TabCtx<'_>) -> KeyHandled {
-        // Filter releases (defense in depth).
+    fn handle_item_key(
+        &mut self,
+        key: KeyEvent,
+        ctx: &mut TabCtx<'_>,
+        focus: &FocusPath,
+    ) -> KeyHandled {
         if key.kind != KeyEventKind::Press && key.kind != KeyEventKind::Repeat {
-            return KeyHandled::Consumed;
+            return KeyHandled::NotConsumed;
         }
 
-        // 1) Register form path — leaf-first: focused textarea sees the key.
-        if ctx.data.config_working.is_none() {
-            return self.handle_register_key(key, ctx);
+        // Register-form text input: when focus is on one of the four
+        // register items and the active context is `TextInput`, route
+        // typing to the corresponding TextArea. Submit Enter routes
+        // SubmitRegister; Esc clears the form error.
+        if let Some(reg) = self.register.as_mut()
+            && let Some(reg_focus) = focus
+                .current()
+                .and_then(Self::register_focus_for_item)
+        {
+            {
+                if let Some(area) = reg.focused_textarea_mut(reg_focus) {
+                    let h = area.handle_key(key);
+                    if matches!(h, KeyHandled::Consumed) {
+                        return KeyHandled::Consumed;
+                    }
+                }
+                if key.code == KeyCode::Char('c')
+                    && key.modifiers.contains(KeyModifiers::CONTROL)
+                {
+                    return KeyHandled::NotConsumed;
+                }
+                return match (key.code, reg_focus) {
+                    (KeyCode::Enter, RegisterFocus::Submit) => {
+                        ctx.tx.send(AppEvent::SubmitRegister);
+                        KeyHandled::Consumed
+                    }
+                    (KeyCode::Esc, _) => {
+                        reg.error = None;
+                        KeyHandled::Consumed
+                    }
+                    _ => KeyHandled::Consumed,
+                };
+            }
         }
 
-        // 2) Daemon settings edit-buffer path.
+        // Daemon-settings edit-buffer path (LogRetentionDays).
         if self.edit_buffer.is_some() {
-            return self.handle_edit_buffer_key(key, ctx);
+            if let Some(buf) = self.edit_buffer.as_mut() {
+                let h = buf.handle_key(key);
+                if matches!(h, KeyHandled::Consumed) {
+                    return KeyHandled::Consumed;
+                }
+            }
+            return match key.code {
+                KeyCode::Enter => {
+                    self.commit_edit_buffer(ctx);
+                    KeyHandled::Consumed
+                }
+                KeyCode::Esc => {
+                    self.edit_buffer = None;
+                    ctx.data.config_edit_error = None;
+                    KeyHandled::Consumed
+                }
+                KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    KeyHandled::NotConsumed
+                }
+                _ => KeyHandled::Consumed,
+            };
         }
 
-        // 3) Daemon settings nav — Enter cycles/edits, j/k moves.
+        // Tab-wide hotkeys (only when no edit buffer is open).
         match (key.code, key.modifiers) {
-            (KeyCode::Char('j') | KeyCode::Down, _) => {
-                self.field = self.field.next();
-                KeyHandled::Consumed
-            }
-            (KeyCode::Char('k') | KeyCode::Up, _) => {
-                self.field = self.field.prev();
-                KeyHandled::Consumed
-            }
-            (KeyCode::Enter, _) => {
-                self.start_or_apply_field(ctx);
-                KeyHandled::Consumed
-            }
-            (KeyCode::Char('w'), _) => {
-                ctx.tx.send(AppEvent::SaveConfig);
-                KeyHandled::Consumed
-            }
-            (KeyCode::Esc, _) => {
-                ctx.tx.send(AppEvent::DiscardConfigEdits);
-                KeyHandled::Consumed
-            }
             (KeyCode::Char('s'), _) => {
                 ctx.tx.send(AppEvent::ServiceStart);
                 KeyHandled::Consumed
@@ -244,143 +323,79 @@ impl Tab for GeneralTab {
                 ctx.tx.send(AppEvent::ServiceStop);
                 KeyHandled::Consumed
             }
+            (KeyCode::Char('w'), _) => {
+                ctx.tx.send(AppEvent::SaveConfig);
+                KeyHandled::Consumed
+            }
+            _ => KeyHandled::NotConsumed,
+        }
+    }
+
+    fn activate_item(&mut self, item_id: CardId, ctx: &mut TabCtx<'_>) -> KeyHandled {
+        match item_id {
+            ITEM_LOG_LEVEL => {
+                let Some(cfg) = ctx.data.config_working.as_mut() else {
+                    return KeyHandled::NotConsumed;
+                };
+                let cur = fields::LOG_LEVELS
+                    .iter()
+                    .position(|s| *s == cfg.daemon.log_level)
+                    .unwrap_or(2);
+                cfg.daemon.log_level =
+                    fields::LOG_LEVELS[(cur + 1) % fields::LOG_LEVELS.len()].to_string();
+                KeyHandled::Consumed
+            }
+            ITEM_LOG_RETENTION => {
+                let Some(cfg) = ctx.data.config_working.as_ref() else {
+                    return KeyHandled::NotConsumed;
+                };
+                self.edit_buffer = Some(TextArea::with_text(
+                    cfg.daemon.log_retention_days.to_string(),
+                ));
+                KeyHandled::Consumed
+            }
+            ITEM_REG_SUBMIT => {
+                ctx.tx.send(AppEvent::SubmitRegister);
+                KeyHandled::Consumed
+            }
+            // Activating a register text-field item dives the user into
+            // text-input mode; nothing to do here besides claim the
+            // event so the dispatcher doesn't fall through.
+            ITEM_REG_CLOUD_URL | ITEM_REG_TOKEN | ITEM_REG_HOST_LABEL => KeyHandled::Consumed,
             _ => KeyHandled::NotConsumed,
         }
     }
 
     fn handle_paste(&mut self, text: String, _ctx: &mut TabCtx<'_>) -> KeyHandled {
-        if let Some(reg) = self.register.as_mut()
-            && let Some(area) = reg.focused_textarea_mut()
-        {
-            area.insert_str(&text);
-            return KeyHandled::Consumed;
-        }
         if let Some(buf) = self.edit_buffer.as_mut() {
             buf.insert_str(&text);
             return KeyHandled::Consumed;
         }
+        // Pasting into the register form is best-effort: we don't know
+        // which field is focused without the FocusPath, so paste lands
+        // on whichever TextArea is currently the leaf via insert. The
+        // GeneralTab drops the paste otherwise.
         KeyHandled::NotConsumed
     }
 
-    fn active_contexts(&self) -> Vec<Context> {
-        if self.editing_text_field() {
-            // Bug-3 fix: text input is the only active context. The
-            // dispatcher won't append `Tabs` / `Global`, so digit/letter
-            // keys can't resolve to tab switches.
-            vec![Context::TextInput]
-        } else {
-            vec![]
+    fn active_contexts(&self, focus: &FocusPath) -> Vec<Context> {
+        // Edit buffer open OR focus is on a register text-field item
+        // → TextInput context. Otherwise no special context (App
+        // appends Tabs + Global).
+        if self.edit_buffer.is_some() {
+            return vec![Context::TextInput];
         }
+        if matches!(
+            focus.current(),
+            Some(ITEM_REG_CLOUD_URL) | Some(ITEM_REG_TOKEN) | Some(ITEM_REG_HOST_LABEL)
+        ) {
+            return vec![Context::TextInput];
+        }
+        Vec::new()
     }
 }
 
 impl GeneralTab {
-    fn handle_register_key(&mut self, key: KeyEvent, ctx: &mut TabCtx<'_>) -> KeyHandled {
-        let Some(reg) = self.register.as_mut() else {
-            return KeyHandled::NotConsumed;
-        };
-        // Layer 2: focused textarea gets first look.
-        if let Some(area) = reg.focused_textarea_mut() {
-            let h = area.handle_key(key);
-            if matches!(h, KeyHandled::Consumed) {
-                return KeyHandled::Consumed;
-            }
-        }
-        // Layer 3: form-level navigation + submit.
-        match (key.code, key.modifiers) {
-            (KeyCode::Up, _) | (KeyCode::BackTab, _) => {
-                let i = reg.focus.idx();
-                let n = 4u8;
-                let next = if i == 0 { n - 1 } else { i - 1 };
-                reg.focus = RegisterFocus::from_idx(next);
-                KeyHandled::Consumed
-            }
-            (KeyCode::Down, _) | (KeyCode::Tab, _) => {
-                let i = reg.focus.idx();
-                let next = (i + 1) % 4;
-                reg.focus = RegisterFocus::from_idx(next);
-                KeyHandled::Consumed
-            }
-            (KeyCode::Enter, _) => {
-                if matches!(reg.focus, RegisterFocus::Submit) {
-                    ctx.tx.send(AppEvent::SubmitRegister);
-                } else {
-                    let i = reg.focus.idx();
-                    let next = (i + 1) % 4;
-                    reg.focus = RegisterFocus::from_idx(next);
-                }
-                KeyHandled::Consumed
-            }
-            (KeyCode::Esc, _) => {
-                reg.error = None;
-                KeyHandled::Consumed
-            }
-            // Ctrl+C must escape the form so the user can quit even mid-typing.
-            (KeyCode::Char('c'), m) if m.contains(KeyModifiers::CONTROL) => {
-                KeyHandled::NotConsumed
-            }
-            _ => {
-                // Anything else while a text field is focused is consumed
-                // so it cannot fall through to the global keymap. The
-                // textarea already consumed printable chars above; this
-                // catches Function keys, etc.
-                if matches!(
-                    reg.focus,
-                    RegisterFocus::CloudUrl | RegisterFocus::Token | RegisterFocus::HostLabel
-                ) {
-                    KeyHandled::Consumed
-                } else {
-                    KeyHandled::NotConsumed
-                }
-            }
-        }
-    }
-
-    fn handle_edit_buffer_key(&mut self, key: KeyEvent, ctx: &mut TabCtx<'_>) -> KeyHandled {
-        // Leaf-first: textarea handles printable / cursor / backspace.
-        if let Some(buf) = self.edit_buffer.as_mut() {
-            let h = buf.handle_key(key);
-            if matches!(h, KeyHandled::Consumed) {
-                return KeyHandled::Consumed;
-            }
-        }
-        match key.code {
-            KeyCode::Enter => {
-                self.commit_edit_buffer(ctx);
-                KeyHandled::Consumed
-            }
-            KeyCode::Esc => {
-                self.edit_buffer = None;
-                ctx.data.config_edit_error = None;
-                KeyHandled::Consumed
-            }
-            KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                KeyHandled::NotConsumed
-            }
-            _ => KeyHandled::Consumed,
-        }
-    }
-
-    fn start_or_apply_field(&mut self, ctx: &mut TabCtx<'_>) {
-        let Some(cfg) = ctx.data.config_working.as_mut() else {
-            return;
-        };
-        ctx.data.config_edit_error = None;
-        match self.field {
-            GeneralField::LogLevel => {
-                use super::config::LOG_LEVELS;
-                let cur = LOG_LEVELS
-                    .iter()
-                    .position(|s| *s == cfg.daemon.log_level)
-                    .unwrap_or(2);
-                cfg.daemon.log_level = LOG_LEVELS[(cur + 1) % LOG_LEVELS.len()].to_string();
-            }
-            GeneralField::LogRetentionDays => {
-                self.edit_buffer = Some(TextArea::with_text(cfg.daemon.log_retention_days.to_string()));
-            }
-        }
-    }
-
     fn commit_edit_buffer(&mut self, ctx: &mut TabCtx<'_>) {
         let Some(buf) = self.edit_buffer.take() else {
             return;
@@ -389,11 +404,7 @@ impl GeneralTab {
         let Some(cfg) = ctx.data.config_working.as_mut() else {
             return;
         };
-        let id = match self.field {
-            GeneralField::LogRetentionDays => fields::FieldId::LogRetentionDays,
-            GeneralField::LogLevel => return,
-        };
-        match fields::set_text_value(cfg, id, &text, ctx.data.runner_picker_idx) {
+        match fields::set_text_value(cfg, fields::FieldId::LogRetentionDays, &text, ctx.data.runner_picker_idx) {
             Ok(()) => {
                 ctx.data.config_edit_error = None;
             }
@@ -404,9 +415,8 @@ impl GeneralTab {
         }
     }
 
-    fn render_register(&self, area: Rect, buf: &mut Buffer) {
+    fn render_register(&self, area: Rect, buf: &mut Buffer, focus: &FocusPath) {
         let Some(reg) = self.register.as_ref() else {
-            // No form yet — first refresh will seed.
             let p = Paragraph::new(Line::from(Span::styled(
                 "Loading…",
                 Style::default().add_modifier(Modifier::DIM),
@@ -424,8 +434,7 @@ impl GeneralTab {
             .constraints([Constraint::Min(0), Constraint::Length(3)])
             .split(area);
 
-        // Compose lines for the explanatory body, then render textareas
-        // in their reserved row(s).
+        let cur = focus.current();
         let mut lines: Vec<Line<'static>> = vec![
             Line::from(Span::styled(
                 "This dev machine isn't enrolled yet.",
@@ -436,25 +445,26 @@ impl GeneralTab {
             Line::from("Fill in the form below and press [Connect] to enroll."),
             Line::raw(""),
         ];
-        // Reserve 3 rows per editable field (label line + cursor row).
-        // We'll render text by overdrawing a Paragraph with the value
-        // already serialized, since textarea owns its own cursor; the
-        // simplest approach is to inline the values into the paragraph
-        // content, mark the focused one bold, and skip the textarea
-        // widget render call. The textarea state still drives content.
-        lines.push(form_line("Cloud URL       ", reg.cloud_url.text(), reg.focus == RegisterFocus::CloudUrl, false));
+        lines.push(form_line(
+            "Cloud URL       ",
+            reg.cloud_url.text(),
+            cur == Some(ITEM_REG_CLOUD_URL),
+        ));
         lines.push(form_line(
             "Enrollment token",
             &mask_token(reg.token.text()),
-            reg.focus == RegisterFocus::Token,
-            false,
+            cur == Some(ITEM_REG_TOKEN),
         ));
-        lines.push(form_line("Host label      ", reg.host_label.text(), reg.focus == RegisterFocus::HostLabel, false));
+        lines.push(form_line(
+            "Host label      ",
+            reg.host_label.text(),
+            cur == Some(ITEM_REG_HOST_LABEL),
+        ));
         lines.push(Line::raw(""));
-        lines.push(submit_line(reg.focus == RegisterFocus::Submit, reg.busy));
+        lines.push(submit_line(cur == Some(ITEM_REG_SUBMIT), reg.busy));
         lines.push(Line::raw(""));
         lines.push(Line::from(Span::styled(
-            "Tab/↑↓ move   type to edit   ↵ advance / submit",
+            "←/→/↑/↓ navigate   ↵ enter / submit   Esc back",
             Style::default().add_modifier(Modifier::DIM),
         )));
         lines.push(Line::from(Span::styled(
@@ -479,6 +489,7 @@ impl GeneralTab {
             .block(
                 Block::default()
                     .borders(Borders::ALL)
+                    .border_style(border_style(is_in_path(focus, CARD_REGISTER)))
                     .title(" Register with cloud "),
             )
             .wrap(Wrap { trim: false });
@@ -492,7 +503,7 @@ impl GeneralTab {
         footer.render(chunks[1], buf);
     }
 
-    fn daemon_settings_card<'a>(&self, data: &'a AppData) -> Paragraph<'a> {
+    fn daemon_settings_card<'a>(&self, data: &'a AppData, focus: &FocusPath) -> Paragraph<'a> {
         let Some(cfg) = data.config_working.as_ref() else {
             return Paragraph::new("(no config loaded)").block(
                 Block::default()
@@ -500,8 +511,11 @@ impl GeneralTab {
                     .title(" Daemon settings "),
             );
         };
-        let editing = self.field == GeneralField::LogRetentionDays && self.edit_buffer.is_some();
-        let log_level_style = if self.field == GeneralField::LogLevel {
+        let cur = focus.current();
+        let editing = cur == Some(ITEM_LOG_RETENTION) && self.edit_buffer.is_some();
+        let log_level_focused = cur == Some(ITEM_LOG_LEVEL);
+        let log_retention_focused = cur == Some(ITEM_LOG_RETENTION);
+        let log_level_style = if log_level_focused {
             Style::default()
                 .fg(Color::White)
                 .add_modifier(Modifier::BOLD)
@@ -513,7 +527,7 @@ impl GeneralTab {
         } else {
             cfg.daemon.log_retention_days.to_string()
         };
-        let retention_style = if self.field == GeneralField::LogRetentionDays {
+        let retention_style = if log_retention_focused {
             if editing {
                 Style::default().fg(Color::Yellow)
             } else {
@@ -528,11 +542,11 @@ impl GeneralTab {
         let mut lines: Vec<Line<'_>> = Vec::new();
         lines.push(Line::from(vec![
             Span::styled(
-                format!(" {} log_level         ", marker(self.field == GeneralField::LogLevel)),
+                format!(" {} log_level         ", marker(log_level_focused)),
                 Style::default().fg(Color::Cyan),
             ),
             Span::styled(cfg.daemon.log_level.clone(), log_level_style),
-            if self.field == GeneralField::LogLevel {
+            if log_level_focused {
                 Span::styled("   [Enter cycles]".to_string(), Style::default().add_modifier(Modifier::DIM))
             } else {
                 Span::raw("")
@@ -540,11 +554,11 @@ impl GeneralTab {
         ]));
         lines.push(Line::from(vec![
             Span::styled(
-                format!(" {} log_retention_days ", marker(self.field == GeneralField::LogRetentionDays)),
+                format!(" {} log_retention_days ", marker(log_retention_focused)),
                 Style::default().fg(Color::Cyan),
             ),
             Span::styled(retention_value, retention_style),
-            if self.field == GeneralField::LogRetentionDays && !editing {
+            if log_retention_focused && !editing {
                 Span::styled("   [Enter edits]".to_string(), Style::default().add_modifier(Modifier::DIM))
             } else {
                 Span::raw("")
@@ -552,7 +566,7 @@ impl GeneralTab {
         ]));
         lines.push(Line::raw(""));
         lines.push(Line::from(Span::styled(
-            "[j/k ↑↓] move   [Enter] edit/cycle   [w] save+reload   [Esc] discard",
+            "←/→ between cards   ↑/↓ between fields   ↵ edit/cycle   [w] save",
             Style::default().add_modifier(Modifier::DIM),
         )));
         if let Some(e) = &data.config_edit_error {
@@ -577,13 +591,14 @@ impl GeneralTab {
             .block(
                 Block::default()
                     .borders(Borders::ALL)
+                    .border_style(border_style(is_in_path(focus, CARD_DAEMON_SETTINGS)))
                     .title(" Daemon settings "),
             )
             .wrap(Wrap { trim: true })
     }
 }
 
-fn service_card(data: &AppData) -> Paragraph<'_> {
+fn service_card(data: &AppData, focused: bool) -> Paragraph<'_> {
     let raw = data.service_state.as_deref().unwrap_or("unknown");
     let (label, color) = match raw {
         "active" => ("● Running".to_string(), Color::Green),
@@ -610,12 +625,13 @@ fn service_card(data: &AppData) -> Paragraph<'_> {
         .block(
             Block::default()
                 .borders(Borders::ALL)
+                .border_style(border_style(focused))
                 .title(" Runner service "),
         )
         .wrap(Wrap { trim: true })
 }
 
-fn connection_card(data: &AppData) -> Paragraph<'_> {
+fn connection_card(data: &AppData, focused: bool) -> Paragraph<'_> {
     let lines = match &data.status {
         Some(s) => vec![
             Line::from(vec![Span::styled(
@@ -642,11 +658,16 @@ fn connection_card(data: &AppData) -> Paragraph<'_> {
         ))],
     };
     Paragraph::new(lines)
-        .block(Block::default().borders(Borders::ALL).title(" Connection "))
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(border_style(focused))
+                .title(" Connection "),
+        )
         .wrap(Wrap { trim: true })
 }
 
-fn hotkeys_card(data: &AppData) -> Paragraph<'_> {
+fn hotkeys_card(data: &AppData, focused: bool) -> Paragraph<'_> {
     let active = matches!(data.service_state.as_deref(), Some("active"));
     let start_style = if active {
         Style::default().add_modifier(Modifier::DIM)
@@ -664,10 +685,15 @@ fn hotkeys_card(data: &AppData) -> Paragraph<'_> {
         Span::styled("[x] stop", stop_style),
         Span::raw("   [r] refresh"),
     ]))
-    .block(Block::default().borders(Borders::ALL).title(" Controls "))
+    .block(
+        Block::default()
+            .borders(Borders::ALL)
+            .border_style(border_style(focused))
+            .title(" Controls "),
+    )
 }
 
-fn form_line(label: &str, value: &str, focused: bool, _: bool) -> Line<'static> {
+fn form_line(label: &str, value: &str, focused: bool) -> Line<'static> {
     let marker = if focused { "▶" } else { " " };
     let cursor = if focused { "▊" } else { "" };
     let value_style = if focused {

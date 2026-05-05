@@ -34,13 +34,15 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph, Tabs};
 use tokio::sync::mpsc;
 
+use std::collections::HashMap;
+
 use super::event::AppEvent;
 use super::event_sender::AppEventSender;
 use super::input::keymap::{self, Action, Context, KeymapRegistry, Resolution};
 use super::ipc_client::TuiIpc;
 use super::tui_runtime::{FrameRequester, Tui, TuiEvent};
 use super::view::tab::TabCtx;
-use super::view::{KeyHandled, View, ViewCompletion, ViewCtx};
+use super::view::{FocusPath, KeyHandled, View, ViewCompletion, ViewCtx};
 use super::views::{ApprovalsTab, GeneralTab, RunnerStatusTab, RunsTab};
 use super::view::tab::{Tab as TabTrait, TabKind};
 use crate::util::paths::Paths;
@@ -151,6 +153,11 @@ pub struct App {
     pub event_tx: AppEventSender,
     pub frame: FrameRequester,
     pub quit: bool,
+    /// Per-tab focus path. Empty path = focus is on the tab bar
+    /// (Layer 0). Switching tabs preserves where the user was inside
+    /// each one. Today populated with empty paths only — the
+    /// dispatcher (next task) will push/pop on Enter/Esc.
+    pub focus_paths: HashMap<TabKind, FocusPath>,
 }
 
 impl App {
@@ -173,7 +180,20 @@ impl App {
             event_tx,
             frame,
             quit: false,
+            focus_paths: HashMap::new(),
         }
+    }
+
+    /// Get the focus path for the given tab, lazily seeding an empty
+    /// (Layer 0 / tab-bar) entry if none exists yet.
+    fn focus_for(&mut self, tab: TabKind) -> &FocusPath {
+        self.focus_paths.entry(tab).or_default()
+    }
+
+    /// Mutable variant for the dispatcher to push/pop layers.
+    #[allow(dead_code)]
+    fn focus_for_mut(&mut self, tab: TabKind) -> &mut FocusPath {
+        self.focus_paths.entry(tab).or_default()
     }
 
     fn with_tab_ctx<R>(&mut self, f: impl FnOnce(&mut dyn TabTrait, &mut TabCtx<'_>) -> R) -> R {
@@ -264,10 +284,23 @@ impl App {
         }
 
         // Body — delegate to the active tab.
-        self.active_tab().render(layout[body_idx], buf, &self.data);
+        let focus = self.focus_for(self.tab).clone();
+        self.active_tab()
+            .render(layout[body_idx], buf, &self.data, &focus);
 
+        let crumb = super::view::breadcrumb(&focus);
+        let hint_text = if crumb.is_empty() {
+            " [1]General [2]Runners [3]Runs [4]Approvals  ←/→ tabs  ↓ enter  </> runner  r refresh  ?help  q exit "
+                .to_string()
+        } else {
+            format!(
+                " {} › {}    ←/→/↑/↓ move  ↵ enter  Esc back  ?help  q exit ",
+                self.tab.label(),
+                crumb,
+            )
+        };
         let hint = Line::from(Span::styled(
-            " [1]General [2]Runners [3]Runs [4]Approvals  h/l switch  j/k move  </> runner  r refresh  ?help  q exit ",
+            hint_text,
             Style::default().add_modifier(Modifier::DIM),
         ));
         ratatui::widgets::Widget::render(Paragraph::new(hint), layout[hint_idx], buf);
@@ -282,7 +315,10 @@ impl App {
             .view_stack
             .last()
             .and_then(|v| v.cursor_pos(area))
-            .or_else(|| self.active_tab().cursor_pos(layout[body_idx], &self.data));
+            .or_else(|| {
+                self.active_tab()
+                    .cursor_pos(layout[body_idx], &self.data, &focus)
+            });
         if let Some((x, y)) = cursor {
             frame.set_cursor_position((x, y));
         }
@@ -689,6 +725,125 @@ impl App {
         });
     }
 
+    /// Layer-aware focus dispatch (`.ai_design/tui_refactor`):
+    /// pre-handles ←/→/↑/↓/Enter/Esc for tabs that declare a
+    /// `focus_tree`. Returns `Consumed` once a layer-nav action fires
+    /// or routes a leaf-key to the tab; `NotConsumed` for legacy tabs
+    /// (empty tree) and for keys the layered model doesn't claim
+    /// (those continue down the legacy path / keymap).
+    fn dispatch_focus_key(&mut self, key: KeyEvent) -> KeyHandled {
+        use super::view::focus::{locate, next_sibling, parent_siblings, FocusNode, NavDir};
+
+        let tree = self
+            .with_tab_ctx(|tab, ctx| tab.focus_tree(ctx.data));
+        if tree.is_empty() {
+            return KeyHandled::NotConsumed;
+        }
+
+        let focus = self.focus_for(self.tab).clone();
+        let active_ctxs = self.active_tab().active_contexts(&focus);
+        let text_input_only = active_ctxs == [Context::TextInput];
+
+        if text_input_only {
+            // Tab fully owns input while a TextArea is the focused leaf
+            // (`Context::TextInput` rule). Esc and Enter still flow to
+            // the tab so it can commit / discard an edit buffer; Ctrl-
+            // modified keys are deferred to the keymap upstream so
+            // Ctrl+C remains a global escape hatch.
+            if key.modifiers.contains(KeyModifiers::CONTROL) {
+                return KeyHandled::NotConsumed;
+            }
+            let handled = self.with_tab_ctx(|tab, ctx| tab.handle_item_key(key, ctx, &focus));
+            if matches!(handled, KeyHandled::Consumed) {
+                self.frame.schedule_frame();
+            }
+            return handled;
+        }
+
+        if focus.is_tab_bar() {
+            // Layer 0: tab bar. ↓ descends into the first card; everything
+            // else (←/→/digits) falls through to the existing Tabs/Global
+            // keymap so tab navigation works as today.
+            if matches!(key.code, KeyCode::Down)
+                && let Some(first) = tree.first()
+            {
+                let id = first.id();
+                self.focus_for_mut(self.tab).push(id);
+                self.frame.schedule_frame();
+                return KeyHandled::Consumed;
+            }
+            return KeyHandled::NotConsumed;
+        }
+
+        match key.code {
+            KeyCode::Left | KeyCode::Right | KeyCode::Up | KeyCode::Down => {
+                let dir = match key.code {
+                    KeyCode::Left => NavDir::Left,
+                    KeyCode::Right => NavDir::Right,
+                    KeyCode::Up => NavDir::Up,
+                    KeyCode::Down => NavDir::Down,
+                    _ => unreachable!(),
+                };
+                let path = focus.segments();
+                if let Some((siblings, idx)) = parent_siblings(&tree, path)
+                    && let Some(next_id) = next_sibling(siblings, idx, dir)
+                {
+                    self.focus_for_mut(self.tab).replace_leaf(next_id);
+                    self.frame.schedule_frame();
+                    return KeyHandled::Consumed;
+                }
+                // No sibling in this direction — give the focused card /
+                // item a chance to handle the arrow itself (e.g. moving
+                // an internal list cursor on the Runs tab). If it
+                // declines, consume anyway so the legacy keymap (Tabs
+                // ←/→) doesn't switch tabs out from under the user.
+                let inner =
+                    self.with_tab_ctx(|tab, ctx| tab.handle_item_key(key, ctx, &focus));
+                if matches!(inner, KeyHandled::Consumed) {
+                    self.frame.schedule_frame();
+                }
+                KeyHandled::Consumed
+            }
+            KeyCode::Enter => {
+                let path = focus.segments();
+                if let Some(node) = locate(&tree, path) {
+                    if !node.interactive() {
+                        return KeyHandled::Consumed;
+                    }
+                    match node {
+                        FocusNode::Card { children, .. } if !children.is_empty() => {
+                            let first = children[0].id();
+                            self.focus_for_mut(self.tab).push(first);
+                            self.frame.schedule_frame();
+                        }
+                        FocusNode::Card { .. } => {
+                            // Interactive card with no children — no-op.
+                        }
+                        FocusNode::Item { id, .. } => {
+                            let id = *id;
+                            let _ = self
+                                .with_tab_ctx(|tab, ctx| tab.activate_item(id, ctx));
+                            self.frame.schedule_frame();
+                        }
+                    }
+                }
+                KeyHandled::Consumed
+            }
+            KeyCode::Esc => {
+                let consumed =
+                    self.with_tab_ctx(|tab, ctx| tab.handle_item_key(key, ctx, &focus));
+                if matches!(consumed, KeyHandled::Consumed) {
+                    self.frame.schedule_frame();
+                    return KeyHandled::Consumed;
+                }
+                self.focus_for_mut(self.tab).pop();
+                self.frame.schedule_frame();
+                KeyHandled::Consumed
+            }
+            _ => self.with_tab_ctx(|tab, ctx| tab.handle_item_key(key, ctx, &focus)),
+        }
+    }
+
     /// Five-layer key routing: stack-top → focused child → pane keymap →
     /// tab keymap → global keymap.
     pub fn dispatch_key(&mut self, key: KeyEvent) {
@@ -726,10 +881,17 @@ impl App {
             }
         }
 
-        // Layers 2-5: hand off to the active tab. Tab is responsible for
-        // leaf-first routing inside its own subtree (focused TextArea
-        // before any keymap), and consumes the key if any layer claims
-        // it. If not consumed, we resolve via the keymap below.
+        // Layer 2: focus dispatcher (only for tabs that have opted into
+        // the layered model by populating `focus_tree`). Pre-handles
+        // ←/→/↑/↓/Enter/Esc for sibling navigation, descend, pop, and
+        // routes other keys to `handle_item_key` when an Item is focused.
+        // Legacy tabs return an empty tree and fall through.
+        if matches!(self.dispatch_focus_key(key), KeyHandled::Consumed) {
+            return;
+        }
+
+        // Layer 3: legacy tab handler. Tabs not yet migrated to the
+        // focus-tree model still route everything through `handle_key`.
         let tab_handled = self.with_tab_ctx(|tab, ctx| tab.handle_key(key, ctx));
         if matches!(tab_handled, KeyHandled::Consumed) {
             self.frame.schedule_frame();
@@ -741,7 +903,8 @@ impl App {
         // so this layer is structurally inert for plain printable keys
         // in that case (Bug-3 invariant: digits / `h` / `l` cannot
         // resolve to tab switches while typing).
-        let mut active = self.active_tab().active_contexts();
+        let active_focus = self.focus_for(self.tab).clone();
+        let mut active = self.active_tab().active_contexts(&active_focus);
         let text_input_only = active == [Context::TextInput];
         if !text_input_only {
             active.push(Context::Tabs);
@@ -853,7 +1016,8 @@ impl App {
             }
 
             Action::SettingsToggleFocus => {
-                self.runner_status.toggle_focus();
+                // No-op in the layered focus model — ←/→ at Layer 1
+                // moves between sibling cards instead.
             }
 
             Action::ServiceStart if matches!(self.tab, TabKind::General) => {

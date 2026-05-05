@@ -14,10 +14,11 @@ use super::super::app::AppData;
 use super::super::event_sender::AppEventSender;
 use super::super::input::keymap::{Context, KeymapRegistry};
 use super::super::tui_runtime::FrameRequester;
+use super::focus::{CardId, FocusNode, FocusPath};
 use super::KeyHandled;
 use crate::util::paths::Paths;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum TabKind {
     General,
     RunnerStatus,
@@ -92,29 +93,79 @@ pub trait Tab {
 
     /// Render the tab body into `area`. Tabs draw their own internal
     /// layout (cards, lists, settings panels). Pure read of `data`.
-    fn render(&self, area: Rect, buf: &mut Buffer, data: &AppData);
+    /// `focus` carries the current focus path so the tab can highlight
+    /// the focused card with a yellow border.
+    fn render(&self, area: Rect, buf: &mut Buffer, data: &AppData, focus: &FocusPath);
 
-    /// Hand a key to the tab. The tab is responsible for the
-    /// leaf-first rule: it should hand the key to its focused
-    /// textarea / list before consulting any pane-level binding.
-    /// Returns `Consumed` once any layer claims the key.
-    fn handle_key(&mut self, key: KeyEvent, ctx: &mut TabCtx<'_>) -> KeyHandled;
+    /// Recompute the focusable card/item tree from current state.
+    /// Called once per render so dynamic structure (e.g. the General
+    /// tab's register form appearing on a fresh machine) is reflected
+    /// immediately. Empty Vec = no focusable surface; focus stays on
+    /// the tab bar (Layer 0).
+    fn focus_tree(&self, _data: &AppData) -> Vec<FocusNode> {
+        Vec::new()
+    }
+
+    /// Hand a key to the tab when focus is on an interactive Item AND
+    /// the App-level dispatcher hasn't claimed the key (i.e. the key
+    /// isn't a layer-nav key resolved by the tab's `active_contexts`).
+    /// The tab dispatches based on `focus.current()`, e.g. typing into
+    /// a TextArea, committing an edit buffer, etc. Returning `Consumed`
+    /// suppresses any further action — including the App's auto-pop on
+    /// Esc, so a tab that wants to discard an edit buffer locally can
+    /// do so without exiting the layer.
+    fn handle_item_key(
+        &mut self,
+        _key: KeyEvent,
+        _ctx: &mut TabCtx<'_>,
+        _focus: &FocusPath,
+    ) -> KeyHandled {
+        KeyHandled::NotConsumed
+    }
+
+    /// Tab-defined action when the user presses Enter on an
+    /// interactive `Item`. For Cards the App handles Enter as
+    /// "descend into the first child" — `activate_item` is only for
+    /// leaves. Examples: cycle an enum field in place, open a buffer,
+    /// trigger a Submit. Returning `KeyHandled::NotConsumed` lets the
+    /// App fall through to its default (no-op).
+    fn activate_item(
+        &mut self,
+        _item_id: CardId,
+        _ctx: &mut TabCtx<'_>,
+    ) -> KeyHandled {
+        KeyHandled::NotConsumed
+    }
 
     /// Accept a paste burst (bracketed-paste path). Default: ignore.
     fn handle_paste(&mut self, _text: String, _ctx: &mut TabCtx<'_>) -> KeyHandled {
         KeyHandled::NotConsumed
     }
 
-    /// Active keymap contexts for this tab right now. The dispatcher
-    /// builds `[…active_contexts(), Tabs, Global]` and resolves keys
-    /// through it (`§5.5`). When a textarea is focused inside the
-    /// tab, this should return `[Context::TextInput]` *only* — no
-    /// `Tabs`, no `Global` — so digit/letter keys can never be
-    /// hijacked by tab switches.
-    fn active_contexts(&self) -> Vec<Context>;
+    /// Active keymap contexts for this tab given the current focus
+    /// path. The dispatcher builds
+    /// `[…active_contexts(), Tabs, Global]` and resolves keys through
+    /// it. When a textarea is the focused leaf, this should return
+    /// `[Context::TextInput]` *only* — no `Tabs`, no `Global` — so
+    /// digit/letter keys can never be hijacked by tab switches.
+    fn active_contexts(&self, _focus: &FocusPath) -> Vec<Context> {
+        Vec::new()
+    }
+
+    /// Legacy keymap dispatch: until a tab is migrated to the
+    /// focus-tree model, the App falls back to this for non-Layer-0
+    /// keys. Default: ignore.
+    fn handle_key(&mut self, _key: KeyEvent, _ctx: &mut TabCtx<'_>) -> KeyHandled {
+        KeyHandled::NotConsumed
+    }
 
     /// Cursor position the terminal should park at this frame.
-    fn cursor_pos(&self, _area: Rect, _data: &AppData) -> Option<(u16, u16)> {
+    fn cursor_pos(
+        &self,
+        _area: Rect,
+        _data: &AppData,
+        _focus: &FocusPath,
+    ) -> Option<(u16, u16)> {
         None
     }
 

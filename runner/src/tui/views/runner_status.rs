@@ -1,12 +1,16 @@
 //! Runners tab — list of every runner this daemon hosts plus the
 //! per-runner settings panel for the highlighted runner.
 //!
-//! Owns: a `SelectableList<runner_name>` (bug-2 fix — selection
-//! survives refresh and `[d]` reads the same source as the
-//! highlight); a `Pane` enum (`Pane::List | Pane::Settings`) — the
-//! single source of truth for visual focus (bug-1 fix); the
-//! settings-pane field cursor + an optional inline `TextArea` edit
-//! buffer.
+//! Four top-level focus cards on row 0:
+//!
+//!   `runner_list` (interactive) | `settings` (interactive, children = each
+//!   editable field) | `live_state` (read-only) | `hotkeys` (read-only)
+//!
+//! At Layer 1 ←/→ cycles through the cards. ↑/↓ on `runner_list` moves
+//! its internal cursor (and broadcasts `SelectRunner`); ↑/↓ on the other
+//! cards is a no-op. Enter on `settings` dives to Layer 2 where each
+//! field is an Item; Enter on a Bool/Enum field cycles in place; Enter
+//! on a Text/U32 field opens an inline edit buffer (TextInput context).
 
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use ratatui::buffer::Buffer;
@@ -20,24 +24,24 @@ use ratatui::widgets::{
 use super::super::app::AppData;
 use super::super::event::AppEvent;
 use super::super::input::keymap::Context;
+use super::super::view::focus::{
+    border_style, is_focused, is_in_path, FocusNode, FocusPath,
+};
 use super::super::view::tab::{Tab, TabCtx, TabKind};
 use super::super::view::KeyHandled;
 use super::super::widgets::{SelectableList, TextArea};
 use super::config as fields;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum Pane {
-    #[default]
-    List,
-    Settings,
-}
+const CARD_RUNNER_LIST: &str = "runner_list";
+const CARD_SETTINGS: &str = "settings";
+const CARD_LIVE_STATE: &str = "live_state";
+const CARD_HOTKEYS: &str = "hotkeys";
 
 pub struct RunnerStatusTab {
     list: SelectableList<String>,
-    pane: Pane,
-    /// Index into `FIELDS` for the settings pane field cursor.
-    field_idx: usize,
-    /// Inline edit buffer for Text/U32 fields.
+    /// Inline edit buffer for Text/U32 fields (Layer 2 → text-input
+    /// sub-state). Presence of this buffer flips the active context to
+    /// `TextInput` so the dispatcher routes typing to us.
     edit_buffer: Option<TextArea>,
     /// Which field id we're editing — needed to commit back via
     /// `set_text_value` even after the cursor moves.
@@ -48,8 +52,6 @@ impl RunnerStatusTab {
     pub fn new() -> Self {
         Self {
             list: SelectableList::new(),
-            pane: Pane::List,
-            field_idx: 0,
             edit_buffer: None,
             editing_field: None,
         }
@@ -61,30 +63,32 @@ impl RunnerStatusTab {
             None => Vec::new(),
         };
         self.list.reconcile(&ids);
-        // Keep the global picker idx in sync with the list selection
-        // so `<`/`>` and Alt+N stay coherent across tab switches.
-        if let Some(idx) = self.list.selected_index() {
-            // Note: we don't push back to the AppData here — the
-            // dispatcher does that explicitly via `SelectRunner`.
-            let _ = idx;
-        }
-    }
-
-    pub fn toggle_focus(&mut self) {
-        self.pane = match self.pane {
-            Pane::List => Pane::Settings,
-            Pane::Settings => Pane::List,
-        };
     }
 
     pub fn selected_runner_name(&self, data: &AppData) -> Option<String> {
-        // Prefer the list's id; fall back to the picker index for
-        // fresh-load case where the list hasn't reconciled yet.
         if let Some(id) = self.list.selected_id() {
             return Some(id.clone());
         }
         let working = data.config_working.as_ref()?;
-        working.runners.get(data.runner_picker_idx).map(|r| r.name.clone())
+        working
+            .runners
+            .get(data.runner_picker_idx)
+            .map(|r| r.name.clone())
+    }
+
+    /// Index of the field currently selected at Layer 2 (for the
+    /// settings card). Falls back to 0 when the focus path doesn't
+    /// resolve (e.g. between renders).
+    fn focused_field_idx(&self, focus: &FocusPath) -> usize {
+        focus
+            .segments()
+            .last()
+            .and_then(|leaf| {
+                fields::FIELDS
+                    .iter()
+                    .position(|spec| spec.id.id_str() == *leaf)
+            })
+            .unwrap_or(0)
     }
 }
 
@@ -99,7 +103,54 @@ impl Tab for RunnerStatusTab {
         TabKind::RunnerStatus
     }
 
-    fn render(&self, area: Rect, buf: &mut Buffer, data: &AppData) {
+    fn focus_tree(&self, data: &AppData) -> Vec<FocusNode> {
+        let runners_present = data
+            .config_working
+            .as_ref()
+            .map(|c| !c.runners.is_empty())
+            .unwrap_or(false);
+        let settings_children = if runners_present {
+            fields::FIELDS
+                .iter()
+                .enumerate()
+                .map(|(i, spec)| FocusNode::Item {
+                    id: spec.id.id_str(),
+                    interactive: true,
+                    row: i,
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
+        vec![
+            FocusNode::Card {
+                id: CARD_RUNNER_LIST,
+                interactive: true,
+                row: 0,
+                children: Vec::new(),
+            },
+            FocusNode::Card {
+                id: CARD_SETTINGS,
+                interactive: runners_present,
+                row: 0,
+                children: settings_children,
+            },
+            FocusNode::Card {
+                id: CARD_LIVE_STATE,
+                interactive: false,
+                row: 0,
+                children: Vec::new(),
+            },
+            FocusNode::Card {
+                id: CARD_HOTKEYS,
+                interactive: false,
+                row: 0,
+                children: Vec::new(),
+            },
+        ]
+    }
+
+    fn render(&self, area: Rect, buf: &mut Buffer, data: &AppData, focus: &FocusPath) {
         if data.config_working.is_none() {
             render_unregistered_placeholder(area, buf);
             return;
@@ -116,76 +167,81 @@ impl Tab for RunnerStatusTab {
             .direction(Direction::Vertical)
             .constraints([Constraint::Min(8), Constraint::Length(11)])
             .split(body[1]);
-        self.render_runner_list(body[0], buf, data);
-        self.render_settings_panel(right[0], buf, data);
-        render_live_state_panel(right[1], buf, data, self.selected_runner_name(data).as_deref());
-        hotkeys_card().render(outer[1], buf);
+        self.render_runner_list(body[0], buf, data, focus);
+        self.render_settings_panel(right[0], buf, data, focus);
+        render_live_state_panel(
+            right[1],
+            buf,
+            data,
+            self.selected_runner_name(data).as_deref(),
+            is_focused(focus, CARD_LIVE_STATE),
+        );
+        hotkeys_card(is_focused(focus, CARD_HOTKEYS)).render(outer[1], buf);
     }
 
-    fn handle_key(&mut self, key: KeyEvent, ctx: &mut TabCtx<'_>) -> KeyHandled {
+    fn handle_item_key(
+        &mut self,
+        key: KeyEvent,
+        ctx: &mut TabCtx<'_>,
+        focus: &FocusPath,
+    ) -> KeyHandled {
         if key.kind != KeyEventKind::Press && key.kind != KeyEventKind::Repeat {
-            return KeyHandled::Consumed;
+            return KeyHandled::NotConsumed;
         }
-        // 1) Edit-buffer path: textarea is the focused leaf.
-        if self.edit_buffer.is_some() {
-            return self.handle_edit_buffer_key(key, ctx);
-        }
-        let runner_ids: Vec<String> = match &ctx.data.status {
-            Some(s) => s.runners.iter().map(|r| r.name.clone()).collect(),
-            None => Vec::new(),
-        };
 
+        // Edit-buffer path: typing Text/U32 fields. The dispatcher only
+        // routes here when active_contexts() is `[TextInput]`, so all
+        // other key handlers are inert in this mode.
+        if self.edit_buffer.is_some() {
+            if let Some(buf) = self.edit_buffer.as_mut() {
+                let h = buf.handle_key(key);
+                if matches!(h, KeyHandled::Consumed) {
+                    return KeyHandled::Consumed;
+                }
+            }
+            return match key.code {
+                KeyCode::Enter => {
+                    self.commit_edit_buffer(ctx);
+                    KeyHandled::Consumed
+                }
+                KeyCode::Esc => {
+                    self.edit_buffer = None;
+                    self.editing_field = None;
+                    ctx.data.config_edit_error = None;
+                    KeyHandled::Consumed
+                }
+                _ => KeyHandled::Consumed,
+            };
+        }
+
+        // List-cursor moves on the runner_list card (no sibling row
+        // exists, so the dispatcher hands ↑/↓/j/k here).
+        if focus.current() == Some(CARD_RUNNER_LIST) {
+            let runner_ids: Vec<String> = match &ctx.data.status {
+                Some(s) => s.runners.iter().map(|r| r.name.clone()).collect(),
+                None => Vec::new(),
+            };
+            match key.code {
+                KeyCode::Char('j') | KeyCode::Down => {
+                    self.list.move_down(&runner_ids);
+                    if let Some(idx) = self.list.selected_index() {
+                        ctx.tx.send(AppEvent::SelectRunner(idx));
+                    }
+                    return KeyHandled::Consumed;
+                }
+                KeyCode::Char('k') | KeyCode::Up => {
+                    self.list.move_up(&runner_ids);
+                    if let Some(idx) = self.list.selected_index() {
+                        ctx.tx.send(AppEvent::SelectRunner(idx));
+                    }
+                    return KeyHandled::Consumed;
+                }
+                _ => {}
+            }
+        }
+
+        // Tab-wide hotkeys (work regardless of which card is focused).
         match (key.code, key.modifiers) {
-            (KeyCode::Tab, _) | (KeyCode::BackTab, _) => {
-                self.toggle_focus();
-                KeyHandled::Consumed
-            }
-            (KeyCode::Char('j') | KeyCode::Down, _) => {
-                match self.pane {
-                    Pane::List => {
-                        self.list.move_down(&runner_ids);
-                        if let Some(idx) = self.list.selected_index() {
-                            ctx.tx.send(AppEvent::SelectRunner(idx));
-                        }
-                    }
-                    Pane::Settings => {
-                        let n = fields::field_count();
-                        if n > 0 {
-                            self.field_idx = (self.field_idx + 1) % n;
-                        }
-                    }
-                }
-                KeyHandled::Consumed
-            }
-            (KeyCode::Char('k') | KeyCode::Up, _) => {
-                match self.pane {
-                    Pane::List => {
-                        self.list.move_up(&runner_ids);
-                        if let Some(idx) = self.list.selected_index() {
-                            ctx.tx.send(AppEvent::SelectRunner(idx));
-                        }
-                    }
-                    Pane::Settings => {
-                        let n = fields::field_count();
-                        if n > 0 {
-                            self.field_idx = if self.field_idx == 0 { n - 1 } else { self.field_idx - 1 };
-                        }
-                    }
-                }
-                KeyHandled::Consumed
-            }
-            (KeyCode::Enter, _) if matches!(self.pane, Pane::Settings) => {
-                self.start_or_apply_settings_field(ctx);
-                KeyHandled::Consumed
-            }
-            (KeyCode::Char('w'), _) => {
-                ctx.tx.send(AppEvent::SaveConfig);
-                KeyHandled::Consumed
-            }
-            (KeyCode::Esc, _) => {
-                ctx.tx.send(AppEvent::DiscardConfigEdits);
-                KeyHandled::Consumed
-            }
             (KeyCode::Char('a'), m) if !m.contains(KeyModifiers::CONTROL) => {
                 let v = super::modals::add_runner::AddRunnerView::open(ctx.data);
                 ctx.tx.push_view(Box::new(v));
@@ -198,19 +254,49 @@ impl Tab for RunnerStatusTab {
                 }
                 KeyHandled::Consumed
             }
+            (KeyCode::Char('w'), _) => {
+                ctx.tx.send(AppEvent::SaveConfig);
+                KeyHandled::Consumed
+            }
             _ => KeyHandled::NotConsumed,
         }
     }
 
-    fn active_contexts(&self) -> Vec<Context> {
-        if self.edit_buffer.is_some() {
-            vec![Context::TextInput]
-        } else {
-            match self.pane {
-                Pane::List => vec![Context::List],
-                Pane::Settings => vec![Context::Settings],
+    fn activate_item(&mut self, item_id: super::super::view::CardId, ctx: &mut TabCtx<'_>) -> KeyHandled {
+        // Only settings fields are activatable items in this tab.
+        let Some(field_id) = fields::FieldId::from_id_str(item_id) else {
+            return KeyHandled::NotConsumed;
+        };
+        let Some(cfg) = ctx.data.config_working.as_mut() else {
+            return KeyHandled::NotConsumed;
+        };
+        ctx.data.config_edit_error = None;
+        let runner_idx = ctx.data.runner_picker_idx;
+        let spec = fields::FIELDS
+            .iter()
+            .find(|s| s.id == field_id)
+            .expect("field id round-trips");
+        match spec.kind {
+            fields::FieldKind::Bool => fields::toggle_bool(cfg, field_id, runner_idx),
+            fields::FieldKind::Enum(_) => fields::cycle_enum(cfg, field_id, runner_idx),
+            fields::FieldKind::Text | fields::FieldKind::U32 => {
+                let value = fields::display_value(cfg, field_id, runner_idx);
+                self.edit_buffer = Some(TextArea::with_text(value));
+                self.editing_field = Some(field_id);
             }
         }
+        KeyHandled::Consumed
+    }
+
+    fn active_contexts(&self, focus: &FocusPath) -> Vec<Context> {
+        if self.edit_buffer.is_some() {
+            return vec![Context::TextInput];
+        }
+        // Keep the RunnerPicker (`<` / `>` / Alt+1..9) keys live anywhere
+        // on this tab so the user can switch runners without going
+        // back to Layer 0.
+        let _ = focus;
+        vec![Context::List]
     }
 
     fn on_focus(&mut self, ctx: &mut TabCtx<'_>) {
@@ -219,54 +305,6 @@ impl Tab for RunnerStatusTab {
 }
 
 impl RunnerStatusTab {
-    fn handle_edit_buffer_key(&mut self, key: KeyEvent, ctx: &mut TabCtx<'_>) -> KeyHandled {
-        // Leaf-first: textarea claims printable / cursor / backspace.
-        if let Some(buf) = self.edit_buffer.as_mut() {
-            let h = buf.handle_key(key);
-            if matches!(h, KeyHandled::Consumed) {
-                return KeyHandled::Consumed;
-            }
-        }
-        match key.code {
-            KeyCode::Enter => {
-                self.commit_edit_buffer(ctx);
-                KeyHandled::Consumed
-            }
-            KeyCode::Esc => {
-                self.edit_buffer = None;
-                self.editing_field = None;
-                ctx.data.config_edit_error = None;
-                KeyHandled::Consumed
-            }
-            KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                KeyHandled::NotConsumed
-            }
-            _ => KeyHandled::Consumed,
-        }
-    }
-
-    fn start_or_apply_settings_field(&mut self, ctx: &mut TabCtx<'_>) {
-        let Some(cfg) = ctx.data.config_working.as_mut() else {
-            return;
-        };
-        if fields::field_count() == 0 {
-            return;
-        }
-        let idx = self.field_idx.min(fields::field_count() - 1);
-        let spec = fields::field_at(idx);
-        ctx.data.config_edit_error = None;
-        let runner_idx = ctx.data.runner_picker_idx;
-        match spec.kind {
-            fields::FieldKind::Bool => fields::toggle_bool(cfg, spec.id, runner_idx),
-            fields::FieldKind::Enum(_) => fields::cycle_enum(cfg, spec.id, runner_idx),
-            fields::FieldKind::Text | fields::FieldKind::U32 => {
-                let value = fields::display_value(cfg, spec.id, runner_idx);
-                self.edit_buffer = Some(TextArea::with_text(value));
-                self.editing_field = Some(spec.id);
-            }
-        }
-    }
-
     fn commit_edit_buffer(&mut self, ctx: &mut TabCtx<'_>) {
         let Some(buf) = self.edit_buffer.take() else {
             return;
@@ -291,7 +329,7 @@ impl RunnerStatusTab {
         }
     }
 
-    fn render_runner_list(&self, area: Rect, buf: &mut Buffer, data: &AppData) {
+    fn render_runner_list(&self, area: Rect, buf: &mut Buffer, data: &AppData, focus: &FocusPath) {
         let runners: Vec<&crate::ipc::protocol::RunnerStatusSnapshot> = data
             .status
             .as_ref()
@@ -353,17 +391,11 @@ impl RunnerStatusTab {
             .collect();
         let total = runners.len();
         let title = format!(" Runners ({}/{}) ", picked_idx + 1, total);
-        let focused = matches!(self.pane, Pane::List);
-        let block_style = if focused {
-            Style::default().fg(Color::Yellow)
-        } else {
-            Style::default()
-        };
         let list = List::new(items)
             .block(
                 Block::default()
                     .borders(Borders::ALL)
-                    .border_style(block_style)
+                    .border_style(border_style(is_focused(focus, CARD_RUNNER_LIST)))
                     .title(title),
             )
             .highlight_style(Style::default().add_modifier(Modifier::REVERSED));
@@ -372,7 +404,7 @@ impl RunnerStatusTab {
         StatefulWidget::render(list, area, buf, &mut lstate);
     }
 
-    fn render_settings_panel(&self, area: Rect, buf: &mut Buffer, data: &AppData) {
+    fn render_settings_panel(&self, area: Rect, buf: &mut Buffer, data: &AppData, focus: &FocusPath) {
         let Some(working) = data.config_working.as_ref() else {
             return;
         };
@@ -413,25 +445,19 @@ impl RunnerStatusTab {
         } else {
             " Settings (selected runner) "
         };
-        let focused = matches!(self.pane, Pane::Settings);
-        let block_style = if focused {
-            Style::default().fg(Color::Yellow)
-        } else {
-            Style::default()
-        };
         let edit_buffer_str: Option<String> =
             self.edit_buffer.as_ref().map(|t| t.text().to_string());
         let p = Paragraph::new(fields::editable_lines(
             working,
             &loaded,
-            self.field_idx,
+            self.focused_field_idx(focus),
             data.runner_picker_idx,
             edit_buffer_str.as_deref(),
         ))
         .block(
             Block::default()
                 .borders(Borders::ALL)
-                .border_style(block_style)
+                .border_style(border_style(is_in_path(focus, CARD_SETTINGS)))
                 .title(title),
         )
         .wrap(Wrap { trim: false });
@@ -463,17 +489,28 @@ fn render_unregistered_placeholder(area: Rect, buf: &mut Buffer) {
     p.render(area, buf);
 }
 
-fn hotkeys_card() -> Paragraph<'static> {
+fn hotkeys_card(focused: bool) -> Paragraph<'static> {
     Paragraph::new(Line::from(vec![
         Span::styled("[a] add", Style::default().fg(Color::Green)),
         Span::raw("   "),
         Span::styled("[d] remove", Style::default().fg(Color::Red)),
-        Span::raw("   [Tab] switch card   [j/k ↑↓] move   [</>] runner   [↵] edit   [w] save   [r] refresh"),
+        Span::raw("   ←/→ card   ↑/↓ list   ↵ edit   [w] save   [r] refresh"),
     ]))
-    .block(Block::default().borders(Borders::ALL).title(" Controls "))
+    .block(
+        Block::default()
+            .borders(Borders::ALL)
+            .border_style(border_style(focused))
+            .title(" Controls "),
+    )
 }
 
-fn render_live_state_panel(area: Rect, buf: &mut Buffer, data: &AppData, selected_name: Option<&str>) {
+fn render_live_state_panel(
+    area: Rect,
+    buf: &mut Buffer,
+    data: &AppData,
+    selected_name: Option<&str>,
+    focused: bool,
+) {
     let snapshot = selected_name
         .and_then(|n| data.status.as_ref().and_then(|s| s.runner_by_name(n)));
     let mut lines: Vec<Line<'static>> = Vec::new();
@@ -483,7 +520,12 @@ fn render_live_state_panel(area: Rect, buf: &mut Buffer, data: &AppData, selecte
             Style::default().fg(Color::DarkGray),
         )));
         Paragraph::new(lines)
-            .block(Block::default().borders(Borders::ALL).title(" Live state "))
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .border_style(border_style(focused))
+                    .title(" Live state "),
+            )
             .wrap(Wrap { trim: true })
             .render(area, buf);
         return;
@@ -533,7 +575,12 @@ fn render_live_state_panel(area: Rect, buf: &mut Buffer, data: &AppData, selecte
         )));
     }
     Paragraph::new(lines)
-        .block(Block::default().borders(Borders::ALL).title(" Live state "))
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(border_style(focused))
+                .title(" Live state "),
+        )
         .wrap(Wrap { trim: true })
         .render(area, buf);
 }

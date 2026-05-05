@@ -1,8 +1,9 @@
 //! Runs tab — recent runs for the picker-scoped runner.
 //!
-//! Owns its own `SelectableList<RunId>` so the cursor / scroll
-//! position survives every 500ms IPC refresh — this is the per-tab
-//! piece of the Bug-2 fix.
+//! One top-level card containing the runs list. ↑/↓ at Layer 1 routes
+//! through to the internal `SelectableList` cursor (the App
+//! dispatcher's "no sibling → handle_item_key" fallback). Esc pops to
+//! the tab bar.
 
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind};
 use ratatui::buffer::Buffer;
@@ -11,11 +12,13 @@ use ratatui::style::{Modifier, Style};
 use ratatui::widgets::{Block, Borders, List, ListItem, ListState, StatefulWidget};
 
 use super::super::app::AppData;
-use super::super::input::keymap::Context;
+use super::super::view::focus::{border_style, is_focused, FocusNode, FocusPath};
 use super::super::view::tab::{Tab, TabCtx, TabKind};
 use super::super::view::KeyHandled;
 use super::super::widgets::SelectableList;
 use uuid::Uuid;
+
+const CARD_RECENT: &str = "recent_runs";
 
 pub struct RunsTab {
     list: SelectableList<Uuid>,
@@ -45,7 +48,16 @@ impl Tab for RunsTab {
         TabKind::Runs
     }
 
-    fn render(&self, area: Rect, buf: &mut Buffer, data: &AppData) {
+    fn focus_tree(&self, _data: &AppData) -> Vec<FocusNode> {
+        vec![FocusNode::Card {
+            id: CARD_RECENT,
+            interactive: true,
+            row: 0,
+            children: Vec::new(),
+        }]
+    }
+
+    fn render(&self, area: Rect, buf: &mut Buffer, data: &AppData, focus: &FocusPath) {
         let items: Vec<ListItem<'_>> = data
             .runs
             .iter()
@@ -59,11 +71,12 @@ impl Tab for RunsTab {
                 ))
             })
             .collect();
+        let focused = is_focused(focus, CARD_RECENT);
         let list = List::new(items)
             .block(
                 Block::default()
                     .borders(Borders::ALL)
-                    .border_style(Style::default().fg(ratatui::style::Color::Yellow))
+                    .border_style(border_style(focused))
                     .title(" Recent runs "),
             )
             .highlight_style(Style::default().add_modifier(Modifier::REVERSED));
@@ -72,9 +85,14 @@ impl Tab for RunsTab {
         StatefulWidget::render(list, area, buf, &mut lstate);
     }
 
-    fn handle_key(&mut self, key: KeyEvent, ctx: &mut TabCtx<'_>) -> KeyHandled {
+    fn handle_item_key(
+        &mut self,
+        key: KeyEvent,
+        ctx: &mut TabCtx<'_>,
+        _focus: &FocusPath,
+    ) -> KeyHandled {
         if key.kind != KeyEventKind::Press && key.kind != KeyEventKind::Repeat {
-            return KeyHandled::Consumed;
+            return KeyHandled::NotConsumed;
         }
         let ids: Vec<Uuid> = ctx.data.runs.iter().map(|r| r.run_id).collect();
         match key.code {
@@ -88,10 +106,6 @@ impl Tab for RunsTab {
             }
             _ => KeyHandled::NotConsumed,
         }
-    }
-
-    fn active_contexts(&self) -> Vec<Context> {
-        vec![Context::List]
     }
 
     fn on_focus(&mut self, ctx: &mut TabCtx<'_>) {
