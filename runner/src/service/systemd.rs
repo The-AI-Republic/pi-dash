@@ -70,18 +70,24 @@ WantedBy=default.target
 }
 
 /// Escape a value to be safe inside a systemd `Environment="KEY=VALUE"`
-/// directive. Per `man systemd.exec`, double-quoted values use C-style
-/// escapes; `"`, `\`, `$`, and backtick are the meaningful specials. Real
-/// PATH entries rarely contain any of these, but we escape them anyway so
-/// a pathological username (e.g. one with a `$`) can't corrupt the unit.
+/// directive. Per `man systemd.syntax(7)`, the only valid C-style escapes
+/// inside a double-quoted string are `\a \b \f \n \r \t \v \\ \" \' \s
+/// \xXX \NNN`. `\$` and `` \` `` are *not* recognized: systemd-analyze
+/// rejects them as `Invalid syntax, ignoring`, silently dropping the
+/// entire directive. systemd does no `$VAR` or backtick expansion in
+/// `Environment=` values either, so `$` and backtick pass through
+/// verbatim and need no escaping.
+///
+/// We therefore only escape `\` and `"`, the two characters that are
+/// genuinely special inside the double quotes. A pathological PATH entry
+/// containing either still produces a valid unit; everything else is left
+/// untouched.
 fn systemd_double_quoted_escape(value: &str) -> String {
     let mut out = String::with_capacity(value.len());
     for c in value.chars() {
         match c {
             '\\' => out.push_str("\\\\"),
             '"' => out.push_str("\\\""),
-            '$' => out.push_str("\\$"),
-            '`' => out.push_str("\\`"),
             other => out.push(other),
         }
     }
@@ -262,13 +268,16 @@ mod tests {
 
     #[test]
     fn systemd_escape_handles_specials() {
-        // Inside `Environment="..."`, systemd treats $, `, ", and \ as
-        // special. Anyone with a `$` in their username (rare but legal on
-        // Unix) would otherwise see systemd try to expand `$Username` in
-        // their PATH and silently mangle it.
+        // Inside `Environment="..."`, only `"` and `\` are valid C-style
+        // escapes per `man systemd.syntax(7)`. `$` and backtick have no
+        // special meaning in `Environment=` values (no expansion happens),
+        // so they must pass through verbatim — escaping them as `\$` /
+        // `` \` `` produces an unrecognized C-escape that systemd-analyze
+        // rejects as "Invalid syntax, ignoring", silently dropping the
+        // entire PATH assignment.
         assert_eq!(systemd_double_quoted_escape("a/b/c"), "a/b/c");
-        assert_eq!(systemd_double_quoted_escape("/foo$bar"), "/foo\\$bar");
-        assert_eq!(systemd_double_quoted_escape("/back`tick"), "/back\\`tick");
+        assert_eq!(systemd_double_quoted_escape("/foo$bar"), "/foo$bar");
+        assert_eq!(systemd_double_quoted_escape("/back`tick"), "/back`tick");
         assert_eq!(systemd_double_quoted_escape("/quo\"ted"), "/quo\\\"ted");
         assert_eq!(systemd_double_quoted_escape("a\\b"), "a\\\\b");
     }

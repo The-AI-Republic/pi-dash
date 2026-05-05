@@ -43,11 +43,25 @@ pub(crate) fn validate_path_for_unit(path: &Path) -> Result<&str> {
 /// Returns `None` (skip writing the env var) when:
 /// - `$PATH` is unset or empty in the install-time environment, or
 /// - the value contains a control char that would corrupt the unit / plist.
+///
+/// Each skip path emits a `tracing::warn!` so the operator can correlate a
+/// later "claude: not found" failure with a known-bad install-time env.
 pub(crate) fn capture_install_time_path() -> Option<String> {
-    let value = std::env::var("PATH").ok()?;
-    if value.is_empty() {
-        return None;
-    }
+    let value = match std::env::var("PATH") {
+        Ok(v) if !v.is_empty() => v,
+        Ok(_) => {
+            tracing::warn!(
+                "$PATH is empty at install time; service unit will fall back to the manager's stripped PATH"
+            );
+            return None;
+        }
+        Err(e) => {
+            tracing::warn!(
+                "$PATH could not be read at install time ({e}); service unit will fall back to the manager's stripped PATH"
+            );
+            return None;
+        }
+    };
     if value.chars().any(|c| c.is_control()) {
         tracing::warn!(
             "$PATH contains a control character at install time; not baking into service unit"
