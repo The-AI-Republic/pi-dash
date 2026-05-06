@@ -64,6 +64,16 @@ impl TabKind {
         ]
     }
 
+    pub fn next(self) -> Self {
+        let all = Self::all();
+        all[(self.idx() + 1) % all.len()]
+    }
+
+    pub fn prev(self) -> Self {
+        let all = Self::all();
+        all[(self.idx() + all.len() - 1) % all.len()]
+    }
+
     /// Parse `--tab` values: accepts the canonical name or a 1-based
     /// index (`1`–`4`). The old `config` alias resolves to
     /// `runners` since per-runner settings now live there.

@@ -191,7 +191,6 @@ impl App {
     }
 
     /// Mutable variant for the dispatcher to push/pop layers.
-    #[allow(dead_code)]
     fn focus_for_mut(&mut self, tab: TabKind) -> &mut FocusPath {
         self.focus_paths.entry(tab).or_default()
     }
@@ -390,21 +389,31 @@ impl App {
 
             AppEvent::ApprovalsUpdated(result) => {
                 self.data.ipc_approvals_in_flight = false;
-                if let Ok(v) = result {
-                    let was = self.data.last_approval_count;
-                    let count = v.len();
-                    self.data.last_approval_count = count;
-                    if !self.data.suppress_approval_alert
-                        && count > was
-                        && self.tab != TabKind::Approvals
-                    {
-                        self.event_tx.send(AppEvent::Bell);
-                        self.tab = TabKind::Approvals;
-                        self.with_tab_ctx(|tab, ctx| tab.on_focus(ctx));
+                match result {
+                    Ok(v) => {
+                        let was = self.data.last_approval_count;
+                        let count = v.len();
+                        self.data.last_approval_count = count;
+                        if !self.data.suppress_approval_alert
+                            && count > was
+                            && self.tab != TabKind::Approvals
+                        {
+                            self.event_tx.send(AppEvent::Bell);
+                            self.tab = TabKind::Approvals;
+                            self.with_tab_ctx(|tab, ctx| tab.on_focus(ctx));
+                        }
+                        self.data.suppress_approval_alert = false;
+                        self.data.approvals = v;
+                        self.data.error = None;
+                        self.approvals_tab.reconcile(&self.data);
                     }
-                    self.data.suppress_approval_alert = false;
-                    self.data.approvals = v;
-                    self.approvals_tab.reconcile(&self.data);
+                    Err(e) => {
+                        // Surface the failure so the operator sees why
+                        // the approvals list isn't refreshing — the old
+                        // code silently dropped this and the tab just
+                        // looked frozen.
+                        self.data.error = Some(format!("approvals: {e}"));
+                    }
                 }
                 self.frame.schedule_frame();
             }
@@ -484,6 +493,13 @@ impl App {
                         .and_then(|s| s.runners.iter().find(|r| r.runner_id == runner_id))
                         .map(|r| r.name.clone())
                 };
+                // Hold the approvals in-flight gate across the entire
+                // decide → re-fetch sequence. Without this, the 500ms
+                // tick can race in between the two awaits, fire its own
+                // `approvals()` poll, and its (stale) result can land
+                // *after* our post-decide poll — visibly resurrecting
+                // the item the user just acted on.
+                self.data.ipc_approvals_in_flight = true;
                 let ipc = self.data.ipc.clone();
                 let tx = self.event_tx.clone();
                 tokio::spawn(async move {
@@ -535,10 +551,6 @@ impl App {
             AppEvent::EnrollFailed(msg) => {
                 self.general.set_register_busy(false, Some(msg));
                 self.frame.schedule_frame();
-            }
-            AppEvent::SubmitAddRunner => {
-                // The AddRunnerView posts this with its own state via
-                // a separate event path. We never reach here today.
             }
             AppEvent::SubmitRemoveRunner(name) => {
                 self.spawn_remove_runner(name);
@@ -953,12 +965,10 @@ impl App {
             Action::Refresh => self.event_tx.send(AppEvent::Refresh),
 
             Action::NextTab => {
-                let next = (self.tab.idx() + 1) % 4;
-                self.set_tab(TabKind::from_idx(next).unwrap());
+                self.set_tab(self.tab.next());
             }
             Action::PrevTab => {
-                let prev = (self.tab.idx() + 3) % 4;
-                self.set_tab(TabKind::from_idx(prev).unwrap());
+                self.set_tab(self.tab.prev());
             }
             Action::GoToTab(i) => {
                 if let Some(t) = TabKind::from_idx(i) {
@@ -1120,6 +1130,13 @@ pub async fn run(paths: Paths, initial_tab: TabKind) -> Result<()> {
     let mut tui = Tui::init()?;
     let frame_requester = tui.frame_requester().clone();
 
+    // Intentionally unbounded: every IPC task is short-lived, the per-
+    // concern `*_in_flight` flags cap concurrent producers to a small
+    // constant (one per concern), and the FrameRequester already
+    // coalesces redraws via a `broadcast(1)`. Back-pressure here would
+    // risk blocking the IPC tasks on send and deadlocking the loop —
+    // worse than the bounded memory we'd save under a pathological
+    // burst.
     let (tx, mut rx) = mpsc::unbounded_channel::<AppEvent>();
     let sender = AppEventSender::new(tx);
 

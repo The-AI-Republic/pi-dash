@@ -34,6 +34,11 @@ pub enum BurstDecision {
     /// Flush is due. Returned text was the buffered chunk; caller
     /// should insert it as a single paste.
     Flush(String),
+    /// A non-ASCII (IME) char arrived mid-burst. The caller should
+    /// *first* insert the buffered chunk as a paste, *then* insert the
+    /// trigger char as a normal keystroke. Atomic so the IME char
+    /// can't be silently swallowed by the flush.
+    FlushAndInsert(String, char),
     /// Caller should ignore this event.
     Ignore,
 }
@@ -72,15 +77,13 @@ impl PasteBurst {
     /// buffering — they're never paste-stream artifacts.
     pub fn on_plain_char(&mut self, c: char, now: Instant) -> BurstDecision {
         if !c.is_ascii() {
-            // Bypass: flush whatever's pending first as a chunk.
+            // Bypass: flush whatever's pending first as a chunk, then
+            // surface the trigger char in the same decision so the
+            // caller can apply both atomically. The buffer is left
+            // empty — non-ASCII chars must never linger as buffered
+            // state since they're not paste-stream artifacts.
             if let Some(s) = self.flush() {
-                // We can't return both flush and insert from one
-                // call; the caller is expected to drain via its own
-                // pre-handling. Return Flush; the caller re-feeds c
-                // on the next call with same `now`.
-                self.buffer.push(c);
-                self.last_at = Some(now);
-                return BurstDecision::Flush(s);
+                return BurstDecision::FlushAndInsert(s, c);
             }
             return BurstDecision::InsertChar(c);
         }
@@ -150,5 +153,31 @@ mod tests {
         let d = p.on_plain_char('é', t);
         assert!(matches!(d, BurstDecision::InsertChar('é')));
         assert!(p.is_empty());
+    }
+
+    #[test]
+    fn non_ascii_mid_burst_flushes_and_inserts_atomically() {
+        // Regression: previously this branch swallowed the IME char by
+        // stuffing it into the buffer with `last_at` set, then only
+        // returning `Flush` for the prior text. The trigger char would
+        // be invisible until the next keypress.
+        let mut p = PasteBurst::new();
+        let t0 = Instant::now();
+        let _ = p.on_plain_char('a', t0);
+        let _ = p.on_plain_char('b', t0 + Duration::from_micros(100));
+        assert_eq!(p.buffer(), "ab");
+
+        let d = p.on_plain_char('é', t0 + Duration::from_micros(200));
+        match d {
+            BurstDecision::FlushAndInsert(s, c) => {
+                assert_eq!(s, "ab");
+                assert_eq!(c, 'é');
+            }
+            other => panic!("expected FlushAndInsert, got {:?}", other),
+        }
+        // Buffer must be empty afterwards — the IME char is not a
+        // paste-stream artifact and must never linger as buffered state.
+        assert!(p.is_empty());
+        assert!(p.last_at.is_none());
     }
 }

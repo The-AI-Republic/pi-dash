@@ -7,6 +7,7 @@
 //! Press/Repeat. The 4-variant `TuiEvent` is what the App's
 //! `select!` arm consumes.
 
+#[cfg(test)]
 use std::time::Duration;
 
 use crossterm::event::{Event, EventStream, KeyEvent, KeyEventKind};
@@ -80,7 +81,7 @@ impl TuiEventStream {
 /// Convenience helper used by tests / fallback paths: pull the next
 /// crossterm event off-thread with a 200ms timeout. Not used by the
 /// main loop — the real path uses `EventStream` directly.
-#[allow(dead_code)]
+#[cfg(test)]
 pub async fn poll_event_blocking() -> Option<Event> {
     tokio::task::spawn_blocking(|| {
         if crossterm::event::poll(Duration::from_millis(200)).ok()? {

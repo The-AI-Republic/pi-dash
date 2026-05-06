@@ -95,8 +95,6 @@ pub enum AppEvent {
     /// Enroll-stage failure (cloud unreachable, validation error, file
     /// write failure). The form stays visible with the error attached.
     EnrollFailed(String),
-    /// Submit the open AddRunnerView.
-    SubmitAddRunner,
     /// Confirm-remove the currently-highlighted runner.
     SubmitRemoveRunner(String),
     /// Persist the working config and run `restart_and_verify`.
@@ -144,7 +142,6 @@ impl std::fmt::Debug for AppEvent {
                 f.debug_struct("EnrollOutcome").field("ok", &reload.ok).finish()
             }
             AppEvent::EnrollFailed(s) => f.debug_tuple("EnrollFailed").field(s).finish(),
-            AppEvent::SubmitAddRunner => f.write_str("SubmitAddRunner"),
             AppEvent::SubmitRemoveRunner(n) => f.debug_tuple("SubmitRemoveRunner").field(n).finish(),
             AppEvent::SaveConfig => f.write_str("SaveConfig"),
             AppEvent::DiscardConfigEdits => f.write_str("DiscardConfigEdits"),
