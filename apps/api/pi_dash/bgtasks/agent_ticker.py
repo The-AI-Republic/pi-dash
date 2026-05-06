@@ -33,7 +33,9 @@ from django.utils import timezone
 from pi_dash.db.models.issue_agent_ticker import (
     INFINITE_MAX_TICKS,
     IssueAgentTicker,
+    TickerDisarmReason,
 )
+from pi_dash.orchestration.agent_phases import is_ticking_state
 
 logger = logging.getLogger("pi_dash.worker")
 
@@ -79,7 +81,6 @@ def fire_tick(ticker_id: str) -> bool:
     state, run already in flight, etc.).
     """
     from pi_dash.orchestration.scheduling import (
-        DELEGATION_STATE_NAME,
         TRIGGER_TICK,
         dispatch_continuation_run,
     )
@@ -106,13 +107,16 @@ def fire_tick(ticker_id: str) -> bool:
         if cap != INFINITE_MAX_TICKS and ticker.tick_count >= cap:
             # Already at cap — disarm and bail.
             ticker.enabled = False
-            ticker.save(update_fields=["enabled", "updated_at"])
+            ticker.disarm_reason = TickerDisarmReason.CAP_HIT
+            ticker.save(
+                update_fields=["enabled", "disarm_reason", "updated_at"]
+            )
             return False
 
         issue = ticker.issue
-        # Mirror ``_is_delegation_trigger``: only the literally-named
-        # "In Progress" state can tick in v1.
-        if issue.state is None or issue.state.name != DELEGATION_STATE_NAME:
+        # Registry-driven: only the registered ticking state for the
+        # issue's state group fires.
+        if not is_ticking_state(issue.state):
             return False
 
         # Pre-claim skips. All three reasons (active run, no prior run,
@@ -145,6 +149,7 @@ def fire_tick(ticker_id: str) -> bool:
         prev_tick_count = ticker.tick_count
         prev_next_run_at = ticker.next_run_at
         prev_enabled = ticker.enabled
+        prev_disarm_reason = ticker.disarm_reason
 
         ticker.tick_count = ticker.tick_count + 1
         ticker.last_tick_at = now
@@ -161,6 +166,7 @@ def fire_tick(ticker_id: str) -> bool:
             # Disarm immediately (no more fires); the In Progress → Paused
             # transition is deferred to the run-terminate hook (§4.4.1).
             ticker.enabled = False
+            ticker.disarm_reason = TickerDisarmReason.CAP_HIT
 
         ticker.save(
             update_fields=[
@@ -168,6 +174,7 @@ def fire_tick(ticker_id: str) -> bool:
                 "last_tick_at",
                 "next_run_at",
                 "enabled",
+                "disarm_reason",
                 "updated_at",
             ]
         )
@@ -192,11 +199,18 @@ def fire_tick(ticker_id: str) -> bool:
                 rollback.tick_count = prev_tick_count
                 rollback.next_run_at = prev_next_run_at
                 rollback.enabled = prev_enabled
+                # Restore the captured pre-claim reason. fire_tick only
+                # reaches the claim block on an enabled ticker, so this
+                # is NONE in practice — but capturing keeps the rollback
+                # consistent with the other prev_* fields and survives
+                # any future weakening of that early-return invariant.
+                rollback.disarm_reason = prev_disarm_reason
                 rollback.save(
                     update_fields=[
                         "tick_count",
                         "next_run_at",
                         "enabled",
+                        "disarm_reason",
                         "updated_at",
                     ]
                 )

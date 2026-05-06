@@ -27,8 +27,35 @@ pub enum IssueCommand {
         /// Project-scoped identifier, e.g. `ENG-42`.
         identifier: String,
     },
+    /// Create a new work item under a project. `--project` is required — the CLI
+    /// is machine-global and intentionally has no default project, so the caller
+    /// must always name one (slug like `ENG` or a project UUID).
+    Create(CreateArgs),
     /// Update fields on a work item. Pass only the fields you want to change.
     Patch(PatchArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct CreateArgs {
+    /// Project identifier (slug like `ENG`) or project UUID.
+    #[arg(long)]
+    pub project: String,
+
+    /// Title (required).
+    #[arg(long)]
+    pub title: String,
+
+    /// Description (plain text or markdown).
+    #[arg(long)]
+    pub description: Option<String>,
+
+    /// Priority: `none|low|medium|high|urgent`.
+    #[arg(long)]
+    pub priority: Option<String>,
+
+    /// Initial state — exact state name (case-insensitive) or a state UUID.
+    #[arg(long)]
+    pub state: Option<String>,
 }
 
 #[derive(Debug, Args)]
@@ -65,6 +92,7 @@ pub async fn run(args: IssueArgs, paths: &crate::util::paths::Paths) -> i32 {
 
     let result = match args.command {
         IssueCommand::Get { identifier } => cmd_get(&client, &identifier).await,
+        IssueCommand::Create(a) => cmd_create(&client, a).await,
         IssueCommand::Patch(p) => cmd_patch(&client, p).await,
     };
     match result {
@@ -78,6 +106,48 @@ async fn cmd_get(client: &ApiClient, identifier: &str) -> Result<(), CliError> {
     println!(
         "{}",
         serde_json::to_string(&issue.raw).expect("serialize JSON value")
+    );
+    Ok(())
+}
+
+async fn cmd_create(client: &ApiClient, args: CreateArgs) -> Result<(), CliError> {
+    if args.project.trim().is_empty() {
+        return Err(CliError::new(EXIT_INVALID, "--project must not be empty"));
+    }
+    if args.title.trim().is_empty() {
+        return Err(CliError::new(EXIT_INVALID, "--title must not be empty"));
+    }
+
+    // Pass `--project` straight through. The backend accepts either a UUID or
+    // a workspace-scoped slug in the URL path, so the CLI no longer pre-resolves
+    // it. The same value seeds the state-name resolution URL below.
+    let project_ref = args.project.as_str();
+
+    let mut body: Map<String, Value> = Map::new();
+    body.insert("name".into(), Value::String(args.title));
+    if let Some(desc) = args.description {
+        body.insert("description".into(), Value::String(desc));
+    }
+    if let Some(prio) = args.priority {
+        body.insert("priority".into(), Value::String(prio));
+    }
+    if let Some(state) = args.state {
+        let uuid = if looks_like_uuid(&state) {
+            state
+        } else {
+            resolve_state_name(client, project_ref, &state).await?
+        };
+        body.insert("state".into(), Value::String(uuid));
+    }
+
+    let path = format!(
+        "workspaces/{}/projects/{}/work-items/",
+        client.env.workspace_slug, project_ref
+    );
+    let resp = client.post(&path, &Value::Object(body)).await?;
+    println!(
+        "{}",
+        serde_json::to_string(&resp).expect("serialize JSON value")
     );
     Ok(())
 }

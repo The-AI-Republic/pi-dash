@@ -18,17 +18,17 @@ urlpatterns = [
         name="project",
     ),
     path(
-        "workspaces/<str:slug>/projects/<uuid:pk>/",
+        "workspaces/<str:slug>/projects/<str:pk>/",
         ProjectDetailAPIEndpoint.as_view(http_method_names=["get", "patch", "delete"]),
         name="project",
     ),
     path(
-        "workspaces/<str:slug>/projects/<uuid:project_id>/archive/",
+        "workspaces/<str:slug>/projects/<str:project_id>/archive/",
         ProjectArchiveUnarchiveAPIEndpoint.as_view(http_method_names=["post", "delete"]),
         name="project-archive-unarchive",
     ),
     path(
-        "workspaces/<str:slug>/projects/<uuid:project_id>/summary/",
+        "workspaces/<str:slug>/projects/<str:project_id>/summary/",
         ProjectSummaryAPIEndpoint.as_view(http_method_names=["get"]),
         name="project-summary",
     ),

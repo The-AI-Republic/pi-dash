@@ -73,17 +73,17 @@ urlpatterns = [
         name="advance-analytics-chart",
     ),
     path(
-        "workspaces/<str:slug>/projects/<uuid:project_id>/advance-analytics/",
+        "workspaces/<str:slug>/projects/<str:project_id>/advance-analytics/",
         ProjectAdvanceAnalyticsEndpoint.as_view(),
         name="project-advance-analytics",
     ),
     path(
-        "workspaces/<str:slug>/projects/<uuid:project_id>/advance-analytics-stats/",
+        "workspaces/<str:slug>/projects/<str:project_id>/advance-analytics-stats/",
         ProjectAdvanceAnalyticsStatsEndpoint.as_view(),
         name="project-advance-analytics-stats",
     ),
     path(
-        "workspaces/<str:slug>/projects/<uuid:project_id>/advance-analytics-charts/",
+        "workspaces/<str:slug>/projects/<str:project_id>/advance-analytics-charts/",
         ProjectAdvanceAnalyticsChartEndpoint.as_view(),
         name="project-advance-analytics-chart",
     ),

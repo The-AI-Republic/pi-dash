@@ -54,3 +54,41 @@ def generate_operation_summary(method, path, tag):
         return f"Transfer {tag.rstrip('s')}"
 
     return method_summaries.get(method, f"{method} {resource}")
+
+
+def postprocess_project_id_dual_form(result, generator, request, public):
+    """Annotate project path parameters that now accept either a project UUID
+    or a workspace-scoped slug.
+
+    The URL converters were widened from ``<uuid:project_id>`` to
+    ``<str:project_id>`` (and the project-detail ``<uuid:pk>`` likewise) so the
+    backend accepts either form transparently. Spectacular generates the
+    parameter as a plain string from the converter; this hook updates the
+    description and ``examples`` so OpenAPI consumers know both forms are
+    valid without us having to decorate every endpoint individually.
+    """
+    description = (
+        "Either the project's UUID or its workspace-scoped identifier (e.g. ``ENG``). "
+        "Identifier matching is case-insensitive."
+    )
+
+    for path, path_item in (result.get("paths") or {}).items():
+        if "{project_id}" not in path and "/projects/{pk}/" not in path:
+            continue
+        for method, operation in path_item.items():
+            if not isinstance(operation, dict):
+                continue
+            for param in operation.get("parameters", []) or []:
+                if param.get("in") != "path":
+                    continue
+                name = param.get("name")
+                if name == "project_id" or (name == "pk" and "/projects/{pk}/" in path):
+                    param["description"] = description
+                    schema = param.setdefault("schema", {})
+                    schema.pop("format", None)
+                    schema["type"] = "string"
+                    param["examples"] = {
+                        "uuid": {"value": "00000000-0000-0000-0000-000000000000", "summary": "UUID form"},
+                        "slug": {"value": "ENG", "summary": "Workspace-scoped identifier"},
+                    }
+    return result
