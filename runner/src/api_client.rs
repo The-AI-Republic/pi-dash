@@ -171,77 +171,6 @@ impl CliEnv {
     }
 }
 
-#[cfg(test)]
-mod resolve_tests {
-    use super::*;
-    use crate::config::file::write_config;
-    use crate::config::schema::{
-        AgentSection, ApprovalPolicySection, ClaudeCodeSection, CliSection, CodexSection,
-        Config, DaemonConfig, RunnerConfig, WorkspaceSection,
-    };
-    use crate::util::paths::Paths;
-    use tempfile::tempdir;
-
-    fn paths_for(root: &std::path::Path) -> Paths {
-        Paths {
-            config_dir: root.join("config"),
-            data_dir: root.join("data"),
-            runtime_dir: root.join("runtime"),
-        }
-    }
-
-    fn make_config(token: &str) -> Config {
-        Config {
-            version: 2,
-            daemon: DaemonConfig {
-                cloud_url: "https://cloud.example/".into(),
-                log_level: "info".into(),
-                log_retention_days: 14,
-                agent_observability_v1: false,
-            },
-            runners: vec![RunnerConfig {
-                name: "r1".into(),
-                runner_id: uuid::Uuid::new_v4(),
-                workspace_slug: Some("acme".into()),
-                project_slug: Some("WEB".into()),
-                pod_id: None,
-                workspace: WorkspaceSection {
-                    working_dir: std::path::PathBuf::from("/tmp/wd"),
-                },
-                agent: AgentSection::default(),
-                codex: CodexSection::default(),
-                claude_code: ClaudeCodeSection::default(),
-                approval_policy: ApprovalPolicySection::default(),
-            }],
-            cli: Some(CliSection {
-                token: Some(token.into()),
-            }),
-        }
-    }
-
-    #[test]
-    fn resolve_reads_url_workspace_token_from_config_file() {
-        // The new behaviour: with a populated config file on disk, the
-        // CLI reads URL, workspace, and token from the same file the
-        // daemon uses. This is the happy-path that fixes the runner's
-        // "PIDASH_API_URL is not set" bug — no env vars needed.
-        //
-        // Resolver tries config FIRST, so this assertion holds
-        // regardless of whether the test process has PIDASH_*  exported
-        // (the env path is never reached when config has all three).
-        let tmp = tempdir().unwrap();
-        let paths = paths_for(tmp.path());
-        write_config(&paths, &make_config("tok-from-cfg")).unwrap();
-
-        let env = CliEnv::resolve(&paths).expect("resolve should succeed");
-        // Trailing slash in the config is stripped by the resolver so
-        // `v1()` builds clean URLs.
-        assert_eq!(env.api_url, "https://cloud.example");
-        assert_eq!(env.workspace_slug, "acme");
-        assert_eq!(env.token, "tok-from-cfg");
-    }
-}
-
 /// Thin HTTP client scoped to a single CLI invocation.
 pub struct ApiClient {
     pub env: CliEnv,
@@ -348,4 +277,75 @@ pub fn report_error(err: &CliError) -> i32 {
     };
     eprintln!("{payload}");
     err.exit_code
+}
+
+#[cfg(test)]
+mod resolve_tests {
+    use super::*;
+    use crate::config::file::write_config;
+    use crate::config::schema::{
+        AgentSection, ApprovalPolicySection, ClaudeCodeSection, CliSection, CodexSection,
+        Config, DaemonConfig, RunnerConfig, WorkspaceSection,
+    };
+    use crate::util::paths::Paths;
+    use tempfile::tempdir;
+
+    fn paths_for(root: &std::path::Path) -> Paths {
+        Paths {
+            config_dir: root.join("config"),
+            data_dir: root.join("data"),
+            runtime_dir: root.join("runtime"),
+        }
+    }
+
+    fn make_config(token: &str) -> Config {
+        Config {
+            version: 2,
+            daemon: DaemonConfig {
+                cloud_url: "https://cloud.example/".into(),
+                log_level: "info".into(),
+                log_retention_days: 14,
+                agent_observability_v1: false,
+            },
+            runners: vec![RunnerConfig {
+                name: "r1".into(),
+                runner_id: uuid::Uuid::new_v4(),
+                workspace_slug: Some("acme".into()),
+                project_slug: Some("WEB".into()),
+                pod_id: None,
+                workspace: WorkspaceSection {
+                    working_dir: std::path::PathBuf::from("/tmp/wd"),
+                },
+                agent: AgentSection::default(),
+                codex: CodexSection::default(),
+                claude_code: ClaudeCodeSection::default(),
+                approval_policy: ApprovalPolicySection::default(),
+            }],
+            cli: Some(CliSection {
+                token: Some(token.into()),
+            }),
+        }
+    }
+
+    #[test]
+    fn resolve_reads_url_workspace_token_from_config_file() {
+        // The new behaviour: with a populated config file on disk, the
+        // CLI reads URL, workspace, and token from the same file the
+        // daemon uses. This is the happy-path that fixes the runner's
+        // "PIDASH_API_URL is not set" bug — no env vars needed.
+        //
+        // Resolver tries config FIRST, so this assertion holds
+        // regardless of whether the test process has PIDASH_*  exported
+        // (the env path is never reached when config has all three).
+        let tmp = tempdir().unwrap();
+        let paths = paths_for(tmp.path());
+        write_config(&paths, &make_config("tok-from-cfg")).unwrap();
+
+        let env = CliEnv::resolve(&paths).expect("resolve should succeed");
+        // Trailing slash in the config is stripped by the resolver so
+        // `v1()` builds clean URLs.
+        assert_eq!(env.api_url, "https://cloud.example");
+        assert_eq!(env.workspace_slug, "acme");
+        assert_eq!(env.token, "tok-from-cfg");
+    }
 }

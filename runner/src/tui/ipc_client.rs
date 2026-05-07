@@ -4,6 +4,7 @@ use std::path::PathBuf;
 use crate::ipc::client::Client;
 use crate::ipc::protocol::{Request, Response, StatusSnapshot};
 
+#[derive(Clone)]
 pub struct TuiIpc {
     pub socket: PathBuf,
     /// When set, scope per-runner read requests (`runs`, `approvals`,
@@ -54,12 +55,26 @@ impl TuiIpc {
         approval_id: &str,
         decision: crate::cloud::protocol::ApprovalDecision,
     ) -> Result<()> {
+        self.decide_for_runner(approval_id, decision, self.selected_runner.clone())
+            .await
+    }
+
+    /// Same as `decide` but with an explicit runner override. Used by
+    /// the approvals tab so the decision routes to the runner that
+    /// owned the approval at selection time, regardless of any picker
+    /// change in between.
+    pub async fn decide_for_runner(
+        &self,
+        approval_id: &str,
+        decision: crate::cloud::protocol::ApprovalDecision,
+        runner: Option<String>,
+    ) -> Result<()> {
         let mut c = Client::connect(&self.socket).await?;
         match c
             .call(Request::ApprovalsDecide {
                 approval_id: approval_id.to_string(),
                 decision,
-                runner: self.selected_runner.clone(),
+                runner,
             })
             .await?
         {

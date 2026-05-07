@@ -17,7 +17,6 @@
 use anyhow::{Result, bail};
 use clap::Args as ClapArgs;
 
-use crate::cloud::runners::delete_runner;
 use crate::util::paths::Paths;
 
 #[derive(Debug, ClapArgs)]
@@ -72,30 +71,23 @@ pub async fn run(args: Args, paths: &Paths) -> Result<()> {
         tracing::warn!("service uninstall failed (ok if not installed): {e:#}");
     }
 
-    // Cloud-side cleanup: best-effort delete each runner under this
-    // connection. Connection itself is left for the user to revoke from
-    // the cloud UI — the daemon doesn't have authority to revoke its own
-    // connection row in the new design (the bearer it holds would
-    // self-defeat at exactly the wrong moment).
-    match crate::config::file::load_all(paths) {
-        Ok((config, creds)) => {
+    // Cloud-side cleanup: best-effort self-revoke each runner via the
+    // machine-token DELETE endpoint. Loop carries on past per-runner
+    // failures so a single network blip on runner N+1 doesn't strand
+    // the operator with N revoked-and-N-still-half-alive runners.
+    match crate::config::file::load_config(paths) {
+        Ok(config) => {
             if !args.local_only {
                 for r in &config.runners {
-                    match delete_runner(
-                        &config.daemon.cloud_url,
-                        &creds.connection_id,
-                        &creds.connection_secret,
-                        &r.runner_id,
-                    )
-                    .await
+                    match crate::cli::connect::revoke_additional_runner(paths, &r.name, false).await
                     {
                         Ok(()) => {
-                            tracing::info!(runner = %r.name, "cloud delete-runner ok");
+                            tracing::info!(runner = %r.name, "cloud self-revoke ok");
                         }
                         Err(e) => {
                             tracing::warn!(
                                 runner = %r.name,
-                                "cloud delete-runner failed: {e:#}"
+                                "cloud self-revoke failed: {e:#}"
                             );
                         }
                     }

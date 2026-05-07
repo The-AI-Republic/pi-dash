@@ -99,6 +99,7 @@ async fn router_resolution_is_idempotent_after_first_writer() {
     let router = ApprovalRouter::new();
     let rec = ApprovalRecord {
         approval_id: "a1".into(),
+        runner_id: Uuid::nil(),
         run_id: Uuid::new_v4(),
         kind: ApprovalKind::CommandExecution,
         payload: serde_json::json!({"command": "ls"}),

@@ -9,6 +9,7 @@ from .enrollment import (
     RunnerEnrollEndpoint,
     RunnerInviteEndpoint,
     RunnerRefreshEndpoint,
+    RunnerSelfRevokeEndpoint,
 )
 from .metrics import MetricsEndpoint
 from .pods import PodDetailEndpoint, PodListEndpoint
@@ -48,6 +49,7 @@ __all__ = [
     "RunnerEnrollEndpoint",
     "RunnerInviteEndpoint",
     "RunnerRefreshEndpoint",
+    "RunnerSelfRevokeEndpoint",
     "HealthEndpoint",
     "MetricsEndpoint",
     "PodDetailEndpoint",

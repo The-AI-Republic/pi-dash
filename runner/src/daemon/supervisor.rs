@@ -10,7 +10,7 @@ use crate::approval::policy::Policy;
 use crate::approval::router::{ApprovalRecord, ApprovalRouter, ApprovalStatus, DecisionSource};
 use crate::cloud::http::{
     AckEntry, AttachBody, CredentialsHandle, HttpLoop, InboundEnvelope, PollStatus,
-    RunnerCloudClient, RunnerCredentials, SharedHttpTransport,
+    RunnerCloudClient, SharedHttpTransport,
 };
 use crate::cloud::protocol::{
     ClientMsg, FailureReason, RunnerStatus, ServerMsg, WIRE_VERSION, WorkspaceState,
@@ -365,42 +365,9 @@ async fn load_runner_credentials(
     runner_paths: &RunnerPaths,
     runner_name: &str,
 ) -> Result<CredentialsHandle> {
-    let path = runner_paths.credentials_path();
-    let raw = tokio::fs::read_to_string(&path)
+    crate::cloud::http::load_runner_credentials_from(runner_paths.credentials_path(), runner_name)
         .await
-        .map_err(|e| anyhow::anyhow!("reading runner credentials at {path:?}: {e}"))?;
-    let parsed: toml::Value = toml::from_str(&raw)
-        .map_err(|e| anyhow::anyhow!("parsing runner credentials at {path:?}: {e}"))?;
-    let runner_id = parsed
-        .get("runner")
-        .and_then(|v| v.get("id"))
-        .and_then(toml::Value::as_str)
-        .ok_or_else(|| anyhow::anyhow!("runner credentials at {path:?} are missing runner.id"))?;
-    let refresh_token = parsed
-        .get("refresh")
-        .and_then(|v| v.get("token"))
-        .and_then(toml::Value::as_str)
-        .ok_or_else(|| {
-            anyhow::anyhow!("runner credentials at {path:?} are missing refresh.token")
-        })?;
-    let generation = parsed
-        .get("refresh")
-        .and_then(|v| v.get("generation"))
-        .and_then(toml::Value::as_integer)
-        .ok_or_else(|| {
-            anyhow::anyhow!("runner credentials at {path:?} are missing refresh.generation")
-        })?;
-    let runner_id = uuid::Uuid::parse_str(runner_id)
-        .map_err(|e| anyhow::anyhow!("invalid runner.id in {path:?}: {e}"))?;
-    Ok(CredentialsHandle::new(
-        path,
-        RunnerCredentials {
-            runner_id,
-            name: runner_name.to_string(),
-            refresh_token: refresh_token.to_string(),
-            refresh_token_generation: generation as u64,
-        },
-    ))
+        .map_err(|e| anyhow::anyhow!("{e}"))
 }
 
 fn attach_body_for_instance(inst: &RunnerInstance) -> AttachBody {
@@ -1233,7 +1200,7 @@ impl AssignWorker {
                 end -= 1;
             }
             joined.truncate(end);
-            joined.push_str("…");
+            joined.push('…');
         }
         joined
     }
@@ -1339,6 +1306,7 @@ impl AssignWorker {
                 }
                 let rec = ApprovalRecord {
                     approval_id: approval_id.clone(),
+                    runner_id: self.runner_config.runner_id,
                     run_id,
                     kind,
                     payload: payload.clone(),

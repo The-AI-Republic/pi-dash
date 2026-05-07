@@ -535,9 +535,7 @@ mod tests {
     fn stderr_buffer_handles_multibyte_input() {
         let mut buf = StderrBuffer::new(1);
         // "ä" is 2 bytes; build a string that crosses the cap mid-character.
-        let line: String = std::iter::repeat('ä')
-            .take(STDERR_LINE_CAP_BYTES)
-            .collect();
+        let line: String = "ä".repeat(STDERR_LINE_CAP_BYTES);
         buf.push(&line);
         // Should not panic on truncation (regression: naive byte slicing
         // would split a multi-byte sequence).

@@ -18,7 +18,7 @@ use std::io::{BufRead, IsTerminal, Write};
 use std::path::PathBuf;
 
 use crate::cloud::http::{
-    RunnerCredentials, SharedHttpTransport, enroll_runner, write_runner_credentials,
+    RunnerCredentials, SharedHttpTransport, TransportError, enroll_runner, write_runner_credentials,
 };
 use crate::config::file;
 use crate::config::schema::{Config, Credentials, DaemonConfig, RunnerConfig, WorkspaceSection};
@@ -345,6 +345,196 @@ pub(crate) fn validate_cloud_url(url: &str) -> Result<()> {
         );
     }
     anyhow::bail!("cloud URL must start with https:// (or http:// for localhost), got {url}")
+}
+
+/// Friendly error surface for the TUI add-runner modal. Each variant
+/// maps to a specific user-facing message; opaque cloud-side failures
+/// fall through to `Server`. Constructed via `map_enroll_error`.
+#[derive(thiserror::Error, Debug)]
+pub enum EnrollAdditionalError {
+    #[error(
+        "this machine has no config.toml — run `pidash connect` first to enroll the first runner"
+    )]
+    NoExistingConfig,
+    #[error("loading config.toml failed: {0}")]
+    LoadConfigFailed(String),
+    #[error("{0}")]
+    WorkspaceCollision(String),
+    #[error("enrollment token is invalid or expired — generate a new one in the cloud UI")]
+    TokenInvalid,
+    #[error("enrollment token has already been used — generate a new one in the cloud UI")]
+    TokenAlreadyUsed,
+    #[error("this runner has been revoked cloud-side")]
+    RunnerRevoked,
+    #[error("network error contacting cloud: {0}")]
+    Network(String),
+    #[error("cloud responded with HTTP {status}: {body}")]
+    Server { status: u16, body: String },
+    #[error("writing per-runner credentials failed: {0}")]
+    WriteCredentials(String),
+    #[error("writing config.toml failed: {0}")]
+    WriteConfig(String),
+}
+
+fn map_enroll_error(err: TransportError) -> EnrollAdditionalError {
+    match err {
+        TransportError::Network(s) => EnrollAdditionalError::Network(s),
+        TransportError::RunnerRevoked => EnrollAdditionalError::RunnerRevoked,
+        TransportError::Server { status, body } => {
+            if body.contains("invalid_or_expired_enrollment_token") {
+                EnrollAdditionalError::TokenInvalid
+            } else if body.contains("enrollment_token_already_used") {
+                EnrollAdditionalError::TokenAlreadyUsed
+            } else if body.contains("runner_revoked") {
+                EnrollAdditionalError::RunnerRevoked
+            } else {
+                EnrollAdditionalError::Server { status, body }
+            }
+        }
+        other => EnrollAdditionalError::Network(format!("{other:#}")),
+    }
+}
+
+/// Library entry point for the TUI add-runner modal: enroll an
+/// additional runner against this machine's existing config and
+/// persist the new `[[runner]]` block. Mirrors the
+/// non-first-enrollment branch of `run()` above; caller is responsible
+/// for restarting the daemon afterward (the unit is already installed).
+pub async fn enroll_additional_runner(
+    paths: &Paths,
+    token: &str,
+    host_label: &str,
+    working_dir: Option<PathBuf>,
+) -> std::result::Result<RunnerConfig, EnrollAdditionalError> {
+    if !paths.config_path().exists() {
+        return Err(EnrollAdditionalError::NoExistingConfig);
+    }
+    let mut cfg =
+        file::load_config(paths).map_err(|e| EnrollAdditionalError::LoadConfigFailed(format!("{e:#}")))?;
+
+    if let Some(new_wd) = working_dir.as_ref() {
+        assert_no_workspace_collision(&cfg.runners, new_wd)
+            .map_err(|e| EnrollAdditionalError::WorkspaceCollision(format!("{e:#}")))?;
+    }
+
+    let transport = SharedHttpTransport::new(cfg.daemon.cloud_url.clone())
+        .map_err(|e| EnrollAdditionalError::Network(format!("transport: {e:#}")))?;
+    let resp = enroll_runner(&transport, token, host_label, None)
+        .await
+        .map_err(map_enroll_error)?;
+
+    let runner_paths = paths.for_runner(resp.runner_id);
+    runner_paths
+        .ensure()
+        .map_err(|e| EnrollAdditionalError::WriteCredentials(format!("create dirs: {e:#}")))?;
+    write_runner_credentials(
+        runner_paths.credentials_path(),
+        RunnerCredentials {
+            runner_id: resp.runner_id,
+            name: resp.runner_name.clone(),
+            refresh_token: resp.refresh_token.clone(),
+            refresh_token_generation: resp.refresh_token_generation,
+        },
+    )
+    .await
+    .map_err(|e| EnrollAdditionalError::WriteCredentials(format!("{e:#}")))?;
+
+    let working_dir = working_dir.unwrap_or_else(|| paths.runner_dir(resp.runner_id).join("workspace"));
+    let new_runner = RunnerConfig {
+        name: resp.runner_name.clone(),
+        runner_id: resp.runner_id,
+        workspace_slug: Some(resp.workspace_slug.clone()),
+        project_slug: Some(resp.project_identifier.clone()),
+        pod_id: None,
+        workspace: WorkspaceSection { working_dir },
+        agent: Default::default(),
+        codex: Default::default(),
+        claude_code: Default::default(),
+        approval_policy: Default::default(),
+    };
+    cfg.runners.push(new_runner.clone());
+    file::write_config(paths, &cfg)
+        .map_err(|e| EnrollAdditionalError::WriteConfig(format!("{e:#}")))?;
+    Ok(new_runner)
+}
+
+/// Friendly error surface for the TUI / CLI runner-remove flow.
+#[derive(thiserror::Error, Debug)]
+pub enum RemoveAdditionalError {
+    #[error("no existing config — nothing to remove")]
+    NoExistingConfig,
+    #[error("loading config.toml failed: {0}")]
+    LoadConfigFailed(String),
+    #[error("no runner named {0:?} in config.toml")]
+    UnknownRunner(String),
+    #[error("loading per-runner credentials failed: {0}")]
+    LoadCredentials(String),
+    #[error("network error contacting cloud: {0}")]
+    Network(String),
+    #[error("cloud responded with HTTP {status}: {body}")]
+    Server { status: u16, body: String },
+    #[error("writing config.toml failed: {0}")]
+    WriteConfig(String),
+}
+
+fn map_revoke_error(err: TransportError) -> RemoveAdditionalError {
+    match err {
+        TransportError::Network(s) => RemoveAdditionalError::Network(s),
+        TransportError::Server { status, body } => RemoveAdditionalError::Server { status, body },
+        other => RemoveAdditionalError::Network(format!("{other:#}")),
+    }
+}
+
+/// Library entry point for the TUI / CLI runner-remove flow. Self-revokes
+/// the runner cloud-side via the new machine-token endpoint, drops the
+/// `[[runner]]` block from the local config, and best-effort wipes the
+/// per-runner data dir. Caller is responsible for restarting the daemon.
+///
+/// `local_only=true` skips the cloud call (use when the cloud is
+/// unreachable or the runner row is already gone).
+pub async fn revoke_additional_runner(
+    paths: &Paths,
+    runner_name: &str,
+    local_only: bool,
+) -> std::result::Result<(), RemoveAdditionalError> {
+    if !paths.config_path().exists() {
+        return Err(RemoveAdditionalError::NoExistingConfig);
+    }
+    let mut cfg = file::load_config(paths)
+        .map_err(|e| RemoveAdditionalError::LoadConfigFailed(format!("{e:#}")))?;
+    let idx = cfg
+        .runners
+        .iter()
+        .position(|r| r.name == runner_name)
+        .ok_or_else(|| RemoveAdditionalError::UnknownRunner(runner_name.to_string()))?;
+    let runner_id = cfg.runners[idx].runner_id;
+
+    if !local_only {
+        let runner_paths = paths.for_runner(runner_id);
+        let creds = crate::cloud::http::load_runner_credentials_from(
+            runner_paths.credentials_path(),
+            runner_name,
+        )
+        .await
+        .map_err(|e| RemoveAdditionalError::LoadCredentials(format!("{e:#}")))?;
+        let transport = SharedHttpTransport::new(cfg.daemon.cloud_url.clone())
+            .map_err(|e| RemoveAdditionalError::Network(format!("transport: {e:#}")))?;
+        let client = crate::cloud::http::RunnerCloudClient::new(runner_id, creds, transport);
+        crate::cloud::http::revoke_runner_self(&client)
+            .await
+            .map_err(map_revoke_error)?;
+    }
+
+    cfg.runners.remove(idx);
+    file::write_config(paths, &cfg)
+        .map_err(|e| RemoveAdditionalError::WriteConfig(format!("{e:#}")))?;
+    let runner_data = paths.runner_dir(runner_id);
+    if runner_data.exists() {
+        // Best effort: a stranded directory is annoying but not fatal;
+        // the runner is already gone cloud-side.
+        let _ = std::fs::remove_dir_all(&runner_data);
+    }
+    Ok(())
 }
 
 /// Hook left for symmetry with future ``pidash connect --read-stdin`` flows.
