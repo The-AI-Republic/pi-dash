@@ -47,13 +47,18 @@ def runner_for_workspace(db, workspace, project, create_user):
     # ``Pod.default_for_workspace`` accessor. The binding fixture below
     # takes ``project`` already, so resolve the default pod through it.
     pod = Pod.default_for_project(project)
+    # ``credential_hash`` / ``credential_fingerprint`` were renamed to
+    # ``refresh_token_hash`` / ``refresh_token_fingerprint`` in the
+    # per-runner HTTPS transport rollout. Keep this fixture's intent
+    # (an active runner with credential state populated) but use the
+    # current field names.
     return Runner.objects.create(
         owner=create_user,
         workspace=workspace,
         pod=pod,
         name="agentA",
-        credential_hash="h",
-        credential_fingerprint="f" * 12,
+        refresh_token_hash="h",
+        refresh_token_fingerprint="f" * 12,
         status=RunnerStatus.ONLINE,
         last_heartbeat_at=timezone.now(),
     )
