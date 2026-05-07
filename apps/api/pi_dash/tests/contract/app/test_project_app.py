@@ -75,8 +75,10 @@ class TestProjectAPIPost(TestProjectBase):
         # Check response status
         assert response.status_code == status.HTTP_201_CREATED
 
-        # Verify project was created
-        assert Project.objects.count() == 1
+        # Verify project was created (the workspace fixture pre-creates a
+        # ``Workspace Default Project``; assert against the new project's name
+        # so this test only counts what it just created).
+        assert Project.objects.filter(name=project_data["name"]).count() == 1
         project = Project.objects.get(name=project_data["name"])
         assert project.workspace == workspace
 
@@ -140,7 +142,9 @@ class TestProjectAPIPost(TestProjectBase):
         response = session_client.post(url, project_data, format="json")
 
         assert response.status_code == status.HTTP_403_FORBIDDEN
-        assert Project.objects.count() == 0
+        # Filter by the rejected project's name; the workspace fixture
+        # pre-creates a ``Workspace Default Project`` that is not relevant here.
+        assert not Project.objects.filter(name=project_data["name"]).exists()
 
     @pytest.mark.django_db
     def test_create_project_unauthenticated(self, client, workspace):
@@ -247,9 +251,12 @@ class TestProjectAPIGet(TestProjectBase):
 
         assert response.status_code == status.HTTP_200_OK
         data = response.json()
-        assert len(data) == 1
-        assert data[0]["name"] == "Test Project"
-        assert data[0]["identifier"] == "TP"
+        # Workspace admins see all workspace projects; the workspace fixture
+        # pre-creates a ``Workspace Default Project``. Match by identifier so
+        # the assertion is robust to that.
+        tp = next((p for p in data if p["identifier"] == "TP"), None)
+        assert tp is not None
+        assert tp["name"] == "Test Project"
 
     @pytest.mark.django_db
     def test_list_projects_authenticated_guest(self, session_client, workspace):
@@ -304,9 +311,13 @@ class TestProjectAPIGet(TestProjectBase):
 
         assert response.status_code == status.HTTP_200_OK
         data = response.json()
-        assert len(data) == 1
-        assert data[0]["name"] == "Detailed Project"
-        assert data[0]["description"] == "A detailed test project"
+        # Workspace admins see all workspace projects; the workspace fixture
+        # pre-creates a ``Workspace Default Project``. Match by identifier so
+        # the assertion is robust to that.
+        dp = next((p for p in data if p["identifier"] == "DP"), None)
+        assert dp is not None
+        assert dp["name"] == "Detailed Project"
+        assert dp["description"] == "A detailed test project"
 
     @pytest.mark.django_db
     def test_retrieve_project_success(self, session_client, workspace, create_user):

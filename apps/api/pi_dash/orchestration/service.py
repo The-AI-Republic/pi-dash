@@ -449,14 +449,14 @@ def dispatch_scheduler_run(
     """
     from pi_dash.runner.services import matcher
 
-    pod = Pod.default_for_workspace_id(binding.workspace_id)
+    pod = Pod.default_for_project_id(binding.project_id)
     if pod is None:
         logger.warning(
-            "scheduler.dispatch: skip binding=%s reason=no-default-pod workspace=%s",
+            "scheduler.dispatch: skip binding=%s reason=no-default-pod project=%s",
             binding.pk,
-            binding.workspace_id,
+            binding.project_id,
         )
-        return None, f"no default pod for workspace {binding.workspace_id}"
+        return None, f"no default pod for project {binding.project_id}"
 
     creator = binding.actor
     if creator is None:
