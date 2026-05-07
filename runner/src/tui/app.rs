@@ -804,7 +804,40 @@ impl App {
                     self.frame.schedule_frame();
                     return KeyHandled::Consumed;
                 }
-                // No sibling in this direction — give the focused card /
+                // Auto-dive: if no sibling exists in the ↑/↓ direction
+                // and the focused node is an interactive Card with
+                // children, descend into it instead of forcing the user
+                // to press Enter first. ↓ lands on the first child; ↑
+                // lands on the last. Cards that handle ↑/↓ themselves
+                // (declared with no children, e.g. the Runners list
+                // whose cursor lives in the tab struct) skip this branch
+                // and fall through to handle_item_key below — which
+                // keeps their existing custom navigation. ←/→ is
+                // intentionally not auto-dived: that axis is reserved
+                // for row-sibling movement.
+                if matches!(key.code, KeyCode::Up | KeyCode::Down)
+                    && let Some(node) = locate(&tree, focus.segments())
+                    && let FocusNode::Card {
+                        children,
+                        interactive,
+                        ..
+                    } = node
+                    && *interactive
+                    && !children.is_empty()
+                {
+                    let target = if matches!(key.code, KeyCode::Down) {
+                        children.first()
+                    } else {
+                        children.last()
+                    };
+                    if let Some(child) = target {
+                        let id = child.id();
+                        self.focus_for_mut(self.tab).push(id);
+                        self.frame.schedule_frame();
+                        return KeyHandled::Consumed;
+                    }
+                }
+                // No sibling and no auto-dive — give the focused card /
                 // item a chance to handle the arrow itself (e.g. moving
                 // an internal list cursor on the Runs tab). If it
                 // declines, consume anyway so the legacy keymap (Tabs
