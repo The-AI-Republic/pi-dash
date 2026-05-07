@@ -164,7 +164,7 @@ def test_scan_respects_future_next_run_at(binding):
 
 @pytest.mark.unit
 def test_fire_creates_run_and_advances_next_run_at(binding):
-    fired = fire_scheduler_binding.__wrapped__(fire_scheduler_binding, str(binding.pk))
+    fired = fire_scheduler_binding(str(binding.pk))
     assert fired is True
     binding.refresh_from_db()
     assert binding.last_run_id is not None
@@ -180,7 +180,7 @@ def test_fire_creates_run_and_advances_next_run_at(binding):
 def test_fire_resolves_prompt_with_extra_context(scheduler, binding):
     binding.extra_context = "Focus on authn paths."
     binding.save(update_fields=["extra_context"])
-    fire_scheduler_binding.__wrapped__(fire_scheduler_binding, str(binding.pk))
+    fire_scheduler_binding(str(binding.pk))
     binding.refresh_from_db()
     run = binding.last_run
     assert "Scan the project." in run.prompt
@@ -191,7 +191,7 @@ def test_fire_resolves_prompt_with_extra_context(scheduler, binding):
 def test_fire_phase3a_save_advances_updated_at(binding):
     """Codex review #6: Phase 3a must use save() so auto_now fires."""
     before = binding.updated_at
-    fire_scheduler_binding.__wrapped__(fire_scheduler_binding, str(binding.pk))
+    fire_scheduler_binding(str(binding.pk))
     binding.refresh_from_db()
     assert binding.updated_at > before
 
@@ -218,7 +218,7 @@ def test_fire_skips_when_last_run_in_flight(binding, workspace, project, create_
     binding.next_run_at = prior_next_run_at
     binding.save(update_fields=["last_run", "next_run_at"])
 
-    fired = fire_scheduler_binding.__wrapped__(fire_scheduler_binding, str(binding.pk))
+    fired = fire_scheduler_binding(str(binding.pk))
     assert fired is False
     binding.refresh_from_db()
     # next_run_at must NOT have advanced — skip is silent
@@ -232,7 +232,7 @@ def test_fire_disables_binding_with_bad_cron_and_clears_next_run_at(binding):
     binding.next_run_at = timezone.now() - timedelta(seconds=5)
     binding.save(update_fields=["cron", "next_run_at"])
 
-    fired = fire_scheduler_binding.__wrapped__(fire_scheduler_binding, str(binding.pk))
+    fired = fire_scheduler_binding(str(binding.pk))
     assert fired is False
     binding.refresh_from_db()
     assert binding.enabled is False
@@ -248,10 +248,10 @@ def test_fire_rolls_back_next_run_at_on_dispatch_failure(monkeypatch, binding):
     binding.save(update_fields=["next_run_at"])
 
     monkeypatch.setattr(
-        "pi_dash.bgtasks.scheduler.dispatch_scheduler_run",
+        "pi_dash.orchestration.service.dispatch_scheduler_run",
         lambda b, p: (None, "no default pod for workspace test"),
     )
-    fired = fire_scheduler_binding.__wrapped__(fire_scheduler_binding, str(binding.pk))
+    fired = fire_scheduler_binding(str(binding.pk))
     assert fired is False
     binding.refresh_from_db()
     # Rolled back to NULL — no scheduled time advanced since dispatch failed
@@ -264,5 +264,5 @@ def test_fire_rolls_back_next_run_at_on_dispatch_failure(monkeypatch, binding):
 @pytest.mark.unit
 def test_fire_returns_false_when_binding_deleted(binding):
     binding.delete()  # soft-delete
-    fired = fire_scheduler_binding.__wrapped__(fire_scheduler_binding, str(binding.pk))
+    fired = fire_scheduler_binding(str(binding.pk))
     assert fired is False
