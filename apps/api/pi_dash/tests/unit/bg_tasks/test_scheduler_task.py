@@ -42,8 +42,11 @@ def project(db, workspace, create_user):
 
 
 @pytest.fixture
-def runner_for_workspace(db, workspace, create_user):
-    pod = Pod.default_for_workspace(workspace)
+def runner_for_workspace(db, workspace, project, create_user):
+    # Pods became project-scoped in #77 — there is no longer a
+    # ``Pod.default_for_workspace`` accessor. The binding fixture below
+    # takes ``project`` already, so resolve the default pod through it.
+    pod = Pod.default_for_project(project)
     return Runner.objects.create(
         owner=create_user,
         workspace=workspace,
@@ -194,9 +197,9 @@ def test_fire_phase3a_save_advances_updated_at(binding):
 
 
 @pytest.mark.unit
-def test_fire_skips_when_last_run_in_flight(binding, workspace, create_user):
+def test_fire_skips_when_last_run_in_flight(binding, workspace, project, create_user):
     """Concurrency policy: a non-terminal previous run blocks the next tick."""
-    pod = Pod.default_for_workspace(workspace)
+    pod = Pod.default_for_project(project)
     in_flight = AgentRun.objects.create(
         workspace=workspace,
         created_by=create_user,
