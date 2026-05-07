@@ -74,11 +74,14 @@ def stub_drain(monkeypatch):
 
 @pytest.fixture
 def scheduler(workspace, create_user):
+    # Use a slug that does NOT collide with the builtins seeded by the
+    # ``post_save(Workspace)`` signal in ``pi_dash.scheduler.signals``. See
+    # ``test_scheduler.py::scheduler`` for the full rationale.
     with impersonate(create_user):
         return Scheduler.objects.create(
             workspace=workspace,
-            slug="security-audit",
-            name="Security Audit",
+            slug="test-scheduler",
+            name="Test Scheduler",
             description="Test",
             prompt="Scan the project.",
         )
