@@ -25,7 +25,7 @@ use super::super::app::AppData;
 use super::super::event::AppEvent;
 use super::super::input::keymap::Context;
 use super::super::view::focus::{
-    border_style, is_focused, is_in_path, FocusNode, FocusPath,
+    border_style, dived_marker, is_focused, is_in_path, FocusNode, FocusPath,
 };
 use super::super::view::tab::{Tab, TabCtx, TabKind};
 use super::super::view::{CardId, KeyHandled};
@@ -490,7 +490,10 @@ impl GeneralTab {
                 Block::default()
                     .borders(Borders::ALL)
                     .border_style(border_style(is_in_path(focus, CARD_REGISTER)))
-                    .title(" Register with cloud "),
+                    .title(format!(
+                        " Register with cloud {}",
+                        dived_marker(focus, CARD_REGISTER)
+                    )),
             )
             .wrap(Wrap { trim: false });
         body.render(chunks[0], buf);
@@ -592,7 +595,10 @@ impl GeneralTab {
                 Block::default()
                     .borders(Borders::ALL)
                     .border_style(border_style(is_in_path(focus, CARD_DAEMON_SETTINGS)))
-                    .title(" Daemon settings "),
+                    .title(format!(
+                        " Daemon settings {}",
+                        dived_marker(focus, CARD_DAEMON_SETTINGS)
+                    )),
             )
             .wrap(Wrap { trim: true })
     }

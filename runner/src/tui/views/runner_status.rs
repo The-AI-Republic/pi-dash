@@ -25,7 +25,7 @@ use super::super::app::AppData;
 use super::super::event::AppEvent;
 use super::super::input::keymap::Context;
 use super::super::view::focus::{
-    border_style, is_focused, is_in_path, FocusNode, FocusPath,
+    border_style, dived_marker, is_focused, is_in_path, FocusNode, FocusPath,
 };
 use super::super::view::tab::{Tab, TabCtx, TabKind};
 use super::super::view::KeyHandled;
@@ -440,10 +440,11 @@ impl RunnerStatusTab {
             .as_ref()
             .map(|l| fields::differs(l, working))
             .unwrap_or(true);
+        let marker = dived_marker(focus, CARD_SETTINGS);
         let title = if dirty {
-            " Settings (selected runner) [unsaved] "
+            format!(" Settings (selected runner) [unsaved] {marker}")
         } else {
-            " Settings (selected runner) "
+            format!(" Settings (selected runner) {marker}")
         };
         let edit_buffer_str: Option<String> =
             self.edit_buffer.as_ref().map(|t| t.text().to_string());

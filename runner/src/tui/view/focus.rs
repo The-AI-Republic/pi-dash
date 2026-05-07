@@ -192,6 +192,25 @@ pub fn is_in_path(path: &FocusPath, card_id: CardId) -> bool {
     path.segments().contains(&card_id)
 }
 
+/// True iff the user has dived *into* this card — `card_id` is in the
+/// focus path but is not the leaf, so an inner item owns input. This
+/// is the visual signal for "you're editing inside this card; Esc
+/// pops you back out." It's strictly tighter than `is_in_path`, which
+/// stays true even when focus is on the card itself.
+pub fn is_dived(path: &FocusPath, card_id: CardId) -> bool {
+    let segs = path.segments();
+    segs.contains(&card_id) && segs.last() != Some(&card_id)
+}
+
+/// Title-suffix marker for a card that is currently dived. Returns
+/// `"* "` (asterisk + trailing space) so it can be embedded inside
+/// the existing `" Title "` padding convention as `" Title * "`,
+/// or `""` when the card is not dived. Keeping the marker in one
+/// place avoids per-tab drift on what "dived" looks like.
+pub fn dived_marker(path: &FocusPath, card_id: CardId) -> &'static str {
+    if is_dived(path, card_id) { "* " } else { "" }
+}
+
 /// Format the focus path as `card › child › grandchild` for display in
 /// the footer breadcrumb. Returns an empty string at Layer 0.
 pub fn breadcrumb(path: &FocusPath) -> String {
@@ -303,6 +322,30 @@ mod tests {
         assert_eq!(node.id(), "log_retention");
         assert!(!node.is_card());
         assert!(locate(&tree, &["settings", "missing"]).is_none());
+    }
+
+    #[test]
+    fn is_dived_true_only_when_card_is_an_ancestor() {
+        let mut p = FocusPath::new();
+        // Layer 0 — card not in path.
+        assert!(!is_dived(&p, "settings"));
+        assert_eq!(dived_marker(&p, "settings"), "");
+
+        // Layer 1, focus on the card itself — not yet dived.
+        p.push("settings");
+        assert!(!is_dived(&p, "settings"));
+        assert_eq!(dived_marker(&p, "settings"), "");
+
+        // Layer 2, focus on a child — dived.
+        p.push("log_retention");
+        assert!(is_dived(&p, "settings"));
+        assert_eq!(dived_marker(&p, "settings"), "* ");
+        assert!(!is_dived(&p, "log_retention")); // leaf is not dived in itself
+
+        // Pop back to the card — marker disappears.
+        p.pop();
+        assert!(!is_dived(&p, "settings"));
+        assert_eq!(dived_marker(&p, "settings"), "");
     }
 
     #[test]
