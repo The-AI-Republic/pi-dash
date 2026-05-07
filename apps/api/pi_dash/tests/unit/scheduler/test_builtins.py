@@ -44,12 +44,16 @@ def test_ensure_is_idempotent(workspace):
 def test_ensure_updates_existing_row(workspace, create_user):
     """If a workspace already has a builtin row with stale prompt text,
     ensure_builtin_schedulers refreshes it."""
-    Scheduler.objects.create(
-        workspace=workspace,
-        slug="security-audit",
-        name="Stale name",
-        prompt="Stale prompt",
-    )
+    # The ``post_save(Workspace)`` signal already seeded the builtins for
+    # this workspace, so we can't create a fresh ``security-audit`` row —
+    # the conditional unique constraint would reject it. Mutate the seeded
+    # row to look stale instead, then call ``ensure_builtin_schedulers`` to
+    # confirm the refresh path repaints it.
+    stale = Scheduler.objects.get(workspace=workspace, slug="security-audit")
+    stale.name = "Stale name"
+    stale.prompt = "Stale prompt"
+    stale.save(update_fields=["name", "prompt", "updated_at"])
+
     ensure_builtin_schedulers(workspace)
     row = Scheduler.objects.get(workspace=workspace, slug="security-audit")
     builtin = next(b for b in BUILTINS if b.slug == "security-audit")
