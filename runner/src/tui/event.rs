@@ -99,6 +99,12 @@ pub enum AppEvent {
     SubmitRemoveRunner(String),
     /// Persist the working config and run `restart_and_verify`.
     SaveConfig,
+    /// Persist the working config synchronously and quit on success.
+    /// Skips the async `restart_and_verify` step (the spawned task
+    /// would die with the TUI runtime anyway). Save errors abort the
+    /// quit and surface via `config_edit_error` so the user can fix
+    /// and retry. Posted by the dirty exit-confirm modal.
+    SaveAndQuit,
     /// Clone `config_loaded` into `config_working` (Esc on the
     /// editable tabs).
     DiscardConfigEdits,
@@ -144,6 +150,7 @@ impl std::fmt::Debug for AppEvent {
             AppEvent::EnrollFailed(s) => f.debug_tuple("EnrollFailed").field(s).finish(),
             AppEvent::SubmitRemoveRunner(n) => f.debug_tuple("SubmitRemoveRunner").field(n).finish(),
             AppEvent::SaveConfig => f.write_str("SaveConfig"),
+            AppEvent::SaveAndQuit => f.write_str("SaveAndQuit"),
             AppEvent::DiscardConfigEdits => f.write_str("DiscardConfigEdits"),
             AppEvent::ReloadOutcomeUpdated(_) => f.write_str("ReloadOutcomeUpdated"),
             AppEvent::SelectRunner(i) => f.debug_tuple("SelectRunner").field(i).finish(),

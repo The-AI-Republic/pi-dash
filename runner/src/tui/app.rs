@@ -558,6 +558,30 @@ impl App {
             AppEvent::SaveConfig => {
                 self.spawn_save_config();
             }
+            AppEvent::SaveAndQuit => {
+                // Sync write only — skip the async restart_and_verify
+                // since the spawned task would be cancelled when the
+                // runtime shuts down. The daemon will pick up the new
+                // config on its next start. On write failure, surface
+                // the error and *don't* quit, so the user can fix and
+                // retry instead of silently losing edits.
+                if let Some(cfg) = self.data.config_working.clone() {
+                    match crate::config::file::write_config(&self.data.paths, &cfg) {
+                        Ok(()) => {
+                            self.data.config_loaded = Some(cfg);
+                            self.data.config_edit_error = None;
+                            self.quit = true;
+                        }
+                        Err(e) => {
+                            self.data.config_edit_error =
+                                Some(format!("save failed: {e:#}"));
+                            self.frame.schedule_frame();
+                        }
+                    }
+                } else {
+                    self.quit = true;
+                }
+            }
             AppEvent::DiscardConfigEdits => {
                 if let Some(loaded) = self.data.config_loaded.clone() {
                     self.data.config_working = Some(loaded);
@@ -983,7 +1007,13 @@ impl App {
     fn dispatch_action(&mut self, action: Action) {
         match action {
             Action::Quit => {
-                let v = super::views::modals::confirm::ConfirmExitView::new();
+                let dirty = match (&self.data.config_loaded, &self.data.config_working) {
+                    (Some(loaded), Some(working)) => {
+                        super::views::config::differs(loaded, working)
+                    }
+                    _ => false,
+                };
+                let v = super::views::modals::confirm::ConfirmExitView::new(dirty);
                 self.event_tx.push_view(Box::new(v));
             }
             Action::QuitForce => self.quit = true,
