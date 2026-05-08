@@ -35,13 +35,17 @@ from pi_dash.runner.models import (
     Pod,
     Runner,
     RunnerForceRefresh,
+    RunnerStatus,
 )
 from pi_dash.runner.serializers import (
     RunnerEnrollRequestSerializer,
     RunnerEnrollmentInviteSerializer,
 )
 from pi_dash.runner.services import tokens
-from pi_dash.runner.services.permissions import is_workspace_member
+from pi_dash.runner.services.permissions import (
+    is_workspace_admin,
+    is_workspace_member,
+)
 from pi_dash.runner.services.pubsub import close_runner_session, send_to_runner
 
 logger = logging.getLogger(__name__)
@@ -378,6 +382,101 @@ class RunnerRefreshEndpoint(APIView):
                 "refresh_token_generation": runner.refresh_token_generation,
             }
         )
+
+
+class RunnerReviveEndpoint(APIView):
+    """``POST /api/runners/<runner_id>/revive/`` — mint a fresh enrollment token.
+
+    Two recovery cases the legacy invite flow cannot serve without
+    spawning a duplicate Runner row:
+
+    - **Stale PENDING**: ``RunnerInviteEndpoint`` minted a token, the
+      operator lost it before running ``pidash connect``. The row sits
+      in PENDING (``enrolled_at IS NULL``) with a hash nobody holds the
+      preimage for.
+    - **Revoked**: an active runner was revoked (manual or replay) and
+      the operator wants to reuse the same name / pod / id rather than
+      start over.
+
+    Either case resets the row to PENDING and returns a fresh
+    enrollment-token payload identical to ``RunnerInviteEndpoint`` so
+    the web UI can reuse the same install-command panel. Refuses
+    actively-enrolled runners — revoke first, then revive.
+    """
+
+    authentication_classes = [BaseSessionAuthentication]
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, runner_id):
+        with transaction.atomic():
+            runner = (
+                Runner.objects.select_for_update()
+                .select_related("workspace", "pod__project")
+                .filter(pk=runner_id)
+                .first()
+            )
+            if runner is None:
+                return Response(
+                    {"error": "not found"}, status=status.HTTP_404_NOT_FOUND
+                )
+            if runner.owner_id != request.user.id and not is_workspace_admin(
+                request.user, runner.workspace_id
+            ):
+                return Response(
+                    {"error": "forbidden"}, status=status.HTTP_403_FORBIDDEN
+                )
+            if runner.revoked_at is None and runner.enrolled_at is not None:
+                return Response(
+                    {"error": "runner is currently active; revoke it first"},
+                    status=status.HTTP_409_CONFLICT,
+                )
+
+            enrollment = tokens.mint_enrollment_token()
+            runner.enrollment_token_hash = enrollment.hashed
+            runner.enrollment_token_fingerprint = enrollment.fingerprint
+            runner.enrolled_at = None
+            runner.refresh_token_hash = ""
+            runner.refresh_token_fingerprint = ""
+            runner.previous_refresh_token_hash = ""
+            runner.refresh_token_generation = 0
+            runner.revoked_at = None
+            runner.revoked_reason = ""
+            runner.status = RunnerStatus.OFFLINE
+            runner.save(
+                update_fields=[
+                    "enrollment_token_hash",
+                    "enrollment_token_fingerprint",
+                    "enrolled_at",
+                    "refresh_token_hash",
+                    "refresh_token_fingerprint",
+                    "previous_refresh_token_hash",
+                    "refresh_token_generation",
+                    "revoked_at",
+                    "revoked_reason",
+                    "status",
+                    "updated_at",
+                ]
+            )
+            # Drop any leftover force-refresh directive — we are at rtg=0.
+            RunnerForceRefresh.objects.filter(runner=runner).delete()
+
+        project_identifier = (
+            runner.pod.project.identifier
+            if runner.pod and runner.pod.project_id
+            else ""
+        )
+        body = RunnerEnrollmentInviteSerializer(
+            {
+                "runner_id": runner.id,
+                "name": runner.name,
+                "workspace_slug": runner.workspace.slug,
+                "project_identifier": project_identifier,
+                "pod_id": runner.pod_id,
+                "enrollment_token": enrollment.raw,
+                "enrollment_expires_at": enrollment.expires_at.isoformat(),
+            }
+        ).data
+        return Response(body, status=status.HTTP_201_CREATED)
 
 
 class RunnerSelfRevokeEndpoint(APIView):

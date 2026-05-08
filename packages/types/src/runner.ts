@@ -69,6 +69,14 @@ export interface IRunner {
   /** Volatile per-active-run agent snapshot. Optional / null when the
    * runner has not yet reported any observability data (pre-flag runner). */
   live_state?: IRunnerLiveState | null;
+  /** Set the first time the daemon successfully exchanges its enrollment
+   * token for a refresh token. Null = PENDING (still needs to enroll). */
+  enrolled_at: string | null;
+  /** Set when the runner is hard-revoked (manual, replay, membership
+   * change). The row stays visible; `revive` clears this and mints a
+   * fresh enrollment token on the same row. */
+  revoked_at: string | null;
+  revoked_reason: string;
   created_at: string;
   updated_at: string;
 }

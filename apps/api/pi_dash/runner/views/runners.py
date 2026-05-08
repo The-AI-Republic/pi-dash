@@ -144,3 +144,34 @@ class RunnerDetailEndpoint(APIView):
         close_runner_session(runner_pk)
         Runner.objects.filter(pk=runner_pk).delete()
         return Response(status=status.HTTP_204_NO_CONTENT)
+
+
+class RunnerRevokeEndpoint(APIView):
+    """``POST /api/runners/<runner_id>/revoke/`` — hard-revoke without delete.
+
+    Cascades to sessions, in-flight runs, and pinned follow-ups via
+    ``Runner.revoke()``. Idempotent: revoking an already-revoked runner
+    re-emits the control frame and returns 200 with the current row.
+    Use this when an operator wants to stop a runner permanently but
+    keep its history visible in the list — paired with the ``revive``
+    endpoint that mints a fresh enrollment token on the same row.
+    """
+
+    authentication_classes = [BaseSessionAuthentication]
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, runner_id):
+        runner = Runner.objects.filter(pk=runner_id).first()
+        if runner is None:
+            return Response({"error": "not found"}, status=status.HTTP_404_NOT_FOUND)
+        if not _can_manage_runner(request.user, runner):
+            return Response({"error": "forbidden"}, status=status.HTTP_403_FORBIDDEN)
+        runner_pk = runner.pk
+        runner.revoke(reason="manual_revoke")
+        send_to_runner(
+            runner_pk,
+            {"type": "revoke", "reason": "revoked by user"},
+        )
+        close_runner_session(runner_pk)
+        runner.refresh_from_db()
+        return Response(RunnerSerializer(runner).data)

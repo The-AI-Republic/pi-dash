@@ -440,6 +440,16 @@ export default {
       delete_confirm_body:
         "The runner row is removed and the daemon is forced offline. Historic runs are preserved with a null runner reference.",
       delete_failed: "Failed to delete runner",
+      revoke: "Revoke",
+      revoke_confirm_title: "Revoke runner?",
+      revoke_confirm_body:
+        "The runner's credentials are invalidated and any in-flight runs are cancelled, but the row stays in the list. You can revive it later to mint a fresh enrollment token on the same row.",
+      revoke_failed: "Failed to revoke runner",
+      revive: "Revive",
+      revive_failed: "Failed to revive runner",
+      revive_modal_title: "New enrollment token",
+      revive_modal_body:
+        "Run the command below on the host that should pick up this runner. Copy it now — the token will not be shown again.",
       status: {
         online: "online",
         busy: "busy",
