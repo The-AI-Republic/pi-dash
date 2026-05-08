@@ -43,7 +43,7 @@ from pi_dash.runner.serializers import (
 )
 from pi_dash.runner.services import tokens
 from pi_dash.runner.services.permissions import (
-    is_workspace_admin,
+    can_manage_runner,
     is_workspace_member,
 )
 from pi_dash.runner.services.pubsub import close_runner_session, send_to_runner
@@ -419,9 +419,7 @@ class RunnerReviveEndpoint(APIView):
                 return Response(
                     {"error": "not found"}, status=status.HTTP_404_NOT_FOUND
                 )
-            if runner.owner_id != request.user.id and not is_workspace_admin(
-                request.user, runner.workspace_id
-            ):
+            if not can_manage_runner(request.user, runner):
                 return Response(
                     {"error": "forbidden"}, status=status.HTTP_403_FORBIDDEN
                 )

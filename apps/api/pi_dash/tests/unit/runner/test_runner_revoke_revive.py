@@ -83,6 +83,14 @@ def test_revoke_404_for_unknown_runner(db, session_client):
 
 
 @pytest.mark.unit
+def test_revive_404_for_unknown_runner(db, session_client):
+    import uuid
+
+    resp = session_client.post(f"/api/runners/{uuid.uuid4()}/revive/")
+    assert resp.status_code == 404
+
+
+@pytest.mark.unit
 def test_revive_pending_mints_new_enrollment_token(
     db, session_client, pending_runner
 ):
