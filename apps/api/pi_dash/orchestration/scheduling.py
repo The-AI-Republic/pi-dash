@@ -443,16 +443,29 @@ def dispatch_run_ai_run(issue: Issue, *, actor) -> Optional[AgentRun]:
 
     if orchestration_service._active_run_for(issue) is not None:
         logger.info(
-            "run_ai: skip dispatch issue=%s reason=active-run-exists",
+            "agent_ticker: skip dispatch issue=%s reason=active-run-exists triggered_by=%s",
             issue.pk,
+            TRIGGER_RUN_AI,
+        )
+        return None
+
+    creator = _resolve_creator_for_trigger(
+        issue, triggered_by=TRIGGER_RUN_AI, actor=actor
+    )
+    if creator is None:
+        logger.warning(
+            "agent_ticker: skip dispatch issue=%s reason=no-creator triggered_by=%s",
+            issue.pk,
+            TRIGGER_RUN_AI,
         )
         return None
 
     pod = _resolve_pod_for_issue(issue)
     if pod is None:
         logger.warning(
-            "run_ai: skip dispatch issue=%s reason=no-pod",
+            "agent_ticker: skip dispatch issue=%s reason=no-pod triggered_by=%s",
             issue.pk,
+            TRIGGER_RUN_AI,
         )
         return None
 
@@ -461,14 +474,14 @@ def dispatch_run_ai_run(issue: Issue, *, actor) -> Optional[AgentRun]:
         outcome = orchestration_service._create_continuation_run(
             issue=issue,
             parent=parent,
-            creator=actor,
+            creator=creator,
             pod=pod,
         )
     else:
         outcome = orchestration_service._create_and_dispatch_run(
             issue=issue,
             parent=None,
-            creator=actor,
+            creator=creator,
             pod=pod,
         )
     return outcome.created_run

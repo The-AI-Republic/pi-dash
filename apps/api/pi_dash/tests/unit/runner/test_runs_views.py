@@ -614,9 +614,12 @@ def test_comment_and_run_404_for_issue_in_other_workspace(db, api_client, worksp
 @pytest.mark.unit
 def test_run_ai_renders_prompt_from_phase_template(db, session_client, workspace, project):
     """The Run AI button must produce a prompt rendered from the
-    phase template — not the literal client-supplied default. The
-    rendered body always carries the issue identifier, which is the
-    cheapest available signal that the templated path was taken."""
+    phase template — not the literal client-supplied default. We assert
+    on three signals: (1) the issue identifier (cheap signal of server
+    rendering), (2) absence of the legacy literal sentence (regression
+    guard), and (3) a unique fragment from the seeded default template's
+    intro (proves the templated composition path was taken — server
+    could otherwise return any non-empty string and pass the first two)."""
     from pi_dash.prompting.seed import seed_default_template
 
     seed_default_template()
@@ -637,6 +640,9 @@ def test_run_ai_renders_prompt_from_phase_template(db, session_client, workspace
     expected_id = f"{project_obj.identifier}-{issue.sequence_id}"
     assert expected_id in run.prompt
     assert "Please pick up this work item" not in run.prompt
+    # Stable phrase from ``prompting/fragments/01_intro.md`` — present
+    # iff the composer actually rendered the template.
+    assert "orchestrates AI agents" in run.prompt
 
 
 @pytest.mark.unit
@@ -665,7 +671,7 @@ def test_run_ai_links_continuation_when_prior_run_exists(db, session_client, wor
 
 
 @pytest.mark.unit
-def test_run_ai_succeeds_when_no_prior_run(db, session_client, workspace, project):
+def test_run_ai_succeeds_when_no_prior_run(db, session_client, workspace):
     """Unlike Comment & Run, Run AI must work on a brand-new issue with
     no prior agent run — it falls through to the first-run dispatch
     path (``_create_and_dispatch_run``), which still renders the
@@ -677,15 +683,15 @@ def test_run_ai_succeeds_when_no_prior_run(db, session_client, workspace, projec
 
     seed_default_template()
     with impersonate(workspace.owner):
-        project = Project.objects.create(
+        fresh_project = Project.objects.create(
             name="RA1", identifier="RA1", workspace=workspace,
             created_by=workspace.owner,
         )
         in_progress = State.objects.create(
-            name="In Progress", project=project, group="started"
+            name="In Progress", project=fresh_project, group="started"
         )
         issue = Issue.objects.create(
-            name="Fresh task", workspace=workspace, project=project,
+            name="Fresh task", workspace=workspace, project=fresh_project,
             state=in_progress, created_by=workspace.owner,
         )
     # Discard the run the state-transition signal auto-created so the
@@ -740,6 +746,51 @@ def test_run_ai_returns_409_when_active_run_exists(db, session_client, workspace
         format="json",
     )
     assert resp.status_code == status.HTTP_409_CONFLICT
+
+
+@pytest.mark.unit
+def test_run_ai_returns_409_when_no_pod_available(db, session_client, workspace):
+    """When the issue's project has no default Pod, ``dispatch_run_ai_run``
+    returns ``None`` (no-pod) and the endpoint must surface that as 409 —
+    not 201 with a never-runnable AgentRun."""
+    from crum import impersonate
+
+    from pi_dash.db.models import Issue, Project, State
+    from pi_dash.prompting.seed import seed_default_template
+
+    seed_default_template()
+    with impersonate(workspace.owner):
+        podless_project = Project.objects.create(
+            name="NoPod", identifier="NOPOD", workspace=workspace,
+            created_by=workspace.owner,
+        )
+        in_progress = State.objects.create(
+            name="In Progress", project=podless_project, group="started"
+        )
+        issue = Issue.objects.create(
+            name="Stranded", workspace=workspace, project=podless_project,
+            state=in_progress, created_by=workspace.owner,
+        )
+    # Discard the AgentRun the post_save(Issue) state-transition signal
+    # auto-created (otherwise the active-run guardrail trips first and
+    # masks the no-pod path we're trying to exercise). ``AgentRun.pod``
+    # and ``Issue.assigned_pod`` are both on_delete=PROTECT, so we must
+    # detach those references before dropping the auto-created Pod.
+    AgentRun.objects.filter(work_item=issue).delete()
+    type(issue).all_objects.filter(pk=issue.pk).update(assigned_pod=None)
+    Pod.objects.filter(project=podless_project).delete()
+
+    resp = session_client.post(
+        "/api/runners/runs/",
+        {
+            "workspace": str(workspace.id),
+            "work_item": str(issue.id),
+            "triggered_by": "run_ai",
+        },
+        format="json",
+    )
+    assert resp.status_code == status.HTTP_409_CONFLICT, resp.data
+    assert AgentRun.objects.filter(work_item=issue).count() == 0
 
 
 @pytest.mark.unit
