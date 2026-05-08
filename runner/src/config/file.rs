@@ -511,6 +511,76 @@ model_default = "o4-mini"
     }
 
     #[test]
+    fn mutate_config_serializes_concurrent_writers_no_lost_update() {
+        // Two threads racing through `mutate_config` must both land
+        // their changes — no last-writer-wins. The flock guarantees
+        // serialization; this test exercises that the lock actually
+        // holds across the read-modify-write window so the second
+        // writer sees the first writer's committed state, not the
+        // pre-race load.
+        use std::sync::Arc;
+        use std::sync::Barrier;
+
+        let tmp = tempdir().unwrap();
+        let paths = Arc::new(paths_for(tmp.path()));
+        let cfg = Config {
+            version: 2,
+            daemon: DaemonConfig {
+                cloud_url: "https://x".into(),
+                log_level: "info".into(),
+                log_retention_days: 14,
+                agent_observability_v1: false,
+            },
+            runners: vec![
+                sample_runner("a", tmp.path().join("wd-a")),
+                sample_runner("b", tmp.path().join("wd-b")),
+            ],
+        };
+        write_config(&paths, &cfg).unwrap();
+
+        // Both threads start at the same instant via the barrier so
+        // there's a real race for the flock. Each thread retains every
+        // runner whose name is NOT its target — so a lost-update bug
+        // (second mutate loaded the pre-race config) would leave one
+        // of the targets still on disk.
+        let barrier = Arc::new(Barrier::new(2));
+        let p1 = Arc::clone(&paths);
+        let b1 = Arc::clone(&barrier);
+        let t1 = std::thread::spawn(move || {
+            b1.wait();
+            mutate_config(&p1, |c| {
+                c.runners.retain(|r| r.name != "a");
+                Ok(())
+            })
+            .unwrap();
+        });
+        let p2 = Arc::clone(&paths);
+        let b2 = Arc::clone(&barrier);
+        let t2 = std::thread::spawn(move || {
+            b2.wait();
+            mutate_config(&p2, |c| {
+                c.runners.retain(|r| r.name != "b");
+                Ok(())
+            })
+            .unwrap();
+        });
+        t1.join().unwrap();
+        t2.join().unwrap();
+
+        // Both writes landed: neither "a" nor "b" remain.
+        let reloaded = load_config(&paths).unwrap();
+        assert!(
+            reloaded.runners.is_empty(),
+            "both writers should have landed; got {:?}",
+            reloaded
+                .runners
+                .iter()
+                .map(|r| r.name.as_str())
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
     fn credentials_without_optional_fields_round_trip_via_serde_default() {
         // A minimal credentials.toml — connection_id + connection_secret +
         // issued_at — must still parse with optional fields defaulting.

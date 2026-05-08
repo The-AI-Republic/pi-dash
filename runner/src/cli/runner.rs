@@ -10,7 +10,6 @@
 use anyhow::{Context, Result};
 use clap::{Args as ClapArgs, Subcommand};
 use std::path::PathBuf;
-use uuid::Uuid;
 
 use crate::cloud::runners::{
     RegisterRunnerRequest, RunnerCrudError, delete_runner, probe_cloud_reachable, register_runner,
@@ -254,12 +253,30 @@ enum RemoveMode {
     /// `--local-only` was passed: we never touch the cloud regardless
     /// of reachability. Spec B3.
     LocalOnly,
-    /// Cloud unreachable (or no api_token in credentials): can't issue
-    /// a cloud delete, fall back to local-only with the B2 prompt.
+    /// Cloud unreachable or credentials lack an `api_token`: can't
+    /// issue a cloud delete, fall back to local-only. Spec B2. The
+    /// specific cause is carried in [`FallbackReason`] so we can pick
+    /// honest prompt + success-message copy.
     OfflineFallback,
     /// Cloud reachable, api_token present: cascade delete (cloud +
     /// local). Spec B1.
     Cascade,
+}
+
+/// Why we fell back to local-only when the user did not pass
+/// `--local-only`. Lets us avoid the "cannot reach the cloud" lie
+/// when the real cause is missing credentials.
+#[derive(Debug, Clone, Copy)]
+enum FallbackReason {
+    /// Probe to `/api/v1/runner/health/` returned non-success or timed
+    /// out within the configured window.
+    CloudUnreachable,
+    /// `credentials.toml` has no `api_token`; the v1 delete endpoint
+    /// requires one.
+    MissingApiToken,
+    /// Mode is not `OfflineFallback`; field is meaningless. Used in
+    /// place of `Option` to keep the destructuring tuple flat.
+    Unused,
 }
 
 pub async fn remove(args: RemoveArgs, paths: &Paths) -> Result<()> {
@@ -273,33 +290,53 @@ pub async fn remove(args: RemoveArgs, paths: &Paths) -> Result<()> {
     let cloud_url = cfg.daemon.cloud_url.clone();
 
     // Decide the mode before prompting so the prompt copy matches the
-    // action we'll actually take.
-    let (mode, api_token): (RemoveMode, Option<String>) = if args.local_only {
-        (RemoveMode::LocalOnly, None)
-    } else {
-        let creds = file::load_credentials(paths)
-            .context("no credentials.toml — run `pidash connect` first, or pass --local-only")?;
-        match creds.api_token {
-            Some(token) if probe_cloud_reachable(&cloud_url).await => {
-                (RemoveMode::Cascade, Some(token))
+    // action we'll actually take. The fallback reason (no api_token vs
+    // cloud unreachable) is captured separately so the prompt text
+    // doesn't claim "cannot reach the cloud" when the real cause is a
+    // missing credential.
+    let (mode, api_token, fallback_reason): (RemoveMode, Option<String>, FallbackReason) =
+        if args.local_only {
+            (RemoveMode::LocalOnly, None, FallbackReason::Unused)
+        } else {
+            let creds = file::load_credentials(paths).context(
+                "no credentials.toml — run `pidash connect` first, or pass --local-only",
+            )?;
+            match creds.api_token {
+                None => (
+                    RemoveMode::OfflineFallback,
+                    None,
+                    FallbackReason::MissingApiToken,
+                ),
+                Some(token) if probe_cloud_reachable(&cloud_url).await => {
+                    (RemoveMode::Cascade, Some(token), FallbackReason::Unused)
+                }
+                Some(_) => (
+                    RemoveMode::OfflineFallback,
+                    None,
+                    FallbackReason::CloudUnreachable,
+                ),
             }
-            // Either cloud is unreachable, or credentials lack the
-            // X-Api-Key the v1 delete endpoint wants. Both paths
-            // collapse to local-only with the B2 prompt copy.
-            _ => (RemoveMode::OfflineFallback, None),
-        }
-    };
+        };
 
     let prompt = match mode {
         RemoveMode::Cascade => format!(
             "Delete runner '{}' from cloud and remove the local instance?",
             args.name
         ),
-        RemoveMode::OfflineFallback => format!(
-            "Cannot reach the cloud right now. \
-             Only the local runner instance for '{}' can be deleted, continue?",
-            args.name
-        ),
+        RemoveMode::OfflineFallback => match fallback_reason {
+            FallbackReason::CloudUnreachable => format!(
+                "Cannot reach the cloud right now. \
+                 Only the local runner instance for '{}' can be deleted, continue?",
+                args.name
+            ),
+            FallbackReason::MissingApiToken => format!(
+                "These credentials lack an api_token; cloud-side deregistration \
+                 is not possible from this CLI. Only the local runner instance for \
+                 '{}' can be deleted — delete the cloud row from the web UI. Continue?",
+                args.name
+            ),
+            FallbackReason::Unused => unreachable!("OfflineFallback always has a reason"),
+        },
         RemoveMode::LocalOnly => format!(
             "Remove the local instance of '{}'? \
              The cloud row will not be touched.",
@@ -346,13 +383,24 @@ pub async fn remove(args: RemoveArgs, paths: &Paths) -> Result<()> {
         RemoveMode::Cascade => {
             println!("Removed runner {} (cloud + local).", args.name);
         }
-        RemoveMode::OfflineFallback => {
-            println!(
-                "Removed runner {} locally. The cloud row remains; \
-                 delete it from the web UI when you're back online.",
-                args.name
-            );
-        }
+        RemoveMode::OfflineFallback => match fallback_reason {
+            FallbackReason::CloudUnreachable => {
+                println!(
+                    "Removed runner {} locally. The cloud row remains; \
+                     delete it from the web UI when you're back online.",
+                    args.name
+                );
+            }
+            FallbackReason::MissingApiToken => {
+                println!(
+                    "Removed runner {} locally. The cloud row remains; \
+                     delete it from the web UI (these credentials lack an \
+                     api_token).",
+                    args.name
+                );
+            }
+            FallbackReason::Unused => unreachable!("OfflineFallback always has a reason"),
+        },
         RemoveMode::LocalOnly => {
             println!(
                 "Removed runner {} from local config (cloud row not touched).",
@@ -363,25 +411,3 @@ pub async fn remove(args: RemoveArgs, paths: &Paths) -> Result<()> {
     Ok(())
 }
 
-/// Library shim used by the TUI to delete by `runner_id` (when the user
-/// confirms in the runners-list view). The TUI runs its own confirm
-/// dialog before calling, so we pass `yes=true` here.
-#[allow(dead_code)]
-pub async fn remove_by_id(runner_id: &Uuid, paths: &Paths) -> Result<()> {
-    let cfg = file::load_config(paths)?;
-    let name = cfg
-        .runners
-        .iter()
-        .find(|r| r.runner_id == *runner_id)
-        .map(|r| r.name.clone())
-        .ok_or_else(|| anyhow::anyhow!("no runner with id {runner_id} in config.toml"))?;
-    remove(
-        RemoveArgs {
-            name,
-            local_only: false,
-            yes: true,
-        },
-        paths,
-    )
-    .await
-}

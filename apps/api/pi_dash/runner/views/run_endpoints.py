@@ -121,6 +121,13 @@ class RunEventEndpoint(_RunEndpointBase):
         # RunEvent batching is independent of lifecycle ordering
         # (design.md §7.5). Each event in the batch is keyed by seq;
         # the dedupe key is per-batch.
+        if run.is_terminal:
+            # A late-arriving batch after RunCompleted/RunFailed/
+            # RunCancelled is not actionable: appending to a closed run
+            # would surface as ghost activity in the UI and the
+            # observability bridge. Acknowledge so the runner stops
+            # retrying, but record nothing.
+            return Response({"ok": True, "terminal": True, "accepted": 0})
         if not _record_dedupe(run, _idempotency_key(request)):
             return Response({"ok": True, "duplicate": True})
         events = request.data.get("events") or [request.data]

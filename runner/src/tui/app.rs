@@ -607,14 +607,21 @@ async fn handle_event(ev: Event, state: &mut AppState) {
             }
             return;
         }
-        // Remove-runner confirmation modal: y / Y commits, anything
-        // else cancels. Same shape as confirm_stop above.
+        // Remove-runner confirmation modal: y / Y commits; n / N /
+        // Esc / Enter cancel. Restricted set so a stray arrow / resize
+        // / focus-change event can't dismiss the modal accidentally.
         if state.remove_runner_confirm.is_some() {
             match key.code {
                 KeyCode::Char('y') | KeyCode::Char('Y') => {
                     submit_remove_runner(state).await;
                 }
-                _ => state.remove_runner_confirm = None,
+                KeyCode::Char('n')
+                | KeyCode::Char('N')
+                | KeyCode::Esc
+                | KeyCode::Enter => {
+                    state.remove_runner_confirm = None;
+                }
+                _ => {}
             }
             return;
         }

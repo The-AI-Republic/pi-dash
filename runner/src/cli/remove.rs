@@ -88,7 +88,13 @@ pub async fn run(args: Args, paths: &Paths) -> Result<()> {
                     );
                     crate::config::file::remove_all(paths)?;
                     println!("local runner state removed.");
-                    return Ok(());
+                    // Non-zero exit so CI scripts notice that cloud-side
+                    // state was *not* deregistered. Caller can pass
+                    // `--local-only` to opt out of this check.
+                    bail!(
+                        "cloud-side deregistration skipped (no api_token); \
+                         delete each runner from the web UI"
+                    );
                 };
                 for r in &config.runners {
                     match delete_runner(&config.daemon.cloud_url, api_token, &r.runner_id, false)

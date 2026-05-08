@@ -365,10 +365,14 @@ class Runner(models.Model):
             # next daemon poll on the old session will see the row gone
             # and react with 409 session_evicted; pub/sub eviction
             # signaling fires from the eviction sweeper / session-open
-            # path, not here.
+            # path, not here. Propagate the caller's reason so the 409
+            # body's `reason` field carries the canonical string the
+            # daemon's synthesizer matches against (`runner_removed`
+            # for cascade delete, `manual_revoke` / `membership_revoked`
+            # / `refresh_token_replayed` otherwise).
             RunnerSession.objects.filter(
                 runner=self, revoked_at__isnull=True
-            ).update(revoked_at=now, revoked_reason="runner_revoked")
+            ).update(revoked_at=now, revoked_reason=reason[:32])
 
             active_runs = list(
                 AgentRun.objects.select_for_update()
