@@ -74,9 +74,15 @@ fn config_lock_path(paths: &Paths) -> std::path::PathBuf {
 /// the daemon's RemoveRunner handler can't race each other.
 ///
 /// The closure receives `&mut Config` already loaded from disk and
-/// migrated; on `Ok(())` we serialize and atomically rewrite the file.
-/// On error the on-disk file is untouched. Returns the post-mutation
-/// `Config` so callers can introspect (e.g. "was that the last runner?").
+/// migrated; on `Ok(())` we run `Config::validate` and, if that
+/// passes, serialize + atomically rewrite the file. On any error the
+/// on-disk file is untouched. Returns the post-mutation `Config` so
+/// callers can introspect (e.g. "was that the last runner?").
+///
+/// Validation runs inside the lock so a closure can't write a config
+/// the loader would later reject; today's callers (retain/remove and
+/// the new add path) all produce valid configs, but defending the
+/// invariant here keeps future callers honest.
 pub fn mutate_config<F>(paths: &Paths, mutate: F) -> Result<Config>
 where
     F: FnOnce(&mut Config) -> Result<()>,
@@ -99,6 +105,8 @@ where
         .map_err(|(_, errno)| anyhow::anyhow!("flock({lock_path:?}) failed: {errno}"))?;
     let mut cfg = load_config(paths)?;
     mutate(&mut cfg)?;
+    cfg.validate()
+        .with_context(|| "config invalid after mutate_config closure")?;
     write_config(paths, &cfg)?;
     Ok(cfg)
 }

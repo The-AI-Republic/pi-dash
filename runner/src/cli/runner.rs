@@ -98,13 +98,19 @@ pub async fn run(args: RunnerArgs, paths: &Paths) -> Result<()> {
 pub async fn add(args: AddArgs, paths: &Paths) -> Result<RunnerConfig> {
     let creds = file::load_credentials(paths)
         .context("no credentials.toml — run `pidash connect` first")?;
-    let mut cfg = file::load_config(paths)?;
+    // Initial unlocked load: used for read-only access (cap check,
+    // cloud_url for the register call). The actual mutation happens
+    // under `mutate_config` below, which re-reads inside the host-wide
+    // flock so a concurrent `pidash runner remove` or daemon-side
+    // strip can't lose this write.
+    let cfg_initial = file::load_config(paths)?;
 
-    if cfg.runners.len() >= MAX_RUNNERS_PER_DAEMON {
+    if cfg_initial.runners.len() >= MAX_RUNNERS_PER_DAEMON {
         anyhow::bail!(
             "daemon already at the {MAX_RUNNERS_PER_DAEMON}-runner cap; remove one with `pidash runner remove <NAME>` first"
         );
     }
+    let cloud_url = cfg_initial.daemon.cloud_url.clone();
 
     let user_supplied = args.name.is_some();
     if let Some(n) = &args.name {
@@ -135,7 +141,7 @@ pub async fn add(args: AddArgs, paths: &Paths) -> Result<RunnerConfig> {
             protocol_version: crate::PROTOCOL_VERSION,
         };
         match register_runner(
-            &cfg.daemon.cloud_url,
+            &cloud_url,
             &creds.connection_id,
             &creds.connection_secret,
             &req,
@@ -182,26 +188,40 @@ pub async fn add(args: AddArgs, paths: &Paths) -> Result<RunnerConfig> {
         claude_code: ClaudeCodeSection::default(),
         approval_policy: ApprovalPolicySection::default(),
     };
-    cfg.runners.push(new_runner.clone());
+    // Persist under the host-wide config lock so a concurrent
+    // `pidash runner remove` or the daemon's RemoveRunner handler
+    // can't last-writer-wins our new block. `mutate_config` runs
+    // `Config::validate` after the closure (cap, project slug,
+    // duplicate name/runner_id) — we still re-check cap explicitly
+    // inside the closure because the initial unlocked read could
+    // have been racy.
+    let push_result = file::mutate_config(paths, |cfg| {
+        if cfg.runners.len() >= MAX_RUNNERS_PER_DAEMON {
+            anyhow::bail!(
+                "daemon already at the {MAX_RUNNERS_PER_DAEMON}-runner cap; remove one with `pidash runner remove <NAME>` first"
+            );
+        }
+        cfg.runners.push(new_runner.clone());
+        Ok(())
+    });
 
-    // Validate post-mutation so we catch conflicts (duplicate name,
-    // duplicate working_dir) before persisting. Roll back the cloud-side
-    // registration if validation fails — otherwise we'd leak an orphaned
-    // runner row. The rollback uses the X-Api-Key delete surface; if
-    // the credentials don't carry an api_token (older enrollments) we
+    // Roll back the cloud-side registration on any persistence
+    // failure — invalid post-mutation state, lock contention, IO
+    // error, anything. Otherwise we'd leak an orphaned runner row.
+    // The rollback uses the X-Api-Key delete surface; if the
+    // credentials don't carry an api_token (older enrollments) we
     // log and move on — the operator can clean up via the web UI.
-    if let Err(err) = cfg.validate() {
+    if let Err(err) = push_result {
         if let Some(token) = creds.api_token.as_deref() {
-            let _ = delete_runner(&cfg.daemon.cloud_url, token, &runner_id, true).await;
+            let _ = delete_runner(&cloud_url, token, &runner_id, true).await;
         } else {
             tracing::warn!(
                 "rollback skipped: credentials lack api_token; \
                  runner row {runner_id} may be orphaned cloud-side"
             );
         }
-        anyhow::bail!("runner config invalid after add: {err}");
+        return Err(err.context("persisting new runner to config.toml"));
     }
-    file::write_config(paths, &cfg)?;
     println!(
         "Added runner {} ({}) under project {}.",
         new_runner.name, new_runner.runner_id, resp.project_identifier

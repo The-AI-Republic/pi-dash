@@ -44,17 +44,24 @@ from pi_dash.runner.services.pubsub import (
 def delete_runner(runner: Runner, *, purge_local: bool) -> None:
     """Tear down ``runner`` cloud-side and (optionally) cascade to local.
 
-    Caller is responsible for authentication + authorization. This
-    function performs the destructive work atomically with respect to
-    the runner row: cancel runs → evict session → enqueue control
-    frame → hard-delete row.
+    Caller is responsible for authentication + authorization.
+
+    Order matters: the control frame is enqueued *before*
+    ``runner.revoke()`` runs. ``revoke()`` revokes the active
+    ``RunnerSession`` row, after which ``enqueue_for_runner`` would see
+    no active session and divert the frame into the offline buffer —
+    but the row is then hard-deleted, so future auth attempts return
+    ``runner_not_found`` and the offline buffer never drains. Enqueue
+    while the session is still alive so the daemon's in-flight
+    long-poll can drain the frame; revoke + close + delete then run as
+    the cleanup tail.
     """
     runner_pk: UUID = runner.pk
-    runner.revoke()
     if purge_local:
         send_runner_remove(runner_pk, reason="deleted by user")
     else:
         send_runner_revoke(runner_pk, reason="deleted by user")
+    runner.revoke()
     close_runner_session(runner_pk)
     Runner.objects.filter(pk=runner_pk).delete()
 

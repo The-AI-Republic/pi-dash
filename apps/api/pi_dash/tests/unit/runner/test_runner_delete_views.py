@@ -53,11 +53,17 @@ def _stub_outbox_send():
     service then layers either ``remove_runner`` or ``revoke`` on
     top. We stub the lowest-level enqueue so tests don't need a real
     Redis instance and can assert on the per-type calls.
+
+    ``send_runner_remove`` / ``send_runner_revoke`` import
+    ``enqueue_for_runner`` into the ``pubsub`` namespace via a
+    ``from … import`` (see pubsub.py), so the live binding is
+    ``pi_dash.runner.services.pubsub.enqueue_for_runner`` — patching
+    the source module would not intercept the local reference.
     """
     with patch(
         "pi_dash.runner.services.pubsub.send_to_runner"
     ) as mock_st, patch(
-        "pi_dash.runner.services.outbox.enqueue_for_runner"
+        "pi_dash.runner.services.pubsub.enqueue_for_runner"
     ) as mock_eq, patch(
         "pi_dash.runner.services.pubsub.close_runner_session"
     ) as mock_cl:
