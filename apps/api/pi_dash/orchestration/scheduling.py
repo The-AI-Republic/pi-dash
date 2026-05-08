@@ -322,6 +322,7 @@ def reset_ticker_after_comment_and_run(issue: Issue) -> Optional[IssueAgentTicke
 
 TRIGGER_TICK = "tick"
 TRIGGER_COMMENT_AND_RUN = "comment_and_run"
+TRIGGER_RUN_AI = "run_ai"
 
 
 def _resolve_pod_for_issue(issue: Issue):
@@ -415,6 +416,61 @@ def dispatch_continuation_run(
         creator=creator,
         pod=pod,
     )
+    return outcome.created_run
+
+
+def dispatch_run_ai_run(issue: Issue, *, actor) -> Optional[AgentRun]:
+    """Public wrapper for the "Run AI" button.
+
+    Builds the same templated prompt the state-transition-into-In-Progress
+    path produces, by routing through the orchestration service's run-
+    creation helpers (which call ``composer.build_first_turn``). This is
+    the prompt-parity contract: a manual Run AI click renders the phase's
+    template against the issue's current state, identical to a tick or a
+    state transition into the same phase.
+
+    Behavior:
+    - Bails (returns ``None``) when an active run already exists on the
+      issue (single-active-run guardrail) or no pod is available.
+    - When a prior run exists, delegates to ``_create_continuation_run``
+      so the new run inherits parent linkage and runner pinning (repo
+      locality, same as Comment & Run / tick).
+    - When no prior run exists, delegates to ``_create_and_dispatch_run``
+      so a brand-new issue's first agent run still goes through the
+      templated prompt path.
+    """
+    from pi_dash.orchestration import service as orchestration_service
+
+    if orchestration_service._active_run_for(issue) is not None:
+        logger.info(
+            "run_ai: skip dispatch issue=%s reason=active-run-exists",
+            issue.pk,
+        )
+        return None
+
+    pod = _resolve_pod_for_issue(issue)
+    if pod is None:
+        logger.warning(
+            "run_ai: skip dispatch issue=%s reason=no-pod",
+            issue.pk,
+        )
+        return None
+
+    parent = orchestration_service._latest_prior_run(issue)
+    if parent is not None:
+        outcome = orchestration_service._create_continuation_run(
+            issue=issue,
+            parent=parent,
+            creator=actor,
+            pod=pod,
+        )
+    else:
+        outcome = orchestration_service._create_and_dispatch_run(
+            issue=issue,
+            parent=None,
+            creator=actor,
+            pod=pod,
+        )
     return outcome.created_run
 
 
@@ -530,10 +586,12 @@ __all__ = [
     "INFINITE_MAX_TICKS",
     "PAUSED_STATE_NAME",
     "TRIGGER_COMMENT_AND_RUN",
+    "TRIGGER_RUN_AI",
     "TRIGGER_TICK",
     "arm_ticker",
     "disarm_ticker",
     "dispatch_continuation_run",
+    "dispatch_run_ai_run",
     "maybe_apply_deferred_pause",
     "maybe_disarm_on_terminal_signal",
     "reset_ticker_after_comment_and_run",

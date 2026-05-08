@@ -17,12 +17,14 @@ const agentRunService = new AgentRunService();
 type CreateRunArgs = {
   workspaceSlug: string;
   issueId: string;
-  /** When provided, dispatches a fresh prompted run via ``createAgentRun``
-   * (the "Run AI" button path). When omitted, falls through to
-   * ``commentAndRun`` which reuses the per-issue continuation pipeline
-   * and rebuilds the prompt from issue + comments server-side (the
-   * "Comment & Run" modal path). */
-  prompt?: string;
+  /** Selects the dispatch path. Both modes have the prompt rendered
+   * server-side from the issue's phase template (``coding-task`` for
+   * In Progress, ``review`` for In Review, default otherwise) so the
+   * agent receives the same prompt a state transition / tick produces.
+   * - ``"run_ai"``: the "Run AI" button — no comment is posted first.
+   * - ``"comment_and_run"``: the Comment & Run modal — caller has just
+   *   posted a comment on the issue. */
+  mode: "run_ai" | "comment_and_run";
 };
 
 export function useCreateAgentRun() {
@@ -31,7 +33,7 @@ export function useCreateAgentRun() {
   const [isSubmitting, setIsSubmitting] = useState(false);
 
   const triggerRun = useCallback(
-    async ({ workspaceSlug, issueId, prompt }: CreateRunArgs) => {
+    async ({ workspaceSlug, issueId, mode }: CreateRunArgs) => {
       const workspace = workspaceStore.getWorkspaceBySlug(workspaceSlug);
       if (!workspace?.id) {
         setToast({
@@ -44,16 +46,16 @@ export function useCreateAgentRun() {
 
       setIsSubmitting(true);
       try {
-        const run = prompt
-          ? await agentRunService.createAgentRun({
-              workspace: workspace.id,
-              work_item: issueId,
-              prompt,
-            })
-          : await agentRunService.commentAndRun({
-              workspace: workspace.id,
-              work_item: issueId,
-            });
+        const run =
+          mode === "run_ai"
+            ? await agentRunService.runAi({
+                workspace: workspace.id,
+                work_item: issueId,
+              })
+            : await agentRunService.commentAndRun({
+                workspace: workspace.id,
+                work_item: issueId,
+              });
         setToast({
           type: TOAST_TYPE.SUCCESS,
           title: t("run_ai.success_title"),
