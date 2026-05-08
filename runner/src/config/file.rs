@@ -3,6 +3,8 @@ use std::fs;
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::Path;
 
+use nix::fcntl::{Flock, FlockArg};
+
 use super::schema::{Config, Credentials};
 use crate::util::paths::Paths;
 
@@ -54,6 +56,51 @@ pub fn write_config(paths: &Paths, config: &Config) -> Result<()> {
     paths.ensure()?;
     let s = toml::to_string_pretty(config)?;
     write_private(&paths.config_path(), s.as_bytes())
+}
+
+/// Path to the host-wide `config.toml` mutation lock. Held by
+/// [`mutate_config`] while it does its read-modify-write.
+fn config_lock_path(paths: &Paths) -> std::path::PathBuf {
+    paths.config_dir.join(".config.lock")
+}
+
+/// Read-modify-write `config.toml` under an exclusive `flock` on
+/// `<config_dir>/.config.lock`.
+///
+/// All `config.toml` mutators (CLI subcommands plus the daemon's
+/// per-runner cascade-uninstall) must go through this helper — without
+/// it, two concurrent writers will lose changes via last-writer-wins.
+/// The lock is host-wide (not per-runner) so a `pidash runner add` and
+/// the daemon's RemoveRunner handler can't race each other.
+///
+/// The closure receives `&mut Config` already loaded from disk and
+/// migrated; on `Ok(())` we serialize and atomically rewrite the file.
+/// On error the on-disk file is untouched. Returns the post-mutation
+/// `Config` so callers can introspect (e.g. "was that the last runner?").
+pub fn mutate_config<F>(paths: &Paths, mutate: F) -> Result<Config>
+where
+    F: FnOnce(&mut Config) -> Result<()>,
+{
+    paths.ensure()?;
+    let lock_path = config_lock_path(paths);
+    let lock_file = fs::OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        // The lock file is opened only to hand its fd to `flock`; we
+        // never read or write its contents, so explicitly opt out of
+        // truncation. Without this, a concurrent `mutate_config` could
+        // see a 0-byte stat between the open and the flock acquisition.
+        .truncate(false)
+        .mode(0o600)
+        .open(&lock_path)
+        .with_context(|| format!("opening config lock {lock_path:?}"))?;
+    let _guard = Flock::lock(lock_file, FlockArg::LockExclusive)
+        .map_err(|(_, errno)| anyhow::anyhow!("flock({lock_path:?}) failed: {errno}"))?;
+    let mut cfg = load_config(paths)?;
+    mutate(&mut cfg)?;
+    write_config(paths, &cfg)?;
+    Ok(cfg)
 }
 
 pub fn write_credentials(paths: &Paths, creds: &Credentials) -> Result<()> {
@@ -345,6 +392,114 @@ model_default = "o4-mini"
         let loaded = load_config(&paths).unwrap();
         let primary = loaded.primary_runner().expect("runner");
         assert_eq!(primary.codex.model_default.as_deref(), Some("o4-mini"));
+    }
+
+    #[test]
+    fn mutate_config_round_trips_under_lock() {
+        // mutate_config takes the exclusive flock on .config.lock, applies
+        // the closure to the loaded config, and writes it back atomically.
+        // The lock guard drops at function end, so a second call works.
+        let tmp = tempdir().unwrap();
+        let paths = paths_for(tmp.path());
+        let cfg = Config {
+            version: 2,
+            daemon: DaemonConfig {
+                cloud_url: "https://x".into(),
+                log_level: "info".into(),
+                log_retention_days: 14,
+                agent_observability_v1: false,
+            },
+            runners: vec![
+                sample_runner("a", tmp.path().join("wd-a")),
+                sample_runner("b", tmp.path().join("wd-b")),
+            ],
+        };
+        write_config(&paths, &cfg).unwrap();
+
+        let after = mutate_config(&paths, |c| {
+            c.runners.retain(|r| r.name != "a");
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(after.runners.len(), 1);
+        assert_eq!(after.runners[0].name, "b");
+
+        // Lock guard released; a second mutation succeeds.
+        let after2 = mutate_config(&paths, |c| {
+            c.runners.clear();
+            Ok(())
+        })
+        .unwrap();
+        assert!(after2.runners.is_empty());
+        let reloaded = load_config(&paths).unwrap();
+        assert!(reloaded.runners.is_empty());
+    }
+
+    #[test]
+    fn mutate_config_strips_one_runner_leaves_others() {
+        // The daemon's `ServerMsg::RemoveRunner` handler and the CLI's
+        // `pidash runner remove` both call `mutate_config` with a
+        // closure that retains every block whose `runner_id` does NOT
+        // match the target. Verify the on-disk file ends up with
+        // exactly the other runners, and the systemd unit name (the
+        // shared `pidash.service`) is not expressed in this layer at
+        // all — config.toml is per-runner, the unit isn't touched.
+        let tmp = tempdir().unwrap();
+        let paths = paths_for(tmp.path());
+        let cfg = Config {
+            version: 2,
+            daemon: DaemonConfig {
+                cloud_url: "https://x".into(),
+                log_level: "info".into(),
+                log_retention_days: 14,
+                agent_observability_v1: false,
+            },
+            runners: vec![
+                sample_runner("a", tmp.path().join("wd-a")),
+                sample_runner("b", tmp.path().join("wd-b")),
+                sample_runner("c", tmp.path().join("wd-c")),
+            ],
+        };
+        write_config(&paths, &cfg).unwrap();
+        let target = cfg.runners[1].runner_id;
+
+        let after = mutate_config(&paths, |c| {
+            c.runners.retain(|r| r.runner_id != target);
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(after.runners.len(), 2);
+        assert!(after.runners.iter().all(|r| r.runner_id != target));
+        let names: Vec<_> = after.runners.iter().map(|r| r.name.as_str()).collect();
+        assert_eq!(names, vec!["a", "c"]);
+    }
+
+    #[test]
+    fn mutate_config_error_preserves_on_disk_state() {
+        // If the closure returns Err, the on-disk file must not change.
+        let tmp = tempdir().unwrap();
+        let paths = paths_for(tmp.path());
+        let cfg = Config {
+            version: 2,
+            daemon: DaemonConfig {
+                cloud_url: "https://x".into(),
+                log_level: "info".into(),
+                log_retention_days: 14,
+                agent_observability_v1: false,
+            },
+            runners: vec![sample_runner("keep", tmp.path().join("wd"))],
+        };
+        write_config(&paths, &cfg).unwrap();
+
+        let err = mutate_config(&paths, |c| {
+            c.runners.clear();
+            anyhow::bail!("simulated failure");
+        })
+        .unwrap_err();
+        assert!(format!("{err:#}").contains("simulated failure"));
+        let reloaded = load_config(&paths).unwrap();
+        assert_eq!(reloaded.runners.len(), 1);
+        assert_eq!(reloaded.runners[0].name, "keep");
     }
 
     #[test]

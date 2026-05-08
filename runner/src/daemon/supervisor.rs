@@ -177,9 +177,11 @@ impl Supervisor {
             let inst_remove_tx = inst.remove_tx.clone();
             let live_mailboxes = mailboxes.clone();
             let live_hello_runners = hello_runners.clone();
+            let daemon_paths = paths.clone();
             let h = tokio::spawn(async move {
                 let run = RunnerLoop {
                     runner_paths,
+                    paths: daemon_paths,
                     runner_config,
                     out: inst_out,
                     state: inst_state,
@@ -502,6 +504,10 @@ fn hostname() -> Option<String> {
 
 struct RunnerLoop {
     runner_paths: RunnerPaths,
+    /// Daemon-level paths. Threaded in so `ServerMsg::RemoveRunner` can
+    /// strip this runner's `[[runner]]` block from `config.toml` under
+    /// the host-wide config lock.
+    paths: Paths,
     runner_config: crate::config::schema::RunnerConfig,
     out: RunnerOut,
     state: StateHandle,
@@ -757,24 +763,61 @@ impl RunnerLoop {
                             runner_dir,
                         );
                     }
-                    // NOTE: the [[runner]] entry in config.toml is not
-                    // cleaned up here — operators run
-                    // `pidash token remove-runner --name <name>` to
-                    // also strip config.toml so the next daemon
-                    // restart doesn't re-Hello for this runner_id.
-                    // Surface this loudly so the operator notices
-                    // before the next restart turns into a silent
-                    // re-Hello → RemoveRunner loop.
-                    tracing::warn!(
-                        runner = %self.runner_config.name,
-                        runner_id = %runner_id,
-                        "runner removed cloud-side; \
-                         run `pidash token remove-runner --name {}` to \
-                         strip the [[runner]] block from config.toml. \
-                         Otherwise the daemon will re-Hello this id on \
-                         next restart and the cloud will tear it down again.",
-                        self.runner_config.name,
-                    );
+                    // Strip the matching `[[runner]]` block from
+                    // config.toml under the host-wide config lock so a
+                    // concurrent `pidash runner add` can't lose its
+                    // write. Without this the next daemon restart would
+                    // re-Hello for the dead runner_id and the cloud
+                    // would tear it down again on every boot.
+                    //
+                    // The systemd unit (`pidash.service`) hosts every
+                    // runner under one process, so we deliberately
+                    // never touch it here — only `pidash uninstall`
+                    // does. If this was the last runner, log a hint
+                    // so the operator knows they can remove the unit.
+                    let target_runner_id = self.runner_paths.runner_id;
+                    let runner_name = self.runner_config.name.clone();
+                    let paths_for_strip = self.paths.clone();
+                    let strip_result = tokio::task::spawn_blocking(move || {
+                        crate::config::file::mutate_config(&paths_for_strip, |cfg| {
+                            cfg.runners.retain(|r| r.runner_id != target_runner_id);
+                            Ok(())
+                        })
+                    })
+                    .await;
+                    match strip_result {
+                        Ok(Ok(post)) => {
+                            tracing::info!(
+                                runner = %runner_name,
+                                runner_id = %target_runner_id,
+                                remaining = post.runners.len(),
+                                "stripped [[runner]] block from config.toml",
+                            );
+                            if post.runners.is_empty() {
+                                tracing::warn!(
+                                    "config.toml has no remaining runners; \
+                                     run `pidash uninstall` to remove the \
+                                     pidash.service systemd unit if you \
+                                     no longer need the daemon on this host.",
+                                );
+                            }
+                        }
+                        Ok(Err(e)) => {
+                            tracing::warn!(
+                                runner = %runner_name,
+                                runner_id = %target_runner_id,
+                                "failed to strip [[runner]] block from \
+                                 config.toml: {e:#}. Run \
+                                 `pidash runner remove --local-only \
+                                 --yes {runner_name}` to clean it up by \
+                                 hand; otherwise the next daemon restart \
+                                 will re-Hello this id.",
+                            );
+                        }
+                        Err(join_err) => {
+                            tracing::warn!("config-strip task panicked: {join_err:#}",);
+                        }
+                    }
                     should_break = true;
                 }
             }

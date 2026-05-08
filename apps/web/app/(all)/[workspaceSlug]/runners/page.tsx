@@ -4,7 +4,7 @@
  * See the LICENSE file for details.
  */
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { observer } from "mobx-react";
 import { HelpCircle } from "lucide-react";
 import useSWR from "swr";
@@ -13,7 +13,7 @@ import { TOAST_TYPE, setToast } from "@pi-dash/propel/toast";
 import { PodService, RunnerService } from "@pi-dash/services";
 import type { IPod, IRunner, TRunnerStatus } from "@pi-dash/types";
 import type { TBadgeVariant } from "@pi-dash/ui";
-import { AlertModalCore, Badge, Button, Tooltip } from "@pi-dash/ui";
+import { AlertModalCore, Badge, Button, Checkbox, Tooltip } from "@pi-dash/ui";
 import { PageHead } from "@/components/core/page-title";
 import { AddRunnerModal } from "@/components/runners/add-runner-modal";
 import { useWorkspace } from "@/hooks/store/use-workspace";
@@ -52,12 +52,31 @@ const RunnersListPage = observer(function RunnersListPage() {
   const [addOpen, setAddOpen] = useState(false);
   const [deleteRunner, setDeleteRunner] = useState<IRunner | null>(null);
   const [deleting, setDeleting] = useState(false);
+  // Default-checked per spec: when the runner is connected, the
+  // "Also delete the local runner instance" cascade is the action a
+  // user clicking through the dialog usually wants. Reset to true on
+  // every modal open so a previous "Cancel" doesn't carry an
+  // unchecked state into the next attempt.
+  const [purgeLocal, setPurgeLocal] = useState(true);
+  useEffect(() => {
+    if (deleteRunner) setPurgeLocal(true);
+  }, [deleteRunner]);
+
+  // The cascade self-uninstall only works while the daemon is alive
+  // to receive the `remove_runner` frame. ``busy`` counts as
+  // connected — the daemon is in the middle of a run but is still
+  // polling the session. ``offline`` and ``revoked`` cannot cascade.
+  const isConnected = deleteRunner?.status === "online" || deleteRunner?.status === "busy";
+  // Force purge_local off when the runner is disconnected — there's
+  // nothing for the daemon to act on. The modal hides the checkbox
+  // in that case and shows the offline notice instead.
+  const effectivePurgeLocal = isConnected && purgeLocal;
 
   async function confirmDeleteRunner() {
     if (!deleteRunner) return;
     setDeleting(true);
     try {
-      await service.deleteRunner(deleteRunner.id);
+      await service.deleteRunner(deleteRunner.id, { purgeLocal: effectivePurgeLocal });
       setDeleteRunner(null);
       mutateRunners();
     } catch (e: unknown) {
@@ -71,6 +90,27 @@ const RunnersListPage = observer(function RunnersListPage() {
       setDeleting(false);
     }
   }
+
+  const deleteModalContent = deleteRunner ? (
+    <div className="flex flex-col gap-3">
+      <div>{t("runners.list.delete_confirm_body")}</div>
+      {isConnected ? (
+        <label className="flex cursor-pointer items-start gap-2 text-13 text-secondary">
+          <Checkbox
+            checked={purgeLocal}
+            onChange={(e) => setPurgeLocal(e.target.checked)}
+            disabled={deleting}
+            className="mt-0.5"
+          />
+          <span>{t("runners.list.delete_purge_local_label")}</span>
+        </label>
+      ) : (
+        <div className="rounded-md border border-subtle bg-layer-1 px-3 py-2 text-12 text-secondary">
+          {t("runners.list.delete_offline_notice")}
+        </div>
+      )}
+    </div>
+  ) : null;
 
   return (
     <div className="flex flex-col gap-6">
@@ -199,7 +239,7 @@ const RunnersListPage = observer(function RunnersListPage() {
         handleSubmit={confirmDeleteRunner}
         isSubmitting={deleting}
         title={t("runners.list.delete_confirm_title")}
-        content={t("runners.list.delete_confirm_body")}
+        content={deleteModalContent}
         primaryButtonText={{ default: t("runners.list.delete"), loading: t("runners.list.delete") }}
       />
     </div>

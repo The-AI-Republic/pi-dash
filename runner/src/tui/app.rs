@@ -1321,6 +1321,10 @@ async fn submit_remove_runner(state: &mut AppState) {
     let args = crate::cli::runner::RemoveArgs {
         name: name.clone(),
         local_only: false,
+        // The TUI runs its own confirm modal before reaching this
+        // function (`remove_runner_confirm`), so we skip the CLI's
+        // built-in y/N prompt to avoid double-asking.
+        yes: true,
     };
     match crate::cli::runner::remove(args, &state.paths).await {
         Ok(_) => {

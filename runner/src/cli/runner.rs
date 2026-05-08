@@ -13,13 +13,14 @@ use std::path::PathBuf;
 use uuid::Uuid;
 
 use crate::cloud::runners::{
-    RegisterRunnerRequest, RunnerCrudError, delete_runner, register_runner,
+    RegisterRunnerRequest, RunnerCrudError, delete_runner, probe_cloud_reachable, register_runner,
 };
 use crate::config::file;
 use crate::config::schema::{
     AgentKind, AgentSection, ApprovalPolicySection, ClaudeCodeSection, CodexSection,
     MAX_RUNNERS_PER_DAEMON, RunnerConfig, WorkspaceSection,
 };
+use crate::util::confirm::maybe_confirm;
 use crate::util::paths::Paths;
 use crate::util::runner_id;
 use crate::util::runner_name;
@@ -77,6 +78,11 @@ pub struct RemoveArgs {
     /// cloud-side, or when the cloud is unreachable.
     #[arg(long)]
     pub local_only: bool,
+
+    /// Skip the interactive y/N confirm. Required for non-interactive
+    /// (CI / scripted) callers.
+    #[arg(short = 'y', long = "yes")]
+    pub yes: bool,
 }
 
 pub async fn run(args: RunnerArgs, paths: &Paths) -> Result<()> {
@@ -181,15 +187,18 @@ pub async fn add(args: AddArgs, paths: &Paths) -> Result<RunnerConfig> {
     // Validate post-mutation so we catch conflicts (duplicate name,
     // duplicate working_dir) before persisting. Roll back the cloud-side
     // registration if validation fails — otherwise we'd leak an orphaned
-    // runner row.
+    // runner row. The rollback uses the X-Api-Key delete surface; if
+    // the credentials don't carry an api_token (older enrollments) we
+    // log and move on — the operator can clean up via the web UI.
     if let Err(err) = cfg.validate() {
-        let _ = delete_runner(
-            &cfg.daemon.cloud_url,
-            &creds.connection_id,
-            &creds.connection_secret,
-            &runner_id,
-        )
-        .await;
+        if let Some(token) = creds.api_token.as_deref() {
+            let _ = delete_runner(&cfg.daemon.cloud_url, token, &runner_id, true).await;
+        } else {
+            tracing::warn!(
+                "rollback skipped: credentials lack api_token; \
+                 runner row {runner_id} may be orphaned cloud-side"
+            );
+        }
         anyhow::bail!("runner config invalid after add: {err}");
     }
     file::write_config(paths, &cfg)?;
@@ -218,60 +227,125 @@ pub fn list(paths: &Paths) -> Result<()> {
     Ok(())
 }
 
+/// Outcome of the `pidash runner remove` connectivity probe; drives
+/// the prompt copy and whether we hit the cloud at all.
+#[derive(Debug, Clone, Copy)]
+enum RemoveMode {
+    /// `--local-only` was passed: we never touch the cloud regardless
+    /// of reachability. Spec B3.
+    LocalOnly,
+    /// Cloud unreachable (or no api_token in credentials): can't issue
+    /// a cloud delete, fall back to local-only with the B2 prompt.
+    OfflineFallback,
+    /// Cloud reachable, api_token present: cascade delete (cloud +
+    /// local). Spec B1.
+    Cascade,
+}
+
 pub async fn remove(args: RemoveArgs, paths: &Paths) -> Result<()> {
-    let mut cfg = file::load_config(paths)?;
+    let cfg = file::load_config(paths)?;
     let idx = cfg
         .runners
         .iter()
         .position(|r| r.name == args.name)
         .ok_or_else(|| anyhow::anyhow!("no runner named {:?} in config.toml", args.name))?;
     let runner_id = cfg.runners[idx].runner_id;
+    let cloud_url = cfg.daemon.cloud_url.clone();
 
-    if !args.local_only {
-        // TODO(cloud-endpoint): the per-runner refactor removed the
-        // `connections/<id>/runners/<rid>/` DELETE route this CLI was
-        // calling. Until a runner-scoped delete endpoint is added under
-        // the machine-token auth surface, this call will 404. Surface a
-        // useful hint pointing at --local-only and the web UI.
+    // Decide the mode before prompting so the prompt copy matches the
+    // action we'll actually take.
+    let (mode, api_token): (RemoveMode, Option<String>) = if args.local_only {
+        (RemoveMode::LocalOnly, None)
+    } else {
         let creds = file::load_credentials(paths)
             .context("no credentials.toml — run `pidash connect` first, or pass --local-only")?;
-        if let Err(e) = delete_runner(
-            &cfg.daemon.cloud_url,
-            &creds.connection_id,
-            &creds.connection_secret,
-            &runner_id,
-        )
-        .await
-        {
-            eprintln!("cloud delete-runner failed: {e:#}");
-            eprintln!();
-            eprintln!("To remove this runner from the cloud, use the web UI's");
-            eprintln!("\"Delete\" button on the runners page.");
-            eprintln!("To clean up local state only, re-run with --local-only:");
-            eprintln!("  pidash runner remove {} --local-only", args.name);
-            anyhow::bail!("cloud delete-runner failed");
+        match creds.api_token {
+            Some(token) if probe_cloud_reachable(&cloud_url).await => {
+                (RemoveMode::Cascade, Some(token))
+            }
+            // Either cloud is unreachable, or credentials lack the
+            // X-Api-Key the v1 delete endpoint wants. Both paths
+            // collapse to local-only with the B2 prompt copy.
+            _ => (RemoveMode::OfflineFallback, None),
         }
+    };
+
+    let prompt = match mode {
+        RemoveMode::Cascade => format!(
+            "Delete runner '{}' from cloud and remove the local instance?",
+            args.name
+        ),
+        RemoveMode::OfflineFallback => format!(
+            "Cannot reach the cloud right now. \
+             Only the local runner instance for '{}' can be deleted, continue?",
+            args.name
+        ),
+        RemoveMode::LocalOnly => format!(
+            "Remove the local instance of '{}'? \
+             The cloud row will not be touched.",
+            args.name
+        ),
+    };
+    if !maybe_confirm(&prompt, false, args.yes) {
+        println!("Aborted; runner '{}' was not removed.", args.name);
+        return Ok(());
     }
 
-    cfg.runners.remove(idx);
-    file::write_config(paths, &cfg)?;
+    // Cloud delete first (cascade only). The daemon will receive the
+    // remove_runner frame and tear itself down — but we still do our
+    // own local cleanup below as belt-and-suspenders, since the
+    // daemon may not be running on this host right now.
+    if let RemoveMode::Cascade = mode
+        && let Some(token) = api_token.as_deref()
+        && let Err(e) = delete_runner(&cloud_url, token, &runner_id, true).await
+    {
+        eprintln!("cloud delete-runner failed: {e:#}");
+        eprintln!();
+        eprintln!("To remove this runner from the cloud, use the web UI's");
+        eprintln!("\"Delete\" button on the runners page.");
+        eprintln!("To clean up local state only, re-run with --local-only:");
+        eprintln!("  pidash runner remove {} --local-only --yes", args.name);
+        anyhow::bail!("cloud delete-runner failed");
+    }
+
+    // Local cleanup: strip the [[runner]] block under the host-wide
+    // config lock, then drop the per-runner data dir. The daemon's
+    // cascade handler does the same thing on its own; doing it here
+    // too is a no-op when both paths run, and the only path when the
+    // daemon is offline.
+    file::mutate_config(paths, |c| {
+        c.runners.retain(|r| r.runner_id != runner_id);
+        Ok(())
+    })?;
     let runner_data = paths.runner_dir(runner_id);
     if runner_data.exists() {
         let _ = std::fs::remove_dir_all(&runner_data);
     }
-    if args.local_only {
-        println!(
-            "Removed runner {} from local config (cloud row not touched).",
-            args.name
-        );
-    } else {
-        println!("Removed runner {}.", args.name);
+
+    match mode {
+        RemoveMode::Cascade => {
+            println!("Removed runner {} (cloud + local).", args.name);
+        }
+        RemoveMode::OfflineFallback => {
+            println!(
+                "Removed runner {} locally. The cloud row remains; \
+                 delete it from the web UI when you're back online.",
+                args.name
+            );
+        }
+        RemoveMode::LocalOnly => {
+            println!(
+                "Removed runner {} from local config (cloud row not touched).",
+                args.name
+            );
+        }
     }
     Ok(())
 }
 
 /// Library shim used by the TUI to delete by `runner_id` (when the user
-/// confirms in the runners-list view).
+/// confirms in the runners-list view). The TUI runs its own confirm
+/// dialog before calling, so we pass `yes=true` here.
 #[allow(dead_code)]
 pub async fn remove_by_id(runner_id: &Uuid, paths: &Paths) -> Result<()> {
     let cfg = file::load_config(paths)?;
@@ -285,6 +359,7 @@ pub async fn remove_by_id(runner_id: &Uuid, paths: &Paths) -> Result<()> {
         RemoveArgs {
             name,
             local_only: false,
+            yes: true,
         },
         paths,
     )

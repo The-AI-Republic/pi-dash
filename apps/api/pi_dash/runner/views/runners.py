@@ -12,14 +12,20 @@ from pi_dash.authentication.session import BaseSessionAuthentication
 from pi_dash.runner.models import Pod, Runner
 from pi_dash.runner.serializers import RunnerSerializer
 from pi_dash.runner.services.permissions import (
-    is_workspace_admin,
+    can_manage_runner,
     is_workspace_member,
 )
-from pi_dash.runner.services.pubsub import close_runner_session, send_to_runner
+from pi_dash.runner.services.runner_delete import (
+    delete_runner as delete_runner_svc,
+    parse_purge_local,
+)
 
 
 def _can_manage_runner(user, runner: Runner) -> bool:
-    return runner.owner_id == user.id or is_workspace_admin(user, runner.workspace_id)
+    """Thin alias kept so external imports keep working; new code
+    should call :func:`can_manage_runner` from the permissions service.
+    """
+    return can_manage_runner(user, runner)
 
 
 class RunnerListEndpoint(APIView):
@@ -126,21 +132,24 @@ class RunnerDetailEndpoint(APIView):
         AgentRuns are tombstoned (status=cancelled, ended_at set), then
         drops the row. AgentRun.runner is ``SET_NULL`` so historic runs
         survive with a null FK.
+
+        Accepts a ``?purge_local=true|false`` query flag (default:
+        ``true``). When true the daemon receives a ``remove_runner``
+        frame and cascades the teardown to local state (data dir +
+        ``[[runner]]`` block in ``config.toml``); when false a plain
+        ``revoke`` frame is emitted and the local install is left
+        untouched.
         """
         runner = Runner.objects.filter(pk=runner_id).first()
         if runner is None:
             return Response({"error": "not found"}, status=status.HTTP_404_NOT_FOUND)
         if not _can_manage_runner(request.user, runner):
             return Response({"error": "forbidden"}, status=status.HTTP_403_FORBIDDEN)
-        runner_pk = runner.pk
-        runner.revoke()
-        # Don't stamp ``v`` here — the consumer's ``_send_envelope`` adds the
-        # current PROTOCOL_VERSION on every outbound frame. Hard-coding a
-        # stale value would override that and ship a wrong wire version.
-        send_to_runner(
-            runner_pk,
-            {"type": "revoke", "reason": "deleted by user"},
-        )
-        close_runner_session(runner_pk)
-        Runner.objects.filter(pk=runner_pk).delete()
+        try:
+            purge_local = parse_purge_local(request.query_params)
+        except ValueError as exc:
+            return Response(
+                {"error": str(exc)}, status=status.HTTP_400_BAD_REQUEST
+            )
+        delete_runner_svc(runner, purge_local=purge_local)
         return Response(status=status.HTTP_204_NO_CONTENT)

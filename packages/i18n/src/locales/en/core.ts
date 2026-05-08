@@ -439,6 +439,10 @@ export default {
       delete_confirm_title: "Delete runner?",
       delete_confirm_body:
         "The runner row is removed and the daemon is forced offline. Historic runs are preserved with a null runner reference.",
+      delete_purge_local_label:
+        "Also delete the local runner instance (strips the [[runner]] block from config.toml and deletes the per-runner data dir on the host).",
+      delete_offline_notice:
+        "This runner is not connected, so we cannot delete the local instance for you. After the cloud delete, remove it manually on the host with `pidash runner remove <name>`.",
       delete_failed: "Failed to delete runner",
       status: {
         online: "online",

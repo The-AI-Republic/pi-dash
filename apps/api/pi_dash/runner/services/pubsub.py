@@ -105,6 +105,50 @@ def send_runner_revoke(
         logger.exception("send_runner_revoke failed for %s", runner_id)
 
 
+def send_runner_remove(
+    runner_id: UUID | str, reason: str = "deleted by user"
+) -> None:
+    """Enqueue a ``remove_runner`` control frame for the runner.
+
+    The daemon's ``RunnerLoop`` handler (Rust:
+    ``ServerMsg::RemoveRunner``) responds by:
+
+    - cancelling the in-flight run (if any),
+    - removing the runner from its live mailbox + hello maps,
+    - deleting the per-runner data dir on disk, and
+    - stripping the matching ``[[runner]]`` block from
+      ``config.toml`` under the host-wide config lock.
+
+    The systemd unit (``pidash.service``) hosts every runner under one
+    process, so the daemon never touches it on this path; only
+    ``pidash uninstall`` removes the service.
+
+    Use this verb when the user opted into a *cascade* delete (the
+    "Also delete the local runner instance" checkbox in the web UI, or
+    the default for ``pidash runner remove`` when the cloud is
+    reachable). For a cloud-only delete that leaves the local install
+    in place, call :func:`send_runner_revoke` instead.
+    """
+    try:
+        enqueue_for_runner(
+            runner_id,
+            {
+                "type": "remove_runner",
+                "runner_id": str(runner_id),
+                "reason": reason,
+            },
+        )
+    except RunnerOfflineError:
+        # ``remove_runner`` is in the offline-allowed set, but a runner
+        # that is currently offline can't act on the frame anyway —
+        # log defensively if the queue ever rejects it.
+        logger.warning(
+            "remove_runner enqueue rejected as offline for %s", runner_id
+        )
+    except Exception:
+        logger.exception("send_runner_remove failed for %s", runner_id)
+
+
 # Backwards-compatibility alias for any caller still importing the old
 # name. New code should call ``send_runner_revoke`` directly.
 send_connection_revoke = send_runner_revoke

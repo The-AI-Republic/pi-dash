@@ -80,23 +80,29 @@ pub async fn register_runner(
         .map_err(RunnerCrudError::Other)
 }
 
-/// ``DELETE /api/v1/runner/connections/<id>/runners/<rid>/``.
+/// ``DELETE /api/v1/runners/<runner_id>/?purge_local=true|false``.
+///
+/// Cloud-side runner deletion via the X-Api-Key (MachineToken) auth
+/// surface — the route the local CLI uses now that the connection-
+/// scoped variant is gone. ``purge_local=true`` emits a
+/// ``remove_runner`` control frame so the daemon cascades the
+/// teardown to local config + data dir; ``false`` emits the legacy
+/// ``revoke`` and leaves the local install in place.
 pub async fn delete_runner(
     cloud_url: &str,
-    connection_id: &Uuid,
-    connection_secret: &str,
+    api_token: &str,
     runner_id: &Uuid,
+    purge_local: bool,
 ) -> Result<()> {
     let url = format!(
-        "{}/api/v1/runner/connections/{}/runners/{}/",
+        "{}/api/v1/runners/{}/?purge_local={}",
         cloud_url.trim_end_matches('/'),
-        connection_id,
-        runner_id
+        runner_id,
+        if purge_local { "true" } else { "false" },
     );
     let resp = http_client()?
         .delete(&url)
-        .bearer_auth(connection_secret)
-        .header("X-Connection-Id", connection_id.to_string())
+        .header("X-Api-Key", api_token)
         .send()
         .await
         .with_context(|| format!("DELETE {url}"))?;
@@ -106,6 +112,26 @@ pub async fn delete_runner(
         anyhow::bail!("delete-runner failed: HTTP {status}: {body}");
     }
     Ok(())
+}
+
+/// Probe the cloud's `/api/v1/runner/health/` endpoint with a short
+/// timeout. Used by `pidash runner remove` to decide whether to take
+/// the cascade path (B1) or the local-only path (B2) when the user
+/// hasn't passed `--local-only`.
+pub async fn probe_cloud_reachable(cloud_url: &str) -> bool {
+    let url = format!("{}/api/v1/runner/health/", cloud_url.trim_end_matches('/'),);
+    let client = match reqwest::Client::builder()
+        .timeout(Duration::from_secs(4))
+        .user_agent(format!("pidash/{}", crate::RUNNER_VERSION))
+        .build()
+    {
+        Ok(c) => c,
+        Err(_) => return false,
+    };
+    match client.get(&url).send().await {
+        Ok(resp) => resp.status().is_success(),
+        Err(_) => false,
+    }
 }
 
 fn classify(status: reqwest::StatusCode, body: &str) -> RunnerCrudError {

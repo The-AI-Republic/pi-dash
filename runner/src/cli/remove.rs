@@ -72,22 +72,27 @@ pub async fn run(args: Args, paths: &Paths) -> Result<()> {
         tracing::warn!("service uninstall failed (ok if not installed): {e:#}");
     }
 
-    // Cloud-side cleanup: best-effort delete each runner under this
-    // connection. Connection itself is left for the user to revoke from
-    // the cloud UI — the daemon doesn't have authority to revoke its own
-    // connection row in the new design (the bearer it holds would
-    // self-defeat at exactly the wrong moment).
+    // Cloud-side cleanup: best-effort delete each runner. The systemd
+    // service has already been stopped + uninstalled above, so the
+    // daemon won't be alive to receive the `remove_runner` cascade
+    // frame anyway — pass `purge_local=false` so the cloud emits a
+    // plain `revoke` and we don't waste a cascade payload that no one
+    // will read. Local files are wiped wholesale by `remove_all` below.
     match crate::config::file::load_all(paths) {
         Ok((config, creds)) => {
             if !args.local_only {
+                let Some(api_token) = creds.api_token.as_deref() else {
+                    eprintln!(
+                        "credentials lack an api_token; skipping cloud-side \
+                         deregistration. Delete each runner from the web UI."
+                    );
+                    crate::config::file::remove_all(paths)?;
+                    println!("local runner state removed.");
+                    return Ok(());
+                };
                 for r in &config.runners {
-                    match delete_runner(
-                        &config.daemon.cloud_url,
-                        &creds.connection_id,
-                        &creds.connection_secret,
-                        &r.runner_id,
-                    )
-                    .await
+                    match delete_runner(&config.daemon.cloud_url, api_token, &r.runner_id, false)
+                        .await
                     {
                         Ok(()) => {
                             tracing::info!(runner = %r.name, "cloud delete-runner ok");

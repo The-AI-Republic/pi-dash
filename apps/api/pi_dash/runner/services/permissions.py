@@ -52,3 +52,14 @@ def is_at_least_member(user, workspace_id) -> bool:
     """True if ``user`` is at least Member role (>=15) — not Guest."""
     role = workspace_role(user, workspace_id)
     return role is not None and role >= ROLE_MEMBER
+
+
+def can_manage_runner(user, runner) -> bool:
+    """True if ``user`` is the runner's owner or a workspace admin.
+
+    Mirrors the predicate used by both delete surfaces (web session
+    auth + the X-Api-Key v1 endpoint) so the rule stays in one place.
+    """
+    return runner.owner_id == user.id or is_workspace_admin(
+        user, runner.workspace_id
+    )
