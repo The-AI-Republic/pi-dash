@@ -16,6 +16,7 @@ import type { TBadgeVariant } from "@pi-dash/ui";
 import { AlertModalCore, Badge, Button, Checkbox, Tooltip } from "@pi-dash/ui";
 import { PageHead } from "@/components/core/page-title";
 import { AddRunnerModal } from "@/components/runners/add-runner-modal";
+import { RunnerAgentStatusPanel } from "@/components/runners/runner-agent-status-panel";
 import { useWorkspace } from "@/hooks/store/use-workspace";
 
 const service = new RunnerService();
@@ -223,6 +224,20 @@ const RunnersListPage = observer(function RunnersListPage() {
           </table>
         </div>
       </section>
+
+      {/* Active-run observability: render one panel per runner that
+          currently reports an in-flight ``observed_run_id``. Lets
+          operators see which agent is doing what without clicking
+          through to a per-runner detail page. */}
+      {(runners ?? [])
+        .filter((r) => r.live_state?.observed_run_id)
+        .map((r) => (
+          <RunnerAgentStatusPanel
+            key={`agent-status-${r.id}`}
+            runner={{ id: r.id, name: r.name, status: r.status }}
+            liveState={r.live_state}
+          />
+        ))}
 
       {workspaceId && workspaceSlug && (
         <AddRunnerModal

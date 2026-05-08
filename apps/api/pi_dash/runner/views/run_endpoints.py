@@ -50,7 +50,18 @@ def _idempotency_key(request) -> str:
 
 
 def _record_dedupe(run: AgentRun, message_id: str) -> bool:
-    """Return True when the call is fresh; False when it's a duplicate."""
+    """Return True when the call is fresh; False when it's a duplicate.
+
+    Caller MUST invoke this inside an outer ``transaction.atomic()``
+    block that also contains the side effect being deduped — otherwise
+    a side-effect failure (DB blip, deadlock, scheduler hook error)
+    after the dedupe row commits will leave the dedupe in place but
+    the state transition unapplied, and the runner's retry will get
+    ``{"ok": True, "duplicate": True}`` and silently drop the
+    transition. The inner ``transaction.atomic()`` here becomes a
+    savepoint when nested; ``IntegrityError`` rolls back just the
+    savepoint, keeping the outer transaction valid.
+    """
     if not message_id:
         return True
     try:
@@ -91,9 +102,10 @@ class RunAcceptEndpoint(_RunEndpointBase):
         run, err = self._resolve(request, run_id)
         if err:
             return err
-        if not _record_dedupe(run, _idempotency_key(request)):
-            return Response({"ok": True, "duplicate": True})
-        AgentRun.objects.filter(pk=run.pk).update(status=AgentRunStatus.RUNNING)
+        with transaction.atomic():
+            if not _record_dedupe(run, _idempotency_key(request)):
+                return Response({"ok": True, "duplicate": True})
+            AgentRun.objects.filter(pk=run.pk).update(status=AgentRunStatus.RUNNING)
         return Response({"ok": True})
 
 
@@ -102,14 +114,15 @@ class RunStartedEndpoint(_RunEndpointBase):
         run, err = self._resolve(request, run_id)
         if err:
             return err
-        if not _record_dedupe(run, _idempotency_key(request)):
-            return Response({"ok": True, "duplicate": True})
-        thread_id = (request.data.get("thread_id") or "")[:128]
-        AgentRun.objects.filter(pk=run.pk).update(
-            status=AgentRunStatus.RUNNING,
-            thread_id=thread_id,
-            started_at=timezone.now(),
-        )
+        with transaction.atomic():
+            if not _record_dedupe(run, _idempotency_key(request)):
+                return Response({"ok": True, "duplicate": True})
+            thread_id = (request.data.get("thread_id") or "")[:128]
+            AgentRun.objects.filter(pk=run.pk).update(
+                status=AgentRunStatus.RUNNING,
+                thread_id=thread_id,
+                started_at=timezone.now(),
+            )
         return Response({"ok": True})
 
 
@@ -128,31 +141,32 @@ class RunEventEndpoint(_RunEndpointBase):
             # observability bridge. Acknowledge so the runner stops
             # retrying, but record nothing.
             return Response({"ok": True, "terminal": True, "accepted": 0})
-        if not _record_dedupe(run, _idempotency_key(request)):
-            return Response({"ok": True, "duplicate": True})
-        events = request.data.get("events") or [request.data]
-        accepted = 0
-        for ev in events:
-            seq = int(ev.get("seq") or 0)
-            kind = (ev.get("kind") or "")[:64]
-            payload = ev.get("payload") or {}
-            if not kind:
-                continue
-            try:
-                encoded = json.dumps(payload, default=str)
-            except (TypeError, ValueError):
-                encoded = ""
-            if len(encoded.encode("utf-8")) > MAX_EVENT_PAYLOAD_BYTES:
-                payload = {
-                    "_truncated": True,
-                    "original_size_bytes": len(encoded.encode("utf-8")),
-                }
-            AgentRunEvent.objects.update_or_create(
-                agent_run=run,
-                seq=seq,
-                defaults={"kind": kind, "payload": payload},
-            )
-            accepted += 1
+        with transaction.atomic():
+            if not _record_dedupe(run, _idempotency_key(request)):
+                return Response({"ok": True, "duplicate": True})
+            events = request.data.get("events") or [request.data]
+            accepted = 0
+            for ev in events:
+                seq = int(ev.get("seq") or 0)
+                kind = (ev.get("kind") or "")[:64]
+                payload = ev.get("payload") or {}
+                if not kind:
+                    continue
+                try:
+                    encoded = json.dumps(payload, default=str)
+                except (TypeError, ValueError):
+                    encoded = ""
+                if len(encoded.encode("utf-8")) > MAX_EVENT_PAYLOAD_BYTES:
+                    payload = {
+                        "_truncated": True,
+                        "original_size_bytes": len(encoded.encode("utf-8")),
+                    }
+                AgentRunEvent.objects.update_or_create(
+                    agent_run=run,
+                    seq=seq,
+                    defaults={"kind": kind, "payload": payload},
+                )
+                accepted += 1
         return Response({"ok": True, "accepted": accepted})
 
 
@@ -161,29 +175,30 @@ class RunApprovalEndpoint(_RunEndpointBase):
         run, err = self._resolve(request, run_id)
         if err:
             return err
-        if not _record_dedupe(run, _idempotency_key(request)):
-            return Response({"ok": True, "duplicate": True})
-        approval_id = request.data.get("approval_id")
-        kind_raw = (request.data.get("kind") or "").lower()
-        kind = {
-            "command_execution": ApprovalKind.COMMAND_EXECUTION,
-            "file_change": ApprovalKind.FILE_CHANGE,
-            "network_access": ApprovalKind.NETWORK_ACCESS,
-        }.get(kind_raw, ApprovalKind.OTHER)
-        ApprovalRequest.objects.update_or_create(
-            id=approval_id,
-            defaults={
-                "agent_run": run,
-                "kind": kind,
-                "payload": request.data.get("payload") or {},
-                "reason": request.data.get("reason") or "",
-                "status": ApprovalStatus.PENDING,
-                "expires_at": request.data.get("expires_at"),
-            },
-        )
-        AgentRun.objects.filter(pk=run.pk).update(
-            status=AgentRunStatus.AWAITING_APPROVAL
-        )
+        with transaction.atomic():
+            if not _record_dedupe(run, _idempotency_key(request)):
+                return Response({"ok": True, "duplicate": True})
+            approval_id = request.data.get("approval_id")
+            kind_raw = (request.data.get("kind") or "").lower()
+            kind = {
+                "command_execution": ApprovalKind.COMMAND_EXECUTION,
+                "file_change": ApprovalKind.FILE_CHANGE,
+                "network_access": ApprovalKind.NETWORK_ACCESS,
+            }.get(kind_raw, ApprovalKind.OTHER)
+            ApprovalRequest.objects.update_or_create(
+                id=approval_id,
+                defaults={
+                    "agent_run": run,
+                    "kind": kind,
+                    "payload": request.data.get("payload") or {},
+                    "reason": request.data.get("reason") or "",
+                    "status": ApprovalStatus.PENDING,
+                    "expires_at": request.data.get("expires_at"),
+                },
+            )
+            AgentRun.objects.filter(pk=run.pk).update(
+                status=AgentRunStatus.AWAITING_APPROVAL
+            )
         return Response({"ok": True})
 
 
@@ -192,11 +207,12 @@ class RunAwaitingReauthEndpoint(_RunEndpointBase):
         run, err = self._resolve(request, run_id)
         if err:
             return err
-        if not _record_dedupe(run, _idempotency_key(request)):
-            return Response({"ok": True, "duplicate": True})
-        AgentRun.objects.filter(pk=run.pk).update(
-            status=AgentRunStatus.AWAITING_REAUTH
-        )
+        with transaction.atomic():
+            if not _record_dedupe(run, _idempotency_key(request)):
+                return Response({"ok": True, "duplicate": True})
+            AgentRun.objects.filter(pk=run.pk).update(
+                status=AgentRunStatus.AWAITING_REAUTH
+            )
         return Response({"ok": True})
 
 
@@ -205,16 +221,17 @@ class RunCompletedEndpoint(_RunEndpointBase):
         run, err = self._resolve(request, run_id)
         if err:
             return err
-        if not _record_dedupe(run, _idempotency_key(request)):
-            return Response({"ok": True, "duplicate": True})
-        runner = getattr(request, "auth_runner", None)
-        if runner is not None:
-            run_lifecycle.finalize_run_terminal(
-                runner,
-                run.id,
-                AgentRunStatus.COMPLETED,
-                done_payload=request.data.get("done_payload"),
-            )
+        with transaction.atomic():
+            if not _record_dedupe(run, _idempotency_key(request)):
+                return Response({"ok": True, "duplicate": True})
+            runner = getattr(request, "auth_runner", None)
+            if runner is not None:
+                run_lifecycle.finalize_run_terminal(
+                    runner,
+                    run.id,
+                    AgentRunStatus.COMPLETED,
+                    done_payload=request.data.get("done_payload"),
+                )
         return Response({"ok": True})
 
 
@@ -223,16 +240,17 @@ class RunPausedEndpoint(_RunEndpointBase):
         run, err = self._resolve(request, run_id)
         if err:
             return err
-        if not _record_dedupe(run, _idempotency_key(request)):
-            return Response({"ok": True, "duplicate": True})
-        runner = getattr(request, "auth_runner", None)
-        if runner is None:
-            return Response({"ok": True})
-        payload = request.data.get("payload") or {}
-        # Posts the agent's question to the issue thread,
-        # applies deferred-pause workspace transitions, and re-fires
-        # drain. See run_lifecycle.apply_run_paused.
-        run_lifecycle.apply_run_paused(runner, run.id, payload)
+        with transaction.atomic():
+            if not _record_dedupe(run, _idempotency_key(request)):
+                return Response({"ok": True, "duplicate": True})
+            runner = getattr(request, "auth_runner", None)
+            if runner is None:
+                return Response({"ok": True})
+            payload = request.data.get("payload") or {}
+            # Posts the agent's question to the issue thread,
+            # applies deferred-pause workspace transitions, and re-fires
+            # drain. See run_lifecycle.apply_run_paused.
+            run_lifecycle.apply_run_paused(runner, run.id, payload)
         return Response({"ok": True})
 
 
@@ -241,24 +259,25 @@ class RunFailedEndpoint(_RunEndpointBase):
         run, err = self._resolve(request, run_id)
         if err:
             return err
-        if not _record_dedupe(run, _idempotency_key(request)):
-            return Response({"ok": True, "duplicate": True})
-        runner = getattr(request, "auth_runner", None)
-        if runner is None:
-            return Response({"ok": True})
-        # Resume-unavailable is a re-queue, not a terminal failure.
-        # Without this branch, runs that miss their session on disk
-        # fail-stop instead of falling back into the pod's queue with
-        # a fresh session.
-        if (request.data.get("reason") or "") == "resume_unavailable":
-            run_lifecycle.apply_run_resume_unavailable(runner, run.id)
-            return Response({"ok": True, "rescheduled": True})
-        run_lifecycle.finalize_run_terminal(
-            runner,
-            run.id,
-            AgentRunStatus.FAILED,
-            error_detail=request.data.get("detail") or "",
-        )
+        with transaction.atomic():
+            if not _record_dedupe(run, _idempotency_key(request)):
+                return Response({"ok": True, "duplicate": True})
+            runner = getattr(request, "auth_runner", None)
+            if runner is None:
+                return Response({"ok": True})
+            # Resume-unavailable is a re-queue, not a terminal failure.
+            # Without this branch, runs that miss their session on disk
+            # fail-stop instead of falling back into the pod's queue with
+            # a fresh session.
+            if (request.data.get("reason") or "") == "resume_unavailable":
+                run_lifecycle.apply_run_resume_unavailable(runner, run.id)
+                return Response({"ok": True, "rescheduled": True})
+            run_lifecycle.finalize_run_terminal(
+                runner,
+                run.id,
+                AgentRunStatus.FAILED,
+                error_detail=request.data.get("detail") or "",
+            )
         return Response({"ok": True})
 
 
@@ -267,13 +286,14 @@ class RunCancelledEndpoint(_RunEndpointBase):
         run, err = self._resolve(request, run_id)
         if err:
             return err
-        if not _record_dedupe(run, _idempotency_key(request)):
-            return Response({"ok": True, "duplicate": True})
-        runner = getattr(request, "auth_runner", None)
-        if runner is not None:
-            run_lifecycle.finalize_run_terminal(
-                runner, run.id, AgentRunStatus.CANCELLED
-            )
+        with transaction.atomic():
+            if not _record_dedupe(run, _idempotency_key(request)):
+                return Response({"ok": True, "duplicate": True})
+            runner = getattr(request, "auth_runner", None)
+            if runner is not None:
+                run_lifecycle.finalize_run_terminal(
+                    runner, run.id, AgentRunStatus.CANCELLED
+                )
         return Response({"ok": True})
 
 
@@ -282,9 +302,10 @@ class RunResumedEndpoint(_RunEndpointBase):
         run, err = self._resolve(request, run_id)
         if err:
             return err
-        if not _record_dedupe(run, _idempotency_key(request)):
-            return Response({"ok": True, "duplicate": True})
-        AgentRun.objects.filter(pk=run.pk).update(status=AgentRunStatus.RUNNING)
+        with transaction.atomic():
+            if not _record_dedupe(run, _idempotency_key(request)):
+                return Response({"ok": True, "duplicate": True})
+            AgentRun.objects.filter(pk=run.pk).update(status=AgentRunStatus.RUNNING)
         return Response({"ok": True})
 
 

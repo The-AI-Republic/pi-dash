@@ -46,8 +46,8 @@ pub enum TransportError {
     RefreshTokenReplayed,
     #[error("auth: membership_revoked")]
     MembershipRevoked,
-    #[error("auth: runner_revoked")]
-    RunnerRevoked,
+    #[error("auth: runner_revoked: {body}")]
+    RunnerRevoked { body: String },
     #[error("auth: runner_id_mismatch")]
     RunnerIdMismatch,
     #[error("auth: invalid_refresh_token")]
@@ -82,7 +82,7 @@ impl TransportError {
             self,
             TransportError::RefreshTokenReplayed
                 | TransportError::MembershipRevoked
-                | TransportError::RunnerRevoked
+                | TransportError::RunnerRevoked { .. }
                 | TransportError::RunnerIdMismatch
                 | TransportError::InvalidRefreshToken
                 | TransportError::SessionEvicted { .. }
@@ -311,11 +311,21 @@ impl TransportErrorCode {
         // We round-trip the error tag; specific variants matter for
         // routing, so reconstruct the auth-class ones precisely. For
         // anything else fall back to Network.
-        match self.0.as_str() {
+        let s = self.0.as_str();
+        if let Some(body) = s.strip_prefix("auth: runner_revoked: ") {
+            return TransportError::RunnerRevoked {
+                body: body.to_string(),
+            };
+        }
+        if let Some(reason) = s.strip_prefix("session_evicted: ") {
+            return TransportError::SessionEvicted {
+                reason: reason.to_string(),
+            };
+        }
+        match s {
             "auth: access_token_expired" => TransportError::AccessTokenExpired,
             "auth: refresh_token_replayed" => TransportError::RefreshTokenReplayed,
             "auth: membership_revoked" => TransportError::MembershipRevoked,
-            "auth: runner_revoked" => TransportError::RunnerRevoked,
             "auth: runner_id_mismatch" => TransportError::RunnerIdMismatch,
             "auth: invalid_refresh_token" => TransportError::InvalidRefreshToken,
             other => TransportError::Network(other.to_string()),
@@ -537,6 +547,7 @@ impl RunnerCloudClient {
         &self,
         ack: Vec<String>,
         status: PollStatus,
+        long_poll_interval_secs: u64,
     ) -> Result<PollResponse, TransportError> {
         let (session_id, token_raw) = {
             let token = self.ensure_access_token().await?;
@@ -555,6 +566,13 @@ impl RunnerCloudClient {
             session_id
         );
         let body = serde_json::json!({ "ack": ack, "status": status });
+        // Per-request timeout = server's long-poll block + 5s buffer.
+        // Without this, the shared `Client::timeout` (60s) would fire
+        // before the server's block_ms when an operator bumps
+        // `LONG_POLL_INTERVAL_SECS` over 55, dropping in-flight assigns
+        // and spinning the backoff loop. We override per-request so
+        // the shared client's default still protects every other RPC.
+        let request_timeout = Duration::from_secs(long_poll_interval_secs.saturating_add(5));
         let resp = self
             .inner
             .transport
@@ -562,6 +580,7 @@ impl RunnerCloudClient {
             .post(&url)
             .header(AUTHORIZATION, format!("Bearer {token_raw}"))
             .json(&body)
+            .timeout(request_timeout)
             .send()
             .await
             .map_err(|e| TransportError::Network(e.to_string()))?;
@@ -953,6 +972,75 @@ pub struct HttpLoop {
     /// caller that doesn't want to thread state through.
     pub state: Option<crate::daemon::state::StateHandle>,
     inline_acks: VecDeque<String>,
+    /// Bounded mid-dedupe (design.md §8 / Decision 21). At-least-once
+    /// delivery + the PEL-replay path (`use_zero=True` on the first
+    /// poll after session-open) means an `assign` / `cancel` /
+    /// `decide` frame can legitimately arrive twice. Without dedupe
+    /// the runner would re-execute side-effects each time, converting
+    /// at-least-once delivery into at-least-once execution.
+    mid_dedupe: MidDedupe,
+    /// Per-poll request timeout (server's long-poll block + buffer),
+    /// captured from the welcome envelope. Used to override the shared
+    /// reqwest client's 60s default so an operator-bumped
+    /// `LONG_POLL_INTERVAL_SECS` doesn't cause the client timeout to
+    /// fire before the server's block_ms.
+    long_poll_interval_secs: u64,
+}
+
+/// Hard upper bound on `long_poll_interval_secs` the daemon honors.
+/// Server-side `LONG_POLL_INTERVAL_SECS` should also clamp to this; if
+/// a misconfigured cloud sends a larger value the daemon caps it
+/// locally so a single welcome can't lock us into a multi-minute
+/// per-poll wait that masks real failures.
+const MAX_LONG_POLL_INTERVAL_SECS: u64 = 55;
+/// Fallback when welcome carries no value or the cloud cannot be
+/// trusted. Matches the server's documented default.
+const DEFAULT_LONG_POLL_INTERVAL_SECS: u64 = 25;
+
+/// Maximum number of recently-seen `mid` values retained for daemon-side
+/// inbound-frame dedupe. Sized so a multi-hour PEL replay storm fits
+/// without churning the ring; ~36-byte UUID strings × 4096 ≈ 150 KiB
+/// per running runner instance.
+const MID_DEDUPE_CAPACITY: usize = 4096;
+
+/// Bounded "have we seen this mid before?" set. Cap-bounded ring of
+/// recent mids; when the ring is full, the oldest entry is evicted
+/// from both the ring and the lookup set so memory stays predictable.
+#[derive(Debug)]
+struct MidDedupe {
+    ring: VecDeque<String>,
+    lookup: std::collections::HashSet<String>,
+    capacity: usize,
+}
+
+impl MidDedupe {
+    fn with_capacity(capacity: usize) -> Self {
+        Self {
+            ring: VecDeque::with_capacity(capacity),
+            lookup: std::collections::HashSet::with_capacity(capacity),
+            capacity,
+        }
+    }
+
+    /// Returns `true` if `mid` was already in the ring (caller should
+    /// drop the duplicate). Records `mid` if not. Empty mids are not
+    /// recorded — we cannot dedupe what we cannot key on.
+    fn record(&mut self, mid: &str) -> bool {
+        if mid.is_empty() {
+            return false;
+        }
+        if self.lookup.contains(mid) {
+            return true;
+        }
+        if self.ring.len() >= self.capacity
+            && let Some(evicted) = self.ring.pop_front()
+        {
+            self.lookup.remove(&evicted);
+        }
+        self.ring.push_back(mid.to_string());
+        self.lookup.insert(mid.to_string());
+        false
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -999,6 +1087,8 @@ impl HttpLoop {
             attach_body,
             state: None,
             inline_acks: VecDeque::new(),
+            mid_dedupe: MidDedupe::with_capacity(MID_DEDUPE_CAPACITY),
+            long_poll_interval_secs: DEFAULT_LONG_POLL_INTERVAL_SECS,
         }
     }
 
@@ -1033,11 +1123,19 @@ impl HttpLoop {
         // 1. Bootstrap: ensure access token, open session.
         self.client.ensure_access_token().await?;
         let session = self.client.open_session(self.current_attach_body()).await?;
+        // Capture the server's long-poll interval (clamped) so the per-
+        // request timeout in `RunnerCloudClient::poll` matches the
+        // server's actual block deadline.
+        self.long_poll_interval_secs = session
+            .welcome
+            .long_poll_interval_secs
+            .unwrap_or(DEFAULT_LONG_POLL_INTERVAL_SECS)
+            .min(MAX_LONG_POLL_INTERVAL_SECS);
         // 2. Hand welcome (and optional resume_ack) to the mailbox so
         //    the existing per-runner handlers ingest them as today.
         let welcome_body = ServerMsg::Welcome {
             server_time: session.welcome.server_time.unwrap_or_else(Utc::now),
-            heartbeat_interval_secs: session.welcome.long_poll_interval_secs.unwrap_or(25),
+            heartbeat_interval_secs: self.long_poll_interval_secs,
             protocol_version: session.welcome.protocol_version.unwrap_or(WIRE_VERSION),
         };
         let _ = self
@@ -1134,7 +1232,10 @@ impl HttpLoop {
             }
             _ => PollStatus::from_wire(wire_status, in_flight),
         };
-        let resp = self.client.poll(acks, status).await?;
+        let resp = self
+            .client
+            .poll(acks, status, self.long_poll_interval_secs)
+            .await?;
         for msg in resp.messages {
             self.dispatch(msg).await;
         }
@@ -1144,6 +1245,21 @@ impl HttpLoop {
     async fn dispatch(&mut self, msg: PollMessage) {
         let stream_id = msg.stream_id.clone();
         let runner_id = self.client.runner_id();
+        // At-least-once delivery (design.md §8): a frame the daemon
+        // already executed can reappear via PEL replay or stream
+        // retries. Drop duplicates by `mid` before they reach the
+        // mailbox, but still inline-ack the stream entry so the
+        // cloud's outbox doesn't grow unbounded.
+        if self.mid_dedupe.record(&msg.mid) {
+            tracing::debug!(
+                runner = %runner_id,
+                mid = %msg.mid,
+                kind = ?msg.kind,
+                "dropping duplicate inbound frame"
+            );
+            self.inline_acks.push_back(stream_id);
+            return;
+        }
         // Decode the body's "type" field via the ServerMsg enum.
         let parsed: Result<ServerMsg, _> = serde_json::from_value(msg.body.clone());
         match parsed {
@@ -1186,33 +1302,42 @@ impl HttpLoop {
     /// local-cleanup path that the wire `RemoveRunner` frame would
     /// trigger.
     ///
-    /// `RunnerRevoked` / `RefreshTokenReplayed` / `MembershipRevoked`
-    /// are unambiguous: the cloud has decided the runner is gone.
-    /// `SessionEvicted` is conditional on the cloud's `reason` body
-    /// (see `apps/api/pi_dash/runner/views/sessions.py`): the cloud
-    /// echoes `session.revoked_reason`, which is set by
-    /// `Runner.revoke()` to one of the canonical strings. We treat
-    /// only those as terminal; an empty / unknown reason might be a
-    /// session-replaced scenario where another daemon process holds
-    /// the canonical config, so we leave local state alone.
+    /// `RefreshTokenReplayed` / `MembershipRevoked` are unambiguous —
+    /// the cloud has decided the runner's auth is gone for cause —
+    /// but `RunnerRevoked` and `SessionEvicted` carry a free-text
+    /// reason from the cloud, and only some of those reasons mean
+    /// "wipe local state." A bare `runner_revoked` body could be a
+    /// transient server bug, a CDN edge spoofing the body, or a
+    /// race against an undo; we don't want any of those to nuke
+    /// `config.toml`. Match against the same canonical set the cloud
+    /// emits via `Runner.revoke(reason=…)` (see
+    /// `apps/api/pi_dash/runner/models.py`), and lean conservative:
+    /// when in doubt the runner just exits cleanly and the operator
+    /// can `pidash runner remove --local-only` if cleanup is needed.
     fn should_synthesize_remove_runner(err: &TransportError) -> bool {
         match err {
-            TransportError::RunnerRevoked
-            | TransportError::RefreshTokenReplayed
-            | TransportError::MembershipRevoked => true,
+            TransportError::RefreshTokenReplayed | TransportError::MembershipRevoked => true,
+            TransportError::RunnerRevoked { body } => Self::body_matches_canonical_reason(body),
             TransportError::SessionEvicted { reason } => {
-                // The body is `{"error": "session_evicted", "reason":
-                // "<revoked_reason>"}`; do a substring match so we
-                // tolerate JSON envelopes, plain text, and future
-                // additions to the canonical reason set.
-                let r = reason.to_ascii_lowercase();
-                r.contains("runner_removed")
-                    || r.contains("manual_revoke")
-                    || r.contains("membership_revoked")
-                    || r.contains("refresh_token_replayed")
+                Self::body_matches_canonical_reason(reason)
             }
             _ => false,
         }
+    }
+
+    /// Substring-match the cloud-supplied reason body against the
+    /// canonical set defined by `Runner.revoke(reason=…)`. Tolerates
+    /// JSON envelopes (`{"error":"...","reason":"runner_removed"}`),
+    /// plain text, and case differences. Future cloud-side renames
+    /// will need to update both sides; the test matrix in
+    /// `synthesize_remove_runner_classifies_canonical_reasons` is the
+    /// canary.
+    fn body_matches_canonical_reason(body: &str) -> bool {
+        let r = body.to_ascii_lowercase();
+        r.contains("runner_removed")
+            || r.contains("manual_revoke")
+            || r.contains("membership_revoked")
+            || r.contains("refresh_token_replayed")
     }
 }
 
@@ -1242,7 +1367,9 @@ fn map_auth_error(status: StatusCode, body: &str) -> TransportError {
             return TransportError::MembershipRevoked;
         }
         if body.contains("runner_revoked") {
-            return TransportError::RunnerRevoked;
+            return TransportError::RunnerRevoked {
+                body: body.chars().take(256).collect(),
+            };
         }
         if body.contains("invalid_refresh_token") {
             return TransportError::InvalidRefreshToken;
@@ -1351,14 +1478,19 @@ mod tests {
     #[test]
     fn auth_error_mapping() {
         let err = map_auth_error(StatusCode::UNAUTHORIZED, "{\"error\":\"runner_revoked\"}");
-        assert!(matches!(err, TransportError::RunnerRevoked));
+        assert!(matches!(err, TransportError::RunnerRevoked { .. }));
         let err = map_auth_error(StatusCode::FORBIDDEN, "{\"error\":\"runner_id_mismatch\"}");
         assert!(matches!(err, TransportError::RunnerIdMismatch));
     }
 
     #[test]
     fn fatal_classification() {
-        assert!(TransportError::RunnerRevoked.is_fatal_for_runner());
+        assert!(
+            TransportError::RunnerRevoked {
+                body: "x".into()
+            }
+            .is_fatal_for_runner()
+        );
         assert!(TransportError::RefreshTokenReplayed.is_fatal_for_runner());
         assert!(TransportError::SessionEvicted { reason: "x".into() }.is_fatal_for_runner());
         assert!(!TransportError::Network("net".into()).is_fatal_for_runner());
@@ -1366,10 +1498,7 @@ mod tests {
 
     #[test]
     fn synthesize_remove_runner_classifies_canonical_reasons() {
-        // Unambiguous "runner gone" signals always synthesize.
-        assert!(HttpLoop::should_synthesize_remove_runner(
-            &TransportError::RunnerRevoked
-        ));
+        // Always-synthesize signals: by-construction unambiguous.
         assert!(HttpLoop::should_synthesize_remove_runner(
             &TransportError::RefreshTokenReplayed
         ));
@@ -1377,37 +1506,59 @@ mod tests {
             &TransportError::MembershipRevoked
         ));
 
-        // SessionEvicted depends on the cloud-supplied reason. The
-        // canonical set comes from `Runner.revoke(reason=…)` on the
-        // cloud (apps/api/pi_dash/runner/models.py).
-        for reason in [
+        // RunnerRevoked and SessionEvicted both depend on the
+        // cloud-supplied body. The canonical set comes from
+        // `Runner.revoke(reason=…)` on the cloud (see
+        // apps/api/pi_dash/runner/models.py).
+        for body in [
             "runner_removed",
             "manual_revoke",
             "membership_revoked",
             "refresh_token_replayed",
-            // Tolerate JSON wrapping: the cloud emits
-            // `{"error": "session_evicted", "reason": "runner_removed"}`.
+            // Tolerate JSON wrapping.
             r#"{"error":"session_evicted","reason":"runner_removed"}"#,
+            r#"{"error":"runner_revoked","reason":"manual_revoke"}"#,
             // Case-insensitive.
             "RUNNER_REMOVED",
         ] {
             assert!(
                 HttpLoop::should_synthesize_remove_runner(&TransportError::SessionEvicted {
-                    reason: reason.into()
+                    reason: body.into()
                 }),
-                "reason {reason:?} should synthesize",
+                "SessionEvicted reason {body:?} should synthesize",
+            );
+            assert!(
+                HttpLoop::should_synthesize_remove_runner(&TransportError::RunnerRevoked {
+                    body: body.into()
+                }),
+                "RunnerRevoked body {body:?} should synthesize",
             );
         }
 
-        // Empty / unknown reasons are conservatively NOT synthesized
-        // — could be a session-replaced scenario where another
-        // process holds the canonical config.
-        for reason in ["", "session_replaced", "unknown_thing"] {
+        // Bodies that lack a canonical reason — including the
+        // self-naming `runner_revoked` literal which is not in the
+        // canonical wipe set — are conservatively NOT synthesized.
+        // This is the #2 false-positive guard: a transient or spoofed
+        // 401 carrying just `{"error":"runner_revoked"}` no longer
+        // wipes local state.
+        for body in [
+            "",
+            "session_replaced",
+            "unknown_thing",
+            r#"{"error":"runner_revoked"}"#,
+            "runner_revoked",
+        ] {
             assert!(
                 !HttpLoop::should_synthesize_remove_runner(&TransportError::SessionEvicted {
-                    reason: reason.into()
+                    reason: body.into()
                 }),
-                "reason {reason:?} should NOT synthesize",
+                "SessionEvicted reason {body:?} should NOT synthesize",
+            );
+            assert!(
+                !HttpLoop::should_synthesize_remove_runner(&TransportError::RunnerRevoked {
+                    body: body.into()
+                }),
+                "RunnerRevoked body {body:?} should NOT synthesize",
             );
         }
 
@@ -1419,6 +1570,43 @@ mod tests {
         assert!(!HttpLoop::should_synthesize_remove_runner(
             &TransportError::RunnerIdMismatch
         ));
+    }
+
+    #[test]
+    fn mid_dedupe_drops_repeats_within_capacity() {
+        // Same mid twice — second call returns true so the dispatcher
+        // can skip the side effect.
+        let mut d = MidDedupe::with_capacity(4);
+        assert!(!d.record("a"));
+        assert!(d.record("a"));
+        assert!(!d.record("b"));
+        assert!(d.record("b"));
+    }
+
+    #[test]
+    fn mid_dedupe_evicts_oldest_when_full() {
+        // Capacity 2: a, b, then c forces a out. Re-recording a after
+        // eviction is treated as new (correctness trade-off documented
+        // in design.md §8 — the cap bounds memory, replays older than
+        // the window can in principle re-execute).
+        let mut d = MidDedupe::with_capacity(2);
+        assert!(!d.record("a"));
+        assert!(!d.record("b"));
+        assert!(!d.record("c")); // evicts a
+        assert!(!d.record("a")); // a was evicted, so this is "new" again
+        assert!(d.record("c")); // still in the ring
+        assert!(d.record("a")); // we re-inserted it above
+    }
+
+    #[test]
+    fn mid_dedupe_ignores_empty_mid() {
+        // Cloud-side bug or a ServerMsg without a mid won't poison the
+        // ring or trigger a dedupe drop.
+        let mut d = MidDedupe::with_capacity(8);
+        assert!(!d.record(""));
+        assert!(!d.record(""));
+        assert!(!d.record("a"));
+        assert!(d.record("a"));
     }
 
     fn sample_attach_body() -> AttachBody {

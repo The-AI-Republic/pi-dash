@@ -118,6 +118,15 @@ pub async fn delete_runner(
 /// timeout. Used by `pidash runner remove` to decide whether to take
 /// the cascade path (B1) or the local-only path (B2) when the user
 /// hasn't passed `--local-only`.
+///
+/// "Reachable" means the cloud answered with *any* HTTP response —
+/// 2xx, 4xx, or 5xx. The auth-walled / disabled / mis-deployed cases
+/// (401/403/404/5xx) all imply the cloud is up, just unhappy with this
+/// particular request, and the actual delete endpoint may behave
+/// differently. Only network errors (DNS, refused, TLS, timeout)
+/// drive us into OfflineFallback. This is the conservative posture:
+/// when in doubt, attempt the cloud delete and let its error path
+/// surface the real failure to the operator.
 pub async fn probe_cloud_reachable(cloud_url: &str) -> bool {
     let url = format!("{}/api/v1/runner/health/", cloud_url.trim_end_matches('/'),);
     let client = match reqwest::Client::builder()
@@ -128,10 +137,10 @@ pub async fn probe_cloud_reachable(cloud_url: &str) -> bool {
         Ok(c) => c,
         Err(_) => return false,
     };
-    match client.get(&url).send().await {
-        Ok(resp) => resp.status().is_success(),
-        Err(_) => false,
-    }
+    // Any HTTP response — including 4xx / 5xx — proves the cloud is
+    // reachable. Only transport-layer errors (timeout, refused, DNS,
+    // TLS) mean "offline".
+    client.get(&url).send().await.is_ok()
 }
 
 fn classify(status: reqwest::StatusCode, body: &str) -> RunnerCrudError {

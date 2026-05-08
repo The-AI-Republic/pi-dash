@@ -285,9 +285,15 @@ impl Supervisor {
 /// Hello legitimately reports null. This sends a clean terminal
 /// signal instead.
 ///
-/// Returns the count of runs we attempted to fail. Send errors are
+/// Returns the count of runs we successfully drained. Send errors are
 /// logged at warn but do not abort the drain — one runner's
 /// unreachable cloud client must not block another runner's drain.
+///
+/// Sends are issued in parallel via `join_all` and each is bounded by
+/// a 2s timeout. The outer 5s timeout in `Supervisor::run` still caps
+/// total wall-time, but with up to ~30 concurrent runners on one host
+/// a serial loop (each attempt potentially walking through the shared
+/// reqwest Client's 60s timeout) would starve later runners entirely.
 async fn drain_in_flight_runs(runners: Arc<RwLock<HelloRunnerMap>>) -> usize {
     // Snapshot under the read lock so the lock is dropped before any
     // network I/O; concurrent writers (config reloads, etc.) are not
@@ -300,26 +306,38 @@ async fn drain_in_flight_runs(runners: Arc<RwLock<HelloRunnerMap>>) -> usize {
             .collect()
     };
     let now = Utc::now();
-    let mut sent = 0usize;
-    for (runner_id, in_flight, out) in snapshot {
-        let Some(run_id) = in_flight else { continue };
+    let drains = snapshot.into_iter().filter_map(|(runner_id, in_flight, out)| {
+        let run_id = in_flight?;
         let msg = ClientMsg::RunFailed {
             run_id,
             reason: FailureReason::DaemonRestart,
             detail: Some("daemon shutdown requested".to_string()),
             ended_at: now,
         };
-        match out.send(msg).await {
-            Ok(()) => {
-                sent += 1;
-                tracing::info!(%runner_id, %run_id, "drained in-flight run on shutdown");
+        Some(async move {
+            // Per-attempt timeout so one stuck cloud client can't keep
+            // a parallel sibling from completing in time.
+            match tokio::time::timeout(Duration::from_secs(2), out.send(msg)).await {
+                Ok(Ok(())) => {
+                    tracing::info!(%runner_id, %run_id, "drained in-flight run on shutdown");
+                    true
+                }
+                Ok(Err(e)) => {
+                    tracing::warn!(%runner_id, %run_id, "drain send failed: {e:#}");
+                    false
+                }
+                Err(_) => {
+                    tracing::warn!(%runner_id, %run_id, "drain send timed out at 2s");
+                    false
+                }
             }
-            Err(e) => {
-                tracing::warn!(%runner_id, %run_id, "drain send failed: {e:#}");
-            }
-        }
-    }
-    sent
+        })
+    });
+    futures_util::future::join_all(drains)
+        .await
+        .into_iter()
+        .filter(|ok| *ok)
+        .count()
 }
 
 /// Watch the `connected` notify and re-emit one `Hello` per `RunnerInstance`
@@ -1114,7 +1132,11 @@ impl AssignWorker {
         // give up and fail the run. Without this, an unrecognised wait —
         // e.g. a future codex protocol change — leaves the runner blocked
         // on stdout and the cloud showing "running" indefinitely.
-        const STALL_TIMEOUT: Duration = Duration::from_secs(5 * 60);
+        //
+        // Threshold is per-agent because Codex emits continuous token-
+        // count events while Claude can be silent for the full
+        // duration of a single tool call (see `AgentKind::stall_timeout`).
+        let stall_timeout = self.runner_config.agent.kind.stall_timeout();
 
         let shutdown = self.state.shutdown_notified();
         let cancel = self.cancel.clone();
@@ -1124,7 +1146,7 @@ impl AssignWorker {
             // the previous iteration disarms the watchdog; one that just
             // resolved re-arms it.
             let stall_deadline = if self.approvals.list_pending().await.is_empty() {
-                Some(tokio::time::Instant::now() + STALL_TIMEOUT)
+                Some(tokio::time::Instant::now() + stall_timeout)
             } else {
                 None
             };
@@ -1185,7 +1207,7 @@ impl AssignWorker {
                         None => std::future::pending::<()>().await,
                     }
                 } => {
-                    let mins = STALL_TIMEOUT.as_secs() / 60;
+                    let mins = stall_timeout.as_secs() / 60;
                     let detail = format!("no agent frames for {mins} minutes");
                     self.send(ClientMsg::RunFailed {
                         run_id: cursor.run_id(),
