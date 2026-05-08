@@ -6,7 +6,7 @@
 
 import { useState } from "react";
 import { observer } from "mobx-react";
-import { HelpCircle } from "lucide-react";
+import { HelpCircle, Plus } from "lucide-react";
 import useSWR from "swr";
 import { useTranslation } from "@pi-dash/i18n";
 import { TOAST_TYPE, setToast } from "@pi-dash/propel/toast";
@@ -17,7 +17,9 @@ import type { TBadgeVariant } from "@pi-dash/ui";
 import { AlertModalCore, Badge, Button, Tooltip } from "@pi-dash/ui";
 import { PageHead } from "@/components/core/page-title";
 import { AddRunnerModal } from "@/components/runners/add-runner-modal";
+import { CreatePodModal } from "@/components/runners/create-pod-modal";
 import { RunnerEnrollmentCommand } from "@/components/runners/runner-enrollment-command";
+import { useSelectedPodFilter } from "@/hooks/use-selected-pod-filter";
 import { useWorkspace } from "@/hooks/store/use-workspace";
 
 const service = new RunnerService();
@@ -56,13 +58,17 @@ const RunnersListPage = observer(function RunnersListPage() {
     { refreshInterval: 5_000 }
   );
 
-  const { data: pods, error: podsError } = useSWR<IPod[]>(
-    workspaceId ? ["pods", workspaceId] : null,
-    () => podService.list(workspaceId!),
-    { refreshInterval: 30_000 }
-  );
+  const {
+    data: pods,
+    error: podsError,
+    mutate: mutatePods,
+  } = useSWR<IPod[]>(workspaceId ? ["pods", workspaceId] : null, () => podService.list(workspaceId!), {
+    refreshInterval: 30_000,
+  });
 
   const [addOpen, setAddOpen] = useState(false);
+  const [createPodOpen, setCreatePodOpen] = useState(false);
+  const { selectedPodId, setSelectedPodId, filteredRunners, selectedPod } = useSelectedPodFilter(runners, pods);
   const [deleteRunner, setDeleteRunner] = useState<IRunner | null>(null);
   const [deleting, setDeleting] = useState(false);
   const [revokeRunner, setRevokeRunner] = useState<IRunner | null>(null);
@@ -170,27 +176,63 @@ const RunnersListPage = observer(function RunnersListPage() {
           <div className="text-destructive text-12">{t("runners.pods.load_failed")}</div>
         ) : (
           <div className="flex flex-wrap gap-2">
-            {(pods ?? []).map((p) => (
-              <div key={p.id} className="rounded-md border border-subtle bg-layer-1 px-3 py-2 text-12">
-                <div className="flex items-center gap-2">
-                  <span className="font-medium text-primary">{p.name}</span>
-                  {p.is_default && (
-                    <Badge variant="accent-neutral" size="sm">
-                      {t("runners.pods.default_badge")}
-                    </Badge>
-                  )}
-                </div>
-                <div className="text-secondary">{t("runners.pods.runner_count", { count: p.runner_count })}</div>
-              </div>
-            ))}
-            {(pods ?? []).length === 0 && <div className="text-12 text-secondary">{t("runners.pods.empty")}</div>}
+            {(pods ?? []).map((p) => {
+              const isSelected = p.id === selectedPodId;
+              return (
+                <button
+                  key={p.id}
+                  type="button"
+                  aria-pressed={isSelected}
+                  aria-label={t("runners.pods.tile_aria", { name: p.name })}
+                  onClick={() => setSelectedPodId(isSelected ? null : p.id)}
+                  className={`rounded-md border px-3 py-2 text-left text-12 transition-colors ${
+                    isSelected
+                      ? "border-custom-primary-100 bg-custom-primary-100/10 ring-custom-primary-100 ring-1"
+                      : "hover:border-primary border-subtle bg-layer-1"
+                  }`}
+                >
+                  <div className="flex items-center gap-2">
+                    <span className="font-medium text-primary">{p.name}</span>
+                    {p.is_default && (
+                      <Badge variant="accent-neutral" size="sm">
+                        {t("runners.pods.default_badge")}
+                      </Badge>
+                    )}
+                  </div>
+                  <div className="text-secondary">{t("runners.pods.runner_count", { count: p.runner_count })}</div>
+                </button>
+              );
+            })}
+            <button
+              type="button"
+              onClick={() => setCreatePodOpen(true)}
+              disabled={!workspaceSlug}
+              className="hover:border-primary flex items-center gap-1.5 rounded-md border border-dashed border-subtle bg-transparent px-3 py-2 text-12 text-secondary hover:text-primary disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              <Plus className="size-3.5" />
+              <span className="font-medium">{t("runners.pods.create_tile")}</span>
+            </button>
           </div>
         )}
       </section>
 
       {/* Runners list — pending rows show as offline until the daemon enrolls */}
       <section>
-        <div className="mb-2 text-13 font-medium text-primary">{t("runners.list.connected_runners")}</div>
+        <div className="mb-2 flex items-center gap-3">
+          <div className="text-13 font-medium text-primary">{t("runners.list.connected_runners")}</div>
+          {selectedPod && (
+            <div className="flex items-center gap-2 text-12 text-secondary">
+              <span>{t("runners.pods.filter_active", { name: selectedPod.name })}</span>
+              <button
+                type="button"
+                onClick={() => setSelectedPodId(null)}
+                className="text-custom-primary-100 underline-offset-2 hover:underline"
+              >
+                {t("runners.pods.filter_clear")}
+              </button>
+            </div>
+          )}
+        </div>
         <div className="overflow-x-auto rounded-md border border-subtle">
           <table className="w-full text-13">
             <thead className="bg-layer-1 text-left text-secondary">
@@ -205,7 +247,7 @@ const RunnersListPage = observer(function RunnersListPage() {
               </tr>
             </thead>
             <tbody>
-              {(runners ?? []).map((r) => (
+              {(filteredRunners ?? []).map((r) => (
                 <tr key={r.id} className="border-t border-subtle">
                   <td className="font-mono px-3 py-2 text-11">{r.name}</td>
                   <td className="px-3 py-2">{r.pod_detail ? r.pod_detail.name : "—"}</td>
@@ -244,7 +286,7 @@ const RunnersListPage = observer(function RunnersListPage() {
                   </td>
                 </tr>
               ))}
-              {(runners ?? []).length === 0 && (
+              {(filteredRunners ?? []).length === 0 && (
                 <tr>
                   <td colSpan={7} className="px-3 py-8 text-center text-secondary">
                     {t("runners.list.empty")}
@@ -263,6 +305,14 @@ const RunnersListPage = observer(function RunnersListPage() {
           workspaceId={workspaceId}
           workspaceSlug={workspaceSlug}
           onCreated={() => mutateRunners()}
+        />
+      )}
+      {workspaceSlug && (
+        <CreatePodModal
+          isOpen={createPodOpen}
+          onClose={() => setCreatePodOpen(false)}
+          workspaceSlug={workspaceSlug}
+          onCreated={() => mutatePods()}
         />
       )}
       <AlertModalCore
