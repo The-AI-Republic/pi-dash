@@ -61,7 +61,14 @@ def delete_runner(runner: Runner, *, purge_local: bool) -> None:
         send_runner_remove(runner_pk, reason="deleted by user")
     else:
         send_runner_revoke(runner_pk, reason="deleted by user")
-    runner.revoke()
+    # Use the canonical ``runner_removed`` revoke reason so the
+    # session-evicted body the daemon sees (sessions.py emits
+    # ``session.revoked_reason`` in the 409 body) carries a reason
+    # the daemon can match against to fall back to local cleanup if
+    # the ``remove_runner`` frame above was lost in the small window
+    # between enqueue and session eviction. See
+    # ``runner/src/cloud/http.rs`` for the synthesizer.
+    runner.revoke(reason="runner_removed")
     close_runner_session(runner_pk)
     Runner.objects.filter(pk=runner_pk).delete()
 

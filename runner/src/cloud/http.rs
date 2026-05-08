@@ -1071,6 +1071,32 @@ impl HttpLoop {
                 }
                 Err(err) if err.is_fatal_for_runner() => {
                     tracing::warn!(runner = %self.client.runner_id(), "fatal transport error: {err}");
+                    // Closes the F3 race: when the cloud-side delete
+                    // path enqueues `remove_runner` and then evicts
+                    // the session in the next breath, the daemon may
+                    // see the 409 before its long-poll has drained
+                    // the live-stream entry. Synthesize the same
+                    // RemoveRunner envelope here so the RunnerLoop's
+                    // existing handler (cancel run + strip config +
+                    // delete data dir) runs regardless of whether the
+                    // wire frame made it across. The handler is
+                    // idempotent — if the real frame DID arrive
+                    // first, the second pass strips an already-empty
+                    // config block and removes a non-existent dir,
+                    // which is a no-op.
+                    if Self::should_synthesize_remove_runner(&err) {
+                        let synth = ServerMsg::RemoveRunner {
+                            runner_id: self.client.runner_id(),
+                            reason: Some(format!("synthesized: {err}")),
+                        };
+                        let _ = self
+                            .mailbox
+                            .send(InboundEnvelope {
+                                stream_id: None,
+                                env: Envelope::for_runner(self.client.runner_id(), synth),
+                            })
+                            .await;
+                    }
                     return Err(err);
                 }
                 Err(err) if err.is_recoverable() => {
@@ -1152,6 +1178,40 @@ impl HttpLoop {
                     kind = msg.kind,
                 );
             }
+        }
+    }
+
+    /// True when the fatal-for-runner error means "the runner row is
+    /// gone (or about to be)" and the daemon should run the same
+    /// local-cleanup path that the wire `RemoveRunner` frame would
+    /// trigger.
+    ///
+    /// `RunnerRevoked` / `RefreshTokenReplayed` / `MembershipRevoked`
+    /// are unambiguous: the cloud has decided the runner is gone.
+    /// `SessionEvicted` is conditional on the cloud's `reason` body
+    /// (see `apps/api/pi_dash/runner/views/sessions.py`): the cloud
+    /// echoes `session.revoked_reason`, which is set by
+    /// `Runner.revoke()` to one of the canonical strings. We treat
+    /// only those as terminal; an empty / unknown reason might be a
+    /// session-replaced scenario where another daemon process holds
+    /// the canonical config, so we leave local state alone.
+    fn should_synthesize_remove_runner(err: &TransportError) -> bool {
+        match err {
+            TransportError::RunnerRevoked
+            | TransportError::RefreshTokenReplayed
+            | TransportError::MembershipRevoked => true,
+            TransportError::SessionEvicted { reason } => {
+                // The body is `{"error": "session_evicted", "reason":
+                // "<revoked_reason>"}`; do a substring match so we
+                // tolerate JSON envelopes, plain text, and future
+                // additions to the canonical reason set.
+                let r = reason.to_ascii_lowercase();
+                r.contains("runner_removed")
+                    || r.contains("manual_revoke")
+                    || r.contains("membership_revoked")
+                    || r.contains("refresh_token_replayed")
+            }
+            _ => false,
         }
     }
 }
@@ -1302,6 +1362,63 @@ mod tests {
         assert!(TransportError::RefreshTokenReplayed.is_fatal_for_runner());
         assert!(TransportError::SessionEvicted { reason: "x".into() }.is_fatal_for_runner());
         assert!(!TransportError::Network("net".into()).is_fatal_for_runner());
+    }
+
+    #[test]
+    fn synthesize_remove_runner_classifies_canonical_reasons() {
+        // Unambiguous "runner gone" signals always synthesize.
+        assert!(HttpLoop::should_synthesize_remove_runner(
+            &TransportError::RunnerRevoked
+        ));
+        assert!(HttpLoop::should_synthesize_remove_runner(
+            &TransportError::RefreshTokenReplayed
+        ));
+        assert!(HttpLoop::should_synthesize_remove_runner(
+            &TransportError::MembershipRevoked
+        ));
+
+        // SessionEvicted depends on the cloud-supplied reason. The
+        // canonical set comes from `Runner.revoke(reason=…)` on the
+        // cloud (apps/api/pi_dash/runner/models.py).
+        for reason in [
+            "runner_removed",
+            "manual_revoke",
+            "membership_revoked",
+            "refresh_token_replayed",
+            // Tolerate JSON wrapping: the cloud emits
+            // `{"error": "session_evicted", "reason": "runner_removed"}`.
+            r#"{"error":"session_evicted","reason":"runner_removed"}"#,
+            // Case-insensitive.
+            "RUNNER_REMOVED",
+        ] {
+            assert!(
+                HttpLoop::should_synthesize_remove_runner(&TransportError::SessionEvicted {
+                    reason: reason.into()
+                }),
+                "reason {reason:?} should synthesize",
+            );
+        }
+
+        // Empty / unknown reasons are conservatively NOT synthesized
+        // — could be a session-replaced scenario where another
+        // process holds the canonical config.
+        for reason in ["", "session_replaced", "unknown_thing"] {
+            assert!(
+                !HttpLoop::should_synthesize_remove_runner(&TransportError::SessionEvicted {
+                    reason: reason.into()
+                }),
+                "reason {reason:?} should NOT synthesize",
+            );
+        }
+
+        // Non-fatal errors don't reach the synthesizer in practice,
+        // but the predicate still answers no.
+        assert!(!HttpLoop::should_synthesize_remove_runner(
+            &TransportError::Network("net".into())
+        ));
+        assert!(!HttpLoop::should_synthesize_remove_runner(
+            &TransportError::RunnerIdMismatch
+        ));
     }
 
     fn sample_attach_body() -> AttachBody {
