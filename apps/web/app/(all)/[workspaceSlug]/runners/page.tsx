@@ -4,7 +4,7 @@
  * See the LICENSE file for details.
  */
 
-import { useEffect, useMemo, useState } from "react";
+import { useState } from "react";
 import { observer } from "mobx-react";
 import { HelpCircle, Plus } from "lucide-react";
 import useSWR from "swr";
@@ -19,6 +19,7 @@ import { PageHead } from "@/components/core/page-title";
 import { AddRunnerModal } from "@/components/runners/add-runner-modal";
 import { CreatePodModal } from "@/components/runners/create-pod-modal";
 import { RunnerEnrollmentCommand } from "@/components/runners/runner-enrollment-command";
+import { useSelectedPodFilter } from "@/hooks/use-selected-pod-filter";
 import { useWorkspace } from "@/hooks/store/use-workspace";
 
 const service = new RunnerService();
@@ -67,23 +68,7 @@ const RunnersListPage = observer(function RunnersListPage() {
 
   const [addOpen, setAddOpen] = useState(false);
   const [createPodOpen, setCreatePodOpen] = useState(false);
-  const [selectedPodId, setSelectedPodId] = useState<string | null>(null);
-
-  // Drop the selection if the chosen pod disappears from the list (deleted
-  // server-side, or the user switched workspace). Without this the filter
-  // would silently keep an unreachable id and hide every runner.
-  useEffect(() => {
-    if (!selectedPodId) return;
-    if (!pods) return;
-    if (!pods.some((p) => p.id === selectedPodId)) setSelectedPodId(null);
-  }, [pods, selectedPodId]);
-
-  const filteredRunners = useMemo(() => {
-    if (!runners) return runners;
-    if (!selectedPodId) return runners;
-    return runners.filter((r) => r.pod === selectedPodId);
-  }, [runners, selectedPodId]);
-  const selectedPod = selectedPodId ? pods?.find((p) => p.id === selectedPodId) : undefined;
+  const { selectedPodId, setSelectedPodId, filteredRunners, selectedPod } = useSelectedPodFilter(runners, pods);
   const [deleteRunner, setDeleteRunner] = useState<IRunner | null>(null);
   const [deleting, setDeleting] = useState(false);
   const [revokeRunner, setRevokeRunner] = useState<IRunner | null>(null);
