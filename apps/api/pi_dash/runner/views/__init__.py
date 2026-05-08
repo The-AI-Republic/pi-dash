@@ -9,6 +9,7 @@ from .enrollment import (
     RunnerEnrollEndpoint,
     RunnerInviteEndpoint,
     RunnerRefreshEndpoint,
+    RunnerReviveEndpoint,
     RunnerSelfRevokeEndpoint,
 )
 from .metrics import MetricsEndpoint
@@ -28,7 +29,11 @@ from .run_endpoints import (
     RunStartedEndpoint,
     RunStreamUpgradeEndpoint,
 )
-from .runners import RunnerDetailEndpoint, RunnerListEndpoint
+from .runners import (
+    RunnerDetailEndpoint,
+    RunnerListEndpoint,
+    RunnerRevokeEndpoint,
+)
 from .runs import (
     AgentRunCancelEndpoint,
     AgentRunDetailEndpoint,
@@ -49,6 +54,8 @@ __all__ = [
     "RunnerEnrollEndpoint",
     "RunnerInviteEndpoint",
     "RunnerRefreshEndpoint",
+    "RunnerReviveEndpoint",
+    "RunnerRevokeEndpoint",
     "RunnerSelfRevokeEndpoint",
     "HealthEndpoint",
     "MetricsEndpoint",

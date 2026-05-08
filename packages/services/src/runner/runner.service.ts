@@ -42,6 +42,30 @@ export class RunnerService extends APIService {
       });
   }
 
+  /** ``POST /api/runners/<id>/revoke/`` — hard-revoke without removing
+   * the row. Cascades to sessions, in-flight runs, and pinned follow-ups
+   * via the model's ``revoke()``. Idempotent. */
+  async revokeRunner(runnerId: string): Promise<IRunner> {
+    return this.post(`/api/runners/${runnerId}/revoke/`, {})
+      .then((r) => r?.data)
+      .catch((e) => {
+        throw e?.response?.data;
+      });
+  }
+
+  /** ``POST /api/runners/<id>/revive/`` — mint a fresh enrollment token
+   * on an existing PENDING-or-REVOKED runner row. The response payload
+   * is identical to ``createRunnerInvite`` so the same install-command
+   * panel can render it. 409 if the runner is currently active — revoke
+   * it first. */
+  async reviveRunner(runnerId: string): Promise<IRunnerInvite> {
+    return this.post(`/api/runners/${runnerId}/revive/`, {})
+      .then((r) => r?.data)
+      .catch((e) => {
+        throw e?.response?.data;
+      });
+  }
+
   /** Move a runner to a different pod (same workspace). Owner or admin only. */
   async move(runnerId: string, podId: string, name?: string): Promise<IRunner> {
     const body: Record<string, unknown> = { pod: podId };

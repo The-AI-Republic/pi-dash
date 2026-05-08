@@ -127,6 +127,38 @@ pub async fn run(args: Args, paths: &Paths) -> Result<()> {
     .await
     .context("writing runner credentials failed")?;
 
+    // Re-enrollment after revive: the cloud reused the same Runner row
+    // and minted a fresh refresh token. The local config already has a
+    // matching `[[runner]]` block; rotating credentials.toml above is
+    // the only thing required, and appending another block would create
+    // a duplicate runner_id that the supervisor would reject. Skip the
+    // append and the rest of the first-enrollment scaffolding.
+    let already_configured = existing_config
+        .as_ref()
+        .map(|cfg| cfg.runners.iter().any(|r| r.runner_id == resp.runner_id))
+        .unwrap_or(false);
+    if already_configured {
+        println!(
+            "Re-enrolled runner {} ({}) — local config left as-is, refresh token rotated.",
+            resp.runner_name, resp.runner_id
+        );
+        println!("Restarting service to pick up the new credentials…");
+        let outcome = crate::service::reload::restart_and_verify(paths).await;
+        if outcome.ok {
+            println!("Service restarted ({}).", outcome.summary);
+        } else {
+            println!(
+                "Service restart did not complete cleanly: {}",
+                outcome.summary
+            );
+            if let Some(detail) = outcome.detail {
+                println!("\n{detail}");
+            }
+            println!("\nThe new credentials were written. Try `pidash restart` manually.");
+        }
+        return Ok(());
+    }
+
     // working_dir falls back to a per-runner sandbox under
     // data_dir/runners/<rid>/workspace when the operator didn't pass
     // ``--working-dir``. The sandbox path runs but is rarely what
@@ -438,6 +470,13 @@ pub async fn enroll_additional_runner(
     )
     .await
     .map_err(|e| EnrollAdditionalError::WriteCredentials(format!("{e:#}")))?;
+
+    // Re-enrollment of an existing runner row (cloud-side ``revive``):
+    // credentials.toml has already been rotated above. Return the
+    // existing config block instead of pushing a duplicate.
+    if let Some(existing) = cfg.runners.iter().find(|r| r.runner_id == resp.runner_id) {
+        return Ok(existing.clone());
+    }
 
     let working_dir = working_dir.unwrap_or_else(|| paths.runner_dir(resp.runner_id).join("workspace"));
     let new_runner = RunnerConfig {
