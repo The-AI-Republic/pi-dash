@@ -337,8 +337,13 @@ class Runner(models.Model):
            a brief chance to observe shutdown (``design.md`` §7.8).
 
         The reason string is one of ``manual_revoke``,
-        ``membership_revoked``, ``refresh_token_replayed``, or
-        ``runner_removed``.
+        ``membership_revoked``, ``refresh_token_replayed``,
+        ``runner_removed``, or ``user_revoke``. The first four are in
+        the daemon's "synthesize local cleanup" canonical set (see
+        ``runner/src/cloud/http.rs::body_matches_canonical_reason``);
+        ``user_revoke`` is the explicit "revoke cloud-side only, leave
+        the local install alone" signal used by ``delete_runner``
+        when the user unchecks the cascade-delete checkbox.
         """
         from django.db import transaction
         from pi_dash.runner.services.matcher import (

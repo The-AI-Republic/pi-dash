@@ -153,6 +153,53 @@ def test_web_delete_purge_false_emits_revoke_only(
 
 
 @pytest.mark.unit
+def test_delete_propagates_canonical_reason_when_purging(
+    db, create_user, workspace, pod, _stub_outbox_send
+):
+    """purge_local=True must put a canonical reason on the session row.
+
+    The Rust synthesizer in ``runner/src/cloud/http.rs`` matches the
+    session's ``revoked_reason`` (echoed in the 409 body) against a
+    canonical set; ``runner_removed`` is in that set so the daemon
+    will fall back to local cleanup if the wire frame above is lost.
+    """
+    from pi_dash.runner.models import RunnerSession
+    from pi_dash.runner.services.runner_delete import delete_runner
+
+    r = _make_runner(create_user, workspace, pod, "purge-true")
+    session = RunnerSession.objects.create(runner=r)
+    delete_runner(r, purge_local=True)
+    session.refresh_from_db()
+    assert session.revoked_at is not None
+    assert session.revoked_reason == "runner_removed"
+
+
+@pytest.mark.unit
+def test_delete_uses_non_canonical_reason_when_not_purging(
+    db, create_user, workspace, pod, _stub_outbox_send
+):
+    """purge_local=False must NOT trigger the daemon's local-wipe synthesizer.
+
+    The synthesizer matches a small canonical set of reasons (see
+    ``body_matches_canonical_reason`` in ``http.rs``). ``user_revoke``
+    is deliberately outside that set: the daemon's RunnerLoop exits
+    cleanly on 409 but does not strip ``config.toml`` or the data dir.
+    Without this distinction every revoke-only delete was wiping local
+    state too, breaking the "Also delete the local runner instance"
+    checkbox-unchecked path in the web UI.
+    """
+    from pi_dash.runner.models import RunnerSession
+    from pi_dash.runner.services.runner_delete import delete_runner
+
+    r = _make_runner(create_user, workspace, pod, "purge-false")
+    session = RunnerSession.objects.create(runner=r)
+    delete_runner(r, purge_local=False)
+    session.refresh_from_db()
+    assert session.revoked_at is not None
+    assert session.revoked_reason == "user_revoke"
+
+
+@pytest.mark.unit
 def test_web_delete_purge_invalid_returns_400(
     db, session_client, create_user, workspace, pod
 ):

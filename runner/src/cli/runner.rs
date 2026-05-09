@@ -365,6 +365,19 @@ pub async fn remove(args: RemoveArgs, paths: &Paths) -> Result<()> {
         anyhow::bail!("cloud delete-runner failed");
     }
 
+    // For OfflineFallback / LocalOnly modes, ask the local daemon to
+    // tear down the runner via IPC before we touch config.toml or the
+    // data dir. Without this the daemon keeps polling the cloud against
+    // its in-memory copy of the config and re-creates the data dir
+    // until the operator manually restarts the service. For Cascade
+    // mode, the cloud already enqueued a remove_runner frame and the
+    // daemon will react to that; the direct mutation below is the
+    // belt-and-suspenders "what if the daemon isn't running on this
+    // host" path.
+    if !matches!(mode, RemoveMode::Cascade) {
+        let _ = try_ipc_remove_local(paths, &args.name).await;
+    }
+
     // Local cleanup: strip the [[runner]] block under the host-wide
     // config lock, then drop the per-runner data dir. The daemon's
     // cascade handler does the same thing on its own; doing it here
@@ -409,5 +422,74 @@ pub async fn remove(args: RemoveArgs, paths: &Paths) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// Best-effort IPC ping to the running daemon: ask it to tear down
+/// the named runner without touching the cloud. The daemon's handler
+/// runs the same teardown the cloud's `remove_runner` wire frame
+/// triggers (cancel run, strip config.toml, delete data dir), but
+/// bounded to this one runner; the shared `pidash.service` systemd
+/// unit and other runners are left alone.
+///
+/// Failure is non-fatal: if the daemon isn't running, the socket
+/// doesn't exist, or it's an older `pidash` that doesn't know the
+/// `RunnerRemoveLocal` verb, we silently swallow the error and let
+/// the caller fall through to the direct config-mutation path. The
+/// IPC call is purely an optimisation to avoid the "daemon keeps
+/// polling for a runner that's been removed from config" window —
+/// not a correctness requirement.
+async fn try_ipc_remove_local(paths: &Paths, runner_name: &str) -> Result<()> {
+    use crate::ipc::client::Client;
+    use crate::ipc::protocol::{Request, Response};
+
+    let socket = paths.ipc_socket_path();
+    let mut client = match Client::connect(&socket).await {
+        Ok(c) => c,
+        Err(e) => {
+            // Daemon isn't running on this host — that's the common
+            // case for a fresh install or a service that's been
+            // stopped. Not noise-worthy.
+            tracing::debug!(
+                "ipc connect to {socket:?} failed: {e:#}; skipping daemon-side teardown"
+            );
+            return Ok(());
+        }
+    };
+    let req = Request::RunnerRemoveLocal {
+        runner: runner_name.to_string(),
+    };
+    match client.call(req).await {
+        Ok(Response::Ack) => {
+            tracing::info!(runner = %runner_name, "daemon acked local-remove via IPC");
+            Ok(())
+        }
+        Ok(Response::Error(err)) => {
+            // Older daemon that doesn't know the verb, or the runner
+            // name resolution failed. The fallback config-mutation
+            // path will still clean up.
+            tracing::debug!(
+                runner = %runner_name,
+                "ipc remove_local rejected by daemon: {} (code {}); \
+                 falling back to direct config mutation",
+                err.message,
+                err.code,
+            );
+            Ok(())
+        }
+        Ok(other) => {
+            tracing::debug!(
+                runner = %runner_name,
+                "unexpected ipc response from daemon: {other:?}"
+            );
+            Ok(())
+        }
+        Err(e) => {
+            tracing::debug!(
+                runner = %runner_name,
+                "ipc remove_local call failed: {e:#}; falling back to direct config mutation"
+            );
+            Ok(())
+        }
+    }
 }
 

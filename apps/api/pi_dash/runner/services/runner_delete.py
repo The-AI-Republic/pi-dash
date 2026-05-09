@@ -61,14 +61,21 @@ def delete_runner(runner: Runner, *, purge_local: bool) -> None:
         send_runner_remove(runner_pk, reason="deleted by user")
     else:
         send_runner_revoke(runner_pk, reason="deleted by user")
-    # Use the canonical ``runner_removed`` revoke reason so the
-    # session-evicted body the daemon sees (sessions.py emits
-    # ``session.revoked_reason`` in the 409 body) carries a reason
-    # the daemon can match against to fall back to local cleanup if
-    # the ``remove_runner`` frame above was lost in the small window
-    # between enqueue and session eviction. See
-    # ``runner/src/cloud/http.rs`` for the synthesizer.
-    runner.revoke(reason="runner_removed")
+    # The session's ``revoked_reason`` is echoed in the 409
+    # session_evicted body the daemon sees on its next poll. The Rust
+    # synthesizer in ``runner/src/cloud/http.rs`` matches a small
+    # canonical set of reasons and synthesizes a ``RemoveRunner`` frame
+    # locally — which means **wipe the local install**.
+    #
+    # When ``purge_local=True`` we want that behaviour: send the
+    # canonical ``runner_removed`` so the daemon falls back to local
+    # cleanup if the wire frame above was lost in the enqueue-vs-evict
+    # window. When ``purge_local=False`` the user explicitly asked us
+    # NOT to touch the local install — pick a reason outside the
+    # synthesizer's canonical set so the daemon exits its RunnerLoop
+    # cleanly without wiping ``config.toml`` or the data dir.
+    revoke_reason = "runner_removed" if purge_local else "user_revoke"
+    runner.revoke(reason=revoke_reason)
     close_runner_session(runner_pk)
     Runner.objects.filter(pk=runner_pk).delete()
 
