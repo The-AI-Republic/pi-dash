@@ -348,7 +348,15 @@ POSTHOG_API_KEY = os.environ.get("POSTHOG_API_KEY", False)
 POSTHOG_HOST = os.environ.get("POSTHOG_HOST", False)
 
 # Per-runner HTTPS transport tunables (see ``.ai_design/move_to_https/design.md`` §9).
-LONG_POLL_INTERVAL_SECS = int(os.environ.get("LONG_POLL_INTERVAL_SECS", 25))
+# Clamped to 55 seconds so the server-side block always finishes
+# strictly before the daemon's per-request timeout (capped at 55 + 5
+# buffer in `runner/src/cloud/http.rs::MAX_LONG_POLL_INTERVAL_SECS`).
+# Without this clamp an operator could push the env to 60+ and cause
+# the daemon to drop in-flight assigns when reqwest fires its own
+# timeout before the server's block completes.
+LONG_POLL_INTERVAL_SECS = min(
+    int(os.environ.get("LONG_POLL_INTERVAL_SECS", 25)), 55
+)
 ACCESS_TOKEN_TTL_SECS = int(os.environ.get("ACCESS_TOKEN_TTL_SECS", 3600))
 RUNNER_OFFLINE_THRESHOLD_SECS = int(os.environ.get("RUNNER_OFFLINE_THRESHOLD_SECS", 50))
 OFFLINE_STREAM_TTL_SECS = int(os.environ.get("OFFLINE_STREAM_TTL_SECS", 86400))

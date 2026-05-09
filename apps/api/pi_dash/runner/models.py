@@ -337,8 +337,13 @@ class Runner(models.Model):
            a brief chance to observe shutdown (``design.md`` §7.8).
 
         The reason string is one of ``manual_revoke``,
-        ``membership_revoked``, ``refresh_token_replayed``, or
-        ``runner_removed``.
+        ``membership_revoked``, ``refresh_token_replayed``,
+        ``runner_removed``, or ``user_revoke``. The first four are in
+        the daemon's "synthesize local cleanup" canonical set (see
+        ``runner/src/cloud/http.rs::body_matches_canonical_reason``);
+        ``user_revoke`` is the explicit "revoke cloud-side only, leave
+        the local install alone" signal used by ``delete_runner``
+        when the user unchecks the cascade-delete checkbox.
         """
         from django.db import transaction
         from pi_dash.runner.services.matcher import (
@@ -365,10 +370,15 @@ class Runner(models.Model):
             # next daemon poll on the old session will see the row gone
             # and react with 409 session_evicted; pub/sub eviction
             # signaling fires from the eviction sweeper / session-open
-            # path, not here.
+            # path, not here. Propagate the caller's reason so the 409
+            # body's `reason` field carries the canonical string the
+            # daemon's synthesizer matches against (`runner_removed`
+            # for cascade delete, `manual_revoke` / `membership_revoked`
+            # / `refresh_token_replayed` for revoke flows; `user_revoke`
+            # is the deliberate "do NOT match the synthesizer" signal).
             RunnerSession.objects.filter(
                 runner=self, revoked_at__isnull=True
-            ).update(revoked_at=now, revoked_reason="runner_revoked")
+            ).update(revoked_at=now, revoked_reason=reason[:32])
 
             active_runs = list(
                 AgentRun.objects.select_for_update()

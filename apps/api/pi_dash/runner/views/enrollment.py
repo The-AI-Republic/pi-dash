@@ -189,7 +189,10 @@ class RunnerEnrollEndpoint(APIView):
 
     authentication_classes: list = []
     permission_classes = [AllowAny]
-    throttle_classes: list = []
+    # Inherit DEFAULT_THROTTLE_CLASSES (AnonRateThrottle, 30/minute per
+    # IP) — design.md §9.1 requires enroll to be tightly auth-throttled
+    # against bearer-token brute-force. The DRF default is the lightest
+    # protection that won't break legitimate one-off enrollments.
 
     def post(self, request):
         serializer = RunnerEnrollRequestSerializer(data=request.data)
@@ -570,7 +573,8 @@ class MachineTokenRedeemEndpoint(APIView):
 
     authentication_classes: list = []
     permission_classes = [AllowAny]
-    throttle_classes: list = []
+    # Inherit DEFAULT_THROTTLE_CLASSES (AnonRateThrottle) so a leaked
+    # ticket can't be brute-redeemed at line speed.
 
     def post(self, request):
         ticket = (request.data.get("ticket") or "").strip()
