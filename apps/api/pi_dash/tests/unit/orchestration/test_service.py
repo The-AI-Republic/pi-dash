@@ -334,7 +334,15 @@ def test_comment_creates_pinned_continuation(
     seeded, project, issue, states, runner_for_workspace, create_user
 ):
     """``handle_issue_comment`` is the explicit entry point Comment & Run
-    invokes — comments themselves no longer fire it via post_save."""
+    invokes — comments themselves no longer fire it via post_save.
+
+    The follow-up run gets a fresh full-template render — *not* a continuation
+    prompt that embeds the new comment text. The agent reads the comment
+    thread at runtime via ``pidash comment list``. See
+    ``.ai_design/ticking_optimization/design.md``.
+    """
+    from pi_dash.prompting.composer import build_first_turn
+
     Issue.all_objects.filter(pk=issue.pk).update(state=states["in_progress"])
     issue.refresh_from_db()
     prior = _make_paused_run(issue, runner_for_workspace)
@@ -351,7 +359,11 @@ def test_comment_creates_pinned_continuation(
     assert r_next is not None
     assert r_next.pinned_runner_id == runner_for_workspace.id
     assert r_next.status == AgentRunStatus.QUEUED
-    assert "option B" in r_next.prompt
+    # The rendered prompt is the full template — same shape as a fresh
+    # first-turn render — and does not embed the comment body verbatim.
+    assert r_next.prompt == build_first_turn(issue, r_next)
+    assert "option B" not in r_next.prompt
+    assert "Pi Dash issue" in r_next.prompt
 
 
 @pytest.mark.unit
@@ -417,10 +429,14 @@ def test_comment_during_active_run_returns_prior_run_active(
 
 
 @pytest.mark.unit
-def test_pin_skipped_when_parent_has_no_thread_id(
+def test_pin_preserved_even_without_parent_thread_id(
     seeded, project, issue, states, runner_for_workspace, create_user
 ):
-    """No thread_id means there's no session to resume against; don't pin."""
+    """Pinning is now driven by repo locality (same checkout / branch on the
+    same runner), not by session resume. A parent without a thread_id still
+    gets its runner pinned for the follow-up. See
+    ``.ai_design/ticking_optimization/design.md``.
+    """
     Issue.all_objects.filter(pk=issue.pk).update(state=states["in_progress"])
     issue.refresh_from_db()
     prior = _make_paused_run(issue, runner_for_workspace, thread_id="")
@@ -435,4 +451,165 @@ def test_pin_skipped_when_parent_has_no_thread_id(
         .first()
     )
     assert r_next is not None
-    assert r_next.pinned_runner_id is None
+    assert r_next.pinned_runner_id == runner_for_workspace.id
+
+
+# ---------------------------------------------------------------------------
+# Re-arm on human comment (.ai_design/create_review_state/design.md §4.6)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+def test_comment_rearms_terminally_disarmed_ticker(
+    seeded, project, issue, states, runner_for_workspace, create_user
+):
+    """A follow-up human comment after a `completed` terminal disarm
+    must flip ``enabled=True`` and clear ``disarm_reason``."""
+    from pi_dash.db.models.issue_agent_ticker import (
+        IssueAgentTicker,
+        TickerDisarmReason,
+    )
+    from pi_dash.orchestration import scheduling
+
+    Issue.all_objects.filter(pk=issue.pk).update(state=states["in_progress"])
+    issue.refresh_from_db()
+    _make_paused_run(issue, runner_for_workspace)
+    scheduling.arm_ticker(issue)
+    sched = IssueAgentTicker.objects.get(issue=issue)
+    sched.enabled = False
+    sched.disarm_reason = TickerDisarmReason.TERMINAL_SIGNAL
+    sched.tick_count = 5
+    sched.save(update_fields=["enabled", "disarm_reason", "tick_count"])
+
+    comment = _make_comment(issue, create_user, "I disagree, look again")
+    service.handle_issue_comment(comment)
+
+    sched.refresh_from_db()
+    assert sched.enabled is True
+    assert sched.disarm_reason == TickerDisarmReason.NONE
+    assert sched.tick_count == 0
+
+
+@pytest.mark.unit
+def test_comment_rearms_even_when_continuation_coalesces(
+    seeded, project, issue, states, runner_for_workspace, create_user
+):
+    """Re-arm fires before the coalesce / active-run / no-pod returns
+    so ticking restarts even when no new run dispatches."""
+    from django.utils import timezone
+
+    from pi_dash.db.models.issue_agent_ticker import (
+        IssueAgentTicker,
+        TickerDisarmReason,
+    )
+    from pi_dash.orchestration import scheduling
+
+    Issue.all_objects.filter(pk=issue.pk).update(state=states["in_progress"])
+    issue.refresh_from_db()
+    prior = _make_paused_run(issue, runner_for_workspace)
+    AgentRun.objects.create(
+        workspace=issue.workspace,
+        owner=runner_for_workspace.owner,
+        pod=runner_for_workspace.pod,
+        work_item=issue,
+        parent_run=prior,
+        status=AgentRunStatus.QUEUED,
+        prompt="already queued",
+        started_at=timezone.now(),
+    )
+    scheduling.arm_ticker(issue)
+    sched = IssueAgentTicker.objects.get(issue=issue)
+    sched.enabled = False
+    sched.disarm_reason = TickerDisarmReason.TERMINAL_SIGNAL
+    sched.save(update_fields=["enabled", "disarm_reason"])
+
+    comment = _make_comment(issue, create_user, "ping")
+    outcome = service.handle_issue_comment(comment)
+    assert outcome.reason == "coalesced"
+    sched.refresh_from_db()
+    assert sched.enabled is True
+
+
+@pytest.mark.unit
+def test_comment_does_not_rearm_user_disabled_ticker(
+    seeded, project, issue, states, runner_for_workspace, create_user
+):
+    """The user_disabled escape hatch survives re-arm-on-comment."""
+    from pi_dash.db.models.issue_agent_ticker import IssueAgentTicker
+    from pi_dash.orchestration import scheduling
+
+    Issue.all_objects.filter(pk=issue.pk).update(state=states["in_progress"])
+    issue.refresh_from_db()
+    _make_paused_run(issue, runner_for_workspace)
+    scheduling.arm_ticker(issue)
+    sched = IssueAgentTicker.objects.get(issue=issue)
+    sched.user_disabled = True
+    sched.enabled = False
+    sched.save(update_fields=["user_disabled", "enabled"])
+
+    comment = _make_comment(issue, create_user, "wake up")
+    service.handle_issue_comment(comment)
+
+    sched.refresh_from_db()
+    assert sched.user_disabled is True
+    assert sched.enabled is False
+
+
+@pytest.mark.unit
+def test_bot_comment_does_not_rearm(
+    seeded, project, issue, states, runner_for_workspace, workpad_bot_user
+):
+    """Bot comments early-return before re-arm; no ticker mutation."""
+    from pi_dash.db.models.issue_agent_ticker import (
+        IssueAgentTicker,
+        TickerDisarmReason,
+    )
+    from pi_dash.orchestration import scheduling
+
+    Issue.all_objects.filter(pk=issue.pk).update(state=states["in_progress"])
+    issue.refresh_from_db()
+    _make_paused_run(issue, runner_for_workspace)
+    scheduling.arm_ticker(issue)
+    sched = IssueAgentTicker.objects.get(issue=issue)
+    sched.enabled = False
+    sched.disarm_reason = TickerDisarmReason.TERMINAL_SIGNAL
+    sched.save(update_fields=["enabled", "disarm_reason"])
+
+    comment = _make_comment(issue, workpad_bot_user, "## Workpad")
+    service.handle_issue_comment(comment)
+
+    sched.refresh_from_db()
+    assert sched.enabled is False
+    assert sched.disarm_reason == TickerDisarmReason.TERMINAL_SIGNAL
+
+
+@pytest.mark.unit
+def test_comment_on_non_eligible_state_does_not_rearm(
+    seeded, project, issue, states, runner_for_workspace, create_user
+):
+    """Comment on a Done/Backlog/Cancelled issue does not re-arm —
+    the early ``state-not-eligible`` return precedes the re-arm call.
+    """
+    from pi_dash.db.models.issue_agent_ticker import (
+        IssueAgentTicker,
+        TickerDisarmReason,
+    )
+    from pi_dash.orchestration import scheduling
+
+    Issue.all_objects.filter(pk=issue.pk).update(state=states["in_progress"])
+    issue.refresh_from_db()
+    _make_paused_run(issue, runner_for_workspace)
+    scheduling.arm_ticker(issue)
+    sched = IssueAgentTicker.objects.get(issue=issue)
+    sched.enabled = False
+    sched.disarm_reason = TickerDisarmReason.TERMINAL_SIGNAL
+    sched.save(update_fields=["enabled", "disarm_reason"])
+
+    Issue.all_objects.filter(pk=issue.pk).update(state=states["done"])
+    issue.refresh_from_db()
+
+    comment = _make_comment(issue, create_user, "ping")
+    outcome = service.handle_issue_comment(comment)
+    assert outcome.reason == "state-not-eligible"
+    sched.refresh_from_db()
+    assert sched.enabled is False

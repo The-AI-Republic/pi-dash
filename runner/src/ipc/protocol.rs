@@ -4,6 +4,7 @@ use uuid::Uuid;
 
 use crate::approval::router::ApprovalRecord;
 use crate::cloud::protocol::{ApprovalDecision, RunnerStatus};
+use crate::daemon::state::ObservabilitySnapshot;
 use crate::history::index::RunSummary;
 
 /// IPC wire version. Bumped on incompatible shape changes between
@@ -17,11 +18,15 @@ use crate::history::index::RunSummary;
 /// `{ daemon, runners: Vec<RunnerStatusSnapshot> }` and added the
 /// `runner` selector to every per-runner request variant.
 ///
-/// v3 added `RunnerRemoveLocal`, the CLI's "tell the daemon to clean
-/// up this runner without going through the cloud" verb. Older daemons
-/// reject the variant with an `unknown method` error; the CLI catches
-/// that and falls back to direct config mutation, so the bump is
-/// safe across mixed-version daemon/CLI pairs during dev.
+/// v3 added the optional `observability` field to
+/// `RunnerStatusSnapshot` so the TUI can surface per-active-run
+/// telemetry (turn count, tokens, agent pid, last event) that the
+/// daemon already collects under `agent_observability_v1`. The same
+/// bump also added `RunnerRemoveLocal`, the CLI's "tell the daemon to
+/// clean up this runner without going through the cloud" verb. Older
+/// daemons reject the variant with an `unknown method` error; the CLI
+/// catches that and falls back to direct config mutation, so mixed
+/// daemon/CLI pairs during dev stay safe.
 pub const IPC_VERSION: u32 = 3;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -150,6 +155,11 @@ pub struct RunnerStatusSnapshot {
     pub current_run: Option<CurrentRunSummary>,
     pub approvals_pending: usize,
     pub last_heartbeat: Option<DateTime<Utc>>,
+    /// Per-active-run telemetry. `None` when the daemon isn't running
+    /// with `agent_observability_v1` enabled, or when the runner has
+    /// never seen a run.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub observability: Option<ObservabilitySnapshot>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -240,6 +250,7 @@ mod tests {
                 current_run: None,
                 approvals_pending: 0,
                 last_heartbeat: Some(Utc::now()),
+                observability: None,
             }],
         };
         let s = serde_json::to_string(&snap).unwrap();
@@ -248,6 +259,52 @@ mod tests {
         assert_eq!(back.runners[0].name, "laptop-main");
         assert_eq!(back.runners[0].project_slug.as_deref(), Some("WEB"));
         assert!(back.daemon.connected);
+    }
+
+    #[test]
+    fn observability_field_roundtrips() {
+        use crate::daemon::observability::TokenUsage;
+        use crate::daemon::state::ObservabilitySnapshot;
+        let snap = StatusSnapshot {
+            daemon: DaemonInfo {
+                cloud_url: "https://x".into(),
+                connected: true,
+                uptime_secs: 1,
+            },
+            runners: vec![RunnerStatusSnapshot {
+                runner_id: Uuid::new_v4(),
+                name: "obs".into(),
+                project_slug: None,
+                pod_id: None,
+                status: RunnerStatus::Busy,
+                current_run: None,
+                approvals_pending: 0,
+                last_heartbeat: None,
+                observability: Some(ObservabilitySnapshot {
+                    last_event_at: Some(Utc::now()),
+                    last_event_kind: Some("raw".into()),
+                    last_event_summary: Some("turn started".into()),
+                    agent_pid: Some(12345),
+                    agent_subprocess_alive: Some(true),
+                    tokens: Some(TokenUsage {
+                        input: 10,
+                        output: 20,
+                        total: 30,
+                    }),
+                    turn_count: Some(2),
+                    last_exec_command: None,
+                }),
+            }],
+        };
+        let s = serde_json::to_string(&snap).unwrap();
+        let back: StatusSnapshot = serde_json::from_str(&s).unwrap();
+        let obs = back.runners[0]
+            .observability
+            .as_ref()
+            .expect("observability field lost on roundtrip");
+        assert_eq!(obs.turn_count, Some(2));
+        assert_eq!(obs.agent_pid, Some(12345));
+        assert_eq!(obs.tokens.map(|t| t.total), Some(30));
     }
 
     #[test]
@@ -298,6 +355,7 @@ mod tests {
                     current_run: None,
                     approvals_pending: 0,
                     last_heartbeat: None,
+                    observability: None,
                 },
                 RunnerStatusSnapshot {
                     runner_id: Uuid::new_v4(),
@@ -308,6 +366,7 @@ mod tests {
                     current_run: None,
                     approvals_pending: 0,
                     last_heartbeat: None,
+                    observability: None,
                 },
             ],
         };

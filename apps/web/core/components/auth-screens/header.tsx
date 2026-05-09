@@ -9,7 +9,7 @@ import { observer } from "mobx-react";
 import Link from "next/link";
 import { AUTH_TRACKER_ELEMENTS } from "@pi-dash/constants";
 import { useTranslation } from "@pi-dash/i18n";
-import { PiDashLockup } from "@pi-dash/propel/icons";
+import { PiSymbol } from "@pi-dash/propel/icons";
 import { PageHead } from "@/components/core/page-title";
 import { EAuthModes } from "@/helpers/authentication.helper";
 import { useInstance } from "@/hooks/store/use-instance";
@@ -73,7 +73,7 @@ export function AuthHeaderBase(props: TAuthHeaderBase) {
       <PageHead title={pageTitle + " - Pi Dash"} />
       <div className="sticky top-0 flex w-full flex-shrink-0 items-center justify-between gap-6">
         <Link href="/">
-          <PiDashLockup height={20} width={95} className="text-primary" />
+          <PiSymbol height={28} width={28} className="text-primary" />
         </Link>
         {additionalAction}
       </div>

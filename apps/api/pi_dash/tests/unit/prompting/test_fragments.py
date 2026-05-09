@@ -81,6 +81,10 @@ def test_assemble_contains_expanded_pidash_cli_subsections():
         "### Not for you",
         "### Typical recipes",
         "pidash comment update <identifier> <comment-id>",
+        # Issue create/list are exposed to the agent — guard against silent
+        # removal so the agent loses these capabilities.
+        "pidash issue create --project",
+        "pidash issue list --project",
     ):
         assert marker in body, f"missing CLI subsection marker: {marker!r}"
 

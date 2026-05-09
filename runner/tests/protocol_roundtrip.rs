@@ -61,7 +61,6 @@ fn envelope_roundtrips_all_server_variants() {
             expected_codex_model: None,
             approval_policy_overrides: None,
             deadline: None,
-            resume_thread_id: None,
         },
         ServerMsg::Assign {
             run_id: Uuid::new_v4(),
@@ -73,7 +72,6 @@ fn envelope_roundtrips_all_server_variants() {
             expected_codex_model: None,
             approval_policy_overrides: None,
             deadline: None,
-            resume_thread_id: Some("sess_resume".into()),
         },
         ServerMsg::Cancel {
             run_id: Uuid::new_v4(),
@@ -101,6 +99,7 @@ async fn router_resolution_is_idempotent_after_first_writer() {
     let router = ApprovalRouter::new();
     let rec = ApprovalRecord {
         approval_id: "a1".into(),
+        runner_id: Uuid::nil(),
         run_id: Uuid::new_v4(),
         kind: ApprovalKind::CommandExecution,
         payload: serde_json::json!({"command": "ls"}),

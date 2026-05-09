@@ -10,7 +10,7 @@ use crate::approval::policy::Policy;
 use crate::approval::router::{ApprovalRecord, ApprovalRouter, ApprovalStatus, DecisionSource};
 use crate::cloud::http::{
     AckEntry, AttachBody, CredentialsHandle, HttpLoop, InboundEnvelope, PollStatus,
-    RunnerCloudClient, RunnerCredentials, SharedHttpTransport,
+    RunnerCloudClient, SharedHttpTransport,
 };
 use crate::cloud::protocol::{
     ClientMsg, FailureReason, RunnerStatus, ServerMsg, WIRE_VERSION, WorkspaceState,
@@ -385,42 +385,9 @@ async fn load_runner_credentials(
     runner_paths: &RunnerPaths,
     runner_name: &str,
 ) -> Result<CredentialsHandle> {
-    let path = runner_paths.credentials_path();
-    let raw = tokio::fs::read_to_string(&path)
+    crate::cloud::http::load_runner_credentials_from(runner_paths.credentials_path(), runner_name)
         .await
-        .map_err(|e| anyhow::anyhow!("reading runner credentials at {path:?}: {e}"))?;
-    let parsed: toml::Value = toml::from_str(&raw)
-        .map_err(|e| anyhow::anyhow!("parsing runner credentials at {path:?}: {e}"))?;
-    let runner_id = parsed
-        .get("runner")
-        .and_then(|v| v.get("id"))
-        .and_then(toml::Value::as_str)
-        .ok_or_else(|| anyhow::anyhow!("runner credentials at {path:?} are missing runner.id"))?;
-    let refresh_token = parsed
-        .get("refresh")
-        .and_then(|v| v.get("token"))
-        .and_then(toml::Value::as_str)
-        .ok_or_else(|| {
-            anyhow::anyhow!("runner credentials at {path:?} are missing refresh.token")
-        })?;
-    let generation = parsed
-        .get("refresh")
-        .and_then(|v| v.get("generation"))
-        .and_then(toml::Value::as_integer)
-        .ok_or_else(|| {
-            anyhow::anyhow!("runner credentials at {path:?} are missing refresh.generation")
-        })?;
-    let runner_id = uuid::Uuid::parse_str(runner_id)
-        .map_err(|e| anyhow::anyhow!("invalid runner.id in {path:?}: {e}"))?;
-    Ok(CredentialsHandle::new(
-        path,
-        RunnerCredentials {
-            runner_id,
-            name: runner_name.to_string(),
-            refresh_token: refresh_token.to_string(),
-            refresh_token_generation: generation as u64,
-        },
-    ))
+        .map_err(|e| anyhow::anyhow!("{e}"))
 }
 
 fn attach_body_for_instance(inst: &RunnerInstance) -> AttachBody {
@@ -493,13 +460,19 @@ fn spawn_exit_watch(
     mut exit_rx: tokio::sync::watch::Receiver<Option<crate::agent::ExitSnapshot>>,
 ) {
     tokio::spawn(async move {
-        // Wait for the next change. The initial value is None at spawn
-        // time; the wait task publishes Some(ExitSnapshot) once.
-        if exit_rx.changed().await.is_err() {
-            return;
-        }
-        if exit_rx.borrow().is_none() {
-            return;
+        // A freshly-cloned watch::Receiver marks the current value as
+        // "seen", so changed() only fires on values published *after*
+        // we subscribed. Check borrow() first to catch the case where
+        // the wait task already published Some(ExitSnapshot) before we
+        // got here (e.g. agent binary segfaults on startup).
+        let already_exited = exit_rx.borrow().is_some();
+        if !already_exited {
+            if exit_rx.changed().await.is_err() {
+                return;
+            }
+            if exit_rx.borrow().is_none() {
+                return;
+            }
         }
         // Guard: only stamp alive=false if the in-flight run is still
         // ours. A new run may already have taken over and called
@@ -595,7 +568,6 @@ impl RunnerLoop {
                     repo_url,
                     git_work_branch,
                     expected_codex_model,
-                    resume_thread_id,
                     ..
                 } => {
                     if self.current_run.is_some() {
@@ -654,7 +626,6 @@ impl RunnerLoop {
                                 repo_url,
                                 git_work_branch,
                                 expected_codex_model,
-                                resume_thread_id,
                             )
                             .await
                         {
@@ -892,7 +863,6 @@ impl AssignWorker {
         repo_url: Option<String>,
         git_work_branch: Option<String>,
         expected_codex_model: Option<String>,
-        resume_thread_id: Option<String>,
     ) -> Result<()> {
         self.handle_assign(
             run_id,
@@ -900,7 +870,6 @@ impl AssignWorker {
             repo_url,
             git_work_branch,
             expected_codex_model,
-            resume_thread_id,
         )
         .await
     }
@@ -912,7 +881,6 @@ impl AssignWorker {
         repo_url: Option<String>,
         git_work_branch: Option<String>,
         expected_codex_model: Option<String>,
-        resume_thread_id: Option<String>,
     ) -> Result<()> {
         // Resolve workspace.
         let wd = self.runner_config.workspace.working_dir.clone();
@@ -1009,7 +977,6 @@ impl AssignWorker {
             &self.runner_config,
             &workspace_path,
             expected_codex_model.clone(),
-            resume_thread_id.as_deref(),
         )
         .await
         {
@@ -1049,7 +1016,6 @@ impl AssignWorker {
             run_id,
             prompt,
             model: expected_codex_model,
-            resume_thread_id,
         };
         let mut cursor = match bridge.run(&payload, &workspace_path).await {
             Ok(c) => c,
@@ -1062,20 +1028,9 @@ impl AssignWorker {
                 })
                 .await
                 .ok();
-                // Distinguish "agent CLI couldn't find the session id" from a
-                // generic agent crash. Cloud's reaction differs: drop the pin
-                // and re-queue with no resume hint, vs. mark the run failed.
-                let reason = if e
-                    .downcast_ref::<crate::agent::ResumeUnavailable>()
-                    .is_some()
-                {
-                    FailureReason::ResumeUnavailable
-                } else {
-                    self.crash_reason()
-                };
                 self.send(ClientMsg::RunFailed {
                     run_id,
-                    reason,
+                    reason: self.crash_reason(),
                     detail: Some(format!("{e:#}")),
                     ended_at: Utc::now(),
                 })
@@ -1178,17 +1133,20 @@ impl AssignWorker {
                 events = bridge.next_events(cursor) => {
                     let Some(events) = events else {
                         let reason = self.crash_reason();
+                        let detail = self
+                            .build_failure_detail("agent stdout closed", bridge)
+                            .await;
                         self.send(ClientMsg::RunFailed {
                             run_id: cursor.run_id(),
                             reason,
-                            detail: Some("agent stdout closed".to_string()),
+                            detail: Some(detail.clone()),
                             ended_at: Utc::now(),
                         }).await;
                         hist.append(&HistoryEntry::Footer {
                             ts: Utc::now(),
                             final_status: "failed".into(),
                             done_payload: None,
-                            error: Some("agent stdout closed".into()),
+                            error: Some(detail),
                         }).await?;
                         return Ok(Outcome { status_label: "failed".into() });
                     };
@@ -1208,7 +1166,8 @@ impl AssignWorker {
                     }
                 } => {
                     let mins = stall_timeout.as_secs() / 60;
-                    let detail = format!("no agent frames for {mins} minutes");
+                    let base = format!("no agent frames for {mins} minutes");
+                    let detail = self.build_failure_detail(&base, bridge).await;
                     self.send(ClientMsg::RunFailed {
                         run_id: cursor.run_id(),
                         reason: FailureReason::Timeout,
@@ -1225,6 +1184,90 @@ impl AssignWorker {
                 }
             }
         }
+    }
+
+    /// Build a `RunFailed.detail` string that includes whatever local
+    /// context might help the cloud / UI explain what went wrong:
+    /// - the supervisor's own classifier message (e.g. `"no agent frames
+    ///   for 5 minutes"`),
+    /// - the most recent shell command the agent kicked off,
+    /// - the last few lines of agent stderr.
+    ///
+    /// All inputs are optional and the assembly degrades gracefully when
+    /// they're missing — for a healthy code-edit task the result is just
+    /// the base string. The total payload is bounded so a runaway stderr
+    /// dump can't balloon a `RunFailed` body.
+    async fn build_failure_detail(&self, base: &str, bridge: &AgentBridge) -> String {
+        const DETAIL_BYTES_CAP: usize = 4096;
+        const STDERR_TAIL_LINES: usize = 10;
+
+        let last_cmd = self
+            .state
+            .observability_snapshot()
+            .await
+            .last_exec_command;
+        let stderr = bridge.recent_stderr().await;
+
+        let mut parts: Vec<String> = vec![base.to_string()];
+        if let Some(cmd) = last_cmd {
+            let elapsed = (Utc::now() - cmd.started_at).num_seconds().max(0);
+            let cwd = cmd
+                .cwd
+                .as_deref()
+                .map(|c| format!(" in `{c}`"))
+                .unwrap_or_default();
+            parts.push(format!(
+                "last command: `{}`{cwd} (started {elapsed}s ago)",
+                cmd.command
+            ));
+        }
+        // The stderr ring has already filtered codex tracing noise;
+        // `stderr.dropped` is the running count of lines we rejected so
+        // the user has an honest signal of how much was suppressed.
+        // Emit the section if either we have content to show OR a
+        // non-zero dropped count (the latter alone tells the operator
+        // "the agent was emitting noise but no signal").
+        if !stderr.lines.is_empty() || stderr.dropped > 0 {
+            let shown = stderr.lines.len().min(STDERR_TAIL_LINES);
+            let tail = stderr
+                .lines
+                .iter()
+                .rev()
+                .take(STDERR_TAIL_LINES)
+                .rev()
+                .cloned()
+                .collect::<Vec<_>>()
+                .join("\n  ");
+            let suffix = if stderr.dropped > 0 {
+                format!(
+                    " (plus {} noise line(s) filtered from codex tracing)",
+                    stderr.dropped
+                )
+            } else {
+                String::new()
+            };
+            if shown > 0 {
+                parts.push(format!(
+                    "stderr tail ({shown} line(s){suffix}):\n  {tail}"
+                ));
+            } else {
+                // Filter dropped everything — surface that fact alone
+                // rather than emitting an empty stderr block.
+                parts.push(format!("stderr: empty after filtering{suffix}"));
+            }
+        }
+        let mut joined = parts.join("; ");
+        if joined.len() > DETAIL_BYTES_CAP {
+            // Truncate on a char boundary, leaving a sentinel so consumers
+            // can tell the body was clipped.
+            let mut end = DETAIL_BYTES_CAP;
+            while !joined.is_char_boundary(end) && end > 0 {
+                end -= 1;
+            }
+            joined.truncate(end);
+            joined.push('…');
+        }
+        joined
     }
 
     async fn handle_bridge_event(
@@ -1256,6 +1299,33 @@ impl AssignWorker {
                 }
                 "turn/started" => {
                     self.state.incr_turn().await;
+                }
+                "item/started" | "assistant/message" => {
+                    // Failure-detail enrichment: capture the most recent
+                    // shell command the agent kicked off. Routing for
+                    // codex (`item/started` → commandExecution) and
+                    // Claude (`assistant/message` → Bash tool_use) lives
+                    // in `extract_exec_command_hint` so it's
+                    // unit-testable without a live bridge — a typo in
+                    // either method name is caught by tests rather than
+                    // by silently absent `last command:` fields in
+                    // production failure details.
+                    if let Some(hint) =
+                        crate::daemon::observability::extract_exec_command_hint(
+                            method.as_str(),
+                            params,
+                        )
+                    {
+                        self.state
+                            .note_exec_command(
+                                crate::daemon::state::ExecCommandSnapshot {
+                                    command: hint.command,
+                                    cwd: hint.cwd,
+                                    started_at: Utc::now(),
+                                },
+                            )
+                            .await;
+                    }
                 }
                 _ => {}
             }
@@ -1301,6 +1371,7 @@ impl AssignWorker {
                 }
                 let rec = ApprovalRecord {
                     approval_id: approval_id.clone(),
+                    runner_id: self.runner_config.runner_id,
                     run_id,
                     kind,
                     payload: payload.clone(),
@@ -1412,10 +1483,22 @@ impl AssignWorker {
                 reason,
                 detail,
             } => {
+                // Codex / claude-detected failures (e.g.
+                // "turn/completed without conclusion", `error` notifications
+                // with `willRetry=false`) reach us with whatever bare
+                // string the bridge produced. Run them through the same
+                // enrichment helper the watchdog and stdout-close paths
+                // use so the user sees `last command:` and a stderr
+                // tail in the issue activity comment, not just the
+                // bridge's classifier text.
+                let base = detail
+                    .clone()
+                    .unwrap_or_else(|| "agent reported failure".to_string());
+                let enriched = self.build_failure_detail(&base, bridge).await;
                 self.send(ClientMsg::RunFailed {
                     run_id,
                     reason,
-                    detail: detail.clone(),
+                    detail: Some(enriched.clone()),
                     ended_at: Utc::now(),
                 })
                 .await;
@@ -1423,7 +1506,7 @@ impl AssignWorker {
                     ts: Utc::now(),
                     final_status: "failed".into(),
                     done_payload: None,
-                    error: detail,
+                    error: Some(enriched),
                 })
                 .await
                 .ok();
@@ -1549,6 +1632,7 @@ mod tests {
             version: 2,
             daemon: Default::default(),
             runners: vec![],
+            cli: None,
         });
         let task = tokio::spawn(async move {
             hello_emitter(runners, connected_for_task, daemon_state).await;

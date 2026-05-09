@@ -32,6 +32,43 @@ from pi_dash.runner.models import (
 logger = logging.getLogger(__name__)
 
 
+def _apply_post_run_orchestration(run: AgentRun) -> None:
+    """Run the ticker side-effects that follow a paused or terminal run.
+
+    Called from both ``apply_run_paused`` (PAUSED_AWAITING_INPUT) and
+    ``finalize_run_terminal`` (COMPLETED / FAILED / CANCELLED), hence
+    "post-run" rather than "terminal" — paused runs are not terminal
+    but still need the same hooks.
+
+    Order matters: terminal-disarm must run before deferred-pause so the
+    deferred-pause hook sees the latest disarm reason. Both helpers are
+    idempotent and safe to call on paused runs — the payload-status
+    gate inside ``maybe_disarm_on_terminal_signal`` only fires on
+    completed/blocked, and the CAP_HIT gate inside
+    ``maybe_apply_deferred_pause`` skips terminal-signal disarms.
+
+    Each side-effect is wrapped in its own try/except so a failure in one
+    does not block the other or the surrounding drain.
+    """
+    from pi_dash.orchestration.scheduling import (
+        maybe_apply_deferred_pause,
+        maybe_disarm_on_terminal_signal,
+    )
+
+    try:
+        maybe_disarm_on_terminal_signal(run)
+    except Exception:
+        logger.exception(
+            "orchestration.error: terminal-disarm failed for run %s", run.pk
+        )
+    try:
+        maybe_apply_deferred_pause(run)
+    except Exception:
+        logger.exception(
+            "orchestration.error: deferred-pause failed for run %s", run.pk
+        )
+
+
 def apply_run_paused(
     runner: Runner, run_id: UUID | str, payload: Dict[str, Any]
 ) -> None:
@@ -78,7 +115,6 @@ def apply_run_paused(
                 comment_html="".join(body_parts),
             )
 
-    from pi_dash.orchestration.scheduling import maybe_apply_deferred_pause
     from pi_dash.runner.services.matcher import drain_for_runner_by_id
 
     def _pause_and_drain(rid=run_id, runner_id=runner.id):
@@ -92,13 +128,7 @@ def apply_run_paused(
             .first()
         )
         if paused is not None:
-            try:
-                maybe_apply_deferred_pause(paused)
-            except Exception:
-                logger.exception(
-                    "orchestration.error: deferred-pause failed for run %s",
-                    rid,
-                )
+            _apply_post_run_orchestration(paused)
         drain_for_runner_by_id(runner_id)
 
     transaction.on_commit(_pause_and_drain)
@@ -133,6 +163,78 @@ def apply_run_resume_unavailable(runner: Runner, run_id: UUID | str) -> None:
         )
 
 
+# Detail-string prefixes for failures that aren't actionable by the user
+# (the runner restarted, the cloud watchdog reaped a stalled cluster of
+# runs, etc.). These get a DB row update and nothing else — surfacing a
+# `Run failed: daemon shutdown requested` on the issue thread is noise,
+# not signal. The next continuation will pick the work back up.
+#
+# Strings are intentionally compared as prefixes so the runner / cloud
+# can append context (timestamps, run ids) without breaking the guard.
+# When the remediation-map work lands, this hard-coded list goes away
+# and we route on `FailureReason` instead.
+_INFRA_FAILURE_DETAIL_PREFIXES = (
+    "daemon shutdown requested",
+    "agent stalled: no events for >",
+)
+
+
+def _post_failure_comment(run_id: UUID | str, error_detail: str) -> None:
+    """Post a single IssueComment from the agent system user describing
+    why a run failed. Mirrors the shape of ``apply_run_paused``'s comment
+    creation so the issue activity feed is the one place a user has to
+    look to understand what happened.
+
+    Conservative wording — we surface the runner's classification + any
+    detail it sent (last command, stderr tail) rather than asserting a
+    root cause we can't prove from telemetry alone. Hidden behind the
+    public ``finalize_run_terminal`` entry-point so callers don't have
+    to opt in.
+
+    Suppressed for known infrastructure-flavored failures (daemon
+    restart, cloud-side stall reconciler) — see
+    ``_INFRA_FAILURE_DETAIL_PREFIXES``. The DB row still gets the
+    ``error`` field; we just don't pollute the issue thread.
+    """
+    from django.utils.html import format_html
+
+    from pi_dash.db.models.issue import IssueComment
+    from pi_dash.orchestration.workpad import get_agent_system_user
+
+    detail = (error_detail or "").strip()
+    if detail.startswith(_INFRA_FAILURE_DETAIL_PREFIXES):
+        return
+
+    run = (
+        AgentRun.objects.select_related("work_item", "work_item__project")
+        .filter(pk=run_id)
+        .first()
+    )
+    if run is None or run.work_item_id is None:
+        return
+
+    if detail:
+        body = format_html(
+            "<p><strong>Run failed.</strong></p><pre>{}</pre>",
+            detail,
+        )
+    else:
+        # Defensive: we'd rather post "(no diagnostic detail)" than
+        # silently drop the activity entry.
+        body = format_html(
+            "<p><strong>Run failed.</strong> {}</p>",
+            "(no diagnostic detail)",
+        )
+
+    IssueComment.objects.create(
+        issue=run.work_item,
+        project=run.work_item.project,
+        workspace=run.work_item.workspace,
+        actor=get_agent_system_user(),
+        comment_html=body,
+    )
+
+
 def finalize_run_terminal(
     runner: Runner,
     run_id: UUID | str,
@@ -158,7 +260,18 @@ def finalize_run_terminal(
         updates["error"] = error_detail[:16000]
     AgentRun.objects.filter(id=run_id, runner=runner).update(**updates)
 
-    from pi_dash.orchestration.scheduling import maybe_apply_deferred_pause
+    if new_status == AgentRunStatus.FAILED:
+        try:
+            _post_failure_comment(run_id, error_detail)
+        except Exception:
+            # Comment posting must never block the lifecycle terminal
+            # transition. Log and move on so the run still gets reaped /
+            # the pod still gets drained.
+            logger.exception(
+                "run_lifecycle: failed to post failure comment for run %s",
+                run_id,
+            )
+
     from pi_dash.runner.services.matcher import (
         drain_for_runner_by_id,
         drain_pod_by_id,
@@ -182,12 +295,7 @@ def finalize_run_terminal(
             .first()
         )
         if run is not None:
-            try:
-                maybe_apply_deferred_pause(run)
-            except Exception:
-                logger.exception(
-                    "orchestration.error: deferred-pause failed for run %s", rid
-                )
+            _apply_post_run_orchestration(run)
             if run.scheduler_binding_id is not None:
                 try:
                     update_scheduler_binding_on_terminate(run)

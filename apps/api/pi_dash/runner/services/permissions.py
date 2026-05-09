@@ -55,10 +55,13 @@ def is_at_least_member(user, workspace_id) -> bool:
 
 
 def can_manage_runner(user, runner) -> bool:
-    """True if ``user`` is the runner's owner or a workspace admin.
+    """True if ``user`` owns the runner or is admin of its workspace.
 
-    Mirrors the predicate used by both delete surfaces (web session
-    auth + the X-Api-Key v1 endpoint) so the rule stays in one place.
+    Shared by every runner view (revoke/revive/delete/patch) and both
+    delete surfaces (web session auth + the X-Api-Key v1 endpoint), so
+    the rule lives in one place. Duck-typed on ``runner.owner_id`` /
+    ``runner.workspace_id`` to avoid an import-time dependency on the
+    Runner model.
     """
     return runner.owner_id == user.id or is_workspace_admin(
         user, runner.workspace_id

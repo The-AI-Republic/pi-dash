@@ -10,7 +10,6 @@ import type { SubmitHandler } from "react-hook-form";
 import { Controller, useForm } from "react-hook-form";
 import useSWR from "swr";
 // pi dash imports
-import { API_BASE_URL } from "@pi-dash/constants";
 import { useTranslation } from "@pi-dash/i18n";
 import { Button } from "@pi-dash/propel/button";
 import { TOAST_TYPE, setToast } from "@pi-dash/propel/toast";
@@ -18,6 +17,7 @@ import { PodService, RunnerService } from "@pi-dash/services";
 import type { IPod, IRunnerInvite, TPartialProject } from "@pi-dash/types";
 import { CustomSelect, EModalPosition, EModalWidth, Input, ModalCore } from "@pi-dash/ui";
 // app
+import { RunnerEnrollmentCommand } from "@/components/runners/runner-enrollment-command";
 import { ProjectService } from "@/services/project";
 
 type Props = {
@@ -63,8 +63,6 @@ export const AddRunnerModal = observer(function AddRunnerModal(props: Props) {
   } = useForm<FormValues>({ defaultValues: DEFAULT_VALUES });
 
   const [invite, setInvite] = useState<IRunnerInvite | null>(null);
-  const [origin, setOrigin] = useState("");
-  const [justCopied, setJustCopied] = useState(false);
 
   // Reset everything on close→open. State persists between consecutive
   // opens otherwise (RHF + local invite state would carry the stale
@@ -72,9 +70,7 @@ export const AddRunnerModal = observer(function AddRunnerModal(props: Props) {
   useEffect(() => {
     if (!isOpen) return;
     setInvite(null);
-    setJustCopied(false);
     reset(DEFAULT_VALUES);
-    if (typeof window !== "undefined") setOrigin(window.location.origin);
   }, [isOpen, reset]);
 
   // Project picker + pod picker load whenever the modal is open. Pod
@@ -126,28 +122,8 @@ export const AddRunnerModal = observer(function AddRunnerModal(props: Props) {
     if (!stillFits) setValue("podName", "");
   }, [selectedProject, selectedPodName, podsForPicker, setValue]);
 
-  const apiOrigin = API_BASE_URL || origin;
-
-  const enrollmentCommand = useMemo(() => {
-    if (!invite) return "";
-    const hostLabelArg = watch("hostLabel").trim();
-    const workingDirArg = watch("workingDir").trim();
-    const lines = [`pidash connect \\`, `  --url ${apiOrigin} \\`, `  --token ${invite.enrollment_token}`];
-    // host-label / working-dir are CLI-only flags; they don't go to the
-    // invite endpoint. Append each on its own continuation line so the
-    // generated command stays readable and copy-pasteable.
-    const optionalArgs: string[] = [];
-    if (hostLabelArg) optionalArgs.push(`  --host-label ${hostLabelArg}`);
-    if (workingDirArg) optionalArgs.push(`  --working-dir ${workingDirArg}`);
-    if (optionalArgs.length > 0) {
-      lines[lines.length - 1] += " \\";
-      for (let i = 0; i < optionalArgs.length; i += 1) {
-        const isLast = i === optionalArgs.length - 1;
-        lines.push(isLast ? optionalArgs[i] : `${optionalArgs[i]} \\`);
-      }
-    }
-    return lines.join("\n");
-  }, [invite, apiOrigin, watch]);
+  const hostLabelInput = watch("hostLabel");
+  const workingDirInput = watch("workingDir");
 
   const onSubmit: SubmitHandler<FormValues> = async (values) => {
     try {
@@ -165,21 +141,6 @@ export const AddRunnerModal = observer(function AddRunnerModal(props: Props) {
         type: TOAST_TYPE.ERROR,
         title: t("runners.toast.error_title"),
         message: err?.error ?? t("runners.add_modal.errors.create_failed"),
-      });
-    }
-  };
-
-  const copyCommand = async () => {
-    if (!enrollmentCommand) return;
-    try {
-      await navigator.clipboard.writeText(enrollmentCommand);
-      setJustCopied(true);
-      window.setTimeout(() => setJustCopied(false), 2000);
-    } catch {
-      setToast({
-        type: TOAST_TYPE.ERROR,
-        title: t("runners.toast.error_title"),
-        message: t("runners.list.copy_failed"),
       });
     }
   };
@@ -341,18 +302,7 @@ export const AddRunnerModal = observer(function AddRunnerModal(props: Props) {
             </p>
           </div>
 
-          <div className="border-amber-500/40 bg-amber-500/10 rounded border p-3 text-13 text-primary">
-            <div className="font-medium">{t("runners.add_modal.token_warning")}</div>
-            <p className="mt-2 text-secondary">{t("runners.add_modal.token_instructions")}</p>
-            <pre className="font-mono mt-1 rounded border border-subtle bg-layer-1 p-2 text-11 whitespace-pre-wrap text-primary select-all">
-              {enrollmentCommand}
-            </pre>
-            <div className="mt-2">
-              <Button size="sm" onClick={copyCommand}>
-                {justCopied ? t("runners.add_modal.copied") : t("runners.add_modal.copy_command")}
-              </Button>
-            </div>
-          </div>
+          <RunnerEnrollmentCommand invite={invite} hostLabel={hostLabelInput} workingDir={workingDirInput} />
 
           <div className="flex justify-end">
             <Button onClick={onClose}>{t("runners.add_modal.done")}</Button>

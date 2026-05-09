@@ -21,13 +21,6 @@ from pi_dash.runner.services.runner_delete import (
 )
 
 
-def _can_manage_runner(user, runner: Runner) -> bool:
-    """Thin alias kept so external imports keep working; new code
-    should call :func:`can_manage_runner` from the permissions service.
-    """
-    return can_manage_runner(user, runner)
-
-
 class RunnerListEndpoint(APIView):
     """List runners in a workspace.
 
@@ -87,7 +80,7 @@ class RunnerDetailEndpoint(APIView):
             return Response({"error": "not found"}, status=status.HTTP_404_NOT_FOUND)
         if runner is False:
             return Response({"error": "forbidden"}, status=status.HTTP_403_FORBIDDEN)
-        if not _can_manage_runner(request.user, runner):
+        if not can_manage_runner(request.user, runner):
             return Response({"error": "forbidden"}, status=status.HTTP_403_FORBIDDEN)
 
         updates: list[str] = []
@@ -143,7 +136,7 @@ class RunnerDetailEndpoint(APIView):
         runner = Runner.objects.filter(pk=runner_id).first()
         if runner is None:
             return Response({"error": "not found"}, status=status.HTTP_404_NOT_FOUND)
-        if not _can_manage_runner(request.user, runner):
+        if not can_manage_runner(request.user, runner):
             return Response({"error": "forbidden"}, status=status.HTTP_403_FORBIDDEN)
         try:
             purge_local = parse_purge_local(request.query_params)
@@ -153,3 +146,49 @@ class RunnerDetailEndpoint(APIView):
             )
         delete_runner_svc(runner, purge_local=purge_local)
         return Response(status=status.HTTP_204_NO_CONTENT)
+
+
+class RunnerRevokeEndpoint(APIView):
+    """``POST /api/runners/<runner_id>/revoke/`` — hard-revoke without delete.
+
+    Cascades to sessions, in-flight runs, and pinned follow-ups via
+    ``Runner.revoke()``. Idempotent: a second call on an already-revoked
+    row returns 200 with the current state without re-emitting the
+    revoke control frame or re-closing the (already closed) session.
+    Use this when an operator wants to stop a runner permanently but
+    keep its history visible in the list — paired with the ``revive``
+    endpoint that mints a fresh enrollment token on the same row.
+    """
+
+    authentication_classes = [BaseSessionAuthentication]
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, runner_id):
+        # Hold the row lock across the read-then-revoke window so two
+        # concurrent operator clicks don't both see ``revoked_at IS NULL``
+        # and both fire the cascade + control frame.
+        with transaction.atomic():
+            runner = (
+                Runner.objects.select_for_update().filter(pk=runner_id).first()
+            )
+            if runner is None:
+                return Response(
+                    {"error": "not found"}, status=status.HTTP_404_NOT_FOUND
+                )
+            if not can_manage_runner(request.user, runner):
+                return Response(
+                    {"error": "forbidden"}, status=status.HTTP_403_FORBIDDEN
+                )
+            already_revoked = runner.revoked_at is not None
+            runner_pk = runner.pk
+            if not already_revoked:
+                runner.revoke(reason="manual_revoke")
+
+        if not already_revoked:
+            send_to_runner(
+                runner_pk,
+                {"type": "revoke", "reason": "revoked by user"},
+            )
+            close_runner_session(runner_pk)
+            runner.refresh_from_db()
+        return Response(RunnerSerializer(runner).data)

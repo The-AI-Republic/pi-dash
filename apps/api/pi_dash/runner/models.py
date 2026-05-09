@@ -374,7 +374,8 @@ class Runner(models.Model):
             # body's `reason` field carries the canonical string the
             # daemon's synthesizer matches against (`runner_removed`
             # for cascade delete, `manual_revoke` / `membership_revoked`
-            # / `refresh_token_replayed` otherwise).
+            # / `refresh_token_replayed` for revoke flows; `user_revoke`
+            # is the deliberate "do NOT match the synthesizer" signal).
             RunnerSession.objects.filter(
                 runner=self, revoked_at__isnull=True
             ).update(revoked_at=now, revoked_reason=reason[:32])
@@ -808,10 +809,12 @@ class RunnerLiveState(models.Model):
     last_event_summary = models.CharField(max_length=200, null=True, blank=True)
     agent_pid = models.PositiveIntegerField(null=True, blank=True)
     agent_subprocess_alive = models.BooleanField(null=True, blank=True)
-    # PositiveIntegerField, not SmallInteger: the runner serialises this as
-    # u32 with a u32::MAX guard sentinel, which would overflow a SMALLINT
-    # column (max 32767) and raise DataError on save(), 500-ing the poll
-    # path. PositiveInteger covers the full u32 range.
+    # PositiveIntegerField (Postgres INTEGER, max 2_147_483_647), not
+    # SmallInteger: the runner serialises this as u32. Real-world counts
+    # are tiny so the int32 ceiling is unreachable in practice; the
+    # u32::MAX (4_294_967_295) saturating sentinel the runner uses on
+    # `usize → u32` conversion would still overflow this column, but
+    # producing approvals_pending > 4 billion is not a realistic path.
     approvals_pending = models.PositiveIntegerField(null=True, blank=True)
     input_tokens = models.BigIntegerField(null=True, blank=True)
     output_tokens = models.BigIntegerField(null=True, blank=True)

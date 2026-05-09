@@ -11,12 +11,12 @@ from pi_dash.api.views import (
 
 urlpatterns = [
     path(
-        "workspaces/<str:slug>/projects/<uuid:project_id>/states/",
+        "workspaces/<str:slug>/projects/<str:project_id>/states/",
         StateListCreateAPIEndpoint.as_view(http_method_names=["get", "post"]),
         name="states",
     ),
     path(
-        "workspaces/<str:slug>/projects/<uuid:project_id>/states/<uuid:state_id>/",
+        "workspaces/<str:slug>/projects/<str:project_id>/states/<uuid:state_id>/",
         StateDetailAPIEndpoint.as_view(http_method_names=["get", "patch", "delete"]),
         name="states",
     ),

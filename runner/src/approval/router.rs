@@ -18,6 +18,13 @@ pub enum DecisionSource {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ApprovalRecord {
     pub approval_id: String,
+    /// Runner this approval belongs to. Stamped at `open()` time so
+    /// the TUI can route a `Decide` to the right instance even if the
+    /// user changes the runner picker between selection and decision.
+    /// Defaulted to nil for back-compat with records minted before the
+    /// field landed.
+    #[serde(default)]
+    pub runner_id: Uuid,
     pub run_id: Uuid,
     pub kind: ApprovalKind,
     pub payload: serde_json::Value,
@@ -178,6 +185,7 @@ mod tests {
     fn rec() -> ApprovalRecord {
         ApprovalRecord {
             approval_id: "a1".into(),
+            runner_id: Uuid::nil(),
             run_id: Uuid::new_v4(),
             kind: ApprovalKind::CommandExecution,
             payload: serde_json::json!({ "command": "rm /x" }),

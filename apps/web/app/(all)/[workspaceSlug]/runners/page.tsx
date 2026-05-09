@@ -4,19 +4,22 @@
  * See the LICENSE file for details.
  */
 
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import { observer } from "mobx-react";
-import { HelpCircle } from "lucide-react";
+import { HelpCircle, Plus } from "lucide-react";
 import useSWR from "swr";
 import { useTranslation } from "@pi-dash/i18n";
 import { TOAST_TYPE, setToast } from "@pi-dash/propel/toast";
 import { PodService, RunnerService } from "@pi-dash/services";
-import type { IPod, IRunner, TRunnerStatus } from "@pi-dash/types";
+import { EModalPosition, EModalWidth, ModalCore } from "@pi-dash/ui";
+import type { IPod, IRunner, IRunnerInvite, TRunnerStatus } from "@pi-dash/types";
 import type { TBadgeVariant } from "@pi-dash/ui";
-import { AlertModalCore, Badge, Button, Checkbox, Tooltip } from "@pi-dash/ui";
+import { AlertModalCore, Badge, Button, Tooltip } from "@pi-dash/ui";
 import { PageHead } from "@/components/core/page-title";
 import { AddRunnerModal } from "@/components/runners/add-runner-modal";
-import { RunnerAgentStatusPanel } from "@/components/runners/runner-agent-status-panel";
+import { CreatePodModal } from "@/components/runners/create-pod-modal";
+import { RunnerEnrollmentCommand } from "@/components/runners/runner-enrollment-command";
+import { useSelectedPodFilter } from "@/hooks/use-selected-pod-filter";
 import { useWorkspace } from "@/hooks/store/use-workspace";
 
 const service = new RunnerService();
@@ -28,6 +31,17 @@ const STATUS_BADGE_VARIANT: Record<TRunnerStatus, TBadgeVariant> = {
   offline: "accent-neutral",
   revoked: "accent-warning",
 };
+
+// A runner is "revivable" when it has never enrolled or has been
+// revoked — i.e., it's not currently holding live credentials.
+// ``revoke`` is the inverse: only meaningful when the runner is
+// active (enrolled and not yet revoked).
+function isRevivable(r: IRunner): boolean {
+  return r.status === "revoked" || r.enrolled_at === null;
+}
+function isRevocable(r: IRunner): boolean {
+  return r.status !== "revoked" && r.enrolled_at !== null;
+}
 
 const RunnersListPage = observer(function RunnersListPage() {
   const { currentWorkspace } = useWorkspace();
@@ -44,40 +58,29 @@ const RunnersListPage = observer(function RunnersListPage() {
     { refreshInterval: 5_000 }
   );
 
-  const { data: pods, error: podsError } = useSWR<IPod[]>(
-    workspaceId ? ["pods", workspaceId] : null,
-    () => podService.list(workspaceId!),
-    { refreshInterval: 30_000 }
-  );
+  const {
+    data: pods,
+    error: podsError,
+    mutate: mutatePods,
+  } = useSWR<IPod[]>(workspaceId ? ["pods", workspaceId] : null, () => podService.list(workspaceId!), {
+    refreshInterval: 30_000,
+  });
 
   const [addOpen, setAddOpen] = useState(false);
+  const [createPodOpen, setCreatePodOpen] = useState(false);
+  const { selectedPodId, setSelectedPodId, filteredRunners, selectedPod } = useSelectedPodFilter(runners, pods);
   const [deleteRunner, setDeleteRunner] = useState<IRunner | null>(null);
   const [deleting, setDeleting] = useState(false);
-  // Default-checked per spec: when the runner is connected, the
-  // "Also delete the local runner instance" cascade is the action a
-  // user clicking through the dialog usually wants. Reset to true on
-  // every modal open so a previous "Cancel" doesn't carry an
-  // unchecked state into the next attempt.
-  const [purgeLocal, setPurgeLocal] = useState(true);
-  useEffect(() => {
-    if (deleteRunner) setPurgeLocal(true);
-  }, [deleteRunner]);
-
-  // The cascade self-uninstall only works while the daemon is alive
-  // to receive the `remove_runner` frame. ``busy`` counts as
-  // connected — the daemon is in the middle of a run but is still
-  // polling the session. ``offline`` and ``revoked`` cannot cascade.
-  const isConnected = deleteRunner?.status === "online" || deleteRunner?.status === "busy";
-  // Force purge_local off when the runner is disconnected — there's
-  // nothing for the daemon to act on. The modal hides the checkbox
-  // in that case and shows the offline notice instead.
-  const effectivePurgeLocal = isConnected && purgeLocal;
+  const [revokeRunner, setRevokeRunner] = useState<IRunner | null>(null);
+  const [revoking, setRevoking] = useState(false);
+  const [reviving, setReviving] = useState<string | null>(null);
+  const [reviveInvite, setReviveInvite] = useState<IRunnerInvite | null>(null);
 
   async function confirmDeleteRunner() {
     if (!deleteRunner) return;
     setDeleting(true);
     try {
-      await service.deleteRunner(deleteRunner.id, { purgeLocal: effectivePurgeLocal });
+      await service.deleteRunner(deleteRunner.id);
       setDeleteRunner(null);
       mutateRunners();
     } catch (e: unknown) {
@@ -92,26 +95,42 @@ const RunnersListPage = observer(function RunnersListPage() {
     }
   }
 
-  const deleteModalContent = deleteRunner ? (
-    <div className="flex flex-col gap-3">
-      <div>{t("runners.list.delete_confirm_body")}</div>
-      {isConnected ? (
-        <label className="flex cursor-pointer items-start gap-2 text-13 text-secondary">
-          <Checkbox
-            checked={purgeLocal}
-            onChange={(e) => setPurgeLocal(e.target.checked)}
-            disabled={deleting}
-            className="mt-0.5"
-          />
-          <span>{t("runners.list.delete_purge_local_label")}</span>
-        </label>
-      ) : (
-        <div className="rounded-md border border-subtle bg-layer-1 px-3 py-2 text-12 text-secondary">
-          {t("runners.list.delete_offline_notice")}
-        </div>
-      )}
-    </div>
-  ) : null;
+  async function confirmRevokeRunner() {
+    if (!revokeRunner) return;
+    setRevoking(true);
+    try {
+      await service.revokeRunner(revokeRunner.id);
+      setRevokeRunner(null);
+      mutateRunners();
+    } catch (e: unknown) {
+      const err = e as { error?: string } | null;
+      setToast({
+        type: TOAST_TYPE.ERROR,
+        title: t("runners.toast.error_title"),
+        message: err?.error ?? t("runners.list.revoke_failed"),
+      });
+    } finally {
+      setRevoking(false);
+    }
+  }
+
+  async function reviveRunner(runner: IRunner) {
+    setReviving(runner.id);
+    try {
+      const invite = await service.reviveRunner(runner.id);
+      setReviveInvite(invite);
+      mutateRunners();
+    } catch (e: unknown) {
+      const err = e as { error?: string } | null;
+      setToast({
+        type: TOAST_TYPE.ERROR,
+        title: t("runners.toast.error_title"),
+        message: err?.error ?? t("runners.list.revive_failed"),
+      });
+    } finally {
+      setReviving(null);
+    }
+  }
 
   return (
     <div className="flex flex-col gap-6">
@@ -157,27 +176,63 @@ const RunnersListPage = observer(function RunnersListPage() {
           <div className="text-destructive text-12">{t("runners.pods.load_failed")}</div>
         ) : (
           <div className="flex flex-wrap gap-2">
-            {(pods ?? []).map((p) => (
-              <div key={p.id} className="rounded-md border border-subtle bg-layer-1 px-3 py-2 text-12">
-                <div className="flex items-center gap-2">
-                  <span className="font-medium text-primary">{p.name}</span>
-                  {p.is_default && (
-                    <Badge variant="accent-neutral" size="sm">
-                      {t("runners.pods.default_badge")}
-                    </Badge>
-                  )}
-                </div>
-                <div className="text-secondary">{t("runners.pods.runner_count", { count: p.runner_count })}</div>
-              </div>
-            ))}
-            {(pods ?? []).length === 0 && <div className="text-12 text-secondary">{t("runners.pods.empty")}</div>}
+            {(pods ?? []).map((p) => {
+              const isSelected = p.id === selectedPodId;
+              return (
+                <button
+                  key={p.id}
+                  type="button"
+                  aria-pressed={isSelected}
+                  aria-label={t("runners.pods.tile_aria", { name: p.name })}
+                  onClick={() => setSelectedPodId(isSelected ? null : p.id)}
+                  className={`rounded-md border px-3 py-2 text-left text-12 transition-colors ${
+                    isSelected
+                      ? "border-custom-primary-100 bg-custom-primary-100/10 ring-custom-primary-100 ring-1"
+                      : "hover:border-primary border-subtle bg-layer-1"
+                  }`}
+                >
+                  <div className="flex items-center gap-2">
+                    <span className="font-medium text-primary">{p.name}</span>
+                    {p.is_default && (
+                      <Badge variant="accent-neutral" size="sm">
+                        {t("runners.pods.default_badge")}
+                      </Badge>
+                    )}
+                  </div>
+                  <div className="text-secondary">{t("runners.pods.runner_count", { count: p.runner_count })}</div>
+                </button>
+              );
+            })}
+            <button
+              type="button"
+              onClick={() => setCreatePodOpen(true)}
+              disabled={!workspaceSlug}
+              className="hover:border-primary flex items-center gap-1.5 rounded-md border border-dashed border-subtle bg-transparent px-3 py-2 text-12 text-secondary hover:text-primary disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              <Plus className="size-3.5" />
+              <span className="font-medium">{t("runners.pods.create_tile")}</span>
+            </button>
           </div>
         )}
       </section>
 
       {/* Runners list — pending rows show as offline until the daemon enrolls */}
       <section>
-        <div className="mb-2 text-13 font-medium text-primary">{t("runners.list.connected_runners")}</div>
+        <div className="mb-2 flex items-center gap-3">
+          <div className="text-13 font-medium text-primary">{t("runners.list.connected_runners")}</div>
+          {selectedPod && (
+            <div className="flex items-center gap-2 text-12 text-secondary">
+              <span>{t("runners.pods.filter_active", { name: selectedPod.name })}</span>
+              <button
+                type="button"
+                onClick={() => setSelectedPodId(null)}
+                className="text-custom-primary-100 underline-offset-2 hover:underline"
+              >
+                {t("runners.pods.filter_clear")}
+              </button>
+            </div>
+          )}
+        </div>
         <div className="overflow-x-auto rounded-md border border-subtle">
           <table className="w-full text-13">
             <thead className="bg-layer-1 text-left text-secondary">
@@ -192,7 +247,7 @@ const RunnersListPage = observer(function RunnersListPage() {
               </tr>
             </thead>
             <tbody>
-              {(runners ?? []).map((r) => (
+              {(filteredRunners ?? []).map((r) => (
                 <tr key={r.id} className="border-t border-subtle">
                   <td className="font-mono px-3 py-2 text-11">{r.name}</td>
                   <td className="px-3 py-2">{r.pod_detail ? r.pod_detail.name : "—"}</td>
@@ -207,13 +262,31 @@ const RunnersListPage = observer(function RunnersListPage() {
                     {r.last_heartbeat_at ? new Date(r.last_heartbeat_at).toLocaleString() : "—"}
                   </td>
                   <td className="px-3 py-2 text-right">
-                    <Button variant="tertiary-danger" size="sm" onClick={() => setDeleteRunner(r)}>
-                      {t("runners.list.delete")}
-                    </Button>
+                    <div className="flex justify-end gap-2">
+                      {isRevivable(r) && (
+                        <Button
+                          variant="neutral-primary"
+                          size="sm"
+                          onClick={() => reviveRunner(r)}
+                          disabled={reviving === r.id}
+                          loading={reviving === r.id}
+                        >
+                          {t("runners.list.revive")}
+                        </Button>
+                      )}
+                      {isRevocable(r) && (
+                        <Button variant="outline-danger" size="sm" onClick={() => setRevokeRunner(r)}>
+                          {t("runners.list.revoke")}
+                        </Button>
+                      )}
+                      <Button variant="tertiary-danger" size="sm" onClick={() => setDeleteRunner(r)}>
+                        {t("runners.list.delete")}
+                      </Button>
+                    </div>
                   </td>
                 </tr>
               ))}
-              {(runners ?? []).length === 0 && (
+              {(filteredRunners ?? []).length === 0 && (
                 <tr>
                   <td colSpan={7} className="px-3 py-8 text-center text-secondary">
                     {t("runners.list.empty")}
@@ -225,20 +298,6 @@ const RunnersListPage = observer(function RunnersListPage() {
         </div>
       </section>
 
-      {/* Active-run observability: render one panel per runner that
-          currently reports an in-flight ``observed_run_id``. Lets
-          operators see which agent is doing what without clicking
-          through to a per-runner detail page. */}
-      {(runners ?? [])
-        .filter((r) => r.live_state?.observed_run_id)
-        .map((r) => (
-          <RunnerAgentStatusPanel
-            key={`agent-status-${r.id}`}
-            runner={{ id: r.id, name: r.name, status: r.status }}
-            liveState={r.live_state}
-          />
-        ))}
-
       {workspaceId && workspaceSlug && (
         <AddRunnerModal
           isOpen={addOpen}
@@ -248,15 +307,56 @@ const RunnersListPage = observer(function RunnersListPage() {
           onCreated={() => mutateRunners()}
         />
       )}
+      {workspaceSlug && (
+        <CreatePodModal
+          isOpen={createPodOpen}
+          onClose={() => setCreatePodOpen(false)}
+          workspaceSlug={workspaceSlug}
+          onCreated={() => mutatePods()}
+        />
+      )}
       <AlertModalCore
         isOpen={!!deleteRunner}
         handleClose={() => (deleting ? null : setDeleteRunner(null))}
         handleSubmit={confirmDeleteRunner}
         isSubmitting={deleting}
         title={t("runners.list.delete_confirm_title")}
-        content={deleteModalContent}
+        content={t("runners.list.delete_confirm_body")}
         primaryButtonText={{ default: t("runners.list.delete"), loading: t("runners.list.delete") }}
       />
+      <AlertModalCore
+        isOpen={!!revokeRunner}
+        handleClose={() => (revoking ? null : setRevokeRunner(null))}
+        handleSubmit={confirmRevokeRunner}
+        isSubmitting={revoking}
+        title={t("runners.list.revoke_confirm_title")}
+        content={t("runners.list.revoke_confirm_body")}
+        primaryButtonText={{ default: t("runners.list.revoke"), loading: t("runners.list.revoke") }}
+      />
+      <ModalCore
+        isOpen={!!reviveInvite}
+        handleClose={() => setReviveInvite(null)}
+        position={EModalPosition.CENTER}
+        width={EModalWidth.XXL}
+      >
+        {reviveInvite && (
+          <div className="flex flex-col gap-4 p-5">
+            <div>
+              <div className="text-18 font-medium text-primary">{t("runners.list.revive_modal_title")}</div>
+              <p className="mt-1 text-13 text-secondary">
+                {t("runners.add_modal.runner_id_label")}: <code className="text-12">{reviveInvite.runner_id}</code>
+                <br />
+                {reviveInvite.name}
+              </p>
+              <p className="mt-2 text-13 text-secondary">{t("runners.list.revive_modal_body")}</p>
+            </div>
+            <RunnerEnrollmentCommand invite={reviveInvite} />
+            <div className="flex justify-end">
+              <Button onClick={() => setReviveInvite(null)}>{t("runners.add_modal.done")}</Button>
+            </div>
+          </div>
+        )}
+      </ModalCore>
     </div>
   );
 });

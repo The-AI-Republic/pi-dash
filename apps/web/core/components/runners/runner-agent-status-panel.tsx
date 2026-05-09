@@ -46,13 +46,6 @@ const BADGE_LABEL: Record<ActivityBadgeKey, string> = {
 
 const ACTIVITY_THRESHOLD_SECS = 30;
 const THINKING_THRESHOLD_SECS = 180;
-/** Mirrors cloud's ``RUNNER_AGENT_OBSERVABILITY_STALE_SECS`` default
- *  (apps/api/pi_dash/runner/tasks.py). When the snapshot itself is
- *  older than this, the runner has stopped polling and *all* the
- *  scalars on it are unreliable — including a "fresh" ``last_event_at``
- *  that would otherwise show as "Active" indefinitely after the runner
- *  goes offline. */
-const SNAPSHOT_STALE_SECS = 90;
 
 /**
  * Pure derivation: compute the activity badge from the raw live-state
@@ -63,17 +56,6 @@ export function deriveActivityBadge(
   now: number = Date.now()
 ): ActivityBadgeKey {
   if (!state) return "unknown";
-
-  // Snapshot-staleness gate: if the runner stopped polling, every
-  // scalar on the row is frozen. Without this guard the panel would
-  // happily render "Stalled" using the last-known timestamps even
-  // after the runner has been offline for hours.
-  if (state.updated_at) {
-    const snapshotAgeMs = now - new Date(state.updated_at).getTime();
-    if (Number.isFinite(snapshotAgeMs) && snapshotAgeMs > SNAPSHOT_STALE_SECS * 1000) {
-      return "unknown";
-    }
-  }
 
   if (state.agent_subprocess_alive === false) return "dead";
 

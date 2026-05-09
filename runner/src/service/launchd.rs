@@ -20,7 +20,9 @@ pub async fn write_unit(paths: &Paths) -> Result<()> {
     let logs = xml_escape(super::validate_path_for_unit(&logs_dir)?);
     let config = xml_escape(super::validate_path_for_unit(&paths.config_dir)?);
     let data = xml_escape(super::validate_path_for_unit(&paths.data_dir)?);
-    let body = render_plist(&exe_str, &config, &data, &logs);
+    // See `service::capture_install_time_path` for why we bake $PATH in.
+    let path_env = super::capture_install_time_path().map(|p| xml_escape(&p));
+    let body = render_plist(&exe_str, &config, &data, &logs, path_env.as_deref());
     tokio::fs::write(&plist_path, body).await?;
     println!("installed launchd agent at {}", plist_path.display());
     Ok(())
@@ -30,7 +32,22 @@ pub async fn write_unit(paths: &Paths) -> Result<()> {
 /// `XDG_RUNTIME_DIR`: on macOS `directories::ProjectDirs` ignores it (runtime
 /// dir is derived from `data_dir`), so the env var is a no-op that only
 /// obscures the real path contract between the daemon and the CLI client.
-fn render_plist(exe: &str, config: &str, data: &str, logs: &str) -> String {
+///
+/// `path_env`, when `Some`, is rendered as a `<key>PATH</key>` entry inside
+/// `EnvironmentVariables` so the daemon (and every subprocess it forks)
+/// inherits the operator's interactive PATH instead of launchd's stripped
+/// default. See `service::capture_install_time_path` for the full rationale.
+fn render_plist(
+    exe: &str,
+    config: &str,
+    data: &str,
+    logs: &str,
+    path_env: Option<&str>,
+) -> String {
+    let path_entry = match path_env {
+        Some(p) => format!("\n    <key>PATH</key><string>{p}</string>"),
+        None => String::new(),
+    };
     format!(
         r#"<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -45,7 +62,7 @@ fn render_plist(exe: &str, config: &str, data: &str, logs: &str) -> String {
   <key>EnvironmentVariables</key>
   <dict>
     <key>PIDASH_CONFIG_DIR</key><string>{config}</string>
-    <key>PIDASH_DATA_DIR</key><string>{data}</string>
+    <key>PIDASH_DATA_DIR</key><string>{data}</string>{path_entry}
   </dict>
   <key>KeepAlive</key><true/>
   <key>RunAtLoad</key><true/>
@@ -171,6 +188,7 @@ mod tests {
             "/Users/user/Library/Application Support/pidash",
             "/Users/user/Library/Application Support/pidash",
             "/Users/user/Library/Application Support/pidash/logs",
+            None,
         );
         assert!(
             !body.contains("XDG_RUNTIME_DIR"),
@@ -180,12 +198,50 @@ mod tests {
 
     #[test]
     fn plist_body_includes_program_args_and_logs() {
-        let body = render_plist("/bin/pidash", "/cfg", "/data", "/logs");
+        let body = render_plist("/bin/pidash", "/cfg", "/data", "/logs", None);
         assert!(body.contains("<string>/bin/pidash</string>"));
         assert!(body.contains("<string>__run</string>"));
         assert!(body.contains("<key>PIDASH_CONFIG_DIR</key><string>/cfg</string>"));
         assert!(body.contains("<key>PIDASH_DATA_DIR</key><string>/data</string>"));
         assert!(body.contains("<string>/logs/runner.out.log</string>"));
         assert!(body.contains("<string>/logs/runner.err.log</string>"));
+    }
+
+    #[test]
+    fn plist_body_omits_path_when_not_captured() {
+        // None means we couldn't (or shouldn't) snapshot $PATH at install
+        // time. The plist must not contain a PATH key in that case — an
+        // empty PATH would be worse than launchd's default.
+        let body = render_plist("/bin/pidash", "/cfg", "/data", "/logs", None);
+        assert!(
+            !body.contains("<key>PATH</key>"),
+            "plist body must not declare PATH when path_env is None; got:\n{body}"
+        );
+    }
+
+    #[test]
+    fn plist_body_bakes_in_path_when_provided() {
+        let body = render_plist(
+            "/bin/pidash",
+            "/cfg",
+            "/data",
+            "/logs",
+            Some("/Users/u/.local/bin:/opt/homebrew/bin:/usr/bin"),
+        );
+        assert!(
+            body.contains(
+                "<key>PATH</key><string>/Users/u/.local/bin:/opt/homebrew/bin:/usr/bin</string>"
+            ),
+            "plist body must include captured PATH inside EnvironmentVariables; got:\n{body}"
+        );
+        // PATH must sit *inside* the EnvironmentVariables dict, after the
+        // existing keys, not at the top-level dict alongside Label/KeepAlive.
+        let env_open = body.find("<key>EnvironmentVariables</key>").unwrap();
+        let path_idx = body.find("<key>PATH</key>").unwrap();
+        let dict_close = body[env_open..].find("</dict>").unwrap() + env_open;
+        assert!(
+            path_idx > env_open && path_idx < dict_close,
+            "PATH key must live inside EnvironmentVariables dict"
+        );
     }
 }

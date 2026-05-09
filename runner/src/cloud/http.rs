@@ -46,8 +46,8 @@ pub enum TransportError {
     RefreshTokenReplayed,
     #[error("auth: membership_revoked")]
     MembershipRevoked,
-    #[error("auth: runner_revoked: {body}")]
-    RunnerRevoked { body: String },
+    #[error("auth: runner_revoked")]
+    RunnerRevoked,
     #[error("auth: runner_id_mismatch")]
     RunnerIdMismatch,
     #[error("auth: invalid_refresh_token")]
@@ -77,15 +77,18 @@ impl TransportError {
     }
 
     /// True when the server's reply means this runner must shut down.
+    /// `SessionEvicted` is intentionally NOT here — eviction just means
+    /// "another session opened for this runner_id, yours got closed."
+    /// The right response is to reopen and continue, not to give up. The
+    /// run loop has a dedicated arm for it.
     pub fn is_fatal_for_runner(&self) -> bool {
         matches!(
             self,
             TransportError::RefreshTokenReplayed
                 | TransportError::MembershipRevoked
-                | TransportError::RunnerRevoked { .. }
+                | TransportError::RunnerRevoked
                 | TransportError::RunnerIdMismatch
                 | TransportError::InvalidRefreshToken
-                | TransportError::SessionEvicted { .. }
         )
     }
 }
@@ -311,21 +314,11 @@ impl TransportErrorCode {
         // We round-trip the error tag; specific variants matter for
         // routing, so reconstruct the auth-class ones precisely. For
         // anything else fall back to Network.
-        let s = self.0.as_str();
-        if let Some(body) = s.strip_prefix("auth: runner_revoked: ") {
-            return TransportError::RunnerRevoked {
-                body: body.to_string(),
-            };
-        }
-        if let Some(reason) = s.strip_prefix("session_evicted: ") {
-            return TransportError::SessionEvicted {
-                reason: reason.to_string(),
-            };
-        }
-        match s {
+        match self.0.as_str() {
             "auth: access_token_expired" => TransportError::AccessTokenExpired,
             "auth: refresh_token_replayed" => TransportError::RefreshTokenReplayed,
             "auth: membership_revoked" => TransportError::MembershipRevoked,
+            "auth: runner_revoked" => TransportError::RunnerRevoked,
             "auth: runner_id_mismatch" => TransportError::RunnerIdMismatch,
             "auth: invalid_refresh_token" => TransportError::InvalidRefreshToken,
             other => TransportError::Network(other.to_string()),
@@ -347,6 +340,10 @@ impl RunnerCloudClient {
 
     pub fn runner_id(&self) -> Uuid {
         self.inner.runner_id
+    }
+
+    pub fn transport(&self) -> &SharedHttpTransport {
+        &self.inner.transport
     }
 
     pub async fn access_token_exp(&self) -> Option<DateTime<Utc>> {
@@ -567,11 +564,11 @@ impl RunnerCloudClient {
         );
         let body = serde_json::json!({ "ack": ack, "status": status });
         // Per-request timeout = server's long-poll block + 5s buffer.
-        // Without this, the shared `Client::timeout` (60s) would fire
-        // before the server's block_ms when an operator bumps
+        // Without this, the shared `Client::timeout` (60s) fires before
+        // the server's block_ms when an operator bumps
         // `LONG_POLL_INTERVAL_SECS` over 55, dropping in-flight assigns
-        // and spinning the backoff loop. We override per-request so
-        // the shared client's default still protects every other RPC.
+        // and spinning the backoff loop. Override per-request so the
+        // shared client default still protects every other RPC.
         let request_timeout = Duration::from_secs(long_poll_interval_secs.saturating_add(5));
         let resp = self
             .inner
@@ -974,10 +971,10 @@ pub struct HttpLoop {
     inline_acks: VecDeque<String>,
     /// Bounded mid-dedupe (design.md §8 / Decision 21). At-least-once
     /// delivery + the PEL-replay path (`use_zero=True` on the first
-    /// poll after session-open) means an `assign` / `cancel` /
-    /// `decide` frame can legitimately arrive twice. Without dedupe
-    /// the runner would re-execute side-effects each time, converting
-    /// at-least-once delivery into at-least-once execution.
+    /// poll after session-open) means an `assign` / `cancel` / `decide`
+    /// frame can legitimately arrive twice. Without dedupe the runner
+    /// would re-execute side-effects each time, converting at-least-
+    /// once delivery into at-least-once execution.
     mid_dedupe: MidDedupe,
     /// Per-poll request timeout (server's long-poll block + buffer),
     /// captured from the welcome envelope. Used to override the shared
@@ -986,6 +983,12 @@ pub struct HttpLoop {
     /// fire before the server's block_ms.
     long_poll_interval_secs: u64,
 }
+
+/// Maximum number of recently-seen `mid` values retained for daemon-side
+/// inbound-frame dedupe. Sized so a multi-hour PEL replay storm fits
+/// without churning the ring; ~36-byte UUID strings × 4096 ≈ 150 KiB
+/// per running runner instance.
+const MID_DEDUPE_CAPACITY: usize = 4096;
 
 /// Hard upper bound on `long_poll_interval_secs` the daemon honors.
 /// Server-side `LONG_POLL_INTERVAL_SECS` should also clamp to this; if
@@ -996,12 +999,6 @@ const MAX_LONG_POLL_INTERVAL_SECS: u64 = 55;
 /// Fallback when welcome carries no value or the cloud cannot be
 /// trusted. Matches the server's documented default.
 const DEFAULT_LONG_POLL_INTERVAL_SECS: u64 = 25;
-
-/// Maximum number of recently-seen `mid` values retained for daemon-side
-/// inbound-frame dedupe. Sized so a multi-hour PEL replay storm fits
-/// without churning the ring; ~36-byte UUID strings × 4096 ≈ 150 KiB
-/// per running runner instance.
-const MID_DEDUPE_CAPACITY: usize = 4096;
 
 /// Bounded "have we seen this mid before?" set. Cap-bounded ring of
 /// recent mids; when the ring is full, the oldest entry is evicted
@@ -1119,10 +1116,56 @@ impl HttpLoop {
         )
     }
 
+    /// Run `ensure_access_token` then `open_session`, retrying transient
+    /// failures with exponential backoff (1s → 30s capped). Returns when
+    /// the session is open OR the loop is shutdown. Only fatal-for-runner
+    /// errors propagate — recoverable / SessionEvicted errors loop until
+    /// success.
+    async fn bootstrap_with_retry(&self) -> Result<OpenSessionResponse, TransportError> {
+        let mut backoff_secs = 1u64;
+        loop {
+            let attempt = async {
+                self.client.ensure_access_token().await?;
+                self.client
+                    .open_session(self.current_attach_body())
+                    .await
+            };
+            let shutdown = self.shutdown.clone();
+            match tokio::select! {
+                _ = shutdown.notified() => {
+                    return Err(TransportError::Network("shutdown during bootstrap".into()));
+                }
+                result = attempt => result,
+            } {
+                Ok(session) => return Ok(session),
+                Err(err) if err.is_fatal_for_runner() => {
+                    tracing::warn!(
+                        runner = %self.client.runner_id(),
+                        "fatal error during bootstrap: {err}",
+                    );
+                    return Err(err);
+                }
+                Err(err) => {
+                    tracing::warn!(
+                        runner = %self.client.runner_id(),
+                        backoff_secs,
+                        "bootstrap failed; retrying: {err}",
+                    );
+                    sleep(Duration::from_secs(backoff_secs)).await;
+                    backoff_secs = (backoff_secs * 2).min(30);
+                }
+            }
+        }
+    }
+
     pub async fn run(mut self) -> Result<(), TransportError> {
-        // 1. Bootstrap: ensure access token, open session.
-        self.client.ensure_access_token().await?;
-        let session = self.client.open_session(self.current_attach_body()).await?;
+        // 1. Bootstrap: ensure access token, open session. Both calls
+        // can hit transient network blips (request timeout, connection
+        // reset, brief 5xx during cloud restart) — retry with backoff
+        // so a single startup glitch doesn't kill the loop forever. Only
+        // genuinely fatal errors (revoked creds, runner_id mismatch)
+        // unwind here.
+        let session = self.bootstrap_with_retry().await?;
         // Capture the server's long-poll interval (clamped) so the per-
         // request timeout in `RunnerCloudClient::poll` matches the
         // server's actual block deadline.
@@ -1158,6 +1201,7 @@ impl HttpLoop {
         }
 
         let mut backoff_secs = 1u64;
+        let mut consecutive_evictions = 0u32;
         loop {
             let shutdown = self.shutdown.clone();
             match tokio::select! {
@@ -1166,42 +1210,48 @@ impl HttpLoop {
             } {
                 Ok(()) => {
                     backoff_secs = 1;
+                    consecutive_evictions = 0;
                 }
                 Err(err) if err.is_fatal_for_runner() => {
                     tracing::warn!(runner = %self.client.runner_id(), "fatal transport error: {err}");
-                    // Closes the F3 race: when the cloud-side delete
-                    // path enqueues `remove_runner` and then evicts
-                    // the session in the next breath, the daemon may
-                    // see the 409 before its long-poll has drained
-                    // the live-stream entry. Synthesize the same
-                    // RemoveRunner envelope here so the RunnerLoop's
-                    // existing handler (cancel run + strip config +
-                    // delete data dir) runs regardless of whether the
-                    // wire frame made it across. The handler is
-                    // idempotent — if the real frame DID arrive
-                    // first, the second pass strips an already-empty
-                    // config block and removes a non-existent dir,
-                    // which is a no-op.
-                    if Self::should_synthesize_remove_runner(&err) {
-                        let synth = ServerMsg::RemoveRunner {
-                            runner_id: self.client.runner_id(),
-                            reason: Some(format!("synthesized: {err}")),
-                        };
-                        let _ = self
-                            .mailbox
-                            .send(InboundEnvelope {
-                                stream_id: None,
-                                env: Envelope::for_runner(self.client.runner_id(), synth),
-                            })
-                            .await;
-                    }
                     return Err(err);
                 }
+                Err(TransportError::SessionEvicted { reason }) => {
+                    // Another session opened for this runner_id and the
+                    // cloud closed ours. Reopen and continue. Back off
+                    // exponentially on repeats so a competing daemon
+                    // doesn't pin us in a thrash loop.
+                    consecutive_evictions = consecutive_evictions.saturating_add(1);
+                    let backoff =
+                        Duration::from_secs((1u64 << consecutive_evictions.min(5)).min(30));
+                    tracing::warn!(
+                        runner = %self.client.runner_id(),
+                        consecutive = consecutive_evictions,
+                        backoff_secs = backoff.as_secs(),
+                        "session evicted ({reason}); reopening",
+                    );
+                    sleep(backoff).await;
+                    if let Err(e) = self
+                        .client
+                        .open_session(self.current_attach_body())
+                        .await
+                    {
+                        tracing::warn!(
+                            runner = %self.client.runner_id(),
+                            "reopen after eviction failed: {e}",
+                        );
+                    }
+                }
                 Err(err) if err.is_recoverable() => {
+                    // Transient: long-poll timeout, transient 5xx, token
+                    // refresh window, etc. Back off and retry on the
+                    // EXISTING session — do NOT reopen, because each
+                    // reopen evicts our own prior session and a long-poll
+                    // already in flight against it would surface as
+                    // SessionEvicted on the next loop iteration.
                     tracing::debug!(runner = %self.client.runner_id(), "recoverable transport error: {err}");
                     sleep(Duration::from_secs(backoff_secs)).await;
                     backoff_secs = (backoff_secs * 2).min(30);
-                    let _ = self.client.open_session(self.current_attach_body()).await;
                 }
                 Err(err) => {
                     tracing::error!(runner = %self.client.runner_id(), "transport error: {err}");
@@ -1296,49 +1346,6 @@ impl HttpLoop {
             }
         }
     }
-
-    /// True when the fatal-for-runner error means "the runner row is
-    /// gone (or about to be)" and the daemon should run the same
-    /// local-cleanup path that the wire `RemoveRunner` frame would
-    /// trigger.
-    ///
-    /// `RefreshTokenReplayed` / `MembershipRevoked` are unambiguous —
-    /// the cloud has decided the runner's auth is gone for cause —
-    /// but `RunnerRevoked` and `SessionEvicted` carry a free-text
-    /// reason from the cloud, and only some of those reasons mean
-    /// "wipe local state." A bare `runner_revoked` body could be a
-    /// transient server bug, a CDN edge spoofing the body, or a
-    /// race against an undo; we don't want any of those to nuke
-    /// `config.toml`. Match against the same canonical set the cloud
-    /// emits via `Runner.revoke(reason=…)` (see
-    /// `apps/api/pi_dash/runner/models.py`), and lean conservative:
-    /// when in doubt the runner just exits cleanly and the operator
-    /// can `pidash runner remove --local-only` if cleanup is needed.
-    fn should_synthesize_remove_runner(err: &TransportError) -> bool {
-        match err {
-            TransportError::RefreshTokenReplayed | TransportError::MembershipRevoked => true,
-            TransportError::RunnerRevoked { body } => Self::body_matches_canonical_reason(body),
-            TransportError::SessionEvicted { reason } => {
-                Self::body_matches_canonical_reason(reason)
-            }
-            _ => false,
-        }
-    }
-
-    /// Substring-match the cloud-supplied reason body against the
-    /// canonical set defined by `Runner.revoke(reason=…)`. Tolerates
-    /// JSON envelopes (`{"error":"...","reason":"runner_removed"}`),
-    /// plain text, and case differences. Future cloud-side renames
-    /// will need to update both sides; the test matrix in
-    /// `synthesize_remove_runner_classifies_canonical_reasons` is the
-    /// canary.
-    fn body_matches_canonical_reason(body: &str) -> bool {
-        let r = body.to_ascii_lowercase();
-        r.contains("runner_removed")
-            || r.contains("manual_revoke")
-            || r.contains("membership_revoked")
-            || r.contains("refresh_token_replayed")
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1367,9 +1374,7 @@ fn map_auth_error(status: StatusCode, body: &str) -> TransportError {
             return TransportError::MembershipRevoked;
         }
         if body.contains("runner_revoked") {
-            return TransportError::RunnerRevoked {
-                body: body.chars().take(256).collect(),
-            };
+            return TransportError::RunnerRevoked;
         }
         if body.contains("invalid_refresh_token") {
             return TransportError::InvalidRefreshToken;
@@ -1429,6 +1434,46 @@ pub async fn enroll_runner(
         .map_err(|e| TransportError::Protocol(format!("enroll body: {e}")))
 }
 
+/// Read a per-runner `credentials.toml` from disk and return a
+/// `CredentialsHandle` ready for use with `RunnerCloudClient`. Centralised
+/// here so the supervisor and the CLI/TUI remove flow share one parser.
+pub async fn load_runner_credentials_from(
+    path: PathBuf,
+    runner_name: &str,
+) -> Result<CredentialsHandle, TransportError> {
+    let raw = tokio::fs::read_to_string(&path)
+        .await
+        .map_err(|e| TransportError::Network(format!("reading {path:?}: {e}")))?;
+    let parsed: toml::Value = toml::from_str(&raw)
+        .map_err(|e| TransportError::Protocol(format!("parsing {path:?}: {e}")))?;
+    let runner_id = parsed
+        .get("runner")
+        .and_then(|v| v.get("id"))
+        .and_then(toml::Value::as_str)
+        .ok_or_else(|| TransportError::Protocol(format!("{path:?} missing runner.id")))?;
+    let refresh_token = parsed
+        .get("refresh")
+        .and_then(|v| v.get("token"))
+        .and_then(toml::Value::as_str)
+        .ok_or_else(|| TransportError::Protocol(format!("{path:?} missing refresh.token")))?;
+    let generation = parsed
+        .get("refresh")
+        .and_then(|v| v.get("generation"))
+        .and_then(toml::Value::as_integer)
+        .ok_or_else(|| TransportError::Protocol(format!("{path:?} missing refresh.generation")))?;
+    let runner_id = Uuid::parse_str(runner_id)
+        .map_err(|e| TransportError::Protocol(format!("invalid runner.id in {path:?}: {e}")))?;
+    Ok(CredentialsHandle::new(
+        path,
+        RunnerCredentials {
+            runner_id,
+            name: runner_name.to_string(),
+            refresh_token: refresh_token.to_string(),
+            refresh_token_generation: generation as u64,
+        },
+    ))
+}
+
 pub async fn write_runner_credentials(
     path: PathBuf,
     creds: RunnerCredentials,
@@ -1438,6 +1483,36 @@ pub async fn write_runner_credentials(
         .rotate(creds.refresh_token.clone(), creds.refresh_token_generation)
         .await
         .map_err(|e| TransportError::Network(e.to_string()))
+}
+
+/// Self-revoke a runner cloud-side via the machine-token auth surface.
+/// `DELETE /api/v1/runner/runners/<rid>/`. Idempotent on the server:
+/// re-issuing against an already-deleted runner returns 401 (the bearer
+/// no longer resolves), which we map back to `Ok(())` so callers don't
+/// need to special-case the second invocation. Caller is responsible
+/// for cleaning up local state afterwards.
+pub async fn revoke_runner_self(client: &RunnerCloudClient) -> Result<(), TransportError> {
+    let token = client.ensure_access_token().await?;
+    let url = format!(
+        "{}/api/v1/runner/runners/{}/",
+        client.transport().cloud_url(),
+        client.runner_id(),
+    );
+    let resp = client
+        .transport()
+        .http()
+        .delete(&url)
+        .header("Authorization", format!("Bearer {}", token.raw))
+        .send()
+        .await
+        .map_err(|e| TransportError::Network(e.to_string()))?;
+    let status = resp.status();
+    if status.is_success() || status == StatusCode::NOT_FOUND || status == StatusCode::UNAUTHORIZED
+    {
+        return Ok(());
+    }
+    let body = resp.text().await.unwrap_or_default();
+    Err(map_auth_error(status, &body))
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -1478,135 +1553,19 @@ mod tests {
     #[test]
     fn auth_error_mapping() {
         let err = map_auth_error(StatusCode::UNAUTHORIZED, "{\"error\":\"runner_revoked\"}");
-        assert!(matches!(err, TransportError::RunnerRevoked { .. }));
+        assert!(matches!(err, TransportError::RunnerRevoked));
         let err = map_auth_error(StatusCode::FORBIDDEN, "{\"error\":\"runner_id_mismatch\"}");
         assert!(matches!(err, TransportError::RunnerIdMismatch));
     }
 
     #[test]
     fn fatal_classification() {
-        assert!(
-            TransportError::RunnerRevoked {
-                body: "x".into()
-            }
-            .is_fatal_for_runner()
-        );
+        assert!(TransportError::RunnerRevoked.is_fatal_for_runner());
         assert!(TransportError::RefreshTokenReplayed.is_fatal_for_runner());
-        assert!(TransportError::SessionEvicted { reason: "x".into() }.is_fatal_for_runner());
+        // SessionEvicted is recoverable — the run loop has a dedicated
+        // arm that reopens the session. See `HttpLoop::run`.
+        assert!(!TransportError::SessionEvicted { reason: "x".into() }.is_fatal_for_runner());
         assert!(!TransportError::Network("net".into()).is_fatal_for_runner());
-    }
-
-    #[test]
-    fn synthesize_remove_runner_classifies_canonical_reasons() {
-        // Always-synthesize signals: by-construction unambiguous.
-        assert!(HttpLoop::should_synthesize_remove_runner(
-            &TransportError::RefreshTokenReplayed
-        ));
-        assert!(HttpLoop::should_synthesize_remove_runner(
-            &TransportError::MembershipRevoked
-        ));
-
-        // RunnerRevoked and SessionEvicted both depend on the
-        // cloud-supplied body. The canonical set comes from
-        // `Runner.revoke(reason=…)` on the cloud (see
-        // apps/api/pi_dash/runner/models.py).
-        for body in [
-            "runner_removed",
-            "manual_revoke",
-            "membership_revoked",
-            "refresh_token_replayed",
-            // Tolerate JSON wrapping.
-            r#"{"error":"session_evicted","reason":"runner_removed"}"#,
-            r#"{"error":"runner_revoked","reason":"manual_revoke"}"#,
-            // Case-insensitive.
-            "RUNNER_REMOVED",
-        ] {
-            assert!(
-                HttpLoop::should_synthesize_remove_runner(&TransportError::SessionEvicted {
-                    reason: body.into()
-                }),
-                "SessionEvicted reason {body:?} should synthesize",
-            );
-            assert!(
-                HttpLoop::should_synthesize_remove_runner(&TransportError::RunnerRevoked {
-                    body: body.into()
-                }),
-                "RunnerRevoked body {body:?} should synthesize",
-            );
-        }
-
-        // Bodies that lack a canonical reason — including the
-        // self-naming `runner_revoked` literal which is not in the
-        // canonical wipe set — are conservatively NOT synthesized.
-        // This is the #2 false-positive guard: a transient or spoofed
-        // 401 carrying just `{"error":"runner_revoked"}` no longer
-        // wipes local state.
-        for body in [
-            "",
-            "session_replaced",
-            "unknown_thing",
-            r#"{"error":"runner_revoked"}"#,
-            "runner_revoked",
-        ] {
-            assert!(
-                !HttpLoop::should_synthesize_remove_runner(&TransportError::SessionEvicted {
-                    reason: body.into()
-                }),
-                "SessionEvicted reason {body:?} should NOT synthesize",
-            );
-            assert!(
-                !HttpLoop::should_synthesize_remove_runner(&TransportError::RunnerRevoked {
-                    body: body.into()
-                }),
-                "RunnerRevoked body {body:?} should NOT synthesize",
-            );
-        }
-
-        // Non-fatal errors don't reach the synthesizer in practice,
-        // but the predicate still answers no.
-        assert!(!HttpLoop::should_synthesize_remove_runner(
-            &TransportError::Network("net".into())
-        ));
-        assert!(!HttpLoop::should_synthesize_remove_runner(
-            &TransportError::RunnerIdMismatch
-        ));
-    }
-
-    #[test]
-    fn mid_dedupe_drops_repeats_within_capacity() {
-        // Same mid twice — second call returns true so the dispatcher
-        // can skip the side effect.
-        let mut d = MidDedupe::with_capacity(4);
-        assert!(!d.record("a"));
-        assert!(d.record("a"));
-        assert!(!d.record("b"));
-        assert!(d.record("b"));
-    }
-
-    #[test]
-    fn mid_dedupe_evicts_oldest_when_full() {
-        // Capacity 2: a, b, then c forces a out. Re-recording a after
-        // eviction is treated as new (correctness trade-off documented
-        // in design.md §8 — the cap bounds memory, replays older than
-        // the window can in principle re-execute).
-        let mut d = MidDedupe::with_capacity(2);
-        assert!(!d.record("a"));
-        assert!(!d.record("b"));
-        assert!(!d.record("c")); // evicts a
-        assert!(!d.record("a")); // a was evicted, so this is "new" again
-        assert!(d.record("c")); // still in the ring
-        assert!(d.record("a")); // we re-inserted it above
-    }
-
-    #[test]
-    fn mid_dedupe_ignores_empty_mid() {
-        // Cloud-side bug or a ServerMsg without a mid won't poison the
-        // ring or trigger a dedupe drop.
-        let mut d = MidDedupe::with_capacity(8);
-        assert!(!d.record(""));
-        assert!(!d.record(""));
-        assert!(!d.record("a"));
-        assert!(d.record("a"));
     }
 
     fn sample_attach_body() -> AttachBody {
@@ -1743,6 +1702,7 @@ mod tests {
                 total: 300,
             }),
             turn_count: Some(2),
+            last_exec_command: None,
         };
         let s = PollStatus::from_state(WireStatus::Busy, Some(rid), true, snap, 1);
         let v = serde_json::to_value(&s).unwrap();

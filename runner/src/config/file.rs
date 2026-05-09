@@ -193,6 +193,7 @@ mod tests {
                 agent_observability_v1: false,
             },
             runners: vec![sample_runner("t", tmp.path().join("wd"))],
+            cli: None,
         };
         write_config(&paths, &cfg).unwrap();
         let loaded = load_config(&paths).unwrap();
@@ -421,6 +422,7 @@ model_default = "o4-mini"
                 sample_runner("a", tmp.path().join("wd-a")),
                 sample_runner("b", tmp.path().join("wd-b")),
             ],
+        cli: None,
         };
         write_config(&paths, &cfg).unwrap();
 
@@ -467,6 +469,7 @@ model_default = "o4-mini"
                 sample_runner("b", tmp.path().join("wd-b")),
                 sample_runner("c", tmp.path().join("wd-c")),
             ],
+        cli: None,
         };
         write_config(&paths, &cfg).unwrap();
         let target = cfg.runners[1].runner_id;
@@ -496,6 +499,7 @@ model_default = "o4-mini"
                 agent_observability_v1: false,
             },
             runners: vec![sample_runner("keep", tmp.path().join("wd"))],
+        cli: None,
         };
         write_config(&paths, &cfg).unwrap();
 
@@ -535,6 +539,7 @@ model_default = "o4-mini"
                 sample_runner("a", tmp.path().join("wd-a")),
                 sample_runner("b", tmp.path().join("wd-b")),
             ],
+        cli: None,
         };
         write_config(&paths, &cfg).unwrap();
 

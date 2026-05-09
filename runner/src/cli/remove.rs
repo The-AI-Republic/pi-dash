@@ -17,7 +17,6 @@
 use anyhow::{Result, bail};
 use clap::Args as ClapArgs;
 
-use crate::cloud::runners::delete_runner;
 use crate::util::paths::Paths;
 
 #[derive(Debug, ClapArgs)]
@@ -72,41 +71,25 @@ pub async fn run(args: Args, paths: &Paths) -> Result<()> {
         tracing::warn!("service uninstall failed (ok if not installed): {e:#}");
     }
 
-    // Cloud-side cleanup: best-effort delete each runner. The systemd
-    // service has already been stopped + uninstalled above, so the
-    // daemon won't be alive to receive the `remove_runner` cascade
-    // frame anyway — pass `purge_local=false` so the cloud emits a
-    // plain `revoke` and we don't waste a cascade payload that no one
-    // will read. Local files are wiped wholesale by `remove_all` below.
-    match crate::config::file::load_all(paths) {
-        Ok((config, creds)) => {
+    // Cloud-side cleanup: best-effort self-revoke each runner via the
+    // machine-token DELETE endpoint. Each runner uses its own
+    // credentials (no workspace api_token needed). Loop carries on past
+    // per-runner failures so a single network blip on runner N+1
+    // doesn't strand the operator with N revoked-and-N-still-half-alive
+    // runners.
+    match crate::config::file::load_config(paths) {
+        Ok(config) => {
             if !args.local_only {
-                let Some(api_token) = creds.api_token.as_deref() else {
-                    eprintln!(
-                        "credentials lack an api_token; skipping cloud-side \
-                         deregistration. Delete each runner from the web UI."
-                    );
-                    crate::config::file::remove_all(paths)?;
-                    println!("local runner state removed.");
-                    // Non-zero exit so CI scripts notice that cloud-side
-                    // state was *not* deregistered. Caller can pass
-                    // `--local-only` to opt out of this check.
-                    bail!(
-                        "cloud-side deregistration skipped (no api_token); \
-                         delete each runner from the web UI"
-                    );
-                };
                 for r in &config.runners {
-                    match delete_runner(&config.daemon.cloud_url, api_token, &r.runner_id, false)
-                        .await
+                    match crate::cli::connect::revoke_additional_runner(paths, &r.name, false).await
                     {
                         Ok(()) => {
-                            tracing::info!(runner = %r.name, "cloud delete-runner ok");
+                            tracing::info!(runner = %r.name, "cloud self-revoke ok");
                         }
                         Err(e) => {
                             tracing::warn!(
                                 runner = %r.name,
-                                "cloud delete-runner failed: {e:#}"
+                                "cloud self-revoke failed: {e:#}"
                             );
                         }
                     }

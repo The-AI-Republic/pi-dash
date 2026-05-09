@@ -34,11 +34,16 @@ def project(db, workspace, create_user):
 
 @pytest.fixture
 def scheduler(workspace, create_user):
+    # Use a slug that does NOT collide with the builtins seeded by the
+    # ``post_save(Workspace)`` signal in ``pi_dash.scheduler.signals`` (e.g.
+    # ``security-audit``). The constraint
+    # ``scheduler_unique_workspace_slug_when_active`` would otherwise reject
+    # this insert because the seeded builtin already occupies that slot.
     with impersonate(create_user):
         return Scheduler.objects.create(
             workspace=workspace,
-            slug="security-audit",
-            name="Security Audit",
+            slug="test-scheduler",
+            name="Test Scheduler",
             prompt="Scan the project.",
         )
 
@@ -48,8 +53,8 @@ def other_scheduler(workspace, create_user):
     with impersonate(create_user):
         return Scheduler.objects.create(
             workspace=workspace,
-            slug="gdpr",
-            name="GDPR",
+            slug="test-other-scheduler",
+            name="Test Other Scheduler",
             prompt="Check GDPR compliance.",
         )
 
