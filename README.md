@@ -9,6 +9,7 @@
 <p align="center"><b>Pi Dash -- AI Agent Orchestration Platform</b></p>
 
 <p align="center">
+    <a href="https://pidash.airepublic.com"><b>Live</b></a> •
     <a href="https://airepublic.com/"><b>Website</b></a> •
     <a href="https://airepublic.com/docs"><b>Documentation</b></a> •
     <a href="https://airepublic.com/"><b>Community</b></a> •
@@ -16,6 +17,8 @@
 </p>
 
 Pi Dash is an open-source AI agent orchestration platform built for **As Coding (asynchronous vibe coding)** — a workflow where you define what needs to be built, and coding agents handle the implementation in the background. Instead of babysitting agent runs and watching terminals scroll, Pi Dash lets you focus on the work that matters: scoping tasks, reviewing results, and shipping products.
+
+Try it now at **[pidash.airepublic.com](https://pidash.airepublic.com)** — no installation required.
 
 > Pi Dash is evolving every day. Your suggestions, ideas, and reported bugs help us immensely. Do not hesitate to open a [GitHub discussion](https://github.com/The-AI-Republic/pi-dash/discussions) or [raise an issue](https://github.com/The-AI-Republic/pi-dash/issues). We read everything and respond to most.
 
