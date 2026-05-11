@@ -40,7 +40,7 @@ Pi Dash is agent-agnostic — bring your own coding agent. Whether you use Apple
 
 ## 🚀 Installation
 
-> **Pi Dash Cloud** is coming soon. For now, self-hosting is the way to go.
+> **Pi Dash Cloud** is now live at **[pidash.airepublic.com](https://pidash.airepublic.com)** — sign up to get started without running your own infrastructure. Prefer to self-host? Follow the steps below.
 
 ### 1. Pi Dash Platform (self-hosted)
 
