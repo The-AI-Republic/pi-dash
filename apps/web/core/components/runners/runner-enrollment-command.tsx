@@ -14,10 +14,14 @@ import type { IRunnerInvite } from "@pi-dash/types";
 type Props = {
   invite: IRunnerInvite;
   /** Optional CLI flags surfaced for parity with the create-runner modal.
-   * The host_label / working_dir flags don't change anything server-side
-   * — they're CLI-only, so we keep the input simple here. */
+   * The host_label / working_dir / agent flags don't change anything
+   * server-side — they're CLI-only, so we keep the input simple here. */
   hostLabel?: string;
   workingDir?: string;
+  /** Agent kind in the runner CLI's kebab-case value-enum spelling
+   * (``codex`` or ``claude-code``). Omitted from the rendered command
+   * when unset. */
+  agent?: string;
 };
 
 /**
@@ -26,7 +30,7 @@ type Props = {
  * and the revive flow so both surface the same install instructions.
  */
 export function RunnerEnrollmentCommand(props: Props) {
-  const { invite, hostLabel, workingDir } = props;
+  const { invite, hostLabel, workingDir, agent } = props;
   const { t } = useTranslation();
   const [origin, setOrigin] = useState("");
   const [justCopied, setJustCopied] = useState(false);
@@ -42,6 +46,7 @@ export function RunnerEnrollmentCommand(props: Props) {
     const optionalArgs: string[] = [];
     if (hostLabel?.trim()) optionalArgs.push(`  --host-label ${hostLabel.trim()}`);
     if (workingDir?.trim()) optionalArgs.push(`  --working-dir ${workingDir.trim()}`);
+    if (agent?.trim()) optionalArgs.push(`  --agent ${agent.trim()}`);
     if (optionalArgs.length > 0) {
       lines[lines.length - 1] += " \\";
       for (let i = 0; i < optionalArgs.length; i += 1) {
@@ -50,7 +55,7 @@ export function RunnerEnrollmentCommand(props: Props) {
       }
     }
     return lines.join("\n");
-  }, [invite.enrollment_token, apiOrigin, hostLabel, workingDir]);
+  }, [invite.enrollment_token, apiOrigin, hostLabel, workingDir, agent]);
 
   const copy = async () => {
     if (!enrollmentCommand) return;
