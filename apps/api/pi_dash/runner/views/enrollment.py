@@ -25,6 +25,7 @@ from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
+from pi_dash.api.middleware.api_authentication import APIKeyAuthentication
 from pi_dash.authentication.session import BaseSessionAuthentication
 from pi_dash.runner.authentication import (
     RunnerAccessTokenAuthentication,
@@ -509,6 +510,137 @@ class RunnerSelfRevokeEndpoint(APIView):
         close_runner_session(runner_pk)
         Runner.objects.filter(pk=runner_pk).delete()
         return Response(status=status.HTTP_204_NO_CONTENT)
+
+
+class RunnerCreateEndpoint(APIView):
+    """``POST /api/v1/runner/runners/`` — CLI-initiated runner creation.
+
+    The dual of ``RunnerInviteEndpoint`` + ``RunnerEnrollEndpoint`` for
+    callers that already have a user-scoped CLI token (issued by
+    ``pidash auth login``). One round-trip mints the Runner row, marks
+    it enrolled, and returns the same shape as ``RunnerEnrollEndpoint``
+    so the daemon code path can be reused verbatim. No one-time
+    enrollment-token paste required.
+
+    Auth: ``X-Api-Key`` (APIToken). The token's user must be a member
+    of the target workspace and the workspace must contain the named
+    project. We deliberately do NOT require admin/maintainer here for
+    parity with the web "Add Runner" button — any workspace member who
+    can see the project can register a runner against it.
+    """
+
+    authentication_classes = [APIKeyAuthentication]
+    permission_classes = [IsAuthenticated]
+    throttle_classes: list = []
+
+    def post(self, request):
+        workspace_slug = (request.data.get("workspace_slug") or "").strip()
+        project_identifier = (request.data.get("project") or "").strip()
+        host_label = (request.data.get("host_label") or "").strip()[:255]
+        body_name = (request.data.get("name") or "").strip()[:128]
+        pod_name = (request.data.get("pod") or "").strip()
+
+        if not workspace_slug or not project_identifier:
+            return Response(
+                {"error": "workspace_slug and project are required"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        from pi_dash.db.models.project import Project
+        from pi_dash.db.models.workspace import Workspace
+
+        workspace = Workspace.objects.filter(slug=workspace_slug).first()
+        if workspace is None:
+            return Response(
+                {"error": "workspace_not_found"},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+        if not is_workspace_member(request.user, workspace.id):
+            # Same 404 the invite endpoint returns — don't leak existence
+            # of workspaces the caller can't see.
+            return Response(
+                {"error": "workspace_not_found"},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+        project = Project.objects.filter(
+            workspace_id=workspace.id, identifier=project_identifier
+        ).first()
+        if project is None:
+            return Response(
+                {"error": "project_not_found"},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+
+        pod: Optional[Pod] = None
+        if pod_name:
+            pod = Pod.objects.filter(
+                project=project, name=pod_name, deleted_at__isnull=True
+            ).first()
+        if pod is None:
+            pod = Pod.default_for_project_id(project.id)
+        if pod is None:
+            return Response(
+                {"error": "project_has_no_default_pod"},
+                status=status.HTTP_409_CONFLICT,
+            )
+
+        name = body_name
+        if not name:
+            count = Runner.objects.filter(pod=pod).count()
+            name = f"runner_{count + 1:03d}"
+
+        with transaction.atomic():
+            refresh = tokens.mint_refresh_token()
+            try:
+                runner = Runner.objects.create(
+                    owner=request.user,
+                    workspace_id=workspace.id,
+                    pod=pod,
+                    name=name,
+                    host_label=host_label,
+                    enrolled_at=timezone.now(),
+                    refresh_token_hash=refresh.hashed,
+                    refresh_token_fingerprint=refresh.fingerprint,
+                    refresh_token_generation=1,
+                )
+            except IntegrityError:
+                return Response(
+                    {"error": "runner_name_taken"},
+                    status=status.HTTP_409_CONFLICT,
+                )
+
+            access = tokens.mint_access_token(
+                runner_id=str(runner.id),
+                user_id=str(runner.owner_id),
+                workspace_id=str(runner.workspace_id),
+                rtg=1,
+            )
+
+            machine_minted: Optional[tokens.MintedToken] = None
+            if host_label:
+                machine_minted = _maybe_mint_machine_token(
+                    user=runner.owner,
+                    workspace=runner.workspace,
+                    host_label=host_label,
+                )
+
+        body = {
+            "runner_id": str(runner.id),
+            "runner_name": runner.name,
+            "refresh_token": refresh.raw,
+            "access_token": access.raw,
+            "access_token_expires_at": access.expires_at.isoformat(),
+            "refresh_token_generation": runner.refresh_token_generation,
+            "workspace_slug": workspace.slug,
+            "pod_slug": pod.name,
+            "project_identifier": project.identifier,
+            "long_poll_interval_secs": 25,
+            "protocol_version": 4,
+            "machine_token_minted": machine_minted is not None,
+        }
+        if machine_minted is not None:
+            body["machine_token"] = machine_minted.raw
+        return Response(body, status=status.HTTP_201_CREATED)
 
 
 class MachineTokenTicketEndpoint(APIView):

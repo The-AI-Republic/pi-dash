@@ -1305,6 +1305,52 @@ fn map_session_error(status: StatusCode, body: &str) -> TransportError {
 
 /// Public helper to enroll a runner — replaces the legacy `enroll.rs`
 /// connection-flow body.
+/// CLI-initiated runner creation.
+///
+/// `pidash auth login` populates `[cli].token` with a user-scoped
+/// `APIToken`. Once that token exists, `pidash runner add` can mint a
+/// runner directly without the one-time enrollment-token paste — we POST
+/// to `/api/v1/runner/runners/` with `X-Api-Key`, and the cloud returns
+/// the same `EnrollResponse` shape `enroll_runner` would have.
+pub async fn create_runner(
+    transport: &SharedHttpTransport,
+    api_token: &str,
+    workspace_slug: &str,
+    project: &str,
+    host_label: &str,
+    name: Option<&str>,
+    pod: Option<&str>,
+) -> Result<EnrollResponse, TransportError> {
+    let url = format!("{}/api/v1/runner/runners/", transport.cloud_url());
+    let mut body = serde_json::json!({
+        "workspace_slug": workspace_slug,
+        "project": project,
+        "host_label": host_label,
+    });
+    if let Some(n) = name {
+        body["name"] = Json::String(n.to_string());
+    }
+    if let Some(p) = pod {
+        body["pod"] = Json::String(p.to_string());
+    }
+    let resp = transport
+        .http()
+        .post(&url)
+        .header("X-Api-Key", api_token)
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| TransportError::Network(e.to_string()))?;
+    let status = resp.status();
+    if !status.is_success() {
+        let body = resp.text().await.unwrap_or_default();
+        return Err(map_auth_error(status, &body));
+    }
+    resp.json::<EnrollResponse>()
+        .await
+        .map_err(|e| TransportError::Protocol(format!("create_runner body: {e}")))
+}
+
 pub async fn enroll_runner(
     transport: &SharedHttpTransport,
     enrollment_token: &str,
