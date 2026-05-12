@@ -361,6 +361,36 @@ EVENT_BATCH_MAX_BYTES = int(os.environ.get("EVENT_BATCH_MAX_BYTES", 65536))
 RUN_MESSAGE_DEDUPE_TTL_SECS = int(os.environ.get("RUN_MESSAGE_DEDUPE_TTL_SECS", 604800))
 RUNNER_PROTOCOL_VERSION = 4
 
+# Runner auto-update advisory. Cloud announces these in the welcome frame;
+# runners with `auto_update` enabled swap their on-disk binary to match
+# LATEST_RUNNER_VERSION. MIN_RUNNER_VERSION surfaces a red banner in the
+# runner TUI/status (advisory only — does not block task claims).
+# Leave unset (empty string) to skip the announcement. Values must match
+# the SemVer shape `MAJOR.MINOR.PATCH[-prerelease]`; the runner's
+# `version_lt` ignores values it can't parse, so a typo silently disables
+# the advisory. We log a warning at startup so operator mistakes are
+# noisy rather than invisible.
+import re as _re_runner_version
+import logging as _logging_runner_version
+
+_RUNNER_VERSION_RE = _re_runner_version.compile(r"^\d+\.\d+\.\d+(-[0-9A-Za-z.-]+)?$")
+
+
+def _validated_runner_version(name):
+    raw = os.environ.get(name, "") or None
+    if raw is not None and not _RUNNER_VERSION_RE.match(raw):
+        _logging_runner_version.getLogger(__name__).warning(
+            "%s=%r does not match MAJOR.MINOR.PATCH[-pre]; "
+            "runners will treat the advisory as malformed and skip it",
+            name,
+            raw,
+        )
+    return raw
+
+
+LATEST_RUNNER_VERSION = _validated_runner_version("LATEST_RUNNER_VERSION")
+MIN_RUNNER_VERSION = _validated_runner_version("MIN_RUNNER_VERSION")
+
 # Per-active-run agent observability watchdog tunables — see
 # ``.ai_design/runner_agent_bridge/design.md`` §4.5.3.
 # 360s is slightly longer than the runner's own 5-minute internal stall

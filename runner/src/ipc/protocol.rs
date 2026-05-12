@@ -113,6 +113,46 @@ pub struct DaemonInfo {
     pub cloud_url: String,
     pub connected: bool,
     pub uptime_secs: u64,
+    /// Update advisory. Populated once a runner's welcome frame carries
+    /// a `latest_runner_version` and/or `min_runner_version` from the
+    /// cloud. `None` means either the daemon hasn't completed its first
+    /// session bootstrap, or the cloud isn't announcing any advisory.
+    /// `#[serde(default)]` keeps old `pidash status` clients parsing a
+    /// newer daemon's Status without serde failures during dev.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub update: Option<UpdateAdvisory>,
+}
+
+/// Version advisory surfaced via `pidash status` and the TUI. Pure data
+/// — the daemon's update orchestration (auto-swap on disk, restart-to-
+/// apply hints) consumes the same fields but is implemented separately.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UpdateAdvisory {
+    /// Version this daemon process is running (compile-time
+    /// `CARGO_PKG_VERSION`). After an auto-swap the on-disk binary may
+    /// be ahead — that's what `on_disk_version` is for.
+    pub running_version: String,
+    /// Version of `~/.local/bin/pidash` on disk. `None` until the
+    /// daemon has reason to believe it differs from `running_version`
+    /// (e.g. a successful auto-swap completed). Equal to
+    /// `running_version` for fresh processes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub on_disk_version: Option<String>,
+    /// Latest version the cloud has announced in the welcome frame.
+    /// `None` if the cloud isn't announcing one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub latest_announced: Option<String>,
+    /// Minimum acceptable version the cloud is advertising. Advisory
+    /// only today — the daemon does not refuse work below this floor.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min_required: Option<String>,
+    /// Whether the user has the auto-update toggle enabled. Surfaced
+    /// here so the TUI's banner can phrase itself appropriately
+    /// ("restart to apply" vs. "update available — run pidash update").
+    /// `#[serde(default)]` defaults to `false` for older daemons that
+    /// didn't populate it.
+    #[serde(default)]
+    pub auto_update_enabled: bool,
 }
 
 /// Per-runner snapshot. The daemon emits one of these per configured
@@ -159,6 +199,9 @@ impl StatusSnapshot {
             },
             self.daemon.cloud_url
         );
+        if let Some(advisory) = &self.daemon.update {
+            advisory.print_compact();
+        }
         if self.runners.is_empty() {
             println!("  no runners configured");
             return;
@@ -172,6 +215,82 @@ impl StatusSnapshot {
     /// with that name is configured.
     pub fn runner_by_name(&self, name: &str) -> Option<&RunnerStatusSnapshot> {
         self.runners.iter().find(|r| r.name == name)
+    }
+}
+
+impl UpdateAdvisory {
+    /// One-line print used by `pidash status`. Mirrors the four-state
+    /// matrix the TUI's Connection card renders (see `runner/README.md`
+    /// → Auto-update). Stays a single line per state so callers like
+    /// `pidash status` keep their compact two-line summary.
+    pub fn print_compact(&self) {
+        let running = self.running_version.as_str();
+        if let Some(min) = self.min_required.as_deref()
+            && version_lt(running, min)
+        {
+            let on_disk = self.on_disk_version.as_deref().unwrap_or(running);
+            if !version_lt(on_disk, min) {
+                println!("  update: REQUIRED — cloud floor v{min}; restart to apply");
+            } else if self.auto_update_enabled {
+                println!("  update: REQUIRED — cloud floor v{min}; swap pending");
+            } else {
+                println!("  update: REQUIRED — cloud floor v{min}; run `pidash update`");
+            }
+            return;
+        }
+        if let Some(latest) = self.latest_announced.as_deref()
+            && version_lt(running, latest)
+        {
+            let on_disk = self.on_disk_version.as_deref().unwrap_or(running);
+            if on_disk == latest {
+                println!("  update: restart to apply v{latest} (running v{running})");
+            } else if self.auto_update_enabled {
+                println!("  update: v{latest} pending swap (running v{running})");
+            } else {
+                println!("  update: v{latest} available — run `pidash update`");
+            }
+        }
+    }
+}
+
+/// Numeric-triple semver compare with one bit of prerelease handling:
+/// when the `(major, minor, patch)` triples are equal, a version with
+/// a prerelease suffix ranks *below* one without (SemVer §11.4.1). So
+/// `0.1.2-rc.1 < 0.1.2` is `true`, matching the SemVer spec.
+///
+/// We deliberately do *not* compare two prerelease identifiers against
+/// each other (`rc.1` vs `beta.2`) — both render as "less than the GA"
+/// for the same triple, which is enough to surface "you should upgrade
+/// to the GA" but not enough to differentiate prerelease channels. If
+/// the cloud announces a prerelease as `LATEST_RUNNER_VERSION`, stable
+/// users will still see it as newer (numeric triple `0.1.3 > 0.1.2`);
+/// guard that policy on the Django side rather than here.
+///
+/// Any non-numeric segment or parse error returns `false` so the caller
+/// doesn't surface an unhelpful "update required" banner from a version
+/// string we don't understand. Pub(crate) because the daemon's
+/// auto-swap gate uses the same compare to decide whether to swap.
+pub(crate) fn version_lt(a: &str, b: &str) -> bool {
+    fn parts(v: &str) -> Option<((u32, u32, u32), bool)> {
+        let (core, has_pre) = match v.split_once('-') {
+            Some((c, _)) => (c, true),
+            None => (v, false),
+        };
+        let mut it = core.split('.');
+        let major = it.next()?.parse().ok()?;
+        let minor = it.next()?.parse().ok()?;
+        let patch = it.next()?.parse().ok()?;
+        Some(((major, minor, patch), has_pre))
+    }
+    match (parts(a), parts(b)) {
+        (Some((ta, pa)), Some((tb, pb))) => {
+            if ta != tb {
+                return ta < tb;
+            }
+            // Equal triple: prerelease is "less than" no-prerelease.
+            matches!((pa, pb), (true, false))
+        }
+        _ => false,
     }
 }
 
@@ -213,12 +332,46 @@ mod tests {
     use super::*;
 
     #[test]
+    fn version_lt_handles_numeric_triples() {
+        assert!(version_lt("0.1.2", "0.1.3"));
+        assert!(version_lt("0.1.2", "0.2.0"));
+        assert!(version_lt("0.1.2", "1.0.0"));
+        assert!(!version_lt("0.1.2", "0.1.2"));
+        assert!(!version_lt("0.1.3", "0.1.2"));
+    }
+
+    #[test]
+    fn version_lt_prerelease_ranks_below_ga_at_same_triple() {
+        // SemVer §11.4.1: a version with a prerelease suffix ranks
+        // below the same triple without one.
+        assert!(version_lt("0.1.2-rc.1", "0.1.2"));
+        assert!(!version_lt("0.1.2", "0.1.2-rc.1"));
+        // Two prereleases on the same triple compare equal in our
+        // crude model — neither is "less than" the other. Good enough
+        // until we wire in the `semver` crate.
+        assert!(!version_lt("0.1.2-rc.1", "0.1.2-rc.2"));
+        // Cross-triple comparison still uses the numeric ordering,
+        // so a stable user sees a newer-triple prerelease as newer.
+        // This is policy: the Django side controls what gets
+        // announced as `LATEST_RUNNER_VERSION`.
+        assert!(version_lt("0.1.2", "0.1.3-rc.1"));
+    }
+
+    #[test]
+    fn version_lt_returns_false_on_unparseable_input() {
+        assert!(!version_lt("nope", "0.1.2"));
+        assert!(!version_lt("0.1.2", "nope"));
+        assert!(!version_lt("0.1", "0.1.2"));
+    }
+
+    #[test]
     fn status_snapshot_roundtrips() {
         let snap = StatusSnapshot {
             daemon: DaemonInfo {
                 cloud_url: "https://x".into(),
                 connected: true,
                 uptime_secs: 42,
+                update: None,
             },
             runners: vec![RunnerStatusSnapshot {
                 runner_id: Uuid::new_v4(),
@@ -249,6 +402,7 @@ mod tests {
                 cloud_url: "https://x".into(),
                 connected: true,
                 uptime_secs: 1,
+                update: None,
             },
             runners: vec![RunnerStatusSnapshot {
                 runner_id: Uuid::new_v4(),
@@ -323,6 +477,7 @@ mod tests {
                 cloud_url: "https://x".into(),
                 connected: false,
                 uptime_secs: 0,
+                update: None,
             },
             runners: vec![
                 RunnerStatusSnapshot {

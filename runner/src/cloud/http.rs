@@ -753,6 +753,12 @@ pub struct WelcomePayload {
     pub long_poll_interval_secs: Option<u64>,
     #[serde(default)]
     pub protocol_version: Option<u32>,
+    /// Optional version advisories pushed from the cloud. See
+    /// ``ServerMsg::Welcome`` for semantics.
+    #[serde(default)]
+    pub latest_runner_version: Option<String>,
+    #[serde(default)]
+    pub min_runner_version: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1092,6 +1098,8 @@ impl HttpLoop {
             server_time: session.welcome.server_time.unwrap_or_else(Utc::now),
             heartbeat_interval_secs: session.welcome.long_poll_interval_secs.unwrap_or(25),
             protocol_version: session.welcome.protocol_version.unwrap_or(WIRE_VERSION),
+            latest_runner_version: session.welcome.latest_runner_version.clone(),
+            min_runner_version: session.welcome.min_runner_version.clone(),
         };
         let _ = self
             .mailbox

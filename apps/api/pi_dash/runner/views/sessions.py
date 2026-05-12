@@ -170,6 +170,10 @@ class RunnerSessionOpenEndpoint(APIView):
             "long_poll_interval_secs": settings.LONG_POLL_INTERVAL_SECS,
             "protocol_version": settings.RUNNER_PROTOCOL_VERSION,
         }
+        if settings.LATEST_RUNNER_VERSION:
+            welcome["latest_runner_version"] = settings.LATEST_RUNNER_VERSION
+        if settings.MIN_RUNNER_VERSION:
+            welcome["min_runner_version"] = settings.MIN_RUNNER_VERSION
         return Response(
             {
                 "session_id": str(new_sid),

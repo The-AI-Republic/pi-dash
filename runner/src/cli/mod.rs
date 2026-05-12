@@ -19,6 +19,7 @@ mod status;
 mod stop;
 mod tui;
 mod uninstall;
+pub mod update;
 mod workspace;
 
 /// Re-exported for integration tests that want to exercise the daemon-entry
@@ -81,6 +82,11 @@ pub enum Command {
     /// Run preflight checks (Codex installed, logged in; git configured; cloud reachable).
     Doctor(doctor::Args),
 
+    /// Swap the on-disk `pidash` binary for the latest GitHub release.
+    /// The running daemon keeps its loaded copy; pass `--restart` to
+    /// also restart so the new code takes effect immediately.
+    Update(update::Args),
+
     /// Deregister with the cloud and delete local credentials.
     Remove(remove::Args),
 
@@ -118,6 +124,7 @@ pub async fn run(cli: Cli) -> Result<()> {
         Command::Status(args) => status::run(args, &paths).await,
         Command::Tui(args) => tui::run(args, &paths).await,
         Command::Doctor(args) => doctor::run(args, &paths).await,
+        Command::Update(args) => update::run(args, &paths).await,
         Command::Remove(args) => remove::run(args, &paths).await,
         Command::Issue(args) => run_crud(issue::run(args, &paths).await),
         Command::Comment(args) => run_crud(comment::run(args, &paths).await),
