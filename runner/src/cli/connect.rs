@@ -23,6 +23,7 @@ use crate::cloud::http::{
 use crate::config::file;
 use crate::config::schema::{Config, Credentials, DaemonConfig, RunnerConfig, WorkspaceSection};
 use crate::util::paths::Paths;
+use crate::workspace::context::{ContextFields, write_context_md};
 
 #[derive(Debug, ClapArgs)]
 pub struct Args {
@@ -204,6 +205,20 @@ pub async fn run(args: Args, paths: &Paths) -> Result<()> {
     };
     file::write_config(paths, &config)?;
 
+    // Mark the runner's working_dir with `.pidash/context.md` so the
+    // checkout is self-describing — non-fatal: the runner is already
+    // configured cloud-side and the enrollment token is single-use, so
+    // a marker-write hiccup is not worth unwinding.
+    let new_runner = config.runners.last().expect("just pushed");
+    write_pidash_context(
+        &new_runner.workspace.working_dir,
+        &config.daemon.cloud_url,
+        &resp.workspace_slug,
+        &resp.project_identifier,
+        &resp.runner_name,
+        resp.runner_id,
+    );
+
     // Legacy machine-scoped credentials are no longer used by the
     // HTTP transport, but a minimal file keeps older CLI surfaces from
     // crashing while the rest of the migration lands. Only write on
@@ -316,6 +331,44 @@ fn hostname() -> Option<String> {
         .and_then(|o| String::from_utf8(o.stdout).ok())
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
+}
+
+/// Best-effort write of `<working_dir>/.pidash/context.md`. Logs and
+/// continues on failure: the cloud enrollment and local config have
+/// already landed, and the enrollment token is single-use, so a
+/// permission/disk hiccup on the marker should not unwind enrollment.
+fn write_pidash_context(
+    working_dir: &std::path::Path,
+    cloud_url: &str,
+    workspace_slug: &str,
+    project_identifier: &str,
+    runner_name: &str,
+    runner_id: uuid::Uuid,
+) {
+    let fields = ContextFields {
+        cloud_url,
+        workspace_slug,
+        project_identifier,
+        runner_name,
+        runner_id,
+    };
+    match write_context_md(working_dir, &fields) {
+        Ok(path) => {
+            tracing::info!(path = %path.display(), "wrote .pidash/context.md");
+        }
+        Err(e) => {
+            tracing::warn!(
+                error = %e,
+                working_dir = %working_dir.display(),
+                "failed to write .pidash/context.md (non-fatal)"
+            );
+            eprintln!(
+                "Warning: could not write {}/.pidash/context.md ({}). Runner is otherwise configured.",
+                working_dir.display(),
+                e
+            );
+        }
+    }
 }
 
 /// Refuse to enroll if `new_wd` collides with any already-configured
@@ -494,6 +547,14 @@ pub async fn enroll_additional_runner(
     cfg.runners.push(new_runner.clone());
     file::write_config(paths, &cfg)
         .map_err(|e| EnrollAdditionalError::WriteConfig(format!("{e:#}")))?;
+    write_pidash_context(
+        &new_runner.workspace.working_dir,
+        &cfg.daemon.cloud_url,
+        &resp.workspace_slug,
+        &resp.project_identifier,
+        &resp.runner_name,
+        resp.runner_id,
+    );
     Ok(new_runner)
 }
 
