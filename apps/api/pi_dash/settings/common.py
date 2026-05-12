@@ -361,6 +361,14 @@ EVENT_BATCH_MAX_BYTES = int(os.environ.get("EVENT_BATCH_MAX_BYTES", 65536))
 RUN_MESSAGE_DEDUPE_TTL_SECS = int(os.environ.get("RUN_MESSAGE_DEDUPE_TTL_SECS", 604800))
 RUNNER_PROTOCOL_VERSION = 4
 
+# Runner auto-update advisory. Cloud announces these in the welcome frame;
+# runners with `auto_update` enabled swap their on-disk binary to match
+# LATEST_RUNNER_VERSION. MIN_RUNNER_VERSION surfaces a red banner in the
+# runner TUI/status (advisory only — does not block task claims).
+# Leave unset (empty string) to skip the announcement.
+LATEST_RUNNER_VERSION = os.environ.get("LATEST_RUNNER_VERSION", "") or None
+MIN_RUNNER_VERSION = os.environ.get("MIN_RUNNER_VERSION", "") or None
+
 # Per-active-run agent observability watchdog tunables — see
 # ``.ai_design/runner_agent_bridge/design.md`` §4.5.3.
 # 360s is slightly longer than the runner's own 5-minute internal stall
