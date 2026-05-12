@@ -43,6 +43,7 @@ fn non_service_commands_still_present() {
         "comment",
         "state",
         "workspace",
+        "update",
     ] {
         assert!(
             names.contains(&v.to_string()),
