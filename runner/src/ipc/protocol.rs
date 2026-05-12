@@ -113,6 +113,39 @@ pub struct DaemonInfo {
     pub cloud_url: String,
     pub connected: bool,
     pub uptime_secs: u64,
+    /// Update advisory. Populated once a runner's welcome frame carries
+    /// a `latest_runner_version` and/or `min_runner_version` from the
+    /// cloud. `None` means either the daemon hasn't completed its first
+    /// session bootstrap, or the cloud isn't announcing any advisory.
+    /// `#[serde(default)]` keeps old `pidash status` clients parsing a
+    /// newer daemon's Status without serde failures during dev.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub update: Option<UpdateAdvisory>,
+}
+
+/// Version advisory surfaced via `pidash status` and the TUI. Pure data
+/// — the daemon's update orchestration (auto-swap on disk, restart-to-
+/// apply hints) consumes the same fields but is implemented separately.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UpdateAdvisory {
+    /// Version this daemon process is running (compile-time
+    /// `CARGO_PKG_VERSION`). After an auto-swap the on-disk binary may
+    /// be ahead — that's what `on_disk_version` is for.
+    pub running_version: String,
+    /// Version of `~/.local/bin/pidash` on disk. `None` until the
+    /// daemon has reason to believe it differs from `running_version`
+    /// (e.g. a successful auto-swap completed). Equal to
+    /// `running_version` for fresh processes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub on_disk_version: Option<String>,
+    /// Latest version the cloud has announced in the welcome frame.
+    /// `None` if the cloud isn't announcing one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub latest_announced: Option<String>,
+    /// Minimum acceptable version the cloud is advertising. Advisory
+    /// only today — the daemon does not refuse work below this floor.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min_required: Option<String>,
 }
 
 /// Per-runner snapshot. The daemon emits one of these per configured
@@ -159,6 +192,9 @@ impl StatusSnapshot {
             },
             self.daemon.cloud_url
         );
+        if let Some(advisory) = &self.daemon.update {
+            advisory.print_compact();
+        }
         if self.runners.is_empty() {
             println!("  no runners configured");
             return;
@@ -172,6 +208,50 @@ impl StatusSnapshot {
     /// with that name is configured.
     pub fn runner_by_name(&self, name: &str) -> Option<&RunnerStatusSnapshot> {
         self.runners.iter().find(|r| r.name == name)
+    }
+}
+
+impl UpdateAdvisory {
+    /// One-line print used by `pidash status`. Renders the most
+    /// actionable state. See the matrix in `runner/README.md`.
+    pub fn print_compact(&self) {
+        let running = &self.running_version;
+        if let Some(min) = &self.min_required
+            && version_lt(running, min)
+        {
+            println!("  update: REQUIRED — running {running}, cloud floor is {min}");
+            return;
+        }
+        if let Some(latest) = &self.latest_announced
+            && version_lt(running, latest)
+        {
+            let on_disk = self.on_disk_version.as_deref().unwrap_or(running);
+            if on_disk == latest {
+                println!("  update: pending restart — v{latest} on disk, daemon running {running}");
+            } else {
+                println!("  update: v{latest} available — running {running}");
+            }
+        }
+    }
+}
+
+/// Naive numeric semver compare: `"a" < "b"` if `a`'s `(major, minor,
+/// patch)` triple is lexicographically less than `b`'s. Any non-numeric
+/// segment, prerelease suffix, or parse error returns `false` so the
+/// caller doesn't surface an unhelpful "update required" banner from a
+/// version string we don't understand.
+fn version_lt(a: &str, b: &str) -> bool {
+    fn parse(v: &str) -> Option<(u32, u32, u32)> {
+        let core = v.split('-').next().unwrap_or(v);
+        let mut parts = core.split('.');
+        let major = parts.next()?.parse().ok()?;
+        let minor = parts.next()?.parse().ok()?;
+        let patch = parts.next()?.parse().ok()?;
+        Some((major, minor, patch))
+    }
+    match (parse(a), parse(b)) {
+        (Some(x), Some(y)) => x < y,
+        _ => false,
     }
 }
 
@@ -219,6 +299,7 @@ mod tests {
                 cloud_url: "https://x".into(),
                 connected: true,
                 uptime_secs: 42,
+                update: None,
             },
             runners: vec![RunnerStatusSnapshot {
                 runner_id: Uuid::new_v4(),
@@ -249,6 +330,7 @@ mod tests {
                 cloud_url: "https://x".into(),
                 connected: true,
                 uptime_secs: 1,
+                update: None,
             },
             runners: vec![RunnerStatusSnapshot {
                 runner_id: Uuid::new_v4(),
@@ -323,6 +405,7 @@ mod tests {
                 cloud_url: "https://x".into(),
                 connected: false,
                 uptime_secs: 0,
+                update: None,
             },
             runners: vec![
                 RunnerStatusSnapshot {

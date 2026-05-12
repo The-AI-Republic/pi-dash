@@ -524,6 +524,8 @@ impl RunnerLoop {
                 ServerMsg::Welcome {
                     protocol_version,
                     heartbeat_interval_secs,
+                    latest_runner_version,
+                    min_runner_version,
                     ..
                 } => {
                     if protocol_version != WIRE_VERSION {
@@ -536,6 +538,16 @@ impl RunnerLoop {
                     if heartbeat_interval_secs > 0 {
                         let _ = self.state.tx_heartbeat_secs.send(heartbeat_interval_secs);
                     }
+                    if latest_runner_version.is_some() || min_runner_version.is_some() {
+                        tracing::info!(
+                            latest = ?latest_runner_version,
+                            min = ?min_runner_version,
+                            "received runner version advisory from cloud",
+                        );
+                    }
+                    self.state
+                        .set_update_advisory(latest_runner_version, min_runner_version)
+                        .await;
                     self.state.set_connected(true).await;
                 }
                 ServerMsg::Assign {

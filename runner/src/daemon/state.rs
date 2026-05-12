@@ -81,6 +81,12 @@ struct Inner {
     current_run: Mutex<Option<CurrentRunSummary>>,
     approvals_pending: Mutex<usize>,
     runner_id: Mutex<Option<Uuid>>,
+    /// Latest version advisory the cloud has pushed via the welcome
+    /// frame. `(latest_announced, min_required)`. Populated on every
+    /// welcome receipt; cleared on `set_connected(false)` is *not*
+    /// done deliberately — operators looking at a recently-
+    /// disconnected daemon still want to see the last advisory.
+    update_advisory: Mutex<(Option<String>, Option<String>)>,
     /// Per-active-run observability snapshot. One `Mutex` over the whole
     /// struct (rather than seven `Mutex<Option<T>>` fields) so that:
     ///   1. `reset_run_snapshot()` is a single assignment — adding a
@@ -122,6 +128,7 @@ impl StateHandle {
                 current_run: Mutex::new(None),
                 approvals_pending: Mutex::new(0),
                 runner_id: Mutex::new(None),
+                update_advisory: Mutex::new((None, None)),
                 run_snapshot: Mutex::new(ObservabilitySnapshot::default()),
             }),
             tx_tick,
@@ -335,11 +342,38 @@ impl StateHandle {
         let uptime = (Utc::now() - self.inner.started_at).num_seconds().max(0) as u64;
         let cloud_url = self.inner.cloud_url.lock().await.clone();
         let connected = *self.inner.connected.lock().await;
+        let (latest_announced, min_required) = self.inner.update_advisory.lock().await.clone();
+        // Only synthesise `update` when the cloud has actually announced
+        // something. A "no advisory" daemon should not surface an empty
+        // banner — keep `update: None` in that case.
+        let update = if latest_announced.is_some() || min_required.is_some() {
+            Some(crate::ipc::protocol::UpdateAdvisory {
+                running_version: env!("CARGO_PKG_VERSION").to_string(),
+                on_disk_version: None,
+                latest_announced,
+                min_required,
+            })
+        } else {
+            None
+        };
         crate::ipc::protocol::DaemonInfo {
             cloud_url,
             connected,
             uptime_secs: uptime,
+            update,
         }
+    }
+
+    /// Record the version advisory carried on a welcome frame. Either
+    /// or both fields may be `None`; passing `(None, None)` clears any
+    /// prior advisory (used only by tests today).
+    pub async fn set_update_advisory(
+        &self,
+        latest: Option<String>,
+        min: Option<String>,
+    ) {
+        let mut guard = self.inner.update_advisory.lock().await;
+        *guard = (latest, min);
     }
 }
 
@@ -364,6 +398,28 @@ mod tests {
             started_at: Utc::now(),
             events: 0,
         }
+    }
+
+    #[tokio::test]
+    async fn update_advisory_round_trips_to_daemon_info() {
+        let state = empty_state();
+        // Default: no advisory seen yet -> daemon_info reports none.
+        assert!(state.daemon_info().await.update.is_none());
+
+        // Welcome with latest + min populates the advisory.
+        state
+            .set_update_advisory(Some("0.1.3".into()), Some("0.1.2".into()))
+            .await;
+        let info = state.daemon_info().await;
+        let adv = info.update.expect("advisory should be populated");
+        assert_eq!(adv.latest_announced.as_deref(), Some("0.1.3"));
+        assert_eq!(adv.min_required.as_deref(), Some("0.1.2"));
+        assert_eq!(adv.running_version, env!("CARGO_PKG_VERSION"));
+        assert!(adv.on_disk_version.is_none(), "no swap has happened yet");
+
+        // Cloud that explicitly clears its advisory drops back to None.
+        state.set_update_advisory(None, None).await;
+        assert!(state.daemon_info().await.update.is_none());
     }
 
     #[tokio::test]
