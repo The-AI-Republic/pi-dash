@@ -737,8 +737,14 @@ fn update_advisory_line(adv: &crate::ipc::protocol::UpdateAdvisory) -> Option<Li
     if let Some(min) = adv.min_required.as_deref()
         && version_lt(running, min)
     {
-        let msg = if adv.auto_update_enabled {
+        let on_disk = adv.on_disk_version.as_deref().unwrap_or(running);
+        // "restart to apply" only makes sense when the binary on disk
+        // actually meets the floor. Before the swap has landed, the
+        // user has nothing to restart onto.
+        let msg = if !version_lt(on_disk, min) {
             format!("⛔ Update required: cloud floor v{min}; restart to apply")
+        } else if adv.auto_update_enabled {
+            format!("⛔ Update required: cloud floor v{min}; swap pending")
         } else {
             format!("⛔ Update required: cloud floor v{min} — run `pidash update`")
         };

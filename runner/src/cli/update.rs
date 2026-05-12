@@ -9,8 +9,8 @@
 //!
 //! `--check` reports whether an update is available without performing one.
 //!
-//! The daemon's auto-update path (Step 4) calls into [`perform_swap`] so
-//! the manual CLI and the daemon-driven swap share one code path.
+//! The daemon's auto-update path calls [`check_or_swap`] so the manual
+//! CLI and the daemon-driven swap share one code path.
 //!
 //! ## Receipt requirement
 //!
@@ -23,6 +23,7 @@ use anyhow::{Context, Result};
 use axoupdater::AxoUpdater;
 use clap::Args as ClapArgs;
 
+use crate::RUNNER_VERSION;
 use crate::util::paths::Paths;
 
 #[derive(Debug, ClapArgs)]
@@ -39,20 +40,19 @@ pub struct Args {
     pub restart: bool,
 }
 
-pub async fn run(args: Args, paths: &Paths) -> Result<()> {
+pub async fn run(args: Args, _paths: &Paths) -> Result<()> {
     match check_or_swap(args.check).await? {
         SwapOutcome::AlreadyLatest => {
-            println!("pidash is already on the latest version ({}).", current_version());
+            println!("pidash is already on the latest version (v{RUNNER_VERSION}).");
         }
         SwapOutcome::UpdateAvailable { new_version } => {
             // --check path: print and exit without touching disk.
             println!(
-                "update available: v{new_version} (running v{}). run `pidash update` to install.",
-                current_version()
+                "update available: v{new_version} (running v{RUNNER_VERSION}). run `pidash update` to install."
             );
         }
         SwapOutcome::Swapped { new_version, old_version } => {
-            let old = old_version.unwrap_or_else(|| current_version().to_string());
+            let old = old_version.unwrap_or_else(|| RUNNER_VERSION.to_string());
             println!("installed v{new_version} (was v{old}).");
             if args.restart {
                 println!("restarting daemon to apply...");
@@ -67,7 +67,6 @@ pub async fn run(args: Args, paths: &Paths) -> Result<()> {
             }
         }
     }
-    let _ = paths; // Paths reserved for future use (e.g. lockfile to coordinate swaps).
     Ok(())
 }
 
@@ -144,8 +143,3 @@ pub async fn check_or_swap(check: bool) -> Result<SwapOutcome> {
     }
 }
 
-/// Compile-time version string. Kept as a tiny helper so callers don't
-/// repeat the `env!` and so tests can compare against it.
-pub fn current_version() -> &'static str {
-    env!("CARGO_PKG_VERSION")
-}

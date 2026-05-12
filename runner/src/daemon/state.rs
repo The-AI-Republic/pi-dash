@@ -366,7 +366,7 @@ impl StateHandle {
             || on_disk_version.is_some()
         {
             Some(crate::ipc::protocol::UpdateAdvisory {
-                running_version: env!("CARGO_PKG_VERSION").to_string(),
+                running_version: crate::RUNNER_VERSION.to_string(),
                 on_disk_version,
                 latest_announced,
                 min_required,
@@ -384,8 +384,9 @@ impl StateHandle {
     }
 
     /// Record the version advisory carried on a welcome frame. Either
-    /// or both fields may be `None`; passing `(None, None)` clears any
-    /// prior advisory (used only by tests today).
+    /// or both fields may be `None`; production callers pass `None` when
+    /// the cloud has no `LATEST_RUNNER_VERSION` / `MIN_RUNNER_VERSION`
+    /// announcement, which clears any prior advisory.
     pub async fn set_update_advisory(
         &self,
         latest: Option<String>,
@@ -422,6 +423,13 @@ impl StateHandle {
     /// Record the on-disk version after a successful swap.
     pub async fn set_on_disk_version(&self, version: String) {
         *self.inner.on_disk_version.lock().await = Some(version);
+    }
+
+    /// Current on-disk version, if a swap has landed. `None` until the
+    /// auto-update path or `pidash update` has successfully swapped at
+    /// least once during this daemon's lifetime.
+    pub async fn on_disk_version(&self) -> Option<String> {
+        self.inner.on_disk_version.lock().await.clone()
     }
 }
 
@@ -462,7 +470,7 @@ mod tests {
         let adv = info.update.expect("advisory should be populated");
         assert_eq!(adv.latest_announced.as_deref(), Some("0.1.3"));
         assert_eq!(adv.min_required.as_deref(), Some("0.1.2"));
-        assert_eq!(adv.running_version, env!("CARGO_PKG_VERSION"));
+        assert_eq!(adv.running_version, crate::RUNNER_VERSION);
         assert!(adv.on_disk_version.is_none(), "no swap has happened yet");
         // Default config has auto_update = true (see DaemonConfig::default).
         assert!(adv.auto_update_enabled);

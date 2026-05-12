@@ -554,14 +554,16 @@ impl RunnerLoop {
                     self.state.set_connected(true).await;
 
                     // Auto-update path: when the user has opted in, the
-                    // cloud is announcing a newer version, and no swap
-                    // is already in flight, spawn a background task to
-                    // swap the on-disk binary. We deliberately do NOT
+                    // cloud is announcing a newer version, no swap is
+                    // already in flight, AND the on-disk binary is not
+                    // already at the announced version, spawn a
+                    // background task to swap. We deliberately do NOT
                     // restart the running daemon — it keeps its loaded
                     // copy until the next natural restart. See
-                    // `runner/RELEASING.md` (auto-update section).
+                    // `runner/README.md` (Auto-update).
                     if let Some(latest) = latest_runner_version.as_deref()
-                        && version_lt(env!("CARGO_PKG_VERSION"), latest)
+                        && version_lt(crate::RUNNER_VERSION, latest)
+                        && self.state.on_disk_version().await.as_deref() != Some(latest)
                         && self.state.auto_update_enabled().await
                         && self.state.try_claim_swap()
                     {
@@ -590,13 +592,14 @@ impl RunnerLoop {
                                     );
                                 }
                                 Err(e) => {
-                                    // No install receipt (source build) is the
-                                    // expected failure on dev machines — keep
-                                    // it quiet rather than warning every
-                                    // welcome.
+                                    // Can be no-receipt (source build), a
+                                    // GitHub network/rate-limit error, or a
+                                    // failed installer run. Logged at info so
+                                    // operators can see the cause without
+                                    // editorialising about which it is.
                                     tracing::info!(
                                         error = %e,
-                                        "auto-update: skipped (likely source build with no install receipt)",
+                                        "auto-update: swap failed",
                                     );
                                 }
                             }
