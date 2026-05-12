@@ -38,6 +38,7 @@ const CARD_DAEMON_SETTINGS: &str = "daemon_settings";
 const CARD_HOTKEYS: &str = "hotkeys";
 const ITEM_LOG_LEVEL: &str = "field:log_level";
 const ITEM_LOG_RETENTION: &str = "field:log_retention_days";
+const ITEM_AUTO_UPDATE: &str = "field:auto_update";
 
 const CARD_REGISTER: &str = "register";
 const ITEM_REG_CLOUD_URL: &str = "register:cloud_url";
@@ -212,6 +213,11 @@ impl Tab for GeneralTab {
                         interactive: true,
                         row: 1,
                     },
+                    FocusNode::Item {
+                        id: ITEM_AUTO_UPDATE,
+                        interactive: true,
+                        row: 2,
+                    },
                 ],
             },
             FocusNode::Card {
@@ -352,6 +358,13 @@ impl Tab for GeneralTab {
                 self.edit_buffer = Some(TextArea::with_text(
                     cfg.daemon.log_retention_days.to_string(),
                 ));
+                KeyHandled::Consumed
+            }
+            ITEM_AUTO_UPDATE => {
+                let Some(cfg) = ctx.data.config_working.as_mut() else {
+                    return KeyHandled::NotConsumed;
+                };
+                cfg.daemon.auto_update = !cfg.daemon.auto_update;
                 KeyHandled::Consumed
             }
             ITEM_REG_SUBMIT => {
@@ -518,6 +531,7 @@ impl GeneralTab {
         let editing = cur == Some(ITEM_LOG_RETENTION) && self.edit_buffer.is_some();
         let log_level_focused = cur == Some(ITEM_LOG_LEVEL);
         let log_retention_focused = cur == Some(ITEM_LOG_RETENTION);
+        let auto_update_focused = cur == Some(ITEM_AUTO_UPDATE);
         let log_level_style = if log_level_focused {
             Style::default()
                 .fg(Color::White)
@@ -563,6 +577,37 @@ impl GeneralTab {
             Span::styled(retention_value, retention_style),
             if log_retention_focused && !editing {
                 Span::styled("   [Enter edits]".to_string(), Style::default().add_modifier(Modifier::DIM))
+            } else {
+                Span::raw("")
+            },
+        ]));
+        let auto_update_value = if cfg.daemon.auto_update { "on" } else { "off" };
+        let auto_update_style = if auto_update_focused {
+            Style::default()
+                .fg(if cfg.daemon.auto_update {
+                    Color::Green
+                } else {
+                    Color::Yellow
+                })
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(if cfg.daemon.auto_update {
+                Color::Green
+            } else {
+                Color::Gray
+            })
+        };
+        lines.push(Line::from(vec![
+            Span::styled(
+                format!(" {} auto_update         ", marker(auto_update_focused)),
+                Style::default().fg(Color::Cyan),
+            ),
+            Span::styled(auto_update_value.to_string(), auto_update_style),
+            if auto_update_focused {
+                Span::styled(
+                    "   [Enter toggles]".to_string(),
+                    Style::default().add_modifier(Modifier::DIM),
+                )
             } else {
                 Span::raw("")
             },
@@ -638,26 +683,34 @@ fn service_card(data: &AppData, focused: bool) -> Paragraph<'_> {
 }
 
 fn connection_card(data: &AppData, focused: bool) -> Paragraph<'_> {
-    let lines = match &data.status {
-        Some(s) => vec![
-            Line::from(vec![Span::styled(
-                if s.daemon.connected {
-                    "● Cloud connected"
-                } else {
-                    "○ Cloud offline"
-                },
-                Style::default()
-                    .fg(if s.daemon.connected {
-                        Color::Green
+    let lines: Vec<Line<'_>> = match &data.status {
+        Some(s) => {
+            let mut v = vec![
+                Line::from(vec![Span::styled(
+                    if s.daemon.connected {
+                        "● Cloud connected"
                     } else {
-                        Color::Red
-                    })
-                    .add_modifier(Modifier::BOLD),
-            )]),
-            Line::from(format!("Cloud URL: {}", s.daemon.cloud_url)),
-            Line::from(format!("Uptime:    {}s", s.daemon.uptime_secs)),
-            Line::from(format!("Runners:   {} configured", s.runners.len(),)),
-        ],
+                        "○ Cloud offline"
+                    },
+                    Style::default()
+                        .fg(if s.daemon.connected {
+                            Color::Green
+                        } else {
+                            Color::Red
+                        })
+                        .add_modifier(Modifier::BOLD),
+                )]),
+                Line::from(format!("Cloud URL: {}", s.daemon.cloud_url)),
+                Line::from(format!("Uptime:    {}s", s.daemon.uptime_secs)),
+                Line::from(format!("Runners:   {} configured", s.runners.len(),)),
+            ];
+            if let Some(advisory) = &s.daemon.update
+                && let Some(line) = update_advisory_line(advisory)
+            {
+                v.push(line);
+            }
+            v
+        }
         None => vec![Line::from(Span::styled(
             "Daemon IPC unreachable.",
             Style::default().fg(Color::DarkGray),
@@ -671,6 +724,48 @@ fn connection_card(data: &AppData, focused: bool) -> Paragraph<'_> {
                 .title(" Connection "),
         )
         .wrap(Wrap { trim: true })
+}
+
+/// Render the auto-update advisory matrix from `runner/RELEASING.md`:
+/// red banner for `min_required` violation, yellow "restart to apply"
+/// when an auto-swap has already landed a newer binary on disk, yellow
+/// "update available" otherwise. Returns `None` when there's nothing
+/// to surface (running version already meets both fields).
+fn update_advisory_line(adv: &crate::ipc::protocol::UpdateAdvisory) -> Option<Line<'static>> {
+    use crate::ipc::protocol::version_lt;
+    let running = adv.running_version.as_str();
+    if let Some(min) = adv.min_required.as_deref()
+        && version_lt(running, min)
+    {
+        let msg = if adv.auto_update_enabled {
+            format!("⛔ Update required: cloud floor v{min}; restart to apply")
+        } else {
+            format!("⛔ Update required: cloud floor v{min} — run `pidash update`")
+        };
+        return Some(Line::from(Span::styled(
+            msg,
+            Style::default()
+                .fg(Color::Red)
+                .add_modifier(Modifier::BOLD),
+        )));
+    }
+    if let Some(latest) = adv.latest_announced.as_deref()
+        && version_lt(running, latest)
+    {
+        let on_disk = adv.on_disk_version.as_deref().unwrap_or(running);
+        let msg = if on_disk == latest {
+            format!("⚠ Restart to apply v{latest} (running v{running})")
+        } else if adv.auto_update_enabled {
+            format!("⚠ Update v{latest} pending swap (running v{running})")
+        } else {
+            format!("⚠ Update v{latest} available — run `pidash update`")
+        };
+        return Some(Line::from(Span::styled(
+            msg,
+            Style::default().fg(Color::Yellow),
+        )));
+    }
+    None
 }
 
 fn hotkeys_card(data: &AppData, focused: bool) -> Paragraph<'_> {
