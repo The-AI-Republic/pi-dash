@@ -87,6 +87,17 @@ struct Inner {
     /// done deliberately — operators looking at a recently-
     /// disconnected daemon still want to see the last advisory.
     update_advisory: Mutex<(Option<String>, Option<String>)>,
+    /// Version of `~/.local/bin/pidash` after the most recent successful
+    /// auto-swap. `None` until a swap has actually happened; once `Some`,
+    /// the IPC advisory shows "restart to apply" instead of "update
+    /// available" because the new bytes are already on disk.
+    on_disk_version: Mutex<Option<String>>,
+    /// Guard against re-entrant or overlapping auto-swap attempts.
+    /// Set atomically before kicking off `cli::update::check_or_swap`
+    /// from the welcome handler; cleared in the spawned task's `finally`
+    /// arm regardless of swap outcome. Plain `AtomicBool` is fine — the
+    /// guard never participates in cross-await borrow lifetimes.
+    swap_in_progress: std::sync::atomic::AtomicBool,
     /// Per-active-run observability snapshot. One `Mutex` over the whole
     /// struct (rather than seven `Mutex<Option<T>>` fields) so that:
     ///   1. `reset_run_snapshot()` is a single assignment — adding a
@@ -129,6 +140,8 @@ impl StateHandle {
                 approvals_pending: Mutex::new(0),
                 runner_id: Mutex::new(None),
                 update_advisory: Mutex::new((None, None)),
+                on_disk_version: Mutex::new(None),
+                swap_in_progress: std::sync::atomic::AtomicBool::new(false),
                 run_snapshot: Mutex::new(ObservabilitySnapshot::default()),
             }),
             tx_tick,
@@ -343,14 +356,18 @@ impl StateHandle {
         let cloud_url = self.inner.cloud_url.lock().await.clone();
         let connected = *self.inner.connected.lock().await;
         let (latest_announced, min_required) = self.inner.update_advisory.lock().await.clone();
+        let on_disk_version = self.inner.on_disk_version.lock().await.clone();
         let auto_update_enabled = self.inner.cfg.lock().await.daemon.auto_update;
         // Only synthesise `update` when the cloud has actually announced
         // something. A "no advisory" daemon should not surface an empty
         // banner — keep `update: None` in that case.
-        let update = if latest_announced.is_some() || min_required.is_some() {
+        let update = if latest_announced.is_some()
+            || min_required.is_some()
+            || on_disk_version.is_some()
+        {
             Some(crate::ipc::protocol::UpdateAdvisory {
                 running_version: env!("CARGO_PKG_VERSION").to_string(),
-                on_disk_version: None,
+                on_disk_version,
                 latest_announced,
                 min_required,
                 auto_update_enabled,
@@ -376,6 +393,35 @@ impl StateHandle {
     ) {
         let mut guard = self.inner.update_advisory.lock().await;
         *guard = (latest, min);
+    }
+
+    /// Read auto-update toggle directly from the live config snapshot.
+    /// Cheap — single mutex acquisition.
+    pub async fn auto_update_enabled(&self) -> bool {
+        self.inner.cfg.lock().await.daemon.auto_update
+    }
+
+    /// Attempt to claim the auto-swap guard. Returns true if we won
+    /// the race (caller proceeds with the swap), false if another
+    /// swap is already in flight.
+    pub fn try_claim_swap(&self) -> bool {
+        use std::sync::atomic::Ordering;
+        self.inner
+            .swap_in_progress
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+    }
+
+    /// Release the swap guard. Always paired with a prior successful
+    /// `try_claim_swap`.
+    pub fn release_swap(&self) {
+        use std::sync::atomic::Ordering;
+        self.inner.swap_in_progress.store(false, Ordering::Release);
+    }
+
+    /// Record the on-disk version after a successful swap.
+    pub async fn set_on_disk_version(&self, version: String) {
+        *self.inner.on_disk_version.lock().await = Some(version);
     }
 }
 

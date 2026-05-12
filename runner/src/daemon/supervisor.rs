@@ -21,7 +21,7 @@ use crate::daemon::runner_out::RunnerOut;
 use crate::daemon::state::StateHandle;
 use crate::history::index::{RunSummary, RunsIndex};
 use crate::history::jsonl::{HistoryEntry, HistoryWriter};
-use crate::ipc::protocol::CurrentRunSummary;
+use crate::ipc::protocol::{CurrentRunSummary, version_lt};
 use crate::ipc::server::IpcServer;
 use crate::util::paths::{Paths, RunnerPaths};
 
@@ -546,9 +546,63 @@ impl RunnerLoop {
                         );
                     }
                     self.state
-                        .set_update_advisory(latest_runner_version, min_runner_version)
+                        .set_update_advisory(
+                            latest_runner_version.clone(),
+                            min_runner_version,
+                        )
                         .await;
                     self.state.set_connected(true).await;
+
+                    // Auto-update path: when the user has opted in, the
+                    // cloud is announcing a newer version, and no swap
+                    // is already in flight, spawn a background task to
+                    // swap the on-disk binary. We deliberately do NOT
+                    // restart the running daemon — it keeps its loaded
+                    // copy until the next natural restart. See
+                    // `runner/RELEASING.md` (auto-update section).
+                    if let Some(latest) = latest_runner_version.as_deref()
+                        && version_lt(env!("CARGO_PKG_VERSION"), latest)
+                        && self.state.auto_update_enabled().await
+                        && self.state.try_claim_swap()
+                    {
+                        let st = self.state.clone();
+                        let latest_owned = latest.to_string();
+                        tokio::spawn(async move {
+                            tracing::info!(
+                                target = %latest_owned,
+                                "auto-update: swapping pidash on disk",
+                            );
+                            match crate::cli::update::check_or_swap(false).await {
+                                Ok(crate::cli::update::SwapOutcome::Swapped {
+                                    new_version,
+                                    ..
+                                }) => {
+                                    tracing::info!(
+                                        %new_version,
+                                        "auto-update: swap complete; restart to apply",
+                                    );
+                                    st.set_on_disk_version(new_version).await;
+                                }
+                                Ok(other) => {
+                                    tracing::debug!(
+                                        ?other,
+                                        "auto-update: no swap performed",
+                                    );
+                                }
+                                Err(e) => {
+                                    // No install receipt (source build) is the
+                                    // expected failure on dev machines — keep
+                                    // it quiet rather than warning every
+                                    // welcome.
+                                    tracing::info!(
+                                        error = %e,
+                                        "auto-update: skipped (likely source build with no install receipt)",
+                                    );
+                                }
+                            }
+                            st.release_swap();
+                        });
+                    }
                 }
                 ServerMsg::Assign {
                     run_id,

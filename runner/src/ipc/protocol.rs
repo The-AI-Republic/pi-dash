@@ -254,8 +254,9 @@ impl UpdateAdvisory {
 /// patch)` triple is lexicographically less than `b`'s. Any non-numeric
 /// segment, prerelease suffix, or parse error returns `false` so the
 /// caller doesn't surface an unhelpful "update required" banner from a
-/// version string we don't understand.
-fn version_lt(a: &str, b: &str) -> bool {
+/// version string we don't understand. Pub(crate) because the daemon's
+/// auto-swap gate uses the same compare to decide whether to swap.
+pub(crate) fn version_lt(a: &str, b: &str) -> bool {
     fn parse(v: &str) -> Option<(u32, u32, u32)> {
         let core = v.split('-').next().unwrap_or(v);
         let mut parts = core.split('.');
