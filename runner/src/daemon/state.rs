@@ -343,6 +343,7 @@ impl StateHandle {
         let cloud_url = self.inner.cloud_url.lock().await.clone();
         let connected = *self.inner.connected.lock().await;
         let (latest_announced, min_required) = self.inner.update_advisory.lock().await.clone();
+        let auto_update_enabled = self.inner.cfg.lock().await.daemon.auto_update;
         // Only synthesise `update` when the cloud has actually announced
         // something. A "no advisory" daemon should not surface an empty
         // banner — keep `update: None` in that case.
@@ -352,6 +353,7 @@ impl StateHandle {
                 on_disk_version: None,
                 latest_announced,
                 min_required,
+                auto_update_enabled,
             })
         } else {
             None
@@ -416,6 +418,8 @@ mod tests {
         assert_eq!(adv.min_required.as_deref(), Some("0.1.2"));
         assert_eq!(adv.running_version, env!("CARGO_PKG_VERSION"));
         assert!(adv.on_disk_version.is_none(), "no swap has happened yet");
+        // Default config has auto_update = true (see DaemonConfig::default).
+        assert!(adv.auto_update_enabled);
 
         // Cloud that explicitly clears its advisory drops back to None.
         state.set_update_advisory(None, None).await;

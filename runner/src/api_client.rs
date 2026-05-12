@@ -306,6 +306,7 @@ mod resolve_tests {
                 log_level: "info".into(),
                 log_retention_days: 14,
                 agent_observability_v1: false,
+                auto_update: true,
             },
             runners: vec![RunnerConfig {
                 name: "r1".into(),

@@ -237,6 +237,17 @@ impl IpcServer {
                 self.primary_state.shutdown();
                 Ok(Response::Ack)
             }
+            Request::SetAutoUpdate { enabled } => {
+                // Persist via the same load-mutate-write-reload path the
+                // TUI's ConfigUpdate uses, so a daemon restart picks up
+                // the new value from disk.
+                let mut cfg = crate::config::file::load_config(&self.paths)?;
+                cfg.daemon.auto_update = enabled;
+                crate::config::file::write_config(&self.paths, &cfg)?;
+                self.primary_state.set_config(cfg).await;
+                tracing::info!(enabled, "auto_update toggled via IPC");
+                Ok(Response::Ack)
+            }
         }
     }
 

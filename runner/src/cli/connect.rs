@@ -197,6 +197,7 @@ pub async fn run(args: Args, paths: &Paths) -> Result<()> {
                 log_level: "info".to_string(),
                 log_retention_days: 14,
                 agent_observability_v1: false,
+                auto_update: true,
             },
             runners: vec![new_runner_block],
             cli: None,

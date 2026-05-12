@@ -88,6 +88,14 @@ pub enum Request {
     RunnerReconnect,
     /// Deregister + stop.
     RunnerDisconnect,
+    /// Flip the daemon's auto-update policy. Persisted to disk so the
+    /// setting survives a daemon restart. The current welcome-frame
+    /// advisory is re-evaluated immediately: turning auto-update on
+    /// when a newer version has already been announced triggers a
+    /// swap on the next tick (Step 4 wiring).
+    SetAutoUpdate {
+        enabled: bool,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -146,6 +154,13 @@ pub struct UpdateAdvisory {
     /// only today — the daemon does not refuse work below this floor.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub min_required: Option<String>,
+    /// Whether the user has the auto-update toggle enabled. Surfaced
+    /// here so the TUI's banner can phrase itself appropriately
+    /// ("restart to apply" vs. "update available — run pidash update").
+    /// `#[serde(default)]` defaults to `false` for older daemons that
+    /// didn't populate it.
+    #[serde(default)]
+    pub auto_update_enabled: bool,
 }
 
 /// Per-runner snapshot. The daemon emits one of these per configured
