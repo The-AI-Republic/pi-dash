@@ -10,7 +10,7 @@ import { useTranslation } from "@pi-dash/i18n";
 import { setPromiseToast } from "@pi-dash/propel/toast";
 import { Tooltip } from "@pi-dash/propel/tooltip";
 import type { IProject } from "@pi-dash/types";
-import { CycleIcon, IntakeIcon, ModuleIcon, PageIcon, ViewsIcon } from "@pi-dash/propel/icons";
+import { CalendarAfterIcon, CycleIcon, IntakeIcon, ModuleIcon, PageIcon, ViewsIcon } from "@pi-dash/propel/icons";
 // components
 import { SettingsBoxedControlItem } from "@/components/settings/boxed-control-item";
 import { SettingsHeading } from "@/components/settings/heading";
@@ -70,6 +70,15 @@ const PROJECT_FEATURES_LIST = {
     title: "Intake",
     description: "Consider and discuss work items before you add them to your project.",
     icon: <IntakeIcon className="h-5 w-5 flex-shrink-0 text-tertiary" />,
+    isPro: false,
+    isEnabled: true,
+  },
+  schedulers: {
+    key: "schedulers",
+    property: "scheduler_view",
+    title: "Scheduler",
+    description: "Surface this project's scheduler installs in the sidebar so admins can manage them in one click.",
+    icon: <CalendarAfterIcon className="h-5 w-5 flex-shrink-0 text-tertiary" />,
     isPro: false,
     isEnabled: true,
   },

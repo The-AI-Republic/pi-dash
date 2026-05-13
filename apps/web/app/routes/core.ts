@@ -234,6 +234,15 @@ export const coreRoutes: RouteConfigEntry[] = [
               "./(all)/[workspaceSlug]/(projects)/projects/(detail)/[projectId]/intake/page.tsx"
             ),
           ]),
+          // Schedulers (per-project) — top-level project route that mirrors
+          // the same scheduler bindings UI as Settings → Schedulers.
+          // Surfaced in the sidebar when project.scheduler_view is on.
+          layout("./(all)/[workspaceSlug]/(projects)/projects/(detail)/[projectId]/schedulers/layout.tsx", [
+            route(
+              ":workspaceSlug/projects/:projectId/schedulers",
+              "./(all)/[workspaceSlug]/(projects)/projects/(detail)/[projectId]/schedulers/page.tsx"
+            ),
+          ]),
         ]),
 
         // Project Archives - Issues, Cycles, Modules
