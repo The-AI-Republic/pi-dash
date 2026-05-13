@@ -15,6 +15,7 @@ token in lock-step on the server.
 from __future__ import annotations
 
 import logging
+import re
 import uuid as _uuid
 from typing import Optional
 
@@ -512,6 +513,14 @@ class RunnerSelfRevokeEndpoint(APIView):
         return Response(status=status.HTTP_204_NO_CONTENT)
 
 
+# Runner names must round-trip safely through systemd unit names,
+# filesystem paths, and TOML keys — so reject anything that would
+# blow up downstream. Matches the runner CLI's `runner_name::validate`
+# in spirit; the regex stays simple on purpose.
+_RUNNER_NAME_RE = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_.\-]{0,127}$")
+_MAX_AUTO_NAME_RETRIES = 5
+
+
 class RunnerCreateEndpoint(APIView):
     """``POST /api/v1/runner/runners/`` — CLI-initiated runner creation.
 
@@ -527,6 +536,12 @@ class RunnerCreateEndpoint(APIView):
     project. We deliberately do NOT require admin/maintainer here for
     parity with the web "Add Runner" button — any workspace member who
     can see the project can register a runner against it.
+
+    Workspace resolution: when ``workspace_slug`` is omitted, and the
+    caller is a member of exactly one workspace, we infer it. With zero
+    memberships we return 400; with multiple we require the caller to
+    name one. This matches the single-workspace-per-host onboarding
+    model the CLI is built around.
     """
 
     authentication_classes = [APIKeyAuthentication]
@@ -534,34 +549,66 @@ class RunnerCreateEndpoint(APIView):
     throttle_classes: list = []
 
     def post(self, request):
+        from pi_dash.db.models.project import Project
+        from pi_dash.db.models.workspace import Workspace, WorkspaceMember
+
         workspace_slug = (request.data.get("workspace_slug") or "").strip()
         project_identifier = (request.data.get("project") or "").strip()
         host_label = (request.data.get("host_label") or "").strip()[:255]
         body_name = (request.data.get("name") or "").strip()[:128]
         pod_name = (request.data.get("pod") or "").strip()
 
-        if not workspace_slug or not project_identifier:
+        if not project_identifier:
             return Response(
-                {"error": "workspace_slug and project are required"},
+                {"error": "project is required"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if body_name and not _RUNNER_NAME_RE.match(body_name):
+            return Response(
+                {
+                    "error": "invalid_runner_name",
+                    "error_description": "name must start with [A-Za-z0-9_] and contain only A-Z, a-z, 0-9, _, ., -",
+                },
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        from pi_dash.db.models.project import Project
-        from pi_dash.db.models.workspace import Workspace
+        # Resolve workspace. Explicit slug wins; otherwise infer from
+        # the caller's single workspace membership (most pidash CLI
+        # users only belong to one). Multi-workspace users must be
+        # explicit so we don't pick the wrong one.
+        if workspace_slug:
+            workspace = Workspace.objects.filter(slug=workspace_slug).first()
+            if workspace is None or not is_workspace_member(request.user, workspace.id):
+                # Same 404 in both cases — don't leak existence of
+                # workspaces the caller can't see.
+                return Response(
+                    {"error": "workspace_not_found"},
+                    status=status.HTTP_404_NOT_FOUND,
+                )
+        else:
+            memberships = list(
+                WorkspaceMember.objects.filter(member=request.user, is_active=True)
+                .select_related("workspace")
+                .order_by("created_at")[:2]
+            )
+            if not memberships:
+                return Response(
+                    {
+                        "error": "no_workspace_membership",
+                        "error_description": "Caller is not a member of any workspace.",
+                    },
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            if len(memberships) > 1:
+                return Response(
+                    {
+                        "error": "workspace_slug_required",
+                        "error_description": "Caller belongs to multiple workspaces — pass workspace_slug to pick one.",
+                    },
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            workspace = memberships[0].workspace
 
-        workspace = Workspace.objects.filter(slug=workspace_slug).first()
-        if workspace is None:
-            return Response(
-                {"error": "workspace_not_found"},
-                status=status.HTTP_404_NOT_FOUND,
-            )
-        if not is_workspace_member(request.user, workspace.id):
-            # Same 404 the invite endpoint returns — don't leak existence
-            # of workspaces the caller can't see.
-            return Response(
-                {"error": "workspace_not_found"},
-                status=status.HTTP_404_NOT_FOUND,
-            )
         project = Project.objects.filter(
             workspace_id=workspace.id, identifier=project_identifier
         ).first()
@@ -584,45 +631,67 @@ class RunnerCreateEndpoint(APIView):
                 status=status.HTTP_409_CONFLICT,
             )
 
-        name = body_name
-        if not name:
-            count = Runner.objects.filter(pod=pod).count()
-            name = f"runner_{count + 1:03d}"
-
-        with transaction.atomic():
-            refresh = tokens.mint_refresh_token()
+        # Mint the runner row, retrying on auto-name collisions when no
+        # name was supplied. Two `pidash runner add` calls running
+        # concurrently can both compute the same ``runner_NNN`` default;
+        # retrying server-side hides that race from the user. If the
+        # caller passed an explicit name and we 409, surface it.
+        attempts = 0
+        last_exc: Optional[IntegrityError] = None
+        runner: Optional[Runner] = None
+        refresh: Optional[tokens.MintedToken] = None
+        access: Optional[tokens.MintedToken] = None
+        machine_minted: Optional[tokens.MintedToken] = None
+        while attempts < _MAX_AUTO_NAME_RETRIES:
+            attempts += 1
+            name = body_name or _next_auto_runner_name(pod)
             try:
-                runner = Runner.objects.create(
-                    owner=request.user,
-                    workspace_id=workspace.id,
-                    pod=pod,
-                    name=name,
-                    host_label=host_label,
-                    enrolled_at=timezone.now(),
-                    refresh_token_hash=refresh.hashed,
-                    refresh_token_fingerprint=refresh.fingerprint,
-                    refresh_token_generation=1,
-                )
-            except IntegrityError:
-                return Response(
-                    {"error": "runner_name_taken"},
-                    status=status.HTTP_409_CONFLICT,
-                )
-
-            access = tokens.mint_access_token(
-                runner_id=str(runner.id),
-                user_id=str(runner.owner_id),
-                workspace_id=str(runner.workspace_id),
-                rtg=1,
+                with transaction.atomic():
+                    refresh = tokens.mint_refresh_token()
+                    runner = Runner.objects.create(
+                        owner=request.user,
+                        workspace_id=workspace.id,
+                        pod=pod,
+                        name=name,
+                        host_label=host_label,
+                        enrolled_at=timezone.now(),
+                        refresh_token_hash=refresh.hashed,
+                        refresh_token_fingerprint=refresh.fingerprint,
+                        refresh_token_generation=1,
+                    )
+                    access = tokens.mint_access_token(
+                        runner_id=str(runner.id),
+                        user_id=str(runner.owner_id),
+                        workspace_id=str(runner.workspace_id),
+                        rtg=1,
+                    )
+                    if host_label:
+                        machine_minted = _maybe_mint_machine_token(
+                            user=runner.owner,
+                            workspace=runner.workspace,
+                            host_label=host_label,
+                        )
+                break
+            except IntegrityError as exc:
+                last_exc = exc
+                if body_name:
+                    # Caller named it explicitly — don't retry.
+                    return Response(
+                        {"error": "runner_name_taken"},
+                        status=status.HTTP_409_CONFLICT,
+                    )
+                # Auto-name path: retry with a freshly recomputed name.
+                continue
+        if runner is None or refresh is None or access is None:
+            logger.warning(
+                "RunnerCreateEndpoint: gave up after %s auto-name attempts: %s",
+                _MAX_AUTO_NAME_RETRIES,
+                last_exc,
             )
-
-            machine_minted: Optional[tokens.MintedToken] = None
-            if host_label:
-                machine_minted = _maybe_mint_machine_token(
-                    user=runner.owner,
-                    workspace=runner.workspace,
-                    host_label=host_label,
-                )
+            return Response(
+                {"error": "could_not_allocate_runner_name"},
+                status=status.HTTP_409_CONFLICT,
+            )
 
         body = {
             "runner_id": str(runner.id),
@@ -641,6 +710,15 @@ class RunnerCreateEndpoint(APIView):
         if machine_minted is not None:
             body["machine_token"] = machine_minted.raw
         return Response(body, status=status.HTTP_201_CREATED)
+
+
+def _next_auto_runner_name(pod: Pod) -> str:
+    """Generate ``runner_NNN`` numbered higher than any existing runner
+    in the same pod. Used by ``RunnerCreateEndpoint`` when the caller
+    didn't supply ``name``. Race-safe via the retry loop in the caller.
+    """
+    count = Runner.objects.filter(pod=pod).count()
+    return f"runner_{count + 1:03d}"
 
 
 class MachineTokenTicketEndpoint(APIView):

@@ -122,17 +122,15 @@ pub async fn add(args: AddArgs, paths: &Paths) -> Result<RunnerConfig> {
     let host_label = hostname_or_unknown();
     let transport = SharedHttpTransport::new(cloud_url.clone())
         .context("building HTTP transport for cloud")?;
+    // workspace_slug is optional client-side. When omitted, the cloud
+    // infers from the caller's single workspace membership (the
+    // single-workspace-per-host onboarding case); multi-workspace
+    // callers must pass `--workspace` and get a clear error from the
+    // server otherwise.
     let resp = create_runner(
         &transport,
         &api_token,
-        // workspace_slug isn't asked from the user yet — pulled from
-        // the caller's token. The endpoint resolves the project under
-        // any workspace the caller belongs to via the workspace_slug we
-        // pass. v1 is one-workspace-per-host, so we send an empty
-        // string and let the endpoint fall back to the user's primary
-        // workspace as derived from `auth login`. If the endpoint
-        // requires it, we'll surface the cloud's error verbatim.
-        &args.workspace.clone().unwrap_or_default(),
+        args.workspace.as_deref(),
         &args.project,
         &host_label,
         args.name.as_deref(),

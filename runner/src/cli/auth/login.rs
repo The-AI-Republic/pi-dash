@@ -18,7 +18,6 @@ use anyhow::{Context, Result};
 use clap::Args as ClapArgs;
 use serde::Deserialize;
 use std::io::{IsTerminal, Write};
-use std::path::PathBuf;
 use std::time::Duration;
 
 use crate::cli::runner_ops;
@@ -364,9 +363,3 @@ fn pick_project(projects: &[ProjectRow]) -> Result<Option<&ProjectRow>> {
     Ok(Some(&projects[idx - 1]))
 }
 
-// `_` silences "unused import" on the `PathBuf` reference further up
-// when run::tests are disabled; left as a guard for future expansion.
-#[allow(dead_code)]
-fn _unused() -> Option<PathBuf> {
-    None
-}

@@ -210,3 +210,173 @@ def test_runner_create_requires_auth(db, api_client, workspace, project):
     )
     # DRF returns 403 when no auth class produces a credential (unauthenticated).
     assert resp.status_code in (401, 403)
+
+
+@pytest.mark.unit
+def test_runner_create_infers_workspace_when_caller_has_one(
+    db, api_key_client, workspace, project
+):
+    """The documented onboarding flow: `pidash runner add --project X`
+    (without --workspace) must succeed when the caller belongs to
+    exactly one workspace. The `workspace` fixture wires a single
+    membership for `create_user`, matching the dev-laptop case.
+    """
+    resp = api_key_client.post(
+        "/api/v1/runner/runners/",
+        {"project": project.identifier, "host_label": "test-host"},
+        format="json",
+    )
+    assert resp.status_code == 201, resp.data
+    assert resp.data["workspace_slug"] == workspace.slug
+
+
+@pytest.mark.unit
+def test_runner_create_400_when_workspace_ambiguous(
+    db, api_key_client, create_user, workspace, project
+):
+    """If the caller belongs to multiple workspaces and omits
+    `workspace_slug`, we should refuse with a specific error rather
+    than guessing wrong.
+    """
+    from pi_dash.db.models.workspace import Workspace, WorkspaceMember
+
+    other_ws = Workspace.objects.create(
+        name="other-ws",
+        owner=create_user,
+        slug="other-ws",
+    )
+    WorkspaceMember.objects.create(workspace=other_ws, member=create_user, role=20)
+
+    resp = api_key_client.post(
+        "/api/v1/runner/runners/",
+        {"project": project.identifier},
+        format="json",
+    )
+    assert resp.status_code == 400
+    assert resp.data["error"] == "workspace_slug_required"
+
+
+@pytest.mark.unit
+def test_runner_create_rejects_invalid_name(db, api_key_client, workspace, project):
+    """Disallow path-traversal / control chars in user-supplied names."""
+    resp = api_key_client.post(
+        "/api/v1/runner/runners/",
+        {
+            "workspace_slug": workspace.slug,
+            "project": project.identifier,
+            "name": "../etc/passwd",
+        },
+        format="json",
+    )
+    assert resp.status_code == 400
+    assert resp.data["error"] == "invalid_runner_name"
+
+
+@pytest.mark.unit
+def test_runner_create_400_when_no_workspace_membership(
+    db, api_client, create_user, workspace, project
+):
+    """A token bound to a user with no workspace memberships at all
+    should get a clear `no_workspace_membership` error, not a 500.
+    """
+    from pi_dash.db.models import APIToken
+    from pi_dash.db.models.workspace import WorkspaceMember
+
+    WorkspaceMember.objects.filter(member=create_user).delete()
+    # Mint a fresh token now that the user has no memberships.
+    tok = APIToken.objects.create(user=create_user)
+    api_client.credentials(HTTP_X_API_KEY=tok.token)
+
+    resp = api_client.post(
+        "/api/v1/runner/runners/",
+        {"project": project.identifier},
+        format="json",
+    )
+    assert resp.status_code == 400
+    assert resp.data["error"] == "no_workspace_membership"
+
+
+# -------------------- approval hardening --------------------
+
+
+@pytest.mark.unit
+def test_approve_rejects_second_user_takeover(
+    db, api_client, session_client, create_user
+):
+    """Once user A approves a code, user B (a different logged-in
+    session) cannot re-approve and steal the eventual token.
+    """
+    from pi_dash.db.models import User
+
+    start = api_client.post("/api/v1/auth/device/start/", {}, format="json").data
+    # User A approves.
+    first = session_client.post(
+        "/api/v1/auth/device/approve/", {"user_code": start["user_code"]}, format="json"
+    )
+    assert first.status_code == 200, first.data
+
+    # User B (different account) tries to approve the same code.
+    user_b = User.objects.create(email="b@example.com", username="b")
+    api_client.force_authenticate(user=user_b)
+    second = api_client.post(
+        "/api/v1/auth/device/approve/", {"user_code": start["user_code"]}, format="json"
+    )
+    assert second.status_code == 409
+    api_client.force_authenticate(user=None)
+
+    # Subsequent CLI poll mints the token for user A (the original
+    # approver), not user B.
+    CLIDeviceCode.objects.filter(device_code=start["device_code"]).update(
+        last_polled_at=timezone.now() - timedelta(seconds=30)
+    )
+    poll = api_client.post(
+        "/api/v1/auth/device/token/", {"device_code": start["device_code"]}, format="json"
+    )
+    assert poll.status_code == 200
+    assert poll.data["user_email"] == create_user.email
+
+
+@pytest.mark.unit
+def test_approve_idempotent_for_same_user(db, api_client, session_client, create_user):
+    """Re-approving by the same user is OK (idempotent UX): the human
+    might double-click Approve in the browser.
+    """
+    start = api_client.post("/api/v1/auth/device/start/", {}, format="json").data
+    a = session_client.post(
+        "/api/v1/auth/device/approve/", {"user_code": start["user_code"]}, format="json"
+    )
+    assert a.status_code == 200
+    b = session_client.post(
+        "/api/v1/auth/device/approve/", {"user_code": start["user_code"]}, format="json"
+    )
+    assert b.status_code == 200
+
+
+# -------------------- slow_down DoS prevention --------------------
+
+
+@pytest.mark.unit
+def test_slow_down_does_not_update_last_polled_at(db, api_client):
+    """A rapid poller (or attacker holding the device_code) must NOT be
+    able to slip `last_polled_at` forward on each rejection, otherwise
+    the legit CLI's slower poll would always look "too fast" too.
+    """
+    start = api_client.post("/api/v1/auth/device/start/", {}, format="json").data
+    # First poll establishes last_polled_at.
+    first = api_client.post(
+        "/api/v1/auth/device/token/", {"device_code": start["device_code"]}, format="json"
+    )
+    assert first.status_code == 400
+    row = CLIDeviceCode.objects.get(device_code=start["device_code"])
+    first_polled = row.last_polled_at
+    assert first_polled is not None
+
+    # Second poll within the min-gap returns slow_down — and must leave
+    # last_polled_at frozen at the previous value.
+    second = api_client.post(
+        "/api/v1/auth/device/token/", {"device_code": start["device_code"]}, format="json"
+    )
+    assert second.status_code == 400
+    assert second.data["error"] == "slow_down"
+    row.refresh_from_db()
+    assert row.last_polled_at == first_polled

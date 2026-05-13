@@ -1312,10 +1312,14 @@ fn map_session_error(status: StatusCode, body: &str) -> TransportError {
 /// runner directly without the one-time enrollment-token paste — we POST
 /// to `/api/v1/runner/runners/` with `X-Api-Key`, and the cloud returns
 /// the same `EnrollResponse` shape `enroll_runner` would have.
+///
+/// `workspace_slug` is optional: the cloud falls back to the caller's
+/// single workspace membership when omitted. Multi-workspace callers
+/// must pass an explicit slug.
 pub async fn create_runner(
     transport: &SharedHttpTransport,
     api_token: &str,
-    workspace_slug: &str,
+    workspace_slug: Option<&str>,
     project: &str,
     host_label: &str,
     name: Option<&str>,
@@ -1323,10 +1327,12 @@ pub async fn create_runner(
 ) -> Result<EnrollResponse, TransportError> {
     let url = format!("{}/api/v1/runner/runners/", transport.cloud_url());
     let mut body = serde_json::json!({
-        "workspace_slug": workspace_slug,
         "project": project,
         "host_label": host_label,
     });
+    if let Some(ws) = workspace_slug {
+        body["workspace_slug"] = Json::String(ws.to_string());
+    }
     if let Some(n) = name {
         body["name"] = Json::String(n.to_string());
     }

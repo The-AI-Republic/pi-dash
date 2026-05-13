@@ -88,6 +88,10 @@ REST_FRAMEWORK = {
         "anon": "30/minute",
         "asset_id": "5/minute",
         "user": "120/minute",
+        # `pidash auth login` device-code start. Bounded per IP — the
+        # endpoint creates a DB row each call, so a flood would otherwise
+        # be a free table-pollution vector.
+        "auth_device_start": "20/minute",
     },
     "DEFAULT_PERMISSION_CLASSES": ("rest_framework.permissions.IsAuthenticated",),
     "DEFAULT_RENDERER_CLASSES": ("rest_framework.renderers.JSONRenderer",),

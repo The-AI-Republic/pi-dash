@@ -25,13 +25,14 @@ import logging
 from datetime import timedelta
 
 # Django imports
-from django.db import transaction
+from django.db import IntegrityError, transaction
 from django.utils import timezone
 
 # Third party imports
 from rest_framework import status
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
+from rest_framework.throttling import AnonRateThrottle
 from rest_framework.views import APIView
 
 # Module imports
@@ -50,6 +51,21 @@ DEVICE_CODE_TTL = timedelta(minutes=10)
 DEVICE_CODE_POLL_INTERVAL_SECONDS = 5
 DEVICE_CODE_MIN_POLL_GAP = timedelta(seconds=3)
 
+# Generated user_codes have ~3×10^11 entropy across the 10-min window,
+# so collisions are vanishingly rare in practice — but a single
+# collision still 500s the request, which we'd rather convert into a
+# retry. Bounded so a pathological alphabet exhaustion can't loop.
+DEVICE_CODE_START_MAX_RETRIES = 5
+
+
+class DeviceCodeStartThrottle(AnonRateThrottle):
+    """Per-IP cap on `device/start/` to keep the table from being
+    filled with junk by an unauthenticated caller. The legit flow
+    needs one call per `pidash auth login`, so a modest cap is fine.
+    """
+
+    scope = "auth_device_start"
+
 
 def _verification_uri(request) -> str:
     return f"{base_host(request=request).rstrip('/')}/auth/device/"
@@ -60,19 +76,34 @@ class DeviceCodeStartEndpoint(APIView):
 
     Anonymous endpoint. Anyone with network access can request a code;
     this is harmless because the code only unlocks anything once a
-    logged-in human explicitly approves it via the web UI.
+    logged-in human explicitly approves it via the web UI. Throttled
+    per IP so a malicious caller can't fill the table.
     """
 
     permission_classes = [AllowAny]
     authentication_classes: list = []
+    throttle_classes = [DeviceCodeStartThrottle]
 
     def post(self, request):
         expires_at = timezone.now() + DEVICE_CODE_TTL
-        row = CLIDeviceCode.objects.create(
-            expires_at=expires_at,
-            # No user/workspace yet — the row is "pending" until the
-            # human approves it in their browser session.
-        )
+        # Retry on the (vanishingly improbable) unique-constraint
+        # collision so a 1-in-10^11 unlucky generator output doesn't
+        # surface a 500 to the user.
+        for _attempt in range(DEVICE_CODE_START_MAX_RETRIES):
+            try:
+                row = CLIDeviceCode.objects.create(
+                    expires_at=expires_at,
+                    # No user/workspace yet — the row is "pending" until
+                    # the human approves it in their browser session.
+                )
+                break
+            except IntegrityError as exc:
+                logger.warning("CLIDeviceCode create collided, retrying: %s", exc)
+        else:
+            return Response(
+                {"error": "internal_error", "error_description": "Could not allocate a device code; try again."},
+                status=status.HTTP_503_SERVICE_UNAVAILABLE,
+            )
         return Response(
             {
                 "device_code": row.device_code,
@@ -138,6 +169,17 @@ class DeviceCodeApproveEndpoint(APIView):
                 return Response(
                     {"error": "This code has expired. Run `pidash auth login` again."},
                     status=status.HTTP_410_GONE,
+                )
+            # Reject second-user takeover: once a code is approved, only
+            # the same user can re-approve it (idempotent). Otherwise an
+            # attacker who shoulder-surfs the user_code in the ~10-min
+            # window could overwrite `row.user` before the CLI polls and
+            # end up with a token impersonating the second-approver's
+            # account.
+            if row.approved and row.user_id is not None and row.user_id != request.user.id:
+                return Response(
+                    {"error": "This code has already been approved by another user."},
+                    status=status.HTTP_409_CONFLICT,
                 )
 
             # Pick a workspace the approving user is a member of. v1 is
@@ -218,9 +260,13 @@ class DeviceCodeTokenEndpoint(APIView):
             # MUST NOT poll faster than `interval`; if they do we should
             # tell them to `slow_down`. We accept the first poll
             # unconditionally and clamp subsequent ones to a 3s floor.
+            #
+            # Critically, do NOT bump `last_polled_at` on a slow_down
+            # rejection — otherwise a malicious caller holding the
+            # device_code could spam fast polls and starve the legit
+            # CLI, which would always see `(now - last_polled_at) < gap`
+            # because the attacker just touched it.
             if row.last_polled_at is not None and (now - row.last_polled_at) < DEVICE_CODE_MIN_POLL_GAP:
-                row.last_polled_at = now
-                row.save(update_fields=["last_polled_at", "updated_at"])
                 return Response(
                     {"error": "slow_down"},
                     status=status.HTTP_400_BAD_REQUEST,

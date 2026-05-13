@@ -91,6 +91,7 @@ pub fn clear_cli_token(paths: &Paths) -> Result<()> {
 /// Result of applying a mint locally: the new `RunnerConfig` block and
 /// whether this was the host's first runner (so callers can decide
 /// whether to install the OS service unit / restart it).
+#[derive(Debug)]
 pub struct AppliedRunner {
     pub runner: RunnerConfig,
     pub is_first_runner: bool,
@@ -113,40 +114,10 @@ pub async fn apply_enroll_response(
     working_dir: Option<PathBuf>,
     agent_kind: AgentKind,
 ) -> Result<AppliedRunner> {
-    // Per-runner credentials.toml first — config.toml is the canonical
-    // list but the supervisor refuses runner rows that have no
-    // credentials file, so we want the credential on disk before the
-    // config references it.
-    let runner_paths = paths.for_runner(resp.runner_id);
-    runner_paths.ensure()?;
-    write_runner_credentials(
-        runner_paths.credentials_path(),
-        RunnerCredentials {
-            runner_id: resp.runner_id,
-            name: resp.runner_name.clone(),
-            refresh_token: resp.refresh_token.clone(),
-            refresh_token_generation: resp.refresh_token_generation,
-        },
-    )
-    .await
-    .context("writing per-runner credentials failed")?;
-
-    let working_dir =
-        working_dir.unwrap_or_else(|| paths.runner_dir(resp.runner_id).join("workspace"));
-
-    let new_runner = RunnerConfig {
-        name: resp.runner_name.clone(),
-        runner_id: resp.runner_id,
-        workspace_slug: Some(resp.workspace_slug.clone()),
-        project_slug: Some(resp.project_identifier.clone()),
-        pod_id: None,
-        workspace: WorkspaceSection { working_dir },
-        agent: AgentSection { kind: agent_kind },
-        codex: CodexSection::default(),
-        claude_code: ClaudeCodeSection::default(),
-        approval_policy: ApprovalPolicySection::default(),
-    };
-
+    // Load existing config (if any) and check the cloud URL BEFORE we
+    // touch disk. Writing per-runner credentials first and then
+    // discovering a cloud-URL mismatch leaves an orphaned credentials
+    // file the daemon will never reference — annoying to clean up.
     let mut cfg = if paths.config_path().exists() {
         file::load_config(paths)?
     } else {
@@ -178,14 +149,210 @@ pub async fn apply_enroll_response(
     if cfg.daemon.cloud_url.is_empty() {
         cfg.daemon.cloud_url = cloud_url.to_string();
     }
+
+    let working_dir =
+        working_dir.unwrap_or_else(|| paths.runner_dir(resp.runner_id).join("workspace"));
+
+    let new_runner = RunnerConfig {
+        name: resp.runner_name.clone(),
+        runner_id: resp.runner_id,
+        workspace_slug: Some(resp.workspace_slug.clone()),
+        project_slug: Some(resp.project_identifier.clone()),
+        pod_id: None,
+        workspace: WorkspaceSection { working_dir },
+        agent: AgentSection { kind: agent_kind },
+        codex: CodexSection::default(),
+        claude_code: ClaudeCodeSection::default(),
+        approval_policy: ApprovalPolicySection::default(),
+    };
+
+    // Validate the merged config in-memory before persisting anything.
     let is_first_runner = cfg.runners.is_empty();
     cfg.runners.push(new_runner.clone());
     cfg.validate()
         .map_err(|e| anyhow::anyhow!("config invalid after add: {e}"))?;
+
+    // Disk writes only happen after every fast-fail above has cleared.
+    // credentials.toml goes first: the supervisor refuses to start a
+    // runner whose config block references a missing credentials file,
+    // so write the credential before the config that points at it.
+    let runner_paths = paths.for_runner(resp.runner_id);
+    runner_paths.ensure()?;
+    write_runner_credentials(
+        runner_paths.credentials_path(),
+        RunnerCredentials {
+            runner_id: resp.runner_id,
+            name: resp.runner_name.clone(),
+            refresh_token: resp.refresh_token.clone(),
+            refresh_token_generation: resp.refresh_token_generation,
+        },
+    )
+    .await
+    .context("writing per-runner credentials failed")?;
     file::write_config(paths, &cfg)?;
 
     Ok(AppliedRunner {
         runner: new_runner,
         is_first_runner,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::cloud::http::EnrollResponse;
+    use tempfile::tempdir;
+    use uuid::Uuid;
+
+    fn paths_for(root: &std::path::Path) -> Paths {
+        Paths {
+            config_dir: root.join("config"),
+            data_dir: root.join("data"),
+            runtime_dir: root.join("runtime"),
+        }
+    }
+
+    fn sample_response(runner_name: &str) -> EnrollResponse {
+        EnrollResponse {
+            runner_id: Uuid::new_v4(),
+            runner_name: runner_name.into(),
+            refresh_token: "refresh".into(),
+            access_token: "access".into(),
+            access_token_expires_at: "2099-01-01T00:00:00+00:00".into(),
+            refresh_token_generation: 1,
+            workspace_slug: "acme".into(),
+            pod_slug: "default".into(),
+            project_identifier: "WEB".into(),
+            long_poll_interval_secs: 25,
+            protocol_version: 4,
+            machine_token: None,
+            machine_token_minted: false,
+        }
+    }
+
+    #[tokio::test]
+    async fn first_runner_bootstraps_config_when_none_exists() {
+        let tmp = tempdir().unwrap();
+        let paths = paths_for(tmp.path());
+        let resp = sample_response("r1");
+        let applied = apply_enroll_response(
+            &paths,
+            &resp,
+            "https://example.com",
+            Some(tmp.path().join("wd")),
+            AgentKind::Codex,
+        )
+        .await
+        .unwrap();
+        assert!(applied.is_first_runner);
+        let cfg = file::load_config(&paths).unwrap();
+        assert_eq!(cfg.daemon.cloud_url, "https://example.com");
+        assert_eq!(cfg.runners.len(), 1);
+        assert_eq!(cfg.runners[0].name, "r1");
+    }
+
+    #[tokio::test]
+    async fn second_runner_appends_and_flags_not_first() {
+        let tmp = tempdir().unwrap();
+        let paths = paths_for(tmp.path());
+        let r1 = sample_response("r1");
+        apply_enroll_response(
+            &paths,
+            &r1,
+            "https://example.com",
+            Some(tmp.path().join("wd1")),
+            AgentKind::Codex,
+        )
+        .await
+        .unwrap();
+
+        let r2 = sample_response("r2");
+        let applied = apply_enroll_response(
+            &paths,
+            &r2,
+            "https://example.com",
+            Some(tmp.path().join("wd2")),
+            AgentKind::Codex,
+        )
+        .await
+        .unwrap();
+        assert!(!applied.is_first_runner);
+        let cfg = file::load_config(&paths).unwrap();
+        assert_eq!(cfg.runners.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn cloud_url_mismatch_does_not_leave_orphan_credentials() {
+        // The whole point of the URL-check-before-write reorder. If the
+        // user is enrolled with cloud A and a misuse points us at cloud
+        // B, we MUST refuse before writing per-runner credentials —
+        // otherwise an orphan file is left for the operator to clean up.
+        let tmp = tempdir().unwrap();
+        let paths = paths_for(tmp.path());
+        let r1 = sample_response("r1");
+        apply_enroll_response(
+            &paths,
+            &r1,
+            "https://cloud-a.example.com",
+            Some(tmp.path().join("wd1")),
+            AgentKind::Codex,
+        )
+        .await
+        .unwrap();
+
+        let r2 = sample_response("r2");
+        let err = apply_enroll_response(
+            &paths,
+            &r2,
+            "https://cloud-b.example.com",
+            Some(tmp.path().join("wd2")),
+            AgentKind::Codex,
+        )
+        .await
+        .unwrap_err();
+        assert!(format!("{err}").contains("refusing to add a runner pointing at"));
+        // No credentials file should exist for r2 — the bail happened
+        // before the write.
+        let r2_creds = paths.for_runner(r2.runner_id).credentials_path();
+        assert!(!r2_creds.exists(), "orphan credentials file at {r2_creds:?}");
+    }
+
+    #[test]
+    fn write_then_load_cli_token_roundtrips() {
+        let tmp = tempdir().unwrap();
+        let paths = paths_for(tmp.path());
+        write_cli_token(&paths, "https://example.com", "pi_dash_api_xxx").unwrap();
+        let token = load_cli_token(&paths).unwrap();
+        assert_eq!(token.as_deref(), Some("pi_dash_api_xxx"));
+    }
+
+    #[test]
+    fn clear_cli_token_keeps_runner_blocks() {
+        let tmp = tempdir().unwrap();
+        let paths = paths_for(tmp.path());
+        // Seed config with a runner block + token via the normal flow.
+        write_cli_token(&paths, "https://example.com", "pi_dash_api_xxx").unwrap();
+        // Append a runner block manually by writing config.
+        let mut cfg = file::load_config(&paths).unwrap();
+        cfg.runners.push(RunnerConfig {
+            name: "r1".into(),
+            runner_id: Uuid::new_v4(),
+            workspace_slug: Some("acme".into()),
+            project_slug: Some("WEB".into()),
+            pod_id: None,
+            workspace: WorkspaceSection {
+                working_dir: tmp.path().join("wd"),
+            },
+            agent: AgentSection::default(),
+            codex: CodexSection::default(),
+            claude_code: ClaudeCodeSection::default(),
+            approval_policy: ApprovalPolicySection::default(),
+        });
+        file::write_config(&paths, &cfg).unwrap();
+
+        clear_cli_token(&paths).unwrap();
+        let after = file::load_config(&paths).unwrap();
+        assert!(after.cli.as_ref().and_then(|c| c.token.as_ref()).is_none());
+        assert_eq!(after.runners.len(), 1, "runner block must be preserved");
+    }
 }

@@ -23,14 +23,11 @@ struct UserMe {
 }
 
 pub async fn run(_args: Args, paths: &Paths) -> Result<()> {
-    let token = match runner_ops::load_cli_token(paths)? {
-        Some(t) => t,
-        None => {
-            println!("Not logged in.");
-            println!("Run `pidash auth login` to authenticate this host.");
-            std::process::exit(1);
-        }
-    };
+    let token = runner_ops::load_cli_token(paths)?.ok_or_else(|| {
+        anyhow::anyhow!(
+            "not logged in — run `pidash auth login` to authenticate this host"
+        )
+    })?;
 
     let cfg = file::load_config(paths).ok();
     let cloud_url = cfg
@@ -53,9 +50,9 @@ pub async fn run(_args: Args, paths: &Paths) -> Result<()> {
         .with_context(|| format!("GET {url}"))?;
     let status = resp.status();
     if status.as_u16() == 401 || status.as_u16() == 403 {
-        println!("Logged in to {cloud_url}");
-        println!("  ✗ Token rejected by cloud ({status}). Run `pidash auth login` to re-authenticate.");
-        std::process::exit(1);
+        anyhow::bail!(
+            "logged in to {cloud_url} but the cloud rejected the token (HTTP {status}) — run `pidash auth login` to re-authenticate"
+        );
     }
     if !status.is_success() {
         let body = resp.text().await.unwrap_or_default();
