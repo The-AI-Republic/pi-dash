@@ -225,6 +225,7 @@ export default {
   modules: "Modules",
   pages: "Pages",
   intake: "Intake",
+  schedulers: "Scheduler",
   time_tracking: "Time Tracking",
   work_management: "Work management",
   projects_and_issues: "Projects and work items",
@@ -235,6 +236,8 @@ export default {
   views_description: "Save custom sorts, filters, and display options or share them with your team.",
   pages_description: "Create and edit free-form content; notes, docs, anything.",
   intake_description: "Let non-members share bugs, feedback, and suggestions; without disrupting your workflow.",
+  schedulers_description:
+    "Surface this project's scheduler installs in the sidebar so admins can manage them in one click.",
   time_tracking_description: "Log time spent on work items and projects.",
   work_management_description: "Manage your work and projects with ease.",
   documentation: "Documentation",

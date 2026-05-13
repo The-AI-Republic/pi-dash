@@ -84,6 +84,7 @@ class ProjectCreateSerializer(BaseSerializer):
             "issue_views_view",
             "page_view",
             "intake_view",
+            "scheduler_view",
             "guest_view_all_features",
             "members_can_edit_states",
             "archive_in",

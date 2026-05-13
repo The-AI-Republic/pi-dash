@@ -30,6 +30,7 @@ export interface IPartialProject {
   module_view: boolean;
   page_view: boolean;
   inbox_view: boolean;
+  scheduler_view: boolean;
   guest_view_all_features?: boolean;
   members_can_edit_states?: boolean;
   project_lead?: IUserLite | string | null;
