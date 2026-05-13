@@ -18,16 +18,43 @@ Pin to a specific version instead of `latest` by swapping in the tag, e.g. `.../
 After install:
 
 ```bash
-pidash configure \
-  --url http://localhost \
-  --token <ONE_TIME_CODE> \
-  --name my-laptop
-pidash install   # register a systemd user unit (Linux) or launchd agent (macOS)
-pidash start
-pidash tui       # optional: open the interactive UI
+# 1. Log in as your user. Opens a browser to approve a short code shown in
+#    the terminal — same idea as `gh auth login` or `stripe login`. Stores
+#    a CLI token at ~/.config/pidash/config.toml.
+pidash auth login --url https://pidash.example.com
+
+# 2. Register this host as a runner. Uses the token from step 1 to mint
+#    runner credentials cloud-side; no enrollment-token paste needed. On
+#    the first runner, installs the systemd user unit / launchd agent and
+#    starts the daemon.
+pidash runner add --project WEB
+
+# 3. Optional: open the interactive UI.
+pidash tui
 ```
 
-Generate the one-time token from the Pi Dash web UI under the runners admin page.
+`pidash auth login` prompts to add a runner inline when no runner exists yet on the host — for the dev-laptop case, that single command is enough.
+
+Useful follow-ups:
+
+```bash
+pidash auth status               # who am I logged in as; runner list
+pidash auth logout               # revoke the CLI token server-side
+pidash runner add --project X    # add another runner
+pidash runner list / remove      # manage runners
+```
+
+### Alternative: legacy enrollment-token flow
+
+For headless / scripted setup where you can't run the browser flow, the original `pidash connect` enrollment-token paste still works:
+
+```bash
+# Generate a one-time enrollment token from the Pi Dash web UI
+# (Runners admin → "Add connection"), then on the target host:
+pidash connect --url https://pidash.example.com --token <ONE_TIME_TOKEN>
+```
+
+This path is kept as a fallback; the device-code flow above is the recommended path for everyone with browser access.
 
 ## Auto-update
 
