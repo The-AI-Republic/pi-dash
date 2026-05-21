@@ -4,6 +4,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import process from "node:process";
+import { IntlMessageFormat } from "intl-messageformat";
 import ts from "typescript";
 
 const repoRoot = path.resolve(import.meta.dirname, "../../..");
@@ -12,6 +13,9 @@ const localeFiles = ["core", "translations", "accessibility", "editor", "empty-s
 const targetLocaleFile = "translations.ts";
 const fallbackLanguage = "en";
 const defaultBatchSize = 30;
+const defaultRequestTimeoutMs = 180000;
+const defaultRetryCount = 2;
+const defaultRetryDelayMs = 2000;
 const readmeTranslationTargets = new Map([
   ["es", path.join(repoRoot, "packages/i18n/README.es.md")],
   ["zh-CN", path.join(repoRoot, "packages/i18n/README.zh-CN.md")],
@@ -71,6 +75,12 @@ function parseArgs(argv) {
 
 function configFromArgs() {
   const args = parseArgs(process.argv.slice(2));
+
+  if (args.help === true) {
+    console.log(usage());
+    process.exit(0);
+  }
+
   const provider = String(args.provider || process.env.I18N_TRANSLATION_PROVIDER || "openai").toLowerCase();
   const baseUrl =
     args.base_url ||
@@ -87,6 +97,13 @@ function configFromArgs() {
   const dryRun = args.dry_run === true || process.env.I18N_TRANSLATION_DRY_RUN === "1";
   const limit = Number(args.limit || process.env.I18N_TRANSLATION_LIMIT || 0);
   const batchSize = Number(args.batch_size || process.env.I18N_TRANSLATION_BATCH_SIZE || defaultBatchSize);
+  const requestTimeoutMs = Number(
+    args.request_timeout_ms || process.env.I18N_TRANSLATION_REQUEST_TIMEOUT_MS || defaultRequestTimeoutMs
+  );
+  const retryCount = Number(args.retry_count || process.env.I18N_TRANSLATION_RETRY_COUNT || defaultRetryCount);
+  const retryDelayMs = Number(
+    args.retry_delay_ms || process.env.I18N_TRANSLATION_RETRY_DELAY_MS || defaultRetryDelayMs
+  );
   const skipReadme = args.skip_readme === true || process.env.I18N_TRANSLATION_SKIP_README === "1";
 
   if (!model && !dryRun) {
@@ -108,8 +125,34 @@ function configFromArgs() {
     dryRun,
     limit: Number.isFinite(limit) && limit > 0 ? limit : 0,
     batchSize: Number.isFinite(batchSize) && batchSize > 0 ? batchSize : defaultBatchSize,
+    requestTimeoutMs:
+      Number.isFinite(requestTimeoutMs) && requestTimeoutMs > 0 ? requestTimeoutMs : defaultRequestTimeoutMs,
+    retryCount: Number.isFinite(retryCount) && retryCount >= 0 ? retryCount : defaultRetryCount,
+    retryDelayMs: Number.isFinite(retryDelayMs) && retryDelayMs >= 0 ? retryDelayMs : defaultRetryDelayMs,
     skipReadme,
   };
+}
+
+function usage() {
+  return [
+    "Usage:",
+    "  pnpm i18n:translate -- --provider openai --model <model> --api-key <key>",
+    "  pnpm i18n:translate -- --provider fireworks --model <model> --api-key <key>",
+    "",
+    "Options:",
+    "  --provider openai|fireworks",
+    "  --api-key <key>",
+    "  --model <model>",
+    "  --base-url <openai-compatible-chat-completions-url>",
+    "  --languages fr,es,ja",
+    "  --limit 100",
+    "  --batch-size 30",
+    "  --request-timeout-ms 180000",
+    "  --retry-count 2",
+    "  --retry-delay-ms 2000",
+    "  --dry-run",
+    "  --skip-readme",
+  ].join("\n");
 }
 
 function resolveLanguages(value) {
@@ -356,8 +399,34 @@ async function requestTranslations(config, language, items) {
 }
 
 async function requestChatCompletion(config, messages) {
+  let delayMs = config.retryDelayMs;
+
+  for (let attempt = 0; attempt <= config.retryCount; attempt += 1) {
+    try {
+      return await requestChatCompletionOnce(config, messages);
+    } catch (error) {
+      const hasAttemptsRemaining = attempt < config.retryCount;
+      if (!hasAttemptsRemaining || !isRetryableError(error)) {
+        throw error;
+      }
+
+      console.warn(`i18n: request failed (${formatErrorMessage(error)}), retrying ${attempt + 1}/${config.retryCount}`);
+      await sleep(delayMs);
+      delayMs *= 2;
+    }
+  }
+
+  throw new Error("Translation request failed unexpectedly");
+}
+
+async function requestChatCompletionOnce(config, messages) {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), config.requestTimeoutMs);
+  timeout.unref?.();
+
   const response = await fetch(config.baseUrl, {
     method: "POST",
+    signal: controller.signal,
     headers: {
       Authorization: `Bearer ${config.apiKey}`,
       "Content-Type": "application/json",
@@ -367,14 +436,40 @@ async function requestChatCompletion(config, messages) {
       temperature: 0,
       messages,
     }),
+  }).finally(() => {
+    clearTimeout(timeout);
   });
 
   const body = await response.text();
   if (!response.ok) {
-    throw new Error(`Translation request failed: HTTP ${response.status} ${body}`);
+    const error = new Error(`Translation request failed: HTTP ${response.status} ${body}`);
+    error.status = response.status;
+    error.retryable = response.status === 429 || response.status >= 500;
+    throw error;
   }
 
   return JSON.parse(body);
+}
+
+function isRetryableError(error) {
+  if (error?.retryable === true) return true;
+  if (error?.name === "AbortError" || error?.name === "TimeoutError") return true;
+
+  const code = error?.code || error?.cause?.code;
+  if (typeof code === "string" && code.startsWith("UND_ERR_")) return true;
+
+  return error instanceof TypeError && error.message === "fetch failed";
+}
+
+function formatErrorMessage(error) {
+  const causeCode = error?.cause?.code ? ` ${error.cause.code}` : "";
+  return `${error?.message || String(error)}${causeCode}`.trim();
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => {
+    setTimeout(resolve, ms);
+  });
 }
 
 function parseJsonContent(content) {
@@ -395,6 +490,13 @@ function validateTranslations(items, translations, language) {
     }
     if (translation.length === 0) {
       console.warn(`i18n: ${language.value} returned an empty translation for ${item.key}`);
+      continue;
+    }
+    try {
+      const messageFormat = new IntlMessageFormat(translation, language.value);
+      void messageFormat;
+    } catch (error) {
+      console.warn(`i18n: ${language.value} returned invalid ICU for ${item.key}: ${error.message}`);
       continue;
     }
     valid[item.key] = translation;
@@ -509,8 +611,23 @@ async function main() {
   }
 
   if (!config.skipReadme) {
+    const readmeFailures = [];
+
     for (const language of config.languages) {
-      await translateReadme(config, language);
+      try {
+        await translateReadme(config, language);
+      } catch (error) {
+        if (readmeTranslationTargets.has(language.value)) {
+          readmeFailures.push(language.value);
+          console.error(`i18n: ${language.value} README translation failed: ${formatErrorMessage(error)}`);
+        } else {
+          throw error;
+        }
+      }
+    }
+
+    if (readmeFailures.length > 0) {
+      throw new Error(`README translation failed for: ${readmeFailures.join(", ")}`);
     }
   }
 }

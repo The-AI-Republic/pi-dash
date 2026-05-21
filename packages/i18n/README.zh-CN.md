@@ -24,7 +24,7 @@ const { t } = useTranslation();
 return <button>{t("common.save")}</button>;
 ```
 
-`t("...")` 不会在运行时创建 key。缺失的 key 会先回退到 English，再回退到 key 字符串本身。空字符串会被视为缺失值，因此未翻译的 placeholder 不会渲染成空白 UI。
+`t("...")` 不会在运行时创建 key。缺失的 key 会先回退到英文，再回退到 key 字符串本身。空字符串会被视为缺失值，因此未翻译的占位符不会渲染成空白 UI。
 
 ## 添加 Key
 
@@ -40,19 +40,19 @@ t("new_feature.title");
 pnpm i18n:sync
 ```
 
-该命令会扫描字面量 `t("...")` 调用，并把缺失的 key 作为空字符串 placeholder 添加到每个 locale 的 `translations.ts`。
+该命令会扫描字面量 `t("...")` 调用，并把缺失的 key 作为空字符串占位符添加到每个 locale 的 `translations.ts`。
 
 同步命令是手动命令。它不会在 `pnpm build` 期间运行。
 
 ## 翻译缺失值
 
-运行 `pnpm i18n:sync` 后，使用 LLM 翻译命令填充空 placeholder：
+运行 `pnpm i18n:sync` 后，使用 LLM 翻译命令填充空占位符：
 
 ```bash
 pnpm i18n:translate -- --provider openai --model "$MODEL" --api-key "$OPENAI_API_KEY"
 ```
 
-如果省略 `--languages`，会翻译所有受支持的非 English 语言。
+如果省略 `--languages`，会翻译所有受支持的非英文语言。
 
 翻译指定语言：
 
@@ -76,6 +76,9 @@ pnpm i18n:translate -- --provider fireworks --model "$MODEL" --api-key "$FIREWOR
 --languages fr,es,ja
 --limit 100
 --batch-size 30
+--request-timeout-ms 180000
+--retry-count 2
+--retry-delay-ms 2000
 --dry-run
 --skip-readme
 ```
@@ -90,27 +93,30 @@ I18N_TRANSLATION_BASE_URL
 I18N_TRANSLATION_LANGUAGES
 I18N_TRANSLATION_LIMIT
 I18N_TRANSLATION_BATCH_SIZE
+I18N_TRANSLATION_REQUEST_TIMEOUT_MS
+I18N_TRANSLATION_RETRY_COUNT
+I18N_TRANSLATION_RETRY_DELAY_MS
 I18N_TRANSLATION_SKIP_README
 OPENAI_API_KEY
 FIREWORKS_API_KEY
 ```
 
-翻译器只会填充目标 locale `translations.ts` 文件中的空字符串。它使用合并后的 English locale 作为源文本，并要求模型保留 ICU MessageFormat placeholder。
+翻译器只会填充目标 locale `translations.ts` 文件中的空字符串。它使用合并后的英文 locale 作为源文本，并要求模型保留 ICU MessageFormat 占位符。
 
-同一个命令也会使用 `README.md` 作为 English 源文档来更新已翻译的 README。当前维护的 README 翻译包括：
+同一个命令也会使用 `README.md` 作为英文源文档来更新已翻译的 README。当前维护的 README 翻译包括：
 
 - `README.es.md`
 - `README.zh-CN.md`
 
-使用 `--skip-readme` 或 `I18N_TRANSLATION_SKIP_README=1` 可以只翻译 locale placeholder。
+使用 `--skip-readme` 或 `I18N_TRANSLATION_SKIP_README=1` 可以只翻译 locale 占位符。
 
 ## 推荐流程
 
 1. 使用 `t("some.key")` 添加或更新 UI 代码。
 2. 运行 `pnpm i18n:sync`。
-3. 检查 `packages/i18n/src/locales/*/translations.ts` 中新增的空 placeholder。
+3. 检查 `packages/i18n/src/locales/*/translations.ts` 中新增的空占位符。
 4. 运行 `pnpm i18n:translate -- --provider openai --model "$MODEL"`，或手动翻译。
-5. 提交前检查 diff，特别是 `{count}` 这样的 ICU placeholder、plural 块以及已翻译 README 中的命令示例。
+5. 提交前检查 diff，特别是 `{count}` 这样的 ICU 占位符、plural 块以及已翻译 README 中的命令示例。
 6. 运行：
 
 ```bash

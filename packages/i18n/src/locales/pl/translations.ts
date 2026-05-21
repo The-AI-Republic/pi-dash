@@ -78,6 +78,10 @@ export default {
               message: "Coś poszło nie tak. Spróbuj ponownie.",
             },
           },
+          error: {
+            title: "",
+            message: "",
+          },
         },
       },
       unique_code: {
@@ -829,6 +833,7 @@ export default {
       show_weekends: "Pokaż weekendy",
       enable: "Włącz",
       disable: "Wyłącz",
+      copy_markdown: "Kopiuj markdown",
     },
     name: "Nazwa",
     discard: "Odrzuć",
@@ -919,6 +924,7 @@ export default {
     paused: "Wstrzymane",
     no_of: "Liczba {entity}",
     resolved: "Rozwiązane",
+    overview: "Przegląd",
   },
   chart: {
     x_axis: "Oś X",
@@ -1581,6 +1587,22 @@ export default {
         },
       },
     },
+    activity: {
+      heading: "Aktywność",
+      description: "Śledź swoje ostatnie działania i zmiany we wszystkich projektach i elementach pracy.",
+    },
+    api_tokens: {
+      heading: "Osobiste tokeny dostępu",
+      description: "Generuj bezpieczne tokeny API, aby zintegrować swoje dane z zewnętrznymi systemami i aplikacjami.",
+    },
+    notifications: {
+      heading: "Powiadomienia e-mail",
+      description: "Bądź na bieżąco z elementami pracy, które subskrybujesz. Włącz to, aby otrzymywać powiadomienia.",
+    },
+    preferences: {
+      heading: "Preferencje",
+      description: "Dostosuj swoje doświadczenie w aplikacji do swojego sposobu pracy",
+    },
   },
   workspace_settings: {
     label: "Ustawienia przestrzeni roboczej",
@@ -1620,6 +1642,7 @@ export default {
           },
           company_size: {
             required: "Rozmiar firmy jest wymagany",
+            select_a_range: "Wybierz rozmiar organizacji",
           },
         },
       },
@@ -1654,6 +1677,8 @@ export default {
         current_plan: "Obecny plan",
         free_plan: "Używasz bezpłatnego planu",
         view_plans: "Wyświetl plany",
+        heading: "Rozliczenia i plany",
+        description: "Wybierz swój plan, zarządzaj subskrypcjami i łatwo uaktualniaj w miarę wzrostu potrzeb.",
       },
       exports: {
         title: "Eksporty",
@@ -1674,6 +1699,11 @@ export default {
             },
           },
         },
+        heading: "Eksporty",
+        description:
+          "Eksportuj dane projektu w różnych formatach i uzyskaj dostęp do historii eksportu z linkami do pobrania.",
+        exporting_projects: "Eksportowanie projektu",
+        format: "Format",
       },
       webhooks: {
         title: "Webhooki",
@@ -1725,6 +1755,7 @@ export default {
             message: "Błąd podczas kopiowania klucza.",
           },
         },
+        description: "Automatyzuj powiadomienia do zewnętrznych usług, gdy wystąpią zdarzenia projektu.",
       },
       api_tokens: {
         title: "Tokeny API",
@@ -1787,6 +1818,7 @@ export default {
       priority_distribution: {
         title: "Elementy według priorytetu",
         empty: "Twórz elementy, aby móc analizować priorytety.",
+        priority: "",
       },
       recent_activity: {
         title: "Ostatnia aktywność",
@@ -1867,6 +1899,20 @@ export default {
         title: "Brak stanów w grupie {groupKey}",
         description: "Utwórz nowy stan",
       },
+      members_edit: {
+        toast: {
+          loading: "Aktualizowanie ustawienia projektu...",
+          success_title: "Sukces!",
+          success_message: "Ustawienie projektu zaktualizowane.",
+          error_title: "Błąd!",
+          error_message: "Coś poszło nie tak podczas aktualizacji ustawienia projektu. Spróbuj ponownie.",
+        },
+        title: "Pozwól członkom edytować stany",
+        description:
+          "Gdy włączone, członkowie projektu mogą dodawać, edytować, zmieniać kolejność i usuwać stany przepływu pracy. Gdy wyłączone, tylko administratorzy mogą zarządzać stanami.",
+      },
+      heading: "Stany",
+      description: "Zdefiniuj i dostosuj stany przepływu pracy, aby śledzić postęp swoich elementów pracy.",
     },
     labels: {
       label_title: "Nazwa etykiety",
@@ -1875,6 +1921,8 @@ export default {
       toast: {
         error: "Błąd podczas aktualizacji etykiety",
       },
+      heading: "Etykiety",
+      description: "Twórz niestandardowe etykiety, aby kategoryzować i organizować swoje elementy pracy",
     },
     estimates: {
       label: "Szacunki",
@@ -1959,6 +2007,8 @@ export default {
           hours: "Godziny",
         },
       },
+      heading: "Szacunki",
+      enable_description: "Pomagają w komunikowaniu złożoności i obciążenia pracą zespołu.",
     },
     automations: {
       label: "Automatyzacja",
@@ -1973,6 +2023,9 @@ export default {
         duration: "Zamknij elementy nieaktywne dłużej niż",
         auto_close_status: "Status automatycznego zamknięcia",
       },
+      heading: "Automatyzacje",
+      description:
+        "Skonfiguruj zautomatyzowane działania, aby usprawnić przepływ pracy w zarządzaniu projektem i zmniejszyć liczbę ręcznych zadań.",
     },
     empty_state: {
       labels: {
@@ -2333,6 +2386,7 @@ export default {
       unarchived: "Przywrócono z archiwum",
       snoozed: "Odłożono",
       unsnoozed: "Anulowano odłożenie",
+      un_snoozed: "",
     },
     empty_state: {
       detail: {
@@ -2687,4 +2741,461 @@ export default {
     comment_failed_title: "Could not post comment",
     comment_failed_message: "Failed to post the comment.",
   },
+  scheduler_bindings: {
+    tab_label: "Harmonogramy",
+    title: "Harmonogramy",
+    subtitle:
+      "Harmonogramy zainstalowane w tym projekcie. Każda instalacja uruchamia swoje zapytanie względem projektu zgodnie z skonfigurowanym cronem.",
+    install: "Zainstaluj harmonogram",
+    columns: {
+      name: "Harmonogram",
+      cron: "Cron",
+      next_run: "Następne uruchomienie",
+      last_run: "Ostatnie uruchomienie",
+      status: "Status",
+      updated: "Zaktualizowano",
+    },
+    toast: {
+      updated_title: "Instalacja zaktualizowana",
+      enabled_message: "Harmonogram włączony — uruchomi się przy następnym tiknięciu cron.",
+      disabled_message: "Harmonogram wyłączony — nie uruchomi się, dopóki nie zostanie ponownie włączony.",
+      error_title: "Coś poszło nie tak",
+      update_failed: "Nie udało się zaktualizować instalacji.",
+      updated_message: "Kolejne uruchomienia będą używać nowych ustawień.",
+      installed_title: "Harmonogram zainstalowany",
+      installed_message: "Będzie uruchamiany na skonfigurowanym cronie.",
+      install_failed: "Nie można zainstalować harmonogramu.",
+      uninstalled_title: "Harmonogram odinstalowany",
+      uninstalled_message: "Nie będzie uruchamiany w tym projekcie do czasu ponownej instalacji.",
+      uninstall_failed: "Nie można odinstalować harmonogramu.",
+    },
+    list: {
+      empty:
+        "W tym projekcie nie zainstalowano jeszcze żadnych harmonogramów. Kliknij „Zainstaluj harmonogram”, aby dodać go z katalogu obszaru roboczego.",
+      none_yet: "(nigdy)",
+    },
+    actions: {
+      disable: "Wyłącz harmonogram",
+      enable: "Włącz harmonogram",
+      edit: "Edytuj",
+      uninstall: "Odinstaluj",
+    },
+    status: {
+      enabled: "Włączony",
+      disabled: "Wyłączony",
+    },
+    edit_modal: {
+      title: "Edytuj instalację harmonogramu",
+      saving: "Zapisywanie…",
+      save: "Zapisz",
+    },
+    install_modal: {
+      cron_label: "Harmonogram (cron)",
+      errors: {
+        cron_required: "Wyrażenie cron jest wymagane.",
+        scheduler_required: "Wybierz harmonogram.",
+      },
+      cron_placeholder: "0 9 * * *",
+      cron_help: "Wyrażenie cron z 5 polami w UTC, np. ``0 9 * * *`` dla 09:00 UTC każdego dnia.",
+      extra_context_label: "Kontekst projektu (opcjonalnie)",
+      extra_context_placeholder: "Notatki specyficzne dla tego projektu…",
+      extra_context_help:
+        "Dołączane do podstawowego promptu harmonogramu w czasie wykonania. Użyj go, aby nadać kontekst specyficzny dla projektu, którego prompt obszaru roboczego nie powinien przenosić.",
+      enabled_label: "Włączony",
+      enabled_help: "Wyłączone instalacje nie uruchamiają się na cronie do czasu ponownego włączenia.",
+      cancel: "Anuluj",
+      none_available_title: "Brak dostępnych harmonogramów",
+      none_available_body:
+        "Albo każdy harmonogram obszaru roboczego jest już zainstalowany w tym projekcie, albo administrator obszaru roboczego nie włączył żadnego. Odwiedź Obszar roboczy → Harmonogramy, aby zarządzać katalogiem.",
+      title: "Zainstaluj harmonogram",
+      scheduler_label: "Harmonogram",
+      scheduler_help:
+        "Wybierz z włączonych harmonogramów w swoim obszarze roboczym. Już zainstalowane nie są wyświetlane.",
+      installing: "Instalowanie…",
+      install: "Zainstaluj",
+    },
+    uninstall_modal: {
+      title: "Odinstalować harmonogram?",
+      body: "Harmonogram przestaje działać w tym projekcie. Definicja obszaru roboczego pozostaje bez zmian i można ją później ponownie zainstalować.",
+      confirm: "Odinstaluj",
+    },
+  },
+  prompts: {
+    detail: {
+      loading: "Ładowanie…",
+      not_found: "Nie znaleziono szablonu.",
+      default_title: "Szablon monitu (domyślny Pi Dash)",
+      workspace_title: "Szablon monitu (nadpisanie obszaru roboczego)",
+      default_description:
+        "To jest wbudowany domyślny szablon Pi Dash. Administratorzy obszaru roboczego nie mogą go tutaj edytować — dostosuj go dla swojego obszaru roboczego, aby go nadpisać.",
+      workspace_description:
+        "Nadpisanie domyślnego szablonu Pi Dash dla Twojego obszaru roboczego. Edycje zwiększają wersję i są stosowane przy następnym uruchomieniu agenta dla tego obszaru roboczego.",
+      back: "Powrót do listy",
+      body: "Treść szablonu (Jinja + Markdown)",
+      unsaved: "Niezapisane zmiany",
+      save: "Zapisz",
+    },
+    toast: {
+      saved_title: "Monit zapisany",
+      saved_message: "Kolejne uruchomienia agenta będą używać zaktualizowanego monitu.",
+      save_failed: "Nie udało się zapisać monitu.",
+      error_title: "Coś poszło nie tak",
+      created_title: "Utworzono nadpisanie obszaru roboczego",
+      created_message: "Skopiowaliśmy bieżący domyślny szablon Pi Dash. Edytuj i zapisz, aby go dostosować.",
+      customize_failed: "Nie udało się utworzyć nadpisania obszaru roboczego.",
+      reverted_title: "Przywrócono domyślny szablon Pi Dash",
+      reverted_message: "Ten obszar roboczy ponownie korzysta z udostępnionego domyślnego szablonu.",
+      revert_failed: "Nie udało się przywrócić monitu.",
+    },
+    preview: {
+      missing_issue_id: "Najpierw wprowadź identyfikator zgłoszenia.",
+      failed: "Renderowanie nie powiodło się.",
+      title: "Podgląd",
+      issue_id_placeholder: "Identyfikator zgłoszenia (UUID)",
+      run: "Podgląd",
+      empty:
+        "Wklej identyfikator zgłoszenia i kliknij Podgląd, aby wyrenderować szablon na podstawie rzeczywistego zgłoszenia.",
+      admin_only:
+        "Podgląd wyrenderowanego promptu jest działaniem dostępnym tylko dla administratora przestrzeni roboczej. Zapytaj swojego administratora przestrzeni roboczej, jeśli potrzebujesz zobaczyć go wyrenderowanego dla konkretnego zgłoszenia.",
+    },
+    scope: {
+      default: "Domyślny Pi Dash",
+      workspace: "Nadpisanie przestrzeni roboczej",
+    },
+    title: "Prompty",
+    subtitle:
+      "Szablony promptów systemowych, które są renderowane dla każdego zgłoszenia przed uruchomieniem agenta. Administratorzy przestrzeni roboczej mogą dostosować domyślny szablon dla tej przestrzeni roboczej.",
+    customize: "Dostosuj dla tej przestrzeni roboczej",
+    columns: {
+      name: "Nazwa",
+      scope: "Zakres",
+      version: "Wersja",
+      updated: "Zaktualizowano",
+    },
+    list: {
+      empty: "Brak dostępnych szablonów promptów. Domyślny Pi Dash zostanie wprowadzony przy następnej migracji.",
+    },
+    revert: {
+      confirm_title: "Przywrócić domyślny Pi Dash?",
+      confirm_body:
+        "To zarchiwizuje szablon o zakresie przestrzeni roboczej. Nowe uruchomienia agentów w tej przestrzeni roboczej będą używać domyślnego Pi Dash, dopóki nie utworzysz innego nadpisania.",
+      confirm: "Przywróć",
+    },
+    actions: {
+      edit: "Edytuj",
+      view: "Podgląd",
+      revert: "Przywróć domyślny",
+    },
+  },
+  runners: {
+    toast: {
+      error_title: "Błąd!",
+    },
+    approvals: {
+      decision_failed: "Nie udało się zapisać decyzji",
+      empty: "Brak oczekujących zatwierdzeń.",
+      run_meta: "Uruchomienie {runId} · żądano {at}",
+      expires: "wygasa {at}",
+      accept_once: "Zaakceptuj raz",
+      accept_for_session: "Zaakceptuj na sesję",
+      decline: "Odrzuć",
+    },
+    tabs: {
+      runners: "Agenci AI",
+      runs: "Uruchomienia",
+      approvals: "Zatwierdzenia",
+    },
+    title: "Agenci AI",
+    page_title: "{workspace} - Agenci AI",
+    list: {
+      delete_failed: "Nie udało się usunąć runnera",
+      revoke_failed: "Nie udało się unieważnić runnera",
+      revive_failed: "Nie udało się przywrócić runnera",
+      add_runner: "Dodaj runnera",
+      how_it_works_title: "Jak dodać runnera",
+      how_it_works_body:
+        '1. Kliknij "Dodaj runnera", wybierz projekt + pod i zatwierdź. Chmura generuje jednorazowy token rejestracji powiązany z tym runnerem.\n2. Na maszynie, która będzie hostować runnera, uruchom wyświetlone polecenie `pidash connect --url ... --token ... --host-label ...`.\n3. Demon rejestruje się, a runner pojawia się jako online.\n\nKażdy runner ma swój własny token. Pierwszy runner zarejestrowany na hoście inicjuje również token maszyny używany przez CLI `pidash` do poleceń innych niż runner.\n\nWymaganie wstępne: CLI agenta (codex / claude) musi być już zainstalowane na hoście.',
+      connected_runners: "Runnery",
+      columns: {
+        name: "Nazwa",
+        status: "Status",
+        os_arch: "OS / Arch",
+        version: "Wersja",
+        last_heartbeat: "Ostatni puls",
+      },
+      columns_pod: "Pod",
+      revive: "Przywróć",
+      revoke: "Unieważnij",
+      delete: "Usuń",
+      empty: 'Brak runnerów. Kliknij "Dodaj runnera", aby wygenerować pierwszy token rejestracji dla runnera.',
+      delete_confirm_title: "Usunąć runnera?",
+      delete_confirm_body:
+        "Wiersz runnera zostanie usunięty, a demon zostanie wymuszony offline. Historyczne uruchomienia zostaną zachowane z odwołaniem null do runnera.",
+      revoke_confirm_title: "Unieważnić runnera?",
+      revoke_confirm_body:
+        "Poświadczenia runnera zostaną unieważnione, a wszelkie bieżące uruchomienia anulowane, ale wiersz pozostanie na liście. Możesz go później przywrócić, aby wygenerować nowy token rejestracji w tym samym wierszu.",
+      revive_modal_title: "Nowy token rejestracji",
+      revive_modal_body:
+        "Uruchom poniższe polecenie na hoście, który ma przejąć tego runnera. Skopiuj je teraz — token nie zostanie pokazany ponownie.",
+      project_placeholder: "Wybierz projekt",
+      copy_failed: "Nie udało się skopiować do schowka",
+    },
+    machine_token_note: {
+      body: "Gdy runner rejestruje się po raz pierwszy na nowym hoście (tj. nowym ``host_label``), chmura wydaje również token maszyny używany przez CLI ``pidash`` do poleceń innych niż runner (issue, comment, state). Kolejne runnery na tym samym hoście ponownie używają tego tokena.",
+    },
+    pods: {
+      title: "Pody",
+      help: "Pody grupują twoich runnerów. Zadania delegują do poda, a każdy wolny runner wewnątrz podejmuje pracę. Kliknij kafelek, aby filtrować runnerów.",
+      load_failed: "Nie udało się załadować podów",
+      tile_aria: "Filtruj runnerów według poda {name}",
+      default_badge: "domyślny",
+      runner_count: "{count} runnerów",
+      create_tile: "Utwórz nowy pod",
+      filter_active: "Filtrowanie runnerów według poda {name}",
+      filter_clear: "Wyczyść filtr",
+    },
+    add_modal: {
+      runner_id_label: "Identyfikator runnera",
+      done: "Gotowe",
+      agent_options: {
+        claude_code: "Claude Code",
+        codex: "Codex",
+      },
+      errors: {
+        create_failed: "Nie udało się wygenerować tokena rejestracyjnego.",
+        project_required: "Wybierz projekt.",
+        load_projects_failed: "Nie udało się załadować projektów.",
+        load_pods_failed: "Nie udało się załadować podów.",
+      },
+      title: "Dodaj runnera",
+      subtitle:
+        "Wygeneruj jednorazowy token rejestracyjny dla nowego runnera. Uruchom wyświetlone polecenie `pidash connect` na maszynie, która będzie go hostować.",
+      project_label: "Projekt",
+      project_help: "Projekt, nad którym będzie pracował ten runner.",
+      pod_label: "Pod (opcjonalnie)",
+      pod_default_option: "(domyślny pod)",
+      pod_help: "Domyślnie używany jest domyślny pod projektu.",
+      name_label: "Nazwa (opcjonalnie)",
+      name_placeholder: "my-laptop-runner",
+      name_help: "Przypisywany automatycznie, jeśli pozostawisz puste, np. ``runner_001``.",
+      host_label_label: "Etykieta hosta (opcjonalnie)",
+      host_label_placeholder: "my-laptop",
+      host_label_help:
+        "Dowolna nazwa hosta wbudowana w sugerowane polecenie. Demon zastąpi ją rzeczywistą nazwą hosta, jeśli pominiesz flagę.",
+      working_dir_label: "Katalog roboczy (opcjonalnie)",
+      working_dir_placeholder: "lokalny katalog roboczy projektu",
+      working_dir_help:
+        "Lokalna ścieżka, w której demon uruchamia CLI agenta — zazwyczaj repozytorium projektu na dysku. Domyślnie ustawiana jest na piaskownicę w katalogu danych runnera, co rzadko jest pożądane.",
+      agent_label: "Agent",
+      agent_help:
+        "Którego CLI agenta AI będzie obsługiwać ten runner. Wbudowane w wyświetlane polecenie ``pidash connect``.",
+      cancel: "Anuluj",
+      submitting: "Mintowanie…",
+      submit: "Wygeneruj token rejestracyjny",
+      token_warning: "Skopiuj to teraz — token rejestracyjny nie zostanie pokazany ponownie.",
+      token_instructions: "Uruchom to na maszynie, która będzie hostować runnera:",
+      copied: "Skopiowano!",
+      copy_command: "Kopiuj polecenie",
+    },
+    runs: {
+      cancel_failed: "Nie udało się anulować uruchomienia",
+      columns: {
+        started: "Rozpoczęto",
+        status: "Status",
+        prompt: "Prompt",
+      },
+      empty: "Brak uruchomień.",
+      select_run: "Wybierz uruchomienie po lewej stronie.",
+      cancel: "Anuluj uruchomienie",
+      prompt: "Prompt",
+      error: "Błąd",
+      done_payload: "Ładunek zakończenia",
+      events_count: "Zdarzenia ({count})",
+      event_columns: {
+        seq: "seq",
+        kind: "rodzaj",
+        at: "czas",
+      },
+      cancel_confirm_title: "Anulować uruchomienie?",
+      cancel_confirm_body: "Runner zatrzyma to uruchomienie, gdy tylko otrzyma sygnał.",
+    },
+    create_pod_modal: {
+      errors: {
+        create_failed: "Nie udało się utworzyć poda.",
+        project_required: "Wybierz projekt.",
+        load_projects_failed: "Nie udało się załadować projektów.",
+        name_required: "Nazwa jest wymagana.",
+      },
+      title: "Utwórz nowy pod",
+      subtitle: "Pody grupują runners w ramach projektu. Wybierz projekt, a następnie nadaj podowi nazwę.",
+      project_label: "Projekt",
+      project_placeholder: "Wybierz projekt",
+      project_help: "Projekt, do którego należy ten pod. Nazwa zostanie poprzedzona identyfikatorem projektu.",
+      name_label: "Nazwa",
+      name_placeholder: "beefy",
+      name_help: "Litery, cyfry, myślniki i podkreślenia. Prefiks projektu jest dodawany automatycznie.",
+      description_label: "Opis (opcjonalny)",
+      description_placeholder: "Gdzie ten pod działa, do czego służy itp.",
+      cancel: "Anuluj",
+      submitting: "Tworzenie…",
+      submit: "Utwórz pod",
+    },
+  },
+  schedulers: {
+    toast: {
+      created_title: "Harmonogram utworzony",
+      created_message: "Administratorzy projektów mogą teraz zainstalować go w swoich projektach.",
+      create_failed: "Nie udało się utworzyć harmonogramu.",
+      error_title: "Coś poszło nie tak",
+      updated_title: "Harmonogram zaktualizowany",
+      updated_message: "Kolejne uruchomienia będą korzystać ze zaktualizowanej definicji.",
+      update_failed: "Nie udało się zaktualizować harmonogramu.",
+      deleted_title: "Harmonogram usunięty",
+      deleted_message: "Aktywne powiązania przestały się uruchamiać.",
+      delete_failed: "Nie udało się usunąć harmonogramu.",
+    },
+    title: "Harmonogramy",
+    subtitle:
+      "Wielokrotnego użytku definicje harmonogramów dla tej przestrzeni roboczej. Zainstaluj jeden w projekcie, aby uruchamiać jego prompt względem projektu zgodnie z cronem.",
+    new: "Nowy harmonogram",
+    columns: {
+      name: "Nazwa",
+      slug: "Slug",
+      source: "Źródło",
+      installs: "Instalacje",
+      status: "Status",
+      updated: "Aktualizacja",
+    },
+    list: {
+      empty: "Brak harmonogramów w tym obszarze roboczym. Kliknij „Nowy harmonogram”, aby go utworzyć.",
+      installs_count: "{count, plural, one {# instalacja} other {# instalacji}}",
+    },
+    source: {
+      manifest: "Manifest",
+      builtin: "Wbudowany",
+    },
+    status: {
+      enabled: "Włączony",
+      disabled: "Wyłączony",
+    },
+    actions: {
+      edit: "Edytuj",
+      delete: "Usuń",
+    },
+    delete: {
+      confirm_title: "Usunąć harmonogram?",
+      confirm_body:
+        "Spowoduje to miękkie usunięcie harmonogramu. Wszystkie aktywne powiązania projektów przestaną działać. Slug stanie się dostępny do ponownego utworzenia.",
+      confirm: "Usuń",
+    },
+    form: {
+      edit_title: "Edytuj harmonogram",
+      create_title: "Nowy harmonogram",
+      slug_label: "Slug",
+      errors: {
+        slug_required: "Slug jest wymagany.",
+        name_required: "Nazwa jest wymagana.",
+        prompt_required: "Prompt jest wymagany.",
+      },
+      slug_placeholder: "security-audit",
+      slug_help: "Identyfikator pisany małymi literami używany w adresach URL. Nie można go zmienić po utworzeniu.",
+      name_label: "Nazwa",
+      name_placeholder: "Audyt bezpieczeństwa",
+      description_label: "Opis",
+      description_placeholder: "Krótkie podsumowanie wyświetlane w selektorze instalacji.",
+      prompt_label: "Prompt",
+      prompt_placeholder: "Szukaj nierozwiązanych problemów bezpieczeństwa w tym projekcie…",
+      prompt_help:
+        "Podstawowy prompt, który agent uruchamia przy każdym cyklu. Kontekst specyficzny dla projektu jest dodawany podczas instalacji, więc zachowaj ten prompt niezależny od projektu.",
+      enabled_label: "Włączony",
+      enabled_help:
+        "Wyłączone harmonogramy nie mogą być instalowane w nowych projektach, a istniejące powiązania nie będą uruchamiane.",
+      cancel: "Anuluj",
+      saving: "Zapisywanie…",
+      save: "Zapisz",
+      creating: "Tworzenie…",
+      create: "Utwórz harmonogram",
+    },
+  },
+  power_k: {
+    search_menu: {
+      no_results: "Nie znaleziono wyników",
+      clear_search: "Wyczyść wyszukiwanie",
+    },
+    miscellaneous_actions: {
+      copy_current_page_url_toast_success: "Adres URL bieżącej strony skopiowano do schowka.",
+      copy_current_page_url_toast_error: "Wystąpił błąd podczas kopiowania adresu URL bieżącej strony do schowka.",
+    },
+    preferences_actions: {
+      toast: {
+        theme: {
+          error: "Nie udało się zaktualizować motywu. Spróbuj ponownie.",
+        },
+        timezone: {
+          success: "Strefa czasowa została zaktualizowana pomyślnie.",
+          error: "Nie udało się zaktualizować strefy czasowej. Spróbuj ponownie.",
+        },
+        generic: {
+          success: "Preferencje zostały zaktualizowane pomyślnie.",
+          error: "Nie udało się zaktualizować preferencji. Spróbuj ponownie.",
+        },
+      },
+    },
+    footer: {
+      workspace_level: "Poziom obszaru roboczego",
+    },
+    page_placeholders: {
+      default: "Wpisz polecenie lub wyszukaj",
+    },
+    contextual_actions: {
+      cycle: {
+        copy_url_toast_success: "Adres URL cyklu skopiowano do schowka.",
+        copy_url_toast_error: "Wystąpił błąd podczas kopiowania adresu URL cyklu do schowka.",
+      },
+      module: {
+        copy_url_toast_success: "Adres URL modułu skopiowano do schowka.",
+        copy_url_toast_error: "Wystąpił błąd podczas kopiowania adresu URL modułu do schowka.",
+      },
+      page: {
+        copy_url_toast_success: "Adres URL strony skopiowano do schowka.",
+        copy_url_toast_error: "Wystąpił błąd podczas kopiowania adresu URL strony do schowka.",
+      },
+      work_item: {
+        copy_id_toast_success: "Identyfikator elementu pracy skopiowano do schowka.",
+        copy_id_toast_error: "Wystąpił błąd podczas kopiowania identyfikatora elementu pracy do schowka.",
+        copy_title_toast_success: "Tytuł elementu pracy skopiowano do schowka.",
+        copy_title_toast_error: "Wystąpił błąd podczas kopiowania tytułu elementu pracy do schowka.",
+        copy_url_toast_success: "Adres URL elementu pracy skopiowano do schowka.",
+        copy_url_toast_error: "Wystąpił błąd podczas kopiowania adresu URL elementu pracy do schowka.",
+      },
+    },
+  },
+  date: "",
+  epics: "",
+  Unassigned: "",
+  creating_theme: "",
+  issue_advanced_git: "",
+  git_work_branch: "",
+  git_work_branch_hint: "",
+  git_work_branch_too_long: "",
+  git_work_branch_invalid_chars: "",
+  git_work_branch_placeholder: "",
+  progress: "",
+  customize_navigation: "Dostosuj nawigację",
+  personal: "Osobiste",
+  accordion_navigation_control: "Nawigacja boczna akordeonu",
+  horizontal_navigation_bar: "Nawigacja zakładkowa",
+  show_limited_projects_on_sidebar: "Pokaż ograniczoną liczbę projektów na pasku bocznym",
+  enter_number_of_projects: "Wprowadź liczbę projektów",
+  repo_url_too_long: "",
+  git_repository_url_placeholder: "",
+  base_branch_too_long: "",
+  base_branch_invalid_chars: "",
+  base_branch_placeholder: "",
+  git_repository_url: "",
+  base_branch: "",
+  timezone_setting: "Bieżące ustawienie strefy czasowej.",
+  language_setting: "Wybierz język używany w interfejsie użytkownika.",
+  language_and_time: "Język i czas",
+  preferences: "Preferencje",
 } as const;

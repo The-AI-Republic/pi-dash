@@ -78,6 +78,10 @@ export default {
               message: "問題が発生しました。もう一度お試しください。",
             },
           },
+          error: {
+            title: "",
+            message: "",
+          },
         },
       },
       unique_code: {
@@ -828,6 +832,8 @@ export default {
       show_weekends: "週末を表示",
       enable: "有効化",
       disable: "無効化",
+      copy_markdown: "マークダウンをコピー",
+      restore: "復元",
     },
     name: "名前",
     discard: "破棄",
@@ -918,6 +924,7 @@ export default {
     paused: "一時停止",
     no_of: "{entity} の数",
     resolved: "解決済み",
+    overview: "概要",
   },
   chart: {
     x_axis: "エックス アクシス",
@@ -1437,6 +1444,7 @@ export default {
         title: "公開",
         description: "ゲスト以外のワークスペースの全員が参加可能",
       },
+      label: "ネットワーク",
     },
     error: {
       permission: "この操作を実行する権限がありません。",
@@ -1577,6 +1585,22 @@ export default {
         },
       },
     },
+    activity: {
+      heading: "アクティビティ",
+      description: "すべてのプロジェクトと作業アイテムにおける最近のアクションと変更を追跡します。",
+    },
+    api_tokens: {
+      heading: "個人アクセストークン",
+      description: "外部システムやアプリケーションとデータを統合するための安全なAPIトークンを生成します。",
+    },
+    notifications: {
+      heading: "メール通知",
+      description: "購読している作業アイテムの最新情報を入手します。これを有効にすると通知を受け取れます。",
+    },
+    preferences: {
+      heading: "設定",
+      description: "あなたの作業方法に合わせてアプリのエクスペリエンスをカスタマイズします",
+    },
   },
   workspace_settings: {
     label: "ワークスペース設定",
@@ -1652,6 +1676,8 @@ export default {
         current_plan: "現在のプラン",
         free_plan: "現在フリープランを使用中です",
         view_plans: "プランを表示",
+        heading: "請求とプラン",
+        description: "プランを選択し、サブスクリプションを管理し、ニーズの拡大に合わせて簡単にアップグレードできます。",
       },
       exports: {
         title: "エクスポート",
@@ -1672,6 +1698,11 @@ export default {
             },
           },
         },
+        heading: "エクスポート",
+        description:
+          "プロジェクトデータをさまざまな形式でエクスポートし、ダウンロードリンク付きのエクスポート履歴にアクセスできます。",
+        exporting_projects: "プロジェクトをエクスポート中",
+        format: "形式",
       },
       webhooks: {
         title: "Webhook",
@@ -1723,6 +1754,7 @@ export default {
             message: "シークレットキーのコピー中にエラーが発生しました。",
           },
         },
+        description: "プロジェクトイベント発生時に外部サービスへの通知を自動化します。",
       },
       api_tokens: {
         title: "APIトークン",
@@ -1787,6 +1819,7 @@ export default {
       priority_distribution: {
         title: "優先度別作業項目",
         empty: "より良い分析のために、作業項目を作成してグラフで優先度別に表示します。",
+        priority: "",
       },
       recent_activity: {
         title: "最近のアクティビティ",
@@ -1870,6 +1903,20 @@ export default {
         title: "{groupKey}グループのステータスがありません",
         description: "新しいステータスを作成してください",
       },
+      members_edit: {
+        toast: {
+          loading: "プロジェクト設定を更新中...",
+          success_title: "成功！",
+          success_message: "プロジェクト設定が更新されました。",
+          error_title: "エラー！",
+          error_message: "プロジェクト設定の更新中に問題が発生しました。もう一度お試しください。",
+        },
+        title: "メンバーがステータスを編集できるようにする",
+        description:
+          "有効にすると、プロジェクトメンバーはワークフローステータスの追加、編集、並べ替え、削除ができます。無効にすると、管理者のみがステータスを管理できます。",
+      },
+      heading: "ステータス",
+      description: "ワークフローステータスを定義・カスタマイズして、作業項目の進捗を追跡します。",
     },
     labels: {
       label_title: "ラベルタイトル",
@@ -1878,6 +1925,8 @@ export default {
       toast: {
         error: "ラベルの更新中にエラーが発生しました",
       },
+      heading: "ラベル",
+      description: "カスタムラベルを作成して、作業項目を分類・整理します。",
     },
     estimates: {
       label: "見積もり",
@@ -1961,6 +2010,8 @@ export default {
           hours: "時間",
         },
       },
+      heading: "見積もり",
+      enable_description: "チームの複雑さや作業負荷を伝えるのに役立ちます。",
     },
     automations: {
       label: "自動化",
@@ -1975,6 +2026,8 @@ export default {
         duration: "非アクティブな作業項目を自動的に閉じる",
         auto_close_status: "自動クローズステータス",
       },
+      heading: "自動化",
+      description: "自動アクションを設定して、プロジェクト管理ワークフローを効率化し、手動作業を削減します。",
     },
     empty_state: {
       labels: {
@@ -2347,6 +2400,7 @@ export default {
       unarchived: "通知をアーカイブ解除しました",
       snoozed: "通知をスヌーズしました",
       unsnoozed: "通知のスヌーズを解除しました",
+      un_snoozed: "",
     },
     empty_state: {
       detail: {
@@ -2708,4 +2762,463 @@ export default {
     comment_failed_title: "Could not post comment",
     comment_failed_message: "Failed to post the comment.",
   },
+  scheduler_bindings: {
+    tab_label: "スケジューラー",
+    title: "スケジューラー",
+    subtitle:
+      "このプロジェクトにインストールされたスケジューラー。各インストールは、設定されたcronに従ってプロジェクトに対してプロンプトを実行します。",
+    install: "スケジューラーをインストール",
+    columns: {
+      name: "スケジューラー",
+      cron: "スケジュール",
+      next_run: "次回実行",
+      last_run: "前回実行",
+      status: "ステータス",
+      updated: "更新日",
+    },
+    toast: {
+      updated_title: "インストールが更新されました",
+      enabled_message: "スケジューラーが有効になりました — 次のcron tickで実行されます。",
+      disabled_message: "スケジューラーが無効になりました — 再び有効になるまで実行されません。",
+      error_title: "問題が発生しました",
+      update_failed: "インストールを更新できませんでした。",
+      updated_message: "以降の実行では新しい設定が使用されます。",
+      installed_title: "スケジューラーがインストールされました",
+      installed_message: "設定されたcronで実行されます。",
+      install_failed: "スケジューラーをインストールできませんでした。",
+      uninstalled_title: "スケジューラーがアンインストールされました",
+      uninstalled_message: "再インストールされるまで、このプロジェクトでは実行されません。",
+      uninstall_failed: "スケジューラーをアンインストールできませんでした。",
+    },
+    list: {
+      empty:
+        "このプロジェクトにはまだスケジューラーがインストールされていません。ワークスペースカタログから追加するには、「スケジューラーをインストール」をクリックしてください。",
+      none_yet: "(なし)",
+    },
+    actions: {
+      disable: "スケジューラーを無効にする",
+      enable: "スケジューラーを有効にする",
+      edit: "編集",
+      uninstall: "アンインストール",
+    },
+    status: {
+      enabled: "有効",
+      disabled: "無効",
+    },
+    edit_modal: {
+      title: "スケジューラーのインストールを編集",
+      saving: "保存中…",
+      save: "保存",
+    },
+    install_modal: {
+      cron_label: "スケジュール (cron)",
+      errors: {
+        cron_required: "Cron式が必要です。",
+        scheduler_required: "スケジューラーを選択してください。",
+      },
+      cron_placeholder: "0 9 * * *",
+      cron_help: "UTCでの5フィールドcron式。例：毎日09:00 UTCの場合は ``0 9 * * *``。",
+      extra_context_label: "プロジェクトコンテキスト（オプション）",
+      extra_context_placeholder: "このプロジェクト固有のメモ…",
+      extra_context_help:
+        "実行時にスケジューラーのベースプロンプトに追加されます。ワークスペースプロンプトが持つべきでないプロジェクト固有の枠組みを指定するために使用します。",
+      enabled_label: "有効",
+      enabled_help: "無効なインストールは、再び有効になるまでcronで実行されません。",
+      cancel: "キャンセル",
+      none_available_title: "利用可能なスケジューラーがありません",
+      none_available_body:
+        "すべてのワークスペーススケジューラーがこのプロジェクトに既にインストールされているか、ワークスペース管理者が有効にしていないかのいずれかです。カタログを管理するには、ワークスペース → スケジューラーにアクセスしてください。",
+      title: "スケジューラをインストール",
+      scheduler_label: "スケジューラ",
+      scheduler_help:
+        "ワークスペースで有効なスケジューラから選択してください。既にインストールされているものは表示されません。",
+      installing: "インストール中…",
+      install: "インストール",
+    },
+    uninstall_modal: {
+      title: "スケジューラをアンインストールしますか？",
+      body: "このプロジェクトではスケジューラが実行されなくなります。ワークスペースの定義は影響を受けず、後で再インストールできます。",
+      confirm: "アンインストール",
+    },
+  },
+  prompts: {
+    detail: {
+      loading: "読み込み中…",
+      not_found: "テンプレートが見つかりません。",
+      default_title: "プロンプトテンプレート（Pi Dash デフォルト）",
+      workspace_title: "プロンプトテンプレート（ワークスペースオーバーライド）",
+      default_description:
+        "これは組み込みのPi Dashデフォルトです。ワークスペース管理者はここで編集できません。オーバーライドするにはワークスペース用にカスタマイズしてください。",
+      workspace_description:
+        "ワークスペースのPi Dashデフォルトのオーバーライドです。編集するとバージョンが上がり、このワークスペースの次回のエージェント実行に適用されます。",
+      back: "一覧に戻る",
+      body: "テンプレート本文（Jinja + Markdown）",
+      unsaved: "未保存の変更",
+      save: "保存",
+    },
+    toast: {
+      saved_title: "プロンプトを保存しました",
+      saved_message: "以降のエージェント実行では更新されたプロンプトが使用されます。",
+      save_failed: "プロンプトを保存できませんでした。",
+      error_title: "問題が発生しました",
+      created_title: "ワークスペースオーバーライドを作成しました",
+      created_message: "現在のPi Dashデフォルトをコピーしました。編集して保存し、カスタマイズしてください。",
+      customize_failed: "ワークスペースオーバーライドを作成できませんでした。",
+      reverted_title: "Pi Dashデフォルトに戻しました",
+      reverted_message: "このワークスペースは共有デフォルトテンプレートに戻りました。",
+      revert_failed: "プロンプトを元に戻せませんでした。",
+    },
+    preview: {
+      missing_issue_id: "最初にイシューIDを入力してください。",
+      failed: "レンダリングに失敗しました。",
+      title: "プレビュー",
+      issue_id_placeholder: "課題ID (UUID)",
+      run: "プレビュー",
+      empty: "課題IDを貼り付けて「プレビュー」をクリックすると、実際の課題に対してテンプレートがレンダリングされます。",
+      admin_only:
+        "レンダリングされたプロンプトのプレビューはワークスペース管理者の操作です。特定の課題に対してレンダリングされたものを確認する必要がある場合は、ワークスペース管理者にお問い合わせください。",
+    },
+    scope: {
+      default: "Pi Dash デフォルト",
+      workspace: "ワークスペースオーバーライド",
+    },
+    title: "プロンプト",
+    subtitle:
+      "エージェント実行前に各課題に対してレンダリングされるシステムプロンプトテンプレート。ワークスペース管理者はこのワークスペースのデフォルトをカスタマイズできます。",
+    customize: "このワークスペース用にカスタマイズ",
+    columns: {
+      name: "名前",
+      scope: "スコープ",
+      version: "バージョン",
+      updated: "更新日",
+    },
+    list: {
+      empty:
+        "利用可能なプロンプトテンプレートがありません。次回のマイグレーション時にPi Dashデフォルトがシードされます。",
+    },
+    revert: {
+      confirm_title: "Pi Dashデフォルトに戻しますか？",
+      confirm_body:
+        "これにより、ワークスペーススコープのテンプレートがアーカイブされます。このワークスペースでの新しいエージェント実行は、別のオーバーライドを作成するまでPi Dashデフォルトを使用します。",
+      confirm: "戻す",
+    },
+    actions: {
+      edit: "編集",
+      view: "表示",
+      revert: "デフォルトに戻す",
+    },
+  },
+  runners: {
+    toast: {
+      error_title: "エラー！",
+    },
+    approvals: {
+      decision_failed: "決定の記録に失敗しました",
+      empty: "保留中の承認はありません。",
+      run_meta: "実行 {runId} · 要求日時 {at}",
+      expires: "期限 {at}",
+      accept_once: "1回だけ承認",
+      accept_for_session: "セッション中は承認",
+      decline: "却下",
+    },
+    tabs: {
+      runners: "AIエージェント",
+      runs: "実行",
+      approvals: "承認",
+    },
+    title: "AIエージェント",
+    page_title: "{workspace} - AIエージェント",
+    list: {
+      delete_failed: "ランナーの削除に失敗しました",
+      revoke_failed: "ランナーの失効に失敗しました",
+      revive_failed: "ランナーの復活に失敗しました",
+      add_runner: "ランナーを追加",
+      how_it_works_title: "ランナーの追加方法",
+      how_it_works_body:
+        "1. 「ランナーを追加」をクリックし、プロジェクトとポッドを選択して送信します。クラウドがそのランナーに紐づく1回限りの登録トークンを発行します。\n2. ランナーをホストするマシンで、表示された `pidash connect --url ... --token ... --host-label ...` コマンドを実行します。\n3. デーモンが登録され、ランナーがここにオンライン表示されます。\n\n各ランナーには独自のトークンがあります。ホストに最初に登録されたランナーは、`pidash` CLIがランナー以外のコマンドで使用するマシントークンもブートストラップします。\n\n前提条件: エージェントCLI（codex / claude）がホストにインストールされている必要があります。",
+      connected_runners: "ランナー",
+      columns: {
+        name: "名前",
+        status: "ステータス",
+        os_arch: "OS / アーキテクチャ",
+        version: "バージョン",
+        last_heartbeat: "最終ハートビート",
+      },
+      columns_pod: "ポッド",
+      revive: "復活",
+      revoke: "失効",
+      delete: "削除",
+      empty:
+        "まだランナーがありません。「ランナーを追加」をクリックして、最初のランナーごとの登録トークンを発行してください。",
+      delete_confirm_title: "ランナーを削除しますか？",
+      delete_confirm_body:
+        "ランナーの行が削除され、デーモンは強制的にオフラインになります。過去の実行はランナー参照がnullのまま保持されます。",
+      revoke_confirm_title: "ランナーを失効しますか？",
+      revoke_confirm_body:
+        "ランナーの認証情報が無効化され、進行中の実行はキャンセルされますが、行はリストに残ります。後で復活させて、同じ行に新しい登録トークンを発行できます。",
+      revive_modal_title: "新しい登録トークン",
+      revive_modal_body:
+        "このランナーを引き継ぐホストで以下のコマンドを実行してください。今すぐコピーしてください。トークンは再度表示されません。",
+      project_placeholder: "プロジェクトを選択",
+      copy_failed: "クリップボードにコピーできませんでした",
+    },
+    machine_token_note: {
+      body: "ランナーが新しいホスト（つまり新しい ``host_label``）に初めて登録されるとき、クラウドは ``pidash`` CLIがランナー以外のコマンド（issue、comment、state）で使用するマシントークンも発行します。同じホスト上の後続のランナーはそのトークンを再利用します。",
+    },
+    pods: {
+      title: "ポッド",
+      help: "ポッドはランナーをグループ化します。Issueはポッドに委任され、その中の空いているランナーが作業を引き受けます。タイルをクリックしてランナーをフィルタリングしてください。",
+      load_failed: "ポッドの読み込みに失敗しました",
+      tile_aria: "{name} ポッドでランナーをフィルタリング",
+      default_badge: "デフォルト",
+      runner_count: "{count} ランナー",
+      create_tile: "新しいポッドを作成",
+      filter_active: "{name} ポッドでランナーをフィルタリング中",
+      filter_clear: "フィルターをクリア",
+    },
+    add_modal: {
+      runner_id_label: "ランナーID",
+      done: "完了",
+      agent_options: {
+        claude_code: "Claude Code",
+        codex: "Codex",
+      },
+      errors: {
+        create_failed: "登録トークンを発行できませんでした。",
+        project_required: "プロジェクトを選択してください。",
+        load_projects_failed: "プロジェクトを読み込めませんでした。",
+        load_pods_failed: "ポッドを読み込めませんでした。",
+      },
+      title: "ランナーを追加",
+      subtitle:
+        "新しいランナー用の一回限りの登録トークンを発行します。表示された `pidash connect` コマンドを、ランナーをホストするマシンで実行してください。",
+      project_label: "プロジェクト",
+      project_help: "このランナーが作業するプロジェクト。",
+      pod_label: "ポッド（オプション）",
+      pod_default_option: "（デフォルトポッド）",
+      pod_help: "デフォルトではプロジェクトのデフォルトポッドになります。",
+      name_label: "名前（オプション）",
+      name_placeholder: "my-laptop-runner",
+      name_help: "空白の場合は自動割り当て（例：``runner_001``）。",
+      host_label_label: "ホストラベル（オプション）",
+      host_label_placeholder: "my-laptop",
+      host_label_help:
+        "提案されるコマンドに埋め込まれる自由形式のホスト名。フラグを省略すると、デーモンが実際のホスト名に置き換えます。",
+      working_dir_label: "作業ディレクトリ（オプション）",
+      working_dir_placeholder: "ローカル開発マシンのプロジェクト作業ディレクトリ",
+      working_dir_help:
+        "デーモンがエージェントCLIを実行するローカルパス — 通常はディスク上のプロジェクトリポジトリです。デフォルトはランナーのデータディレクトリ下のサンドボックスになりますが、これはほとんど望ましいものではありません。",
+      agent_label: "エージェント",
+      agent_help: "このランナーが駆動するAIエージェントCLI。表示される``pidash connect``コマンドに組み込まれています。",
+      cancel: "キャンセル",
+      submitting: "発行中…",
+      submit: "登録トークンを発行",
+      token_warning: "これは一度だけコピーしてください — 登録トークンは再度表示されません。",
+      token_instructions: "ランナーをホストするマシンでこれを実行してください：",
+      copied: "コピーしました！",
+      copy_command: "コマンドをコピー",
+    },
+    runs: {
+      cancel_failed: "実行のキャンセルに失敗しました",
+      columns: {
+        started: "開始",
+        status: "ステータス",
+        prompt: "プロンプト",
+      },
+      empty: "まだ実行はありません。",
+      select_run: "左側の実行を選択してください。",
+      cancel: "実行をキャンセル",
+      prompt: "プロンプト",
+      error: "エラー",
+      done_payload: "完了ペイロード",
+      events_count: "イベント ({count})",
+      event_columns: {
+        seq: "seq",
+        kind: "kind",
+        at: "at",
+      },
+      cancel_confirm_title: "実行をキャンセルしますか？",
+      cancel_confirm_body: "ランナーはシグナルを受け取り次第、この実行を停止します。",
+    },
+    create_pod_modal: {
+      errors: {
+        create_failed: "ポッドを作成できませんでした。",
+        project_required: "プロジェクトを選択してください。",
+        load_projects_failed: "プロジェクトを読み込めませんでした。",
+        name_required: "名前は必須です。",
+      },
+      title: "新しいPodを作成",
+      subtitle: "Podはプロジェクトの下でランナーをグループ化します。プロジェクトを選択し、Podに名前を付けてください。",
+      project_label: "プロジェクト",
+      project_placeholder: "プロジェクトを選択",
+      project_help: "このPodが属するプロジェクト。名前の前にプロジェクト識別子が付加されます。",
+      name_label: "名前",
+      name_placeholder: "beefy",
+      name_help:
+        "英字、数字、ダッシュ、アンダースコアが使用できます。プロジェクトプレフィックスは自動的に追加されます。",
+      description_label: "説明（オプション）",
+      description_placeholder: "このPodの実行場所や目的など",
+      cancel: "キャンセル",
+      submitting: "作成中…",
+      submit: "Podを作成",
+    },
+  },
+  schedulers: {
+    toast: {
+      created_title: "スケジューラーが作成されました",
+      created_message: "プロジェクト管理者は、これをプロジェクトにインストールできるようになりました。",
+      create_failed: "スケジューラーを作成できませんでした。",
+      error_title: "問題が発生しました",
+      updated_title: "スケジューラーが更新されました",
+      updated_message: "以降の実行では、更新された定義が使用されます。",
+      update_failed: "スケジューラーを更新できませんでした。",
+      deleted_title: "スケジューラーが削除されました",
+      deleted_message: "アクティブなバインディングは停止しました。",
+      delete_failed: "スケジューラーを削除できませんでした。",
+    },
+    title: "スケジューラー",
+    subtitle:
+      "このワークスペースの再利用可能なスケジューラー定義。プロジェクトにインストールすると、cronでプロジェクトに対してプロンプトを実行できます。",
+    new: "新しいスケジューラー",
+    columns: {
+      name: "名前",
+      slug: "スラッグ",
+      source: "ソース",
+      installs: "インストール",
+      status: "ステータス",
+      updated: "更新日時",
+    },
+    list: {
+      empty:
+        "このワークスペースにはまだスケジューラーがありません。「新しいスケジューラー」をクリックして作成してください。",
+      installs_count: "{count, plural, one {#インストール} other {#インストール}}",
+    },
+    source: {
+      manifest: "マニフェスト",
+      builtin: "組み込み",
+    },
+    status: {
+      enabled: "有効",
+      disabled: "無効",
+    },
+    actions: {
+      edit: "編集",
+      delete: "削除",
+    },
+    delete: {
+      confirm_title: "スケジューラーを削除しますか？",
+      confirm_body:
+        "これによりスケジューラーは論理削除されます。アクティブなプロジェクトバインディングは停止します。スラッグは再作成可能になります。",
+      confirm: "削除",
+    },
+    form: {
+      edit_title: "スケジューラーの編集",
+      create_title: "新しいスケジューラー",
+      slug_label: "スラッグ",
+      errors: {
+        slug_required: "スラッグは必須です。",
+        name_required: "名前は必須です。",
+        prompt_required: "プロンプトは必須です。",
+      },
+      slug_placeholder: "security-audit",
+      slug_help: "URLで使用される小文字の識別子。作成後は変更できません。",
+      name_label: "名前",
+      name_placeholder: "セキュリティ監査",
+      description_label: "説明",
+      description_placeholder: "インストールピッカーに表示される短い概要。",
+      prompt_label: "プロンプト",
+      prompt_placeholder: "このプロジェクトの未解決のセキュリティ問題を探す…",
+      prompt_help:
+        "エージェントが各ティックで実行するベースプロンプト。インストール時にプロジェクトごとのコンテキストが追加されるため、このプロンプトはプロジェクトに依存しないようにしてください。",
+      enabled_label: "有効",
+      enabled_help:
+        "無効なスケジューラーは新しいプロジェクトにインストールできず、既存のバインディングは実行されません。",
+      cancel: "キャンセル",
+      saving: "保存中…",
+      save: "保存",
+      creating: "作成中…",
+      create: "スケジューラーを作成",
+    },
+  },
+  power_k: {
+    search_menu: {
+      no_results: "結果が見つかりません",
+      clear_search: "検索をクリア",
+    },
+    miscellaneous_actions: {
+      copy_current_page_url_toast_success: "現在のページのURLをクリップボードにコピーしました。",
+      copy_current_page_url_toast_error: "現在のページのURLをクリップボードにコピー中にエラーが発生しました。",
+    },
+    preferences_actions: {
+      toast: {
+        theme: {
+          error: "テーマの更新に失敗しました。もう一度お試しください。",
+        },
+        timezone: {
+          success: "タイムゾーンが正常に更新されました。",
+          error: "タイムゾーンの更新に失敗しました。もう一度お試しください。",
+        },
+        generic: {
+          success: "設定が正常に更新されました。",
+          error: "設定の更新に失敗しました。もう一度お試しください。",
+        },
+      },
+    },
+    footer: {
+      workspace_level: "ワークスペースレベル",
+    },
+    page_placeholders: {
+      default: "コマンドを入力するか検索",
+    },
+    contextual_actions: {
+      cycle: {
+        copy_url_toast_success: "サイクルのURLをクリップボードにコピーしました。",
+        copy_url_toast_error: "サイクルのURLをクリップボードにコピー中にエラーが発生しました。",
+      },
+      module: {
+        copy_url_toast_success: "モジュールのURLをクリップボードにコピーしました。",
+        copy_url_toast_error: "モジュールのURLをクリップボードにコピー中にエラーが発生しました。",
+      },
+      page: {
+        copy_url_toast_success: "ページのURLをクリップボードにコピーしました。",
+        copy_url_toast_error: "ページのURLをクリップボードにコピー中にエラーが発生しました。",
+      },
+      work_item: {
+        copy_id_toast_success: "作業項目IDをクリップボードにコピーしました。",
+        copy_id_toast_error: "作業項目IDをクリップボードにコピー中にエラーが発生しました。",
+        copy_title_toast_success: "作業項目のタイトルをクリップボードにコピーしました。",
+        copy_title_toast_error: "作業項目のタイトルをクリップボードにコピー中にエラーが発生しました。",
+        copy_url_toast_success: "作業項目のURLをクリップボードにコピーしました。",
+        copy_url_toast_error: "作業項目のURLをクリップボードにコピー中にエラーが発生しました。",
+      },
+    },
+  },
+  date: "",
+  epics: "",
+  Unassigned: "",
+  creating_theme: "",
+  issue_advanced_git: "",
+  git_work_branch: "",
+  git_work_branch_hint: "",
+  git_work_branch_too_long: "",
+  git_work_branch_invalid_chars: "",
+  git_work_branch_placeholder: "",
+  progress: "",
+  customize_navigation: "ナビゲーションをカスタマイズ",
+  personal: "個人設定",
+  accordion_navigation_control: "アコーディオンサイドバーナビゲーション",
+  horizontal_navigation_bar: "タブ付きナビゲーション",
+  show_limited_projects_on_sidebar: "サイドバーに表示するプロジェクト数を制限",
+  enter_number_of_projects: "プロジェクト数を入力",
+  repo_url_too_long: "",
+  git_repository_url_placeholder: "",
+  base_branch_too_long: "",
+  base_branch_invalid_chars: "",
+  base_branch_placeholder: "",
+  git_repository_url: "",
+  base_branch: "",
+  timezone_setting: "現在のタイムゾーン設定。",
+  language_setting: "ユーザーインターフェースで使用する言語を選択します。",
+  language_and_time: "言語と時刻",
+  preferences: "環境設定",
 } as const;

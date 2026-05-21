@@ -78,6 +78,10 @@ export default {
               message: "Ceva nu a funcționat. Te rugăm să încerci din nou.",
             },
           },
+          error: {
+            title: "",
+            message: "",
+          },
         },
       },
       unique_code: {
@@ -835,6 +839,7 @@ export default {
       show_weekends: "Arată sfârșiturile de săptămână",
       enable: "Activează",
       disable: "Dezactivează",
+      copy_markdown: "Copiază markdown",
     },
     name: "Nume",
     discard: "Renunță",
@@ -925,6 +930,7 @@ export default {
     paused: "Pauzat",
     no_of: "Nr. de {entity}",
     resolved: "Rezolvat",
+    overview: "Prezentare generală",
   },
   chart: {
     x_axis: "axa-X",
@@ -1590,6 +1596,23 @@ export default {
         },
       },
     },
+    activity: {
+      heading: "Activitate",
+      description: "Urmărește acțiunile și modificările recente din toate proiectele și elementele de lucru.",
+    },
+    api_tokens: {
+      heading: "Token-uri de acces personale",
+      description: "Generează token-uri API sigure pentru a-ți integra datele cu sisteme și aplicații externe.",
+    },
+    notifications: {
+      heading: "Notificări prin e-mail",
+      description:
+        "Rămâi la curent cu elementele de lucru la care ești abonat. Activează această opțiune pentru a primi notificări.",
+    },
+    preferences: {
+      heading: "Preferințe",
+      description: "Personalizează experiența aplicației în funcție de modul tău de lucru.",
+    },
   },
   workspace_settings: {
     label: "Setări spațiu de lucru",
@@ -1666,6 +1689,8 @@ export default {
         current_plan: "Abonament curent",
         free_plan: "Folosești în prezent abonamentul gratuit",
         view_plans: "Vezi abonamentele",
+        heading: "Facturare și planuri",
+        description: "Alege-ți planul, gestionează abonamentele și actualizează ușor pe măsură ce nevoile tale cresc.",
       },
       exports: {
         title: "Exporturi",
@@ -1686,6 +1711,11 @@ export default {
             },
           },
         },
+        heading: "Exporturi",
+        description:
+          "Exportă datele proiectului tău în diverse formate și accesează istoricul exporturilor cu link-uri de descărcare.",
+        exporting_projects: "Se exportă proiectul",
+        format: "Format",
       },
       webhooks: {
         title: "Puncte de notificare (Webhooks)",
@@ -1737,6 +1767,7 @@ export default {
             message: "A apărut o eroare la copierea cheii secrete.",
           },
         },
+        description: "Automatizează notificările către servicii externe atunci când au loc evenimente în proiect.",
       },
       api_tokens: {
         title: "Chei secrete API",
@@ -1802,6 +1833,7 @@ export default {
       priority_distribution: {
         title: "Activități după prioritate",
         empty: "Creează activități pentru a le vedea distribuite pe priorități în grafic, pentru o analiză mai bună.",
+        priority: "",
       },
       recent_activity: {
         title: "Activitate recentă",
@@ -1885,6 +1917,22 @@ export default {
         title: "Nicio stare disponibilă pentru grupul {groupKey}",
         description: "Te rog să creezi o stare nouă",
       },
+      members_edit: {
+        toast: {
+          loading: "Se actualizează setarea proiectului...",
+          success_title: "Succes!",
+          success_message: "Setarea proiectului a fost actualizată.",
+          error_title: "Eroare!",
+          error_message:
+            "Ceva nu a funcționat corect în timpul actualizării setării proiectului. Vă rugăm să încercați din nou.",
+        },
+        title: "Permiteți membrilor să editeze stările",
+        description:
+          "Când este activată, membrii proiectului pot adăuga, edita, reordona și șterge stările fluxului de lucru. Când este dezactivată, doar administratorii pot gestiona stările.",
+      },
+      heading: "Stări",
+      description:
+        "Definiți și personalizați stările fluxului de lucru pentru a urmări progresul elementelor de lucru.",
     },
     labels: {
       label_title: "Titlu etichetă",
@@ -1893,6 +1941,8 @@ export default {
       toast: {
         error: "Eroare la actualizarea etichetei",
       },
+      heading: "Etichete",
+      description: "Creați etichete personalizate pentru a categorisi și organiza elementele de lucru",
     },
     estimates: {
       label: "Estimări",
@@ -1977,6 +2027,8 @@ export default {
           hours: "Ore",
         },
       },
+      heading: "Estimări",
+      enable_description: "Acestea vă ajută să comunicați complexitatea și volumul de muncă al echipei.",
     },
     automations: {
       label: "Automatizări",
@@ -1991,6 +2043,9 @@ export default {
         duration: "Închide automat activitățile inactive de",
         auto_close_status: "Stare închidere automată",
       },
+      heading: "Automatizări",
+      description:
+        "Configurați acțiuni automatizate pentru a eficientiza fluxul de lucru al gestionării proiectelor și a reduce sarcinile manuale.",
     },
     empty_state: {
       labels: {
@@ -2167,6 +2222,12 @@ export default {
           "Pentru a păstra proiectul ordonat, arhivează ciclurile completate. Le vei găsi aici după arhivare.",
       },
     },
+    start_date: "Data de început",
+    end_date: "Data de sfârșit",
+    in_your_timezone: "În fusul dvs. orar",
+    transfer_work_items: "Transferați {count} elemente de lucru",
+    add_date: "Adăugați data",
+    date_range: "Interval de date",
   },
   project_issues: {
     empty_state: {
@@ -2362,6 +2423,7 @@ export default {
       unarchived: "Notificare dezarhivată",
       snoozed: "Notificare amânată",
       unsnoozed: "Notificare reactivată",
+      un_snoozed: "",
     },
     empty_state: {
       detail: {
@@ -2725,4 +2787,460 @@ export default {
     comment_failed_title: "Could not post comment",
     comment_failed_message: "Failed to post the comment.",
   },
+  scheduler_bindings: {
+    tab_label: "Planificatoare",
+    title: "Planificatoare",
+    subtitle:
+      "Planificatoare instalate pe acest proiect. Fiecare instalare declanșează promptul său împotriva proiectului la cronul configurat.",
+    install: "Instalați planificatorul",
+    columns: {
+      name: "Planificator",
+      cron: "Programare",
+      next_run: "Următoarea execuție",
+      last_run: "Ultima execuție",
+      status: "Stare",
+      updated: "Actualizat",
+    },
+    toast: {
+      updated_title: "Instalare actualizată",
+      enabled_message: "Planificator activat — se va declanșa la următorul tic cron.",
+      disabled_message: "Scheduler dezactivat — nu se va declanșa până când nu va fi reactivat.",
+      error_title: "Ceva a mers greșit",
+      update_failed: "Nu s-a putut actualiza instalarea.",
+      updated_message: "Execuțiile ulterioare folosesc noile setări.",
+      installed_title: "Scheduler instalat",
+      installed_message: "Se va declanșa conform cron-ului configurat.",
+      install_failed: "Nu s-a putut instala scheduler-ul.",
+      uninstalled_title: "Scheduler dezinstalat",
+      uninstalled_message: "Nu se va declanșa pe acest proiect până când nu va fi reinstalat.",
+      uninstall_failed: "Nu s-a putut dezinstala scheduler-ul.",
+    },
+    list: {
+      empty:
+        "Niciun scheduler instalat încă pe acest proiect. Faceți clic pe „Instalează scheduler” pentru a adăuga unul din catalogul spațiului de lucru.",
+      none_yet: "(niciodată)",
+    },
+    actions: {
+      disable: "Dezactivează scheduler",
+      enable: "Activează scheduler",
+      edit: "Editează",
+      uninstall: "Dezinstalează",
+    },
+    status: {
+      enabled: "Activat",
+      disabled: "Dezactivat",
+    },
+    edit_modal: {
+      title: "Editează instalarea scheduler-ului",
+      saving: "Se salvează…",
+      save: "Salvează",
+    },
+    install_modal: {
+      cron_label: "Programare (cron)",
+      errors: {
+        cron_required: "Expresia cron este obligatorie.",
+        scheduler_required: "Alegeți un scheduler.",
+      },
+      cron_placeholder: "0 9 * * *",
+      cron_help: "Expresie cron cu 5 câmpuri în UTC, de ex. ``0 9 * * *`` pentru 09:00 UTC în fiecare zi.",
+      extra_context_label: "Contextul proiectului (opțional)",
+      extra_context_placeholder: "Note specifice acestui proiect…",
+      extra_context_help:
+        "Adăugat la promptul de bază al scheduler-ului la momentul execuției. Folosiți-l pentru a oferi un cadru specific proiectului pe care promptul spațiului de lucru nu ar trebui să îl conțină.",
+      enabled_label: "Activat",
+      enabled_help: "Instalările dezactivate nu se declanșează în cron până când nu sunt reactivate.",
+      cancel: "Anulare",
+      none_available_title: "Niciun scheduler disponibil",
+      none_available_body:
+        "Fie fiecare scheduler al spațiului de lucru este deja instalat pe acest proiect, fie administratorul spațiului de lucru nu a activat niciunul. Accesați Spațiu de lucru → Schedulers pentru a gestiona catalogul.",
+      title: "Instalează scheduler",
+      scheduler_label: "Scheduler",
+      scheduler_help:
+        "Alege dintre scheduler-ele activate ale spațiului tău de lucru. Cele deja instalate nu sunt listate.",
+      installing: "Se instalează…",
+      install: "Instalează",
+    },
+    uninstall_modal: {
+      title: "Dezinstalezi scheduler-ul?",
+      body: "Scheduler-ul nu se mai declanșează pe acest proiect. Definiția spațiului de lucru rămâne neschimbată și poate fi reinstalată ulterior.",
+      confirm: "Dezinstalează",
+    },
+  },
+  prompts: {
+    detail: {
+      loading: "Se încarcă…",
+      not_found: "Șablonul nu a fost găsit.",
+      default_title: "Șablon de prompt (implicit Pi Dash)",
+      workspace_title: "Șablon de prompt (suprascriere spațiu de lucru)",
+      default_description:
+        "Acesta este implicitul încorporat Pi Dash. Administratorii spațiului de lucru nu îl pot edita aici — personalizați pentru spațiul dvs. de lucru pentru a-l suprascrie.",
+      workspace_description:
+        "Suprascrierea spațiului tău de lucru pentru implicitul Pi Dash. Modificările incrementează versiunea și se aplică la următoarea rulare a agentului pentru acest spațiu de lucru.",
+      back: "Înapoi la listă",
+      body: "Corpul șablonului (Jinja + Markdown)",
+      unsaved: "Modificări nesalvate",
+      save: "Salvează",
+    },
+    toast: {
+      saved_title: "Prompt salvat",
+      saved_message: "Rulările ulterioare ale agentului vor folosi promptul actualizat.",
+      save_failed: "Nu s-a putut salva promptul.",
+      error_title: "Ceva nu a funcționat",
+      created_title: "Suprascrierea spațiului de lucru a fost creată",
+      created_message: "Am copiat implicitul curent Pi Dash. Editează și salvează pentru a-l personaliza.",
+      customize_failed: "Nu s-a putut crea suprascrierea spațiului de lucru.",
+      reverted_title: "Revenit la implicitul Pi Dash",
+      reverted_message: "Acest spațiu de lucru a revenit la șablonul implicit partajat.",
+      revert_failed: "Nu s-a putut reveni la promptul implicit.",
+    },
+    preview: {
+      missing_issue_id: "Introduceți mai întâi un ID de problemă.",
+      failed: "Redarea a eșuat.",
+      title: "Previzualizare",
+      issue_id_placeholder: "ID problemă (UUID)",
+      run: "Previzualizare",
+      empty: "Lipiți un ID de problemă și faceți clic pe Previzualizare pentru a reda șablonul pe o problemă reală.",
+      admin_only:
+        "Previzualizarea promptului redat este o acțiune de administrator al spațiului de lucru. Întrebați administratorul spațiului de lucru dacă trebuie să îl vedeți redat pe o anumită problemă.",
+    },
+    scope: {
+      default: "Pi Dash implicit",
+      workspace: "Suprascriere spațiu de lucru",
+    },
+    title: "Prompturi",
+    subtitle:
+      "Șabloane de prompturi de sistem care sunt redate pentru fiecare problemă înainte de o rulare a agentului. Administratorii spațiului de lucru pot personaliza implicitul pentru acest spațiu de lucru.",
+    customize: "Personalizați pentru acest spațiu de lucru",
+    columns: {
+      name: "Nume",
+      scope: "Domeniu",
+      version: "Versiune",
+      updated: "Actualizat",
+    },
+    list: {
+      empty: "Nu există șabloane de prompturi disponibile. Implicitul Pi Dash va fi introdus la următoarea migrare.",
+    },
+    revert: {
+      confirm_title: "Reveniți la implicitul Pi Dash?",
+      confirm_body:
+        "Acest lucru arhivează șablonul la nivel de spațiu de lucru. Noile rulări ale agentului în acest spațiu de lucru vor folosi implicitul Pi Dash până când creați o altă suprascriere.",
+      confirm: "Revenire",
+    },
+    actions: {
+      edit: "Editare",
+      view: "Vizualizare",
+      revert: "Revenire la implicit",
+    },
+  },
+  runners: {
+    toast: {
+      error_title: "Eroare!",
+    },
+    approvals: {
+      decision_failed: "Nu s-a putut înregistra decizia",
+      empty: "Nicio aprobare în așteptare.",
+      run_meta: "Rulare {runId} · solicitată {at}",
+      expires: "expiră {at}",
+      accept_once: "Acceptă o dată",
+      accept_for_session: "Acceptă pentru sesiune",
+      decline: "Respinge",
+    },
+    tabs: {
+      runners: "Agenți AI",
+      runs: "Rulări",
+      approvals: "Aprobări",
+    },
+    title: "Agenți AI",
+    page_title: "{workspace} - Agenți AI",
+    list: {
+      delete_failed: "Eroare la ștergerea runner-ului",
+      revoke_failed: "Eroare la revocarea runner-ului",
+      revive_failed: "Eroare la reactivarea runner-ului",
+      add_runner: "Adaugă runner",
+      how_it_works_title: "Cum să adaugi un runner",
+      how_it_works_body:
+        '1. Faceți clic pe "Adaugă runner", alegeți un proiect + pod și trimiteți. Cloud-ul generează un token de înscriere unic, legat de acel runner.\n2. Pe mașina care va găzdui runner-ul, rulați comanda afișată `pidash connect --url ... --token ... --host-label ...`.\n3. Daemon-ul se înscrie și runner-ul apare online aici.\n\nFiecare runner are propriul token. Primul runner înscris pe un host inițializează și un token de mașină folosit de CLI-ul `pidash` pentru comenzi non-runner.\n\nCondiție prealabilă: CLI-ul agent (codex / claude) trebuie să fie deja instalat pe host.',
+      connected_runners: "Runneri",
+      columns: {
+        name: "Nume",
+        status: "Stare",
+        os_arch: "SO / Arhitectură",
+        version: "Versiune",
+        last_heartbeat: "Ultimul heartbeat",
+      },
+      columns_pod: "Pod",
+      revive: "Reactivează",
+      revoke: "Revocă",
+      delete: "Șterge",
+      empty:
+        'Încă nu există runneri. Faceți clic pe "Adaugă runner" pentru a genera primul token de înscriere per runner.',
+      delete_confirm_title: "Ștergeți runner-ul?",
+      delete_confirm_body:
+        "Rândul runner-ului este eliminat, iar daemon-ul este forțat să intre offline. Rulările istorice sunt păstrate cu o referință null la runner.",
+      revoke_confirm_title: "Revocați runner-ul?",
+      revoke_confirm_body:
+        "Credențialele runner-ului sunt invalidate, iar orice rulări în curs sunt anulate, dar rândul rămâne în listă. Îl puteți reactiva mai târziu pentru a genera un token de înscriere nou pe același rând.",
+      revive_modal_title: "Token de înscriere nou",
+      revive_modal_body:
+        "Rulați comanda de mai jos pe gazda care ar trebui să preia acest runner. Copiați-o acum — tokenul nu va mai fi afișat.",
+      project_placeholder: "Selectați un proiect",
+      copy_failed: "Nu s-a putut copia în clipboard",
+    },
+    machine_token_note: {
+      body: "Prima dată când un runner se înregistrează pe o gazdă nouă (adică un nou ``host_label``), cloudul emite și un token de mașină folosit de CLI-ul ``pidash`` pentru comenzi non-runner (issue, comment, state). Runnerii ulteriori de pe aceeași gazdă reutilizează acel token.",
+    },
+    pods: {
+      title: "Poduri",
+      help: "Podurile grupează runnerii tăi. Issues deleagă unui pod, iar orice runner liber din interior preia sarcina. Faceți clic pe un tile pentru a filtra runnerii.",
+      load_failed: "Nu s-au putut încărca podurile",
+      tile_aria: "Filtrează runnerii după podul {name}",
+      default_badge: "implicit",
+      runner_count: "{count} runner(i)",
+      create_tile: "Creează pod nou",
+      filter_active: "Se filtrează runnerii după podul {name}",
+      filter_clear: "Șterge filtrul",
+    },
+    add_modal: {
+      runner_id_label: "ID runner",
+      done: "Gata",
+      agent_options: {
+        claude_code: "Claude Code",
+        codex: "Codex",
+      },
+      errors: {
+        create_failed: "Nu s-a putut emite tokenul de înscriere.",
+        project_required: "Selectați un proiect.",
+        load_projects_failed: "Nu s-au putut încărca proiectele.",
+        load_pods_failed: "Nu s-au putut încărca podurile.",
+      },
+      title: "Adăugare runner",
+      subtitle:
+        "Emiteți un token de înscriere unic pentru un runner nou. Veți rula comanda `pidash connect` afișată pe mașina care îl va găzdui.",
+      project_label: "Proiect",
+      project_help: "Proiectul pe care va lucra acest runner.",
+      pod_label: "Pod (opțional)",
+      pod_default_option: "(pod implicit)",
+      pod_help: "Implicit, podul implicit al proiectului.",
+      name_label: "Nume (opțional)",
+      name_placeholder: "my-laptop-runner",
+      name_help: "Atribuit automat dacă este gol, de ex. ``runner_001``.",
+      host_label_label: "Etichetă gazdă (opțional)",
+      host_label_placeholder: "laptopul-meu",
+      host_label_help:
+        "Nume de gazdă liber, încorporat în comanda sugerată. Daemonul va înlocui cu numele său real de gazdă dacă omiteți flagul.",
+      working_dir_label: "Director de lucru (opțional)",
+      working_dir_placeholder: "director de lucru al proiectului pe mașina locală de dezvoltare",
+      working_dir_help:
+        "Calea locală în care daemonul rulează CLI-ul agentului — de obicei depozitul proiectului pe disc. Implicit este un sandbox în directorul de date al runnerului, ceea ce rareori doriți.",
+      agent_label: "Agent",
+      agent_help: "Ce CLI de agent AI va conduce acest runner. Încorporat în comanda ``pidash connect`` afișată.",
+      cancel: "Anulează",
+      submitting: "Se emite…",
+      submit: "Emite token de înscriere",
+      token_warning: "Copiați acest token o singură dată — tokenul de înscriere nu va mai fi afișat.",
+      token_instructions: "Rulați aceasta pe mașina care va găzdui runnerul:",
+      copied: "Copiat!",
+      copy_command: "Copiază comanda",
+    },
+    runs: {
+      cancel_failed: "Eșec la anularea rulării",
+      columns: {
+        started: "Început",
+        status: "Stare",
+        prompt: "Prompt",
+      },
+      empty: "Nicio rulare încă.",
+      select_run: "Selectați o rulare în stânga.",
+      cancel: "Anulează rularea",
+      prompt: "Prompt",
+      error: "Eroare",
+      done_payload: "Payload finalizat",
+      events_count: "Evenimente ({count})",
+      event_columns: {
+        seq: "seq",
+        kind: "tip",
+        at: "la",
+      },
+      cancel_confirm_title: "Anulați rularea?",
+      cancel_confirm_body: "Runnerul va opri această rulare imediat ce primește semnalul.",
+    },
+    create_pod_modal: {
+      errors: {
+        create_failed: "Nu s-a putut crea podul.",
+        project_required: "Alegeți un proiect.",
+        load_projects_failed: "Nu s-au putut încărca proiectele.",
+        name_required: "Numele este obligatoriu.",
+      },
+      title: "Creați un pod nou",
+      subtitle: "Podurile grupează runneri sub un proiect. Alegeți un proiect, apoi dați podului un nume.",
+      project_label: "Proiect",
+      project_placeholder: "Selectați un proiect",
+      project_help: "Proiectul căruia îi aparține acest pod. Numele va fi prefixat cu identificatorul proiectului.",
+      name_label: "Nume",
+      name_placeholder: "beefy",
+      name_help: "Litere, cifre, liniuțe și underscore-uri. Prefixul proiectului se adaugă automat.",
+      description_label: "Descriere (opțional)",
+      description_placeholder: "Unde rulează acest pod, pentru ce este, etc.",
+      cancel: "Anulare",
+      submitting: "Se creează…",
+      submit: "Creați pod",
+    },
+  },
+  schedulers: {
+    toast: {
+      created_title: "Scheduler creat",
+      created_message: "Administratorii de proiect îl pot instala acum pe proiectele lor.",
+      create_failed: "Nu s-a putut crea schedulerul.",
+      error_title: "Ceva nu a funcționat",
+      updated_title: "Scheduler actualizat",
+      updated_message: "Rulările ulterioare vor folosi definiția actualizată.",
+      update_failed: "Nu s-a putut actualiza schedulerul.",
+      deleted_title: "Scheduler șters",
+      deleted_message: "Legăturile active au încetat să se declanșeze.",
+      delete_failed: "Nu s-a putut șterge schedulerul.",
+    },
+    title: "Schedulere",
+    subtitle:
+      "Definiții de scheduler reutilizabile pentru acest spațiu de lucru. Instalați unul pe un proiect pentru a rula promptul acestuia împotriva proiectului pe un cron.",
+    new: "Scheduler nou",
+    columns: {
+      name: "Nume",
+      slug: "Slug",
+      source: "Sursă",
+      installs: "Instalări",
+      status: "Stare",
+      updated: "Actualizat",
+    },
+    list: {
+      empty: "Nu există încă schedulere în acest spațiu de lucru. Faceți clic pe „Scheduler nou” pentru a crea unul.",
+      installs_count: "{count, plural, one {# instalare} other {# instalări}}",
+    },
+    source: {
+      manifest: "Manifest",
+      builtin: "Încorporat",
+    },
+    status: {
+      enabled: "Activat",
+      disabled: "Dezactivat",
+    },
+    actions: {
+      edit: "Editare",
+      delete: "Ștergere",
+    },
+    delete: {
+      confirm_title: "Ștergeți schedulerul?",
+      confirm_body:
+        "Aceasta șterge soft schedulerul. Orice legături active de proiect vor înceta să se declanșeze. Slug-ul devine disponibil pentru recreare.",
+      confirm: "Șterge",
+    },
+    form: {
+      edit_title: "Editare scheduler",
+      create_title: "Scheduler nou",
+      slug_label: "Slug",
+      errors: {
+        slug_required: "Slug-ul este obligatoriu.",
+        name_required: "Numele este obligatoriu.",
+        prompt_required: "Promptul este obligatoriu.",
+      },
+      slug_placeholder: "security-audit",
+      slug_help: "Identificator cu litere mici utilizat în URL-uri. Nu poate fi modificat după creare.",
+      name_label: "Nume",
+      name_placeholder: "Security audit",
+      description_label: "Descriere",
+      description_placeholder: "Rezumat scurt afișat în selectorul de instalare.",
+      prompt_label: "Prompt",
+      prompt_placeholder: "Căutați probleme de securitate restante în acest proiect…",
+      prompt_help:
+        "Promptul de bază pe care agentul îl rulează la fiecare tick. Contextul per-proiect este adăugat la instalare, așa că păstrați acest prompt independent de proiect.",
+      enabled_label: "Activat",
+      enabled_help:
+        "Planificatoarele dezactivate nu pot fi instalate pe proiecte noi, iar legăturile existente nu se vor declanșa.",
+      cancel: "Anulare",
+      saving: "Se salvează…",
+      save: "Salvare",
+      creating: "Se creează…",
+      create: "Creează planificator",
+    },
+  },
+  power_k: {
+    search_menu: {
+      no_results: "Nu s-au găsit rezultate",
+      clear_search: "Șterge căutarea",
+    },
+    miscellaneous_actions: {
+      copy_current_page_url_toast_success: "URL-ul paginii curente a fost copiat în clipboard.",
+      copy_current_page_url_toast_error: "A apărut o eroare la copierea URL-ului paginii curente în clipboard.",
+    },
+    preferences_actions: {
+      toast: {
+        theme: {
+          error: "Actualizarea temei a eșuat. Vă rugăm să încercați din nou.",
+        },
+        timezone: {
+          success: "Fusul orar a fost actualizat cu succes.",
+          error: "Actualizarea fusului orar a eșuat. Vă rugăm să încercați din nou.",
+        },
+        generic: {
+          success: "Preferințele au fost actualizate cu succes.",
+          error: "Actualizarea preferințelor a eșuat. Vă rugăm să încercați din nou.",
+        },
+      },
+    },
+    footer: {
+      workspace_level: "Nivel spațiu de lucru",
+    },
+    page_placeholders: {
+      default: "Tastați o comandă sau căutați",
+    },
+    contextual_actions: {
+      cycle: {
+        copy_url_toast_success: "URL-ul ciclului a fost copiat în clipboard.",
+        copy_url_toast_error: "A apărut o eroare la copierea URL-ului ciclului în clipboard.",
+      },
+      module: {
+        copy_url_toast_success: "URL-ul modulului a fost copiat în clipboard.",
+        copy_url_toast_error: "A apărut o eroare la copierea URL-ului modulului în clipboard.",
+      },
+      page: {
+        copy_url_toast_success: "URL-ul paginii a fost copiat în clipboard.",
+        copy_url_toast_error: "A apărut o eroare la copierea URL-ului paginii în clipboard.",
+      },
+      work_item: {
+        copy_id_toast_success: "ID-ul elementului de lucru a fost copiat în clipboard.",
+        copy_id_toast_error: "A apărut o eroare la copierea ID-ului elementului de lucru în clipboard.",
+        copy_title_toast_success: "Titlul elementului de lucru a fost copiat în clipboard.",
+        copy_title_toast_error: "A apărut o eroare la copierea titlului elementului de lucru în clipboard.",
+        copy_url_toast_success: "URL-ul elementului de lucru a fost copiat în clipboard.",
+        copy_url_toast_error: "A apărut o eroare la copierea URL-ului elementului de lucru în clipboard.",
+      },
+    },
+  },
+  date: "",
+  epics: "",
+  Unassigned: "",
+  creating_theme: "",
+  issue_advanced_git: "",
+  git_work_branch: "",
+  git_work_branch_hint: "",
+  git_work_branch_too_long: "",
+  git_work_branch_invalid_chars: "",
+  git_work_branch_placeholder: "",
+  progress: "",
+  customize_navigation: "Personalizați navigarea",
+  personal: "Personal",
+  accordion_navigation_control: "Navigare cu acordeon în bara laterală",
+  horizontal_navigation_bar: "Navigare cu file",
+  show_limited_projects_on_sidebar: "Afișați proiecte limitate în bara laterală",
+  enter_number_of_projects: "Introduceți numărul de proiecte",
+  repo_url_too_long: "",
+  git_repository_url_placeholder: "",
+  base_branch_too_long: "",
+  base_branch_invalid_chars: "",
+  base_branch_placeholder: "",
+  git_repository_url: "",
+  base_branch: "",
+  timezone_setting: "Setarea curentă a fusului orar.",
+  language_setting: "Alegeți limba utilizată în interfața utilizatorului.",
+  language_and_time: "Limbă și timp",
+  preferences: "Preferințe",
 } as const;

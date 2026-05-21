@@ -2,7 +2,7 @@
 
 Paquete compartido de traducciones de interfaz para Pi Dash.
 
-## Almacenamiento De Traducciones
+## Almacenamiento de traducciones
 
 Las traducciones viven en `packages/i18n/src/locales/<language>/`.
 
@@ -24,7 +24,7 @@ const { t } = useTranslation();
 return <button>{t("common.save")}</button>;
 ```
 
-`t("...")` no crea claves en tiempo de ejecución. Las claves faltantes usan English como fallback y luego la cadena de la propia clave. Los valores de cadena vacía se tratan como faltantes, por lo que los placeholders sin traducir no muestran UI en blanco.
+`t("...")` no crea claves en tiempo de ejecución. Las claves faltantes recurren al inglés y luego a la propia cadena de la clave. Los valores de cadena vacía se tratan como faltantes, por lo que los placeholders sin traducir no muestran UI en blanco.
 
 ## Agregar Claves
 
@@ -52,7 +52,7 @@ Después de ejecutar `pnpm i18n:sync`, usa el comando de traducción con LLM par
 pnpm i18n:translate -- --provider openai --model "$MODEL" --api-key "$OPENAI_API_KEY"
 ```
 
-Si se omite `--languages`, se traducen todos los idiomas compatibles que no sean English.
+Si se omite `--languages`, se traducen todos los idiomas compatibles que no sean inglés.
 
 Traducir idiomas seleccionados:
 
@@ -76,6 +76,9 @@ Opciones compatibles:
 --languages fr,es,ja
 --limit 100
 --batch-size 30
+--request-timeout-ms 180000
+--retry-count 2
+--retry-delay-ms 2000
 --dry-run
 --skip-readme
 ```
@@ -90,14 +93,17 @@ I18N_TRANSLATION_BASE_URL
 I18N_TRANSLATION_LANGUAGES
 I18N_TRANSLATION_LIMIT
 I18N_TRANSLATION_BATCH_SIZE
+I18N_TRANSLATION_REQUEST_TIMEOUT_MS
+I18N_TRANSLATION_RETRY_COUNT
+I18N_TRANSLATION_RETRY_DELAY_MS
 I18N_TRANSLATION_SKIP_README
 OPENAI_API_KEY
 FIREWORKS_API_KEY
 ```
 
-El traductor solo completa cadenas vacías en los archivos `translations.ts` del locale destino. Usa el locale English fusionado como texto fuente y pide al modelo preservar los placeholders de ICU MessageFormat.
+El traductor solo completa cadenas vacías en los archivos `translations.ts` del locale destino. Usa el locale inglés fusionado como texto fuente y pide al modelo preservar los placeholders de ICU MessageFormat.
 
-El mismo comando también actualiza los README traducidos usando `README.md` como fuente English. La traducción de README se mantiene actualmente para:
+El mismo comando también actualiza los README traducidos usando `README.md` como fuente inglés. La traducción de README se mantiene actualmente para:
 
 - `README.es.md`
 - `README.zh-CN.md`
