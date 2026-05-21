@@ -152,26 +152,53 @@ def test_web_delete_purge_false_emits_revoke_only(
     assert "remove_runner" not in types_enqueued
 
 
+def _capture_revoke_reason(monkeypatch_target, captured: dict):
+    """Wrap ``Runner.revoke`` to capture the reason argument.
+
+    The service ``delete_runner`` calls ``runner.revoke(reason=...)``
+    and then hard-deletes the Runner row, which cascades to
+    ``RunnerSession`` (FK is ``on_delete=CASCADE``). That makes a
+    post-call ``session.refresh_from_db()`` raise ``DoesNotExist``, so
+    we can't peek at the session row after the fact. Instead we wrap
+    ``revoke`` itself: invoke the real method (so the session's
+    ``revoked_reason`` does get written), then stash the reason that
+    was passed in so the test can assert on the routing decision
+    without depending on the cascaded row surviving.
+    """
+    real_revoke = monkeypatch_target.revoke
+
+    def wrapper(self, *args, **kwargs):
+        captured["reason"] = kwargs.get("reason") or (args[0] if args else None)
+        return real_revoke(self, *args, **kwargs)
+
+    return wrapper
+
+
 @pytest.mark.unit
 def test_delete_propagates_canonical_reason_when_purging(
     db, create_user, workspace, pod, _stub_outbox_send
 ):
-    """purge_local=True must put a canonical reason on the session row.
+    """purge_local=True must hand a canonical reason to ``runner.revoke``.
 
     The Rust synthesizer in ``runner/src/cloud/http.rs`` matches the
     session's ``revoked_reason`` (echoed in the 409 body) against a
     canonical set; ``runner_removed`` is in that set so the daemon
     will fall back to local cleanup if the wire frame above is lost.
+
+    We can't read the session row after ``delete_runner`` returns —
+    ``Runner.delete()`` cascades and drops it — so the test wraps
+    ``revoke`` to capture the reason argument while still letting the
+    real revoke logic run.
     """
-    from pi_dash.runner.models import RunnerSession
     from pi_dash.runner.services.runner_delete import delete_runner
 
-    r = _make_runner(create_user, workspace, pod, "purge-true")
-    session = RunnerSession.objects.create(runner=r)
-    delete_runner(r, purge_local=True)
-    session.refresh_from_db()
-    assert session.revoked_at is not None
-    assert session.revoked_reason == "runner_removed"
+    captured: dict = {}
+    with patch.object(
+        Runner, "revoke", new=_capture_revoke_reason(Runner, captured)
+    ):
+        r = _make_runner(create_user, workspace, pod, "purge-true")
+        delete_runner(r, purge_local=True)
+    assert captured["reason"] == "runner_removed"
 
 
 @pytest.mark.unit
@@ -188,15 +215,15 @@ def test_delete_uses_non_canonical_reason_when_not_purging(
     state too, breaking the "Also delete the local runner instance"
     checkbox-unchecked path in the web UI.
     """
-    from pi_dash.runner.models import RunnerSession
     from pi_dash.runner.services.runner_delete import delete_runner
 
-    r = _make_runner(create_user, workspace, pod, "purge-false")
-    session = RunnerSession.objects.create(runner=r)
-    delete_runner(r, purge_local=False)
-    session.refresh_from_db()
-    assert session.revoked_at is not None
-    assert session.revoked_reason == "user_revoke"
+    captured: dict = {}
+    with patch.object(
+        Runner, "revoke", new=_capture_revoke_reason(Runner, captured)
+    ):
+        r = _make_runner(create_user, workspace, pod, "purge-false")
+        delete_runner(r, purge_local=False)
+    assert captured["reason"] == "user_revoke"
 
 
 @pytest.mark.unit
@@ -221,9 +248,13 @@ def test_web_delete_forbidden_when_not_owner_or_admin(
     """A workspace member who is neither owner nor admin can't delete."""
     from pi_dash.db.models import User, WorkspaceMember
 
-    other = User.objects.create(email="other@example.com")
-    other.set_password("x")
-    other.save()
+    # ``username`` is unique on the User model; the conftest's
+    # ``create_user`` fixture already created a user with the default
+    # empty username, so this second user must pick its own to avoid a
+    # collision on the unique constraint.
+    other = User.objects.create_user(
+        email="other-web-forbidden@example.com", username="other-web-forbidden"
+    )
     WorkspaceMember.objects.create(workspace=workspace, member=other, role=15)
     r = _make_runner(create_user, workspace, pod, "web-forbidden")
     api_client.force_authenticate(user=other)
@@ -290,9 +321,11 @@ def test_v1_delete_forbidden_when_token_user_cannot_manage(
     admin must not be able to delete via the v1 surface either."""
     from pi_dash.db.models import APIToken, User, WorkspaceMember
 
-    other = User.objects.create(email="other-v1@example.com")
-    other.set_password("x")
-    other.save()
+    # Pick an explicit username to avoid colliding with the ``create_user``
+    # fixture's default empty-string username on the unique constraint.
+    other = User.objects.create_user(
+        email="other-v1-forbidden@example.com", username="other-v1-forbidden"
+    )
     WorkspaceMember.objects.create(workspace=workspace, member=other, role=15)
     other_token = APIToken.objects.create(
         user=other,

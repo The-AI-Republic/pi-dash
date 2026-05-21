@@ -15,6 +15,10 @@ from pi_dash.runner.services.permissions import (
     can_manage_runner,
     is_workspace_member,
 )
+from pi_dash.runner.services.pubsub import (
+    close_runner_session,
+    send_runner_revoke,
+)
 from pi_dash.runner.services.runner_delete import (
     delete_runner as delete_runner_svc,
     parse_purge_local,
@@ -185,10 +189,7 @@ class RunnerRevokeEndpoint(APIView):
                 runner.revoke(reason="manual_revoke")
 
         if not already_revoked:
-            send_to_runner(
-                runner_pk,
-                {"type": "revoke", "reason": "revoked by user"},
-            )
+            send_runner_revoke(runner_pk, reason="revoked by user")
             close_runner_session(runner_pk)
             runner.refresh_from_db()
         return Response(RunnerSerializer(runner).data)

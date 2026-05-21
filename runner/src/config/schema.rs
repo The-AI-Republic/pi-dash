@@ -51,6 +51,19 @@ pub struct DaemonConfig {
     /// See `.ai_design/runner_agent_bridge/design.md` §4.2.
     #[serde(default)]
     pub agent_observability_v1: bool,
+    /// Auto-update policy. When `true` (default), the daemon swaps the
+    /// on-disk `pidash` binary in place whenever the cloud announces a
+    /// newer `latest_runner_version` in the welcome frame. The running
+    /// daemon is never disturbed — the new code only takes effect on
+    /// the next natural restart. When `false`, the daemon surfaces an
+    /// advisory in `pidash status` / TUI and waits for the operator to
+    /// run `pidash update` manually.
+    #[serde(default = "default_auto_update")]
+    pub auto_update: bool,
+}
+
+fn default_auto_update() -> bool {
+    true
 }
 
 fn default_log_level() -> String {
@@ -68,6 +81,7 @@ impl Default for DaemonConfig {
             log_level: default_log_level(),
             log_retention_days: default_retention_days(),
             agent_observability_v1: false,
+            auto_update: default_auto_update(),
         }
     }
 }
@@ -491,6 +505,7 @@ mod tests {
                 log_level: "info".into(),
                 log_retention_days: 14,
                 agent_observability_v1: false,
+                auto_update: true,
             },
             runners,
             cli: None,

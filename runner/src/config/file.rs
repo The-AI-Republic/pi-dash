@@ -191,6 +191,7 @@ mod tests {
                 log_level: "info".into(),
                 log_retention_days: 14,
                 agent_observability_v1: false,
+                auto_update: true,
             },
             runners: vec![sample_runner("t", tmp.path().join("wd"))],
             cli: None,
@@ -417,6 +418,7 @@ model_default = "o4-mini"
                 log_level: "info".into(),
                 log_retention_days: 14,
                 agent_observability_v1: false,
+                auto_update: true,
             },
             runners: vec![
                 sample_runner("a", tmp.path().join("wd-a")),
@@ -463,6 +465,7 @@ model_default = "o4-mini"
                 log_level: "info".into(),
                 log_retention_days: 14,
                 agent_observability_v1: false,
+                auto_update: true,
             },
             runners: vec![
                 sample_runner("a", tmp.path().join("wd-a")),
@@ -497,6 +500,7 @@ model_default = "o4-mini"
                 log_level: "info".into(),
                 log_retention_days: 14,
                 agent_observability_v1: false,
+                auto_update: true,
             },
             runners: vec![sample_runner("keep", tmp.path().join("wd"))],
         cli: None,
@@ -534,6 +538,7 @@ model_default = "o4-mini"
                 log_level: "info".into(),
                 log_retention_days: 14,
                 agent_observability_v1: false,
+                auto_update: true,
             },
             runners: vec![
                 sample_runner("a", tmp.path().join("wd-a")),
