@@ -6,28 +6,35 @@ Windows.
 
 The window simply navigates to the URL baked in at build time — there is no
 desktop-specific UI code. To change behavior on desktop, edit `apps/web` (and
-read `apps/desktop/src-tauri/src/main.rs` for the small set of native concerns
-that live here).
+read `src-tauri/src/main.rs` for the small set of native concerns that live
+here).
+
+This package is **not** part of the pnpm workspace (excluded in
+`pnpm-workspace.yaml`) — it's a standalone Rust crate, the same convention as
+`runner/`. `pnpm build` at the repo root does not touch it.
 
 ## Build-time URL
 
-The target URL is read from the `PI_DASH_URL` environment variable when
-`cargo` compiles the binary. If unset, it defaults to `http://localhost:3000`
-(the `apps/web` dev server).
+The target URL is read from the `PI_DASH_URL` environment variable when the
+binary is compiled. If unset, it defaults to `http://localhost:3000` (the
+`apps/web` dev server). A bad URL fails the build (`build.rs` validates).
 
 ```bash
+cd apps/desktop/src-tauri
+
 # Dev: launches a window pointing at the local web dev server
-pnpm --filter desktop dev
+cargo tauri dev
 
 # Prod build pointing at your cloud instance
-PI_DASH_URL=https://app.your-instance.com pnpm --filter desktop build
+PI_DASH_URL=https://app.your-instance.com cargo tauri build
 ```
 
 Artifacts land under `apps/desktop/src-tauri/target/release/bundle/`:
 
-- `bundle/deb/Pi Dash_<version>_amd64.deb`
-- `bundle/rpm/Pi Dash-<version>-1.x86_64.rpm`
-- `bundle/appimage/Pi Dash_<version>_amd64.AppImage`
+- `bundle/deb/pi-dash_<version>_amd64.deb`
+- `bundle/appimage/pi-dash_<version>_amd64.AppImage`
+- `bundle/dmg/pi-dash_<version>_x64.dmg` (macOS)
+- `bundle/msi/pi-dash_<version>_x64_en-US.msi` (Windows)
 
 ## Running on Linux setups with GPU/driver quirks
 
@@ -38,7 +45,7 @@ Fall back to software/compositor-less rendering:
 
 ```bash
 WEBKIT_DISABLE_COMPOSITING_MODE=1 WEBKIT_DISABLE_DMABUF_RENDERER=1 \
-  ./Pi\ Dash_0.1.0_amd64.AppImage
+  ./pi-dash_0.1.0_amd64.AppImage
 ```
 
 ## Prerequisites (Linux)
@@ -54,8 +61,11 @@ Rust toolchain (rustup) and `cargo-tauri` (`cargo install tauri-cli --version '^
 ## Regenerating icons
 
 The icon set under `src-tauri/icons/` is generated from
-`src-tauri/icons/icon.png` (a 512×512 source). After replacing the source:
+`src-tauri/icons/icon.png` (a 512×512 source). The canonical master lives at
+`apps/web/public/icons/icon-512x512.png` — keep both in sync when the brand
+mark changes.
 
 ```
-pnpm --filter desktop icon
+cd apps/desktop/src-tauri
+cargo tauri icon icons/icon.png
 ```

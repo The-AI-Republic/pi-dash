@@ -13,7 +13,12 @@ path = "src/main.rs"
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
+url = "2"
 
 [dependencies]
 tauri = { version = "2", features = [] }
-url = "2"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = true

@@ -2,6 +2,7 @@ packages:
 - apps/*
 - packages/*
 - "!apps/api"
+- "!apps/desktop"
 - "!apps/proxy"
 
 catalog:
