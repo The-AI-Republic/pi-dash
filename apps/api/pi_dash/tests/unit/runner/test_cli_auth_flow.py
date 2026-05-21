@@ -296,6 +296,68 @@ def test_runner_create_400_when_no_workspace_membership(
     assert resp.data["error"] == "no_workspace_membership"
 
 
+# -------------------- workspaces list --------------------
+
+
+@pytest.mark.unit
+def test_workspaces_list_returns_single_membership(db, api_key_client, workspace):
+    """Single-workspace caller sees exactly that workspace, by slug + name.
+
+    Drives the no-prompt branch of `pidash auth login`'s workspace
+    resolver: one membership → silently persist `[cli].workspace_slug`.
+    """
+    resp = api_key_client.get("/api/v1/auth/workspaces/")
+    assert resp.status_code == 200, resp.data
+    assert resp.data == {"workspaces": [{"slug": workspace.slug, "name": workspace.name}]}
+
+
+@pytest.mark.unit
+def test_workspaces_list_returns_multiple_in_join_order(
+    db, api_key_client, create_user, workspace
+):
+    """Multi-workspace caller sees every active membership, ordered by
+    join time. The CLI's picker renders them in this order so the list
+    is stable across calls.
+    """
+    from pi_dash.db.models.workspace import Workspace, WorkspaceMember
+
+    second = Workspace.objects.create(name="second-ws", owner=create_user, slug="second-ws")
+    WorkspaceMember.objects.create(workspace=second, member=create_user, role=20)
+
+    resp = api_key_client.get("/api/v1/auth/workspaces/")
+    assert resp.status_code == 200, resp.data
+    slugs = [w["slug"] for w in resp.data["workspaces"]]
+    assert slugs == [workspace.slug, second.slug]
+
+
+@pytest.mark.unit
+def test_workspaces_list_excludes_inactive_memberships(
+    db, api_key_client, create_user, workspace
+):
+    """Soft-removed memberships (`is_active=False`) must not surface
+    in the picker — otherwise the user could pick a workspace they no
+    longer have access to and hit a confusing 403 on the next call.
+    """
+    from pi_dash.db.models.workspace import Workspace, WorkspaceMember
+
+    inactive = Workspace.objects.create(name="gone-ws", owner=create_user, slug="gone-ws")
+    WorkspaceMember.objects.create(
+        workspace=inactive, member=create_user, role=20, is_active=False
+    )
+
+    resp = api_key_client.get("/api/v1/auth/workspaces/")
+    assert resp.status_code == 200, resp.data
+    slugs = [w["slug"] for w in resp.data["workspaces"]]
+    assert slugs == [workspace.slug]
+
+
+@pytest.mark.unit
+def test_workspaces_list_requires_auth(db, api_client):
+    """Anonymous callers get 401; the endpoint is CLI-token only."""
+    resp = api_client.get("/api/v1/auth/workspaces/")
+    assert resp.status_code in (401, 403)
+
+
 # -------------------- approval hardening --------------------
 
 
