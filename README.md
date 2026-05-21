@@ -26,6 +26,14 @@ Try it now at **[pidash.airepublic.com](https://pidash.airepublic.com)** — no 
 
 Pi Dash is composed of three major components:
 
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="./images/pidash_diagram_white.png" />
+    <source media="(prefers-color-scheme: light)" srcset="./images/pidash_diagram_black.png" />
+    <img alt="Pi Dash architecture diagram" src="./images/pidash_diagram_black.png" width="358" />
+  </picture>
+</p>
+
 ### Pi Dash Platform
 
 The web-based orchestration hub where you manage projects, define tasks, and monitor agent progress. Create work items, organize them into cycles and modules, review agent output, and track analytics — all from a single dashboard. This is where you spend your time instead of watching terminals.
@@ -37,14 +45,6 @@ A local command-line tool and background daemon that runs on your development ma
 ### AI Agent (user-provided)
 
 Pi Dash is agent-agnostic — bring your own coding agent. Today the runner ships first-class support for **Claude Code** and **Codex**; the dispatch layer is designed so additional agents can be wired in without changing the orchestration model. You configure which agent the runner invokes; Pi Dash handles the rest.
-
-<p align="center">
-  <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="./images/pidash_diagram_white.png" />
-    <source media="(prefers-color-scheme: light)" srcset="./images/pidash_diagram_black.png" />
-    <img alt="Pi Dash architecture diagram" src="./images/pidash_diagram_black.png" width="560" />
-  </picture>
-</p>
 
 ## 🚀 Installation
 
