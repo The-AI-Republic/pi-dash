@@ -1,6 +1,7 @@
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 
+pub mod auth;
 mod comment;
 pub mod connect;
 pub mod doctor;
@@ -13,6 +14,7 @@ mod run;
 // `runner` is `pub` so the TUI can call its library functions
 // (`add`, `remove`) directly without going through clap.
 pub mod runner;
+pub mod runner_ops;
 mod start;
 mod state;
 mod status;
@@ -52,6 +54,11 @@ pub struct Cli {
 
 #[derive(Debug, Subcommand)]
 pub enum Command {
+    /// Authenticate this host as a user (`auth login` / `status` /
+    /// `logout`). Mints a CLI token used by `pidash` commands and by
+    /// `pidash runner add` to register runners.
+    Auth(auth::AuthArgs),
+
     /// Enroll this dev machine with Pi Dash cloud (one-time pairing).
     Connect(connect::Args),
 
@@ -114,6 +121,7 @@ pub async fn run(cli: Cli) -> Result<()> {
     tracing::debug!(?paths, "resolved runner paths");
 
     match cli.command {
+        Command::Auth(args) => auth::run(args, &paths).await,
         Command::Connect(args) => connect::run(args, &paths).await,
         Command::Runner(args) => runner::run(args, &paths).await,
         Command::Install(args) => install::run(args, &paths).await,

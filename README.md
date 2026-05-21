@@ -26,6 +26,14 @@ Try it now at **[pidash.airepublic.com](https://pidash.airepublic.com)** — no 
 
 Pi Dash is composed of three major components:
 
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="./images/pidash_diagram_white.png" />
+    <source media="(prefers-color-scheme: light)" srcset="./images/pidash_diagram_black.png" />
+    <img alt="Pi Dash architecture diagram" src="./images/pidash_diagram_black.png" width="358" />
+  </picture>
+</p>
+
 ### Pi Dash Platform
 
 The web-based orchestration hub where you manage projects, define tasks, and monitor agent progress. Create work items, organize them into cycles and modules, review agent output, and track analytics — all from a single dashboard. This is where you spend your time instead of watching terminals.
@@ -111,17 +119,29 @@ curl --proto '=https' --tlsv1.2 -LsSf \
   https://github.com/The-AI-Republic/pi-dash/releases/latest/download/pidash-installer.sh | sh
 ```
 
-Then enroll the machine with your Pi Dash platform. A single `pidash connect` call exchanges the one-time token, registers the first runner, installs the OS service (systemd user unit on Linux, launchd agent on macOS), and starts the daemon:
+Then authenticate the machine and register a runner. The standard flow is two commands:
 
 ```bash
-# Grab the one-time token from the "Add connection" button in the web UI
-pidash connect \
-  --url https://your-pidash-instance.com \
-  --token <ONE_TIME_CODE> \
-  --working-dir /path/to/your/repo
+# 1. Browser-based device-code login (like `gh auth login` / `stripe login`).
+#    Stores a CLI token at ~/.config/pidash/config.toml.
+pidash auth login --url https://your-pidash-instance.com
+
+# 2. Register this host as a runner. Uses the token from step 1 — no
+#    enrollment-token paste needed. On the first runner, installs the OS
+#    service (systemd user unit on Linux, launchd agent on macOS) and
+#    starts the daemon.
+pidash runner add --project <project-id>
 ```
 
-Need to add another runner under the same host later? Use `pidash runner add --project <project-id>`. To wire the host up but skip the auto service install (e.g. in CI), pass `--skip-service` and run `pidash install && pidash start` yourself.
+`pidash auth login` prompts to add a runner inline when no runner exists yet, so a fresh dev laptop can be onboarded with a single command. Add more runners later with `pidash runner add --project <other-project-id>`.
+
+For headless / scripted hosts where the browser flow is awkward, the legacy enrollment-token paste still works:
+
+```bash
+pidash connect --url https://your-pidash-instance.com --token <ONE_TIME_TOKEN>
+```
+
+Generate `<ONE_TIME_TOKEN>` from the "Add connection" button in the web UI.
 
 The runner daemon runs in the background, polls for assigned tasks, dispatches them to your AI agent, and reports results back to the platform.
 

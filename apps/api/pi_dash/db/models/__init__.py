@@ -3,7 +3,7 @@
 # See the LICENSE file for details.
 
 from .analytic import AnalyticView
-from .api import APIActivityLog, APIToken
+from .api import APIActivityLog, APIToken, CLIDeviceCode
 from .asset import FileAsset
 from .base import BaseModel
 from .cycle import Cycle, CycleIssue, CycleUserProperties

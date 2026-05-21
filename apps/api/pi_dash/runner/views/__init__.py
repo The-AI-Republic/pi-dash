@@ -6,6 +6,7 @@ from .approvals import ApprovalDecideEndpoint, ApprovalListEndpoint
 from .enrollment import (
     MachineTokenRedeemEndpoint,
     MachineTokenTicketEndpoint,
+    RunnerCreateEndpoint,
     RunnerEnrollEndpoint,
     RunnerInviteEndpoint,
     RunnerRefreshEndpoint,
@@ -51,6 +52,7 @@ __all__ = [
     "ApprovalListEndpoint",
     "MachineTokenRedeemEndpoint",
     "MachineTokenTicketEndpoint",
+    "RunnerCreateEndpoint",
     "RunnerEnrollEndpoint",
     "RunnerInviteEndpoint",
     "RunnerRefreshEndpoint",

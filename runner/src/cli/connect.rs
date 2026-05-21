@@ -21,7 +21,9 @@ use crate::cloud::http::{
     RunnerCredentials, SharedHttpTransport, TransportError, enroll_runner, write_runner_credentials,
 };
 use crate::config::file;
-use crate::config::schema::{Config, Credentials, DaemonConfig, RunnerConfig, WorkspaceSection};
+use crate::config::schema::{
+    AgentKind, AgentSection, Config, Credentials, DaemonConfig, RunnerConfig, WorkspaceSection,
+};
 use crate::util::paths::Paths;
 
 #[derive(Debug, ClapArgs)]
@@ -46,6 +48,11 @@ pub struct Args {
     /// fine for sandbox runs but not what most operators want.
     #[arg(long)]
     pub working_dir: Option<PathBuf>,
+
+    /// Which agent CLI this runner drives (``codex`` or ``claude-code``).
+    /// Defaults to ``AgentKind::default()`` when omitted.
+    #[arg(long, value_enum)]
+    pub agent: Option<AgentKind>,
 
     /// Skip the post-enroll doctor + service install. Useful in CI.
     #[arg(long)]
@@ -176,7 +183,9 @@ pub async fn run(args: Args, paths: &Paths) -> Result<()> {
         project_slug: Some(resp.project_identifier.clone()),
         pod_id: None,
         workspace: WorkspaceSection { working_dir },
-        agent: Default::default(),
+        agent: AgentSection {
+            kind: args.agent.unwrap_or_default(),
+        },
         codex: Default::default(),
         claude_code: Default::default(),
         approval_policy: Default::default(),
