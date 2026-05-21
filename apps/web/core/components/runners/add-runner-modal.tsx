@@ -29,12 +29,19 @@ type Props = {
   onCreated: () => void;
 };
 
+// Mirrors the runner CLI's ``--agent`` value-enum (kebab-case). Keep in
+// sync with runner/src/config/schema.rs:AgentKind.
+const AGENT_OPTIONS = ["claude-code", "codex"] as const;
+type TAgent = (typeof AGENT_OPTIONS)[number];
+const DEFAULT_AGENT: TAgent = "claude-code";
+
 interface FormValues {
   projectIdentifier: string;
   podName: string;
   name: string;
   hostLabel: string;
   workingDir: string;
+  agent: TAgent;
 }
 
 const DEFAULT_VALUES: FormValues = {
@@ -43,6 +50,7 @@ const DEFAULT_VALUES: FormValues = {
   name: "",
   hostLabel: "",
   workingDir: "",
+  agent: DEFAULT_AGENT,
 };
 
 const runnerService = new RunnerService();
@@ -124,6 +132,12 @@ export const AddRunnerModal = observer(function AddRunnerModal(props: Props) {
 
   const hostLabelInput = watch("hostLabel");
   const workingDirInput = watch("workingDir");
+  const agentInput = watch("agent");
+
+  const agentOptionLabel = (value: TAgent): string =>
+    value === "claude-code"
+      ? t("runners.add_modal.agent_options.claude_code")
+      : t("runners.add_modal.agent_options.codex");
 
   const onSubmit: SubmitHandler<FormValues> = async (values) => {
     try {
@@ -282,6 +296,36 @@ export const AddRunnerModal = observer(function AddRunnerModal(props: Props) {
             <p className="text-12 text-secondary">{t("runners.add_modal.working_dir_help")}</p>
           </div>
 
+          <div className="flex flex-col gap-1">
+            <label htmlFor="add-runner-agent" className="text-13 font-medium text-primary">
+              {t("runners.add_modal.agent_label")}
+            </label>
+            <Controller
+              control={control}
+              name="agent"
+              render={({ field }) => (
+                <CustomSelect
+                  value={field.value}
+                  label={agentOptionLabel(field.value)}
+                  onChange={(v: TAgent) => field.onChange(v)}
+                  buttonClassName="border border-subtle"
+                  input
+                  maxHeight="lg"
+                  placement="bottom-start"
+                >
+                  <>
+                    {AGENT_OPTIONS.map((opt) => (
+                      <CustomSelect.Option key={opt} value={opt}>
+                        {agentOptionLabel(opt)}
+                      </CustomSelect.Option>
+                    ))}
+                  </>
+                </CustomSelect>
+              )}
+            />
+            <p className="text-12 text-secondary">{t("runners.add_modal.agent_help")}</p>
+          </div>
+
           <div className="flex justify-end gap-2">
             <Button variant="secondary" onClick={onClose} disabled={isSubmitting}>
               {t("runners.add_modal.cancel")}
@@ -302,7 +346,12 @@ export const AddRunnerModal = observer(function AddRunnerModal(props: Props) {
             </p>
           </div>
 
-          <RunnerEnrollmentCommand invite={invite} hostLabel={hostLabelInput} workingDir={workingDirInput} />
+          <RunnerEnrollmentCommand
+            invite={invite}
+            hostLabel={hostLabelInput}
+            workingDir={workingDirInput}
+            agent={agentInput}
+          />
 
           <div className="flex justify-end">
             <Button onClick={onClose}>{t("runners.add_modal.done")}</Button>
