@@ -1,0 +1,8 @@
+src-tauri/target/
+src-tauri/gen/
+
+# Tauri requires frontendDist to exist at build time. Our wrapper navigates to
+# an external URL so this dir only holds a stub — un-ignore it (root .gitignore
+# ignores `dist` globally).
+!src-tauri/dist/
+!src-tauri/dist/**

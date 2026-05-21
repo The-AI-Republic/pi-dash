@@ -1,0 +1,12 @@
+{
+  "name": "desktop",
+  "version": "0.1.0",
+  "private": true,
+  "license": "AGPL-3.0",
+  "scripts": {
+    "dev": "cargo tauri dev",
+    "build": "cargo tauri build",
+    "icon": "cargo tauri icon src-tauri/icons/icon.png",
+    "clean": "rm -rf src-tauri/target"
+  }
+}

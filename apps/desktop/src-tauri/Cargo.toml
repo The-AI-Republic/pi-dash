@@ -1,0 +1,19 @@
+[package]
+name = "pi-dash-desktop"
+version = "0.1.0"
+description = "Pi Dash desktop wrapper (Tauri v2)"
+edition = "2024"
+rust-version = "1.93"
+license = "AGPL-3.0-only"
+repository = "https://github.com/The-AI-Republic/pi-dash"
+
+[[bin]]
+name = "pi-dash-desktop"
+path = "src/main.rs"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+url = "2"
