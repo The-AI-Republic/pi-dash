@@ -118,6 +118,11 @@ def _base_ctx(*, parent=None, work_branch=None, base_branch="trunk"):
     referenced by the workpad-setup and implementation fragments.
     """
     return {
+        # Jinja runs in strict mode, so every key any fragment touches
+        # must exist on the dict even when the value is empty. Keeping
+        # this shape in sync with the fragments is brittle by design —
+        # if a new fragment field is added, this fixture needs to grow.
+        # See: `grep -rh 'issue\.\w*' pi_dash/prompting/fragments/`.
         "issue": {
             "identifier": "TP-7",
             "title": "Make button blue",
@@ -125,6 +130,11 @@ def _base_ctx(*, parent=None, work_branch=None, base_branch="trunk"):
             "state": "Todo",
             "state_group": "started",
             "description": "",
+            "labels": [],
+            "assignees": [],
+            "project_states": [],
+            "target_date": None,
+            "url": "https://example.test/issue/TP-7",
         },
         "project": {"identifier": "TP", "name": "Test Project"},
         "repo": {

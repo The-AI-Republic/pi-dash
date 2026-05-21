@@ -59,8 +59,19 @@ class CycleCreateSerializer(BaseSerializer):
         ]
 
     def validate(self, data):
-        project_id = self.initial_data.get("project_id") or (
-            self.instance.project_id if self.instance and hasattr(self.instance, "project_id") else None
+        # ``project_id`` comes from the URL kwarg, not the request body —
+        # the view passes it via ``context`` (preferred) or, for updates,
+        # we read it off the existing instance. The legacy
+        # ``self.initial_data.get("project_id")`` path is kept for any
+        # caller that still hands the id in the body.
+        project_id = (
+            self.context.get("project_id")
+            or self.initial_data.get("project_id")
+            or (
+                self.instance.project_id
+                if self.instance and hasattr(self.instance, "project_id")
+                else None
+            )
         )
 
         if not project_id:
