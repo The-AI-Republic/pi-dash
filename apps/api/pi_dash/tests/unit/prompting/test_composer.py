@@ -4,7 +4,7 @@
 
 import pytest
 
-from pi_dash.db.models import Issue, Project, State, Workspace
+from pi_dash.db.models import Issue, Project, State
 from pi_dash.prompting.composer import (
     PromptTemplateNotFound,
     build_first_turn,

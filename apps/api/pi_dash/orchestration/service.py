@@ -123,19 +123,18 @@ def handle_issue_state_transition(
     # Detect cross-phase transition (both states are ticking but in
     # different groups). On started → review, capture the latest impl
     # run as the resume parent so the reverse transition can restore
-    # that exact session. We capture **before** the disarm/re-arm
-    # below so the captured run is genuinely the latest pre-review.
+    # that exact session. We read **before** the disarm/re-arm below so
+    # the captured run is genuinely the latest pre-review; we persist it
+    # after arming so upgraded issues that do not yet have a ticker row
+    # still get a resume target.
     cross_phase = (
         is_ticking_state(from_state)
         and is_ticking_state(to_state)
         and from_state.group != to_state.group
     )
+    resume_parent = None
     if cross_phase and from_state.group == StateGroup.STARTED.value:
-        latest_impl = _latest_prior_run(issue)
-        if latest_impl is not None:
-            IssueAgentTicker.objects.filter(issue=issue).update(
-                resume_parent_run=latest_impl
-            )
+        resume_parent = _latest_prior_run(issue)
 
     # Disarm when leaving a ticking state into anything that isn't the
     # *same* ticking state. Inter-phase transitions (e.g., In Progress
@@ -153,6 +152,10 @@ def handle_issue_state_transition(
     # this handler or by the caller — the ticker is the steady-state tick
     # source either way.
     scheduling.arm_ticker(issue, dispatch_immediate=dispatch_immediate)
+    if resume_parent is not None:
+        IssueAgentTicker.objects.filter(issue=issue).update(
+            resume_parent_run=resume_parent
+        )
 
     if not dispatch_immediate:
         return TransitionOutcome(reason="dispatch-deferred-to-caller")

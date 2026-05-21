@@ -37,7 +37,6 @@ def _absolute_issue_url(issue: Issue) -> str:
     web layer; we return a relative path so templates still have something
     useful to show."""
     ws = getattr(issue.workspace, "slug", "")
-    proj = getattr(issue.project, "identifier", "")
     return f"/{ws}/projects/{issue.project_id}/issues/{issue.id}" if ws else ""
 
 

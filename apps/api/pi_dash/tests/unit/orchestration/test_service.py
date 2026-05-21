@@ -664,8 +664,6 @@ def test_in_review_to_in_progress_resumes_pre_review_run(
     """Hand-back transition uses ``resume_parent_run`` (the impl run we
     stashed on entry to review) as parent — NOT the latest review run.
     """
-    from pi_dash.db.models.issue_agent_ticker import IssueAgentTicker
-
     Issue.all_objects.filter(pk=issue.pk).update(state=states["in_progress"])
     issue.refresh_from_db()
     impl_run = _make_paused_run(issue, runner_for_workspace, thread_id="impl")
@@ -684,6 +682,9 @@ def test_in_review_to_in_progress_resumes_pre_review_run(
     )
     assert review_run is not None
     assert review_run.id != impl_run.id
+    review_run.status = AgentRunStatus.COMPLETED
+    review_run.done_payload = {"status": "blocked"}
+    review_run.save(update_fields=["status", "done_payload"])
 
     # Now hand back to In Progress.
     outcome = service.handle_issue_state_transition(
