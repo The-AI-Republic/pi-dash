@@ -42,6 +42,8 @@ pnpm i18n:sync
 
 This scans literal `t("...")` calls and adds missing keys as empty-string placeholders to each locale's `translations.ts`.
 
+If a new key conflicts with an existing object or string path, the sync command prints the conflicting key and call sites, then exits with an error. Rename the key to avoid the conflict. Use `I18N_SYNC_ALLOW_CONFLICTS=1` only when you intentionally want to skip those keys.
+
 The sync command is manual. It does not run during `pnpm build`.
 
 ## Translating Missing Values
@@ -101,7 +103,7 @@ OPENAI_API_KEY
 FIREWORKS_API_KEY
 ```
 
-The translator only fills empty strings in target locale `translations.ts` files. It uses the merged English locale as source text and asks the model to preserve ICU MessageFormat placeholders.
+The translator only fills empty strings in target locale `translations.ts` files. It uses the merged English locale as source text and rejects model output that changes ICU MessageFormat argument names or argument types.
 
 The same command also updates translated README files from `README.md` as the English source. README translation is currently maintained for:
 

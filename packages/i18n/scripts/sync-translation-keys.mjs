@@ -76,7 +76,7 @@ function isStringLike(node) {
 }
 
 function collectUsedTranslationKeys() {
-  const keys = new Set();
+  const keys = new Map();
   const files = sourceRoots.flatMap((root) => walkFiles(root));
 
   for (const filePath of files) {
@@ -92,7 +92,12 @@ function collectUsedTranslationKeys() {
         isStringLike(node.arguments[0])
       ) {
         const key = node.arguments[0].text.trim();
-        if (key) keys.add(key);
+        if (key) {
+          const location = sourceFile.getLineAndCharacterOfPosition(node.arguments[0].getStart(sourceFile));
+          const references = keys.get(key) || [];
+          references.push(`${path.relative(repoRoot, filePath)}:${location.line + 1}:${location.character + 1}`);
+          keys.set(key, references);
+        }
       }
 
       ts.forEachChild(node, visit);
@@ -282,7 +287,9 @@ export default ${formatObject(object)} as const;
 }
 
 function main() {
-  const usedKeys = collectUsedTranslationKeys();
+  const usedKeyReferences = collectUsedTranslationKeys();
+  const usedKeys = Array.from(usedKeyReferences.keys());
+  const conflictReferences = new Map();
   let totalAdded = 0;
   let totalConflicts = 0;
 
@@ -300,6 +307,7 @@ function main() {
     for (const key of usedKeys) {
       if (hasShapeConflict(localeTranslations, key)) {
         conflictsForLanguage += 1;
+        conflictReferences.set(key, usedKeyReferences.get(key) || []);
         continue;
       }
 
@@ -319,9 +327,23 @@ function main() {
     totalConflicts += conflictsForLanguage;
   }
 
+  if (conflictReferences.size > 0) {
+    console.error("i18n: skipped keys with shape conflicts:");
+    for (const [key, references] of Array.from(conflictReferences.entries()).toSorted(([a], [b]) =>
+      a.localeCompare(b)
+    )) {
+      const referenceText = references.length > 0 ? ` (${references.slice(0, 5).join(", ")})` : "";
+      console.error(`i18n:   ${key}${referenceText}`);
+    }
+  }
+
   console.log(
-    `i18n: scanned ${usedKeys.size} literal translation keys; added ${totalAdded} placeholders; skipped ${totalConflicts} shape conflicts`
+    `i18n: scanned ${usedKeys.length} literal translation keys; added ${totalAdded} placeholders; skipped ${totalConflicts} shape conflicts`
   );
+
+  if (conflictReferences.size > 0 && process.env.I18N_SYNC_ALLOW_CONFLICTS !== "1") {
+    throw new Error("i18n sync found shape conflicts. Rename the key or set I18N_SYNC_ALLOW_CONFLICTS=1 to override.");
+  }
 }
 
 main();

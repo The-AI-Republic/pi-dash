@@ -42,6 +42,8 @@ pnpm i18n:sync
 
 该命令会扫描字面量 `t("...")` 调用，并把缺失的 key 作为空字符串占位符添加到每个 locale 的 `translations.ts`。
 
+如果新 key 与现有对象路径或字符串路径冲突，同步命令会打印冲突 key 和调用位置，然后以错误退出。请重命名 key 来避免冲突。只有在你明确想跳过这些 key 时，才使用 `I18N_SYNC_ALLOW_CONFLICTS=1`。
+
 同步命令是手动命令。它不会在 `pnpm build` 期间运行。
 
 ## 翻译缺失值
@@ -101,7 +103,7 @@ OPENAI_API_KEY
 FIREWORKS_API_KEY
 ```
 
-翻译器只会填充目标 locale `translations.ts` 文件中的空字符串。它使用合并后的英文 locale 作为源文本，并要求模型保留 ICU MessageFormat 占位符。
+翻译器只会填充目标 locale `translations.ts` 文件中的空字符串。它使用合并后的英文 locale 作为源文本，并拒绝会改变 ICU MessageFormat 参数名称或参数类型的模型输出。
 
 同一个命令也会使用 `README.md` 作为英文源文档来更新已翻译的 README。当前维护的 README 翻译包括：
 

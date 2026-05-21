@@ -42,6 +42,8 @@ pnpm i18n:sync
 
 Esto escanea las llamadas literales `t("...")` y agrega las claves faltantes como placeholders de cadena vacía en el `translations.ts` de cada locale.
 
+Si una clave nueva entra en conflicto con una ruta existente de objeto o cadena, el comando de sincronización imprime la clave en conflicto y sus call sites, y luego sale con error. Renombra la clave para evitar el conflicto. Usa `I18N_SYNC_ALLOW_CONFLICTS=1` solo cuando quieras omitir esas claves intencionalmente.
+
 El comando de sincronización es manual. No se ejecuta durante `pnpm build`.
 
 ## Traducir Valores Faltantes
@@ -101,7 +103,7 @@ OPENAI_API_KEY
 FIREWORKS_API_KEY
 ```
 
-El traductor solo completa cadenas vacías en los archivos `translations.ts` del locale destino. Usa el locale inglés fusionado como texto fuente y pide al modelo preservar los placeholders de ICU MessageFormat.
+El traductor solo completa cadenas vacías en los archivos `translations.ts` del locale destino. Usa el locale inglés fusionado como texto fuente y rechaza salidas del modelo que cambien los nombres o tipos de argumentos de ICU MessageFormat.
 
 El mismo comando también actualiza los README traducidos usando `README.md` como fuente inglés. La traducción de README se mantiene actualmente para:
 

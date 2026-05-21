@@ -499,10 +499,48 @@ function validateTranslations(items, translations, language) {
       console.warn(`i18n: ${language.value} returned invalid ICU for ${item.key}: ${error.message}`);
       continue;
     }
+    if (!hasMatchingIcuArguments(item.source, translation, language.value)) {
+      console.warn(`i18n: ${language.value} returned ICU argument mismatch for ${item.key}`);
+      continue;
+    }
     valid[item.key] = translation;
   }
 
   return valid;
+}
+
+function hasMatchingIcuArguments(source, translation, locale) {
+  const sourceArguments = getIcuArgumentSignature(source, fallbackLanguage);
+  const translationArguments = getIcuArgumentSignature(translation, locale);
+
+  return JSON.stringify(sourceArguments) === JSON.stringify(translationArguments);
+}
+
+function getIcuArgumentSignature(message, locale) {
+  const messageFormat = new IntlMessageFormat(message, locale);
+  const argumentsByName = new Map();
+
+  collectIcuArguments(messageFormat.getAst(), argumentsByName);
+
+  return Array.from(argumentsByName.entries())
+    .map(([name, types]) => [name, Array.from(types).toSorted()])
+    .toSorted(([left], [right]) => left.localeCompare(right));
+}
+
+function collectIcuArguments(ast, result) {
+  for (const node of ast) {
+    if (typeof node.value === "string" && [1, 2, 3, 4, 5, 6].includes(node.type)) {
+      const types = result.get(node.value) || new Set();
+      types.add(node.type);
+      result.set(node.value, types);
+    }
+
+    if (node.options) {
+      for (const option of Object.values(node.options)) {
+        collectIcuArguments(option.value, result);
+      }
+    }
+  }
 }
 
 async function translateLanguage(config, language, englishTranslations) {

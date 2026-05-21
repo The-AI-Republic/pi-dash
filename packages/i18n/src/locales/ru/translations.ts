@@ -3172,7 +3172,7 @@ export default {
       load_failed: "Не удалось загрузить группы",
       tile_aria: "Фильтровать раннеры по группе {name}",
       default_badge: "по умолчанию",
-      runner_count: "{count, plural, one {# раннер} few {# раннера} many {# раннеров} other {# раннера}}",
+      runner_count: "{count} раннер(ов)",
       create_tile: "Создать новую группу",
       filter_active: "Фильтрация раннеров по группе {name}",
       filter_clear: "Очистить фильтр",
