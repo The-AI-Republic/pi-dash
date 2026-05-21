@@ -38,6 +38,14 @@ A local command-line tool and background daemon that runs on your development ma
 
 Pi Dash is agent-agnostic — bring your own coding agent. Today the runner ships first-class support for **Claude Code** and **Codex**; the dispatch layer is designed so additional agents can be wired in without changing the orchestration model. You configure which agent the runner invokes; Pi Dash handles the rest.
 
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="./images/pidash_diagram_white.png" />
+    <source media="(prefers-color-scheme: light)" srcset="./images/pidash_diagram_black.png" />
+    <img alt="Pi Dash architecture diagram" src="./images/pidash_diagram_black.png" width="560" />
+  </picture>
+</p>
+
 ## 🚀 Installation
 
 > **Pi Dash Cloud** is now live at **[pidash.airepublic.com](https://pidash.airepublic.com)** — sign up to get started without running your own infrastructure. Prefer to self-host? Follow the steps below.
