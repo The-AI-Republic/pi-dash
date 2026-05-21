@@ -9,6 +9,7 @@ from pi_dash.authentication.views.cli import (
     DeviceCodeRevokeEndpoint,
     DeviceCodeStartEndpoint,
     DeviceCodeTokenEndpoint,
+    WorkspaceListEndpoint,
 )
 
 urlpatterns = [
@@ -31,5 +32,10 @@ urlpatterns = [
         "auth/revoke/",
         DeviceCodeRevokeEndpoint.as_view(),
         name="auth-revoke",
+    ),
+    path(
+        "auth/workspaces/",
+        WorkspaceListEndpoint.as_view(),
+        name="auth-workspaces",
     ),
 ]

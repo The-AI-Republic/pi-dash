@@ -38,6 +38,9 @@ pub fn load_cli_token(paths: &Paths) -> Result<Option<String>> {
 /// `[daemon]` block with the cloud URL the login was performed against.
 /// No `[[runner]]` blocks are added — the runner is registered
 /// separately via `pidash runner add`.
+///
+/// Preserves any pre-existing `[cli].workspace_slug` so a re-login
+/// (e.g. token refresh) doesn't wipe the host's workspace binding.
 pub fn write_cli_token(paths: &Paths, cloud_url: &str, token: &str) -> Result<()> {
     let mut cfg = if paths.config_path().exists() {
         file::load_config(paths)?
@@ -66,9 +69,47 @@ pub fn write_cli_token(paths: &Paths, cloud_url: &str, token: &str) -> Result<()
     if cfg.daemon.cloud_url.is_empty() {
         cfg.daemon.cloud_url = cloud_url.to_string();
     }
+    let preserved_workspace = cfg.cli.as_ref().and_then(|c| c.workspace_slug.clone());
     cfg.cli = Some(CliSection {
         token: Some(token.to_string()),
+        workspace_slug: preserved_workspace,
     });
+    file::write_config(paths, &cfg)?;
+    Ok(())
+}
+
+/// Read `[cli].workspace_slug` from `config.toml`.
+///
+/// Returns `Ok(None)` if no config exists, the `[cli]` section is
+/// absent, or `workspace_slug` was never set. `pidash runner add` uses
+/// this as the default workspace when the caller omits `--workspace`.
+pub fn load_cli_workspace(paths: &Paths) -> Result<Option<String>> {
+    if !paths.config_path().exists() {
+        return Ok(None);
+    }
+    let cfg = file::load_config(paths)?;
+    Ok(cfg.cli.and_then(|c| c.workspace_slug))
+}
+
+/// Write `[cli].workspace_slug` into `config.toml`. Called by
+/// `pidash auth login` after the workspace picker resolves which
+/// workspace this host is bound to. Requires a pre-existing config
+/// (the token write always happens first).
+///
+/// Rebinding to a different workspace is allowed — the login flow
+/// itself decides whether to keep the existing binding (slug still in
+/// the user's memberships) or pick a new one. Callers that need a
+/// safety check should compare before calling.
+pub fn write_cli_workspace(paths: &Paths, workspace_slug: &str) -> Result<()> {
+    if !paths.config_path().exists() {
+        anyhow::bail!(
+            "no config.toml — `pidash auth login` must write the CLI token before the workspace binding"
+        );
+    }
+    let mut cfg = file::load_config(paths)?;
+    let mut cli = cfg.cli.unwrap_or_default();
+    cli.workspace_slug = Some(workspace_slug.to_string());
+    cfg.cli = Some(cli);
     file::write_config(paths, &cfg)?;
     Ok(())
 }
@@ -324,6 +365,48 @@ mod tests {
         write_cli_token(&paths, "https://example.com", "pi_dash_api_xxx").unwrap();
         let token = load_cli_token(&paths).unwrap();
         assert_eq!(token.as_deref(), Some("pi_dash_api_xxx"));
+    }
+
+    #[test]
+    fn write_then_load_cli_workspace_roundtrips() {
+        let tmp = tempdir().unwrap();
+        let paths = paths_for(tmp.path());
+        write_cli_token(&paths, "https://example.com", "pi_dash_api_xxx").unwrap();
+        assert_eq!(load_cli_workspace(&paths).unwrap(), None);
+        write_cli_workspace(&paths, "acme").unwrap();
+        assert_eq!(load_cli_workspace(&paths).unwrap().as_deref(), Some("acme"));
+    }
+
+    #[test]
+    fn write_cli_token_preserves_existing_workspace_slug() {
+        // Re-login (e.g. token refresh) must not clobber the host's
+        // existing workspace binding — otherwise users hit the picker
+        // every time their token rolls.
+        let tmp = tempdir().unwrap();
+        let paths = paths_for(tmp.path());
+        write_cli_token(&paths, "https://example.com", "tok-1").unwrap();
+        write_cli_workspace(&paths, "acme").unwrap();
+        write_cli_token(&paths, "https://example.com", "tok-2").unwrap();
+        let cfg = file::load_config(&paths).unwrap();
+        let cli = cfg.cli.expect("cli section");
+        assert_eq!(cli.token.as_deref(), Some("tok-2"));
+        assert_eq!(cli.workspace_slug.as_deref(), Some("acme"));
+    }
+
+    #[test]
+    fn write_cli_workspace_rebinds_when_called_with_new_slug() {
+        // Workspace rebinding is intentionally allowed (membership
+        // changes, user pick a different one on re-login). The login
+        // flow gates this; the helper itself does not refuse.
+        let tmp = tempdir().unwrap();
+        let paths = paths_for(tmp.path());
+        write_cli_token(&paths, "https://example.com", "tok").unwrap();
+        write_cli_workspace(&paths, "acme").unwrap();
+        write_cli_workspace(&paths, "zenith").unwrap();
+        assert_eq!(
+            load_cli_workspace(&paths).unwrap().as_deref(),
+            Some("zenith")
+        );
     }
 
     #[test]

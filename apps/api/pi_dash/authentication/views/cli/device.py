@@ -303,6 +303,36 @@ class DeviceCodeTokenEndpoint(APIView):
         )
 
 
+class WorkspaceListEndpoint(APIView):
+    """``GET /api/v1/auth/workspaces/`` — workspaces the caller belongs to.
+
+    Used by ``pidash auth login`` to drive a "which workspace should this
+    host be bound to?" picker. The Pi Dash CLI on a dev host is
+    single-workspace-per-install in v1: after login the CLI persists one
+    ``workspace_slug`` and forwards it on subsequent runner-create calls.
+
+    Authenticated with the CLI's ``X-Api-Key`` token. Returns
+    ``{"workspaces": [{"slug", "name"}, ...]}`` in member-since order so
+    the picker stays stable across calls.
+    """
+
+    permission_classes = [IsAuthenticated]
+    authentication_classes = [APIKeyAuthentication]
+
+    def get(self, request):
+        members = (
+            WorkspaceMember.objects.filter(member=request.user, is_active=True)
+            .select_related("workspace")
+            .order_by("created_at")
+        )
+        workspaces = [
+            {"slug": m.workspace.slug, "name": m.workspace.name}
+            for m in members
+            if m.workspace is not None
+        ]
+        return Response({"workspaces": workspaces}, status=status.HTTP_200_OK)
+
+
 class DeviceCodeRevokeEndpoint(APIView):
     """Invalidate the caller's CLI token. Idempotent.
 

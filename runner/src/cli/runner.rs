@@ -122,15 +122,20 @@ pub async fn add(args: AddArgs, paths: &Paths) -> Result<RunnerConfig> {
     let host_label = hostname_or_unknown();
     let transport = SharedHttpTransport::new(cloud_url.clone())
         .context("building HTTP transport for cloud")?;
-    // workspace_slug is optional client-side. When omitted, the cloud
-    // infers from the caller's single workspace membership (the
-    // single-workspace-per-host onboarding case); multi-workspace
-    // callers must pass `--workspace` and get a clear error from the
-    // server otherwise.
+    // Workspace resolution order:
+    //   1. Explicit `--workspace` from this call (highest precedence).
+    //   2. `[cli].workspace_slug` persisted by `pidash auth login`
+    //      (the v1 single-workspace-per-host binding).
+    //   3. None — let the cloud infer from a single membership; it
+    //      rejects with a clear error if the caller is multi-workspace.
+    let workspace_arg = args
+        .workspace
+        .clone()
+        .or(runner_ops::load_cli_workspace(paths)?);
     let resp = create_runner(
         &transport,
         &api_token,
-        args.workspace.as_deref(),
+        workspace_arg.as_deref(),
         &args.project,
         &host_label,
         args.name.as_deref(),

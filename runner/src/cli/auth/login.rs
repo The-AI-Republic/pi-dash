@@ -56,8 +56,11 @@ struct TokenSuccess {
     access_token: String,
     #[serde(default)]
     user_email: Option<String>,
-    #[serde(default)]
-    workspace_slug: Option<String>,
+    // The server also returns `workspace_slug` here (the workspace the
+    // approve step auto-picked), but the CLI deliberately ignores it
+    // and re-resolves via `GET /api/v1/auth/workspaces/` so multi-
+    // workspace users can pick rather than silently inheriting the
+    // server's auto-pick.
 }
 
 #[derive(Debug, Deserialize)]
@@ -94,9 +97,13 @@ pub async fn run(args: Args, paths: &Paths) -> Result<()> {
     } else {
         println!("✓ Logged in.");
     }
-    if let Some(ws) = token.workspace_slug.as_deref() {
-        println!("  Workspace: {ws}");
-    }
+
+    // v1: a CLI install is bound to one workspace. Resolve which one
+    // (auto-pick if there's only one membership; prompt otherwise),
+    // persist the choice, and use it for any subsequent runner-add.
+    let workspace_slug =
+        resolve_workspace_binding(paths, &cloud_url, &token.access_token).await?;
+    println!("  Workspace: {workspace_slug}");
 
     if args.no_runner_prompt {
         return Ok(());
@@ -104,7 +111,7 @@ pub async fn run(args: Args, paths: &Paths) -> Result<()> {
     if !std::io::stdout().is_terminal() {
         return Ok(());
     }
-    maybe_offer_runner_add(paths, &cloud_url, &token.access_token).await?;
+    maybe_offer_runner_add(paths, &cloud_url, &token.access_token, &workspace_slug).await?;
     Ok(())
 }
 
@@ -239,7 +246,119 @@ async fn poll_for_token(
     }
 }
 
-async fn maybe_offer_runner_add(paths: &Paths, cloud_url: &str, api_token: &str) -> Result<()> {
+/// Pick which workspace this CLI install is bound to and persist it
+/// to `[cli].workspace_slug`. Always reaches out to the cloud (even if
+/// a stored binding exists) so a stale slug from a removed membership
+/// gets corrected.
+///
+/// Rules:
+/// - 0 memberships → bail; the user must be invited first.
+/// - 1 membership → silently use it (no prompt).
+/// - ≥2 memberships → if a stored slug is still valid, keep it; else
+///   prompt the user to pick.
+async fn resolve_workspace_binding(
+    paths: &Paths,
+    cloud_url: &str,
+    api_token: &str,
+) -> Result<String> {
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(15))
+        .build()
+        .context("building HTTP client for workspace list")?;
+    let workspaces = fetch_workspaces(&client, cloud_url, api_token).await?;
+
+    if workspaces.is_empty() {
+        anyhow::bail!(
+            "your account isn't a member of any workspace — ask an admin to invite you, then re-run `pidash auth login`"
+        );
+    }
+
+    let stored = runner_ops::load_cli_workspace(paths)?;
+
+    let chosen_slug = if workspaces.len() == 1 {
+        workspaces[0].slug.clone()
+    } else if let Some(slug) = stored.as_deref()
+        && workspaces.iter().any(|w| w.slug == slug)
+    {
+        // Stable across re-logins: keep the existing binding.
+        slug.to_string()
+    } else {
+        if stored.is_some() {
+            println!();
+            println!(
+                "(Previous workspace binding is no longer valid — pick a new one.)"
+            );
+        }
+        let picked = pick_workspace(&workspaces)?;
+        picked.slug.clone()
+    };
+
+    runner_ops::write_cli_workspace(paths, &chosen_slug)
+        .context("writing [cli].workspace_slug to config.toml")?;
+    Ok(chosen_slug)
+}
+
+#[derive(Debug, Deserialize)]
+struct WorkspaceRow {
+    slug: String,
+    name: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct WorkspaceListResponse {
+    workspaces: Vec<WorkspaceRow>,
+}
+
+async fn fetch_workspaces(
+    client: &reqwest::Client,
+    cloud_url: &str,
+    api_token: &str,
+) -> Result<Vec<WorkspaceRow>> {
+    let url = format!("{cloud_url}/api/v1/auth/workspaces/");
+    let resp = client
+        .get(&url)
+        .header("X-Api-Key", api_token)
+        .send()
+        .await
+        .with_context(|| format!("GET {url}"))?;
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+        anyhow::bail!("workspace list failed: HTTP {status}: {body}");
+    }
+    let parsed: WorkspaceListResponse =
+        resp.json().await.context("parsing workspace list")?;
+    Ok(parsed.workspaces)
+}
+
+fn pick_workspace(workspaces: &[WorkspaceRow]) -> Result<&WorkspaceRow> {
+    use std::io::BufRead;
+    println!();
+    println!("Your account belongs to multiple workspaces.");
+    println!("Pick the one this host should be bound to:");
+    println!();
+    for (i, w) in workspaces.iter().enumerate() {
+        println!("  {}) {:<20} {}", i + 1, w.slug, w.name);
+    }
+    print!("Pick a workspace [1-{}]: ", workspaces.len());
+    std::io::stdout().flush().ok();
+    let stdin = std::io::stdin();
+    let mut line = String::new();
+    stdin.lock().read_line(&mut line).ok();
+    let ans = line.trim();
+    let idx: usize = ans.parse().context("expected a number")?;
+    if idx == 0 || idx > workspaces.len() {
+        anyhow::bail!("selection {idx} out of range");
+    }
+    Ok(&workspaces[idx - 1])
+}
+
+async fn maybe_offer_runner_add(
+    paths: &Paths,
+    cloud_url: &str,
+    api_token: &str,
+    workspace_slug: &str,
+) -> Result<()> {
     // Skip the prompt entirely if a runner already exists — the user
     // ran `auth login` to refresh a token, not to onboard.
     let existing_runners = if paths.config_path().exists() {
@@ -290,7 +409,7 @@ async fn maybe_offer_runner_add(paths: &Paths, cloud_url: &str, api_token: &str)
         crate::cli::runner::AddArgs {
             name: None,
             project: project.identifier.clone(),
-            workspace: None,
+            workspace: Some(workspace_slug.to_string()),
             pod: None,
             working_dir: None,
             agent: crate::config::schema::AgentKind::default(),

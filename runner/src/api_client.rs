@@ -328,6 +328,7 @@ mod resolve_tests {
             }],
             cli: Some(CliSection {
                 token: Some(token.into()),
+                workspace_slug: None,
             }),
         }
     }
