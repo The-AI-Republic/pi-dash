@@ -348,14 +348,30 @@ POSTHOG_API_KEY = os.environ.get("POSTHOG_API_KEY", False)
 POSTHOG_HOST = os.environ.get("POSTHOG_HOST", False)
 
 # Per-runner HTTPS transport tunables (see ``.ai_design/move_to_https/design.md`` §9).
-# Clamped to 55 seconds so the server-side block always finishes
-# strictly before the daemon's per-request timeout (capped at 55 + 5
-# buffer in `runner/src/cloud/http.rs::MAX_LONG_POLL_INTERVAL_SECS`).
-# Without this clamp an operator could push the env to 60+ and cause
-# the daemon to drop in-flight assigns when reqwest fires its own
-# timeout before the server's block completes.
-LONG_POLL_INTERVAL_SECS = min(
-    int(os.environ.get("LONG_POLL_INTERVAL_SECS", 25)), 55
+# Clamped to [1, 55] so the server-side block always finishes strictly
+# before the daemon's per-request timeout (capped at 55 + 5 buffer in
+# `runner/src/cloud/http.rs::MAX_LONG_POLL_INTERVAL_SECS`) and a
+# misconfigured 0 doesn't tight-loop the daemon. Out-of-range values are
+# logged at WARNING so operators see the override during boot instead
+# of silently getting a value they didn't ask for.
+_LONG_POLL_MIN_SECS = 1
+_LONG_POLL_MAX_SECS = 55
+_raw_long_poll_secs = int(os.environ.get("LONG_POLL_INTERVAL_SECS", 25))
+if _raw_long_poll_secs < _LONG_POLL_MIN_SECS or _raw_long_poll_secs > _LONG_POLL_MAX_SECS:
+    import logging
+
+    logging.getLogger(__name__).warning(
+        "LONG_POLL_INTERVAL_SECS=%s out of allowed range [%s, %s]; clamping. "
+        "Raising the upper bound requires also raising "
+        "MAX_LONG_POLL_INTERVAL_SECS in runner/src/cloud/http.rs and the "
+        "shared reqwest Client::timeout so daemon timeouts don't fire "
+        "before the server's block_ms completes.",
+        _raw_long_poll_secs,
+        _LONG_POLL_MIN_SECS,
+        _LONG_POLL_MAX_SECS,
+    )
+LONG_POLL_INTERVAL_SECS = max(
+    _LONG_POLL_MIN_SECS, min(_raw_long_poll_secs, _LONG_POLL_MAX_SECS)
 )
 ACCESS_TOKEN_TTL_SECS = int(os.environ.get("ACCESS_TOKEN_TTL_SECS", 3600))
 RUNNER_OFFLINE_THRESHOLD_SECS = int(os.environ.get("RUNNER_OFFLINE_THRESHOLD_SECS", 50))

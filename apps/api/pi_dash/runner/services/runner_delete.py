@@ -33,6 +33,8 @@ from __future__ import annotations
 
 from uuid import UUID
 
+from django.db import transaction
+
 from pi_dash.runner.models import Runner
 from pi_dash.runner.services.pubsub import (
     close_runner_session,
@@ -55,6 +57,16 @@ def delete_runner(runner: Runner, *, purge_local: bool) -> None:
     while the session is still alive so the daemon's in-flight
     long-poll can drain the frame; revoke + close + delete then run as
     the cleanup tail.
+
+    The cleanup tail (revoke + close + delete) is wrapped in an outer
+    ``transaction.atomic()`` so a failure between ``revoke()`` and the
+    row delete can't leave the runner in a partial state
+    (revoked-but-still-present). ``revoke()`` opens its own
+    ``transaction.atomic()`` which nests as a savepoint;
+    ``close_runner_session`` publishes to Redis from within the tx —
+    that publish is not transactional, but the daemon already treats
+    such frames as idempotent advisories, so a rollback after the
+    publish is recoverable on the next poll.
     """
     runner_pk: UUID = runner.pk
     if purge_local:
@@ -75,9 +87,10 @@ def delete_runner(runner: Runner, *, purge_local: bool) -> None:
     # synthesizer's canonical set so the daemon exits its RunnerLoop
     # cleanly without wiping ``config.toml`` or the data dir.
     revoke_reason = "runner_removed" if purge_local else "user_revoke"
-    runner.revoke(reason=revoke_reason)
-    close_runner_session(runner_pk)
-    Runner.objects.filter(pk=runner_pk).delete()
+    with transaction.atomic():
+        runner.revoke(reason=revoke_reason)
+        close_runner_session(runner_pk)
+        Runner.objects.filter(pk=runner_pk).delete()
 
 
 def parse_purge_local(query_params, *, default: bool = True) -> bool:
