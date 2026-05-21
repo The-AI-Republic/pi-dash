@@ -114,6 +114,9 @@ build/
 .react-router/
 temp/
 scripts/
+!packages/i18n/scripts/
+!packages/i18n/scripts/sync-translation-keys.mjs
+!packages/i18n/scripts/translate-missing.mjs
 
 # Rust
 /runner/target/

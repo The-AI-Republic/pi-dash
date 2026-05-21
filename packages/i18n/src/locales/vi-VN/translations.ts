@@ -78,6 +78,10 @@ export default {
               message: "Đã xảy ra lỗi. Vui lòng thử lại.",
             },
           },
+          error: {
+            title: "",
+            message: "",
+          },
         },
       },
       unique_code: {
@@ -836,6 +840,8 @@ export default {
       show_weekends: "Hiển thị cuối tuần",
       enable: "Bật",
       disable: "Tắt",
+      copy_markdown: "Sao chép markdown",
+      restore: "Khôi phục",
     },
     name: "Tên",
     discard: "Hủy bỏ",
@@ -926,6 +932,7 @@ export default {
     paused: "Tạm dừng",
     no_of: "Số lượng {entity}",
     resolved: "Đã giải quyết",
+    overview: "Tổng quan",
   },
   chart: {
     x_axis: "Trục X",
@@ -1446,6 +1453,7 @@ export default {
         title: "Công khai",
         description: "Bất kỳ ai trong không gian làm việc ngoại trừ khách đều có thể tham gia",
       },
+      label: "Mạng",
     },
     error: {
       permission: "Bạn không có quyền thực hiện thao tác này.",
@@ -1587,6 +1595,22 @@ export default {
         },
       },
     },
+    activity: {
+      heading: "Hoạt động",
+      description: "Theo dõi các hành động và thay đổi gần đây của bạn trên tất cả các dự án và mục công việc.",
+    },
+    api_tokens: {
+      heading: "Mã thông báo truy cập cá nhân",
+      description: "Tạo mã thông báo API an toàn để tích hợp dữ liệu của bạn với các hệ thống và ứng dụng bên ngoài.",
+    },
+    notifications: {
+      heading: "Thông báo qua email",
+      description: "Luôn cập nhật về các mục công việc bạn đã đăng ký. Bật tính năng này để nhận thông báo.",
+    },
+    preferences: {
+      heading: "Tùy chọn",
+      description: "Tùy chỉnh trải nghiệm ứng dụng theo cách bạn làm việc",
+    },
   },
   workspace_settings: {
     label: "Cài đặt không gian làm việc",
@@ -1662,6 +1686,8 @@ export default {
         current_plan: "Kế hoạch hiện tại",
         free_plan: "Bạn đang sử dụng kế hoạch miễn phí",
         view_plans: "Xem kế hoạch",
+        heading: "Thanh toán & Gói",
+        description: "Chọn gói của bạn, quản lý đăng ký và dễ dàng nâng cấp khi nhu cầu của bạn tăng lên.",
       },
       exports: {
         title: "Xuất",
@@ -1682,6 +1708,11 @@ export default {
             },
           },
         },
+        heading: "Xuất dữ liệu",
+        description:
+          "Xuất dữ liệu dự án của bạn ở nhiều định dạng khác nhau và truy cập lịch sử xuất với các liên kết tải xuống.",
+        exporting_projects: "Đang xuất dự án",
+        format: "Định dạng",
       },
       webhooks: {
         title: "Webhooks",
@@ -1733,6 +1764,7 @@ export default {
             message: "Đã xảy ra lỗi khi sao chép khóa bí mật.",
           },
         },
+        description: "Tự động hóa thông báo đến các dịch vụ bên ngoài khi các sự kiện dự án xảy ra.",
       },
       api_tokens: {
         title: "Token API",
@@ -1797,6 +1829,7 @@ export default {
       priority_distribution: {
         title: "Mục công việc theo mức độ ưu tiên",
         empty: "Tạo mục công việc để xem phân loại theo mức độ ưu tiên trong biểu đồ để phân tích tốt hơn.",
+        priority: "",
       },
       recent_activity: {
         title: "Hoạt động gần đây",
@@ -1880,6 +1913,20 @@ export default {
         title: "Không có trạng thái trong nhóm {groupKey}",
         description: "Vui lòng tạo một trạng thái mới",
       },
+      members_edit: {
+        toast: {
+          loading: "Đang cập nhật cài đặt dự án...",
+          success_title: "Thành công!",
+          success_message: "Đã cập nhật cài đặt dự án.",
+          error_title: "Lỗi!",
+          error_message: "Đã xảy ra lỗi khi cập nhật cài đặt dự án. Vui lòng thử lại.",
+        },
+        title: "Cho phép thành viên chỉnh sửa trạng thái",
+        description:
+          "Khi được bật, thành viên dự án có thể thêm, chỉnh sửa, sắp xếp lại và xóa các trạng thái quy trình làm việc. Khi tắt, chỉ quản trị viên mới có thể quản lý trạng thái.",
+      },
+      heading: "Trạng thái",
+      description: "Xác định và tùy chỉnh các trạng thái quy trình làm việc để theo dõi tiến độ của các mục công việc.",
     },
     labels: {
       label_title: "Tiêu đề nhãn",
@@ -1888,6 +1935,8 @@ export default {
       toast: {
         error: "Đã xảy ra lỗi khi cập nhật nhãn",
       },
+      heading: "Nhãn",
+      description: "Tạo nhãn tùy chỉnh để phân loại và sắp xếp các mục công việc của bạn",
     },
     estimates: {
       label: "Ước tính",
@@ -1950,6 +1999,8 @@ export default {
         empty: "Giá trị ước tính không được để trống",
         already_exists: "Giá trị ước tính này đã tồn tại",
         unsaved_changes: "Bạn có thay đổi chưa lưu. Vui lòng lưu trước khi nhấn 'xong'",
+        remove_empty:
+          "Ước tính không được để trống. Nhập giá trị vào mỗi trường hoặc xóa những trường bạn không có giá trị.",
       },
       systems: {
         points: {
@@ -1970,6 +2021,8 @@ export default {
           hours: "Giờ",
         },
       },
+      heading: "Ước tính",
+      enable_description: "Chúng giúp bạn truyền đạt độ phức tạp và khối lượng công việc của nhóm.",
     },
     automations: {
       label: "Tự động hóa",
@@ -1984,6 +2037,8 @@ export default {
         duration: "Tự động đóng không hoạt động",
         auto_close_status: "Trạng thái tự động đóng",
       },
+      heading: "Tự động hóa",
+      description: "Cấu hình các hành động tự động để hợp lý hóa quy trình quản lý dự án và giảm các tác vụ thủ công.",
     },
     empty_state: {
       labels: {
@@ -2358,6 +2413,7 @@ export default {
       unarchived: "Thông báo đã được đánh dấu là đã hủy lưu trữ",
       snoozed: "Thông báo đã được tạm hoãn",
       unsnoozed: "Thông báo đã được hủy tạm hoãn",
+      un_snoozed: "",
     },
     empty_state: {
       detail: {
@@ -2719,4 +2775,459 @@ export default {
     comment_failed_title: "Could not post comment",
     comment_failed_message: "Failed to post the comment.",
   },
+  scheduler_bindings: {
+    tab_label: "Bộ lập lịch",
+    title: "Bộ lập lịch",
+    subtitle:
+      "Các bộ lập lịch được cài đặt trên dự án này. Mỗi lần cài đặt sẽ kích hoạt lời nhắc của nó đối với dự án theo cron đã cấu hình.",
+    install: "Cài đặt bộ lập lịch",
+    columns: {
+      name: "Bộ lập lịch",
+      cron: "Lịch trình",
+      next_run: "Lần chạy tiếp theo",
+      last_run: "Lần chạy trước",
+      status: "Trạng thái",
+      updated: "Đã cập nhật",
+    },
+    toast: {
+      updated_title: "Đã cập nhật cài đặt",
+      enabled_message: "Bộ lập lịch đã được bật — nó sẽ kích hoạt vào lần đánh dấu cron tiếp theo.",
+      disabled_message: "Bộ lập lịch đã bị tắt — nó sẽ không kích hoạt cho đến khi được bật lại.",
+      error_title: "Đã xảy ra lỗi",
+      update_failed: "Không thể cập nhật cài đặt.",
+      updated_message: "Các lần chạy sau sẽ sử dụng cài đặt mới.",
+      installed_title: "Trình lập lịch đã được cài đặt",
+      installed_message: "Nó sẽ kích hoạt theo cron đã cấu hình.",
+      install_failed: "Không thể cài đặt trình lập lịch.",
+      uninstalled_title: "Trình lập lịch đã được gỡ cài đặt",
+      uninstalled_message: "Nó sẽ không kích hoạt trên dự án này cho đến khi được cài đặt lại.",
+      uninstall_failed: "Không thể gỡ cài đặt trình lập lịch.",
+    },
+    list: {
+      empty:
+        "Chưa có trình lập lịch nào được cài đặt trên dự án này. Nhấp vào “Cài đặt trình lập lịch” để thêm một trình từ danh mục không gian làm việc.",
+      none_yet: "(chưa bao giờ)",
+    },
+    actions: {
+      disable: "Vô hiệu hóa trình lập lịch",
+      enable: "Kích hoạt trình lập lịch",
+      edit: "Chỉnh sửa",
+      uninstall: "Gỡ cài đặt",
+    },
+    status: {
+      enabled: "Đã kích hoạt",
+      disabled: "Đã vô hiệu hóa",
+    },
+    edit_modal: {
+      title: "Chỉnh sửa cài đặt trình lập lịch",
+      saving: "Đang lưu…",
+      save: "Lưu",
+    },
+    install_modal: {
+      cron_label: "Lịch trình (cron)",
+      errors: {
+        cron_required: "Biểu thức cron là bắt buộc.",
+        scheduler_required: "Chọn một trình lập lịch.",
+      },
+      cron_placeholder: "0 9 * * *",
+      cron_help: "Biểu thức cron 5 trường theo UTC, ví dụ: ``0 9 * * *`` cho 09:00 UTC mỗi ngày.",
+      extra_context_label: "Ngữ cảnh dự án (tùy chọn)",
+      extra_context_placeholder: "Ghi chú cụ thể cho dự án này…",
+      extra_context_help:
+        "Được thêm vào lời nhắc cơ sở của trình lập lịch tại thời điểm chạy. Sử dụng nó để cung cấp khung cụ thể cho dự án mà lời nhắc không gian làm việc không nên mang.",
+      enabled_label: "Đã kích hoạt",
+      enabled_help: "Các cài đặt bị vô hiệu hóa sẽ không kích hoạt theo cron cho đến khi được kích hoạt lại.",
+      cancel: "Hủy",
+      none_available_title: "Không có trình lập lịch nào khả dụng",
+      none_available_body:
+        "Hoặc mọi bộ lập lịch của không gian làm việc đã được cài đặt trên dự án này, hoặc quản trị viên không gian làm việc của bạn chưa bật bất kỳ cái nào. Truy cập Workspace → Schedulers để quản lý danh mục.",
+      title: "Cài đặt bộ lập lịch",
+      scheduler_label: "Bộ lập lịch",
+      scheduler_help:
+        "Chọn từ các bộ lập lịch đã được bật trong không gian làm việc của bạn. Những bộ đã cài đặt sẽ không được liệt kê.",
+      installing: "Đang cài đặt…",
+      install: "Cài đặt",
+    },
+    uninstall_modal: {
+      title: "Gỡ cài đặt bộ lập lịch?",
+      body: "Bộ lập lịch sẽ ngừng kích hoạt trên dự án này. Định nghĩa trong không gian làm việc không bị ảnh hưởng và có thể được cài đặt lại sau.",
+      confirm: "Gỡ cài đặt",
+    },
+  },
+  prompts: {
+    detail: {
+      loading: "Đang tải…",
+      not_found: "Không tìm thấy mẫu.",
+      default_title: "Mẫu lời nhắc (mặc định Pi Dash)",
+      workspace_title: "Mẫu lời nhắc (ghi đè không gian làm việc)",
+      default_description:
+        "Đây là mặc định tích hợp sẵn của Pi Dash. Quản trị viên không gian làm việc không thể chỉnh sửa nó ở đây — hãy tùy chỉnh cho không gian làm việc của bạn để ghi đè.",
+      workspace_description:
+        "Bản ghi đè của không gian làm việc của bạn so với mặc định Pi Dash. Các chỉnh sửa sẽ tăng phiên bản và áp dụng cho lần chạy tác nhân tiếp theo cho không gian làm việc này.",
+      back: "Quay lại danh sách",
+      body: "Nội dung mẫu (Jinja + Markdown)",
+      unsaved: "Thay đổi chưa lưu",
+      save: "Lưu",
+    },
+    toast: {
+      saved_title: "Đã lưu lời nhắc",
+      saved_message: "Các lần chạy tác nhân tiếp theo sẽ sử dụng lời nhắc đã cập nhật.",
+      save_failed: "Không thể lưu lời nhắc.",
+      error_title: "Đã xảy ra lỗi",
+      created_title: "Đã tạo ghi đè không gian làm việc",
+      created_message: "Chúng tôi đã sao chép mặc định Pi Dash hiện tại. Chỉnh sửa và lưu để tùy chỉnh.",
+      customize_failed: "Không thể tạo ghi đè không gian làm việc.",
+      reverted_title: "Đã khôi phục về mặc định Pi Dash",
+      reverted_message: "Không gian làm việc này đã trở lại mẫu mặc định dùng chung.",
+      revert_failed: "Không thể khôi phục lời nhắc.",
+    },
+    preview: {
+      missing_issue_id: "Nhập ID vấn đề trước.",
+      failed: "Kết xuất thất bại.",
+      title: "Xem trước",
+      issue_id_placeholder: "ID vấn đề (UUID)",
+      run: "Xem trước",
+      empty: "Dán ID vấn đề và nhấp Xem trước để kết xuất mẫu với một vấn đề thực tế.",
+      admin_only:
+        "Xem trước prompt đã kết xuất là hành động của quản trị viên không gian làm việc. Hãy hỏi quản trị viên không gian làm việc của bạn nếu bạn cần xem nó được kết xuất với một vấn đề cụ thể.",
+    },
+    scope: {
+      default: "Mặc định của Pi Dash",
+      workspace: "Ghi đè không gian làm việc",
+    },
+    title: "Lời nhắc",
+    subtitle:
+      "Các mẫu lời nhắc hệ thống được kết xuất với mỗi vấn đề trước khi chạy tác nhân. Quản trị viên không gian làm việc có thể tùy chỉnh mặc định cho không gian làm việc này.",
+    customize: "Tùy chỉnh cho không gian làm việc này",
+    columns: {
+      name: "Tên",
+      scope: "Phạm vi",
+      version: "Phiên bản",
+      updated: "Đã cập nhật",
+    },
+    list: {
+      empty: "Không có mẫu lời nhắc nào. Mặc định của Pi Dash sẽ được tạo trong lần di chuyển tiếp theo.",
+    },
+    revert: {
+      confirm_title: "Hoàn nguyên về mặc định của Pi Dash?",
+      confirm_body:
+        "Thao tác này sẽ lưu trữ mẫu theo phạm vi không gian làm việc của bạn. Các lần chạy tác nhân mới trong không gian làm việc này sẽ sử dụng mặc định của Pi Dash cho đến khi bạn tạo ghi đè khác.",
+      confirm: "Hoàn nguyên",
+    },
+    actions: {
+      edit: "Chỉnh sửa",
+      view: "Xem",
+      revert: "Hoàn nguyên về mặc định",
+    },
+  },
+  runners: {
+    toast: {
+      error_title: "Lỗi!",
+    },
+    approvals: {
+      decision_failed: "Không ghi lại được quyết định",
+      empty: "Không có phê duyệt đang chờ.",
+      run_meta: "Chạy {runId} · đã yêu cầu {at}",
+      expires: "hết hạn {at}",
+      accept_once: "Chấp nhận một lần",
+      accept_for_session: "Chấp nhận cho phiên",
+      decline: "Từ chối",
+    },
+    tabs: {
+      runners: "Tác nhân AI",
+      runs: "Lượt chạy",
+      approvals: "Phê duyệt",
+    },
+    title: "Tác nhân AI",
+    page_title: "{workspace} - Tác nhân AI",
+    list: {
+      delete_failed: "Không thể xóa runner",
+      revoke_failed: "Không thể thu hồi runner",
+      revive_failed: "Không thể khôi phục runner",
+      add_runner: "Thêm runner",
+      how_it_works_title: "Cách thêm runner",
+      how_it_works_body:
+        '1. Nhấp "Thêm runner", chọn một dự án + pod và gửi. Đám mây tạo một mã thông báo đăng ký một lần gắn với runner đó.\n2. Trên máy sẽ chạy runner, chạy lệnh `pidash connect --url ... --token ... --host-label ...` được hiển thị.\n3. Daemon đăng ký và runner hiển thị trực tuyến tại đây.\n\nMỗi runner có mã thông báo riêng. Runner đầu tiên đăng ký trên một máy chủ cũng khởi tạo một mã thông báo máy được sử dụng bởi CLI `pidash` cho các lệnh không phải runner.\n\nĐiều kiện tiên quyết: CLI tác nhân (codex / claude) phải được cài đặt sẵn trên máy chủ.',
+      connected_runners: "Các runner",
+      columns: {
+        name: "Tên",
+        status: "Trạng thái",
+        os_arch: "HĐH / Kiến trúc",
+        version: "Phiên bản",
+        last_heartbeat: "Lần heartbeat cuối",
+      },
+      columns_pod: "Pod",
+      revive: "Khôi phục",
+      revoke: "Thu hồi",
+      delete: "Xóa",
+      empty: 'Chưa có runner nào. Nhấp "Thêm runner" để tạo mã thông báo đăng ký cho runner đầu tiên.',
+      delete_confirm_title: "Xóa runner?",
+      delete_confirm_body:
+        "Hàng runner bị xóa và daemon bị buộc ngoại tuyến. Các lần chạy lịch sử được giữ lại với tham chiếu runner null.",
+      revoke_confirm_title: "Thu hồi runner?",
+      revoke_confirm_body:
+        "Thông tin xác thực của runner bị vô hiệu hóa và mọi lần chạy đang thực hiện bị hủy, nhưng hàng vẫn ở trong danh sách. Bạn có thể khôi phục nó sau để tạo mã thông báo đăng ký mới trên cùng hàng đó.",
+      revive_modal_title: "Mã thông báo đăng ký mới",
+      revive_modal_body:
+        "Chạy lệnh bên dưới trên máy chủ sẽ nhận runner này. Sao chép ngay bây giờ — mã thông báo sẽ không được hiển thị lại.",
+      project_placeholder: "Chọn một dự án",
+      copy_failed: "Không thể sao chép vào bộ nhớ tạm",
+    },
+    machine_token_note: {
+      body: "Lần đầu tiên một runner đăng ký trên một host mới (tức là một ``host_label`` mới), cloud cũng cấp một machine token được sử dụng bởi CLI ``pidash`` cho các lệnh không phải runner (issue, comment, state). Các runner sau đó trên cùng host sẽ tái sử dụng token đó.",
+    },
+    pods: {
+      title: "Pods",
+      help: "Pods nhóm các runner của bạn. Các issue được ủy thác cho một pod, và bất kỳ runner rảnh nào trong pod đó sẽ nhận công việc. Nhấp vào một ô để lọc runner.",
+      load_failed: "Không thể tải pods",
+      tile_aria: "Lọc runner theo pod {name}",
+      default_badge: "mặc định",
+      runner_count: "{count} runner",
+      create_tile: "Tạo pod mới",
+      filter_active: "Đang lọc runner theo pod {name}",
+      filter_clear: "Xóa bộ lọc",
+    },
+    add_modal: {
+      runner_id_label: "ID runner",
+      done: "Xong",
+      agent_options: {
+        claude_code: "Claude Code",
+        codex: "Codex",
+      },
+      errors: {
+        create_failed: "Không thể tạo token đăng ký.",
+        project_required: "Chọn một dự án.",
+        load_projects_failed: "Không thể tải danh sách dự án.",
+        load_pods_failed: "Không thể tải pods.",
+      },
+      title: "Thêm runner",
+      subtitle:
+        "Tạo một token đăng ký một lần cho runner mới. Bạn sẽ chạy lệnh `pidash connect` được hiển thị trên máy sẽ chạy runner đó.",
+      project_label: "Dự án",
+      project_help: "Dự án mà runner này sẽ làm việc.",
+      pod_label: "Pod (tùy chọn)",
+      pod_default_option: "(pod mặc định)",
+      pod_help: "Mặc định là pod mặc định của dự án.",
+      name_label: "Tên (tùy chọn)",
+      name_placeholder: "my-laptop-runner",
+      name_help: "Tự động gán nếu để trống, ví dụ: ``runner_001``.",
+      host_label_label: "Nhãn host (tùy chọn)",
+      host_label_placeholder: "my-laptop",
+      host_label_help:
+        "Tên máy chủ tự do được nhúng vào lệnh đề xuất. Daemon sẽ thay thế tên máy chủ thực tế nếu bạn bỏ cờ.",
+      working_dir_label: "Thư mục làm việc (tùy chọn)",
+      working_dir_placeholder: "thư mục làm việc dự án trên máy dev cục bộ",
+      working_dir_help:
+        "Đường dẫn cục bộ mà daemon chạy agent CLI — thường là kho lưu trữ dự án trên đĩa. Mặc định là một sandbox trong thư mục dữ liệu của runner, điều này hiếm khi bạn muốn.",
+      agent_label: "Tác nhân",
+      agent_help: "CLI tác nhân AI nào mà runner này sẽ điều khiển. Được nhúng vào lệnh ``pidash connect`` hiển thị.",
+      cancel: "Hủy",
+      submitting: "Đang tạo…",
+      submit: "Tạo token đăng ký",
+      token_warning: "Sao chép một lần — token đăng ký sẽ không được hiển thị lại.",
+      token_instructions: "Chạy lệnh này trên máy sẽ chạy runner:",
+      copied: "Đã sao chép!",
+      copy_command: "Sao chép lệnh",
+    },
+    runs: {
+      cancel_failed: "Không thể hủy lần chạy",
+      columns: {
+        started: "Đã bắt đầu",
+        status: "Trạng thái",
+        prompt: "Lời nhắc",
+      },
+      empty: "Chưa có lần chạy nào.",
+      select_run: "Chọn một lần chạy ở bên trái.",
+      cancel: "Hủy lần chạy",
+      prompt: "Lời nhắc",
+      error: "Lỗi",
+      done_payload: "Tải trọng đã hoàn thành",
+      events_count: "Sự kiện ({count})",
+      event_columns: {
+        seq: "seq",
+        kind: "loại",
+        at: "tại",
+      },
+      cancel_confirm_title: "Hủy lần chạy?",
+      cancel_confirm_body: "Runner sẽ dừng lần chạy này ngay khi nhận được tín hiệu.",
+    },
+    create_pod_modal: {
+      errors: {
+        create_failed: "Không thể tạo pod.",
+        project_required: "Chọn một dự án.",
+        load_projects_failed: "Không thể tải danh sách dự án.",
+        name_required: "Tên là bắt buộc.",
+      },
+      title: "Tạo pod mới",
+      subtitle: "Pod nhóm các runner trong một dự án. Chọn một dự án, sau đó đặt tên cho pod.",
+      project_label: "Dự án",
+      project_placeholder: "Chọn một dự án",
+      project_help: "Dự án mà pod này thuộc về. Tên sẽ được thêm tiền tố là mã định danh của dự án.",
+      name_label: "Tên",
+      name_placeholder: "beefy",
+      name_help: "Chữ cái, chữ số, dấu gạch ngang và dấu gạch dưới. Tiền tố dự án được thêm tự động.",
+      description_label: "Mô tả (không bắt buộc)",
+      description_placeholder: "Nơi pod này chạy, mục đích sử dụng, v.v.",
+      cancel: "Hủy",
+      submitting: "Đang tạo…",
+      submit: "Tạo pod",
+    },
+  },
+  schedulers: {
+    toast: {
+      created_title: "Đã tạo bộ lập lịch",
+      created_message: "Quản trị viên dự án hiện có thể cài đặt nó trên các dự án của họ.",
+      create_failed: "Không thể tạo bộ lập lịch.",
+      error_title: "Đã xảy ra lỗi",
+      updated_title: "Đã cập nhật bộ lập lịch",
+      updated_message: "Các lần chạy tiếp theo sẽ sử dụng định nghĩa đã cập nhật.",
+      update_failed: "Không thể cập nhật bộ lập lịch.",
+      deleted_title: "Đã xóa bộ lập lịch",
+      deleted_message: "Các ràng buộc đang hoạt động đã ngừng kích hoạt.",
+      delete_failed: "Không thể xóa bộ lập lịch.",
+    },
+    title: "Bộ lập lịch",
+    subtitle:
+      "Các định nghĩa bộ lập lịch có thể tái sử dụng cho không gian làm việc này. Cài đặt một bộ trên một dự án để chạy prompt của nó theo lịch cron.",
+    new: "Bộ lập lịch mới",
+    columns: {
+      name: "Tên",
+      slug: "Slug",
+      source: "Nguồn",
+      installs: "Lượt cài đặt",
+      status: "Trạng thái",
+      updated: "Đã cập nhật",
+    },
+    list: {
+      empty: "Chưa có bộ lập lịch nào trong không gian làm việc này. Nhấp vào “Bộ lập lịch mới” để tạo một bộ.",
+      installs_count: "{count, plural, one {# lần cài đặt} other {# lần cài đặt}}",
+    },
+    source: {
+      manifest: "Manifest",
+      builtin: "Tích hợp sẵn",
+    },
+    status: {
+      enabled: "Đã bật",
+      disabled: "Đã tắt",
+    },
+    actions: {
+      edit: "Chỉnh sửa",
+      delete: "Xóa",
+    },
+    delete: {
+      confirm_title: "Xóa bộ lập lịch?",
+      confirm_body:
+        "Thao tác này sẽ xóa mềm bộ lập lịch. Mọi liên kết dự án đang hoạt động sẽ ngừng kích hoạt. Slug sẽ có sẵn để tạo lại.",
+      confirm: "Xóa",
+    },
+    form: {
+      edit_title: "Chỉnh sửa bộ lập lịch",
+      create_title: "Bộ lập lịch mới",
+      slug_label: "Slug",
+      errors: {
+        slug_required: "Slug là bắt buộc.",
+        name_required: "Tên là bắt buộc.",
+        prompt_required: "Lời nhắc là bắt buộc.",
+      },
+      slug_placeholder: "security-audit",
+      slug_help: "Định danh chữ thường được sử dụng trong URL. Không thể thay đổi sau khi tạo.",
+      name_label: "Tên",
+      name_placeholder: "Kiểm tra bảo mật",
+      description_label: "Mô tả",
+      description_placeholder: "Tóm tắt ngắn hiển thị trong trình chọn cài đặt.",
+      prompt_label: "Lời nhắc",
+      prompt_placeholder: "Tìm kiếm các vấn đề bảo mật nổi bật trong dự án này…",
+      prompt_help:
+        "Lời nhắc cơ sở mà tác nhân chạy mỗi lần đánh dấu. Ngữ cảnh theo dự án được thêm vào tại thời điểm cài đặt, vì vậy hãy giữ lời nhắc này không phụ thuộc vào dự án.",
+      enabled_label: "Đã bật",
+      enabled_help:
+        "Các bộ lập lịch bị tắt không thể được cài đặt trên các dự án mới và các ràng buộc hiện có sẽ không kích hoạt.",
+      cancel: "Hủy",
+      saving: "Đang lưu…",
+      save: "Lưu",
+      creating: "Đang tạo…",
+      create: "Tạo bộ lập lịch",
+    },
+  },
+  power_k: {
+    search_menu: {
+      no_results: "Không tìm thấy kết quả",
+      clear_search: "Xóa tìm kiếm",
+    },
+    miscellaneous_actions: {
+      copy_current_page_url_toast_success: "URL trang hiện tại đã được sao chép vào bảng tạm.",
+      copy_current_page_url_toast_error: "Đã xảy ra lỗi khi sao chép URL trang hiện tại vào bảng tạm.",
+    },
+    preferences_actions: {
+      toast: {
+        theme: {
+          error: "Không thể cập nhật chủ đề. Vui lòng thử lại.",
+        },
+        timezone: {
+          success: "Múi giờ đã được cập nhật thành công.",
+          error: "Không thể cập nhật múi giờ. Vui lòng thử lại.",
+        },
+        generic: {
+          success: "Tùy chọn đã được cập nhật thành công.",
+          error: "Không thể cập nhật tùy chọn. Vui lòng thử lại.",
+        },
+      },
+    },
+    footer: {
+      workspace_level: "Cấp không gian làm việc",
+    },
+    page_placeholders: {
+      default: "Nhập lệnh hoặc tìm kiếm",
+    },
+    contextual_actions: {
+      cycle: {
+        copy_url_toast_success: "URL chu kỳ đã được sao chép vào bảng tạm.",
+        copy_url_toast_error: "Đã xảy ra lỗi khi sao chép URL chu kỳ vào bảng tạm.",
+      },
+      module: {
+        copy_url_toast_success: "URL mô-đun đã được sao chép vào bảng tạm.",
+        copy_url_toast_error: "Đã xảy ra lỗi khi sao chép URL mô-đun vào bảng tạm.",
+      },
+      page: {
+        copy_url_toast_success: "URL trang đã được sao chép vào bảng tạm.",
+        copy_url_toast_error: "Đã xảy ra lỗi khi sao chép URL trang vào bảng tạm.",
+      },
+      work_item: {
+        copy_id_toast_success: "ID mục công việc đã được sao chép vào bảng tạm.",
+        copy_id_toast_error: "Đã xảy ra lỗi khi sao chép ID mục công việc vào bảng tạm.",
+        copy_title_toast_success: "Tiêu đề mục công việc đã được sao chép vào bảng tạm.",
+        copy_title_toast_error: "Đã xảy ra lỗi khi sao chép tiêu đề mục công việc vào bảng tạm.",
+        copy_url_toast_success: "URL mục công việc đã được sao chép vào bảng tạm.",
+        copy_url_toast_error: "Đã xảy ra lỗi khi sao chép URL của mục công việc vào bảng nhớ tạm.",
+      },
+    },
+  },
+  date: "",
+  epics: "",
+  Unassigned: "",
+  creating_theme: "",
+  issue_advanced_git: "",
+  git_work_branch: "",
+  git_work_branch_hint: "",
+  git_work_branch_too_long: "",
+  git_work_branch_invalid_chars: "",
+  git_work_branch_placeholder: "",
+  progress: "",
+  customize_navigation: "Tùy chỉnh điều hướng",
+  personal: "Cá nhân",
+  accordion_navigation_control: "Điều hướng thanh bên dạng Accordion",
+  horizontal_navigation_bar: "Điều hướng dạng tab",
+  show_limited_projects_on_sidebar: "Hiển thị số lượng dự án giới hạn trên thanh bên",
+  enter_number_of_projects: "Nhập số lượng dự án",
+  repo_url_too_long: "",
+  git_repository_url_placeholder: "",
+  base_branch_too_long: "",
+  base_branch_invalid_chars: "",
+  base_branch_placeholder: "",
+  git_repository_url: "",
+  base_branch: "",
+  timezone_setting: "Cài đặt múi giờ hiện tại.",
+  language_setting: "Chọn ngôn ngữ sử dụng trong giao diện người dùng.",
+  language_and_time: "Ngôn ngữ & Thời gian",
+  preferences: "Tùy chọn",
 } as const;

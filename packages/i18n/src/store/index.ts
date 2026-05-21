@@ -4,7 +4,7 @@
  * See the LICENSE file for details.
  */
 
-import IntlMessageFormat from "intl-messageformat";
+import { IntlMessageFormat } from "intl-messageformat";
 import { get, merge } from "lodash-es";
 import { makeAutoObservable, runInAction } from "mobx";
 // constants
@@ -72,8 +72,6 @@ export class TranslationStore {
       });
       // Load current and fallback languages in parallel
       await this.loadPrimaryLanguages();
-      // Load all remaining languages in parallel
-      this.loadRemainingLanguages();
     } catch (error) {
       console.error("Failed in translation initialization:", error);
       runInAction(() => {
@@ -103,16 +101,6 @@ export class TranslationStore {
         this.isLoading = false;
       });
     }
-  }
-
-  private loadRemainingLanguages(): void {
-    const remainingLanguages = SUPPORTED_LANGUAGES.map((lang) => lang.value).filter(
-      (lang) => !this.loadedLanguages.has(lang) && lang !== this.currentLocale && lang !== FALLBACK_LANGUAGE
-    );
-    // Load all remaining languages in parallel
-    Promise.all(remainingLanguages.map((lang) => this.loadLanguageTranslations(lang))).catch((error) => {
-      console.error("Failed to load some remaining languages:", error);
-    });
   }
 
   private async loadLanguageTranslations(language: TLanguage): Promise<void> {
@@ -162,7 +150,7 @@ export class TranslationStore {
       const merged = modules.reduce((acc: any, module: any) => merge(acc, module.default), {});
       return { default: merged };
     } catch (error) {
-      throw new Error(`Failed to import and merge files for ${language}: ${error}`);
+      throw new Error(`Failed to import and merge files for ${language}`, { cause: error });
     }
   }
 
@@ -205,7 +193,7 @@ export class TranslationStore {
 
     // Get the message from the translations
     const message = get(this.translations[locale], key);
-    if (typeof message !== "string") return null;
+    if (typeof message !== "string" || message.length === 0) return null;
 
     try {
       const formatter = new IntlMessageFormat(message, locale);
