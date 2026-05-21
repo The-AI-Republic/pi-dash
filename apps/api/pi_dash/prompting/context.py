@@ -64,7 +64,7 @@ def _parent_done_payload(issue: Issue, run: AgentRun) -> str:
     the In Progress -> In Review transition. Fall back to ``run.parent_run``
     for tests and any future non-fresh review entry path.
     """
-    parent_run = run.parent_run
+    parent_run = getattr(run, "parent_run", None)
     if parent_run is None:
         ticker = getattr(issue, "agent_ticker", None)
         parent_run = getattr(ticker, "resume_parent_run", None)
