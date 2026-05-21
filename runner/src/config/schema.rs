@@ -11,6 +11,31 @@ pub struct Config {
     /// daemon; will grow once the cap is lifted (design.md §16).
     #[serde(default, rename = "runner")]
     pub runners: Vec<RunnerConfig>,
+    /// CLI-side configuration consumed by the `pidash issue/comment/
+    /// state/workspace` subcommands when invoked by the agent (or by the
+    /// operator out-of-band). Optional so older configs still parse;
+    /// missing means "fall back to environment variables".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cli: Option<CliSection>,
+}
+
+/// Top-level `[cli]` table. Holds the auth token the `pidash` CRUD
+/// subcommands present to the cloud. The CLI also reads `cloud_url`
+/// from `[daemon]` and `workspace_slug` from the primary `[[runner]]`
+/// — there's deliberately no duplication of those values here.
+///
+/// For v1 the token is populated manually by the operator (or by a
+/// future `pidash login` flow). A per-run, per-issue scoped token
+/// minted by the cloud is the next step; see
+/// `.ai_design/agent_cli_auth/` (TBD).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct CliSection {
+    /// Auth token presented to the cloud as `Authorization: Bearer …`
+    /// by the CRUD subcommands. Optional so a partial config (URL +
+    /// workspace, no token) still parses; the CLI errors with a clear
+    /// "no token" message when it's missing at command time.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -20,6 +45,24 @@ pub struct DaemonConfig {
     pub log_level: String,
     #[serde(default = "default_retention_days")]
     pub log_retention_days: u32,
+    /// Opt into the per-active-run observability snapshot on the poll
+    /// status. Default off; new fields ride only when this is true.
+    /// See `.ai_design/runner_agent_bridge/design.md` §4.2.
+    #[serde(default)]
+    pub agent_observability_v1: bool,
+    /// Auto-update policy. When `true` (default), the daemon swaps the
+    /// on-disk `pidash` binary in place whenever the cloud announces a
+    /// newer `latest_runner_version` in the welcome frame. The running
+    /// daemon is never disturbed — the new code only takes effect on
+    /// the next natural restart. When `false`, the daemon surfaces an
+    /// advisory in `pidash status` / TUI and waits for the operator to
+    /// run `pidash update` manually.
+    #[serde(default = "default_auto_update")]
+    pub auto_update: bool,
+}
+
+fn default_auto_update() -> bool {
+    true
 }
 
 fn default_log_level() -> String {
@@ -36,6 +79,8 @@ impl Default for DaemonConfig {
             cloud_url: String::new(),
             log_level: default_log_level(),
             log_retention_days: default_retention_days(),
+            agent_observability_v1: false,
+            auto_update: default_auto_update(),
         }
     }
 }
@@ -434,8 +479,11 @@ mod tests {
                 cloud_url: "https://x".into(),
                 log_level: "info".into(),
                 log_retention_days: 14,
+                agent_observability_v1: false,
+                auto_update: true,
             },
             runners,
+            cli: None,
         }
     }
 

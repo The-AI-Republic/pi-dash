@@ -26,12 +26,12 @@ urlpatterns = [
     ),
     # Project-level: scheduler-binding CRUD (project admin).
     path(
-        "workspaces/<str:slug>/projects/<uuid:project_id>/scheduler-bindings/",
+        "workspaces/<str:slug>/projects/<str:project_id>/scheduler-bindings/",
         ProjectSchedulerBindingListEndpoint.as_view(),
         name="project-scheduler-bindings-list",
     ),
     path(
-        "workspaces/<str:slug>/projects/<uuid:project_id>/scheduler-bindings/<uuid:binding_id>/",
+        "workspaces/<str:slug>/projects/<str:project_id>/scheduler-bindings/<uuid:binding_id>/",
         ProjectSchedulerBindingDetailEndpoint.as_view(),
         name="project-scheduler-bindings-detail",
     ),

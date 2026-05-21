@@ -13,8 +13,8 @@ use crate::cloud::protocol::{ApprovalDecision, ApprovalKind, FailureReason};
 use crate::codex::app_server::AppServer;
 use crate::codex::jsonrpc::{self, Incoming};
 use crate::codex::schema::{
-    ApprovalResponseParams, ClientInfo, InitializeParams, NotificationKind, ThreadResumeParams,
-    ThreadStartParams, TurnInputItem, TurnStartParams,
+    ApprovalResponseParams, ClientInfo, InitializeParams, NotificationKind, ThreadStartParams,
+    TurnInputItem, TurnStartParams,
 };
 
 pub struct Bridge {
@@ -58,11 +58,7 @@ impl Bridge {
 
     pub async fn run(&mut self, payload: &RunPayload, cwd: &Path) -> Result<BridgeCursor> {
         self.initialize().await?;
-        let thread_id = if let Some(existing) = &payload.resume_thread_id {
-            self.resume_thread(existing).await?
-        } else {
-            self.start_thread(cwd).await?
-        };
+        let thread_id = self.start_thread(cwd).await?;
         self.start_turn(&thread_id, payload).await?;
         Ok(BridgeCursor {
             run_id: payload.run_id,
@@ -113,32 +109,6 @@ impl Bridge {
             .and_then(|v| v.as_str())
             .map(|s| s.to_string())
             .context("thread/start missing threadId")
-    }
-
-    async fn resume_thread(&mut self, thread_id: &str) -> Result<String> {
-        let id = self.server.alloc_id();
-        let line = jsonrpc::request(
-            id,
-            "thread/resume",
-            &ThreadResumeParams {
-                thread_id: thread_id.to_string(),
-            },
-        )?;
-        self.server.send_raw(&line).await?;
-        match self.await_response(id, Duration::from_secs(30)).await {
-            Ok(_) => Ok(thread_id.to_string()),
-            Err(e) => {
-                // The Codex app-server returns an error when the thread id
-                // is unknown locally (session store wiped, runner reinstalled,
-                // id stale). Surface as a typed error so the supervisor can
-                // emit FailureReason::ResumeUnavailable rather than the
-                // generic CodexCrash, and the cloud can drop the pin.
-                Err(anyhow::Error::new(crate::agent::ResumeUnavailable {
-                    thread_id: thread_id.to_string(),
-                    detail: format!("{e:#}"),
-                }))
-            }
-        }
     }
 
     async fn start_turn(&mut self, thread_id: &str, payload: &RunPayload) -> Result<()> {
@@ -289,9 +259,7 @@ impl BridgeCursor {
                     // a `turn/completed` with no conclusion right after a
                     // systemError, so the runner reported "completed" on
                     // 400s from OpenAI.
-                    let conclusion = params
-                        .get("conclusion")
-                        .and_then(|v| v.as_str());
+                    let conclusion = params.get("conclusion").and_then(|v| v.as_str());
                     if conclusion == Some("success") {
                         vec![BridgeEvent::Completed {
                             run_id: self.run_id,
@@ -358,9 +326,7 @@ impl BridgeCursor {
                         .get("status")
                         .and_then(|s| s.get("activeFlags"))
                         .and_then(|f| f.as_array())
-                        .map(|arr| {
-                            arr.iter().any(|v| v.as_str() == Some("waitingOnApproval"))
-                        })
+                        .map(|arr| arr.iter().any(|v| v.as_str() == Some("waitingOnApproval")))
                         .unwrap_or(false);
                     if waiting && let Some(pending) = self.pending_command.clone() {
                         // We've already emitted an ApprovalRequest for this
@@ -411,10 +377,8 @@ impl BridgeCursor {
                     // Cache the most recent in-progress commandExecution so
                     // a later `waitingOnApproval` flag can refer to it.
                     if let Some(item) = params.get("item")
-                        && item.get("type").and_then(|v| v.as_str())
-                            == Some("commandExecution")
-                        && item.get("status").and_then(|v| v.as_str())
-                            == Some("inProgress")
+                        && item.get("type").and_then(|v| v.as_str()) == Some("commandExecution")
+                        && item.get("status").and_then(|v| v.as_str()) == Some("inProgress")
                     {
                         let item_id = item
                             .get("id")
@@ -450,8 +414,7 @@ impl BridgeCursor {
                     // The cached command finished; drop the tracking so a
                     // late waitingOnApproval doesn't re-open it.
                     if let Some(item) = params.get("item")
-                        && item.get("type").and_then(|v| v.as_str())
-                            == Some("commandExecution")
+                        && item.get("type").and_then(|v| v.as_str()) == Some("commandExecution")
                     {
                         let same = self
                             .pending_command
@@ -517,10 +480,7 @@ mod translate_tests {
         assert_eq!(evs.len(), 1);
         match &evs[0] {
             BridgeEvent::Failed { detail, .. } => {
-                assert_eq!(
-                    detail.as_deref(),
-                    Some("turn/completed without conclusion")
-                );
+                assert_eq!(detail.as_deref(), Some("turn/completed without conclusion"));
             }
             other => panic!("expected Failed, got {other:?}"),
         }
@@ -602,15 +562,23 @@ mod translate_tests {
             json!({"status": {"activeFlags": ["waitingOnApproval"]}}),
         ));
         match evs.as_slice() {
-            [BridgeEvent::ApprovalRequest {
-                kind,
-                payload,
-                reason,
-                ..
-            }] => {
+            [
+                BridgeEvent::ApprovalRequest {
+                    kind,
+                    payload,
+                    reason,
+                    ..
+                },
+            ] => {
                 assert!(matches!(kind, ApprovalKind::CommandExecution));
-                assert_eq!(payload.get("command").and_then(|v| v.as_str()), Some("rm -rf /tmp/x"));
-                assert_eq!(payload.get("synthesized").and_then(|v| v.as_bool()), Some(true));
+                assert_eq!(
+                    payload.get("command").and_then(|v| v.as_str()),
+                    Some("rm -rf /tmp/x")
+                );
+                assert_eq!(
+                    payload.get("synthesized").and_then(|v| v.as_bool()),
+                    Some(true)
+                );
                 assert!(reason.as_deref().unwrap_or("").contains("rm -rf /tmp/x"));
             }
             other => panic!("expected ApprovalRequest, got {other:?}"),
@@ -639,7 +607,10 @@ mod translate_tests {
             "thread/status/changed",
             json!({"status": {"activeFlags": ["waitingOnApproval"]}}),
         ));
-        assert!(matches!(first.as_slice(), [BridgeEvent::ApprovalRequest { .. }]));
+        assert!(matches!(
+            first.as_slice(),
+            [BridgeEvent::ApprovalRequest { .. }]
+        ));
 
         let second = c.translate(notif(
             "thread/status/changed",

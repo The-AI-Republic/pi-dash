@@ -29,6 +29,43 @@ pidash tui       # optional: open the interactive UI
 
 Generate the one-time token from the Pi Dash web UI under the runners admin page.
 
+## Auto-update
+
+`pidash` keeps itself current. When the cloud announces a newer `latest_runner_version` in the welcome frame, the running daemon swaps the on-disk `pidash` binary in place. The currently-running process is **never disturbed** — it keeps its loaded copy until the next natural restart (`pidash restart`, host reboot, or a service-manager respawn after a crash). This gives you the Claude-Code-style "always current" experience without ever killing in-flight work.
+
+The toggle lives in the General tab's **Daemon settings** card (`pidash tui` → `auto_update`). Default is **on**; press Enter to flip, then `[w]` to save. With auto-update off, the runner instead surfaces a yellow `⚠ Update v0.1.x available` advisory in the Connection card and on `pidash status`, and you apply updates manually:
+
+```bash
+pidash update              # swap binary; tells you to run pidash restart
+pidash update --check      # report whether an update is available
+pidash update --restart    # swap and restart the daemon in one shot
+```
+
+`pidash update` only works for binaries installed via `pidash-installer.sh` (it reads the cargo-dist install receipt). Source builds and `cargo install`'d binaries don't have a receipt and get a clear "reinstall via the installer if you want self-update" error.
+
+### What the advisory states mean
+
+| State                                                     | TUI / `pidash status`                                  |
+| --------------------------------------------------------- | ------------------------------------------------------ |
+| Running version ≥ `latest_announced` and ≥ `min_required` | nothing shown                                          |
+| Newer `latest_announced`, swap already on disk            | yellow `⚠ Restart to apply v0.1.x`                     |
+| Newer `latest_announced`, auto-update on, swap pending    | yellow `⚠ Update v0.1.x pending swap`                  |
+| Newer `latest_announced`, auto-update off                 | yellow `⚠ Update v0.1.x available — run pidash update` |
+| Running version below `min_required` (cloud-set floor)    | red `⛔ Update required: cloud floor v0.1.x`           |
+
+`min_required` is advisory in the current implementation — the daemon does not refuse new tasks below the floor. The red banner is the user-facing signal that they should act before the cloud bumps the wire-protocol floor and disconnects them.
+
+### Announcing a release from the cloud
+
+The Pi Dash backend reads two optional environment variables and folds them into every session-create welcome response:
+
+| Env var                 | Effect                                                                                    |
+| ----------------------- | ----------------------------------------------------------------------------------------- |
+| `LATEST_RUNNER_VERSION` | Drives the yellow "update available" advisory and triggers auto-swap on opted-in runners. |
+| `MIN_RUNNER_VERSION`    | Drives the red "update required" advisory.                                                |
+
+Set both after cutting a runner release (`RELEASING.md` walks through tagging). Leave them unset to skip the announcement.
+
 ## Design docs
 
 See `.ai_design/implement_runner/`:
@@ -81,7 +118,7 @@ All secrets on disk are written with `0600`. The Unix IPC socket is also `0600`.
 
 ## Protocol
 
-Wire version is `2` — bumped on incompatible shape changes. See `src/cloud/protocol.rs` for exhaustive schemas. Runner authenticates to the cloud with an HTTP `Authorization: Bearer <runner_secret>` header on the WebSocket upgrade request and echoes its UUID in `X-Runner-Id`. The server echoes an accepted `protocol_version` in the `welcome` frame.
+Wire version is `4` — bumped on incompatible shape changes. See `src/cloud/protocol.rs` for the exhaustive schema (including the v3→v4 move from WebSocket to per-runner HTTPS long-poll). The runner authenticates to the cloud with a per-runner access token issued from a refresh-token pair; the cloud echoes an accepted `protocol_version` and may include optional `latest_runner_version` / `min_runner_version` advisories in the `welcome` payload (consumed by the auto-update path).
 
 ## Test strategy
 

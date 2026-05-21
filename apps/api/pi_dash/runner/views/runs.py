@@ -104,6 +104,13 @@ class AgentRunListEndpoint(APIView):
         if triggered_by == "comment_and_run":
             return self._post_comment_and_run(request)
 
+        # Run AI button — same templated-prompt path as a state transition
+        # into the issue's current ticking phase. The frontend sends only
+        # the issue id; the prompt is rendered server-side from the phase
+        # template via ``composer.build_first_turn``.
+        if triggered_by == "run_ai":
+            return self._post_run_ai(request)
+
         prompt = request.data.get("prompt")
         workspace_id = request.data.get("workspace")
         if not prompt:
@@ -146,13 +153,64 @@ class AgentRunListEndpoint(APIView):
             status=status.HTTP_201_CREATED,
         )
 
+    def _post_run_ai(self, request):
+        """Dispatch a run for the "Run AI" button.
+
+        Body must include ``work_item`` (issue id). Builds the prompt
+        from the phase template (``coding-task`` for In Progress,
+        ``review`` for In Review, default otherwise) so the manual
+        button produces the same prompt as a state-transition or tick
+        for that phase.
+        """
+        from pi_dash.db.models.issue import Issue
+        from pi_dash.orchestration import scheduling
+
+        work_item_id = request.data.get("work_item")
+        if not work_item_id:
+            return Response(
+                {"error": "work_item is required for run_ai"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        issue = Issue.all_objects.filter(pk=work_item_id).first()
+        if issue is None:
+            return Response(
+                {"error": "issue not found"}, status=status.HTTP_404_NOT_FOUND
+            )
+        if not is_workspace_member(request.user, issue.workspace_id):
+            return Response(
+                {"error": "issue not found"}, status=status.HTTP_404_NOT_FOUND
+            )
+
+        with transaction.atomic():
+            run = scheduling.dispatch_run_ai_run(issue, actor=request.user)
+            # Run AI is explicit human re-engagement — mirror the Comment
+            # & Run reset so the next automatic tick budget restarts
+            # cleanly. Only fires when the dispatch actually committed a
+            # run (active-run-exists / no-pod return None).
+            if run is not None:
+                scheduling.reset_ticker_after_comment_and_run(issue)
+        if run is None:
+            return Response(
+                {
+                    "error": (
+                        "could not dispatch — issue may already have an "
+                        "active run, or no pod is available"
+                    )
+                },
+                status=status.HTTP_409_CONFLICT,
+            )
+        return Response(
+            AgentRunSerializer(run).data,
+            status=status.HTTP_201_CREATED,
+        )
+
     def _post_comment_and_run(self, request):
-        """Dispatch a continuation run for an issue (Comment & Run button).
+        """Dispatch a follow-up run for an issue (Comment & Run button).
 
         Body must include ``work_item`` (issue id). The just-posted comment
         is expected to already exist on the issue (the client posts it
-        before calling this endpoint); the prompt builder picks it up via
-        :func:`pi_dash.prompting.composer.build_continuation`.
+        before calling this endpoint); the agent reads it from the comment
+        thread via ``pidash comment list`` when the run executes.
         """
         from pi_dash.db.models.issue import Issue
         from pi_dash.orchestration import scheduling

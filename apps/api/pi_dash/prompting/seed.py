@@ -35,8 +35,8 @@ REVIEW_TEMPLATE_BODY = """\
 You are reviewing the work product of a previous implementation pass.
 "Review" can mean different things depending on what was produced.
 
-Issue: {{ issue.name }}
-Description: {{ issue.description_stripped }}
+Issue: {{ issue.title }}
+Description: {{ issue.description }}
 Recent activity:
 {{ comments_section }}
 Latest implementation run output (read this carefully —

@@ -8,13 +8,19 @@ import { API_BASE_URL } from "@pi-dash/constants";
 // services
 import { APIService } from "@/services/api.service";
 
-export type TCreateAgentRunPayload = {
+/**
+ * Run AI button dispatch — server renders the prompt from the issue's
+ * phase template (``coding-task`` for In Progress, ``review`` for In
+ * Review, default otherwise) via ``composer.build_first_turn``. The
+ * client never sends a prompt body; the manual button produces the
+ * same prompt a state transition / tick produces for that phase.
+ *
+ * Server-side wiring: see ``apps/api/pi_dash/runner/views/runs.py``
+ * ``_post_run_ai`` (gated on ``triggered_by === "run_ai"``).
+ */
+export type TRunAiPayload = {
   workspace: string;
-  prompt: string;
-  work_item?: string;
-  pod?: string;
-  run_config?: Record<string, unknown>;
-  required_capabilities?: string[];
+  work_item: string;
 };
 
 /**
@@ -47,8 +53,13 @@ export class AgentRunService extends APIService {
     super(API_BASE_URL);
   }
 
-  async createAgentRun(data: TCreateAgentRunPayload): Promise<TAgentRun> {
-    return this.post(`/api/runners/runs/`, data)
+  /**
+   * Dispatch a run for the "Run AI" button. Prompt is rendered server-
+   * side from the issue's phase template — the client sends only the
+   * workspace + issue ids.
+   */
+  async runAi(data: TRunAiPayload): Promise<TAgentRun> {
+    return this.post(`/api/runners/runs/`, { ...data, triggered_by: "run_ai" })
       .then((response) => response?.data)
       .catch((error) => {
         throw error?.response?.data ?? error;

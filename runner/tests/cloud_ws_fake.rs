@@ -39,6 +39,8 @@ async fn start_fake_cloud() -> (SocketAddr, tokio::task::JoinHandle<()>) {
             server_time: Utc::now(),
             heartbeat_interval_secs: 25,
             protocol_version: WIRE_VERSION,
+            latest_runner_version: None,
+            min_runner_version: None,
         });
         tx.send(Message::Text(serde_json::to_string(&welcome).unwrap()))
             .await
@@ -64,7 +66,6 @@ async fn start_fake_cloud() -> (SocketAddr, tokio::task::JoinHandle<()>) {
             expected_codex_model: None,
             approval_policy_overrides: None,
             deadline: None,
-            resume_thread_id: None,
         });
         tx.send(Message::Text(serde_json::to_string(&assign).unwrap()))
             .await
@@ -152,6 +153,8 @@ async fn start_flapping_cloud(connections: usize) -> (SocketAddr, tokio::task::J
                 server_time: Utc::now(),
                 heartbeat_interval_secs: 25,
                 protocol_version: WIRE_VERSION,
+                latest_runner_version: None,
+                min_runner_version: None,
             });
             let _ = tx
                 .send(Message::Text(serde_json::to_string(&welcome).unwrap()))
@@ -274,6 +277,8 @@ async fn start_two_hello_collector(
             server_time: Utc::now(),
             heartbeat_interval_secs: 25,
             protocol_version: WIRE_VERSION,
+            latest_runner_version: None,
+            min_runner_version: None,
         });
         let _ = tx
             .send(Message::Text(serde_json::to_string(&welcome).unwrap()))

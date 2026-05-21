@@ -44,6 +44,7 @@ def add_in_review_state_to_projects(apps, schema_editor):
         exists = State._default_manager.filter(
             project=project,
             name=REVIEW_NAME,
+            group=REVIEW_GROUP,
             deleted_at__isnull=True,
         ).exists()
         if exists:

@@ -48,6 +48,10 @@ export const GROUP_CHOICES = {
     key: "started",
     i18n_label: "workspace_projects.state.started",
   },
+  review: {
+    key: "review",
+    i18n_label: "workspace_projects.state.review",
+  },
   completed: {
     key: "completed",
     i18n_label: "workspace_projects.state.completed",

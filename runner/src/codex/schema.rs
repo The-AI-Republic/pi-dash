@@ -20,7 +20,6 @@ pub enum NotificationKind {
     AccountReauthRequired,
     Other(String),
 }
-
 impl NotificationKind {
     pub fn from_method(method: &str) -> Self {
         match method {
@@ -100,10 +99,4 @@ pub struct TurnInputItem {
 pub struct ApprovalResponseParams {
     pub approval_id: String,
     pub decision: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ThreadResumeParams {
-    pub thread_id: String,
 }

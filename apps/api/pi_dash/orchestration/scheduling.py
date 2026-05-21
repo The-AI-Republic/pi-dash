@@ -47,11 +47,12 @@ logger = logging.getLogger(__name__)
 
 PAUSED_STATE_NAME = "Paused"
 
-# Retained for backwards compatibility with callers / tests that import
-# the literal. New code should use
+# DEPRECATED: retained only for backward compatibility with external
+# importers (tests, integrations). Internal callers must use
 # ``orchestration.agent_phases.is_ticking_state`` /
-# ``phase_config_for`` instead. The literal still names the In Progress
-# phase's state — see ``agent_phases.PHASES``.
+# ``phase_config_for`` — the literal still names the In Progress
+# phase's state, see ``agent_phases.PHASES``. Remove once no
+# remaining imports of ``DELEGATION_STATE_NAME`` exist.
 DELEGATION_STATE_NAME = "In Progress"
 
 
@@ -110,14 +111,15 @@ def arm_ticker(
     *,
     dispatch_immediate: bool = True,  # noqa: ARG001 — caller-only signal
 ) -> IssueAgentTicker:
-    """Create or reset the ticker for an issue entering Started/In Progress.
+    """Create or reset the ticker for an issue entering a ticking state.
 
     ``dispatch_immediate`` does not affect the schedule itself — arming
     *never* fires a run. The flag exists only to document the caller's
-    intent: ``True`` means the state-transition handler is firing the
-    immediate dispatch on its own; ``False`` means another path
-    (Comment & Run on a Paused issue, §4.6) owns the dispatch and arming
-    should not duplicate it.
+    intent: ``True`` means the caller is firing (or expects another
+    immediate dispatch), ``False`` means arming alone is enough — no
+    new run should be inferred from this call. Used by Comment & Run
+    on a Paused issue (§4.6) and by re-arm-on-comment in
+    :func:`pi_dash.orchestration.service.handle_issue_comment`.
 
     Honors ``user_disabled`` and project-level ``agent_ticking_enabled``:
     sets ``enabled = False`` when either suppresses ticks.
@@ -199,7 +201,27 @@ def disarm_ticker(
     triggers ``maybe_apply_deferred_pause`` to auto-Pause the issue.
     Terminal-signal disarms (``completed`` / ``blocked``) leave the
     issue in place for the human to act.
+
+    Note: this helper *overwrites* ``disarm_reason`` even when the
+    ticker is already disabled — callers are expected to know which
+    cause should win. This differs from
+    :func:`maybe_disarm_on_terminal_signal`, which deliberately
+    preserves the prior reason so an opportunistic terminal-signal
+    disarm cannot clobber a pre-existing ``CAP_HIT``. Today the only
+    production caller is the state-transition handler with the
+    default ``LEFT_TICKING_STATE`` reason. Callers needing the
+    terminal-signal semantics must use
+    :func:`maybe_disarm_on_terminal_signal`; passing
+    ``TERMINAL_SIGNAL`` here raises ``ValueError`` because the
+    overwrite-always behavior would silently clobber a pre-existing
+    ``CAP_HIT`` and skip the auto-pause.
     """
+    if reason == TickerDisarmReason.TERMINAL_SIGNAL:
+        raise ValueError(
+            "disarm_ticker overwrites disarm_reason — use "
+            "maybe_disarm_on_terminal_signal() for TERMINAL_SIGNAL "
+            "to preserve a prior CAP_HIT and the auto-pause it gates."
+        )
     with transaction.atomic():
         sched = (
             IssueAgentTicker.objects.select_for_update()
@@ -334,6 +356,7 @@ def reset_ticker_after_comment_and_run(issue: Issue) -> Optional[IssueAgentTicke
 
 TRIGGER_TICK = "tick"
 TRIGGER_COMMENT_AND_RUN = "comment_and_run"
+TRIGGER_RUN_AI = "run_ai"
 
 
 def _resolve_pod_for_issue(issue: Issue):
@@ -430,6 +453,74 @@ def dispatch_continuation_run(
     return outcome.created_run
 
 
+def dispatch_run_ai_run(issue: Issue, *, actor) -> Optional[AgentRun]:
+    """Public wrapper for the "Run AI" button.
+
+    Builds the same templated prompt the state-transition-into-In-Progress
+    path produces, by routing through the orchestration service's run-
+    creation helpers (which call ``composer.build_first_turn``). This is
+    the prompt-parity contract: a manual Run AI click renders the phase's
+    template against the issue's current state, identical to a tick or a
+    state transition into the same phase.
+
+    Behavior:
+    - Bails (returns ``None``) when an active run already exists on the
+      issue (single-active-run guardrail) or no pod is available.
+    - When a prior run exists, delegates to ``_create_continuation_run``
+      so the new run inherits parent linkage and runner pinning (repo
+      locality, same as Comment & Run / tick).
+    - When no prior run exists, delegates to ``_create_and_dispatch_run``
+      so a brand-new issue's first agent run still goes through the
+      templated prompt path.
+    """
+    from pi_dash.orchestration import service as orchestration_service
+
+    if orchestration_service._active_run_for(issue) is not None:
+        logger.info(
+            "agent_ticker: skip dispatch issue=%s reason=active-run-exists triggered_by=%s",
+            issue.pk,
+            TRIGGER_RUN_AI,
+        )
+        return None
+
+    creator = _resolve_creator_for_trigger(
+        issue, triggered_by=TRIGGER_RUN_AI, actor=actor
+    )
+    if creator is None:
+        logger.warning(
+            "agent_ticker: skip dispatch issue=%s reason=no-creator triggered_by=%s",
+            issue.pk,
+            TRIGGER_RUN_AI,
+        )
+        return None
+
+    pod = _resolve_pod_for_issue(issue)
+    if pod is None:
+        logger.warning(
+            "agent_ticker: skip dispatch issue=%s reason=no-pod triggered_by=%s",
+            issue.pk,
+            TRIGGER_RUN_AI,
+        )
+        return None
+
+    parent = orchestration_service._latest_prior_run(issue)
+    if parent is not None:
+        outcome = orchestration_service._create_continuation_run(
+            issue=issue,
+            parent=parent,
+            creator=creator,
+            pod=pod,
+        )
+    else:
+        outcome = orchestration_service._create_and_dispatch_run(
+            issue=issue,
+            parent=None,
+            creator=creator,
+            pod=pod,
+        )
+    return outcome.created_run
+
+
 # ---------------------------------------------------------------------------
 # Deferred cap-hit pause (§4.4.1)
 # ---------------------------------------------------------------------------
@@ -506,6 +597,13 @@ def maybe_apply_deferred_pause(run: AgentRun) -> bool:
         )
         if locked_sched is None or locked_sched.enabled:
             return False
+        # Re-check disarm_reason under the lock so a concurrent
+        # ``disarm_ticker`` (e.g., the user moved the issue out of the
+        # ticking state mid-flight, flipping the reason from CAP_HIT to
+        # LEFT_TICKING_STATE) cannot drive an auto-pause off a stale
+        # unlocked read.
+        if locked_sched.disarm_reason != TickerDisarmReason.CAP_HIT:
+            return False
         # Re-fetch the issue under the same transaction to guard against a
         # racing state transition.
         IssueModel = type(issue)
@@ -535,10 +633,12 @@ __all__ = [
     "INFINITE_MAX_TICKS",
     "PAUSED_STATE_NAME",
     "TRIGGER_COMMENT_AND_RUN",
+    "TRIGGER_RUN_AI",
     "TRIGGER_TICK",
     "arm_ticker",
     "disarm_ticker",
     "dispatch_continuation_run",
+    "dispatch_run_ai_run",
     "maybe_apply_deferred_pause",
     "maybe_disarm_on_terminal_signal",
     "reset_ticker_after_comment_and_run",

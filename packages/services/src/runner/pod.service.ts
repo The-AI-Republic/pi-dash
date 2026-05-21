@@ -26,7 +26,7 @@ export class PodService extends APIService {
       });
   }
 
-  async create(input: { workspace: string; name: string; description?: string }): Promise<IPod> {
+  async create(input: { project: string; name: string; description?: string }): Promise<IPod> {
     return this.post("/api/runners/pods/", input)
       .then((r) => r?.data)
       .catch((e) => {

@@ -13,32 +13,45 @@ from pi_dash.runner.views import (
     AgentRunReleasePinEndpoint,
     ApprovalDecideEndpoint,
     ApprovalListEndpoint,
-    ConnectionDetailEndpoint,
-    ConnectionListCreateEndpoint,
+    MachineTokenTicketEndpoint,
     PodDetailEndpoint,
     PodListEndpoint,
     ProjectListEndpoint,
     RunnerDetailEndpoint,
+    RunnerInviteEndpoint,
     RunnerListEndpoint,
+    RunnerReviveEndpoint,
+    RunnerRevokeEndpoint,
 )
 
 urlpatterns = [
     path("", RunnerListEndpoint.as_view(), name="runner-list"),
-    # Connections (paired dev machines).
+    # Mint a runner-enrollment invite (one-time token). Replaces the
+    # legacy ``connections/`` create flow.
     path(
-        "connections/",
-        ConnectionListCreateEndpoint.as_view(),
-        name="connection-list",
+        "invites/",
+        RunnerInviteEndpoint.as_view(),
+        name="runner-invite",
     ),
     path(
-        "connections/<uuid:connection_id>/",
-        ConnectionDetailEndpoint.as_view(),
-        name="connection-detail",
+        "machine-tokens/<uuid:workspace_id>/tickets/",
+        MachineTokenTicketEndpoint.as_view(),
+        name="machine-token-ticket",
     ),
     path(
         "<uuid:runner_id>/",
         RunnerDetailEndpoint.as_view(),
         name="runner-detail",
+    ),
+    path(
+        "<uuid:runner_id>/revoke/",
+        RunnerRevokeEndpoint.as_view(),
+        name="runner-revoke",
+    ),
+    path(
+        "<uuid:runner_id>/revive/",
+        RunnerReviveEndpoint.as_view(),
+        name="runner-revive",
     ),
     # Pods
     path("pods/", PodListEndpoint.as_view(), name="pod-list"),

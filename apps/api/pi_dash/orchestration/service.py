@@ -28,15 +28,17 @@ from pi_dash.orchestration.agent_phases import (
     is_ticking_state,
     phase_config_for,
 )
-from pi_dash.prompting.composer import build_continuation, build_first_turn
+from pi_dash.prompting.composer import build_first_turn
 from pi_dash.prompting.renderer import PromptRenderError
 from pi_dash.runner.models import AgentRun, AgentRunStatus, Pod, Runner, RunnerStatus
 
 logger = logging.getLogger(__name__)
 
-#: Retained for backwards compatibility with imports. New code should use
+#: DEPRECATED: retained only for backward compatibility with external
+#: importers (tests, integrations). Internal callers must use
 #: ``orchestration.agent_phases.is_ticking_state`` /
-#: ``phase_config_for`` instead.
+#: ``phase_config_for``. Remove this constant once no remaining
+#: imports of ``DELEGATION_STATE_NAME`` exist.
 DELEGATION_STATE_NAME = "In Progress"
 
 
@@ -137,8 +139,8 @@ def handle_issue_state_transition(
 
     # Disarm when leaving a ticking state into anything that isn't the
     # *same* ticking state. Inter-phase transitions (e.g., In Progress
-    # → In Review) intentionally disarm-then-re-arm so the ticker row
-    # lands on the new phase's effective cadence.
+    # → In Review) intentionally disarm-then-re-arm so the ticker row's
+    # runtime fields land on the new phase's defaults.
     if is_ticking_state(from_state) and (
         not is_ticking_state(to_state) or from_state.group != to_state.group
     ):
@@ -284,8 +286,9 @@ def handle_issue_comment(comment: IssueComment) -> ContinuationOutcome:
     2. Skip when the issue's state group disallows continuation (see
        :data:`CONTINUATION_ELIGIBLE_GROUPS`).
     3. Coalesce: if a QUEUED follow-up already exists for the issue,
-       leave it alone — the prompt builder will pick up the new comment
-       at dispatch time via :func:`build_continuation`.
+       leave it alone — the next agent run will read the comment thread
+       fresh (via ``pidash comment list``) when it executes, so a duplicate
+       run isn't needed to surface the new comment.
     4. Skip if the latest run is itself ``is_active`` (RUNNING / ASSIGNED
        / AWAITING_*). The terminate-side sweep will pick the comment up
        when that run finishes.
@@ -314,7 +317,10 @@ def handle_issue_comment(comment: IssueComment) -> ContinuationOutcome:
     # coalesce / active-run / no-pod early returns so the ticker
     # restarts even when this specific comment doesn't dispatch a
     # new run (the existing run / queued follow-up will pick up the
-    # comment, and the next tick happens automatically).
+    # comment, and the next tick happens automatically). The
+    # no-prior-run case also re-arms — ``fire_tick`` will still skip
+    # those ticks via its own no-prior-run guard, so the ticker row
+    # is harmless until something else creates a run.
     from pi_dash.orchestration import scheduling
 
     if is_ticking_state(issue.state):
@@ -331,8 +337,9 @@ def handle_issue_comment(comment: IssueComment) -> ContinuationOutcome:
         logger.info("orchestration.continuation: skip issue=%s reason=no-prior-run", issue.pk)
         return ContinuationOutcome(reason="no-prior-run")
 
-    # Coalesce against an already-queued follow-up. The prompt builder
-    # rebuilds the continuation prompt from comments at dispatch time.
+    # Coalesce against an already-queued follow-up. The agent reads the
+    # comment thread fresh on dispatch, so the queued run will pick up
+    # the new comment without needing a separate queued run per comment.
     queued_follow_up = (
         AgentRun.objects.filter(
             work_item=issue, status=AgentRunStatus.QUEUED
@@ -370,7 +377,13 @@ def handle_issue_comment(comment: IssueComment) -> ContinuationOutcome:
 def _create_continuation_run(
     *, issue: Issue, parent: AgentRun, creator, pod
 ) -> ContinuationOutcome:
-    """Create R_next as a continuation of ``parent`` with optional pin."""
+    """Create R_next as a follow-up to ``parent`` with optional pin.
+
+    "Continuation" is a historical name. The new run renders a self-sufficient
+    full prompt and starts a fresh agent session — it does not resume the
+    parent's session. ``parent`` is retained for lineage / pin selection only.
+    See ``.ai_design/ticking_optimization/design.md``.
+    """
     from pi_dash.runner.services import matcher
 
     pinned_runner = _pinned_runner_for(parent)
@@ -392,7 +405,7 @@ def _create_continuation_run(
             },
         )
         try:
-            run.prompt = build_continuation(issue, run)
+            run.prompt = build_first_turn(issue, run)
         except PromptRenderError as exc:
             run.status = AgentRunStatus.FAILED
             run.error = f"prompt render failed: {exc}"
@@ -412,12 +425,14 @@ def _create_continuation_run(
 def _pinned_runner_for(parent: AgentRun) -> Optional[Runner]:
     """Return the runner to pin a follow-up to, or None.
 
-    Pin only when the parent has a session id we can resume against and
-    its runner is still online-eligible. Otherwise leave the new run
-    unpinned so any runner in the pod can take it (with a fresh-context
-    fallback).
+    Prefer the parent's runner when it's still eligible. The motivation is
+    **repo locality**: that runner already has the issue's branch checked
+    out and the workpad context on disk, so the next run avoids re-cloning
+    or re-fetching. Resume is no longer in play
+    (see ``.ai_design/ticking_optimization/design.md``); pinning is best-
+    effort and the run is correct on any runner in the pod.
     """
-    if not parent.thread_id or parent.runner_id is None:
+    if parent.runner_id is None:
         return None
     runner = parent.runner
     if runner is None:
@@ -518,14 +533,14 @@ def dispatch_scheduler_run(
     """
     from pi_dash.runner.services import matcher
 
-    pod = Pod.default_for_workspace_id(binding.workspace_id)
+    pod = Pod.default_for_project_id(binding.project_id)
     if pod is None:
         logger.warning(
-            "scheduler.dispatch: skip binding=%s reason=no-default-pod workspace=%s",
+            "scheduler.dispatch: skip binding=%s reason=no-default-pod project=%s",
             binding.pk,
-            binding.workspace_id,
+            binding.project_id,
         )
-        return None, f"no default pod for workspace {binding.workspace_id}"
+        return None, f"no default pod for project {binding.project_id}"
 
     creator = binding.actor
     if creator is None:

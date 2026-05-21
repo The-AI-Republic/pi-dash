@@ -2,97 +2,109 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 # See the LICENSE file for details.
 
-"""Channels group-send helpers used by orchestrator code (Celery tasks, views)
-to push messages onto a connected runner's WebSocket.
+"""Helpers for routing control messages to a runner.
 
-Usage:
-
-    from pi_dash.runner.services.pubsub import send_to_runner
-    send_to_runner(runner_id, {"type": "assign", ...})
-
-The corresponding group is created in :class:`RunnerConsumer` as
-``runner.<runner_id>``.
+Per ``.ai_design/move_to_https/design.md`` Phase 5, the always-on
+WebSocket control plane is retired. Control traffic moves to Redis
+Streams via :mod:`pi_dash.runner.services.outbox`. This module exposes
+the small set of verbs the orchestrator uses (``send_to_runner``,
+``close_runner_session``, ``send_runner_revoke``) as thin wrappers
+over that outbox.
 """
 
 from __future__ import annotations
 
 import logging
+import uuid as _uuid
 from typing import Any, Dict
 from uuid import UUID
 
-from asgiref.sync import async_to_sync
-from channels.layers import get_channel_layer
+from pi_dash.runner.services.outbox import (
+    RunnerOfflineError,
+    enqueue_for_runner,
+)
 
 logger = logging.getLogger(__name__)
 
 
 def runner_group(runner_id: UUID | str) -> str:
+    """Legacy Channels group name; retained for the upgrade-ticket WS."""
     return f"runner.{runner_id}"
 
 
+def _ensure_envelope(message: Dict[str, Any]) -> Dict[str, Any]:
+    body = dict(message)
+    body.setdefault("mid", str(_uuid.uuid4()))
+    return body
+
+
 def send_to_runner(runner_id: UUID | str, message: Dict[str, Any]) -> None:
-    """Best-effort fire-and-forget send to a runner's current WS process.
+    """Best-effort enqueue of a control message for the runner.
 
-    The ``runner_id`` is stamped onto the channels event so the
-    consumer can tag the outbound envelope's ``rid`` correctly even
-    in multi-runner mode where one consumer serves N runner groups.
+    Routes through the outbox: live stream when the runner has an
+    active session, offline buffer when it does not. Offline-rejected
+    types (``assign``/``cancel``/``decide``/``resume_ack``) raise
+    :class:`RunnerOfflineError`; callers in matcher/orchestrator are
+    expected to re-queue the corresponding domain row.
     """
-    layer = get_channel_layer()
-    if layer is None:
-        logger.warning("channel layer not configured; cannot route to %s", runner_id)
-        return
-    async_to_sync(layer.group_send)(runner_group(runner_id), {
-        "type": "runner.send",
-        "runner_id": str(runner_id),
-        "payload": message,
-    })
-
-
-async def asend_to_runner(runner_id: UUID | str, message: Dict[str, Any]) -> None:
-    layer = get_channel_layer()
-    if layer is None:
-        logger.warning("channel layer not configured; cannot route to %s", runner_id)
-        return
-    await layer.group_send(runner_group(runner_id), {
-        "type": "runner.send",
-        "runner_id": str(runner_id),
-        "payload": message,
-    })
+    try:
+        enqueue_for_runner(runner_id, _ensure_envelope(message))
+    except RunnerOfflineError:
+        # Caller (matcher) handles requeue.
+        raise
+    except Exception:
+        logger.exception("send_to_runner enqueue failed for %s", runner_id)
 
 
 def close_runner_session(runner_id: UUID | str, code: int = 4010) -> None:
-    """Tell any connected consumer for this runner to close its WebSocket.
+    """Tell the cloud to evict any active session for this runner.
 
-    Used after credential rotation / revocation to drop sessions still bound
-    to an old secret.
+    Implemented as a session row revoke + Redis pub/sub eviction signal.
+    See ``design.md`` §7.6.
     """
-    layer = get_channel_layer()
-    if layer is None:
-        logger.warning("channel layer not configured; cannot close %s", runner_id)
-        return
-    async_to_sync(layer.group_send)(runner_group(runner_id), {
-        "type": "runner.close",
-        "code": code,
-    })
+    from django.utils import timezone
+
+    from pi_dash.runner.models import RunnerSession
+    from pi_dash.runner.services.outbox import (
+        clear_session_marker,
+        publish_session_eviction,
+    )
+
+    sessions = list(
+        RunnerSession.objects.filter(
+            runner_id=runner_id, revoked_at__isnull=True
+        )
+    )
+    for session in sessions:
+        session.revoked_at = timezone.now()
+        session.revoked_reason = "force_close"
+        session.save(update_fields=["revoked_at", "revoked_reason"])
+        clear_session_marker(session.id)
+        publish_session_eviction(
+            runner_id, old_session_id=str(session.id), new_session_id=""
+        )
 
 
-def send_connection_revoke(
-    runner_id: UUID | str, reason: str = "connection revoked"
+def send_runner_revoke(
+    runner_id: UUID | str, reason: str = "runner revoked"
 ) -> None:
-    """Send a connection-scoped ``Revoke`` frame to the consumer that
-    serves ``runner_id``, then close the WebSocket.
+    """Enqueue a ``revoke`` control frame for the runner.
 
-    Used by ``Connection.revoke()`` so the daemon receives a wire-level
-    Revoke (rid=None) rather than just a TCP close, lets its supervisor
-    initiate ``state.shutdown()`` cleanly, and exits non-zero. One
-    consumer is joined to N runner groups on a connection; sending to
-    any single owned runner reaches the same consumer once.
+    Replaces the old ``send_connection_revoke`` channels-layer fan-out.
     """
-    layer = get_channel_layer()
-    if layer is None:
-        logger.warning("channel layer not configured; cannot revoke %s", runner_id)
-        return
-    async_to_sync(layer.group_send)(runner_group(runner_id), {
-        "type": "runner.revoke",
-        "reason": reason,
-    })
+    try:
+        enqueue_for_runner(
+            runner_id,
+            {"type": "revoke", "reason": reason},
+        )
+    except RunnerOfflineError:
+        # ``revoke`` is in the offline-allowed set; it cannot raise this
+        # error in practice. Log defensively if it ever does.
+        logger.warning("revoke enqueue rejected as offline for %s", runner_id)
+    except Exception:
+        logger.exception("send_runner_revoke failed for %s", runner_id)
+
+
+# Backwards-compatibility alias for any caller still importing the old
+# name. New code should call ``send_runner_revoke`` directly.
+send_connection_revoke = send_runner_revoke

@@ -42,15 +42,23 @@ def project(db, workspace, create_user):
 
 
 @pytest.fixture
-def runner_for_workspace(db, workspace, create_user):
-    pod = Pod.default_for_workspace(workspace)
+def runner_for_workspace(db, workspace, project, create_user):
+    # Pods became project-scoped in #77 — there is no longer a
+    # ``Pod.default_for_workspace`` accessor. The binding fixture below
+    # takes ``project`` already, so resolve the default pod through it.
+    pod = Pod.default_for_project(project)
+    # ``credential_hash`` / ``credential_fingerprint`` were renamed to
+    # ``refresh_token_hash`` / ``refresh_token_fingerprint`` in the
+    # per-runner HTTPS transport rollout. Keep this fixture's intent
+    # (an active runner with credential state populated) but use the
+    # current field names.
     return Runner.objects.create(
         owner=create_user,
         workspace=workspace,
         pod=pod,
         name="agentA",
-        credential_hash="h",
-        credential_fingerprint="f" * 12,
+        refresh_token_hash="h",
+        refresh_token_fingerprint="f" * 12,
         status=RunnerStatus.ONLINE,
         last_heartbeat_at=timezone.now(),
     )
@@ -74,11 +82,14 @@ def stub_drain(monkeypatch):
 
 @pytest.fixture
 def scheduler(workspace, create_user):
+    # Use a slug that does NOT collide with the builtins seeded by the
+    # ``post_save(Workspace)`` signal in ``pi_dash.scheduler.signals``. See
+    # ``test_scheduler.py::scheduler`` for the full rationale.
     with impersonate(create_user):
         return Scheduler.objects.create(
             workspace=workspace,
-            slug="security-audit",
-            name="Security Audit",
+            slug="test-scheduler",
+            name="Test Scheduler",
             description="Test",
             prompt="Scan the project.",
         )
@@ -153,7 +164,7 @@ def test_scan_respects_future_next_run_at(binding):
 
 @pytest.mark.unit
 def test_fire_creates_run_and_advances_next_run_at(binding):
-    fired = fire_scheduler_binding.__wrapped__(fire_scheduler_binding, str(binding.pk))
+    fired = fire_scheduler_binding(str(binding.pk))
     assert fired is True
     binding.refresh_from_db()
     assert binding.last_run_id is not None
@@ -169,7 +180,7 @@ def test_fire_creates_run_and_advances_next_run_at(binding):
 def test_fire_resolves_prompt_with_extra_context(scheduler, binding):
     binding.extra_context = "Focus on authn paths."
     binding.save(update_fields=["extra_context"])
-    fire_scheduler_binding.__wrapped__(fire_scheduler_binding, str(binding.pk))
+    fire_scheduler_binding(str(binding.pk))
     binding.refresh_from_db()
     run = binding.last_run
     assert "Scan the project." in run.prompt
@@ -180,7 +191,7 @@ def test_fire_resolves_prompt_with_extra_context(scheduler, binding):
 def test_fire_phase3a_save_advances_updated_at(binding):
     """Codex review #6: Phase 3a must use save() so auto_now fires."""
     before = binding.updated_at
-    fire_scheduler_binding.__wrapped__(fire_scheduler_binding, str(binding.pk))
+    fire_scheduler_binding(str(binding.pk))
     binding.refresh_from_db()
     assert binding.updated_at > before
 
@@ -191,9 +202,9 @@ def test_fire_phase3a_save_advances_updated_at(binding):
 
 
 @pytest.mark.unit
-def test_fire_skips_when_last_run_in_flight(binding, workspace, create_user):
+def test_fire_skips_when_last_run_in_flight(binding, workspace, project, create_user):
     """Concurrency policy: a non-terminal previous run blocks the next tick."""
-    pod = Pod.default_for_workspace(workspace)
+    pod = Pod.default_for_project(project)
     in_flight = AgentRun.objects.create(
         workspace=workspace,
         created_by=create_user,
@@ -207,7 +218,7 @@ def test_fire_skips_when_last_run_in_flight(binding, workspace, create_user):
     binding.next_run_at = prior_next_run_at
     binding.save(update_fields=["last_run", "next_run_at"])
 
-    fired = fire_scheduler_binding.__wrapped__(fire_scheduler_binding, str(binding.pk))
+    fired = fire_scheduler_binding(str(binding.pk))
     assert fired is False
     binding.refresh_from_db()
     # next_run_at must NOT have advanced — skip is silent
@@ -221,7 +232,7 @@ def test_fire_disables_binding_with_bad_cron_and_clears_next_run_at(binding):
     binding.next_run_at = timezone.now() - timedelta(seconds=5)
     binding.save(update_fields=["cron", "next_run_at"])
 
-    fired = fire_scheduler_binding.__wrapped__(fire_scheduler_binding, str(binding.pk))
+    fired = fire_scheduler_binding(str(binding.pk))
     assert fired is False
     binding.refresh_from_db()
     assert binding.enabled is False
@@ -237,10 +248,10 @@ def test_fire_rolls_back_next_run_at_on_dispatch_failure(monkeypatch, binding):
     binding.save(update_fields=["next_run_at"])
 
     monkeypatch.setattr(
-        "pi_dash.bgtasks.scheduler.dispatch_scheduler_run",
+        "pi_dash.orchestration.service.dispatch_scheduler_run",
         lambda b, p: (None, "no default pod for workspace test"),
     )
-    fired = fire_scheduler_binding.__wrapped__(fire_scheduler_binding, str(binding.pk))
+    fired = fire_scheduler_binding(str(binding.pk))
     assert fired is False
     binding.refresh_from_db()
     # Rolled back to NULL — no scheduled time advanced since dispatch failed
@@ -253,5 +264,5 @@ def test_fire_rolls_back_next_run_at_on_dispatch_failure(monkeypatch, binding):
 @pytest.mark.unit
 def test_fire_returns_false_when_binding_deleted(binding):
     binding.delete()  # soft-delete
-    fired = fire_scheduler_binding.__wrapped__(fire_scheduler_binding, str(binding.pk))
+    fired = fire_scheduler_binding(str(binding.pk))
     assert fired is False

@@ -9,15 +9,25 @@
 //! 2. Uninstall the service unit (tolerant; no-op if not installed).
 //! 3. Deregister with the cloud (skipped with `--local-only` or if no creds).
 //! 4. Delete local `config.toml` + `credentials.toml`.
+//!
+//! Requires `--all` as an explicit confirmation: this command wipes EVERY
+//! runner on the host plus connection credentials. To drop a single runner
+//! instead, use `pidash runner remove <name>`.
 
-use anyhow::Result;
+use anyhow::{Result, bail};
 use clap::Args as ClapArgs;
 
-use crate::cloud::runners::delete_runner;
 use crate::util::paths::Paths;
 
 #[derive(Debug, ClapArgs)]
 pub struct Args {
+    /// REQUIRED confirmation that you want to wipe ALL runners on this
+    /// host and the connection credentials. Without this flag the
+    /// command refuses to do anything. Use `pidash runner remove <name>`
+    /// to drop a single runner instead.
+    #[arg(long)]
+    pub all: bool,
+
     /// Delete local state without contacting the cloud. The connection
     /// row remains in the cloud UI until the user revokes it there.
     #[arg(long)]
@@ -25,6 +35,34 @@ pub struct Args {
 }
 
 pub async fn run(args: Args, paths: &Paths) -> Result<()> {
+    if !args.all {
+        // Refuse and explain. List what would be removed so the user
+        // sees the blast radius before re-running with --all.
+        eprintln!("pidash remove: refusing to run without --all.");
+        eprintln!();
+        eprintln!("This command wipes EVERY runner on this host AND the connection");
+        eprintln!("credentials. It is not reversible without re-enrolling from scratch.");
+        eprintln!();
+        match crate::config::file::load_all(paths) {
+            Ok((config, _)) => {
+                eprintln!("Runners that would be removed:");
+                for r in &config.runners {
+                    eprintln!("  - {} ({})", r.name, r.runner_id);
+                }
+                if config.runners.is_empty() {
+                    eprintln!("  (no runners configured)");
+                }
+            }
+            Err(_) => {
+                eprintln!("(no local configuration found — nothing to remove)");
+            }
+        }
+        eprintln!();
+        eprintln!("To drop a single runner instead:  pidash runner remove <NAME>");
+        eprintln!("To proceed with the full teardown: pidash remove --all");
+        bail!("--all is required");
+    }
+
     let svc = crate::service::detect();
     if let Err(e) = svc.stop().await {
         tracing::warn!("service stop failed (ok if not running): {e:#}");
@@ -33,30 +71,23 @@ pub async fn run(args: Args, paths: &Paths) -> Result<()> {
         tracing::warn!("service uninstall failed (ok if not installed): {e:#}");
     }
 
-    // Cloud-side cleanup: best-effort delete each runner under this
-    // connection. Connection itself is left for the user to revoke from
-    // the cloud UI — the daemon doesn't have authority to revoke its own
-    // connection row in the new design (the bearer it holds would
-    // self-defeat at exactly the wrong moment).
-    match crate::config::file::load_all(paths) {
-        Ok((config, creds)) => {
+    // Cloud-side cleanup: best-effort self-revoke each runner via the
+    // machine-token DELETE endpoint. Loop carries on past per-runner
+    // failures so a single network blip on runner N+1 doesn't strand
+    // the operator with N revoked-and-N-still-half-alive runners.
+    match crate::config::file::load_config(paths) {
+        Ok(config) => {
             if !args.local_only {
                 for r in &config.runners {
-                    match delete_runner(
-                        &config.daemon.cloud_url,
-                        &creds.connection_id,
-                        &creds.connection_secret,
-                        &r.runner_id,
-                    )
-                    .await
+                    match crate::cli::connect::revoke_additional_runner(paths, &r.name, false).await
                     {
                         Ok(()) => {
-                            tracing::info!(runner = %r.name, "cloud delete-runner ok");
+                            tracing::info!(runner = %r.name, "cloud self-revoke ok");
                         }
                         Err(e) => {
                             tracing::warn!(
                                 runner = %r.name,
-                                "cloud delete-runner failed: {e:#}"
+                                "cloud self-revoke failed: {e:#}"
                             );
                         }
                     }

@@ -1,59 +1,76 @@
-//! Per-runner outbound channel handle.
-//!
-//! Wraps the daemon's shared `mpsc::Sender<Envelope<ClientMsg>>` with a
-//! baked-in `runner_id`. Every frame sent through `RunnerOut::send` is
-//! automatically tagged with that id via `Envelope::for_runner`, so call
-//! sites can't accidentally emit a connection-scoped frame when they
-//! meant a per-runner one (or vice versa).
-//!
-//! With one runner per daemon today, this only ensures a stable
-//! `rid` field on outbound traffic. It compounds when multi-runner lands:
-//! each `RunnerInstance` carries its own `RunnerOut` cloned off the
-//! shared `out_tx`, and the cloud's demux uses the field to route
-//! responses to the right server-side runner record. See `design.md` §6.3.
+//! Per-runner outbound transport handle.
 
+use anyhow::{Result, anyhow};
 use tokio::sync::mpsc;
 use uuid::Uuid;
 
+use crate::cloud::http::RunnerCloudClient;
 use crate::cloud::protocol::{ClientMsg, Envelope};
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct RunnerOut {
     runner_id: Uuid,
-    inner: mpsc::Sender<Envelope<ClientMsg>>,
+    inner: RunnerOutInner,
+}
+
+#[derive(Clone)]
+enum RunnerOutInner {
+    Ws(mpsc::Sender<Envelope<ClientMsg>>),
+    Http(RunnerCloudClient),
+    Offline,
 }
 
 impl RunnerOut {
     pub fn new(runner_id: Uuid, inner: mpsc::Sender<Envelope<ClientMsg>>) -> Self {
-        Self { runner_id, inner }
+        Self {
+            runner_id,
+            inner: RunnerOutInner::Ws(inner),
+        }
+    }
+
+    pub fn new_http(client: RunnerCloudClient) -> Self {
+        Self {
+            runner_id: client.runner_id(),
+            inner: RunnerOutInner::Http(client),
+        }
+    }
+
+    pub fn offline(runner_id: Uuid) -> Self {
+        Self {
+            runner_id,
+            inner: RunnerOutInner::Offline,
+        }
     }
 
     pub fn runner_id(&self) -> Uuid {
         self.runner_id
     }
 
-    /// Send a frame tagged with this runner's id. Returns `Err` if the
-    /// receiver has been dropped (e.g. the cloud loop exited and the
-    /// channel buffer drained); callers typically ignore the error and
-    /// rely on the supervisor's shutdown path.
-    pub async fn send(
-        &self,
-        body: ClientMsg,
-    ) -> Result<(), mpsc::error::SendError<Envelope<ClientMsg>>> {
-        self.inner
-            .send(Envelope::for_runner(self.runner_id, body))
-            .await
+    pub async fn send(&self, body: ClientMsg) -> Result<()> {
+        let env = Envelope::for_runner(self.runner_id, body);
+        match &self.inner {
+            RunnerOutInner::Ws(tx) => tx
+                .send(env)
+                .await
+                .map_err(|e| anyhow!("cloud sender dropped: {e}")),
+            RunnerOutInner::Http(client) => {
+                client.dispatch_client_msg(env).await.map_err(Into::into)
+            }
+            RunnerOutInner::Offline => Ok(()),
+        }
     }
 
-    /// Escape hatch for callers that need to send a *connection-scoped*
-    /// frame (no runner_id) over this same channel — e.g. the supervisor
-    /// emitting `Bye { reason: "shutdown" }` when the daemon is exiting.
-    /// Most call sites should prefer `send`.
-    pub async fn send_connection_scoped(
-        &self,
-        body: ClientMsg,
-    ) -> Result<(), mpsc::error::SendError<Envelope<ClientMsg>>> {
-        self.inner.send(Envelope::new(body)).await
+    pub async fn send_connection_scoped(&self, body: ClientMsg) -> Result<()> {
+        match &self.inner {
+            RunnerOutInner::Ws(tx) => tx
+                .send(Envelope::new(body))
+                .await
+                .map_err(|e| anyhow!("cloud sender dropped: {e}")),
+            RunnerOutInner::Http(_) => Err(anyhow!(
+                "connection-scoped frames are unsupported on HTTP transport"
+            )),
+            RunnerOutInner::Offline => Ok(()),
+        }
     }
 }
 

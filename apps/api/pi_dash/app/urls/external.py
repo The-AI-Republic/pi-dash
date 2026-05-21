@@ -12,7 +12,7 @@ from pi_dash.app.views import GPTIntegrationEndpoint, WorkspaceGPTIntegrationEnd
 urlpatterns = [
     path("unsplash/", UnsplashEndpoint.as_view(), name="unsplash"),
     path(
-        "workspaces/<str:slug>/projects/<uuid:project_id>/ai-assistant/",
+        "workspaces/<str:slug>/projects/<str:project_id>/ai-assistant/",
         GPTIntegrationEndpoint.as_view(),
         name="importer",
     ),

@@ -84,7 +84,7 @@ export const CommentAndRunModal = observer(function CommentAndRunModal(props: Pr
       setIsPosting(false);
     }
 
-    const run = await triggerRun({ workspaceSlug, issueId });
+    const run = await triggerRun({ workspaceSlug, issueId, mode: "comment_and_run" });
     if (run) onClose();
   };
 

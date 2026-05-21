@@ -52,3 +52,15 @@ def is_at_least_member(user, workspace_id) -> bool:
     """True if ``user`` is at least Member role (>=15) — not Guest."""
     role = workspace_role(user, workspace_id)
     return role is not None and role >= ROLE_MEMBER
+
+
+def can_manage_runner(user, runner) -> bool:
+    """True if ``user`` owns the runner or is admin of its workspace.
+
+    Shared by the runner views so revoke/revive/delete/patch all gate on
+    the same rule. Duck-typed on ``runner.owner_id`` / ``runner.workspace_id``
+    to avoid an import-time dependency on the Runner model.
+    """
+    return runner.owner_id == user.id or is_workspace_admin(
+        user, runner.workspace_id
+    )

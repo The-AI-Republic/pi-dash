@@ -38,12 +38,12 @@ urlpatterns = [
     ),
     # Project-level
     path(
-        "workspaces/<str:slug>/projects/<uuid:project_id>/github/",
+        "workspaces/<str:slug>/projects/<str:project_id>/github/",
         GithubProjectStatusEndpoint.as_view(),
         name="github-project-status",
     ),
     path(
-        "workspaces/<str:slug>/projects/<uuid:project_id>/github/bind/",
+        "workspaces/<str:slug>/projects/<str:project_id>/github/bind/",
         GithubProjectBindEndpoint.as_view(),
         name="github-project-bind",
     ),

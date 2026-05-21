@@ -52,6 +52,10 @@ venv
 .venv
 *.pyc
 staticfiles
+# Django collectstatic output for the api app (STATIC_ROOT in
+# apps/api/pi_dash/settings/common.py). Regenerated on every deploy;
+# never source-of-truth.
+apps/api/pi_dash/static-assets/
 mediafiles
 .env
 .DS_Store

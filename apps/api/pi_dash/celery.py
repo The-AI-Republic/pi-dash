@@ -7,6 +7,8 @@ import os
 import logging
 
 # Third party imports
+from datetime import timedelta
+
 from celery import Celery
 from pythonjsonlogger.jsonlogger import JsonFormatter
 from celery.signals import after_setup_logger, after_setup_task_logger
@@ -85,6 +87,14 @@ app.conf.beat_schedule = {
     "runner-mark-offline-runners": {
         "task": "runner.mark_offline_runners",
         "schedule": crontab(minute="*/1"),
+    },
+    # Per-active-run agent stall watchdog. Backstop for the runner's own
+    # internal 5-minute stall timer; see
+    # `.ai_design/runner_agent_bridge/design.md` §4.5.3. 30s gives ~12
+    # ticks per stall threshold so we don't oversleep the deadline.
+    "runner-reconcile-stalled-runs": {
+        "task": "runner.reconcile_stalled_runs",
+        "schedule": timedelta(seconds=30),
     },
     # Issue ticking — see .ai_design/issue_ticking_system/design.md §6
     "scan-due-agent-tickers": {

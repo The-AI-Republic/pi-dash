@@ -134,8 +134,12 @@ def workspace(create_user):
     pod now need at least one Project so the workspace has a default pod via
     the project's auto-creation. To keep every existing test working without
     explicit ``project=`` plumbing, the workspace fixture creates a single
-    Project named "TEST"; tests that need a *second* project should depend on
-    the dedicated ``project`` fixture (and / or create more directly).
+    Project with a deliberately-distinctive name and identifier
+    (``Workspace Default Project`` / ``DEF``) so it does not collide with
+    project/cycle/label tests that create their own ``Project(name="Test
+    Project", identifier="TEST"|"TP"|...)``. Tests that need a *second*
+    project should depend on the dedicated ``project`` fixture (and / or
+    create more directly).
     """
     from pi_dash.db.models.project import Project
 
@@ -152,8 +156,8 @@ def workspace(create_user):
     # ``workspace=workspace`` and no explicit pod can fall through
     # ``Runner.save()``'s single-project auto-resolution.
     Project.objects.create(
-        name="Test Project",
-        identifier="TEST",
+        name="Workspace Default Project",
+        identifier="DEF",
         workspace=created_workspace,
         created_by=create_user,
     )
@@ -169,4 +173,4 @@ def project(workspace, create_user):
     """
     from pi_dash.db.models.project import Project
 
-    return Project.objects.get(workspace=workspace, identifier="TEST")
+    return Project.objects.get(workspace=workspace, identifier="DEF")

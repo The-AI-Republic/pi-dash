@@ -12,10 +12,6 @@ import { AiIcon } from "@pi-dash/propel/icons";
 // local
 import { useCreateAgentRun } from "./use-create-agent-run";
 
-const DEFAULT_PROMPT =
-  "Please pick up this work item and make progress on it. " +
-  "Read the issue details and existing comments before acting.";
-
 type Props = {
   workspaceSlug: string;
   issueId: string;
@@ -30,7 +26,7 @@ export const RunAIActionButton = observer(function RunAIActionButton(props: Prop
   const handleClick = (e: React.MouseEvent<HTMLButtonElement>) => {
     e.preventDefault();
     e.stopPropagation();
-    triggerRun({ workspaceSlug, issueId, prompt: DEFAULT_PROMPT });
+    triggerRun({ workspaceSlug, issueId, mode: "run_ai" });
   };
 
   return (
