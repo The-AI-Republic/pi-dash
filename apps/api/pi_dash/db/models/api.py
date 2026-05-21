@@ -3,6 +3,7 @@
 # See the LICENSE file for details.
 
 # Python imports
+import secrets
 from uuid import uuid4
 
 # Django imports
@@ -18,6 +19,17 @@ def generate_label_token():
 
 def generate_token():
     return "pi_dash_api_" + uuid4().hex
+
+
+def generate_device_code():
+    return secrets.token_urlsafe(32)
+
+
+def generate_user_code():
+    # 8-char, ambiguity-free alphabet, hyphenated for readability ("WXYZ-1234").
+    alphabet = "BCDFGHJKLMNPQRSTVWXZ23456789"
+    raw = "".join(secrets.choice(alphabet) for _ in range(8))
+    return f"{raw[:4]}-{raw[4:]}"
 
 
 class APIToken(BaseModel):
@@ -46,6 +58,40 @@ class APIToken(BaseModel):
 
     def __str__(self):
         return str(self.user.id)
+
+
+class CLIDeviceCode(BaseModel):
+    """RFC 8628-shaped device-authorization grant for `pidash auth login`.
+
+    Lifecycle: ``pidash auth login`` POSTs to start, gets back
+    ``device_code`` (opaque, returned to CLI only) + ``user_code``
+    (short, shown to the human). User opens the verification URL in a
+    browser, signs in, enters ``user_code``, approves — server stamps
+    ``user`` + ``approved``. CLI polls the token endpoint with
+    ``device_code`` and trades the approved row for a fresh
+    :class:`APIToken`. Row is then marked ``consumed`` to prevent reuse.
+    """
+
+    device_code = models.CharField(max_length=64, unique=True, default=generate_device_code, db_index=True)
+    user_code = models.CharField(max_length=16, unique=True, default=generate_user_code, db_index=True)
+    user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, null=True, related_name="device_codes")
+    workspace = models.ForeignKey(
+        "db.Workspace", related_name="device_codes", on_delete=models.CASCADE, null=True, blank=True
+    )
+    approved = models.BooleanField(default=False)
+    denied = models.BooleanField(default=False)
+    consumed = models.BooleanField(default=False)
+    expires_at = models.DateTimeField()
+    last_polled_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        verbose_name = "CLI Device Code"
+        verbose_name_plural = "CLI Device Codes"
+        db_table = "cli_device_codes"
+        ordering = ("-created_at",)
+
+    def __str__(self):
+        return self.user_code
 
 
 class APIActivityLog(BaseModel):

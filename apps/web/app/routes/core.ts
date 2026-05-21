@@ -35,6 +35,9 @@ export const coreRoutes: RouteConfigEntry[] = [
   // Onboarding
   layout("./(all)/onboarding/layout.tsx", [route("onboarding", "./(all)/onboarding/page.tsx")]),
 
+  // Device-code CLI authorization (`pidash auth login` redirects users here).
+  layout("./(all)/auth/device/layout.tsx", [route("auth/device", "./(all)/auth/device/page.tsx")]),
+
   // Invitations
   layout("./(all)/invitations/layout.tsx", [route("invitations", "./(all)/invitations/page.tsx")]),
 

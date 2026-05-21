@@ -16,6 +16,8 @@ from pi_dash.runner.views import (
     HealthEndpoint,
     MachineTokenRedeemEndpoint,
     MetricsEndpoint,
+    ProjectListEndpoint,
+    RunnerCreateEndpoint,
     RunAcceptEndpoint,
     RunApprovalEndpoint,
     RunAwaitingReauthEndpoint,
@@ -45,6 +47,21 @@ urlpatterns = [
         "runners/enroll/",
         RunnerEnrollEndpoint.as_view(),
         name="runner-enroll",
+    ),
+    # CLI-initiated runner creation (X-Api-Key auth). Dual of
+    # invite+enroll for callers that already have a user-scoped token.
+    path(
+        "runners/",
+        RunnerCreateEndpoint.as_view(),
+        name="runner-create",
+    ),
+    # CLI-facing project list — same view as /api/runners/projects/ but
+    # mounted here so `pidash` calls stay under /api/v1/runner/. Auth
+    # accepts X-Api-Key (set by `pidash auth login`).
+    path(
+        "projects/",
+        ProjectListEndpoint.as_view(),
+        name="cli-project-list",
     ),
     path(
         "runners/<uuid:runner_id>/refresh/",
