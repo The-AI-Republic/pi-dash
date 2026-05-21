@@ -9,6 +9,7 @@ import { useEffect, useRef } from "react";
 import type { IWorkspaceMemberInvitation } from "@pi-dash/types";
 import { EOnboardingSteps } from "@pi-dash/types";
 // local components
+import { CliInstallStep } from "./cli-install";
 import { ProfileSetupStep } from "./profile";
 import { RoleSetupStep } from "./role";
 import { InviteTeamStep } from "./team";
@@ -23,6 +24,8 @@ type Props = {
 
 function OnboardingStepContent({ currentStep, invitations, handleStepChange }: Props) {
   switch (currentStep) {
+    case EOnboardingSteps.CLI_INSTALL:
+      return <CliInstallStep handleStepChange={handleStepChange} />;
     case EOnboardingSteps.PROFILE_SETUP:
       return <ProfileSetupStep handleStepChange={handleStepChange} />;
     case EOnboardingSteps.ROLE_SETUP:

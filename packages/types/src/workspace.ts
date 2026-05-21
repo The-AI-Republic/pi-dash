@@ -253,6 +253,7 @@ export interface IWorkspaceSidebarNavigation {
 }
 
 export enum EOnboardingSteps {
+  CLI_INSTALL = "CLI_INSTALL",
   PROFILE_SETUP = "PROFILE_SETUP",
   ROLE_SETUP = "ROLE_SETUP",
   USE_CASE_SETUP = "USE_CASE_SETUP",
