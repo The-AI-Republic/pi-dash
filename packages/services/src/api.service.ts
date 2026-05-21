@@ -6,6 +6,19 @@
 
 import type { AxiosInstance, AxiosRequestConfig } from "axios";
 import axios from "axios";
+// `_axios-setup` first so its registry is fully initialized before
+// `./ee/init` runs and (in cloud builds) registers an interceptor.
+import { applyAxiosSetups } from "./_axios-setup";
+// Side-effect import: lets builds plug per-instance axios setup (eg. an auth
+// refresh interceptor) into every APIService without forking this file.
+// The OSS build ships an empty stub; ee-overlay builds replace it. The
+// stub/replacement must import its `registerAxiosSetup` from
+// `../_axios-setup` (not from this file) to avoid a circular-import TDZ.
+// eslint-disable-next-line import/no-unassigned-import
+import "./ee/init";
+
+export type { AxiosInstanceSetup } from "./_axios-setup";
+export { registerAxiosSetup } from "./_axios-setup";
 
 /**
  * Abstract base class for making HTTP requests using axios
@@ -25,6 +38,7 @@ export abstract class APIService {
       baseURL,
       withCredentials: true,
     });
+    applyAxiosSetups(this.axiosInstance);
   }
 
   /**
