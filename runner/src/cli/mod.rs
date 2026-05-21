@@ -1,6 +1,7 @@
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 
+pub mod auth;
 mod comment;
 pub mod connect;
 pub mod doctor;
@@ -13,12 +14,14 @@ mod run;
 // `runner` is `pub` so the TUI can call its library functions
 // (`add`, `remove`) directly without going through clap.
 pub mod runner;
+pub mod runner_ops;
 mod start;
 mod state;
 mod status;
 mod stop;
 mod tui;
 mod uninstall;
+pub mod update;
 mod workspace;
 
 /// Re-exported for integration tests that want to exercise the daemon-entry
@@ -51,6 +54,11 @@ pub struct Cli {
 
 #[derive(Debug, Subcommand)]
 pub enum Command {
+    /// Authenticate this host as a user (`auth login` / `status` /
+    /// `logout`). Mints a CLI token used by `pidash` commands and by
+    /// `pidash runner add` to register runners.
+    Auth(auth::AuthArgs),
+
     /// Enroll this dev machine with Pi Dash cloud (one-time pairing).
     Connect(connect::Args),
 
@@ -81,6 +89,11 @@ pub enum Command {
     /// Run preflight checks (Codex installed, logged in; git configured; cloud reachable).
     Doctor(doctor::Args),
 
+    /// Swap the on-disk `pidash` binary for the latest GitHub release.
+    /// The running daemon keeps its loaded copy; pass `--restart` to
+    /// also restart so the new code takes effect immediately.
+    Update(update::Args),
+
     /// Deregister with the cloud and delete local credentials.
     Remove(remove::Args),
 
@@ -108,6 +121,7 @@ pub async fn run(cli: Cli) -> Result<()> {
     tracing::debug!(?paths, "resolved runner paths");
 
     match cli.command {
+        Command::Auth(args) => auth::run(args, &paths).await,
         Command::Connect(args) => connect::run(args, &paths).await,
         Command::Runner(args) => runner::run(args, &paths).await,
         Command::Install(args) => install::run(args, &paths).await,
@@ -118,6 +132,7 @@ pub async fn run(cli: Cli) -> Result<()> {
         Command::Status(args) => status::run(args, &paths).await,
         Command::Tui(args) => tui::run(args, &paths).await,
         Command::Doctor(args) => doctor::run(args, &paths).await,
+        Command::Update(args) => update::run(args, &paths).await,
         Command::Remove(args) => remove::run(args, &paths).await,
         Command::Issue(args) => run_crud(issue::run(args, &paths).await),
         Command::Comment(args) => run_crud(comment::run(args, &paths).await),

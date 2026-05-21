@@ -37,6 +37,15 @@ pub struct CliSection {
     /// "no token" message when it's missing at command time.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub token: Option<String>,
+
+    /// Workspace this host is bound to. The Pi Dash CLI on a dev host
+    /// is single-workspace-per-install in v1: `pidash auth login`
+    /// resolves it (auto-picks if the user belongs to one workspace,
+    /// prompts if they belong to several) and persists it here.
+    /// `pidash runner add` reads this as the default for `--workspace`
+    /// when the caller doesn't pass one explicitly.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace_slug: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -21,7 +21,7 @@ use crate::daemon::runner_out::RunnerOut;
 use crate::daemon::state::StateHandle;
 use crate::history::index::{RunSummary, RunsIndex};
 use crate::history::jsonl::{HistoryEntry, HistoryWriter};
-use crate::ipc::protocol::CurrentRunSummary;
+use crate::ipc::protocol::{CurrentRunSummary, version_lt};
 use crate::ipc::server::IpcServer;
 use crate::util::paths::{Paths, RunnerPaths};
 
@@ -548,6 +548,8 @@ impl RunnerLoop {
                 ServerMsg::Welcome {
                     protocol_version,
                     heartbeat_interval_secs,
+                    latest_runner_version,
+                    min_runner_version,
                     ..
                 } => {
                     if protocol_version != WIRE_VERSION {
@@ -560,7 +562,74 @@ impl RunnerLoop {
                     if heartbeat_interval_secs > 0 {
                         let _ = self.state.tx_heartbeat_secs.send(heartbeat_interval_secs);
                     }
+                    if latest_runner_version.is_some() || min_runner_version.is_some() {
+                        tracing::info!(
+                            latest = ?latest_runner_version,
+                            min = ?min_runner_version,
+                            "received runner version advisory from cloud",
+                        );
+                    }
+                    self.state
+                        .set_update_advisory(
+                            latest_runner_version.clone(),
+                            min_runner_version,
+                        )
+                        .await;
                     self.state.set_connected(true).await;
+
+                    // Auto-update path: when the user has opted in, the
+                    // cloud is announcing a newer version, no swap is
+                    // already in flight, AND the on-disk binary is not
+                    // already at the announced version, spawn a
+                    // background task to swap. We deliberately do NOT
+                    // restart the running daemon — it keeps its loaded
+                    // copy until the next natural restart. See
+                    // `runner/README.md` (Auto-update).
+                    if let Some(latest) = latest_runner_version.as_deref()
+                        && version_lt(crate::RUNNER_VERSION, latest)
+                        && self.state.on_disk_version().await.as_deref() != Some(latest)
+                        && self.state.auto_update_enabled().await
+                        && self.state.try_claim_swap()
+                    {
+                        let st = self.state.clone();
+                        let latest_owned = latest.to_string();
+                        tokio::spawn(async move {
+                            tracing::info!(
+                                target = %latest_owned,
+                                "auto-update: swapping pidash on disk",
+                            );
+                            match crate::cli::update::check_or_swap(false).await {
+                                Ok(crate::cli::update::SwapOutcome::Swapped {
+                                    new_version,
+                                    ..
+                                }) => {
+                                    tracing::info!(
+                                        %new_version,
+                                        "auto-update: swap complete; restart to apply",
+                                    );
+                                    st.set_on_disk_version(new_version).await;
+                                }
+                                Ok(other) => {
+                                    tracing::debug!(
+                                        ?other,
+                                        "auto-update: no swap performed",
+                                    );
+                                }
+                                Err(e) => {
+                                    // Can be no-receipt (source build), a
+                                    // GitHub network/rate-limit error, or a
+                                    // failed installer run. Logged at info so
+                                    // operators can see the cause without
+                                    // editorialising about which it is.
+                                    tracing::info!(
+                                        error = %e,
+                                        "auto-update: swap failed",
+                                    );
+                                }
+                            }
+                            st.release_swap();
+                        });
+                    }
                 }
                 ServerMsg::Assign {
                     run_id,

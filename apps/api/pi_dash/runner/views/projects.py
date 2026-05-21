@@ -20,6 +20,7 @@ from rest_framework import status
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
+from pi_dash.api.middleware.api_authentication import APIKeyAuthentication
 from pi_dash.authentication.session import BaseSessionAuthentication
 from pi_dash.db.models.project import Project
 from pi_dash.db.models.workspace import WorkspaceMember
@@ -77,13 +78,16 @@ def _serialize_projects(workspace_id) -> list[dict]:
 class ProjectListEndpoint(APIView):
     """GET /api/runners/projects/
 
-    Two auth modes:
+    Three auth modes (in order):
     - Bearer access-token (runner) — scoped to ``runner.workspace_id``.
+    - ``X-Api-Key`` (CLI/user) — scoped to caller's workspace memberships.
+      Used by ``pidash auth login``'s post-login project picker.
     - Session auth (web UI) — scoped to caller's workspace memberships.
     """
 
     authentication_classes = [
         RunnerAccessTokenAuthentication,
+        APIKeyAuthentication,
         BaseSessionAuthentication,
     ]
     permission_classes: list = []

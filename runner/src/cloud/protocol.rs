@@ -166,6 +166,19 @@ pub enum ServerMsg {
         server_time: DateTime<Utc>,
         heartbeat_interval_secs: u64,
         protocol_version: u32,
+        /// Latest available runner version the cloud is announcing.
+        /// Daemons compare against their own `CARGO_PKG_VERSION` and
+        /// either swap the on-disk binary (when `auto_update` is on) or
+        /// surface a "restart to apply" / "update available" advisory.
+        /// Optional + `skip_serializing_if = None` for forward-compat:
+        /// older clouds that don't set this look the same on the wire.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        latest_runner_version: Option<String>,
+        /// Minimum acceptable runner version. Advisory today; surfaced
+        /// in TUI/status as a red banner so operators can act before
+        /// the cloud bumps the wire-protocol floor.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        min_runner_version: Option<String>,
     },
     Assign {
         run_id: Uuid,
@@ -321,6 +334,55 @@ mod tests {
         let s = serde_json::to_string(&env).unwrap();
         let back: Envelope<ClientMsg> = serde_json::from_str(&s).unwrap();
         assert_eq!(back.version, WIRE_VERSION);
+    }
+
+    #[test]
+    fn roundtrips_server_welcome_with_version_advisory() {
+        let msg = ServerMsg::Welcome {
+            server_time: Utc::now(),
+            heartbeat_interval_secs: 25,
+            protocol_version: WIRE_VERSION,
+            latest_runner_version: Some("0.1.3".into()),
+            min_runner_version: Some("0.1.2".into()),
+        };
+        let env = Envelope::new(msg);
+        let s = serde_json::to_string(&env).unwrap();
+        let back: Envelope<ServerMsg> = serde_json::from_str(&s).unwrap();
+        match back.body {
+            ServerMsg::Welcome {
+                latest_runner_version,
+                min_runner_version,
+                ..
+            } => {
+                assert_eq!(latest_runner_version.as_deref(), Some("0.1.3"));
+                assert_eq!(min_runner_version.as_deref(), Some("0.1.2"));
+            }
+            other => panic!("expected Welcome, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn server_welcome_omits_version_advisory_when_absent() {
+        // Older clouds that don't announce a version must produce the
+        // exact same wire bytes they always have. `skip_serializing_if`
+        // drops the optional fields entirely; no `null` on the wire.
+        let msg = ServerMsg::Welcome {
+            server_time: Utc::now(),
+            heartbeat_interval_secs: 25,
+            protocol_version: WIRE_VERSION,
+            latest_runner_version: None,
+            min_runner_version: None,
+        };
+        let env = Envelope::new(msg);
+        let s = serde_json::to_string(&env).unwrap();
+        assert!(
+            !s.contains("latest_runner_version"),
+            "expected latest_runner_version omitted: {s}",
+        );
+        assert!(
+            !s.contains("min_runner_version"),
+            "expected min_runner_version omitted: {s}",
+        );
     }
 
     #[test]

@@ -38,6 +38,15 @@ gets a fix or feature on its own cadence.
 5. When green, the GitHub Release will be at
    `https://github.com/The-AI-Republic/pi-dash/releases/tag/pidash-v0.1.2`
    with a `pidash-installer.sh` and platform-specific archives.
+6. Announce the new version to running runners by setting
+   `LATEST_RUNNER_VERSION=0.1.2` (and optionally `MIN_RUNNER_VERSION=0.1.2`
+   if this is a breaking-protocol or security release) on the Pi Dash
+   API service. Runners with `auto_update` enabled — the default — will
+   swap the on-disk binary on their next session bootstrap and surface
+   a "restart to apply" advisory in `pidash status` / the TUI. Runners
+   with `auto_update` disabled show an "update available — run `pidash
+update`" banner instead. See `runner/README.md` (Auto-update) for
+   the full rendering matrix.
 
 ## Cutting a platform release
 

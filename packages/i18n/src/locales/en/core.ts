@@ -547,6 +547,12 @@ export default {
       working_dir_help:
         "Local path the daemon runs the agent CLI in — usually the project repo on disk. Defaults to a sandbox under the runner's data dir, which is rarely what you want.",
       working_dir_placeholder: "local dev machine project working dir",
+      agent_label: "Agent",
+      agent_help: "Which AI agent CLI this runner will drive. Baked into the displayed ``pidash connect`` command.",
+      agent_options: {
+        claude_code: "Claude Code",
+        codex: "Codex",
+      },
       submit: "Mint enrollment token",
       submitting: "Minting…",
       cancel: "Cancel",

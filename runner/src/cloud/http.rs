@@ -762,6 +762,12 @@ pub struct WelcomePayload {
     pub long_poll_interval_secs: Option<u64>,
     #[serde(default)]
     pub protocol_version: Option<u32>,
+    /// Optional version advisories pushed from the cloud. See
+    /// ``ServerMsg::Welcome`` for semantics.
+    #[serde(default)]
+    pub latest_runner_version: Option<String>,
+    #[serde(default)]
+    pub min_runner_version: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1180,6 +1186,8 @@ impl HttpLoop {
             server_time: session.welcome.server_time.unwrap_or_else(Utc::now),
             heartbeat_interval_secs: self.long_poll_interval_secs,
             protocol_version: session.welcome.protocol_version.unwrap_or(WIRE_VERSION),
+            latest_runner_version: session.welcome.latest_runner_version.clone(),
+            min_runner_version: session.welcome.min_runner_version.clone(),
         };
         let _ = self
             .mailbox
@@ -1403,6 +1411,58 @@ fn map_session_error(status: StatusCode, body: &str) -> TransportError {
 
 /// Public helper to enroll a runner — replaces the legacy `enroll.rs`
 /// connection-flow body.
+/// CLI-initiated runner creation.
+///
+/// `pidash auth login` populates `[cli].token` with a user-scoped
+/// `APIToken`. Once that token exists, `pidash runner add` can mint a
+/// runner directly without the one-time enrollment-token paste — we POST
+/// to `/api/v1/runner/runners/` with `X-Api-Key`, and the cloud returns
+/// the same `EnrollResponse` shape `enroll_runner` would have.
+///
+/// `workspace_slug` is optional: the cloud falls back to the caller's
+/// single workspace membership when omitted. Multi-workspace callers
+/// must pass an explicit slug.
+pub async fn create_runner(
+    transport: &SharedHttpTransport,
+    api_token: &str,
+    workspace_slug: Option<&str>,
+    project: &str,
+    host_label: &str,
+    name: Option<&str>,
+    pod: Option<&str>,
+) -> Result<EnrollResponse, TransportError> {
+    let url = format!("{}/api/v1/runner/runners/", transport.cloud_url());
+    let mut body = serde_json::json!({
+        "project": project,
+        "host_label": host_label,
+    });
+    if let Some(ws) = workspace_slug {
+        body["workspace_slug"] = Json::String(ws.to_string());
+    }
+    if let Some(n) = name {
+        body["name"] = Json::String(n.to_string());
+    }
+    if let Some(p) = pod {
+        body["pod"] = Json::String(p.to_string());
+    }
+    let resp = transport
+        .http()
+        .post(&url)
+        .header("X-Api-Key", api_token)
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| TransportError::Network(e.to_string()))?;
+    let status = resp.status();
+    if !status.is_success() {
+        let body = resp.text().await.unwrap_or_default();
+        return Err(map_auth_error(status, &body));
+    }
+    resp.json::<EnrollResponse>()
+        .await
+        .map_err(|e| TransportError::Protocol(format!("create_runner body: {e}")))
+}
+
 pub async fn enroll_runner(
     transport: &SharedHttpTransport,
     enrollment_token: &str,

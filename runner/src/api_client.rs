@@ -150,10 +150,14 @@ impl CliEnv {
         let token = from_cfg_token
             .or_else(|| std::env::var("PIDASH_TOKEN").ok())
             .ok_or_else(|| {
+                // Most common cause: the user enrolled a runner but
+                // never ran `pidash auth login` (which writes
+                // `[cli].token`). Point them at the fix directly
+                // rather than the generic "set this field" wording.
                 CliError::new(
                     EXIT_INVALID,
-                    "no auth token configured: set [cli].token in pidash \
-                     config or export PIDASH_TOKEN",
+                    "not logged in: run `pidash auth login` to authenticate this host, \
+                     or export PIDASH_TOKEN for one-off scripted use",
                 )
             })?;
 
@@ -324,6 +328,7 @@ mod resolve_tests {
             }],
             cli: Some(CliSection {
                 token: Some(token.into()),
+                workspace_slug: None,
             }),
         }
     }

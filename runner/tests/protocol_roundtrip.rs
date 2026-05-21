@@ -50,6 +50,8 @@ fn envelope_roundtrips_all_server_variants() {
             server_time: chrono::Utc::now(),
             heartbeat_interval_secs: 25,
             protocol_version: WIRE_VERSION,
+            latest_runner_version: None,
+            min_runner_version: None,
         },
         ServerMsg::Assign {
             run_id: Uuid::new_v4(),

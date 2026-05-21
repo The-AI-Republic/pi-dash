@@ -1,6 +1,6 @@
 [package]
 name = "pidash"
-version = "0.1.1"
+version = "0.1.3"
 edition = "2024"
 rust-version = "1.93"
 description = "Pi Dash local runner: connects a dev machine to the Pi Dash cloud and drives Codex for assigned tasks."
@@ -56,6 +56,13 @@ ratatui = "0.28"
 crossterm = { version = "0.28", features = ["event-stream"] }
 bytes = "1"
 http = "1"
+# Self-update path. Default features include `github_releases`, which is
+# how cargo-dist publishes our binaries; opt in to `tokio` so we can
+# await the update from the async CLI.
+axoupdater = { version = "0.10", default-features = false, features = [
+    "github_releases",
+    "tokio",
+] }
 
 [target.'cfg(unix)'.dependencies]
 nix = { version = "0.29", features = ["fs", "signal", "user", "hostname"] }

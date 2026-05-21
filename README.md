@@ -9,6 +9,7 @@
 <p align="center"><b>Pi Dash -- AI Agent Orchestration Platform</b></p>
 
 <p align="center">
+    <a href="https://pidash.airepublic.com"><b>Live</b></a> •
     <a href="https://airepublic.com/"><b>Website</b></a> •
     <a href="https://airepublic.com/docs"><b>Documentation</b></a> •
     <a href="https://airepublic.com/"><b>Community</b></a> •
@@ -17,11 +18,21 @@
 
 Pi Dash is an open-source AI agent orchestration platform built for **As Coding (asynchronous vibe coding)** — a workflow where you define what needs to be built, and coding agents handle the implementation in the background. Instead of babysitting agent runs and watching terminals scroll, Pi Dash lets you focus on the work that matters: scoping tasks, reviewing results, and shipping products.
 
+Try it now at **[pidash.airepublic.com](https://pidash.airepublic.com)** — no installation required.
+
 > Pi Dash is evolving every day. Your suggestions, ideas, and reported bugs help us immensely. Do not hesitate to open a [GitHub discussion](https://github.com/The-AI-Republic/pi-dash/discussions) or [raise an issue](https://github.com/The-AI-Republic/pi-dash/issues). We read everything and respond to most.
 
 ## 🌟 Architecture
 
 Pi Dash is composed of three major components:
+
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="./images/pidash_diagram_white.png" />
+    <source media="(prefers-color-scheme: light)" srcset="./images/pidash_diagram_black.png" />
+    <img alt="Pi Dash architecture diagram" src="./images/pidash_diagram_black.png" width="358" />
+  </picture>
+</p>
 
 ### Pi Dash Platform
 
@@ -33,21 +44,21 @@ A local command-line tool and background daemon that runs on your development ma
 
 ### AI Agent (user-provided)
 
-Pi Dash is agent-agnostic — bring your own coding agent. Whether you use Apple Pi, Claude Code, Codex, OpenClaw, or a custom solution, Pi Dash orchestrates the workflow around it. You configure which agent the runner invokes; Pi Dash handles the rest.
+Pi Dash is agent-agnostic — bring your own coding agent. Today the runner ships first-class support for **Claude Code** and **Codex**; the dispatch layer is designed so additional agents can be wired in without changing the orchestration model. You configure which agent the runner invokes; Pi Dash handles the rest.
 
 ## 🚀 Installation
 
-> **Pi Dash Cloud** is coming soon. For now, self-hosting is the way to go.
+> **Pi Dash Cloud** is now live at **[pidash.airepublic.com](https://pidash.airepublic.com)** — sign up to get started without running your own infrastructure. Prefer to self-host? Follow the steps below.
 
 ### 1. Pi Dash Platform (self-hosted)
 
 #### Requirements
 
 - Docker Engine installed and running
-- Node.js version 20+ [LTS version](https://nodejs.org/en/about/previous-releases)
-- Python version 3.8+
-- Postgres version v14
-- Redis version v6.2.7
+- Node.js version 22+ [LTS version](https://nodejs.org/en/about/previous-releases)
+- Python version 3.12+
+- Postgres version v15+
+- Valkey v7+ (or Redis 7+, drop-in compatible)
 - **Memory**: Minimum **12 GB RAM** recommended
   > Running the project on a system with only 8 GB RAM may lead to setup failures or memory crashes (especially during Docker container build/start or dependency install). Use cloud environments like GitHub Codespaces or upgrade local RAM if possible.
 
@@ -108,18 +119,29 @@ curl --proto '=https' --tlsv1.2 -LsSf \
   https://github.com/The-AI-Republic/pi-dash/releases/latest/download/pidash-installer.sh | sh
 ```
 
-Then register with your Pi Dash platform, install the OS service, and start the daemon:
+Then authenticate the machine and register a runner. The standard flow is two commands:
 
 ```bash
-# Register with your Pi Dash instance (grab the one-time token from the web UI)
-pidash configure --url https://your-pidash-instance.com --token <ONE_TIME_CODE>
+# 1. Browser-based device-code login (like `gh auth login` / `stripe login`).
+#    Stores a CLI token at ~/.config/pidash/config.toml.
+pidash auth login --url https://your-pidash-instance.com
 
-# Install as a system service (systemd on Linux, launchd on macOS)
-pidash install
-
-# Start the daemon
-pidash start
+# 2. Register this host as a runner. Uses the token from step 1 — no
+#    enrollment-token paste needed. On the first runner, installs the OS
+#    service (systemd user unit on Linux, launchd agent on macOS) and
+#    starts the daemon.
+pidash runner add --project <project-id>
 ```
+
+`pidash auth login` prompts to add a runner inline when no runner exists yet, so a fresh dev laptop can be onboarded with a single command. Add more runners later with `pidash runner add --project <other-project-id>`.
+
+For headless / scripted hosts where the browser flow is awkward, the legacy enrollment-token paste still works:
+
+```bash
+pidash connect --url https://your-pidash-instance.com --token <ONE_TIME_TOKEN>
+```
+
+Generate `<ONE_TIME_TOKEN>` from the "Add connection" button in the web UI.
 
 The runner daemon runs in the background, polls for assigned tasks, dispatches them to your AI agent, and reports results back to the platform.
 
@@ -136,7 +158,12 @@ See `pidash --help` for all available commands.
 
 ### 3. AI Agent (user-provided)
 
-Pi Dash does not ship an AI agent — you bring your own. Ensure your chosen agent is installed and accessible on the machine running the Pi Dash CLI. Supported agents include Apple Pi, Claude Code, Codex, OpenClaw, and any custom agent that conforms to the Pi Dash agent interface.
+Pi Dash does not ship an AI agent — you bring your own. Ensure your chosen agent CLI is installed and accessible on the machine running the Pi Dash CLI. The runner currently supports two agent kinds out of the box:
+
+- **Claude Code** — install [`claude`](https://docs.anthropic.com/en/docs/claude-code) and make sure `claude --version` works.
+- **Codex** — install [`codex`](https://github.com/openai/codex) and make sure `codex --version` works.
+
+`pidash doctor` verifies the configured agent is on `PATH` and the cloud is reachable before you go live.
 
 ## ⚙️ Built with
 

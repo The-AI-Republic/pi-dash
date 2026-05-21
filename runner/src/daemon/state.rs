@@ -81,6 +81,23 @@ struct Inner {
     current_run: Mutex<Option<CurrentRunSummary>>,
     approvals_pending: Mutex<usize>,
     runner_id: Mutex<Option<Uuid>>,
+    /// Latest version advisory the cloud has pushed via the welcome
+    /// frame. `(latest_announced, min_required)`. Populated on every
+    /// welcome receipt; cleared on `set_connected(false)` is *not*
+    /// done deliberately — operators looking at a recently-
+    /// disconnected daemon still want to see the last advisory.
+    update_advisory: Mutex<(Option<String>, Option<String>)>,
+    /// Version of `~/.local/bin/pidash` after the most recent successful
+    /// auto-swap. `None` until a swap has actually happened; once `Some`,
+    /// the IPC advisory shows "restart to apply" instead of "update
+    /// available" because the new bytes are already on disk.
+    on_disk_version: Mutex<Option<String>>,
+    /// Guard against re-entrant or overlapping auto-swap attempts.
+    /// Set atomically before kicking off `cli::update::check_or_swap`
+    /// from the welcome handler; cleared in the spawned task's `finally`
+    /// arm regardless of swap outcome. Plain `AtomicBool` is fine — the
+    /// guard never participates in cross-await borrow lifetimes.
+    swap_in_progress: std::sync::atomic::AtomicBool,
     /// Per-active-run observability snapshot. One `Mutex` over the whole
     /// struct (rather than seven `Mutex<Option<T>>` fields) so that:
     ///   1. `reset_run_snapshot()` is a single assignment — adding a
@@ -122,6 +139,9 @@ impl StateHandle {
                 current_run: Mutex::new(None),
                 approvals_pending: Mutex::new(0),
                 runner_id: Mutex::new(None),
+                update_advisory: Mutex::new((None, None)),
+                on_disk_version: Mutex::new(None),
+                swap_in_progress: std::sync::atomic::AtomicBool::new(false),
                 run_snapshot: Mutex::new(ObservabilitySnapshot::default()),
             }),
             tx_tick,
@@ -335,11 +355,81 @@ impl StateHandle {
         let uptime = (Utc::now() - self.inner.started_at).num_seconds().max(0) as u64;
         let cloud_url = self.inner.cloud_url.lock().await.clone();
         let connected = *self.inner.connected.lock().await;
+        let (latest_announced, min_required) = self.inner.update_advisory.lock().await.clone();
+        let on_disk_version = self.inner.on_disk_version.lock().await.clone();
+        let auto_update_enabled = self.inner.cfg.lock().await.daemon.auto_update;
+        // Only synthesise `update` when the cloud has actually announced
+        // something. A "no advisory" daemon should not surface an empty
+        // banner — keep `update: None` in that case.
+        let update = if latest_announced.is_some()
+            || min_required.is_some()
+            || on_disk_version.is_some()
+        {
+            Some(crate::ipc::protocol::UpdateAdvisory {
+                running_version: crate::RUNNER_VERSION.to_string(),
+                on_disk_version,
+                latest_announced,
+                min_required,
+                auto_update_enabled,
+            })
+        } else {
+            None
+        };
         crate::ipc::protocol::DaemonInfo {
             cloud_url,
             connected,
             uptime_secs: uptime,
+            update,
         }
+    }
+
+    /// Record the version advisory carried on a welcome frame. Either
+    /// or both fields may be `None`; production callers pass `None` when
+    /// the cloud has no `LATEST_RUNNER_VERSION` / `MIN_RUNNER_VERSION`
+    /// announcement, which clears any prior advisory.
+    pub async fn set_update_advisory(
+        &self,
+        latest: Option<String>,
+        min: Option<String>,
+    ) {
+        let mut guard = self.inner.update_advisory.lock().await;
+        *guard = (latest, min);
+    }
+
+    /// Read auto-update toggle directly from the live config snapshot.
+    /// Cheap — single mutex acquisition.
+    pub async fn auto_update_enabled(&self) -> bool {
+        self.inner.cfg.lock().await.daemon.auto_update
+    }
+
+    /// Attempt to claim the auto-swap guard. Returns true if we won
+    /// the race (caller proceeds with the swap), false if another
+    /// swap is already in flight.
+    pub fn try_claim_swap(&self) -> bool {
+        use std::sync::atomic::Ordering;
+        self.inner
+            .swap_in_progress
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+    }
+
+    /// Release the swap guard. Always paired with a prior successful
+    /// `try_claim_swap`.
+    pub fn release_swap(&self) {
+        use std::sync::atomic::Ordering;
+        self.inner.swap_in_progress.store(false, Ordering::Release);
+    }
+
+    /// Record the on-disk version after a successful swap.
+    pub async fn set_on_disk_version(&self, version: String) {
+        *self.inner.on_disk_version.lock().await = Some(version);
+    }
+
+    /// Current on-disk version, if a swap has landed. `None` until the
+    /// auto-update path or `pidash update` has successfully swapped at
+    /// least once during this daemon's lifetime.
+    pub async fn on_disk_version(&self) -> Option<String> {
+        self.inner.on_disk_version.lock().await.clone()
     }
 }
 
@@ -364,6 +454,30 @@ mod tests {
             started_at: Utc::now(),
             events: 0,
         }
+    }
+
+    #[tokio::test]
+    async fn update_advisory_round_trips_to_daemon_info() {
+        let state = empty_state();
+        // Default: no advisory seen yet -> daemon_info reports none.
+        assert!(state.daemon_info().await.update.is_none());
+
+        // Welcome with latest + min populates the advisory.
+        state
+            .set_update_advisory(Some("0.1.3".into()), Some("0.1.2".into()))
+            .await;
+        let info = state.daemon_info().await;
+        let adv = info.update.expect("advisory should be populated");
+        assert_eq!(adv.latest_announced.as_deref(), Some("0.1.3"));
+        assert_eq!(adv.min_required.as_deref(), Some("0.1.2"));
+        assert_eq!(adv.running_version, crate::RUNNER_VERSION);
+        assert!(adv.on_disk_version.is_none(), "no swap has happened yet");
+        // Default config has auto_update = true (see DaemonConfig::default).
+        assert!(adv.auto_update_enabled);
+
+        // Cloud that explicitly clears its advisory drops back to None.
+        state.set_update_advisory(None, None).await;
+        assert!(state.daemon_info().await.update.is_none());
     }
 
     #[tokio::test]
