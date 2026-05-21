@@ -45,35 +45,47 @@ async fn run_errors_when_config_missing() {
 
 #[tokio::test]
 async fn run_errors_when_creds_missing_but_config_present() {
+    // Multi-runner: config.toml has one [[runner]] block, but the
+    // per-runner credentials.toml under data_dir/runners/<id>/ is
+    // absent. The daemon must bail with an action-guiding error before
+    // trying to spawn the runner, naming the file the operator needs
+    // to produce and the command that produces it.
     let tmp = tempdir().unwrap();
     let paths = empty_paths(tmp.path());
     ensure_dirs(&paths);
-    // Config exists, credentials do not.
+    let runner_id = uuid::Uuid::new_v4();
     std::fs::write(
         paths.config_path(),
-        r#"
-version = 1
+        format!(
+            r#"
+version = 2
 
-[runner]
-name = "t"
+[daemon]
 cloud_url = "https://x"
 
-[workspace]
+[[runner]]
+name = "t"
+runner_id = "{runner_id}"
+workspace_slug = "acme"
+project_slug = "TEST"
+
+[runner.workspace]
 working_dir = "/tmp/wd"
-"#,
+"#
+        ),
     )
     .unwrap();
     let args = RunArgs { offline: true };
     let err = pidash::cli::run_for_tests(args, &paths)
         .await
-        .expect_err("__run with config but no creds should fail");
+        .expect_err("__run with config but no per-runner creds should fail");
     let msg = format!("{err:#}");
     assert!(
         msg.contains("credentials.toml"),
         "error should mention credentials.toml: {msg}",
     );
     assert!(
-        msg.contains("pidash connect"),
-        "error should point at `pidash connect`: {msg}",
+        msg.contains("pidash runner add"),
+        "error should point at `pidash runner add`: {msg}",
     );
 }
