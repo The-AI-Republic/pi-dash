@@ -11,6 +11,8 @@ full composer + Issue fixture stack.
 
 from __future__ import annotations
 
+from uuid import uuid4
+
 import pytest
 
 from pi_dash.prompting.fragments import FRAGMENTS_DIR, assemble, fragment_paths
@@ -111,46 +113,96 @@ def test_fragments_directory_exists_on_disk():
     assert FRAGMENTS_DIR.is_dir(), f"fragments dir missing: {FRAGMENTS_DIR}"
 
 
-def _base_ctx(*, parent=None, work_branch=None, base_branch="trunk"):
-    """Minimal context shape needed to render the assembled fragment body.
+def _ctx_from_db(*, parent_branch=None, work_branch=None, base_branch="trunk", has_parent=False):
+    """Build the Jinja context for these fragment tests via the production
+    ``prompting.context.build_context``.
 
-    Mirrors the keys produced by ``prompting.context.build_context`` that are
-    referenced by the workpad-setup and implementation fragments.
+    Why go through the DB instead of a hand-rolled dict:
+
+    The Jinja renderer runs in ``StrictUndefined`` mode (templates are
+    workspace-admin-editable, so a typo in production must error rather
+    than silently emit empty). A hand-rolled fixture has to enumerate
+    every key any fragment ever references — adding a new
+    ``{{ issue.foo }}`` to any fragment immediately breaks this test
+    until the fixture is updated by hand. We've burned that paper cut
+    a few times already.
+
+    Sourcing the ctx from ``build_context(issue, run)`` instead means:
+
+    - The fixture stays in lockstep with the production ctx shape
+      automatically: whatever keys ``build_context`` adds, this test
+      sees on the next run.
+    - Templates that reference a key ``build_context`` doesn't fill in
+      surface as a clear failure here (the right place for it), not
+      hidden behind a stale fixture.
+
+    The cost is touching the DB for this test, which is fine — the
+    test class already runs under pytest-django.
     """
-    return {
-        # Jinja runs in strict mode, so every key any fragment touches
-        # must exist on the dict even when the value is empty. Keeping
-        # this shape in sync with the fragments is brittle by design —
-        # if a new fragment field is added, this fixture needs to grow.
-        # See: `grep -rh 'issue\.\w*' pi_dash/prompting/fragments/`.
-        "issue": {
-            "identifier": "TP-7",
-            "title": "Make button blue",
-            "priority": "high",
-            "state": "Todo",
-            "state_group": "started",
-            "description": "",
-            "labels": [],
-            "assignees": [],
-            "project_states": [],
-            "target_date": None,
-            "url": "https://example.test/issue/TP-7",
-        },
-        "project": {"identifier": "TP", "name": "Test Project"},
-        "repo": {
-            "url": "git@github.com:acme/web.git",
-            "base_branch": base_branch,
-            "work_branch": work_branch,
-        },
-        "parent": parent,
-        "run": {"id": "00000000", "attempt": 1, "turn_number": 1},
-        "workspace": {"slug": "test-workspace"},
-    }
+    from pi_dash.db.models import (
+        Issue,
+        Project,
+        State,
+        Workspace,
+        User,
+    )
+    from pi_dash.runner.models import AgentRun, Pod
+    from pi_dash.prompting.context import build_context
+
+    # Each invocation rolls its own row set so parametrised tests don't
+    # collide on unique (workspace_slug, project_identifier, …).
+    owner, _ = User.objects.get_or_create(
+        email="fragment-test@example.com",
+        defaults={"username": "fragment-test"},
+    )
+    workspace = Workspace.objects.create(
+        slug=f"ws-{uuid4().hex[:8]}",
+        name="Fragments WS",
+        owner=owner,
+    )
+    project = Project.objects.create(
+        name="Test Project",
+        identifier="TP",
+        workspace=workspace,
+        created_by=owner,
+        base_branch=base_branch,
+    )
+    State.objects.create(
+        name="Todo", project=project, workspace=workspace, group="unstarted", default=True
+    )
+
+    parent = None
+    if has_parent:
+        parent = Issue.objects.create(
+            name="Umbrella",
+            workspace=workspace,
+            project=project,
+            created_by=owner,
+            git_work_branch=parent_branch or "",
+        )
+    issue = Issue.objects.create(
+        name="Make button blue",
+        workspace=workspace,
+        project=project,
+        created_by=owner,
+        parent=parent,
+        git_work_branch=work_branch or "",
+        priority="high",
+    )
+    pod = Pod.default_for_project(project)
+    run = AgentRun.objects.create(
+        work_item=issue,
+        workspace=workspace,
+        pod=pod,
+        created_by=owner,
+    )
+    return build_context(issue, run)
 
 
 @pytest.mark.unit
+@pytest.mark.django_db
 def test_assemble_renders_independent_issue_uses_project_base():
-    body = render(assemble(), _base_ctx())
+    body = render(assemble(), _ctx_from_db())
     # No parent → independent path: BASE comes from project base branch.
     assert "BASE=trunk" in body
     # And the PR-base prose in Step 2 matches.
@@ -158,13 +210,12 @@ def test_assemble_renders_independent_issue_uses_project_base():
 
 
 @pytest.mark.unit
+@pytest.mark.django_db
 def test_assemble_renders_parent_with_work_branch_uses_parent_branch():
-    parent = {
-        "identifier": "TP-1",
-        "title": "Umbrella",
-        "work_branch": "pi-dash/tp-1",
-    }
-    body = render(assemble(), _base_ctx(parent=parent))
+    body = render(
+        assemble(),
+        _ctx_from_db(has_parent=True, parent_branch="pi-dash/tp-1"),
+    )
     # Parent w/ branch → BASE points at the parent's branch.
     assert "BASE=pi-dash/tp-1" in body
     # PR-base prose in Step 2 references the parent's branch, not the project base.
@@ -172,9 +223,9 @@ def test_assemble_renders_parent_with_work_branch_uses_parent_branch():
 
 
 @pytest.mark.unit
+@pytest.mark.django_db
 def test_assemble_renders_parent_without_work_branch_falls_back_to_project_base():
-    parent = {"identifier": "TP-1", "title": "Umbrella", "work_branch": None}
-    body = render(assemble(), _base_ctx(parent=parent))
+    body = render(assemble(), _ctx_from_db(has_parent=True, parent_branch=None))
     # Parent w/o branch → fall back to project base.
     assert "BASE=trunk" in body
     # And the fallback note must be present so the agent records it.
@@ -182,8 +233,9 @@ def test_assemble_renders_parent_without_work_branch_falls_back_to_project_base(
 
 
 @pytest.mark.unit
+@pytest.mark.django_db
 def test_assemble_renders_existing_work_branch_skips_base_resolution():
-    body = render(assemble(), _base_ctx(work_branch="feat/pinned"))
+    body = render(assemble(), _ctx_from_db(work_branch="feat/pinned"))
     # repo.work_branch path → checkout existing branch directly, no BASE= resolution.
     assert "git checkout feat/pinned" in body
     assert "BASE=" not in body

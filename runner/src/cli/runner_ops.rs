@@ -155,42 +155,6 @@ pub async fn apply_enroll_response(
     working_dir: Option<PathBuf>,
     agent_kind: AgentKind,
 ) -> Result<AppliedRunner> {
-    // Load existing config (if any) and check the cloud URL BEFORE we
-    // touch disk. Writing per-runner credentials first and then
-    // discovering a cloud-URL mismatch leaves an orphaned credentials
-    // file the daemon will never reference — annoying to clean up.
-    let mut cfg = if paths.config_path().exists() {
-        file::load_config(paths)?
-    } else {
-        // First runner on a host that never had a config — happens when
-        // the user ran `pidash auth login` (which writes [cli] but no
-        // [[runner]]). Bootstrap a minimal config seeded from the
-        // response's cloud URL.
-        Config {
-            version: 2,
-            daemon: DaemonConfig {
-                cloud_url: cloud_url.to_string(),
-                log_level: "info".to_string(),
-                log_retention_days: 14,
-                agent_observability_v1: false,
-                auto_update: true,
-            },
-            runners: vec![],
-            cli: None,
-        }
-    };
-
-    if !cfg.daemon.cloud_url.is_empty() && cfg.daemon.cloud_url != cloud_url {
-        anyhow::bail!(
-            "this host is enrolled with cloud {} — refusing to add a runner pointing at {}",
-            cfg.daemon.cloud_url,
-            cloud_url
-        );
-    }
-    if cfg.daemon.cloud_url.is_empty() {
-        cfg.daemon.cloud_url = cloud_url.to_string();
-    }
-
     let working_dir =
         working_dir.unwrap_or_else(|| paths.runner_dir(resp.runner_id).join("workspace"));
 
@@ -207,16 +171,59 @@ pub async fn apply_enroll_response(
         approval_policy: ApprovalPolicySection::default(),
     };
 
-    // Validate the merged config in-memory before persisting anything.
-    let is_first_runner = cfg.runners.is_empty();
-    cfg.runners.push(new_runner.clone());
-    cfg.validate()
-        .map_err(|e| anyhow::anyhow!("config invalid after add: {e}"))?;
+    // Bootstrap closure for the no-config-yet case (first runner on a
+    // fresh host that ran `pidash auth login` but not `pidash connect`).
+    // Seeds a minimal `[daemon]` block from the response's cloud URL.
+    let bootstrap_cloud_url = cloud_url.to_string();
+    let init_cfg = move || {
+        Some(Config {
+            version: 2,
+            daemon: DaemonConfig {
+                cloud_url: bootstrap_cloud_url.clone(),
+                log_level: "info".to_string(),
+                log_retention_days: 14,
+                agent_observability_v1: false,
+                auto_update: true,
+            },
+            runners: vec![],
+            cli: None,
+        })
+    };
 
-    // Disk writes only happen after every fast-fail above has cleared.
-    // credentials.toml goes first: the supervisor refuses to start a
-    // runner whose config block references a missing credentials file,
-    // so write the credential before the config that points at it.
+    // Persist the `[[runner]]` block under the host-wide `.config.lock`
+    // so a concurrent `pidash runner add` / daemon `RemoveRunner` strip
+    // can't last-writer-wins this write. The closure also performs the
+    // cloud-URL mismatch check inside the lock — doing it before
+    // `mutate_config_or_init` would race with a concurrent `auth login
+    // --url <different>` that may be rewriting `[cli]` at the same time.
+    let new_runner_for_closure = new_runner.clone();
+    let mut is_first_runner = false;
+    file::mutate_config_or_init(paths, init_cfg, |cfg| {
+        if !cfg.daemon.cloud_url.is_empty() && cfg.daemon.cloud_url != cloud_url {
+            anyhow::bail!(
+                "this host is enrolled with cloud {} — refusing to add a runner pointing at {}",
+                cfg.daemon.cloud_url,
+                cloud_url
+            );
+        }
+        if cfg.daemon.cloud_url.is_empty() {
+            cfg.daemon.cloud_url = cloud_url.to_string();
+        }
+        is_first_runner = cfg.runners.is_empty();
+        cfg.runners.push(new_runner_for_closure);
+        Ok(())
+    })
+    .map_err(|e| anyhow::anyhow!("persisting [[runner]] block under config lock: {e}"))?;
+
+    // Credentials write happens AFTER config so a config-write failure
+    // (cloud-URL mismatch, validation error, IO) doesn't leave an orphan
+    // per-runner credentials file pointing at a runner the supervisor
+    // never sees. The flipside — config block exists but credentials
+    // don't — is recoverable: the supervisor logs the missing-file
+    // error and `pidash runner remove <name>` can clean up by name.
+    // (The caller's rollback umbrella in cli/runner.rs also strips the
+    // partial `[[runner]]` block on credentials-write failure, see the
+    // `Err(persist_err)` arm there.)
     let runner_paths = paths.for_runner(resp.runner_id);
     runner_paths.ensure()?;
     write_runner_credentials(
@@ -230,7 +237,6 @@ pub async fn apply_enroll_response(
     )
     .await
     .context("writing per-runner credentials failed")?;
-    file::write_config(paths, &cfg)?;
 
     Ok(AppliedRunner {
         runner: new_runner,

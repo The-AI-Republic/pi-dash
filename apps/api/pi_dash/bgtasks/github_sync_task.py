@@ -144,6 +144,15 @@ def _upsert_issue(
     # fields land as NULL — clobbering the values we just set above.
     # Re-stamp via ``.update`` (bypasses save) so the audit fields
     # actually carry the workspace integration's actor.
+    #
+    # TODO: ``BaseModel.save`` already supports ``disable_auto_set_user=True``
+    # to opt out of the crum auto-stamp, but ``update_or_create`` doesn't
+    # forward kwargs to ``save``. The cleaner long-term fix is either
+    # (a) split the upsert into get + Issue(..).save(disable_auto_set_user=True)
+    # or (b) add a manager helper like ``Issue.objects.upsert_as_actor(actor, …)``
+    # so every sync worker doesn't reinvent this double-write. Leaving the
+    # workaround in place for this PR; touch when the next GitHub-sync
+    # change lands. See ``db/models/base.py:BaseModel.save``.
     Issue.objects.filter(pk=issue.pk).update(
         created_by_id=sync.actor_id,
         updated_by_id=sync.actor_id,

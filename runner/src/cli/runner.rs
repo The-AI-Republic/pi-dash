@@ -167,6 +167,18 @@ pub async fn add(args: AddArgs, paths: &Paths) -> Result<RunnerConfig> {
     {
         Ok(applied) => applied,
         Err(persist_err) => {
+            // Best-effort local cleanup before unwinding the cloud row.
+            // `apply_enroll_response` may have written either nothing
+            // (config-write failed) or just the `[[runner]]` block (the
+            // credentials write failed after the config write); we strip
+            // the block and the per-runner files regardless of which
+            // step tripped so the operator isn't left with stray state.
+            let runner_paths = paths.for_runner(resp.runner_id);
+            let _ = file::mutate_config(paths, |cfg| {
+                cfg.runners.retain(|r| r.runner_id != resp.runner_id);
+                Ok(())
+            });
+            let _ = std::fs::remove_file(runner_paths.credentials_path());
             if let Err(rollback_err) =
                 delete_runner(&cloud_url, &api_token, &resp.runner_id, true).await
             {

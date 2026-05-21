@@ -87,6 +87,24 @@ pub fn mutate_config<F>(paths: &Paths, mutate: F) -> Result<Config>
 where
     F: FnOnce(&mut Config) -> Result<()>,
 {
+    mutate_config_or_init(paths, || None, mutate)
+}
+
+/// Same contract as [`mutate_config`] but tolerates a missing
+/// `config.toml`. When the file is absent, ``init()`` is invoked under
+/// the lock to produce the bootstrap `Config`; the closure then mutates
+/// it as normal. Returning `None` from ``init`` preserves the strict
+/// [`mutate_config`] behaviour (propagate the NotFound error).
+///
+/// Exists so `pidash runner add` / `pidash connect` can serialise the
+/// first-runner write against the same `.config.lock` the daemon's
+/// `RemoveRunner` strip uses, instead of taking the legacy unlocked
+/// read-then-write path that loses a write on race.
+pub fn mutate_config_or_init<I, M>(paths: &Paths, init: I, mutate: M) -> Result<Config>
+where
+    I: FnOnce() -> Option<Config>,
+    M: FnOnce(&mut Config) -> Result<()>,
+{
     paths.ensure()?;
     let lock_path = config_lock_path(paths);
     let lock_file = fs::OpenOptions::new()
@@ -103,7 +121,26 @@ where
         .with_context(|| format!("opening config lock {lock_path:?}"))?;
     let _guard = Flock::lock(lock_file, FlockArg::LockExclusive)
         .map_err(|(_, errno)| anyhow::anyhow!("flock({lock_path:?}) failed: {errno}"))?;
-    let mut cfg = load_config(paths)?;
+    let mut cfg = match load_config(paths) {
+        Ok(c) => c,
+        Err(e) => {
+            // Bootstrap the config only when the file is missing.
+            // Any other error (parse failure, permissions) still
+            // propagates so silent corruption can't slip through.
+            let is_not_found = e
+                .downcast_ref::<std::io::Error>()
+                .map(|io| io.kind() == std::io::ErrorKind::NotFound)
+                .unwrap_or(false);
+            if is_not_found {
+                match init() {
+                    Some(c) => c,
+                    None => return Err(e),
+                }
+            } else {
+                return Err(e);
+            }
+        }
+    };
     mutate(&mut cfg)?;
     cfg.validate()
         .with_context(|| "config invalid after mutate_config closure")?;
