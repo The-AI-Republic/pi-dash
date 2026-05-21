@@ -78,6 +78,10 @@ export default {
               message: "Terjadi kesalahan. Silakan coba lagi.",
             },
           },
+          error: {
+            title: "",
+            message: "",
+          },
         },
       },
       unique_code: {
@@ -833,6 +837,7 @@ export default {
       show_weekends: "Tampilkan akhir pekan",
       enable: "Aktifkan",
       disable: "Nonaktifkan",
+      copy_markdown: "Salin markdown",
     },
     name: "Nama",
     discard: "Buang",
@@ -923,6 +928,7 @@ export default {
     paused: "Dijedaikan",
     no_of: "Jumlah {entity}",
     resolved: "Terselesaikan",
+    overview: "Ikhtisar",
   },
   chart: {
     x_axis: "Sumbu-X",
@@ -1586,6 +1592,23 @@ export default {
         },
       },
     },
+    activity: {
+      heading: "Aktivitas",
+      description: "Lacak tindakan dan perubahan terbaru Anda di semua proyek dan item pekerjaan.",
+    },
+    api_tokens: {
+      heading: "Token Akses Pribadi",
+      description:
+        "Hasilkan token API yang aman untuk mengintegrasikan data Anda dengan sistem dan aplikasi eksternal.",
+    },
+    notifications: {
+      heading: "Notifikasi email",
+      description: "Tetap terupdate tentang Work items yang Anda ikuti. Aktifkan ini untuk mendapatkan notifikasi.",
+    },
+    preferences: {
+      heading: "Preferensi",
+      description: "Sesuaikan pengalaman aplikasi Anda sesuai cara Anda bekerja",
+    },
   },
   workspace_settings: {
     label: "Pengaturan ruang kerja",
@@ -1662,6 +1685,9 @@ export default {
         current_plan: "Rencana saat ini",
         free_plan: "Anda saat ini menggunakan rencana gratis",
         view_plans: "Lihat rencana",
+        heading: "Tagihan & Paket",
+        description:
+          "Pilih paket Anda, kelola langganan, dan tingkatkan dengan mudah seiring pertumbuhan kebutuhan Anda.",
       },
       exports: {
         title: "Ekspor",
@@ -1682,6 +1708,11 @@ export default {
             },
           },
         },
+        heading: "Ekspor",
+        description:
+          "Ekspor data proyek Anda dalam berbagai format dan akses riwayat ekspor Anda dengan tautan unduhan.",
+        exporting_projects: "Mengekspor proyek",
+        format: "Format",
       },
       webhooks: {
         title: "Webhook",
@@ -1733,6 +1764,7 @@ export default {
             message: "Terjadi kesalahan saat menyalin kunci rahasia.",
           },
         },
+        description: "Otomatiskan notifikasi ke layanan eksternal saat peristiwa proyek terjadi.",
       },
       api_tokens: {
         title: "Token API",
@@ -1797,6 +1829,7 @@ export default {
       priority_distribution: {
         title: "Item kerja berdasarkan Prioritas",
         empty: "Buat item kerja untuk melihatnya berdasarkan prioritas dalam grafik untuk analisis yang lebih baik.",
+        priority: "",
       },
       recent_activity: {
         title: "Aktivitas terkini",
@@ -1880,6 +1913,20 @@ export default {
         title: "Tidak ada status yang tersedia untuk grup {groupKey}",
         description: "Silakan buat status baru",
       },
+      members_edit: {
+        toast: {
+          loading: "Memperbarui pengaturan proyek...",
+          success_title: "Berhasil!",
+          success_message: "Pengaturan proyek diperbarui.",
+          error_title: "Kesalahan!",
+          error_message: "Terjadi kesalahan saat memperbarui pengaturan proyek. Silakan coba lagi.",
+        },
+        title: "Izinkan anggota mengedit status",
+        description:
+          "Jika diaktifkan, anggota proyek dapat menambah, mengedit, mengurutkan ulang, dan menghapus status alur kerja. Jika dinonaktifkan, hanya admin yang dapat mengelola status.",
+      },
+      heading: "Status",
+      description: "Tentukan dan sesuaikan status alur kerja untuk melacak kemajuan item pekerjaan Anda.",
     },
     labels: {
       label_title: "Judul label",
@@ -1888,6 +1935,8 @@ export default {
       toast: {
         error: "Kesalahan saat memperbarui label",
       },
+      heading: "Label",
+      description: "Buat label kustom untuk mengkategorikan dan mengatur item pekerjaan Anda",
     },
     estimates: {
       label: "Perkiraan",
@@ -1972,6 +2021,8 @@ export default {
           hours: "Jam",
         },
       },
+      heading: "Estimasi",
+      enable_description: "Mereka membantu Anda dalam mengomunikasikan kompleksitas dan beban kerja tim.",
     },
     automations: {
       label: "Otomatisasi",
@@ -1986,6 +2037,9 @@ export default {
         duration: "Tutup otomatis item kerja yang tidak aktif selama",
         auto_close_status: "Status penutupan otomatis",
       },
+      heading: "Otomatisasi",
+      description:
+        "Konfigurasikan tindakan otomatis untuk menyederhanakan alur kerja manajemen proyek Anda dan mengurangi tugas manual.",
     },
     empty_state: {
       labels: {
@@ -2161,6 +2215,12 @@ export default {
           "Untuk membersihkan proyek Anda, arsipkan siklus yang telah diselesaikan. Temukan di sini setelah diarsipkan.",
       },
     },
+    start_date: "Tanggal mulai",
+    end_date: "Tanggal berakhir",
+    in_your_timezone: "Di zona waktu Anda",
+    transfer_work_items: "Transfer {count} item pekerjaan",
+    add_date: "Tambahkan tanggal",
+    date_range: "Rentang tanggal",
   },
   project_issues: {
     empty_state: {
@@ -2355,6 +2415,7 @@ export default {
       unarchived: "Notifikasi ditandai sebagai dihapus arsip",
       snoozed: "Notifikasi ditunda",
       unsnoozed: "Notifikasi dihapus tunda",
+      un_snoozed: "",
     },
     empty_state: {
       detail: {
@@ -2720,4 +2781,460 @@ export default {
     comment_failed_title: "Could not post comment",
     comment_failed_message: "Failed to post the comment.",
   },
+  scheduler_bindings: {
+    tab_label: "Penjadwal",
+    title: "Penjadwal",
+    subtitle:
+      "Penjadwal yang terpasang di proyek ini. Setiap pemasangan akan memicu promptnya terhadap proyek pada cron yang dikonfigurasi.",
+    install: "Pasang penjadwal",
+    columns: {
+      name: "Penjadwal",
+      cron: "Jadwal",
+      next_run: "Jalankan berikutnya",
+      last_run: "Jalankan terakhir",
+      status: "Status",
+      updated: "Diperbarui",
+    },
+    toast: {
+      updated_title: "Pemasangan diperbarui",
+      enabled_message: "Penjadwal diaktifkan — akan dijalankan pada tick cron berikutnya.",
+      disabled_message: "Penjadwal dinonaktifkan — tidak akan berjalan hingga diaktifkan kembali.",
+      error_title: "Terjadi kesalahan",
+      update_failed: "Tidak dapat memperbarui pemasangan.",
+      updated_message: "Jalur selanjutnya menggunakan pengaturan baru.",
+      installed_title: "Penjadwal terpasang",
+      installed_message: "Ini akan berjalan pada cron yang dikonfigurasi.",
+      install_failed: "Tidak dapat memasang penjadwal.",
+      uninstalled_title: "Penjadwal dicopot",
+      uninstalled_message: "Ini tidak akan berjalan pada proyek ini hingga dipasang kembali.",
+      uninstall_failed: "Tidak dapat mencopot penjadwal.",
+    },
+    list: {
+      empty:
+        "Belum ada penjadwal yang terpasang di proyek ini. Klik “Pasang penjadwal” untuk menambahkan dari katalog ruang kerja.",
+      none_yet: "(tidak pernah)",
+    },
+    actions: {
+      disable: "Nonaktifkan penjadwal",
+      enable: "Aktifkan penjadwal",
+      edit: "Sunting",
+      uninstall: "Copot",
+    },
+    status: {
+      enabled: "Diaktifkan",
+      disabled: "Dinonaktifkan",
+    },
+    edit_modal: {
+      title: "Sunting pemasangan penjadwal",
+      saving: "Menyimpan…",
+      save: "Simpan",
+    },
+    install_modal: {
+      cron_label: "Jadwal (cron)",
+      errors: {
+        cron_required: "Ekspresi cron diperlukan.",
+        scheduler_required: "Pilih penjadwal.",
+      },
+      cron_placeholder: "0 9 * * *",
+      cron_help: "Ekspresi cron 5-bidang dalam UTC, mis. ``0 9 * * *`` untuk 09:00 UTC setiap hari.",
+      extra_context_label: "Konteks proyek (opsional)",
+      extra_context_placeholder: "Catatan khusus untuk proyek ini…",
+      extra_context_help:
+        "Ditambahkan ke prompt dasar penjadwal saat dijalankan. Gunakan untuk memberikan kerangka khusus proyek yang tidak boleh dibawa oleh prompt ruang kerja.",
+      enabled_label: "Diaktifkan",
+      enabled_help: "Instal yang dinonaktifkan tidak akan berjalan pada cron sampai diaktifkan kembali.",
+      cancel: "Batal",
+      none_available_title: "Tidak ada penjadwal yang tersedia",
+      none_available_body:
+        "Setiap penjadwal ruang kerja sudah terinstal di proyek ini, atau admin ruang kerja Anda belum mengaktifkannya. Kunjungi Ruang Kerja → Penjadwal untuk mengelola katalog.",
+      title: "Instal penjadwal",
+      scheduler_label: "Penjadwal",
+      scheduler_help:
+        "Pilih dari penjadwal yang diaktifkan di ruang kerja Anda. Penjadwal yang sudah terinstal tidak akan ditampilkan.",
+      installing: "Memasang…",
+      install: "Instal",
+    },
+    uninstall_modal: {
+      title: "Copot pemasangan penjadwal?",
+      body: "Penjadwal berhenti berjalan di proyek ini. Definisi ruang kerja tidak terpengaruh dan dapat diinstal ulang nanti.",
+      confirm: "Copot pemasangan",
+    },
+  },
+  prompts: {
+    detail: {
+      loading: "Memuat…",
+      not_found: "Templat tidak ditemukan.",
+      default_title: "Templat perintah (default Pi Dash)",
+      workspace_title: "Templat perintah (penggantian ruang kerja)",
+      default_description:
+        "Ini adalah default bawaan Pi Dash. Admin ruang kerja tidak dapat mengeditnya di sini — sesuaikan untuk ruang kerja Anda untuk menggantinya.",
+      workspace_description:
+        "Penggantian default Pi Dash oleh ruang kerja Anda. Pengeditan akan menaikkan versi dan diterapkan pada proses agen berikutnya untuk ruang kerja ini.",
+      back: "Kembali ke daftar",
+      body: "Isi templat (Jinja + Markdown)",
+      unsaved: "Perubahan yang belum disimpan",
+      save: "Simpan",
+    },
+    toast: {
+      saved_title: "Perintah disimpan",
+      saved_message: "Proses agen selanjutnya akan menggunakan perintah yang diperbarui.",
+      save_failed: "Tidak dapat menyimpan perintah.",
+      error_title: "Terjadi kesalahan",
+      created_title: "Penggantian ruang kerja dibuat",
+      created_message: "Kami menyalin default Pi Dash saat ini. Edit dan simpan untuk menyesuaikannya.",
+      customize_failed: "Tidak dapat membuat penggantian ruang kerja.",
+      reverted_title: "Kembali ke default Pi Dash",
+      reverted_message: "Ruang kerja ini kembali ke template default bersama.",
+      revert_failed: "Tidak dapat mengembalikan prompt.",
+    },
+    preview: {
+      missing_issue_id: "Masukkan ID isu terlebih dahulu.",
+      failed: "Render gagal.",
+      title: "Pratinjau",
+      issue_id_placeholder: "ID isu (UUID)",
+      run: "Pratinjau",
+      empty: "Tempelkan ID isu dan klik Pratinjau untuk merender template terhadap isu nyata.",
+      admin_only:
+        "Melihat pratinjau prompt yang dirender adalah tindakan admin ruang kerja. Tanyakan admin ruang kerja Anda jika perlu melihatnya dirender terhadap isu tertentu.",
+    },
+    scope: {
+      default: "Default Pi Dash",
+      workspace: "Penggantian ruang kerja",
+    },
+    title: "Prompt",
+    subtitle:
+      "Template prompt sistem yang dirender terhadap setiap isu sebelum menjalankan agen. Admin ruang kerja dapat menyesuaikan default untuk ruang kerja ini.",
+    customize: "Sesuaikan untuk ruang kerja ini",
+    columns: {
+      name: "Nama",
+      scope: "Lingkup",
+      version: "Versi",
+      updated: "Diperbarui",
+    },
+    list: {
+      empty: "Tidak ada template prompt yang tersedia. Default Pi Dash akan diisi pada migrasi berikutnya.",
+    },
+    revert: {
+      confirm_title: "Kembalikan ke default Pi Dash?",
+      confirm_body:
+        "Ini mengarsipkan template lingkup ruang kerja Anda. Jalankan agen baru di ruang kerja ini akan menggunakan default Pi Dash sampai Anda membuat penggantian lain.",
+      confirm: "Kembalikan",
+    },
+    actions: {
+      edit: "Edit",
+      view: "Lihat",
+      revert: "Kembalikan ke default",
+    },
+  },
+  runners: {
+    toast: {
+      error_title: "Kesalahan!",
+    },
+    approvals: {
+      decision_failed: "Gagal merekam keputusan",
+      empty: "Tidak ada persetujuan yang tertunda.",
+      run_meta: "Jalankan {runId} · diminta {at}",
+      expires: "kedaluwarsa {at}",
+      accept_once: "Terima sekali",
+      accept_for_session: "Terima untuk sesi",
+      decline: "Tolak",
+    },
+    tabs: {
+      runners: "Agen AI",
+      runs: "Proses",
+      approvals: "Persetujuan",
+    },
+    title: "Agen AI",
+    page_title: "{workspace} - Agen AI",
+    list: {
+      delete_failed: "Gagal menghapus runner",
+      revoke_failed: "Gagal mencabut runner",
+      revive_failed: "Gagal menghidupkan kembali runner",
+      add_runner: "Tambah runner",
+      how_it_works_title: "Cara menambahkan runner",
+      how_it_works_body:
+        '1. Klik "Tambah runner", pilih proyek + pod dan kirim. Cloud membuat token pendaftaran satu kali yang terikat pada runner tersebut.\n2. Pada mesin yang akan menjadi host runner, jalankan perintah `pidash connect --url ... --token ... --host-label ...` yang ditampilkan.\n3. Daemon mendaftar dan runner muncul online di sini.\n\nSetiap runner memiliki token sendiri. Runner pertama yang didaftarkan pada host juga mem-bootstrap token mesin yang digunakan oleh CLI `pidash` untuk perintah non-runner.\n\nPrasyarat: CLI agen (codex / claude) harus sudah terinstal di host.',
+      connected_runners: "Runner",
+      columns: {
+        name: "Nama",
+        status: "Status",
+        os_arch: "OS / Arsitektur",
+        version: "Versi",
+        last_heartbeat: "Detak jantung terakhir",
+      },
+      columns_pod: "Pod",
+      revive: "Hidupkan kembali",
+      revoke: "Cabut",
+      delete: "Hapus",
+      empty: 'Belum ada runner. Klik "Tambah runner" untuk membuat token pendaftaran per-runner pertama Anda.',
+      delete_confirm_title: "Hapus runner?",
+      delete_confirm_body:
+        "Baris runner dihapus dan daemon dipaksa offline. Proses historis tetap disimpan dengan referensi runner null.",
+      revoke_confirm_title: "Cabut runner?",
+      revoke_confirm_body:
+        "Kredensial runner dinonaktifkan dan semua proses yang sedang berjalan dibatalkan, tetapi baris tetap ada di daftar. Anda dapat menghidupkannya kembali nanti untuk membuat token pendaftaran baru pada baris yang sama.",
+      revive_modal_title: "Token pendaftaran baru",
+      revive_modal_body:
+        "Jalankan perintah di bawah pada host yang seharusnya mengambil runner ini. Salin sekarang — token tidak akan ditampilkan lagi.",
+      project_placeholder: "Pilih proyek",
+      copy_failed: "Tidak dapat menyalin ke clipboard",
+    },
+    machine_token_note: {
+      body: "Saat pertama kali runner mendaftar di host baru (yaitu, ``host_label`` baru), cloud juga mengeluarkan token mesin yang digunakan oleh CLI ``pidash`` untuk perintah non-runner (issue, comment, state). Runner berikutnya di host yang sama menggunakan kembali token tersebut.",
+    },
+    pods: {
+      title: "Pod",
+      help: "Pod mengelompokkan runner Anda. Isu mendelegasikan ke pod, dan runner gratis di dalamnya mengambil pekerjaan. Klik ubin untuk memfilter runner.",
+      load_failed: "Gagal memuat pod",
+      tile_aria: "Filter runner berdasarkan pod {name}",
+      default_badge: "default",
+      runner_count: "{count} runner",
+      create_tile: "Buat pod baru",
+      filter_active: "Memfilter runner berdasarkan pod {name}",
+      filter_clear: "Hapus filter",
+    },
+    add_modal: {
+      runner_id_label: "ID Runner",
+      done: "Selesai",
+      agent_options: {
+        claude_code: "Claude Code",
+        codex: "Codex",
+      },
+      errors: {
+        create_failed: "Tidak dapat membuat token pendaftaran.",
+        project_required: "Pilih proyek.",
+        load_projects_failed: "Tidak dapat memuat proyek.",
+        load_pods_failed: "Tidak dapat memuat pod.",
+      },
+      title: "Tambah runner",
+      subtitle:
+        "Buat token pendaftaran satu kali untuk runner baru. Anda akan menjalankan perintah `pidash connect` yang ditampilkan di mesin yang akan menjadi hostnya.",
+      project_label: "Proyek",
+      project_help: "Proyek tempat runner ini akan bekerja.",
+      pod_label: "Pod (opsional)",
+      pod_default_option: "(pod default)",
+      pod_help: "Default ke pod default proyek.",
+      name_label: "Nama (opsional)",
+      name_placeholder: "my-laptop-runner",
+      name_help: "Otomatis ditetapkan jika kosong, mis. ``runner_001``.",
+      host_label_label: "Label host (opsional)",
+      host_label_placeholder: "laptop-saya",
+      host_label_help:
+        "Nama host bebas yang disematkan ke dalam perintah yang disarankan. Daemon akan mengganti dengan nama host sebenarnya jika Anda tidak menyertakan flag.",
+      working_dir_label: "Direktori kerja (opsional)",
+      working_dir_placeholder: "direktori kerja proyek mesin pengembangan lokal",
+      working_dir_help:
+        "Jalur lokal tempat daemon menjalankan CLI agen — biasanya repositori proyek di disk. Defaultnya adalah sandbox di bawah direktori data runner, yang jarang Anda inginkan.",
+      agent_label: "Agen",
+      agent_help:
+        "CLI agen AI mana yang akan dijalankan oleh runner ini. Disematkan ke dalam perintah ``pidash connect`` yang ditampilkan.",
+      cancel: "Batal",
+      submitting: "Mencetak…",
+      submit: "Cetak token pendaftaran",
+      token_warning: "Salin ini sekali — token pendaftaran tidak akan ditampilkan lagi.",
+      token_instructions: "Jalankan ini di mesin yang akan menjadi host runner:",
+      copied: "Disalin!",
+      copy_command: "Salin perintah",
+    },
+    runs: {
+      cancel_failed: "Gagal membatalkan run",
+      columns: {
+        started: "Dimulai",
+        status: "Status",
+        prompt: "Prompt",
+      },
+      empty: "Belum ada run.",
+      select_run: "Pilih run di sebelah kiri.",
+      cancel: "Batalkan run",
+      prompt: "Prompt",
+      error: "Kesalahan",
+      done_payload: "Payload selesai",
+      events_count: "Peristiwa ({count})",
+      event_columns: {
+        seq: "seq",
+        kind: "kind",
+        at: "at",
+      },
+      cancel_confirm_title: "Batalkan proses?",
+      cancel_confirm_body: "Runner akan menghentikan proses ini segera setelah menerima sinyal.",
+    },
+    create_pod_modal: {
+      errors: {
+        create_failed: "Tidak dapat membuat pod.",
+        project_required: "Pilih proyek.",
+        load_projects_failed: "Tidak dapat memuat proyek.",
+        name_required: "Nama diperlukan.",
+      },
+      title: "Buat pod baru",
+      subtitle: "Pod mengelompokkan runner dalam suatu proyek. Pilih proyek, lalu beri nama pod.",
+      project_label: "Proyek",
+      project_placeholder: "Pilih proyek",
+      project_help: "Proyek tempat pod ini berada. Nama akan diawali dengan pengenal proyek.",
+      name_label: "Nama",
+      name_placeholder: "beefy",
+      name_help: "Huruf, angka, tanda hubung, dan garis bawah. Awalan proyek ditambahkan secara otomatis.",
+      description_label: "Deskripsi (opsional)",
+      description_placeholder: "Di mana pod ini berjalan, untuk apa, dll.",
+      cancel: "Batal",
+      submitting: "Membuat…",
+      submit: "Buat pod",
+    },
+  },
+  schedulers: {
+    toast: {
+      created_title: "Penjadwal dibuat",
+      created_message: "Admin proyek sekarang dapat menginstalnya di proyek mereka.",
+      create_failed: "Tidak dapat membuat penjadwal.",
+      error_title: "Terjadi kesalahan",
+      updated_title: "Penjadwal diperbarui",
+      updated_message: "Proses selanjutnya akan menggunakan definisi yang diperbarui.",
+      update_failed: "Tidak dapat memperbarui penjadwal.",
+      deleted_title: "Penjadwal dihapus",
+      deleted_message: "Pengikatan aktif berhenti berjalan.",
+      delete_failed: "Tidak dapat menghapus penjadwal.",
+    },
+    title: "Penjadwal",
+    subtitle:
+      "Definisi penjadwal yang dapat digunakan kembali untuk ruang kerja ini. Pasang satu pada proyek untuk menjalankan prompt-nya terhadap proyek secara cron.",
+    new: "Penjadwal baru",
+    columns: {
+      name: "Nama",
+      slug: "Slug",
+      source: "Sumber",
+      installs: "Pemasangan",
+      status: "Status",
+      updated: "Diperbarui",
+    },
+    list: {
+      empty: "Belum ada penjadwal di ruang kerja ini. Klik “Penjadwal baru” untuk membuatnya.",
+      installs_count: "{count, plural, one {# pemasangan} other {# pemasangan}}",
+    },
+    source: {
+      manifest: "Manifest",
+      builtin: "Bawaan",
+    },
+    status: {
+      enabled: "Diaktifkan",
+      disabled: "Dinonaktifkan",
+    },
+    actions: {
+      edit: "Edit",
+      delete: "Hapus",
+    },
+    delete: {
+      confirm_title: "Hapus penjadwal?",
+      confirm_body:
+        "Ini akan menghapus penjadwal secara lunak. Semua pengikatan proyek yang aktif akan berhenti berjalan. Slug akan tersedia untuk dibuat ulang.",
+      confirm: "Hapus",
+    },
+    form: {
+      edit_title: "Edit penjadwal",
+      create_title: "Penjadwal baru",
+      slug_label: "Slug",
+      errors: {
+        slug_required: "Slug wajib diisi.",
+        name_required: "Nama wajib diisi.",
+        prompt_required: "Prompt wajib diisi.",
+      },
+      slug_placeholder: "security-audit",
+      slug_help: "Pengidentifikasi huruf kecil yang digunakan di URL. Tidak dapat diubah setelah dibuat.",
+      name_label: "Nama",
+      name_placeholder: "Audit keamanan",
+      description_label: "Deskripsi",
+      description_placeholder: "Ringkasan singkat yang ditampilkan di pemilih instalasi.",
+      prompt_label: "Prompt",
+      prompt_placeholder: "Cari masalah keamanan yang menonjol di proyek ini…",
+      prompt_help:
+        "Prompt dasar yang dijalankan agen setiap tick. Konteks per proyek ditambahkan saat instalasi, jadi pertahankan prompt ini agar tidak bergantung pada proyek.",
+      enabled_label: "Diaktifkan",
+      enabled_help:
+        "Penjadwal yang dinonaktifkan tidak dapat diinstal pada proyek baru, dan pengikatan yang ada tidak akan berjalan.",
+      cancel: "Batal",
+      saving: "Menyimpan…",
+      save: "Simpan",
+      creating: "Membuat…",
+      create: "Buat penjadwal",
+    },
+  },
+  power_k: {
+    search_menu: {
+      no_results: "Tidak ada hasil ditemukan",
+      clear_search: "Hapus pencarian",
+    },
+    miscellaneous_actions: {
+      copy_current_page_url_toast_success: "URL halaman saat ini disalin ke clipboard.",
+      copy_current_page_url_toast_error: "Terjadi kesalahan saat menyalin URL halaman saat ini ke clipboard.",
+    },
+    preferences_actions: {
+      toast: {
+        theme: {
+          error: "Gagal memperbarui tema. Silakan coba lagi.",
+        },
+        timezone: {
+          success: "Zona waktu berhasil diperbarui.",
+          error: "Gagal memperbarui zona waktu. Silakan coba lagi.",
+        },
+        generic: {
+          success: "Preferensi berhasil diperbarui.",
+          error: "Gagal memperbarui preferensi. Silakan coba lagi.",
+        },
+      },
+    },
+    footer: {
+      workspace_level: "Tingkat ruang kerja",
+    },
+    page_placeholders: {
+      default: "Ketik perintah atau cari",
+    },
+    contextual_actions: {
+      cycle: {
+        copy_url_toast_success: "URL siklus disalin ke clipboard.",
+        copy_url_toast_error: "Terjadi kesalahan saat menyalin URL siklus ke clipboard.",
+      },
+      module: {
+        copy_url_toast_success: "URL modul disalin ke clipboard.",
+        copy_url_toast_error: "Terjadi kesalahan saat menyalin URL modul ke clipboard.",
+      },
+      page: {
+        copy_url_toast_success: "URL halaman disalin ke clipboard.",
+        copy_url_toast_error: "Terjadi kesalahan saat menyalin URL halaman ke clipboard.",
+      },
+      work_item: {
+        copy_id_toast_success: "ID item kerja disalin ke clipboard.",
+        copy_id_toast_error: "Terjadi kesalahan saat menyalin ID item kerja ke clipboard.",
+        copy_title_toast_success: "Judul item kerja disalin ke papan klip.",
+        copy_title_toast_error: "Terjadi kesalahan saat menyalin judul item kerja ke papan klip.",
+        copy_url_toast_success: "URL item kerja disalin ke papan klip.",
+        copy_url_toast_error: "Terjadi kesalahan saat menyalin URL item kerja ke papan klip.",
+      },
+    },
+  },
+  date: "",
+  epics: "",
+  Unassigned: "",
+  creating_theme: "",
+  issue_advanced_git: "",
+  git_work_branch: "",
+  git_work_branch_hint: "",
+  git_work_branch_too_long: "",
+  git_work_branch_invalid_chars: "",
+  git_work_branch_placeholder: "",
+  progress: "",
+  customize_navigation: "Sesuaikan navigasi",
+  personal: "Pribadi",
+  accordion_navigation_control: "Navigasi sidebar akordeon",
+  horizontal_navigation_bar: "Navigasi Bertab",
+  show_limited_projects_on_sidebar: "Tampilkan proyek terbatas di sidebar",
+  enter_number_of_projects: "Masukkan jumlah proyek",
+  repo_url_too_long: "",
+  git_repository_url_placeholder: "",
+  base_branch_too_long: "",
+  base_branch_invalid_chars: "",
+  base_branch_placeholder: "",
+  git_repository_url: "",
+  base_branch: "",
+  timezone_setting: "Pengaturan zona waktu saat ini.",
+  language_setting: "Pilih bahasa yang digunakan di antarmuka pengguna.",
+  language_and_time: "Bahasa & Waktu",
+  preferences: "Preferensi",
 } as const;

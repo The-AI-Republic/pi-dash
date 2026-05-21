@@ -61,8 +61,8 @@ export const ChangeEmailModal = observer(function ChangeEmailModal(props: Props)
     await signOut().catch(() =>
       setToast({
         type: TOAST_TYPE.ERROR,
-        title: t("sign_out.toast.error.title"),
-        message: t("sign_out.toast.error.message"),
+        title: t("auth.sign_out.toast.error.title"),
+        message: t("auth.sign_out.toast.error.message"),
       })
     );
   };
@@ -189,6 +189,7 @@ export const ChangeEmailModal = observer(function ChangeEmailModal(props: Props)
                   placeholder={changeEmailT("form.code.placeholder")}
                   className={cn({ "border-danger-strong": errors.code })}
                   autoComplete="off"
+                  // oxlint-disable-next-line jsx-a11y/no-autofocus -- This modal intentionally focuses the verification code field on step entry.
                   autoFocus
                 />
               )}

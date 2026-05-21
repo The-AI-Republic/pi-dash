@@ -79,6 +79,10 @@ export default {
               message: "Bir şeyler ters gitti. Lütfen tekrar deneyin.",
             },
           },
+          error: {
+            title: "",
+            message: "",
+          },
         },
       },
       unique_code: {
@@ -922,6 +926,7 @@ export default {
     paused: "Durduruldu",
     no_of: "{entity} sayısı",
     resolved: "Çözüldü",
+    overview: "Genel Bakış",
   },
   chart: {
     x_axis: "X ekseni",
@@ -1586,6 +1591,23 @@ export default {
         },
       },
     },
+    activity: {
+      heading: "Etkinlik",
+      description: "Tüm projeler ve iş öğeleri arasında son işlemlerinizi ve değişikliklerinizi takip edin.",
+    },
+    api_tokens: {
+      heading: "Kişisel Erişim Belirteçleri",
+      description:
+        "Verilerinizi harici sistemler ve uygulamalarla entegre etmek için güvenli API belirteçleri oluşturun.",
+    },
+    notifications: {
+      heading: "E-posta bildirimleri",
+      description: "Abone olduğunuz iş öğeleri hakkında bilgi sahibi olun. Bildirim almak için bunu etkinleştirin.",
+    },
+    preferences: {
+      heading: "Tercihler",
+      description: "Uygulama deneyiminizi çalışma şeklinize göre özelleştirin",
+    },
   },
   workspace_settings: {
     label: "Çalışma Alanı Ayarları",
@@ -1662,6 +1684,8 @@ export default {
         current_plan: "Mevcut plan",
         free_plan: "Şu anda ücretsiz planı kullanıyorsunuz",
         view_plans: "Planları görüntüle",
+        heading: "Faturalandırma ve Planlar",
+        description: "Planınızı seçin, abonelikleri yönetin ve ihtiyaçlarınız arttıkça kolayca yükseltin.",
       },
       exports: {
         title: "Dışa Aktarımlar",
@@ -1682,6 +1706,11 @@ export default {
             },
           },
         },
+        heading: "Dışa Aktarımlar",
+        description:
+          "Proje verilerinizi çeşitli formatlarda dışa aktarın ve indirme bağlantılarıyla dışa aktarma geçmişinize erişin.",
+        exporting_projects: "Proje dışa aktarılıyor",
+        format: "Biçim",
       },
       webhooks: {
         title: "Webhook'lar",
@@ -1733,6 +1762,7 @@ export default {
             message: "Gizli anahtar kopyalanırken hata oluştu.",
           },
         },
+        description: "Proje olayları gerçekleştiğinde harici hizmetlere bildirimleri otomatikleştirin.",
       },
       api_tokens: {
         title: "API Token'ları",
@@ -1796,6 +1826,7 @@ export default {
       priority_distribution: {
         title: "Önceliğe göre iş öğeleri",
         empty: "Daha iyi analiz için önceliklerine göre iş öğelerini görmek üzere iş öğesi oluşturun.",
+        priority: "",
       },
       recent_activity: {
         title: "Son aktiviteler",
@@ -1878,6 +1909,20 @@ export default {
         title: "{groupKey} grubu için durum yok",
         description: "Lütfen yeni bir durum oluşturun",
       },
+      members_edit: {
+        toast: {
+          loading: "Proje ayarı güncelleniyor...",
+          success_title: "Başarılı!",
+          success_message: "Proje ayarı güncellendi.",
+          error_title: "Hata!",
+          error_message: "Proje ayarı güncellenirken bir şeyler ters gitti. Lütfen tekrar deneyin.",
+        },
+        title: "Üyelerin durumları düzenlemesine izin ver",
+        description:
+          "Etkinleştirildiğinde, proje üyeleri iş akışı durumlarını ekleyebilir, düzenleyebilir, yeniden sıralayabilir ve silebilir. Devre dışı bırakıldığında, yalnızca yöneticiler durumları yönetebilir.",
+      },
+      heading: "Durumlar",
+      description: "İş öğelerinizin ilerlemesini takip etmek için iş akışı durumlarını tanımlayın ve özelleştirin.",
     },
     labels: {
       label_title: "Etiket başlığı",
@@ -1886,6 +1931,8 @@ export default {
       toast: {
         error: "Etiket güncellenirken hata oluştu",
       },
+      heading: "Etiketler",
+      description: "İş öğelerinizi kategorize etmek ve düzenlemek için özel etiketler oluşturun",
     },
     estimates: {
       label: "Tahminler",
@@ -1898,6 +1945,8 @@ export default {
         choose_template: "Şablon seç",
         choose_estimate_system: "Tahmin sistemi seç",
         enter_estimate_point: "Tahmin puanı girin",
+        step: "Adım {step} / {total}",
+        label: "Tahmin oluştur",
       },
       toasts: {
         created: {
@@ -1945,7 +1994,11 @@ export default {
         empty: "Tahmin değeri boş olamaz.",
         already_exists: "Tahmin değeri zaten var.",
         unsaved_changes: "Kaydedilmemiş değişiklikleriniz var, bitirmeden önce lütfen kaydedin",
+        remove_empty: "Tahmin boş olamaz. Her alana bir değer girin veya değeri olmayanları kaldırın.",
       },
+      new: "Yeni tahmin sistemi",
+      heading: "Tahminler",
+      enable_description: "Ekibin karmaşıklığını ve iş yükünü iletmenize yardımcı olurlar.",
     },
     automations: {
       label: "Otomasyonlar",
@@ -1960,6 +2013,9 @@ export default {
         duration: "Şu süre etkin olmayan iş öğelerini otomatik kapat",
         auto_close_status: "Otomatik kapatma durumu",
       },
+      heading: "Otomasyonlar",
+      description:
+        "Proje yönetimi iş akışınızı kolaylaştırmak ve manuel görevleri azaltmak için otomatik eylemleri yapılandırın.",
     },
     empty_state: {
       labels: {
@@ -2333,6 +2389,7 @@ export default {
       unarchived: "Bildirim arşivden çıkarıldı",
       snoozed: "Bildirim ertelendi",
       unsnoozed: "Bildirim ertelenmedi",
+      un_snoozed: "",
     },
     empty_state: {
       detail: {
@@ -2696,4 +2753,459 @@ export default {
     comment_failed_title: "Could not post comment",
     comment_failed_message: "Failed to post the comment.",
   },
+  scheduler_bindings: {
+    tab_label: "Zamanlayıcılar",
+    title: "Zamanlayıcılar",
+    subtitle:
+      "Bu projeye yüklenen zamanlayıcılar. Her yükleme, yapılandırılan cron üzerinde projeye karşı istemini tetikler.",
+    install: "Zamanlayıcı yükle",
+    columns: {
+      name: "Zamanlayıcı",
+      cron: "Zamanlama",
+      next_run: "Sonraki çalıştırma",
+      last_run: "Son çalıştırma",
+      status: "Durum",
+      updated: "Güncellendi",
+    },
+    toast: {
+      updated_title: "Yükleme güncellendi",
+      enabled_message: "Zamanlayıcı etkinleştirildi — bir sonraki cron tıklamasında tetiklenecek.",
+      disabled_message: "Zamanlayıcı devre dışı bırakıldı — yeniden etkinleştirilene kadar tetiklenmeyecek.",
+      error_title: "Bir şeyler ters gitti",
+      update_failed: "Yükleme güncellenemedi.",
+      updated_message: "Sonraki çalıştırmalar yeni ayarları kullanır.",
+      installed_title: "Zamanlayıcı yüklendi",
+      installed_message: "Yapılandırılan cron'da tetiklenecek.",
+      install_failed: "Zamanlayıcı yüklenemedi.",
+      uninstalled_title: "Zamanlayıcı kaldırıldı",
+      uninstalled_message: "Tekrar yüklenene kadar bu projede tetiklenmeyecek.",
+      uninstall_failed: "Zamanlayıcı kaldırılamadı.",
+    },
+    list: {
+      empty:
+        "Bu projede henüz hiçbir zamanlayıcı yüklü değil. Çalışma alanı kataloğundan bir tane eklemek için “Zamanlayıcıyı yükle”ye tıklayın.",
+      none_yet: "(hiç)",
+    },
+    actions: {
+      disable: "Zamanlayıcıyı devre dışı bırak",
+      enable: "Zamanlayıcıyı etkinleştir",
+      edit: "Düzenle",
+      uninstall: "Kaldır",
+    },
+    status: {
+      enabled: "Etkin",
+      disabled: "Devre dışı",
+    },
+    edit_modal: {
+      title: "Zamanlayıcı yüklemesini düzenle",
+      saving: "Kaydediliyor…",
+      save: "Kaydet",
+    },
+    install_modal: {
+      cron_label: "Zamanlama (cron)",
+      errors: {
+        cron_required: "Cron ifadesi gereklidir.",
+        scheduler_required: "Bir zamanlayıcı seçin.",
+      },
+      cron_placeholder: "0 9 * * *",
+      cron_help: "UTC'de 5 alanlı cron ifadesi, örn. her gün 09:00 UTC için ``0 9 * * *``.",
+      extra_context_label: "Proje bağlamı (isteğe bağlı)",
+      extra_context_placeholder: "Bu projeye özel notlar…",
+      extra_context_help:
+        "Çalışma zamanında zamanlayıcının temel istemine eklenir. Çalışma alanı isteminin taşımaması gereken projeye özel çerçeveleme sağlamak için kullanın.",
+      enabled_label: "Etkin",
+      enabled_help: "Devre dışı bırakılan yüklemeler, yeniden etkinleştirilene kadar cron'da tetiklenmez.",
+      cancel: "İptal",
+      none_available_title: "Kullanılabilir zamanlayıcı yok",
+      none_available_body:
+        "Ya bu projeye tüm çalışma alanı zamanlayıcıları zaten yüklendi ya da çalışma alanı yöneticiniz hiçbirini etkinleştirmedi. Kataloğu yönetmek için Çalışma Alanı → Zamanlayıcılar sayfasını ziyaret edin.",
+      title: "Zamanlayıcıyı yükle",
+      scheduler_label: "Zamanlayıcı",
+      scheduler_help:
+        "Çalışma alanınızın etkinleştirilmiş zamanlayıcıları arasından seçim yapın. Zaten yüklü olanlar listelenmez.",
+      installing: "Yükleniyor…",
+      install: "Yükle",
+    },
+    uninstall_modal: {
+      title: "Zamanlayıcı kaldırılsın mı?",
+      body: "Zamanlayıcı bu projede tetiklenmeyi durdurur. Çalışma alanı tanımı etkilenmez ve daha sonra yeniden yüklenebilir.",
+      confirm: "Kaldır",
+    },
+  },
+  prompts: {
+    detail: {
+      loading: "Yükleniyor…",
+      not_found: "Şablon bulunamadı.",
+      default_title: "İstem şablonu (Pi Dash varsayılanı)",
+      workspace_title: "İstem şablonu (çalışma alanı geçersiz kılma)",
+      default_description:
+        "Bu, yerleşik Pi Dash varsayılanıdır. Çalışma alanı yöneticileri burada düzenleyemez — geçersiz kılmak için çalışma alanınız için özelleştirin.",
+      workspace_description:
+        "Çalışma alanınızın Pi Dash varsayılanını geçersiz kılması. Düzenlemeler sürümü artırır ve bu çalışma alanı için bir sonraki aracı çalıştırmasında uygulanır.",
+      back: "Listeye dön",
+      body: "Şablon gövdesi (Jinja + Markdown)",
+      unsaved: "Kaydedilmemiş değişiklikler",
+      save: "Kaydet",
+    },
+    toast: {
+      saved_title: "İstem kaydedildi",
+      saved_message: "Sonraki aracı çalıştırmaları güncellenmiş istemi kullanacaktır.",
+      save_failed: "İstem kaydedilemedi.",
+      error_title: "Bir şeyler ters gitti",
+      created_title: "Çalışma alanı geçersiz kılma oluşturuldu",
+      created_message: "Mevcut Pi Dash varsayılanını kopyaladık. Özelleştirmek için düzenleyin ve kaydedin.",
+      customize_failed: "Çalışma alanı geçersiz kılma oluşturulamadı.",
+      reverted_title: "Pi Dash varsayılanına dönüldü",
+      reverted_message: "Bu çalışma alanı, paylaşılan varsayılan şablona geri döndü.",
+      revert_failed: "İstem geri alınamadı.",
+    },
+    preview: {
+      missing_issue_id: "Önce bir sorun kimliği girin.",
+      failed: "İşleme başarısız oldu.",
+      title: "Önizleme",
+      issue_id_placeholder: "Sorun kimliği (UUID)",
+      run: "Önizleme",
+      empty: "Bir sorun kimliği yapıştırın ve gerçek bir soruna karşı şablonu işlemek için Önizleme'ye tıklayın.",
+      admin_only:
+        "İşlenmiş istemin önizlemesi bir çalışma alanı yöneticisi eylemidir. Belirli bir soruna karşı işlenmiş halini görmeniz gerekiyorsa çalışma alanı yöneticinize danışın.",
+    },
+    scope: {
+      default: "Pi Dash varsayılanı",
+      workspace: "Çalışma alanı geçersiz kılma",
+    },
+    title: "İstemler",
+    subtitle:
+      "Bir ajan çalıştırmadan önce her soruna karşı işlenen sistem istemi şablonları. Çalışma alanı yöneticileri bu çalışma alanı için varsayılanı özelleştirebilir.",
+    customize: "Bu çalışma alanı için özelleştir",
+    columns: {
+      name: "Ad",
+      scope: "Kapsam",
+      version: "Sürüm",
+      updated: "Güncellenme",
+    },
+    list: {
+      empty: "Kullanılabilir istem şablonu yok. Pi Dash varsayılanı bir sonraki geçişte tohumlanacak.",
+    },
+    revert: {
+      confirm_title: "Pi Dash varsayılanına geri dönülsün mü?",
+      confirm_body:
+        "Bu, çalışma alanı kapsamlı şablonunuzu arşivler. Bu çalışma alanındaki yeni ajan çalıştırmaları, başka bir geçersiz kılma oluşturana kadar Pi Dash varsayılanını kullanacak.",
+      confirm: "Geri dön",
+    },
+    actions: {
+      edit: "Düzenle",
+      view: "Görüntüle",
+      revert: "Varsayılana geri dön",
+    },
+  },
+  runners: {
+    toast: {
+      error_title: "Hata!",
+    },
+    approvals: {
+      decision_failed: "Karar kaydedilemedi",
+      empty: "Bekleyen onay yok.",
+      run_meta: "Çalıştırma {runId} · talep edildi {at}",
+      expires: "sona eriyor {at}",
+      accept_once: "Bir kez kabul et",
+      accept_for_session: "Oturum için kabul et",
+      decline: "Reddet",
+    },
+    tabs: {
+      runners: "Yapay Zeka Ajanları",
+      runs: "Çalıştırmalar",
+      approvals: "Onaylar",
+    },
+    title: "Yapay Zeka Ajanları",
+    page_title: "{workspace} - Yapay Zeka Ajanları",
+    list: {
+      delete_failed: "Runner silinemedi",
+      revoke_failed: "Runner iptal edilemedi",
+      revive_failed: "Runner canlandırılamadı",
+      add_runner: "Runner ekle",
+      how_it_works_title: "Runner nasıl eklenir",
+      how_it_works_body:
+        "1. \"Runner ekle\"ye tıklayın, bir proje + pod seçin ve gönderin. Bulut, bu runner'a bağlı tek kullanımlık bir kayıt token'ı oluşturur.\n2. Runner'ı barındıracak makinede, görüntülenen `pidash connect --url ... --token ... --host-label ...` komutunu çalıştırın.\n3. Daemon kaydolur ve runner burada çevrimiçi görünür.\n\nHer runner'ın kendi token'ı vardır. Bir ana bilgisayarda kaydolan ilk runner, aynı zamanda `pidash` CLI tarafından runner olmayan komutlar için kullanılan bir makine token'ı başlatır.\n\nÖn koşul: aracı CLI (codex / claude) ana bilgisayara zaten yüklenmiş olmalıdır.",
+      connected_runners: "Runner'lar",
+      columns: {
+        name: "Ad",
+        status: "Durum",
+        os_arch: "İşletim Sistemi / Mimarisi",
+        version: "Sürüm",
+        last_heartbeat: "Son kalp atışı",
+      },
+      columns_pod: "Pod",
+      revive: "Canlandır",
+      revoke: "İptal et",
+      delete: "Sil",
+      empty: 'Henüz runner yok. İlk runner başına kayıt token\'ınızı oluşturmak için "Runner ekle"ye tıklayın.',
+      delete_confirm_title: "Runner silinsin mi?",
+      delete_confirm_body:
+        "Runner satırı kaldırılır ve daemon çevrimdışı olmaya zorlanır. Geçmiş çalıştırmalar, null runner referansı ile korunur.",
+      revoke_confirm_title: "Runner iptal edilsin mi?",
+      revoke_confirm_body:
+        "Runner'ın kimlik bilgileri geçersiz kılınır ve devam eden tüm çalıştırmalar iptal edilir, ancak satır listede kalır. Daha sonra canlandırarak aynı satırda yeni bir kayıt token'ı oluşturabilirsiniz.",
+      revive_modal_title: "Yeni kayıt token'ı",
+      revive_modal_body:
+        "Bu runner'ı alması gereken ana bilgisayarda aşağıdaki komutu çalıştırın. Şimdi kopyalayın — token bir daha gösterilmeyecek.",
+      project_placeholder: "Bir proje seçin",
+      copy_failed: "Panoya kopyalanamadı",
+    },
+    machine_token_note: {
+      body: "Bir runner ilk kez yeni bir ana bilgisayara (yani yeni bir ``host_label``) kaydolduğunda, bulut ayrıca ``pidash`` CLI tarafından runner olmayan komutlar (issue, comment, state) için kullanılan bir makine token'ı yayınlar. Aynı ana bilgisayardaki sonraki runner'lar bu token'ı yeniden kullanır.",
+    },
+    pods: {
+      title: "Pod'lar",
+      help: "Pod'lar runner'larınızı gruplar. Sorunlar bir pod'a devredilir ve içindeki herhangi bir boş runner işi alır. Runner'ları filtrelemek için bir kutucuğa tıklayın.",
+      load_failed: "Pod'lar yüklenemedi",
+      tile_aria: "Runner'ları pod {name} ile filtrele",
+      default_badge: "varsayılan",
+      runner_count: "{count} runner",
+      create_tile: "Yeni pod oluştur",
+      filter_active: "Runner'lar pod {name} ile filtreleniyor",
+      filter_clear: "Filtreyi temizle",
+    },
+    add_modal: {
+      runner_id_label: "Runner kimliği",
+      done: "Tamam",
+      agent_options: {
+        claude_code: "Claude Code",
+        codex: "Codex",
+      },
+      errors: {
+        create_failed: "Kayıt token'ı oluşturulamadı.",
+        project_required: "Bir proje seçin.",
+        load_projects_failed: "Projeler yüklenemedi.",
+        load_pods_failed: "Pod'lar yüklenemedi.",
+      },
+      title: "Runner ekle",
+      subtitle:
+        "Yeni bir runner için tek kullanımlık kayıt token'ı oluşturun. Görüntülenen `pidash connect` komutunu, runner'ı barındıracak makinede çalıştıracaksınız.",
+      project_label: "Proje",
+      project_help: "Bu runner'ın üzerinde çalışacağı proje.",
+      pod_label: "Pod (isteğe bağlı)",
+      pod_default_option: "(varsayılan pod)",
+      pod_help: "Varsayılan olarak projenin varsayılan pod'u kullanılır.",
+      name_label: "Ad (isteğe bağlı)",
+      name_placeholder: "my-laptop-runner",
+      name_help: "Boş bırakılırsa otomatik atanır, örn. ``runner_001``.",
+      host_label_label: "Ana bilgisayar etiketi (isteğe bağlı)",
+      host_label_placeholder: "my-laptop",
+      host_label_help:
+        "Önerilen komuta gömülü serbest biçimli ana bilgisayar adı. Bayrağı kapatırsanız arka plan programı gerçek ana bilgisayar adını kullanır.",
+      working_dir_label: "Çalışma dizini (isteğe bağlı)",
+      working_dir_placeholder: "yerel geliştirme makinesi proje çalışma dizini",
+      working_dir_help:
+        "Arka plan programının aracı CLI'sini çalıştırdığı yerel yol — genellikle diskteki proje deposu. Varsayılan olarak çalıştırıcının veri dizini altındaki bir kum havuzudur, bu nadiren istediğiniz şeydir.",
+      agent_label: "Aracı",
+      agent_help:
+        "Bu çalıştırıcının hangi AI aracı CLI'sini yönlendireceği. Görüntülenen ``pidash connect`` komutuna gömülüdür.",
+      cancel: "İptal",
+      submitting: "Basılıyor…",
+      submit: "Kayıt tokeni bas",
+      token_warning: "Bunu bir kez kopyalayın — kayıt tokeni bir daha gösterilmeyecek.",
+      token_instructions: "Bunu çalıştırıcıyı barındıracak makinede çalıştırın:",
+      copied: "Kopyalandı!",
+      copy_command: "Komutu kopyala",
+    },
+    runs: {
+      cancel_failed: "Çalıştırma iptal edilemedi",
+      columns: {
+        started: "Başlatıldı",
+        status: "Durum",
+        prompt: "İstem",
+      },
+      empty: "Henüz çalıştırma yok.",
+      select_run: "Soldan bir çalıştırma seçin.",
+      cancel: "Çalıştırmayı iptal et",
+      prompt: "İstem",
+      error: "Hata",
+      done_payload: "Tamamlanan yük",
+      events_count: "Olaylar ({count})",
+      event_columns: {
+        seq: "sıra",
+        kind: "tür",
+        at: "zaman",
+      },
+      cancel_confirm_title: "Çalıştırma iptal edilsin mi?",
+      cancel_confirm_body: "Çalıştırıcı, sinyali alır almaz bu çalıştırmayı durduracak.",
+    },
+    create_pod_modal: {
+      errors: {
+        create_failed: "Pod oluşturulamadı.",
+        project_required: "Bir proje seçin.",
+        load_projects_failed: "Projeler yüklenemedi.",
+        name_required: "Ad gereklidir.",
+      },
+      title: "Yeni pod oluştur",
+      subtitle: "Pod'lar, çalıştırıcıları bir proje altında gruplar. Bir proje seçin, ardından pod'a bir ad verin.",
+      project_label: "Proje",
+      project_placeholder: "Bir proje seçin",
+      project_help: "Bu pod'un ait olduğu proje. Ad, proje tanımlayıcısı ile ön eklenecektir.",
+      name_label: "Ad",
+      name_placeholder: "beefy",
+      name_help: "Harfler, rakamlar, tireler ve alt çizgiler. Proje ön eki otomatik olarak eklenir.",
+      description_label: "Açıklama (isteğe bağlı)",
+      description_placeholder: "Bu pod'un nerede çalıştığı, ne için olduğu vb.",
+      cancel: "İptal",
+      submitting: "Oluşturuluyor…",
+      submit: "Pod oluştur",
+    },
+  },
+  schedulers: {
+    toast: {
+      created_title: "Zamanlayıcı oluşturuldu",
+      created_message: "Proje yöneticileri artık bunu projelerine yükleyebilir.",
+      create_failed: "Zamanlayıcı oluşturulamadı.",
+      error_title: "Bir şeyler yanlış gitti",
+      updated_title: "Zamanlayıcı güncellendi",
+      updated_message: "Sonraki çalıştırmalar güncellenmiş tanımı kullanacak.",
+      update_failed: "Zamanlayıcı güncellenemedi.",
+      deleted_title: "Zamanlayıcı silindi",
+      deleted_message: "Aktif bağlamaların tetiklenmesi durduruldu.",
+      delete_failed: "Zamanlayıcı silinemedi.",
+    },
+    title: "Zamanlayıcılar",
+    subtitle:
+      "Bu çalışma alanı için yeniden kullanılabilir zamanlayıcı tanımları. Bir projeye yükleyerek, projeye karşı cron ile istemini çalıştırın.",
+    new: "Yeni zamanlayıcı",
+    columns: {
+      name: "Ad",
+      slug: "Kısa ad",
+      source: "Kaynak",
+      installs: "Yüklemeler",
+      status: "Durum",
+      updated: "Güncellenme",
+    },
+    list: {
+      empty: "Bu çalışma alanında henüz zamanlayıcı yok. Yeni bir tane oluşturmak için “Yeni zamanlayıcı”ya tıklayın.",
+      installs_count: "{count, plural, one {# yükleme} other {# yükleme}}",
+    },
+    source: {
+      manifest: "Bildirim",
+      builtin: "Yerleşik",
+    },
+    status: {
+      enabled: "Etkin",
+      disabled: "Devre dışı",
+    },
+    actions: {
+      edit: "Düzenle",
+      delete: "Sil",
+    },
+    delete: {
+      confirm_title: "Zamanlayıcı silinsin mi?",
+      confirm_body:
+        "Bu, zamanlayıcıyı yumuşak siler. Etkin proje bağlamaları tetiklenmeyi durdurur. Kısa ad yeniden oluşturma için kullanılabilir hale gelir.",
+      confirm: "Sil",
+    },
+    form: {
+      edit_title: "Zamanlayıcıyı düzenle",
+      create_title: "Yeni zamanlayıcı",
+      slug_label: "Kısa ad",
+      errors: {
+        slug_required: "Kısa ad gereklidir.",
+        name_required: "Ad gereklidir.",
+        prompt_required: "İstem gereklidir.",
+      },
+      slug_placeholder: "security-audit",
+      slug_help: "URL'lerde kullanılan küçük harf tanımlayıcı. Oluşturulduktan sonra değiştirilemez.",
+      name_label: "Ad",
+      name_placeholder: "Güvenlik denetimi",
+      description_label: "Açıklama",
+      description_placeholder: "Yükleme seçicide gösterilen kısa özet.",
+      prompt_label: "İstem",
+      prompt_placeholder: "Bu projedeki önemli güvenlik sorunlarını ara…",
+      prompt_help:
+        "Ajanın her tikte çalıştırdığı temel istem. Proje başına bağlam, kurulum sırasında eklenir, bu nedenle bu istemi projeden bağımsız tutun.",
+      enabled_label: "Etkin",
+      enabled_help: "Devre dışı bırakılan zamanlayıcılar yeni projelere kurulamaz ve mevcut bağlamalar tetiklenmez.",
+      cancel: "İptal",
+      saving: "Kaydediliyor…",
+      save: "Kaydet",
+      creating: "Oluşturuluyor…",
+      create: "Zamanlayıcı oluştur",
+    },
+  },
+  power_k: {
+    search_menu: {
+      no_results: "Sonuç bulunamadı",
+      clear_search: "Aramayı temizle",
+    },
+    miscellaneous_actions: {
+      copy_current_page_url_toast_success: "Geçerli sayfa URL'si panoya kopyalandı.",
+      copy_current_page_url_toast_error: "Geçerli sayfa URL'si panoya kopyalanırken bir hata oluştu.",
+    },
+    preferences_actions: {
+      toast: {
+        theme: {
+          error: "Tema güncellenemedi. Lütfen tekrar deneyin.",
+        },
+        timezone: {
+          success: "Saat dilimi başarıyla güncellendi.",
+          error: "Saat dilimi güncellenemedi. Lütfen tekrar deneyin.",
+        },
+        generic: {
+          success: "Tercihler başarıyla güncellendi.",
+          error: "Tercihler güncellenemedi. Lütfen tekrar deneyin.",
+        },
+      },
+    },
+    footer: {
+      workspace_level: "Çalışma alanı düzeyi",
+    },
+    page_placeholders: {
+      default: "Bir komut yazın veya arayın",
+    },
+    contextual_actions: {
+      cycle: {
+        copy_url_toast_success: "Döngü URL'si panoya kopyalandı.",
+        copy_url_toast_error: "Döngü URL'si panoya kopyalanırken bir hata oluştu.",
+      },
+      module: {
+        copy_url_toast_success: "Modül URL'si panoya kopyalandı.",
+        copy_url_toast_error: "Modül URL'si panoya kopyalanırken bir hata oluştu.",
+      },
+      page: {
+        copy_url_toast_success: "Sayfa URL'si panoya kopyalandı.",
+        copy_url_toast_error: "Sayfa URL'si panoya kopyalanırken bir hata oluştu.",
+      },
+      work_item: {
+        copy_id_toast_success: "İş öğesi kimliği panoya kopyalandı.",
+        copy_id_toast_error: "İş öğesi kimliği panoya kopyalanırken bir hata oluştu.",
+        copy_title_toast_success: "İş öğesi başlığı panoya kopyalandı.",
+        copy_title_toast_error: "İş öğesi başlığı panoya kopyalanırken bir hata oluştu.",
+        copy_url_toast_success: "İş öğesi URL'si panoya kopyalandı.",
+        copy_url_toast_error: "Çalışma öğesi URL'si panoya kopyalanırken bir hata oluştu.",
+      },
+    },
+  },
+  date: "",
+  epics: "",
+  Unassigned: "",
+  creating_theme: "",
+  issue_advanced_git: "",
+  git_work_branch: "",
+  git_work_branch_hint: "",
+  git_work_branch_too_long: "",
+  git_work_branch_invalid_chars: "",
+  git_work_branch_placeholder: "",
+  progress: "",
+  customize_navigation: "Navigasyonu özelleştir",
+  personal: "Kişisel",
+  accordion_navigation_control: "Akordeon yan çubuk navigasyonu",
+  horizontal_navigation_bar: "Sekmeli Navigasyon",
+  show_limited_projects_on_sidebar: "Yan çubukta sınırlı projeleri göster",
+  enter_number_of_projects: "Proje sayısını girin",
+  repo_url_too_long: "",
+  git_repository_url_placeholder: "",
+  base_branch_too_long: "",
+  base_branch_invalid_chars: "",
+  base_branch_placeholder: "",
+  git_repository_url: "",
+  base_branch: "",
+  timezone_setting: "Geçerli saat dilimi ayarı.",
+  language_setting: "Kullanıcı arayüzünde kullanılan dili seçin.",
+  language_and_time: "Dil ve Saat",
+  preferences: "Tercihler",
 } as const;
