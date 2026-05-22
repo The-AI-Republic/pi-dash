@@ -78,6 +78,10 @@ export default {
               message: "Něco se pokazilo. Zkuste to prosím znovu.",
             },
           },
+          error: {
+            title: "",
+            message: "",
+          },
         },
       },
       unique_code: {
@@ -828,6 +832,7 @@ export default {
       show_weekends: "Zobrazit víkendy",
       enable: "Povolit",
       disable: "Zakázat",
+      copy_markdown: "Kopírovat markdown",
     },
     name: "Název",
     discard: "Zahodit",
@@ -918,6 +923,7 @@ export default {
     paused: "Pozastaveno",
     no_of: "Počet {entity}",
     resolved: "Vyřešeno",
+    overview: "Přehled",
   },
   chart: {
     x_axis: "Osa X",
@@ -1578,6 +1584,23 @@ export default {
         },
       },
     },
+    activity: {
+      heading: "Aktivita",
+      description: "Sledujte své nedávné akce a změny napříč všemi projekty a pracovními položkami.",
+    },
+    api_tokens: {
+      heading: "Osobní přístupové tokeny",
+      description: "Generujte bezpečné API tokeny pro integraci vašich dat s externími systémy a aplikacemi.",
+    },
+    notifications: {
+      heading: "E-mailová oznámení",
+      description:
+        "Buďte v obraze ohledně pracovních položek, ke kterým jste přihlášeni. Povolením této možnosti budete dostávat oznámení.",
+    },
+    preferences: {
+      heading: "Předvolby",
+      description: "Přizpůsobte si prostředí aplikace podle svého pracovního stylu",
+    },
   },
   workspace_settings: {
     label: "Nastavení pracovního prostoru",
@@ -1651,6 +1674,9 @@ export default {
         current_plan: "Aktuální plán",
         free_plan: "Používáte bezplatný plán",
         view_plans: "Zobrazit plány",
+        heading: "Fakturace a plány",
+        description:
+          "Vyberte si svůj plán, spravujte předplatná a snadno upgradujte podle toho, jak rostou vaše potřeby.",
       },
       exports: {
         title: "Exporty",
@@ -1671,6 +1697,11 @@ export default {
             },
           },
         },
+        heading: "Exporty",
+        description:
+          "Exportujte data svých projektů v různých formátech a přistupujte k historii exportů pomocí odkazů ke stažení.",
+        exporting_projects: "Exportování projektu",
+        format: "Formát",
       },
       webhooks: {
         title: "Webhooky",
@@ -1722,6 +1753,7 @@ export default {
             message: "Chyba při kopírování klíče.",
           },
         },
+        description: "Automatizujte oznámení externím službám při událostech v projektu.",
       },
       api_tokens: {
         title: "API Tokeny",
@@ -1784,6 +1816,7 @@ export default {
       priority_distribution: {
         title: "Položky podle priority",
         empty: "Vytvářejte položky pro analýzu priorit.",
+        priority: "",
       },
       recent_activity: {
         title: "Nedávná aktivita",
@@ -1864,6 +1897,20 @@ export default {
         title: "Žádné stavy pro skupinu {groupKey}",
         description: "Vytvořte nový stav",
       },
+      members_edit: {
+        toast: {
+          loading: "Aktualizace nastavení projektu...",
+          success_title: "Úspěch!",
+          success_message: "Nastavení projektu bylo aktualizováno.",
+          error_title: "Chyba!",
+          error_message: "Při aktualizaci nastavení projektu došlo k chybě. Zkuste to prosím znovu.",
+        },
+        title: "Umožnit členům upravovat stavy",
+        description:
+          "Pokud je povoleno, členové projektu mohou přidávat, upravovat, přeskupovat a mazat stavy pracovních postupů. Pokud je zakázáno, stavy mohou spravovat pouze administrátoři.",
+      },
+      heading: "Stavy",
+      description: "Definujte a přizpůsobte stavy pracovních postupů pro sledování průběhu vašich pracovních položek.",
     },
     labels: {
       label_title: "Název štítku",
@@ -1872,6 +1919,8 @@ export default {
       toast: {
         error: "Chyba při aktualizaci štítku",
       },
+      heading: "Štítky",
+      description: "Vytvářejte vlastní štítky pro kategorizaci a organizaci vašich pracovních položek",
     },
     estimates: {
       label: "Odhady",
@@ -1956,6 +2005,8 @@ export default {
           hours: "Hodiny",
         },
       },
+      heading: "Odhady",
+      enable_description: "Pomáhají vám komunikovat složitost a pracovní zátěž týmu.",
     },
     automations: {
       label: "Automatizace",
@@ -1970,6 +2021,9 @@ export default {
         duration: "Automaticky uzavřít pracovní položky, které jsou neaktivní po dobu",
         auto_close_status: "Stav automatického uzavření",
       },
+      heading: "Automatizace",
+      description:
+        "Nakonfigurujte automatizované akce pro zefektivnění pracovního postupu řízení projektu a snížení manuálních úkolů.",
     },
     empty_state: {
       labels: {
@@ -2330,6 +2384,7 @@ export default {
       unarchived: "Zrušena archivace",
       snoozed: "Odloženo",
       unsnoozed: "Zrušeno odložení",
+      un_snoozed: "",
     },
     empty_state: {
       detail: {
@@ -2684,4 +2739,458 @@ export default {
     comment_failed_title: "Could not post comment",
     comment_failed_message: "Failed to post the comment.",
   },
+  scheduler_bindings: {
+    tab_label: "Plánovače",
+    title: "Plánovače",
+    subtitle:
+      "Plánovače nainstalované v tomto projektu. Každá instalace spouští svůj prompt vůči projektu podle nakonfigurovaného cronu.",
+    install: "Nainstalovat plánovač",
+    columns: {
+      name: "Plánovač",
+      cron: "Plán",
+      next_run: "Další spuštění",
+      last_run: "Poslední spuštění",
+      status: "Stav",
+      updated: "Aktualizováno",
+    },
+    toast: {
+      updated_title: "Instalace aktualizována",
+      enabled_message: "Plánovač povolen — spustí se při příštím cron ticku.",
+      disabled_message: "Plánovač zakázán — nespustí se, dokud nebude znovu povolen.",
+      error_title: "Došlo k chybě",
+      update_failed: "Instalaci se nepodařilo aktualizovat.",
+      updated_message: "Následující spuštění používají nová nastavení.",
+      installed_title: "Plánovač nainstalován",
+      installed_message: "Spustí se podle nakonfigurovaného cronu.",
+      install_failed: "Nelze nainstalovat plánovač.",
+      uninstalled_title: "Plánovač odinstalován",
+      uninstalled_message: "Dokud nebude znovu nainstalován, nebude se v tomto projektu spouštět.",
+      uninstall_failed: "Nelze odinstalovat plánovač.",
+    },
+    list: {
+      empty:
+        "V tomto projektu zatím nejsou nainstalovány žádné plánovače. Kliknutím na „Instalovat plánovač“ přidáte jeden z katalogu pracovního prostoru.",
+      none_yet: "(nikdy)",
+    },
+    actions: {
+      disable: "Zakázat plánovač",
+      enable: "Povolit plánovač",
+      edit: "Upravit",
+      uninstall: "Odinstalovat",
+    },
+    status: {
+      enabled: "Povoleno",
+      disabled: "Zakázáno",
+    },
+    edit_modal: {
+      title: "Upravit instalaci plánovače",
+      saving: "Ukládání…",
+      save: "Uložit",
+    },
+    install_modal: {
+      cron_label: "Plán (cron)",
+      errors: {
+        cron_required: "Cron výraz je povinný.",
+        scheduler_required: "Vyberte plánovač.",
+      },
+      cron_placeholder: "0 9 * * *",
+      cron_help: "Cron výraz o 5 polích v UTC, např. ``0 9 * * *`` pro 09:00 UTC každý den.",
+      extra_context_label: "Kontext projektu (volitelné)",
+      extra_context_placeholder: "Poznámky specifické pro tento projekt…",
+      extra_context_help:
+        "Připojeno k základnímu promptu plánovače za běhu. Použijte k poskytnutí projektově specifického rámce, který by prompt pracovního prostoru neměl nést.",
+      enabled_label: "Povoleno",
+      enabled_help: "Zakázané instalace se nespouštějí podle cronu, dokud nejsou znovu povoleny.",
+      cancel: "Zrušit",
+      none_available_title: "Žádné plánovače nejsou k dispozici",
+      none_available_body:
+        "Buď je každý plánovač pracovního prostoru již nainstalován v tomto projektu, nebo váš správce pracovního prostoru žádný nepovolil. Navštivte Pracovní prostor → Plánovače pro správu katalogu.",
+      title: "Instalovat plánovač",
+      scheduler_label: "Plánovač",
+      scheduler_help: "Vyberte z povolených plánovačů vašeho pracovního prostoru. Již nainstalované nejsou uvedeny.",
+      installing: "Instaluje se…",
+      install: "Nainstalovat",
+    },
+    uninstall_modal: {
+      title: "Odinstalovat plánovač?",
+      body: "Plánovač přestane na tomto projektu spouštět akce. Definice pracovního prostoru zůstává nedotčena a lze ji později znovu nainstalovat.",
+      confirm: "Odinstalovat",
+    },
+  },
+  prompts: {
+    detail: {
+      loading: "Načítá se…",
+      not_found: "Šablona nenalezena.",
+      default_title: "Šablona výzvy (výchozí Pi Dash)",
+      workspace_title: "Šablona výzvy (přepsání pracovním prostorem)",
+      default_description:
+        "Toto je vestavěný výchozí Pi Dash. Správci pracovního prostoru jej zde nemohou upravovat – přizpůsobte jej svému pracovnímu prostoru pro přepsání.",
+      workspace_description:
+        "Přepsání výchozího Pi Dash vaším pracovním prostorem. Úpravy zvyšují verzi a projeví se při příštím spuštění agenta pro tento pracovní prostor.",
+      back: "Zpět na seznam",
+      body: "Tělo šablony (Jinja + Markdown)",
+      unsaved: "Neuložené změny",
+      save: "Uložit",
+    },
+    toast: {
+      saved_title: "Výzva uložena",
+      saved_message: "Následující spuštění agenta použijí aktualizovanou výzvu.",
+      save_failed: "Výzvu se nepodařilo uložit.",
+      error_title: "Něco se pokazilo",
+      created_title: "Přepsání pracovního prostoru vytvořeno",
+      created_message: "Zkopírovali jsme aktuální výchozí Pi Dash. Upravte a uložte pro přizpůsobení.",
+      customize_failed: "Přepsání pracovního prostoru se nepodařilo vytvořit.",
+      reverted_title: "Vráceno na výchozí Pi Dash",
+      reverted_message: "Tento pracovní prostor je zpět na sdílené výchozí šabloně.",
+      revert_failed: "Výzvu se nepodařilo vrátit.",
+    },
+    preview: {
+      missing_issue_id: "Nejprve zadejte ID problému.",
+      failed: "Vykreslení selhalo.",
+      title: "Náhled",
+      issue_id_placeholder: "ID problému (UUID)",
+      run: "Náhled",
+      empty: "Vložte ID úkolu a klikněte na Náhled pro vykreslení šablony na skutečném úkolu.",
+      admin_only:
+        "Náhled vykreslené šablony je akce vyhrazená pro správce pracovního prostoru. Pokud potřebujete vidět vykreslení na konkrétním úkolu, obraťte se na svého správce.",
+    },
+    scope: {
+      default: "Pi Dash výchozí",
+      workspace: "Přepsání pracovního prostoru",
+    },
+    title: "Šablony",
+    subtitle:
+      "Šablony systémových výzev, které se vykreslují pro každý úkol před spuštěním agenta. Správci pracovního prostoru mohou přizpůsobit výchozí nastavení pro tento pracovní prostor.",
+    customize: "Přizpůsobit pro tento pracovní prostor",
+    columns: {
+      name: "Název",
+      scope: "Rozsah",
+      version: "Verze",
+      updated: "Aktualizováno",
+    },
+    list: {
+      empty: "Nejsou k dispozici žádné šablony výzev. Výchozí šablona Pi Dash bude nasazena při příští migraci.",
+    },
+    revert: {
+      confirm_title: "Vrátit se k výchozímu nastavení Pi Dash?",
+      confirm_body:
+        "Tímto archivujete šablonu pro tento pracovní prostor. Nová spuštění agentů v tomto pracovním prostoru budou používat výchozí nastavení Pi Dash, dokud nevytvoříte další přepsání.",
+      confirm: "Vrátit",
+    },
+    actions: {
+      edit: "Upravit",
+      view: "Zobrazit",
+      revert: "Vrátit na výchozí",
+    },
+  },
+  runners: {
+    toast: {
+      error_title: "Chyba!",
+    },
+    approvals: {
+      decision_failed: "Nepodařilo se zaznamenat rozhodnutí",
+      empty: "Žádná čekající schválení.",
+      run_meta: "Spuštění {runId} · požadováno {at}",
+      expires: "vyprší {at}",
+      accept_once: "Přijmout jednou",
+      accept_for_session: "Přijmout pro relaci",
+      decline: "Odmítnout",
+    },
+    tabs: {
+      runners: "Agenti AI",
+      runs: "Spuštění",
+      approvals: "Schválení",
+    },
+    title: "Agenti AI",
+    page_title: "{workspace} - Agenti AI",
+    list: {
+      delete_failed: "Nepodařilo se smazat runnera",
+      revoke_failed: "Nepodařilo se odvolat runnera",
+      revive_failed: "Nepodařilo se obnovit runnera",
+      add_runner: "Přidat runnera",
+      how_it_works_title: "Jak přidat runnera",
+      how_it_works_body:
+        "1. Klikněte na „Přidat runnera“, vyberte projekt + pod a odešlete. Cloud vygeneruje jednorázový registrační token vázaný na tohoto runnera.\n2. Na stroji, který bude runnera hostovat, spusťte zobrazený příkaz `pidash connect --url ... --token ... --host-label ...`.\n3. Daemon se zaregistruje a runner se zde zobrazí jako online.\n\nKaždý runner má svůj vlastní token. První runner zaregistrovaný na hostiteli také vytvoří strojový token používaný CLI `pidash` pro příkazy nesouvisející s runnerem.\n\nPředpoklad: CLI agenta (codex / claude) musí být již nainstalováno na hostiteli.",
+      connected_runners: "Runnery",
+      columns: {
+        name: "Název",
+        status: "Stav",
+        os_arch: "OS / Arch",
+        version: "Verze",
+        last_heartbeat: "Poslední heartbeat",
+      },
+      columns_pod: "Pod",
+      revive: "Obnovit",
+      revoke: "Odvolat",
+      delete: "Smazat",
+      empty:
+        "Zatím žádní runnery. Klikněte na „Přidat runnera“ pro vytvoření prvního registračního tokenu pro runnera.",
+      delete_confirm_title: "Smazat runnera?",
+      delete_confirm_body:
+        "Řádek runnera bude odstraněn a daemon bude nuceně offline. Historické běhy zůstanou zachovány s odkazem na null runnera.",
+      revoke_confirm_title: "Odvolat runnera?",
+      revoke_confirm_body:
+        "Přihlašovací údaje runnera budou zneplatněny a všechny probíhající běhy zrušeny, ale řádek zůstane v seznamu. Později jej můžete obnovit a vytvořit nový registrační token na stejném řádku.",
+      revive_modal_title: "Nový registrační token",
+      revive_modal_body:
+        "Spusťte níže uvedený příkaz na hostiteli, který by měl tohoto runnera převzít. Zkopírujte jej nyní – token již nebude znovu zobrazen.",
+      project_placeholder: "Vyberte projekt",
+      copy_failed: "Nepodařilo se zkopírovat do schránky",
+    },
+    machine_token_note: {
+      body: "Při prvním zaregistrování runnera na novém hostiteli (tj. novém ``host_label``) cloud také vydá strojový token používaný CLI ``pidash`` pro příkazy nesouvisející s runnerem (issue, comment, state). Další runnery na stejném hostiteli tento token znovu používají.",
+    },
+    pods: {
+      title: "Pody",
+      help: "Pody seskupují vaše runnery. Issues delegují na pod a jakýkoli volný runner uvnitř převezme práci. Kliknutím na dlaždici filtrujete runnery.",
+      load_failed: "Nepodařilo se načíst pody",
+      tile_aria: "Filtrovat běžce podle podu {name}",
+      default_badge: "výchozí",
+      runner_count: "{count} běžců",
+      create_tile: "Vytvořit nový pod",
+      filter_active: "Filtrování běžců podle podu {name}",
+      filter_clear: "Vymazat filtr",
+    },
+    add_modal: {
+      runner_id_label: "ID běžce",
+      done: "Hotovo",
+      agent_options: {
+        claude_code: "Claude Code",
+        codex: "Codex",
+      },
+      errors: {
+        create_failed: "Nepodařilo se vytvořit registrační token.",
+        project_required: "Vyberte projekt.",
+        load_projects_failed: "Nepodařilo se načíst projekty.",
+        load_pods_failed: "Nepodařilo se načíst pody.",
+      },
+      title: "Přidat běžce",
+      subtitle:
+        "Vytvořte jednorázový registrační token pro nového běžce. Na stroji, který jej bude hostit, spustíte zobrazený příkaz `pidash connect`.",
+      project_label: "Projekt",
+      project_help: "Projekt, na kterém bude tento běžec pracovat.",
+      pod_label: "Pod (volitelné)",
+      pod_default_option: "(výchozí pod)",
+      pod_help: "Výchozí hodnota je výchozí pod projektu.",
+      name_label: "Název (volitelné)",
+      name_placeholder: "my-laptop-runner",
+      name_help: "Pokud je prázdné, automaticky se přiřadí, např. ``runner_001``.",
+      host_label_label: "Označení hostitele (volitelné)",
+      host_label_placeholder: "my-laptop",
+      host_label_help:
+        "Volný název hostitele vložený do navrhovaného příkazu. Pokud příznak vynecháte, démon nahradí svůj skutečný název hostitele.",
+      working_dir_label: "Pracovní adresář (volitelné)",
+      working_dir_placeholder: "pracovní adresář projektu na místním vývojovém stroji",
+      working_dir_help:
+        "Místní cesta, ve které démon spouští CLI agenta — obvykle repozitář projektu na disku. Výchozí je sandbox v datovém adresáři runneru, což je zřídka to, co chcete.",
+      agent_label: "Agent",
+      agent_help: "Které CLI AI agenta bude tento runner řídit. Je součástí zobrazeného příkazu ``pidash connect``.",
+      cancel: "Zrušit",
+      submitting: "Razení…",
+      submit: "Razit registrační token",
+      token_warning: "Zkopírujte to hned — registrační token už nebude znovu zobrazen.",
+      token_instructions: "Spusťte to na stroji, který bude hostit runner:",
+      copied: "Zkopírováno!",
+      copy_command: "Zkopírovat příkaz",
+    },
+    runs: {
+      cancel_failed: "Nepodařilo se zrušit běh",
+      columns: {
+        started: "Zahájeno",
+        status: "Stav",
+        prompt: "Výzva",
+      },
+      empty: "Zatím žádné běhy.",
+      select_run: "Vyberte běh vlevo.",
+      cancel: "Zrušit běh",
+      prompt: "Výzva",
+      error: "Chyba",
+      done_payload: "Dokončený payload",
+      events_count: "Události ({count})",
+      event_columns: {
+        seq: "seq",
+        kind: "druh",
+        at: "čas",
+      },
+      cancel_confirm_title: "Zrušit běh?",
+      cancel_confirm_body: "Runner zastaví tento běh, jakmile obdrží signál.",
+    },
+    create_pod_modal: {
+      errors: {
+        create_failed: "Nepodařilo se vytvořit pod.",
+        project_required: "Vyberte projekt.",
+        load_projects_failed: "Nepodařilo se načíst projekty.",
+        name_required: "Jméno je povinné.",
+      },
+      title: "Vytvořit nový pod",
+      subtitle: "Pody seskupují runnery v rámci projektu. Vyberte projekt a poté pojmenujte pod.",
+      project_label: "Projekt",
+      project_placeholder: "Vyberte projekt",
+      project_help: "Projekt, ke kterému tento pod patří. Název bude opatřen prefixem identifikátoru projektu.",
+      name_label: "Název",
+      name_placeholder: "beefy",
+      name_help: "Písmena, číslice, pomlčky a podtržítka. Prefix projektu se přidává automaticky.",
+      description_label: "Popis (volitelný)",
+      description_placeholder: "Kde tento pod běží, k čemu slouží atd.",
+      cancel: "Zrušit",
+      submitting: "Vytváření…",
+      submit: "Vytvořit pod",
+    },
+  },
+  schedulers: {
+    toast: {
+      created_title: "Plánovač vytvořen",
+      created_message: "Správci projektu jej nyní mohou nainstalovat na své projekty.",
+      create_failed: "Plánovač se nepodařilo vytvořit.",
+      error_title: "Něco se pokazilo",
+      updated_title: "Plánovač aktualizován",
+      updated_message: "Následující spuštění použijí aktualizovanou definici.",
+      update_failed: "Plánovač se nepodařilo aktualizovat.",
+      deleted_title: "Plánovač smazán",
+      deleted_message: "Aktivní vazby přestaly fungovat.",
+      delete_failed: "Plánovač se nepodařilo smazat.",
+    },
+    title: "Plánovače",
+    subtitle:
+      "Opakovaně použitelné definice plánovačů pro tento pracovní prostor. Nainstalujte jeden na projekt, aby se jeho výzva spouštěla proti projektu podle cronu.",
+    new: "Nový plánovač",
+    columns: {
+      name: "Název",
+      slug: "Slug",
+      source: "Zdroj",
+      installs: "Instalace",
+      status: "Stav",
+      updated: "Aktualizováno",
+    },
+    list: {
+      empty: "V tomto pracovním prostoru zatím nejsou žádné plánovače. Kliknutím na „Nový plánovač“ jej vytvoříte.",
+      installs_count: "{count, plural, one {# instalace} few {# instalace} many {# instalací} other {# instalací}}",
+    },
+    source: {
+      manifest: "Manifest",
+      builtin: "Vestavěný",
+    },
+    status: {
+      enabled: "Povoleno",
+      disabled: "Zakázáno",
+    },
+    actions: {
+      edit: "Upravit",
+      delete: "Smazat",
+    },
+    delete: {
+      confirm_title: "Smazat plánovač?",
+      confirm_body:
+        "Toto provede měkké smazání plánovače. Všechna aktivní propojení s projekty přestanou fungovat. Slug bude k dispozici pro opětovné vytvoření.",
+      confirm: "Smazat",
+    },
+    form: {
+      edit_title: "Upravit plánovač",
+      create_title: "Nový plánovač",
+      slug_label: "Slug",
+      errors: {
+        slug_required: "Slug je povinný.",
+        name_required: "Název je povinný.",
+        prompt_required: "Prompt je povinný.",
+      },
+      slug_placeholder: "security-audit",
+      slug_help: "Identifikátor psaný malými písmeny používaný v URL. Po vytvoření nelze změnit.",
+      name_label: "Název",
+      name_placeholder: "Bezpečnostní audit",
+      description_label: "Popis",
+      description_placeholder: "Krátký souhrn zobrazený ve výběru instalace.",
+      prompt_label: "Prompt",
+      prompt_placeholder: "Hledejte nevyřešené bezpečnostní problémy v tomto projektu…",
+      prompt_help:
+        "Základní prompt, který agent spouští každý tick. Kontext projektu se přidává při instalaci, proto udržujte tento prompt nezávislý na projektu.",
+      enabled_label: "Povoleno",
+      enabled_help: "Zakázané plánovače nelze instalovat na nové projekty a stávající propojení nebudou fungovat.",
+      cancel: "Zrušit",
+      saving: "Ukládání…",
+      save: "Uložit",
+      creating: "Vytváření…",
+      create: "Vytvořit plánovač",
+    },
+  },
+  power_k: {
+    search_menu: {
+      no_results: "Nebyly nalezeny žádné výsledky",
+      clear_search: "Vymazat vyhledávání",
+    },
+    miscellaneous_actions: {
+      copy_current_page_url_toast_success: "Adresa URL aktuální stránky byla zkopírována do schránky.",
+      copy_current_page_url_toast_error: "Při kopírování adresy URL aktuální stránky do schránky došlo k chybě.",
+    },
+    preferences_actions: {
+      toast: {
+        theme: {
+          error: "Aktualizace motivu se nezdařila. Zkuste to prosím znovu.",
+        },
+        timezone: {
+          success: "Časové pásmo bylo úspěšně aktualizováno.",
+          error: "Aktualizace časového pásma se nezdařila. Zkuste to prosím znovu.",
+        },
+        generic: {
+          success: "Předvolby byly úspěšně aktualizovány.",
+          error: "Aktualizace předvoleb se nezdařila. Zkuste to prosím znovu.",
+        },
+      },
+    },
+    footer: {
+      workspace_level: "Úroveň pracovního prostoru",
+    },
+    page_placeholders: {
+      default: "Zadejte příkaz nebo hledejte",
+    },
+    contextual_actions: {
+      cycle: {
+        copy_url_toast_success: "Adresa URL cyklu byla zkopírována do schránky.",
+        copy_url_toast_error: "Při kopírování adresy URL cyklu do schránky došlo k chybě.",
+      },
+      module: {
+        copy_url_toast_success: "Adresa URL modulu byla zkopírována do schránky.",
+        copy_url_toast_error: "Při kopírování adresy URL modulu do schránky došlo k chybě.",
+      },
+      page: {
+        copy_url_toast_success: "Adresa URL stránky byla zkopírována do schránky.",
+        copy_url_toast_error: "Při kopírování adresy URL stránky do schránky došlo k chybě.",
+      },
+      work_item: {
+        copy_id_toast_success: "ID pracovní položky bylo zkopírováno do schránky.",
+        copy_id_toast_error: "Při kopírování ID pracovní položky do schránky došlo k chybě.",
+        copy_title_toast_success: "Název pracovní položky byl zkopírován do schránky.",
+        copy_title_toast_error: "Při kopírování názvu pracovní položky do schránky došlo k chybě.",
+        copy_url_toast_success: "Adresa URL pracovní položky byla zkopírována do schránky.",
+        copy_url_toast_error: "Při kopírování adresy URL pracovní položky do schránky došlo k chybě.",
+      },
+    },
+  },
+  date: "",
+  epics: "",
+  Unassigned: "",
+  creating_theme: "",
+  issue_advanced_git: "",
+  git_work_branch: "",
+  git_work_branch_hint: "",
+  git_work_branch_too_long: "",
+  git_work_branch_invalid_chars: "",
+  git_work_branch_placeholder: "",
+  progress: "",
+  customize_navigation: "Přizpůsobit navigaci",
+  personal: "Osobní",
+  accordion_navigation_control: "Akordeonová navigace v postranním panelu",
+  horizontal_navigation_bar: "Navigace pomocí záložek",
+  show_limited_projects_on_sidebar: "Zobrazit omezený počet projektů na postranním panelu",
+  enter_number_of_projects: "Zadejte počet projektů",
+  repo_url_too_long: "",
+  git_repository_url_placeholder: "",
+  base_branch_too_long: "",
+  base_branch_invalid_chars: "",
+  base_branch_placeholder: "",
+  git_repository_url: "",
+  base_branch: "",
+  timezone_setting: "Aktuální nastavení časového pásma.",
+  language_setting: "Vyberte jazyk používaný v uživatelském rozhraní.",
+  language_and_time: "Jazyk a čas",
+  preferences: "Předvolby",
 } as const;

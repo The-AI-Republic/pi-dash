@@ -11,6 +11,7 @@ defend against unintended attribute access on them.
 
 from __future__ import annotations
 
+import json
 from typing import Any, Dict
 
 from pi_dash.db.models.issue import Issue
@@ -36,8 +37,40 @@ def _absolute_issue_url(issue: Issue) -> str:
     web layer; we return a relative path so templates still have something
     useful to show."""
     ws = getattr(issue.workspace, "slug", "")
-    proj = getattr(issue.project, "identifier", "")
     return f"/{ws}/projects/{issue.project_id}/issues/{issue.id}" if ws else ""
+
+
+def _comments_section(issue: Issue) -> str:
+    """Return non-bot issue comments as plain text for review prompts."""
+    from pi_dash.db.models.issue import IssueComment
+
+    comments = (
+        IssueComment.objects.filter(issue=issue, actor__is_bot=False)
+        .order_by("created_at")
+        .values_list("comment_stripped", flat=True)
+    )
+    bodies = [body.strip() for body in comments if body and body.strip()]
+    if not bodies:
+        return "(no recent human comments)"
+    return "\n\n---\n\n".join(bodies)
+
+
+def _parent_done_payload(issue: Issue, run: AgentRun) -> str:
+    """Return the implementation run payload the review prompt should inspect.
+
+    Review entry intentionally creates a fresh run with ``parent_run=None``.
+    The implementation parent is therefore stored on the issue ticker during
+    the In Progress -> In Review transition. Fall back to ``run.parent_run``
+    for tests and any future non-fresh review entry path.
+    """
+    parent_run = getattr(run, "parent_run", None)
+    if parent_run is None:
+        ticker = getattr(issue, "agent_ticker", None)
+        parent_run = getattr(ticker, "resume_parent_run", None)
+    payload = getattr(parent_run, "done_payload", None) if parent_run is not None else None
+    if not payload:
+        return "(no parent run done payload available)"
+    return json.dumps(payload, indent=2, sort_keys=True)
 
 
 def build_context(issue: Issue, run: AgentRun) -> Dict[str, Any]:
@@ -113,6 +146,8 @@ def build_context(issue: Issue, run: AgentRun) -> Dict[str, Any]:
             "attempt": attempt,
             "turn_number": 1,
         },
+        "comments_section": _comments_section(issue),
+        "parent_done_payload": _parent_done_payload(issue, run),
     }
 
 

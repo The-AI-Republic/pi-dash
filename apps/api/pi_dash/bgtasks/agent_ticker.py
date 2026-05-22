@@ -26,7 +26,7 @@ import logging
 
 from celery import shared_task
 from django.db import transaction
-from django.db.models import F, Q
+from django.db.models import Case, F, Q, When
 from django.db.models.functions import Coalesce
 from django.utils import timezone
 
@@ -35,6 +35,7 @@ from pi_dash.db.models.issue_agent_ticker import (
     IssueAgentTicker,
     TickerDisarmReason,
 )
+from pi_dash.db.models.state import StateGroup
 from pi_dash.orchestration.agent_phases import is_ticking_state
 
 logger = logging.getLogger("pi_dash.worker")
@@ -48,12 +49,24 @@ def scan_due_tickers() -> int:
     Returns the number of fan-outs (mostly for logging / tests).
     """
     now = timezone.now()
-    # Effective cap = override if set, else project default. We compute it
-    # via Coalesce so the scanner can filter under-cap rows at the DB level
-    # (instead of fanning out tasks that fire_tick will then have to disarm
-    # on the backstop). ``-1`` means infinite — admit unconditionally.
-    effective_cap = Coalesce(
-        F("max_ticks"), F("issue__project__agent_default_max_ticks")
+    # Effective cap = override if set, else project default. Phase-
+    # aware via Case/When over the issue's state group: pick the
+    # review-phase pair when the issue is in the review group, else
+    # the In Progress pair. ``-1`` means infinite — admit
+    # unconditionally. See
+    # ``.ai_design/create_review_state/design.md`` §7.5.
+    effective_cap = Case(
+        When(
+            issue__state__group=StateGroup.REVIEW.value,
+            then=Coalesce(
+                F("review_max_ticks"),
+                F("issue__project__agent_review_default_max_ticks"),
+            ),
+        ),
+        default=Coalesce(
+            F("max_ticks"),
+            F("issue__project__agent_default_max_ticks"),
+        ),
     )
     due_ids = list(
         IssueAgentTicker.objects.filter(

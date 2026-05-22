@@ -78,6 +78,10 @@ export default {
               message: "Qualcosa è andato storto. Per favore riprova.",
             },
           },
+          error: {
+            title: "",
+            message: "",
+          },
         },
       },
       unique_code: {
@@ -831,6 +835,7 @@ export default {
       show_weekends: "Mostra weekend",
       enable: "Abilita",
       disable: "Disabilita",
+      copy_markdown: "Copia markdown",
     },
     name: "Nome",
     discard: "Scarta",
@@ -923,6 +928,7 @@ export default {
     paused: "In pausa",
     no_of: "N. di {entity}",
     resolved: "Risolto",
+    overview: "Panoramica",
   },
   chart: {
     x_axis: "Asse X",
@@ -1590,6 +1596,23 @@ export default {
         },
       },
     },
+    activity: {
+      heading: "Attività",
+      description: "Tieni traccia delle tue azioni e modifiche recenti in tutti i progetti e gli elementi di lavoro.",
+    },
+    api_tokens: {
+      heading: "Token di accesso personali",
+      description: "Genera token API sicuri per integrare i tuoi dati con sistemi e applicazioni esterni.",
+    },
+    notifications: {
+      heading: "Notifiche email",
+      description:
+        "Rimani aggiornato sugli elementi di lavoro a cui sei iscritto. Attiva questa opzione per ricevere notifiche.",
+    },
+    preferences: {
+      heading: "Preferenze",
+      description: "Personalizza l'esperienza dell'app in base al tuo modo di lavorare",
+    },
   },
   workspace_settings: {
     label: "Impostazioni dello spazio di lavoro",
@@ -1666,6 +1689,9 @@ export default {
         current_plan: "Piano attuale",
         free_plan: "Stai attualmente utilizzando il piano gratuito",
         view_plans: "Visualizza piani",
+        heading: "Fatturazione e piani",
+        description:
+          "Scegli il tuo piano, gestisci gli abbonamenti e aggiorna facilmente man mano che le tue esigenze crescono.",
       },
       exports: {
         title: "Esportazioni",
@@ -1686,6 +1712,11 @@ export default {
             },
           },
         },
+        heading: "Esportazioni",
+        description:
+          "Esporta i dati del tuo progetto in vari formati e accedi alla cronologia delle esportazioni con link per il download.",
+        exporting_projects: "Esportazione del progetto",
+        format: "Formato",
       },
       webhooks: {
         title: "Webhooks",
@@ -1737,6 +1768,7 @@ export default {
             message: "Errore durante la copia della chiave segreta.",
           },
         },
+        description: "Automatizza le notifiche verso servizi esterni quando si verificano eventi del progetto.",
       },
       api_tokens: {
         title: "Token API",
@@ -1801,6 +1833,7 @@ export default {
       priority_distribution: {
         title: "Elementi di lavoro per priorità",
         empty: "Crea elementi di lavoro per visualizzarli per priorità nel grafico per un'analisi migliore.",
+        priority: "",
       },
       recent_activity: {
         title: "Attività recente",
@@ -1884,6 +1917,21 @@ export default {
         title: "Nessuno stato disponibile per il gruppo {groupKey}",
         description: "Crea un nuovo stato",
       },
+      members_edit: {
+        toast: {
+          loading: "Aggiornamento impostazione del progetto...",
+          success_title: "Operazione riuscita!",
+          success_message: "Impostazione del progetto aggiornata.",
+          error_title: "Errore!",
+          error_message: "Si è verificato un errore durante l'aggiornamento dell'impostazione del progetto. Riprova.",
+        },
+        title: "Consenti ai membri di modificare gli stati",
+        description:
+          "Se abilitata, i membri del progetto possono aggiungere, modificare, riordinare ed eliminare gli stati del flusso di lavoro. Se disabilitata, solo gli amministratori possono gestire gli stati.",
+      },
+      heading: "Stati",
+      description:
+        "Definisci e personalizza gli stati del flusso di lavoro per monitorare l'avanzamento dei tuoi elementi di lavoro.",
     },
     labels: {
       label_title: "Titolo etichetta",
@@ -1892,6 +1940,8 @@ export default {
       toast: {
         error: "Errore durante l'aggiornamento dell'etichetta",
       },
+      heading: "Etichette",
+      description: "Crea etichette personalizzate per categorizzare e organizzare i tuoi elementi di lavoro",
     },
     estimates: {
       label: "Stime",
@@ -1976,6 +2026,8 @@ export default {
           hours: "Ore",
         },
       },
+      heading: "Stime",
+      enable_description: "Ti aiutano a comunicare la complessità e il carico di lavoro del team.",
     },
     automations: {
       label: "Automatizzazioni",
@@ -1991,6 +2043,9 @@ export default {
         duration: "Chiudi automaticamente gli elementi di lavoro inattivi per",
         auto_close_status: "Stato di chiusura automatica",
       },
+      heading: "Automazioni",
+      description:
+        "Configura azioni automatizzate per ottimizzare il flusso di lavoro di gestione del progetto e ridurre le attività manuali.",
     },
     empty_state: {
       labels: {
@@ -2369,6 +2424,7 @@ export default {
       unarchived: "Notifica rimossa dall'archivio",
       snoozed: "Notifica snoozata",
       unsnoozed: "Notifica desnoozata",
+      un_snoozed: "",
     },
     empty_state: {
       detail: {
@@ -2731,4 +2787,464 @@ export default {
     comment_failed_title: "Could not post comment",
     comment_failed_message: "Failed to post the comment.",
   },
+  scheduler_bindings: {
+    tab_label: "Pianificatori",
+    title: "Pianificatori",
+    subtitle:
+      "Pianificatori installati su questo progetto. Ogni installazione attiva il suo prompt sul progetto secondo il cron configurato.",
+    install: "Installa pianificatore",
+    columns: {
+      name: "Pianificatore",
+      cron: "Programmazione",
+      next_run: "Prossima esecuzione",
+      last_run: "Ultima esecuzione",
+      status: "Stato",
+      updated: "Aggiornato",
+    },
+    toast: {
+      updated_title: "Installazione aggiornata",
+      enabled_message: "Pianificatore abilitato — verrà attivato al prossimo tick del cron.",
+      disabled_message: "Pianificatore disabilitato — non verrà attivato finché non verrà riabilitato.",
+      error_title: "Qualcosa è andato storto",
+      update_failed: "Impossibile aggiornare l'installazione.",
+      updated_message: "Le esecuzioni successive utilizzeranno le nuove impostazioni.",
+      installed_title: "Pianificatore installato",
+      installed_message: "Verrà attivato secondo il cron configurato.",
+      install_failed: "Impossibile installare lo scheduler.",
+      uninstalled_title: "Scheduler disinstallato",
+      uninstalled_message: "Non verrà attivato su questo progetto finché non verrà reinstallato.",
+      uninstall_failed: "Impossibile disinstallare lo scheduler.",
+    },
+    list: {
+      empty:
+        "Nessuno scheduler installato su questo progetto. Fai clic su “Installa scheduler” per aggiungerne uno dal catalogo dell'area di lavoro.",
+      none_yet: "(mai)",
+    },
+    actions: {
+      disable: "Disabilita scheduler",
+      enable: "Abilita scheduler",
+      edit: "Modifica",
+      uninstall: "Disinstalla",
+    },
+    status: {
+      enabled: "Abilitato",
+      disabled: "Disabilitato",
+    },
+    edit_modal: {
+      title: "Modifica installazione scheduler",
+      saving: "Salvataggio in corso…",
+      save: "Salva",
+    },
+    install_modal: {
+      cron_label: "Programmazione (cron)",
+      errors: {
+        cron_required: "L'espressione cron è obbligatoria.",
+        scheduler_required: "Scegli uno scheduler.",
+      },
+      cron_placeholder: "0 9 * * *",
+      cron_help: "Espressione cron a 5 campi in UTC, ad es. ``0 9 * * *`` per le 09:00 UTC ogni giorno.",
+      extra_context_label: "Contesto del progetto (opzionale)",
+      extra_context_placeholder: "Note specifiche per questo progetto…",
+      extra_context_help:
+        "Aggiunto al prompt di base dello scheduler in fase di esecuzione. Usalo per fornire un contesto specifico del progetto che il prompt dell'area di lavoro non dovrebbe contenere.",
+      enabled_label: "Abilitato",
+      enabled_help: "Le installazioni disabilitate non vengono attivate sul cron finché non vengono riabilitate.",
+      cancel: "Annulla",
+      none_available_title: "Nessuno scheduler disponibile",
+      none_available_body:
+        "O tutti gli scheduler dell'area di lavoro sono già installati su questo progetto, oppure l'amministratore dell'area di lavoro non ne ha abilitati. Visita Area di lavoro → Scheduler per gestire il catalogo.",
+      title: "Installa scheduler",
+      scheduler_label: "Scheduler",
+      scheduler_help: "Scegli tra gli scheduler abilitati del tuo workspace. Quelli già installati non sono elencati.",
+      installing: "Installazione in corso…",
+      install: "Installa",
+    },
+    uninstall_modal: {
+      title: "Disinstallare lo scheduler?",
+      body: "Lo scheduler smette di attivarsi su questo progetto. La definizione del workspace rimane invariata e può essere reinstallata in seguito.",
+      confirm: "Disinstalla",
+    },
+  },
+  prompts: {
+    detail: {
+      loading: "Caricamento in corso…",
+      not_found: "Modello non trovato.",
+      default_title: "Modello di prompt (predefinito Pi Dash)",
+      workspace_title: "Modello di prompt (override del workspace)",
+      default_description:
+        "Questo è il predefinito integrato di Pi Dash. Gli amministratori del workspace non possono modificarlo qui — personalizza per il tuo workspace per sovrascriverlo.",
+      workspace_description:
+        "L'override del tuo workspace del predefinito di Pi Dash. Le modifiche incrementano la versione e si applicano alla prossima esecuzione dell'agente per questo workspace.",
+      back: "Torna all'elenco",
+      body: "Corpo del modello (Jinja + Markdown)",
+      unsaved: "Modifiche non salvate",
+      save: "Salva",
+    },
+    toast: {
+      saved_title: "Prompt salvato",
+      saved_message: "Le successive esecuzioni dell'agente utilizzeranno il prompt aggiornato.",
+      save_failed: "Impossibile salvare il prompt.",
+      error_title: "Qualcosa è andato storto",
+      created_title: "Override del workspace creato",
+      created_message: "Abbiamo copiato il predefinito corrente di Pi Dash. Modifica e salva per personalizzarlo.",
+      customize_failed: "Impossibile creare l'override del workspace.",
+      reverted_title: "Ripristinato al predefinito di Pi Dash",
+      reverted_message: "Questo workspace è tornato al modello predefinito condiviso.",
+      revert_failed: "Impossibile ripristinare il prompt.",
+    },
+    preview: {
+      missing_issue_id: "Inserisci prima un ID issue.",
+      failed: "Rendering fallito.",
+      title: "Anteprima",
+      issue_id_placeholder: "ID issue (UUID)",
+      run: "Anteprima",
+      empty: "Incolla un ID issue e fai clic su Anteprima per visualizzare il template su un issue reale.",
+      admin_only:
+        "Visualizzare l'anteprima del prompt renderizzato è un'azione riservata agli amministratori del workspace. Chiedi al tuo amministratore del workspace se hai bisogno di vederlo renderizzato su un issue specifico.",
+    },
+    scope: {
+      default: "Predefinito Pi Dash",
+      workspace: "Override del workspace",
+    },
+    title: "Prompt",
+    subtitle:
+      "Template di prompt di sistema che vengono renderizzati su ogni issue prima di un'esecuzione dell'agente. Gli amministratori del workspace possono personalizzare il predefinito per questo workspace.",
+    customize: "Personalizza per questo workspace",
+    columns: {
+      name: "Nome",
+      scope: "Ambito",
+      version: "Versione",
+      updated: "Aggiornato",
+    },
+    list: {
+      empty: "Nessun template di prompt disponibile. Il predefinito Pi Dash verrà inserito alla prossima migrazione.",
+    },
+    revert: {
+      confirm_title: "Ripristinare il predefinito Pi Dash?",
+      confirm_body:
+        "Questa operazione archivia il template con ambito workspace. Le nuove esecuzioni dell'agente in questo workspace utilizzeranno il predefinito Pi Dash finché non creerai un altro override.",
+      confirm: "Ripristina",
+    },
+    actions: {
+      edit: "Modifica",
+      view: "Visualizza",
+      revert: "Ripristina al predefinito",
+    },
+  },
+  runners: {
+    toast: {
+      error_title: "Errore!",
+    },
+    approvals: {
+      decision_failed: "Impossibile registrare la decisione",
+      empty: "Nessuna approvazione in sospeso.",
+      run_meta: "Esecuzione {runId} · richiesta {at}",
+      expires: "scade {at}",
+      accept_once: "Accetta una volta",
+      accept_for_session: "Accetta per la sessione",
+      decline: "Rifiuta",
+    },
+    tabs: {
+      runners: "Agenti AI",
+      runs: "Esecuzioni",
+      approvals: "Approvazioni",
+    },
+    title: "Agenti AI",
+    page_title: "{workspace} - Agenti AI",
+    list: {
+      delete_failed: "Impossibile eliminare il runner",
+      revoke_failed: "Impossibile revocare il runner",
+      revive_failed: "Impossibile riattivare il runner",
+      add_runner: "Aggiungi runner",
+      how_it_works_title: "Come aggiungere un runner",
+      how_it_works_body:
+        "1. Clicca su \"Aggiungi runner\", scegli un progetto + pod e invia. Il cloud genera un token di registrazione monouso legato a quel runner.\n2. Sulla macchina che ospiterà il runner, esegui il comando visualizzato `pidash connect --url ... --token ... --host-label ...`.\n3. Il demone si registra e il runner appare online qui.\n\nOgni runner ha il proprio token. Il primo runner registrato su un host avvia anche un token macchina utilizzato dalla CLI `pidash` per comandi non runner.\n\nPrerequisito: la CLI dell'agente (codex / claude) deve essere già installata sull'host.",
+      connected_runners: "Runner",
+      columns: {
+        name: "Nome",
+        status: "Stato",
+        os_arch: "SO / Arch",
+        version: "Versione",
+        last_heartbeat: "Ultimo heartbeat",
+      },
+      columns_pod: "Pod",
+      revive: "Riattiva",
+      revoke: "Revoca",
+      delete: "Elimina",
+      empty:
+        'Nessun runner ancora. Clicca su "Aggiungi runner" per generare il tuo primo token di registrazione per runner.',
+      delete_confirm_title: "Eliminare il runner?",
+      delete_confirm_body:
+        "La riga del runner viene rimossa e il demone viene forzato offline. Le esecuzioni storiche vengono conservate con un riferimento runner nullo.",
+      revoke_confirm_title: "Revocare il runner?",
+      revoke_confirm_body:
+        "Le credenziali del runner vengono invalidate e tutte le esecuzioni in corso vengono annullate, ma la riga rimane nell'elenco. Puoi riattivarla in seguito per generare un nuovo token di registrazione sulla stessa riga.",
+      revive_modal_title: "Nuovo token di registrazione",
+      revive_modal_body:
+        "Esegui il comando seguente sull'host che dovrebbe riprendere questo runner. Copialo ora: il token non verrà più mostrato.",
+      project_placeholder: "Seleziona un progetto",
+      copy_failed: "Impossibile copiare negli appunti",
+    },
+    machine_token_note: {
+      body: "La prima volta che un runner si registra su un nuovo host (cioè un nuovo ``host_label``), il cloud emette anche un token macchina utilizzato dalla CLI ``pidash`` per comandi non runner (issue, comment, state). I runner successivi sullo stesso host riutilizzano quel token.",
+    },
+    pods: {
+      title: "Pod",
+      help: "I Pod raggruppano i tuoi runner. Le issue delegano a un pod e qualsiasi runner libero al suo interno prende in carico il lavoro. Clicca su un riquadro per filtrare i runner.",
+      load_failed: "Impossibile caricare i pod",
+      tile_aria: "Filtra i runner per pod {name}",
+      default_badge: "predefinito",
+      runner_count: "{count} runner",
+      create_tile: "Crea nuovo pod",
+      filter_active: "Filtraggio dei runner per pod {name}",
+      filter_clear: "Cancella filtro",
+    },
+    add_modal: {
+      runner_id_label: "ID runner",
+      done: "Fatto",
+      agent_options: {
+        claude_code: "Claude Code",
+        codex: "Codex",
+      },
+      errors: {
+        create_failed: "Impossibile creare il token di registrazione.",
+        project_required: "Seleziona un progetto.",
+        load_projects_failed: "Impossibile caricare i progetti.",
+        load_pods_failed: "Impossibile caricare i pod.",
+      },
+      title: "Aggiungi runner",
+      subtitle:
+        "Crea un token di registrazione monouso per un nuovo runner. Eseguirai il comando `pidash connect` visualizzato sulla macchina che lo ospiterà.",
+      project_label: "Progetto",
+      project_help: "Il progetto su cui lavorerà questo runner.",
+      pod_label: "Pod (opzionale)",
+      pod_default_option: "(pod predefinito)",
+      pod_help: "Per impostazione predefinita, utilizza il pod predefinito del progetto.",
+      name_label: "Nome (opzionale)",
+      name_placeholder: "my-laptop-runner",
+      name_help: "Assegnato automaticamente se vuoto, ad es. ``runner_001``.",
+      host_label_label: "Etichetta host (opzionale)",
+      host_label_placeholder: "my-laptop",
+      host_label_help:
+        "Nome host libero incorporato nel comando suggerito. Il demone sostituirà il suo nome host effettivo se si lascia il flag vuoto.",
+      working_dir_label: "Directory di lavoro (opzionale)",
+      working_dir_placeholder: "directory di lavoro del progetto sulla macchina di sviluppo locale",
+      working_dir_help:
+        "Percorso locale in cui il demone esegue la CLI dell'agente — di solito il repository del progetto su disco. Per impostazione predefinita, viene utilizzata una sandbox nella directory dati del runner, cosa che raramente è quella desiderata.",
+      agent_label: "Agente",
+      agent_help:
+        "Quale CLI dell'agente AI questo runner guiderà. Incorporato nel comando ``pidash connect`` visualizzato.",
+      cancel: "Annulla",
+      submitting: "Generazione in corso…",
+      submit: "Genera token di iscrizione",
+      token_warning: "Copia questo una volta — il token di iscrizione non verrà più mostrato.",
+      token_instructions: "Esegui questo sul computer che ospiterà il runner:",
+      copied: "Copiato!",
+      copy_command: "Copia comando",
+    },
+    runs: {
+      cancel_failed: "Impossibile annullare l'esecuzione",
+      columns: {
+        started: "Avviato",
+        status: "Stato",
+        prompt: "Prompt",
+      },
+      empty: "Nessuna esecuzione ancora.",
+      select_run: "Seleziona un'esecuzione a sinistra.",
+      cancel: "Annulla esecuzione",
+      prompt: "Prompt",
+      error: "Errore",
+      done_payload: "Payload completato",
+      events_count: "Eventi ({count})",
+      event_columns: {
+        seq: "seq",
+        kind: "tipo",
+        at: "alle",
+      },
+      cancel_confirm_title: "Annullare l'esecuzione?",
+      cancel_confirm_body: "Il runner interromperà questa esecuzione non appena riceverà il segnale.",
+    },
+    create_pod_modal: {
+      errors: {
+        create_failed: "Impossibile creare il pod.",
+        project_required: "Seleziona un progetto.",
+        load_projects_failed: "Impossibile caricare i progetti.",
+        name_required: "Il nome è obbligatorio.",
+      },
+      title: "Crea nuovo pod",
+      subtitle: "I pod raggruppano i runner in un progetto. Scegli un progetto, poi dai un nome al pod.",
+      project_label: "Progetto",
+      project_placeholder: "Seleziona un progetto",
+      project_help: "Il progetto a cui appartiene questo pod. Il nome sarà preceduto dall'identificatore del progetto.",
+      name_label: "Nome",
+      name_placeholder: "beefy",
+      name_help: "Lettere, cifre, trattini e trattini bassi. Il prefisso del progetto viene aggiunto automaticamente.",
+      description_label: "Descrizione (opzionale)",
+      description_placeholder: "Dove viene eseguito questo pod, a cosa serve, ecc.",
+      cancel: "Annulla",
+      submitting: "Creazione in corso…",
+      submit: "Crea pod",
+    },
+  },
+  schedulers: {
+    toast: {
+      created_title: "Scheduler creato",
+      created_message: "Gli amministratori del progetto possono ora installarlo sui loro progetti.",
+      create_failed: "Impossibile creare lo scheduler.",
+      error_title: "Qualcosa è andato storto",
+      updated_title: "Scheduler aggiornato",
+      updated_message: "Le esecuzioni successive utilizzeranno la definizione aggiornata.",
+      update_failed: "Impossibile aggiornare lo scheduler.",
+      deleted_title: "Scheduler eliminato",
+      deleted_message: "I binding attivi hanno smesso di attivarsi.",
+      delete_failed: "Impossibile eliminare lo scheduler.",
+    },
+    title: "Scheduler",
+    subtitle:
+      "Definizioni di scheduler riutilizzabili per questo workspace. Installane uno su un progetto per eseguire il suo prompt sul progetto con un cron.",
+    new: "Nuovo scheduler",
+    columns: {
+      name: "Nome",
+      slug: "Slug",
+      source: "Origine",
+      installs: "Installazioni",
+      status: "Stato",
+      updated: "Aggiornato",
+    },
+    list: {
+      empty: "Ancora nessun scheduler in questo workspace. Fai clic su “Nuovo scheduler” per crearne uno.",
+      installs_count: "{count, plural, one {# installazione} other {# installazioni}}",
+    },
+    source: {
+      manifest: "Manifesto",
+      builtin: "Integrato",
+    },
+    status: {
+      enabled: "Abilitato",
+      disabled: "Disabilitato",
+    },
+    actions: {
+      edit: "Modifica",
+      delete: "Elimina",
+    },
+    delete: {
+      confirm_title: "Eliminare lo scheduler?",
+      confirm_body:
+        "Questa operazione elimina lo scheduler in modo soft. Tutti i binding attivi del progetto smetteranno di funzionare. Lo slug diventa disponibile per la ricreazione.",
+      confirm: "Elimina",
+    },
+    form: {
+      edit_title: "Modifica scheduler",
+      create_title: "Nuovo scheduler",
+      slug_label: "Slug",
+      errors: {
+        slug_required: "Lo slug è obbligatorio.",
+        name_required: "Il nome è obbligatorio.",
+        prompt_required: "Il prompt è obbligatorio.",
+      },
+      slug_placeholder: "security-audit",
+      slug_help: "Identificatore in minuscolo utilizzato negli URL. Non può essere modificato dopo la creazione.",
+      name_label: "Nome",
+      name_placeholder: "Security audit",
+      description_label: "Descrizione",
+      description_placeholder: "Breve riepilogo mostrato nel selettore di installazione.",
+      prompt_label: "Prompt",
+      prompt_placeholder: "Cerca problemi di sicurezza in sospeso in questo progetto…",
+      prompt_help:
+        "Il prompt di base che l'agente esegue a ogni tick. Il contesto per progetto viene aggiunto al momento dell'installazione, quindi mantieni questo prompt indipendente dal progetto.",
+      enabled_label: "Abilitato",
+      enabled_help:
+        "Gli scheduler disabilitati non possono essere installati su nuovi progetti e i binding esistenti non verranno attivati.",
+      cancel: "Annulla",
+      saving: "Salvataggio…",
+      save: "Salva",
+      creating: "Creazione…",
+      create: "Crea scheduler",
+    },
+  },
+  power_k: {
+    search_menu: {
+      no_results: "Nessun risultato trovato",
+      clear_search: "Cancella ricerca",
+    },
+    miscellaneous_actions: {
+      copy_current_page_url_toast_success: "URL della pagina corrente copiato negli appunti.",
+      copy_current_page_url_toast_error:
+        "Si è verificato un errore durante la copia dell'URL della pagina corrente negli appunti.",
+    },
+    preferences_actions: {
+      toast: {
+        theme: {
+          error: "Impossibile aggiornare il tema. Riprova.",
+        },
+        timezone: {
+          success: "Fuso orario aggiornato con successo.",
+          error: "Impossibile aggiornare il fuso orario. Riprova.",
+        },
+        generic: {
+          success: "Preferenze aggiornate con successo.",
+          error: "Impossibile aggiornare le preferenze. Riprova.",
+        },
+      },
+    },
+    footer: {
+      workspace_level: "Livello workspace",
+    },
+    page_placeholders: {
+      default: "Digita un comando o cerca",
+    },
+    contextual_actions: {
+      cycle: {
+        copy_url_toast_success: "URL del ciclo copiato negli appunti.",
+        copy_url_toast_error: "Si è verificato un errore durante la copia dell'URL del ciclo negli appunti.",
+      },
+      module: {
+        copy_url_toast_success: "URL del modulo copiato negli appunti.",
+        copy_url_toast_error: "Si è verificato un errore durante la copia dell'URL del modulo negli appunti.",
+      },
+      page: {
+        copy_url_toast_success: "URL della pagina copiato negli appunti.",
+        copy_url_toast_error: "Si è verificato un errore durante la copia dell'URL della pagina negli appunti.",
+      },
+      work_item: {
+        copy_id_toast_success: "ID dell'elemento di lavoro copiato negli appunti.",
+        copy_id_toast_error:
+          "Si è verificato un errore durante la copia dell'ID dell'elemento di lavoro negli appunti.",
+        copy_title_toast_success: "Titolo dell'elemento di lavoro copiato negli appunti.",
+        copy_title_toast_error:
+          "Si è verificato un errore durante la copia del titolo dell'elemento di lavoro negli appunti.",
+        copy_url_toast_success: "URL dell'elemento di lavoro copiato negli appunti.",
+        copy_url_toast_error:
+          "Si è verificato un errore durante la copia dell'URL dell'elemento di lavoro negli appunti.",
+      },
+    },
+  },
+  date: "",
+  epics: "",
+  Unassigned: "",
+  creating_theme: "",
+  issue_advanced_git: "",
+  git_work_branch: "",
+  git_work_branch_hint: "",
+  git_work_branch_too_long: "",
+  git_work_branch_invalid_chars: "",
+  git_work_branch_placeholder: "",
+  progress: "",
+  customize_navigation: "Personalizza navigazione",
+  personal: "Personale",
+  accordion_navigation_control: "Navigazione laterale a fisarmonica",
+  horizontal_navigation_bar: "Navigazione a schede",
+  show_limited_projects_on_sidebar: "Mostra un numero limitato di progetti nella barra laterale",
+  enter_number_of_projects: "Inserisci il numero di progetti",
+  repo_url_too_long: "",
+  git_repository_url_placeholder: "",
+  base_branch_too_long: "",
+  base_branch_invalid_chars: "",
+  base_branch_placeholder: "",
+  git_repository_url: "",
+  base_branch: "",
+  timezone_setting: "Impostazione del fuso orario corrente.",
+  language_setting: "Scegli la lingua utilizzata nell'interfaccia utente.",
+  language_and_time: "Lingua e ora",
+  preferences: "Preferenze",
 } as const;

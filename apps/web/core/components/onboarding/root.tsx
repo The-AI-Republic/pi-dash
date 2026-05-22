@@ -23,7 +23,7 @@ type Props = {
 };
 
 export const OnboardingRoot = observer(function OnboardingRoot({ invitations = [] }: Props) {
-  const [currentStep, setCurrentStep] = useState<TOnboardingStep>(EOnboardingSteps.PROFILE_SETUP);
+  const [currentStep, setCurrentStep] = useState<TOnboardingStep>(EOnboardingSteps.CLI_INSTALL);
   // store hooks
   const { data: user } = useUser();
   const { data: userProfile, updateUserProfile, finishUserOnboarding } = useUserProfile();
@@ -70,6 +70,9 @@ export const OnboardingRoot = observer(function OnboardingRoot({ invitations = [
   const handleStepChange = useCallback(
     (step: EOnboardingSteps, skipInvites?: boolean) => {
       switch (step) {
+        case EOnboardingSteps.CLI_INSTALL:
+          setCurrentStep(EOnboardingSteps.PROFILE_SETUP);
+          break;
         case EOnboardingSteps.PROFILE_SETUP:
           if (isSelfManaged) {
             // Skip role & use case steps for self-hosted

@@ -438,7 +438,7 @@ def transfer_cycle_issues(
         workspace__slug=slug,
         issue__archived_at__isnull=True,
         issue__is_draft=False,
-        issue__state__group__in=["backlog", "unstarted", "started"],
+        issue__state__group__in=["backlog", "unstarted", "started", "review"],
     )
 
     updated_cycles = []

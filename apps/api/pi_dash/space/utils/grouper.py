@@ -227,7 +227,7 @@ def issue_group_values(
     if field == "priority":
         return ["low", "medium", "high", "urgent", "none"]
     if field == "state__group":
-        return ["backlog", "unstarted", "started", "completed", "cancelled"]
+        return ["backlog", "unstarted", "started", "review", "completed", "cancelled"]
     if field == "target_date":
         queryset = queryset.values_list("target_date", flat=True).distinct()
         if project_id:

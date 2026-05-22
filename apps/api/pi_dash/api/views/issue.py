@@ -328,7 +328,7 @@ class IssueListCreateAPIEndpoint(BaseAPIView):
 
         # Custom ordering for priority and state
         priority_order = ["urgent", "high", "medium", "low", "none"]
-        state_order = ["backlog", "unstarted", "started", "completed", "cancelled"]
+        state_order = ["backlog", "unstarted", "started", "review", "completed", "cancelled"]
 
         order_by_param = request.GET.get("order_by", "-created_at")
 

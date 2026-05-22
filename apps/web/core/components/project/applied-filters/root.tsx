@@ -28,8 +28,8 @@ type Props = {
   totalProjects: number;
 };
 
-const MEMBERS_FILTERS = ["lead", "members"];
-const DATE_FILTERS = ["created_at"];
+const MEMBERS_FILTERS = new Set(["lead", "members"]);
+const DATE_FILTERS = new Set(["created_at"]);
 
 export function ProjectAppliedFiltersList(props: Props) {
   const { t } = useTranslation();
@@ -69,14 +69,14 @@ export function ProjectAppliedFiltersList(props: Props) {
                   values={value}
                 />
               )}
-              {DATE_FILTERS.includes(filterKey) && (
+              {DATE_FILTERS.has(filterKey) && (
                 <AppliedDateFilters
                   editable={isEditingAllowed}
                   handleRemove={(val) => handleRemoveFilter(filterKey, val)}
                   values={value}
                 />
               )}
-              {MEMBERS_FILTERS.includes(filterKey) && (
+              {MEMBERS_FILTERS.has(filterKey) && (
                 <AppliedMembersFilters
                   editable={isEditingAllowed}
                   handleRemove={(val) => handleRemoveFilter(filterKey, val)}
@@ -98,7 +98,7 @@ export function ProjectAppliedFiltersList(props: Props) {
         {/* Applied display filters */}
         {appliedDisplayFilters.length > 0 && (
           <Tag key="project_display_filters">
-            <span className="text-11 text-tertiary">{t("projects.label", { count: 2 })}</span>
+            <span className="text-11 text-tertiary">{t("workspace_projects.label", { count: 2 })}</span>
             <AppliedProjectDisplayFilters
               editable={isEditingAllowed}
               values={appliedDisplayFilters}

@@ -1647,6 +1647,7 @@ export default {
       priority_distribution: {
         title: "Work items by Priority",
         empty: "Create work items to view the them by priority in the graph for better analysis.",
+        priority: "",
       },
       recent_activity: {
         title: "Recent activity",
@@ -2228,6 +2229,7 @@ export default {
       unarchived: "Notification marked as un archived",
       snoozed: "Notification snoozed",
       unsnoozed: "Notification un snoozed",
+      un_snoozed: "",
     },
     empty_state: {
       detail: {
@@ -2760,7 +2762,6 @@ export default {
       help: "Help",
     },
   },
-  // Navigation customization
   customize_navigation: "Customize navigation",
   personal: "Personal",
   accordion_navigation_control: "Accordion sidebar navigation",
@@ -2785,5 +2786,35 @@ export default {
     workspace_not_found: "Workspace not found.",
     comment_failed_title: "Could not post comment",
     comment_failed_message: "Failed to post the comment.",
+  },
+  date: "",
+  epics: "",
+  Unassigned: "",
+  creating_theme: "",
+  issue_advanced_git: "",
+  git_work_branch: "",
+  git_work_branch_hint: "",
+  git_work_branch_too_long: "",
+  git_work_branch_invalid_chars: "",
+  git_work_branch_placeholder: "",
+  progress: "",
+  repo_url_too_long: "",
+  git_repository_url_placeholder: "",
+  base_branch_too_long: "",
+  base_branch_invalid_chars: "",
+  base_branch_placeholder: "",
+  git_repository_url: "",
+  base_branch: "",
+  auth: {
+    common: {
+      password: {
+        toast: {
+          error: {
+            title: "",
+            message: "",
+          },
+        },
+      },
+    },
   },
 } as const;
