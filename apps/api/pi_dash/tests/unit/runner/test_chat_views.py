@@ -19,6 +19,8 @@ from pi_dash.runner.models import (
     AgentChatMessageStatus,
     AgentChatSession,
     AgentChatSessionStatus,
+    AgentRun,
+    AgentRunStatus,
     Pod,
     Runner,
     RunnerStatus,
@@ -160,6 +162,102 @@ def test_runner_chat_delta_string_is_persisted_and_completed(
 
 
 @pytest.mark.unit
+def test_chat_completion_drains_queued_task_after_releasing_runner(
+    db, api_client, create_user, workspace, pod, enrolled_runner, runner_token
+):
+    session = AgentChatSession.objects.create(
+        workspace=workspace,
+        runner=enrolled_runner,
+        created_by=create_user,
+        pod=pod,
+        active_turn_id="turn_1",
+    )
+    message = AgentChatMessage.objects.create(
+        session=session,
+        role=AgentChatMessageRole.USER,
+        content="hello",
+        status=AgentChatMessageStatus.SENT,
+        seq=1,
+    )
+    session.active_message_id = message.id
+    session.save(update_fields=["active_message_id", "updated_at"])
+    queued = AgentRun.objects.create(
+        workspace=workspace,
+        created_by=create_user,
+        pod=pod,
+        prompt="queued while chat is active",
+        status=AgentRunStatus.QUEUED,
+    )
+
+    with (
+        patch("django.db.transaction.on_commit", side_effect=lambda fn, **kw: fn()),
+        patch("pi_dash.runner.services.pubsub.send_to_runner") as send_to_runner,
+    ):
+        resp = api_client.post(
+            f"/api/v1/runner/chat/sessions/{session.id}/messages/{message.id}/complete/",
+            {"status": "completed"},
+            format="json",
+            HTTP_AUTHORIZATION=f"Bearer {runner_token}",
+            HTTP_IDEMPOTENCY_KEY=uuid.uuid4().hex,
+        )
+
+    assert resp.status_code == 200, resp.data
+    queued.refresh_from_db()
+    assert queued.status == AgentRunStatus.ASSIGNED
+    assert queued.runner_id == enrolled_runner.id
+    send_to_runner.assert_called_once()
+    assert send_to_runner.call_args.args[1]["type"] == "assign"
+
+
+@pytest.mark.unit
+def test_chat_failure_drains_queued_task_after_releasing_runner(
+    db, api_client, create_user, workspace, pod, enrolled_runner, runner_token
+):
+    session = AgentChatSession.objects.create(
+        workspace=workspace,
+        runner=enrolled_runner,
+        created_by=create_user,
+        pod=pod,
+        active_turn_id="turn_1",
+    )
+    message = AgentChatMessage.objects.create(
+        session=session,
+        role=AgentChatMessageRole.USER,
+        content="hello",
+        status=AgentChatMessageStatus.SENT,
+        seq=1,
+    )
+    session.active_message_id = message.id
+    session.save(update_fields=["active_message_id", "updated_at"])
+    queued = AgentRun.objects.create(
+        workspace=workspace,
+        created_by=create_user,
+        pod=pod,
+        prompt="queued while chat is active",
+        status=AgentRunStatus.QUEUED,
+    )
+
+    with (
+        patch("django.db.transaction.on_commit", side_effect=lambda fn, **kw: fn()),
+        patch("pi_dash.runner.services.pubsub.send_to_runner") as send_to_runner,
+    ):
+        resp = api_client.post(
+            f"/api/v1/runner/chat/sessions/{session.id}/failed/",
+            {"code": "agent_failed", "detail": "boom"},
+            format="json",
+            HTTP_AUTHORIZATION=f"Bearer {runner_token}",
+            HTTP_IDEMPOTENCY_KEY=uuid.uuid4().hex,
+        )
+
+    assert resp.status_code == 200, resp.data
+    queued.refresh_from_db()
+    assert queued.status == AgentRunStatus.ASSIGNED
+    assert queued.runner_id == enrolled_runner.id
+    send_to_runner.assert_called_once()
+    assert send_to_runner.call_args.args[1]["type"] == "assign"
+
+
+@pytest.mark.unit
 def test_chat_message_get_is_not_send_throttled(db, session_client, create_user, workspace, pod, enrolled_runner):
     session = AgentChatSession.objects.create(
         workspace=workspace,
@@ -231,9 +329,7 @@ def test_chat_warm_dispatches_without_creating_message(
 
 
 @pytest.mark.unit
-def test_chat_warm_skips_active_turn_without_dispatch(
-    db, session_client, create_user, workspace, pod, enrolled_runner
-):
+def test_chat_warm_skips_active_turn_without_dispatch(db, session_client, create_user, workspace, pod, enrolled_runner):
     session = AgentChatSession.objects.create(
         workspace=workspace,
         runner=enrolled_runner,

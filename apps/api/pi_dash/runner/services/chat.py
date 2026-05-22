@@ -47,10 +47,7 @@ def event_channel(session_id) -> str:
 def can_read_chat(user, session: AgentChatSession) -> bool:
     if not is_workspace_member(user, session.workspace_id):
         return False
-    return (
-        session.created_by_id == user.id
-        or is_workspace_admin(user, session.workspace_id)
-    )
+    return session.created_by_id == user.id or is_workspace_admin(user, session.workspace_id)
 
 
 def can_send_chat(user, session: AgentChatSession) -> bool:
@@ -61,10 +58,7 @@ def can_decide_chat_approval(user, approval: AgentChatApprovalRequest) -> bool:
     session = approval.session
     if not is_workspace_member(user, session.workspace_id):
         return False
-    return (
-        session.created_by_id == user.id
-        or is_workspace_admin(user, session.workspace_id)
-    )
+    return session.created_by_id == user.id or is_workspace_admin(user, session.workspace_id)
 
 
 def runner_has_active_chat(runner: Runner) -> bool:
@@ -85,6 +79,34 @@ def runner_has_active_task(runner: Runner) -> bool:
     ).exists()
 
 
+def drain_tasks_after_chat_release(session: AgentChatSession) -> None:
+    """Wake the task queue after an active chat turn releases a runner.
+
+    Chat and task runs intentionally do not share a queue. The only coupling is
+    runner capacity: an active chat turn makes the matcher skip that runner.
+    When chat clears ``active_message_id`` / ``active_turn_id``, any queued
+    AgentRun rows need the same drain trigger a completed task would get.
+    """
+
+    runner_id = session.runner_id
+    pod_id = session.pod_id
+    if runner_id is None:
+        return
+
+    def _drain() -> None:
+        try:
+            matcher.drain_for_runner_by_id(runner_id)
+            if pod_id is not None:
+                matcher.drain_pod_by_id(pod_id)
+        except Exception:
+            logger.exception(
+                "failed to drain task queue after chat release for runner %s",
+                runner_id,
+            )
+
+    transaction.on_commit(_drain)
+
+
 def normalize_cwd(value: Any) -> str:
     # MVP: the cloud ignores caller-selected cwd. The runner resolves its
     # configured workspace path and enforces containment before spawn.
@@ -92,22 +114,12 @@ def normalize_cwd(value: Any) -> str:
 
 
 def next_message_seq_locked(session: AgentChatSession) -> int:
-    current = (
-        AgentChatMessage.objects.filter(session=session).aggregate(Max("seq"))[
-            "seq__max"
-        ]
-        or 0
-    )
+    current = AgentChatMessage.objects.filter(session=session).aggregate(Max("seq"))["seq__max"] or 0
     return int(current) + 1
 
 
 def next_event_seq_locked(session: AgentChatSession) -> int:
-    current = (
-        AgentChatEvent.objects.filter(session=session).aggregate(Max("seq"))[
-            "seq__max"
-        ]
-        or 0
-    )
+    current = AgentChatEvent.objects.filter(session=session).aggregate(Max("seq"))["seq__max"] or 0
     return int(current) + 1
 
 
@@ -142,9 +154,7 @@ def append_event_locked(
     source_key: str = "",
 ) -> AgentChatEvent:
     if source_key:
-        existing = AgentChatEvent.objects.filter(
-            session=session, source_key=source_key
-        ).first()
+        existing = AgentChatEvent.objects.filter(session=session, source_key=source_key).first()
         if existing is not None:
             return existing
     event = AgentChatEvent.objects.create(
@@ -259,13 +269,10 @@ def mark_warm_dispatch_failed(session_id) -> None:
 
 def mark_message_dispatch_failed(session_id, message_id, detail: str) -> None:
     with transaction.atomic():
-        session = (
-            AgentChatSession.objects.select_for_update()
-            .filter(pk=session_id)
-            .first()
-        )
+        session = AgentChatSession.objects.select_for_update().filter(pk=session_id).first()
         if session is None:
             return
+        was_active = bool(session.active_message_id or session.active_turn_id)
         message = AgentChatMessage.objects.filter(pk=message_id).first()
         if message is not None:
             message.status = AgentChatMessageStatus.FAILED
@@ -293,6 +300,8 @@ def mark_message_dispatch_failed(session_id, message_id, detail: str) -> None:
         )
         if session.status == AgentChatSessionStatus.CLOSED:
             append_event_locked(session, "chat_closed", {"reason": "close_requested"})
+        if was_active:
+            drain_tasks_after_chat_release(session)
 
 
 def create_assistant_message_locked(
@@ -319,6 +328,7 @@ def complete_active_turn_locked(
     payload: Optional[dict[str, Any]] = None,
 ) -> None:
     now = timezone.now()
+    was_active = bool(session.active_message_id or session.active_turn_id)
     if session.active_message_id:
         AgentChatMessage.objects.filter(pk=session.active_message_id).update(
             status=final_status,
@@ -351,6 +361,8 @@ def complete_active_turn_locked(
     )
     if session.status == AgentChatSessionStatus.CLOSED:
         append_event_locked(session, "chat_closed", {"reason": "close_requested"})
+    if was_active:
+        drain_tasks_after_chat_release(session)
 
 
 def sweep_active_turns() -> int:
@@ -371,6 +383,7 @@ def sweep_active_turns() -> int:
             )
             if session is None:
                 continue
+            was_active = bool(session.active_message_id or session.active_turn_id)
             if session.active_message_id:
                 AgentChatMessage.objects.filter(pk=session.active_message_id).update(
                     status=AgentChatMessageStatus.FAILED,
@@ -397,6 +410,8 @@ def sweep_active_turns() -> int:
             )
             if session.status == AgentChatSessionStatus.CLOSED:
                 append_event_locked(session, "chat_closed", {"reason": "close_requested"})
+            if was_active:
+                drain_tasks_after_chat_release(session)
             count += 1
     return count
 

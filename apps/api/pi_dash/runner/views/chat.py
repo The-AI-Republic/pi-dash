@@ -153,11 +153,7 @@ class AgentChatSessionListEndpoint(APIView):
         if not is_workspace_member(request.user, workspace_id):
             return Response({"error": "forbidden"}, status=status.HTTP_403_FORBIDDEN)
         with transaction.atomic():
-            runner = (
-                Runner.objects.select_for_update()
-                .filter(pk=runner_id, workspace_id=workspace_id)
-                .first()
-            )
+            runner = Runner.objects.select_for_update().filter(pk=runner_id, workspace_id=workspace_id).first()
             if runner is None:
                 return Response({"error": "runner_not_found"}, status=status.HTTP_404_NOT_FOUND)
             if _runner_unavailable(runner):
@@ -209,18 +205,11 @@ class AgentChatWarmEndpoint(APIView):
     def post(self, request, session_id):
         with transaction.atomic():
             session = (
-                AgentChatSession.objects.select_for_update()
-                .select_related("runner")
-                .filter(pk=session_id)
-                .first()
+                AgentChatSession.objects.select_for_update().select_related("runner").filter(pk=session_id).first()
             )
             if session is None or not chat_service.can_send_chat(request.user, session):
                 return Response({"error": "not found"}, status=status.HTTP_404_NOT_FOUND)
-            runner = (
-                Runner.objects.select_for_update()
-                .filter(pk=session.runner_id)
-                .first()
-            )
+            runner = Runner.objects.select_for_update().filter(pk=session.runner_id).first()
             if session.status != AgentChatSessionStatus.OPEN:
                 return Response(
                     {"error": "chat_session_closed"},
@@ -234,9 +223,7 @@ class AgentChatWarmEndpoint(APIView):
             if session.active_message_id is not None or session.active_turn_id:
                 return Response({"ok": True, "skipped": "chat_turn_active"})
             if chat_service.runner_has_active_task(runner) or runner.status == RunnerStatus.BUSY:
-                return Response(
-                    {"error": "runner_busy"}, status=status.HTTP_409_CONFLICT
-                )
+                return Response({"error": "runner_busy"}, status=status.HTTP_409_CONFLICT)
             chat_service.enqueue_chat_warm_after_commit(
                 runner.id,
                 chat_session_id=session.id,
@@ -275,18 +262,11 @@ class AgentChatMessageListEndpoint(APIView):
             )
         with transaction.atomic():
             session = (
-                AgentChatSession.objects.select_for_update()
-                .select_related("runner")
-                .filter(pk=session_id)
-                .first()
+                AgentChatSession.objects.select_for_update().select_related("runner").filter(pk=session_id).first()
             )
             if session is None or not chat_service.can_send_chat(request.user, session):
                 return Response({"error": "not found"}, status=status.HTTP_404_NOT_FOUND)
-            runner = (
-                Runner.objects.select_for_update()
-                .filter(pk=session.runner_id)
-                .first()
-            )
+            runner = Runner.objects.select_for_update().filter(pk=session.runner_id).first()
             if session.status != AgentChatSessionStatus.OPEN:
                 return Response(
                     {"error": "chat_session_closed"},
@@ -298,9 +278,7 @@ class AgentChatMessageListEndpoint(APIView):
                     status=status.HTTP_409_CONFLICT,
                 )
             if chat_service.runner_has_active_task(runner) or runner.status == RunnerStatus.BUSY:
-                return Response(
-                    {"error": "runner_busy"}, status=status.HTTP_409_CONFLICT
-                )
+                return Response({"error": "runner_busy"}, status=status.HTTP_409_CONFLICT)
             if session.active_message_id is not None or session.active_turn_id:
                 return Response(
                     {"error": "chat_turn_active"},
@@ -316,9 +294,7 @@ class AgentChatMessageListEndpoint(APIView):
             )
             session.active_message_id = message.id
             session.last_message_at = timezone.now()
-            session.save(
-                update_fields=["active_message_id", "last_message_at", "updated_at"]
-            )
+            session.save(update_fields=["active_message_id", "last_message_at", "updated_at"])
             chat_service.enqueue_chat_message_after_commit(
                 runner.id,
                 chat_session_id=session.id,
@@ -340,10 +316,7 @@ class AgentChatCancelEndpoint(APIView):
     def post(self, request, session_id):
         with transaction.atomic():
             session = (
-                AgentChatSession.objects.select_for_update()
-                .select_related("runner")
-                .filter(pk=session_id)
-                .first()
+                AgentChatSession.objects.select_for_update().select_related("runner").filter(pk=session_id).first()
             )
             if session is None or not chat_service.can_send_chat(request.user, session):
                 return Response({"error": "not found"}, status=status.HTTP_404_NOT_FOUND)
@@ -370,10 +343,7 @@ class AgentChatCloseEndpoint(APIView):
     def post(self, request, session_id):
         with transaction.atomic():
             session = (
-                AgentChatSession.objects.select_for_update()
-                .select_related("runner")
-                .filter(pk=session_id)
-                .first()
+                AgentChatSession.objects.select_for_update().select_related("runner").filter(pk=session_id).first()
             )
             if session is None or not chat_service.can_send_chat(request.user, session):
                 return Response({"error": "not found"}, status=status.HTTP_404_NOT_FOUND)
@@ -463,11 +433,7 @@ class AgentChatApprovalDecideEndpoint(APIView):
                     {"error": "already decided"},
                     status=status.HTTP_409_CONFLICT,
                 )
-            approval.status = (
-                ApprovalStatus.ACCEPTED
-                if decision == "accept"
-                else ApprovalStatus.DECLINED
-            )
+            approval.status = ApprovalStatus.ACCEPTED if decision == "accept" else ApprovalStatus.DECLINED
             approval.decision_source = "web"
             approval.decided_by = request.user
             approval.decided_at = timezone.now()
@@ -719,6 +685,7 @@ class ChatFailedEndpoint(_ChatRunnerEndpointBase):
                 return Response({"ok": True, "duplicate": True})
             code = request.data.get("code") or "chat_failed"
             detail = request.data.get("detail") or ""
+            was_active = bool(session.active_message_id or session.active_turn_id)
             if session.active_message_id:
                 AgentChatMessage.objects.filter(pk=session.active_message_id).update(
                     status=AgentChatMessageStatus.FAILED,
@@ -737,6 +704,8 @@ class ChatFailedEndpoint(_ChatRunnerEndpointBase):
             chat_service.append_event_locked(session, "chat_failed", {"code": code, "detail": detail})
             if should_close:
                 chat_service.append_event_locked(session, "chat_closed", {"reason": "close_requested"})
+            if was_active:
+                chat_service.drain_tasks_after_chat_release(session)
         return Response({"ok": True})
 
 
@@ -752,6 +721,7 @@ class ChatClosedEndpoint(_ChatRunnerEndpointBase):
             session = AgentChatSession.objects.select_for_update().get(pk=session.pk)
             if not chat_service.record_dedupe(session, key):
                 return Response({"ok": True, "duplicate": True})
+            was_active = bool(session.active_message_id or session.active_turn_id)
             session.status = AgentChatSessionStatus.CLOSED
             session.active_message_id = None
             session.active_turn_id = ""
@@ -762,6 +732,8 @@ class ChatClosedEndpoint(_ChatRunnerEndpointBase):
                 "chat_closed",
                 {"reason": request.data.get("reason") or "runner_closed"},
             )
+            if was_active:
+                chat_service.drain_tasks_after_chat_release(session)
         return Response({"ok": True})
 
 
