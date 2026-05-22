@@ -251,12 +251,12 @@ enum RemoveMode {
     /// `--local-only` was passed: we never touch the cloud regardless
     /// of reachability. Spec B3.
     LocalOnly,
-    /// Cloud unreachable or credentials lack an `api_token`: can't
-    /// issue a cloud delete, fall back to local-only. Spec B2. The
-    /// specific cause is carried in [`FallbackReason`] so we can pick
-    /// honest prompt + success-message copy.
+    /// Cloud unreachable or no `[cli].token` configured: can't issue a
+    /// cloud delete, fall back to local-only. Spec B2. The specific
+    /// cause is carried in [`FallbackReason`] so we can pick honest
+    /// prompt + success-message copy.
     OfflineFallback,
-    /// Cloud reachable, api_token present: cascade delete (cloud +
+    /// Cloud reachable, CLI token present: cascade delete (cloud +
     /// local). Spec B1.
     Cascade,
 }
@@ -269,8 +269,8 @@ enum FallbackReason {
     /// Probe to `/api/v1/runner/health/` returned non-success or timed
     /// out within the configured window.
     CloudUnreachable,
-    /// `credentials.toml` has no `api_token`; the v1 delete endpoint
-    /// requires one.
+    /// `[cli].token` in `config.toml` is absent; the v1 delete endpoint
+    /// requires it. Operator needs to run `pidash auth login` first.
     MissingApiToken,
     /// Mode is not `OfflineFallback`; field is meaningless. Used in
     /// place of `Option` to keep the destructuring tuple flat.
@@ -288,18 +288,27 @@ pub async fn remove(args: RemoveArgs, paths: &Paths) -> Result<()> {
     let cloud_url = cfg.daemon.cloud_url.clone();
 
     // Decide the mode before prompting so the prompt copy matches the
-    // action we'll actually take. The fallback reason (no api_token vs
+    // action we'll actually take. The fallback reason (no CLI token vs
     // cloud unreachable) is captured separately so the prompt text
     // doesn't claim "cannot reach the cloud" when the real cause is a
     // missing credential.
+    //
+    // The CLI token comes from `[cli].token` in `config.toml` — the
+    // single source of truth populated by `pidash auth login`. The
+    // legacy workspace-level `credentials.toml::api_token` field is
+    // never populated by any current path (see
+    // `cli/connect.rs::write_credentials` which hard-codes
+    // `api_token: None`), so reading from it would always classify
+    // every host as `MissingApiToken` and silently kill cascade
+    // delete. Aligns this with `pidash runner add` which also reads
+    // via `runner_ops::load_cli_token`.
     let (mode, api_token, fallback_reason): (RemoveMode, Option<String>, FallbackReason) =
         if args.local_only {
             (RemoveMode::LocalOnly, None, FallbackReason::Unused)
         } else {
-            let creds = file::load_credentials(paths).context(
-                "no credentials.toml — run `pidash connect` first, or pass --local-only",
-            )?;
-            match creds.api_token {
+            let cli_token = runner_ops::load_cli_token(paths)
+                .context("reading [cli].token from config.toml")?;
+            match cli_token {
                 None => (
                     RemoveMode::OfflineFallback,
                     None,
@@ -328,9 +337,10 @@ pub async fn remove(args: RemoveArgs, paths: &Paths) -> Result<()> {
                 args.name
             ),
             FallbackReason::MissingApiToken => format!(
-                "These credentials lack an api_token; cloud-side deregistration \
-                 is not possible from this CLI. Only the local runner instance for \
-                 '{}' can be deleted — delete the cloud row from the web UI. Continue?",
+                "No CLI token configured (run `pidash auth login` to authenticate \
+                 this host with the cloud); cloud-side deregistration is not \
+                 possible from this CLI. Only the local runner instance for '{}' \
+                 can be deleted — delete the cloud row from the web UI. Continue?",
                 args.name
             ),
             FallbackReason::Unused => unreachable!("OfflineFallback always has a reason"),
@@ -405,8 +415,8 @@ pub async fn remove(args: RemoveArgs, paths: &Paths) -> Result<()> {
             FallbackReason::MissingApiToken => {
                 println!(
                     "Removed runner {} locally. The cloud row remains; \
-                     delete it from the web UI (these credentials lack an \
-                     api_token).",
+                     delete it from the web UI, or run `pidash auth login` \
+                     and re-run this command to enable cloud-side delete.",
                     args.name
                 );
             }
