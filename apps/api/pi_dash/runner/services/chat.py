@@ -212,6 +212,51 @@ def enqueue_chat_message_after_commit(
     transaction.on_commit(_send)
 
 
+def enqueue_chat_warm_after_commit(
+    runner_id,
+    *,
+    chat_session_id,
+    local_thread_id: str,
+    local_session_id: str,
+    cwd: str,
+    model: str,
+) -> None:
+    def _send():
+        try:
+            send_to_runner(
+                runner_id,
+                {
+                    "type": "chat_warm",
+                    "chat_session_id": str(chat_session_id),
+                    "local_thread_id": local_thread_id or None,
+                    "local_session_id": local_session_id or None,
+                    "cwd": cwd or None,
+                    "model": model or None,
+                },
+            )
+        except Exception:
+            logger.exception("chat warm dispatch failed for session %s", chat_session_id)
+            mark_warm_dispatch_failed(chat_session_id)
+
+    transaction.on_commit(_send)
+
+
+def mark_warm_dispatch_failed(session_id) -> None:
+    with transaction.atomic():
+        session = (
+            AgentChatSession.objects.select_for_update()
+            .filter(pk=session_id, status=AgentChatSessionStatus.OPEN)
+            .first()
+        )
+        if session is None:
+            return
+        append_event_locked(
+            session,
+            "chat_warm_failed",
+            {"code": "dispatch_failed"},
+        )
+
+
 def mark_message_dispatch_failed(session_id, message_id, detail: str) -> None:
     with transaction.atomic():
         session = (

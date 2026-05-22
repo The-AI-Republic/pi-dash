@@ -304,6 +304,17 @@ pub enum ServerMsg {
         #[serde(default)]
         model: Option<String>,
     },
+    ChatWarm {
+        chat_session_id: Uuid,
+        #[serde(default)]
+        local_thread_id: Option<String>,
+        #[serde(default)]
+        local_session_id: Option<String>,
+        #[serde(default)]
+        cwd: Option<String>,
+        #[serde(default)]
+        model: Option<String>,
+    },
     ChatCancel {
         chat_session_id: Uuid,
         reason: Option<String>,

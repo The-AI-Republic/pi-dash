@@ -14,6 +14,7 @@ from pi_dash.runner.views import (
     AgentChatMessageListEndpoint,
     AgentChatSessionDetailEndpoint,
     AgentChatSessionListEndpoint,
+    AgentChatWarmEndpoint,
     AgentRunCancelEndpoint,
     AgentRunDetailEndpoint,
     AgentRunListEndpoint,
@@ -112,6 +113,11 @@ urlpatterns = [
         "chat/sessions/<uuid:session_id>/messages/",
         AgentChatMessageListEndpoint.as_view(),
         name="runner-chat-messages",
+    ),
+    path(
+        "chat/sessions/<uuid:session_id>/warm/",
+        AgentChatWarmEndpoint.as_view(),
+        name="runner-chat-warm",
     ),
     path(
         "chat/sessions/<uuid:session_id>/events/",

@@ -200,6 +200,52 @@ class AgentChatSessionDetailEndpoint(APIView):
         return Response(AgentChatSessionSerializer(session).data)
 
 
+class AgentChatWarmEndpoint(APIView):
+    authentication_classes = [BaseSessionAuthentication]
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, session_id):
+        with transaction.atomic():
+            session = (
+                AgentChatSession.objects.select_for_update()
+                .select_related("runner")
+                .filter(pk=session_id)
+                .first()
+            )
+            if session is None or not chat_service.can_send_chat(request.user, session):
+                return Response({"error": "not found"}, status=status.HTTP_404_NOT_FOUND)
+            runner = (
+                Runner.objects.select_for_update()
+                .filter(pk=session.runner_id)
+                .first()
+            )
+            if session.status != AgentChatSessionStatus.OPEN:
+                return Response(
+                    {"error": "chat_session_closed"},
+                    status=status.HTTP_409_CONFLICT,
+                )
+            if runner is None or _runner_unavailable(runner):
+                return Response(
+                    {"error": "runner_unavailable"},
+                    status=status.HTTP_409_CONFLICT,
+                )
+            if session.active_message_id is not None or session.active_turn_id:
+                return Response({"ok": True, "skipped": "chat_turn_active"})
+            if chat_service.runner_has_active_task(runner) or runner.status == RunnerStatus.BUSY:
+                return Response(
+                    {"error": "runner_busy"}, status=status.HTTP_409_CONFLICT
+                )
+            chat_service.enqueue_chat_warm_after_commit(
+                runner.id,
+                chat_session_id=session.id,
+                local_thread_id=session.local_thread_id,
+                local_session_id=session.local_session_id,
+                cwd=session.cwd,
+                model=session.model,
+            )
+        return Response({"ok": True}, status=status.HTTP_202_ACCEPTED)
+
+
 class AgentChatMessageListEndpoint(APIView):
     authentication_classes = [BaseSessionAuthentication]
     permission_classes = [IsAuthenticated]

@@ -267,6 +267,14 @@ export class RunnerService extends APIService {
       });
   }
 
+  async warmChatSession(sessionId: string): Promise<{ ok: boolean; skipped?: string }> {
+    return this.post(`/api/runners/chat/sessions/${sessionId}/warm/`, {})
+      .then((r) => r?.data)
+      .catch((e) => {
+        throw e?.response?.data;
+      });
+  }
+
   async cancelChat(sessionId: string, reason?: string): Promise<{ ok: boolean }> {
     return this.post(`/api/runners/chat/sessions/${sessionId}/cancel/`, { reason: reason ?? "" })
       .then((r) => r?.data)

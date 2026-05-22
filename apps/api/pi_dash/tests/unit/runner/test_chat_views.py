@@ -143,6 +143,52 @@ def test_second_chat_message_is_rejected_while_first_dispatch_is_active(
 
 
 @pytest.mark.unit
+def test_chat_warm_dispatches_without_creating_message(
+    db, session_client, create_user, workspace, pod, enrolled_runner
+):
+    session = AgentChatSession.objects.create(
+        workspace=workspace,
+        runner=enrolled_runner,
+        created_by=create_user,
+        pod=pod,
+        local_session_id="claude-session-1",
+        local_thread_id="claude-session-1",
+    )
+    with (
+        patch("django.db.transaction.on_commit", side_effect=lambda fn, **kw: fn()),
+        patch("pi_dash.runner.services.chat.send_to_runner") as send_to_runner,
+    ):
+        resp = session_client.post(f"/api/runners/chat/sessions/{session.id}/warm/")
+
+    assert resp.status_code == 202, resp.data
+    assert AgentChatMessage.objects.filter(session=session).count() == 0
+    send_to_runner.assert_called_once()
+    _runner_id, payload = send_to_runner.call_args.args
+    assert payload["type"] == "chat_warm"
+    assert payload["chat_session_id"] == str(session.id)
+    assert payload["local_session_id"] == "claude-session-1"
+
+
+@pytest.mark.unit
+def test_chat_warm_skips_active_turn_without_dispatch(
+    db, session_client, create_user, workspace, pod, enrolled_runner
+):
+    session = AgentChatSession.objects.create(
+        workspace=workspace,
+        runner=enrolled_runner,
+        created_by=create_user,
+        pod=pod,
+        active_turn_id="turn_1",
+    )
+    with patch("pi_dash.runner.services.chat.send_to_runner") as send_to_runner:
+        resp = session_client.post(f"/api/runners/chat/sessions/{session.id}/warm/")
+
+    assert resp.status_code == 200, resp.data
+    assert resp.data["skipped"] == "chat_turn_active"
+    send_to_runner.assert_not_called()
+
+
+@pytest.mark.unit
 def test_workspace_admin_lists_pending_chat_approvals_for_other_users(
     db, session_client, create_user, workspace, pod, enrolled_runner
 ):

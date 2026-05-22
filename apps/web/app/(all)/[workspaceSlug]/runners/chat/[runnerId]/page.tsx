@@ -4,7 +4,7 @@
  * See the LICENSE file for details.
  */
 
-import { useCallback, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { observer } from "mobx-react";
 import { Send, Square, X } from "lucide-react";
 import { useParams } from "react-router";
@@ -35,6 +35,8 @@ const RunnerChatPage = observer(function RunnerChatPage() {
   const [draft, setDraft] = useState("");
   const [sending, setSending] = useState(false);
   const [events, setEvents] = useState<IAgentChatEvent[]>([]);
+  const warmSessionRef = useRef<string | null>(null);
+  const createWarmKeyRef = useRef<string | null>(null);
 
   const { data: runner } = useSWR<IRunner>(runnerId ? ["runner-detail", runnerId] : null, () =>
     service.getDetail(runnerId!)
@@ -52,6 +54,49 @@ const RunnerChatPage = observer(function RunnerChatPage() {
     [sessions]
   );
 
+  useEffect(() => {
+    warmSessionRef.current = null;
+    createWarmKeyRef.current = null;
+    setEvents([]);
+  }, [runnerId]);
+
+  useEffect(() => {
+    let cancelled = false;
+    async function warmSelectedRunner() {
+      if (!workspaceId || !runnerId || !runner || runner.status !== "online") return;
+      if (session?.status === "open") {
+        if (warmSessionRef.current === session.id) return;
+        warmSessionRef.current = session.id;
+        try {
+          await service.warmChatSession(session.id);
+        } catch {
+          warmSessionRef.current = null;
+        }
+        return;
+      }
+      if (!sessions) return;
+      const key = `${workspaceId}:${runnerId}`;
+      if (createWarmKeyRef.current === key) return;
+      createWarmKeyRef.current = key;
+      try {
+        const created = await service.createChatSession({
+          workspace: workspaceId,
+          runner: runnerId,
+        });
+        if (cancelled) return;
+        warmSessionRef.current = created.id;
+        await service.warmChatSession(created.id);
+        mutateSessions();
+      } catch {
+        createWarmKeyRef.current = null;
+      }
+    }
+    warmSelectedRunner();
+    return () => {
+      cancelled = true;
+    };
+  }, [mutateSessions, runner, runnerId, session, sessions, workspaceId]);
+
   const { data: messages, mutate: mutateMessages } = useSWR<IAgentChatMessage[]>(
     session?.id ? ["runner-chat-messages", session.id] : null,
     () => service.listChatMessages(session!.id)
@@ -60,7 +105,11 @@ const RunnerChatPage = observer(function RunnerChatPage() {
   const handleEvent = useCallback(
     (event: IAgentChatEvent) => {
       setEvents((prev) => (prev.some((item) => item.seq === event.seq) ? prev : [...prev, event]));
-      if (["assistant_delta", "turn_started", "turn_completed", "chat_failed", "chat_closed"].includes(event.kind)) {
+      if (
+        ["assistant_delta", "turn_started", "turn_completed", "chat_failed", "chat_closed", "chat_warmed"].includes(
+          event.kind
+        )
+      ) {
         mutateSessions();
         mutateMessages();
       }
@@ -153,7 +202,9 @@ const RunnerChatPage = observer(function RunnerChatPage() {
               </div>
             ))}
             {events
-              .filter((event) => !["assistant_delta", "turn_completed", "chat_closed"].includes(event.kind))
+              .filter(
+                (event) => !["assistant_delta", "turn_completed", "chat_closed", "chat_warmed"].includes(event.kind)
+              )
               .slice(-6)
               .map((event) => (
                 <div

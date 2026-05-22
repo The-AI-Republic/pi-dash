@@ -520,7 +520,16 @@ struct ChatTurn {
 }
 
 #[derive(Debug)]
+struct ChatWarm {
+    cwd: Option<String>,
+    model: Option<String>,
+    local_thread_id: Option<String>,
+    local_session_id: Option<String>,
+}
+
+#[derive(Debug)]
 enum ChatCommand {
+    Warm(ChatWarm),
     Message(ChatTurn),
     Cancel { reason: Option<String> },
     Close { reason: Option<String> },
@@ -866,6 +875,84 @@ impl RunnerLoop {
                             .await;
                     }
                 }
+                ServerMsg::ChatWarm {
+                    chat_session_id,
+                    local_thread_id,
+                    local_session_id,
+                    cwd,
+                    model,
+                } => {
+                    if self.current_run.is_some() {
+                        let _ = self
+                            .out
+                            .send(ClientMsg::ChatEvent {
+                                chat_session_id,
+                                bridge_seq: 0,
+                                kind: "chat_warm_skipped".into(),
+                                payload: serde_json::json!({
+                                    "reason": "runner_busy",
+                                }),
+                            })
+                            .await;
+                        continue;
+                    }
+                    let warm = ChatWarm {
+                        cwd,
+                        model,
+                        local_thread_id,
+                        local_session_id,
+                    };
+                    let tx = if let Some(chat) = &self.current_chat {
+                        if chat.chat_session_id == chat_session_id {
+                            if *chat.active_rx.borrow() {
+                                let _ = self
+                                    .out
+                                    .send(ClientMsg::ChatEvent {
+                                        chat_session_id,
+                                        bridge_seq: 0,
+                                        kind: "chat_warm_skipped".into(),
+                                        payload: serde_json::json!({
+                                            "reason": "chat_turn_active",
+                                        }),
+                                    })
+                                    .await;
+                                continue;
+                            }
+                            chat.tx.clone()
+                        } else if *chat.active_rx.borrow() {
+                            let _ = self
+                                .out
+                                .send(ClientMsg::ChatEvent {
+                                    chat_session_id,
+                                    bridge_seq: 0,
+                                    kind: "chat_warm_skipped".into(),
+                                    payload: serde_json::json!({
+                                        "reason": "chat_turn_active",
+                                    }),
+                                })
+                                .await;
+                            continue;
+                        } else {
+                            self.stop_idle_chat_runtime().await;
+                            self.start_chat_runtime(chat_session_id).await
+                        }
+                    } else {
+                        self.start_chat_runtime(chat_session_id).await
+                    };
+                    if tx.send(ChatCommand::Warm(warm)).await.is_err() {
+                        let _ = self
+                            .out
+                            .send(ClientMsg::ChatEvent {
+                                chat_session_id,
+                                bridge_seq: 0,
+                                kind: "chat_warm_failed".into(),
+                                payload: serde_json::json!({
+                                    "detail": "chat runtime closed before accepting warm request",
+                                }),
+                            })
+                            .await;
+                    }
+                }
                 ServerMsg::ChatCancel {
                     chat_session_id,
                     reason,
@@ -1068,6 +1155,35 @@ impl ChatWorker {
                     Ok(None) | Err(_) => break,
                 };
             match command {
+                ChatCommand::Warm(warm) => {
+                    if let Err(e) = self
+                        .handle_warm(
+                            chat_session_id,
+                            warm,
+                            &mut bridge,
+                            &mut workspace_path,
+                            &mut bridge_seq,
+                        )
+                        .await
+                    {
+                        let _ = self
+                            .out
+                            .send(ClientMsg::ChatEvent {
+                                chat_session_id,
+                                bridge_seq,
+                                kind: "chat_warm_failed".into(),
+                                payload: serde_json::json!({
+                                    "detail": format!("{e:#}"),
+                                }),
+                            })
+                            .await;
+                        if let Some(bridge) = bridge.take() {
+                            bridge.shutdown(Duration::from_secs(5)).await.ok();
+                        }
+                        workspace_path.take();
+                        started_sent = false;
+                    }
+                }
                 ChatCommand::Message(turn) => {
                     let _ = self.active_tx.send(true);
                     self.state.set_status(RunnerStatus::Busy).await;
@@ -1129,6 +1245,54 @@ impl ChatWorker {
         let _ = self.active_tx.send(false);
         self.state.set_status(RunnerStatus::Idle).await;
         let _ = &self.runner_paths;
+    }
+
+    async fn handle_warm(
+        &mut self,
+        chat_session_id: uuid::Uuid,
+        warm: ChatWarm,
+        bridge: &mut Option<AgentBridge>,
+        workspace_path: &mut Option<std::path::PathBuf>,
+        bridge_seq: &mut u64,
+    ) -> Result<()> {
+        if workspace_path.is_none() {
+            *workspace_path = Some(self.resolve_chat_workspace(warm.cwd.as_deref()).await?);
+        }
+        let workspace_path = workspace_path
+            .as_deref()
+            .ok_or_else(|| anyhow::anyhow!("chat workspace missing"))?;
+
+        let already_warm = bridge.is_some();
+        if bridge.is_none() {
+            let resume_id = warm
+                .local_session_id
+                .as_deref()
+                .filter(|s| !s.is_empty())
+                .or_else(|| warm.local_thread_id.as_deref().filter(|s| !s.is_empty()));
+            *bridge = Some(
+                AgentBridge::spawn_from_config_with_resume(
+                    &self.runner_config,
+                    workspace_path,
+                    warm.model,
+                    resume_id,
+                )
+                .await?,
+            );
+        }
+
+        *bridge_seq = (*bridge_seq).saturating_add(1);
+        self.out
+            .send(ClientMsg::ChatEvent {
+                chat_session_id,
+                bridge_seq: *bridge_seq,
+                kind: "chat_warmed".into(),
+                payload: serde_json::json!({
+                    "already_warm": already_warm,
+                }),
+            })
+            .await
+            .ok();
+        Ok(())
     }
 
     async fn handle_turn(
@@ -1220,6 +1384,12 @@ impl ChatWorker {
                             bridge.interrupt().await.ok();
                             final_status = "cancelled".into();
                             break;
+                        }
+                        Some(ChatCommand::Warm(_)) => {
+                            tracing::debug!(
+                                %chat_session_id,
+                                "chat warm ignored while turn is active"
+                            );
                         }
                         Some(ChatCommand::Message(_)) => {
                             tracing::warn!(
