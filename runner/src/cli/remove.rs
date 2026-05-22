@@ -72,9 +72,11 @@ pub async fn run(args: Args, paths: &Paths) -> Result<()> {
     }
 
     // Cloud-side cleanup: best-effort self-revoke each runner via the
-    // machine-token DELETE endpoint. Loop carries on past per-runner
-    // failures so a single network blip on runner N+1 doesn't strand
-    // the operator with N revoked-and-N-still-half-alive runners.
+    // machine-token DELETE endpoint. Each runner uses its own
+    // credentials (no workspace api_token needed). Loop carries on past
+    // per-runner failures so a single network blip on runner N+1
+    // doesn't strand the operator with N revoked-and-N-still-half-alive
+    // runners.
     match crate::config::file::load_config(paths) {
         Ok(config) => {
             if !args.local_only {

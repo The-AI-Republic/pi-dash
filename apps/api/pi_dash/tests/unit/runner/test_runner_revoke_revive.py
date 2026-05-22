@@ -165,9 +165,13 @@ def test_revoke_forbidden_for_non_owner_non_admin(
 ):
     from pi_dash.db.models import User
 
-    other = User.objects.create(email="other@example.com")
-    other.set_password("x")
-    other.save()
+    # ``username`` is unique; ``create_user`` already produced a user
+    # with the default empty username, so this second one must pick
+    # its own to avoid a unique-constraint collision.
+    other = User.objects.create_user(
+        email="other-revoke-forbidden@example.com",
+        username="other-revoke-forbidden",
+    )
     api_client.force_authenticate(user=other)
     resp = api_client.post(f"/api/runners/{enrolled_runner.id}/revoke/")
     assert resp.status_code == 403
@@ -180,9 +184,12 @@ def test_revive_forbidden_for_non_owner_non_admin(
     from pi_dash.db.models import User
 
     runner, _ = pending_runner
-    other = User.objects.create(email="other2@example.com")
-    other.set_password("x")
-    other.save()
+    # Explicit username; the ``pending_runner`` fixture's ``create_user``
+    # already took the default empty-username slot on the unique key.
+    other = User.objects.create_user(
+        email="other-revive-forbidden@example.com",
+        username="other-revive-forbidden",
+    )
     api_client.force_authenticate(user=other)
     resp = api_client.post(f"/api/runners/{runner.id}/revive/")
     assert resp.status_code == 403

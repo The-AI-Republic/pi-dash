@@ -5,29 +5,23 @@
 import pytest
 from django.core.exceptions import ValidationError
 
-from pi_dash.db.models import Issue, Project, State
+from pi_dash.db.models import Issue, Project
 
 
-@pytest.fixture
-def project(workspace, create_user):
-    return Project.objects.create(
-        name="Branch Validators",
-        identifier="BV",
-        workspace=workspace,
-        created_by=create_user,
-    )
+# These tests target the regex validator attached to
+# ``Project.base_branch`` / ``Issue.git_work_branch`` only. Running
+# ``full_clean`` on the whole model would also enforce every other
+# required field (``updated_by``, ``icon_prop``, ``default_state``, …),
+# turning a focused validator test into a fixture-completeness test.
+# Instead we ask each field for its own validators and run them — the
+# regex behaviour is what's actually under test here.
 
 
-@pytest.fixture
-def issue(workspace, project, create_user):
-    state = State.objects.create(name="Todo", project=project, group="unstarted")
-    return Issue.objects.create(
-        name="Task",
-        workspace=workspace,
-        project=project,
-        state=state,
-        created_by=create_user,
-    )
+def _validate_field(model_cls, field_name, value):
+    """Run the validators registered on ``model_cls.<field_name>`` against
+    ``value``. Equivalent to what ``full_clean`` would do for that field
+    in isolation; raises ``ValidationError`` on rejection."""
+    model_cls._meta.get_field(field_name).run_validators(value)
 
 
 @pytest.mark.unit
@@ -42,9 +36,8 @@ def issue(workspace, project, create_user):
         "user/jdoe/fix_42",
     ],
 )
-def test_project_base_branch_accepts_valid_names(project, branch):
-    project.base_branch = branch
-    project.full_clean()
+def test_project_base_branch_accepts_valid_names(branch):
+    _validate_field(Project, "base_branch", branch)
 
 
 @pytest.mark.unit
@@ -59,10 +52,9 @@ def test_project_base_branch_accepts_valid_names(project, branch):
         "branch~1",             # ancestor ref
     ],
 )
-def test_project_base_branch_rejects_invalid_names(project, branch):
-    project.base_branch = branch
+def test_project_base_branch_rejects_invalid_names(branch):
     with pytest.raises(ValidationError):
-        project.full_clean()
+        _validate_field(Project, "base_branch", branch)
 
 
 @pytest.mark.unit
@@ -74,9 +66,8 @@ def test_project_base_branch_rejects_invalid_names(project, branch):
         "hotfix/oom_crash",
     ],
 )
-def test_issue_git_work_branch_accepts_valid_names(issue, branch):
-    issue.git_work_branch = branch
-    issue.full_clean()
+def test_issue_git_work_branch_accepts_valid_names(branch):
+    _validate_field(Issue, "git_work_branch", branch)
 
 
 # Note: the server-side regex is intentionally a subset of git's own
@@ -94,7 +85,6 @@ def test_issue_git_work_branch_accepts_valid_names(issue, branch):
         "feat branch?",     # `?`
     ],
 )
-def test_issue_git_work_branch_rejects_invalid_names(issue, branch):
-    issue.git_work_branch = branch
+def test_issue_git_work_branch_rejects_invalid_names(branch):
     with pytest.raises(ValidationError):
-        issue.full_clean()
+        _validate_field(Issue, "git_work_branch", branch)

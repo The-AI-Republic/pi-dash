@@ -21,7 +21,12 @@ use crate::history::index::RunSummary;
 /// v3 added the optional `observability` field to
 /// `RunnerStatusSnapshot` so the TUI can surface per-active-run
 /// telemetry (turn count, tokens, agent pid, last event) that the
-/// daemon already collects under `agent_observability_v1`.
+/// daemon already collects under `agent_observability_v1`. The same
+/// bump also added `RunnerRemoveLocal`, the CLI's "tell the daemon to
+/// clean up this runner without going through the cloud" verb. Older
+/// daemons reject the variant with an `unknown method` error; the CLI
+/// catches that and falls back to direct config mutation, so mixed
+/// daemon/CLI pairs during dev stay safe.
 pub const IPC_VERSION: u32 = 3;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -88,6 +93,22 @@ pub enum Request {
     RunnerReconnect,
     /// Deregister + stop.
     RunnerDisconnect,
+    /// Local-only runner removal (cloud is **not** contacted).
+    ///
+    /// Used by ``pidash runner remove`` when the user passed
+    /// ``--local-only`` or when the cloud is unreachable. The daemon
+    /// runs the same teardown the cloud's ``remove_runner`` wire frame
+    /// would trigger: cancel any in-flight run, drop the per-runner
+    /// data dir, strip the matching ``[[runner]]`` block from
+    /// ``config.toml`` under the host-wide config lock, and exit just
+    /// this runner's RunnerLoop. The shared ``pidash.service`` systemd
+    /// unit is deliberately not touched.
+    ///
+    /// Without this verb, the CLI's offline / local-only paths edited
+    /// ``config.toml`` directly while the daemon kept polling against
+    /// its in-memory copy and re-creating the data dir, until the
+    /// operator manually restarted the service.
+    RunnerRemoveLocal { runner: String },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

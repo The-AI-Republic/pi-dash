@@ -8,13 +8,10 @@ import { observer } from "mobx-react";
 import { useParams } from "next/navigation";
 // pi dash imports
 import { Header, Row } from "@pi-dash/ui";
-import { cn } from "@pi-dash/utils";
 // components
 import { AppHeader } from "@/components/core/app-header";
 import { TabNavigationRoot } from "@/components/navigation";
-import { AppSidebarToggleButton } from "@/components/sidebar/sidebar-toggle-button";
 // hooks
-import { useAppTheme } from "@/hooks/store/use-app-theme";
 import { useIssueDetail } from "@/hooks/store/use-issue-detail";
 import { useProjectNavigationPreferences } from "@/hooks/use-navigation-preferences";
 // local components
@@ -24,7 +21,6 @@ export const ProjectWorkItemDetailsHeader = observer(function ProjectWorkItemDet
   // router
   const { workspaceSlug, workItem } = useParams();
   // store hooks
-  const { sidebarCollapsed } = useAppTheme();
   const {
     issue: { getIssueById, getIssueIdByIdentifier },
   } = useIssueDetail();
@@ -41,12 +37,7 @@ export const ProjectWorkItemDetailsHeader = observer(function ProjectWorkItemDet
           <Row className="flex h-header w-full items-center gap-2 border-b border-subtle bg-surface-1">
             <div className="flex h-full w-full items-center gap-2 divide-x divide-subtle">
               <div className="flex size-full flex-1 items-center gap-2">
-                {sidebarCollapsed && (
-                  <div className="shrink-0">
-                    <AppSidebarToggleButton />
-                  </div>
-                )}
-                <Header className={cn("h-full", { "pl-1.5": !sidebarCollapsed })}>
+                <Header className="h-full pl-1.5">
                   <Header.LeftItem className="h-full max-w-full">
                     <TabNavigationRoot
                       workspaceSlug={workspaceSlug}

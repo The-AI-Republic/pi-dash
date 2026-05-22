@@ -76,9 +76,19 @@ def test_list_returns_global_default_when_no_override(
     response = api_client.get(_list_url(workspace))
     assert response.status_code == 200, response.content
     body = response.json()
-    assert len(body) == 1
-    assert body[0]["is_global_default"] is True
-    assert body[0]["workspace"] is None
+    # The list returns every active global + workspace-scoped template
+    # visible to this workspace. After PR B's review-template migration,
+    # there are TWO global rows by default (`coding-task` + `review`),
+    # and there will likely be more as additional polymorphic templates
+    # land. Filter to the `coding-task` slot — the one this test was
+    # really asserting on — so adding new globals doesn't churn the
+    # expected count here.
+    coding_task_rows = [
+        row for row in body if row["name"] == PromptTemplate.DEFAULT_NAME
+    ]
+    assert len(coding_task_rows) == 1
+    assert coding_task_rows[0]["is_global_default"] is True
+    assert coding_task_rows[0]["workspace"] is None
 
 
 @pytest.mark.contract
@@ -199,10 +209,16 @@ def test_archive_flips_is_active_and_creates_can_retry(
     assert archive.status_code == 200, archive.content
     assert archive.json()["is_active"] is False
 
-    # After archiving, the list should show only the global default again.
+    # After archiving, the workspace override is gone, so the
+    # `coding-task` slot should fall back to the global default again.
+    # Other global templates (e.g. PR B's `review`) live alongside;
+    # filter to the slot under test here.
     listed = api_client.get(_list_url(workspace)).json()
-    assert len(listed) == 1
-    assert listed[0]["is_global_default"] is True
+    coding_task_rows = [
+        row for row in listed if row["name"] == PromptTemplate.DEFAULT_NAME
+    ]
+    assert len(coding_task_rows) == 1
+    assert coding_task_rows[0]["is_global_default"] is True
 
     # And the admin can create a fresh override.
     retry = api_client.post(_list_url(workspace), {}, format="json")

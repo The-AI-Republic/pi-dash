@@ -544,6 +544,7 @@ impl RunnerCloudClient {
         &self,
         ack: Vec<String>,
         status: PollStatus,
+        long_poll_interval_secs: u64,
     ) -> Result<PollResponse, TransportError> {
         let (session_id, token_raw) = {
             let token = self.ensure_access_token().await?;
@@ -562,6 +563,13 @@ impl RunnerCloudClient {
             session_id
         );
         let body = serde_json::json!({ "ack": ack, "status": status });
+        // Per-request timeout = server's long-poll block + 5s buffer.
+        // Without this, the shared `Client::timeout` (60s) fires before
+        // the server's block_ms when an operator bumps
+        // `LONG_POLL_INTERVAL_SECS` over 55, dropping in-flight assigns
+        // and spinning the backoff loop. Override per-request so the
+        // shared client default still protects every other RPC.
+        let request_timeout = Duration::from_secs(long_poll_interval_secs.saturating_add(5));
         let resp = self
             .inner
             .transport
@@ -569,6 +577,7 @@ impl RunnerCloudClient {
             .post(&url)
             .header(AUTHORIZATION, format!("Bearer {token_raw}"))
             .json(&body)
+            .timeout(request_timeout)
             .send()
             .await
             .map_err(|e| TransportError::Network(e.to_string()))?;
@@ -1069,6 +1078,75 @@ pub struct HttpLoop {
     /// caller that doesn't want to thread state through.
     pub state: Option<crate::daemon::state::StateHandle>,
     inline_acks: VecDeque<String>,
+    /// Bounded mid-dedupe (design.md §8 / Decision 21). At-least-once
+    /// delivery + the PEL-replay path (`use_zero=True` on the first
+    /// poll after session-open) means an `assign` / `cancel` / `decide`
+    /// frame can legitimately arrive twice. Without dedupe the runner
+    /// would re-execute side-effects each time, converting at-least-
+    /// once delivery into at-least-once execution.
+    mid_dedupe: MidDedupe,
+    /// Per-poll request timeout (server's long-poll block + buffer),
+    /// captured from the welcome envelope. Used to override the shared
+    /// reqwest client's 60s default so an operator-bumped
+    /// `LONG_POLL_INTERVAL_SECS` doesn't cause the client timeout to
+    /// fire before the server's block_ms.
+    long_poll_interval_secs: u64,
+}
+
+/// Maximum number of recently-seen `mid` values retained for daemon-side
+/// inbound-frame dedupe. Sized so a multi-hour PEL replay storm fits
+/// without churning the ring; ~36-byte UUID strings × 4096 ≈ 150 KiB
+/// per running runner instance.
+const MID_DEDUPE_CAPACITY: usize = 4096;
+
+/// Hard upper bound on `long_poll_interval_secs` the daemon honors.
+/// Server-side `LONG_POLL_INTERVAL_SECS` should also clamp to this; if
+/// a misconfigured cloud sends a larger value the daemon caps it
+/// locally so a single welcome can't lock us into a multi-minute
+/// per-poll wait that masks real failures.
+const MAX_LONG_POLL_INTERVAL_SECS: u64 = 55;
+/// Fallback when welcome carries no value or the cloud cannot be
+/// trusted. Matches the server's documented default.
+const DEFAULT_LONG_POLL_INTERVAL_SECS: u64 = 25;
+
+/// Bounded "have we seen this mid before?" set. Cap-bounded ring of
+/// recent mids; when the ring is full, the oldest entry is evicted
+/// from both the ring and the lookup set so memory stays predictable.
+#[derive(Debug)]
+struct MidDedupe {
+    ring: VecDeque<String>,
+    lookup: std::collections::HashSet<String>,
+    capacity: usize,
+}
+
+impl MidDedupe {
+    fn with_capacity(capacity: usize) -> Self {
+        Self {
+            ring: VecDeque::with_capacity(capacity),
+            lookup: std::collections::HashSet::with_capacity(capacity),
+            capacity,
+        }
+    }
+
+    /// Returns `true` if `mid` was already in the ring (caller should
+    /// drop the duplicate). Records `mid` if not. Empty mids are not
+    /// recorded — we cannot dedupe what we cannot key on.
+    fn record(&mut self, mid: &str) -> bool {
+        if mid.is_empty() {
+            return false;
+        }
+        if self.lookup.contains(mid) {
+            return true;
+        }
+        if self.ring.len() >= self.capacity
+            && let Some(evicted) = self.ring.pop_front()
+        {
+            self.lookup.remove(&evicted);
+        }
+        self.ring.push_back(mid.to_string());
+        self.lookup.insert(mid.to_string());
+        false
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -1115,6 +1193,8 @@ impl HttpLoop {
             attach_body,
             state: None,
             inline_acks: VecDeque::new(),
+            mid_dedupe: MidDedupe::with_capacity(MID_DEDUPE_CAPACITY),
+            long_poll_interval_secs: DEFAULT_LONG_POLL_INTERVAL_SECS,
         }
     }
 
@@ -1195,11 +1275,19 @@ impl HttpLoop {
         // genuinely fatal errors (revoked creds, runner_id mismatch)
         // unwind here.
         let session = self.bootstrap_with_retry().await?;
+        // Capture the server's long-poll interval (clamped) so the per-
+        // request timeout in `RunnerCloudClient::poll` matches the
+        // server's actual block deadline.
+        self.long_poll_interval_secs = session
+            .welcome
+            .long_poll_interval_secs
+            .unwrap_or(DEFAULT_LONG_POLL_INTERVAL_SECS)
+            .min(MAX_LONG_POLL_INTERVAL_SECS);
         // 2. Hand welcome (and optional resume_ack) to the mailbox so
         //    the existing per-runner handlers ingest them as today.
         let welcome_body = ServerMsg::Welcome {
             server_time: session.welcome.server_time.unwrap_or_else(Utc::now),
-            heartbeat_interval_secs: session.welcome.long_poll_interval_secs.unwrap_or(25),
+            heartbeat_interval_secs: self.long_poll_interval_secs,
             protocol_version: session.welcome.protocol_version.unwrap_or(WIRE_VERSION),
             latest_runner_version: session.welcome.latest_runner_version.clone(),
             min_runner_version: session.welcome.min_runner_version.clone(),
@@ -1305,7 +1393,10 @@ impl HttpLoop {
             }
             _ => PollStatus::from_wire(wire_status, in_flight),
         };
-        let resp = self.client.poll(acks, status).await?;
+        let resp = self
+            .client
+            .poll(acks, status, self.long_poll_interval_secs)
+            .await?;
         for msg in resp.messages {
             self.dispatch(msg).await;
         }
@@ -1315,6 +1406,21 @@ impl HttpLoop {
     async fn dispatch(&mut self, msg: PollMessage) {
         let stream_id = msg.stream_id.clone();
         let runner_id = self.client.runner_id();
+        // At-least-once delivery (design.md §8): a frame the daemon
+        // already executed can reappear via PEL replay or stream
+        // retries. Drop duplicates by `mid` before they reach the
+        // mailbox, but still inline-ack the stream entry so the
+        // cloud's outbox doesn't grow unbounded.
+        if self.mid_dedupe.record(&msg.mid) {
+            tracing::debug!(
+                runner = %runner_id,
+                mid = %msg.mid,
+                kind = ?msg.kind,
+                "dropping duplicate inbound frame"
+            );
+            self.inline_acks.push_back(stream_id);
+            return;
+        }
         // Decode the body's "type" field via the ServerMsg enum.
         let parsed: Result<ServerMsg, _> = serde_json::from_value(msg.body.clone());
         match parsed {

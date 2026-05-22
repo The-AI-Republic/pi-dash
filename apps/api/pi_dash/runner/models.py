@@ -2,11 +2,35 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 # See the LICENSE file for details.
 
+import logging
 import uuid
 
 from django.conf import settings
 from django.db import models
 from django.utils import timezone
+
+_logger = logging.getLogger(__name__)
+
+# Canonical set of ``Runner.revoke`` reasons. Kept here (not as a Django
+# ``choices`` enum on the column) because the column also stores
+# RunnerSession reasons echoed back to the daemon, where the same
+# strings cross the wire as part of the 409 ``session_evicted`` body.
+# The Rust side matches a subset of these against its
+# local-cleanup synthesizer (see
+# ``runner/src/cloud/http.rs``); validating Python-side stops the two
+# from drifting silently.
+KNOWN_REVOKE_REASONS = frozenset(
+    {
+        "manual_revoke",
+        "membership_revoked",
+        "refresh_token_replayed",
+        "runner_removed",
+        "self_revoked",
+        "user_revoke",
+    }
+)
+# Matches RunnerSession / Runner.revoked_reason max_length.
+_REVOKE_REASON_MAX_LEN = 32
 
 
 class PodManager(models.Manager):
@@ -358,15 +382,43 @@ class Runner(models.Model):
         4. Schedule delayed Redis stream cleanup once the daemon has had
            a brief chance to observe shutdown (``design.md`` §7.8).
 
-        The reason string is one of ``manual_revoke``,
-        ``membership_revoked``, ``refresh_token_replayed``, or
-        ``runner_removed``.
+        ``reason`` must be one of :data:`KNOWN_REVOKE_REASONS`
+        (``manual_revoke``, ``membership_revoked``,
+        ``refresh_token_replayed``, ``runner_removed``,
+        ``self_revoked``, ``user_revoke``). The first four plus
+        ``self_revoked`` belong to the daemon's "synthesize local
+        cleanup" canonical set; ``user_revoke`` is the explicit
+        "revoke cloud-side only, leave the local install alone"
+        signal used by ``delete_runner`` when the user unchecks the
+        cascade-delete checkbox.
+
+        Reasons outside the canonical set or exceeding the column's
+        32-char width are logged at WARNING and truncated for
+        backwards compat — silent truncation used to mask new reasons
+        falling out of the daemon's match set.
         """
         from django.db import transaction
         from pi_dash.runner.services.matcher import (
             NON_TERMINAL_STATUSES,
             drain_pod_by_id,
         )
+
+        if reason not in KNOWN_REVOKE_REASONS:
+            _logger.warning(
+                "Runner.revoke called with unknown reason %r; "
+                "downstream canonical-set match may misbehave. "
+                "Add the reason to KNOWN_REVOKE_REASONS once intentional.",
+                reason,
+            )
+        if len(reason) > _REVOKE_REASON_MAX_LEN:
+            _logger.warning(
+                "Runner.revoke reason %r exceeds %d chars; truncating. "
+                "The truncated form will not match the daemon's "
+                "canonical-set synthesizer.",
+                reason,
+                _REVOKE_REASON_MAX_LEN,
+            )
+        stored_reason = reason[:_REVOKE_REASON_MAX_LEN]
 
         if self.revoked_at is not None:
             return
@@ -377,20 +429,25 @@ class Runner(models.Model):
             Runner.objects.filter(pk=self.pk).update(
                 status=RunnerStatus.REVOKED,
                 revoked_at=now,
-                revoked_reason=reason[:32],
+                revoked_reason=stored_reason,
             )
             self.status = RunnerStatus.REVOKED
             self.revoked_at = now
-            self.revoked_reason = reason[:32]
+            self.revoked_reason = stored_reason
 
             # (1) Revoke any active RunnerSession for this runner. The
             # next daemon poll on the old session will see the row gone
             # and react with 409 session_evicted; pub/sub eviction
             # signaling fires from the eviction sweeper / session-open
-            # path, not here.
+            # path, not here. Propagate the caller's reason so the 409
+            # body's `reason` field carries the canonical string the
+            # daemon's synthesizer matches against (`runner_removed`
+            # for cascade delete, `manual_revoke` / `membership_revoked`
+            # / `refresh_token_replayed` for revoke flows; `user_revoke`
+            # is the deliberate "do NOT match the synthesizer" signal).
             RunnerSession.objects.filter(
                 runner=self, revoked_at__isnull=True
-            ).update(revoked_at=now, revoked_reason="runner_revoked")
+            ).update(revoked_at=now, revoked_reason=stored_reason)
 
             active_runs = list(
                 AgentRun.objects.select_for_update()

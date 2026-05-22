@@ -38,12 +38,15 @@ def validate_url_ip(url: str) -> None:
     parsed = urlparse(url)
     hostname = parsed.hostname
 
-    if not hostname:
-        raise ValueError("Invalid URL: No hostname found")
-
-    # Only allow HTTP and HTTPS to prevent file://, gopher://, etc.
+    # Scheme check fires first because schemes like ``file:///etc/passwd``
+    # leave ``hostname`` empty; reporting "no hostname" would obscure the
+    # real issue (a disallowed scheme) and prevent callers from showing a
+    # useful error to the user.
     if parsed.scheme not in ("http", "https"):
         raise ValueError("Invalid URL scheme. Only HTTP and HTTPS are allowed")
+
+    if not hostname:
+        raise ValueError("Invalid URL: No hostname found")
 
     # Resolve hostname to IP addresses — this catches domain names that
     # point to internal IPs (e.g. attacker.com -> 169.254.169.254)

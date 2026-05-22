@@ -1,6 +1,7 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
+use std::time::Duration;
 use uuid::Uuid;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -186,6 +187,30 @@ pub enum AgentKind {
     Codex,
     /// Anthropic Claude Code via `claude --print --output-format stream-json`.
     ClaudeCode,
+}
+
+impl AgentKind {
+    /// How long the supervisor's stall watchdog waits for a fresh
+    /// bridge event before declaring the agent stuck. Tuned per agent
+    /// because the protocols have very different "natural quiet"
+    /// envelopes:
+    ///
+    /// - **Codex** emits `codex/event/token_count` continuously while
+    ///   the model thinks, so prolonged silence is genuinely abnormal.
+    ///   5 minutes catches real stalls without false-positive on a
+    ///   long but live token stream.
+    /// - **Claude Code** can be silent for the full duration of a
+    ///   single tool call (e.g. a long `Bash` running tests or a
+    ///   build), and the stream-json transport doesn't expose
+    ///   intra-tool progress. 15 minutes accommodates real-world
+    ///   tool calls without hanging cancellation forever on a truly
+    ///   stuck process.
+    pub fn stall_timeout(self) -> Duration {
+        match self {
+            AgentKind::Codex => Duration::from_secs(5 * 60),
+            AgentKind::ClaudeCode => Duration::from_secs(15 * 60),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

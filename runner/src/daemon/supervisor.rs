@@ -177,9 +177,11 @@ impl Supervisor {
             let inst_remove_tx = inst.remove_tx.clone();
             let live_mailboxes = mailboxes.clone();
             let live_hello_runners = hello_runners.clone();
+            let daemon_paths = paths.clone();
             let h = tokio::spawn(async move {
                 let run = RunnerLoop {
                     runner_paths,
+                    paths: daemon_paths,
                     runner_config,
                     out: inst_out,
                     state: inst_state,
@@ -284,9 +286,15 @@ impl Supervisor {
 /// Hello legitimately reports null. This sends a clean terminal
 /// signal instead.
 ///
-/// Returns the count of runs we attempted to fail. Send errors are
+/// Returns the count of runs we successfully drained. Send errors are
 /// logged at warn but do not abort the drain — one runner's
 /// unreachable cloud client must not block another runner's drain.
+///
+/// Sends are issued in parallel via `join_all` and each is bounded by
+/// a 2s timeout. The outer 5s timeout in `Supervisor::run` still caps
+/// total wall-time, but with up to ~30 concurrent runners on one host
+/// a serial loop (each attempt potentially walking through the shared
+/// reqwest Client's 60s timeout) would starve later runners entirely.
 async fn drain_in_flight_runs(runners: Arc<RwLock<HelloRunnerMap>>) -> usize {
     // Snapshot under the read lock so the lock is dropped before any
     // network I/O; concurrent writers (config reloads, etc.) are not
@@ -299,26 +307,38 @@ async fn drain_in_flight_runs(runners: Arc<RwLock<HelloRunnerMap>>) -> usize {
             .collect()
     };
     let now = Utc::now();
-    let mut sent = 0usize;
-    for (runner_id, in_flight, out) in snapshot {
-        let Some(run_id) = in_flight else { continue };
+    let drains = snapshot.into_iter().filter_map(|(runner_id, in_flight, out)| {
+        let run_id = in_flight?;
         let msg = ClientMsg::RunFailed {
             run_id,
             reason: FailureReason::DaemonRestart,
             detail: Some("daemon shutdown requested".to_string()),
             ended_at: now,
         };
-        match out.send(msg).await {
-            Ok(()) => {
-                sent += 1;
-                tracing::info!(%runner_id, %run_id, "drained in-flight run on shutdown");
+        Some(async move {
+            // Per-attempt timeout so one stuck cloud client can't keep
+            // a parallel sibling from completing in time.
+            match tokio::time::timeout(Duration::from_secs(2), out.send(msg)).await {
+                Ok(Ok(())) => {
+                    tracing::info!(%runner_id, %run_id, "drained in-flight run on shutdown");
+                    true
+                }
+                Ok(Err(e)) => {
+                    tracing::warn!(%runner_id, %run_id, "drain send failed: {e:#}");
+                    false
+                }
+                Err(_) => {
+                    tracing::warn!(%runner_id, %run_id, "drain send timed out at 2s");
+                    false
+                }
             }
-            Err(e) => {
-                tracing::warn!(%runner_id, %run_id, "drain send failed: {e:#}");
-            }
-        }
-    }
-    sent
+        })
+    });
+    futures_util::future::join_all(drains)
+        .await
+        .into_iter()
+        .filter(|ok| *ok)
+        .count()
 }
 
 /// Watch the `connected` notify and re-emit one `Hello` per `RunnerInstance`
@@ -476,6 +496,10 @@ fn hostname() -> Option<String> {
 
 struct RunnerLoop {
     runner_paths: RunnerPaths,
+    /// Daemon-level paths. Threaded in so `ServerMsg::RemoveRunner` can
+    /// strip this runner's `[[runner]]` block from `config.toml` under
+    /// the host-wide config lock.
+    paths: Paths,
     runner_config: crate::config::schema::RunnerConfig,
     out: RunnerOut,
     state: StateHandle,
@@ -1078,24 +1102,61 @@ impl RunnerLoop {
                             runner_dir,
                         );
                     }
-                    // NOTE: the [[runner]] entry in config.toml is not
-                    // cleaned up here — operators run
-                    // `pidash token remove-runner --name <name>` to
-                    // also strip config.toml so the next daemon
-                    // restart doesn't re-Hello for this runner_id.
-                    // Surface this loudly so the operator notices
-                    // before the next restart turns into a silent
-                    // re-Hello → RemoveRunner loop.
-                    tracing::warn!(
-                        runner = %self.runner_config.name,
-                        runner_id = %runner_id,
-                        "runner removed cloud-side; \
-                         run `pidash token remove-runner --name {}` to \
-                         strip the [[runner]] block from config.toml. \
-                         Otherwise the daemon will re-Hello this id on \
-                         next restart and the cloud will tear it down again.",
-                        self.runner_config.name,
-                    );
+                    // Strip the matching `[[runner]]` block from
+                    // config.toml under the host-wide config lock so a
+                    // concurrent `pidash runner add` can't lose its
+                    // write. Without this the next daemon restart would
+                    // re-Hello for the dead runner_id and the cloud
+                    // would tear it down again on every boot.
+                    //
+                    // The systemd unit (`pidash.service`) hosts every
+                    // runner under one process, so we deliberately
+                    // never touch it here — only `pidash uninstall`
+                    // does. If this was the last runner, log a hint
+                    // so the operator knows they can remove the unit.
+                    let target_runner_id = self.runner_paths.runner_id;
+                    let runner_name = self.runner_config.name.clone();
+                    let paths_for_strip = self.paths.clone();
+                    let strip_result = tokio::task::spawn_blocking(move || {
+                        crate::config::file::mutate_config(&paths_for_strip, |cfg| {
+                            cfg.runners.retain(|r| r.runner_id != target_runner_id);
+                            Ok(())
+                        })
+                    })
+                    .await;
+                    match strip_result {
+                        Ok(Ok(post)) => {
+                            tracing::info!(
+                                runner = %runner_name,
+                                runner_id = %target_runner_id,
+                                remaining = post.runners.len(),
+                                "stripped [[runner]] block from config.toml",
+                            );
+                            if post.runners.is_empty() {
+                                tracing::warn!(
+                                    "config.toml has no remaining runners; \
+                                     run `pidash uninstall` to remove the \
+                                     pidash.service systemd unit if you \
+                                     no longer need the daemon on this host.",
+                                );
+                            }
+                        }
+                        Ok(Err(e)) => {
+                            tracing::warn!(
+                                runner = %runner_name,
+                                runner_id = %target_runner_id,
+                                "failed to strip [[runner]] block from \
+                                 config.toml: {e:#}. Run \
+                                 `pidash runner remove --local-only \
+                                 --yes {runner_name}` to clean it up by \
+                                 hand; otherwise the next daemon restart \
+                                 will re-Hello this id.",
+                            );
+                        }
+                        Err(join_err) => {
+                            tracing::warn!("config-strip task panicked: {join_err:#}",);
+                        }
+                    }
                     should_break = true;
                 }
             }
@@ -1846,7 +1907,11 @@ impl AssignWorker {
         // give up and fail the run. Without this, an unrecognised wait —
         // e.g. a future codex protocol change — leaves the runner blocked
         // on stdout and the cloud showing "running" indefinitely.
-        const STALL_TIMEOUT: Duration = Duration::from_secs(5 * 60);
+        //
+        // Threshold is per-agent because Codex emits continuous token-
+        // count events while Claude can be silent for the full
+        // duration of a single tool call (see `AgentKind::stall_timeout`).
+        let stall_timeout = self.runner_config.agent.kind.stall_timeout();
 
         let shutdown = self.state.shutdown_notified();
         let cancel = self.cancel.clone();
@@ -1856,7 +1921,7 @@ impl AssignWorker {
             // the previous iteration disarms the watchdog; one that just
             // resolved re-arms it.
             let stall_deadline = if self.approvals.list_pending().await.is_empty() {
-                Some(tokio::time::Instant::now() + STALL_TIMEOUT)
+                Some(tokio::time::Instant::now() + stall_timeout)
             } else {
                 None
             };
@@ -1920,7 +1985,7 @@ impl AssignWorker {
                         None => std::future::pending::<()>().await,
                     }
                 } => {
-                    let mins = STALL_TIMEOUT.as_secs() / 60;
+                    let mins = stall_timeout.as_secs() / 60;
                     let base = format!("no agent frames for {mins} minutes");
                     let detail = self.build_failure_detail(&base, bridge).await;
                     self.send(ClientMsg::RunFailed {

@@ -16,6 +16,7 @@ from datetime import timedelta
 from celery import shared_task
 from django.conf import settings
 from django.db import models, transaction
+from django.db.models import Q
 from django.utils import timezone
 
 from pi_dash.runner.models import (
@@ -270,12 +271,25 @@ def reconcile_stalled_runs() -> int:
     # future status added to BUSY_STATUSES doesn't silently sneak past
     # the exclusion.
     active_statuses = (AgentRunStatus.ASSIGNED, AgentRunStatus.RUNNING)
+    # Defensive: the AgentRun.status filter above already excludes
+    # AWAITING_APPROVAL / AWAITING_REAUTH, but the snapshot's
+    # ``approvals_pending`` is the runner's own view of "blocked on a
+    # human" and may be ahead of the cloud's status if the approval
+    # POST that flips status is in flight or failed silently. Excluding
+    # rows where the snapshot reports a pending approval costs nothing
+    # and closes the narrow window where a fresh ``last_event_at`` (the
+    # approval prompt itself) hasn't yet rescued the run from the
+    # watchdog.
     stalled = (
         AgentRun.objects.filter(status__in=active_statuses)
         .filter(
             runner__live_state__observed_run_id=models.F("id"),
             runner__live_state__updated_at__gte=snapshot_cutoff,
             runner__live_state__last_event_at__lt=cutoff,
+        )
+        .filter(
+            Q(runner__live_state__approvals_pending=0)
+            | Q(runner__live_state__approvals_pending__isnull=True)
         )
         .select_related("runner")
     )
