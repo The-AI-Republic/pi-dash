@@ -317,6 +317,16 @@ impl AgentBridge {
         }
     }
 
+    /// Prepare a long-lived bridge for a chat session before the first user
+    /// turn. Codex returns the reusable thread id created during warmup;
+    /// Claude Code has no separate thread-start handshake in this bridge.
+    pub async fn warm(&mut self, cwd: &Path) -> Result<Option<String>> {
+        match self {
+            AgentBridge::Codex(b) => Ok(Some(b.warm(cwd).await?)),
+            AgentBridge::ClaudeCode(_) => Ok(None),
+        }
+    }
+
     /// Wait for the next batch of events from the agent. Returns `None` when
     /// the subprocess has closed its output stream (no more events will ever
     /// arrive); callers should surface that as a run failure.

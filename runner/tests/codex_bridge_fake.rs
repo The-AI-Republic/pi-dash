@@ -11,6 +11,25 @@ use std::time::Duration;
 use tokio::process::Command;
 use uuid::Uuid;
 
+async fn wait_completed(bridge: &mut Bridge, cursor: &mut pidash::codex::bridge::BridgeCursor) {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+    while tokio::time::Instant::now() < deadline {
+        let Some(frame) = tokio::time::timeout(Duration::from_secs(1), bridge.next_frame())
+            .await
+            .ok()
+            .flatten()
+        else {
+            continue;
+        };
+        for ev in cursor.translate(frame) {
+            if let BridgeEvent::Completed { .. } = ev {
+                return;
+            }
+        }
+    }
+    panic!("expected turn/completed to produce Completed event");
+}
+
 fn fake_codex_script() -> &'static str {
     // The script reads four lines from stdin (initialize, initialized,
     // thread/start, turn/start) and emits a deterministic sequence of
@@ -34,6 +53,56 @@ fn fake_codex_script() -> &'static str {
         # keep stdin open so the Bridge can still write if it wants.
         sleep 0.3
     "#
+}
+
+#[tokio::test]
+async fn warm_bridge_reuses_initialized_thread_across_turns() {
+    let script = r#"
+        set -e
+        read init
+        case "$init" in *'"method":"initialize"'*) ;; *) printf '%s\n' '{"jsonrpc":"2.0","id":1,"error":{"code":-32600,"message":"expected initialize"}}'; exit 0;; esac
+        printf '%s\n' '{"jsonrpc":"2.0","id":1,"result":{"capabilities":{}}}'
+        read initialized
+        case "$initialized" in *'"method":"initialized"'*) ;; *) exit 1;; esac
+        read thread
+        case "$thread" in *'"method":"thread/start"'*) ;; *) printf '%s\n' '{"jsonrpc":"2.0","id":2,"error":{"code":-32600,"message":"expected thread/start"}}'; exit 0;; esac
+        printf '%s\n' '{"jsonrpc":"2.0","id":2,"result":{"threadId":"th_chat"}}'
+        read turn1
+        case "$turn1" in *'"method":"turn/start"'*) ;; *) printf '%s\n' '{"jsonrpc":"2.0","id":3,"error":{"code":-32600,"message":"expected first turn/start"}}'; exit 0;; esac
+        printf '%s\n' '{"jsonrpc":"2.0","method":"turn/completed","params":{"conclusion":"success","done":{"status":"ok","turn":1}}}'
+        read turn2
+        case "$turn2" in *'"method":"turn/start"'*) ;; *) printf '%s\n' '{"jsonrpc":"2.0","id":3,"error":{"code":-32600,"message":"expected second turn/start"}}'; exit 0;; esac
+        printf '%s\n' '{"jsonrpc":"2.0","method":"turn/completed","params":{"conclusion":"success","done":{"status":"ok","turn":2}}}'
+        sleep 0.1
+    "#;
+    let mut cmd = Command::new("sh");
+    cmd.arg("-c").arg(script);
+    let server = AppServer::spawn_command(cmd)
+        .await
+        .expect("spawn fake codex");
+    let mut bridge = Bridge::from_server(server, None);
+
+    let cwd = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let thread_id = bridge.warm(&cwd).await.expect("warm bridge");
+    assert_eq!(thread_id, "th_chat");
+
+    let first = RunPayload {
+        run_id: Uuid::new_v4(),
+        prompt: "first".into(),
+        model: None,
+    };
+    let mut first_cursor = bridge.run(&first, &cwd).await.expect("first turn setup");
+    assert_eq!(first_cursor.thread_id, "th_chat");
+    wait_completed(&mut bridge, &mut first_cursor).await;
+
+    let second = RunPayload {
+        run_id: Uuid::new_v4(),
+        prompt: "second".into(),
+        model: None,
+    };
+    let mut second_cursor = bridge.run(&second, &cwd).await.expect("second turn setup");
+    assert_eq!(second_cursor.thread_id, "th_chat");
+    wait_completed(&mut bridge, &mut second_cursor).await;
 }
 
 #[tokio::test]

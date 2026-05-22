@@ -83,6 +83,8 @@ def _assistant_delta_text(payload) -> str:
     if not isinstance(params, dict):
         return ""
     delta = params.get("delta")
+    if isinstance(delta, str):
+        return delta
     if isinstance(delta, dict):
         text = delta.get("text")
         if isinstance(text, str):
@@ -668,24 +670,27 @@ class ChatMessageCompleteEndpoint(_ChatRunnerEndpointBase):
             }:
                 final = AgentChatMessageStatus.COMPLETED
             assistant_text = request.data.get("assistant_message") or ""
-            if assistant_text:
-                assistant = (
-                    AgentChatMessage.objects.filter(
-                        session=session,
-                        role=AgentChatMessageRole.ASSISTANT,
-                        status=AgentChatMessageStatus.STREAMING,
-                    )
-                    .order_by("-created_at")
-                    .first()
+            assistant = (
+                AgentChatMessage.objects.filter(
+                    session=session,
+                    role=AgentChatMessageRole.ASSISTANT,
+                    status=AgentChatMessageStatus.STREAMING,
                 )
+                .order_by("-created_at")
+                .first()
+            )
+            if assistant_text or assistant is not None:
                 if assistant is None:
                     assistant = chat_service.create_assistant_message_locked(
                         session, local_turn_id=request.data.get("turn_id") or ""
                     )
-                assistant.content = assistant_text
+                update_fields = ["status", "completed_at"]
+                if assistant_text:
+                    assistant.content = assistant_text
+                    update_fields.append("content")
                 assistant.status = final
                 assistant.completed_at = timezone.now()
-                assistant.save(update_fields=["content", "status", "completed_at"])
+                assistant.save(update_fields=update_fields)
             chat_service.complete_active_turn_locked(
                 session,
                 final_status=final,

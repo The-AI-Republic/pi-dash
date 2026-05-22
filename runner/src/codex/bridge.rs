@@ -20,6 +20,8 @@ use crate::codex::schema::{
 pub struct Bridge {
     pub server: AppServer,
     pub model_default: Option<String>,
+    initialized: bool,
+    thread_id: Option<String>,
     /// Notifications that arrived while we were waiting for an RPC response
     /// (e.g. an early `account/reauthRequired` during `initialize`). Drained
     /// by [`Bridge::next_frame`] before reading from the live stream so the
@@ -33,6 +35,8 @@ impl Bridge {
         Ok(Self {
             server,
             model_default,
+            initialized: false,
+            thread_id: None,
             pending: std::collections::VecDeque::new(),
         })
     }
@@ -43,6 +47,8 @@ impl Bridge {
         Self {
             server,
             model_default,
+            initialized: false,
+            thread_id: None,
             pending: std::collections::VecDeque::new(),
         }
     }
@@ -56,9 +62,23 @@ impl Bridge {
         self.server.inbound.recv().await
     }
 
-    pub async fn run(&mut self, payload: &RunPayload, cwd: &Path) -> Result<BridgeCursor> {
-        self.initialize().await?;
+    /// Prepare the app-server for a chat turn without sending user input.
+    ///
+    /// A warm chat bridge keeps the same Codex app-server process alive for
+    /// multiple turns. Codex accepts `initialize` once per process, and the
+    /// conversation is anchored by the thread created after initialization.
+    pub async fn warm(&mut self, cwd: &Path) -> Result<String> {
+        self.ensure_initialized().await?;
+        if let Some(thread_id) = self.thread_id.as_ref() {
+            return Ok(thread_id.clone());
+        }
         let thread_id = self.start_thread(cwd).await?;
+        self.thread_id = Some(thread_id.clone());
+        Ok(thread_id)
+    }
+
+    pub async fn run(&mut self, payload: &RunPayload, cwd: &Path) -> Result<BridgeCursor> {
+        let thread_id = self.warm(cwd).await?;
         self.start_turn(&thread_id, payload).await?;
         Ok(BridgeCursor {
             run_id: payload.run_id,
@@ -69,7 +89,10 @@ impl Bridge {
         })
     }
 
-    async fn initialize(&mut self) -> Result<()> {
+    async fn ensure_initialized(&mut self) -> Result<()> {
+        if self.initialized {
+            return Ok(());
+        }
         let id = self.server.alloc_id();
         let line = jsonrpc::request(
             id,
@@ -86,6 +109,7 @@ impl Bridge {
         let _ = self.await_response(id, Duration::from_secs(15)).await?;
         let line = jsonrpc::notification("initialized", &serde_json::Value::Null)?;
         self.server.send_raw(&line).await?;
+        self.initialized = true;
         Ok(())
     }
 

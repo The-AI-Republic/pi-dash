@@ -1163,6 +1163,7 @@ impl ChatWorker {
                             &mut bridge,
                             &mut workspace_path,
                             &mut bridge_seq,
+                            &mut started_sent,
                         )
                         .await
                     {
@@ -1254,6 +1255,7 @@ impl ChatWorker {
         bridge: &mut Option<AgentBridge>,
         workspace_path: &mut Option<std::path::PathBuf>,
         bridge_seq: &mut u64,
+        started_sent: &mut bool,
     ) -> Result<()> {
         if workspace_path.is_none() {
             *workspace_path = Some(self.resolve_chat_workspace(warm.cwd.as_deref()).await?);
@@ -1278,6 +1280,23 @@ impl ChatWorker {
                 )
                 .await?,
             );
+        }
+        let bridge = bridge
+            .as_mut()
+            .ok_or_else(|| anyhow::anyhow!("chat bridge missing"))?;
+        if let Some(thread_id) = bridge.warm(workspace_path).await? {
+            if !*started_sent {
+                self.out
+                    .send(ClientMsg::ChatStarted {
+                        chat_session_id,
+                        local_thread_id: thread_id.clone(),
+                        local_session_id: Some(thread_id),
+                        started_at: Utc::now(),
+                    })
+                    .await
+                    .ok();
+                *started_sent = true;
+            }
         }
 
         *bridge_seq = (*bridge_seq).saturating_add(1);
