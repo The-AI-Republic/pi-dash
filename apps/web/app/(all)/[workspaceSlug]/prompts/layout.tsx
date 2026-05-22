@@ -8,6 +8,7 @@ import { observer } from "mobx-react";
 import { Outlet } from "react-router";
 import { EUserPermissions, EUserPermissionsLevel } from "@pi-dash/constants";
 import { NotAuthorizedView } from "@/components/auth-screens/not-authorized-view";
+import { WorkspaceShell } from "@/components/workspace/workspace-shell";
 import { useUserPermissions } from "@/hooks/store/user";
 
 /**
@@ -24,15 +25,19 @@ const PromptsLayout = observer(function PromptsLayout() {
   );
 
   if (workspaceUserInfo && !canView) {
-    return <NotAuthorizedView section="general" className="h-auto" />;
+    return (
+      <WorkspaceShell>
+        <NotAuthorizedView section="general" className="h-auto" />
+      </WorkspaceShell>
+    );
   }
 
   return (
-    <div className="flex h-full w-full flex-col">
+    <WorkspaceShell>
       <div className="flex-1 overflow-auto">
         <Outlet />
       </div>
-    </div>
+    </WorkspaceShell>
   );
 });
 
