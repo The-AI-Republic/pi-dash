@@ -982,10 +982,11 @@ impl RunnerLoop {
                     reason,
                 } => {
                     tracing::info!(%chat_session_id, ?reason, "chat_cancel received");
-                    if let Some(chat) = &self.current_chat {
-                        if chat.chat_session_id == chat_session_id {
+                    match &self.current_chat {
+                        Some(chat) if chat.chat_session_id == chat_session_id => {
                             let _ = chat.tx.send(ChatCommand::Cancel { reason }).await;
                         }
+                        _ => {}
                     }
                 }
                 ServerMsg::ChatClose {
@@ -1345,8 +1346,8 @@ impl ChatWorker {
         let bridge = bridge
             .as_mut()
             .ok_or_else(|| anyhow::anyhow!("chat bridge missing"))?;
-        if let Some(thread_id) = bridge.warm(workspace_path).await? {
-            if !*started_sent {
+        match bridge.warm(workspace_path).await? {
+            Some(thread_id) if !*started_sent => {
                 self.out
                     .send(ClientMsg::ChatStarted {
                         chat_session_id,
@@ -1358,6 +1359,7 @@ impl ChatWorker {
                     .ok();
                 *started_sent = true;
             }
+            _ => {}
         }
 
         *bridge_seq = (*bridge_seq).saturating_add(1);
