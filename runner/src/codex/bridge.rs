@@ -260,12 +260,25 @@ impl BridgeCursor {
                     // systemError, so the runner reported "completed" on
                     // 400s from OpenAI.
                     let conclusion = params.get("conclusion").and_then(|v| v.as_str());
-                    if conclusion == Some("success") {
+                    let turn_status = params
+                        .get("turn")
+                        .and_then(|v| v.get("status"))
+                        .and_then(|v| v.as_str());
+                    let turn_error = params
+                        .get("turn")
+                        .and_then(|v| v.get("error"))
+                        .filter(|v| !v.is_null());
+                    if conclusion == Some("success")
+                        || (conclusion.is_none()
+                            && turn_error.is_none()
+                            && matches!(turn_status, Some("completed" | "succeeded")))
+                    {
                         vec![BridgeEvent::Completed {
                             run_id: self.run_id,
                             done_payload: params.get("done").cloned().unwrap_or_else(|| {
                                 serde_json::json!({
-                                    "conclusion": "success",
+                                    "conclusion": conclusion.unwrap_or("success"),
+                                    "turn": params.get("turn"),
                                     "ended_at": Utc::now().to_rfc3339(),
                                 })
                             }),
@@ -281,6 +294,7 @@ impl BridgeCursor {
                                 .or_else(|| {
                                     conclusion.map(|c| format!("turn ended with conclusion={c:?}"))
                                 })
+                                .or_else(|| turn_error.map(|e| format!("turn completed with error: {e}")))
                                 .or_else(|| Some("turn/completed without conclusion".to_string())),
                         }]
                     }
@@ -491,6 +505,31 @@ mod translate_tests {
         let mut c = cursor();
         let evs = c.translate(notif("turn/completed", json!({"conclusion": "success"})));
         assert!(matches!(evs.as_slice(), [BridgeEvent::Completed { .. }]));
+    }
+
+    #[test]
+    fn turn_completed_with_completed_turn_status_completes_run() {
+        let mut c = cursor();
+        let evs = c.translate(notif(
+            "turn/completed",
+            json!({"turn": {"status": "completed", "error": null}}),
+        ));
+        assert!(matches!(evs.as_slice(), [BridgeEvent::Completed { .. }]));
+    }
+
+    #[test]
+    fn turn_completed_with_turn_error_fails_run() {
+        let mut c = cursor();
+        let evs = c.translate(notif(
+            "turn/completed",
+            json!({"turn": {"status": "completed", "error": {"message": "boom"}}}),
+        ));
+        match evs.as_slice() {
+            [BridgeEvent::Failed { detail, .. }] => {
+                assert!(detail.as_deref().unwrap_or("").contains("boom"));
+            }
+            other => panic!("expected Failed, got {other:?}"),
+        }
     }
 
     #[test]

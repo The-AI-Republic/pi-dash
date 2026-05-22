@@ -1538,18 +1538,19 @@ impl ChatWorker {
     }
 
     async fn resolve_chat_workspace(&self, cwd: Option<&str>) -> Result<std::path::PathBuf> {
-        let base = self.runner_config.workspace.working_dir.clone();
-        let resolution = crate::workspace::resolve(&base, None).await?;
-        let workspace_path = match resolution {
-            crate::workspace::Resolution::ExistingRepo(p)
-            | crate::workspace::Resolution::Cloned(p) => p,
-        };
+        let workspace_path = self.runner_config.workspace.working_dir.clone();
+        std::fs::create_dir_all(&workspace_path)?;
         if let Some(cwd) = cwd.filter(|s| !s.is_empty()) {
             let requested = std::path::PathBuf::from(cwd);
-            if requested.starts_with(&workspace_path) {
-                return Ok(requested);
+            let requested = if requested.is_absolute() {
+                requested
+            } else {
+                workspace_path.join(requested)
+            };
+            if !requested.starts_with(&workspace_path) {
+                anyhow::bail!("chat cwd is outside runner workspace");
             }
-            anyhow::bail!("chat cwd is outside runner workspace");
+            return Ok(requested);
         }
         Ok(workspace_path)
     }
