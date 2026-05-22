@@ -7,14 +7,17 @@ from __future__ import annotations
 import asyncio
 import json
 import time
+from types import SimpleNamespace
 from typing import Optional
 
 import redis.asyncio as aioredis
 from django.conf import settings
 from django.db import transaction
+from django.db.models import Q
 from django.http import JsonResponse, StreamingHttpResponse
 from django.utils import timezone
 from rest_framework import status
+from rest_framework.exceptions import AuthenticationFailed
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.throttling import UserRateThrottle
@@ -54,8 +57,41 @@ class ChatSendThrottle(UserRateThrottle):
     scope = "runner_chat_send"
 
 
+CHAT_EVENT_PAYLOAD_MAX_BYTES = 256 * 1024
+_async_redis_client: Optional[aioredis.Redis] = None
+
+
 def _idempotency_key(request) -> str:
     return (request.headers.get("Idempotency-Key") or "").strip()
+
+
+def _missing_idempotency_key_response() -> Response:
+    return Response({"error": "idempotency_key_required"}, status=status.HTTP_400_BAD_REQUEST)
+
+
+def _payload_too_large(value) -> bool:
+    try:
+        return len(json.dumps(value, default=str).encode("utf-8")) > CHAT_EVENT_PAYLOAD_MAX_BYTES
+    except (TypeError, ValueError):
+        return True
+
+
+def _async_redis() -> aioredis.Redis:
+    global _async_redis_client
+    if _async_redis_client is None:
+        redis_url = getattr(settings, "REDIS_URL", "") or "redis://localhost:6379/0"
+        _async_redis_client = aioredis.from_url(redis_url, decode_responses=True)
+    return _async_redis_client
+
+
+def _session_authenticates(request) -> bool:
+    try:
+        auth_result = BaseSessionAuthentication().authenticate(SimpleNamespace(_request=request))
+    except AuthenticationFailed:
+        return False
+    if auth_result is not None:
+        request.user = auth_result[0]
+    return bool(getattr(request, "user", None) and request.user.is_authenticated)
 
 
 def _runner_unavailable(runner: Runner) -> bool:
@@ -82,14 +118,9 @@ class AgentChatSessionListEndpoint(APIView):
             if not is_workspace_member(request.user, workspace_id):
                 return Response({"error": "forbidden"}, status=status.HTTP_403_FORBIDDEN)
             qs = qs.filter(workspace_id=workspace_id)
-        else:
-            qs = qs.filter(created_by=request.user)
         if runner_id:
             qs = qs.filter(runner_id=runner_id)
-        if workspace_id:
-            if not is_workspace_admin(request.user, workspace_id):
-                qs = qs.filter(created_by=request.user)
-        else:
+        if not workspace_id or not is_workspace_admin(request.user, workspace_id):
             qs = qs.filter(created_by=request.user)
         qs = qs.order_by("-last_message_at", "-created_at")[:100]
         return Response(AgentChatSessionSerializer(qs, many=True).data)
@@ -158,6 +189,11 @@ class AgentChatMessageListEndpoint(APIView):
     authentication_classes = [BaseSessionAuthentication]
     permission_classes = [IsAuthenticated]
     throttle_classes = [ChatSendThrottle]
+
+    def get_throttles(self):
+        if self.request.method == "POST":
+            return super().get_throttles()
+        return []
 
     def get(self, request, session_id):
         session = AgentChatSession.objects.filter(pk=session_id).first()
@@ -320,10 +356,25 @@ class AgentChatApprovalListEndpoint(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
+        workspace_id = request.query_params.get("workspace")
         qs = AgentChatApprovalRequest.objects.select_related("session").filter(
             status=ApprovalStatus.PENDING,
-            session__created_by=request.user,
         )
+        if workspace_id:
+            if not is_workspace_member(request.user, workspace_id):
+                return Response({"error": "forbidden"}, status=status.HTTP_403_FORBIDDEN)
+            qs = qs.filter(session__workspace_id=workspace_id)
+            if not is_workspace_admin(request.user, workspace_id):
+                qs = qs.filter(session__created_by=request.user)
+        else:
+            qs = qs.filter(
+                Q(session__created_by=request.user)
+                | Q(
+                    session__workspace__workspace_member__member=request.user,
+                    session__workspace__workspace_member__role__gte=20,
+                    session__workspace__workspace_member__deleted_at__isnull=True,
+                )
+            ).distinct()
         return Response(AgentChatApprovalRequestSerializer(qs[:200], many=True).data)
 
 
@@ -407,9 +458,11 @@ class ChatStartedEndpoint(_ChatRunnerEndpointBase):
         if err:
             return err
         key = _idempotency_key(request)
+        if not key:
+            return _missing_idempotency_key_response()
         with transaction.atomic():
             session = AgentChatSession.objects.select_for_update().get(pk=session.pk)
-            if key and not chat_service.record_dedupe(session, key):
+            if not chat_service.record_dedupe(session, key):
                 return Response({"ok": True, "duplicate": True})
             session.local_thread_id = (request.data.get("local_thread_id") or "")[:128]
             session.local_session_id = (request.data.get("local_session_id") or "")[:128]
@@ -460,7 +513,7 @@ class ChatEventEndpoint(_ChatRunnerEndpointBase):
             return err
         key = _idempotency_key(request)
         if not key:
-            return Response({"error": "idempotency_key_required"}, status=status.HTTP_400_BAD_REQUEST)
+            return _missing_idempotency_key_response()
         with transaction.atomic():
             session = AgentChatSession.objects.select_for_update().get(pk=session.pk)
             existing = AgentChatEvent.objects.filter(session=session, source_key=key[:160]).first()
@@ -470,8 +523,10 @@ class ChatEventEndpoint(_ChatRunnerEndpointBase):
             payload = request.data.get("payload") or {}
             bridge_seq = request.data.get("bridge_seq")
             if bridge_seq is not None:
-                payload = dict(payload)
+                payload = dict(payload) if isinstance(payload, dict) else {"value": payload}
                 payload["bridge_seq"] = bridge_seq
+            if _payload_too_large(payload):
+                return Response({"error": "payload_too_large"}, status=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE)
             event = chat_service.append_event_locked(
                 session,
                 kind,
@@ -505,6 +560,9 @@ class ChatApprovalEndpoint(_ChatRunnerEndpointBase):
         local_approval_id = (request.data.get("local_approval_id") or "")[:160]
         if not local_approval_id:
             return Response({"error": "local_approval_id_required"}, status=status.HTTP_400_BAD_REQUEST)
+        payload = request.data.get("payload") or {}
+        if _payload_too_large(payload):
+            return Response({"error": "payload_too_large"}, status=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE)
         with transaction.atomic():
             session = AgentChatSession.objects.select_for_update().get(pk=session.pk)
             approval, _ = AgentChatApprovalRequest.objects.update_or_create(
@@ -512,7 +570,7 @@ class ChatApprovalEndpoint(_ChatRunnerEndpointBase):
                 local_approval_id=local_approval_id,
                 defaults={
                     "kind": _approval_kind(request.data.get("kind") or ""),
-                    "payload": request.data.get("payload") or {},
+                    "payload": payload,
                     "reason": request.data.get("reason") or "",
                     "status": ApprovalStatus.PENDING,
                     "expires_at": request.data.get("expires_at"),
@@ -583,9 +641,11 @@ class ChatFailedEndpoint(_ChatRunnerEndpointBase):
         if err:
             return err
         key = _idempotency_key(request)
+        if not key:
+            return _missing_idempotency_key_response()
         with transaction.atomic():
             session = AgentChatSession.objects.select_for_update().get(pk=session.pk)
-            if key and not chat_service.record_dedupe(session, key):
+            if not chat_service.record_dedupe(session, key):
                 return Response({"ok": True, "duplicate": True})
             code = request.data.get("code") or "chat_failed"
             detail = request.data.get("detail") or ""
@@ -594,11 +654,19 @@ class ChatFailedEndpoint(_ChatRunnerEndpointBase):
                     status=AgentChatMessageStatus.FAILED,
                     completed_at=timezone.now(),
                 )
+            should_close = session.close_requested
             session.active_message_id = None
             session.active_turn_id = ""
             session.error = detail[:2000]
-            session.save(update_fields=["active_message_id", "active_turn_id", "error", "updated_at"])
+            update_fields = ["active_message_id", "active_turn_id", "error", "updated_at"]
+            if should_close:
+                session.status = AgentChatSessionStatus.CLOSED
+                session.closed_at = timezone.now()
+                update_fields.extend(["status", "closed_at"])
+            session.save(update_fields=update_fields)
             chat_service.append_event_locked(session, "chat_failed", {"code": code, "detail": detail})
+            if should_close:
+                chat_service.append_event_locked(session, "chat_closed", {"reason": "close_requested"})
         return Response({"ok": True})
 
 
@@ -608,9 +676,11 @@ class ChatClosedEndpoint(_ChatRunnerEndpointBase):
         if err:
             return err
         key = _idempotency_key(request)
+        if not key:
+            return _missing_idempotency_key_response()
         with transaction.atomic():
             session = AgentChatSession.objects.select_for_update().get(pk=session.pk)
-            if key and not chat_service.record_dedupe(session, key):
+            if not chat_service.record_dedupe(session, key):
                 return Response({"ok": True, "duplicate": True})
             session.status = AgentChatSessionStatus.CLOSED
             session.active_message_id = None
@@ -626,7 +696,7 @@ class ChatClosedEndpoint(_ChatRunnerEndpointBase):
 
 
 async def chat_event_stream(request, session_id):
-    if not request.user.is_authenticated:
+    if not await asyncio.to_thread(_session_authenticates, request):
         return JsonResponse(
             {"error": "authentication required"},
             status=status.HTTP_403_FORBIDDEN,
@@ -642,24 +712,23 @@ async def chat_event_stream(request, session_id):
         after = 0
 
     async def _events():
-        redis_url = getattr(settings, "REDIS_URL", "") or "redis://localhost:6379/0"
-        client = aioredis.from_url(redis_url, decode_responses=True)
+        client = _async_redis()
         pubsub = client.pubsub(ignore_subscribe_messages=True)
-        emitted: set[int] = set()
+        last_seq = after
         last_heartbeat = time.monotonic()
         try:
             await pubsub.subscribe(chat_service.event_channel(session_id))
             async for event in AgentChatEvent.objects.filter(session_id=session_id, seq__gt=after).order_by("seq"):
                 data = chat_service.serialize_event(event)
-                emitted.add(event.seq)
+                last_seq = max(last_seq, event.seq)
                 yield f"event: chat.event\nid: {event.seq}\ndata: {json.dumps(data, default=str)}\n\n"
             while True:
                 msg = await pubsub.get_message(timeout=1.0)
                 if msg and msg.get("type") == "message":
                     data = json.loads(msg.get("data") or "{}")
                     seq = int(data.get("seq") or 0)
-                    if seq not in emitted:
-                        emitted.add(seq)
+                    if seq > last_seq:
+                        last_seq = seq
                         yield f"event: chat.event\nid: {seq}\ndata: {json.dumps(data, default=str)}\n\n"
                 if time.monotonic() - last_heartbeat >= 15:
                     last_heartbeat = time.monotonic()
@@ -667,6 +736,5 @@ async def chat_event_stream(request, session_id):
         finally:
             await pubsub.unsubscribe(chat_service.event_channel(session_id))
             await pubsub.close()
-            await client.close()
 
     return StreamingHttpResponse(_events(), content_type="text/event-stream")

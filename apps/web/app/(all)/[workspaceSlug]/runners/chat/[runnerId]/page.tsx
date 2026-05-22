@@ -46,7 +46,9 @@ const RunnerChatPage = observer(function RunnerChatPage() {
 
   const session = useMemo(
     () =>
-      (sessions ?? []).find((s) => s.status === "open" && s.last_message_at !== null) ?? (sessions ?? [])[0] ?? null,
+      (sessions ?? []).find((s) => s.status === "open" && s.last_message_at !== null) ??
+      (sessions ?? []).find((s) => s.status === "open") ??
+      null,
     [sessions]
   );
 
@@ -68,7 +70,7 @@ const RunnerChatPage = observer(function RunnerChatPage() {
   useAgentChatEvents(session?.id, 0, handleEvent);
 
   async function ensureSession(): Promise<IAgentChatSession> {
-    if (session) return session;
+    if (session?.status === "open") return session;
     const created = await service.createChatSession({
       workspace: workspaceId!,
       runner: runnerId!,

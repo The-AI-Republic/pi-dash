@@ -229,20 +229,25 @@ def mark_message_dispatch_failed(session_id, message_id, detail: str) -> None:
         session.active_message_id = None
         session.active_turn_id = ""
         session.error = detail[:2000]
-        session.save(
-            update_fields=[
-                "active_message_id",
-                "active_turn_id",
-                "error",
-                "updated_at",
-            ]
-        )
+        update_fields = [
+            "active_message_id",
+            "active_turn_id",
+            "error",
+            "updated_at",
+        ]
+        if session.close_requested:
+            session.status = AgentChatSessionStatus.CLOSED
+            session.closed_at = timezone.now()
+            update_fields.extend(["status", "closed_at"])
+        session.save(update_fields=update_fields)
         append_event_locked(
             session,
             "chat_failed",
             {"code": "dispatch_failed", "detail": detail},
             message=message,
         )
+        if session.status == AgentChatSessionStatus.CLOSED:
+            append_event_locked(session, "chat_closed", {"reason": "close_requested"})
 
 
 def create_assistant_message_locked(
@@ -329,19 +334,24 @@ def sweep_active_turns() -> int:
             session.active_message_id = None
             session.active_turn_id = ""
             session.error = "active chat turn timed out"
-            session.save(
-                update_fields=[
-                    "active_message_id",
-                    "active_turn_id",
-                    "error",
-                    "updated_at",
-                ]
-            )
+            update_fields = [
+                "active_message_id",
+                "active_turn_id",
+                "error",
+                "updated_at",
+            ]
+            if session.close_requested:
+                session.status = AgentChatSessionStatus.CLOSED
+                session.closed_at = timezone.now()
+                update_fields.extend(["status", "closed_at"])
+            session.save(update_fields=update_fields)
             append_event_locked(
                 session,
                 "chat_failed",
                 {"code": "active_turn_timeout"},
             )
+            if session.status == AgentChatSessionStatus.CLOSED:
+                append_event_locked(session, "chat_closed", {"reason": "close_requested"})
             count += 1
     return count
 

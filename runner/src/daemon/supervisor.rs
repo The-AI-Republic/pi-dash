@@ -738,26 +738,32 @@ impl RunnerLoop {
                     content,
                     content_parts: _,
                     local_thread_id,
-                    local_session_id: _,
+                    local_session_id,
                     cwd,
                     model,
                 } => {
                     if self.current_run.is_some() {
-                        let _ = self.out.send(ClientMsg::ChatFailed {
-                            chat_session_id,
-                            code: "runner_busy".into(),
-                            detail: Some("runner has an active task".into()),
-                            failed_at: Utc::now(),
-                        }).await;
+                        let _ = self
+                            .out
+                            .send(ClientMsg::ChatFailed {
+                                chat_session_id,
+                                code: "runner_busy".into(),
+                                detail: Some("runner has an active task".into()),
+                                failed_at: Utc::now(),
+                            })
+                            .await;
                         continue;
                     }
                     if self.current_chat.is_some() {
-                        let _ = self.out.send(ClientMsg::ChatFailed {
-                            chat_session_id,
-                            code: "chat_turn_active".into(),
-                            detail: Some("runner has an active chat turn".into()),
-                            failed_at: Utc::now(),
-                        }).await;
+                        let _ = self
+                            .out
+                            .send(ClientMsg::ChatFailed {
+                                chat_session_id,
+                                code: "chat_turn_active".into(),
+                                detail: Some("runner has an active chat turn".into()),
+                                failed_at: Utc::now(),
+                            })
+                            .await;
                         continue;
                     }
                     let cancel = std::sync::Arc::new(tokio::sync::Notify::new());
@@ -777,20 +783,27 @@ impl RunnerLoop {
                         cancel,
                     };
                     tokio::spawn(async move {
-                        if let Err(e) = worker.run(
-                            chat_session_id,
-                            message_id,
-                            content,
-                            cwd,
-                            model,
-                            local_thread_id,
-                        ).await {
-                            let _ = worker.out.send(ClientMsg::ChatFailed {
+                        if let Err(e) = worker
+                            .run(
                                 chat_session_id,
-                                code: "internal".into(),
-                                detail: Some(format!("{e:#}")),
-                                failed_at: Utc::now(),
-                            }).await;
+                                message_id,
+                                content,
+                                cwd,
+                                model,
+                                local_thread_id,
+                                local_session_id,
+                            )
+                            .await
+                        {
+                            let _ = worker
+                                .out
+                                .send(ClientMsg::ChatFailed {
+                                    chat_session_id,
+                                    code: "internal".into(),
+                                    detail: Some(format!("{e:#}")),
+                                    failed_at: Utc::now(),
+                                })
+                                .await;
                             worker.state.set_status(RunnerStatus::Idle).await;
                         }
                         let _ = done_tx.send(());
@@ -987,6 +1000,7 @@ impl ChatWorker {
         cwd: Option<String>,
         model: Option<String>,
         _local_thread_id: Option<String>,
+        _local_session_id: Option<String>,
     ) -> Result<()> {
         let workspace_path = self.resolve_chat_workspace(cwd.as_deref()).await?;
 
@@ -1004,7 +1018,7 @@ impl ChatWorker {
             .send(ClientMsg::ChatStarted {
                 chat_session_id,
                 local_thread_id: turn_id.clone(),
-                local_session_id: None,
+                local_session_id: Some(turn_id.clone()),
                 started_at: Utc::now(),
             })
             .await
@@ -1120,9 +1134,7 @@ impl ChatWorker {
                                 }
                             }
                             BridgeEvent::Completed { done_payload, .. } => {
-                                assistant_message =
-                                    assistant_text_from_done_payload(&done_payload)
-                                        .or_else(|| Some(done_payload.to_string()));
+                                assistant_message = assistant_text_from_done_payload(&done_payload);
                                 final_status = "completed".into();
                                 break;
                             }
