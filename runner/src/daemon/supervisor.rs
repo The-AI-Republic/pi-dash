@@ -1054,7 +1054,7 @@ struct ChatWorker {
 
 impl ChatWorker {
     async fn run(&mut self, chat_session_id: uuid::Uuid) {
-        const CHAT_IDLE_TIMEOUT: Duration = Duration::from_secs(120);
+        const CHAT_IDLE_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 
         let mut bridge: Option<AgentBridge> = None;
         let mut workspace_path: Option<std::path::PathBuf> = None;
