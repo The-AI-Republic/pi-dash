@@ -7,24 +7,16 @@
 import { observer } from "mobx-react";
 import { Outlet } from "react-router";
 import { ProjectsAppPowerKProvider } from "@/components/power-k/projects-app-provider";
-// pi dash web components
-import { ProjectAppSidebar } from "./_sidebar";
-import { ExtendedProjectSidebar } from "./extended-project-sidebar";
+import { ExtendedProjectSidebar } from "@/components/workspace/sidebar/app/extended-project-sidebar";
+import { WorkspaceShell } from "@/components/workspace/workspace-shell";
 
 function WorkspaceLayout() {
   return (
     <>
       <ProjectsAppPowerKProvider />
-      <div className="relative flex h-full w-full flex-col overflow-hidden rounded-lg border border-subtle">
-        <div id="full-screen-portal" className="absolute inset-0 w-full" />
-        <div className="relative flex size-full overflow-hidden">
-          <ProjectAppSidebar />
-          <ExtendedProjectSidebar />
-          <main className="relative flex h-full w-full flex-col overflow-hidden bg-surface-1">
-            <Outlet />
-          </main>
-        </div>
-      </div>
+      <WorkspaceShell extendedSidebar={<ExtendedProjectSidebar />} includePortal>
+        <Outlet />
+      </WorkspaceShell>
     </>
   );
 }

@@ -15,10 +15,10 @@ import { ResizableSidebar } from "@/components/sidebar/resizable-sidebar";
 // hooks
 import { useAppTheme } from "@/hooks/store/use-app-theme";
 // local imports
-import { ExtendedAppSidebar } from "./extended-sidebar";
-import { AppSidebar } from "./sidebar";
+import { ExtendedWorkspaceSidebar } from "./extended-workspace-sidebar";
+import { WorkspaceSidebar } from "./workspace-sidebar";
 
-export const ProjectAppSidebar = observer(function ProjectAppSidebar() {
+export const WorkspaceAppSidebar = observer(function WorkspaceAppSidebar() {
   // store hooks
   const {
     sidebarCollapsed,
@@ -60,13 +60,13 @@ export const ProjectAppSidebar = observer(function ProjectAppSidebar() {
         togglePeek={toggleSidebarPeek}
         extendedSidebar={
           <>
-            <ExtendedAppSidebar />
+            <ExtendedWorkspaceSidebar />
           </>
         }
         isAnyExtendedSidebarExpanded={isAnyExtendedSidebarOpen}
         isAnySidebarDropdownOpen={isAnySidebarDropdownOpen}
       >
-        <AppSidebar />
+        <WorkspaceSidebar />
       </ResizableSidebar>
     </>
   );

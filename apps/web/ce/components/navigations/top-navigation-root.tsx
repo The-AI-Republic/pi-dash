@@ -7,12 +7,14 @@
 // components
 import { observer } from "mobx-react";
 import { useParams, usePathname } from "next/navigation";
+import { useTranslation } from "@pi-dash/i18n";
 import { cn } from "@pi-dash/utils";
 import { TopNavPowerK } from "@/components/navigation";
 import { AppSidebarToggleButton } from "@/components/sidebar/sidebar-toggle-button";
 import { HelpMenuRoot } from "@/components/workspace/sidebar/help-section/root";
 import { UserMenuRoot } from "@/components/workspace/sidebar/user-menu-root";
 import { WorkspaceMenuRoot } from "@/components/workspace/sidebar/workspace-menu-root";
+import { useAppTheme } from "@/hooks/store/use-app-theme";
 import { useAppRailPreferences } from "@/hooks/use-navigation-preferences";
 import { Tooltip } from "@pi-dash/propel/tooltip";
 import { AppSidebarItem } from "@/components/sidebar/sidebar-item";
@@ -30,8 +32,18 @@ export const TopNavigationRoot = observer(function TopNavigationRoot() {
   // store hooks
   const { unreadNotificationsCount, getUnreadNotificationsCount } = useWorkspaceNotifications();
   const { preferences } = useAppRailPreferences();
+  const { sidebarCollapsed } = useAppTheme();
+  const { t } = useTranslation();
 
   const showLabel = preferences.displayMode === "icon_with_label";
+  const workspaceSlugString = workspaceSlug?.toString();
+  const sidebarMounted =
+    !!workspaceSlugString &&
+    !pathname?.startsWith(`/${workspaceSlugString}/settings`) &&
+    !pathname?.startsWith(`/${workspaceSlugString}/notifications`);
+  const sidebarToggleTooltip = sidebarCollapsed
+    ? t("aria_labels.projects_sidebar.expand_sidebar")
+    : t("aria_labels.projects_sidebar.collapse_sidebar");
 
   // Fetch notification count
   useSWR(
@@ -54,9 +66,11 @@ export const TopNavigationRoot = observer(function TopNavigationRoot() {
       {/* Workspace Menu */}
       <div className="flex flex-1 shrink-0 items-center gap-1">
         <WorkspaceMenuRoot variant="top-navigation" />
-        <Tooltip tooltipContent="Toggle sidebar" position="bottom">
-          <AppSidebarToggleButton />
-        </Tooltip>
+        {sidebarMounted && (
+          <Tooltip tooltipContent={sidebarToggleTooltip} position="bottom">
+            <AppSidebarToggleButton />
+          </Tooltip>
+        )}
       </div>
       {/* Power K Search */}
       <div className="shrink-0">

@@ -6,18 +6,25 @@
 
 import type { ReactNode } from "react";
 import { observer } from "mobx-react";
-import { ProjectAppSidebar } from "@/app/(all)/[workspaceSlug]/(projects)/_sidebar";
+import { WorkspaceAppSidebar } from "@/components/workspace/sidebar/app/workspace-app-sidebar";
 
 type Props = {
   children: ReactNode;
   extendedSidebar?: ReactNode;
+  includePortal?: boolean;
 };
 
-export const WorkspaceShell = observer(function WorkspaceShell({ children, extendedSidebar }: Props) {
+/** Shared shell for workspace routes that mount the persistent app sidebar. */
+export const WorkspaceShell = observer(function WorkspaceShell({
+  children,
+  extendedSidebar,
+  includePortal = false,
+}: Props) {
   return (
     <div className="relative flex h-full w-full flex-col overflow-hidden rounded-lg border border-subtle">
+      {includePortal && <div id="full-screen-portal" className="absolute inset-0 w-full" />}
       <div className="relative flex size-full overflow-hidden">
-        <ProjectAppSidebar />
+        <WorkspaceAppSidebar />
         {extendedSidebar}
         <main className="relative flex h-full w-full flex-col overflow-hidden bg-surface-1">{children}</main>
       </div>

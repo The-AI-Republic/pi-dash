@@ -20,7 +20,7 @@ import { useUserPermissions } from "@/hooks/store/user";
 // pi dash web components
 import { SidebarTeamsList } from "@/pi-dash-web/components/workspace/sidebar/teams-sidebar-list";
 
-export const AppSidebar = observer(function AppSidebar() {
+export const WorkspaceSidebar = observer(function WorkspaceSidebar() {
   // store hooks
   const { allowPermissions } = useUserPermissions();
   const { groupedFavorites } = useFavorite();
