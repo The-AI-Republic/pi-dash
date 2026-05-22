@@ -7,6 +7,13 @@
 from django.urls import path
 
 from pi_dash.runner.views import (
+    AgentChatApprovalDecideEndpoint,
+    AgentChatApprovalListEndpoint,
+    AgentChatCancelEndpoint,
+    AgentChatCloseEndpoint,
+    AgentChatMessageListEndpoint,
+    AgentChatSessionDetailEndpoint,
+    AgentChatSessionListEndpoint,
     AgentRunCancelEndpoint,
     AgentRunDetailEndpoint,
     AgentRunListEndpoint,
@@ -22,6 +29,7 @@ from pi_dash.runner.views import (
     RunnerListEndpoint,
     RunnerReviveEndpoint,
     RunnerRevokeEndpoint,
+    chat_event_stream,
 )
 
 urlpatterns = [
@@ -88,5 +96,46 @@ urlpatterns = [
         "approvals/<uuid:approval_id>/decide/",
         ApprovalDecideEndpoint.as_view(),
         name="runner-approval-decide",
+    ),
+    # Direct runner chat
+    path(
+        "chat/sessions/",
+        AgentChatSessionListEndpoint.as_view(),
+        name="runner-chat-sessions",
+    ),
+    path(
+        "chat/sessions/<uuid:session_id>/",
+        AgentChatSessionDetailEndpoint.as_view(),
+        name="runner-chat-session-detail",
+    ),
+    path(
+        "chat/sessions/<uuid:session_id>/messages/",
+        AgentChatMessageListEndpoint.as_view(),
+        name="runner-chat-messages",
+    ),
+    path(
+        "chat/sessions/<uuid:session_id>/events/",
+        chat_event_stream,
+        name="runner-chat-events",
+    ),
+    path(
+        "chat/sessions/<uuid:session_id>/cancel/",
+        AgentChatCancelEndpoint.as_view(),
+        name="runner-chat-cancel",
+    ),
+    path(
+        "chat/sessions/<uuid:session_id>/close/",
+        AgentChatCloseEndpoint.as_view(),
+        name="runner-chat-close",
+    ),
+    path(
+        "chat/approvals/",
+        AgentChatApprovalListEndpoint.as_view(),
+        name="runner-chat-approvals",
+    ),
+    path(
+        "chat/approvals/<uuid:approval_id>/decide/",
+        AgentChatApprovalDecideEndpoint.as_view(),
+        name="runner-chat-approval-decide",
     ),
 ]

@@ -1,0 +1,363 @@
+# Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
+# SPDX-License-Identifier: AGPL-3.0-only
+# See the LICENSE file for details.
+
+from __future__ import annotations
+
+import json
+import logging
+from datetime import timedelta
+from typing import Any, Optional
+
+from django.db import IntegrityError, transaction
+from django.db.models import Max, Q
+from django.utils import timezone
+
+from pi_dash.runner.models import (
+    AgentChatApprovalRequest,
+    AgentChatEvent,
+    AgentChatMessage,
+    AgentChatMessageRole,
+    AgentChatMessageStatus,
+    AgentChatSession,
+    AgentChatSessionStatus,
+    AgentRun,
+    ChatMessageDedupe,
+    Runner,
+    RunnerStatus,
+)
+from pi_dash.runner.services import matcher
+from pi_dash.runner.services.permissions import (
+    is_workspace_admin,
+    is_workspace_member,
+)
+from pi_dash.runner.services.pubsub import send_to_runner
+from pi_dash.settings.redis import redis_instance
+
+logger = logging.getLogger(__name__)
+
+CHAT_EVENT_CHANNEL_PREFIX = "agent_chat_session:"
+CHAT_ACTIVE_TIMEOUT_SECS = 1800
+
+
+def event_channel(session_id) -> str:
+    return f"{CHAT_EVENT_CHANNEL_PREFIX}{session_id}"
+
+
+def can_read_chat(user, session: AgentChatSession) -> bool:
+    if not is_workspace_member(user, session.workspace_id):
+        return False
+    return (
+        session.created_by_id == user.id
+        or is_workspace_admin(user, session.workspace_id)
+    )
+
+
+def can_send_chat(user, session: AgentChatSession) -> bool:
+    return is_workspace_member(user, session.workspace_id)
+
+
+def can_decide_chat_approval(user, approval: AgentChatApprovalRequest) -> bool:
+    session = approval.session
+    if not is_workspace_member(user, session.workspace_id):
+        return False
+    return (
+        session.created_by_id == user.id
+        or is_workspace_admin(user, session.workspace_id)
+    )
+
+
+def runner_has_active_chat(runner: Runner) -> bool:
+    return (
+        AgentChatSession.objects.filter(
+            runner=runner,
+            status=AgentChatSessionStatus.OPEN,
+        )
+        .filter(Q(active_message_id__isnull=False) | ~Q(active_turn_id=""))
+        .exists()
+    )
+
+
+def runner_has_active_task(runner: Runner) -> bool:
+    return AgentRun.objects.filter(
+        runner=runner,
+        status__in=matcher.BUSY_STATUSES,
+    ).exists()
+
+
+def normalize_cwd(value: Any) -> str:
+    # MVP: the cloud ignores caller-selected cwd. The runner resolves its
+    # configured workspace path and enforces containment before spawn.
+    return ""
+
+
+def next_message_seq_locked(session: AgentChatSession) -> int:
+    current = (
+        AgentChatMessage.objects.filter(session=session).aggregate(Max("seq"))[
+            "seq__max"
+        ]
+        or 0
+    )
+    return int(current) + 1
+
+
+def next_event_seq_locked(session: AgentChatSession) -> int:
+    current = (
+        AgentChatEvent.objects.filter(session=session).aggregate(Max("seq"))[
+            "seq__max"
+        ]
+        or 0
+    )
+    return int(current) + 1
+
+
+def serialize_event(event: AgentChatEvent) -> dict[str, Any]:
+    return {
+        "id": event.id,
+        "session": str(event.session_id),
+        "message": str(event.message_id) if event.message_id else None,
+        "seq": event.seq,
+        "kind": event.kind,
+        "payload": event.payload,
+        "created_at": event.created_at.isoformat(),
+    }
+
+
+def publish_event(event: AgentChatEvent) -> None:
+    client = redis_instance()
+    if client is None:
+        return
+    try:
+        client.publish(event_channel(event.session_id), json.dumps(serialize_event(event), default=str))
+    except Exception:
+        logger.exception("publish chat event failed for session %s", event.session_id)
+
+
+def append_event_locked(
+    session: AgentChatSession,
+    kind: str,
+    payload: Optional[dict[str, Any]] = None,
+    *,
+    message: Optional[AgentChatMessage] = None,
+    source_key: str = "",
+) -> AgentChatEvent:
+    if source_key:
+        existing = AgentChatEvent.objects.filter(
+            session=session, source_key=source_key
+        ).first()
+        if existing is not None:
+            return existing
+    event = AgentChatEvent.objects.create(
+        session=session,
+        message=message,
+        seq=next_event_seq_locked(session),
+        source_key=source_key[:160],
+        kind=kind[:64],
+        payload=payload or {},
+    )
+    transaction.on_commit(lambda eid=event.id: _publish_event_by_id(eid))
+    return event
+
+
+def _publish_event_by_id(event_id: int) -> None:
+    event = AgentChatEvent.objects.filter(pk=event_id).first()
+    if event is not None:
+        publish_event(event)
+
+
+def record_dedupe(session: AgentChatSession, key: str) -> bool:
+    if not key:
+        return True
+    try:
+        ChatMessageDedupe.objects.create(
+            session=session,
+            message_id=key[:128],
+        )
+        return True
+    except IntegrityError:
+        return False
+
+
+def enqueue_chat_message_after_commit(
+    runner_id,
+    *,
+    chat_session_id,
+    message_id,
+    content: str,
+    content_parts: list[Any],
+    local_thread_id: str,
+    local_session_id: str,
+    cwd: str,
+    model: str,
+) -> None:
+    def _send():
+        try:
+            send_to_runner(
+                runner_id,
+                {
+                    "type": "chat_user_message",
+                    "chat_session_id": str(chat_session_id),
+                    "message_id": str(message_id),
+                    "content": content,
+                    "content_parts": content_parts,
+                    "local_thread_id": local_thread_id or None,
+                    "local_session_id": local_session_id or None,
+                    "cwd": cwd or None,
+                    "model": model or None,
+                },
+            )
+        except Exception as exc:
+            mark_message_dispatch_failed(chat_session_id, message_id, str(exc))
+
+    transaction.on_commit(_send)
+
+
+def mark_message_dispatch_failed(session_id, message_id, detail: str) -> None:
+    with transaction.atomic():
+        session = (
+            AgentChatSession.objects.select_for_update()
+            .filter(pk=session_id)
+            .first()
+        )
+        if session is None:
+            return
+        message = AgentChatMessage.objects.filter(pk=message_id).first()
+        if message is not None:
+            message.status = AgentChatMessageStatus.FAILED
+            message.completed_at = timezone.now()
+            message.save(update_fields=["status", "completed_at"])
+        session.active_message_id = None
+        session.active_turn_id = ""
+        session.error = detail[:2000]
+        session.save(
+            update_fields=[
+                "active_message_id",
+                "active_turn_id",
+                "error",
+                "updated_at",
+            ]
+        )
+        append_event_locked(
+            session,
+            "chat_failed",
+            {"code": "dispatch_failed", "detail": detail},
+            message=message,
+        )
+
+
+def create_assistant_message_locked(
+    session: AgentChatSession,
+    *,
+    local_turn_id: str = "",
+    local_item_id: str = "",
+    status: str = AgentChatMessageStatus.STREAMING,
+) -> AgentChatMessage:
+    return AgentChatMessage.objects.create(
+        session=session,
+        role=AgentChatMessageRole.ASSISTANT,
+        status=status,
+        local_turn_id=local_turn_id[:128],
+        local_item_id=local_item_id[:128],
+        seq=next_message_seq_locked(session),
+    )
+
+
+def complete_active_turn_locked(
+    session: AgentChatSession,
+    *,
+    final_status: str = AgentChatMessageStatus.COMPLETED,
+    payload: Optional[dict[str, Any]] = None,
+) -> None:
+    now = timezone.now()
+    if session.active_message_id:
+        AgentChatMessage.objects.filter(pk=session.active_message_id).update(
+            status=final_status,
+            completed_at=now,
+        )
+    session.active_message_id = None
+    session.active_turn_id = ""
+    session.last_message_at = now
+    if session.close_requested and final_status in {
+        AgentChatMessageStatus.COMPLETED,
+        AgentChatMessageStatus.CANCELLED,
+        AgentChatMessageStatus.FAILED,
+    }:
+        session.status = AgentChatSessionStatus.CLOSED
+        session.closed_at = now
+    session.save(
+        update_fields=[
+            "active_message_id",
+            "active_turn_id",
+            "last_message_at",
+            "status",
+            "closed_at",
+            "updated_at",
+        ]
+    )
+    append_event_locked(
+        session,
+        "turn_completed",
+        payload or {"status": final_status},
+    )
+    if session.status == AgentChatSessionStatus.CLOSED:
+        append_event_locked(session, "chat_closed", {"reason": "close_requested"})
+
+
+def sweep_active_turns() -> int:
+    cutoff = timezone.now() - timedelta(seconds=CHAT_ACTIVE_TIMEOUT_SECS)
+    sessions = list(
+        AgentChatSession.objects.filter(status=AgentChatSessionStatus.OPEN)
+        .filter(Q(active_message_id__isnull=False) | ~Q(active_turn_id=""))
+        .filter(Q(updated_at__lt=cutoff) | Q(runner__status=RunnerStatus.OFFLINE))
+        .values_list("id", flat=True)
+    )
+    count = 0
+    for session_id in sessions:
+        with transaction.atomic():
+            session = (
+                AgentChatSession.objects.select_for_update()
+                .filter(pk=session_id, status=AgentChatSessionStatus.OPEN)
+                .first()
+            )
+            if session is None:
+                continue
+            if session.active_message_id:
+                AgentChatMessage.objects.filter(pk=session.active_message_id).update(
+                    status=AgentChatMessageStatus.FAILED,
+                    completed_at=timezone.now(),
+                )
+            session.active_message_id = None
+            session.active_turn_id = ""
+            session.error = "active chat turn timed out"
+            session.save(
+                update_fields=[
+                    "active_message_id",
+                    "active_turn_id",
+                    "error",
+                    "updated_at",
+                ]
+            )
+            append_event_locked(
+                session,
+                "chat_failed",
+                {"code": "active_turn_timeout"},
+            )
+            count += 1
+    return count
+
+
+def sweep_empty_sessions() -> int:
+    cutoff = timezone.now() - timedelta(hours=24)
+    ids = list(
+        AgentChatSession.objects.filter(
+            status=AgentChatSessionStatus.OPEN,
+            created_at__lt=cutoff,
+            messages__isnull=True,
+        ).values_list("id", flat=True)
+    )
+    if not ids:
+        return 0
+    return AgentChatSession.objects.filter(id__in=ids).update(
+        status=AgentChatSessionStatus.CLOSED,
+        closed_at=timezone.now(),
+    )

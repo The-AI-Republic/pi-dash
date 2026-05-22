@@ -23,6 +23,7 @@ from pi_dash.runner.models import (
     AgentRunStatus,
     ApprovalRequest,
     ApprovalStatus,
+    ChatMessageDedupe,
     RunMessageDedupe,
     Runner,
     RunnerSession,
@@ -199,6 +200,25 @@ def sweep_run_message_dedupe() -> int:
     if deleted:
         logger.info("sweep_run_message_dedupe deleted %s row(s)", deleted)
     return deleted
+
+
+@shared_task(name="runner.sweep_chat_message_dedupe")
+def sweep_chat_message_dedupe() -> int:
+    """Delete chat idempotency rows older than the configured TTL."""
+    ttl = int(getattr(settings, "RUN_MESSAGE_DEDUPE_TTL_SECS", 604800))
+    cutoff = timezone.now() - timedelta(seconds=ttl)
+    deleted, _ = ChatMessageDedupe.objects.filter(created_at__lt=cutoff).delete()
+    if deleted:
+        logger.info("sweep_chat_message_dedupe deleted %s row(s)", deleted)
+    return deleted
+
+
+@shared_task(name="runner.sweep_agent_chat_state")
+def sweep_agent_chat_state() -> int:
+    """Recover orphaned direct-chat state."""
+    from pi_dash.runner.services.chat import sweep_active_turns, sweep_empty_sessions
+
+    return sweep_active_turns() + sweep_empty_sessions()
 
 
 # ---- Per-active-run agent stall watchdog ---------------------------------

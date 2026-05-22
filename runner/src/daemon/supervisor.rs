@@ -190,6 +190,7 @@ impl Supervisor {
                     live_mailboxes,
                     live_hello_runners,
                     current_run: None,
+                    current_chat: None,
                 };
                 if let Err(e) = run.run().await {
                     tracing::error!("runner loop exited: {e:#}");
@@ -492,10 +493,17 @@ struct RunnerLoop {
     /// `tokio::select!` so a new Assign isn't rejected while we wait for the
     /// next inbound frame.
     current_run: Option<CurrentRun>,
+    current_chat: Option<CurrentChat>,
 }
 
 struct CurrentRun {
     run_id: uuid::Uuid,
+    cancel: std::sync::Arc<tokio::sync::Notify>,
+    done_rx: oneshot::Receiver<()>,
+}
+
+struct CurrentChat {
+    chat_session_id: uuid::Uuid,
     cancel: std::sync::Arc<tokio::sync::Notify>,
     done_rx: oneshot::Receiver<()>,
 }
@@ -511,6 +519,10 @@ impl RunnerLoop {
                 biased;
                 () = wait_done(&mut self.current_run) => {
                     self.current_run = None;
+                    continue;
+                }
+                () = wait_chat_done(&mut self.current_chat) => {
+                    self.current_chat = None;
                     continue;
                 }
                 f = &mut inbound => f,
@@ -615,6 +627,13 @@ impl RunnerLoop {
                     expected_codex_model,
                     ..
                 } => {
+                    if self.current_chat.is_some() {
+                        tracing::warn!(
+                            %run_id,
+                            "assign received while chat is active; ignoring"
+                        );
+                        continue;
+                    }
                     if self.current_run.is_some() {
                         tracing::warn!(
                             %run_id,
@@ -709,6 +728,108 @@ impl RunnerLoop {
                 } => {
                     self.approvals
                         .decide(&approval_id.to_string(), decision, DecisionSource::Cloud)
+                        .await;
+                    let pending = self.approvals.list_pending().await.len();
+                    self.state.set_approvals_pending(pending).await;
+                }
+                ServerMsg::ChatUserMessage {
+                    chat_session_id,
+                    message_id,
+                    content,
+                    content_parts: _,
+                    local_thread_id,
+                    local_session_id: _,
+                    cwd,
+                    model,
+                } => {
+                    if self.current_run.is_some() {
+                        let _ = self.out.send(ClientMsg::ChatFailed {
+                            chat_session_id,
+                            code: "runner_busy".into(),
+                            detail: Some("runner has an active task".into()),
+                            failed_at: Utc::now(),
+                        }).await;
+                        continue;
+                    }
+                    if self.current_chat.is_some() {
+                        let _ = self.out.send(ClientMsg::ChatFailed {
+                            chat_session_id,
+                            code: "chat_turn_active".into(),
+                            detail: Some("runner has an active chat turn".into()),
+                            failed_at: Utc::now(),
+                        }).await;
+                        continue;
+                    }
+                    let cancel = std::sync::Arc::new(tokio::sync::Notify::new());
+                    let (done_tx, done_rx) = oneshot::channel();
+                    self.current_chat = Some(CurrentChat {
+                        chat_session_id,
+                        cancel: cancel.clone(),
+                        done_rx,
+                    });
+                    self.state.set_status(RunnerStatus::Busy).await;
+                    let mut worker = ChatWorker {
+                        runner_paths: self.runner_paths.clone(),
+                        runner_config: self.runner_config.clone(),
+                        state: self.state.clone(),
+                        approvals: self.approvals.clone(),
+                        out: self.out.clone(),
+                        cancel,
+                    };
+                    tokio::spawn(async move {
+                        if let Err(e) = worker.run(
+                            chat_session_id,
+                            message_id,
+                            content,
+                            cwd,
+                            model,
+                            local_thread_id,
+                        ).await {
+                            let _ = worker.out.send(ClientMsg::ChatFailed {
+                                chat_session_id,
+                                code: "internal".into(),
+                                detail: Some(format!("{e:#}")),
+                                failed_at: Utc::now(),
+                            }).await;
+                            worker.state.set_status(RunnerStatus::Idle).await;
+                        }
+                        let _ = done_tx.send(());
+                    });
+                }
+                ServerMsg::ChatCancel {
+                    chat_session_id,
+                    reason,
+                } => {
+                    tracing::info!(%chat_session_id, ?reason, "chat_cancel received");
+                    if let Some(chat) = &self.current_chat {
+                        if chat.chat_session_id == chat_session_id {
+                            chat.cancel.notify_waiters();
+                        }
+                    }
+                }
+                ServerMsg::ChatClose {
+                    chat_session_id,
+                    reason,
+                } => {
+                    tracing::info!(%chat_session_id, ?reason, "chat_close received");
+                    if let Some(chat) = &self.current_chat {
+                        if chat.chat_session_id == chat_session_id {
+                            chat.cancel.notify_waiters();
+                        }
+                    } else {
+                        let _ = self.out.send(ClientMsg::ChatClosed {
+                            chat_session_id,
+                            closed_at: Utc::now(),
+                        }).await;
+                    }
+                }
+                ServerMsg::ChatDecide {
+                    local_approval_id,
+                    decision,
+                    ..
+                } => {
+                    self.approvals
+                        .decide(&local_approval_id, decision, DecisionSource::Cloud)
                         .await;
                     let pending = self.approvals.list_pending().await.len();
                     self.state.set_approvals_pending(pending).await;
@@ -837,6 +958,241 @@ async fn wait_done(current: &mut Option<CurrentRun>) {
         }
         None => std::future::pending().await,
     }
+}
+
+async fn wait_chat_done(current: &mut Option<CurrentChat>) {
+    match current {
+        Some(chat) => {
+            let _ = (&mut chat.done_rx).await;
+        }
+        None => std::future::pending().await,
+    }
+}
+
+struct ChatWorker {
+    runner_paths: RunnerPaths,
+    runner_config: crate::config::schema::RunnerConfig,
+    state: StateHandle,
+    approvals: ApprovalRouter,
+    out: RunnerOut,
+    cancel: std::sync::Arc<tokio::sync::Notify>,
+}
+
+impl ChatWorker {
+    async fn run(
+        &mut self,
+        chat_session_id: uuid::Uuid,
+        message_id: uuid::Uuid,
+        content: String,
+        cwd: Option<String>,
+        model: Option<String>,
+        _local_thread_id: Option<String>,
+    ) -> Result<()> {
+        let workspace_path = self.resolve_chat_workspace(cwd.as_deref()).await?;
+
+        let mut bridge =
+            AgentBridge::spawn_from_config(&self.runner_config, &workspace_path, model.clone())
+                .await?;
+        let payload = RunPayload {
+            run_id: message_id,
+            prompt: content,
+            model,
+        };
+        let mut cursor = bridge.run(&payload, &workspace_path).await?;
+        let turn_id = cursor.thread_id().to_string();
+        self.out
+            .send(ClientMsg::ChatStarted {
+                chat_session_id,
+                local_thread_id: turn_id.clone(),
+                local_session_id: None,
+                started_at: Utc::now(),
+            })
+            .await
+            .ok();
+        self.out
+            .send(ClientMsg::ChatMessageStarted {
+                chat_session_id,
+                message_id,
+                turn_id: Some(turn_id.clone()),
+                started_at: Utc::now(),
+            })
+            .await
+            .ok();
+
+        let mut bridge_seq = 0u64;
+        let mut final_status = "completed".to_string();
+        let mut assistant_message: Option<String> = None;
+        loop {
+            tokio::select! {
+                biased;
+                _ = self.cancel.notified() => {
+                    bridge.interrupt().await.ok();
+                    final_status = "cancelled".into();
+                    break;
+                }
+                events = bridge.next_events(&mut cursor) => {
+                    let Some(events) = events else {
+                        self.out.send(ClientMsg::ChatFailed {
+                            chat_session_id,
+                            code: "agent_stdout_closed".into(),
+                            detail: Some("agent stdout closed".into()),
+                            failed_at: Utc::now(),
+                        }).await.ok();
+                        self.state.set_status(RunnerStatus::Idle).await;
+                        return Ok(());
+                    };
+                    for ev in events {
+                        bridge_seq = bridge_seq.saturating_add(1);
+                        match ev {
+                            BridgeEvent::Raw { method, params, .. } => {
+                                let kind = if method.contains("delta") {
+                                    "assistant_delta"
+                                } else {
+                                    "raw"
+                                };
+                                self.out.send(ClientMsg::ChatEvent {
+                                    chat_session_id,
+                                    bridge_seq,
+                                    kind: kind.into(),
+                                    payload: serde_json::json!({
+                                        "method": method,
+                                        "params": params,
+                                    }),
+                                }).await.ok();
+                            }
+                            BridgeEvent::ApprovalRequest {
+                                approval_id,
+                                kind,
+                                payload,
+                                reason,
+                                ..
+                            } => {
+                                let policy = Policy::new(&self.runner_config.approval_policy, &workspace_path);
+                                let decision = policy.evaluate(kind, &payload);
+                                if let Some(auto) = decision.into_cloud() {
+                                    bridge.send_approval(&approval_id, auto).await.ok();
+                                    continue;
+                                }
+                                let rec = ApprovalRecord {
+                                    approval_id: approval_id.clone(),
+                                    runner_id: self.runner_config.runner_id,
+                                    run_id: message_id,
+                                    kind,
+                                    payload: payload.clone(),
+                                    reason: reason.clone(),
+                                    requested_at: Utc::now(),
+                                    expires_at: Some(Utc::now() + chrono::Duration::minutes(10)),
+                                    status: crate::approval::router::ApprovalStatus::Pending,
+                                };
+                                let mut rx = self.approvals.subscribe();
+                                self.approvals.open(rec.clone()).await;
+                                self.state
+                                    .set_approvals_pending(self.approvals.list_pending().await.len())
+                                    .await;
+                                self.out.send(ClientMsg::ChatApprovalRequest {
+                                    chat_session_id,
+                                    local_approval_id: approval_id.clone(),
+                                    kind,
+                                    payload: payload.clone(),
+                                    reason,
+                                    expires_at: rec.expires_at,
+                                }).await.ok();
+                                loop {
+                                    match rx.recv().await {
+                                        Ok(ApprovalRecord {
+                                            approval_id: aid,
+                                            status:
+                                                ApprovalStatus::Resolved {
+                                                    decision, ..
+                                                },
+                                            ..
+                                        }) if aid == approval_id => {
+                                            bridge.send_approval(&approval_id, decision).await.ok();
+                                            self.state
+                                                .set_approvals_pending(self.approvals.list_pending().await.len())
+                                                .await;
+                                            break;
+                                        }
+                                        Ok(_) => continue,
+                                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                                        Err(_) => break,
+                                    }
+                                }
+                            }
+                            BridgeEvent::Completed { done_payload, .. } => {
+                                assistant_message =
+                                    assistant_text_from_done_payload(&done_payload)
+                                        .or_else(|| Some(done_payload.to_string()));
+                                final_status = "completed".into();
+                                break;
+                            }
+                            BridgeEvent::Failed { detail, .. } => {
+                                self.out.send(ClientMsg::ChatFailed {
+                                    chat_session_id,
+                                    code: "agent_failed".into(),
+                                    detail,
+                                    failed_at: Utc::now(),
+                                }).await.ok();
+                                self.state.set_status(RunnerStatus::Idle).await;
+                                return Ok(());
+                            }
+                            BridgeEvent::RunStarted { .. } | BridgeEvent::AwaitingReauth { .. } => {}
+                        }
+                    }
+                    if final_status == "completed" && assistant_message.is_some() {
+                        break;
+                    }
+                }
+            }
+        }
+        bridge.shutdown(Duration::from_secs(5)).await.ok();
+        self.out
+            .send(ClientMsg::ChatMessageCompleted {
+                chat_session_id,
+                message_id,
+                turn_id: Some(turn_id),
+                assistant_message,
+                status: final_status,
+                completed_at: Utc::now(),
+            })
+            .await
+            .ok();
+        self.state.set_status(RunnerStatus::Idle).await;
+        let _ = &self.runner_paths;
+        Ok(())
+    }
+
+    async fn resolve_chat_workspace(&self, cwd: Option<&str>) -> Result<std::path::PathBuf> {
+        let base = self.runner_config.workspace.working_dir.clone();
+        let resolution = crate::workspace::resolve(&base, None).await?;
+        let workspace_path = match resolution {
+            crate::workspace::Resolution::ExistingRepo(p)
+            | crate::workspace::Resolution::Cloned(p) => p,
+        };
+        if let Some(cwd) = cwd.filter(|s| !s.is_empty()) {
+            let requested = std::path::PathBuf::from(cwd);
+            if requested.starts_with(&workspace_path) {
+                return Ok(requested);
+            }
+            anyhow::bail!("chat cwd is outside runner workspace");
+        }
+        Ok(workspace_path)
+    }
+}
+
+fn assistant_text_from_done_payload(payload: &serde_json::Value) -> Option<String> {
+    if let Some(text) = payload.as_str() {
+        return Some(text.to_string());
+    }
+    let obj = payload.as_object()?;
+    for key in ["result", "message", "text", "output", "summary", "content"] {
+        if let Some(text) = obj.get(key).and_then(|value| value.as_str())
+            && !text.is_empty()
+        {
+            return Some(text.to_string());
+        }
+    }
+    None
 }
 
 /// Owns one `Assign`'s lifecycle. Spawned as a task from `RunnerLoop`, so the

@@ -7,6 +7,9 @@
 import { API_BASE_URL } from "@pi-dash/constants";
 import type {
   IAgentRun,
+  IAgentChatApprovalRequest,
+  IAgentChatMessage,
+  IAgentChatSession,
   IApprovalRequest,
   IConnection,
   IConnectionWithToken,
@@ -212,5 +215,91 @@ export class RunnerService extends APIService {
       .catch((e) => {
         throw e?.response?.data;
       });
+  }
+
+  async listChatSessions(workspaceId: string, runnerId?: string): Promise<IAgentChatSession[]> {
+    const params: Record<string, string> = { workspace: workspaceId };
+    if (runnerId) params.runner = runnerId;
+    return this.get("/api/runners/chat/sessions/", { params })
+      .then((r) => r?.data)
+      .catch((e) => {
+        throw e?.response?.data;
+      });
+  }
+
+  async createChatSession(input: {
+    workspace: string;
+    runner: string;
+    model?: string;
+    cwd?: string;
+  }): Promise<IAgentChatSession> {
+    return this.post("/api/runners/chat/sessions/", input)
+      .then((r) => r?.data)
+      .catch((e) => {
+        throw e?.response?.data;
+      });
+  }
+
+  async getChatSession(sessionId: string): Promise<IAgentChatSession> {
+    return this.get(`/api/runners/chat/sessions/${sessionId}/`)
+      .then((r) => r?.data)
+      .catch((e) => {
+        throw e?.response?.data;
+      });
+  }
+
+  async listChatMessages(sessionId: string): Promise<IAgentChatMessage[]> {
+    return this.get(`/api/runners/chat/sessions/${sessionId}/messages/`)
+      .then((r) => r?.data)
+      .catch((e) => {
+        throw e?.response?.data;
+      });
+  }
+
+  async sendChatMessage(sessionId: string, content: string): Promise<IAgentChatMessage> {
+    return this.post(`/api/runners/chat/sessions/${sessionId}/messages/`, {
+      content,
+      content_parts: [],
+    })
+      .then((r) => r?.data)
+      .catch((e) => {
+        throw e?.response?.data;
+      });
+  }
+
+  async cancelChat(sessionId: string, reason?: string): Promise<{ ok: boolean }> {
+    return this.post(`/api/runners/chat/sessions/${sessionId}/cancel/`, { reason: reason ?? "" })
+      .then((r) => r?.data)
+      .catch((e) => {
+        throw e?.response?.data;
+      });
+  }
+
+  async closeChat(sessionId: string): Promise<IAgentChatSession> {
+    return this.post(`/api/runners/chat/sessions/${sessionId}/close/`, {})
+      .then((r) => r?.data)
+      .catch((e) => {
+        throw e?.response?.data;
+      });
+  }
+
+  async listChatApprovals(): Promise<IAgentChatApprovalRequest[]> {
+    return this.get("/api/runners/chat/approvals/")
+      .then((r) => r?.data)
+      .catch((e) => {
+        throw e?.response?.data;
+      });
+  }
+
+  async decideChatApproval(approvalId: string, decision: TApprovalDecision): Promise<IAgentChatApprovalRequest> {
+    return this.post(`/api/runners/chat/approvals/${approvalId}/decide/`, { decision })
+      .then((r) => r?.data)
+      .catch((e) => {
+        throw e?.response?.data;
+      });
+  }
+
+  chatEventsUrl(sessionId: string, after = 0): string {
+    return `${this.baseURL}/api/runners/chat/sessions/${sessionId}/events/?after=${after}`;
   }
 }

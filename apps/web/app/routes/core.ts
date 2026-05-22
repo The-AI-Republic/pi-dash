@@ -113,6 +113,7 @@ export const coreRoutes: RouteConfigEntry[] = [
           route(":workspaceSlug/runners", "./(all)/[workspaceSlug]/runners/page.tsx"),
           route(":workspaceSlug/runners/runs", "./(all)/[workspaceSlug]/runners/runs/page.tsx"),
           route(":workspaceSlug/runners/approvals", "./(all)/[workspaceSlug]/runners/approvals/page.tsx"),
+          route(":workspaceSlug/runners/chat/:runnerId", "./(all)/[workspaceSlug]/runners/chat/[runnerId]/page.tsx"),
         ]),
 
         // Prompts (prompt templates: view for members, create/edit for workspace admins)

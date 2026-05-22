@@ -153,6 +153,50 @@ pub enum ClientMsg {
         thread_id: String,
         elapsed_ms: u64,
     },
+    ChatStarted {
+        chat_session_id: Uuid,
+        local_thread_id: String,
+        local_session_id: Option<String>,
+        started_at: DateTime<Utc>,
+    },
+    ChatMessageStarted {
+        chat_session_id: Uuid,
+        message_id: Uuid,
+        turn_id: Option<String>,
+        started_at: DateTime<Utc>,
+    },
+    ChatEvent {
+        chat_session_id: Uuid,
+        bridge_seq: u64,
+        kind: String,
+        payload: serde_json::Value,
+    },
+    ChatApprovalRequest {
+        chat_session_id: Uuid,
+        local_approval_id: String,
+        kind: ApprovalKind,
+        payload: serde_json::Value,
+        reason: Option<String>,
+        expires_at: Option<DateTime<Utc>>,
+    },
+    ChatMessageCompleted {
+        chat_session_id: Uuid,
+        message_id: Uuid,
+        turn_id: Option<String>,
+        assistant_message: Option<String>,
+        status: String,
+        completed_at: DateTime<Utc>,
+    },
+    ChatFailed {
+        chat_session_id: Uuid,
+        code: String,
+        detail: Option<String>,
+        failed_at: DateTime<Utc>,
+    },
+    ChatClosed {
+        chat_session_id: Uuid,
+        closed_at: DateTime<Utc>,
+    },
     Bye {
         reason: String,
     },
@@ -244,6 +288,36 @@ pub enum ServerMsg {
         reason: Option<String>,
         #[serde(default)]
         min_rtg: Option<u64>,
+    },
+    ChatUserMessage {
+        chat_session_id: Uuid,
+        message_id: Uuid,
+        content: String,
+        #[serde(default)]
+        content_parts: Vec<serde_json::Value>,
+        #[serde(default)]
+        local_thread_id: Option<String>,
+        #[serde(default)]
+        local_session_id: Option<String>,
+        #[serde(default)]
+        cwd: Option<String>,
+        #[serde(default)]
+        model: Option<String>,
+    },
+    ChatCancel {
+        chat_session_id: Uuid,
+        reason: Option<String>,
+    },
+    ChatClose {
+        chat_session_id: Uuid,
+        reason: Option<String>,
+    },
+    ChatDecide {
+        chat_session_id: Uuid,
+        approval_id: Uuid,
+        local_approval_id: String,
+        decision: ApprovalDecision,
+        decided_by: Option<String>,
     },
 }
 
