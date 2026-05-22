@@ -20,7 +20,6 @@ pub enum NotificationKind {
     AccountReauthRequired,
     Other(String),
 }
-
 impl NotificationKind {
     pub fn from_method(method: &str) -> Self {
         match method {
@@ -101,4 +100,3 @@ pub struct ApprovalResponseParams {
     pub approval_id: String,
     pub decision: String,
 }
-

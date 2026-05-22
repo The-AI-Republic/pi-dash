@@ -26,7 +26,6 @@ const CARD_DETAIL: &str = "detail";
 pub struct ApprovalsTab {
     list: SelectableList<String>,
 }
-
 impl ApprovalsTab {
     pub fn new() -> Self {
         Self {
@@ -217,4 +216,3 @@ impl Tab for ApprovalsTab {
         self.reconcile(ctx.data);
     }
 }
-

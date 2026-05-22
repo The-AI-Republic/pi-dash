@@ -46,11 +46,16 @@ class PhaseConfig:
             ``pinned_runner_id`` so the template body becomes the actual
             system prompt rather than a user-turn message on a resumed
             session. See design §4.3.
+        disarm_on_completed:
+            When ``True``, a terminal ``completed``/``blocked``
+            done-signal disarms the ticker for issues in this phase. v1
+            sets ``True`` for every entry — kept here for explicitness.
     """
 
     state_name: str
     template_name: str
     fresh_session_on_entry: bool
+    disarm_on_completed: bool = True
 
 
 PHASES: dict[str, PhaseConfig] = {
@@ -59,7 +64,11 @@ PHASES: dict[str, PhaseConfig] = {
         template_name=PromptTemplate.DEFAULT_NAME,  # "coding-task"
         fresh_session_on_entry=False,
     ),
-    # PR B adds the StateGroup.REVIEW entry for the In Review phase.
+    StateGroup.REVIEW.value: PhaseConfig(
+        state_name="In Review",
+        template_name="review",
+        fresh_session_on_entry=True,
+    ),
 }
 
 

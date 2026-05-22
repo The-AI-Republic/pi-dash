@@ -262,7 +262,7 @@ class DefaultAnalyticsEndpoint(BaseAPIView):
             state_groups.values("state_group").annotate(state_count=Count("state_group")).order_by("state_group")
         )
 
-        open_issues_groups = ["backlog", "unstarted", "started"]
+        open_issues_groups = ["backlog", "unstarted", "started", "review"]
         open_issues_queryset = state_groups.filter(state__group__in=open_issues_groups)
 
         open_issues = open_issues_queryset.count()

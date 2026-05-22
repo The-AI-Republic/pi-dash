@@ -71,9 +71,16 @@ class IssueAgentTicker(BaseModel):
         related_name="agent_ticker",
     )
 
-    # User-configured overrides. ``null`` means "inherit from project".
+    # User-configured overrides for the **In Progress** phase.
+    # ``null`` means "inherit from project default".
     interval_seconds = models.IntegerField(null=True, blank=True)
     max_ticks = models.IntegerField(null=True, blank=True)
+    # User-configured overrides for the **In Review** phase. Mirror
+    # the In Progress pair; ``null`` means "inherit from project's
+    # ``agent_review_default_*``". See
+    # ``.ai_design/create_review_state/design.md`` §6.3.
+    review_interval_seconds = models.IntegerField(null=True, blank=True)
+    review_max_ticks = models.IntegerField(null=True, blank=True)
     user_disabled = models.BooleanField(default=False)
 
     # Runtime state.
@@ -89,6 +96,18 @@ class IssueAgentTicker(BaseModel):
         blank=True,
         default="",
         choices=TickerDisarmReason.choices,
+    )
+    # On entering Review from a different ticking phase, the latest
+    # implementation-phase run is captured here so the reverse
+    # transition (Review → In Progress) can resume that exact session
+    # rather than parenting off the latest review run.
+    # See design §6.3.
+    resume_parent_run = models.ForeignKey(
+        "runner.AgentRun",
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="+",
     )
 
     class Meta:
@@ -109,19 +128,73 @@ class IssueAgentTicker(BaseModel):
     # Effective values (override-or-project-default)
     # ------------------------------------------------------------------
 
+    def _is_review_phase(self) -> bool:
+        """Return ``True`` if the issue's current state is the In
+        Review phase. Used to pick the right cadence-field pair.
+        """
+        # Local imports keep the model file free of orchestration
+        # imports at module load time (orchestration imports state).
+        from pi_dash.db.models.state import StateGroup
+        from pi_dash.orchestration.agent_phases import phase_config_for
+
+        # Require both: a registered ticking state (so a custom
+        # workspace state in the review group does not pick up
+        # phase-aware cadence) AND the review group key. Comparing on
+        # the group enum keeps the cadence resolver decoupled from the
+        # state's display name.
+        cfg = phase_config_for(self.issue.state)
+        if cfg is None:
+            return False
+        return self.issue.state.group == StateGroup.REVIEW.value
+
     def effective_interval_seconds(self) -> int:
-        """Return the interval to use, falling back to the project default."""
-        if self.interval_seconds is not None and self.interval_seconds > 0:
-            return self.interval_seconds
+        """Return the interval to use, picking the In Review pair when
+        the issue is currently In Review and the In Progress pair
+        otherwise. Falls back through: per-issue override → project
+        default → constant.
+        """
         project = self.issue.project
-        return getattr(project, "agent_default_interval_seconds", DEFAULT_INTERVAL_SECONDS)
+        if self._is_review_phase():
+            override = self.review_interval_seconds
+            project_default = getattr(
+                project,
+                "agent_review_default_interval_seconds",
+                DEFAULT_INTERVAL_SECONDS,
+            )
+        else:
+            override = self.interval_seconds
+            project_default = getattr(
+                project,
+                "agent_default_interval_seconds",
+                DEFAULT_INTERVAL_SECONDS,
+            )
+        if override is not None and override > 0:
+            return override
+        return project_default
 
     def effective_max_ticks(self) -> int:
-        """Return the cap to use. ``-1`` means infinite."""
-        if self.max_ticks is not None:
-            return self.max_ticks
+        """Return the cap to use. ``-1`` means infinite. Phase-aware:
+        same chain as ``effective_interval_seconds`` but against the
+        max-ticks pair.
+        """
         project = self.issue.project
-        return getattr(project, "agent_default_max_ticks", DEFAULT_MAX_TICKS)
+        if self._is_review_phase():
+            override = self.review_max_ticks
+            project_default = getattr(
+                project,
+                "agent_review_default_max_ticks",
+                DEFAULT_MAX_TICKS,
+            )
+        else:
+            override = self.max_ticks
+            project_default = getattr(
+                project,
+                "agent_default_max_ticks",
+                DEFAULT_MAX_TICKS,
+            )
+        if override is not None:
+            return override
+        return project_default
 
     def cap_reached(self) -> bool:
         """Has this ticker already exhausted its tick budget?"""

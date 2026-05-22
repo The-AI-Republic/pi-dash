@@ -31,6 +31,30 @@ def test_phases_contains_started_in_progress():
     assert cfg.state_name == "In Progress"
     assert cfg.template_name == PromptTemplate.DEFAULT_NAME
     assert cfg.fresh_session_on_entry is False
+    assert cfg.disarm_on_completed is True
+
+
+@pytest.mark.unit
+def test_phases_contains_review_in_review():
+    cfg = agent_phases.PHASES[StateGroup.REVIEW.value]
+    assert cfg.state_name == "In Review"
+    assert cfg.template_name == "review"
+    assert cfg.fresh_session_on_entry is True
+    assert cfg.disarm_on_completed is True
+
+
+@pytest.mark.unit
+def test_is_ticking_state_true_for_review_in_review():
+    state = _StubState(StateGroup.REVIEW.value, "In Review")
+    assert agent_phases.is_ticking_state(state) is True
+
+
+@pytest.mark.unit
+def test_template_name_for_review_in_review_is_review():
+    name = agent_phases.template_name_for(
+        _StubState(StateGroup.REVIEW.value, "In Review")
+    )
+    assert name == "review"
 
 
 @pytest.mark.unit

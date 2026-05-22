@@ -39,7 +39,6 @@ pub struct Args {
     #[arg(long)]
     pub restart: bool,
 }
-
 pub async fn run(args: Args, _paths: &Paths) -> Result<()> {
     match check_or_swap(args.check).await? {
         SwapOutcome::AlreadyLatest => {
@@ -142,4 +141,3 @@ pub async fn check_or_swap(check: bool) -> Result<SwapOutcome> {
         None => Ok(SwapOutcome::AlreadyLatest),
     }
 }
-

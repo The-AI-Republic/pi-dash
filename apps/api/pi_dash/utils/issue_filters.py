@@ -295,11 +295,12 @@ def filter_completed_at(params, issue_filter, method, prefix=""):
 
 def filter_issue_state_type(params, issue_filter, method, prefix=""):
     type = params.get("type", "all")
-    group = ["backlog", "unstarted", "started", "completed", "cancelled"]
+    group = ["backlog", "unstarted", "started", "review", "completed", "cancelled"]
     if type == "backlog":
         group = ["backlog"]
     if type == "active":
-        group = ["unstarted", "started"]
+        # In Review issues are active work — same as Started for activity-list purposes.
+        group = ["unstarted", "started", "review"]
 
     issue_filter[f"{prefix}state__group__in"] = group
     return issue_filter
