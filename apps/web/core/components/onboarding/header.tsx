@@ -33,6 +33,9 @@ export const OnboardingHeader = observer(function OnboardingHeader(props: Onboar
   // handle step back
   const handleStepBack = () => {
     switch (currentStep) {
+      case EOnboardingSteps.PROFILE_SETUP:
+        updateCurrentStep(EOnboardingSteps.CLI_INSTALL);
+        break;
       case EOnboardingSteps.ROLE_SETUP:
         updateCurrentStep(EOnboardingSteps.PROFILE_SETUP);
         break;
@@ -46,11 +49,12 @@ export const OnboardingHeader = observer(function OnboardingHeader(props: Onboar
   };
 
   // can go back
-  const canGoBack = ![EOnboardingSteps.PROFILE_SETUP, EOnboardingSteps.INVITE_MEMBERS].includes(currentStep);
+  const canGoBack = ![EOnboardingSteps.CLI_INSTALL, EOnboardingSteps.INVITE_MEMBERS].includes(currentStep);
 
   // step order for progress tracking — include INVITE_MEMBERS if user is currently on it
   const showInviteStep = !hasInvitations || currentStep === EOnboardingSteps.INVITE_MEMBERS;
   const stepOrder: TOnboardingStep[] = [
+    EOnboardingSteps.CLI_INSTALL,
     EOnboardingSteps.PROFILE_SETUP,
     ...(isSelfManaged ? [] : [EOnboardingSteps.ROLE_SETUP, EOnboardingSteps.USE_CASE_SETUP]),
     EOnboardingSteps.WORKSPACE_CREATE_OR_JOIN,
