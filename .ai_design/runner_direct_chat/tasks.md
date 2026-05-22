@@ -1,0 +1,268 @@
+# Runner Direct Chat Tasks
+
+Implementation checklist for `design.md`. Keep tasks scoped to this track; do
+not change task-run semantics except where explicitly called out.
+
+## Phase 1a: Cloud Models and Command API
+
+- [ ] Add Django model enums:
+  - `AgentChatSessionStatus`: `open`, `closed`, `failed`
+  - `AgentChatMessageRole`: `user`, `assistant`, `tool`, `system`
+  - `AgentChatMessageStatus`: `queued`, `sent`, `streaming`, `completed`, `failed`, `cancelled`
+- [ ] Add Django models and migrations:
+  - `AgentChatSession`
+  - `AgentChatMessage`
+  - `AgentChatEvent` with `source_key`
+  - `AgentChatApprovalRequest` with `local_approval_id`
+  - `ChatMessageDedupe`
+- [ ] Add model constraints and indexes:
+  - unique `(session, seq)` for messages
+  - unique `(session, seq)` for events
+  - conditional unique `(session, source_key)` for non-empty event source keys
+  - unique `(session, local_approval_id)` for approvals
+  - unique `(session, message_id)` for dedupe
+- [ ] Register new models in runner admin where useful for debugging.
+- [ ] Add serializers for chat sessions, messages, events, and approvals.
+- [ ] Add permission helpers for chat read/send/approval decisions:
+  - creator can read/decide
+  - workspace admin can read/decide
+  - workspace member can create/send
+  - cross-workspace access returns 404 where existence would leak
+- [ ] Implement web chat routes under `/api/runners/chat/`:
+  - session list/create/detail
+  - message list/send
+  - cancel
+  - close
+  - approval list/decide
+- [ ] Serialize empty-session creation by locking the `Runner` row.
+- [ ] Enforce at most one empty open session per `(created_by, runner)` via the locked session-create transaction.
+- [ ] Resolve default `cwd` from runner workspace/pod/project root.
+- [ ] Reject out-of-root `cwd` with `400 invalid_cwd`; ignore user-provided `cwd` for MVP if no product requirement exists.
+- [ ] Implement send-message transaction:
+  - lock session and runner
+  - reject unavailable runner, active task, active chat, closed/failed session
+  - create queued user message
+  - set `active_message_id`
+  - register `transaction.on_commit` dispatch
+- [ ] Implement on-commit chat dispatch failure cleanup:
+  - mark queued user message `failed`
+  - append `chat_failed`
+  - clear `active_message_id` and `active_turn_id`
+  - publish failure to chat event subscribers
+- [ ] Add runner-facing chat endpoints under `/api/v1/runner/chat/sessions/<id>/...`:
+  - started
+  - events
+  - message started
+  - message complete
+  - approvals
+  - failed
+  - closed
+- [ ] Require runner ownership on all runner-facing chat endpoints.
+- [ ] Implement cloud-owned chat event/message seq assignment under `select_for_update(session)`.
+- [ ] Implement runner-event idempotency:
+  - require `Idempotency-Key` for event posts
+  - store stable keys in `AgentChatEvent.source_key`
+  - return existing event on duplicate
+- [ ] Implement lifecycle idempotency:
+  - `(session, message_id, endpoint_kind)` for message started/completed
+  - `ChatMessageDedupe` for started/failed/closed endpoints
+  - `(session, local_approval_id)` for approval requests
+- [ ] Implement approval decide endpoint:
+  - update `AgentChatApprovalRequest`
+  - enqueue `chat_decide` with both cloud `approval_id` and `local_approval_id`
+- [ ] Implement cancel endpoint:
+  - no-op if no active turn/message
+  - enqueue `chat_cancel` on commit
+  - keep active ids until runner acknowledgement or timeout
+- [ ] Implement close endpoint:
+  - if active turn exists, enqueue cancel first and mark close pending
+  - close only after active ids are clear
+  - append `chat_closed`
+  - enqueue `chat_close` best-effort
+- [ ] Extend matcher runner selection to exclude active chat sessions.
+- [ ] Ensure matcher exclusion uses the same runner row locking discipline as chat send.
+- [ ] Add active-turn sweeper:
+  - detect offline/stale active chat sessions
+  - mark active messages failed
+  - append `chat_failed`
+  - clear active ids
+- [ ] Add empty-open-session sweeper for sessions older than 24 hours.
+- [ ] Add basic per-user/session send throttling.
+- [ ] Update stale developer docs such as `CLAUDE.md` to describe v4 HTTPS long-poll.
+- [ ] Add Django tests for:
+  - model constraints and serializers
+  - permissions and cross-workspace 404 behavior
+  - busy/unavailable/closed rejection
+  - empty-session race/reuse
+  - `cwd` containment
+  - on-commit dispatch and dispatch-failure cleanup
+  - event idempotency and approval idempotency
+  - concurrent runner posts assigning unique cloud seq
+  - cancel/close status transitions
+  - active-turn sweeper
+  - send throttling
+  - matcher active-chat exclusion
+
+## Phase 1b: Browser SSE and Event Fan-Out
+
+- [ ] Add chat event publish helper for `agent_chat_session:{session_id}`.
+- [ ] Ensure every chat event insert publishes the persisted event payload after commit.
+- [ ] Implement browser SSE endpoint as fully async:
+  - `AsyncHttpConsumer` or async Django view
+  - `redis.asyncio` or Channels layer
+  - no blocking `StreamingHttpResponse`
+  - no blocking `redis-py` pub/sub in event loop
+- [ ] Authenticate browser SSE with normal session cookie.
+- [ ] Verify session access before opening the stream.
+- [ ] Implement subscribe-first replay:
+  - subscribe to Redis first
+  - replay DB events with `seq > after`
+  - dedupe by `seq`
+  - forward live events
+- [ ] Support `Last-Event-ID` and `?after=<seq>`.
+- [ ] Add heartbeat every 15 seconds.
+- [ ] Close stream on terminal `closed` or `failed`.
+- [ ] Add SSE tests for:
+  - replay from `after`
+  - subscribe-first race coverage
+  - duplicate delivery dedupe
+  - reconnect with `Last-Event-ID`
+  - terminal close
+  - worker-safe async implementation path
+
+## Phase 2: Runner Protocol and Codex Chat
+
+- [ ] Extend `runner/src/cloud/protocol.rs` `ServerMsg`:
+  - `ChatUserMessage`
+  - `ChatCancel`
+  - `ChatClose`
+  - `ChatDecide`
+- [ ] Extend `runner/src/cloud/protocol.rs` `ClientMsg`:
+  - `ChatStarted`
+  - `ChatMessageStarted`
+  - `ChatEvent`
+  - `ChatApprovalRequest`
+  - `ChatMessageCompleted`
+  - `ChatFailed`
+  - `ChatClosed`
+- [ ] Include `bridge_seq` on runner chat events; do not use it as cloud DB seq.
+- [ ] Include `local_approval_id` on runner approval requests and decisions.
+- [ ] Add chat message types to `services/outbox.py` valid type set.
+- [ ] Reject offline buffering for chat control messages.
+- [ ] Map Rust HTTP dispatch for chat `ClientMsg` to runner-upstream endpoints.
+- [ ] Add chat-specific bridge types in `runner/src/agent/mod.rs`:
+  - `ChatUserMessagePayload`
+  - `ChatBridgeEvent`
+  - `AgentChatCursor`
+- [ ] Add chat bridge methods:
+  - `chat_send`
+  - `chat_next_events`
+  - `chat_send_approval(local_approval_id, decision)`
+  - `chat_cancel`
+  - `chat_close`
+- [ ] Implement Codex chat bridge:
+  - initialize app-server
+  - `thread/start` for first message
+  - `thread/resume` for later message
+  - `turn/start`
+  - stream item/turn notifications
+  - map unknown events to raw
+  - `turn/interrupt` for cancel
+  - approval response using local approval id
+- [ ] Add 30-second Codex keep-warm after turn completion.
+- [ ] Ensure keep-warm process does not keep `current_chat` set or runner busy.
+- [ ] Shut down keep-warm process after idle timeout or explicit close.
+- [ ] Add `CurrentChat` and chat worker to `RunnerLoop`.
+- [ ] While `current_chat` is set, report `RunnerStatus::Busy` with `in_flight_run = None`.
+- [ ] Reject/ignore `Assign` while chat is active as runner safety net.
+- [ ] Reject `ChatUserMessage` while task is active as runner safety net.
+- [ ] Reject `ChatUserMessage` while chat turn is active as runner safety net.
+- [ ] Validate `cwd` containment on runner before spawning the agent.
+- [ ] Add local chat JSONL debug history under runner data.
+- [ ] Add Rust tests for:
+  - protocol roundtrips
+  - fake Codex first-message `thread/start`
+  - fake Codex resumed-message `thread/resume`
+  - delta and turn completion events
+  - cancel maps to `turn/interrupt`
+  - approval decision maps to `chat_send_approval(local_approval_id, decision)`
+  - keep-warm shutdown after idle timeout
+  - busy task rejects chat
+  - active chat blocks assign
+  - HTTP dispatch maps chat events to endpoints
+  - runner-side `cwd` containment
+
+## Phase 3: Web AI Agents Middle Panel and Chat UI
+
+- [ ] Update route config for `/runners/chat/:runnerId`.
+- [ ] Replace runners layout with route-scoped AI Agents shell.
+- [ ] Add `AIAgentsMiddlePanel`.
+- [ ] Move existing overview/runs/approvals navigation into overview content or preserve as nested overview tabs.
+- [ ] Render `Overview` as the first middle-panel item.
+- [ ] Render runner rows after overview.
+- [ ] Highlight overview for `/runners`, `/runners/runs`, and `/runners/approvals`.
+- [ ] Highlight runner row for `/runners/chat/:runnerId`.
+- [ ] Show online/busy/offline runner indicators.
+- [ ] Add chat page route and components:
+  - `agent-chat-panel.tsx`
+  - `chat-message-list.tsx`
+  - `chat-composer.tsx`
+  - `use-agent-chat-events.ts`
+- [ ] Add runner chat types in `packages/types/src/runner.ts`.
+- [ ] Add runner chat service methods in `packages/services/src/runner/runner.service.ts`.
+- [ ] Load latest open chat session with at least one message, or stay in new-chat state until first send.
+- [ ] Implement optimistic user message on send.
+- [ ] Open browser SSE for live events.
+- [ ] Render assistant deltas into streaming assistant message.
+- [ ] Replace accumulated delta with completed assistant message.
+- [ ] Render tool events as compact expandable rows.
+- [ ] Render approval request actions inline.
+- [ ] Disable composer for offline, revoked, task-busy, chat-busy, and closed-session states.
+- [ ] Show stop button while active turn streams.
+- [ ] Implement close control.
+- [ ] Add web tests for:
+  - middle panel overview and runner rows
+  - active route highlighting
+  - disabled composer reasons
+  - optimistic send
+  - SSE delta rendering
+  - terminal event completion
+  - stop/close controls
+
+## Phase 4: Claude Code Chat
+
+- [ ] Add Claude chat bridge using resumable per-message subprocesses.
+- [ ] First message uses `claude -p --output-format stream-json`.
+- [ ] Store `system/init.session_id` in `AgentChatSession.local_session_id`.
+- [ ] Later messages use `claude --resume <local_session_id> -p --output-format stream-json`.
+- [ ] Overwrite `local_session_id` when Claude returns a new session id.
+- [ ] Return clear error for chat approvals until non-bypass Claude approval flow exists.
+- [ ] Add fake Claude tests for first message and resumed second message.
+
+## Phase 5: Runner SSE Transport
+
+- [ ] Add runner-facing SSE control endpoint.
+- [ ] Add Rust SSE client task per runner session.
+- [ ] Feed SSE control frames into the same `RunnerLoop` mailbox as long-poll.
+- [ ] Keep long-poll fallback.
+- [ ] Add reconnection behavior.
+- [ ] Add ack behavior.
+- [ ] Add runner SSE tests for reconnect, ack, fallback, and duplicate control delivery.
+
+## End-to-End Acceptance
+
+- [ ] Enroll a runner.
+- [ ] Open `/runners`.
+- [ ] Select a runner in the middle panel.
+- [ ] Send `What repo are you in?`.
+- [ ] Cloud creates `AgentChatSession` and user message.
+- [ ] Runner receives `chat_user_message`.
+- [ ] Codex creates thread and turn.
+- [ ] Runner posts deltas/events.
+- [ ] Browser SSE renders response.
+- [ ] Turn completes and composer re-enables.
+- [ ] Start an `AgentRun` and verify runner chat is disabled with `409 runner_busy`.
+- [ ] Start chat and verify task matcher does not assign a task to the active-chat runner.
+- [ ] Refresh browser mid-response and verify SSE replay recovers persisted events.
+- [ ] Cancel active response and verify active ids clear.
+- [ ] Close session and verify later send returns `409 chat_session_closed`.
