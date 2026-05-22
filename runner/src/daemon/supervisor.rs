@@ -3,7 +3,7 @@ use chrono::Utc;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::{RwLock, mpsc, oneshot};
+use tokio::sync::{RwLock, mpsc, oneshot, watch};
 
 use crate::agent::{AgentBridge, AgentCursor, BridgeEvent, RunPayload};
 use crate::approval::policy::Policy;
@@ -504,28 +504,86 @@ struct CurrentRun {
 
 struct CurrentChat {
     chat_session_id: uuid::Uuid,
-    cancel: std::sync::Arc<tokio::sync::Notify>,
+    tx: mpsc::Sender<ChatCommand>,
+    active_rx: watch::Receiver<bool>,
     done_rx: oneshot::Receiver<()>,
 }
 
+#[derive(Debug)]
+struct ChatTurn {
+    message_id: uuid::Uuid,
+    content: String,
+    cwd: Option<String>,
+    model: Option<String>,
+    local_thread_id: Option<String>,
+    local_session_id: Option<String>,
+}
+
+#[derive(Debug)]
+enum ChatCommand {
+    Message(ChatTurn),
+    Cancel { reason: Option<String> },
+    Close { reason: Option<String> },
+    Shutdown,
+}
+
 impl RunnerLoop {
+    async fn stop_idle_chat_runtime(&mut self) {
+        let Some(mut chat) = self.current_chat.take() else {
+            return;
+        };
+        let _ = chat.tx.send(ChatCommand::Shutdown).await;
+        let _ = tokio::time::timeout(Duration::from_secs(5), &mut chat.done_rx).await;
+    }
+
+    async fn start_chat_runtime(
+        &mut self,
+        chat_session_id: uuid::Uuid,
+    ) -> mpsc::Sender<ChatCommand> {
+        let (tx, rx) = mpsc::channel(8);
+        let (active_tx, active_rx) = watch::channel(false);
+        let (done_tx, done_rx) = oneshot::channel();
+        self.current_chat = Some(CurrentChat {
+            chat_session_id,
+            tx: tx.clone(),
+            active_rx,
+            done_rx,
+        });
+        let mut worker = ChatWorker {
+            runner_paths: self.runner_paths.clone(),
+            runner_config: self.runner_config.clone(),
+            state: self.state.clone(),
+            approvals: self.approvals.clone(),
+            out: self.out.clone(),
+            command_rx: rx,
+            active_tx,
+        };
+        tokio::spawn(async move {
+            worker.run(chat_session_id).await;
+            let _ = done_tx.send(());
+        });
+        tx
+    }
+
     async fn run(mut self) -> Result<()> {
         loop {
-            let inbound = self.inbound.recv();
-            tokio::pin!(inbound);
-            // `done_rx` exists only while a run is in flight; outside of that
-            // window we wait on `pending()` so the select arm is inert.
-            let frame = tokio::select! {
-                biased;
-                () = wait_done(&mut self.current_run) => {
-                    self.current_run = None;
-                    continue;
+            let frame = {
+                let inbound = self.inbound.recv();
+                tokio::pin!(inbound);
+                // `done_rx` exists only while a run is in flight; outside of that
+                // window we wait on `pending()` so the select arm is inert.
+                tokio::select! {
+                    biased;
+                    () = wait_done(&mut self.current_run) => {
+                        self.current_run = None;
+                        continue;
+                    }
+                    () = wait_chat_done(&mut self.current_chat) => {
+                        self.current_chat = None;
+                        continue;
+                    }
+                    f = &mut inbound => f,
                 }
-                () = wait_chat_done(&mut self.current_chat) => {
-                    self.current_chat = None;
-                    continue;
-                }
-                f = &mut inbound => f,
             };
             let Some(frame) = frame else { break };
             let stream_id = frame.stream_id.clone();
@@ -558,10 +616,7 @@ impl RunnerLoop {
                         );
                     }
                     self.state
-                        .set_update_advisory(
-                            latest_runner_version.clone(),
-                            min_runner_version,
-                        )
+                        .set_update_advisory(latest_runner_version.clone(), min_runner_version)
                         .await;
                     self.state.set_connected(true).await;
 
@@ -598,10 +653,7 @@ impl RunnerLoop {
                                     st.set_on_disk_version(new_version).await;
                                 }
                                 Ok(other) => {
-                                    tracing::debug!(
-                                        ?other,
-                                        "auto-update: no swap performed",
-                                    );
+                                    tracing::debug!(?other, "auto-update: no swap performed",);
                                 }
                                 Err(e) => {
                                     // Can be no-receipt (source build), a
@@ -627,12 +679,19 @@ impl RunnerLoop {
                     expected_codex_model,
                     ..
                 } => {
-                    if self.current_chat.is_some() {
+                    if self
+                        .current_chat
+                        .as_ref()
+                        .is_some_and(|chat| *chat.active_rx.borrow())
+                    {
                         tracing::warn!(
                             %run_id,
                             "assign received while chat is active; ignoring"
                         );
                         continue;
+                    }
+                    if self.current_chat.is_some() {
+                        self.stop_idle_chat_runtime().await;
                     }
                     if self.current_run.is_some() {
                         tracing::warn!(
@@ -754,60 +813,58 @@ impl RunnerLoop {
                             .await;
                         continue;
                     }
-                    if self.current_chat.is_some() {
+                    let turn = ChatTurn {
+                        message_id,
+                        content,
+                        cwd,
+                        model,
+                        local_thread_id,
+                        local_session_id,
+                    };
+                    let tx = if let Some(chat) = &self.current_chat {
+                        if chat.chat_session_id == chat_session_id {
+                            if *chat.active_rx.borrow() {
+                                let _ = self
+                                    .out
+                                    .send(ClientMsg::ChatFailed {
+                                        chat_session_id,
+                                        code: "chat_turn_active".into(),
+                                        detail: Some("runner has an active chat turn".into()),
+                                        failed_at: Utc::now(),
+                                    })
+                                    .await;
+                                continue;
+                            }
+                            chat.tx.clone()
+                        } else if *chat.active_rx.borrow() {
+                            let _ = self
+                                .out
+                                .send(ClientMsg::ChatFailed {
+                                    chat_session_id,
+                                    code: "chat_turn_active".into(),
+                                    detail: Some("runner has an active chat turn".into()),
+                                    failed_at: Utc::now(),
+                                })
+                                .await;
+                            continue;
+                        } else {
+                            self.stop_idle_chat_runtime().await;
+                            self.start_chat_runtime(chat_session_id).await
+                        }
+                    } else {
+                        self.start_chat_runtime(chat_session_id).await
+                    };
+                    if tx.send(ChatCommand::Message(turn)).await.is_err() {
                         let _ = self
                             .out
                             .send(ClientMsg::ChatFailed {
                                 chat_session_id,
-                                code: "chat_turn_active".into(),
-                                detail: Some("runner has an active chat turn".into()),
+                                code: "chat_runtime_closed".into(),
+                                detail: Some("chat runtime closed before accepting message".into()),
                                 failed_at: Utc::now(),
                             })
                             .await;
-                        continue;
                     }
-                    let cancel = std::sync::Arc::new(tokio::sync::Notify::new());
-                    let (done_tx, done_rx) = oneshot::channel();
-                    self.current_chat = Some(CurrentChat {
-                        chat_session_id,
-                        cancel: cancel.clone(),
-                        done_rx,
-                    });
-                    self.state.set_status(RunnerStatus::Busy).await;
-                    let mut worker = ChatWorker {
-                        runner_paths: self.runner_paths.clone(),
-                        runner_config: self.runner_config.clone(),
-                        state: self.state.clone(),
-                        approvals: self.approvals.clone(),
-                        out: self.out.clone(),
-                        cancel,
-                    };
-                    tokio::spawn(async move {
-                        if let Err(e) = worker
-                            .run(
-                                chat_session_id,
-                                message_id,
-                                content,
-                                cwd,
-                                model,
-                                local_thread_id,
-                                local_session_id,
-                            )
-                            .await
-                        {
-                            let _ = worker
-                                .out
-                                .send(ClientMsg::ChatFailed {
-                                    chat_session_id,
-                                    code: "internal".into(),
-                                    detail: Some(format!("{e:#}")),
-                                    failed_at: Utc::now(),
-                                })
-                                .await;
-                            worker.state.set_status(RunnerStatus::Idle).await;
-                        }
-                        let _ = done_tx.send(());
-                    });
                 }
                 ServerMsg::ChatCancel {
                     chat_session_id,
@@ -816,7 +873,7 @@ impl RunnerLoop {
                     tracing::info!(%chat_session_id, ?reason, "chat_cancel received");
                     if let Some(chat) = &self.current_chat {
                         if chat.chat_session_id == chat_session_id {
-                            chat.cancel.notify_waiters();
+                            let _ = chat.tx.send(ChatCommand::Cancel { reason }).await;
                         }
                     }
                 }
@@ -827,13 +884,16 @@ impl RunnerLoop {
                     tracing::info!(%chat_session_id, ?reason, "chat_close received");
                     if let Some(chat) = &self.current_chat {
                         if chat.chat_session_id == chat_session_id {
-                            chat.cancel.notify_waiters();
+                            let _ = chat.tx.send(ChatCommand::Close { reason }).await;
                         }
                     } else {
-                        let _ = self.out.send(ClientMsg::ChatClosed {
-                            chat_session_id,
-                            closed_at: Utc::now(),
-                        }).await;
+                        let _ = self
+                            .out
+                            .send(ClientMsg::ChatClosed {
+                                chat_session_id,
+                                closed_at: Utc::now(),
+                            })
+                            .await;
                     }
                 }
                 ServerMsg::ChatDecide {
@@ -988,61 +1048,186 @@ struct ChatWorker {
     state: StateHandle,
     approvals: ApprovalRouter,
     out: RunnerOut,
-    cancel: std::sync::Arc<tokio::sync::Notify>,
+    command_rx: mpsc::Receiver<ChatCommand>,
+    active_tx: watch::Sender<bool>,
 }
 
 impl ChatWorker {
-    async fn run(
+    async fn run(&mut self, chat_session_id: uuid::Uuid) {
+        const CHAT_IDLE_TIMEOUT: Duration = Duration::from_secs(120);
+
+        let mut bridge: Option<AgentBridge> = None;
+        let mut workspace_path: Option<std::path::PathBuf> = None;
+        let mut bridge_seq = 0u64;
+        let mut started_sent = false;
+
+        loop {
+            let command =
+                match tokio::time::timeout(CHAT_IDLE_TIMEOUT, self.command_rx.recv()).await {
+                    Ok(Some(command)) => command,
+                    Ok(None) | Err(_) => break,
+                };
+            match command {
+                ChatCommand::Message(turn) => {
+                    let _ = self.active_tx.send(true);
+                    self.state.set_status(RunnerStatus::Busy).await;
+                    let close_runtime = match self
+                        .handle_turn(
+                            chat_session_id,
+                            turn,
+                            &mut bridge,
+                            &mut workspace_path,
+                            &mut bridge_seq,
+                            &mut started_sent,
+                        )
+                        .await
+                    {
+                        Ok(close_runtime) => close_runtime,
+                        Err(e) => {
+                            let _ = self
+                                .out
+                                .send(ClientMsg::ChatFailed {
+                                    chat_session_id,
+                                    code: "internal".into(),
+                                    detail: Some(format!("{e:#}")),
+                                    failed_at: Utc::now(),
+                                })
+                                .await;
+                            if let Some(bridge) = bridge.take() {
+                                bridge.shutdown(Duration::from_secs(5)).await.ok();
+                            }
+                            started_sent = false;
+                            false
+                        }
+                    };
+                    let _ = self.active_tx.send(false);
+                    self.state.set_status(RunnerStatus::Idle).await;
+                    if close_runtime {
+                        break;
+                    }
+                }
+                ChatCommand::Cancel { reason } => {
+                    tracing::debug!(?reason, %chat_session_id, "chat cancel received while idle");
+                }
+                ChatCommand::Close { reason } => {
+                    tracing::debug!(?reason, %chat_session_id, "chat close received while idle");
+                    let _ = self
+                        .out
+                        .send(ClientMsg::ChatClosed {
+                            chat_session_id,
+                            closed_at: Utc::now(),
+                        })
+                        .await;
+                    break;
+                }
+                ChatCommand::Shutdown => break,
+            }
+        }
+        if let Some(bridge) = bridge.take() {
+            bridge.shutdown(Duration::from_secs(5)).await.ok();
+        }
+        let _ = self.active_tx.send(false);
+        self.state.set_status(RunnerStatus::Idle).await;
+        let _ = &self.runner_paths;
+    }
+
+    async fn handle_turn(
         &mut self,
         chat_session_id: uuid::Uuid,
-        message_id: uuid::Uuid,
-        content: String,
-        cwd: Option<String>,
-        model: Option<String>,
-        _local_thread_id: Option<String>,
-        _local_session_id: Option<String>,
-    ) -> Result<()> {
-        let workspace_path = self.resolve_chat_workspace(cwd.as_deref()).await?;
+        turn: ChatTurn,
+        bridge: &mut Option<AgentBridge>,
+        workspace_path: &mut Option<std::path::PathBuf>,
+        bridge_seq: &mut u64,
+        started_sent: &mut bool,
+    ) -> Result<bool> {
+        if workspace_path.is_none() {
+            *workspace_path = Some(self.resolve_chat_workspace(turn.cwd.as_deref()).await?);
+        }
+        let workspace_path = workspace_path
+            .as_deref()
+            .ok_or_else(|| anyhow::anyhow!("chat workspace missing"))?;
 
-        let mut bridge =
-            AgentBridge::spawn_from_config(&self.runner_config, &workspace_path, model.clone())
-                .await?;
+        if bridge.is_none() {
+            let resume_id = turn
+                .local_session_id
+                .as_deref()
+                .filter(|s| !s.is_empty())
+                .or_else(|| turn.local_thread_id.as_deref().filter(|s| !s.is_empty()));
+            *bridge = Some(
+                AgentBridge::spawn_from_config_with_resume(
+                    &self.runner_config,
+                    workspace_path,
+                    turn.model.clone(),
+                    resume_id,
+                )
+                .await?,
+            );
+        }
+        let bridge = bridge
+            .as_mut()
+            .ok_or_else(|| anyhow::anyhow!("chat bridge missing"))?;
         let payload = RunPayload {
-            run_id: message_id,
-            prompt: content,
-            model,
+            run_id: turn.message_id,
+            prompt: turn.content,
+            model: turn.model,
         };
-        let mut cursor = bridge.run(&payload, &workspace_path).await?;
+        let mut cursor = bridge.run(&payload, workspace_path).await?;
         let turn_id = cursor.thread_id().to_string();
-        self.out
-            .send(ClientMsg::ChatStarted {
-                chat_session_id,
-                local_thread_id: turn_id.clone(),
-                local_session_id: Some(turn_id.clone()),
-                started_at: Utc::now(),
-            })
-            .await
-            .ok();
+        if !*started_sent {
+            self.out
+                .send(ClientMsg::ChatStarted {
+                    chat_session_id,
+                    local_thread_id: turn_id.clone(),
+                    local_session_id: Some(turn_id.clone()),
+                    started_at: Utc::now(),
+                })
+                .await
+                .ok();
+            *started_sent = true;
+        }
         self.out
             .send(ClientMsg::ChatMessageStarted {
                 chat_session_id,
-                message_id,
+                message_id: turn.message_id,
                 turn_id: Some(turn_id.clone()),
                 started_at: Utc::now(),
             })
             .await
             .ok();
 
-        let mut bridge_seq = 0u64;
         let mut final_status = "completed".to_string();
         let mut assistant_message: Option<String> = None;
+        let mut close_after_turn = false;
         loop {
             tokio::select! {
                 biased;
-                _ = self.cancel.notified() => {
-                    bridge.interrupt().await.ok();
-                    final_status = "cancelled".into();
-                    break;
+                command = self.command_rx.recv() => {
+                    match command {
+                        Some(ChatCommand::Cancel { reason }) => {
+                            tracing::info!(?reason, %chat_session_id, "cancelling active chat turn");
+                            bridge.interrupt().await.ok();
+                            final_status = "cancelled".into();
+                            break;
+                        }
+                        Some(ChatCommand::Close { reason }) => {
+                            tracing::info!(?reason, %chat_session_id, "closing active chat turn");
+                            bridge.interrupt().await.ok();
+                            final_status = "cancelled".into();
+                            close_after_turn = true;
+                            break;
+                        }
+                        Some(ChatCommand::Shutdown) | None => {
+                            bridge.interrupt().await.ok();
+                            final_status = "cancelled".into();
+                            break;
+                        }
+                        Some(ChatCommand::Message(_)) => {
+                            tracing::warn!(
+                                %chat_session_id,
+                                "chat runtime received a second message while a turn is active"
+                            );
+                        }
+                    }
                 }
                 events = bridge.next_events(&mut cursor) => {
                     let Some(events) = events else {
@@ -1053,10 +1238,11 @@ impl ChatWorker {
                             failed_at: Utc::now(),
                         }).await.ok();
                         self.state.set_status(RunnerStatus::Idle).await;
-                        return Ok(());
+                        return Ok(false);
                     };
+                    let mut done = false;
                     for ev in events {
-                        bridge_seq = bridge_seq.saturating_add(1);
+                        *bridge_seq = (*bridge_seq).saturating_add(1);
                         match ev {
                             BridgeEvent::Raw { method, params, .. } => {
                                 let kind = if method.contains("delta") {
@@ -1066,7 +1252,7 @@ impl ChatWorker {
                                 };
                                 self.out.send(ClientMsg::ChatEvent {
                                     chat_session_id,
-                                    bridge_seq,
+                                    bridge_seq: *bridge_seq,
                                     kind: kind.into(),
                                     payload: serde_json::json!({
                                         "method": method,
@@ -1081,7 +1267,7 @@ impl ChatWorker {
                                 reason,
                                 ..
                             } => {
-                                let policy = Policy::new(&self.runner_config.approval_policy, &workspace_path);
+                                let policy = Policy::new(&self.runner_config.approval_policy, workspace_path);
                                 let decision = policy.evaluate(kind, &payload);
                                 if let Some(auto) = decision.into_cloud() {
                                     bridge.send_approval(&approval_id, auto).await.ok();
@@ -1090,7 +1276,7 @@ impl ChatWorker {
                                 let rec = ApprovalRecord {
                                     approval_id: approval_id.clone(),
                                     runner_id: self.runner_config.runner_id,
-                                    run_id: message_id,
+                                    run_id: turn.message_id,
                                     kind,
                                     payload: payload.clone(),
                                     reason: reason.clone(),
@@ -1136,6 +1322,7 @@ impl ChatWorker {
                             BridgeEvent::Completed { done_payload, .. } => {
                                 assistant_message = assistant_text_from_done_payload(&done_payload);
                                 final_status = "completed".into();
+                                done = true;
                                 break;
                             }
                             BridgeEvent::Failed { detail, .. } => {
@@ -1146,22 +1333,21 @@ impl ChatWorker {
                                     failed_at: Utc::now(),
                                 }).await.ok();
                                 self.state.set_status(RunnerStatus::Idle).await;
-                                return Ok(());
+                                return Ok(false);
                             }
                             BridgeEvent::RunStarted { .. } | BridgeEvent::AwaitingReauth { .. } => {}
                         }
                     }
-                    if final_status == "completed" && assistant_message.is_some() {
+                    if done {
                         break;
                     }
                 }
             }
         }
-        bridge.shutdown(Duration::from_secs(5)).await.ok();
         self.out
             .send(ClientMsg::ChatMessageCompleted {
                 chat_session_id,
-                message_id,
+                message_id: turn.message_id,
                 turn_id: Some(turn_id),
                 assistant_message,
                 status: final_status,
@@ -1169,9 +1355,16 @@ impl ChatWorker {
             })
             .await
             .ok();
-        self.state.set_status(RunnerStatus::Idle).await;
-        let _ = &self.runner_paths;
-        Ok(())
+        if close_after_turn {
+            let _ = self
+                .out
+                .send(ClientMsg::ChatClosed {
+                    chat_session_id,
+                    closed_at: Utc::now(),
+                })
+                .await;
+        }
+        Ok(close_after_turn)
     }
 
     async fn resolve_chat_workspace(&self, cwd: Option<&str>) -> Result<std::path::PathBuf> {
@@ -1573,11 +1766,7 @@ impl AssignWorker {
         const DETAIL_BYTES_CAP: usize = 4096;
         const STDERR_TAIL_LINES: usize = 10;
 
-        let last_cmd = self
-            .state
-            .observability_snapshot()
-            .await
-            .last_exec_command;
+        let last_cmd = self.state.observability_snapshot().await.last_exec_command;
         let stderr = bridge.recent_stderr().await;
 
         let mut parts: Vec<String> = vec![base.to_string()];
@@ -1619,9 +1808,7 @@ impl AssignWorker {
                 String::new()
             };
             if shown > 0 {
-                parts.push(format!(
-                    "stderr tail ({shown} line(s){suffix}):\n  {tail}"
-                ));
+                parts.push(format!("stderr tail ({shown} line(s){suffix}):\n  {tail}"));
             } else {
                 // Filter dropped everything — surface that fact alone
                 // rather than emitting an empty stderr block.
@@ -1682,20 +1869,16 @@ impl AssignWorker {
                     // either method name is caught by tests rather than
                     // by silently absent `last command:` fields in
                     // production failure details.
-                    if let Some(hint) =
-                        crate::daemon::observability::extract_exec_command_hint(
-                            method.as_str(),
-                            params,
-                        )
-                    {
+                    if let Some(hint) = crate::daemon::observability::extract_exec_command_hint(
+                        method.as_str(),
+                        params,
+                    ) {
                         self.state
-                            .note_exec_command(
-                                crate::daemon::state::ExecCommandSnapshot {
-                                    command: hint.command,
-                                    cwd: hint.cwd,
-                                    started_at: Utc::now(),
-                                },
-                            )
+                            .note_exec_command(crate::daemon::state::ExecCommandSnapshot {
+                                command: hint.command,
+                                cwd: hint.cwd,
+                                started_at: Utc::now(),
+                            })
                             .await;
                     }
                 }

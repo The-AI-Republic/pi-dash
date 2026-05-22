@@ -60,7 +60,7 @@ const RunnerChatPage = observer(function RunnerChatPage() {
   const handleEvent = useCallback(
     (event: IAgentChatEvent) => {
       setEvents((prev) => (prev.some((item) => item.seq === event.seq) ? prev : [...prev, event]));
-      if (["turn_started", "turn_completed", "chat_failed", "chat_closed"].includes(event.kind)) {
+      if (["assistant_delta", "turn_started", "turn_completed", "chat_failed", "chat_closed"].includes(event.kind)) {
         mutateSessions();
         mutateMessages();
       }
@@ -153,7 +153,7 @@ const RunnerChatPage = observer(function RunnerChatPage() {
               </div>
             ))}
             {events
-              .filter((event) => !["turn_completed", "chat_closed"].includes(event.kind))
+              .filter((event) => !["assistant_delta", "turn_completed", "chat_closed"].includes(event.kind))
               .slice(-6)
               .map((event) => (
                 <div

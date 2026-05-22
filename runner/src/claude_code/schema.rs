@@ -22,6 +22,10 @@ pub enum StreamEvent {
     /// `{"type":"user","message":{...}}` — tool-result echoes from the
     /// harness back to the model. Useful for transcripts.
     User(UserEvent),
+    /// `{"type":"stream_event","event":{...}}` — raw Anthropic streaming
+    /// events such as `content_block_delta`. These are what let Pi Dash show
+    /// assistant text before the terminal `assistant` / `result` frames.
+    Stream(StreamJsonEvent),
     /// `{"type":"result","subtype":"success|error_max_turns|error_during_execution",
     ///   "result":"...","usage":{...}}` — terminal frame.
     Result(ResultEvent),
@@ -49,6 +53,9 @@ impl<'de> Deserialize<'de> for StreamEvent {
                 .map_err(D::Error::custom),
             "user" => serde_json::from_value(v)
                 .map(StreamEvent::User)
+                .map_err(D::Error::custom),
+            "stream_event" => serde_json::from_value(v)
+                .map(StreamEvent::Stream)
                 .map_err(D::Error::custom),
             "result" => serde_json::from_value(v)
                 .map(StreamEvent::Result)
@@ -82,6 +89,13 @@ pub struct UserEvent {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+pub struct StreamJsonEvent {
+    pub event: serde_json::Value,
+    #[serde(default)]
+    pub session_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
 pub struct ResultEvent {
     pub subtype: String,
     #[serde(default)]
@@ -107,6 +121,7 @@ impl StreamEvent {
             StreamEvent::System(_) => "system",
             StreamEvent::Assistant(_) => "assistant/message",
             StreamEvent::User(_) => "user/toolResult",
+            StreamEvent::Stream(_) => "stream_event",
             StreamEvent::Result(_) => "result",
             StreamEvent::Unknown(_) => "unknown",
         }

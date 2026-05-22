@@ -76,6 +76,21 @@ def _payload_too_large(value) -> bool:
         return True
 
 
+def _assistant_delta_text(payload) -> str:
+    if not isinstance(payload, dict):
+        return ""
+    params = payload.get("params")
+    if not isinstance(params, dict):
+        return ""
+    delta = params.get("delta")
+    if isinstance(delta, dict):
+        text = delta.get("text")
+        if isinstance(text, str):
+            return text
+    text = params.get("text")
+    return text if isinstance(text, str) else ""
+
+
 def _async_redis() -> aioredis.Redis:
     global _async_redis_client
     if _async_redis_client is None:
@@ -547,6 +562,10 @@ class ChatEventEndpoint(_ChatRunnerEndpointBase):
                     assistant = chat_service.create_assistant_message_locked(
                         session, local_turn_id=session.active_turn_id
                     )
+                delta_text = _assistant_delta_text(payload)
+                if delta_text:
+                    assistant.content = f"{assistant.content or ''}{delta_text}"
+                    assistant.save(update_fields=["content"])
                 event.message = assistant
                 event.save(update_fields=["message"])
         return Response({"ok": True, "event": AgentChatEventSerializer(event).data})

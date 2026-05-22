@@ -1,5 +1,5 @@
-//! Claude Code bridge. Drives the `claude --print` subprocess for one run
-//! and translates stream-json events into agent-agnostic
+//! Claude Code bridge. Drives the `claude --print` subprocess and translates
+//! stream-json events into agent-agnostic
 //! [`crate::agent::BridgeEvent`]s.
 //!
 //! The public surface intentionally mirrors `codex::bridge::Bridge` so the
@@ -38,15 +38,21 @@ pub struct Bridge {
 }
 
 impl Bridge {
-    pub async fn spawn(
+    pub async fn spawn(binary: &str, cwd: &Path, model_default: Option<String>) -> Result<Self> {
+        Self::spawn_with_resume(binary, cwd, model_default, None).await
+    }
+
+    pub async fn spawn_with_resume(
         binary: &str,
         cwd: &Path,
         model_default: Option<String>,
+        resume_session_id: Option<&str>,
     ) -> Result<Self> {
         let proc = ClaudeProcess::spawn(SpawnArgs {
             binary,
             cwd,
             model: model_default.as_deref(),
+            resume_session_id,
             bypass_permissions: true,
         })
         .await?;
@@ -74,9 +80,6 @@ impl Bridge {
         let input = UserInput::user_text(&payload.prompt);
         let line = serde_json::to_string(&input)?;
         self.proc.send_line(&line).await?;
-        // Half-close so Claude processes the turn and exits when done.
-        self.proc.close_stdin();
-
         let deadline = tokio::time::Instant::now() + INIT_TIMEOUT;
         loop {
             let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
@@ -209,6 +212,19 @@ impl BridgeCursor {
                 method: "user/toolResult".into(),
                 params: u.message,
             }],
+            StreamEvent::Stream(s) => {
+                let method = s
+                    .event
+                    .get("type")
+                    .and_then(|value| value.as_str())
+                    .map(|ty| format!("stream_event/{ty}"))
+                    .unwrap_or_else(|| "stream_event".to_string());
+                vec![BridgeEvent::Raw {
+                    run_id: self.run_id,
+                    method,
+                    params: s.event,
+                }]
+            }
             StreamEvent::Result(r) => {
                 self.terminal = true;
                 let is_err = r.is_error.unwrap_or(false) || r.subtype.starts_with("error");

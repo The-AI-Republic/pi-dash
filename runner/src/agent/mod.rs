@@ -278,6 +278,15 @@ impl AgentBridge {
         cwd: &Path,
         model_override: Option<String>,
     ) -> Result<Self> {
+        Self::spawn_from_config_with_resume(runner, cwd, model_override, None).await
+    }
+
+    pub async fn spawn_from_config_with_resume(
+        runner: &RunnerConfig,
+        cwd: &Path,
+        model_override: Option<String>,
+        resume_session_id: Option<&str>,
+    ) -> Result<Self> {
         match runner.agent.kind {
             AgentKind::Codex => {
                 let b = crate::codex::bridge::Bridge::spawn(
@@ -289,10 +298,11 @@ impl AgentBridge {
                 Ok(AgentBridge::Codex(b))
             }
             AgentKind::ClaudeCode => {
-                let b = crate::claude_code::bridge::Bridge::spawn(
+                let b = crate::claude_code::bridge::Bridge::spawn_with_resume(
                     &runner.claude_code.binary,
                     cwd,
                     selected_model(model_override, runner.claude_code.model_default.clone()),
+                    resume_session_id,
                 )
                 .await?;
                 Ok(AgentBridge::ClaudeCode(b))
