@@ -27,7 +27,11 @@ from django.db import migrations, models
 class Migration(migrations.Migration):
 
     dependencies = [
-        ("db", "0135_clidevicecode"),
+        # 0136 is the merge migration that joins `0135_clidevicecode`
+        # (CLI device-code auth) with `0135_review_state_and_cadence_split`
+        # (the "In Review" state). Depending on it ensures both prior
+        # branches' changes are present before this one runs.
+        ("db", "0136_merge_cli_device_code_and_review_state"),
     ]
 
     operations = [
