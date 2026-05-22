@@ -834,19 +834,19 @@ class AgentChatSession(models.Model):
         indexes = [
             models.Index(
                 fields=["workspace", "runner", "status"],
-                name="agent_chat_workspace_runner_status_idx",
+                name="ac_sess_ws_run_stat_idx",
             ),
             models.Index(
                 fields=["created_by", "runner", "status"],
-                name="agent_chat_created_runner_status_idx",
+                name="ac_sess_user_run_stat_idx",
             ),
             models.Index(
                 fields=["runner", "status"],
-                name="agent_chat_runner_status_idx",
+                name="ac_sess_run_stat_idx",
             ),
             models.Index(
                 fields=["last_message_at"],
-                name="agent_chat_last_message_idx",
+                name="ac_sess_last_msg_idx",
             ),
         ]
 
@@ -879,21 +879,21 @@ class AgentChatMessage(models.Model):
         constraints = [
             models.UniqueConstraint(
                 fields=["session", "seq"],
-                name="agent_chat_message_session_seq_unique",
+                name="ac_msg_sess_seq_uniq",
             ),
         ]
         indexes = [
             models.Index(
                 fields=["session", "created_at"],
-                name="agent_chat_msg_session_created_idx",
+                name="ac_msg_sess_created_idx",
             ),
             models.Index(
                 fields=["session", "local_turn_id"],
-                name="agent_chat_msg_session_turn_idx",
+                name="ac_msg_sess_turn_idx",
             ),
             models.Index(
                 fields=["session", "local_item_id"],
-                name="agent_chat_msg_session_item_idx",
+                name="ac_msg_sess_item_idx",
             ),
         ]
 
@@ -922,18 +922,18 @@ class AgentChatEvent(models.Model):
         constraints = [
             models.UniqueConstraint(
                 fields=["session", "seq"],
-                name="agent_chat_event_session_seq_unique",
+                name="ac_evt_sess_seq_uniq",
             ),
             models.UniqueConstraint(
                 fields=["session", "source_key"],
                 condition=~models.Q(source_key=""),
-                name="agent_chat_event_source_key_unique",
+                name="ac_evt_source_key_uniq",
             ),
         ]
         indexes = [
             models.Index(
                 fields=["session", "created_at"],
-                name="agent_chat_event_session_created_idx",
+                name="ac_evt_sess_created_idx",
             )
         ]
 
@@ -971,13 +971,13 @@ class AgentChatApprovalRequest(models.Model):
         constraints = [
             models.UniqueConstraint(
                 fields=["session", "local_approval_id"],
-                name="agent_chat_approval_local_unique",
+                name="ac_appr_local_uniq",
             )
         ]
         indexes = [
             models.Index(
                 fields=["session", "status"],
-                name="agent_chat_approval_session_status_idx",
+                name="ac_appr_sess_stat_idx",
             )
         ]
 
@@ -994,13 +994,13 @@ class ChatMessageDedupe(models.Model):
         constraints = [
             models.UniqueConstraint(
                 fields=["session", "message_id"],
-                name="chat_message_dedupe_unique",
+                name="chat_dedupe_unique",
             ),
         ]
         indexes = [
             models.Index(
                 fields=["created_at"],
-                name="chat_message_dedupe_created_idx",
+                name="chat_dedupe_created_idx",
             )
         ]
 
