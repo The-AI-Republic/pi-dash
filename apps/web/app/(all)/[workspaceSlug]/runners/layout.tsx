@@ -9,6 +9,7 @@ import { NavLink, Outlet, useParams } from "react-router";
 import { EUserPermissions, EUserPermissionsLevel } from "@pi-dash/constants";
 import { useTranslation } from "@pi-dash/i18n";
 import { NotAuthorizedView } from "@/components/auth-screens/not-authorized-view";
+import { WorkspaceShell } from "@/components/workspace/workspace-shell";
 import { useUserPermissions } from "@/hooks/store/user";
 
 const RunnersLayout = observer(function RunnersLayout() {
@@ -22,7 +23,11 @@ const RunnersLayout = observer(function RunnersLayout() {
   );
 
   if (workspaceUserInfo && !canViewRunners) {
-    return <NotAuthorizedView section="general" className="h-auto" />;
+    return (
+      <WorkspaceShell>
+        <NotAuthorizedView section="general" className="h-auto" />
+      </WorkspaceShell>
+    );
   }
 
   const base = `/${workspaceSlug}/runners`;
@@ -33,7 +38,7 @@ const RunnersLayout = observer(function RunnersLayout() {
   ];
 
   return (
-    <div className="flex h-full w-full flex-col">
+    <WorkspaceShell>
       <div className="flex items-center gap-4 border-b border-subtle px-6 py-3">
         <h1 className="text-16 font-semibold text-primary">{t("runners.title")}</h1>
         <nav className="flex gap-2">
@@ -54,7 +59,7 @@ const RunnersLayout = observer(function RunnersLayout() {
       <div className="flex-1 overflow-auto p-6">
         <Outlet />
       </div>
-    </div>
+    </WorkspaceShell>
   );
 });
 
