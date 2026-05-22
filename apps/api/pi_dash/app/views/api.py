@@ -54,7 +54,17 @@ class ApiTokenEndpoint(BaseAPIView):
         return Response(status=status.HTTP_204_NO_CONTENT)
 
     def patch(self, request: Request, pk: str) -> Response:
-        api_token = APIToken.objects.get(user=request.user, pk=pk)
+        # Service tokens are managed out-of-band (worker spawn flow, etc.)
+        # and must not be editable via the user-facing API token endpoint
+        # — mirroring the ``is_service=False`` filter on GET-detail and
+        # DELETE. Without this filter, a user could PATCH a service
+        # token's label and other fields, which is exactly what
+        # ``test_patch_cannot_modify_service_token`` verifies.
+        api_token = APIToken.objects.filter(
+            user=request.user, pk=pk, is_service=False
+        ).first()
+        if api_token is None:
+            return Response(status=status.HTTP_404_NOT_FOUND)
         serializer = APITokenSerializer(api_token, data=request.data, partial=True)
         if serializer.is_valid():
             serializer.save()

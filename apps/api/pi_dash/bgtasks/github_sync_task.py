@@ -138,6 +138,27 @@ def _upsert_issue(
         external_id=str(number),
         defaults=defaults,
     )
+    # ``Issue.save`` routes through ``BaseModel.save``, which re-stamps
+    # ``created_by`` / ``updated_by`` from ``crum.get_current_user()``.
+    # In the sync worker there is no current request user, so the audit
+    # fields land as NULL — clobbering the values we just set above.
+    # Re-stamp via ``.update`` (bypasses save) so the audit fields
+    # actually carry the workspace integration's actor.
+    #
+    # TODO: ``BaseModel.save`` already supports ``disable_auto_set_user=True``
+    # to opt out of the crum auto-stamp, but ``update_or_create`` doesn't
+    # forward kwargs to ``save``. The cleaner long-term fix is either
+    # (a) split the upsert into get + Issue(..).save(disable_auto_set_user=True)
+    # or (b) add a manager helper like ``Issue.objects.upsert_as_actor(actor, …)``
+    # so every sync worker doesn't reinvent this double-write. Leaving the
+    # workaround in place for this PR; touch when the next GitHub-sync
+    # change lands. See ``db/models/base.py:BaseModel.save``.
+    Issue.objects.filter(pk=issue.pk).update(
+        created_by_id=sync.actor_id,
+        updated_by_id=sync.actor_id,
+    )
+    issue.created_by_id = sync.actor_id
+    issue.updated_by_id = sync.actor_id
     # Note: Issue.save() auto-resolves a default state for newly-created
     # rows (see db/models/issue.py); no separate post-create state set is
     # needed here — the `default_state` parameter is kept on the signature
@@ -198,6 +219,14 @@ def _upsert_comment(
             "updated_by_id": sync.actor_id,
         },
     )
+    # Same ``BaseModel.save`` clobber as in ``_upsert_issue`` — re-stamp
+    # via ``.update`` so the audit fields stick.
+    IssueComment.objects.filter(pk=comment.pk).update(
+        created_by_id=sync.actor_id,
+        updated_by_id=sync.actor_id,
+    )
+    comment.created_by_id = sync.actor_id
+    comment.updated_by_id = sync.actor_id
     GithubCommentSync.objects.update_or_create(
         issue_sync=parent_issue_sync,
         comment=comment,

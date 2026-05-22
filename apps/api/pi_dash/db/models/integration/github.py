@@ -30,7 +30,13 @@ class GithubRepository(ProjectBaseModel):
 
 
 class GithubRepositorySync(ProjectBaseModel):
-    repository = models.OneToOneField("db.GithubRepository", on_delete=models.CASCADE, related_name="syncs")
+    # `ForeignKey`, not `OneToOneField`: the latter implicitly enforces
+    # a unique constraint on `repository_id`, which (just like the old
+    # `unique_together = [project, repository]` dropped in migration
+    # 0128) blocks rebinding a project to a previously-soft-deleted
+    # repo. The active-binding invariant is already covered by
+    # `github_repository_sync_unique_per_project_when_active` below.
+    repository = models.ForeignKey("db.GithubRepository", on_delete=models.CASCADE, related_name="syncs")
     credentials = models.JSONField(default=dict)
     # Bot user
     actor = models.ForeignKey("db.User", related_name="user_syncs", on_delete=models.CASCADE)

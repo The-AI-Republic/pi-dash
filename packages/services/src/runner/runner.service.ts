@@ -34,8 +34,19 @@ export class RunnerService extends APIService {
       });
   }
 
-  async deleteRunner(runnerId: string): Promise<void> {
-    return this.delete(`/api/runners/${runnerId}/`)
+  /**
+   * Hard-delete a runner cloud-side. Pass ``purgeLocal: true`` to also
+   * cascade the teardown to the daemon (strips the ``[[runner]]``
+   * block from ``config.toml`` and deletes the per-runner data dir);
+   * pass ``false`` (or omit) to leave the local install intact.
+   *
+   * Default is ``true`` so a caller that doesn't pass options matches
+   * the spec's default-checked checkbox.
+   */
+  async deleteRunner(runnerId: string, options?: { purgeLocal?: boolean }): Promise<void> {
+    const purge = options?.purgeLocal ?? true;
+    const url = `/api/runners/${runnerId}/?purge_local=${purge ? "true" : "false"}`;
+    return this.delete(url)
       .then(() => undefined)
       .catch((e) => {
         throw e?.response?.data;

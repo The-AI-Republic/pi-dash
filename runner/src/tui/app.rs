@@ -729,6 +729,12 @@ impl App {
             let args = crate::cli::runner::RemoveArgs {
                 name: name.clone(),
                 local_only: false,
+                // The TUI runs its own confirmation modal before
+                // dispatching this action, so the inner CLI's
+                // interactive y/N prompt is redundant — and would
+                // hang the spawned task on a stdin that the TUI is
+                // already holding.
+                yes: true,
             };
             let outcome = match crate::cli::runner::remove(args, &paths).await {
                 Ok(_) => crate::service::reload::restart_and_verify(&paths).await,

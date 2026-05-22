@@ -302,9 +302,12 @@ class TestMagicSignIn:
         user_data = json.loads(ri.get("magic_user@example.com"))
         token = user_data["token"]
 
-        # Use Django client to test the redirect flow without following redirects
+        # Use Django client to test the redirect flow without following redirects.
+        # The path must be absolute — ``validate_next_path`` rejects anything
+        # without a leading slash to prevent scheme/netloc injection, so a
+        # bare ``"workspaces"`` would be stripped before the redirect builds.
         url = reverse("magic-sign-in")
-        next_path = "workspaces"
+        next_path = "/workspaces"
         response = django_client.post(
             url,
             {"email": "user@example.com", "code": token, "next_path": next_path},

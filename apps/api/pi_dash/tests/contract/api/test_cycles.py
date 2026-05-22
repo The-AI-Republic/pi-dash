@@ -13,12 +13,19 @@ from pi_dash.db.models import Cycle, Project, ProjectMember
 
 @pytest.fixture
 def project(db, workspace, create_user):
-    """Create a test project with the user as a member"""
+    """Create a test project with the user as a member.
+
+    ``cycle_view`` defaults to ``False`` on the Project model and the
+    cycle create/update serializer refuses to operate on projects with
+    cycles disabled — these tests are specifically exercising the
+    cycle CRUD path, so the fixture turns the feature on.
+    """
     project = Project.objects.create(
         name="Test Project",
         identifier="TP",
         workspace=workspace,
         created_by=create_user,
+        cycle_view=True,
     )
     ProjectMember.objects.create(
         project=project,

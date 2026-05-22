@@ -89,14 +89,23 @@ export function AlertModalCore(props: Props) {
         )}
         <div className="text-center sm:text-left">
           <h3 className="text-16 font-medium">{title}</h3>
-          <p className="mt-1 text-13 text-secondary">{content}</p>
+          {/* `content` is typed `ReactNode | string`. Some callers pass
+              block-level + interactive content (e.g. a checkbox-bearing
+              cascade-delete dialog), which is invalid inside <p>. Use
+              <div> so any ReactNode renders without breaking layout or
+              triggering a hydration warning. */}
+          <div className="mt-1 text-13 text-secondary">{content}</div>
         </div>
       </div>
       <div className="flex flex-col-reverse gap-2 border-t-[0.5px] border-subtle px-5 py-4 sm:flex-row sm:justify-end">
         <Button variant="secondary" onClick={handleClose}>
           {secondaryButtonText}
         </Button>
-        <Button variant={BUTTON_VARIANTS[variant]} tabIndex={1} onClick={handleSubmit} loading={isSubmitting}>
+        {/* No explicit `tabIndex` — positive values disrupt natural
+            keyboard order and trip jsx-a11y/tabindex-no-positive. The
+            modal's focus trap (ModalCore) keeps focus inside the
+            dialog; Tab cycles from Cancel → Submit. */}
+        <Button variant={BUTTON_VARIANTS[variant]} onClick={handleSubmit} loading={isSubmitting}>
           {isSubmitting ? primaryButtonText.loading : primaryButtonText.default}
         </Button>
       </div>

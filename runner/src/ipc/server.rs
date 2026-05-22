@@ -237,6 +237,36 @@ impl IpcServer {
                 self.primary_state.shutdown();
                 Ok(Response::Ack)
             }
+            Request::RunnerRemoveLocal { runner } => {
+                // Synthesize a `ServerMsg::RemoveRunner` envelope into
+                // the target instance's inbound mailbox. The supervisor
+                // already has the full teardown handler for that
+                // variant (cancel run + strip config.toml + delete
+                // data dir + exit RunnerLoop), so we don't duplicate
+                // any of that logic here — we just enter the same
+                // code path the cloud's wire frame would.
+                let inst = self.resolve_runner(Some(&runner))?;
+                let envelope = crate::cloud::protocol::Envelope::for_runner(
+                    inst.runner_id,
+                    crate::cloud::protocol::ServerMsg::RemoveRunner {
+                        runner_id: inst.runner_id,
+                        reason: Some("local removal via pidash CLI".to_string()),
+                    },
+                );
+                inst.mailbox_tx
+                    .send(crate::cloud::http::InboundEnvelope {
+                        stream_id: None,
+                        env: envelope,
+                    })
+                    .await
+                    .with_context(|| {
+                        format!(
+                            "delivering synthesized RemoveRunner to {runner:?} mailbox \
+                             (loop may have already exited)"
+                        )
+                    })?;
+                Ok(Response::Ack)
+            }
         }
     }
 
