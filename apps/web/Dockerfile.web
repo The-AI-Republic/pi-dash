@@ -3,7 +3,7 @@ FROM node:22-alpine AS base
 
 # Setup pnpm package manager with corepack and configure global bin directory for caching
 ENV PNPM_HOME="/pnpm"
-ENV PATH="$PNPM_HOME:$PATH"
+ENV PATH="$PNPM_HOME:$PNPM_HOME/bin:$PATH"
 RUN corepack enable
 
 # *****************************************************************************
@@ -38,6 +38,7 @@ RUN corepack enable pnpm
 # Copy full directory structure before fetch to ensure all package.json files are available
 COPY --from=builder /app/out/full/ .
 COPY turbo.json turbo.json
+COPY pi-symbol-light.svg pi-symbol-light.svg
 
 # Fetch dependencies to cache store, then install offline with dev deps
 RUN --mount=type=cache,id=pnpm-store,target=/pnpm/store pnpm fetch --store-dir=/pnpm/store
