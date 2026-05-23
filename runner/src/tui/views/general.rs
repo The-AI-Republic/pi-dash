@@ -846,15 +846,7 @@ fn mask_token(raw: &str) -> String {
 }
 
 fn default_hostname() -> String {
-    if let Ok(h) = std::env::var("HOSTNAME")
-        && !h.is_empty()
-    {
-        return h;
-    }
-    nix::unistd::gethostname()
-        .ok()
-        .and_then(|os| os.into_string().ok())
-        .unwrap_or_else(|| "runner".to_string())
+    crate::util::hostname::default_hostname()
 }
 
 /// Submit the register form. Spawned by `App::spawn_register_submit`.

@@ -1,10 +1,14 @@
 use anyhow::{Context, Result};
 use std::collections::HashMap;
+#[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufStream};
-use tokio::net::{UnixListener, UnixStream};
+#[cfg(windows)]
+use tokio::net::windows::named_pipe::{NamedPipeServer as IpcStream, ServerOptions};
+#[cfg(unix)]
+use tokio::net::{UnixListener, UnixStream as IpcStream};
 use uuid::Uuid;
 
 use super::protocol::{Request, Response, RpcError, StatusSnapshot};
@@ -31,6 +35,7 @@ pub struct IpcServer {
 }
 
 impl IpcServer {
+    #[cfg(unix)]
     pub async fn run(self) -> Result<()> {
         // Clean up stale socket.
         let _ = tokio::fs::remove_file(&self.path).await;
@@ -69,7 +74,34 @@ impl IpcServer {
         }
     }
 
-    async fn handle_conn(&self, stream: UnixStream) -> Result<()> {
+    #[cfg(windows)]
+    pub async fn run(self) -> Result<()> {
+        let pipe_name = crate::ipc::windows_pipe_name(&self.path);
+        let mut server = ServerOptions::new()
+            .first_pipe_instance(true)
+            .create(&pipe_name)
+            .with_context(|| format!("creating named pipe {pipe_name}"))?;
+
+        let me = Arc::new(self);
+        loop {
+            server
+                .connect()
+                .await
+                .with_context(|| format!("accepting named-pipe client at {pipe_name}"))?;
+            let connected = server;
+            server = ServerOptions::new()
+                .create(&pipe_name)
+                .with_context(|| format!("creating next named pipe {pipe_name}"))?;
+            let server = me.clone();
+            tokio::spawn(async move {
+                if let Err(e) = server.handle_conn(connected).await {
+                    tracing::warn!("ipc conn error: {e:#}");
+                }
+            });
+        }
+    }
+
+    async fn handle_conn(&self, stream: IpcStream) -> Result<()> {
         let mut buf = BufStream::new(stream);
         let mut line = String::new();
         loop {
@@ -110,7 +142,7 @@ impl IpcServer {
         Ok(())
     }
 
-    async fn dispatch(&self, req: Request, buf: &mut BufStream<UnixStream>) -> Result<Response> {
+    async fn dispatch(&self, req: Request, buf: &mut BufStream<IpcStream>) -> Result<Response> {
         match req {
             Request::StatusGet => Ok(Response::Status(self.status_snapshot().await)),
             Request::StatusSubscribe => {
@@ -320,7 +352,7 @@ impl IpcServer {
     }
 }
 
-async fn write_line(buf: &mut BufStream<UnixStream>, resp: &Response) -> Result<()> {
+async fn write_line(buf: &mut BufStream<IpcStream>, resp: &Response) -> Result<()> {
     let mut line = serde_json::to_vec(resp)?;
     line.push(b'\n');
     buf.write_all(&line).await?;

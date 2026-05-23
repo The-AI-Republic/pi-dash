@@ -6,6 +6,7 @@ rust-version = "1.93"
 description = "Pi Dash local runner: connects a dev machine to the Pi Dash cloud and drives Codex for assigned tasks."
 license = "AGPL-3.0-only"
 repository = "https://github.com/The-AI-Republic/pi-dash"
+authors = ["AI Republic <privacy_security@airepublic.com>"]
 default-run = "pidash"
 
 [[bin]]
@@ -63,6 +64,7 @@ axoupdater = { version = "0.10", default-features = false, features = [
     "github_releases",
     "tokio",
 ] }
+fs2 = "0.4"
 
 [target.'cfg(unix)'.dependencies]
 nix = { version = "0.29", features = ["fs", "signal", "user", "hostname"] }
@@ -71,16 +73,8 @@ nix = { version = "0.29", features = ["fs", "signal", "user", "hostname"] }
 tempfile = "3"
 tokio = { version = "1", features = ["test-util"] }
 
-[profile.release]
-lto = "thin"
-codegen-units = 1
-strip = true
-
-[profile.dev]
-opt-level = 0
-
-# Profile cargo-dist invokes via `cargo build --profile dist` for release
-# tarballs. Inherits release's settings (LTO, single codegen unit, strip)
-# rather than redefining them so any future tweak to release flows through.
-[profile.dist]
-inherits = "release"
+[package.metadata.wix]
+upgrade-guid = "28C00FE4-83DD-4D77-9AC9-22FC8736C353"
+path-guid = "2C64B3EB-161D-48B6-8B85-B485A6D859DC"
+license = false
+eula = false

@@ -3,9 +3,13 @@ use std::path::Path;
 
 use crate::util::paths::Paths;
 
+#[cfg(target_os = "macos")]
 pub mod launchd;
 pub mod reload;
+#[cfg(target_os = "linux")]
 pub mod systemd;
+#[cfg(windows)]
+pub mod windows;
 
 /// Reject paths containing characters that would break the systemd unit /
 /// launchd plist we generate. Newlines could inject extra directives; control
@@ -72,8 +76,12 @@ pub(crate) fn capture_install_time_path() -> Option<String> {
 }
 
 pub enum Service {
+    #[cfg(target_os = "linux")]
     Systemd,
+    #[cfg(target_os = "macos")]
     Launchd,
+    #[cfg(windows)]
+    WindowsTask,
 }
 
 /// Outcome of `Service::ensure_boot_start`. Only two variants represent a
@@ -97,12 +105,19 @@ pub enum BootStartOutcome {
     EnableFailed(String),
 }
 
+#[cfg(target_os = "linux")]
 pub fn detect() -> Service {
-    if cfg!(target_os = "macos") {
-        Service::Launchd
-    } else {
-        Service::Systemd
-    }
+    Service::Systemd
+}
+
+#[cfg(target_os = "macos")]
+pub fn detect() -> Service {
+    Service::Launchd
+}
+
+#[cfg(windows)]
+pub fn detect() -> Service {
+    Service::WindowsTask
 }
 
 impl Service {
@@ -110,16 +125,24 @@ impl Service {
     /// start. Allows `pidash install` to gate activation on configuration.
     pub async fn write_unit(&self, paths: &Paths) -> Result<()> {
         match self {
+            #[cfg(target_os = "linux")]
             Service::Systemd => systemd::write_unit(paths).await,
+            #[cfg(target_os = "macos")]
             Service::Launchd => launchd::write_unit(paths).await,
+            #[cfg(windows)]
+            Service::WindowsTask => windows::write_unit(paths).await,
         }
     }
 
     /// Enable at boot/login and start now. Must run after `write_unit`.
     pub async fn enable_and_start(&self) -> Result<()> {
         match self {
+            #[cfg(target_os = "linux")]
             Service::Systemd => systemd::enable_and_start().await,
+            #[cfg(target_os = "macos")]
             Service::Launchd => launchd::enable_and_start().await,
+            #[cfg(windows)]
+            Service::WindowsTask => windows::enable_and_start().await,
         }
     }
 
@@ -129,36 +152,56 @@ impl Service {
     /// — the returned outcome drives post-install messaging.
     pub async fn ensure_boot_start(&self) -> BootStartOutcome {
         match self {
+            #[cfg(target_os = "linux")]
             Service::Systemd => systemd::ensure_linger().await,
+            #[cfg(target_os = "macos")]
             Service::Launchd => BootStartOutcome::NotApplicable,
+            #[cfg(windows)]
+            Service::WindowsTask => BootStartOutcome::NotApplicable,
         }
     }
 
     pub async fn uninstall(&self, paths: &Paths) -> Result<()> {
         match self {
+            #[cfg(target_os = "linux")]
             Service::Systemd => systemd::uninstall(paths).await,
+            #[cfg(target_os = "macos")]
             Service::Launchd => launchd::uninstall(paths).await,
+            #[cfg(windows)]
+            Service::WindowsTask => windows::uninstall(paths).await,
         }
     }
 
     pub async fn start(&self) -> Result<()> {
         match self {
+            #[cfg(target_os = "linux")]
             Service::Systemd => systemd::start().await,
+            #[cfg(target_os = "macos")]
             Service::Launchd => launchd::start().await,
+            #[cfg(windows)]
+            Service::WindowsTask => windows::start().await,
         }
     }
 
     pub async fn stop(&self) -> Result<()> {
         match self {
+            #[cfg(target_os = "linux")]
             Service::Systemd => systemd::stop().await,
+            #[cfg(target_os = "macos")]
             Service::Launchd => launchd::stop().await,
+            #[cfg(windows)]
+            Service::WindowsTask => windows::stop().await,
         }
     }
 
     pub async fn status(&self) -> Result<String> {
         match self {
+            #[cfg(target_os = "linux")]
             Service::Systemd => systemd::status().await,
+            #[cfg(target_os = "macos")]
             Service::Launchd => launchd::status().await,
+            #[cfg(windows)]
+            Service::WindowsTask => windows::status().await,
         }
     }
 }

@@ -108,16 +108,20 @@ For real self-hosted deployments (not local development), pick the path that mat
 Install the CLI on any machine where you want agents to pick up and execute tasks. Currently supported platforms:
 
 - **macOS** — Apple Silicon (arm64)
+- **macOS** — Intel (x86_64)
 - **Linux** — arm64 and x86_64
+- **Windows** — x86_64
 
-> Intel Macs are not in the prebuilt matrix — GitHub retired the `macos-13` runner image. You can still build from source on Intel macOS with Rust 1.93+.
-
-Run the following command in your dev machine terminal:
+On macOS and Linux, run the following command in your dev machine terminal:
 
 ```bash
 curl --proto '=https' --tlsv1.2 -LsSf \
   https://github.com/The-AI-Republic/pi-dash/releases/latest/download/pidash-installer.sh | sh
 ```
+
+On Windows, download and run the MSI installer:
+
+<https://github.com/The-AI-Republic/pi-dash/releases/latest/download/pidash-x86_64-pc-windows-msvc.msi>
 
 Then authenticate the machine and register a runner. The standard flow is two commands:
 
@@ -128,8 +132,8 @@ pidash auth login --url https://your-pidash-instance.com
 
 # 2. Register this host as a runner. Uses the token from step 1 — no
 #    enrollment-token paste needed. On the first runner, installs the OS
-#    service (systemd user unit on Linux, launchd agent on macOS) and
-#    starts the daemon.
+#    service (systemd user unit on Linux, launchd agent on macOS, or a
+#    per-user scheduled task on Windows) and starts the daemon.
 pidash runner add --project <project-id>
 ```
 

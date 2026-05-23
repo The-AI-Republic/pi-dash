@@ -8,7 +8,7 @@ members = ["cargo:runner"]
 [dist]
 cargo-dist-version = "0.22.1"
 ci = "github"
-installers = ["shell"]
+installers = ["shell", "powershell", "msi"]
 # cargo-dist 0.22.1 defaults to the retired ubuntu-20.04 runner image.
 # The workflow is hand-patched to ubuntu-22.04; tell cargo-dist to stop
 # policing it so `cargo dist plan` does not abort on the diff.
@@ -16,17 +16,18 @@ allow-dirty = ["ci"]
 targets = [
     "aarch64-apple-darwin",
     "aarch64-unknown-linux-gnu",
+    "x86_64-apple-darwin",
+    "x86_64-pc-windows-msvc",
     "x86_64-unknown-linux-gnu",
 ]
 pr-run-mode = "plan"
 install-path = "$HOME/.local/bin"
 
-# x86_64-apple-darwin (Intel Mac) intentionally omitted: GitHub's
-# macos-13 runner pool is effectively unavailable in 2026, so the build
-# job sits queued for hours. Apple stopped selling Intel Macs in 2023;
-# Apple Silicon (aarch64-apple-darwin) covers the modern user base.
-# Revisit via cross-compile from macos-14 if Intel Mac demand appears.
+# Intel macOS uses GitHub's current x64 image. Windows builds run on the
+# MSVC image so cargo-dist can produce archives, PowerShell, and MSI installers.
 [dist.github-custom-runners]
 aarch64-apple-darwin = "macos-14"
 aarch64-unknown-linux-gnu = "ubuntu-22.04-arm"
+x86_64-apple-darwin = "macos-15-intel"
+x86_64-pc-windows-msvc = "windows-2022"
 x86_64-unknown-linux-gnu = "ubuntu-22.04"
