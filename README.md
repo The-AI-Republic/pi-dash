@@ -119,11 +119,9 @@ curl --proto '=https' --tlsv1.2 -LsSf \
   https://github.com/The-AI-Republic/pi-dash/releases/latest/download/pidash-installer.sh | sh
 ```
 
-On Windows, run this in PowerShell:
+On Windows, download and run the MSI installer:
 
-```powershell
-powershell -ExecutionPolicy Bypass -c "irm https://github.com/The-AI-Republic/pi-dash/releases/latest/download/pidash-installer.ps1 | iex"
-```
+<https://github.com/The-AI-Republic/pi-dash/releases/latest/download/pidash-x86_64-pc-windows-msvc.msi>
 
 Then authenticate the machine and register a runner. The standard flow is two commands:
 

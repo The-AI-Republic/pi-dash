@@ -13,13 +13,11 @@ curl --proto '=https' --tlsv1.2 -LsSf \
 
 Pin to a specific version instead of `latest` by swapping in the tag, e.g. `.../releases/download/v0.1.0/pidash-installer.sh`.
 
-On Windows, use the PowerShell installer:
+On Windows, download and run the MSI installer:
 
-```powershell
-powershell -ExecutionPolicy Bypass -c "irm https://github.com/The-AI-Republic/pi-dash/releases/latest/download/pidash-installer.ps1 | iex"
-```
+<https://github.com/The-AI-Republic/pi-dash/releases/latest/download/pidash-x86_64-pc-windows-msvc.msi>
 
-Windows release assets also include a `pidash-x86_64-pc-windows-msvc.zip` archive with `pidash.exe`.
+Windows release assets also include a `pidash-installer.ps1` PowerShell installer and a `pidash-x86_64-pc-windows-msvc.zip` archive with `pidash.exe` for advanced/manual installs.
 
 **Prerequisite:** the runner shells out to [Codex](https://github.com/openai/codex) — install it and make sure `codex --version` works before running `pidash configure`. `pidash doctor` checks this.
 
@@ -76,7 +74,7 @@ pidash update --check      # report whether an update is available
 pidash update --restart    # swap and restart the daemon in one shot
 ```
 
-`pidash update` only works for binaries installed via `pidash-installer.sh` (it reads the cargo-dist install receipt). Source builds and `cargo install`'d binaries don't have a receipt and get a clear "reinstall via the installer if you want self-update" error.
+`pidash update` only works for binaries installed via cargo-dist installers such as `pidash-installer.sh`, `pidash-installer.ps1`, or the Windows MSI (it reads the cargo-dist install receipt). Source builds, zip-only installs, and `cargo install`'d binaries don't have a receipt and get a clear "reinstall via the installer if you want self-update" error.
 
 ### What the advisory states mean
 
@@ -163,7 +161,7 @@ Wire version is `4` — bumped on incompatible shape changes. See `src/cloud/pro
 
 ## Release
 
-Managed by `cargo-dist` (see `dist-workspace.toml` + `.github/workflows/release.yml`). Pushing a SemVer tag (e.g. `v0.1.0`) triggers the workflow, which builds binaries for macOS arm64/x64, Linux arm64/x64, and Windows x64, generates shell and PowerShell installers, and publishes everything to a GitHub Release.
+Managed by `cargo-dist` (see `dist-workspace.toml` + `.github/workflows/release.yml`). Pushing a SemVer tag (e.g. `v0.1.0`) triggers the workflow, which builds binaries for macOS arm64/x64, Linux arm64/x64, and Windows x64, generates shell, PowerShell, and MSI installers, and publishes everything to a GitHub Release.
 
 To cut a release:
 

@@ -11,6 +11,8 @@ on:
       - "synchronize"
       - "reopened"
     paths:
+      - "Cargo.toml"
+      - "Cargo.lock"
       - "runner/**"
       - ".github/workflows/pull-request-test-runner.yml"
 
