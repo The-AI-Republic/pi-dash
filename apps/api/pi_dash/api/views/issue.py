@@ -892,6 +892,17 @@ class IssueMoveAPIEndpoint(BaseAPIView):
         current_instance = json.dumps(IssueSerializer(issue).data, cls=DjangoJSONEncoder)
         requested_data = json.dumps({"project": str(target_project.id)}, cls=DjangoJSONEncoder)
 
+        target_state = State.objects.filter(
+            ~Q(is_triage=True),
+            project=target_project,
+            default=True,
+        ).first() or State.objects.filter(~Q(is_triage=True), project=target_project).first()
+        if target_state is None:
+            return Response(
+                {"error": "Target project does not have a workflow state"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
         with transaction.atomic():
             issue = Issue.issue_objects.select_for_update().get(workspace__slug=slug, project_id=project_id, pk=pk)
             lock_key = convert_uuid_to_integer(target_project.id)
@@ -902,12 +913,6 @@ class IssueMoveAPIEndpoint(BaseAPIView):
                 largest=Max("sequence")
             )["largest"]
             next_sequence = last_sequence + 1 if last_sequence else 1
-
-            target_state = State.objects.filter(
-                ~Q(is_triage=True),
-                project=target_project,
-                default=True,
-            ).first() or State.objects.filter(~Q(is_triage=True), project=target_project).first()
 
             issue.project = target_project
             issue.workspace = target_project.workspace

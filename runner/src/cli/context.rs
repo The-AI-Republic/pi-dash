@@ -215,25 +215,11 @@ fn parse_scalar(value: &str) -> String {
     if !(value.starts_with('"') && value.ends_with('"') && value.len() >= 2) {
         return value.to_string();
     }
-
-    let mut out = String::new();
-    let mut escaped = false;
-    for ch in value[1..value.len() - 1].chars() {
-        if escaped {
-            out.push(ch);
-            escaped = false;
-        } else if ch == '\\' {
-            escaped = true;
-        } else {
-            out.push(ch);
-        }
-    }
-    out
+    serde_json::from_str::<String>(value).unwrap_or_else(|_| value[1..value.len() - 1].to_string())
 }
 
 fn yaml_string(value: &str) -> String {
-    let escaped = value.replace('\\', "\\\\").replace('"', "\\\"");
-    format!("\"{escaped}\"")
+    serde_json::to_string(value).expect("serializing YAML scalar")
 }
 
 #[cfg(test)]
@@ -265,6 +251,22 @@ mod tests {
         assert_eq!(parsed.projects.len(), 2);
         assert_eq!(parsed.projects[0].identifier, "WEB");
         assert_eq!(parsed.projects[1].identifier, "API");
+    }
+
+    #[test]
+    fn render_parse_round_trips_escaped_strings() {
+        let mut project = project("p1", "WEB", "Website");
+        project.description = "line 1\nline \"2\" \\ path".to_string();
+        let doc = ContextDoc {
+            workspace_slug: "acme\nworkspace".to_string(),
+            default_project_id: "p1".to_string(),
+            projects: vec![project],
+        };
+
+        let parsed = parse_context(&render_context(&doc)).expect("context parses");
+
+        assert_eq!(parsed.workspace_slug, "acme\nworkspace");
+        assert_eq!(parsed.projects[0].description, "line 1\nline \"2\" \\ path");
     }
 
     #[test]
