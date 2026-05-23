@@ -276,8 +276,15 @@ jobs:
       # documented one-liner (…/releases/latest/download/install.sh)
       # resolves. The wrapper drops the binary via pidash-installer.sh
       # and immediately launches `pidash auth login`.
+      #
+      # The wrapper ships with `latest` baked into its download URL so a
+      # plain `gh release upload runner/install.sh` would mean that even
+      # a tag-pinned wrapper (…/releases/download/pidash-v0.1.0/install.sh)
+      # would silently fetch the latest binary. sed the actual tag in
+      # before upload so pinning works as documented.
       - name: Upload install.sh wrapper
         run: |
+          sed -i "s|/releases/latest/download/pidash-installer.sh|/releases/download/${{ needs.plan.outputs.tag }}/pidash-installer.sh|" runner/install.sh
           gh release upload "${{ needs.plan.outputs.tag }}" runner/install.sh --clobber
 
   announce:
