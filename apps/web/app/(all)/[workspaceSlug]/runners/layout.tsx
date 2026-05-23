@@ -5,7 +5,7 @@
  */
 
 import { observer } from "mobx-react";
-import { Bot, Circle, LayoutDashboard, ListChecks, ShieldCheck } from "lucide-react";
+import { Bot, Circle, LayoutDashboard } from "lucide-react";
 import { NavLink, Outlet, useParams } from "react-router";
 import useSWR from "swr";
 import { EUserPermissions, EUserPermissionsLevel } from "@pi-dash/constants";
@@ -90,29 +90,6 @@ const RunnersLayout = observer(function RunnersLayout() {
                 <Circle className={`size-2 fill-current ${statusColor(runner.status)}`} />
               </NavLink>
             ))}
-            <div className="mt-3 px-2 text-11 font-medium text-tertiary uppercase">Activity</div>
-            <NavLink
-              to={`${base}/runs`}
-              className={({ isActive }) =>
-                `flex h-9 items-center gap-2 rounded px-2 text-13 ${
-                  isActive ? "bg-layer-1 font-medium text-primary" : "text-secondary hover:bg-layer-1"
-                }`
-              }
-            >
-              <ListChecks className="size-4" />
-              <span>{t("runners.tabs.runs")}</span>
-            </NavLink>
-            <NavLink
-              to={`${base}/approvals`}
-              className={({ isActive }) =>
-                `flex h-9 items-center gap-2 rounded px-2 text-13 ${
-                  isActive ? "bg-layer-1 font-medium text-primary" : "text-secondary hover:bg-layer-1"
-                }`
-              }
-            >
-              <ShieldCheck className="size-4" />
-              <span>{t("runners.tabs.approvals")}</span>
-            </NavLink>
           </nav>
         </aside>
         <main className="min-w-0 flex-1 overflow-auto p-6">

@@ -26,7 +26,7 @@ function kindKey(kind: TApprovalKind): string {
   }
 }
 
-const ApprovalsPage = observer(function ApprovalsPage() {
+export const ApprovalsPage = observer(function ApprovalsPage() {
   const { t } = useTranslation();
   const { data: approvals, mutate } = useSWR<IApprovalRequest[]>("runner-approvals", () => service.listApprovals(), {
     refreshInterval: 2_000,
