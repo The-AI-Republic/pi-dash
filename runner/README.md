@@ -44,6 +44,15 @@ Or on Windows, download and run the MSI installer:
 
 <https://github.com/The-AI-Republic/pi-dash/releases/latest/download/pidash-x86_64-pc-windows-msvc.msi>
 
+The MSI is a standard double-click Windows Installer — it drops `pidash.exe` and exits. It does **not** automatically launch the auth flow (MSI typically runs elevated as the Windows Installer service, and many MSI invocations are silent for IT/Group Policy deploys, so spawning a terminal from it would be wrong). To finish setup after the MSI closes:
+
+```powershell
+# Open PowerShell and run:
+pidash
+```
+
+With no config yet, bare `pidash` drops into `auth login` and walks you through the same device-code flow as the `install.ps1` one-liner. (A discoverable Start Menu shortcut for this step is tracked as a follow-up.)
+
 Windows release assets also include a `pidash-x86_64-pc-windows-msvc.zip` archive with `pidash.exe` for advanced/manual installs.
 
 Then run the setup steps manually:
