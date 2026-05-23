@@ -4,7 +4,7 @@ Local daemon + TUI (`pidash` binary) that connects a developer machine to the Pi
 
 ## Install
 
-Prebuilt binaries for macOS (arm64) and Linux (arm64, x86_64) are published to GitHub Releases. The one-liner below downloads the installer, verifies checksums, and drops `pidash` into `$HOME/.local/bin`:
+Prebuilt binaries for macOS (arm64, x86_64), Linux (arm64, x86_64), and Windows (x86_64) are published to GitHub Releases. On macOS and Linux, the one-liner below downloads the installer, verifies checksums, and drops `pidash` into `$HOME/.local/bin`:
 
 ```bash
 curl --proto '=https' --tlsv1.2 -LsSf \
@@ -12,6 +12,14 @@ curl --proto '=https' --tlsv1.2 -LsSf \
 ```
 
 Pin to a specific version instead of `latest` by swapping in the tag, e.g. `.../releases/download/v0.1.0/pidash-installer.sh`.
+
+On Windows, use the PowerShell installer:
+
+```powershell
+powershell -ExecutionPolicy Bypass -c "irm https://github.com/The-AI-Republic/pi-dash/releases/latest/download/pidash-installer.ps1 | iex"
+```
+
+Windows release assets also include a `pidash-x86_64-pc-windows-msvc.zip` archive with `pidash.exe`.
 
 **Prerequisite:** the runner shells out to [Codex](https://github.com/openai/codex) — install it and make sure `codex --version` works before running `pidash configure`. `pidash doctor` checks this.
 
@@ -25,8 +33,8 @@ pidash auth login --url https://pidash.example.com
 
 # 2. Register this host as a runner. Uses the token from step 1 to mint
 #    runner credentials cloud-side; no enrollment-token paste needed. On
-#    the first runner, installs the systemd user unit / launchd agent and
-#    starts the daemon.
+#    the first runner, installs the systemd user unit, launchd agent, or
+#    Windows per-user scheduled task and starts the daemon.
 pidash runner add --project WEB
 
 # 3. Optional: open the interactive UI.
@@ -115,9 +123,9 @@ runner/
 │   ├── codex/                # app-server subprocess + JSON-RPC bridge
 │   ├── workspace/            # working_dir resolution + `git clone` on first task
 │   ├── approval/             # policy engine + first-writer-wins router
-│   ├── ipc/                  # Unix-socket IPC between daemon and TUI/CLI
+│   ├── ipc/                  # local IPC between daemon and TUI/CLI
 │   ├── history/              # JSONL per-run transcripts + recent-runs index
-│   ├── service/              # systemd / launchd unit generators
+│   ├── service/              # systemd / launchd / Windows scheduled-task setup
 │   ├── tui/                  # Ratatui app + views (Status / Runs / Config / Approvals)
 │   ├── config/               # TOML config + credential files (0600)
 │   └── util/                 # paths, logging, backoff, signal handling
@@ -135,13 +143,13 @@ cargo clippy -- -D warnings                  # lint
 
 From a debug build, substitute `./target/debug/pidash` for `pidash` in any of the commands above.
 
-## Runtime paths (XDG)
+## Runtime paths
 
-- Config: `~/.config/pidash/`
-- Data / logs: `~/.local/share/pidash/`
-- Runtime dir: `$XDG_RUNTIME_DIR/pidash/` (Unix socket, PID file)
+- Config: platform config directory for `pidash`
+- Data / logs: platform data directory for `pidash`
+- Runtime dir: platform runtime directory for local IPC and the PID file
 
-All secrets on disk are written with `0600`. The Unix IPC socket is also `0600`.
+On Unix-like systems, secrets on disk are written with `0600` and the IPC socket is also `0600`. On Windows, files are stored under the user's profile directories and daemon IPC uses a local named pipe.
 
 ## Protocol
 
@@ -151,11 +159,11 @@ Wire version is `4` — bumped on incompatible shape changes. See `src/cloud/pro
 
 - **Unit:** `cargo test` — deterministic table-driven tests for protocol serde, approval policy, reconnect backoff, workspace resolve, config roundtrip.
 - **Integration:** `tests/protocol_roundtrip.rs` — every client/server variant round-trips; router state machine invariants.
-- **Manual QA** (per release): macOS arm64 + Linux x64 → first-run `configure` → `install` → `start` → TUI shows connected → synthetic run via `/api/runners/runs/` → approval prompt → decision.
+- **Manual QA** (per release): macOS arm64/x64 + Linux x64 + Windows x64 -> first-run `configure` -> `install` -> `start` -> TUI shows connected -> synthetic run via `/api/runners/runs/` -> approval prompt -> decision.
 
 ## Release
 
-Managed by `cargo-dist` (see `dist-workspace.toml` + `.github/workflows/release.yml`). Pushing a SemVer tag (e.g. `v0.1.0`) triggers the workflow, which builds binaries for macOS arm64 and Linux arm64/x64, generates the shell installer, and publishes everything to a GitHub Release.
+Managed by `cargo-dist` (see `dist-workspace.toml` + `.github/workflows/release.yml`). Pushing a SemVer tag (e.g. `v0.1.0`) triggers the workflow, which builds binaries for macOS arm64/x64, Linux arm64/x64, and Windows x64, generates shell and PowerShell installers, and publishes everything to a GitHub Release.
 
 To cut a release:
 
