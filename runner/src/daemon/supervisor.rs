@@ -987,19 +987,18 @@ impl AssignWorker {
                 return Ok(());
             }
         };
-        if let Some(project_ref) = self.runner_config.project_slug.as_deref() {
-            if let Err(err) = crate::cli::context::write_context_for_project(
+        if let Some(project_ref) = self.runner_config.project_slug.as_deref()
+            && let Err(err) = crate::cli::context::write_context_for_project(
                 &self.daemon_paths,
                 &workspace_path,
                 project_ref,
             )
             .await
-            {
-                tracing::debug!(
-                    error = %err,
-                    "skipping .pidash/context.md refresh after workspace resolution",
-                );
-            }
+        {
+            tracing::debug!(
+                error = %err,
+                "skipping .pidash/context.md refresh after workspace resolution",
+            );
         }
 
         // Pre-flight checkout: if the issue pins an existing branch, land on

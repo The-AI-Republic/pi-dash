@@ -205,10 +205,9 @@ async fn resolve_create_project(
     }
     if let Some(project) = runner_ops::load_cli_default_project(paths)
         .map_err(|e| CliError::new(EXIT_UNKNOWN, format!("loading default project: {e}")))?
+        && !project.trim().is_empty()
     {
-        if !project.trim().is_empty() {
-            return Ok(project);
-        }
+        return Ok(project);
     }
     if let Some(default_project) = project::default_project(client).await? {
         return Ok(default_project.identifier);
