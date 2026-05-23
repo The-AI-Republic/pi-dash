@@ -15,6 +15,10 @@ pub struct ProjectInfo {
     pub id: Uuid,
     pub identifier: String,
     pub name: String,
+    #[serde(default)]
+    pub description: String,
+    #[serde(default)]
+    pub is_default: bool,
     pub default_pod_id: Option<Uuid>,
     #[serde(default)]
     pub pod_count: u32,

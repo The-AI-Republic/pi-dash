@@ -10,8 +10,9 @@ from enum import Enum
 
 # Django imports
 from django.conf import settings
+from django.core.exceptions import ValidationError
 from django.core.validators import MaxValueValidator, MinValueValidator, RegexValidator
-from django.db import models
+from django.db import models, transaction
 from django.db.models import Q
 from django.http import Http404
 
@@ -99,6 +100,7 @@ class Project(BaseModel):
     intake_view = models.BooleanField(default=False)
     is_time_tracking_enabled = models.BooleanField(default=False)
     is_issue_type_enabled = models.BooleanField(default=False)
+    is_default = models.BooleanField(default=False)
     guest_view_all_features = models.BooleanField(default=False)
     members_can_edit_states = models.BooleanField(default=True)
     cover_image = models.TextField(blank=True, null=True)
@@ -225,6 +227,11 @@ class Project(BaseModel):
                 condition=Q(deleted_at__isnull=True),
                 name="project_unique_name_workspace_when_deleted_at_null",
             ),
+            models.UniqueConstraint(
+                fields=["workspace"],
+                condition=Q(is_default=True, deleted_at__isnull=True),
+                name="project_unique_default_per_workspace",
+            ),
         ]
         verbose_name = "Project"
         verbose_name_plural = "Projects"
@@ -241,7 +248,37 @@ class Project(BaseModel):
             workspace = Workspace.objects.get(id=self.workspace_id)
             self.timezone = workspace.timezone
 
-        return super().save(*args, **kwargs)
+        if is_creating and not self.is_default:
+            has_default = Project.objects.filter(
+                workspace_id=self.workspace_id,
+                is_default=True,
+                deleted_at__isnull=True,
+            ).exists()
+            if not has_default:
+                self.is_default = True
+
+        if not is_creating and not self.is_default:
+            was_default = Project.objects.filter(
+                pk=self.pk,
+                is_default=True,
+                deleted_at__isnull=True,
+            ).exists()
+            has_replacement = Project.objects.filter(
+                workspace_id=self.workspace_id,
+                is_default=True,
+                deleted_at__isnull=True,
+            ).exclude(pk=self.pk).exists()
+            if was_default and not has_replacement:
+                raise ValidationError("Default project cannot be unset without assigning another default project.")
+
+        with transaction.atomic():
+            if self.is_default:
+                Project.objects.filter(
+                    workspace_id=self.workspace_id,
+                    is_default=True,
+                    deleted_at__isnull=True,
+                ).exclude(pk=self.pk).update(is_default=False)
+            return super().save(*args, **kwargs)
 
 
 class ProjectBaseModel(BaseModel):

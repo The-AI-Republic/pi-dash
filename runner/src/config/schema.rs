@@ -46,6 +46,12 @@ pub struct CliSection {
     /// when the caller doesn't pass one explicitly.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workspace_slug: Option<String>,
+
+    /// Local fallback project for non-interactive CLI and agent use.
+    /// This can be a project UUID or workspace-scoped identifier. Workspace
+    /// context files still take precedence for agent workflows.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_project: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

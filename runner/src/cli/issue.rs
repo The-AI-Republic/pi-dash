@@ -11,7 +11,9 @@ use clap::{Args, Subcommand};
 use serde_json::{Map, Value};
 
 use crate::api_client::{ApiClient, CliEnv, CliError, EXIT_INVALID, EXIT_UNKNOWN, report_error};
+use crate::cli::runner_ops;
 
+use super::project;
 use super::resolve::{looks_like_uuid, resolve_issue, resolve_state_name};
 
 #[derive(Debug, Args)]
@@ -27,9 +29,9 @@ pub enum IssueCommand {
         /// Project-scoped identifier, e.g. `ENG-42`.
         identifier: String,
     },
-    /// Create a new work item under a project. `--project` is required — the CLI
-    /// is machine-global and intentionally has no default project, so the caller
-    /// must always name one (slug like `ENG` or a project UUID).
+    /// Create a new work item under a project. If `--project` is omitted,
+    /// the CLI uses PIDASH_PROJECT_ID, local config default_project, or
+    /// the workspace default project from Pi Dash cloud.
     Create(CreateArgs),
     /// List work items in a project. Returns the server's paginated envelope
     /// (`{count, next_cursor, prev_cursor, results: [...]}`) — pass `--cursor`
@@ -37,13 +39,15 @@ pub enum IssueCommand {
     List(ListArgs),
     /// Update fields on a work item. Pass only the fields you want to change.
     Patch(PatchArgs),
+    /// Move a work item into another project in the same workspace.
+    Move(MoveArgs),
 }
 
 #[derive(Debug, Args)]
 pub struct CreateArgs {
     /// Project identifier (slug like `ENG`) or project UUID.
     #[arg(long)]
-    pub project: String,
+    pub project: Option<String>,
 
     /// Title (required).
     #[arg(long)]
@@ -103,6 +107,16 @@ pub struct PatchArgs {
     pub priority: Option<String>,
 }
 
+#[derive(Debug, Args)]
+pub struct MoveArgs {
+    /// Project-scoped identifier, e.g. `ENG-42`.
+    pub identifier: String,
+
+    /// Target project identifier (slug like `ENG`) or project UUID.
+    #[arg(long)]
+    pub project: String,
+}
+
 pub async fn run(args: IssueArgs, paths: &crate::util::paths::Paths) -> i32 {
     let env = match CliEnv::resolve(paths) {
         Ok(e) => e,
@@ -115,9 +129,10 @@ pub async fn run(args: IssueArgs, paths: &crate::util::paths::Paths) -> i32 {
 
     let result = match args.command {
         IssueCommand::Get { identifier } => cmd_get(&client, &identifier).await,
-        IssueCommand::Create(a) => cmd_create(&client, a).await,
+        IssueCommand::Create(a) => cmd_create(&client, paths, a).await,
         IssueCommand::List(a) => cmd_list(&client, a).await,
         IssueCommand::Patch(p) => cmd_patch(&client, p).await,
+        IssueCommand::Move(m) => cmd_move(&client, m).await,
     };
     match result {
         Ok(()) => 0,
@@ -134,18 +149,16 @@ async fn cmd_get(client: &ApiClient, identifier: &str) -> Result<(), CliError> {
     Ok(())
 }
 
-async fn cmd_create(client: &ApiClient, args: CreateArgs) -> Result<(), CliError> {
-    if args.project.trim().is_empty() {
-        return Err(CliError::new(EXIT_INVALID, "--project must not be empty"));
-    }
+async fn cmd_create(
+    client: &ApiClient,
+    paths: &crate::util::paths::Paths,
+    args: CreateArgs,
+) -> Result<(), CliError> {
     if args.title.trim().is_empty() {
         return Err(CliError::new(EXIT_INVALID, "--title must not be empty"));
     }
 
-    // Pass `--project` straight through. The backend accepts either a UUID or
-    // a workspace-scoped slug in the URL path, so the CLI no longer pre-resolves
-    // it. The same value seeds the state-name resolution URL below.
-    let project_ref = args.project.as_str();
+    let project_ref = resolve_create_project(client, paths, args.project.as_deref()).await?;
 
     let mut body: Map<String, Value> = Map::new();
     body.insert("name".into(), Value::String(args.title));
@@ -159,7 +172,7 @@ async fn cmd_create(client: &ApiClient, args: CreateArgs) -> Result<(), CliError
         let uuid = if looks_like_uuid(&state) {
             state
         } else {
-            resolve_state_name(client, project_ref, &state).await?
+            resolve_state_name(client, &project_ref, &state).await?
         };
         body.insert("state".into(), Value::String(uuid));
     }
@@ -174,6 +187,35 @@ async fn cmd_create(client: &ApiClient, args: CreateArgs) -> Result<(), CliError
         serde_json::to_string(&resp).expect("serialize JSON value")
     );
     Ok(())
+}
+
+async fn resolve_create_project(
+    client: &ApiClient,
+    paths: &crate::util::paths::Paths,
+    explicit: Option<&str>,
+) -> Result<String, CliError> {
+    if let Some(project) = explicit.map(str::trim).filter(|p| !p.is_empty()) {
+        return Ok(project.to_string());
+    }
+    if let Ok(project) = std::env::var("PIDASH_PROJECT_ID") {
+        let trimmed = project.trim();
+        if !trimmed.is_empty() {
+            return Ok(trimmed.to_string());
+        }
+    }
+    if let Some(project) = runner_ops::load_cli_default_project(paths)
+        .map_err(|e| CliError::new(EXIT_UNKNOWN, format!("loading default project: {e}")))?
+        && !project.trim().is_empty()
+    {
+        return Ok(project);
+    }
+    if let Some(default_project) = project::default_project(client).await? {
+        return Ok(default_project.identifier);
+    }
+    Err(CliError::new(
+        EXIT_INVALID,
+        "--project is required because no default project is configured",
+    ))
 }
 
 async fn cmd_list(client: &ApiClient, args: ListArgs) -> Result<(), CliError> {
@@ -281,6 +323,24 @@ async fn cmd_patch(client: &ApiClient, args: PatchArgs) -> Result<(), CliError> 
     Ok(())
 }
 
+async fn cmd_move(client: &ApiClient, args: MoveArgs) -> Result<(), CliError> {
+    if args.project.trim().is_empty() {
+        return Err(CliError::new(EXIT_INVALID, "--project must not be empty"));
+    }
+    let issue = resolve_issue(client, &args.identifier).await?;
+    let body = serde_json::json!({ "project": args.project });
+    let path = format!(
+        "workspaces/{}/projects/{}/work-items/{}/move/",
+        client.env.workspace_slug, issue.project_id, issue.id
+    );
+    let resp = client.post(&path, &body).await?;
+    println!(
+        "{}",
+        serde_json::to_string(&resp).expect("serialize JSON value")
+    );
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -293,10 +353,7 @@ mod tests {
     #[test]
     fn percent_encode_value_encodes_query_separators() {
         // `=`, `&`, `+`, ` ` would otherwise corrupt the query-string parse.
-        assert_eq!(
-            percent_encode_value("a=b&c+d e"),
-            "a%3Db%26c%2Bd%20e"
-        );
+        assert_eq!(percent_encode_value("a=b&c+d e"), "a%3Db%26c%2Bd%20e");
     }
 
     #[test]

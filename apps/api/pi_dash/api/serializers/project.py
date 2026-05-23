@@ -5,6 +5,7 @@
 # Third party imports
 import random
 from rest_framework import serializers
+from django.db import transaction
 
 
 # Python imports
@@ -93,6 +94,7 @@ class ProjectCreateSerializer(BaseSerializer):
             "external_id",
             "is_issue_type_enabled",
             "is_time_tracking_enabled",
+            "is_default",
             "repo_url",
             "base_branch",
         ]
@@ -154,7 +156,13 @@ class ProjectCreateSerializer(BaseSerializer):
                 },
             }
 
-        project = Project.objects.create(**validated_data, workspace_id=self.context["workspace_id"])
+        with transaction.atomic():
+            if validated_data.get("is_default") is True:
+                Project.objects.filter(workspace_id=self.context["workspace_id"], is_default=True).update(
+                    is_default=False
+                )
+
+            project = Project.objects.create(**validated_data, workspace_id=self.context["workspace_id"])
         return project
 
 
@@ -199,6 +207,16 @@ class ProjectUpdateSerializer(ProjectCreateSerializer):
         ):
             # Check if the estimate is a estimate in the project
             raise serializers.ValidationError("Estimate should be a estimate in the project")
+        if instance.is_default and validated_data.get("is_default") is False:
+            raise serializers.ValidationError(
+                "Default project cannot be unset without assigning another default project."
+            )
+        if validated_data.get("is_default") is True:
+            with transaction.atomic():
+                Project.objects.filter(workspace=instance.workspace, is_default=True).exclude(pk=instance.pk).update(
+                    is_default=False
+                )
+                return super().update(instance, validated_data)
         return super().update(instance, validated_data)
 
 
@@ -244,6 +262,11 @@ class ProjectSerializer(BaseSerializer):
         if project_identifier is not None and re.match(Project.FORBIDDEN_IDENTIFIER_CHARS_PATTERN, project_identifier):
             raise serializers.ValidationError("Project identifier cannot contain special characters.")
 
+        if self.instance and self.instance.is_default and data.get("is_default") is False:
+            raise serializers.ValidationError(
+                "Default project cannot be unset without assigning another default project."
+            )
+
         # Check project lead should be a member of the workspace
         if (
             data.get("project_lead", None) is not None
@@ -284,12 +307,18 @@ class ProjectSerializer(BaseSerializer):
         if ProjectIdentifier.objects.filter(name=identifier, workspace_id=self.context["workspace_id"]).exists():
             raise serializers.ValidationError(detail="Project Identifier is taken")
 
-        project = Project.objects.create(**validated_data, workspace_id=self.context["workspace_id"])
-        _ = ProjectIdentifier.objects.create(
-            name=project.identifier,
-            project=project,
-            workspace_id=self.context["workspace_id"],
-        )
+        with transaction.atomic():
+            if validated_data.get("is_default") is True:
+                Project.objects.filter(workspace_id=self.context["workspace_id"], is_default=True).update(
+                    is_default=False
+                )
+
+            project = Project.objects.create(**validated_data, workspace_id=self.context["workspace_id"])
+            _ = ProjectIdentifier.objects.create(
+                name=project.identifier,
+                project=project,
+                workspace_id=self.context["workspace_id"],
+            )
         return project
 
 
@@ -313,6 +342,7 @@ class ProjectLiteSerializer(BaseSerializer):
             "icon_prop",
             "emoji",
             "description",
+            "is_default",
             "cover_image_url",
         ]
         read_only_fields = fields

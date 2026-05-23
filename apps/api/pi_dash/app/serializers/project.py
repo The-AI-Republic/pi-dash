@@ -75,6 +75,11 @@ class ProjectSerializer(BaseSerializer):
         return identifier
 
     def validate(self, data):
+        if self.instance and self.instance.is_default and data.get("is_default") is False:
+            raise serializers.ValidationError(
+                "Default project cannot be unset without assigning another default project."
+            )
+
         # Validate description content for security
         if "description_html" in data and data["description_html"]:
             is_valid, error_msg, sanitized_html = validate_html_content(str(data["description_html"]))
@@ -108,6 +113,7 @@ class ProjectLiteSerializer(BaseSerializer):
             "cover_image_url",
             "logo_props",
             "description",
+            "is_default",
         ]
         read_only_fields = fields
 

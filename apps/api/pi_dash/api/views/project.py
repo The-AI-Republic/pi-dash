@@ -484,6 +484,11 @@ class ProjectDetailAPIEndpoint(BaseAPIView):
         Only admins can delete projects and the action cannot be undone.
         """
         project = Project.objects.get(pk=pk, workspace__slug=slug)
+        if project.is_default:
+            return Response(
+                {"error": "Default project cannot be deleted"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
         # Delete the user favorite cycle
         UserFavorite.objects.filter(entity_type="project", entity_identifier=pk, project_id=pk).delete()
         project.delete()

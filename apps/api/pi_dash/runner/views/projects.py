@@ -63,6 +63,8 @@ def _serialize_projects(workspace_id) -> list[dict]:
             "id": str(p.id),
             "identifier": p.identifier,
             "name": p.name,
+            "description": p.description,
+            "is_default": p.is_default,
             "default_pod_id": (
                 str(default_pod_ids[p.id]) if p.id in default_pod_ids else None
             ),

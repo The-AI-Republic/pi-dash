@@ -182,6 +182,7 @@ class ProjectViewSet(BaseViewSet):
             "module_view",
             "page_view",
             "inbox_view",
+            "is_default",
             "guest_view_all_features",
             "project_lead",
             "network",
@@ -391,6 +392,11 @@ class ProjectViewSet(BaseViewSet):
             ).exists()
         ):
             project = Project.objects.get(pk=pk, workspace__slug=slug)
+            if project.is_default:
+                return Response(
+                    {"error": "Default project cannot be deleted"},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
             project.delete()
             webhook_activity.delay(
                 event="project",
