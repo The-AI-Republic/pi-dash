@@ -8,7 +8,7 @@ members = ["cargo:runner"]
 [dist]
 cargo-dist-version = "0.22.1"
 ci = "github"
-installers = ["shell", "powershell"]
+installers = ["shell", "powershell", "msi"]
 # cargo-dist 0.22.1 defaults to the retired ubuntu-20.04 runner image.
 # The workflow is hand-patched to ubuntu-22.04; tell cargo-dist to stop
 # policing it so `cargo dist plan` does not abort on the diff.
@@ -24,7 +24,7 @@ pr-run-mode = "plan"
 install-path = "$HOME/.local/bin"
 
 # Intel macOS uses GitHub's current x64 image. Windows builds run on the
-# MSVC image so cargo-dist can produce archives plus the PowerShell installer.
+# MSVC image so cargo-dist can produce archives, PowerShell, and MSI installers.
 [dist.github-custom-runners]
 aarch64-apple-darwin = "macos-14"
 aarch64-unknown-linux-gnu = "ubuntu-22.04-arm"
