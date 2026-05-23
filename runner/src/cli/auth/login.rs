@@ -125,9 +125,33 @@ fn resolve_cloud_url(args: &Args, paths: &Paths) -> Result<String> {
             return Ok(cfg.daemon.cloud_url.trim_end_matches('/').to_string());
         }
     }
+    if std::io::stdin().is_terminal() {
+        return prompt_for_cloud_url();
+    }
     anyhow::bail!(
         "no cloud URL configured — pass --url https://your-pi-dash-instance.example.com"
     );
+}
+
+fn prompt_for_cloud_url() -> Result<String> {
+    use std::io::BufRead;
+    println!();
+    println!("Enter your Pi Dash cloud URL.");
+    println!("(For AI Republic-hosted Pi Dash this is https://pidash.airepublic.com;");
+    println!(" for a self-hosted instance use your own URL.)");
+    println!();
+    print!("Cloud URL: ");
+    std::io::stdout().flush().ok();
+    let mut line = String::new();
+    std::io::stdin()
+        .lock()
+        .read_line(&mut line)
+        .context("reading cloud URL from stdin")?;
+    let url = line.trim();
+    if url.is_empty() {
+        anyhow::bail!("no cloud URL entered — re-run `pidash auth login --url <URL>`");
+    }
+    Ok(url.trim_end_matches('/').to_string())
 }
 
 async fn start_device_code(client: &reqwest::Client, cloud_url: &str) -> Result<StartResponse> {

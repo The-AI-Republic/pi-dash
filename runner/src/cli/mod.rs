@@ -1,5 +1,5 @@
 use anyhow::Result;
-use clap::{Parser, Subcommand};
+use clap::{CommandFactory, Parser, Subcommand};
 
 pub mod auth;
 mod comment;
@@ -40,7 +40,7 @@ pub async fn run_for_tests(args: RunArgs, paths: &crate::util::paths::Paths) -> 
 #[command(name = "pidash", version, about, long_about = None)]
 pub struct Cli {
     #[command(subcommand)]
-    pub command: Command,
+    pub command: Option<Command>,
 
     /// Override config directory (XDG config by default).
     #[arg(long, global = true, env = "PIDASH_CONFIG_DIR")]
@@ -132,7 +132,11 @@ pub async fn run(cli: Cli) -> Result<()> {
     let paths = crate::util::paths::Paths::resolve(cli.config_dir.clone(), cli.data_dir.clone())?;
     tracing::debug!(?paths, "resolved runner paths");
 
-    match cli.command {
+    let Some(command) = cli.command else {
+        return run_default(&paths).await;
+    };
+
+    match command {
         Command::Auth(args) => auth::run(args, &paths).await,
         Command::Connect(args) => connect::run(args, &paths).await,
         Command::Config(args) => config_cmd::run(args, &paths).await,
@@ -155,6 +159,27 @@ pub async fn run(cli: Cli) -> Result<()> {
         Command::Workspace(args) => run_crud(workspace::run(args, &paths).await),
         Command::Run(args) => run::run(args, &paths).await,
     }
+}
+
+/// No-subcommand entrypoint. Acts as a first-run launcher: if this
+/// host has no config yet, drop straight into `pidash auth login` so
+/// the user lands in the device-code flow immediately after the
+/// install one-liner. If config already exists, fall through to
+/// clap's help so the bare command behaves like every other CLI.
+async fn run_default(paths: &crate::util::paths::Paths) -> Result<()> {
+    if !paths.config_path().exists() {
+        let args = auth::AuthArgs {
+            command: auth::AuthCommand::Login(auth::login::Args {
+                url: None,
+                no_browser: false,
+                no_runner_prompt: false,
+            }),
+        };
+        return auth::run(args, paths).await;
+    }
+    Cli::command().print_help()?;
+    println!();
+    Ok(())
 }
 
 fn run_crud(code: i32) -> Result<()> {

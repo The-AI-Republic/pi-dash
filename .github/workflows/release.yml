@@ -271,6 +271,25 @@ jobs:
 
           gh release create "${{ needs.plan.outputs.tag }}" --target "$RELEASE_COMMIT" $PRERELEASE_FLAG --title "$ANNOUNCEMENT_TITLE" --notes-file "$RUNNER_TEMP/notes.txt" artifacts/*
 
+      # Hand-added (cargo-dist doesn't know about this): publish the
+      # install.sh / install.ps1 wrappers alongside the cargo-dist
+      # artifacts so the documented one-liners
+      # (…/releases/latest/download/install.sh and …/install.ps1)
+      # resolve. Each wrapper drops the binary via the matching
+      # cargo-dist installer (pidash-installer.sh / pidash-installer.ps1)
+      # and immediately launches `pidash auth login`.
+      #
+      # The wrappers ship with `latest` baked into their download URLs
+      # so a plain upload would mean that even a tag-pinned wrapper
+      # (…/releases/download/pidash-v0.1.0/install.sh) would silently
+      # fetch the latest binary. sed the actual tag in before upload
+      # so pinning works as documented.
+      - name: Upload install wrappers
+        run: |
+          sed -i "s|/releases/latest/download/pidash-installer.sh|/releases/download/${{ needs.plan.outputs.tag }}/pidash-installer.sh|" runner/install.sh
+          sed -i "s|/releases/latest/download/pidash-installer.ps1|/releases/download/${{ needs.plan.outputs.tag }}/pidash-installer.ps1|" runner/install.ps1
+          gh release upload "${{ needs.plan.outputs.tag }}" runner/install.sh runner/install.ps1 --clobber
+
   announce:
     needs:
       - plan

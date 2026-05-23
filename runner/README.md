@@ -4,24 +4,58 @@ Local daemon + TUI (`pidash` binary) that connects a developer machine to the Pi
 
 ## Install
 
-Prebuilt binaries for macOS (arm64, x86_64), Linux (arm64, x86_64), and Windows (x86_64) are published to GitHub Releases. On macOS and Linux, the one-liner below downloads the installer, verifies checksums, and drops `pidash` into `$HOME/.local/bin`:
+Prebuilt binaries for macOS (arm64, x86_64), Linux (arm64, x86_64), and Windows (x86_64) are published to GitHub Releases. The one-liners below download the installer, verify checksums, drop `pidash` into the standard install path, and immediately start the device-code login so the host is registered with your Pi Dash cloud before you leave the terminal.
+
+**macOS and Linux:**
 
 ```bash
+curl --proto '=https' --tlsv1.2 -LsSf \
+  https://github.com/The-AI-Republic/pi-dash/releases/latest/download/install.sh | sh
+```
+
+**Windows (PowerShell):**
+
+```powershell
+irm https://github.com/The-AI-Republic/pi-dash/releases/latest/download/install.ps1 | iex
+```
+
+The installer will prompt for your Pi Dash cloud URL, walk you through device-code approval in the browser, and offer to register this host as a runner — for the typical dev-laptop case, that's the entire setup.
+
+Pin to a specific version by swapping `latest` for a tag, e.g. `.../releases/download/pidash-v0.1.0/install.sh` (or `install.ps1`).
+
+**Prerequisite:** the runner shells out to [Codex](https://github.com/openai/codex) — install it and make sure `codex --version` works before running `pidash configure`. `pidash doctor` checks this.
+
+### Alternative install paths
+
+If you'd rather install the binary without the auto-auth (e.g. for a base image, MSI-based deploy, or any CI context where auth happens later), use the underlying cargo-dist installers directly:
+
+```bash
+# macOS / Linux
 curl --proto '=https' --tlsv1.2 -LsSf \
   https://github.com/The-AI-Republic/pi-dash/releases/latest/download/pidash-installer.sh | sh
 ```
 
-Pin to a specific version instead of `latest` by swapping in the tag, e.g. `.../releases/download/v0.1.0/pidash-installer.sh`.
+```powershell
+# Windows PowerShell
+irm https://github.com/The-AI-Republic/pi-dash/releases/latest/download/pidash-installer.ps1 | iex
+```
 
-On Windows, download and run the MSI installer:
+Or on Windows, download and run the MSI installer:
 
 <https://github.com/The-AI-Republic/pi-dash/releases/latest/download/pidash-x86_64-pc-windows-msvc.msi>
 
-Windows release assets also include a `pidash-installer.ps1` PowerShell installer and a `pidash-x86_64-pc-windows-msvc.zip` archive with `pidash.exe` for advanced/manual installs.
+The MSI is a standard double-click Windows Installer — it drops `pidash.exe` and exits. It does **not** automatically launch the auth flow (MSI typically runs elevated as the Windows Installer service, and many MSI invocations are silent for IT/Group Policy deploys, so spawning a terminal from it would be wrong). To finish setup after the MSI closes:
 
-**Prerequisite:** the runner shells out to [Codex](https://github.com/openai/codex) — install it and make sure `codex --version` works before running `pidash configure`. `pidash doctor` checks this.
+```powershell
+# Open PowerShell and run:
+pidash
+```
 
-After install:
+With no config yet, bare `pidash` drops into `auth login` and walks you through the same device-code flow as the `install.ps1` one-liner. (A discoverable Start Menu shortcut for this step is tracked as a follow-up.)
+
+Windows release assets also include a `pidash-x86_64-pc-windows-msvc.zip` archive with `pidash.exe` for advanced/manual installs.
+
+Then run the setup steps manually:
 
 ```bash
 # 1. Log in as your user. Opens a browser to approve a short code shown in
@@ -39,7 +73,7 @@ pidash runner add --project WEB
 pidash tui
 ```
 
-`pidash auth login` prompts to add a runner inline when no runner exists yet on the host — for the dev-laptop case, that single command is enough.
+`pidash auth login` prompts to add a runner inline when no runner exists yet on the host — for the dev-laptop case, that single command is enough. Bare `pidash` with no subcommand also drops into the login flow when no config exists, so if you installed via the MSI or skipped auto-auth, you can re-trigger setup just by typing `pidash`.
 
 Useful follow-ups:
 
