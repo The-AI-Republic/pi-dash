@@ -44,10 +44,18 @@ interface FormValues {
   agent: TAgent;
 }
 
+type CommandOptions = Pick<FormValues, "hostLabel" | "workingDir" | "agent">;
+
 const DEFAULT_VALUES: FormValues = {
   projectIdentifier: "",
   podName: "",
   name: "",
+  hostLabel: "",
+  workingDir: "",
+  agent: DEFAULT_AGENT,
+};
+
+const DEFAULT_COMMAND_OPTIONS: CommandOptions = {
   hostLabel: "",
   workingDir: "",
   agent: DEFAULT_AGENT,
@@ -71,6 +79,7 @@ export const AddRunnerModal = observer(function AddRunnerModal(props: Props) {
   } = useForm<FormValues>({ defaultValues: DEFAULT_VALUES });
 
   const [invite, setInvite] = useState<IRunnerInvite | null>(null);
+  const [commandOptions, setCommandOptions] = useState<CommandOptions>(DEFAULT_COMMAND_OPTIONS);
 
   // Reset everything on close→open. State persists between consecutive
   // opens otherwise (RHF + local invite state would carry the stale
@@ -78,6 +87,7 @@ export const AddRunnerModal = observer(function AddRunnerModal(props: Props) {
   useEffect(() => {
     if (!isOpen) return;
     setInvite(null);
+    setCommandOptions(DEFAULT_COMMAND_OPTIONS);
     reset(DEFAULT_VALUES);
   }, [isOpen, reset]);
 
@@ -130,10 +140,6 @@ export const AddRunnerModal = observer(function AddRunnerModal(props: Props) {
     if (!stillFits) setValue("podName", "");
   }, [selectedProject, selectedPodName, podsForPicker, setValue]);
 
-  const hostLabelInput = watch("hostLabel");
-  const workingDirInput = watch("workingDir");
-  const agentInput = watch("agent");
-
   const agentOptionLabel = (value: TAgent): string =>
     value === "claude-code"
       ? t("runners.add_modal.agent_options.claude_code")
@@ -146,6 +152,11 @@ export const AddRunnerModal = observer(function AddRunnerModal(props: Props) {
         projectIdentifier: values.projectIdentifier,
         podName: values.podName || undefined,
         name: values.name.trim() || undefined,
+      });
+      setCommandOptions({
+        hostLabel: values.hostLabel,
+        workingDir: values.workingDir,
+        agent: values.agent,
       });
       setInvite(result);
       onCreated();
@@ -348,9 +359,9 @@ export const AddRunnerModal = observer(function AddRunnerModal(props: Props) {
 
           <RunnerEnrollmentCommand
             invite={invite}
-            hostLabel={hostLabelInput}
-            workingDir={workingDirInput}
-            agent={agentInput}
+            hostLabel={commandOptions.hostLabel}
+            workingDir={commandOptions.workingDir}
+            agent={commandOptions.agent}
           />
 
           <div className="flex justify-end">
