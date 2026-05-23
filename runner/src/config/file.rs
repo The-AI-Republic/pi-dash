@@ -1,9 +1,7 @@
 use anyhow::{Context, Result};
+use fs2::FileExt;
 use std::fs;
-use std::os::unix::fs::OpenOptionsExt;
 use std::path::Path;
-
-use nix::fcntl::{Flock, FlockArg};
 
 use super::schema::{Config, Credentials};
 use crate::util::paths::Paths;
@@ -107,7 +105,8 @@ where
 {
     paths.ensure()?;
     let lock_path = config_lock_path(paths);
-    let lock_file = fs::OpenOptions::new()
+    let mut lock_options = fs::OpenOptions::new();
+    lock_options
         .create(true)
         .read(true)
         .write(true)
@@ -115,12 +114,16 @@ where
         // never read or write its contents, so explicitly opt out of
         // truncation. Without this, a concurrent `mutate_config` could
         // see a 0-byte stat between the open and the flock acquisition.
-        .truncate(false)
-        .mode(0o600)
+        .truncate(false);
+    set_private_open_mode(&mut lock_options);
+    let lock_file = lock_options
         .open(&lock_path)
         .with_context(|| format!("opening config lock {lock_path:?}"))?;
-    let _guard = Flock::lock(lock_file, FlockArg::LockExclusive)
-        .map_err(|(_, errno)| anyhow::anyhow!("flock({lock_path:?}) failed: {errno}"))?;
+    set_private_permissions(&lock_path)?;
+    lock_file
+        .lock_exclusive()
+        .with_context(|| format!("locking config lock {lock_path:?}"))?;
+    let _guard = ConfigLockGuard(lock_file);
     let mut cfg = match load_config(paths) {
         Ok(c) => c,
         Err(e) => {
@@ -169,23 +172,47 @@ fn write_private(path: &Path, bytes: &[u8]) -> Result<()> {
     }
     let tmp = path.with_extension("tmp");
     {
-        let mut f = fs::OpenOptions::new()
-            .create(true)
-            .write(true)
-            .truncate(true)
-            .mode(0o600)
-            .open(&tmp)?;
+        let mut options = fs::OpenOptions::new();
+        options.create(true).write(true).truncate(true);
+        set_private_open_mode(&mut options);
+        let mut f = options.open(&tmp)?;
         use std::io::Write;
         f.write_all(bytes)?;
         f.sync_all()?;
     }
     fs::rename(&tmp, path)?;
-    // `rename` preserves the destination's mode on some filesystems; enforce 0600 again.
-    let mut perm = fs::metadata(path)?.permissions();
-    use std::os::unix::fs::PermissionsExt;
-    perm.set_mode(0o600);
-    fs::set_permissions(path, perm)?;
+    // `rename` preserves the destination's mode on some filesystems; enforce privacy again.
+    set_private_permissions(path)?;
     Ok(())
+}
+
+struct ConfigLockGuard(std::fs::File);
+
+impl Drop for ConfigLockGuard {
+    fn drop(&mut self) {
+        let _ = self.0.unlock();
+    }
+}
+
+fn set_private_permissions(path: &Path) -> Result<()> {
+    #[cfg(unix)]
+    {
+        // 0600 on Unix. Windows has no portable std equivalent for ACL
+        // tightening; the file still lands in the user's profile config dir.
+        let mut perm = fs::metadata(path)?.permissions();
+        use std::os::unix::fs::PermissionsExt;
+        perm.set_mode(0o600);
+        fs::set_permissions(path, perm)?;
+    }
+    Ok(())
+}
+
+fn set_private_open_mode(options: &mut fs::OpenOptions) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
 }
 
 #[cfg(test)]
@@ -217,6 +244,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     #[test]
     fn writes_and_reads_config_with_0600() {
         let tmp = tempdir().unwrap();

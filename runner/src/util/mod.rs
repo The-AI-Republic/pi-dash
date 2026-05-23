@@ -1,5 +1,6 @@
 pub mod backoff;
 pub mod confirm;
+pub mod hostname;
 pub mod logging;
 pub mod paths;
 pub mod runner_id;

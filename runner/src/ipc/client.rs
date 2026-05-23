@@ -1,21 +1,24 @@
 use anyhow::{Context, Result};
 use std::path::{Path, PathBuf};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, BufStream};
-use tokio::net::UnixStream;
+#[cfg(unix)]
+use tokio::net::UnixStream as IpcStream;
+#[cfg(windows)]
+use tokio::net::windows::named_pipe::{ClientOptions, NamedPipeClient as IpcStream};
 
 use super::protocol::{Request, Response};
 
 pub struct Client {
-    stream: BufStream<UnixStream>,
+    stream: BufStream<IpcStream>,
     path: PathBuf,
 }
 
 impl Client {
     pub async fn connect(path: impl AsRef<Path>) -> Result<Self> {
         let path = path.as_ref().to_path_buf();
-        let stream = UnixStream::connect(&path)
+        let stream = connect_stream(&path)
             .await
-            .with_context(|| format!("connecting to runner IPC at {path:?}"))?;
+            .with_context(|| format!("connecting to runner IPC at {}", endpoint_display(&path)))?;
         Ok(Self {
             stream: BufStream::new(stream),
             path,
@@ -49,6 +52,26 @@ impl Client {
 }
 
 /// Convenience that returns a reader half bound to the same stream.
-pub fn reader_from(stream: UnixStream) -> BufReader<UnixStream> {
+pub fn reader_from(stream: IpcStream) -> BufReader<IpcStream> {
     BufReader::new(stream)
+}
+
+#[cfg(unix)]
+async fn connect_stream(path: &Path) -> std::io::Result<IpcStream> {
+    IpcStream::connect(path).await
+}
+
+#[cfg(windows)]
+async fn connect_stream(path: &Path) -> std::io::Result<IpcStream> {
+    ClientOptions::new().open(crate::ipc::windows_pipe_name(path))
+}
+
+#[cfg(unix)]
+fn endpoint_display(path: &Path) -> String {
+    format!("{path:?}")
+}
+
+#[cfg(windows)]
+fn endpoint_display(path: &Path) -> String {
+    crate::ipc::windows_pipe_name(path)
 }
