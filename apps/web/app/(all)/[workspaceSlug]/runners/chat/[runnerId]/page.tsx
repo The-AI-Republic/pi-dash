@@ -37,6 +37,7 @@ const RunnerChatPage = observer(function RunnerChatPage() {
   const [events, setEvents] = useState<IAgentChatEvent[]>([]);
   const warmSessionRef = useRef<string | null>(null);
   const createWarmKeyRef = useRef<string | null>(null);
+  const deltaRefreshRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const { data: runner } = useSWR<IRunner>(runnerId ? ["runner-detail", runnerId] : null, () =>
     service.getDetail(runnerId!)
@@ -57,7 +58,17 @@ const RunnerChatPage = observer(function RunnerChatPage() {
   useEffect(() => {
     warmSessionRef.current = null;
     createWarmKeyRef.current = null;
+    if (deltaRefreshRef.current) {
+      clearTimeout(deltaRefreshRef.current);
+      deltaRefreshRef.current = null;
+    }
     setEvents([]);
+    return () => {
+      if (deltaRefreshRef.current) {
+        clearTimeout(deltaRefreshRef.current);
+        deltaRefreshRef.current = null;
+      }
+    };
   }, [runnerId]);
 
   useEffect(() => {
@@ -105,11 +116,16 @@ const RunnerChatPage = observer(function RunnerChatPage() {
   const handleEvent = useCallback(
     (event: IAgentChatEvent) => {
       setEvents((prev) => (prev.some((item) => item.seq === event.seq) ? prev : [...prev, event]));
-      if (
-        ["assistant_delta", "turn_started", "turn_completed", "chat_failed", "chat_closed", "chat_warmed"].includes(
-          event.kind
-        )
-      ) {
+      if (event.kind === "assistant_delta") {
+        if (!deltaRefreshRef.current) {
+          deltaRefreshRef.current = setTimeout(() => {
+            deltaRefreshRef.current = null;
+            mutateMessages();
+          }, 150);
+        }
+        return;
+      }
+      if (["turn_started", "turn_completed", "chat_failed", "chat_closed", "chat_warmed"].includes(event.kind)) {
         mutateSessions();
         mutateMessages();
       }

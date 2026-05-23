@@ -524,12 +524,17 @@ class ChatMessageStartedEndpoint(_ChatRunnerEndpointBase):
                 status=AgentChatMessageStatus.SENT,
                 local_turn_id=turn_id,
             )
+            assistant = chat_service.create_assistant_message_locked(
+                session,
+                local_turn_id=turn_id,
+            )
             session.active_turn_id = turn_id
             session.save(update_fields=["active_turn_id", "updated_at"])
             chat_service.append_event_locked(
                 session,
                 "turn_started",
                 {"message_id": str(message_id), "turn_id": turn_id},
+                message=assistant,
                 source_key=source_key,
             )
         return Response({"ok": True})

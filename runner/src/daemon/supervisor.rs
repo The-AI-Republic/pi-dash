@@ -1191,6 +1191,21 @@ async fn wait_chat_done(current: &mut Option<CurrentChat>) {
     }
 }
 
+fn chat_resume_id(
+    local_session_id: Option<&str>,
+    local_thread_id: Option<&str>,
+) -> Option<String> {
+    local_session_id
+        .filter(|s| !s.is_empty())
+        .or_else(|| local_thread_id.filter(|s| !s.is_empty()))
+        .map(ToOwned::to_owned)
+}
+
+fn bridge_has_exited(bridge: &AgentBridge) -> bool {
+    let handle = bridge.process_handle();
+    handle.exit_rx.borrow().is_some()
+}
+
 struct ChatWorker {
     runner_paths: RunnerPaths,
     runner_config: crate::config::schema::RunnerConfig,
@@ -1326,19 +1341,25 @@ impl ChatWorker {
             .as_deref()
             .ok_or_else(|| anyhow::anyhow!("chat workspace missing"))?;
 
+        if bridge.as_ref().is_some_and(bridge_has_exited) {
+            if let Some(bridge) = bridge.take() {
+                bridge.shutdown(Duration::from_secs(1)).await.ok();
+            }
+            *started_sent = false;
+        }
+
         let already_warm = bridge.is_some();
+        let resume_id = chat_resume_id(
+            warm.local_session_id.as_deref(),
+            warm.local_thread_id.as_deref(),
+        );
         if bridge.is_none() {
-            let resume_id = warm
-                .local_session_id
-                .as_deref()
-                .filter(|s| !s.is_empty())
-                .or_else(|| warm.local_thread_id.as_deref().filter(|s| !s.is_empty()));
             *bridge = Some(
                 AgentBridge::spawn_from_config_with_resume(
                     &self.runner_config,
                     workspace_path,
                     warm.model,
-                    resume_id,
+                    resume_id.as_deref(),
                 )
                 .await?,
             );
@@ -1346,13 +1367,14 @@ impl ChatWorker {
         let bridge = bridge
             .as_mut()
             .ok_or_else(|| anyhow::anyhow!("chat bridge missing"))?;
-        match bridge.warm(workspace_path).await? {
+        let warmed_thread_id = bridge.warm(workspace_path).await?;
+        match warmed_thread_id.as_ref() {
             Some(thread_id) if !*started_sent => {
                 self.out
                     .send(ClientMsg::ChatStarted {
                         chat_session_id,
                         local_thread_id: thread_id.clone(),
-                        local_session_id: Some(thread_id),
+                        local_session_id: Some(thread_id.clone()),
                         started_at: Utc::now(),
                     })
                     .await
@@ -1370,6 +1392,7 @@ impl ChatWorker {
                 kind: "chat_warmed".into(),
                 payload: serde_json::json!({
                     "already_warm": already_warm,
+                    "local_session_id": warmed_thread_id,
                 }),
             })
             .await
@@ -1393,18 +1416,24 @@ impl ChatWorker {
             .as_deref()
             .ok_or_else(|| anyhow::anyhow!("chat workspace missing"))?;
 
+        if bridge.as_ref().is_some_and(bridge_has_exited) {
+            if let Some(bridge) = bridge.take() {
+                bridge.shutdown(Duration::from_secs(1)).await.ok();
+            }
+            *started_sent = false;
+        }
+
+        let resume_id = chat_resume_id(
+            turn.local_session_id.as_deref(),
+            turn.local_thread_id.as_deref(),
+        );
         if bridge.is_none() {
-            let resume_id = turn
-                .local_session_id
-                .as_deref()
-                .filter(|s| !s.is_empty())
-                .or_else(|| turn.local_thread_id.as_deref().filter(|s| !s.is_empty()));
             *bridge = Some(
                 AgentBridge::spawn_from_config_with_resume(
                     &self.runner_config,
                     workspace_path,
                     turn.model.clone(),
-                    resume_id,
+                    resume_id.as_deref(),
                 )
                 .await?,
             );

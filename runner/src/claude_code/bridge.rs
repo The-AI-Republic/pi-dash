@@ -6,6 +6,7 @@
 //! agent dispatch layer can treat the two uniformly:
 //!
 //! - [`Bridge::spawn`] — launch the subprocess
+//! - [`Bridge::warm`] — keep the subprocess alive for an idle chat session
 //! - [`Bridge::run`] — feed the user prompt, return a per-run cursor
 //! - [`Bridge::next_events`] — pump translated events until the run ends
 //! - [`Bridge::send_approval`] — stub for MVP (bypassPermissions is on)
@@ -31,9 +32,14 @@ const INIT_TIMEOUT: Duration = Duration::from_secs(30);
 
 pub struct Bridge {
     proc: ClaudeProcess,
+    /// Claude session id captured from `system/init`, or provided by
+    /// `--resume`. The process can receive multiple user turns on stdin; the
+    /// session id belongs to that process, not to an individual turn.
+    session_id: Option<String>,
+    init_seen: bool,
     /// Events received while we were waiting synchronously for `system/init`
-    /// inside `run()`. Drained by `next_events` before touching the mpsc so
-    /// no frame is lost across the run-setup boundary.
+    /// on the first real turn. Drained by `next_events` before touching the
+    /// mpsc so no frame is lost across the run-setup boundary.
     pending: VecDeque<StreamEvent>,
 }
 
@@ -58,28 +64,61 @@ impl Bridge {
         .await?;
         Ok(Self {
             proc,
+            session_id: resume_session_id
+                .filter(|s| !s.is_empty())
+                .map(ToOwned::to_owned),
+            init_seen: false,
             pending: VecDeque::new(),
         })
     }
 
     /// Test-friendly constructor that wraps an already-built `ClaudeProcess`
     /// (typically a shell-script fake).
-    pub fn from_process(proc: ClaudeProcess, model_default: Option<String>) -> Self {
-        let _ = model_default;
+    pub fn from_process(proc: ClaudeProcess, _model_default: Option<String>) -> Self {
         Self {
             proc,
+            session_id: None,
+            init_seen: false,
             pending: VecDeque::new(),
         }
     }
 
-    /// Send the prompt and block until Claude emits its `system/init` frame
-    /// so the returned cursor carries a populated `thread_id`, matching the
-    /// Codex bridge's contract. Frames that arrive before init (rare but
-    /// allowed by the protocol) are buffered and replayed by `next_events`.
+    /// Start the subprocess for a chat session without sending user input.
+    ///
+    /// Claude's stream-json mode does not emit `system/init` until the first
+    /// user message, so warm can only guarantee that the CLI process is
+    /// spawned and stdin is open. If this bridge was created with `--resume`,
+    /// return that known session id so the cloud can keep its local-session
+    /// pointer stable while waiting for the first post-resume turn.
+    pub async fn warm(&mut self, _cwd: &Path) -> Result<Option<String>> {
+        Ok(self.session_id.clone())
+    }
+
+    /// Send the prompt and return a per-run cursor. The first real prompt waits
+    /// for Claude's session-level `system/init`; follow-up turns on the same
+    /// subprocess reuse the captured session id and do not wait for another
+    /// init frame.
     pub async fn run(&mut self, payload: &RunPayload, _cwd: &Path) -> Result<BridgeCursor> {
         let input = UserInput::user_text(&payload.prompt);
         let line = serde_json::to_string(&input)?;
         self.proc.send_line(&line).await?;
+        let thread_id = if self.init_seen {
+            self.session_id
+                .clone()
+                .unwrap_or_else(|| format!("claude-{}", payload.run_id))
+        } else {
+            self.wait_for_init(payload.run_id).await?
+        };
+        Ok(BridgeCursor {
+            run_id: payload.run_id,
+            thread_id,
+            suppress_init: true,
+            terminal: false,
+            seq: 0,
+        })
+    }
+
+    async fn wait_for_init(&mut self, run_id: Uuid) -> Result<String> {
         let deadline = tokio::time::Instant::now() + INIT_TIMEOUT;
         loop {
             let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
@@ -91,14 +130,10 @@ impl Bridge {
                     let thread_id = sys
                         .session_id
                         .clone()
-                        .unwrap_or_else(|| format!("claude-{}", payload.run_id));
-                    return Ok(BridgeCursor {
-                        run_id: payload.run_id,
-                        thread_id,
-                        init_consumed: true,
-                        terminal: false,
-                        seq: 0,
-                    });
+                        .unwrap_or_else(|| format!("claude-{run_id}"));
+                    self.session_id = Some(thread_id.clone());
+                    self.init_seen = true;
+                    return Ok(thread_id);
                 }
                 Some(other) => self.pending.push_back(other),
                 None => anyhow::bail!("claude stdout closed before emitting system/init"),
@@ -165,16 +200,16 @@ impl Bridge {
     }
 }
 
-/// Per-run translation state. The `system/init` frame is consumed inside
-/// `Bridge::run`, so by the time the cursor is handed to the supervisor the
-/// `thread_id` is already populated (matching Codex's lifecycle order).
+/// Per-run translation state. The session-level `system/init` frame is handled
+/// by the bridge before the first cursor is returned, so every cursor has a
+/// populated `thread_id` matching the Codex bridge's contract.
 pub struct BridgeCursor {
     pub run_id: Uuid,
     pub thread_id: String,
-    /// True once `Bridge::run` has eaten the leading `init` frame. A second
-    /// `system/init` is silently dropped — Claude shouldn't emit one but we
-    /// defend against it anyway.
-    init_consumed: bool,
+    /// Drop `system/init` if Claude emits it again on a later turn. The bridge
+    /// already recorded the session id and the cloud does not need a duplicate
+    /// raw init event in the chat stream.
+    suppress_init: bool,
     /// Flipped once we see a terminal `result` frame. Used to suppress any
     /// trailing frames a stubborn subprocess might emit after completion.
     terminal: bool,
@@ -190,9 +225,7 @@ impl BridgeCursor {
 
         match ev {
             StreamEvent::System(sys) => {
-                // Duplicate init is a no-op; the real init is handled in
-                // `Bridge::run` so the cursor's `thread_id` is always set.
-                if sys.subtype == "init" && self.init_consumed {
+                if sys.subtype == "init" && self.suppress_init {
                     return Vec::new();
                 }
                 let params = serde_json::to_value(&sys.rest).unwrap_or(serde_json::Value::Null);

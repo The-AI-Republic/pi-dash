@@ -318,12 +318,14 @@ impl AgentBridge {
     }
 
     /// Prepare a long-lived bridge for a chat session before the first user
-    /// turn. Codex returns the reusable thread id created during warmup;
-    /// Claude Code has no separate thread-start handshake in this bridge.
+    /// turn. Codex returns the reusable thread id created during warmup.
+    /// Claude Code starts the stream-json subprocess and returns a session id
+    /// only when one is already known from `--resume`; a fresh Claude session
+    /// does not emit `system/init` until the first user message.
     pub async fn warm(&mut self, cwd: &Path) -> Result<Option<String>> {
         match self {
             AgentBridge::Codex(b) => Ok(Some(b.warm(cwd).await?)),
-            AgentBridge::ClaudeCode(_) => Ok(None),
+            AgentBridge::ClaudeCode(b) => b.warm(cwd).await,
         }
     }
 

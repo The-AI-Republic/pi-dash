@@ -32,6 +32,49 @@ fn fake_claude_script() -> &'static str {
     "#
 }
 
+fn fake_claude_multi_turn_script() -> &'static str {
+    r#"
+        set -e
+        IFS= read -r first
+        test -n "$first"
+        printf '%s\n' '{"type":"system","subtype":"init","session_id":"sess_multi_001","model":"claude-sonnet-4-6","tools":["Read"]}'
+        printf '%s\n' '{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"first"}]},"session_id":"sess_multi_001"}'
+        printf '%s\n' '{"type":"result","subtype":"success","session_id":"sess_multi_001","result":"first done","total_cost_usd":0.0001,"usage":{"input_tokens":10,"output_tokens":5}}'
+        IFS= read -r second
+        test -n "$second"
+        printf '%s\n' '{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"second"}]},"session_id":"sess_multi_001"}'
+        printf '%s\n' '{"type":"result","subtype":"success","session_id":"sess_multi_001","result":"second done","total_cost_usd":0.0001,"usage":{"input_tokens":8,"output_tokens":4}}'
+        sleep 0.2
+    "#
+}
+
+async fn drain_until_completed(
+    bridge: &mut Bridge,
+    cursor: &mut pidash::claude_code::bridge::BridgeCursor,
+) -> serde_json::Value {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+    while tokio::time::Instant::now() < deadline {
+        let Some(events) =
+            tokio::time::timeout(Duration::from_millis(500), bridge.next_events(cursor))
+                .await
+                .ok()
+                .flatten()
+        else {
+            break;
+        };
+        for ev in events {
+            match ev {
+                BridgeEvent::Completed { done_payload, .. } => return done_payload,
+                BridgeEvent::Failed { detail, .. } => {
+                    panic!("unexpected Failed event: {detail:?}");
+                }
+                _ => {}
+            }
+        }
+    }
+    panic!("expected to observe a Completed event");
+}
+
 #[tokio::test]
 async fn bridge_happy_path_drives_fake_claude_to_completion() {
     let mut cmd = Command::new("sh");
@@ -91,6 +134,49 @@ async fn bridge_happy_path_drives_fake_claude_to_completion() {
 
     assert!(saw_assistant, "expected to observe an assistant/message");
     assert!(saw_completed, "expected to observe a Completed event");
+}
+
+#[tokio::test]
+async fn bridge_reuses_stream_json_process_for_multiple_turns() {
+    let mut cmd = Command::new("sh");
+    cmd.arg("-c").arg(fake_claude_multi_turn_script());
+    let proc = ClaudeProcess::spawn_command(cmd)
+        .await
+        .expect("spawn fake claude");
+    let mut bridge = Bridge::from_process(proc, None);
+
+    let cwd = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let first = RunPayload {
+        run_id: Uuid::new_v4(),
+        prompt: "first".into(),
+        model: None,
+    };
+    let mut first_cursor = bridge.run(&first, &cwd).await.expect("first run setup");
+    assert_eq!(first_cursor.thread_id, "sess_multi_001");
+    let first_done = drain_until_completed(&mut bridge, &mut first_cursor).await;
+    assert_eq!(
+        first_done.get("result").and_then(|v| v.as_str()),
+        Some("first done")
+    );
+
+    let second = RunPayload {
+        run_id: Uuid::new_v4(),
+        prompt: "second".into(),
+        model: None,
+    };
+    let mut second_cursor = tokio::time::timeout(
+        Duration::from_millis(500),
+        bridge.run(&second, &cwd),
+    )
+    .await
+    .expect("second run should not wait for another system/init")
+    .expect("second run setup");
+    assert_eq!(second_cursor.thread_id, "sess_multi_001");
+    let second_done = drain_until_completed(&mut bridge, &mut second_cursor).await;
+    assert_eq!(
+        second_done.get("result").and_then(|v| v.as_str()),
+        Some("second done")
+    );
 }
 
 #[tokio::test]

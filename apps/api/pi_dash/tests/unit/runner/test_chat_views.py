@@ -101,6 +101,45 @@ def test_runner_chat_failed_closes_close_requested_session(
 
 
 @pytest.mark.unit
+def test_chat_message_started_creates_assistant_placeholder(
+    db, api_client, create_user, workspace, pod, enrolled_runner, runner_token
+):
+    session = AgentChatSession.objects.create(
+        workspace=workspace,
+        runner=enrolled_runner,
+        created_by=create_user,
+        pod=pod,
+    )
+    message = AgentChatMessage.objects.create(
+        session=session,
+        role=AgentChatMessageRole.USER,
+        content="hello",
+        status=AgentChatMessageStatus.QUEUED,
+        seq=1,
+    )
+
+    resp = api_client.post(
+        f"/api/v1/runner/chat/sessions/{session.id}/messages/{message.id}/started/",
+        {"turn_id": "turn_1"},
+        format="json",
+        HTTP_AUTHORIZATION=f"Bearer {runner_token}",
+        HTTP_IDEMPOTENCY_KEY=uuid.uuid4().hex,
+    )
+
+    assert resp.status_code == 200, resp.data
+    assistant = AgentChatMessage.objects.get(
+        session=session,
+        role=AgentChatMessageRole.ASSISTANT,
+    )
+    assert assistant.content == ""
+    assert assistant.status == AgentChatMessageStatus.STREAMING
+    assert assistant.local_turn_id == "turn_1"
+    assert assistant.seq == 2
+    event = AgentChatEvent.objects.get(session=session, kind="turn_started")
+    assert event.message_id == assistant.id
+
+
+@pytest.mark.unit
 def test_runner_chat_delta_string_is_persisted_and_completed(
     db, api_client, create_user, workspace, pod, enrolled_runner, runner_token
 ):

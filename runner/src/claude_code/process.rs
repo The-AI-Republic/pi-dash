@@ -41,8 +41,8 @@ enum KillRequest {
     Force,
 }
 
-/// Arguments passed to `claude` for a run. The defaults below match the MVP
-/// policy: non-interactive, bypass permissions, stream-json I/O.
+/// Arguments passed to `claude` for a subprocess. The defaults below match the
+/// MVP policy: non-interactive, bypass permissions, stream-json I/O.
 pub struct SpawnArgs<'a> {
     pub binary: &'a str,
     pub cwd: &'a Path,
