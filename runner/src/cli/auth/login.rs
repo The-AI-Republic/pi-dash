@@ -101,8 +101,7 @@ pub async fn run(args: Args, paths: &Paths) -> Result<()> {
     // v1: a CLI install is bound to one workspace. Resolve which one
     // (auto-pick if there's only one membership; prompt otherwise),
     // persist the choice, and use it for any subsequent runner-add.
-    let workspace_slug =
-        resolve_workspace_binding(paths, &cloud_url, &token.access_token).await?;
+    let workspace_slug = resolve_workspace_binding(paths, &cloud_url, &token.access_token).await?;
     println!("  Workspace: {workspace_slug}");
 
     if args.no_runner_prompt {
@@ -125,9 +124,31 @@ fn resolve_cloud_url(args: &Args, paths: &Paths) -> Result<String> {
             return Ok(cfg.daemon.cloud_url.trim_end_matches('/').to_string());
         }
     }
-    anyhow::bail!(
-        "no cloud URL configured — pass --url https://your-pi-dash-instance.example.com"
-    );
+    if std::io::stdin().is_terminal() {
+        return prompt_for_cloud_url();
+    }
+    anyhow::bail!("no cloud URL configured — pass --url https://your-pi-dash-instance.example.com");
+}
+
+fn prompt_for_cloud_url() -> Result<String> {
+    use std::io::BufRead;
+    println!();
+    println!("Enter your Pi Dash cloud URL.");
+    println!("(For AI Republic-hosted Pi Dash this is https://pidash.airepublic.com;");
+    println!(" for a self-hosted instance use your own URL.)");
+    println!();
+    print!("Cloud URL: ");
+    std::io::stdout().flush().ok();
+    let mut line = String::new();
+    std::io::stdin()
+        .lock()
+        .read_line(&mut line)
+        .context("reading cloud URL from stdin")?;
+    let url = line.trim();
+    if url.is_empty() {
+        anyhow::bail!("no cloud URL entered — re-run `pidash auth login --url <URL>`");
+    }
+    Ok(url.trim_end_matches('/').to_string())
 }
 
 async fn start_device_code(client: &reqwest::Client, cloud_url: &str) -> Result<StartResponse> {
@@ -285,9 +306,7 @@ async fn resolve_workspace_binding(
     } else {
         if stored.is_some() {
             println!();
-            println!(
-                "(Previous workspace binding is no longer valid — pick a new one.)"
-            );
+            println!("(Previous workspace binding is no longer valid — pick a new one.)");
         }
         let picked = pick_workspace(&workspaces)?;
         picked.slug.clone()
@@ -326,8 +345,7 @@ async fn fetch_workspaces(
         let body = resp.text().await.unwrap_or_default();
         anyhow::bail!("workspace list failed: HTTP {status}: {body}");
     }
-    let parsed: WorkspaceListResponse =
-        resp.json().await.context("parsing workspace list")?;
+    let parsed: WorkspaceListResponse = resp.json().await.context("parsing workspace list")?;
     Ok(parsed.workspaces)
 }
 
@@ -369,7 +387,9 @@ async fn maybe_offer_runner_add(
     if existing_runners > 0 {
         println!();
         println!("This host already has {existing_runners} runner(s) registered.");
-        println!("Use `pidash runner add` to register another, or `pidash runner list` to see them.");
+        println!(
+            "Use `pidash runner add` to register another, or `pidash runner list` to see them."
+        );
         return Ok(());
     }
 
@@ -377,16 +397,17 @@ async fn maybe_offer_runner_add(
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(15))
         .build()?;
-    let projects =
-        match fetch_projects(&client, cloud_url, api_token).await {
-            Ok(p) => p,
-            Err(e) => {
-                // Non-fatal: we logged in fine, the picker just can't run.
-                println!();
-                println!("(Couldn't list projects: {e}. You can run `pidash runner add --project <SLUG>` later.)");
-                return Ok(());
-            }
-        };
+    let projects = match fetch_projects(&client, cloud_url, api_token).await {
+        Ok(p) => p,
+        Err(e) => {
+            // Non-fatal: we logged in fine, the picker just can't run.
+            println!();
+            println!(
+                "(Couldn't list projects: {e}. You can run `pidash runner add --project <SLUG>` later.)"
+            );
+            return Ok(());
+        }
+    };
 
     if projects.is_empty() {
         println!();
@@ -450,7 +471,10 @@ async fn fetch_projects(
 fn pick_project(projects: &[ProjectRow]) -> Result<Option<&ProjectRow>> {
     use std::io::BufRead;
     if projects.len() == 1 {
-        print!("Register this host for project '{}'? [Y/n] ", projects[0].identifier);
+        print!(
+            "Register this host for project '{}'? [Y/n] ",
+            projects[0].identifier
+        );
         std::io::stdout().flush().ok();
         let stdin = std::io::stdin();
         let mut line = String::new();
@@ -481,4 +505,3 @@ fn pick_project(projects: &[ProjectRow]) -> Result<Option<&ProjectRow>> {
     }
     Ok(Some(&projects[idx - 1]))
 }
-

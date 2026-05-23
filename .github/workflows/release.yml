@@ -271,6 +271,15 @@ jobs:
 
           gh release create "${{ needs.plan.outputs.tag }}" --target "$RELEASE_COMMIT" $PRERELEASE_FLAG --title "$ANNOUNCEMENT_TITLE" --notes-file "$RUNNER_TEMP/notes.txt" artifacts/*
 
+      # Hand-added (cargo-dist doesn't know about this): publish the
+      # install.sh wrapper alongside the cargo-dist artifacts so the
+      # documented one-liner (…/releases/latest/download/install.sh)
+      # resolves. The wrapper drops the binary via pidash-installer.sh
+      # and immediately launches `pidash auth login`.
+      - name: Upload install.sh wrapper
+        run: |
+          gh release upload "${{ needs.plan.outputs.tag }}" runner/install.sh --clobber
+
   announce:
     needs:
       - plan

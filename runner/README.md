@@ -4,18 +4,27 @@ Local daemon + TUI (`pidash` binary) that connects a developer machine to the Pi
 
 ## Install
 
-Prebuilt binaries for macOS (arm64) and Linux (arm64, x86_64) are published to GitHub Releases. The one-liner below downloads the installer, verifies checksums, and drops `pidash` into `$HOME/.local/bin`:
+Prebuilt binaries for macOS (arm64) and Linux (arm64, x86_64) are published to GitHub Releases. The one-liner below downloads the installer, verifies checksums, drops `pidash` into `$HOME/.local/bin`, and immediately starts the device-code login so the host is registered with your Pi Dash cloud before you leave the terminal:
+
+```bash
+curl --proto '=https' --tlsv1.2 -LsSf \
+  https://github.com/The-AI-Republic/pi-dash/releases/latest/download/install.sh | sh
+```
+
+The installer will prompt for your Pi Dash cloud URL, walk you through device-code approval in the browser, and offer to register this host as a runner — for the typical dev-laptop case, that's the entire setup.
+
+Pin to a specific version by swapping `latest` for a tag, e.g. `.../releases/download/pidash-v0.1.0/install.sh`.
+
+**Prerequisite:** the runner shells out to [Codex](https://github.com/openai/codex) — install it and make sure `codex --version` works before running `pidash configure`. `pidash doctor` checks this.
+
+If you'd rather install the binary without the auto-auth (e.g. for a base image where auth happens later), use the underlying cargo-dist installer directly:
 
 ```bash
 curl --proto '=https' --tlsv1.2 -LsSf \
   https://github.com/The-AI-Republic/pi-dash/releases/latest/download/pidash-installer.sh | sh
 ```
 
-Pin to a specific version instead of `latest` by swapping in the tag, e.g. `.../releases/download/v0.1.0/pidash-installer.sh`.
-
-**Prerequisite:** the runner shells out to [Codex](https://github.com/openai/codex) — install it and make sure `codex --version` works before running `pidash configure`. `pidash doctor` checks this.
-
-After install:
+Then run the setup steps manually:
 
 ```bash
 # 1. Log in as your user. Opens a browser to approve a short code shown in
@@ -33,7 +42,7 @@ pidash runner add --project WEB
 pidash tui
 ```
 
-`pidash auth login` prompts to add a runner inline when no runner exists yet on the host — for the dev-laptop case, that single command is enough.
+`pidash auth login` prompts to add a runner inline when no runner exists yet on the host — for the dev-laptop case, that single command is enough. Bare `pidash` with no subcommand also drops into the login flow when no config exists, so if you skipped auto-auth at install time you can re-trigger it just by typing `pidash`.
 
 Useful follow-ups:
 
