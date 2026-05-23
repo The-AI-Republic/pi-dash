@@ -7,6 +7,7 @@ from django.urls import path
 from pi_dash.api.views import (
     IssueListCreateAPIEndpoint,
     IssueDetailAPIEndpoint,
+    IssueMoveAPIEndpoint,
     IssueLinkListCreateAPIEndpoint,
     IssueLinkDetailAPIEndpoint,
     IssueCommentListCreateAPIEndpoint,
@@ -105,6 +106,11 @@ new_url_patterns = [
         "workspaces/<str:slug>/projects/<str:project_id>/work-items/<uuid:pk>/",
         IssueDetailAPIEndpoint.as_view(http_method_names=["get", "patch", "delete"]),
         name="work-item-detail",
+    ),
+    path(
+        "workspaces/<str:slug>/projects/<str:project_id>/work-items/<uuid:pk>/move/",
+        IssueMoveAPIEndpoint.as_view(http_method_names=["post"]),
+        name="work-item-move",
     ),
     path(
         "workspaces/<str:slug>/projects/<str:project_id>/work-items/<uuid:issue_id>/links/",

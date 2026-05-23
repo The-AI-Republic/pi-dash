@@ -18,6 +18,7 @@ from .issue import (
     WorkspaceIssueAPIEndpoint,
     IssueListCreateAPIEndpoint,
     IssueDetailAPIEndpoint,
+    IssueMoveAPIEndpoint,
     LabelListCreateAPIEndpoint,
     LabelDetailAPIEndpoint,
     IssueLinkListCreateAPIEndpoint,

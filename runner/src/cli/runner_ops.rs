@@ -70,9 +70,11 @@ pub fn write_cli_token(paths: &Paths, cloud_url: &str, token: &str) -> Result<()
         cfg.daemon.cloud_url = cloud_url.to_string();
     }
     let preserved_workspace = cfg.cli.as_ref().and_then(|c| c.workspace_slug.clone());
+    let preserved_default_project = cfg.cli.as_ref().and_then(|c| c.default_project.clone());
     cfg.cli = Some(CliSection {
         token: Some(token.to_string()),
         workspace_slug: preserved_workspace,
+        default_project: preserved_default_project,
     });
     file::write_config(paths, &cfg)?;
     Ok(())
@@ -109,6 +111,26 @@ pub fn write_cli_workspace(paths: &Paths, workspace_slug: &str) -> Result<()> {
     let mut cfg = file::load_config(paths)?;
     let mut cli = cfg.cli.unwrap_or_default();
     cli.workspace_slug = Some(workspace_slug.to_string());
+    cfg.cli = Some(cli);
+    file::write_config(paths, &cfg)?;
+    Ok(())
+}
+
+pub fn load_cli_default_project(paths: &Paths) -> Result<Option<String>> {
+    if !paths.config_path().exists() {
+        return Ok(None);
+    }
+    let cfg = file::load_config(paths)?;
+    Ok(cfg.cli.and_then(|c| c.default_project))
+}
+
+pub fn write_cli_default_project(paths: &Paths, project: &str) -> Result<()> {
+    if !paths.config_path().exists() {
+        anyhow::bail!("no config.toml — run `pidash auth login` before setting a default project");
+    }
+    let mut cfg = file::load_config(paths)?;
+    let mut cli = cfg.cli.unwrap_or_default();
+    cli.default_project = Some(project.to_string());
     cfg.cli = Some(cli);
     file::write_config(paths, &cfg)?;
     Ok(())
@@ -361,7 +383,10 @@ mod tests {
         // No credentials file should exist for r2 — the bail happened
         // before the write.
         let r2_creds = paths.for_runner(r2.runner_id).credentials_path();
-        assert!(!r2_creds.exists(), "orphan credentials file at {r2_creds:?}");
+        assert!(
+            !r2_creds.exists(),
+            "orphan credentials file at {r2_creds:?}"
+        );
     }
 
     #[test]

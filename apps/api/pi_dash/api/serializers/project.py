@@ -93,6 +93,7 @@ class ProjectCreateSerializer(BaseSerializer):
             "external_id",
             "is_issue_type_enabled",
             "is_time_tracking_enabled",
+            "is_default",
             "repo_url",
             "base_branch",
         ]
@@ -199,6 +200,10 @@ class ProjectUpdateSerializer(ProjectCreateSerializer):
         ):
             # Check if the estimate is a estimate in the project
             raise serializers.ValidationError("Estimate should be a estimate in the project")
+        if instance.is_default and validated_data.get("is_default") is False:
+            raise serializers.ValidationError(
+                "Default project cannot be unset without assigning another default project."
+            )
         return super().update(instance, validated_data)
 
 
@@ -243,6 +248,11 @@ class ProjectSerializer(BaseSerializer):
 
         if project_identifier is not None and re.match(Project.FORBIDDEN_IDENTIFIER_CHARS_PATTERN, project_identifier):
             raise serializers.ValidationError("Project identifier cannot contain special characters.")
+
+        if self.instance and self.instance.is_default and data.get("is_default") is False:
+            raise serializers.ValidationError(
+                "Default project cannot be unset without assigning another default project."
+            )
 
         # Check project lead should be a member of the workspace
         if (
@@ -313,6 +323,7 @@ class ProjectLiteSerializer(BaseSerializer):
             "icon_prop",
             "emoji",
             "description",
+            "is_default",
             "cover_image_url",
         ]
         read_only_fields = fields

@@ -3,10 +3,13 @@ use clap::{Parser, Subcommand};
 
 pub mod auth;
 mod comment;
+pub mod config_cmd;
 pub mod connect;
+pub mod context;
 pub mod doctor;
 mod install;
 mod issue;
+mod project;
 mod remove;
 pub mod resolve;
 mod restart;
@@ -62,8 +65,17 @@ pub enum Command {
     /// Enroll this dev machine with Pi Dash cloud (one-time pairing).
     Connect(connect::Args),
 
+    /// Manage local CLI configuration.
+    Config(config_cmd::ConfigArgs),
+
     /// Manage runners under the active connection (add / list / remove).
     Runner(runner::RunnerArgs),
+
+    /// Read Pi Dash projects in the active workspace.
+    Project(project::ProjectArgs),
+
+    /// Initialize or inspect local Pi Dash workspace context.
+    Context(context::ContextArgs),
 
     /// Install the OS service (systemd user unit / launchd agent).
     Install(install::Args),
@@ -123,7 +135,10 @@ pub async fn run(cli: Cli) -> Result<()> {
     match cli.command {
         Command::Auth(args) => auth::run(args, &paths).await,
         Command::Connect(args) => connect::run(args, &paths).await,
+        Command::Config(args) => config_cmd::run(args, &paths).await,
         Command::Runner(args) => runner::run(args, &paths).await,
+        Command::Project(args) => run_crud(project::run(args, &paths).await),
+        Command::Context(args) => run_crud(context::run(args, &paths).await),
         Command::Install(args) => install::run(args, &paths).await,
         Command::Uninstall(args) => uninstall::run(args, &paths).await,
         Command::Start(args) => start::run(args, &paths).await,

@@ -126,8 +126,8 @@ pub async fn add(args: AddArgs, paths: &Paths) -> Result<RunnerConfig> {
     };
 
     let host_label = hostname_or_unknown();
-    let transport = SharedHttpTransport::new(cloud_url.clone())
-        .context("building HTTP transport for cloud")?;
+    let transport =
+        SharedHttpTransport::new(cloud_url.clone()).context("building HTTP transport for cloud")?;
     // Workspace resolution order:
     //   1. Explicit `--workspace` from this call (highest precedence).
     //   2. `[cli].workspace_slug` persisted by `pidash auth login`
@@ -196,6 +196,18 @@ pub async fn add(args: AddArgs, paths: &Paths) -> Result<RunnerConfig> {
         "Added runner {} ({}) under project {}.",
         applied.runner.name, applied.runner.runner_id, resp.project_identifier
     );
+    if let Err(err) = crate::cli::context::write_context_for_project(
+        paths,
+        &applied.runner.workspace.working_dir,
+        &resp.project_identifier,
+    )
+    .await
+    {
+        println!(
+            "(Runner was added, but .pidash/context.md was not written: {})",
+            err
+        );
+    }
     if applied.is_first_runner {
         println!(
             "First runner on this host — installing service so the daemon starts automatically."
@@ -207,7 +219,10 @@ pub async fn add(args: AddArgs, paths: &Paths) -> Result<RunnerConfig> {
         // Restart so the new [[runner]] block is loaded.
         let outcome = crate::service::reload::restart_and_verify(paths).await;
         if !outcome.ok {
-            println!("(Service restart did not complete cleanly: {})", outcome.summary);
+            println!(
+                "(Service restart did not complete cleanly: {})",
+                outcome.summary
+            );
             if let Some(detail) = outcome.detail {
                 println!("{detail}");
             }
