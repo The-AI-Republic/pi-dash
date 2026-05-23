@@ -75,6 +75,8 @@ from pi_dash.db.models import (
     IssueComment,
     IssueLink,
     IssueRelation,
+    IssueMention,
+    IssueReaction,
     Label,
     Project,
     ProjectMember,
@@ -82,9 +84,15 @@ from pi_dash.db.models import (
     State,
     IssueAssignee,
     IssueLabel,
+    IssueSubscriber,
+    IssueVote,
+    IssueVersion,
+    IssueDescriptionVersion,
     IssueSequence,
     ModuleIssue,
     Workspace,
+    CommentReaction,
+    Description,
 )
 from pi_dash.runner.models import Pod
 from pi_dash.settings.storage import S3Storage
@@ -885,6 +893,7 @@ class IssueMoveAPIEndpoint(BaseAPIView):
         requested_data = json.dumps({"project": str(target_project.id)}, cls=DjangoJSONEncoder)
 
         with transaction.atomic():
+            issue = Issue.issue_objects.select_for_update().get(workspace__slug=slug, project_id=project_id, pk=pk)
             lock_key = convert_uuid_to_integer(target_project.id)
             with connection.cursor() as cursor:
                 cursor.execute("SELECT pg_advisory_xact_lock(%s)", [lock_key])
@@ -905,8 +914,24 @@ class IssueMoveAPIEndpoint(BaseAPIView):
             issue.sequence_id = next_sequence
             issue.state = target_state
             issue.assigned_pod = Pod.default_for_project_id(target_project.id)
-            issue.save(update_fields=["project", "workspace", "sequence_id", "state", "assigned_pod", "updated_at"])
+            issue.parent = None
+            issue.estimate_point = None
+            issue.type = None
+            issue.save(
+                update_fields=[
+                    "project",
+                    "workspace",
+                    "sequence_id",
+                    "state",
+                    "assigned_pod",
+                    "parent",
+                    "estimate_point",
+                    "type",
+                    "updated_at",
+                ]
+            )
 
+            IssueSequence.objects.filter(issue=issue).exclude(project=target_project).update(issue=None)
             IssueSequence.objects.create(issue=issue, sequence=next_sequence, project=target_project)
 
             valid_assignees = ProjectMember.objects.filter(
@@ -924,6 +949,34 @@ class IssueMoveAPIEndpoint(BaseAPIView):
             IssueLabel.objects.filter(issue=issue).delete()
             CycleIssue.objects.filter(issue=issue).delete()
             ModuleIssue.objects.filter(issue=issue).delete()
+            IssueRelation.objects.filter(Q(issue=issue) | Q(related_issue=issue)).delete()
+            Issue.objects.filter(parent=issue).exclude(project=target_project).update(parent=None)
+
+            comment_ids = list(IssueComment.objects.filter(issue=issue).values_list("id", flat=True))
+            description_ids = list(
+                IssueComment.objects.filter(issue=issue, description__isnull=False).values_list(
+                    "description_id", flat=True
+                )
+            )
+
+            update_kwargs = {
+                "project": target_project,
+                "workspace": target_project.workspace,
+            }
+            IssueLink.objects.filter(issue=issue).update(**update_kwargs)
+            IssueMention.objects.filter(issue=issue).update(**update_kwargs)
+            IssueSubscriber.objects.filter(issue=issue).update(**update_kwargs)
+            IssueReaction.objects.filter(issue=issue).update(**update_kwargs)
+            IssueVote.objects.filter(issue=issue).update(**update_kwargs)
+            IssueVersion.objects.filter(issue=issue).update(**update_kwargs)
+            IssueDescriptionVersion.objects.filter(issue=issue).update(**update_kwargs)
+            IssueActivity.objects.filter(Q(issue=issue) | Q(issue_comment_id__in=comment_ids)).update(
+                **update_kwargs
+            )
+            IssueComment.objects.filter(issue=issue).update(**update_kwargs)
+            CommentReaction.objects.filter(comment_id__in=comment_ids).update(**update_kwargs)
+            Description.objects.filter(id__in=description_ids).update(**update_kwargs)
+            FileAsset.objects.filter(Q(issue=issue) | Q(comment_id__in=comment_ids)).update(**update_kwargs)
 
         issue_activity.delay(
             type="issue.activity.updated",

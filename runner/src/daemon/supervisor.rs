@@ -675,6 +675,7 @@ impl RunnerLoop {
                         }))
                         .await;
                     let runner_paths = self.runner_paths.clone();
+                    let daemon_paths = self.paths.clone();
                     let runner_config = self.runner_config.clone();
                     let state = self.state.clone();
                     let approvals = self.approvals.clone();
@@ -682,6 +683,7 @@ impl RunnerLoop {
                     tokio::spawn(async move {
                         let mut worker = AssignWorker {
                             runner_paths,
+                            daemon_paths,
                             runner_config,
                             state,
                             approvals,
@@ -905,6 +907,7 @@ async fn wait_done(current: &mut Option<CurrentRun>) {
 /// `self.cancel` and `self.approvals`.
 struct AssignWorker {
     runner_paths: RunnerPaths,
+    daemon_paths: Paths,
     runner_config: crate::config::schema::RunnerConfig,
     state: StateHandle,
     approvals: ApprovalRouter,
@@ -984,6 +987,20 @@ impl AssignWorker {
                 return Ok(());
             }
         };
+        if let Some(project_ref) = self.runner_config.project_slug.as_deref() {
+            if let Err(err) = crate::cli::context::write_context_for_project(
+                &self.daemon_paths,
+                &workspace_path,
+                project_ref,
+            )
+            .await
+            {
+                tracing::debug!(
+                    error = %err,
+                    "skipping .pidash/context.md refresh after workspace resolution",
+                );
+            }
+        }
 
         // Pre-flight checkout: if the issue pins an existing branch, land on
         // it before the agent runs so it commits onto that branch directly.

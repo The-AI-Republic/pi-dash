@@ -6,7 +6,10 @@
 
 use clap::{Args, Subcommand};
 
+use crate::api_client::{ApiClient, CliEnv, CliError, EXIT_UNKNOWN, report_error};
 use crate::cli::runner_ops;
+
+use super::project::resolve_project;
 
 #[derive(Debug, Args)]
 pub struct ConfigArgs {
@@ -37,13 +40,38 @@ pub enum SetCommand {
 }
 
 pub async fn run(args: ConfigArgs, paths: &crate::util::paths::Paths) -> anyhow::Result<()> {
-    match args.command {
+    let result = match args.command {
         ConfigCommand::Set(s) => match s.command {
-            SetCommand::DefaultProject { project } => {
-                runner_ops::write_cli_default_project(paths, &project)?;
-                println!("Set default project to {project}.");
-            }
+            SetCommand::DefaultProject { project } => set_default_project(paths, &project).await,
         },
+    };
+    match result {
+        Ok(()) => Ok(()),
+        Err(e) => {
+            let code = report_error(&e);
+            std::process::exit(code);
+        }
     }
+}
+
+async fn set_default_project(
+    paths: &crate::util::paths::Paths,
+    project_ref: &str,
+) -> Result<(), CliError> {
+    let env = CliEnv::resolve(paths)?;
+    let client = ApiClient::new(env).map_err(|e| CliError::new(EXIT_UNKNOWN, format!("{e}")))?;
+    let project = resolve_project(&client, project_ref).await?;
+    let path = format!(
+        "workspaces/{}/projects/{}/",
+        client.env.workspace_slug, project.id
+    );
+    let body = serde_json::json!({ "is_default": true });
+    client.patch(&path, &body).await?;
+    runner_ops::write_cli_default_project(paths, &project.identifier)
+        .map_err(|e| CliError::new(EXIT_UNKNOWN, format!("writing default project: {e}")))?;
+    println!(
+        "Set default project to {} ({}).",
+        project.name, project.identifier
+    );
     Ok(())
 }
