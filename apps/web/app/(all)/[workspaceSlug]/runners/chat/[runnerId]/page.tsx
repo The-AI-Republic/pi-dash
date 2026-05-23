@@ -18,6 +18,61 @@ import { useWorkspace } from "@/hooks/store/use-workspace";
 
 const service = new RunnerService();
 
+function assistantDeltaText(payload: Record<string, unknown>): string {
+  const params = payload.params;
+  if (!params || typeof params !== "object" || Array.isArray(params)) return "";
+  const paramsObject = params as Record<string, unknown>;
+  const delta = paramsObject.delta;
+  if (typeof delta === "string") return delta;
+  if (delta && typeof delta === "object" && !Array.isArray(delta)) {
+    const text = (delta as Record<string, unknown>).text;
+    if (typeof text === "string") return text;
+  }
+  const text = paramsObject.text;
+  return typeof text === "string" ? text : "";
+}
+
+function isRealtimeEvent(event: IAgentChatEvent, streamStartedAt: number): boolean {
+  const eventTime = Date.parse(event.created_at);
+  return Number.isFinite(eventTime) && eventTime >= streamStartedAt - 500;
+}
+
+function appendAssistantDelta(
+  messages: IAgentChatMessage[],
+  event: IAgentChatEvent,
+  delta: string,
+  sessionId: string | undefined
+): IAgentChatMessage[] {
+  const messageId = event.message;
+  if (!messageId) return messages;
+  let found = false;
+  const next = messages.map((message) => {
+    if (message.id !== messageId) return message;
+    found = true;
+    if (message.status !== "streaming") return message;
+    return { ...message, content: `${message.content || ""}${delta}` };
+  });
+  if (found) return next;
+
+  const seq = messages.reduce((max, message) => Math.max(max, message.seq), 0) + 1;
+  return [
+    ...messages,
+    {
+      id: messageId,
+      session: sessionId ?? event.session,
+      role: "assistant",
+      content: delta,
+      content_parts: [],
+      status: "streaming",
+      local_item_id: "",
+      local_turn_id: typeof event.payload.turn_id === "string" ? event.payload.turn_id : "",
+      seq,
+      created_at: event.created_at,
+      completed_at: null,
+    },
+  ];
+}
+
 function disabledReason(runner?: IRunner, session?: IAgentChatSession | null): string | null {
   if (!runner) return "Loading";
   if (runner.status === "offline") return "Runner offline";
@@ -35,9 +90,11 @@ const RunnerChatPage = observer(function RunnerChatPage() {
   const [draft, setDraft] = useState("");
   const [sending, setSending] = useState(false);
   const [events, setEvents] = useState<IAgentChatEvent[]>([]);
+  const [liveMessages, setLiveMessages] = useState<IAgentChatMessage[]>([]);
   const warmSessionRef = useRef<string | null>(null);
   const createWarmKeyRef = useRef<string | null>(null);
-  const deltaRefreshRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const appliedDeltaSeqsRef = useRef<Set<number>>(new Set());
+  const streamStartedAtRef = useRef(Date.now());
 
   const { data: runner } = useSWR<IRunner>(runnerId ? ["runner-detail", runnerId] : null, () =>
     service.getDetail(runnerId!)
@@ -58,18 +115,15 @@ const RunnerChatPage = observer(function RunnerChatPage() {
   useEffect(() => {
     warmSessionRef.current = null;
     createWarmKeyRef.current = null;
-    if (deltaRefreshRef.current) {
-      clearTimeout(deltaRefreshRef.current);
-      deltaRefreshRef.current = null;
-    }
     setEvents([]);
-    return () => {
-      if (deltaRefreshRef.current) {
-        clearTimeout(deltaRefreshRef.current);
-        deltaRefreshRef.current = null;
-      }
-    };
   }, [runnerId]);
+
+  useEffect(() => {
+    appliedDeltaSeqsRef.current = new Set();
+    streamStartedAtRef.current = Date.now();
+    setEvents([]);
+    setLiveMessages([]);
+  }, [session?.id]);
 
   useEffect(() => {
     let cancelled = false;
@@ -113,15 +167,20 @@ const RunnerChatPage = observer(function RunnerChatPage() {
     () => service.listChatMessages(session!.id)
   );
 
+  useEffect(() => {
+    setLiveMessages(messages ?? []);
+  }, [messages]);
+
   const handleEvent = useCallback(
     (event: IAgentChatEvent) => {
       setEvents((prev) => (prev.some((item) => item.seq === event.seq) ? prev : [...prev, event]));
       if (event.kind === "assistant_delta") {
-        if (!deltaRefreshRef.current) {
-          deltaRefreshRef.current = setTimeout(() => {
-            deltaRefreshRef.current = null;
-            mutateMessages();
-          }, 150);
+        if (!appliedDeltaSeqsRef.current.has(event.seq)) {
+          appliedDeltaSeqsRef.current.add(event.seq);
+          const delta = assistantDeltaText(event.payload);
+          if (delta && isRealtimeEvent(event, streamStartedAtRef.current)) {
+            setLiveMessages((prev) => appendAssistantDelta(prev, event, delta, session?.id));
+          }
         }
         return;
       }
@@ -130,7 +189,7 @@ const RunnerChatPage = observer(function RunnerChatPage() {
         mutateMessages();
       }
     },
-    [mutateMessages, mutateSessions]
+    [mutateMessages, mutateSessions, session?.id]
   );
   useAgentChatEvents(session?.id, 0, handleEvent);
 
@@ -180,7 +239,7 @@ const RunnerChatPage = observer(function RunnerChatPage() {
   }
 
   const reason = disabledReason(runner, session);
-  const rows = messages ?? [];
+  const rows = liveMessages;
 
   return (
     <div className="flex h-full min-h-[640px] flex-col overflow-hidden">
