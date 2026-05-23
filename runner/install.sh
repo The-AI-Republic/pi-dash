@@ -38,7 +38,13 @@ echo ""
 # pipe and an interactive prompt would see EOF. Reattach /dev/tty so
 # the device-code flow can read keystrokes for the workspace and
 # runner-add prompts.
-if [ -e /dev/tty ]; then
+#
+# `[ -e /dev/tty ]` is not enough: the device node exists on disk even
+# in headless contexts (Docker without -t, cron, systemd, SSH without
+# -t), so the check would pass and then `< /dev/tty` would crash with
+# "No such device or address". Probe openability by actually trying to
+# read from /dev/tty in a subshell.
+if (: </dev/tty) 2>/dev/null; then
   exec "$PIDASH_BIN" auth login < /dev/tty
 fi
 
