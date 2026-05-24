@@ -281,13 +281,9 @@ class DeviceCodeTokenEndpoint(APIView):
                     status=status.HTTP_400_BAD_REQUEST,
                 )
 
-            # Approved + not yet consumed: mint a fresh APIToken for the
-            # user and consume the row in the same transaction. The label
-            # is what surfaces in the settings UI's token list; the default
-            # `generate_label_token` would render as an opaque hex string
-            # next to user-created PATs, so set a human-readable one with
-            # the issue time so the user can spot which row a given
-            # `pidash auth login` produced.
+            # Override the default `generate_label_token` (opaque hex)
+            # so this row is distinguishable from user-created PATs in
+            # the settings UI token list.
             api_token = APIToken.objects.create(
                 user=row.user,
                 workspace=row.workspace,
