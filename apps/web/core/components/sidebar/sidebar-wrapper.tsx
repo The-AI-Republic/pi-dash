@@ -6,6 +6,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import { observer } from "mobx-react";
+import { useTheme } from "next-themes";
 // pi dash helpers
 import { useOutsideClickDetector } from "@pi-dash/hooks";
 import { PreferencesIcon } from "@pi-dash/propel/icons";
@@ -19,6 +20,9 @@ import useSize from "@/hooks/use-window-size";
 import { WorkspaceEditionBadge } from "@/pi-dash-web/components/workspace/edition-badge";
 import { AppSidebarToggleButton } from "./sidebar-toggle-button";
 import { IconButton } from "@pi-dash/propel/icon-button";
+// assets
+import piSymbolDark from "@/app/assets/pi-dash-logos/pi-symbol-dark.svg?url";
+import piSymbolLight from "@/app/assets/pi-dash-logos/pi-symbol-light.svg?url";
 
 type TSidebarWrapperProps = {
   title: string;
@@ -33,6 +37,8 @@ export const SidebarWrapper = observer(function SidebarWrapper(props: TSidebarWr
   // store hooks
   const { toggleSidebar, sidebarCollapsed } = useAppTheme();
   const windowSize = useSize();
+  const { resolvedTheme } = useTheme();
+  const logoSrc = resolvedTheme === "dark" ? piSymbolDark : piSymbolLight;
   // refs
   const ref = useRef<HTMLDivElement>(null);
 
@@ -55,7 +61,10 @@ export const SidebarWrapper = observer(function SidebarWrapper(props: TSidebarWr
           {/* Workspace switcher and settings */}
 
           <div className="flex items-center justify-between gap-2 px-2">
-            <span className="pt-1 text-16 font-medium text-primary">{title}</span>
+            <div className="flex items-center gap-2">
+              <img src={logoSrc} alt="Pi Dash" className="h-5 w-5 object-contain" aria-hidden="true" />
+              <span className="pt-1 text-16 font-medium text-primary">{title}</span>
+            </div>
             <div className="flex items-center gap-2">
               {title === "Projects" && (
                 <IconButton

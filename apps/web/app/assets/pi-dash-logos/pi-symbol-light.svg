@@ -1,0 +1,16 @@
+<svg width="258" height="140" viewBox="30 0 258 140" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="dot dash dash dot icon, shorter dashes, evenly spaced">
+  <title>Dot dash dash dot - shorter dashes, evenly spaced</title>
+  <g fill="currentColor">
+    <!-- dot -->
+    <circle cx="54" cy="70" r="24"/>
+
+    <!-- dash: rounded on both sides, a little longer than dot -->
+    <rect x="84" y="46" width="72" height="48" rx="24" ry="24"/>
+
+    <!-- dash: rounded on both sides, a little longer than dot -->
+    <rect x="162" y="46" width="72" height="48" rx="24" ry="24"/>
+
+    <!-- dot -->
+    <circle cx="264" cy="70" r="24"/>
+  </g>
+</svg>
