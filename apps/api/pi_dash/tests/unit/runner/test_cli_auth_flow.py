@@ -65,8 +65,11 @@ def test_token_poll_pending_then_approved_mints_apitoken(
     assert poll2.status_code == 200, poll2.data
     assert poll2.data["access_token"].startswith("pi_dash_api_")
     assert poll2.data["user_email"] == create_user.email
-    # APIToken row exists.
-    assert APIToken.objects.filter(token=poll2.data["access_token"], user=create_user).exists()
+    # APIToken row exists with a human-readable label (not the default
+    # opaque hex from `generate_label_token`) so users can recognize it
+    # alongside manually-created PATs in the settings UI.
+    minted = APIToken.objects.get(token=poll2.data["access_token"], user=create_user)
+    assert minted.label.startswith("pidash CLI")
     # Row marked consumed.
     row = CLIDeviceCode.objects.get(device_code=start["device_code"])
     assert row.consumed is True

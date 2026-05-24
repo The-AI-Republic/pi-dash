@@ -282,11 +282,17 @@ class DeviceCodeTokenEndpoint(APIView):
                 )
 
             # Approved + not yet consumed: mint a fresh APIToken for the
-            # user and consume the row in the same transaction.
+            # user and consume the row in the same transaction. The label
+            # is what surfaces in the settings UI's token list; the default
+            # `generate_label_token` would render as an opaque hex string
+            # next to user-created PATs, so set a human-readable one with
+            # the issue time so the user can spot which row a given
+            # `pidash auth login` produced.
             api_token = APIToken.objects.create(
                 user=row.user,
                 workspace=row.workspace,
                 user_type=0,  # Human
+                label=f"pidash CLI · {now.strftime('%Y-%m-%d %H:%M')} UTC",
                 description="Issued by pidash auth login (device-code flow).",
             )
             row.consumed = True
