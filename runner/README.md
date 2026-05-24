@@ -21,7 +21,34 @@ irm https://github.com/The-AI-Republic/pi-dash/releases/latest/download/install.
 
 The installer will prompt for your Pi Dash cloud URL, walk you through device-code approval in the browser, and offer to register this host as a runner — for the typical dev-laptop case, that's the entire setup.
 
-Pin to a specific version by swapping `latest` for a tag, e.g. `.../releases/download/pidash-v0.1.0/install.sh` (or `install.ps1`).
+### Installing a specific version (pinning / prereleases)
+
+Both the wrapper (`install.sh` / `install.ps1`) and the underlying cargo-dist installer (`pidash-installer.sh` / `pidash-installer.ps1`) select a release purely by URL path — swap `latest` for the tag you want:
+
+```bash
+# macOS / Linux — wrapper (with auto-auth)
+curl --proto '=https' --tlsv1.2 -LsSf \
+  https://github.com/The-AI-Republic/pi-dash/releases/download/pidash-v0.1.0/install.sh | sh
+
+# macOS / Linux — bare installer (no auto-auth)
+curl --proto '=https' --tlsv1.2 -LsSf \
+  https://github.com/The-AI-Republic/pi-dash/releases/download/pidash-v0.1.0/pidash-installer.sh | sh
+```
+
+```powershell
+# Windows — wrapper
+irm https://github.com/The-AI-Republic/pi-dash/releases/download/pidash-v0.1.0/install.ps1 | iex
+
+# Windows — bare installer
+irm https://github.com/The-AI-Republic/pi-dash/releases/download/pidash-v0.1.0/pidash-installer.ps1 | iex
+```
+
+**Prereleases** (tags with a SemVer suffix like `-rc.1`, `-alpha.1`, `-beta.1`) are deliberately excluded from `/releases/latest/`, so the public one-liners above keep serving the last stable release. To install a prerelease for testing, use the tag-pinned URL above with the rc tag, e.g.:
+
+```bash
+curl --proto '=https' --tlsv1.2 -LsSf \
+  https://github.com/The-AI-Republic/pi-dash/releases/download/pidash-v0.1.4-rc.1/install.sh | sh
+```
 
 **Prerequisite:** the runner shells out to [Codex](https://github.com/openai/codex) — install it and make sure `codex --version` works before running `pidash configure`. `pidash doctor` checks this.
 
