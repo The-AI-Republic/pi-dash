@@ -236,12 +236,12 @@ impl StateHandle {
 
     /// Bump `last_event_at` and stamp `kind` / `summary` atomically.
     /// Called from `pump_events` on every `BridgeEvent` regardless of variant.
-    pub async fn note_agent_event(&self, ts: DateTime<Utc>, kind: String, summary: Option<String>) {
+    pub async fn note_agent_event(&self, ts: DateTime<Utc>, kind: &str, summary: Option<&str>) {
         let mut snap = self.inner.run_snapshot.lock().await;
         snap.last_event_at = Some(ts);
-        snap.last_event_kind = Some(kind);
+        snap.last_event_kind = Some(kind.to_string());
         if let Some(s) = summary {
-            snap.last_event_summary = Some(s);
+            snap.last_event_summary = Some(s.to_string());
         }
         drop(snap);
         self.tick();
@@ -505,7 +505,7 @@ mod tests {
         state.set_agent_pid(Some(4242)).await;
         state.set_agent_alive(true).await;
         state
-            .note_agent_event(Utc::now(), "raw".into(), Some("test".into()))
+            .note_agent_event(Utc::now(), "raw", Some("test"))
             .await;
 
         // Same rid → must NOT call reset_run_snapshot.
@@ -535,7 +535,7 @@ mod tests {
             .await;
         state.incr_turn().await;
         state
-            .note_agent_event(Utc::now(), "raw".into(), Some("a".into()))
+            .note_agent_event(Utc::now(), "raw", Some("a"))
             .await;
 
         state.set_current_run(Some(summary(rid_b, "running"))).await;
@@ -597,7 +597,7 @@ mod tests {
         let state = empty_state();
         let now = Utc::now();
         state
-            .note_agent_event(now, "tool/exec".into(), Some("running".into()))
+            .note_agent_event(now, "tool/exec", Some("running"))
             .await;
         let snap = state.observability_snapshot().await;
         assert_eq!(snap.last_event_at, Some(now));

@@ -2439,7 +2439,7 @@ impl AssignWorker {
         let kind = crate::daemon::observability::kind_of(&ev);
         let summary = crate::daemon::observability::summary_of(&ev);
         self.state
-            .note_agent_event(Utc::now(), kind.clone(), Some(summary.clone()))
+            .note_agent_event(Utc::now(), &kind, Some(&summary))
             .await;
         if run_events.push(kind, summary) {
             run_events.flush(&self.out).await;
