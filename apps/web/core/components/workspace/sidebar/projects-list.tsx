@@ -12,7 +12,13 @@ import { useParams, usePathname } from "next/navigation";
 import { Ellipsis } from "lucide-react";
 import { Disclosure, Transition } from "@headlessui/react";
 // pi dash imports
-import { EUserPermissions, EUserPermissionsLevel, PROJECT_TRACKER_ELEMENTS } from "@pi-dash/constants";
+import {
+  EUserPermissions,
+  EUserPermissionsLevel,
+  PROJECT_TRACKER_ELEMENTS,
+  WORKSPACE_SIDEBAR_DYNAMIC_NAVIGATION_ITEMS,
+  WORKSPACE_SIDEBAR_STATIC_NAVIGATION_ITEMS,
+} from "@pi-dash/constants";
 import { useTranslation } from "@pi-dash/i18n";
 import { PlusIcon, ChevronRightIcon } from "@pi-dash/propel/icons";
 import { IconButton } from "@pi-dash/propel/icon-button";
@@ -30,8 +36,10 @@ import { useProject } from "@/hooks/store/use-project";
 import { useUserPermissions } from "@/hooks/store/user";
 import { useProjectNavigationPreferences } from "@/hooks/use-navigation-preferences";
 // pi dash web imports
+import { SidebarItem } from "@/pi-dash-web/components/workspace/sidebar/sidebar-item";
 import type { TProject } from "@/pi-dash-web/types";
 // local imports
+import { SidebarItemBase } from "./sidebar-item";
 import { SidebarProjectsListItem } from "./projects-list-item";
 
 export const SidebarProjectsList = observer(function SidebarProjectsList() {
@@ -68,13 +76,12 @@ export const SidebarProjectsList = observer(function SidebarProjectsList() {
   const hasMoreProjects =
     projectPreferences.showLimitedProjects && joinedProjects.length > projectPreferences.limitedProjectsCount;
 
-  const handleCopyText = (projectId: string) => {
-    copyUrlToClipboard(`${workspaceSlug}/projects/${projectId}/issues`).then(() => {
-      setToast({
-        type: TOAST_TYPE.SUCCESS,
-        title: t("link_copied"),
-        message: t("project_link_copied_to_clipboard"),
-      });
+  const handleCopyText = async (projectId: string) => {
+    await copyUrlToClipboard(`${workspaceSlug}/projects/${projectId}/issues`);
+    setToast({
+      type: TOAST_TYPE.SUCCESS,
+      title: t("link_copied"),
+      message: t("project_link_copied_to_clipboard"),
     });
   };
 
@@ -229,14 +236,26 @@ export const SidebarProjectsList = observer(function SidebarProjectsList() {
             >
               {loader === "init-loader" && (
                 <Loader className="w-full space-y-1.5">
-                  {Array.from({ length: 4 }).map((_, index) => (
-                    <Loader.Item key={index} height="28px" />
+                  {["a", "b", "c", "d"].map((id) => (
+                    <Loader.Item key={`loader-${id}`} height="28px" />
                   ))}
                 </Loader>
               )}
               {isAllProjectsListOpen && (
                 <Disclosure.Panel as="div" className="flex flex-col gap-0.5" static>
                   <>
+                    {WORKSPACE_SIDEBAR_STATIC_NAVIGATION_ITEMS["drafts"] && (
+                      <SidebarItem item={WORKSPACE_SIDEBAR_STATIC_NAVIGATION_ITEMS["drafts"]} />
+                    )}
+                    {WORKSPACE_SIDEBAR_DYNAMIC_NAVIGATION_ITEMS["views"] && (
+                      <SidebarItemBase
+                        item={{
+                          ...WORKSPACE_SIDEBAR_DYNAMIC_NAVIGATION_ITEMS["views"],
+                          labelTranslationKey: "sidebar.work_items",
+                        }}
+                        additionalStaticItems={["views"]}
+                      />
+                    )}
                     {displayedProjects.map((projectId, index) => (
                       <SidebarProjectsListItem
                         key={projectId}
