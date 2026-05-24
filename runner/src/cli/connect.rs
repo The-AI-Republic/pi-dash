@@ -16,6 +16,7 @@ use chrono::Utc;
 use clap::Args as ClapArgs;
 use std::io::{BufRead, IsTerminal, Write};
 use std::path::PathBuf;
+use std::time::Duration;
 
 use crate::cloud::http::{
     RunnerCredentials, SharedHttpTransport, TransportError, enroll_runner, write_runner_credentials,
@@ -25,6 +26,8 @@ use crate::config::schema::{
     AgentKind, AgentSection, Config, Credentials, DaemonConfig, RunnerConfig, WorkspaceSection,
 };
 use crate::util::paths::Paths;
+
+const REVOKE_TRANSPORT_TIMEOUT: Duration = Duration::from_secs(10);
 
 #[derive(Debug, ClapArgs)]
 pub struct Args {
@@ -566,8 +569,11 @@ pub async fn revoke_additional_runner(
         )
         .await
         .map_err(|e| RemoveAdditionalError::LoadCredentials(format!("{e:#}")))?;
-        let transport = SharedHttpTransport::new(cfg.daemon.cloud_url.clone())
-            .map_err(|e| RemoveAdditionalError::Network(format!("transport: {e:#}")))?;
+        let transport = SharedHttpTransport::new_with_timeout(
+            cfg.daemon.cloud_url.clone(),
+            REVOKE_TRANSPORT_TIMEOUT,
+        )
+        .map_err(|e| RemoveAdditionalError::Network(format!("transport: {e:#}")))?;
         let client = crate::cloud::http::RunnerCloudClient::new(runner_id, creds, transport);
         crate::cloud::http::revoke_runner_self(&client)
             .await
