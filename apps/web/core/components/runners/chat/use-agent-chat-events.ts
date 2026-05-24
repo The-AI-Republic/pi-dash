@@ -12,21 +12,35 @@ const service = new RunnerService();
 
 export function useAgentChatEvents(
   sessionId: string | undefined,
-  after: number,
-  onEvent: (event: IAgentChatEvent) => void
+  onEvent: (event: IAgentChatEvent) => void,
+  onError?: (error: unknown) => void,
+  initialAfter = 0
 ) {
   const onEventRef = useRef(onEvent);
+  const onErrorRef = useRef(onError);
+  const lastSeqRef = useRef(initialAfter);
   onEventRef.current = onEvent;
+  onErrorRef.current = onError;
 
   useEffect(() => {
     if (!sessionId) return;
-    const source = new EventSource(service.chatEventsUrl(sessionId, after), {
+    lastSeqRef.current = initialAfter;
+    const source = new EventSource(service.chatEventsUrl(sessionId, initialAfter), {
       withCredentials: true,
     });
     source.addEventListener("chat.event", (message) => {
-      const event = JSON.parse((message as MessageEvent).data) as IAgentChatEvent;
-      onEventRef.current(event);
+      try {
+        const event = JSON.parse((message as MessageEvent).data) as IAgentChatEvent;
+        lastSeqRef.current = Math.max(lastSeqRef.current, event.seq);
+        onEventRef.current(event);
+      } catch (error) {
+        console.error("Failed to parse runner chat event", error);
+        onErrorRef.current?.(error);
+      }
+    });
+    source.addEventListener("error", (error) => {
+      onErrorRef.current?.(error);
     });
     return () => source.close();
-  }, [after, sessionId]);
+  }, [initialAfter, sessionId]);
 }

@@ -1233,6 +1233,23 @@ fn assistant_delta_text(params: &serde_json::Value) -> Option<&str> {
     params.get("text").and_then(|value| value.as_str())
 }
 
+fn is_assistant_text_delta(method: &str, params: &serde_json::Value) -> bool {
+    if method == "item/agentMessage/delta" {
+        return assistant_delta_text(params).is_some();
+    }
+    method == "stream_event/content_block_delta"
+        && params
+            .get("delta")
+            .and_then(|delta| delta.get("type"))
+            .and_then(|value| value.as_str())
+            == Some("text_delta")
+        && params
+            .get("delta")
+            .and_then(|delta| delta.get("text"))
+            .and_then(|value| value.as_str())
+            .is_some()
+}
+
 fn timing_payload(stage: &str, mut payload: serde_json::Value) -> serde_json::Value {
     if !payload.is_object() {
         payload = serde_json::json!({});
@@ -1683,7 +1700,7 @@ impl ChatWorker {
                             failed_at: Utc::now(),
                         }).await.ok();
                         self.state.set_status(RunnerStatus::Idle).await;
-                        return Ok(false);
+                        return Ok(true);
                     };
                     let mut done = false;
                     for ev in events {
@@ -1704,7 +1721,7 @@ impl ChatWorker {
                         *bridge_seq = (*bridge_seq).saturating_add(1);
                         match ev {
                             BridgeEvent::Raw { method, params, .. } => {
-                                let kind = if method.contains("delta") {
+                                let kind = if is_assistant_text_delta(&method, &params) {
                                     "assistant_delta"
                                 } else {
                                     "raw"
@@ -1752,7 +1769,16 @@ impl ChatWorker {
                                 let policy = Policy::new(&self.runner_config.approval_policy, workspace_path);
                                 let decision = policy.evaluate(kind, &payload);
                                 if let Some(auto) = decision.into_cloud() {
-                                    bridge.send_approval(&approval_id, auto).await.ok();
+                                    if let Err(e) = bridge.send_approval(&approval_id, auto).await {
+                                        self.out.send(ClientMsg::ChatFailed {
+                                            chat_session_id,
+                                            code: "approval_send_failed".into(),
+                                            detail: Some(format!("{e:#}")),
+                                            failed_at: Utc::now(),
+                                        }).await.ok();
+                                        self.state.set_status(RunnerStatus::Idle).await;
+                                        return Ok(true);
+                                    }
                                     continue;
                                 }
                                 let rec = ApprovalRecord {
@@ -1789,7 +1815,16 @@ impl ChatWorker {
                                                 },
                                             ..
                                         }) if aid == approval_id => {
-                                            bridge.send_approval(&approval_id, decision).await.ok();
+                                            if let Err(e) = bridge.send_approval(&approval_id, decision).await {
+                                                self.out.send(ClientMsg::ChatFailed {
+                                                    chat_session_id,
+                                                    code: "approval_send_failed".into(),
+                                                    detail: Some(format!("{e:#}")),
+                                                    failed_at: Utc::now(),
+                                                }).await.ok();
+                                                self.state.set_status(RunnerStatus::Idle).await;
+                                                return Ok(true);
+                                            }
                                             self.state
                                                 .set_approvals_pending(self.approvals.list_pending().await.len())
                                                 .await;
@@ -1836,7 +1871,7 @@ impl ChatWorker {
                                     failed_at: Utc::now(),
                                 }).await.ok();
                                 self.state.set_status(RunnerStatus::Idle).await;
-                                return Ok(false);
+                                return Ok(true);
                             }
                             BridgeEvent::RunStarted { .. } | BridgeEvent::AwaitingReauth { .. } => {}
                         }
@@ -2103,7 +2138,7 @@ impl AssignWorker {
             prompt,
             model: expected_codex_model,
         };
-        let mut cursor = match bridge.run(&payload, &workspace_path).await {
+        let mut cursor = match bridge.run_one_shot(&payload, &workspace_path).await {
             Ok(c) => c,
             Err(e) => {
                 hist.append(&HistoryEntry::Footer {

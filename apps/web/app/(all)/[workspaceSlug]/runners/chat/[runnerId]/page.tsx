@@ -135,7 +135,7 @@ const RunnerChatPage = observer(function RunnerChatPage() {
         try {
           await service.warmChatSession(session.id);
         } catch {
-          warmSessionRef.current = null;
+          return;
         }
         return;
       }
@@ -153,7 +153,7 @@ const RunnerChatPage = observer(function RunnerChatPage() {
         await service.warmChatSession(created.id);
         mutateSessions();
       } catch {
-        createWarmKeyRef.current = null;
+        return;
       }
     }
     warmSelectedRunner();
@@ -191,7 +191,11 @@ const RunnerChatPage = observer(function RunnerChatPage() {
     },
     [mutateMessages, mutateSessions, session?.id]
   );
-  useAgentChatEvents(session?.id, 0, handleEvent);
+  const handleEventError = useCallback(() => {
+    mutateSessions();
+    mutateMessages();
+  }, [mutateMessages, mutateSessions]);
+  useAgentChatEvents(session?.id, handleEvent, handleEventError);
 
   async function ensureSession(): Promise<IAgentChatSession> {
     if (session?.status === "open") return session;

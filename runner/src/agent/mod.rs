@@ -317,6 +317,15 @@ impl AgentBridge {
         }
     }
 
+    pub async fn run_one_shot(&mut self, payload: &RunPayload, cwd: &Path) -> Result<AgentCursor> {
+        match self {
+            AgentBridge::Codex(b) => Ok(AgentCursor::Codex(b.run(payload, cwd).await?)),
+            AgentBridge::ClaudeCode(b) => {
+                Ok(AgentCursor::ClaudeCode(b.run_one_shot(payload, cwd).await?))
+            }
+        }
+    }
+
     /// Prepare a long-lived bridge for a chat session before the first user
     /// turn. Codex returns the reusable thread id created during warmup.
     /// Claude Code starts the stream-json subprocess and returns a session id

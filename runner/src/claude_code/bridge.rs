@@ -118,6 +118,15 @@ impl Bridge {
         })
     }
 
+    /// One-shot issue-assignment mode. Claude's stream-json `--print` path
+    /// emits its terminal `result` after stdin reaches EOF, so keep `run`
+    /// long-lived for chat and close stdin only for assignment runs.
+    pub async fn run_one_shot(&mut self, payload: &RunPayload, cwd: &Path) -> Result<BridgeCursor> {
+        let cursor = self.run(payload, cwd).await?;
+        self.proc.close_stdin();
+        Ok(cursor)
+    }
+
     async fn wait_for_init(&mut self, run_id: Uuid) -> Result<String> {
         let deadline = tokio::time::Instant::now() + INIT_TIMEOUT;
         loop {

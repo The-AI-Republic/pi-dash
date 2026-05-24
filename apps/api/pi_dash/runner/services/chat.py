@@ -273,11 +273,7 @@ def mark_message_dispatch_failed(session_id, message_id, detail: str) -> None:
         if session is None:
             return
         was_active = bool(session.active_message_id or session.active_turn_id)
-        message = AgentChatMessage.objects.filter(pk=message_id).first()
-        if message is not None:
-            message.status = AgentChatMessageStatus.FAILED
-            message.completed_at = timezone.now()
-            message.save(update_fields=["status", "completed_at"])
+        message = finalize_active_messages_locked(session, AgentChatMessageStatus.FAILED, message_id=message_id)
         session.active_message_id = None
         session.active_turn_id = ""
         session.error = detail[:2000]
@@ -319,6 +315,43 @@ def create_assistant_message_locked(
         local_item_id=local_item_id[:128],
         seq=next_message_seq_locked(session),
     )
+
+
+def active_assistant_message_locked(session: AgentChatSession) -> Optional[AgentChatMessage]:
+    qs = AgentChatMessage.objects.filter(
+        session=session,
+        role=AgentChatMessageRole.ASSISTANT,
+        status=AgentChatMessageStatus.STREAMING,
+    )
+    if session.active_turn_id:
+        assistant = qs.filter(local_turn_id=session.active_turn_id).order_by("-created_at").first()
+        if assistant is not None:
+            return assistant
+    return qs.order_by("-created_at").first()
+
+
+def finalize_active_messages_locked(
+    session: AgentChatSession,
+    final_status: str,
+    *,
+    message_id=None,
+) -> Optional[AgentChatMessage]:
+    now = timezone.now()
+    message = None
+    active_message_id = message_id or session.active_message_id
+    if active_message_id:
+        message = AgentChatMessage.objects.filter(pk=active_message_id, session=session).first()
+        if message is not None:
+            message.status = final_status
+            message.completed_at = now
+            message.save(update_fields=["status", "completed_at"])
+
+    assistant = active_assistant_message_locked(session)
+    if assistant is not None:
+        assistant.status = final_status
+        assistant.completed_at = now
+        assistant.save(update_fields=["status", "completed_at"])
+    return assistant or message
 
 
 def complete_active_turn_locked(
@@ -384,11 +417,7 @@ def sweep_active_turns() -> int:
             if session is None:
                 continue
             was_active = bool(session.active_message_id or session.active_turn_id)
-            if session.active_message_id:
-                AgentChatMessage.objects.filter(pk=session.active_message_id).update(
-                    status=AgentChatMessageStatus.FAILED,
-                    completed_at=timezone.now(),
-                )
+            message = finalize_active_messages_locked(session, AgentChatMessageStatus.FAILED)
             session.active_message_id = None
             session.active_turn_id = ""
             session.error = "active chat turn timed out"
@@ -407,11 +436,44 @@ def sweep_active_turns() -> int:
                 session,
                 "chat_failed",
                 {"code": "active_turn_timeout"},
+                message=message,
             )
             if session.status == AgentChatSessionStatus.CLOSED:
                 append_event_locked(session, "chat_closed", {"reason": "close_requested"})
             if was_active:
                 drain_tasks_after_chat_release(session)
+            count += 1
+    return count
+
+
+def release_active_chats_for_runner(runner: Runner, detail: str) -> int:
+    sessions = list(
+        AgentChatSession.objects.filter(runner=runner, status=AgentChatSessionStatus.OPEN)
+        .filter(Q(active_message_id__isnull=False) | ~Q(active_turn_id=""))
+        .values_list("id", flat=True)
+    )
+    count = 0
+    for session_id in sessions:
+        with transaction.atomic():
+            session = (
+                AgentChatSession.objects.select_for_update()
+                .filter(pk=session_id, status=AgentChatSessionStatus.OPEN)
+                .first()
+            )
+            if session is None or not (session.active_message_id or session.active_turn_id):
+                continue
+            message = finalize_active_messages_locked(session, AgentChatMessageStatus.FAILED)
+            session.active_message_id = None
+            session.active_turn_id = ""
+            session.error = detail[:2000]
+            session.save(update_fields=["active_message_id", "active_turn_id", "error", "updated_at"])
+            append_event_locked(
+                session,
+                "chat_failed",
+                {"code": "runner_session_reopened", "detail": detail},
+                message=message,
+            )
+            drain_tasks_after_chat_release(session)
             count += 1
     return count
 

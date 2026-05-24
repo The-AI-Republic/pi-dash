@@ -48,6 +48,18 @@ fn fake_claude_multi_turn_script() -> &'static str {
     "#
 }
 
+fn fake_claude_one_shot_requires_eof_script() -> &'static str {
+    r#"
+        set -e
+        IFS= read -r first
+        test -n "$first"
+        printf '%s\n' '{"type":"system","subtype":"init","session_id":"sess_one_shot_001"}'
+        cat >/dev/null
+        printf '%s\n' '{"type":"result","subtype":"success","session_id":"sess_one_shot_001","result":"closed stdin","total_cost_usd":0.0001,"usage":{"input_tokens":3,"output_tokens":2}}'
+        sleep 0.2
+    "#
+}
+
 async fn drain_until_completed(
     bridge: &mut Bridge,
     cursor: &mut pidash::claude_code::bridge::BridgeCursor,
@@ -164,18 +176,44 @@ async fn bridge_reuses_stream_json_process_for_multiple_turns() {
         prompt: "second".into(),
         model: None,
     };
-    let mut second_cursor = tokio::time::timeout(
-        Duration::from_millis(500),
-        bridge.run(&second, &cwd),
-    )
-    .await
-    .expect("second run should not wait for another system/init")
-    .expect("second run setup");
+    let mut second_cursor =
+        tokio::time::timeout(Duration::from_millis(500), bridge.run(&second, &cwd))
+            .await
+            .expect("second run should not wait for another system/init")
+            .expect("second run setup");
     assert_eq!(second_cursor.thread_id, "sess_multi_001");
     let second_done = drain_until_completed(&mut bridge, &mut second_cursor).await;
     assert_eq!(
         second_done.get("result").and_then(|v| v.as_str()),
         Some("second done")
+    );
+}
+
+#[tokio::test]
+async fn one_shot_run_closes_stdin_so_claude_emits_result() {
+    let mut cmd = Command::new("sh");
+    cmd.arg("-c")
+        .arg(fake_claude_one_shot_requires_eof_script());
+    let proc = ClaudeProcess::spawn_command(cmd)
+        .await
+        .expect("spawn fake claude");
+    let mut bridge = Bridge::from_process(proc, None);
+
+    let cwd = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let payload = RunPayload {
+        run_id: Uuid::new_v4(),
+        prompt: "one shot".into(),
+        model: None,
+    };
+    let mut cursor = bridge
+        .run_one_shot(&payload, &cwd)
+        .await
+        .expect("one-shot run setup");
+    assert_eq!(cursor.thread_id, "sess_one_shot_001");
+    let done = drain_until_completed(&mut bridge, &mut cursor).await;
+    assert_eq!(
+        done.get("result").and_then(|value| value.as_str()),
+        Some("closed stdin")
     );
 }
 

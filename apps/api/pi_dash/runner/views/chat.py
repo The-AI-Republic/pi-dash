@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import time
 from types import SimpleNamespace
 from typing import Optional
@@ -59,6 +60,7 @@ class ChatSendThrottle(UserRateThrottle):
 
 CHAT_EVENT_PAYLOAD_MAX_BYTES = 256 * 1024
 _async_redis_client: Optional[aioredis.Redis] = None
+logger = logging.getLogger(__name__)
 
 
 def _idempotency_key(request) -> str:
@@ -136,6 +138,13 @@ class AgentChatSessionListEndpoint(APIView):
                 return Response({"error": "forbidden"}, status=status.HTTP_403_FORBIDDEN)
             qs = qs.filter(workspace_id=workspace_id)
         if runner_id:
+            runner_workspace_id = Runner.objects.filter(pk=runner_id).values_list("workspace_id", flat=True).first()
+            if runner_workspace_id is None:
+                qs = qs.none()
+            elif workspace_id and str(runner_workspace_id) != str(workspace_id):
+                qs = qs.none()
+            elif not workspace_id and not is_workspace_member(request.user, runner_workspace_id):
+                return Response({"error": "forbidden"}, status=status.HTTP_403_FORBIDDEN)
             qs = qs.filter(runner_id=runner_id)
         if not workspace_id or not is_workspace_admin(request.user, workspace_id):
             qs = qs.filter(created_by=request.user)
@@ -260,6 +269,8 @@ class AgentChatMessageListEndpoint(APIView):
                 {"error": "content is required"},
                 status=status.HTTP_400_BAD_REQUEST,
             )
+        if _payload_too_large({"content": content, "content_parts": content_parts}):
+            return Response({"error": "payload_too_large"}, status=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE)
         with transaction.atomic():
             session = (
                 AgentChatSession.objects.select_for_update().select_related("runner").filter(pk=session_id).first()
@@ -578,25 +589,20 @@ class ChatEventEndpoint(_ChatRunnerEndpointBase):
                 source_key=key,
             )
             if kind == "assistant_delta":
-                assistant = (
-                    AgentChatMessage.objects.filter(
-                        session=session,
-                        role=AgentChatMessageRole.ASSISTANT,
-                        status=AgentChatMessageStatus.STREAMING,
-                    )
-                    .order_by("-created_at")
-                    .first()
-                )
-                if assistant is None:
-                    assistant = chat_service.create_assistant_message_locked(
-                        session, local_turn_id=session.active_turn_id
-                    )
                 delta_text = _assistant_delta_text(payload)
+                assistant = chat_service.active_assistant_message_locked(session)
                 if delta_text:
+                    if assistant is None:
+                        assistant = chat_service.create_assistant_message_locked(
+                            session, local_turn_id=session.active_turn_id
+                        )
                     assistant.content = f"{assistant.content or ''}{delta_text}"
                     assistant.save(update_fields=["content"])
-                event.message = assistant
-                event.save(update_fields=["message"])
+                    event.message = assistant
+                    event.save(update_fields=["message"])
+                elif assistant is not None:
+                    event.message = assistant
+                    event.save(update_fields=["message"])
         return Response({"ok": True, "event": AgentChatEventSerializer(event).data})
 
 
@@ -701,11 +707,7 @@ class ChatFailedEndpoint(_ChatRunnerEndpointBase):
             code = request.data.get("code") or "chat_failed"
             detail = request.data.get("detail") or ""
             was_active = bool(session.active_message_id or session.active_turn_id)
-            if session.active_message_id:
-                AgentChatMessage.objects.filter(pk=session.active_message_id).update(
-                    status=AgentChatMessageStatus.FAILED,
-                    completed_at=timezone.now(),
-                )
+            message = chat_service.finalize_active_messages_locked(session, AgentChatMessageStatus.FAILED)
             should_close = session.close_requested
             session.active_message_id = None
             session.active_turn_id = ""
@@ -716,7 +718,7 @@ class ChatFailedEndpoint(_ChatRunnerEndpointBase):
                 session.closed_at = timezone.now()
                 update_fields.extend(["status", "closed_at"])
             session.save(update_fields=update_fields)
-            chat_service.append_event_locked(session, "chat_failed", {"code": code, "detail": detail})
+            chat_service.append_event_locked(session, "chat_failed", {"code": code, "detail": detail}, message=message)
             if should_close:
                 chat_service.append_event_locked(session, "chat_closed", {"reason": "close_requested"})
             if was_active:
@@ -737,6 +739,8 @@ class ChatClosedEndpoint(_ChatRunnerEndpointBase):
             if not chat_service.record_dedupe(session, key):
                 return Response({"ok": True, "duplicate": True})
             was_active = bool(session.active_message_id or session.active_turn_id)
+            if was_active:
+                chat_service.finalize_active_messages_locked(session, AgentChatMessageStatus.CANCELLED)
             session.status = AgentChatSessionStatus.CLOSED
             session.active_message_id = None
             session.active_turn_id = ""
@@ -771,10 +775,12 @@ async def chat_event_stream(request, session_id):
     async def _events():
         client = _async_redis()
         pubsub = client.pubsub(ignore_subscribe_messages=True)
+        subscribed = False
         last_seq = after
         last_heartbeat = time.monotonic()
         try:
             await pubsub.subscribe(chat_service.event_channel(session_id))
+            subscribed = True
             async for event in AgentChatEvent.objects.filter(session_id=session_id, seq__gt=after).order_by("seq"):
                 data = chat_service.serialize_event(event)
                 last_seq = max(last_seq, event.seq)
@@ -782,8 +788,16 @@ async def chat_event_stream(request, session_id):
             while True:
                 msg = await pubsub.get_message(timeout=1.0)
                 if msg and msg.get("type") == "message":
-                    data = json.loads(msg.get("data") or "{}")
-                    seq = int(data.get("seq") or 0)
+                    try:
+                        data = json.loads(msg.get("data") or "{}")
+                    except (TypeError, ValueError):
+                        logger.warning("ignoring malformed chat SSE payload for session %s", session_id)
+                        continue
+                    try:
+                        seq = int(data.get("seq") or 0)
+                    except (TypeError, ValueError):
+                        logger.warning("ignoring chat SSE payload with invalid seq for session %s", session_id)
+                        continue
                     if seq > last_seq:
                         last_seq = seq
                         yield f"event: chat.event\nid: {seq}\ndata: {json.dumps(data, default=str)}\n\n"
@@ -791,7 +805,14 @@ async def chat_event_stream(request, session_id):
                     last_heartbeat = time.monotonic()
                     yield ": heartbeat\n\n"
         finally:
-            await pubsub.unsubscribe(chat_service.event_channel(session_id))
-            await pubsub.close()
+            if subscribed:
+                try:
+                    await pubsub.unsubscribe(chat_service.event_channel(session_id))
+                except Exception:
+                    logger.exception("failed to unsubscribe chat SSE pubsub for session %s", session_id)
+            try:
+                await pubsub.close()
+            except Exception:
+                logger.exception("failed to close chat SSE pubsub for session %s", session_id)
 
     return StreamingHttpResponse(_events(), content_type="text/event-stream")

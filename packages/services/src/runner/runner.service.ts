@@ -319,6 +319,7 @@ export class RunnerService extends APIService {
   }
 
   chatEventsUrl(sessionId: string, after = 0): string {
-    return `${this.baseURL}/api/runners/chat/sessions/${sessionId}/events/?after=${after}`;
+    const url = `${this.baseURL}/api/runners/chat/sessions/${sessionId}/events/`;
+    return after > 0 ? `${url}?after=${after}` : url;
   }
 }
