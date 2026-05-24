@@ -72,7 +72,7 @@ impl<T> Envelope<T> {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RunEventRecord {
-    pub seq: u64,
+    pub seq: u32,
     pub kind: String,
     pub payload: serde_json::Value,
 }
