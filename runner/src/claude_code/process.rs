@@ -18,7 +18,7 @@ use crate::claude_code::schema::StreamEvent;
 use crate::util::shell::{is_benign_login_shell_warning, login_shell_command};
 
 /// Handles the `claude --print --output-format stream-json` subprocess
-/// lifecycle. Owns stdin (so we can push the user turn + signal EOF) and
+/// lifecycle. Owns stdin so callers can push one or more user turns and
 /// exposes an mpsc receiver of parsed events coming off stdout.
 ///
 /// Mirrors `AppServer`'s child-ownership split: `Child` is owned by an
@@ -27,9 +27,7 @@ use crate::util::shell::{is_benign_login_shell_warning, login_shell_command};
 /// delivery and observability. See `.ai_design/runner_agent_bridge` §4.4.
 pub struct ClaudeProcess {
     pid: Option<u32>,
-    /// `Option` so we can `take()` stdin when the caller wants to half-close
-    /// it (signalling end-of-input to Claude, which causes it to process the
-    /// queued turn and exit).
+    /// `Option` so we can `take()` stdin when shutting down the process.
     stdin: Option<ChildStdin>,
     pub inbound: mpsc::Receiver<StreamEvent>,
     kill_tx: mpsc::Sender<KillRequest>,
@@ -43,12 +41,13 @@ enum KillRequest {
     Force,
 }
 
-/// Arguments passed to `claude` for a run. The defaults below match the MVP
-/// policy: non-interactive, bypass permissions, stream-json I/O.
+/// Arguments passed to `claude` for a subprocess. The defaults below match the
+/// MVP policy: non-interactive, bypass permissions, stream-json I/O.
 pub struct SpawnArgs<'a> {
     pub binary: &'a str,
     pub cwd: &'a Path,
     pub model: Option<&'a str>,
+    pub resume_session_id: Option<&'a str>,
     /// When `true`, pass `--permission-mode bypassPermissions`. Always `true`
     /// for MVP; wiring a real permission prompt needs an MCP bridge.
     pub bypass_permissions: bool,
@@ -66,12 +65,16 @@ impl ClaudeProcess {
             "stream-json",
             "--output-format",
             "stream-json",
+            "--include-partial-messages",
         ];
         if args.bypass_permissions {
             argv.extend(["--permission-mode", "bypassPermissions"]);
         }
         if let Some(model) = args.model {
             argv.extend(["--model", model]);
+        }
+        if let Some(session_id) = args.resume_session_id.filter(|s| !s.is_empty()) {
+            argv.extend(["--resume", session_id]);
         }
         let cmd = login_shell_command(args.binary, &argv, Some(args.cwd));
         Self::spawn_command(cmd).await
@@ -134,8 +137,7 @@ impl ClaudeProcess {
         Ok(())
     }
 
-    /// Close stdin so Claude knows no further input is coming and processes
-    /// the queued turn to completion. Safe to call more than once.
+    /// Close stdin. Safe to call more than once.
     pub fn close_stdin(&mut self) {
         self.stdin.take();
     }

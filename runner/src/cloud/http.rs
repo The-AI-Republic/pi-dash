@@ -666,6 +666,71 @@ impl RunnerCloudClient {
                 self.post_run_lifecycle(run_id, "resumed", body, &idempotency_key)
                     .await
             }
+            msg @ ClientMsg::ChatStarted {
+                chat_session_id, ..
+            } => {
+                let body = to_value(&msg)?;
+                self.post_chat_lifecycle(chat_session_id, "started", body, &idempotency_key)
+                    .await
+            }
+            msg @ ClientMsg::ChatMessageStarted {
+                chat_session_id,
+                message_id,
+                ..
+            } => {
+                let body = to_value(&msg)?;
+                self.post_chat_message_lifecycle(
+                    chat_session_id,
+                    message_id,
+                    "started",
+                    body,
+                    &idempotency_key,
+                )
+                .await
+            }
+            msg @ ClientMsg::ChatEvent {
+                chat_session_id, ..
+            } => {
+                let body = to_value(&msg)?;
+                self.post_chat_lifecycle(chat_session_id, "events", body, &idempotency_key)
+                    .await
+            }
+            msg @ ClientMsg::ChatApprovalRequest {
+                chat_session_id, ..
+            } => {
+                let body = to_value(&msg)?;
+                self.post_chat_lifecycle(chat_session_id, "approvals", body, &idempotency_key)
+                    .await
+            }
+            msg @ ClientMsg::ChatMessageCompleted {
+                chat_session_id,
+                message_id,
+                ..
+            } => {
+                let body = to_value(&msg)?;
+                self.post_chat_message_lifecycle(
+                    chat_session_id,
+                    message_id,
+                    "complete",
+                    body,
+                    &idempotency_key,
+                )
+                .await
+            }
+            msg @ ClientMsg::ChatFailed {
+                chat_session_id, ..
+            } => {
+                let body = to_value(&msg)?;
+                self.post_chat_lifecycle(chat_session_id, "failed", body, &idempotency_key)
+                    .await
+            }
+            msg @ ClientMsg::ChatClosed {
+                chat_session_id, ..
+            } => {
+                let body = to_value(&msg)?;
+                self.post_chat_lifecycle(chat_session_id, "closed", body, &idempotency_key)
+                    .await
+            }
         }
     }
 
@@ -697,6 +762,44 @@ impl RunnerCloudClient {
             "{}/api/v1/runner/runs/{}/events/",
             self.inner.transport.cloud_url(),
             run_id,
+        );
+        self.post_authed_with_retry(&url, body, idempotency_key, |_| true)
+            .await?;
+        Ok(())
+    }
+
+    async fn post_chat_lifecycle(
+        &self,
+        chat_session_id: Uuid,
+        verb: &str,
+        body: Json,
+        idempotency_key: &str,
+    ) -> Result<(), TransportError> {
+        let url = format!(
+            "{}/api/v1/runner/chat/sessions/{}/{}/",
+            self.inner.transport.cloud_url(),
+            chat_session_id,
+            verb,
+        );
+        self.post_authed_with_retry(&url, body, idempotency_key, |_| true)
+            .await?;
+        Ok(())
+    }
+
+    async fn post_chat_message_lifecycle(
+        &self,
+        chat_session_id: Uuid,
+        message_id: Uuid,
+        verb: &str,
+        body: Json,
+        idempotency_key: &str,
+    ) -> Result<(), TransportError> {
+        let url = format!(
+            "{}/api/v1/runner/chat/sessions/{}/messages/{}/{}/",
+            self.inner.transport.cloud_url(),
+            chat_session_id,
+            message_id,
+            verb,
         );
         self.post_authed_with_retry(&url, body, idempotency_key, |_| true)
             .await?;

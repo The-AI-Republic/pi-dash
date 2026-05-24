@@ -88,6 +88,7 @@ REST_FRAMEWORK = {
         "anon": "30/minute",
         "asset_id": "5/minute",
         "user": "120/minute",
+        "runner_chat_send": "60/minute",
         # `pidash auth login` device-code start. Bounded per IP — the
         # endpoint creates a DB row each call, so a flood would otherwise
         # be a free table-pollution vector.

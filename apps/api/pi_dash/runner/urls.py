@@ -13,6 +13,13 @@ long-polls that session for control-plane messages.
 from django.urls import path
 
 from pi_dash.runner.views import (
+    ChatApprovalEndpoint,
+    ChatClosedEndpoint,
+    ChatEventEndpoint,
+    ChatFailedEndpoint,
+    ChatMessageCompleteEndpoint,
+    ChatMessageStartedEndpoint,
+    ChatStartedEndpoint,
     HealthEndpoint,
     MachineTokenRedeemEndpoint,
     MetricsEndpoint,
@@ -148,6 +155,42 @@ urlpatterns = [
         "runs/<uuid:run_id>/stream/upgrade/",
         RunStreamUpgradeEndpoint.as_view(),
         name="run-stream-upgrade",
+    ),
+    # Direct chat lifecycle + event upstream.
+    path(
+        "chat/sessions/<uuid:session_id>/started/",
+        ChatStartedEndpoint.as_view(),
+        name="chat-started",
+    ),
+    path(
+        "chat/sessions/<uuid:session_id>/events/",
+        ChatEventEndpoint.as_view(),
+        name="chat-events",
+    ),
+    path(
+        "chat/sessions/<uuid:session_id>/messages/<uuid:message_id>/started/",
+        ChatMessageStartedEndpoint.as_view(),
+        name="chat-message-started",
+    ),
+    path(
+        "chat/sessions/<uuid:session_id>/messages/<uuid:message_id>/complete/",
+        ChatMessageCompleteEndpoint.as_view(),
+        name="chat-message-complete",
+    ),
+    path(
+        "chat/sessions/<uuid:session_id>/approvals/",
+        ChatApprovalEndpoint.as_view(),
+        name="chat-approvals",
+    ),
+    path(
+        "chat/sessions/<uuid:session_id>/failed/",
+        ChatFailedEndpoint.as_view(),
+        name="chat-failed",
+    ),
+    path(
+        "chat/sessions/<uuid:session_id>/closed/",
+        ChatClosedEndpoint.as_view(),
+        name="chat-closed",
     ),
     # MachineToken redemption (CLI).
     path(

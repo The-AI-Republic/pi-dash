@@ -278,6 +278,15 @@ impl AgentBridge {
         cwd: &Path,
         model_override: Option<String>,
     ) -> Result<Self> {
+        Self::spawn_from_config_with_resume(runner, cwd, model_override, None).await
+    }
+
+    pub async fn spawn_from_config_with_resume(
+        runner: &RunnerConfig,
+        cwd: &Path,
+        model_override: Option<String>,
+        resume_session_id: Option<&str>,
+    ) -> Result<Self> {
         match runner.agent.kind {
             AgentKind::Codex => {
                 let b = crate::codex::bridge::Bridge::spawn(
@@ -289,10 +298,11 @@ impl AgentBridge {
                 Ok(AgentBridge::Codex(b))
             }
             AgentKind::ClaudeCode => {
-                let b = crate::claude_code::bridge::Bridge::spawn(
+                let b = crate::claude_code::bridge::Bridge::spawn_with_resume(
                     &runner.claude_code.binary,
                     cwd,
                     selected_model(model_override, runner.claude_code.model_default.clone()),
+                    resume_session_id,
                 )
                 .await?;
                 Ok(AgentBridge::ClaudeCode(b))
@@ -304,6 +314,27 @@ impl AgentBridge {
         match self {
             AgentBridge::Codex(b) => Ok(AgentCursor::Codex(b.run(payload, cwd).await?)),
             AgentBridge::ClaudeCode(b) => Ok(AgentCursor::ClaudeCode(b.run(payload, cwd).await?)),
+        }
+    }
+
+    pub async fn run_one_shot(&mut self, payload: &RunPayload, cwd: &Path) -> Result<AgentCursor> {
+        match self {
+            AgentBridge::Codex(b) => Ok(AgentCursor::Codex(b.run(payload, cwd).await?)),
+            AgentBridge::ClaudeCode(b) => {
+                Ok(AgentCursor::ClaudeCode(b.run_one_shot(payload, cwd).await?))
+            }
+        }
+    }
+
+    /// Prepare a long-lived bridge for a chat session before the first user
+    /// turn. Codex returns the reusable thread id created during warmup.
+    /// Claude Code starts the stream-json subprocess and returns a session id
+    /// only when one is already known from `--resume`; a fresh Claude session
+    /// does not emit `system/init` until the first user message.
+    pub async fn warm(&mut self, cwd: &Path) -> Result<Option<String>> {
+        match self {
+            AgentBridge::Codex(b) => Ok(Some(b.warm(cwd).await?)),
+            AgentBridge::ClaudeCode(b) => b.warm(cwd).await,
         }
     }
 

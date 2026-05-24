@@ -23,6 +23,7 @@ from django.db.models import Q
 from django.utils import timezone
 
 from pi_dash.runner.models import (
+    AgentChatSessionStatus,
     AgentRun,
     AgentRunStatus,
     Pod,
@@ -83,6 +84,14 @@ def select_runner_in_pod(pod: Pod) -> Optional[Runner]:
             last_heartbeat_at__gte=alive_threshold,
         )
         .exclude(agent_runs__status__in=BUSY_STATUSES)
+        .exclude(
+            chat_sessions__status=AgentChatSessionStatus.OPEN,
+            chat_sessions__active_message_id__isnull=False,
+        )
+        .exclude(
+            Q(chat_sessions__status=AgentChatSessionStatus.OPEN)
+            & ~Q(chat_sessions__active_turn_id="")
+        )
         .order_by("-last_heartbeat_at")
         .first()
     )
@@ -166,6 +175,14 @@ def drain_pod(pod: Pod) -> int:
                 last_heartbeat_at__gte=alive_threshold,
             )
             .exclude(agent_runs__status__in=BUSY_STATUSES)
+            .exclude(
+                chat_sessions__status=AgentChatSessionStatus.OPEN,
+                chat_sessions__active_message_id__isnull=False,
+            )
+            .exclude(
+                Q(chat_sessions__status=AgentChatSessionStatus.OPEN)
+                & ~Q(chat_sessions__active_turn_id="")
+            )
             .order_by("-last_heartbeat_at")
         )
         for runner in idle_runners:
@@ -223,6 +240,14 @@ def drain_for_runner(runner: Runner) -> bool:
                 last_heartbeat_at__gte=alive_threshold,
             )
             .exclude(agent_runs__status__in=BUSY_STATUSES)
+            .exclude(
+                chat_sessions__status=AgentChatSessionStatus.OPEN,
+                chat_sessions__active_message_id__isnull=False,
+            )
+            .exclude(
+                Q(chat_sessions__status=AgentChatSessionStatus.OPEN)
+                & ~Q(chat_sessions__active_turn_id="")
+            )
             .first()
         )
         if locked is None:
@@ -304,6 +329,14 @@ def select_runner_for_run(run: AgentRun) -> Optional[Runner]:
             last_heartbeat_at__gte=alive_threshold,
         )
         .exclude(agent_runs__status__in=BUSY_STATUSES)
+        .exclude(
+            chat_sessions__status=AgentChatSessionStatus.OPEN,
+            chat_sessions__active_message_id__isnull=False,
+        )
+        .exclude(
+            Q(chat_sessions__status=AgentChatSessionStatus.OPEN)
+            & ~Q(chat_sessions__active_turn_id="")
+        )
         .order_by("-last_heartbeat_at")
         .first()
     )

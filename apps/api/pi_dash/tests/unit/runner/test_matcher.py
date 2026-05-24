@@ -6,6 +6,7 @@ import pytest
 from django.utils import timezone
 
 from pi_dash.runner.models import (
+    AgentChatSession,
     AgentRun,
     AgentRunStatus,
     Runner,
@@ -55,6 +56,30 @@ def test_matcher_ignores_busy_runner(db, online_runner, queued_run):
         prompt="already in flight",
         runner=online_runner,
         status=AgentRunStatus.RUNNING,
+    )
+    assert matcher.select_runner_for_run(queued_run) is None
+
+
+@pytest.mark.unit
+def test_matcher_ignores_runner_with_active_chat_turn(db, online_runner, queued_run, create_user, workspace):
+    AgentChatSession.objects.create(
+        workspace=workspace,
+        runner=online_runner,
+        created_by=create_user,
+        pod=online_runner.pod,
+        active_turn_id="turn_123",
+    )
+    assert matcher.select_runner_for_run(queued_run) is None
+
+
+@pytest.mark.unit
+def test_matcher_ignores_runner_with_active_chat_message(db, online_runner, queued_run, create_user, workspace):
+    AgentChatSession.objects.create(
+        workspace=workspace,
+        runner=online_runner,
+        created_by=create_user,
+        pod=online_runner.pod,
+        active_message_id=queued_run.id,
     )
     assert matcher.select_runner_for_run(queued_run) is None
 

@@ -181,3 +181,69 @@ export interface IApprovalRequest {
   decided_at: string | null;
   expires_at: string | null;
 }
+
+export type TAgentChatSessionStatus = "open" | "closed" | "failed";
+export type TAgentChatMessageRole = "user" | "assistant" | "tool" | "system";
+export type TAgentChatMessageStatus = "queued" | "sent" | "streaming" | "completed" | "failed" | "cancelled";
+
+export interface IAgentChatSession {
+  id: string;
+  workspace: string;
+  runner: string;
+  runner_detail?: IRunner | null;
+  created_by: string;
+  pod: string;
+  status: TAgentChatSessionStatus;
+  agent_kind: string;
+  local_thread_id: string;
+  local_session_id: string;
+  cwd: string;
+  model: string;
+  active_turn_id: string;
+  active_message_id: string | null;
+  close_requested: boolean;
+  last_message_at: string | null;
+  closed_at: string | null;
+  error: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface IAgentChatMessage {
+  id: string;
+  session: string;
+  role: TAgentChatMessageRole;
+  content: string;
+  content_parts: unknown[];
+  status: TAgentChatMessageStatus;
+  local_item_id: string;
+  local_turn_id: string;
+  seq: number;
+  created_at: string;
+  completed_at: string | null;
+}
+
+export interface IAgentChatEvent {
+  id: number;
+  session: string;
+  message: string | null;
+  seq: number;
+  kind: string;
+  payload: Record<string, unknown>;
+  created_at: string;
+}
+
+export interface IAgentChatApprovalRequest {
+  id: string;
+  session: string;
+  local_approval_id: string;
+  kind: TApprovalKind;
+  payload: Record<string, unknown>;
+  reason: string;
+  status: TApprovalStatus;
+  decision_source: string;
+  decided_by: string | null;
+  requested_at: string;
+  expires_at: string | null;
+  decided_at: string | null;
+}

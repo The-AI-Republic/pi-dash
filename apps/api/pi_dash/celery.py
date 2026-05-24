@@ -96,6 +96,14 @@ app.conf.beat_schedule = {
         "task": "runner.reconcile_stalled_runs",
         "schedule": timedelta(seconds=30),
     },
+    "runner-sweep-agent-chat-state": {
+        "task": "runner.sweep_agent_chat_state",
+        "schedule": timedelta(seconds=30),
+    },
+    "runner-sweep-chat-message-dedupe": {
+        "task": "runner.sweep_chat_message_dedupe",
+        "schedule": crontab(hour=4, minute=0),
+    },
     # Issue ticking — see .ai_design/issue_ticking_system/design.md §6
     "scan-due-agent-tickers": {
         "task": "pi_dash.bgtasks.agent_ticker.scan_due_tickers",

@@ -108,13 +108,6 @@ export const coreRoutes: RouteConfigEntry[] = [
           route(":workspaceSlug/stickies", "./(all)/[workspaceSlug]/(projects)/stickies/page.tsx"),
         ]),
 
-        // Runners (Pi Dash runner: connect dev machines, review runs, decide approvals)
-        layout("./(all)/[workspaceSlug]/runners/layout.tsx", [
-          route(":workspaceSlug/runners", "./(all)/[workspaceSlug]/runners/page.tsx"),
-          route(":workspaceSlug/runners/runs", "./(all)/[workspaceSlug]/runners/runs/page.tsx"),
-          route(":workspaceSlug/runners/approvals", "./(all)/[workspaceSlug]/runners/approvals/page.tsx"),
-        ]),
-
         // Prompts (prompt templates: view for members, create/edit for workspace admins)
         layout("./(all)/[workspaceSlug]/prompts/layout.tsx", [
           route(":workspaceSlug/prompts", "./(all)/[workspaceSlug]/prompts/page.tsx"),
@@ -271,6 +264,14 @@ export const coreRoutes: RouteConfigEntry[] = [
             "./(all)/[workspaceSlug]/(projects)/projects/(detail)/[projectId]/archives/modules/page.tsx"
           ),
         ]),
+      ]),
+
+      // Runners (Pi Dash runner: connect dev machines, review runs, decide approvals)
+      layout("./(all)/[workspaceSlug]/runners/layout.tsx", [
+        route(":workspaceSlug/runners", "./(all)/[workspaceSlug]/runners/page.tsx"),
+        route(":workspaceSlug/runners/runs", "./(all)/[workspaceSlug]/runners/runs/page.tsx"),
+        route(":workspaceSlug/runners/approvals", "./(all)/[workspaceSlug]/runners/approvals/page.tsx"),
+        route(":workspaceSlug/runners/chat/:runnerId", "./(all)/[workspaceSlug]/runners/chat/[runnerId]/page.tsx"),
       ]),
 
       // ====================================================================

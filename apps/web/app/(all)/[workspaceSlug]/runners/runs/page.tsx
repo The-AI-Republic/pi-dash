@@ -33,7 +33,7 @@ function isTerminal(status: TAgentRunStatus): boolean {
   return AGENT_RUN_TERMINAL_STATUSES.includes(status);
 }
 
-const RunnerRunsPage = observer(function RunnerRunsPage() {
+export const RunnerRunsPage = observer(function RunnerRunsPage() {
   const { currentWorkspace } = useWorkspace();
   const { t } = useTranslation();
   const workspaceId = currentWorkspace?.id;

@@ -5,21 +5,43 @@
  */
 
 import { observer } from "mobx-react";
+import { Bot, Circle, LayoutDashboard } from "lucide-react";
 import { NavLink, Outlet, useParams } from "react-router";
+import useSWR from "swr";
 import { EUserPermissions, EUserPermissionsLevel } from "@pi-dash/constants";
 import { useTranslation } from "@pi-dash/i18n";
+import { RunnerService } from "@pi-dash/services";
+import type { IRunner } from "@pi-dash/types";
 import { NotAuthorizedView } from "@/components/auth-screens/not-authorized-view";
 import { WorkspaceShell } from "@/components/workspace/workspace-shell";
 import { useUserPermissions } from "@/hooks/store/user";
+import { useWorkspace } from "@/hooks/store/use-workspace";
+
+const service = new RunnerService();
+
+function statusColor(status: IRunner["status"]) {
+  if (status === "online") return "text-success-primary";
+  if (status === "busy") return "text-info-primary";
+  if (status === "revoked") return "text-warning-primary";
+  return "text-tertiary";
+}
 
 const RunnersLayout = observer(function RunnersLayout() {
   const { workspaceSlug } = useParams<{ workspaceSlug: string }>();
+  const { currentWorkspace } = useWorkspace();
   const { workspaceUserInfo, allowPermissions } = useUserPermissions();
   const { t } = useTranslation();
+  const workspaceId = currentWorkspace?.id;
 
   const canViewRunners = allowPermissions(
     [EUserPermissions.ADMIN, EUserPermissions.MEMBER],
     EUserPermissionsLevel.WORKSPACE
+  );
+
+  const { data: runners } = useSWR<IRunner[]>(
+    workspaceId ? ["runners-middle-panel", workspaceId] : null,
+    () => service.list(workspaceId),
+    { refreshInterval: 5_000 }
   );
 
   if (workspaceUserInfo && !canViewRunners) {
@@ -31,33 +53,48 @@ const RunnersLayout = observer(function RunnersLayout() {
   }
 
   const base = `/${workspaceSlug}/runners`;
-  const tabs = [
-    { to: base, label: t("runners.tabs.runners"), end: true },
-    { to: `${base}/runs`, label: t("runners.tabs.runs"), end: false },
-    { to: `${base}/approvals`, label: t("runners.tabs.approvals"), end: false },
-  ];
 
   return (
     <WorkspaceShell>
-      <div className="flex items-center gap-4 border-b border-subtle px-6 py-3">
-        <h1 className="text-16 font-semibold text-primary">{t("runners.title")}</h1>
-        <nav className="flex gap-2">
-          {tabs.map((tab) => (
+      <div className="flex h-full w-full overflow-hidden">
+        <aside className="bg-layer-0 w-[280px] shrink-0 border-r border-subtle">
+          <div className="flex h-12 items-center border-b border-subtle px-4 text-14 font-semibold text-primary">
+            {t("runners.title")}
+          </div>
+          <nav className="flex flex-col gap-1 p-2">
             <NavLink
-              key={tab.to}
-              to={tab.to}
-              end={tab.end}
+              to={base}
+              end
               className={({ isActive }) =>
-                `rounded px-3 py-1 text-13 ${isActive ? "bg-layer-1 font-medium text-primary" : "text-secondary hover:bg-layer-1"}`
+                `flex h-9 items-center gap-2 rounded px-2 text-13 ${
+                  isActive ? "bg-layer-1 font-medium text-primary" : "text-secondary hover:bg-layer-1"
+                }`
               }
             >
-              {tab.label}
+              <LayoutDashboard className="size-4" />
+              <span>Overview</span>
             </NavLink>
-          ))}
-        </nav>
-      </div>
-      <div className="flex-1 overflow-auto p-6">
-        <Outlet />
+            <div className="mt-2 px-2 text-11 font-medium text-tertiary uppercase">Runners</div>
+            {(runners ?? []).map((runner) => (
+              <NavLink
+                key={runner.id}
+                to={`${base}/chat/${runner.id}`}
+                className={({ isActive }) =>
+                  `flex min-h-11 items-center gap-2 rounded px-2 py-2 text-13 ${
+                    isActive ? "bg-layer-1 font-medium text-primary" : "text-secondary hover:bg-layer-1"
+                  }`
+                }
+              >
+                <Bot className="size-4 shrink-0" />
+                <span className="min-w-0 flex-1 truncate">{runner.name}</span>
+                <Circle className={`size-2 fill-current ${statusColor(runner.status)}`} />
+              </NavLink>
+            ))}
+          </nav>
+        </aside>
+        <main className="min-w-0 flex-1 overflow-auto p-6">
+          <Outlet />
+        </main>
       </div>
     </WorkspaceShell>
   );

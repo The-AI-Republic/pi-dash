@@ -220,6 +220,28 @@ class ApprovalKind(models.TextChoices):
     OTHER = "other", "Other"
 
 
+class AgentChatSessionStatus(models.TextChoices):
+    OPEN = "open", "Open"
+    CLOSED = "closed", "Closed"
+    FAILED = "failed", "Failed"
+
+
+class AgentChatMessageRole(models.TextChoices):
+    USER = "user", "User"
+    ASSISTANT = "assistant", "Assistant"
+    TOOL = "tool", "Tool"
+    SYSTEM = "system", "System"
+
+
+class AgentChatMessageStatus(models.TextChoices):
+    QUEUED = "queued", "Queued"
+    SENT = "sent", "Sent"
+    STREAMING = "streaming", "Streaming"
+    COMPLETED = "completed", "Completed"
+    FAILED = "failed", "Failed"
+    CANCELLED = "cancelled", "Cancelled"
+
+
 class Runner(models.Model):
     """First-class trust and worker entity (per-runner HTTPS transport).
 
@@ -821,6 +843,223 @@ class ApprovalRequest(models.Model):
         db_table = "agent_run_approval"
         ordering = ("-requested_at",)
         indexes = [models.Index(fields=["agent_run", "status"])]
+
+
+class AgentChatSession(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    workspace = models.ForeignKey(
+        "db.Workspace",
+        on_delete=models.CASCADE,
+        related_name="agent_chat_sessions",
+    )
+    runner = models.ForeignKey(
+        Runner, on_delete=models.CASCADE, related_name="chat_sessions"
+    )
+    created_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.PROTECT,
+        related_name="agent_chat_sessions",
+    )
+    pod = models.ForeignKey(
+        "runner.Pod",
+        on_delete=models.PROTECT,
+        related_name="agent_chat_sessions",
+    )
+    status = models.CharField(
+        max_length=24,
+        choices=AgentChatSessionStatus.choices,
+        default=AgentChatSessionStatus.OPEN,
+        db_index=True,
+    )
+    agent_kind = models.CharField(max_length=24, blank=True, default="")
+    local_thread_id = models.CharField(max_length=128, blank=True, default="")
+    local_session_id = models.CharField(max_length=128, blank=True, default="")
+    cwd = models.TextField(blank=True, default="")
+    model = models.CharField(max_length=128, blank=True, default="")
+    active_turn_id = models.CharField(max_length=128, blank=True, default="")
+    active_message_id = models.UUIDField(null=True, blank=True)
+    close_requested = models.BooleanField(default=False)
+    last_message_at = models.DateTimeField(null=True, blank=True)
+    closed_at = models.DateTimeField(null=True, blank=True)
+    error = models.TextField(blank=True, default="")
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "agent_chat_session"
+        ordering = ("-last_message_at", "-created_at")
+        indexes = [
+            models.Index(
+                fields=["workspace", "runner", "status"],
+                name="ac_sess_ws_run_stat_idx",
+            ),
+            models.Index(
+                fields=["created_by", "runner", "status"],
+                name="ac_sess_user_run_stat_idx",
+            ),
+            models.Index(
+                fields=["runner", "status"],
+                name="ac_sess_run_stat_idx",
+            ),
+            models.Index(
+                fields=["last_message_at"],
+                name="ac_sess_last_msg_idx",
+            ),
+        ]
+
+
+class AgentChatMessage(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    session = models.ForeignKey(
+        AgentChatSession, on_delete=models.CASCADE, related_name="messages"
+    )
+    role = models.CharField(
+        max_length=16, choices=AgentChatMessageRole.choices, db_index=True
+    )
+    content = models.TextField(blank=True, default="")
+    content_parts = models.JSONField(default=list, blank=True)
+    status = models.CharField(
+        max_length=24,
+        choices=AgentChatMessageStatus.choices,
+        default=AgentChatMessageStatus.COMPLETED,
+        db_index=True,
+    )
+    local_item_id = models.CharField(max_length=128, blank=True, default="")
+    local_turn_id = models.CharField(max_length=128, blank=True, default="")
+    seq = models.PositiveIntegerField()
+    created_at = models.DateTimeField(auto_now_add=True)
+    completed_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        db_table = "agent_chat_message"
+        ordering = ("session", "seq")
+        constraints = [
+            models.UniqueConstraint(
+                fields=["session", "seq"],
+                name="ac_msg_sess_seq_uniq",
+            ),
+        ]
+        indexes = [
+            models.Index(
+                fields=["session", "created_at"],
+                name="ac_msg_sess_created_idx",
+            ),
+            models.Index(
+                fields=["session", "local_turn_id"],
+                name="ac_msg_sess_turn_idx",
+            ),
+            models.Index(
+                fields=["session", "local_item_id"],
+                name="ac_msg_sess_item_idx",
+            ),
+        ]
+
+
+class AgentChatEvent(models.Model):
+    id = models.BigAutoField(primary_key=True)
+    session = models.ForeignKey(
+        AgentChatSession, on_delete=models.CASCADE, related_name="events"
+    )
+    message = models.ForeignKey(
+        AgentChatMessage,
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="events",
+    )
+    seq = models.PositiveIntegerField()
+    source_key = models.CharField(max_length=160, blank=True, default="")
+    kind = models.CharField(max_length=64)
+    payload = models.JSONField(default=dict, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = "agent_chat_event"
+        ordering = ("session", "seq")
+        constraints = [
+            models.UniqueConstraint(
+                fields=["session", "seq"],
+                name="ac_evt_sess_seq_uniq",
+            ),
+            models.UniqueConstraint(
+                fields=["session", "source_key"],
+                condition=~models.Q(source_key=""),
+                name="ac_evt_source_key_uniq",
+            ),
+        ]
+        indexes = [
+            models.Index(
+                fields=["session", "created_at"],
+                name="ac_evt_sess_created_idx",
+            )
+        ]
+
+
+class AgentChatApprovalRequest(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    session = models.ForeignKey(
+        AgentChatSession, on_delete=models.CASCADE, related_name="approvals"
+    )
+    local_approval_id = models.CharField(max_length=160)
+    kind = models.CharField(max_length=24, choices=ApprovalKind.choices)
+    payload = models.JSONField(default=dict, blank=True)
+    reason = models.TextField(blank=True, default="")
+    status = models.CharField(
+        max_length=16,
+        choices=ApprovalStatus.choices,
+        default=ApprovalStatus.PENDING,
+        db_index=True,
+    )
+    decision_source = models.CharField(max_length=16, blank=True, default="")
+    decided_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="runner_chat_approvals_decided",
+    )
+    requested_at = models.DateTimeField(auto_now_add=True)
+    expires_at = models.DateTimeField(null=True, blank=True)
+    decided_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        db_table = "agent_chat_approval"
+        ordering = ("-requested_at",)
+        constraints = [
+            models.UniqueConstraint(
+                fields=["session", "local_approval_id"],
+                name="ac_appr_local_uniq",
+            )
+        ]
+        indexes = [
+            models.Index(
+                fields=["session", "status"],
+                name="ac_appr_sess_stat_idx",
+            )
+        ]
+
+
+class ChatMessageDedupe(models.Model):
+    session = models.ForeignKey(
+        AgentChatSession, on_delete=models.CASCADE, related_name="message_dedupes"
+    )
+    message_id = models.CharField(max_length=128)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = "chat_message_dedupe"
+        constraints = [
+            models.UniqueConstraint(
+                fields=["session", "message_id"],
+                name="chat_dedupe_unique",
+            ),
+        ]
+        indexes = [
+            models.Index(
+                fields=["created_at"],
+                name="chat_dedupe_created_idx",
+            )
+        ]
 
 
 class RunnerLiveState(models.Model):

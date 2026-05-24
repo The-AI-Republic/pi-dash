@@ -5,6 +5,10 @@
 from django.contrib import admin
 
 from pi_dash.runner.models import (
+    AgentChatApprovalRequest,
+    AgentChatEvent,
+    AgentChatMessage,
+    AgentChatSession,
     AgentRun,
     AgentRunEvent,
     ApprovalRequest,
@@ -92,4 +96,37 @@ class AgentRunEventAdmin(admin.ModelAdmin):
 @admin.register(ApprovalRequest)
 class ApprovalRequestAdmin(admin.ModelAdmin):
     list_display = ("id", "agent_run", "kind", "status", "requested_at", "decided_at")
+    list_filter = ("status", "kind")
+
+
+@admin.register(AgentChatSession)
+class AgentChatSessionAdmin(admin.ModelAdmin):
+    list_display = (
+        "id",
+        "runner",
+        "created_by",
+        "status",
+        "active_turn_id",
+        "last_message_at",
+        "closed_at",
+    )
+    list_filter = ("status", "agent_kind")
+    search_fields = ("id", "runner__name", "created_by__email")
+
+
+@admin.register(AgentChatMessage)
+class AgentChatMessageAdmin(admin.ModelAdmin):
+    list_display = ("id", "session", "role", "status", "seq", "created_at")
+    list_filter = ("role", "status")
+
+
+@admin.register(AgentChatEvent)
+class AgentChatEventAdmin(admin.ModelAdmin):
+    list_display = ("id", "session", "seq", "kind", "created_at")
+    list_filter = ("kind",)
+
+
+@admin.register(AgentChatApprovalRequest)
+class AgentChatApprovalRequestAdmin(admin.ModelAdmin):
+    list_display = ("id", "session", "kind", "status", "requested_at", "decided_at")
     list_filter = ("status", "kind")

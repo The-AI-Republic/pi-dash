@@ -20,6 +20,8 @@ use crate::codex::schema::{
 pub struct Bridge {
     pub server: AppServer,
     pub model_default: Option<String>,
+    initialized: bool,
+    thread_id: Option<String>,
     /// Notifications that arrived while we were waiting for an RPC response
     /// (e.g. an early `account/reauthRequired` during `initialize`). Drained
     /// by [`Bridge::next_frame`] before reading from the live stream so the
@@ -33,6 +35,8 @@ impl Bridge {
         Ok(Self {
             server,
             model_default,
+            initialized: false,
+            thread_id: None,
             pending: std::collections::VecDeque::new(),
         })
     }
@@ -43,6 +47,8 @@ impl Bridge {
         Self {
             server,
             model_default,
+            initialized: false,
+            thread_id: None,
             pending: std::collections::VecDeque::new(),
         }
     }
@@ -56,9 +62,23 @@ impl Bridge {
         self.server.inbound.recv().await
     }
 
-    pub async fn run(&mut self, payload: &RunPayload, cwd: &Path) -> Result<BridgeCursor> {
-        self.initialize().await?;
+    /// Prepare the app-server for a chat turn without sending user input.
+    ///
+    /// A warm chat bridge keeps the same Codex app-server process alive for
+    /// multiple turns. Codex accepts `initialize` once per process, and the
+    /// conversation is anchored by the thread created after initialization.
+    pub async fn warm(&mut self, cwd: &Path) -> Result<String> {
+        self.ensure_initialized().await?;
+        if let Some(thread_id) = self.thread_id.as_ref() {
+            return Ok(thread_id.clone());
+        }
         let thread_id = self.start_thread(cwd).await?;
+        self.thread_id = Some(thread_id.clone());
+        Ok(thread_id)
+    }
+
+    pub async fn run(&mut self, payload: &RunPayload, cwd: &Path) -> Result<BridgeCursor> {
+        let thread_id = self.warm(cwd).await?;
         self.start_turn(&thread_id, payload).await?;
         Ok(BridgeCursor {
             run_id: payload.run_id,
@@ -69,7 +89,10 @@ impl Bridge {
         })
     }
 
-    async fn initialize(&mut self) -> Result<()> {
+    async fn ensure_initialized(&mut self) -> Result<()> {
+        if self.initialized {
+            return Ok(());
+        }
         let id = self.server.alloc_id();
         let line = jsonrpc::request(
             id,
@@ -86,6 +109,7 @@ impl Bridge {
         let _ = self.await_response(id, Duration::from_secs(15)).await?;
         let line = jsonrpc::notification("initialized", &serde_json::Value::Null)?;
         self.server.send_raw(&line).await?;
+        self.initialized = true;
         Ok(())
     }
 
@@ -260,12 +284,25 @@ impl BridgeCursor {
                     // systemError, so the runner reported "completed" on
                     // 400s from OpenAI.
                     let conclusion = params.get("conclusion").and_then(|v| v.as_str());
-                    if conclusion == Some("success") {
+                    let turn_status = params
+                        .get("turn")
+                        .and_then(|v| v.get("status"))
+                        .and_then(|v| v.as_str());
+                    let turn_error = params
+                        .get("turn")
+                        .and_then(|v| v.get("error"))
+                        .filter(|v| !v.is_null());
+                    if conclusion == Some("success")
+                        || (conclusion.is_none()
+                            && turn_error.is_none()
+                            && matches!(turn_status, Some("completed" | "succeeded")))
+                    {
                         vec![BridgeEvent::Completed {
                             run_id: self.run_id,
                             done_payload: params.get("done").cloned().unwrap_or_else(|| {
                                 serde_json::json!({
-                                    "conclusion": "success",
+                                    "conclusion": conclusion.unwrap_or("success"),
+                                    "turn": params.get("turn"),
                                     "ended_at": Utc::now().to_rfc3339(),
                                 })
                             }),
@@ -281,6 +318,7 @@ impl BridgeCursor {
                                 .or_else(|| {
                                     conclusion.map(|c| format!("turn ended with conclusion={c:?}"))
                                 })
+                                .or_else(|| turn_error.map(|e| format!("turn completed with error: {e}")))
                                 .or_else(|| Some("turn/completed without conclusion".to_string())),
                         }]
                     }
@@ -491,6 +529,31 @@ mod translate_tests {
         let mut c = cursor();
         let evs = c.translate(notif("turn/completed", json!({"conclusion": "success"})));
         assert!(matches!(evs.as_slice(), [BridgeEvent::Completed { .. }]));
+    }
+
+    #[test]
+    fn turn_completed_with_completed_turn_status_completes_run() {
+        let mut c = cursor();
+        let evs = c.translate(notif(
+            "turn/completed",
+            json!({"turn": {"status": "completed", "error": null}}),
+        ));
+        assert!(matches!(evs.as_slice(), [BridgeEvent::Completed { .. }]));
+    }
+
+    #[test]
+    fn turn_completed_with_turn_error_fails_run() {
+        let mut c = cursor();
+        let evs = c.translate(notif(
+            "turn/completed",
+            json!({"turn": {"status": "completed", "error": {"message": "boom"}}}),
+        ));
+        match evs.as_slice() {
+            [BridgeEvent::Failed { detail, .. }] => {
+                assert!(detail.as_deref().unwrap_or("").contains("boom"));
+            }
+            other => panic!("expected Failed, got {other:?}"),
+        }
     }
 
     #[test]

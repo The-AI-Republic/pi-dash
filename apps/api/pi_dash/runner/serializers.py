@@ -6,6 +6,10 @@ from django.core.validators import RegexValidator
 from rest_framework import serializers
 
 from pi_dash.runner.models import (
+    AgentChatApprovalRequest,
+    AgentChatEvent,
+    AgentChatMessage,
+    AgentChatSession,
     AgentRun,
     AgentRunEvent,
     ApprovalRequest,
@@ -230,3 +234,87 @@ class ApprovalRequestSerializer(serializers.ModelSerializer):
 
 class ApprovalDecisionSerializer(serializers.Serializer):
     decision = serializers.ChoiceField(choices=["accept", "decline"])
+
+
+class AgentChatSessionSerializer(serializers.ModelSerializer):
+    runner_detail = RunnerSerializer(source="runner", read_only=True)
+
+    class Meta:
+        model = AgentChatSession
+        fields = [
+            "id",
+            "workspace",
+            "runner",
+            "runner_detail",
+            "created_by",
+            "pod",
+            "status",
+            "agent_kind",
+            "local_thread_id",
+            "local_session_id",
+            "cwd",
+            "model",
+            "active_turn_id",
+            "active_message_id",
+            "close_requested",
+            "last_message_at",
+            "closed_at",
+            "error",
+            "created_at",
+            "updated_at",
+        ]
+        read_only_fields = fields
+
+
+class AgentChatMessageSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = AgentChatMessage
+        fields = [
+            "id",
+            "session",
+            "role",
+            "content",
+            "content_parts",
+            "status",
+            "local_item_id",
+            "local_turn_id",
+            "seq",
+            "created_at",
+            "completed_at",
+        ]
+        read_only_fields = fields
+
+
+class AgentChatEventSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = AgentChatEvent
+        fields = [
+            "id",
+            "session",
+            "message",
+            "seq",
+            "kind",
+            "payload",
+            "created_at",
+        ]
+        read_only_fields = fields
+
+
+class AgentChatApprovalRequestSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = AgentChatApprovalRequest
+        fields = [
+            "id",
+            "session",
+            "local_approval_id",
+            "kind",
+            "payload",
+            "reason",
+            "status",
+            "decision_source",
+            "decided_by",
+            "requested_at",
+            "expires_at",
+            "decided_at",
+        ]
+        read_only_fields = fields

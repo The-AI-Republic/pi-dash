@@ -45,11 +45,26 @@ _VALID_TYPES = frozenset({
     "resume_ack",
     "force_refresh",
     "welcome",
+    "chat_warm",
+    "chat_user_message",
+    "chat_cancel",
+    "chat_close",
+    "chat_decide",
 })
 
 # Offline-allowed types. Per ``design.md`` §7.4: assign/cancel/decide/
 # resume_ack get rejected (RunnerOfflineError); the rest queue.
-_OFFLINE_REJECT = frozenset({"assign", "cancel", "decide", "resume_ack"})
+_OFFLINE_REJECT = frozenset({
+    "assign",
+    "cancel",
+    "decide",
+    "resume_ack",
+    "chat_warm",
+    "chat_user_message",
+    "chat_cancel",
+    "chat_close",
+    "chat_decide",
+})
 
 
 class RunnerOfflineError(Exception):

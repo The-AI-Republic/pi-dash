@@ -3,6 +3,24 @@
 # See the LICENSE file for details.
 
 from .approvals import ApprovalDecideEndpoint, ApprovalListEndpoint
+from .chat import (
+    AgentChatApprovalDecideEndpoint,
+    AgentChatApprovalListEndpoint,
+    AgentChatCancelEndpoint,
+    AgentChatCloseEndpoint,
+    AgentChatMessageListEndpoint,
+    AgentChatSessionDetailEndpoint,
+    AgentChatSessionListEndpoint,
+    AgentChatWarmEndpoint,
+    ChatApprovalEndpoint,
+    ChatClosedEndpoint,
+    ChatEventEndpoint,
+    ChatFailedEndpoint,
+    ChatMessageCompleteEndpoint,
+    ChatMessageStartedEndpoint,
+    ChatStartedEndpoint,
+    chat_event_stream,
+)
 from .enrollment import (
     MachineTokenRedeemEndpoint,
     MachineTokenTicketEndpoint,
@@ -50,6 +68,22 @@ from .sessions import (
 __all__ = [
     "ApprovalDecideEndpoint",
     "ApprovalListEndpoint",
+    "AgentChatApprovalDecideEndpoint",
+    "AgentChatApprovalListEndpoint",
+    "AgentChatCancelEndpoint",
+    "AgentChatCloseEndpoint",
+    "AgentChatMessageListEndpoint",
+    "AgentChatSessionDetailEndpoint",
+    "AgentChatSessionListEndpoint",
+    "AgentChatWarmEndpoint",
+    "ChatApprovalEndpoint",
+    "ChatClosedEndpoint",
+    "ChatEventEndpoint",
+    "ChatFailedEndpoint",
+    "ChatMessageCompleteEndpoint",
+    "ChatMessageStartedEndpoint",
+    "ChatStartedEndpoint",
+    "chat_event_stream",
     "MachineTokenRedeemEndpoint",
     "MachineTokenTicketEndpoint",
     "RunnerCreateEndpoint",

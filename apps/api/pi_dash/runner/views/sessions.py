@@ -30,6 +30,7 @@ from rest_framework.views import APIView
 
 from pi_dash.runner.authentication import RunnerAccessTokenAuthentication
 from pi_dash.runner.models import RunnerSession, RunnerStatus
+from pi_dash.runner.services import chat as chat_service
 from pi_dash.runner.services import outbox, session_service
 
 logger = logging.getLogger(__name__)
@@ -129,6 +130,16 @@ class RunnerSessionOpenEndpoint(APIView):
 
             session_service.apply_hello(runner, body)
             session_service.mark_runner_online(runner.id)
+            released_chats = chat_service.release_active_chats_for_runner(
+                runner,
+                "runner opened a new session before the prior chat turn completed",
+            )
+            if released_chats:
+                logger.info(
+                    "released %s stale active chat session(s) for runner %s on session open",
+                    released_chats,
+                    runner.id,
+                )
 
         # Post-tx Redis side effects — the new session row is committed and
         # visible, and the row lock is released, so a Redis hang here can no

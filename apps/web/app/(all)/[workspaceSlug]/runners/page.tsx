@@ -21,6 +21,8 @@ import { CreatePodModal } from "@/components/runners/create-pod-modal";
 import { RunnerEnrollmentCommand } from "@/components/runners/runner-enrollment-command";
 import { useSelectedPodFilter } from "@/hooks/use-selected-pod-filter";
 import { useWorkspace } from "@/hooks/store/use-workspace";
+import { ApprovalsPage } from "./approvals/page";
+import { RunnerRunsPage } from "./runs/page";
 
 const service = new RunnerService();
 const podService = new PodService();
@@ -31,6 +33,8 @@ const STATUS_BADGE_VARIANT: Record<TRunnerStatus, TBadgeVariant> = {
   offline: "accent-neutral",
   revoked: "accent-warning",
 };
+
+type TOverviewTab = "overview" | "runs" | "approvals";
 
 // A runner is "revivable" when it has never enrolled or has been
 // revoked — i.e., it's not currently holding live credentials.
@@ -75,6 +79,7 @@ const RunnersListPage = observer(function RunnersListPage() {
   const [revoking, setRevoking] = useState(false);
   const [reviving, setReviving] = useState<string | null>(null);
   const [reviveInvite, setReviveInvite] = useState<IRunnerInvite | null>(null);
+  const [activeTab, setActiveTab] = useState<TOverviewTab>("overview");
 
   async function confirmDeleteRunner() {
     if (!deleteRunner) return;
@@ -136,227 +141,256 @@ const RunnersListPage = observer(function RunnersListPage() {
     <div className="flex flex-col gap-6">
       <PageHead title={pageTitle} />
 
-      {/* Header — primary "Add runner" CTA + how-it-works tooltip */}
-      <section className="rounded-md border border-subtle p-4">
-        <div className="flex items-start justify-between gap-3">
-          <div>
-            <div className="flex items-center gap-1.5">
-              <div className="text-13 font-medium text-primary">{t("runners.list.add_runner")}</div>
-              <Tooltip
-                position="bottom"
-                tooltipContent={
-                  <div className="flex max-w-xs flex-col gap-1 p-1 text-12 whitespace-normal">
-                    <div className="font-medium">{t("runners.list.how_it_works_title")}</div>
-                    <div className="whitespace-pre-line text-secondary">{t("runners.list.how_it_works_body")}</div>
-                  </div>
-                }
-              >
+      <div className="flex border-b border-subtle">
+        {[
+          { key: "overview" as const, label: "Overview" },
+          { key: "runs" as const, label: t("runners.tabs.runs") },
+          { key: "approvals" as const, label: t("runners.tabs.approvals") },
+        ].map((tab) => (
+          <button
+            key={tab.key}
+            type="button"
+            onClick={() => setActiveTab(tab.key)}
+            className={`h-9 border-b-2 px-3 text-13 font-medium transition-colors ${
+              activeTab === tab.key
+                ? "border-custom-primary-100 text-primary"
+                : "border-transparent text-secondary hover:text-primary"
+            }`}
+          >
+            {tab.label}
+          </button>
+        ))}
+      </div>
+
+      {activeTab === "overview" ? (
+        <>
+          {/* Header — primary "Add runner" CTA + how-it-works tooltip */}
+          <section className="rounded-md border border-subtle p-4">
+            <div className="flex items-start justify-between gap-3">
+              <div>
+                <div className="flex items-center gap-1.5">
+                  <div className="text-13 font-medium text-primary">{t("runners.list.add_runner")}</div>
+                  <Tooltip
+                    position="bottom"
+                    tooltipContent={
+                      <div className="flex max-w-xs flex-col gap-1 p-1 text-12 whitespace-normal">
+                        <div className="font-medium">{t("runners.list.how_it_works_title")}</div>
+                        <div className="whitespace-pre-line text-secondary">{t("runners.list.how_it_works_body")}</div>
+                      </div>
+                    }
+                  >
+                    <button
+                      type="button"
+                      aria-label={t("runners.list.how_it_works_title")}
+                      className="text-tertiary hover:text-primary"
+                    >
+                      <HelpCircle className="size-4" />
+                    </button>
+                  </Tooltip>
+                </div>
+                <div className="text-13 text-secondary">{t("runners.machine_token_note.body")}</div>
+              </div>
+              <Button onClick={() => setAddOpen(true)} disabled={!workspaceId}>
+                {t("runners.list.add_runner")}
+              </Button>
+            </div>
+          </section>
+
+          {/* Pods (read-only summary) */}
+          <section>
+            <div className="mb-2 text-13 font-medium text-primary">{t("runners.pods.title")}</div>
+            <div className="mb-2 text-12 text-secondary">{t("runners.pods.help")}</div>
+            {podsError ? (
+              <div className="text-destructive text-12">{t("runners.pods.load_failed")}</div>
+            ) : (
+              <div className="flex flex-wrap gap-2">
+                {(pods ?? []).map((p) => {
+                  const isSelected = p.id === selectedPodId;
+                  return (
+                    <button
+                      key={p.id}
+                      type="button"
+                      aria-pressed={isSelected}
+                      aria-label={t("runners.pods.tile_aria", { name: p.name })}
+                      onClick={() => setSelectedPodId(isSelected ? null : p.id)}
+                      className={`rounded-md border px-3 py-2 text-left text-12 transition-colors ${
+                        isSelected
+                          ? "border-custom-primary-100 bg-custom-primary-100/10 ring-custom-primary-100 ring-1"
+                          : "hover:border-primary border-subtle bg-layer-1"
+                      }`}
+                    >
+                      <div className="flex items-center gap-2">
+                        <span className="font-medium text-primary">{p.name}</span>
+                        {p.is_default && (
+                          <Badge variant="accent-neutral" size="sm">
+                            {t("runners.pods.default_badge")}
+                          </Badge>
+                        )}
+                      </div>
+                      <div className="text-secondary">{t("runners.pods.runner_count", { count: p.runner_count })}</div>
+                    </button>
+                  );
+                })}
                 <button
                   type="button"
-                  aria-label={t("runners.list.how_it_works_title")}
-                  className="text-tertiary hover:text-primary"
+                  onClick={() => setCreatePodOpen(true)}
+                  disabled={!workspaceSlug}
+                  className="hover:border-primary flex items-center gap-1.5 rounded-md border border-dashed border-subtle bg-transparent px-3 py-2 text-12 text-secondary hover:text-primary disabled:cursor-not-allowed disabled:opacity-50"
                 >
-                  <HelpCircle className="size-4" />
+                  <Plus className="size-3.5" />
+                  <span className="font-medium">{t("runners.pods.create_tile")}</span>
                 </button>
-              </Tooltip>
-            </div>
-            <div className="text-13 text-secondary">{t("runners.machine_token_note.body")}</div>
-          </div>
-          <Button onClick={() => setAddOpen(true)} disabled={!workspaceId}>
-            {t("runners.list.add_runner")}
-          </Button>
-        </div>
-      </section>
+              </div>
+            )}
+          </section>
 
-      {/* Pods (read-only summary) */}
-      <section>
-        <div className="mb-2 text-13 font-medium text-primary">{t("runners.pods.title")}</div>
-        <div className="mb-2 text-12 text-secondary">{t("runners.pods.help")}</div>
-        {podsError ? (
-          <div className="text-destructive text-12">{t("runners.pods.load_failed")}</div>
-        ) : (
-          <div className="flex flex-wrap gap-2">
-            {(pods ?? []).map((p) => {
-              const isSelected = p.id === selectedPodId;
-              return (
-                <button
-                  key={p.id}
-                  type="button"
-                  aria-pressed={isSelected}
-                  aria-label={t("runners.pods.tile_aria", { name: p.name })}
-                  onClick={() => setSelectedPodId(isSelected ? null : p.id)}
-                  className={`rounded-md border px-3 py-2 text-left text-12 transition-colors ${
-                    isSelected
-                      ? "border-custom-primary-100 bg-custom-primary-100/10 ring-custom-primary-100 ring-1"
-                      : "hover:border-primary border-subtle bg-layer-1"
-                  }`}
-                >
-                  <div className="flex items-center gap-2">
-                    <span className="font-medium text-primary">{p.name}</span>
-                    {p.is_default && (
-                      <Badge variant="accent-neutral" size="sm">
-                        {t("runners.pods.default_badge")}
-                      </Badge>
-                    )}
-                  </div>
-                  <div className="text-secondary">{t("runners.pods.runner_count", { count: p.runner_count })}</div>
-                </button>
-              );
-            })}
-            <button
-              type="button"
-              onClick={() => setCreatePodOpen(true)}
-              disabled={!workspaceSlug}
-              className="hover:border-primary flex items-center gap-1.5 rounded-md border border-dashed border-subtle bg-transparent px-3 py-2 text-12 text-secondary hover:text-primary disabled:cursor-not-allowed disabled:opacity-50"
-            >
-              <Plus className="size-3.5" />
-              <span className="font-medium">{t("runners.pods.create_tile")}</span>
-            </button>
-          </div>
-        )}
-      </section>
-
-      {/* Runners list — pending rows show as offline until the daemon enrolls */}
-      <section>
-        <div className="mb-2 flex items-center gap-3">
-          <div className="text-13 font-medium text-primary">{t("runners.list.connected_runners")}</div>
-          {selectedPod && (
-            <div className="flex items-center gap-2 text-12 text-secondary">
-              <span>{t("runners.pods.filter_active", { name: selectedPod.name })}</span>
-              <button
-                type="button"
-                onClick={() => setSelectedPodId(null)}
-                className="text-custom-primary-100 underline-offset-2 hover:underline"
-              >
-                {t("runners.pods.filter_clear")}
-              </button>
-            </div>
-          )}
-        </div>
-        <div className="overflow-x-auto rounded-md border border-subtle">
-          <table className="w-full text-13">
-            <thead className="bg-layer-1 text-left text-secondary">
-              <tr>
-                <th className="px-3 py-2">{t("runners.list.columns.name")}</th>
-                <th className="px-3 py-2">{t("runners.list.columns_pod")}</th>
-                <th className="px-3 py-2">{t("runners.list.columns.status")}</th>
-                <th className="px-3 py-2">{t("runners.list.columns.os_arch")}</th>
-                <th className="px-3 py-2">{t("runners.list.columns.version")}</th>
-                <th className="px-3 py-2">{t("runners.list.columns.last_heartbeat")}</th>
-                <th className="px-3 py-2"></th>
-              </tr>
-            </thead>
-            <tbody>
-              {(filteredRunners ?? []).map((r) => (
-                <tr key={r.id} className="border-t border-subtle">
-                  <td className="font-mono px-3 py-2 text-11">{r.name}</td>
-                  <td className="px-3 py-2">{r.pod_detail ? r.pod_detail.name : "—"}</td>
-                  <td className="px-3 py-2">
-                    <Badge variant={STATUS_BADGE_VARIANT[r.status]} size="sm">
-                      {t(`runners.list.status.${r.status}`)}
-                    </Badge>
-                  </td>
-                  <td className="px-3 py-2">{r.os ? `${r.os} / ${r.arch}` : "—"}</td>
-                  <td className="px-3 py-2">{r.runner_version || "—"}</td>
-                  <td className="px-3 py-2">
-                    {r.last_heartbeat_at ? new Date(r.last_heartbeat_at).toLocaleString() : "—"}
-                  </td>
-                  <td className="px-3 py-2 text-right">
-                    <div className="flex justify-end gap-2">
-                      {isRevivable(r) && (
-                        <Button
-                          variant="neutral-primary"
-                          size="sm"
-                          onClick={() => reviveRunner(r)}
-                          disabled={reviving === r.id}
-                          loading={reviving === r.id}
-                        >
-                          {t("runners.list.revive")}
-                        </Button>
-                      )}
-                      {isRevocable(r) && (
-                        <Button variant="outline-danger" size="sm" onClick={() => setRevokeRunner(r)}>
-                          {t("runners.list.revoke")}
-                        </Button>
-                      )}
-                      <Button variant="tertiary-danger" size="sm" onClick={() => setDeleteRunner(r)}>
-                        {t("runners.list.delete")}
-                      </Button>
-                    </div>
-                  </td>
-                </tr>
-              ))}
-              {(filteredRunners ?? []).length === 0 && (
-                <tr>
-                  <td colSpan={7} className="px-3 py-8 text-center text-secondary">
-                    {t("runners.list.empty")}
-                  </td>
-                </tr>
+          {/* Runners list — pending rows show as offline until the daemon enrolls */}
+          <section>
+            <div className="mb-2 flex items-center gap-3">
+              <div className="text-13 font-medium text-primary">{t("runners.list.connected_runners")}</div>
+              {selectedPod && (
+                <div className="flex items-center gap-2 text-12 text-secondary">
+                  <span>{t("runners.pods.filter_active", { name: selectedPod.name })}</span>
+                  <button
+                    type="button"
+                    onClick={() => setSelectedPodId(null)}
+                    className="text-custom-primary-100 underline-offset-2 hover:underline"
+                  >
+                    {t("runners.pods.filter_clear")}
+                  </button>
+                </div>
               )}
-            </tbody>
-          </table>
-        </div>
-      </section>
+            </div>
+            <div className="overflow-x-auto rounded-md border border-subtle">
+              <table className="w-full text-13">
+                <thead className="bg-layer-1 text-left text-secondary">
+                  <tr>
+                    <th className="px-3 py-2">{t("runners.list.columns.name")}</th>
+                    <th className="px-3 py-2">{t("runners.list.columns_pod")}</th>
+                    <th className="px-3 py-2">{t("runners.list.columns.status")}</th>
+                    <th className="px-3 py-2">{t("runners.list.columns.os_arch")}</th>
+                    <th className="px-3 py-2">{t("runners.list.columns.version")}</th>
+                    <th className="px-3 py-2">{t("runners.list.columns.last_heartbeat")}</th>
+                    <th className="px-3 py-2"></th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {(filteredRunners ?? []).map((r) => (
+                    <tr key={r.id} className="border-t border-subtle">
+                      <td className="font-mono px-3 py-2 text-11">{r.name}</td>
+                      <td className="px-3 py-2">{r.pod_detail ? r.pod_detail.name : "—"}</td>
+                      <td className="px-3 py-2">
+                        <Badge variant={STATUS_BADGE_VARIANT[r.status]} size="sm">
+                          {t(`runners.list.status.${r.status}`)}
+                        </Badge>
+                      </td>
+                      <td className="px-3 py-2">{r.os ? `${r.os} / ${r.arch}` : "—"}</td>
+                      <td className="px-3 py-2">{r.runner_version || "—"}</td>
+                      <td className="px-3 py-2">
+                        {r.last_heartbeat_at ? new Date(r.last_heartbeat_at).toLocaleString() : "—"}
+                      </td>
+                      <td className="px-3 py-2 text-right">
+                        <div className="flex justify-end gap-2">
+                          {isRevivable(r) && (
+                            <Button
+                              variant="neutral-primary"
+                              size="sm"
+                              onClick={() => reviveRunner(r)}
+                              disabled={reviving === r.id}
+                              loading={reviving === r.id}
+                            >
+                              {t("runners.list.revive")}
+                            </Button>
+                          )}
+                          {isRevocable(r) && (
+                            <Button variant="outline-danger" size="sm" onClick={() => setRevokeRunner(r)}>
+                              {t("runners.list.revoke")}
+                            </Button>
+                          )}
+                          <Button variant="tertiary-danger" size="sm" onClick={() => setDeleteRunner(r)}>
+                            {t("runners.list.delete")}
+                          </Button>
+                        </div>
+                      </td>
+                    </tr>
+                  ))}
+                  {(filteredRunners ?? []).length === 0 && (
+                    <tr>
+                      <td colSpan={7} className="px-3 py-8 text-center text-secondary">
+                        {t("runners.list.empty")}
+                      </td>
+                    </tr>
+                  )}
+                </tbody>
+              </table>
+            </div>
+          </section>
 
-      {workspaceId && workspaceSlug && (
-        <AddRunnerModal
-          isOpen={addOpen}
-          onClose={() => setAddOpen(false)}
-          workspaceId={workspaceId}
-          workspaceSlug={workspaceSlug}
-          onCreated={() => mutateRunners()}
-        />
+          {workspaceId && workspaceSlug && (
+            <AddRunnerModal
+              isOpen={addOpen}
+              onClose={() => setAddOpen(false)}
+              workspaceId={workspaceId}
+              workspaceSlug={workspaceSlug}
+              onCreated={() => mutateRunners()}
+            />
+          )}
+          {workspaceSlug && (
+            <CreatePodModal
+              isOpen={createPodOpen}
+              onClose={() => setCreatePodOpen(false)}
+              workspaceSlug={workspaceSlug}
+              onCreated={() => mutatePods()}
+            />
+          )}
+          <AlertModalCore
+            isOpen={!!deleteRunner}
+            handleClose={() => (deleting ? null : setDeleteRunner(null))}
+            handleSubmit={confirmDeleteRunner}
+            isSubmitting={deleting}
+            title={t("runners.list.delete_confirm_title")}
+            content={t("runners.list.delete_confirm_body")}
+            primaryButtonText={{ default: t("runners.list.delete"), loading: t("runners.list.delete") }}
+          />
+          <AlertModalCore
+            isOpen={!!revokeRunner}
+            handleClose={() => (revoking ? null : setRevokeRunner(null))}
+            handleSubmit={confirmRevokeRunner}
+            isSubmitting={revoking}
+            title={t("runners.list.revoke_confirm_title")}
+            content={t("runners.list.revoke_confirm_body")}
+            primaryButtonText={{ default: t("runners.list.revoke"), loading: t("runners.list.revoke") }}
+          />
+          <ModalCore
+            isOpen={!!reviveInvite}
+            handleClose={() => setReviveInvite(null)}
+            position={EModalPosition.CENTER}
+            width={EModalWidth.XXL}
+          >
+            {reviveInvite && (
+              <div className="flex flex-col gap-4 p-5">
+                <div>
+                  <div className="text-18 font-medium text-primary">{t("runners.list.revive_modal_title")}</div>
+                  <p className="mt-1 text-13 text-secondary">
+                    {t("runners.add_modal.runner_id_label")}: <code className="text-12">{reviveInvite.runner_id}</code>
+                    <br />
+                    {reviveInvite.name}
+                  </p>
+                  <p className="mt-2 text-13 text-secondary">{t("runners.list.revive_modal_body")}</p>
+                </div>
+                <RunnerEnrollmentCommand invite={reviveInvite} />
+                <div className="flex justify-end">
+                  <Button onClick={() => setReviveInvite(null)}>{t("runners.add_modal.done")}</Button>
+                </div>
+              </div>
+            )}
+          </ModalCore>
+        </>
+      ) : activeTab === "runs" ? (
+        <RunnerRunsPage />
+      ) : (
+        <ApprovalsPage />
       )}
-      {workspaceSlug && (
-        <CreatePodModal
-          isOpen={createPodOpen}
-          onClose={() => setCreatePodOpen(false)}
-          workspaceSlug={workspaceSlug}
-          onCreated={() => mutatePods()}
-        />
-      )}
-      <AlertModalCore
-        isOpen={!!deleteRunner}
-        handleClose={() => (deleting ? null : setDeleteRunner(null))}
-        handleSubmit={confirmDeleteRunner}
-        isSubmitting={deleting}
-        title={t("runners.list.delete_confirm_title")}
-        content={t("runners.list.delete_confirm_body")}
-        primaryButtonText={{ default: t("runners.list.delete"), loading: t("runners.list.delete") }}
-      />
-      <AlertModalCore
-        isOpen={!!revokeRunner}
-        handleClose={() => (revoking ? null : setRevokeRunner(null))}
-        handleSubmit={confirmRevokeRunner}
-        isSubmitting={revoking}
-        title={t("runners.list.revoke_confirm_title")}
-        content={t("runners.list.revoke_confirm_body")}
-        primaryButtonText={{ default: t("runners.list.revoke"), loading: t("runners.list.revoke") }}
-      />
-      <ModalCore
-        isOpen={!!reviveInvite}
-        handleClose={() => setReviveInvite(null)}
-        position={EModalPosition.CENTER}
-        width={EModalWidth.XXL}
-      >
-        {reviveInvite && (
-          <div className="flex flex-col gap-4 p-5">
-            <div>
-              <div className="text-18 font-medium text-primary">{t("runners.list.revive_modal_title")}</div>
-              <p className="mt-1 text-13 text-secondary">
-                {t("runners.add_modal.runner_id_label")}: <code className="text-12">{reviveInvite.runner_id}</code>
-                <br />
-                {reviveInvite.name}
-              </p>
-              <p className="mt-2 text-13 text-secondary">{t("runners.list.revive_modal_body")}</p>
-            </div>
-            <RunnerEnrollmentCommand invite={reviveInvite} />
-            <div className="flex justify-end">
-              <Button onClick={() => setReviveInvite(null)}>{t("runners.add_modal.done")}</Button>
-            </div>
-          </div>
-        )}
-      </ModalCore>
     </div>
   );
 });
