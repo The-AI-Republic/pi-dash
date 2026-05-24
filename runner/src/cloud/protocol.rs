@@ -70,6 +70,13 @@ impl<T> Envelope<T> {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RunEventRecord {
+    pub seq: u64,
+    pub kind: String,
+    pub payload: serde_json::Value,
+}
+
 /// Messages the runner sends to the cloud.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -110,6 +117,10 @@ pub enum ClientMsg {
         seq: u64,
         kind: String,
         payload: serde_json::Value,
+    },
+    RunEvents {
+        run_id: Uuid,
+        events: Vec<RunEventRecord>,
     },
     ApprovalRequest {
         run_id: Uuid,
