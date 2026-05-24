@@ -2,7 +2,7 @@ use anyhow::Result;
 use chrono::Utc;
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::sync::{RwLock, mpsc, oneshot, watch};
 
 use crate::agent::{AgentBridge, AgentCursor, BridgeEvent, RunPayload};
@@ -1206,6 +1206,44 @@ fn bridge_has_exited(bridge: &AgentBridge) -> bool {
     handle.exit_rx.borrow().is_some()
 }
 
+fn elapsed_ms(start: Instant) -> u64 {
+    start.elapsed().as_millis().try_into().unwrap_or(u64::MAX)
+}
+
+fn bridge_event_label(ev: &BridgeEvent) -> &'static str {
+    match ev {
+        BridgeEvent::RunStarted { .. } => "run_started",
+        BridgeEvent::Raw { .. } => "raw",
+        BridgeEvent::ApprovalRequest { .. } => "approval_request",
+        BridgeEvent::AwaitingReauth { .. } => "awaiting_reauth",
+        BridgeEvent::Completed { .. } => "completed",
+        BridgeEvent::Failed { .. } => "failed",
+    }
+}
+
+fn assistant_delta_text(params: &serde_json::Value) -> Option<&str> {
+    if let Some(delta) = params.get("delta") {
+        if let Some(text) = delta.as_str() {
+            return Some(text);
+        }
+        if let Some(text) = delta.get("text").and_then(|value| value.as_str()) {
+            return Some(text);
+        }
+    }
+    params.get("text").and_then(|value| value.as_str())
+}
+
+fn timing_payload(stage: &str, mut payload: serde_json::Value) -> serde_json::Value {
+    if !payload.is_object() {
+        payload = serde_json::json!({});
+    }
+    if let Some(obj) = payload.as_object_mut() {
+        obj.insert("stage".into(), serde_json::json!(stage));
+        obj.insert("runner_recorded_at".into(), serde_json::json!(Utc::now()));
+    }
+    payload
+}
+
 struct ChatWorker {
     runner_paths: RunnerPaths,
     runner_config: crate::config::schema::RunnerConfig,
@@ -1325,6 +1363,25 @@ impl ChatWorker {
         let _ = &self.runner_paths;
     }
 
+    async fn send_timing_event(
+        &self,
+        chat_session_id: uuid::Uuid,
+        bridge_seq: &mut u64,
+        stage: &str,
+        payload: serde_json::Value,
+    ) {
+        *bridge_seq = (*bridge_seq).saturating_add(1);
+        self.out
+            .send(ClientMsg::ChatEvent {
+                chat_session_id,
+                bridge_seq: *bridge_seq,
+                kind: "chat_timing".into(),
+                payload: timing_payload(stage, payload),
+            })
+            .await
+            .ok();
+    }
+
     async fn handle_warm(
         &mut self,
         chat_session_id: uuid::Uuid,
@@ -1334,6 +1391,17 @@ impl ChatWorker {
         bridge_seq: &mut u64,
         started_sent: &mut bool,
     ) -> Result<()> {
+        self.send_timing_event(
+            chat_session_id,
+            bridge_seq,
+            "runner_warm_received",
+            serde_json::json!({
+                "local_session_id": warm.local_session_id.as_deref(),
+                "local_thread_id": warm.local_thread_id.as_deref(),
+            }),
+        )
+        .await;
+
         if workspace_path.is_none() {
             *workspace_path = Some(self.resolve_chat_workspace(warm.cwd.as_deref()).await?);
         }
@@ -1354,6 +1422,7 @@ impl ChatWorker {
             warm.local_thread_id.as_deref(),
         );
         if bridge.is_none() {
+            let spawn_started = Instant::now();
             *bridge = Some(
                 AgentBridge::spawn_from_config_with_resume(
                     &self.runner_config,
@@ -1363,11 +1432,45 @@ impl ChatWorker {
                 )
                 .await?,
             );
+            self.send_timing_event(
+                chat_session_id,
+                bridge_seq,
+                "bridge_spawned",
+                serde_json::json!({
+                    "operation": "warm",
+                    "duration_ms": elapsed_ms(spawn_started),
+                    "resume_id_present": resume_id.is_some(),
+                }),
+            )
+            .await;
+        } else {
+            self.send_timing_event(
+                chat_session_id,
+                bridge_seq,
+                "bridge_reused",
+                serde_json::json!({
+                    "operation": "warm",
+                }),
+            )
+            .await;
         }
         let bridge = bridge
             .as_mut()
             .ok_or_else(|| anyhow::anyhow!("chat bridge missing"))?;
+        let warm_started = Instant::now();
         let warmed_thread_id = bridge.warm(workspace_path).await?;
+        self.send_timing_event(
+            chat_session_id,
+            bridge_seq,
+            "bridge_warmed",
+            serde_json::json!({
+                "operation": "warm",
+                "duration_ms": elapsed_ms(warm_started),
+                "already_warm": already_warm,
+                "local_session_id": warmed_thread_id.as_deref(),
+            }),
+        )
+        .await;
         match warmed_thread_id.as_ref() {
             Some(thread_id) if !*started_sent => {
                 self.out
@@ -1409,6 +1512,19 @@ impl ChatWorker {
         bridge_seq: &mut u64,
         started_sent: &mut bool,
     ) -> Result<bool> {
+        let message_id = turn.message_id;
+        self.send_timing_event(
+            chat_session_id,
+            bridge_seq,
+            "runner_message_received",
+            serde_json::json!({
+                "message_id": message_id,
+                "local_session_id": turn.local_session_id.as_deref(),
+                "local_thread_id": turn.local_thread_id.as_deref(),
+            }),
+        )
+        .await;
+
         if workspace_path.is_none() {
             *workspace_path = Some(self.resolve_chat_workspace(turn.cwd.as_deref()).await?);
         }
@@ -1428,6 +1544,7 @@ impl ChatWorker {
             turn.local_thread_id.as_deref(),
         );
         if bridge.is_none() {
+            let spawn_started = Instant::now();
             *bridge = Some(
                 AgentBridge::spawn_from_config_with_resume(
                     &self.runner_config,
@@ -1437,6 +1554,29 @@ impl ChatWorker {
                 )
                 .await?,
             );
+            self.send_timing_event(
+                chat_session_id,
+                bridge_seq,
+                "bridge_spawned",
+                serde_json::json!({
+                    "operation": "turn",
+                    "message_id": message_id,
+                    "duration_ms": elapsed_ms(spawn_started),
+                    "resume_id_present": resume_id.is_some(),
+                }),
+            )
+            .await;
+        } else {
+            self.send_timing_event(
+                chat_session_id,
+                bridge_seq,
+                "bridge_reused",
+                serde_json::json!({
+                    "operation": "turn",
+                    "message_id": message_id,
+                }),
+            )
+            .await;
         }
         let bridge = bridge
             .as_mut()
@@ -1446,8 +1586,20 @@ impl ChatWorker {
             prompt: turn.content,
             model: turn.model,
         };
+        let turn_started_at = Instant::now();
         let mut cursor = bridge.run(&payload, workspace_path).await?;
         let turn_id = cursor.thread_id().to_string();
+        self.send_timing_event(
+            chat_session_id,
+            bridge_seq,
+            "bridge_turn_started",
+            serde_json::json!({
+                "message_id": message_id,
+                "turn_id": turn_id.as_str(),
+                "duration_ms": elapsed_ms(turn_started_at),
+            }),
+        )
+        .await;
         if !*started_sent {
             self.out
                 .send(ClientMsg::ChatStarted {
@@ -1473,6 +1625,8 @@ impl ChatWorker {
         let mut final_status = "completed".to_string();
         let mut assistant_message: Option<String> = None;
         let mut close_after_turn = false;
+        let mut first_agent_event_sent = false;
+        let mut first_assistant_text_sent = false;
         loop {
             tokio::select! {
                 biased;
@@ -1512,6 +1666,16 @@ impl ChatWorker {
                 }
                 events = bridge.next_events(&mut cursor) => {
                     let Some(events) = events else {
+                        self.send_timing_event(
+                            chat_session_id,
+                            bridge_seq,
+                            "agent_stdout_closed",
+                            serde_json::json!({
+                                "message_id": message_id,
+                                "turn_id": turn_id.as_str(),
+                                "since_turn_start_ms": elapsed_ms(turn_started_at),
+                            }),
+                        ).await;
                         self.out.send(ClientMsg::ChatFailed {
                             chat_session_id,
                             code: "agent_stdout_closed".into(),
@@ -1523,6 +1687,20 @@ impl ChatWorker {
                     };
                     let mut done = false;
                     for ev in events {
+                        if !first_agent_event_sent {
+                            self.send_timing_event(
+                                chat_session_id,
+                                bridge_seq,
+                                "first_agent_event",
+                                serde_json::json!({
+                                    "message_id": message_id,
+                                    "turn_id": turn_id.as_str(),
+                                    "event": bridge_event_label(&ev),
+                                    "since_turn_start_ms": elapsed_ms(turn_started_at),
+                                }),
+                            ).await;
+                            first_agent_event_sent = true;
+                        }
                         *bridge_seq = (*bridge_seq).saturating_add(1);
                         match ev {
                             BridgeEvent::Raw { method, params, .. } => {
@@ -1531,15 +1709,38 @@ impl ChatWorker {
                                 } else {
                                     "raw"
                                 };
+                                let first_text_delta_chars =
+                                    if !first_assistant_text_sent && kind == "assistant_delta" {
+                                        assistant_delta_text(&params)
+                                            .filter(|text| !text.is_empty())
+                                            .map(|text| text.chars().count())
+                                    } else {
+                                        None
+                                    };
                                 self.out.send(ClientMsg::ChatEvent {
                                     chat_session_id,
                                     bridge_seq: *bridge_seq,
                                     kind: kind.into(),
                                     payload: serde_json::json!({
-                                        "method": method,
+                                        "method": method.as_str(),
                                         "params": params,
                                     }),
                                 }).await.ok();
+                                if let Some(delta_chars) = first_text_delta_chars {
+                                    self.send_timing_event(
+                                        chat_session_id,
+                                        bridge_seq,
+                                        "first_assistant_text",
+                                        serde_json::json!({
+                                            "message_id": message_id,
+                                            "turn_id": turn_id.as_str(),
+                                            "method": method.as_str(),
+                                            "delta_chars": delta_chars,
+                                            "since_turn_start_ms": elapsed_ms(turn_started_at),
+                                        }),
+                                    ).await;
+                                    first_assistant_text_sent = true;
+                                }
                             }
                             BridgeEvent::ApprovalRequest {
                                 approval_id,
@@ -1602,11 +1803,32 @@ impl ChatWorker {
                             }
                             BridgeEvent::Completed { done_payload, .. } => {
                                 assistant_message = assistant_text_from_done_payload(&done_payload);
+                                self.send_timing_event(
+                                    chat_session_id,
+                                    bridge_seq,
+                                    "agent_completed",
+                                    serde_json::json!({
+                                        "message_id": message_id,
+                                        "turn_id": turn_id.as_str(),
+                                        "since_turn_start_ms": elapsed_ms(turn_started_at),
+                                    }),
+                                ).await;
                                 final_status = "completed".into();
                                 done = true;
                                 break;
                             }
                             BridgeEvent::Failed { detail, .. } => {
+                                self.send_timing_event(
+                                    chat_session_id,
+                                    bridge_seq,
+                                    "agent_failed",
+                                    serde_json::json!({
+                                        "message_id": message_id,
+                                        "turn_id": turn_id.as_str(),
+                                        "since_turn_start_ms": elapsed_ms(turn_started_at),
+                                        "detail": detail.as_deref(),
+                                    }),
+                                ).await;
                                 self.out.send(ClientMsg::ChatFailed {
                                     chat_session_id,
                                     code: "agent_failed".into(),
@@ -1625,6 +1847,19 @@ impl ChatWorker {
                 }
             }
         }
+        self.send_timing_event(
+            chat_session_id,
+            bridge_seq,
+            "turn_completion",
+            serde_json::json!({
+                "message_id": message_id,
+                "turn_id": turn_id.as_str(),
+                "status": final_status.as_str(),
+                "has_assistant_message": assistant_message.is_some(),
+                "since_turn_start_ms": elapsed_ms(turn_started_at),
+            }),
+        )
+        .await;
         self.out
             .send(ClientMsg::ChatMessageCompleted {
                 chat_session_id,

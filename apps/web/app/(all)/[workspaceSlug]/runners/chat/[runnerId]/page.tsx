@@ -278,7 +278,10 @@ const RunnerChatPage = observer(function RunnerChatPage() {
             ))}
             {events
               .filter(
-                (event) => !["assistant_delta", "turn_completed", "chat_closed", "chat_warmed"].includes(event.kind)
+                (event) =>
+                  !["assistant_delta", "turn_completed", "chat_closed", "chat_warmed", "chat_timing"].includes(
+                    event.kind
+                  )
               )
               .slice(-6)
               .map((event) => (

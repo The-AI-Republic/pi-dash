@@ -295,6 +295,16 @@ class AgentChatMessageListEndpoint(APIView):
             session.active_message_id = message.id
             session.last_message_at = timezone.now()
             session.save(update_fields=["active_message_id", "last_message_at", "updated_at"])
+            chat_service.append_event_locked(
+                session,
+                "chat_timing",
+                {
+                    "stage": "web_send_accepted",
+                    "message_id": str(message.id),
+                    "recorded_at": timezone.now().isoformat(),
+                },
+                message=message,
+            )
             chat_service.enqueue_chat_message_after_commit(
                 runner.id,
                 chat_session_id=session.id,
