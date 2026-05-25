@@ -12,7 +12,9 @@ import { TOAST_TYPE, setToast } from "@pi-dash/propel/toast";
 import { RunnerService } from "@pi-dash/services";
 import type { IApprovalRequest, TApprovalDecision, TApprovalKind } from "@pi-dash/types";
 import { Button } from "@pi-dash/ui";
+import { PageHead } from "@/components/core/page-title";
 import { RunnersTabs } from "@/components/runners/runners-tabs";
+import { useWorkspace } from "@/hooks/store/use-workspace";
 
 const service = new RunnerService();
 
@@ -29,10 +31,14 @@ function kindKey(kind: TApprovalKind): string {
 
 export const ApprovalsPage = observer(function ApprovalsPage() {
   const { t } = useTranslation();
+  const { currentWorkspace } = useWorkspace();
   const { data: approvals, mutate } = useSWR<IApprovalRequest[]>("runner-approvals", () => service.listApprovals(), {
     refreshInterval: 2_000,
   });
   const [pending, setPending] = useState<string | null>(null);
+  const pageTitle = currentWorkspace?.name
+    ? t("runners.page_title", { workspace: currentWorkspace.name })
+    : t("runners.title");
 
   async function decide(id: string, decision: TApprovalDecision) {
     setPending(id);
@@ -55,6 +61,7 @@ export const ApprovalsPage = observer(function ApprovalsPage() {
 
   return (
     <div className="flex flex-col gap-6">
+      <PageHead title={pageTitle} />
       <RunnersTabs />
       {rows.length === 0 ? (
         <div className="rounded-md border border-subtle p-8 text-center text-13 text-secondary">

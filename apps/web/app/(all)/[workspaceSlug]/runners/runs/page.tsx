@@ -15,6 +15,7 @@ import type { IAgentRun, TAgentRunStatus } from "@pi-dash/types";
 import { AGENT_RUN_TERMINAL_STATUSES } from "@pi-dash/types";
 import type { TBadgeVariant } from "@pi-dash/ui";
 import { AlertModalCore, Badge, Button } from "@pi-dash/ui";
+import { PageHead } from "@/components/core/page-title";
 import { RunnersTabs } from "@/components/runners/runners-tabs";
 import { useWorkspace } from "@/hooks/store/use-workspace";
 
@@ -49,11 +50,12 @@ export const RunnerRunsPage = observer(function RunnerRunsPage() {
     { refreshInterval: 5_000 }
   );
 
-  const { data: detail } = useSWR<IAgentRun>(
+  const { data: detail, error: detailError } = useSWR<IAgentRun>(
     selected ? ["runner-run-detail", selected] : null,
     () => service.getRun(selected!, true),
     {
       refreshInterval: (latest) => (latest && isTerminal(latest.status) ? 0 : 3_000),
+      shouldRetryOnError: false,
     }
   );
 
@@ -62,7 +64,7 @@ export const RunnerRunsPage = observer(function RunnerRunsPage() {
 
   function selectRun(id: string) {
     if (!workspaceSlug) return;
-    navigate(`/${workspaceSlug}/runners/runs/${id}`);
+    navigate(`/${workspaceSlug}/runners/runs/${id}`, { replace: true });
   }
 
   async function confirmCancel() {
@@ -84,8 +86,13 @@ export const RunnerRunsPage = observer(function RunnerRunsPage() {
     }
   }
 
+  const pageTitle = currentWorkspace?.name
+    ? t("runners.page_title", { workspace: currentWorkspace.name })
+    : t("runners.title");
+
   return (
     <div className="flex flex-col gap-6">
+      <PageHead title={pageTitle} />
       <RunnersTabs />
       <div className="grid grid-cols-[400px_1fr] gap-4">
         <div className="rounded-md border border-subtle">
@@ -127,7 +134,9 @@ export const RunnerRunsPage = observer(function RunnerRunsPage() {
         </div>
 
         <div className="rounded-md border border-subtle p-4">
-          {!detail ? (
+          {selected && detailError ? (
+            <div className="text-13 text-danger-primary">{t("runners.runs.detail_load_failed")}</div>
+          ) : !detail ? (
             <div className="text-13 text-secondary">{t("runners.runs.select_run")}</div>
           ) : (
             <div className="flex flex-col gap-3">

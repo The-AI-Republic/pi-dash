@@ -458,6 +458,7 @@ export default {
     },
     tabs: {
       runners: "AI Agents",
+      overview: "Overview",
       runs: "Runs",
       approvals: "Approvals",
     },
@@ -624,6 +625,7 @@ export default {
       },
       empty: "No runs yet.",
       select_run: "Select a run on the left.",
+      detail_load_failed: "This run is not available. It may have been deleted or belong to a different workspace.",
       cancel: "Cancel run",
       cancel_confirm_title: "Cancel run?",
       cancel_confirm_body: "The runner will stop this run as soon as it gets the signal.",

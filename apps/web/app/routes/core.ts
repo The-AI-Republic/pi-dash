@@ -289,10 +289,7 @@ export const coreRoutes: RouteConfigEntry[] = [
       // Runners (Pi Dash runner: connect dev machines, review runs, decide approvals)
       layout("./(all)/[workspaceSlug]/runners/layout.tsx", [
         route(":workspaceSlug/runners", "./(all)/[workspaceSlug]/runners/page.tsx"),
-        route(":workspaceSlug/runners/runs", "./(all)/[workspaceSlug]/runners/runs/page.tsx"),
-        route(":workspaceSlug/runners/runs/:runId", "./(all)/[workspaceSlug]/runners/runs/page.tsx", {
-          id: "runner-runs-detail",
-        }),
+        route(":workspaceSlug/runners/runs/:runId?", "./(all)/[workspaceSlug]/runners/runs/page.tsx"),
         route(":workspaceSlug/runners/approvals", "./(all)/[workspaceSlug]/runners/approvals/page.tsx"),
         route(":workspaceSlug/runners/chat/:runnerId", "./(all)/[workspaceSlug]/runners/chat/[runnerId]/page.tsx"),
       ]),
