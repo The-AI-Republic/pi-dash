@@ -4,6 +4,7 @@
 
 from django.urls import path
 
+from pi_dash.app.views.scheduler.occurrences import ProjectSchedulerOccurrencesEndpoint
 from pi_dash.app.views.scheduler.views import (
     ProjectSchedulerBindingDetailEndpoint,
     ProjectSchedulerBindingListEndpoint,
@@ -34,5 +35,12 @@ urlpatterns = [
         "workspaces/<str:slug>/projects/<str:project_id>/scheduler-bindings/<uuid:binding_id>/",
         ProjectSchedulerBindingDetailEndpoint.as_view(),
         name="project-scheduler-bindings-detail",
+    ),
+    # Project-level: calendar occurrences (PR2 — see
+    # .ai_design/project_scheduler_calendar/decisions.md §3).
+    path(
+        "workspaces/<str:slug>/projects/<str:project_id>/scheduler-bindings/occurrences/",
+        ProjectSchedulerOccurrencesEndpoint.as_view(),
+        name="project-scheduler-bindings-occurrences",
     ),
 ]
