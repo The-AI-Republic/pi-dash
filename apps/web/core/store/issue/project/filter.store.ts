@@ -154,9 +154,10 @@ export class ProjectIssuesFilter extends IssueFilterHelperStore implements IProj
     const richFilters = _filters?.rich_filters;
     const shouldApplyBoardDefault =
       !_filters?.preferences?.work_items?.layout_default_applied &&
-      (!_filters?.display_filters?.layout || _filters.display_filters.layout === "list");
+      (!_filters?.display_filters?.layout || _filters?.display_filters?.layout === "list");
     const displayFiltersPayload = shouldApplyBoardDefault
       ? {
+          ...PROJECT_ISSUES_DEFAULT_DISPLAY_FILTERS,
           ..._filters?.display_filters,
           layout: PROJECT_ISSUES_DEFAULT_DISPLAY_FILTERS.layout,
           group_by: PROJECT_ISSUES_DEFAULT_DISPLAY_FILTERS.group_by,
@@ -192,20 +193,20 @@ export class ProjectIssuesFilter extends IssueFilterHelperStore implements IProj
     });
 
     if (shouldApplyBoardDefault && !this.boardDefaultMigrationProjectIds.has(projectId)) {
-      this.boardDefaultMigrationProjectIds.add(projectId);
       try {
         await this.projectService.updateProjectUserProperties(workspaceSlug, projectId, {
-          display_filters: displayFilters,
+          display_filters: displayFiltersPayload,
           preferences: {
-            ..._filters.preferences,
+            ..._filters?.preferences,
             work_items: {
-              ..._filters.preferences?.work_items,
+              ..._filters?.preferences?.work_items,
               layout_default_applied: true,
             },
           },
         });
+        this.boardDefaultMigrationProjectIds.add(projectId);
       } catch (error) {
-        console.log("error while applying default project work item layout", error);
+        console.error("error while applying default project work item layout", error);
       }
     }
   };
