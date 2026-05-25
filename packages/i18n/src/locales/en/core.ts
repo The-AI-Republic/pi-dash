@@ -15,7 +15,7 @@ export default {
     workspace: "Workspace",
     views: "Views",
     analytics: "Analytics",
-    work_items: "Work items",
+    work_items: "Work Items",
     cycles: "Cycles",
     modules: "Modules",
     intake: "Intake",
@@ -27,6 +27,8 @@ export default {
     prompts: "Prompts",
     schedulers: "Schedulers",
     runners: "AI Agents",
+    more: "More",
+    community: "Community",
     tooltips: {
       projects: "Browse projects",
       runners: "Manage your AI Agent connectivities",

@@ -9,8 +9,9 @@ import { SidebarItemBase } from "@/components/workspace/sidebar/sidebar-item";
 
 type Props = {
   item: IWorkspaceSidebarNavigationItem;
+  additionalStaticItems?: string[];
 };
 
-export function SidebarItem({ item }: Props) {
-  return <SidebarItemBase item={item} />;
+export function SidebarItem({ item, additionalStaticItems }: Props) {
+  return <SidebarItemBase item={item} additionalStaticItems={additionalStaticItems} />;
 }

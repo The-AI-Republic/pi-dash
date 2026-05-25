@@ -8,7 +8,6 @@ import { observer } from "mobx-react";
 import { Outlet } from "react-router";
 import { EUserPermissions, EUserPermissionsLevel } from "@pi-dash/constants";
 import { NotAuthorizedView } from "@/components/auth-screens/not-authorized-view";
-import { WorkspaceShell } from "@/components/workspace/workspace-shell";
 import { useUserPermissions } from "@/hooks/store/user";
 
 /**
@@ -16,6 +15,10 @@ import { useUserPermissions } from "@/hooks/store/user";
  * workspace member can *view* scheduler definitions (so the project-side
  * install picker has something to populate); workspace-admin checks gate
  * mutations on the page itself.
+ *
+ * The parent (projects) layout already provides the WorkspaceShell (sidebar +
+ * main); this layout must NOT wrap in a second one or the workspace sidebar
+ * mirrors into the content area.
  */
 const SchedulersLayout = observer(function SchedulersLayout() {
   const { workspaceUserInfo, allowPermissions } = useUserPermissions();
@@ -27,18 +30,16 @@ const SchedulersLayout = observer(function SchedulersLayout() {
 
   if (workspaceUserInfo && !canView) {
     return (
-      <WorkspaceShell>
+      <div className="flex-1 overflow-auto">
         <NotAuthorizedView section="general" className="h-auto" />
-      </WorkspaceShell>
+      </div>
     );
   }
 
   return (
-    <WorkspaceShell>
-      <div className="flex-1 overflow-auto">
-        <Outlet />
-      </div>
-    </WorkspaceShell>
+    <div className="flex-1 overflow-auto">
+      <Outlet />
+    </div>
   );
 });
 

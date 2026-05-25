@@ -11,6 +11,7 @@ import { EUserPermissions, EUserPermissionsLevel } from "@pi-dash/constants";
 // components
 import { SidebarWrapper } from "@/components/sidebar/sidebar-wrapper";
 import { SidebarFavoritesMenu } from "@/components/workspace/sidebar/favorites/favorites-menu";
+import { SidebarMoreSection } from "@/components/workspace/sidebar/more-section";
 import { SidebarProjectsList } from "@/components/workspace/sidebar/projects-list";
 import { SidebarQuickActions } from "@/components/workspace/sidebar/quick-actions";
 import { SidebarMenuItems } from "@/components/workspace/sidebar/sidebar-menu-items";
@@ -34,14 +35,16 @@ export const WorkspaceSidebar = observer(function WorkspaceSidebar() {
   const isFavoriteEmpty = isEmpty(groupedFavorites);
 
   return (
-    <SidebarWrapper title="Projects" quickActions={<SidebarQuickActions />}>
+    <SidebarWrapper title="Pi Dash" quickActions={<SidebarQuickActions />}>
       <SidebarMenuItems />
       {/* Favorites Menu */}
       {canPerformWorkspaceMemberActions && !isFavoriteEmpty && <SidebarFavoritesMenu />}
       {/* Teams List */}
       <SidebarTeamsList />
-      {/* Projects List */}
+      {/* Projects List (renders Drafts + Work Items as the first two items) */}
       <SidebarProjectsList />
+      {/* More — Prompts, Schedulers, Analytics */}
+      <SidebarMoreSection />
     </SidebarWrapper>
   );
 });

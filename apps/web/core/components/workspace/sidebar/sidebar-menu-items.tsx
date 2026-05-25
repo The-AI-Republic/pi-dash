@@ -6,55 +6,34 @@
 
 import React, { useMemo } from "react";
 import { observer } from "mobx-react";
-import { Ellipsis } from "lucide-react";
-import { Disclosure, Transition } from "@headlessui/react";
 // pi dash imports
 import {
-  WORKSPACE_SIDEBAR_DYNAMIC_NAVIGATION_ITEMS_LINKS,
   WORKSPACE_SIDEBAR_STATIC_NAVIGATION_ITEMS,
   WORKSPACE_SIDEBAR_STATIC_NAVIGATION_ITEMS_LINKS,
   WORKSPACE_SIDEBAR_STATIC_PINNED_NAVIGATION_ITEMS_LINKS,
 } from "@pi-dash/constants";
-import { useTranslation } from "@pi-dash/i18n";
-import { ChevronRightIcon } from "@pi-dash/propel/icons";
-import { cn } from "@pi-dash/utils";
-// components
-import { SidebarNavItem } from "@/components/sidebar/sidebar-navigation";
 // store hooks
-import { useAppTheme } from "@/hooks/store/use-app-theme";
-import useLocalStorage from "@/hooks/use-local-storage";
-import {
-  usePersonalNavigationPreferences,
-  useWorkspaceNavigationPreferences,
-} from "@/hooks/use-navigation-preferences";
+import { usePersonalNavigationPreferences } from "@/hooks/use-navigation-preferences";
 // pi-dash-web imports
 import { SidebarItem } from "@/pi-dash-web/components/workspace/sidebar/sidebar-item";
 
-export const SidebarMenuItems = observer(function SidebarMenuItems() {
-  // routers
-  const { setValue: toggleWorkspaceMenu, storedValue: isWorkspaceMenuOpen } = useLocalStorage<boolean>(
-    "is_workspace_menu_open",
-    true
-  );
+// Items relocated out of this section by the AI-orchestration layout:
+//   - drafts → top of Projects section
+//   - views → "Work Items" row in Projects section
+//   - projects, analytics, prompts, schedulers, archives → new "More" section
+// All entries from WORKSPACE_SIDEBAR_DYNAMIC_NAVIGATION_ITEMS_LINKS are relocated,
+// so that list is no longer rendered here.
+const RELOCATED_KEYS = new Set(["drafts", "views", "projects", "analytics", "prompts", "schedulers", "archives"]);
 
-  // store hooks
-  const { isExtendedSidebarOpened, toggleExtendedSidebar } = useAppTheme();
+export const SidebarMenuItems = observer(function SidebarMenuItems() {
   // hooks
   const { preferences: personalPreferences } = usePersonalNavigationPreferences();
-  const { preferences: workspacePreferences } = useWorkspaceNavigationPreferences();
-  // translation
-  const { t } = useTranslation();
 
-  const toggleListDisclosure = (isOpen: boolean) => {
-    toggleWorkspaceMenu(isOpen);
-  };
-
-  // Filter static navigation items based on personal preferences
+  // Personal items (Stickies / Your work) gated by user preferences, sorted.
   const filteredStaticNavigationItems = useMemo(() => {
     const items = [...WORKSPACE_SIDEBAR_STATIC_NAVIGATION_ITEMS_LINKS];
     const personalItems: Array<(typeof items)[0] & { sort_order: number }> = [];
 
-    // Add personal items based on preferences with their sort_order
     const stickiesItem = WORKSPACE_SIDEBAR_STATIC_NAVIGATION_ITEMS["stickies"];
     if (personalPreferences.items.stickies?.enabled && stickiesItem) {
       personalItems.push({
@@ -68,113 +47,27 @@ export const SidebarMenuItems = observer(function SidebarMenuItems() {
         sort_order: personalPreferences.items.your_work.sort_order,
       });
     }
-    if (personalPreferences.items.drafts?.enabled && WORKSPACE_SIDEBAR_STATIC_NAVIGATION_ITEMS["drafts"]) {
-      personalItems.push({
-        ...WORKSPACE_SIDEBAR_STATIC_NAVIGATION_ITEMS["drafts"],
-        sort_order: personalPreferences.items.drafts.sort_order,
-      });
-    }
-
-    // Sort personal items by sort_order
     personalItems.sort((a, b) => a.sort_order - b.sort_order);
 
-    // Merge static items with sorted personal items
-    return [...items, ...personalItems];
+    return [...items, ...personalItems].filter((item) => !RELOCATED_KEYS.has(item.key));
   }, [personalPreferences]);
 
-  const sortedNavigationItems = useMemo(
-    () =>
-      WORKSPACE_SIDEBAR_DYNAMIC_NAVIGATION_ITEMS_LINKS.map((item) => {
-        const preference = workspacePreferences.items[item.key];
-        return {
-          ...item,
-          sort_order: preference ? preference.sort_order : 0,
-        };
-      }).sort((a, b) => a.sort_order - b.sort_order),
-    [workspacePreferences]
+  // Workspace-pinned items (just `runners` after relocation; computed via the
+  // RELOCATED_KEYS filter so the set of survivors stays in lockstep with that
+  // single source of truth).
+  const pinnedNavigationItems = useMemo(
+    () => WORKSPACE_SIDEBAR_STATIC_PINNED_NAVIGATION_ITEMS_LINKS.filter((item) => !RELOCATED_KEYS.has(item.key)),
+    []
   );
 
   return (
-    <>
-      <div className="flex flex-col gap-0.5">
-        {filteredStaticNavigationItems.map((item, _index) => (
-          <SidebarItem key={`static_${_index}`} item={item} />
-        ))}
-      </div>
-      <Disclosure as="div" className="flex flex-col" defaultOpen={!!isWorkspaceMenuOpen}>
-        <div className="group flex w-full items-center justify-between rounded-sm px-2 py-1.5 text-placeholder hover:bg-layer-transparent-hover">
-          <Disclosure.Button
-            as="button"
-            type="button"
-            className="flex w-full items-center gap-1 text-left text-13 font-semibold whitespace-nowrap text-placeholder"
-            onClick={() => toggleListDisclosure(!isWorkspaceMenuOpen)}
-            aria-label={t(
-              isWorkspaceMenuOpen
-                ? "aria_labels.app_sidebar.close_workspace_menu"
-                : "aria_labels.app_sidebar.open_workspace_menu"
-            )}
-          >
-            <span className="text-13 font-semibold">{t("workspace")}</span>
-          </Disclosure.Button>
-          <div className="pointer-events-none flex items-center opacity-0 group-hover:pointer-events-auto group-hover:opacity-100">
-            <Disclosure.Button
-              as="button"
-              type="button"
-              className="flex-shrink-0 rounded-sm p-0.5 hover:bg-layer-1"
-              onClick={() => toggleListDisclosure(!isWorkspaceMenuOpen)}
-              aria-label={t(
-                isWorkspaceMenuOpen
-                  ? "aria_labels.app_sidebar.close_workspace_menu"
-                  : "aria_labels.app_sidebar.open_workspace_menu"
-              )}
-            >
-              <ChevronRightIcon
-                className={cn("size-3 flex-shrink-0 transition-all", {
-                  "rotate-90": isWorkspaceMenuOpen,
-                })}
-              />
-            </Disclosure.Button>
-          </div>
-        </div>
-        <Transition
-          show={!!isWorkspaceMenuOpen}
-          enter="transition duration-100 ease-out"
-          enterFrom="transform scale-95 opacity-0"
-          enterTo="transform scale-100 opacity-100"
-          leave="transition duration-75 ease-out"
-          leaveFrom="transform scale-100 opacity-100"
-          leaveTo="transform scale-95 opacity-0"
-        >
-          {isWorkspaceMenuOpen && (
-            <Disclosure.Panel as="div" className="flex flex-col gap-0.5" static>
-              <>
-                {WORKSPACE_SIDEBAR_STATIC_PINNED_NAVIGATION_ITEMS_LINKS.map((item, _index) => (
-                  <SidebarItem key={`static_${_index}`} item={item} />
-                ))}
-                {sortedNavigationItems.map((item, _index) => (
-                  <SidebarItem key={`dynamic_${_index}`} item={item} />
-                ))}
-                <SidebarNavItem>
-                  <button
-                    type="button"
-                    onClick={() => toggleExtendedSidebar()}
-                    className="flex flex-grow items-center gap-1.5 text-13 font-medium text-tertiary"
-                    id="extended-sidebar-toggle"
-                    aria-label={t(
-                      isExtendedSidebarOpened
-                        ? "aria_labels.app_sidebar.close_extended_sidebar"
-                        : "aria_labels.app_sidebar.open_extended_sidebar"
-                    )}
-                  >
-                    <Ellipsis className="size-4 flex-shrink-0" />
-                    <span>{isExtendedSidebarOpened ? "Hide" : "More"}</span>
-                  </button>
-                </SidebarNavItem>
-              </>
-            </Disclosure.Panel>
-          )}
-        </Transition>
-      </Disclosure>
-    </>
+    <div className="flex flex-col gap-0.5">
+      {filteredStaticNavigationItems.map((item) => (
+        <SidebarItem key={`static_${item.key}`} item={item} />
+      ))}
+      {pinnedNavigationItems.map((item) => (
+        <SidebarItem key={`pinned_${item.key}`} item={item} />
+      ))}
+    </div>
   );
 });
