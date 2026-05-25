@@ -75,25 +75,10 @@ fn render_plist(
     )
 }
 
-/// Load the LaunchAgent. `RunAtLoad=true` in the plist means `bootstrap`
-/// also starts the process immediately. If already loaded, falls back to
-/// `kickstart -k` so re-running `pidash install` after a crash-free run
-/// doesn't fail — it just ensures the service is running.
+/// Load the LaunchAgent. Equivalent to `start()` now that `start` handles
+/// both the "not yet loaded" and "already loaded" cases; kept as a named
+/// entry point so the install flow reads as `write_unit` → `enable_and_start`.
 pub async fn enable_and_start() -> Result<()> {
-    let plist = plist_path()?;
-    let uid = get_uid();
-    let target = format!("gui/{uid}");
-    let status = Command::new("launchctl")
-        .args(["bootstrap", &target, &plist.display().to_string()])
-        .status()
-        .await
-        .context("launchctl bootstrap")?;
-    if status.success() {
-        return Ok(());
-    }
-    // Already loaded → make sure it's running. `kickstart -k` restarts a
-    // loaded service; on a fresh machine (no prior load) this branch isn't
-    // taken because bootstrap succeeded above.
     start().await
 }
 
@@ -113,29 +98,115 @@ pub async fn uninstall(_: &Paths) -> Result<()> {
     Ok(())
 }
 
+/// Bring the LaunchAgent up. Tries `bootstrap` first (which both loads and
+/// starts the service, since `RunAtLoad=true`). Falls back to
+/// `kickstart -k` ONLY when bootstrap's stderr indicates the service is
+/// already loaded — every other bootstrap failure (plist missing,
+/// malformed, permission denied, label rejected, …) is surfaced with
+/// launchctl's own stderr text so the operator can diagnose it. We
+/// deliberately do not chain to kickstart in those cases: kickstart on a
+/// not-loaded service fails with exit 113, which would hide the real
+/// bootstrap cause behind a misleading "kickstart failed" message.
+///
+/// Why both branches matter for `pidash restart`: restart = stop + start
+/// and `stop()` calls `bootout`, fully removing the service from the
+/// user's gui domain. A plain `kickstart -k` after that fails — so start
+/// MUST be able to re-bootstrap.
 pub async fn start() -> Result<()> {
     let uid = get_uid();
-    let target = format!("gui/{uid}/{LABEL}");
-    let status = Command::new("launchctl")
+    let domain = format!("gui/{uid}");
+    let target = format!("{domain}/{LABEL}");
+    let plist = plist_path()?;
+
+    let bootstrap = Command::new("launchctl")
+        .arg("bootstrap")
+        .arg(&domain)
+        .arg(&plist)
+        .output()
+        .await
+        .context("launchctl bootstrap")?;
+    if bootstrap.status.success() {
+        return Ok(());
+    }
+
+    let bootstrap_stderr = String::from_utf8_lossy(&bootstrap.stderr);
+    if !is_already_loaded_error(&bootstrap_stderr) {
+        anyhow::bail!(
+            "launchctl bootstrap failed ({}): {}",
+            bootstrap.status,
+            bootstrap_stderr.trim()
+        );
+    }
+
+    let kickstart = Command::new("launchctl")
         .args(["kickstart", "-k", &target])
-        .status()
+        .output()
         .await
         .context("launchctl kickstart")?;
-    if !status.success() {
-        anyhow::bail!("launchctl kickstart failed: {status}");
+    if kickstart.status.success() {
+        return Ok(());
     }
-    Ok(())
+    let kickstart_stderr = String::from_utf8_lossy(&kickstart.stderr);
+    anyhow::bail!(
+        "launchctl kickstart failed ({}): {} (bootstrap also failed: {})",
+        kickstart.status,
+        kickstart_stderr.trim(),
+        bootstrap_stderr.trim()
+    );
 }
 
 pub async fn stop() -> Result<()> {
     let uid = get_uid();
     let target = format!("gui/{uid}/{LABEL}");
-    Command::new("launchctl")
+    let out = Command::new("launchctl")
         .args(["bootout", &target])
-        .status()
+        .output()
         .await
         .context("launchctl bootout")?;
-    Ok(())
+    if out.status.success() {
+        return Ok(());
+    }
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    // Benign: bootout against a service that isn't loaded. macOS launchctl
+    // has used different exit codes for this across versions (ESRCH=3 on
+    // older releases, the same "Could not find service in domain" code as
+    // kickstart on newer ones), so we match on the stderr text — stable in
+    // launchctl's source — instead of pinning to a single exit code. Stay
+    // quiet so `pidash restart` after an update / crash doesn't spam stderr
+    // with a benign warning.
+    if is_not_loaded_error(&stderr) {
+        return Ok(());
+    }
+    // Real failure. Surface launchctl's diagnostic to stderr even when the
+    // caller `.ok()`s the Result (which `restart`, `uninstall`,
+    // `update --restart`, and `remove` all do): the old `.status()` path
+    // inherited stderr live, and operators rely on seeing it to debug a
+    // wedged bootout. Then propagate a structured error for callers that
+    // do check the Result.
+    eprintln!("{}", stderr.trim_end());
+    anyhow::bail!("launchctl bootout failed ({})", out.status);
+}
+
+/// Pattern-match `launchctl bootstrap` stderr to decide whether the
+/// failure is the benign "service is already loaded in this domain" case
+/// (caller should fall back to `kickstart -k`) or a real configuration
+/// problem that deserves a hard error. Matches on stderr text rather
+/// than exit codes because the codes drift across macOS releases.
+fn is_already_loaded_error(stderr: &str) -> bool {
+    let s = stderr.to_ascii_lowercase();
+    s.contains("already loaded")
+        || s.contains("already bootstrapped")
+        || s.contains("operation already in progress")
+}
+
+/// Pattern-match `launchctl bootout` stderr to decide whether the
+/// failure is the benign "service isn't loaded in the first place" case
+/// (no-op the caller can ignore) or a real teardown failure.
+fn is_not_loaded_error(stderr: &str) -> bool {
+    let s = stderr.to_ascii_lowercase();
+    s.contains("no such process")
+        || s.contains("could not find service")
+        || s.contains("not loaded")
 }
 
 pub async fn status() -> Result<String> {
@@ -217,6 +288,50 @@ mod tests {
             !body.contains("<key>PATH</key>"),
             "plist body must not declare PATH when path_env is None; got:\n{body}"
         );
+    }
+
+    #[test]
+    fn not_loaded_classifier_matches_observed_launchctl_text() {
+        // The exact stderr the reporter saw (macOS Tahoe, errno-style):
+        assert!(is_not_loaded_error("Boot-out failed: 3: No such process"));
+        // Newer macOS phrasing — same wording kickstart uses for the
+        // not-in-domain case; bootout has been observed to share it:
+        assert!(is_not_loaded_error(
+            "Could not find service \"so.pidash.daemon\" in domain for user gui: 501"
+        ));
+        // Variant seen on some releases:
+        assert!(is_not_loaded_error("Service not loaded"));
+        // Real failures we MUST surface, not silently absorb:
+        assert!(!is_not_loaded_error("Operation not permitted"));
+        assert!(!is_not_loaded_error("Bootstrap failed: 5: Input/output error"));
+        assert!(!is_not_loaded_error(""));
+    }
+
+    #[test]
+    fn already_loaded_classifier_matches_bootstrap_eexist_variants() {
+        // EALREADY (37) is the canonical "already loaded" code; launchctl
+        // prints its strerror:
+        assert!(is_already_loaded_error(
+            "Bootstrap failed: 37: Operation already in progress"
+        ));
+        // Verbose variants seen across macOS versions:
+        assert!(is_already_loaded_error(
+            "Service already loaded in this domain"
+        ));
+        assert!(is_already_loaded_error(
+            "Service is already bootstrapped in domain for user gui: 501"
+        ));
+        // Real bootstrap failures we MUST NOT fall through on — falling
+        // through to kickstart on these would mask the real cause behind
+        // a generic "kickstart failed: exit status: 113".
+        assert!(!is_already_loaded_error(
+            "Bootstrap failed: 5: Input/output error"
+        ));
+        assert!(!is_already_loaded_error(
+            "Load failed: 2: No such file or directory"
+        ));
+        assert!(!is_already_loaded_error("Path had bad ownership/permissions"));
+        assert!(!is_already_loaded_error(""));
     }
 
     #[test]
