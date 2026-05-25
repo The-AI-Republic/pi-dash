@@ -52,7 +52,7 @@ export function SchedulerCalendarHeader({ view, viewDate, onChangeView, onChange
       </div>
 
       <div className="flex items-center gap-1 rounded-md border border-subtle p-0.5">
-        {(["month", "week"] as const).map((v) => (
+        {(["week", "month"] as const).map((v) => (
           <button
             key={v}
             type="button"
