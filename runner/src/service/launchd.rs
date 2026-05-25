@@ -75,25 +75,10 @@ fn render_plist(
     )
 }
 
-/// Load the LaunchAgent. `RunAtLoad=true` in the plist means `bootstrap`
-/// also starts the process immediately. If already loaded, falls back to
-/// `kickstart -k` so re-running `pidash install` after a crash-free run
-/// doesn't fail — it just ensures the service is running.
+/// Load the LaunchAgent. Equivalent to `start()` now that `start` handles
+/// both the "not yet loaded" and "already loaded" cases; kept as a named
+/// entry point so the install flow reads as `write_unit` → `enable_and_start`.
 pub async fn enable_and_start() -> Result<()> {
-    let plist = plist_path()?;
-    let uid = get_uid();
-    let target = format!("gui/{uid}");
-    let status = Command::new("launchctl")
-        .args(["bootstrap", &target, &plist.display().to_string()])
-        .status()
-        .await
-        .context("launchctl bootstrap")?;
-    if status.success() {
-        return Ok(());
-    }
-    // Already loaded → make sure it's running. `kickstart -k` restarts a
-    // loaded service; on a fresh machine (no prior load) this branch isn't
-    // taken because bootstrap succeeded above.
     start().await
 }
 
@@ -113,9 +98,33 @@ pub async fn uninstall(_: &Paths) -> Result<()> {
     Ok(())
 }
 
+/// Bring the LaunchAgent up. Tries `bootstrap` first so we can recover from
+/// a fully-unloaded state (the post-`stop()` shape, since `stop` does
+/// `bootout`). `RunAtLoad=true` in the plist means bootstrap also starts the
+/// process. If bootstrap fails because the service is already in the domain,
+/// fall back to `kickstart -k` to restart the loaded copy.
+///
+/// Why this matters for `pidash restart`: restart = stop + start, and
+/// `stop()` calls `bootout` which fully removes the service from the user's
+/// gui domain. A plain `kickstart -k` after that fails with exit 113
+/// ("Could not find service … in domain"), so start MUST be able to
+/// re-bootstrap, not just kickstart.
 pub async fn start() -> Result<()> {
     let uid = get_uid();
-    let target = format!("gui/{uid}/{LABEL}");
+    let plist = plist_path()?;
+    let domain = format!("gui/{uid}");
+    let target = format!("{domain}/{LABEL}");
+
+    let bootstrap_ok = Command::new("launchctl")
+        .args(["bootstrap", &domain, &plist.display().to_string()])
+        .status()
+        .await
+        .context("launchctl bootstrap")?
+        .success();
+    if bootstrap_ok {
+        return Ok(());
+    }
+
     let status = Command::new("launchctl")
         .args(["kickstart", "-k", &target])
         .status()
@@ -130,12 +139,23 @@ pub async fn start() -> Result<()> {
 pub async fn stop() -> Result<()> {
     let uid = get_uid();
     let target = format!("gui/{uid}/{LABEL}");
-    Command::new("launchctl")
+    let out = Command::new("launchctl")
         .args(["bootout", &target])
-        .status()
+        .output()
         .await
         .context("launchctl bootout")?;
-    Ok(())
+    if out.status.success() {
+        return Ok(());
+    }
+    // launchctl exits 3 ("No such process") when the service isn't loaded.
+    // That's not an error for our callers — `restart` tolerates it, and
+    // `uninstall` is happy either way. Stay quiet so `pidash restart` after
+    // an update doesn't spam stderr with a benign warning.
+    if let Some(3) = out.status.code() {
+        return Ok(());
+    }
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    anyhow::bail!("launchctl bootout failed ({}): {}", out.status, stderr.trim());
 }
 
 pub async fn status() -> Result<String> {
