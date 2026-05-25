@@ -130,12 +130,26 @@ impl RunEventMirror {
     }
 
     fn flush_compact_to_pending(&mut self) -> bool {
-        match self.compact.take_payload() {
-            Some(payload) => self.push_record(RUN_EVENT_COMPACT_KIND.to_string(), payload),
-            None => false,
+        if self.compact.is_empty() {
+            return false;
         }
+        // Check seq availability before taking the buffer: `take_payload` resets
+        // it via `mem::take`, so if `push_record` then rejected due to seq
+        // exhaustion the compacted events would be silently dropped.
+        if self.next_seq >= RUN_EVENT_MAX_SEQ {
+            self.warn_seq_exhausted_once();
+            return false;
+        }
+        let payload = self
+            .compact
+            .take_payload()
+            .expect("compact buffer non-empty checked above");
+        self.push_record(RUN_EVENT_COMPACT_KIND.to_string(), payload)
     }
 
+    /// Buffer a run event. Returns `true` if the pending batch reached
+    /// `RUN_EVENT_BATCH_SIZE` (either via this event or via the compact-buffer
+    /// flush that a milestone event triggers) and the caller should flush.
     pub(crate) fn push(&mut self, kind: String, summary: String) -> bool {
         if is_compactable_run_event(&kind) {
             if self.next_seq >= RUN_EVENT_MAX_SEQ {
@@ -411,6 +425,30 @@ mod tests {
             assert_eq!(should_flush, i + 1 == RUN_EVENT_BATCH_SIZE);
         }
         assert_eq!(mirror.pending.len(), RUN_EVENT_BATCH_SIZE);
+    }
+
+    #[test]
+    fn run_event_mirror_preserves_compact_buffer_when_seq_exhausted() {
+        let run_id = uuid::Uuid::new_v4();
+        let mut mirror = RunEventMirror::new(run_id);
+
+        assert!(!mirror.push(
+            "stream_event/message_start".into(),
+            "raw method=stream_event/message_start".into()
+        ));
+        assert!(!mirror.compact.is_empty());
+
+        mirror.next_seq = RUN_EVENT_MAX_SEQ;
+
+        // Milestone event with seq exhausted: neither the milestone nor the
+        // compact summary can be persisted, but the compact buffer's contents
+        // must not silently disappear via `mem::take`.
+        assert!(!mirror.push(
+            "system/api_retry".into(),
+            "raw method=system/api_retry".into()
+        ));
+        assert!(!mirror.compact.is_empty());
+        assert!(mirror.pending.is_empty());
     }
 
     #[test]
