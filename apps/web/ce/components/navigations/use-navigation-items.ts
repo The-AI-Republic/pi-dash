@@ -118,8 +118,10 @@ export const useNavigationItems = ({
       return hasAccess;
     });
 
-    // Sort by sortOrder
-    return filteredItems.toSorted((a, b) => (a.sortOrder || 0) - (b.sortOrder || 0));
+    // Sort by sortOrder. Use sort() because toSorted() isn't in this app's
+    // tsconfig lib (ES2022) — see scheduler.store.ts for the same workaround.
+    // eslint-disable-next-line unicorn/no-array-sort
+    return [...filteredItems].sort((a, b) => (a.sortOrder || 0) - (b.sortOrder || 0));
   }, [workspaceSlug, baseNavigation, allowPermissions, project?.id]);
 
   return navigationItems;

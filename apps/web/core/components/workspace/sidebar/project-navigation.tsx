@@ -153,8 +153,10 @@ export const ProjectNavigation = observer(function ProjectNavigation(props: TPro
       navItems.push(...additionalNavigationItems(workspaceSlug, projectId));
     }
 
-    // sort navigation items by sortOrder
-    return navItems.toSorted((a, b) => (a.sortOrder || 0) - (b.sortOrder || 0));
+    // sort navigation items by sortOrder. Use sort() because toSorted() isn't
+    // in this app's tsconfig lib (ES2022).
+    // eslint-disable-next-line unicorn/no-array-sort
+    return [...navItems].sort((a, b) => (a.sortOrder || 0) - (b.sortOrder || 0));
   }, [workspaceSlug, projectId, baseNavigation, additionalNavigationItems]);
 
   const isActive = useCallback(
