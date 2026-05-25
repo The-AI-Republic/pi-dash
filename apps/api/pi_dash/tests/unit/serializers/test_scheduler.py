@@ -4,11 +4,13 @@
 
 """Tests for the project-scheduler serializers.
 
-Covers cron validation, extra_context bounds, the scheduler-rebind lock
-on PATCH, and the active_binding_count fallback.
+Covers RRULE/dtstart validation, color validation, extra_context bounds,
+the scheduler-rebind lock on PATCH, and the active_binding_count fallback.
 """
 
 from __future__ import annotations
+
+from datetime import datetime, timezone as dt_timezone
 
 import pytest
 from crum import impersonate
@@ -19,6 +21,10 @@ from pi_dash.app.serializers.scheduler import (
     SchedulerSerializer,
 )
 from pi_dash.db.models import Project, Scheduler, SchedulerBinding
+
+
+# Fixture-shared anchor — Mon 2026-01-05 09:00 UTC.
+_ANCHOR = datetime(2026, 1, 5, 9, 0, tzinfo=dt_timezone.utc)
 
 
 @pytest.fixture
@@ -66,50 +72,116 @@ def binding(scheduler, project, workspace, create_user):
             scheduler=scheduler,
             project=project,
             workspace=workspace,
-            cron="* * * * *",
+            dtstart=_ANCHOR,
+            rrule="FREQ=MINUTELY",
+            tzid="UTC",
             actor=create_user,
         )
 
 
 # ---------------------------------------------------------------------------
-# Cron validation
+# RRULE validation
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.unit
 @pytest.mark.parametrize(
-    "cron",
+    "rrule",
     [
-        "* * * * *",
-        "0 * * * *",
-        "*/5 * * * *",
-        "0 0 * * 0",
+        "FREQ=MINUTELY",
+        "FREQ=HOURLY;BYMINUTE=15",
+        "FREQ=DAILY;BYHOUR=9;BYMINUTE=0",
+        "FREQ=WEEKLY;BYDAY=MO,WE,FR",
+        "",  # empty = single-shot at dtstart; allowed
     ],
 )
-def test_valid_cron_accepted(scheduler, project, workspace, cron):
+def test_valid_rrule_accepted(scheduler, project, workspace, rrule):
     s = SchedulerBindingSerializer(
-        data={"scheduler": scheduler.id, "project": project.id, "cron": cron}
+        data={
+            "scheduler": scheduler.id,
+            "project": project.id,
+            "dtstart": _ANCHOR.isoformat(),
+            "rrule": rrule,
+            "tzid": "UTC",
+        }
     )
     assert s.is_valid(), s.errors
 
 
 @pytest.mark.unit
 @pytest.mark.parametrize(
-    "cron",
+    "rrule",
     [
-        "",
-        "not a cron",
-        "* * * *",  # 4 fields
-        "* * * * * *",  # 6 fields — explicitly disallowed (Codex #8)
-        "60 * * * *",  # invalid minute
+        "FREQ=SECONDLY",  # rejected — DoS vector against Beat tick
+        "not a real rrule",
     ],
 )
-def test_invalid_cron_rejected(scheduler, project, workspace, cron):
+def test_invalid_rrule_rejected(scheduler, project, workspace, rrule):
     s = SchedulerBindingSerializer(
-        data={"scheduler": scheduler.id, "project": project.id, "cron": cron}
+        data={
+            "scheduler": scheduler.id,
+            "project": project.id,
+            "dtstart": _ANCHOR.isoformat(),
+            "rrule": rrule,
+            "tzid": "UTC",
+        }
     )
     assert not s.is_valid()
-    assert "cron" in s.errors
+    assert "rrule" in s.errors
+
+
+@pytest.mark.unit
+def test_invalid_tzid_rejected(scheduler, project, workspace):
+    s = SchedulerBindingSerializer(
+        data={
+            "scheduler": scheduler.id,
+            "project": project.id,
+            "dtstart": _ANCHOR.isoformat(),
+            "rrule": "FREQ=DAILY",
+            "tzid": "Mars/Olympus_Mons",
+        }
+    )
+    assert not s.is_valid()
+    assert "tzid" in s.errors
+
+
+@pytest.mark.unit
+def test_rdates_must_be_iso_strings(scheduler, project, workspace):
+    s = SchedulerBindingSerializer(
+        data={
+            "scheduler": scheduler.id,
+            "project": project.id,
+            "dtstart": _ANCHOR.isoformat(),
+            "rrule": "FREQ=DAILY",
+            "rdates": ["not-a-datetime"],
+        }
+    )
+    assert not s.is_valid()
+    assert "rdates" in s.errors
+
+
+# ---------------------------------------------------------------------------
+# Color validation (Scheduler)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("color", ["#3b82f6", "#000000", "#FFFFFF"])
+def test_valid_color_accepted(workspace, color):
+    s = SchedulerSerializer(
+        data={"slug": "x", "name": "x", "prompt": "x", "color": color}
+    )
+    assert s.is_valid(), s.errors
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("color", ["", "blue", "#fff", "#ggghhh", "rgb(0,0,0)"])
+def test_invalid_color_rejected(workspace, color):
+    s = SchedulerSerializer(
+        data={"slug": "x", "name": "x", "prompt": "x", "color": color}
+    )
+    assert not s.is_valid()
+    assert "color" in s.errors
 
 
 # ---------------------------------------------------------------------------
@@ -123,7 +195,8 @@ def test_extra_context_at_max_length_accepted(scheduler, project, workspace):
         data={
             "scheduler": scheduler.id,
             "project": project.id,
-            "cron": "* * * * *",
+            "dtstart": _ANCHOR.isoformat(),
+            "rrule": "FREQ=MINUTELY",
             "extra_context": "x" * EXTRA_CONTEXT_MAX_LENGTH,
         }
     )
@@ -136,7 +209,8 @@ def test_extra_context_over_max_length_rejected(scheduler, project, workspace):
         data={
             "scheduler": scheduler.id,
             "project": project.id,
-            "cron": "* * * * *",
+            "dtstart": _ANCHOR.isoformat(),
+            "rrule": "FREQ=MINUTELY",
             "extra_context": "x" * (EXTRA_CONTEXT_MAX_LENGTH + 1),
         }
     )
@@ -179,10 +253,10 @@ def test_patch_cannot_change_project(binding, workspace, create_user):
 
 
 @pytest.mark.unit
-def test_patch_can_change_cron_and_enabled(binding):
+def test_patch_can_change_rrule_and_enabled(binding):
     s = SchedulerBindingSerializer(
         binding,
-        data={"cron": "0 */6 * * *", "enabled": False},
+        data={"rrule": "FREQ=HOURLY;INTERVAL=6", "enabled": False},
         partial=True,
     )
     assert s.is_valid(), s.errors
