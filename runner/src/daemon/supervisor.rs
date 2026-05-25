@@ -1,6 +1,6 @@
 use anyhow::Result;
 use chrono::Utc;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::{RwLock, mpsc, oneshot, watch};
@@ -43,6 +43,7 @@ const RUN_EVENT_SEND_TIMEOUT: Duration = Duration::from_secs(5);
 const RUN_EVENT_LIFECYCLE_FLUSH_ATTEMPTS: usize = 3;
 const RUN_EVENT_LIFECYCLE_RETRY_DELAY: Duration = Duration::from_millis(250);
 const RUN_EVENT_MAX_SEQ: u32 = i32::MAX as u32;
+const RUN_EVENT_COMPACT_KIND: &str = "agent/stream_activity";
 
 impl Supervisor {
     pub fn new(
@@ -2682,10 +2683,71 @@ struct Outcome {
     status_label: String,
 }
 
+#[derive(Debug, Default)]
+struct CompactRunEventBuffer {
+    count: u64,
+    first_kind: Option<String>,
+    last_kind: Option<String>,
+    kind_counts: BTreeMap<String, u64>,
+}
+
+impl CompactRunEventBuffer {
+    fn is_empty(&self) -> bool {
+        self.count == 0
+    }
+
+    fn push(&mut self, kind: String) {
+        if self.is_empty() {
+            self.first_kind = Some(kind.clone());
+        }
+        self.last_kind = Some(kind.clone());
+        self.count = self.count.saturating_add(1);
+        self.kind_counts
+            .entry(kind)
+            .and_modify(|count| *count = count.saturating_add(1))
+            .or_insert(1);
+    }
+
+    fn take_payload(&mut self) -> Option<serde_json::Value> {
+        if self.is_empty() {
+            return None;
+        }
+        let compacted = std::mem::take(self);
+        let event_word = if compacted.count == 1 {
+            "event"
+        } else {
+            "events"
+        };
+        Some(serde_json::json!({
+            "schema": "runner_event_compact_v1",
+            "summary": format!("{} low-signal agent {event_word}", compacted.count),
+            "compacted": true,
+            "event_count": compacted.count,
+            "first_kind": compacted.first_kind.unwrap_or_default(),
+            "last_kind": compacted.last_kind.unwrap_or_default(),
+            "kind_counts": compacted.kind_counts,
+        }))
+    }
+}
+
+fn is_compactable_run_event(kind: &str) -> bool {
+    kind.starts_with("stream_event/")
+        || matches!(
+            kind,
+            "assistant/message"
+                | "system/status"
+                | "system/task_progress"
+                | "system/task_updated"
+                | "unknown"
+                | "user/toolResult"
+        )
+}
+
 struct RunEventMirror {
     run_id: uuid::Uuid,
     next_seq: u32,
     pending: Vec<RunEventRecord>,
+    compact: CompactRunEventBuffer,
     flush_deadline: Option<tokio::time::Instant>,
     seq_exhausted_warned: bool,
 }
@@ -2696,6 +2758,7 @@ impl RunEventMirror {
             run_id,
             next_seq: 0,
             pending: Vec::with_capacity(RUN_EVENT_BATCH_SIZE),
+            compact: CompactRunEventBuffer::default(),
             flush_deadline: None,
             seq_exhausted_warned: false,
         }
@@ -2705,34 +2768,67 @@ impl RunEventMirror {
         self.flush_deadline
     }
 
-    fn push(&mut self, kind: String, summary: String) -> bool {
-        if self.next_seq >= RUN_EVENT_MAX_SEQ {
-            if !self.seq_exhausted_warned {
-                self.seq_exhausted_warned = true;
-                tracing::warn!(
-                    run_id = %self.run_id,
-                    max_seq = RUN_EVENT_MAX_SEQ,
-                    "agent run event sequence exhausted; dropping further mirrored events"
-                );
-            }
-            return false;
-        }
-        if self.pending.is_empty() {
+    fn ensure_flush_deadline(&mut self) {
+        if self.flush_deadline.is_none() {
             self.flush_deadline = Some(tokio::time::Instant::now() + RUN_EVENT_FLUSH_INTERVAL);
         }
+    }
+
+    fn warn_seq_exhausted_once(&mut self) {
+        if !self.seq_exhausted_warned {
+            self.seq_exhausted_warned = true;
+            tracing::warn!(
+                run_id = %self.run_id,
+                max_seq = RUN_EVENT_MAX_SEQ,
+                "agent run event sequence exhausted; dropping further mirrored events"
+            );
+        }
+    }
+
+    fn push_record(&mut self, kind: String, payload: serde_json::Value) -> bool {
+        if self.next_seq >= RUN_EVENT_MAX_SEQ {
+            self.warn_seq_exhausted_once();
+            return false;
+        }
+        self.ensure_flush_deadline();
         self.next_seq += 1;
         self.pending.push(RunEventRecord {
             seq: self.next_seq,
             kind,
-            payload: serde_json::json!({
-                "schema": "runner_event_summary_v1",
-                "summary": summary,
-            }),
+            payload,
         });
         self.pending.len() >= RUN_EVENT_BATCH_SIZE
     }
 
+    fn flush_compact_to_pending(&mut self) -> bool {
+        match self.compact.take_payload() {
+            Some(payload) => self.push_record(RUN_EVENT_COMPACT_KIND.to_string(), payload),
+            None => false,
+        }
+    }
+
+    fn push(&mut self, kind: String, summary: String) -> bool {
+        if is_compactable_run_event(&kind) {
+            if self.next_seq >= RUN_EVENT_MAX_SEQ {
+                self.warn_seq_exhausted_once();
+                return false;
+            }
+            self.ensure_flush_deadline();
+            self.compact.push(kind);
+            return false;
+        }
+        let should_flush = self.flush_compact_to_pending();
+        self.push_record(
+            kind,
+            serde_json::json!({
+                "schema": "runner_event_summary_v1",
+                "summary": summary,
+            }),
+        ) || should_flush
+    }
+
     async fn flush(&mut self, out: &RunnerOut) -> bool {
+        self.flush_compact_to_pending();
         if self.pending.is_empty() {
             self.flush_deadline = None;
             return true;
@@ -3078,12 +3174,19 @@ mod tests {
                 assert_eq!(seen_run_id, run_id);
                 assert_eq!(events.len(), 2);
                 assert_eq!(events[0].seq, 1);
-                assert_eq!(events[0].kind, "assistant/message");
+                assert_eq!(events[0].kind, RUN_EVENT_COMPACT_KIND);
                 assert_eq!(
                     events[0].payload,
                     serde_json::json!({
-                        "schema": "runner_event_summary_v1",
-                        "summary": "raw method=assistant/message",
+                        "schema": "runner_event_compact_v1",
+                        "summary": "1 low-signal agent event",
+                        "compacted": true,
+                        "event_count": 1,
+                        "first_kind": "assistant/message",
+                        "last_kind": "assistant/message",
+                        "kind_counts": {
+                            "assistant/message": 1,
+                        },
                     })
                 );
                 assert_eq!(events[1].seq, 2);
@@ -3095,12 +3198,68 @@ mod tests {
                         "summary": "run completed",
                     })
                 );
-                for event in events {
-                    let obj = event.payload.as_object().expect("payload object");
-                    assert_eq!(obj.len(), 2);
-                    assert!(obj.contains_key("schema"));
-                    assert!(obj.contains_key("summary"));
-                }
+            }
+            other => panic!("expected RunEvents, got {other:?}"),
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn run_event_mirror_compacts_contiguous_low_signal_events_before_milestones() {
+        let runner_id = uuid::Uuid::new_v4();
+        let run_id = uuid::Uuid::new_v4();
+        let (out_tx, mut out_rx) = mpsc::channel::<Envelope<ClientMsg>>(8);
+        let out = RunnerOut::new(runner_id, out_tx);
+        let mut mirror = RunEventMirror::new(run_id);
+
+        assert!(!mirror.push("system/status".into(), "raw method=system/status".into()));
+        assert!(!mirror.push(
+            "stream_event/message_start".into(),
+            "raw method=stream_event/message_start".into()
+        ));
+        assert!(!mirror.push(
+            "user/toolResult".into(),
+            "raw method=user/toolResult".into()
+        ));
+        assert!(!mirror.push(
+            "system/api_retry".into(),
+            "raw method=system/api_retry".into()
+        ));
+        assert!(mirror.flush(&out).await);
+
+        let env = tokio::time::timeout(std::time::Duration::from_secs(2), out_rx.recv())
+            .await
+            .expect("timed out waiting for RunEvents")
+            .expect("channel closed before RunEvents arrived");
+        match env.body {
+            ClientMsg::RunEvents { events, .. } => {
+                assert_eq!(events.len(), 2);
+                assert_eq!(events[0].seq, 1);
+                assert_eq!(events[0].kind, RUN_EVENT_COMPACT_KIND);
+                assert_eq!(
+                    events[0].payload,
+                    serde_json::json!({
+                        "schema": "runner_event_compact_v1",
+                        "summary": "3 low-signal agent events",
+                        "compacted": true,
+                        "event_count": 3,
+                        "first_kind": "system/status",
+                        "last_kind": "user/toolResult",
+                        "kind_counts": {
+                            "stream_event/message_start": 1,
+                            "system/status": 1,
+                            "user/toolResult": 1,
+                        },
+                    })
+                );
+                assert_eq!(events[1].seq, 2);
+                assert_eq!(events[1].kind, "system/api_retry");
+                assert_eq!(
+                    events[1].payload,
+                    serde_json::json!({
+                        "schema": "runner_event_summary_v1",
+                        "summary": "raw method=system/api_retry",
+                    })
+                );
             }
             other => panic!("expected RunEvents, got {other:?}"),
         }
@@ -3115,7 +3274,10 @@ mod tests {
         let failed_out = RunnerOut::new(runner_id, failed_tx);
         let mut mirror = RunEventMirror::new(run_id);
 
-        mirror.push("assistant/message".into(), "raw method=assistant/message".into());
+        mirror.push(
+            "assistant/message".into(),
+            "raw method=assistant/message".into(),
+        );
         assert!(!mirror.flush(&failed_out).await);
         assert_eq!(mirror.pending.len(), 1);
         assert!(mirror.flush_deadline().is_some());
@@ -3134,6 +3296,7 @@ mod tests {
             ClientMsg::RunEvents { events, .. } => {
                 assert_eq!(events.len(), 1);
                 assert_eq!(events[0].seq, 1);
+                assert_eq!(events[0].kind, RUN_EVENT_COMPACT_KIND);
             }
             other => panic!("expected RunEvents, got {other:?}"),
         }
@@ -3149,6 +3312,21 @@ mod tests {
         let first_deadline = mirror.flush_deadline().expect("deadline after first event");
         assert!(!mirror.push("raw".into(), "raw method=b".into()));
         assert_eq!(mirror.flush_deadline(), Some(first_deadline));
+    }
+
+    #[test]
+    fn run_event_mirror_sets_flush_deadline_for_compacted_events() {
+        let run_id = uuid::Uuid::new_v4();
+        let mut mirror = RunEventMirror::new(run_id);
+
+        assert!(mirror.flush_deadline().is_none());
+        assert!(!mirror.push(
+            "stream_event/content_block_delta".into(),
+            "raw method=stream_event/content_block_delta".into()
+        ));
+        assert!(mirror.flush_deadline().is_some());
+        assert!(mirror.pending.is_empty());
+        assert!(!mirror.compact.is_empty());
     }
 
     #[test]
