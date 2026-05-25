@@ -163,8 +163,11 @@ export const SidebarProjectsList = observer(function SidebarProjectsList() {
     setIsAllProjectsListOpen(isOpen);
     localStorage.setItem("isAllProjectsListOpen", isOpen.toString());
   };
+  // The Projects disclosure also hosts Drafts and Work Items; auto-open it
+  // whenever the user lands on any of those routes so the active row is not
+  // hidden behind a collapsed disclosure.
   useEffect(() => {
-    if (pathname.includes("projects")) {
+    if (pathname.includes("projects") || pathname.includes("/drafts") || pathname.includes("/workspace-views")) {
       setIsAllProjectsListOpen(true);
       localStorage.setItem("isAllProjectsListOpen", "true");
     }
@@ -261,6 +264,11 @@ export const SidebarProjectsList = observer(function SidebarProjectsList() {
                         item={{
                           ...WORKSPACE_SIDEBAR_DYNAMIC_NAVIGATION_ITEMS["views"],
                           labelTranslationKey: "sidebar.work_items",
+                          // The base highlight only matches /workspace-views/all-issues/.
+                          // Since this row is now labelled "Work Items" (the section,
+                          // not a single page) it should stay active on every
+                          // /workspace-views/* route.
+                          highlight: (path: string) => path.includes("/workspace-views"),
                         }}
                         additionalStaticItems={["views"]}
                       />

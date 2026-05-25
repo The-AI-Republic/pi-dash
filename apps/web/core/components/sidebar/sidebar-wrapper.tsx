@@ -79,10 +79,15 @@ export const SidebarWrapper = observer(function SidebarWrapper(props: TSidebarWr
         >
           {children}
         </ScrollArea>
-        {/* User menu (folds Community in as a sub-item) */}
-        <div className="flex items-center border-t border-subtle bg-surface-1 px-2 py-2">
-          <UserMenuRoot variant="sidebar" />
-        </div>
+        {/* User menu (folds Community in as a sub-item). Only mounted when the
+            sidebar is fully visible — when collapsed, TopNavigationRoot renders
+            the compact fallback instead, so there is exactly one UserMenuRoot
+            on screen at any time. */}
+        {!sidebarCollapsed && (
+          <div className="flex items-center border-t border-subtle bg-surface-1 px-2 py-2">
+            <UserMenuRoot variant="sidebar" />
+          </div>
+        )}
       </div>
     </>
   );

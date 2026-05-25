@@ -54,13 +54,23 @@ export const UserMenuRoot = observer(function UserMenuRoot({ variant = "compact"
     );
   };
 
-  // Toggle sidebar dropdown state when menu is open
+  const isSidebarVariant = variant === "sidebar";
+
+  // Only the sidebar-mounted instance participates in peek coordination. The
+  // top-nav fallback (compact variant) lives outside the sidebar, so it must
+  // not write the global peek flag — doing so would let opening the page-
+  // chrome user menu pin the sidebar peek open (and closing it force-close).
   useEffect(() => {
+    if (!isSidebarVariant) return;
     if (isUserMenuOpen) toggleAnySidebarDropdown(true);
     else toggleAnySidebarDropdown(false);
-  }, [isUserMenuOpen, toggleAnySidebarDropdown]);
-
-  const isSidebarVariant = variant === "sidebar";
+    // Always clear the flag on unmount so a route change with the menu still
+    // open doesn't leak `isAnySidebarDropdownOpen=true` for the rest of the
+    // session.
+    return () => {
+      toggleAnySidebarDropdown(false);
+    };
+  }, [isSidebarVariant, isUserMenuOpen, toggleAnySidebarDropdown]);
 
   // The outer wrapper is rendered as a non-interactive element because
   // CustomMenu already wraps `customButton` in its own <button>; nesting
@@ -105,7 +115,9 @@ export const UserMenuRoot = observer(function UserMenuRoot({ variant = "compact"
 
   return (
     <>
-      <PaidPlanUpgradeModal isOpen={isCommunityModalOpen} handleClose={() => setIsCommunityModalOpen(false)} />
+      {isCommunityModalOpen && (
+        <PaidPlanUpgradeModal isOpen={isCommunityModalOpen} handleClose={() => setIsCommunityModalOpen(false)} />
+      )}
       <CustomMenu
         className={cn("flex items-center", isSidebarVariant && "w-full")}
         customButton={isSidebarVariant ? sidebarTrigger : compactTrigger}
@@ -173,7 +185,7 @@ export const UserMenuRoot = observer(function UserMenuRoot({ variant = "compact"
         </div>
         <CustomMenu.MenuItem onClick={() => setIsCommunityModalOpen(true)} className="flex items-center gap-2">
           <Globe className="size-3.5 shrink-0" />
-          Community
+          {t("sidebar.community")}
         </CustomMenu.MenuItem>
         <CustomMenu.MenuItem onClick={handleSignOut} className="flex items-center gap-2">
           <LogOut className="size-3.5 shrink-0" />

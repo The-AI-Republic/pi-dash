@@ -5,20 +5,15 @@
  */
 
 import React, { useMemo } from "react";
-import { orderBy } from "lodash-es";
 import { observer } from "mobx-react";
 // pi dash imports
 import {
-  WORKSPACE_SIDEBAR_DYNAMIC_NAVIGATION_ITEMS_LINKS,
   WORKSPACE_SIDEBAR_STATIC_NAVIGATION_ITEMS,
   WORKSPACE_SIDEBAR_STATIC_NAVIGATION_ITEMS_LINKS,
   WORKSPACE_SIDEBAR_STATIC_PINNED_NAVIGATION_ITEMS_LINKS,
 } from "@pi-dash/constants";
 // store hooks
-import {
-  usePersonalNavigationPreferences,
-  useWorkspaceNavigationPreferences,
-} from "@/hooks/use-navigation-preferences";
+import { usePersonalNavigationPreferences } from "@/hooks/use-navigation-preferences";
 // pi-dash-web imports
 import { SidebarItem } from "@/pi-dash-web/components/workspace/sidebar/sidebar-item";
 
@@ -26,12 +21,13 @@ import { SidebarItem } from "@/pi-dash-web/components/workspace/sidebar/sidebar-
 //   - drafts → top of Projects section
 //   - views → "Work Items" row in Projects section
 //   - projects, analytics, prompts, schedulers, archives → new "More" section
+// All entries from WORKSPACE_SIDEBAR_DYNAMIC_NAVIGATION_ITEMS_LINKS are relocated,
+// so that list is no longer rendered here.
 const RELOCATED_KEYS = new Set(["drafts", "views", "projects", "analytics", "prompts", "schedulers", "archives"]);
 
 export const SidebarMenuItems = observer(function SidebarMenuItems() {
   // hooks
   const { preferences: personalPreferences } = usePersonalNavigationPreferences();
-  const { preferences: workspacePreferences } = useWorkspaceNavigationPreferences();
 
   // Personal items (Stickies / Your work) gated by user preferences, sorted.
   const filteredStaticNavigationItems = useMemo(() => {
@@ -56,21 +52,12 @@ export const SidebarMenuItems = observer(function SidebarMenuItems() {
     return [...items, ...personalItems].filter((item) => !RELOCATED_KEYS.has(item.key));
   }, [personalPreferences]);
 
-  // Workspace-pinned items (projects, runners — prompts/schedulers are relocated).
+  // Workspace-pinned items (just `runners` after relocation; computed via the
+  // RELOCATED_KEYS filter so the set of survivors stays in lockstep with that
+  // single source of truth).
   const pinnedNavigationItems = useMemo(
     () => WORKSPACE_SIDEBAR_STATIC_PINNED_NAVIGATION_ITEMS_LINKS.filter((item) => !RELOCATED_KEYS.has(item.key)),
     []
-  );
-
-  // User-pinned dynamic items, sorted (views/analytics/archives are relocated).
-  const sortedNavigationItems = useMemo(
-    () =>
-      orderBy(
-        WORKSPACE_SIDEBAR_DYNAMIC_NAVIGATION_ITEMS_LINKS.filter((item) => !RELOCATED_KEYS.has(item.key)),
-        [(item) => workspacePreferences.items[item.key]?.sort_order ?? 0],
-        ["asc"]
-      ),
-    [workspacePreferences]
   );
 
   return (
@@ -80,9 +67,6 @@ export const SidebarMenuItems = observer(function SidebarMenuItems() {
       ))}
       {pinnedNavigationItems.map((item) => (
         <SidebarItem key={`pinned_${item.key}`} item={item} />
-      ))}
-      {sortedNavigationItems.map((item) => (
-        <SidebarItem key={`dynamic_${item.key}`} item={item} />
       ))}
     </div>
   );

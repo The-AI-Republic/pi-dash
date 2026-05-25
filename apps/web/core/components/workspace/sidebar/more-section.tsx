@@ -4,13 +4,16 @@
  * See the LICENSE file for details.
  */
 
+import { useEffect } from "react";
 import { observer } from "mobx-react";
+import { usePathname } from "next/navigation";
 import { Disclosure, Transition } from "@headlessui/react";
 // pi dash imports
 import {
   WORKSPACE_SIDEBAR_DYNAMIC_NAVIGATION_ITEMS,
   WORKSPACE_SIDEBAR_STATIC_NAVIGATION_ITEMS,
 } from "@pi-dash/constants";
+import { useTranslation } from "@pi-dash/i18n";
 import { ChevronRightIcon } from "@pi-dash/propel/icons";
 import { cn } from "@pi-dash/utils";
 // hooks
@@ -22,7 +25,13 @@ const MORE_ITEM_KEYS = ["projects", "prompts", "schedulers", "analytics", "archi
 
 const MORE_STATIC_KEYS = ["analytics", "archives"];
 
+// Path segments that, when visited, should auto-open the More disclosure so
+// the active row is visible.
+const MORE_PATH_SEGMENTS = ["/prompts", "/schedulers", "/analytics", "/archives"];
+
 export const SidebarMoreSection = observer(function SidebarMoreSection() {
+  const { t } = useTranslation();
+  const pathname = usePathname();
   const { setValue: toggleMoreMenu, storedValue: isMoreMenuOpen } = useLocalStorage<boolean>(
     "is_sidebar_more_menu_open",
     true
@@ -36,6 +45,17 @@ export const SidebarMoreSection = observer(function SidebarMoreSection() {
     toggleMoreMenu(isOpen);
   };
 
+  // Auto-open when the user navigates to a route hosted under More, so the
+  // active row is not hidden behind a collapsed disclosure.
+  useEffect(() => {
+    if (!pathname) return;
+    if (MORE_PATH_SEGMENTS.some((segment) => pathname.includes(segment))) {
+      toggleMoreMenu(true);
+    }
+    // toggleMoreMenu identity is stable per render; depending on pathname is enough.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pathname]);
+
   return (
     <Disclosure as="div" className="flex flex-col" defaultOpen={!!isMoreMenuOpen}>
       <div className="group flex w-full items-center justify-between rounded-sm px-2 py-1.5 text-placeholder hover:bg-layer-transparent-hover">
@@ -45,7 +65,7 @@ export const SidebarMoreSection = observer(function SidebarMoreSection() {
           className="flex w-full items-center gap-1 text-left text-13 font-semibold whitespace-nowrap text-placeholder"
           onClick={() => toggleListDisclosure(!isMoreMenuOpen)}
         >
-          <span className="text-13 font-semibold">More</span>
+          <span className="text-13 font-semibold">{t("sidebar.more")}</span>
         </Disclosure.Button>
         <div className="pointer-events-none flex items-center opacity-0 group-hover:pointer-events-auto group-hover:opacity-100">
           <Disclosure.Button
