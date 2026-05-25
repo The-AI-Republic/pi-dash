@@ -208,6 +208,9 @@ export interface IProjectUserPropertiesResponse extends IIssueFiltersResponse {
       block_display: boolean;
     };
     navigation: IProjectMemberNavigationPreferences;
+    work_items?: {
+      layout_default_applied?: boolean;
+    };
   };
 }
 

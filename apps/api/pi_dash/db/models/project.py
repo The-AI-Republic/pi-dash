@@ -53,19 +53,23 @@ def get_default_props():
             "subscriber": None,
         },
         "display_filters": {
-            "group_by": None,
-            "order_by": "-created_at",
+            "group_by": "state",
+            "order_by": "sort_order",
             "type": None,
             "sub_issue": True,
             "show_empty_groups": True,
-            "layout": "list",
+            "layout": "kanban",
             "calendar_date_range": "",
         },
     }
 
 
 def get_default_preferences():
-    return {"pages": {"block_display": True}, "navigation": {"default_tab": "work_items", "hide_in_more_menu": []}}
+    return {
+        "pages": {"block_display": True},
+        "navigation": {"default_tab": "work_items", "hide_in_more_menu": []},
+        "work_items": {"layout_default_applied": True},
+    }
 
 
 class Project(BaseModel):

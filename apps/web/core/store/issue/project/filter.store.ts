@@ -31,6 +31,19 @@ import { ProjectService } from "@/services/project";
 // constants
 // services
 
+const PROJECT_ISSUES_DEFAULT_DISPLAY_FILTERS: IIssueDisplayFilterOptions = {
+  calendar: {
+    show_weekends: false,
+    layout: "month",
+  },
+  layout: "kanban",
+  order_by: "sort_order",
+  group_by: "state",
+  sub_group_by: null,
+  sub_issue: true,
+  show_empty_groups: true,
+};
+
 export interface IProjectIssuesFilter extends IBaseIssueFilterStore {
   //helper actions
   getFilterParams: (
@@ -138,7 +151,16 @@ export class ProjectIssuesFilter extends IssueFilterHelperStore implements IProj
     const _filters = await this.projectService.getProjectUserProperties(workspaceSlug, projectId);
 
     const richFilters = _filters?.rich_filters;
-    const displayFilters = this.computedDisplayFilters(_filters?.display_filters);
+    const shouldApplyBoardDefault =
+      !_filters?.preferences?.work_items?.layout_default_applied &&
+      (!_filters?.display_filters?.layout || _filters.display_filters.layout === "list");
+    const displayFiltersPayload = shouldApplyBoardDefault
+      ? {
+          ..._filters?.display_filters,
+          ...PROJECT_ISSUES_DEFAULT_DISPLAY_FILTERS,
+        }
+      : _filters?.display_filters;
+    const displayFilters = this.computedDisplayFilters(displayFiltersPayload, PROJECT_ISSUES_DEFAULT_DISPLAY_FILTERS);
     const displayProperties = this.computedDisplayProperties(_filters?.display_properties);
 
     // fetching the kanban toggle helpers in the local storage
@@ -164,6 +186,23 @@ export class ProjectIssuesFilter extends IssueFilterHelperStore implements IProj
       set(this.filters, [projectId, "displayProperties"], displayProperties);
       set(this.filters, [projectId, "kanbanFilters"], kanbanFilters);
     });
+
+    if (shouldApplyBoardDefault) {
+      try {
+        await this.projectService.updateProjectUserProperties(workspaceSlug, projectId, {
+          display_filters: displayFilters,
+          preferences: {
+            ..._filters.preferences,
+            work_items: {
+              ..._filters.preferences?.work_items,
+              layout_default_applied: true,
+            },
+          },
+        });
+      } catch (error) {
+        console.log("error while applying default project work item layout", error);
+      }
+    }
   };
 
   /**
