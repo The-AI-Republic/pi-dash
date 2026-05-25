@@ -18,7 +18,7 @@ import useLocalStorage from "@/hooks/use-local-storage";
 // components
 import { SidebarItemBase } from "@/components/workspace/sidebar/sidebar-item";
 
-const MORE_ITEM_KEYS = ["prompts", "schedulers", "analytics", "archives"];
+const MORE_ITEM_KEYS = ["projects", "prompts", "schedulers", "analytics", "archives"];
 
 const MORE_STATIC_KEYS = ["analytics", "archives"];
 

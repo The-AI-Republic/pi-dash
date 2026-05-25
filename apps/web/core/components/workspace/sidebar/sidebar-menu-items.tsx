@@ -25,8 +25,8 @@ import { SidebarItem } from "@/pi-dash-web/components/workspace/sidebar/sidebar-
 // Items relocated out of this section by the AI-orchestration layout:
 //   - drafts → top of Projects section
 //   - views → "Work Items" row in Projects section
-//   - analytics, prompts, schedulers, archives → new "More" section
-const RELOCATED_KEYS = new Set(["drafts", "views", "analytics", "prompts", "schedulers", "archives"]);
+//   - projects, analytics, prompts, schedulers, archives → new "More" section
+const RELOCATED_KEYS = new Set(["drafts", "views", "projects", "analytics", "prompts", "schedulers", "archives"]);
 
 export const SidebarMenuItems = observer(function SidebarMenuItems() {
   // hooks
