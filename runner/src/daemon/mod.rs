@@ -1,4 +1,5 @@
 pub mod observability;
+mod run_event_mirror;
 pub mod runner_instance;
 pub mod runner_out;
 pub mod state;
