@@ -230,6 +230,14 @@ export const coreRoutes: RouteConfigEntry[] = [
               "./(all)/[workspaceSlug]/(projects)/projects/(detail)/[projectId]/intake/page.tsx"
             ),
           ]),
+
+          // Schedulers list (project-scoped scheduler bindings)
+          layout("./(all)/[workspaceSlug]/(projects)/projects/(detail)/[projectId]/schedulers/layout.tsx", [
+            route(
+              ":workspaceSlug/projects/:projectId/schedulers",
+              "./(all)/[workspaceSlug]/(projects)/projects/(detail)/[projectId]/schedulers/page.tsx"
+            ),
+          ]),
         ]),
 
         // Project Archives - Issues, Cycles, Modules

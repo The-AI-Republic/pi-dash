@@ -6,6 +6,7 @@
 
 import { useMemo, useCallback } from "react";
 // pi dash imports
+import { CalendarClock } from "lucide-react";
 import { EUserPermissions, EUserPermissionsLevel } from "@pi-dash/constants";
 import { CycleIcon, IntakeIcon, ModuleIcon, PageIcon, ViewsIcon, WorkItemsIcon } from "@pi-dash/propel/icons";
 import type { EUserProjectRoles, IPartialProject } from "@pi-dash/types";
@@ -31,7 +32,7 @@ export const useNavigationItems = ({
 }: UseNavigationItemsProps): TNavigationItem[] => {
   // Base navigation items
   const baseNavigation = useCallback(
-    (workspaceSlug: string, projectId: string): TNavigationItem[] => [
+    (): TNavigationItem[] => [
       {
         i18n_key: "sidebar.work_items",
         key: "work_items",
@@ -92,13 +93,23 @@ export const useNavigationItems = ({
         shouldRender: !!project?.inbox_view,
         sortOrder: 6,
       },
+      {
+        i18n_key: "sidebar.schedulers",
+        key: "schedulers",
+        name: "Schedulers",
+        href: `/${workspaceSlug}/projects/${projectId}/schedulers`,
+        icon: CalendarClock,
+        access: [EUserPermissions.ADMIN, EUserPermissions.MEMBER, EUserPermissions.GUEST],
+        shouldRender: true,
+        sortOrder: 7,
+      },
     ],
-    [project]
+    [project, workspaceSlug, projectId]
   );
 
   // Combine, filter, and sort navigation items
   const navigationItems = useMemo(() => {
-    const navItems = baseNavigation(workspaceSlug, projectId);
+    const navItems = baseNavigation();
 
     // Filter by permissions and shouldRender
     const filteredItems = navItems.filter((item) => {
@@ -107,9 +118,11 @@ export const useNavigationItems = ({
       return hasAccess;
     });
 
-    // Sort by sortOrder
-    return filteredItems.sort((a, b) => (a.sortOrder || 0) - (b.sortOrder || 0));
-  }, [workspaceSlug, projectId, baseNavigation, allowPermissions, project?.id]);
+    // Sort by sortOrder. Use sort() because toSorted() isn't in this app's
+    // tsconfig lib (ES2022) — see scheduler.store.ts for the same workaround.
+    // eslint-disable-next-line unicorn/no-array-sort
+    return [...filteredItems].sort((a, b) => (a.sortOrder || 0) - (b.sortOrder || 0));
+  }, [workspaceSlug, baseNavigation, allowPermissions, project?.id]);
 
   return navigationItems;
 };
