@@ -13,7 +13,7 @@ use crate::cloud::http::{
     RunnerCloudClient, SharedHttpTransport,
 };
 use crate::cloud::protocol::{
-    ClientMsg, FailureReason, RunnerStatus, ServerMsg, WIRE_VERSION, WorkspaceState,
+    ClientMsg, FailureReason, RunEventRecord, RunnerStatus, ServerMsg, WIRE_VERSION, WorkspaceState,
 };
 use crate::config::schema::{AgentKind, Config, Credentials};
 use crate::daemon::runner_instance::RunnerInstance;
@@ -36,6 +36,13 @@ pub struct Supervisor {
 
 type HelloRunner = (RunnerOut, StateHandle, Option<String>);
 type HelloRunnerMap = HashMap<uuid::Uuid, HelloRunner>;
+
+const RUN_EVENT_BATCH_SIZE: usize = 32;
+const RUN_EVENT_FLUSH_INTERVAL: Duration = Duration::from_secs(1);
+const RUN_EVENT_SEND_TIMEOUT: Duration = Duration::from_secs(5);
+const RUN_EVENT_LIFECYCLE_FLUSH_ATTEMPTS: usize = 3;
+const RUN_EVENT_LIFECYCLE_RETRY_DELAY: Duration = Duration::from_millis(250);
+const RUN_EVENT_MAX_SEQ: u32 = i32::MAX as u32;
 
 impl Supervisor {
     pub fn new(
@@ -2233,6 +2240,7 @@ impl AssignWorker {
         let shutdown = self.state.shutdown_notified();
         let cancel = self.cancel.clone();
         let mut cancelled = false;
+        let mut run_events = RunEventMirror::new(cursor.run_id());
         loop {
             // Re-evaluate at every loop entry: an approval that opened on
             // the previous iteration disarms the watchdog; one that just
@@ -2242,13 +2250,16 @@ impl AssignWorker {
             } else {
                 None
             };
+            let run_event_flush_deadline = run_events.flush_deadline();
             tokio::select! {
                 biased;
                 _ = shutdown.notified(), if !cancelled => {
                     cancelled = true;
+                    run_events.flush_before_lifecycle(&self.out).await;
                     bridge.interrupt().await.ok();
                 }
                 _ = cancel.notified(), if !cancelled => {
+                    run_events.flush_before_lifecycle(&self.out).await;
                     bridge.interrupt().await.ok();
                     let _ = self.out.send(ClientMsg::RunCancelled {
                         run_id: cursor.run_id(),
@@ -2267,12 +2278,21 @@ impl AssignWorker {
                     ).await;
                     return Ok(Outcome { status_label: "cancelled".into() });
                 }
+                _ = async {
+                    match run_event_flush_deadline {
+                        Some(d) => tokio::time::sleep_until(d).await,
+                        None => std::future::pending::<()>().await,
+                    }
+                } => {
+                    run_events.flush(&self.out).await;
+                }
                 events = bridge.next_events(cursor) => {
                     let Some(events) = events else {
                         let reason = self.crash_reason();
                         let detail = self
                             .build_failure_detail("agent stdout closed", bridge)
                             .await;
+                        run_events.flush_before_lifecycle(&self.out).await;
                         self.send(ClientMsg::RunFailed {
                             run_id: cursor.run_id(),
                             reason,
@@ -2289,7 +2309,7 @@ impl AssignWorker {
                     };
                     for ev in events {
                         if let Some(out) = self
-                            .handle_bridge_event(ev, bridge, hist, workspace_root)
+                            .handle_bridge_event(ev, bridge, hist, workspace_root, &mut run_events)
                             .await?
                         {
                             return Ok(out);
@@ -2305,6 +2325,7 @@ impl AssignWorker {
                     let mins = stall_timeout.as_secs() / 60;
                     let base = format!("no agent frames for {mins} minutes");
                     let detail = self.build_failure_detail(&base, bridge).await;
+                    run_events.flush_before_lifecycle(&self.out).await;
                     self.send(ClientMsg::RunFailed {
                         run_id: cursor.run_id(),
                         reason: FailureReason::Timeout,
@@ -2407,6 +2428,7 @@ impl AssignWorker {
         bridge: &mut AgentBridge,
         hist: &mut HistoryWriter,
         workspace_root: &std::path::Path,
+        run_events: &mut RunEventMirror,
     ) -> Result<Option<Outcome>> {
         self.state.incr_current_run_events().await;
         // Observability: every bridge event bumps last_event_at + stamps
@@ -2417,8 +2439,11 @@ impl AssignWorker {
         let kind = crate::daemon::observability::kind_of(&ev);
         let summary = crate::daemon::observability::summary_of(&ev);
         self.state
-            .note_agent_event(Utc::now(), kind, Some(summary))
+            .note_agent_event(Utc::now(), &kind, Some(&summary))
             .await;
+        if run_events.push(kind, summary) {
+            run_events.flush(&self.out).await;
+        }
         if let BridgeEvent::Raw { method, params, .. } = &ev {
             match method.as_str() {
                 "codex/event/token_count" => {
@@ -2482,6 +2507,7 @@ impl AssignWorker {
                 payload,
                 reason,
             } => {
+                run_events.flush_before_lifecycle(&self.out).await;
                 let policy = Policy::new(&self.runner_config.approval_policy, workspace_root);
                 let decision = policy.evaluate(kind, &payload);
                 if let Some(auto) = decision.into_cloud() {
@@ -2569,6 +2595,7 @@ impl AssignWorker {
             }
             BridgeEvent::AwaitingReauth { run_id, detail } => {
                 self.state.set_status(RunnerStatus::AwaitingReauth).await;
+                run_events.flush_before_lifecycle(&self.out).await;
                 self.send(ClientMsg::RunAwaitingReauth {
                     run_id,
                     detail: detail.clone(),
@@ -2587,6 +2614,7 @@ impl AssignWorker {
                 run_id,
                 done_payload,
             } => {
+                run_events.flush_before_lifecycle(&self.out).await;
                 self.send(ClientMsg::RunCompleted {
                     run_id,
                     done_payload: done_payload.clone(),
@@ -2622,6 +2650,7 @@ impl AssignWorker {
                     .clone()
                     .unwrap_or_else(|| "agent reported failure".to_string());
                 let enriched = self.build_failure_detail(&base, bridge).await;
+                run_events.flush_before_lifecycle(&self.out).await;
                 self.send(ClientMsg::RunFailed {
                     run_id,
                     reason,
@@ -2651,6 +2680,111 @@ impl AssignWorker {
 
 struct Outcome {
     status_label: String,
+}
+
+struct RunEventMirror {
+    run_id: uuid::Uuid,
+    next_seq: u32,
+    pending: Vec<RunEventRecord>,
+    flush_deadline: Option<tokio::time::Instant>,
+    seq_exhausted_warned: bool,
+}
+
+impl RunEventMirror {
+    fn new(run_id: uuid::Uuid) -> Self {
+        Self {
+            run_id,
+            next_seq: 0,
+            pending: Vec::with_capacity(RUN_EVENT_BATCH_SIZE),
+            flush_deadline: None,
+            seq_exhausted_warned: false,
+        }
+    }
+
+    fn flush_deadline(&self) -> Option<tokio::time::Instant> {
+        self.flush_deadline
+    }
+
+    fn push(&mut self, kind: String, summary: String) -> bool {
+        if self.next_seq >= RUN_EVENT_MAX_SEQ {
+            if !self.seq_exhausted_warned {
+                self.seq_exhausted_warned = true;
+                tracing::warn!(
+                    run_id = %self.run_id,
+                    max_seq = RUN_EVENT_MAX_SEQ,
+                    "agent run event sequence exhausted; dropping further mirrored events"
+                );
+            }
+            return false;
+        }
+        if self.pending.is_empty() {
+            self.flush_deadline = Some(tokio::time::Instant::now() + RUN_EVENT_FLUSH_INTERVAL);
+        }
+        self.next_seq += 1;
+        self.pending.push(RunEventRecord {
+            seq: self.next_seq,
+            kind,
+            payload: serde_json::json!({
+                "schema": "runner_event_summary_v1",
+                "summary": summary,
+            }),
+        });
+        self.pending.len() >= RUN_EVENT_BATCH_SIZE
+    }
+
+    async fn flush(&mut self, out: &RunnerOut) -> bool {
+        if self.pending.is_empty() {
+            self.flush_deadline = None;
+            return true;
+        }
+        let mut events = Vec::with_capacity(RUN_EVENT_BATCH_SIZE);
+        std::mem::swap(&mut events, &mut self.pending);
+        let count = events.len();
+        let msg = ClientMsg::RunEvents {
+            run_id: self.run_id,
+            events: events.clone(),
+        };
+        match tokio::time::timeout(RUN_EVENT_SEND_TIMEOUT, out.send(msg)).await {
+            Ok(Ok(())) => {
+                self.flush_deadline = None;
+                true
+            }
+            Ok(Err(err)) => {
+                self.pending = events;
+                self.flush_deadline = Some(tokio::time::Instant::now() + RUN_EVENT_FLUSH_INTERVAL);
+                tracing::warn!(
+                    run_id = %self.run_id,
+                    count,
+                    error = %err,
+                    "failed to mirror agent run events"
+                );
+                false
+            }
+            Err(_) => {
+                self.pending = events;
+                self.flush_deadline = Some(tokio::time::Instant::now() + RUN_EVENT_FLUSH_INTERVAL);
+                tracing::warn!(
+                    run_id = %self.run_id,
+                    count,
+                    timeout_ms = RUN_EVENT_SEND_TIMEOUT.as_millis(),
+                    "timed out mirroring agent run events"
+                );
+                false
+            }
+        }
+    }
+
+    async fn flush_before_lifecycle(&mut self, out: &RunnerOut) -> bool {
+        for attempt in 0..RUN_EVENT_LIFECYCLE_FLUSH_ATTEMPTS {
+            if self.flush(out).await {
+                return true;
+            }
+            if attempt + 1 < RUN_EVENT_LIFECYCLE_FLUSH_ATTEMPTS {
+                tokio::time::sleep(RUN_EVENT_LIFECYCLE_RETRY_DELAY).await;
+            }
+        }
+        false
+    }
 }
 
 /// Best-effort: if codex hands us a non-UUID approval id (it shouldn't, per
@@ -2914,5 +3048,131 @@ mod tests {
             stray.is_err(),
             "idle drain produced a stray frame: {stray:?}"
         );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn run_event_mirror_flushes_sanitized_batch() {
+        let runner_id = uuid::Uuid::new_v4();
+        let run_id = uuid::Uuid::new_v4();
+        let (out_tx, mut out_rx) = mpsc::channel::<Envelope<ClientMsg>>(8);
+        let out = RunnerOut::new(runner_id, out_tx);
+        let mut mirror = RunEventMirror::new(run_id);
+
+        assert!(!mirror.push(
+            "assistant/message".into(),
+            "raw method=assistant/message".into()
+        ));
+        assert!(!mirror.push("run/completed".into(), "run completed".into()));
+        assert!(mirror.flush(&out).await);
+
+        let env = tokio::time::timeout(std::time::Duration::from_secs(2), out_rx.recv())
+            .await
+            .expect("timed out waiting for RunEvents")
+            .expect("channel closed before RunEvents arrived");
+        assert_eq!(env.runner_id, Some(runner_id));
+        match env.body {
+            ClientMsg::RunEvents {
+                run_id: seen_run_id,
+                events,
+            } => {
+                assert_eq!(seen_run_id, run_id);
+                assert_eq!(events.len(), 2);
+                assert_eq!(events[0].seq, 1);
+                assert_eq!(events[0].kind, "assistant/message");
+                assert_eq!(
+                    events[0].payload,
+                    serde_json::json!({
+                        "schema": "runner_event_summary_v1",
+                        "summary": "raw method=assistant/message",
+                    })
+                );
+                assert_eq!(events[1].seq, 2);
+                assert_eq!(events[1].kind, "run/completed");
+                assert_eq!(
+                    events[1].payload,
+                    serde_json::json!({
+                        "schema": "runner_event_summary_v1",
+                        "summary": "run completed",
+                    })
+                );
+                for event in events {
+                    let obj = event.payload.as_object().expect("payload object");
+                    assert_eq!(obj.len(), 2);
+                    assert!(obj.contains_key("schema"));
+                    assert!(obj.contains_key("summary"));
+                }
+            }
+            other => panic!("expected RunEvents, got {other:?}"),
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn run_event_mirror_retains_batch_after_send_failure() {
+        let runner_id = uuid::Uuid::new_v4();
+        let run_id = uuid::Uuid::new_v4();
+        let (failed_tx, failed_rx) = mpsc::channel::<Envelope<ClientMsg>>(1);
+        drop(failed_rx);
+        let failed_out = RunnerOut::new(runner_id, failed_tx);
+        let mut mirror = RunEventMirror::new(run_id);
+
+        mirror.push("assistant/message".into(), "raw method=assistant/message".into());
+        assert!(!mirror.flush(&failed_out).await);
+        assert_eq!(mirror.pending.len(), 1);
+        assert!(mirror.flush_deadline().is_some());
+
+        let (ok_tx, mut ok_rx) = mpsc::channel::<Envelope<ClientMsg>>(1);
+        let ok_out = RunnerOut::new(runner_id, ok_tx);
+        assert!(mirror.flush(&ok_out).await);
+        assert!(mirror.pending.is_empty());
+        assert!(mirror.flush_deadline().is_none());
+
+        let env = tokio::time::timeout(std::time::Duration::from_secs(2), ok_rx.recv())
+            .await
+            .expect("timed out waiting for retry")
+            .expect("channel closed before retry arrived");
+        match env.body {
+            ClientMsg::RunEvents { events, .. } => {
+                assert_eq!(events.len(), 1);
+                assert_eq!(events[0].seq, 1);
+            }
+            other => panic!("expected RunEvents, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn run_event_mirror_keeps_flush_deadline_until_flush() {
+        let run_id = uuid::Uuid::new_v4();
+        let mut mirror = RunEventMirror::new(run_id);
+
+        assert!(mirror.flush_deadline().is_none());
+        assert!(!mirror.push("raw".into(), "raw method=a".into()));
+        let first_deadline = mirror.flush_deadline().expect("deadline after first event");
+        assert!(!mirror.push("raw".into(), "raw method=b".into()));
+        assert_eq!(mirror.flush_deadline(), Some(first_deadline));
+    }
+
+    #[test]
+    fn run_event_mirror_auto_flushes_at_batch_size() {
+        let run_id = uuid::Uuid::new_v4();
+        let mut mirror = RunEventMirror::new(run_id);
+
+        for i in 0..RUN_EVENT_BATCH_SIZE {
+            let should_flush = mirror.push("raw".into(), format!("raw method={i}"));
+            assert_eq!(should_flush, i + 1 == RUN_EVENT_BATCH_SIZE);
+        }
+        assert_eq!(mirror.pending.len(), RUN_EVENT_BATCH_SIZE);
+    }
+
+    #[test]
+    fn run_event_mirror_caps_seq_at_cloud_column_limit() {
+        let run_id = uuid::Uuid::new_v4();
+        let mut mirror = RunEventMirror::new(run_id);
+        mirror.next_seq = RUN_EVENT_MAX_SEQ - 1;
+
+        assert!(!mirror.push("raw".into(), "raw method=last".into()));
+        assert_eq!(mirror.pending.last().map(|event| event.seq), Some(RUN_EVENT_MAX_SEQ));
+        assert!(!mirror.push("raw".into(), "raw method=dropped".into()));
+        assert_eq!(mirror.pending.len(), 1);
+        assert_eq!(mirror.next_seq, RUN_EVENT_MAX_SEQ);
     }
 }

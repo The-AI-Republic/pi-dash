@@ -631,6 +631,10 @@ impl RunnerCloudClient {
                 let body = to_value(&msg)?;
                 self.post_run_event(run_id, body, &idempotency_key).await
             }
+            msg @ ClientMsg::RunEvents { run_id, .. } => {
+                let body = to_value(&msg)?;
+                self.post_run_event(run_id, body, &idempotency_key).await
+            }
             msg @ ClientMsg::ApprovalRequest { run_id, .. } => {
                 let body = to_value(&msg)?;
                 self.post_run_lifecycle(run_id, "approvals", body, &idempotency_key)
