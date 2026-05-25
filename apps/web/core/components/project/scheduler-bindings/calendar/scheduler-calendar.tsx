@@ -36,7 +36,7 @@ export const SchedulerCalendar = observer(function SchedulerCalendar({ workspace
   const { allowPermissions } = useUserPermissions();
   const canManage = allowPermissions([EUserPermissions.ADMIN], EUserPermissionsLevel.PROJECT, workspaceSlug, projectId);
 
-  const [view, setView] = useState<CalendarView>("month");
+  const [view, setView] = useState<CalendarView>("week");
   const [viewDate, setViewDate] = useState<Date>(() => new Date());
   const [selectedOccurrence, setSelectedOccurrence] = useState<ISchedulerOccurrence | null>(null);
   const [editingBinding, setEditingBinding] = useState<ISchedulerBinding | null>(null);
