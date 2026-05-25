@@ -13,6 +13,7 @@ import { useTranslation } from "@pi-dash/i18n";
 import { Button } from "@pi-dash/propel/button";
 import type { IScheduler } from "@pi-dash/services";
 import { EModalPosition, EModalWidth, Input, ModalCore, TextArea, ToggleSwitch } from "@pi-dash/ui";
+import { SCHEDULER_COLOR_PALETTE as COLOR_PALETTE } from "@/components/project/scheduler-bindings/constants";
 
 interface SchedulerFormValues {
   slug: string;
@@ -22,28 +23,6 @@ interface SchedulerFormValues {
   color: string;
   is_enabled: boolean;
 }
-
-// Same 16-color palette as the backend default-assigner (Scheduler.color)
-// and the decisions doc §6. Indexes 0..15 in this order are what newly
-// created schedulers cycle through. The picker shows them as swatches.
-const COLOR_PALETTE = [
-  "#3b82f6",
-  "#6366f1",
-  "#8b5cf6",
-  "#a855f7",
-  "#d946ef",
-  "#ec4899",
-  "#ef4444",
-  "#f97316",
-  "#eab308",
-  "#84cc16",
-  "#22c55e",
-  "#10b981",
-  "#14b8a6",
-  "#06b6d4",
-  "#0ea5e9",
-  "#f59e0b",
-];
 
 type Props = {
   isOpen: boolean;

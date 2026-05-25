@@ -37,6 +37,21 @@ _PALETTE = [
 ]
 
 
+_UPDATE_FIELDS = ["dtstart", "rrule", "tzid", "rdates", "exdates", "enabled", "last_error", "updated_at"]
+_BATCH_SIZE = 500
+
+
+def _disable(binding, anchor, reason: str) -> None:
+    """Populate the new fields with safe defaults and disable the binding."""
+    binding.dtstart = anchor
+    binding.rrule = ""
+    binding.tzid = "UTC"
+    binding.rdates = []
+    binding.exdates = []
+    binding.enabled = False
+    binding.last_error = reason
+
+
 def _convert_bindings(apps, schema_editor):
     """Backfill ``dtstart`` + ``rrule`` from the existing ``cron`` column.
 
@@ -49,83 +64,54 @@ def _convert_bindings(apps, schema_editor):
     now = datetime.now(tz=dt_timezone.utc)
 
     failed: list[tuple[str, str, str]] = []  # (binding_id, cron, reason)
+    batch: list = []
 
-    for binding in SchedulerBinding.objects.all():
-        cron = (binding.cron or "").strip()
-        if not cron:
-            # Should never happen — model required cron — but handle defensively.
-            failed.append((str(binding.pk), "(empty)", "empty cron"))
-            binding.dtstart = binding.created_at or now
-            binding.rrule = ""
-            binding.tzid = "UTC"
-            binding.rdates = []
-            binding.exdates = []
-            binding.enabled = False
-            binding.last_error = "migration: empty cron, binding disabled"
-            binding.save(update_fields=[
-                "dtstart", "rrule", "tzid", "rdates", "exdates",
-                "enabled", "last_error", "updated_at",
-            ])
-            continue
+    def flush():
+        if not batch:
+            return
+        SchedulerBinding.objects.bulk_update(batch, _UPDATE_FIELDS, batch_size=_BATCH_SIZE)
+        batch.clear()
 
-        try:
-            rrule_str = cron_to_rrule(cron)
-        except CronConversionError as e:
-            failed.append((str(binding.pk), cron, str(e)))
-            # Preserve the binding row but disable it; operator must fix.
-            binding.dtstart = binding.created_at or now
-            binding.rrule = ""
-            binding.tzid = "UTC"
-            binding.rdates = []
-            binding.exdates = []
-            binding.enabled = False
-            binding.last_error = f"migration: unconvertible cron {cron!r}: {e}"
-            binding.save(update_fields=[
-                "dtstart", "rrule", "tzid", "rdates", "exdates",
-                "enabled", "last_error", "updated_at",
-            ])
-            continue
-
-        # Anchor dtstart at "next valid firing after created_at" so the
-        # series phase aligns with what cron would have produced.
+    for binding in SchedulerBinding.objects.all().iterator(chunk_size=_BATCH_SIZE):
         anchor = binding.created_at or now
         if anchor.tzinfo is None:
             anchor = anchor.replace(tzinfo=dt_timezone.utc)
-        # Look one second before the anchor so the next-fire computation
-        # returns the anchor itself if it's a valid firing.
-        anchor_lookback = anchor - timedelta(seconds=1)
-        dtstart = next_fire_from_rrule(
-            dtstart=anchor_lookback,
-            rrule_str=rrule_str,
-            tzid="UTC",
-            now=anchor_lookback,
-        )
-        if dtstart is None:
-            # Converter produced a syntactically valid RRULE that
-            # dateutil couldn't compute a next fire for. Same fallback as
-            # the conversion-failure path.
-            failed.append((str(binding.pk), cron, f"rrule {rrule_str!r} produced no next-fire"))
-            binding.dtstart = anchor
-            binding.rrule = ""
-            binding.tzid = "UTC"
-            binding.rdates = []
-            binding.exdates = []
-            binding.enabled = False
-            binding.last_error = f"migration: rrule produced no next-fire: {rrule_str}"
-            binding.save(update_fields=[
-                "dtstart", "rrule", "tzid", "rdates", "exdates",
-                "enabled", "last_error", "updated_at",
-            ])
-            continue
+        cron = (binding.cron or "").strip()
 
-        binding.dtstart = dtstart
-        binding.rrule = rrule_str
-        binding.tzid = "UTC"
-        binding.rdates = []
-        binding.exdates = []
-        binding.save(update_fields=[
-            "dtstart", "rrule", "tzid", "rdates", "exdates", "updated_at"
-        ])
+        if not cron:
+            failed.append((str(binding.pk), "(empty)", "empty cron"))
+            _disable(binding, anchor, "migration: empty cron, binding disabled")
+        else:
+            try:
+                rrule_str = cron_to_rrule(cron)
+            except CronConversionError as e:
+                failed.append((str(binding.pk), cron, str(e)))
+                _disable(binding, anchor, f"migration: unconvertible cron {cron!r}: {e}")
+            else:
+                # Look one second before the anchor so the next-fire
+                # computation returns the anchor itself if it's a valid firing.
+                lookback = anchor - timedelta(seconds=1)
+                dtstart = next_fire_from_rrule(
+                    dtstart=lookback,
+                    rrule_str=rrule_str,
+                    tzid="UTC",
+                    now=lookback,
+                )
+                if dtstart is None:
+                    failed.append((str(binding.pk), cron, f"rrule {rrule_str!r} produced no next-fire"))
+                    _disable(binding, anchor, f"migration: rrule produced no next-fire: {rrule_str}")
+                else:
+                    binding.dtstart = dtstart
+                    binding.rrule = rrule_str
+                    binding.tzid = "UTC"
+                    binding.rdates = []
+                    binding.exdates = []
+                    # leave binding.enabled / binding.last_error untouched
+
+        batch.append(binding)
+        if len(batch) >= _BATCH_SIZE:
+            flush()
+    flush()
 
     if failed:
         # Log via print; Django routes migration stdout through manage.py.
@@ -143,11 +129,17 @@ def _assign_scheduler_colors(apps, schema_editor):
     # Group by workspace so each workspace's first 16 schedulers get
     # distinct colors regardless of cross-workspace ordering.
     by_workspace: dict = {}
-    for scheduler in Scheduler.objects.all().order_by("workspace_id", "created_at"):
+    batch: list = []
+    for scheduler in Scheduler.objects.all().order_by("workspace_id", "created_at").iterator(chunk_size=_BATCH_SIZE):
         idx = by_workspace.get(scheduler.workspace_id, 0)
         scheduler.color = _PALETTE[idx % len(_PALETTE)]
-        scheduler.save(update_fields=["color", "updated_at"])
         by_workspace[scheduler.workspace_id] = idx + 1
+        batch.append(scheduler)
+        if len(batch) >= _BATCH_SIZE:
+            Scheduler.objects.bulk_update(batch, ["color"], batch_size=_BATCH_SIZE)
+            batch.clear()
+    if batch:
+        Scheduler.objects.bulk_update(batch, ["color"], batch_size=_BATCH_SIZE)
 
 
 def _noop_reverse(apps, schema_editor):

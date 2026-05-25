@@ -39,6 +39,7 @@ from django.utils import timezone
 from pi_dash.bgtasks._rrule import next_fire_from_rrule
 from pi_dash.db.models.scheduler import LAST_ERROR_MAX_LEN, SchedulerBinding
 from pi_dash.runner.models import AgentRunStatus
+from pi_dash.utils.iso_datetime import coerce_iso_datetimes
 
 logger = logging.getLogger("pi_dash.worker")
 
@@ -62,48 +63,19 @@ def _is_enabled() -> bool:
 
 
 def _next_fire_for_binding(binding: SchedulerBinding, *, now: Optional[datetime] = None) -> Optional[datetime]:
-    """Return the next datetime ``binding`` is due strictly after ``now``.
+    """Resolve the next firing for ``binding``.
 
-    Thin wrapper that pulls the binding's RRULE bundle (dtstart, rrule,
-    rdates, exdates, tzid) and forwards to
-    :func:`pi_dash.bgtasks._rrule.next_fire_from_rrule`. Returns ``None``
-    on parse error — callers treat that as a configuration error.
+    Forwards to :func:`pi_dash.bgtasks._rrule.next_fire_from_rrule` with the
+    binding's stored RRULE bundle. Returns ``None`` on parse error.
     """
     return next_fire_from_rrule(
         dtstart=binding.dtstart,
         rrule_str=binding.rrule or "",
         tzid=binding.tzid or "UTC",
-        rdates=_as_datetimes(binding.rdates),
-        exdates=_as_datetimes(binding.exdates),
+        rdates=coerce_iso_datetimes(binding.rdates),
+        exdates=coerce_iso_datetimes(binding.exdates),
         now=now,
     )
-
-
-def _as_datetimes(raw) -> list[datetime]:
-    """Coerce JSONField list values into tz-aware datetimes (UTC).
-
-    The model stores RDATE/EXDATE as JSON arrays of ISO strings; this helper
-    deserializes them once at the call site so the rrule expander gets
-    real datetimes.
-    """
-    out: list[datetime] = []
-    for item in raw or ():
-        if isinstance(item, datetime):
-            d = item
-        elif isinstance(item, str):
-            try:
-                # Accept both "2026-05-25T09:00:00Z" and "2026-05-25T09:00:00+00:00"
-                d = datetime.fromisoformat(item.replace("Z", "+00:00"))
-            except ValueError:
-                logger.warning("scheduler.bad_isodate value=%r — skipping", item)
-                continue
-        else:
-            logger.warning("scheduler.unexpected_rdate_type type=%s — skipping", type(item).__name__)
-            continue
-        if d.tzinfo is None:
-            d = d.replace(tzinfo=dt_timezone.utc)
-        out.append(d)
-    return out
 
 
 def _is_last_run_in_flight(binding: SchedulerBinding) -> bool:

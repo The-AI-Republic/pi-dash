@@ -7,7 +7,8 @@
 import { useMemo } from "react";
 import type { ISchedulerOccurrence } from "@pi-dash/services";
 import { cn } from "@pi-dash/utils";
-import { formatTime, formatWeekday, isSameDay, isToday, monthGridDays } from "./date-helpers";
+import { formatTime, formatWeekday, isToday, monthGridDays } from "./date-helpers";
+import { getOccurrenceStyle } from "./occurrence-style";
 
 type Props = {
   viewDate: Date;
@@ -111,26 +112,19 @@ function DayCell({ date, isInMonth, isCurrentDay, blocks, now, onSelectOccurrenc
       )}
 
       {!showRollup &&
-        visibleBlocks.map((o) => {
-          const isPast = new Date(o.dtstart) < now;
-          return (
-            <button
-              type="button"
-              key={`${o.binding_id}:${o.dtstart}`}
-              onClick={() => onSelectOccurrence(o)}
-              className="flex items-center gap-1 truncate rounded-sm px-1.5 py-0.5 text-left text-12 hover:opacity-80"
-              style={{
-                backgroundColor: isPast ? "#e5e7eb" : `${o.scheduler_color}22`,
-                color: isPast ? "#6b7280" : o.scheduler_color,
-                borderLeft: `3px solid ${isPast ? "#9ca3af" : o.scheduler_color}`,
-              }}
-              title={`${o.scheduler_name} — ${formatTime(new Date(o.dtstart))}${o.status ? ` (${o.status})` : ""}`}
-            >
-              <span className="font-medium">{formatTime(new Date(o.dtstart))}</span>
-              <span className="truncate">{o.scheduler_name}</span>
-            </button>
-          );
-        })}
+        visibleBlocks.map((o) => (
+          <button
+            type="button"
+            key={`${o.binding_id}:${o.dtstart}`}
+            onClick={() => onSelectOccurrence(o)}
+            className="flex items-center gap-1 truncate rounded-sm px-1.5 py-0.5 text-left text-12 hover:opacity-80"
+            style={getOccurrenceStyle(o, now)}
+            title={`${o.scheduler_name} — ${formatTime(new Date(o.dtstart))}${o.status ? ` (${o.status})` : ""}`}
+          >
+            <span className="font-medium">{formatTime(new Date(o.dtstart))}</span>
+            <span className="truncate">{o.scheduler_name}</span>
+          </button>
+        ))}
 
       {!showRollup && overflow > 0 && (
         <button
@@ -160,6 +154,3 @@ function groupByDay(occurrences: ISchedulerOccurrence[]): Map<string, IScheduler
   }
   return out;
 }
-
-// Re-exported helper for tests / week-view.
-export { isSameDay };

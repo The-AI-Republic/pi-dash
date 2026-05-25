@@ -8,6 +8,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import type { ISchedulerOccurrence } from "@pi-dash/services";
 import { cn } from "@pi-dash/utils";
 import { formatDayHeader, formatTime, isToday, weekGridDays } from "./date-helpers";
+import { getOccurrenceStyle } from "./occurrence-style";
 
 type Props = {
   viewDate: Date;
@@ -45,12 +46,11 @@ export function SchedulerWeekView({ viewDate, occurrences, onSelectOccurrence }:
     el.scrollTop = hour * HOUR_HEIGHT;
   }, [days]);
 
-  // Tick the current-time line every minute.
-  const [, setTick] = useState(0);
-  useEffect(() => {
-    const id = window.setInterval(() => setTick((n) => n + 1), 60 * 1000);
-    return () => window.clearInterval(id);
-  }, []);
+  // ``now`` is captured per render. The minute-resolution refresh lives on
+  // the <CurrentTimeLine /> child below so the per-minute tick doesn't
+  // re-render every occurrence button (a 5000-block reconciliation per
+  // minute while the tab is open).
+  const now = useMemo(() => new Date(), []);
 
   return (
     <div className="flex h-full w-full flex-col">
@@ -93,7 +93,13 @@ export function SchedulerWeekView({ viewDate, occurrences, onSelectOccurrence }:
 
         {/* Day columns */}
         {days.map((d, dayIdx) => (
-          <DayColumn key={d.toISOString()} date={d} blocks={byDay[dayIdx]} onSelectOccurrence={onSelectOccurrence} />
+          <DayColumn
+            key={d.toISOString()}
+            date={d}
+            blocks={byDay[dayIdx]}
+            now={now}
+            onSelectOccurrence={onSelectOccurrence}
+          />
         ))}
       </div>
     </div>
@@ -103,14 +109,13 @@ export function SchedulerWeekView({ viewDate, occurrences, onSelectOccurrence }:
 type DayColumnProps = {
   date: Date;
   blocks: PositionedBlock[];
+  /** Snapshot at parent-render time. Used for past/future color flip. */
+  now: Date;
   onSelectOccurrence: (o: ISchedulerOccurrence) => void;
 };
 
-function DayColumn({ date, blocks, onSelectOccurrence }: DayColumnProps) {
-  const now = new Date();
+function DayColumn({ date, blocks, now, onSelectOccurrence }: DayColumnProps) {
   const dayIsToday = isToday(date);
-  // Current-time-line offset within the column.
-  const nowOffset = dayIsToday ? ((now.getHours() * 60 + now.getMinutes()) / 60) * HOUR_HEIGHT : null;
 
   return (
     <div className="relative flex-1 border-l border-subtle" style={{ minHeight: 24 * HOUR_HEIGHT }}>
@@ -119,19 +124,12 @@ function DayColumn({ date, blocks, onSelectOccurrence }: DayColumnProps) {
         <div key={`grid-${h}`} className="border-b border-dashed border-subtle" style={{ height: HOUR_HEIGHT }} />
       ))}
 
-      {/* Current-time line — only on today's column */}
-      {nowOffset !== null && (
-        <div
-          className="border-red-500 pointer-events-none absolute right-0 left-0 z-10 border-t-2"
-          style={{ top: nowOffset }}
-        >
-          <div className="bg-red-500 absolute -top-1.5 -left-1 size-3 rounded-full" />
-        </div>
-      )}
+      {/* Current-time line is in its own component so its per-minute tick
+          doesn't re-render the surrounding occurrence buttons. */}
+      {dayIsToday && <CurrentTimeLine />}
 
       {/* Occurrence blocks */}
       {blocks.map((block) => {
-        const isPast = new Date(block.occurrence.dtstart) < now;
         const widthPct = 100 / block.lane.total;
         const leftPct = widthPct * block.lane.index;
         return (
@@ -145,9 +143,7 @@ function DayColumn({ date, blocks, onSelectOccurrence }: DayColumnProps) {
               height: BLOCK_HEIGHT,
               left: `calc(${leftPct}% + 2px)`,
               width: `calc(${widthPct}% - 4px)`,
-              backgroundColor: isPast ? "#e5e7eb" : `${block.occurrence.scheduler_color}22`,
-              color: isPast ? "#6b7280" : block.occurrence.scheduler_color,
-              borderLeft: `3px solid ${isPast ? "#9ca3af" : block.occurrence.scheduler_color}`,
+              ...getOccurrenceStyle(block.occurrence, now),
             }}
             title={`${block.occurrence.scheduler_name} — ${formatTime(
               new Date(block.occurrence.dtstart)
@@ -166,6 +162,20 @@ function formatHourLabel(h: number): string {
   const d = new Date();
   d.setHours(h, 0, 0, 0);
   return new Intl.DateTimeFormat(undefined, { hour: "numeric" }).format(d);
+}
+
+function CurrentTimeLine() {
+  const [now, setNow] = useState(() => new Date());
+  useEffect(() => {
+    const id = window.setInterval(() => setNow(new Date()), 60 * 1000);
+    return () => window.clearInterval(id);
+  }, []);
+  const top = ((now.getHours() * 60 + now.getMinutes()) / 60) * HOUR_HEIGHT;
+  return (
+    <div className="border-red-500 pointer-events-none absolute right-0 left-0 z-10 border-t-2" style={{ top }}>
+      <div className="bg-red-500 absolute -top-1.5 -left-1 size-3 rounded-full" />
+    </div>
+  );
 }
 
 // ---------------------------------------------------------------------------

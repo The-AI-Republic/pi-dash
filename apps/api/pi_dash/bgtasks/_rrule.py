@@ -27,8 +27,8 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone as dt_timezone
-from typing import Iterable, Optional
+from datetime import datetime, timezone as dt_timezone
+from typing import Optional, Sequence
 
 from dateutil import rrule as dateutil_rrule
 from dateutil.rrule import rrulestr
@@ -271,8 +271,8 @@ def next_fire_from_rrule(
     dtstart: datetime,
     rrule_str: str,
     tzid: str = "UTC",
-    rdates: Optional[Iterable[datetime]] = None,
-    exdates: Optional[Iterable[datetime]] = None,
+    rdates: Optional[Sequence[datetime]] = None,
+    exdates: Optional[Sequence[datetime]] = None,
     now: Optional[datetime] = None,
 ) -> Optional[datetime]:
     """Return the next datetime the RRULE bundle is due strictly after ``now``.
@@ -341,8 +341,8 @@ def occurrences_between(
     dtstart: datetime,
     rrule_str: str,
     tzid: str = "UTC",
-    rdates: Optional[Iterable[datetime]] = None,
-    exdates: Optional[Iterable[datetime]] = None,
+    rdates: Optional[Sequence[datetime]] = None,
+    exdates: Optional[Sequence[datetime]] = None,
     window_start: datetime,
     window_end: datetime,
     cap: int = 5000,
@@ -366,27 +366,32 @@ def occurrences_between(
         if rrule_str:
             rule = rrulestr(rrule_str, dtstart=dtstart)
             if rdates or exdates:
-                rset = dateutil_rrule.rruleset()
-                rset.rrule(rule)
+                source: dateutil_rrule.rrulebase = dateutil_rrule.rruleset()
+                source.rrule(rule)
                 for d in rdates or ():
                     if d.tzinfo is None:
                         d = d.replace(tzinfo=dt_timezone.utc)
-                    rset.rdate(d)
+                    source.rdate(d)
                 for d in exdates or ():
                     if d.tzinfo is None:
                         d = d.replace(tzinfo=dt_timezone.utc)
-                    rset.exdate(d)
-                iterator = rset.between(window_start, window_end, inc=True)
+                    source.exdate(d)
             else:
-                iterator = rule.between(window_start, window_end, inc=True)
-            for occ in iterator:
+                source = rule
+            # ``xafter`` is a lazy generator — stop as soon as we leave the
+            # window or hit the cap. ``between`` materialises the full
+            # expansion in dateutil before returning, which defeats the cap
+            # for fast-firing rules (e.g. FREQ=MINUTELY over 90 days = 130k
+            # allocations before we ever check len(out)).
+            for occ in source.xafter(window_start, inc=True):
+                if occ > window_end:
+                    break
                 if occ.tzinfo is None:
                     occ = occ.replace(tzinfo=dt_timezone.utc)
                 out.append(occ.astimezone(dt_timezone.utc))
                 if len(out) >= cap:
                     return out, True
         else:
-            # Single-shot
             if window_start <= dtstart <= window_end and dtstart not in (exdates or ()):
                 out.append(dtstart)
             for d in rdates or ():

@@ -6,7 +6,6 @@
 
 import { useMemo, useState } from "react";
 import { observer } from "mobx-react";
-import { rrulestr } from "rrule";
 import useSWR from "swr";
 // pi dash imports
 import { EUserPermissions, EUserPermissionsLevel } from "@pi-dash/constants";
@@ -21,6 +20,8 @@ import { InstallSchedulerBindingModal } from "@/components/project/scheduler-bin
 import { UninstallSchedulerBindingModal } from "@/components/project/scheduler-bindings/uninstall-binding-modal";
 // hooks
 import { useUserPermissions } from "@/hooks/store/user";
+import { DEFAULT_SCHEDULER_COLOR } from "./constants";
+import { humanizeRrule } from "./rrule-text";
 
 const schedulerService = new SchedulerService();
 
@@ -186,17 +187,11 @@ function BindingRow({ binding, canManage, onEdit, onUninstall, onToggle }: RowPr
 
   const formatTs = (ts: string | null) => (ts ? new Date(ts).toLocaleString() : t("scheduler_bindings.list.none_yet"));
 
-  // Humanize the RRULE for display. Empty rrule = single-shot at dtstart.
-  // The rrule lib emits English by default; localized output would require
-  // a per-locale gettext setup which isn't worth the v1 scope.
+  // Humanize the RRULE for display. The rrule lib emits English; localized
+  // output would need a per-locale gettext setup we haven't built yet.
   const scheduleText = useMemo(() => {
-    if (!binding.rrule) return t("scheduler_bindings.list.single_shot");
-    try {
-      const cleaned = binding.rrule.replace(/^RRULE:/i, "");
-      return rrulestr(cleaned, { dtstart: new Date(binding.dtstart) }).toText();
-    } catch {
-      return binding.rrule;
-    }
+    const human = humanizeRrule(binding.rrule, binding.dtstart);
+    return human ?? t("scheduler_bindings.list.single_shot");
   }, [binding.rrule, binding.dtstart, t]);
 
   // Wraps the parent's onToggle so the switch can render a disabled state
@@ -218,7 +213,7 @@ function BindingRow({ binding, canManage, onEdit, onUninstall, onToggle }: RowPr
         <div className="flex items-center gap-2">
           <span
             className="inline-block h-3 w-3 flex-shrink-0 rounded-sm"
-            style={{ backgroundColor: binding.scheduler_color || "#3b82f6" }}
+            style={{ backgroundColor: binding.scheduler_color || DEFAULT_SCHEDULER_COLOR }}
             aria-hidden="true"
           />
           <span>{binding.scheduler_name}</span>

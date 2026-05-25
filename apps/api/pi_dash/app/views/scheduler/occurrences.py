@@ -32,8 +32,8 @@ Caching (PR2 leaves this simple; future work can introduce Valkey):
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timedelta, timezone as dt_timezone
-from typing import Iterable, Optional
+from datetime import datetime, timedelta
+from typing import Optional
 
 from django.shortcuts import get_object_or_404
 from django.utils import timezone
@@ -45,6 +45,8 @@ from pi_dash.app.views.base import BaseAPIView
 from pi_dash.bgtasks._rrule import occurrences_between
 from pi_dash.db.models import Project, SchedulerBinding
 from pi_dash.runner.models import AgentRun
+from pi_dash.utils.iso_datetime import coerce_iso_datetimes, parse_iso_utc
+
 
 logger = logging.getLogger(__name__)
 
@@ -52,39 +54,10 @@ logger = logging.getLogger(__name__)
 MAX_WINDOW_DAYS = 90
 OCCURRENCE_CAP = 5000
 
-
-def _parse_iso(value: str) -> Optional[datetime]:
-    """Parse an ISO 8601 datetime, accepting both Z and ±HH:MM tz suffixes.
-
-    Returns ``None`` if the value can't be parsed.
-    """
-    if not value:
-        return None
-    try:
-        d = datetime.fromisoformat(value.replace("Z", "+00:00"))
-    except ValueError:
-        return None
-    if d.tzinfo is None:
-        d = d.replace(tzinfo=dt_timezone.utc)
-    return d.astimezone(dt_timezone.utc)
-
-
-def _as_datetimes(raw: Iterable) -> list[datetime]:
-    """Coerce a JSONField list of ISO strings into tz-aware UTC datetimes."""
-    out: list[datetime] = []
-    for item in raw or ():
-        if isinstance(item, datetime):
-            d = item
-        elif isinstance(item, str):
-            d = _parse_iso(item)
-            if d is None:
-                continue
-        else:
-            continue
-        if d.tzinfo is None:
-            d = d.replace(tzinfo=dt_timezone.utc)
-        out.append(d)
-    return out
+# Re-exported under their pre-refactor names so the contract tests don't
+# need to know the helpers moved to a shared module.
+_parse_iso = parse_iso_utc
+_as_datetimes = coerce_iso_datetimes
 
 
 class ProjectSchedulerOccurrencesEndpoint(BaseAPIView):
