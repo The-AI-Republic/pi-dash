@@ -61,6 +61,7 @@ def get_default_filters():
 def get_default_display_filters():
     return {
         "group_by": "state",
+        "sub_group_by": None,
         "order_by": "sort_order",
         "type": None,
         "sub_issue": True,

@@ -54,6 +54,7 @@ def get_default_props():
         },
         "display_filters": {
             "group_by": "state",
+            "sub_group_by": None,
             "order_by": "sort_order",
             "type": None,
             "sub_issue": True,

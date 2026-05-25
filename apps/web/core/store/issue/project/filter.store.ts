@@ -76,6 +76,7 @@ export class ProjectIssuesFilter extends IssueFilterHelperStore implements IProj
   rootIssueStore: IIssueRootStore;
   // services
   projectService;
+  boardDefaultMigrationProjectIds: Set<string> = new Set();
 
   constructor(_rootStore: IIssueRootStore) {
     super();
@@ -157,7 +158,10 @@ export class ProjectIssuesFilter extends IssueFilterHelperStore implements IProj
     const displayFiltersPayload = shouldApplyBoardDefault
       ? {
           ..._filters?.display_filters,
-          ...PROJECT_ISSUES_DEFAULT_DISPLAY_FILTERS,
+          layout: PROJECT_ISSUES_DEFAULT_DISPLAY_FILTERS.layout,
+          group_by: PROJECT_ISSUES_DEFAULT_DISPLAY_FILTERS.group_by,
+          sub_group_by: PROJECT_ISSUES_DEFAULT_DISPLAY_FILTERS.sub_group_by,
+          order_by: PROJECT_ISSUES_DEFAULT_DISPLAY_FILTERS.order_by,
         }
       : _filters?.display_filters;
     const displayFilters = this.computedDisplayFilters(displayFiltersPayload, PROJECT_ISSUES_DEFAULT_DISPLAY_FILTERS);
@@ -187,7 +191,8 @@ export class ProjectIssuesFilter extends IssueFilterHelperStore implements IProj
       set(this.filters, [projectId, "kanbanFilters"], kanbanFilters);
     });
 
-    if (shouldApplyBoardDefault) {
+    if (shouldApplyBoardDefault && !this.boardDefaultMigrationProjectIds.has(projectId)) {
+      this.boardDefaultMigrationProjectIds.add(projectId);
       try {
         await this.projectService.updateProjectUserProperties(workspaceSlug, projectId, {
           display_filters: displayFilters,
