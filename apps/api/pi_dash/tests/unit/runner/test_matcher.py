@@ -163,7 +163,7 @@ def test_drain_pod_includes_runner_with_closed_session_and_clean_open_session(
 
 
 @pytest.mark.unit
-def test_matcher_excludes_runner_with_only_closed_sessions_having_stale_fields(
+def test_matcher_includes_runner_with_only_closed_sessions_having_stale_fields(
     db, online_runner, queued_run, create_user, workspace
 ):
     """Sanity: CLOSED sessions alone — even with stale active fields —
