@@ -15,7 +15,7 @@ import { CommonProjectBreadcrumbs } from "@/pi-dash-web/components/breadcrumbs/c
 
 export const ProjectSchedulersHeader = observer(function ProjectSchedulersHeader() {
   const { workspaceSlug, projectId } = useParams();
-  const { currentProjectDetails, loader } = useProject();
+  const { loader } = useProject();
   const { t } = useTranslation();
 
   return (
@@ -27,7 +27,7 @@ export const ProjectSchedulersHeader = observer(function ProjectSchedulersHeader
             component={
               <BreadcrumbLink
                 label={t("sidebar.schedulers")}
-                href={`/${workspaceSlug}/projects/${currentProjectDetails?.id}/schedulers`}
+                href={`/${workspaceSlug}/projects/${projectId}/schedulers`}
                 icon={<CalendarClock className="size-4 text-tertiary" />}
                 isLast
               />
