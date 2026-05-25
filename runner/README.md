@@ -47,7 +47,7 @@ irm https://github.com/The-AI-Republic/pi-dash/releases/download/pidash-v0.1.0/p
 
 ```bash
 curl --proto '=https' --tlsv1.2 -LsSf \
-  https://github.com/The-AI-Republic/pi-dash/releases/download/pidash-v0.1.4-rc.1/install.sh | sh
+  https://github.com/The-AI-Republic/pi-dash/releases/download/pidash-v0.1.4/install.sh | sh
 ```
 
 **Prerequisite:** the runner shells out to [Codex](https://github.com/openai/codex) — install it and make sure `codex --version` works before running `pidash configure`. `pidash doctor` checks this.

@@ -123,7 +123,7 @@ On Windows, download and run the MSI installer:
 
 <https://github.com/The-AI-Republic/pi-dash/releases/latest/download/pidash-x86_64-pc-windows-msvc.msi>
 
-To pin to a specific version (or install a prerelease), swap `latest` for the tag, e.g. `.../releases/download/pidash-v0.1.4-rc.1/pidash-installer.sh`. Prereleases are excluded from `/latest/`, so the one-liners above always serve the last stable release. Full pinning recipes — wrapper, bare installer, Windows variants — are in [`runner/README.md`](./runner/README.md#installing-a-specific-version-pinning--prereleases).
+To pin to a specific version (or install a prerelease), swap `latest` for the tag, e.g. `.../releases/download/pidash-v0.1.4/pidash-installer.sh`. Prereleases are excluded from `/latest/`, so the one-liners above always serve the last stable release. Full pinning recipes — wrapper, bare installer, Windows variants — are in [`runner/README.md`](./runner/README.md#installing-a-specific-version-pinning--prereleases).
 
 Then authenticate the machine and register a runner. The standard flow is two commands:
 
