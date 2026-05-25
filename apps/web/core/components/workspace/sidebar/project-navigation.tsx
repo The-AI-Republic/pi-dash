@@ -135,6 +135,9 @@ export const ProjectNavigation = observer(function ProjectNavigation(props: TPro
         i18n_key: "sidebar.schedulers",
         key: "schedulers",
         name: "Schedulers",
+        // /schedulers redirects to /schedulers/calendar via the page
+        // component. Linking to /schedulers (not /calendar directly) keeps
+        // the sidebar item highlighted on both List and Calendar tabs.
         href: `/${workspaceSlug}/projects/${projectId}/schedulers`,
         icon: CalendarClock,
         access: [EUserPermissions.ADMIN, EUserPermissions.MEMBER, EUserPermissions.GUEST],

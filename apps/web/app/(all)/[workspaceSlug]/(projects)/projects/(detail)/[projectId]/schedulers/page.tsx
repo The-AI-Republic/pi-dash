@@ -4,28 +4,13 @@
  * See the LICENSE file for details.
  */
 
-import { observer } from "mobx-react";
-import { useTranslation } from "@pi-dash/i18n";
-import { PageHead } from "@/components/core/page-title";
-import { SchedulerBindingsPanel } from "@/components/project/scheduler-bindings/bindings-panel";
-import { useProject } from "@/hooks/store/use-project";
-import type { Route } from "./+types/page";
+import { Navigate } from "react-router";
 
-function ProjectSchedulersPage({ params }: Route.ComponentProps) {
-  const { workspaceSlug, projectId } = params;
-  const { t } = useTranslation();
-  const { getProjectById } = useProject();
-  const project = getProjectById(projectId);
-  const pageTitle = project?.name
-    ? `${project.name} - ${t("scheduler_bindings.title")}`
-    : t("scheduler_bindings.title");
-
-  return (
-    <>
-      <PageHead title={pageTitle} />
-      <SchedulerBindingsPanel workspaceSlug={workspaceSlug} projectId={projectId} />
-    </>
-  );
+/**
+ * Redirect /schedulers → /schedulers/calendar so the default landing for
+ * the Schedulers nav entry is the calendar view. The list view stays
+ * reachable at /schedulers/list via the in-page tab bar.
+ */
+export default function ProjectSchedulersIndexPage() {
+  return <Navigate to="calendar" replace />;
 }
-
-export default observer(ProjectSchedulersPage);

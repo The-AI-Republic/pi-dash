@@ -18,7 +18,11 @@ export default function ProjectSchedulersLayout() {
   const { t } = useTranslation();
 
   const basePath = `/${workspaceSlug}/projects/${projectId}/schedulers`;
-  const isCalendar = pathname.endsWith("/calendar");
+  // /schedulers is a redirect to /schedulers/calendar; anything else is
+  // an explicit tab. Highlight Calendar when the URL ends with /calendar
+  // and when the user is on the bare /schedulers route (redirect in flight).
+  const isListActive = pathname.endsWith("/list");
+  const isCalendarActive = !isListActive;
 
   return (
     <>
@@ -27,12 +31,12 @@ export default function ProjectSchedulersLayout() {
         <div className="flex h-full w-full flex-col">
           {/* Tab bar: List | Calendar. Single sidebar entry, internal toggle. */}
           <div className="flex items-center gap-1 border-b border-subtle px-4 pt-3">
-            <SchedulerTabLink to={basePath} active={!isCalendar} icon={<ListIcon className="size-4" />}>
+            <SchedulerTabLink to={`${basePath}/list`} active={isListActive} icon={<ListIcon className="size-4" />}>
               {t("scheduler_bindings.tabs.list")}
             </SchedulerTabLink>
             <SchedulerTabLink
               to={`${basePath}/calendar`}
-              active={isCalendar}
+              active={isCalendarActive}
               icon={<CalendarClock className="size-4" />}
             >
               {t("scheduler_bindings.tabs.calendar")}

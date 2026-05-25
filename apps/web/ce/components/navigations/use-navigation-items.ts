@@ -97,6 +97,10 @@ export const useNavigationItems = ({
         i18n_key: "sidebar.schedulers",
         key: "schedulers",
         name: "Schedulers",
+        // /schedulers redirects to /schedulers/calendar — see the page
+        // component. Linking to /schedulers (not /schedulers/calendar)
+        // keeps the sidebar item highlighted when the user is on the
+        // List tab at /schedulers/list.
         href: `/${workspaceSlug}/projects/${projectId}/schedulers`,
         icon: CalendarClock,
         access: [EUserPermissions.ADMIN, EUserPermissions.MEMBER, EUserPermissions.GUEST],

@@ -233,12 +233,18 @@ export const coreRoutes: RouteConfigEntry[] = [
 
           // Schedulers list (project-scoped scheduler bindings)
           layout("./(all)/[workspaceSlug]/(projects)/projects/(detail)/[projectId]/schedulers/layout.tsx", [
+            // Index page is a redirect to /calendar (the default landing).
             route(
               ":workspaceSlug/projects/:projectId/schedulers",
               "./(all)/[workspaceSlug]/(projects)/projects/(detail)/[projectId]/schedulers/page.tsx"
             ),
-            // Calendar tab — sibling page under the same layout so the
-            // shared header/tab-bar persists when switching tabs.
+            // List tab — the table of installed bindings.
+            route(
+              ":workspaceSlug/projects/:projectId/schedulers/list",
+              "./(all)/[workspaceSlug]/(projects)/projects/(detail)/[projectId]/schedulers/list/page.tsx"
+            ),
+            // Calendar tab — month + week views over expanded RRULE
+            // occurrences and past AgentRuns.
             route(
               ":workspaceSlug/projects/:projectId/schedulers/calendar",
               "./(all)/[workspaceSlug]/(projects)/projects/(detail)/[projectId]/schedulers/calendar/page.tsx"
