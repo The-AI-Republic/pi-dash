@@ -274,11 +274,7 @@ class RunnerSessionPollEndpoint(APIView):
         # nudge, any QUEUED work in the pod sits until a new run is
         # created or the runner reopens its session.
         now_ts = timezone.now()
-        prior_hb = (
-            Runner.objects.filter(pk=runner.id)
-            .values_list("last_heartbeat_at", flat=True)
-            .first()
-        )
+        prior_hb = runner.last_heartbeat_at
         was_stale = prior_hb is None or (now_ts - prior_hb) > HEARTBEAT_GRACE
 
         Runner.objects.filter(pk=runner.id).update(
@@ -290,9 +286,16 @@ class RunnerSessionPollEndpoint(APIView):
             ),
         )
         if was_stale:
-            transaction.on_commit(
-                lambda rid=runner.id: drain_for_runner_by_id(rid)
-            )
+            def _drain_recovered_runner(rid=runner.id):
+                try:
+                    drain_for_runner_by_id(rid)
+                except Exception:
+                    logger.exception(
+                        "drain_for_runner_by_id failed for recovered runner %s",
+                        rid,
+                    )
+
+            transaction.on_commit(_drain_recovered_runner)
         if status_entry:
             session_service.reap_stale_busy_runs(runner, status_entry)
             # Volatile observability snapshot — see
