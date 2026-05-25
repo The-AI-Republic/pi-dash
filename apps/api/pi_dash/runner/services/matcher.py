@@ -87,6 +87,7 @@ def _runners_with_active_chat_ids():
     return (
         AgentChatSession.objects.filter(status=AgentChatSessionStatus.OPEN)
         .filter(Q(active_message_id__isnull=False) | ~Q(active_turn_id=""))
+        .order_by()  # strip the model's default ordering — wasted inside IN (...)
         .values("runner_id")
     )
 

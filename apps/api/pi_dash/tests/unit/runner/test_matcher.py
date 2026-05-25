@@ -7,6 +7,7 @@ from django.utils import timezone
 
 from pi_dash.runner.models import (
     AgentChatSession,
+    AgentChatSessionStatus,
     AgentRun,
     AgentRunStatus,
     Runner,
@@ -82,6 +83,103 @@ def test_matcher_ignores_runner_with_active_chat_message(db, online_runner, queu
         active_message_id=queued_run.id,
     )
     assert matcher.select_runner_for_run(queued_run) is None
+
+
+# ---------------------------------------------------------------------------
+# Regression: chat-session exclude across multiple rows
+#
+# The pre-fix matcher chained two ``.exclude(chat_sessions__...)`` calls.
+# Django compiled each to its own EXISTS subquery, so the conditions could
+# be satisfied by *different* chat_session rows on the same runner —
+# over-excluding when a runner had a stale CLOSED session plus an idle
+# OPEN session. The fix collapses both clauses into a single subquery so
+# all conditions evaluate on the same row.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+def test_matcher_includes_runner_with_closed_session_and_clean_open_session(
+    db, online_runner, queued_run, create_user, workspace
+):
+    """Runner is eligible when its only OPEN session has no active turn,
+    even if a separate CLOSED session was never cleared of its
+    ``active_message_id`` / ``active_turn_id``.
+
+    Pre-fix bug: two chained ``.exclude()`` clauses on ``chat_sessions__*``
+    matched the CLOSED row's active_message_id and the OPEN row's status
+    independently, falsely excluding the runner. After fix, both
+    conditions must match on the same row, so a CLOSED row can't combine
+    with an OPEN row.
+    """
+    # Historical CLOSED session with stale active fields (the kind of row
+    # left behind when chat-state cleanup didn't run).
+    AgentChatSession.objects.create(
+        workspace=workspace,
+        runner=online_runner,
+        created_by=create_user,
+        pod=online_runner.pod,
+        status=AgentChatSessionStatus.CLOSED,
+        active_message_id=queued_run.id,
+        active_turn_id="stale_turn",
+    )
+    # Current OPEN session that is idle (no active turn).
+    AgentChatSession.objects.create(
+        workspace=workspace,
+        runner=online_runner,
+        created_by=create_user,
+        pod=online_runner.pod,
+        status=AgentChatSessionStatus.OPEN,
+    )
+    assert matcher.select_runner_for_run(queued_run) == online_runner
+
+
+@pytest.mark.unit
+def test_drain_pod_includes_runner_with_closed_session_and_clean_open_session(
+    db, online_runner, queued_run, create_user, workspace
+):
+    """Same regression check via the pod-scoped dispatcher path."""
+    AgentChatSession.objects.create(
+        workspace=workspace,
+        runner=online_runner,
+        created_by=create_user,
+        pod=online_runner.pod,
+        status=AgentChatSessionStatus.CLOSED,
+        active_message_id=queued_run.id,
+    )
+    AgentChatSession.objects.create(
+        workspace=workspace,
+        runner=online_runner,
+        created_by=create_user,
+        pod=online_runner.pod,
+        status=AgentChatSessionStatus.OPEN,
+    )
+    # Pod-scope the queued run so drain_pod can see it.
+    queued_run.pod = online_runner.pod
+    queued_run.save(update_fields=["pod"])
+    assigned = matcher.drain_pod(online_runner.pod)
+    assert assigned == 1
+    queued_run.refresh_from_db()
+    assert queued_run.runner_id == online_runner.id
+
+
+@pytest.mark.unit
+def test_matcher_excludes_runner_with_only_closed_sessions_having_stale_fields(
+    db, online_runner, queued_run, create_user, workspace
+):
+    """Sanity: CLOSED sessions alone — even with stale active fields —
+    never block the matcher. (Same logical case as above without the
+    second OPEN row, to pin down that the open row isn't required for
+    inclusion.)"""
+    AgentChatSession.objects.create(
+        workspace=workspace,
+        runner=online_runner,
+        created_by=create_user,
+        pod=online_runner.pod,
+        status=AgentChatSessionStatus.CLOSED,
+        active_message_id=queued_run.id,
+        active_turn_id="stale",
+    )
+    assert matcher.select_runner_for_run(queued_run) == online_runner
 
 
 @pytest.mark.unit
