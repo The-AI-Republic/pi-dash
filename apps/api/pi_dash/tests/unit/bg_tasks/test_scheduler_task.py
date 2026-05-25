@@ -97,13 +97,15 @@ def scheduler(workspace, create_user):
 
 @pytest.fixture
 def binding(scheduler, project, workspace, create_user, runner_for_workspace):
-    """A binding due immediately (next_run_at = NULL) with a valid cron."""
+    """A binding due immediately (next_run_at = NULL) with an RRULE that fires every minute."""
     with impersonate(create_user):
         return SchedulerBinding.objects.create(
             scheduler=scheduler,
             project=project,
             workspace=workspace,
-            cron="* * * * *",
+            dtstart=timezone.now() - timedelta(days=1),
+            rrule="FREQ=MINUTELY",
+            tzid="UTC",
             extra_context="",
             enabled=True,
             actor=create_user,
@@ -226,18 +228,19 @@ def test_fire_skips_when_last_run_in_flight(binding, workspace, project, create_
 
 
 @pytest.mark.unit
-def test_fire_disables_binding_with_bad_cron_and_clears_next_run_at(binding):
-    """Codex review #10: bad-cron disable must also clear next_run_at."""
-    binding.cron = "this is not a cron"
+def test_fire_disables_binding_with_bad_rrule_and_clears_next_run_at(binding):
+    """Bad RRULE bundle disable must also clear next_run_at (parallels the
+    legacy bad-cron handler — Codex review #10)."""
+    binding.rrule = "this is not a real rrule"
     binding.next_run_at = timezone.now() - timedelta(seconds=5)
-    binding.save(update_fields=["cron", "next_run_at"])
+    binding.save(update_fields=["rrule", "next_run_at"])
 
     fired = fire_scheduler_binding(str(binding.pk))
     assert fired is False
     binding.refresh_from_db()
     assert binding.enabled is False
     assert binding.next_run_at is None
-    assert "invalid cron" in binding.last_error
+    assert "invalid rrule" in binding.last_error
 
 
 @pytest.mark.unit

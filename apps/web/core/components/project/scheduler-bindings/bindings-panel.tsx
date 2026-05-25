@@ -4,8 +4,9 @@
  * See the LICENSE file for details.
  */
 
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import { observer } from "mobx-react";
+import { rrulestr } from "rrule";
 import useSWR from "swr";
 // pi dash imports
 import { EUserPermissions, EUserPermissionsLevel } from "@pi-dash/constants";
@@ -70,7 +71,7 @@ export const SchedulerBindingsPanel = observer(function SchedulerBindingsPanel(p
             <thead className="bg-layer-1 text-left text-secondary">
               <tr>
                 <th className="px-3 py-2">{t("scheduler_bindings.columns.name")}</th>
-                <th className="px-3 py-2">{t("scheduler_bindings.columns.cron")}</th>
+                <th className="px-3 py-2">{t("scheduler_bindings.columns.schedule")}</th>
                 <th className="px-3 py-2">{t("scheduler_bindings.columns.next_run")}</th>
                 <th className="px-3 py-2">{t("scheduler_bindings.columns.last_run")}</th>
                 <th className="px-3 py-2">{t("scheduler_bindings.columns.status")}</th>
@@ -185,6 +186,19 @@ function BindingRow({ binding, canManage, onEdit, onUninstall, onToggle }: RowPr
 
   const formatTs = (ts: string | null) => (ts ? new Date(ts).toLocaleString() : t("scheduler_bindings.list.none_yet"));
 
+  // Humanize the RRULE for display. Empty rrule = single-shot at dtstart.
+  // The rrule lib emits English by default; localized output would require
+  // a per-locale gettext setup which isn't worth the v1 scope.
+  const scheduleText = useMemo(() => {
+    if (!binding.rrule) return t("scheduler_bindings.list.single_shot");
+    try {
+      const cleaned = binding.rrule.replace(/^RRULE:/i, "");
+      return rrulestr(cleaned, { dtstart: new Date(binding.dtstart) }).toText();
+    } catch {
+      return binding.rrule;
+    }
+  }, [binding.rrule, binding.dtstart, t]);
+
   // Wraps the parent's onToggle so the switch can render a disabled state
   // during the in-flight PATCH (prevents a double-click from racing two
   // requests).
@@ -201,13 +215,20 @@ function BindingRow({ binding, canManage, onEdit, onUninstall, onToggle }: RowPr
   return (
     <tr className="border-t border-subtle">
       <td className="px-3 py-2 font-medium text-primary">
-        {binding.scheduler_name}
+        <div className="flex items-center gap-2">
+          <span
+            className="inline-block h-3 w-3 flex-shrink-0 rounded-sm"
+            style={{ backgroundColor: binding.scheduler_color || "#3b82f6" }}
+            aria-hidden="true"
+          />
+          <span>{binding.scheduler_name}</span>
+        </div>
         <div className="text-12 text-secondary">
           <code>{binding.scheduler_slug}</code>
         </div>
       </td>
-      <td className="px-3 py-2 text-secondary">
-        <code className="text-12">{binding.cron}</code>
+      <td className="px-3 py-2 text-secondary" title={binding.rrule || ""}>
+        <span className="text-13">{scheduleText}</span>
       </td>
       <td className="px-3 py-2 text-secondary">{formatTs(binding.next_run_at)}</td>
       <td className="px-3 py-2 text-secondary">{formatTs(binding.last_run_ended_at)}</td>

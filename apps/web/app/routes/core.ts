@@ -237,6 +237,12 @@ export const coreRoutes: RouteConfigEntry[] = [
               ":workspaceSlug/projects/:projectId/schedulers",
               "./(all)/[workspaceSlug]/(projects)/projects/(detail)/[projectId]/schedulers/page.tsx"
             ),
+            // Calendar tab — sibling page under the same layout so the
+            // shared header/tab-bar persists when switching tabs.
+            route(
+              ":workspaceSlug/projects/:projectId/schedulers/calendar",
+              "./(all)/[workspaceSlug]/(projects)/projects/(detail)/[projectId]/schedulers/calendar/page.tsx"
+            ),
           ]),
         ]),
 

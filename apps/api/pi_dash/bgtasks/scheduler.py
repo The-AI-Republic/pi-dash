@@ -10,7 +10,8 @@ Beat and fans out one :func:`fire_scheduler_binding` task per due binding.
 ``.ai_design/project_scheduler/design.md`` §6.2:
 
 1. **Claim** under SFU: re-check enabled, skip when ``last_run`` is
-   non-terminal, advance ``next_run_at`` from the cron expression, commit.
+   non-terminal, advance ``next_run_at`` from the RRULE bundle
+   (``dtstart`` + ``rrule`` + ``rdates`` + ``exdates``), commit.
 2. **Dispatch** outside the SFU transaction. The dispatcher registers
    ``transaction.on_commit(drain_pod_by_id)`` and holding the row lock
    across that callback breaks pod drain.
@@ -30,12 +31,12 @@ from datetime import datetime, timedelta, timezone as dt_timezone
 from typing import Optional
 
 from celery import shared_task
-from croniter import croniter, CroniterBadCronError
 from django.conf import settings
 from django.db import transaction
 from django.db.models import Q
 from django.utils import timezone
 
+from pi_dash.bgtasks._rrule import next_fire_from_rrule
 from pi_dash.db.models.scheduler import LAST_ERROR_MAX_LEN, SchedulerBinding
 from pi_dash.runner.models import AgentRunStatus
 
@@ -60,24 +61,49 @@ def _is_enabled() -> bool:
     return getattr(settings, "SCHEDULER_ENABLED", True)
 
 
-def _next_fire_from_cron(cron_expr: str, *, now: Optional[datetime] = None) -> Optional[datetime]:
-    """Return the next datetime ``cron_expr`` is due after ``now`` (UTC).
+def _next_fire_for_binding(binding: SchedulerBinding, *, now: Optional[datetime] = None) -> Optional[datetime]:
+    """Return the next datetime ``binding`` is due strictly after ``now``.
 
-    Returns ``None`` if ``cron_expr`` is malformed — callers treat that as
-    a configuration error and skip.
+    Thin wrapper that pulls the binding's RRULE bundle (dtstart, rrule,
+    rdates, exdates, tzid) and forwards to
+    :func:`pi_dash.bgtasks._rrule.next_fire_from_rrule`. Returns ``None``
+    on parse error — callers treat that as a configuration error.
     """
-    base = now or timezone.now()
-    if base.tzinfo is None:
-        base = base.replace(tzinfo=dt_timezone.utc)
-    try:
-        itr = croniter(cron_expr, base)
-        nxt = itr.get_next(datetime)
-        if nxt.tzinfo is None:
-            nxt = nxt.replace(tzinfo=dt_timezone.utc)
-        return nxt
-    except (CroniterBadCronError, ValueError) as e:
-        logger.warning("scheduler.cron_parse: bad cron=%r err=%s", cron_expr, e)
-        return None
+    return next_fire_from_rrule(
+        dtstart=binding.dtstart,
+        rrule_str=binding.rrule or "",
+        tzid=binding.tzid or "UTC",
+        rdates=_as_datetimes(binding.rdates),
+        exdates=_as_datetimes(binding.exdates),
+        now=now,
+    )
+
+
+def _as_datetimes(raw) -> list[datetime]:
+    """Coerce JSONField list values into tz-aware datetimes (UTC).
+
+    The model stores RDATE/EXDATE as JSON arrays of ISO strings; this helper
+    deserializes them once at the call site so the rrule expander gets
+    real datetimes.
+    """
+    out: list[datetime] = []
+    for item in raw or ():
+        if isinstance(item, datetime):
+            d = item
+        elif isinstance(item, str):
+            try:
+                # Accept both "2026-05-25T09:00:00Z" and "2026-05-25T09:00:00+00:00"
+                d = datetime.fromisoformat(item.replace("Z", "+00:00"))
+            except ValueError:
+                logger.warning("scheduler.bad_isodate value=%r — skipping", item)
+                continue
+        else:
+            logger.warning("scheduler.unexpected_rdate_type type=%s — skipping", type(item).__name__)
+            continue
+        if d.tzinfo is None:
+            d = d.replace(tzinfo=dt_timezone.utc)
+        out.append(d)
+    return out
 
 
 def _is_last_run_in_flight(binding: SchedulerBinding) -> bool:
@@ -178,14 +204,15 @@ def fire_scheduler_binding(self, binding_id: str) -> bool:
             )
             return False
 
-        nxt = _next_fire_from_cron(binding.cron, now=now)
+        nxt = _next_fire_for_binding(binding, now=now)
         if nxt is None:
-            # Bad cron — record the error and disable the binding so we
-            # don't re-attempt every minute. Also clear next_run_at so
-            # that if the user later re-enables (without changing cron),
-            # the API path through ProjectSchedulerBindingDetailEndpoint
-            # is the only way back in — and that path validates cron.
-            binding.last_error = f"invalid cron expression: {binding.cron!r}"[:LAST_ERROR_MAX_LEN]
+            # Bad RRULE bundle — record the error and disable the binding
+            # so we don't re-attempt every minute. Same recovery path as
+            # the legacy bad-cron handler: re-enable via the API edit
+            # endpoint, which validates the RRULE on PATCH.
+            binding.last_error = (
+                f"invalid rrule: dtstart={binding.dtstart!r} rrule={binding.rrule!r}"
+            )[:LAST_ERROR_MAX_LEN]
             binding.enabled = False
             binding.next_run_at = None
             binding.save(

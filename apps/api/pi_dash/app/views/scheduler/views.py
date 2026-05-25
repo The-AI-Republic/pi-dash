@@ -208,8 +208,8 @@ class ProjectSchedulerBindingListEndpoint(BaseAPIView):
         # Populate next_run_at on first save so the scanner picks it up on
         # the next minute tick. The Beat fire path also handles NULL, but
         # writing the next-fire time here surfaces it in the API response.
-        from pi_dash.bgtasks.scheduler import _next_fire_from_cron
-        nxt = _next_fire_from_cron(binding.cron, now=timezone.now())
+        from pi_dash.bgtasks.scheduler import _next_fire_for_binding
+        nxt = _next_fire_for_binding(binding, now=timezone.now())
         if nxt is not None and binding.next_run_at != nxt:
             binding.next_run_at = nxt
             binding.save(update_fields=["next_run_at", "updated_at"])
@@ -256,10 +256,14 @@ class ProjectSchedulerBindingDetailEndpoint(BaseAPIView):
         serializer = SchedulerBindingSerializer(binding, data=request.data, partial=True)
         serializer.is_valid(raise_exception=True)
         serializer.save()
-        # If cron was updated, recompute next_run_at to honour the new schedule.
-        if "cron" in request.data:
-            from pi_dash.bgtasks.scheduler import _next_fire_from_cron
-            nxt = _next_fire_from_cron(binding.cron, now=timezone.now())
+        # If any RRULE-bundle field was touched, recompute next_run_at so the
+        # scanner honours the new schedule on its next tick.
+        if any(
+            k in request.data for k in ("dtstart", "rrule", "rdates", "exdates", "tzid")
+        ):
+            from pi_dash.bgtasks.scheduler import _next_fire_for_binding
+            binding.refresh_from_db()
+            nxt = _next_fire_for_binding(binding, now=timezone.now())
             if nxt is not None:
                 binding.next_run_at = nxt
                 binding.save(update_fields=["next_run_at", "updated_at"])

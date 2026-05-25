@@ -31,6 +31,8 @@ export interface IScheduler {
   name: string;
   description: string;
   prompt: string;
+  /** 7-char hex like "#3b82f6". Used to color this scheduler's calendar blocks. */
+  color: string;
   source: SchedulerSource;
   is_enabled: boolean;
   active_binding_count: number;
@@ -43,19 +45,33 @@ export interface ISchedulerCreatePayload {
   name: string;
   description?: string;
   prompt: string;
+  color?: string;
   is_enabled?: boolean;
 }
 
-export type ISchedulerUpdatePayload = Partial<Pick<IScheduler, "name" | "description" | "prompt" | "is_enabled">>;
+export type ISchedulerUpdatePayload = Partial<
+  Pick<IScheduler, "name" | "description" | "prompt" | "color" | "is_enabled">
+>;
 
 export interface ISchedulerBinding {
   id: string;
   scheduler: string;
   scheduler_slug: string;
   scheduler_name: string;
+  /** Joined from Scheduler.color so the calendar can render without a second fetch. */
+  scheduler_color: string;
   project: string;
   workspace: string;
-  cron: string;
+  /** ISO datetime. Series anchor for the RRULE expansion. */
+  dtstart: string;
+  /** IANA tz name. Currently informational (expansion runs in UTC); future PRs add wall-clock semantics. */
+  tzid: string;
+  /** RFC 5545 RRULE string. Empty = single-shot at dtstart. */
+  rrule: string;
+  /** Extra one-off firings (ISO strings). */
+  rdates: string[];
+  /** Firings to skip (ISO strings). */
+  exdates: string[];
   extra_context: string;
   enabled: boolean;
   next_run_at: string | null;
@@ -78,12 +94,18 @@ export interface ISchedulerBindingCreatePayload {
    * requiring it, the client has to send it.
    */
   project: string;
-  cron: string;
+  dtstart: string;
+  tzid?: string;
+  rrule: string;
+  rdates?: string[];
+  exdates?: string[];
   extra_context?: string;
   enabled?: boolean;
 }
 
-export type ISchedulerBindingUpdatePayload = Partial<Pick<ISchedulerBinding, "cron" | "extra_context" | "enabled">>;
+export type ISchedulerBindingUpdatePayload = Partial<
+  Pick<ISchedulerBinding, "dtstart" | "tzid" | "rrule" | "rdates" | "exdates" | "extra_context" | "enabled">
+>;
 
 export class SchedulerService extends APIService {
   constructor(BASE_URL?: string) {
@@ -189,4 +211,53 @@ export class SchedulerService extends APIService {
         throw err?.response?.data;
       });
   }
+
+  // -------- Occurrences (calendar) --------
+
+  async listOccurrences(
+    workspaceSlug: string,
+    projectId: string,
+    params: { from?: string; to?: string } = {}
+  ): Promise<ISchedulerOccurrenceResponse> {
+    const search = new URLSearchParams();
+    if (params.from) search.set("from", params.from);
+    if (params.to) search.set("to", params.to);
+    const qs = search.toString();
+    const url = `/api/workspaces/${workspaceSlug}/projects/${projectId}/scheduler-bindings/occurrences/${qs ? `?${qs}` : ""}`;
+    return this.get(url)
+      .then((res) => res?.data)
+      .catch((err) => {
+        throw err?.response?.data;
+      });
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Occurrences (calendar)
+// ---------------------------------------------------------------------------
+
+export type SchedulerOccurrenceKind = "scheduled" | "past";
+
+/** One occurrence on the project calendar — past run or future firing. */
+export interface ISchedulerOccurrence {
+  binding_id: string;
+  scheduler_id: string;
+  scheduler_name: string;
+  /** Joined from Scheduler.color so the calendar renders without a second fetch. */
+  scheduler_color: string;
+  /** UTC ISO datetime — the firing instant. */
+  dtstart: string;
+  tzid: string;
+  /** "scheduled" = expanded from RRULE; "past" = a real AgentRun row. */
+  kind: SchedulerOccurrenceKind;
+  /** Present when kind="past". */
+  agent_run_id: string | null;
+  /** Present when kind="past" — the AgentRun status. */
+  status: string | null;
+}
+
+export interface ISchedulerOccurrenceResponse {
+  occurrences: ISchedulerOccurrence[];
+  has_more: boolean;
+  next_window_start: string | null;
 }
