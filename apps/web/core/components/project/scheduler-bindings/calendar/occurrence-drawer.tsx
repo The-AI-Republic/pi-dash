@@ -5,16 +5,19 @@
  */
 
 import { useMemo } from "react";
-import { rrulestr } from "rrule";
 import { X as CloseIcon } from "lucide-react";
 import { useTranslation } from "@pi-dash/i18n";
 import { Button } from "@pi-dash/propel/button";
 import type { ISchedulerBinding, ISchedulerOccurrence } from "@pi-dash/services";
+import { DEFAULT_SCHEDULER_COLOR } from "../constants";
+import { humanizeRrule } from "../rrule-text";
 
 type Props = {
   occurrence: ISchedulerOccurrence | null;
   /** Closest matching binding (used to populate the edit-from-drawer affordance). */
   binding: ISchedulerBinding | null;
+  /** Whether the viewing user can mutate bindings on this project. */
+  canManage: boolean;
   onClose: () => void;
   onEditBinding: (binding: ISchedulerBinding) => void;
 };
@@ -28,18 +31,10 @@ type Props = {
  * happy path. The full AgentRun detail (events, output, etc.) opens in
  * a separate page or panel reused from the runner module.
  */
-export function OccurrenceDrawer({ occurrence, binding, onClose, onEditBinding }: Props) {
+export function OccurrenceDrawer({ occurrence, binding, canManage, onClose, onEditBinding }: Props) {
   const { t } = useTranslation();
 
-  const friendlyRule = useMemo(() => {
-    if (!binding?.rrule) return null;
-    try {
-      const cleaned = binding.rrule.replace(/^RRULE:/i, "");
-      return rrulestr(cleaned, { dtstart: new Date(binding.dtstart) }).toText();
-    } catch {
-      return binding.rrule;
-    }
-  }, [binding]);
+  const friendlyRule = useMemo(() => (binding ? humanizeRrule(binding.rrule, binding.dtstart) : null), [binding]);
 
   if (!occurrence) return null;
 
@@ -52,7 +47,7 @@ export function OccurrenceDrawer({ occurrence, binding, onClose, onEditBinding }
         <div className="flex items-center gap-2">
           <span
             className="inline-block size-4 rounded-sm"
-            style={{ backgroundColor: occurrence.scheduler_color || "#3b82f6" }}
+            style={{ backgroundColor: occurrence.scheduler_color || DEFAULT_SCHEDULER_COLOR }}
           />
           <h2 className="text-14 font-medium text-primary">{occurrence.scheduler_name}</h2>
         </div>
@@ -92,7 +87,7 @@ export function OccurrenceDrawer({ occurrence, binding, onClose, onEditBinding }
         )}
       </div>
 
-      {!isPast && binding && (
+      {!isPast && binding && canManage && (
         <footer className="flex justify-end gap-2 border-t border-subtle px-4 py-3">
           <Button variant="secondary" size="sm" onClick={onClose}>
             {t("scheduler_bindings.calendar.drawer.cancel")}

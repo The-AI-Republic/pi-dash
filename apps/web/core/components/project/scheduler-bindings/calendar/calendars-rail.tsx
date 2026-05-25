@@ -6,6 +6,7 @@
 
 import { useTranslation } from "@pi-dash/i18n";
 import type { IScheduler } from "@pi-dash/services";
+import { DEFAULT_SCHEDULER_COLOR } from "../constants";
 
 type Props = {
   /** Workspace-scoped scheduler templates installed on this project. */
@@ -65,11 +66,11 @@ export function CalendarsRail({ schedulers, isVisible, onToggle, onShowAll, onHi
                 checked={visible}
                 onChange={() => onToggle(s.id)}
                 className="size-4 rounded border-subtle"
-                style={{ accentColor: s.color || "#3b82f6" }}
+                style={{ accentColor: s.color || DEFAULT_SCHEDULER_COLOR }}
               />
               <span
                 className="inline-block h-3 w-3 flex-shrink-0 rounded-sm"
-                style={{ backgroundColor: s.color || "#3b82f6", opacity: visible ? 1 : 0.3 }}
+                style={{ backgroundColor: s.color || DEFAULT_SCHEDULER_COLOR, opacity: visible ? 1 : 0.3 }}
               />
               <span className={visible ? "text-primary" : "text-tertiary"}>{s.name}</span>
             </label>

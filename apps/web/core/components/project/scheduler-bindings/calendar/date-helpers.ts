@@ -5,62 +5,33 @@
  */
 
 /**
- * Pure date helpers for the scheduler calendar. No React, no MobX — just
- * functions over Date.
+ * Calendar-grid + label helpers for the scheduler calendar. Primitive date
+ * math is delegated to ``date-fns`` (already a workspace dependency); only
+ * the calendar-shape helpers and the locale-aware label formatters live here.
  */
+
+import {
+  addDays,
+  addMonths as dfAddMonths,
+  addWeeks as dfAddWeeks,
+  endOfWeek as dfEndOfWeek,
+  startOfMonth,
+  startOfWeek,
+} from "date-fns";
 
 export type CalendarView = "month" | "week";
 
-export const startOfMonth = (d: Date): Date => new Date(d.getFullYear(), d.getMonth(), 1);
-export const endOfMonth = (d: Date): Date => new Date(d.getFullYear(), d.getMonth() + 1, 0, 23, 59, 59, 999);
-
-/** Sunday-rooted start of the week containing ``d``. */
-export const startOfWeek = (d: Date): Date => {
-  const out = new Date(d);
-  out.setHours(0, 0, 0, 0);
-  out.setDate(out.getDate() - out.getDay());
-  return out;
-};
-
-export const endOfWeek = (d: Date): Date => {
-  const out = startOfWeek(d);
-  out.setDate(out.getDate() + 6);
-  out.setHours(23, 59, 59, 999);
-  return out;
-};
-
-/**
- * For month view: returns the 6-week (42-day) grid covering the full month,
- * padded by days from the previous and following months so each row has 7
- * days. Always 42 entries — same as Google Calendar's month grid.
- */
+/** 6-week (42-day) Sunday-rooted grid covering the month of ``viewDate``. */
 export function monthGridDays(viewDate: Date): Date[] {
-  const first = startOfMonth(viewDate);
-  const start = startOfWeek(first);
-  const days: Date[] = [];
-  for (let i = 0; i < 42; i++) {
-    const d = new Date(start);
-    d.setDate(start.getDate() + i);
-    days.push(d);
-  }
-  return days;
+  const start = startOfWeek(startOfMonth(viewDate), { weekStartsOn: 0 });
+  return Array.from({ length: 42 }, (_, i) => addDays(start, i));
 }
 
+/** 7-day Sunday-rooted week containing ``viewDate``. */
 export function weekGridDays(viewDate: Date): Date[] {
-  const start = startOfWeek(viewDate);
-  const days: Date[] = [];
-  for (let i = 0; i < 7; i++) {
-    const d = new Date(start);
-    d.setDate(start.getDate() + i);
-    days.push(d);
-  }
-  return days;
+  const start = startOfWeek(viewDate, { weekStartsOn: 0 });
+  return Array.from({ length: 7 }, (_, i) => addDays(start, i));
 }
-
-export const isSameDay = (a: Date, b: Date): boolean =>
-  a.getFullYear() === b.getFullYear() && a.getMonth() === b.getMonth() && a.getDate() === b.getDate();
-
-export const isToday = (d: Date): boolean => isSameDay(d, new Date());
 
 export const formatTime = (d: Date): string =>
   new Intl.DateTimeFormat(undefined, { hour: "numeric", minute: "2-digit" }).format(d);
@@ -77,11 +48,10 @@ export const formatDayHeader = (d: Date): string =>
 export function windowForView(view: CalendarView, viewDate: Date): { fromIso: string; toIso: string } {
   if (view === "week") {
     return {
-      fromIso: startOfWeek(viewDate).toISOString(),
-      toIso: endOfWeek(viewDate).toISOString(),
+      fromIso: startOfWeek(viewDate, { weekStartsOn: 0 }).toISOString(),
+      toIso: dfEndOfWeek(viewDate, { weekStartsOn: 0 }).toISOString(),
     };
   }
-  // month view: include the visible grid (which spans into prev/next month).
   const days = monthGridDays(viewDate);
   return {
     fromIso: days[0].toISOString(),
@@ -89,12 +59,7 @@ export function windowForView(view: CalendarView, viewDate: Date): { fromIso: st
   };
 }
 
-export function addMonths(d: Date, n: number): Date {
-  return new Date(d.getFullYear(), d.getMonth() + n, 1);
-}
+export const addMonths = dfAddMonths;
+export const addWeeks = dfAddWeeks;
 
-export function addWeeks(d: Date, n: number): Date {
-  const out = new Date(d);
-  out.setDate(out.getDate() + n * 7);
-  return out;
-}
+export { isSameDay, isToday } from "date-fns";

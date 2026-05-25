@@ -6,30 +6,35 @@
 
 import { useMemo, useState } from "react";
 import { observer } from "mobx-react";
-import useSWR from "swr";
+import useSWR, { useSWRConfig } from "swr";
+import { EUserPermissions, EUserPermissionsLevel } from "@pi-dash/constants";
 import { useTranslation } from "@pi-dash/i18n";
 import { Spinner } from "@pi-dash/ui";
 import type { IScheduler, ISchedulerBinding, ISchedulerOccurrence } from "@pi-dash/services";
-import { SchedulerService } from "@pi-dash/services";
 import { EditSchedulerBindingModal } from "@/components/project/scheduler-bindings/edit-binding-modal";
+import { useUserPermissions } from "@/hooks/store/user";
 import { CalendarsRail } from "./calendars-rail";
 import { SchedulerCalendarHeader } from "./calendar-header";
 import { type CalendarView, windowForView } from "./date-helpers";
 import { SchedulerMonthView } from "./month-view";
 import { OccurrenceDrawer } from "./occurrence-drawer";
-import { useSchedulerOccurrences } from "./use-occurrences";
+import { schedulerService, useSchedulerOccurrences } from "./use-occurrences";
 import { useVisibleSchedulers } from "./use-visible-schedulers";
 import { SchedulerWeekView } from "./week-view";
+
+const bindingsKey = (slug: string, projectId: string) => ["scheduler-bindings", slug, projectId];
+const schedulersKey = (slug: string) => ["schedulers", slug];
 
 type Props = {
   workspaceSlug: string;
   projectId: string;
 };
 
-const schedulerService = new SchedulerService();
-
 export const SchedulerCalendar = observer(function SchedulerCalendar({ workspaceSlug, projectId }: Props) {
   const { t } = useTranslation();
+  const { mutate: mutateCache } = useSWRConfig();
+  const { allowPermissions } = useUserPermissions();
+  const canManage = allowPermissions([EUserPermissions.ADMIN], EUserPermissionsLevel.PROJECT, workspaceSlug, projectId);
 
   const [view, setView] = useState<CalendarView>("month");
   const [viewDate, setViewDate] = useState<Date>(() => new Date());
@@ -38,19 +43,22 @@ export const SchedulerCalendar = observer(function SchedulerCalendar({ workspace
 
   const { fromIso, toIso } = useMemo(() => windowForView(view, viewDate), [view, viewDate]);
 
-  const { occurrences, hasMore, isLoading, mutate } = useSchedulerOccurrences({
+  const {
+    occurrences,
+    hasMore,
+    isLoading,
+    mutate: mutateOccurrences,
+  } = useSchedulerOccurrences({
     workspaceSlug,
     projectId,
     from: fromIso,
     to: toIso,
   });
 
-  // Bindings (for the edit-from-drawer affordance) and workspace schedulers
-  // (for the calendars rail) come from the existing endpoints.
-  const { data: bindings } = useSWR<ISchedulerBinding[]>(["scheduler-bindings", workspaceSlug, projectId], () =>
+  const { data: bindings } = useSWR<ISchedulerBinding[]>(bindingsKey(workspaceSlug, projectId), () =>
     schedulerService.listBindings(workspaceSlug, projectId)
   );
-  const { data: workspaceSchedulers } = useSWR<IScheduler[]>(["schedulers", workspaceSlug], () =>
+  const { data: workspaceSchedulers } = useSWR<IScheduler[]>(schedulersKey(workspaceSlug), () =>
     schedulerService.listSchedulers(workspaceSlug)
   );
 
@@ -130,6 +138,7 @@ export const SchedulerCalendar = observer(function SchedulerCalendar({ workspace
       <OccurrenceDrawer
         occurrence={selectedOccurrence}
         binding={bindingForOccurrence}
+        canManage={canManage}
         onClose={() => setSelectedOccurrence(null)}
         onEditBinding={(b) => {
           setEditingBinding(b);
@@ -144,7 +153,11 @@ export const SchedulerCalendar = observer(function SchedulerCalendar({ workspace
         projectId={projectId}
         binding={editingBinding}
         onUpdated={() => {
-          mutate();
+          // Bust both the occurrences cache (so the new schedule shows up
+          // on the calendar) and the bindings cache (so re-opening the
+          // drawer reads the updated binding row, not the stale copy).
+          mutateOccurrences();
+          mutateCache(bindingsKey(workspaceSlug, projectId));
           setEditingBinding(null);
         }}
       />

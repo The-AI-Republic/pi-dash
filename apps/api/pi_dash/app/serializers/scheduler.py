@@ -14,6 +14,7 @@ from __future__ import annotations
 import re
 from datetime import datetime
 from typing import Iterable
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from rest_framework import serializers
 
@@ -22,14 +23,13 @@ from pi_dash.bgtasks._rrule import RRuleValidationError, validate_rrule_string
 from pi_dash.db.models.scheduler import Scheduler, SchedulerBinding
 
 
-# Bound `extra_context` so an admin doesn't accidentally (or deliberately)
-# inflate the prompt past what the model and the runner can usefully process.
-# 16 KiB is enough for several pages of project-specific context.
 EXTRA_CONTEXT_MAX_LENGTH = 16 * 1024
 
-# Hex color regex — 6 hex digits with a leading "#". The model column is
-# CharField(max_length=7); enforce the format at the API edge so the
-# calendar's color rail never has to handle malformed values.
+# Cap the JSON-list extras stored on a binding — RDATE/EXDATE are
+# expanded on every fire and every occurrences-endpoint request. A
+# pathological 10k-entry list would slow each tick.
+RDATE_EXDATE_MAX_LENGTH = 256
+
 _HEX_COLOR_RE = re.compile(r"^#[0-9a-fA-F]{6}$")
 
 
@@ -50,6 +50,10 @@ def _validate_iso_datetime_list(values: Iterable, field: str) -> list[str]:
         raise serializers.ValidationError(
             {field: "must be a JSON array of ISO 8601 datetime strings"}
         )
+    if len(values) > RDATE_EXDATE_MAX_LENGTH:
+        raise serializers.ValidationError(
+            {field: f"must contain at most {RDATE_EXDATE_MAX_LENGTH} entries"}
+        )
     out: list[str] = []
     for i, raw in enumerate(values):
         if not isinstance(raw, str):
@@ -57,8 +61,6 @@ def _validate_iso_datetime_list(values: Iterable, field: str) -> list[str]:
                 {field: f"item {i} must be a string, got {type(raw).__name__}"}
             )
         try:
-            # Accept "...Z" and "...+00:00" alike; round-trip to canonical
-            # ISO so callers can rely on the stored format.
             parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
         except ValueError as e:
             raise serializers.ValidationError(
@@ -187,12 +189,9 @@ class SchedulerBindingSerializer(BaseSerializer):
 
     def validate_tzid(self, value: str) -> str:
         value = (value or "UTC").strip()
-        # Best-effort IANA check via zoneinfo; UTC always passes.
         if value == "UTC":
             return value
         try:
-            from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
-
             ZoneInfo(value)
         except ZoneInfoNotFoundError:
             raise serializers.ValidationError(

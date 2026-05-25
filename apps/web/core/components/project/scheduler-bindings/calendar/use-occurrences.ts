@@ -8,7 +8,8 @@ import useSWR from "swr";
 import type { ISchedulerOccurrence, ISchedulerOccurrenceResponse } from "@pi-dash/services";
 import { SchedulerService } from "@pi-dash/services";
 
-const schedulerService = new SchedulerService();
+// Shared singleton so the calendar root and the hook talk to one client.
+export const schedulerService = new SchedulerService();
 
 type Params = {
   workspaceSlug: string;
