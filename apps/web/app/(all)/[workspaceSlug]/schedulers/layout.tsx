@@ -29,7 +29,11 @@ const SchedulersLayout = observer(function SchedulersLayout() {
   );
 
   if (workspaceUserInfo && !canView) {
-    return <NotAuthorizedView section="general" className="h-auto" />;
+    return (
+      <div className="flex-1 overflow-auto">
+        <NotAuthorizedView section="general" className="h-auto" />
+      </div>
+    );
   }
 
   return (

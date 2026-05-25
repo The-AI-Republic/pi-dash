@@ -62,15 +62,15 @@ export const UserMenuRoot = observer(function UserMenuRoot({ variant = "compact"
 
   const isSidebarVariant = variant === "sidebar";
 
+  // The outer wrapper is rendered as a non-interactive element because
+  // CustomMenu already wraps `customButton` in its own <button>; nesting
+  // <button>s would be invalid HTML and break ARIA semantics.
   const sidebarTrigger = (
-    <button
-      type="button"
+    <div
       className={cn(
         "flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left hover:bg-layer-transparent-hover",
         isUserMenuOpen && "bg-layer-transparent-selected"
       )}
-      aria-haspopup="menu"
-      aria-expanded={isUserMenuOpen}
     >
       <Avatar
         name={currentUser?.display_name}
@@ -83,7 +83,7 @@ export const UserMenuRoot = observer(function UserMenuRoot({ variant = "compact"
         <span className="truncate text-11 text-tertiary">{currentUser?.email}</span>
       </div>
       <ChevronsUpDown className="size-3.5 shrink-0 text-tertiary" />
-    </button>
+    </div>
   );
 
   const compactTrigger = (

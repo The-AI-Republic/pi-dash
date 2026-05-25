@@ -34,12 +34,11 @@ import { useAppTheme } from "@/hooks/store/use-app-theme";
 import { useCommandPalette } from "@/hooks/store/use-command-palette";
 import { useProject } from "@/hooks/store/use-project";
 import { useUserPermissions } from "@/hooks/store/user";
-import { useProjectNavigationPreferences } from "@/hooks/use-navigation-preferences";
+import { usePersonalNavigationPreferences, useProjectNavigationPreferences } from "@/hooks/use-navigation-preferences";
 // pi dash web imports
 import { SidebarItem } from "@/pi-dash-web/components/workspace/sidebar/sidebar-item";
 import type { TProject } from "@/pi-dash-web/types";
 // local imports
-import { SidebarItemBase } from "./sidebar-item";
 import { SidebarProjectsListItem } from "./projects-list-item";
 
 export const SidebarProjectsList = observer(function SidebarProjectsList() {
@@ -54,6 +53,8 @@ export const SidebarProjectsList = observer(function SidebarProjectsList() {
   const { toggleCreateProjectModal } = useCommandPalette();
   const { allowPermissions } = useUserPermissions();
   const { preferences: projectPreferences } = useProjectNavigationPreferences();
+  const { preferences: personalPreferences } = usePersonalNavigationPreferences();
+  const isDraftsEnabled = personalPreferences.items.drafts?.enabled ?? true;
   const { isExtendedProjectSidebarOpened, toggleExtendedProjectSidebar } = useAppTheme();
 
   const { loader, getPartialProjectById, joinedProjectIds: joinedProjects, updateProjectView } = useProject();
@@ -77,12 +78,20 @@ export const SidebarProjectsList = observer(function SidebarProjectsList() {
     projectPreferences.showLimitedProjects && joinedProjects.length > projectPreferences.limitedProjectsCount;
 
   const handleCopyText = async (projectId: string) => {
-    await copyUrlToClipboard(`${workspaceSlug}/projects/${projectId}/issues`);
-    setToast({
-      type: TOAST_TYPE.SUCCESS,
-      title: t("link_copied"),
-      message: t("project_link_copied_to_clipboard"),
-    });
+    try {
+      await copyUrlToClipboard(`${workspaceSlug}/projects/${projectId}/issues`);
+      setToast({
+        type: TOAST_TYPE.SUCCESS,
+        title: t("link_copied"),
+        message: t("project_link_copied_to_clipboard"),
+      });
+    } catch {
+      setToast({
+        type: TOAST_TYPE.ERROR,
+        title: t("error"),
+        message: t("something_went_wrong"),
+      });
+    }
   };
 
   const handleOnProjectDrop = (
@@ -244,11 +253,11 @@ export const SidebarProjectsList = observer(function SidebarProjectsList() {
               {isAllProjectsListOpen && (
                 <Disclosure.Panel as="div" className="flex flex-col gap-0.5" static>
                   <>
-                    {WORKSPACE_SIDEBAR_STATIC_NAVIGATION_ITEMS["drafts"] && (
+                    {isDraftsEnabled && WORKSPACE_SIDEBAR_STATIC_NAVIGATION_ITEMS["drafts"] && (
                       <SidebarItem item={WORKSPACE_SIDEBAR_STATIC_NAVIGATION_ITEMS["drafts"]} />
                     )}
                     {WORKSPACE_SIDEBAR_DYNAMIC_NAVIGATION_ITEMS["views"] && (
-                      <SidebarItemBase
+                      <SidebarItem
                         item={{
                           ...WORKSPACE_SIDEBAR_DYNAMIC_NAVIGATION_ITEMS["views"],
                           labelTranslationKey: "sidebar.work_items",

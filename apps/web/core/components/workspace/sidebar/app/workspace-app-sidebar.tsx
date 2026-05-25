@@ -15,27 +15,17 @@ import { ResizableSidebar } from "@/components/sidebar/resizable-sidebar";
 // hooks
 import { useAppTheme } from "@/hooks/store/use-app-theme";
 // local imports
-import { ExtendedWorkspaceSidebar } from "./extended-workspace-sidebar";
 import { WorkspaceSidebar } from "./workspace-sidebar";
 
 export const WorkspaceAppSidebar = observer(function WorkspaceAppSidebar() {
   // store hooks
-  const {
-    sidebarCollapsed,
-    toggleSidebar,
-    sidebarPeek,
-    toggleSidebarPeek,
-    isExtendedSidebarOpened,
-    isAnySidebarDropdownOpen,
-  } = useAppTheme();
+  const { sidebarCollapsed, toggleSidebar, sidebarPeek, toggleSidebarPeek, isAnySidebarDropdownOpen } = useAppTheme();
   const { storedValue, setValue } = useLocalStorage("sidebarWidth", SIDEBAR_WIDTH);
   // states
   const [sidebarWidth, setSidebarWidth] = useState<number>(storedValue ?? SIDEBAR_WIDTH);
   // routes
   const { workspaceSlug } = useParams();
   const pathname = usePathname();
-  // derived values
-  const isAnyExtendedSidebarOpen = isExtendedSidebarOpened;
 
   const isNotificationsPath = pathname.includes(`/${workspaceSlug}/notifications`);
 
@@ -45,29 +35,22 @@ export const WorkspaceAppSidebar = observer(function WorkspaceAppSidebar() {
   if (isNotificationsPath) return null;
 
   return (
-    <>
-      <ResizableSidebar
-        showPeek={sidebarPeek}
-        defaultWidth={storedValue ?? 250}
-        width={sidebarWidth}
-        setWidth={setSidebarWidth}
-        defaultCollapsed={sidebarCollapsed}
-        peekDuration={1500}
-        onWidthChange={handleWidthChange}
-        onCollapsedChange={toggleSidebar}
-        isCollapsed={sidebarCollapsed}
-        toggleCollapsed={toggleSidebar}
-        togglePeek={toggleSidebarPeek}
-        extendedSidebar={
-          <>
-            <ExtendedWorkspaceSidebar />
-          </>
-        }
-        isAnyExtendedSidebarExpanded={isAnyExtendedSidebarOpen}
-        isAnySidebarDropdownOpen={isAnySidebarDropdownOpen}
-      >
-        <WorkspaceSidebar />
-      </ResizableSidebar>
-    </>
+    <ResizableSidebar
+      showPeek={sidebarPeek}
+      defaultWidth={storedValue ?? 250}
+      width={sidebarWidth}
+      setWidth={setSidebarWidth}
+      defaultCollapsed={sidebarCollapsed}
+      peekDuration={1500}
+      onWidthChange={handleWidthChange}
+      onCollapsedChange={toggleSidebar}
+      isCollapsed={sidebarCollapsed}
+      toggleCollapsed={toggleSidebar}
+      togglePeek={toggleSidebarPeek}
+      isAnyExtendedSidebarExpanded={false}
+      isAnySidebarDropdownOpen={isAnySidebarDropdownOpen}
+    >
+      <WorkspaceSidebar />
+    </ResizableSidebar>
   );
 });

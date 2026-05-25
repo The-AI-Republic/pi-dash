@@ -15,8 +15,8 @@ import { ChevronRightIcon } from "@pi-dash/propel/icons";
 import { cn } from "@pi-dash/utils";
 // hooks
 import useLocalStorage from "@/hooks/use-local-storage";
-// components
-import { SidebarItemBase } from "@/components/workspace/sidebar/sidebar-item";
+// pi-dash-web imports
+import { SidebarItem } from "@/pi-dash-web/components/workspace/sidebar/sidebar-item";
 
 const MORE_ITEM_KEYS = ["projects", "prompts", "schedulers", "analytics", "archives"];
 
@@ -74,7 +74,7 @@ export const SidebarMoreSection = observer(function SidebarMoreSection() {
         {isMoreMenuOpen && (
           <Disclosure.Panel as="div" className="flex flex-col gap-0.5" static>
             {items.map((item) => (
-              <SidebarItemBase key={item.key} item={item} additionalStaticItems={MORE_STATIC_KEYS} />
+              <SidebarItem key={item.key} item={item} additionalStaticItems={MORE_STATIC_KEYS} />
             ))}
           </Disclosure.Panel>
         )}
