@@ -645,6 +645,8 @@ export default {
         running: "running",
         awaiting_approval: "awaiting approval",
         awaiting_reauth: "awaiting reauth",
+        paused_awaiting_input: "paused awaiting input",
+        blocked: "blocked",
         completed: "completed",
         failed: "failed",
         cancelled: "cancelled",

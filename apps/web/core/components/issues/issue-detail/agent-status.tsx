@@ -83,6 +83,31 @@ function formatTickBudget(ticker: TIssueAgentTicker | null | undefined): string 
   return `Tick ${ticker.tick_count} of ${ticker.max_ticks}`;
 }
 
+function getPayloadString(payload: Record<string, unknown> | null | undefined, key: string): string | null {
+  const value = payload?.[key];
+  if (typeof value !== "string") return null;
+  const trimmed = value.trim();
+  return trimmed ? trimmed : null;
+}
+
+function getNestedPayloadString(
+  payload: Record<string, unknown> | null | undefined,
+  groupKey: string,
+  key: string
+): string | null {
+  const group = payload?.[groupKey];
+  if (!group || typeof group !== "object" || Array.isArray(group)) return null;
+  return getPayloadString(group as Record<string, unknown>, key);
+}
+
+function getPayloadStringList(payload: Record<string, unknown> | null | undefined, key: string): string | null {
+  const value = payload?.[key];
+  if (!Array.isArray(value)) return null;
+  const items = value.filter((item): item is string => typeof item === "string").map((item) => item.trim());
+  const nonEmptyItems = items.filter(Boolean);
+  return nonEmptyItems.length > 0 ? nonEmptyItems.join(", ") : null;
+}
+
 function getLiveDetail(run: TIssueAgentRunSummary, now: number): string | null {
   const liveState = run.live_state;
   if (!liveState) return null;
@@ -106,6 +131,13 @@ function getRunView(
   const nextTick = formatUntil(ticker?.next_run_at, now);
   const doneDetail =
     ticker?.enabled && nextTick ? `${formatRunDone(runCount)}, next ticking in ${nextTick}` : formatRunDone(runCount);
+  const pausedDetail =
+    getNestedPayloadString(run.done_payload, "autonomy", "question_for_human") ??
+    getPayloadString(run.done_payload, "summary");
+  const blockedDetail =
+    getPayloadStringList(run.done_payload, "blockers") ??
+    getNestedPayloadString(run.done_payload, "autonomy", "reason") ??
+    getPayloadString(run.done_payload, "summary");
 
   switch (run.status) {
     case "queued":
@@ -156,7 +188,7 @@ function getRunView(
     case "paused_awaiting_input":
       return {
         title: "AI agent is waiting for input",
-        detail: run.done_payload?.summary ? truncate(String(run.done_payload.summary)) : runnerDetail,
+        detail: pausedDetail ? truncate(pausedDetail) : runnerDetail,
         badge: "Paused",
         badgeVariant: "warning",
         icon: CirclePause,
@@ -165,7 +197,7 @@ function getRunView(
     case "blocked":
       return {
         title: "AI agent is blocked on this issue",
-        detail: run.done_payload?.reason ? truncate(String(run.done_payload.reason)) : runnerDetail,
+        detail: blockedDetail ? truncate(blockedDetail) : runnerDetail,
         badge: "Blocked",
         badgeVariant: "warning",
         icon: CircleAlert,
