@@ -43,6 +43,7 @@ import { DateAlert } from "@/pi-dash-web/components/issues/issue-details/sidebar
 import { TransferHopInfo } from "@/pi-dash-web/components/issues/issue-details/sidebar/transfer-hop-info";
 import { IssueWorklogProperty } from "@/pi-dash-web/components/issues/worklog/property";
 import { SidebarPropertyListItem } from "@/components/common/layout/sidebar/property-list-item";
+import { IssueAgentStatusPanel } from "./agent-status";
 import { IssueCycleSelect } from "./cycle-select";
 import { IssueLabel } from "./label";
 import { IssueModuleSelect } from "./module-select";
@@ -86,6 +87,13 @@ export const IssueDetailsSidebar = observer(function IssueDetailsSidebar(props: 
     <>
       <div className="flex h-full w-full flex-col items-center divide-y-2 divide-subtle-1 overflow-hidden">
         <div className="h-full w-full overflow-y-auto px-6">
+          <IssueAgentStatusPanel
+            workspaceSlug={workspaceSlug}
+            projectId={projectId}
+            issueId={issueId}
+            issue={issue}
+            issueOperations={issueOperations}
+          />
           <h5 className="mt-5 text-body-xs-medium">{t("common.properties")}</h5>
           <div className={`mt-4 mb-2 space-y-2.5 truncate ${!isEditable ? "opacity-60" : ""}`}>
             <SidebarPropertyListItem icon={StatePropertyIcon} label={t("common.state")}>
