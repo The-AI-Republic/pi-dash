@@ -20,7 +20,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow};
 use chrono::{DateTime, Utc};
-use reqwest::header::{AUTHORIZATION, CONTENT_TYPE};
+use reqwest::header::{AUTHORIZATION, CONTENT_TYPE, HeaderMap, RETRY_AFTER};
 use reqwest::{Client, StatusCode};
 use serde::{Deserialize, Serialize};
 use serde_json::Value as Json;
@@ -64,6 +64,8 @@ pub enum TransportError {
     Protocol(String),
     #[error("local: {0}")]
     Local(String),
+    #[error("local teardown: {0}")]
+    LocalTeardown(String),
 }
 
 impl TransportError {
@@ -92,6 +94,7 @@ impl TransportError {
                 | TransportError::RunnerIdMismatch
                 | TransportError::InvalidRefreshToken
                 | TransportError::Local(_)
+                | TransportError::LocalTeardown(_)
         )
     }
 
@@ -99,6 +102,11 @@ impl TransportError {
     /// the right self-healing action.
     pub fn requires_daemon_restart(&self) -> bool {
         matches!(self, TransportError::Local(_))
+    }
+
+    /// True when a local runner teardown intentionally closed the mailbox.
+    pub fn is_expected_teardown(&self) -> bool {
+        matches!(self, TransportError::LocalTeardown(_))
     }
 }
 
@@ -902,16 +910,19 @@ impl RunnerCloudClient {
                 }
                 return Err(map_auth_error(status, &txt));
             }
+            let retry_after = retry_after_delay(resp.headers());
             let txt = resp.text().await.unwrap_or_default();
             let err = map_auth_error(status, &txt);
             if should_retry_post_error(&err, attempt) {
+                let sleep_for = retry_after.unwrap_or(delay);
                 tracing::warn!(
                     attempt = attempt + 1,
                     max_attempts = POST_RETRY_ATTEMPTS,
+                    delay_ms = sleep_for.as_millis(),
                     error = %err,
                     "runner POST returned retryable status; retrying"
                 );
-                sleep(delay).await;
+                sleep(sleep_for).await;
                 attempt = attempt.saturating_add(1);
                 delay = (delay * 2).min(POST_RETRY_MAX_DELAY);
                 continue;
@@ -930,6 +941,19 @@ fn should_retry_post_error(err: &TransportError, attempt: u8) -> bool {
         TransportError::Server { status, .. } => *status >= 500,
         _ => false,
     }
+}
+
+fn retry_after_delay(headers: &HeaderMap) -> Option<Duration> {
+    let raw = headers.get(RETRY_AFTER)?.to_str().ok()?.trim();
+    if let Ok(seconds) = raw.parse::<u64>() {
+        return Some(Duration::from_secs(seconds).min(POST_RETRY_MAX_DELAY));
+    }
+    let retry_at = DateTime::parse_from_rfc2822(raw).ok()?.with_timezone(&Utc);
+    let delay = retry_at
+        .signed_duration_since(Utc::now())
+        .to_std()
+        .unwrap_or_default();
+    Some(delay.min(POST_RETRY_MAX_DELAY))
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -1160,6 +1184,7 @@ pub struct HttpLoop {
     /// which is identical to the v3 wire shape — used by tests and any
     /// caller that doesn't want to thread state through.
     pub state: Option<crate::daemon::state::StateHandle>,
+    teardown_rx: Option<watch::Receiver<bool>>,
     inline_acks: VecDeque<String>,
     /// Bounded mid-dedupe (design.md §8 / Decision 21). At-least-once
     /// delivery + the PEL-replay path (`use_zero=True` on the first
@@ -1278,6 +1303,7 @@ impl HttpLoop {
             shutdown,
             attach_body,
             state: None,
+            teardown_rx: None,
             inline_acks: VecDeque::new(),
             mid_dedupe: MidDedupe::with_capacity(MID_DEDUPE_CAPACITY),
             long_poll_interval_secs: DEFAULT_LONG_POLL_INTERVAL_SECS,
@@ -1290,6 +1316,22 @@ impl HttpLoop {
     pub fn with_state(mut self, state: crate::daemon::state::StateHandle) -> Self {
         self.state = Some(state);
         self
+    }
+
+    /// Attach the per-runner teardown latch. When the runner is deliberately
+    /// removed, its mailbox closes; treat that as expected teardown rather
+    /// than a daemon-level invariant failure.
+    pub fn with_teardown_rx(mut self, teardown_rx: watch::Receiver<bool>) -> Self {
+        self.teardown_rx = Some(teardown_rx);
+        self
+    }
+
+    fn mailbox_closed_error(&self, err: impl std::fmt::Display) -> TransportError {
+        if self.teardown_rx.as_ref().is_some_and(|rx| *rx.borrow()) {
+            TransportError::LocalTeardown(format!("runner mailbox closed after teardown: {err}"))
+        } else {
+            TransportError::Local(format!("runner mailbox closed: {err}"))
+        }
     }
 
     /// Build a fresh `AttachBody` snapshotting the current status and
@@ -1382,7 +1424,7 @@ impl HttpLoop {
                 env: Envelope::for_runner(self.client.runner_id(), welcome_body),
             })
             .await
-            .map_err(|e| TransportError::Local(format!("runner mailbox closed: {e}")))?;
+            .map_err(|e| self.mailbox_closed_error(e))?;
         if let Some(resume_body) = session.resume_ack
             && let Ok(parsed) = serde_json::from_value::<ServerMsg>(resume_body.clone())
         {
@@ -1392,7 +1434,7 @@ impl HttpLoop {
                     env: Envelope::for_runner(self.client.runner_id(), parsed),
                 })
                 .await
-                .map_err(|e| TransportError::Local(format!("runner mailbox closed: {e}")))?;
+                .map_err(|e| self.mailbox_closed_error(e))?;
         }
 
         let mut backoff_secs = 1u64;
@@ -1526,7 +1568,7 @@ impl HttpLoop {
                     .await
                 {
                     tracing::warn!(runner = %runner_id, "mailbox send failed: {e}");
-                    return Err(TransportError::Local(format!("runner mailbox closed: {e}")));
+                    return Err(self.mailbox_closed_error(e));
                 }
             }
             Err(err) => {
@@ -1807,10 +1849,24 @@ mod tests {
     fn fatal_classification() {
         assert!(TransportError::RunnerRevoked.is_fatal_for_runner());
         assert!(TransportError::RefreshTokenReplayed.is_fatal_for_runner());
+        let teardown = TransportError::LocalTeardown("runner removed".into());
+        assert!(teardown.is_fatal_for_runner());
+        assert!(teardown.is_expected_teardown());
+        assert!(!teardown.requires_daemon_restart());
         // SessionEvicted is recoverable — the run loop has a dedicated
         // arm that reopens the session. See `HttpLoop::run`.
         assert!(!TransportError::SessionEvicted { reason: "x".into() }.is_fatal_for_runner());
         assert!(!TransportError::Network("net".into()).is_fatal_for_runner());
+    }
+
+    #[test]
+    fn retry_after_delay_parses_and_caps_delta_seconds() {
+        let mut headers = HeaderMap::new();
+        headers.insert(RETRY_AFTER, "7".parse().unwrap());
+        assert_eq!(retry_after_delay(&headers), Some(Duration::from_secs(7)));
+
+        headers.insert(RETRY_AFTER, "9999".parse().unwrap());
+        assert_eq!(retry_after_delay(&headers), Some(POST_RETRY_MAX_DELAY));
     }
 
     #[test]

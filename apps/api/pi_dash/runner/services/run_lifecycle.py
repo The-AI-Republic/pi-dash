@@ -17,7 +17,7 @@ runs that miss their session on disk fail-stop instead of recovering.
 from __future__ import annotations
 
 import logging
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 from uuid import UUID
 
 from django.db import transaction
@@ -145,19 +145,29 @@ def apply_run_paused(
     transaction.on_commit(_pause_and_drain)
 
 
-def apply_run_resume_unavailable(runner: Runner, run_id: UUID | str) -> None:
+def apply_run_resume_unavailable(
+    runner: Runner,
+    run_id: UUID | str,
+    *,
+    locked_run: Optional[AgentRun] = None,
+) -> None:
     """Re-queue a run whose pinned session disappeared.
 
     Drops the runner / pin / assigned_at and clears the parent's
     ``thread_id`` so the next dispatch builds a fresh-session Assign.
     See legacy ``RunnerConsumer._handle_resume_unavailable``.
+
+    Must be called inside ``transaction.atomic()`` because the fallback
+    lookup takes a row lock.
     """
-    run = (
-        AgentRun.objects.select_for_update()
-        .filter(id=run_id, runner=runner)
-        .exclude(status__in=TERMINAL_RUN_STATUSES)
-        .first()
-    )
+    run = locked_run
+    if run is None:
+        run = (
+            AgentRun.objects.select_for_update()
+            .filter(id=run_id, runner=runner)
+            .exclude(status__in=TERMINAL_RUN_STATUSES)
+            .first()
+        )
     if run is None:
         return
     run.status = AgentRunStatus.QUEUED

@@ -14,6 +14,15 @@ use crate::ipc::protocol::{CurrentRunSummary, RunnerStatusSnapshot};
 
 static AUTO_SWAP_IN_PROGRESS: AtomicBool = AtomicBool::new(false);
 
+#[must_use = "dropping AutoSwapGuard releases the process-wide swap claim"]
+pub struct AutoSwapGuard;
+
+impl Drop for AutoSwapGuard {
+    fn drop(&mut self) {
+        AUTO_SWAP_IN_PROGRESS.store(false, Ordering::Release);
+    }
+}
+
 /// Volatile observability fields that ride on `PollStatus`. Doubles as
 /// the in-memory storage shape (held under one `Mutex` inside `Inner`)
 /// AND the wire-snapshot returned by `StateHandle::observability_snapshot()`.
@@ -400,19 +409,19 @@ impl StateHandle {
         self.inner.cfg.lock().await.daemon.auto_update
     }
 
-    /// Attempt to claim the process-wide auto-swap guard. Returns true if
-    /// we won the race, false if any runner loop in this daemon already has
-    /// a swap in flight.
-    pub fn try_claim_swap(&self) -> bool {
-        AUTO_SWAP_IN_PROGRESS
+    /// Attempt to claim the process-wide auto-swap guard. Returns a guard if
+    /// we won the race, or ``None`` if any runner loop in this daemon already
+    /// has a swap in flight. Dropping the guard releases the claim, so tests
+    /// and production tasks cannot leak cross-runner state by returning early.
+    pub fn try_claim_swap(&self) -> Option<AutoSwapGuard> {
+        if AUTO_SWAP_IN_PROGRESS
             .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
             .is_ok()
-    }
-
-    /// Release the process-wide swap guard. Always paired with a prior
-    /// successful `try_claim_swap`.
-    pub fn release_swap(&self) {
-        AUTO_SWAP_IN_PROGRESS.store(false, Ordering::Release);
+        {
+            Some(AutoSwapGuard)
+        } else {
+            None
+        }
     }
 
     /// Record the on-disk version after a successful swap.
@@ -473,6 +482,15 @@ mod tests {
         // Cloud that explicitly clears its advisory drops back to None.
         state.set_update_advisory(None, None).await;
         assert!(state.daemon_info().await.update.is_none());
+    }
+
+    #[test]
+    fn auto_swap_guard_releases_on_drop() {
+        let state = empty_state();
+        let guard = state.try_claim_swap().expect("first claim should win");
+        assert!(state.try_claim_swap().is_none());
+        drop(guard);
+        assert!(state.try_claim_swap().is_some());
     }
 
     #[tokio::test]

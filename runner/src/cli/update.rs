@@ -60,7 +60,11 @@ pub async fn run(args: Args, paths: &Paths) -> Result<()> {
             println!("installed v{new_version} (was v{old}).");
             if args.restart {
                 println!("restarting daemon to apply...");
-                let outcome = crate::service::reload::restart_and_verify(paths).await;
+                let outcome =
+                    crate::service::reload::restart_and_verify_with_progress(paths, |msg| {
+                        eprintln!("{msg}")
+                    })
+                    .await;
                 if !outcome.ok {
                     anyhow::bail!(
                         "daemon restart after update did not complete cleanly: {}\n{}",

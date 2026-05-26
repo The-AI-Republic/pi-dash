@@ -299,10 +299,14 @@ class RunFailedEndpoint(_RunEndpointBase):
             # fail-stop instead of falling back into the pod's queue with
             # a fresh session.
             if (request.data.get("reason") or "") == "resume_unavailable":
-                _, closed = self._lock_non_terminal(run)
+                locked, closed = self._lock_non_terminal(run)
                 if closed:
                     return closed
-                run_lifecycle.apply_run_resume_unavailable(runner, run.id)
+                run_lifecycle.apply_run_resume_unavailable(
+                    runner,
+                    locked.id,
+                    locked_run=locked,
+                )
                 return Response({"ok": True, "rescheduled": True})
             run_lifecycle.finalize_run_terminal(
                 runner,

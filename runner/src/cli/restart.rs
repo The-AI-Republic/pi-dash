@@ -10,7 +10,9 @@ pub struct Args {}
 
 pub async fn run(_args: Args, paths: &Paths) -> Result<()> {
     println!("restarting daemon...");
-    let outcome = crate::service::reload::restart_and_verify(paths).await;
+    let outcome =
+        crate::service::reload::restart_and_verify_with_progress(paths, |msg| eprintln!("{msg}"))
+            .await;
     if outcome.ok {
         println!("daemon restarted ({}).", outcome.summary);
         return Ok(());

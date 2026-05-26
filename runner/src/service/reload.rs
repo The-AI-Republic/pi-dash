@@ -31,6 +31,7 @@ use crate::util::paths::Paths;
 const IPC_TIMEOUT: Duration = Duration::from_secs(5);
 const CLOUD_TIMEOUT: Duration = Duration::from_secs(30);
 const POLL_INTERVAL: Duration = Duration::from_millis(250);
+const PROGRESS_INTERVAL: Duration = Duration::from_secs(5);
 
 /// Outcome of a reload attempt. `ok = true` means the daemon is up and
 /// talking to the cloud; a `false` value carries a message explaining which
@@ -53,8 +54,16 @@ pub struct ReloadOutcome {
 /// something you can render — failures carry a `detail` string, successes
 /// carry a summary of "<name> is connected".
 pub async fn restart_and_verify(paths: &Paths) -> ReloadOutcome {
+    restart_and_verify_with_progress(paths, |_| {}).await
+}
+
+pub async fn restart_and_verify_with_progress<F>(paths: &Paths, mut progress: F) -> ReloadOutcome
+where
+    F: FnMut(String),
+{
     let svc = crate::service::detect();
 
+    progress("starting runner service".into());
     // `enable_and_start` is idempotent *and* on systemd uses `restart`, so
     // this covers both "first start" and "reload after config change."
     if let Err(e) = svc.enable_and_start().await {
@@ -72,7 +81,11 @@ pub async fn restart_and_verify(paths: &Paths) -> ReloadOutcome {
 
     // Stage 1: wait for IPC. A successful `StatusGet` means the daemon got
     // past config load, credential load, and agent init.
-    let stage1 = wait_for_ipc(paths, IPC_TIMEOUT).await;
+    progress(format!(
+        "waiting up to {}s for daemon IPC",
+        IPC_TIMEOUT.as_secs()
+    ));
+    let stage1 = wait_for_ipc(paths, IPC_TIMEOUT, &mut progress).await;
     let snapshot = match stage1 {
         Some(s) => s,
         None => {
@@ -105,7 +118,11 @@ pub async fn restart_and_verify(paths: &Paths) -> ReloadOutcome {
             service_state: state,
         };
     }
-    match wait_for_cloud_connected(paths, CLOUD_TIMEOUT).await {
+    progress(format!(
+        "waiting up to {}s for cloud connection",
+        CLOUD_TIMEOUT.as_secs()
+    ));
+    match wait_for_cloud_connected(paths, CLOUD_TIMEOUT, &mut progress).await {
         Some(final_snap) => {
             let state = svc.status().await.unwrap_or_else(|_| "unknown".into());
             ReloadOutcome {
@@ -141,8 +158,11 @@ pub async fn restart_and_verify(paths: &Paths) -> ReloadOutcome {
 async fn wait_for_ipc(
     paths: &Paths,
     timeout: Duration,
+    progress: &mut impl FnMut(String),
 ) -> Option<crate::ipc::protocol::StatusSnapshot> {
-    let deadline = Instant::now() + timeout;
+    let start = Instant::now();
+    let deadline = start + timeout;
+    let mut next_progress = start + PROGRESS_INTERVAL;
     loop {
         if let Ok(mut c) = Client::connect(paths.ipc_socket_path()).await
             && let Ok(Response::Status(s)) = c.call(Request::StatusGet).await
@@ -152,6 +172,7 @@ async fn wait_for_ipc(
         if Instant::now() >= deadline {
             return None;
         }
+        maybe_emit_wait_progress("daemon IPC", start, timeout, &mut next_progress, progress);
         tokio::time::sleep(POLL_INTERVAL).await;
     }
 }
@@ -159,8 +180,11 @@ async fn wait_for_ipc(
 async fn wait_for_cloud_connected(
     paths: &Paths,
     timeout: Duration,
+    progress: &mut impl FnMut(String),
 ) -> Option<crate::ipc::protocol::StatusSnapshot> {
-    let deadline = Instant::now() + timeout;
+    let start = Instant::now();
+    let deadline = start + timeout;
+    let mut next_progress = start + PROGRESS_INTERVAL;
     loop {
         if let Ok(mut c) = Client::connect(paths.ipc_socket_path()).await
             && let Ok(Response::Status(s)) = c.call(Request::StatusGet).await
@@ -171,8 +195,34 @@ async fn wait_for_cloud_connected(
         if Instant::now() >= deadline {
             return None;
         }
+        maybe_emit_wait_progress(
+            "cloud connection",
+            start,
+            timeout,
+            &mut next_progress,
+            progress,
+        );
         tokio::time::sleep(POLL_INTERVAL).await;
     }
+}
+
+fn maybe_emit_wait_progress(
+    label: &str,
+    start: Instant,
+    timeout: Duration,
+    next_progress: &mut Instant,
+    progress: &mut impl FnMut(String),
+) {
+    let now = Instant::now();
+    if now < *next_progress {
+        return;
+    }
+    let elapsed = now.saturating_duration_since(start).as_secs();
+    progress(format!(
+        "still waiting for {label} ({elapsed}s elapsed, {}s max)",
+        timeout.as_secs()
+    ));
+    *next_progress = now + PROGRESS_INTERVAL;
 }
 
 /// Best-effort collection of service-manager output to show in the error
