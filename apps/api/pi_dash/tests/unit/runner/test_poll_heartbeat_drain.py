@@ -11,16 +11,17 @@ session, ``last_heartbeat_at`` was refreshed but **nothing triggered a
 drain** — queued runs in the pod sat indefinitely until either a new
 run was created or the runner opened a fresh session.
 
-The poll path also needs a drain when the daemon reports it has become
-idle after a busy run. Otherwise a ticker-created follow-up can land while
-the cloud still has the runner marked BUSY and then sit QUEUED forever.
+The poll path also needs a drain when the daemon explicitly reports it has
+become idle after a busy run. Otherwise a ticker-created follow-up can land
+while the cloud still has the runner marked BUSY and then sit QUEUED forever.
 
 The fix captures prior heartbeat/status before the update and schedules
-``drain_for_runner_by_id`` on commit for stale→fresh and busy→online
+``drain_for_runner_by_id`` on commit for stale→fresh and busy→idle
 transitions. These tests guard against:
 
   * the drain trigger being silently removed
   * the trigger firing on every poll (regression: per-poll churn)
+  * status-less polls being treated as an idle report
 """
 
 from __future__ import annotations
@@ -164,7 +165,18 @@ def test_drain_fires_when_runner_reports_idle_after_busy(
     """Busy runner → idle poll → drain once for queued follow-up work."""
     Runner.objects.filter(pk=enrolled_runner.id).update(status=RunnerStatus.BUSY)
 
-    with _patched_poll_dependencies() as mock_drain:
+    events = []
+
+    def _record_drain(runner_id):
+        events.append(("drain", runner_id))
+
+    with (
+        patch(
+            "pi_dash.runner.views.sessions.session_service.reap_stale_busy_runs",
+            side_effect=lambda *_: events.append(("reap", enrolled_runner.id)),
+        ),
+        _patched_poll_dependencies(drain_side_effect=_record_drain) as mock_drain,
+    ):
         resp = _poll(
             api_client,
             enrolled_runner.id,
@@ -175,6 +187,7 @@ def test_drain_fires_when_runner_reports_idle_after_busy(
 
     assert resp.status_code == 200, resp.data
     mock_drain.assert_called_once_with(enrolled_runner.id)
+    assert events == [("reap", enrolled_runner.id), ("drain", enrolled_runner.id)]
 
 
 @pytest.mark.unit
@@ -191,6 +204,26 @@ def test_drain_does_not_fire_while_runner_reports_busy(
             runner_session.id,
             runner_token,
             body={"status": {"status": "busy"}},
+        )
+
+    assert resp.status_code == 200, resp.data
+    mock_drain.assert_not_called()
+
+
+@pytest.mark.unit
+def test_statusless_busy_runner_poll_does_not_trigger_available_drain(
+    db, api_client, enrolled_runner, runner_token, runner_session
+):
+    """Busy runner must explicitly report idle before the availability drain fires."""
+    Runner.objects.filter(pk=enrolled_runner.id).update(status=RunnerStatus.BUSY)
+
+    with _patched_poll_dependencies() as mock_drain:
+        resp = _poll(
+            api_client,
+            enrolled_runner.id,
+            runner_session.id,
+            runner_token,
+            body={"ack": []},
         )
 
     assert resp.status_code == 200, resp.data

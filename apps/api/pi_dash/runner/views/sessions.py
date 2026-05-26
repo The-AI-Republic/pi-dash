@@ -272,29 +272,43 @@ class RunnerSessionPollEndpoint(APIView):
         # busy->idle transitions otherwise leave QUEUED runs sitting until a
         # new run is created or the runner reopens its session.
         now_ts = timezone.now()
-        prior_hb = runner.last_heartbeat_at
-        prior_status = runner.status
-        was_stale = prior_hb is None or (now_ts - prior_hb) > HEARTBEAT_GRACE
-        reports_busy = status_entry.get("status") == "busy"
-        became_available = prior_status == RunnerStatus.BUSY and not reports_busy
+        with transaction.atomic():
+            runner_snapshot = (
+                Runner.objects.select_for_update()
+                .filter(pk=runner.id)
+                .values("last_heartbeat_at", "status")
+                .get()
+            )
+            prior_hb = runner_snapshot["last_heartbeat_at"]
+            prior_status = runner_snapshot["status"]
+            was_stale = (
+                prior_hb is None or (now_ts - prior_hb) > HEARTBEAT_GRACE
+            )
+            reported_status = status_entry.get("status")
+            reports_busy = reported_status == "busy"
+            reports_idle = reported_status == "idle"
+            became_available = (
+                prior_status == RunnerStatus.BUSY and reports_idle
+            )
 
-        Runner.objects.filter(pk=runner.id).update(
-            last_heartbeat_at=now_ts,
-            status=RunnerStatus.BUSY if reports_busy else RunnerStatus.ONLINE,
-        )
-        if was_stale or became_available:
-            def _drain_available_runner(rid=runner.id):
-                try:
-                    drain_for_runner_by_id(rid)
-                except Exception:
-                    logger.exception(
-                        "drain_for_runner_by_id failed for available runner %s",
-                        rid,
-                    )
+            Runner.objects.filter(pk=runner.id).update(
+                last_heartbeat_at=now_ts,
+                status=RunnerStatus.BUSY if reports_busy else RunnerStatus.ONLINE,
+            )
+            if status_entry:
+                session_service.reap_stale_busy_runs(runner, status_entry)
+            if was_stale or became_available:
+                def _drain_available_runner(rid=runner.id):
+                    try:
+                        drain_for_runner_by_id(rid)
+                    except Exception:
+                        logger.exception(
+                            "drain_for_runner_by_id failed for available runner %s",
+                            rid,
+                        )
 
-            transaction.on_commit(_drain_available_runner)
+                transaction.on_commit(_drain_available_runner)
         if status_entry:
-            session_service.reap_stale_busy_runs(runner, status_entry)
             # Volatile observability snapshot — see
             # `.ai_design/runner_agent_bridge/design.md` §4.5.2.
             # Pre-observability runners send no snapshot fields and the

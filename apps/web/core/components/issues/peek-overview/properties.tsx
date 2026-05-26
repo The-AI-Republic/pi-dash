@@ -42,7 +42,6 @@ import { DateAlert } from "@/pi-dash-web/components/issues/issue-details/sidebar
 import { TransferHopInfo } from "@/pi-dash-web/components/issues/issue-details/sidebar/transfer-hop-info";
 import { IssueWorklogProperty } from "@/pi-dash-web/components/issues/worklog/property";
 import type { TIssueOperations } from "../issue-detail";
-import { IssueAgentStatusPanel } from "../issue-detail/agent-status";
 import { IssueCycleSelect } from "../issue-detail/cycle-select";
 import { IssueLabel } from "../issue-detail/label";
 import { IssueModuleSelect } from "../issue-detail/module-select";
@@ -81,13 +80,6 @@ export const PeekOverviewProperties = observer(function PeekOverviewProperties(p
 
   return (
     <div className="space-y-5">
-      <IssueAgentStatusPanel
-        workspaceSlug={workspaceSlug}
-        projectId={projectId}
-        issueId={issueId}
-        issue={issue}
-        issueOperations={issueOperations}
-      />
       <div>
         <h6 className="text-body-xs-medium">{t("common.properties")}</h6>
         <div className={`mt-3 w-full space-y-3 ${disabled ? "opacity-60" : ""}`}>
