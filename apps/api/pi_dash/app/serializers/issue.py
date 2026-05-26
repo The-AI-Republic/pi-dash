@@ -1037,6 +1037,7 @@ class IssueDetailSerializer(IssueSerializer):
     is_subscribed = serializers.BooleanField(read_only=True)
     is_intake = serializers.BooleanField(read_only=True)
     agent_ticker = serializers.SerializerMethodField()
+    agent_status = serializers.SerializerMethodField()
 
     class Meta(IssueSerializer.Meta):
         fields = IssueSerializer.Meta.fields + [
@@ -1044,8 +1045,12 @@ class IssueDetailSerializer(IssueSerializer):
             "is_subscribed",
             "is_intake",
             "agent_ticker",
+            "agent_status",
         ]
         read_only_fields = fields
+
+    def _serialize_datetime(self, value):
+        return value.isoformat() if value else None
 
     def get_agent_ticker(self, obj):
         """Surface the per-issue continuation ticker for the issue detail UI.
@@ -1065,6 +1070,90 @@ class IssueDetailSerializer(IssueSerializer):
             "interval_seconds": ticker.effective_interval_seconds(),
             "next_run_at": ticker.next_run_at.isoformat() if ticker.next_run_at else None,
             "last_tick_at": ticker.last_tick_at.isoformat() if ticker.last_tick_at else None,
+            "disarm_reason": ticker.disarm_reason,
+        }
+
+    def _serialize_agent_live_state(self, state):
+        if state is None:
+            return None
+        return {
+            "observed_run_id": str(state.observed_run_id) if state.observed_run_id else None,
+            "last_event_at": self._serialize_datetime(state.last_event_at),
+            "last_event_kind": state.last_event_kind,
+            "last_event_summary": state.last_event_summary,
+            "agent_pid": state.agent_pid,
+            "agent_subprocess_alive": state.agent_subprocess_alive,
+            "approvals_pending": state.approvals_pending,
+            "input_tokens": state.input_tokens,
+            "output_tokens": state.output_tokens,
+            "total_tokens": state.total_tokens,
+            "turn_count": state.turn_count,
+            "updated_at": self._serialize_datetime(state.updated_at),
+        }
+
+    def _serialize_agent_run(self, run, *, include_live_state=False):
+        if run is None:
+            return None
+        live_state = None
+        if include_live_state and run.runner_id is not None:
+            live_state = getattr(run.runner, "live_state", None)
+            if (
+                live_state is not None
+                and live_state.observed_run_id is not None
+                and str(live_state.observed_run_id) != str(run.id)
+            ):
+                live_state = None
+        return {
+            "id": str(run.id),
+            "status": run.status,
+            "runner": str(run.runner_id) if run.runner_id else None,
+            "runner_name": run.runner.name if run.runner_id and run.runner else None,
+            "created_at": self._serialize_datetime(run.created_at),
+            "assigned_at": self._serialize_datetime(run.assigned_at),
+            "started_at": self._serialize_datetime(run.started_at),
+            "ended_at": self._serialize_datetime(run.ended_at),
+            "done_payload": run.done_payload,
+            "error": run.error,
+            "live_state": self._serialize_agent_live_state(live_state),
+        }
+
+    def get_agent_status(self, obj):
+        """Compact agent-run state for the issue detail indicator.
+
+        ``IssueAgentTicker`` remains the source of truth for the next
+        automatic tick. ``AgentRun`` remains the source of truth for current
+        execution/failure/completion state. This method only composes those
+        rows for the issue page.
+        """
+        from pi_dash.runner.models import AgentRun, AgentRunStatus
+
+        ticker = self.get_agent_ticker(obj)
+        runs = AgentRun.objects.filter(work_item=obj)
+        latest_run = runs.select_related("runner__live_state").order_by("-created_at").first()
+        active_run = (
+            runs.select_related("runner__live_state")
+            .filter(
+                status__in=[
+                    AgentRunStatus.QUEUED,
+                    AgentRunStatus.ASSIGNED,
+                    AgentRunStatus.RUNNING,
+                    AgentRunStatus.AWAITING_APPROVAL,
+                    AgentRunStatus.AWAITING_REAUTH,
+                    AgentRunStatus.PAUSED_AWAITING_INPUT,
+                ]
+            )
+            .order_by("-created_at")
+            .first()
+        )
+
+        if ticker is None and latest_run is None:
+            return None
+
+        return {
+            "ticker": ticker,
+            "active_run": self._serialize_agent_run(active_run, include_live_state=True),
+            "latest_run": self._serialize_agent_run(latest_run, include_live_state=active_run is None),
+            "run_count": runs.count(),
         }
 
 
