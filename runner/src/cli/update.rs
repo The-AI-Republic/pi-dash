@@ -22,6 +22,8 @@
 use anyhow::{Context, Result};
 use axoupdater::AxoUpdater;
 use clap::Args as ClapArgs;
+use fs2::FileExt;
+use std::fs::{self, File, OpenOptions};
 
 use crate::RUNNER_VERSION;
 use crate::util::paths::Paths;
@@ -39,8 +41,8 @@ pub struct Args {
     #[arg(long)]
     pub restart: bool,
 }
-pub async fn run(args: Args, _paths: &Paths) -> Result<()> {
-    match check_or_swap(args.check).await? {
+pub async fn run(args: Args, paths: &Paths) -> Result<()> {
+    match check_or_swap(args.check, paths).await? {
         SwapOutcome::AlreadyLatest => {
             println!("pidash is already on the latest version (v{RUNNER_VERSION}).");
         }
@@ -50,17 +52,27 @@ pub async fn run(args: Args, _paths: &Paths) -> Result<()> {
                 "update available: v{new_version} (running v{RUNNER_VERSION}). run `pidash update` to install."
             );
         }
-        SwapOutcome::Swapped { new_version, old_version } => {
+        SwapOutcome::Swapped {
+            new_version,
+            old_version,
+        } => {
             let old = old_version.unwrap_or_else(|| RUNNER_VERSION.to_string());
             println!("installed v{new_version} (was v{old}).");
             if args.restart {
                 println!("restarting daemon to apply...");
-                let svc = crate::service::detect();
-                svc.stop().await.ok();
-                svc.start()
-                    .await
-                    .context("daemon restart after update")?;
-                println!("daemon restarted on the new binary.");
+                let outcome =
+                    crate::service::reload::restart_and_verify_with_progress(paths, |msg| {
+                        eprintln!("{msg}")
+                    })
+                    .await;
+                if !outcome.ok {
+                    anyhow::bail!(
+                        "daemon restart after update did not complete cleanly: {}\n{}",
+                        outcome.summary,
+                        outcome.detail.unwrap_or_default()
+                    );
+                }
+                println!("daemon restarted on the new binary ({}).", outcome.summary);
             } else {
                 println!("run `pidash restart` to apply (the running daemon is still on v{old}).");
             }
@@ -93,7 +105,12 @@ pub enum SwapOutcome {
 /// install via `pidash-installer.sh`. That's a hard failure for the CLI
 /// but the daemon's auto-update path should treat it as "skip silently"
 /// since auto-swap doesn't apply to source builds.
-pub async fn check_or_swap(check: bool) -> Result<SwapOutcome> {
+pub async fn check_or_swap(check: bool, paths: &Paths) -> Result<SwapOutcome> {
+    let _update_lock = if check {
+        None
+    } else {
+        Some(UpdateLock::acquire(paths)?)
+    };
     let mut updater = AxoUpdater::new_for("pidash");
     updater
         .load_receipt()
@@ -139,5 +156,33 @@ pub async fn check_or_swap(check: bool) -> Result<SwapOutcome> {
         // `run` returned `Ok(None)` means it raced and another process
         // brought us up to date. Treat as already-latest.
         None => Ok(SwapOutcome::AlreadyLatest),
+    }
+}
+
+struct UpdateLock {
+    file: File,
+}
+
+impl UpdateLock {
+    fn acquire(paths: &Paths) -> Result<Self> {
+        fs::create_dir_all(&paths.data_dir)
+            .with_context(|| format!("creating update lock dir {:?}", paths.data_dir))?;
+        let lock_path = paths.data_dir.join(".update.lock");
+        let file = OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(&lock_path)
+            .with_context(|| format!("opening update lock {lock_path:?}"))?;
+        file.lock_exclusive()
+            .with_context(|| format!("locking update lock {lock_path:?}"))?;
+        Ok(Self { file })
+    }
+}
+
+impl Drop for UpdateLock {
+    fn drop(&mut self) {
+        let _ = self.file.unlock();
     }
 }
