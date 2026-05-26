@@ -1129,9 +1129,9 @@ class IssueDetailSerializer(IssueSerializer):
 
         ticker = self.get_agent_ticker(obj)
         runs = AgentRun.objects.filter(work_item=obj)
-        latest_run = runs.select_related("runner").order_by("-created_at").first()
+        latest_run = runs.select_related("runner__live_state").order_by("-created_at").first()
         active_run = (
-            runs.select_related("runner")
+            runs.select_related("runner__live_state")
             .filter(
                 status__in=[
                     AgentRunStatus.QUEUED,
