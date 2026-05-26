@@ -7,11 +7,14 @@
 import { useState } from "react";
 import { observer } from "mobx-react";
 import { Cpu, Laptop, Terminal } from "lucide-react";
+import { EUserPermissions, EUserPermissionsLevel } from "@pi-dash/constants";
 import { useTranslation } from "@pi-dash/i18n";
 import { Button } from "@pi-dash/propel/button";
 import { TOAST_TYPE, setToast } from "@pi-dash/propel/toast";
+import { NotAuthorizedView } from "@/components/auth-screens/not-authorized-view";
 import { PageHead } from "@/components/core/page-title";
 import { AddRunnerModal } from "@/components/runners/add-runner-modal";
+import { useUserPermissions } from "@/hooks/store/user";
 import { useWorkspace } from "@/hooks/store/use-workspace";
 
 // One-liners point at the GitHub Releases ``latest`` channel. The wrapper
@@ -29,6 +32,7 @@ const noopOnCreated = () => {};
 
 const AiDevMachinesPage = observer(function AiDevMachinesPage() {
   const { currentWorkspace } = useWorkspace();
+  const { workspaceUserInfo, allowPermissions } = useUserPermissions();
   const { t } = useTranslation();
 
   const workspaceId = currentWorkspace?.id;
@@ -37,7 +41,16 @@ const AiDevMachinesPage = observer(function AiDevMachinesPage() {
     ? t("ai_dev_machines.page_title", { workspace: currentWorkspace.name })
     : t("ai_dev_machines.title");
 
+  // Mirror the sidebar entry's `access` field (ADMIN + MEMBER) — guests must
+  // not be able to reach this page by direct URL even though the sidebar
+  // hides the link for them. See packages/constants/src/workspace.ts.
+  const canView = allowPermissions([EUserPermissions.ADMIN, EUserPermissions.MEMBER], EUserPermissionsLevel.WORKSPACE);
+
   const [addOpen, setAddOpen] = useState(false);
+
+  if (workspaceUserInfo && !canView) {
+    return <NotAuthorizedView section="general" className="h-auto" />;
+  }
 
   return (
     <div className="flex flex-col gap-8 p-6">
@@ -156,7 +169,7 @@ function InstallCommand({ label, command }: InstallCommandProps) {
           {justCopied ? t("ai_dev_machines.install.copied") : t("ai_dev_machines.install.copy_command")}
         </Button>
       </div>
-      <pre className="font-mono bg-layer-0 rounded border border-subtle p-2 text-11 whitespace-pre-wrap text-primary select-all">
+      <pre className="font-mono rounded border border-subtle bg-layer-2 p-2 text-11 whitespace-pre-wrap text-primary select-all">
         {command}
       </pre>
     </div>
