@@ -34,7 +34,7 @@ export const SidebarMoreSection = observer(function SidebarMoreSection() {
   const pathname = usePathname();
   const { setValue: toggleMoreMenu, storedValue: isMoreMenuOpen } = useLocalStorage<boolean>(
     "is_sidebar_more_menu_open",
-    true
+    false
   );
 
   const items = MORE_ITEM_KEYS.map(
