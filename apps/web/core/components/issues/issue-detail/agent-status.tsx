@@ -43,6 +43,8 @@ const ACTIVE_RUN_STATUSES = new Set<TAgentRunStatus>([
   "awaiting_reauth",
   "paused_awaiting_input",
 ]);
+const AGENT_STATUS_POLL_INTERVAL_MS = 15_000;
+const MAX_SCHEDULED_REFRESH_DELAY_MS = 2_147_483_647;
 
 function truncate(value: string, maxLength = 140): string {
   if (value.length <= maxLength) return value;
@@ -313,8 +315,8 @@ export function IssueAgentStatusPanel({ workspaceSlug, projectId, issueId, issue
   const status = issue.agent_status;
   const ticker = status?.ticker ?? issue.agent_ticker;
   const activeRun = status?.active_run;
-  const activeRunId = activeRun?.id;
   const activeRunStatus = activeRun?.status;
+  const hasActiveAgentRun = Boolean(activeRunStatus && ACTIVE_RUN_STATUSES.has(activeRunStatus));
   const view = useMemo(() => getAgentStatusView(issue, now, t), [issue, now, t]);
 
   useEffect(() => {
@@ -323,12 +325,23 @@ export function IssueAgentStatusPanel({ workspaceSlug, projectId, issueId, issue
   }, []);
 
   useEffect(() => {
-    if (!activeRunStatus || !ACTIVE_RUN_STATUSES.has(activeRunStatus)) return;
+    if (!hasActiveAgentRun) return;
     const timer = window.setInterval(() => {
       void issueOperations.fetch(workspaceSlug, projectId, issueId);
-    }, 15_000);
+    }, AGENT_STATUS_POLL_INTERVAL_MS);
     return () => window.clearInterval(timer);
-  }, [activeRunId, activeRunStatus, issueId, issueOperations, projectId, workspaceSlug]);
+  }, [hasActiveAgentRun, issueId, issueOperations, projectId, workspaceSlug]);
+
+  useEffect(() => {
+    if (hasActiveAgentRun || !ticker?.enabled || !ticker.next_run_at) return;
+    const nextRunAt = new Date(ticker.next_run_at).getTime();
+    if (Number.isNaN(nextRunAt)) return;
+    const refreshDelay = Math.min(Math.max(nextRunAt - Date.now(), 0), MAX_SCHEDULED_REFRESH_DELAY_MS);
+    const timer = window.setTimeout(() => {
+      void issueOperations.fetch(workspaceSlug, projectId, issueId);
+    }, refreshDelay);
+    return () => window.clearTimeout(timer);
+  }, [hasActiveAgentRun, issueId, issueOperations, projectId, ticker?.enabled, ticker?.next_run_at, workspaceSlug]);
 
   if (!view) return null;
 

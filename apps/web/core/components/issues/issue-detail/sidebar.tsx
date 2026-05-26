@@ -35,6 +35,7 @@ import { useIssueDetail } from "@/hooks/store/use-issue-detail";
 import { useMember } from "@/hooks/store/use-member";
 import { useProject } from "@/hooks/store/use-project";
 import { useProjectState } from "@/hooks/store/use-project-state";
+import useSize from "@/hooks/use-window-size";
 // pi dash web components
 // components
 import { WorkItemAdditionalSidebarProperties } from "@/pi-dash-web/components/issues/issue-details/additional-properties";
@@ -68,8 +69,10 @@ export const IssueDetailsSidebar = observer(function IssueDetailsSidebar(props: 
   } = useIssueDetail();
   const { getUserDetails } = useMember();
   const { getStateById } = useProjectState();
+  const windowSize = useSize();
   const issue = getIssueById(issueId);
   if (!issue) return <></>;
+  const shouldRenderAgentStatus = windowSize[0] >= 768;
 
   const createdByDetails = getUserDetails(issue.created_by);
 
@@ -87,13 +90,15 @@ export const IssueDetailsSidebar = observer(function IssueDetailsSidebar(props: 
     <>
       <div className="flex h-full w-full flex-col items-center divide-y-2 divide-subtle-1 overflow-hidden">
         <div className="h-full w-full overflow-y-auto px-6">
-          <IssueAgentStatusPanel
-            workspaceSlug={workspaceSlug}
-            projectId={projectId}
-            issueId={issueId}
-            issue={issue}
-            issueOperations={issueOperations}
-          />
+          {shouldRenderAgentStatus && (
+            <IssueAgentStatusPanel
+              workspaceSlug={workspaceSlug}
+              projectId={projectId}
+              issueId={issueId}
+              issue={issue}
+              issueOperations={issueOperations}
+            />
+          )}
           <h5 className="mt-5 text-body-xs-medium">{t("common.properties")}</h5>
           <div className={`mt-4 mb-2 space-y-2.5 truncate ${!isEditable ? "opacity-60" : ""}`}>
             <SidebarPropertyListItem icon={StatePropertyIcon} label={t("common.state")}>
