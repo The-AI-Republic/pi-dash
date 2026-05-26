@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import uuid as _uuid
+from unittest.mock import patch
 
 import pytest
 from django.utils import timezone
@@ -65,6 +66,73 @@ def assigned_run(db, create_user, workspace, pod, enrolled_runner):
         status=AgentRunStatus.ASSIGNED,
         assigned_at=timezone.now(),
     )
+
+
+@pytest.mark.unit
+def test_session_open_waits_for_first_poll_before_dispatch(
+    db, api_client, runner_token, enrolled_runner, create_user, workspace, pod
+):
+    enrolled_runner.status = RunnerStatus.OFFLINE
+    enrolled_runner.last_heartbeat_at = None
+    enrolled_runner.save(update_fields=["status", "last_heartbeat_at"])
+    queued = AgentRun.objects.create(
+        owner=create_user,
+        created_by=create_user,
+        workspace=workspace,
+        pod=pod,
+        pinned_runner=enrolled_runner,
+        prompt="queued",
+        status=AgentRunStatus.QUEUED,
+    )
+
+    open_resp = api_client.post(
+        f"/api/v1/runner/runners/{enrolled_runner.id}/sessions/",
+        {
+            "version": "test",
+            "os": "linux",
+            "arch": "x86_64",
+            "status": "online",
+            "in_flight_run": None,
+        },
+        format="json",
+        HTTP_AUTHORIZATION=f"Bearer {runner_token}",
+    )
+
+    assert open_resp.status_code == 201, open_resp.data
+    queued.refresh_from_db()
+    enrolled_runner.refresh_from_db()
+    assert queued.status == AgentRunStatus.QUEUED
+    assert queued.runner_id is None
+    assert enrolled_runner.status == RunnerStatus.OFFLINE
+
+    sid = open_resp.data["session_id"]
+    with (
+        patch("pi_dash.runner.views.sessions.outbox.is_pel_drained", return_value=False),
+        patch("pi_dash.runner.views.sessions.outbox.read_for_session", return_value=[]),
+        patch("pi_dash.runner.views.sessions.outbox.mark_pel_drained"),
+        patch("django.db.transaction.on_commit", side_effect=lambda fn, **kw: fn()),
+    ):
+        poll_resp = api_client.post(
+            f"/api/v1/runner/runners/{enrolled_runner.id}/sessions/{sid}/poll",
+            {
+                "ack": [],
+                "status": {
+                    "status": "online",
+                    "in_flight_run": None,
+                    "ts": timezone.now().isoformat(),
+                },
+            },
+            format="json",
+            HTTP_AUTHORIZATION=f"Bearer {runner_token}",
+        )
+
+    assert poll_resp.status_code == 200, poll_resp.data
+    queued.refresh_from_db()
+    enrolled_runner.refresh_from_db()
+    assert queued.status == AgentRunStatus.ASSIGNED
+    assert queued.runner_id == enrolled_runner.id
+    assert queued.assigned_at is not None
+    assert enrolled_runner.status == RunnerStatus.ONLINE
 
 
 @pytest.mark.unit
@@ -154,6 +222,105 @@ def test_complete_endpoint_marks_terminal_and_drains(
     assigned_run.refresh_from_db()
     assert assigned_run.status == AgentRunStatus.COMPLETED
     assert assigned_run.ended_at is not None
+
+
+@pytest.mark.unit
+def test_complete_endpoint_clears_stale_error(
+    db, api_client, runner_token, assigned_run
+):
+    assigned_run.error = "daemon shutdown requested"
+    assigned_run.save(update_fields=["error"])
+
+    resp = api_client.post(
+        f"/api/v1/runner/runs/{assigned_run.id}/complete/",
+        {"done_payload": {"summary": "done"}},
+        format="json",
+        HTTP_AUTHORIZATION=f"Bearer {runner_token}",
+    )
+
+    assert resp.status_code == 200, resp.data
+    assigned_run.refresh_from_db()
+    assert assigned_run.status == AgentRunStatus.COMPLETED
+    assert assigned_run.error == ""
+
+
+@pytest.mark.unit
+def test_late_complete_does_not_overwrite_failed_run(
+    db, api_client, runner_token, assigned_run
+):
+    failed = api_client.post(
+        f"/api/v1/runner/runs/{assigned_run.id}/fail/",
+        {"detail": "reaped by heartbeat"},
+        format="json",
+        HTTP_AUTHORIZATION=f"Bearer {runner_token}",
+        HTTP_IDEMPOTENCY_KEY=_uuid.uuid4().hex,
+    )
+    assert failed.status_code == 200, failed.data
+    assigned_run.refresh_from_db()
+    ended_at = assigned_run.ended_at
+
+    completed = api_client.post(
+        f"/api/v1/runner/runs/{assigned_run.id}/complete/",
+        {"done_payload": {"summary": "late success"}},
+        format="json",
+        HTTP_AUTHORIZATION=f"Bearer {runner_token}",
+        HTTP_IDEMPOTENCY_KEY=_uuid.uuid4().hex,
+    )
+
+    assert completed.status_code == 200, completed.data
+    assigned_run.refresh_from_db()
+    assert assigned_run.status == AgentRunStatus.FAILED
+    assert assigned_run.error == "reaped by heartbeat"
+    assert assigned_run.ended_at == ended_at
+    assert assigned_run.done_payload is None
+
+
+@pytest.mark.unit
+def test_late_started_does_not_revive_failed_run(
+    db, api_client, runner_token, assigned_run
+):
+    assigned_run.status = AgentRunStatus.FAILED
+    assigned_run.ended_at = timezone.now()
+    assigned_run.error = "reaped by heartbeat"
+    assigned_run.save(update_fields=["status", "ended_at", "error"])
+
+    resp = api_client.post(
+        f"/api/v1/runner/runs/{assigned_run.id}/started/",
+        {"thread_id": "late_thread"},
+        format="json",
+        HTTP_AUTHORIZATION=f"Bearer {runner_token}",
+    )
+
+    assert resp.status_code == 200, resp.data
+    assert resp.data.get("terminal") is True
+    assigned_run.refresh_from_db()
+    assert assigned_run.status == AgentRunStatus.FAILED
+    assert assigned_run.thread_id == ""
+    assert assigned_run.started_at is None
+
+
+@pytest.mark.unit
+def test_late_resume_unavailable_does_not_requeue_failed_run(
+    db, api_client, runner_token, assigned_run, enrolled_runner
+):
+    assigned_run.status = AgentRunStatus.FAILED
+    assigned_run.ended_at = timezone.now()
+    assigned_run.error = "reaped by heartbeat"
+    assigned_run.save(update_fields=["status", "ended_at", "error"])
+
+    resp = api_client.post(
+        f"/api/v1/runner/runs/{assigned_run.id}/fail/",
+        {"reason": "resume_unavailable", "detail": "session gone"},
+        format="json",
+        HTTP_AUTHORIZATION=f"Bearer {runner_token}",
+    )
+
+    assert resp.status_code == 200, resp.data
+    assert resp.data.get("terminal") is True
+    assigned_run.refresh_from_db()
+    assert assigned_run.status == AgentRunStatus.FAILED
+    assert assigned_run.runner_id == enrolled_runner.id
+    assert assigned_run.error == "reaped by heartbeat"
 
 
 @pytest.mark.unit

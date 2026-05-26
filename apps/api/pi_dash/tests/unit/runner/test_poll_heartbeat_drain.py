@@ -21,7 +21,7 @@ transitions. These tests guard against:
 
   * the drain trigger being silently removed
   * the trigger firing on every poll (regression: per-poll churn)
-  * status-less polls being treated as an idle report
+  * status-less polls being treated as an idle/ready report
 """
 
 from __future__ import annotations
@@ -90,7 +90,7 @@ def _poll(api_client, runner_id, session_id, token, body=None):
 
 
 @contextmanager
-def _patched_poll_dependencies(*, drain_side_effect=None):
+def _patched_poll_dependencies(*, drain_side_effect=None, is_pel_drained=True):
     # Patch the matcher's drain + the Redis-touching parts of the poll
     # path so the tests run without Redis. Patching the symbol at its
     # source (matcher) because the view does a function-local import.
@@ -102,8 +102,9 @@ def _patched_poll_dependencies(*, drain_side_effect=None):
         patch("pi_dash.runner.views.sessions.outbox.ack_for_session"),
         patch(
             "pi_dash.runner.views.sessions.outbox.is_pel_drained",
-            return_value=True,
+            return_value=is_pel_drained,
         ),
+        patch("pi_dash.runner.views.sessions.outbox.mark_pel_drained"),
         patch(
             "pi_dash.runner.views.sessions.outbox.read_for_session",
             return_value=[],
@@ -141,9 +142,7 @@ def test_drain_fires_when_runner_polls_after_stale_window(
 
 
 @pytest.mark.unit
-def test_drain_does_not_fire_on_fresh_heartbeat_poll(
-    db, api_client, enrolled_runner, runner_token, runner_session
-):
+def test_drain_does_not_fire_on_fresh_heartbeat_poll(db, api_client, enrolled_runner, runner_token, runner_session):
     """Fresh heartbeat → poll → drain NOT called (no per-poll churn)."""
     # last_heartbeat_at is fresh from the fixture (now()).
     with _patched_poll_dependencies() as mock_drain:
@@ -159,9 +158,7 @@ def test_drain_does_not_fire_on_fresh_heartbeat_poll(
 
 
 @pytest.mark.unit
-def test_drain_fires_when_runner_reports_idle_after_busy(
-    db, api_client, enrolled_runner, runner_token, runner_session
-):
+def test_drain_fires_when_runner_reports_idle_after_busy(db, api_client, enrolled_runner, runner_token, runner_session):
     """Busy runner → idle poll → drain once for queued follow-up work."""
     Runner.objects.filter(pk=enrolled_runner.id).update(status=RunnerStatus.BUSY)
 
@@ -191,9 +188,7 @@ def test_drain_fires_when_runner_reports_idle_after_busy(
 
 
 @pytest.mark.unit
-def test_drain_does_not_fire_while_runner_reports_busy(
-    db, api_client, enrolled_runner, runner_token, runner_session
-):
+def test_drain_does_not_fire_while_runner_reports_busy(db, api_client, enrolled_runner, runner_token, runner_session):
     """Busy runner that is still busy must not be drained."""
     Runner.objects.filter(pk=enrolled_runner.id).update(status=RunnerStatus.BUSY)
 
@@ -217,7 +212,7 @@ def test_statusless_busy_runner_poll_does_not_trigger_available_drain(
     """Busy runner must explicitly report idle before the availability drain fires."""
     Runner.objects.filter(pk=enrolled_runner.id).update(status=RunnerStatus.BUSY)
 
-    with _patched_poll_dependencies() as mock_drain:
+    with _patched_poll_dependencies(is_pel_drained=False) as mock_drain:
         resp = _poll(
             api_client,
             enrolled_runner.id,
@@ -231,9 +226,7 @@ def test_statusless_busy_runner_poll_does_not_trigger_available_drain(
 
 
 @pytest.mark.unit
-def test_drain_fires_when_runner_has_no_prior_heartbeat(
-    db, api_client, enrolled_runner, runner_token, runner_session
-):
+def test_drain_fires_when_runner_has_no_prior_heartbeat(db, api_client, enrolled_runner, runner_token, runner_session):
     """First-ever heartbeat (prior_hb is NULL) is treated as stale → drain.
 
     Covers the ``prior_hb is None`` branch of the staleness check, which
@@ -256,16 +249,12 @@ def test_drain_fires_when_runner_has_no_prior_heartbeat(
 
 
 @pytest.mark.unit
-def test_drain_failure_does_not_fail_poll_response(
-    db, api_client, enrolled_runner, runner_token, runner_session
-):
+def test_drain_failure_does_not_fail_poll_response(db, api_client, enrolled_runner, runner_token, runner_session):
     """The recovery drain is best-effort; poll must still return messages."""
     stale_ts = timezone.now() - timedelta(seconds=600)
     Runner.objects.filter(pk=enrolled_runner.id).update(last_heartbeat_at=stale_ts)
 
-    with _patched_poll_dependencies(
-        drain_side_effect=RuntimeError("boom")
-    ) as mock_drain:
+    with _patched_poll_dependencies(drain_side_effect=RuntimeError("boom")) as mock_drain:
         resp = _poll(
             api_client,
             enrolled_runner.id,

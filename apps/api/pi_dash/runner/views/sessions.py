@@ -110,11 +110,7 @@ class RunnerSessionOpenEndpoint(APIView):
         old_session_id = None
         new_sid = _uuid.uuid4()
         with transaction.atomic():
-            prior = (
-                RunnerSession.objects.select_for_update()
-                .filter(runner=runner, revoked_at__isnull=True)
-                .first()
-            )
+            prior = RunnerSession.objects.select_for_update().filter(runner=runner, revoked_at__isnull=True).first()
             if prior is not None:
                 old_session_id = str(prior.id)
                 prior.revoked_at = timezone.now()
@@ -129,7 +125,6 @@ class RunnerSessionOpenEndpoint(APIView):
             )
 
             session_service.apply_hello(runner, body)
-            session_service.mark_runner_online(runner.id)
             released_chats = chat_service.release_active_chats_for_runner(
                 runner,
                 "runner opened a new session before the prior chat turn completed",
@@ -157,18 +152,10 @@ class RunnerSessionOpenEndpoint(APIView):
             new_session_id=str(new_sid),
         )
 
-        # 8. Drain queued runs into the live stream.
-        try:
-            from pi_dash.runner.services.matcher import drain_for_runner_by_id
-
-            drain_for_runner_by_id(runner.id)
-        except Exception:
-            logger.exception("drain_for_runner_by_id failed for %s", runner.id)
-
-        # 9. Drain offline buffer into live stream.
+        # 8. Drain offline buffer into live stream.
         outbox.drain_offline_into_live(runner.id)
 
-        # 10. Resume in-flight run, if any.
+        # 9. Resume in-flight run, if any.
         resume_ack = None
         in_flight = body.get("in_flight_run")
         if in_flight:
@@ -210,9 +197,7 @@ class RunnerSessionDeleteEndpoint(APIView):
                 status=status.HTTP_403_FORBIDDEN,
             )
         try:
-            session = RunnerSession.objects.get(
-                id=sid, runner=runner, revoked_at__isnull=True
-            )
+            session = RunnerSession.objects.get(id=sid, runner=runner, revoked_at__isnull=True)
         except RunnerSession.DoesNotExist:
             outbox.clear_session_marker(sid)
             return Response(status=status.HTTP_204_NO_CONTENT)
@@ -267,29 +252,21 @@ class RunnerSessionPollEndpoint(APIView):
             drain_for_runner_by_id,
         )
 
-        # Capture prior heartbeat/status so we can detect when this poll makes
-        # the runner eligible for queued work again. Stale recovery and
-        # busy->idle transitions otherwise leave QUEUED runs sitting until a
-        # new run is created or the runner reopens its session.
+        # Capture prior heartbeat/status from the DB so we can detect when this
+        # poll makes the runner eligible for queued work again.
         now_ts = timezone.now()
         with transaction.atomic():
             runner_snapshot = (
-                Runner.objects.select_for_update()
-                .filter(pk=runner.id)
-                .values("last_heartbeat_at", "status")
-                .get()
+                Runner.objects.select_for_update().filter(pk=runner.id).values("last_heartbeat_at", "status").get()
             )
             prior_hb = runner_snapshot["last_heartbeat_at"]
             prior_status = runner_snapshot["status"]
-            was_stale = (
-                prior_hb is None or (now_ts - prior_hb) > HEARTBEAT_GRACE
-            )
+            was_stale = prior_hb is None or (now_ts - prior_hb) > HEARTBEAT_GRACE
             reported_status = status_entry.get("status")
             reports_busy = reported_status == "busy"
-            reports_idle = reported_status == "idle"
-            became_available = (
-                prior_status == RunnerStatus.BUSY and reports_idle
-            )
+            reports_available = reported_status in {"idle", "online"}
+            became_available = prior_status == RunnerStatus.BUSY and reports_available
+            status_allows_drain = reports_available or (not status_entry and prior_status != RunnerStatus.BUSY)
 
             Runner.objects.filter(pk=runner.id).update(
                 last_heartbeat_at=now_ts,
@@ -297,17 +274,6 @@ class RunnerSessionPollEndpoint(APIView):
             )
             if status_entry:
                 session_service.reap_stale_busy_runs(runner, status_entry)
-            if was_stale or became_available:
-                def _drain_available_runner(rid=runner.id):
-                    try:
-                        drain_for_runner_by_id(rid)
-                    except Exception:
-                        logger.exception(
-                            "drain_for_runner_by_id failed for available runner %s",
-                            rid,
-                        )
-
-                transaction.on_commit(_drain_available_runner)
         if status_entry:
             # Volatile observability snapshot — see
             # `.ai_design/runner_agent_bridge/design.md` §4.5.2.
@@ -330,9 +296,30 @@ class RunnerSessionPollEndpoint(APIView):
         # 6. XREADGROUP — first poll uses 0 (replay PEL), subsequent
         # polls use >.
         use_zero = not outbox.is_pel_drained(sid)
-        block_ms = max(
-            1, settings.LONG_POLL_INTERVAL_SECS * 1000
-        ) if not use_zero else 0
+
+        # A session-open alone is not proof that the daemon is actually
+        # polling. Drain on either stale-heartbeat recovery or the first
+        # real poll for this session, after the heartbeat/status update
+        # makes the runner assignable. Keep this as one trigger so a first
+        # poll with no prior heartbeat does not double-dispatch.
+        if (
+            (was_stale or became_available or use_zero)
+            and status_allows_drain
+            and not status_entry.get("in_flight_run")
+        ):
+
+            def _drain_poll_ready_runner(rid=runner.id):
+                try:
+                    drain_for_runner_by_id(rid)
+                except Exception:
+                    logger.exception(
+                        "drain_for_runner_by_id failed for poll-ready runner %s",
+                        rid,
+                    )
+
+            transaction.on_commit(_drain_poll_ready_runner)
+
+        block_ms = max(1, settings.LONG_POLL_INTERVAL_SECS * 1000) if not use_zero else 0
         try:
             messages = self._read_with_eviction_awareness(
                 runner_id=runner.id,
