@@ -7,7 +7,7 @@
   "background_color": "#f9fafb",
   "theme_color": "#3f76ff",
   "icons": [
-    { "src": "/pi-dash-logos/pi-dash-mobile-pwa.png", "sizes": "192x192", "type": "image/png" },
-    { "src": "/pi-dash-logos/pi-dash-mobile-pwa.png", "sizes": "512x512", "type": "image/png" }
+    { "src": "/icons/icon-192x192.png", "sizes": "192x192", "type": "image/png" },
+    { "src": "/icons/icon-512x512.png", "sizes": "512x512", "type": "image/png" }
   ]
 }
