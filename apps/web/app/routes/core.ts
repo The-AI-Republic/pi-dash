@@ -294,6 +294,10 @@ export const coreRoutes: RouteConfigEntry[] = [
         route(":workspaceSlug/runners/chat/:runnerId", "./(all)/[workspaceSlug]/runners/chat/[runnerId]/page.tsx"),
       ]),
 
+      // AI Dev Machines — explains what pidash CLI / daemon / runner is for and
+      // surfaces the install one-liner + an "add runner" entry point.
+      route(":workspaceSlug/ai-dev-machines", "./(all)/[workspaceSlug]/ai-dev-machines/page.tsx"),
+
       // ====================================================================
       // SETTINGS SECTION
       // ====================================================================

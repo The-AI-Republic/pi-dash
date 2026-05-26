@@ -300,6 +300,14 @@ export const WORKSPACE_SIDEBAR_STATIC_NAVIGATION_ITEMS: Record<string, IWorkspac
     highlight: (pathname: string, url: string) => pathname.includes(url),
     tooltipTranslationKey: "sidebar.tooltips.schedulers",
   },
+  "ai-dev-machines": {
+    key: "ai_dev_machines",
+    labelTranslationKey: "sidebar.ai_dev_machines",
+    href: `/ai-dev-machines/`,
+    access: [EUserWorkspaceRoles.ADMIN, EUserWorkspaceRoles.MEMBER],
+    highlight: (pathname: string, url: string) => pathname.includes(url),
+    tooltipTranslationKey: "sidebar.tooltips.ai_dev_machines",
+  },
 };
 
 export const WORKSPACE_SIDEBAR_STATIC_NAVIGATION_ITEMS_LINKS: IWorkspaceSidebarNavigationItem[] = [

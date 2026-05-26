@@ -27,6 +27,7 @@ export default {
     prompts: "Prompts",
     schedulers: "Schedulers",
     runners: "AI Agents",
+    ai_dev_machines: "AI Dev Machines",
     more: "More",
     community: "Community",
     tooltips: {
@@ -34,6 +35,7 @@ export default {
       runners: "Manage your AI Agent connectivities",
       prompts: "AI Prompt Templates",
       schedulers: "Recurring AI Agent jobs scoped to projects",
+      ai_dev_machines: "Install the pidash CLI and register dev machines as AI agent runners",
     },
   },
 
@@ -664,6 +666,43 @@ export default {
         network_access: "The runner wants to make a network call",
         other: "The runner is requesting approval",
       },
+    },
+  },
+
+  ai_dev_machines: {
+    title: "AI Dev Machines",
+    page_title: "{workspace} - AI Dev Machines",
+    intro: {
+      heading: "What is the pidash CLI, daemon, and runner?",
+      body: "Pi Dash hands AI agents (Claude Code, Codex, …) the keys to a real dev machine so they can pick up work items, write code, and open changes. Three pieces work together to make that possible:",
+      cli: {
+        title: "pidash CLI",
+        body: "The command-line tool installed on each dev machine. Handles authentication with the cloud, manages local config (`~/.pidash/config.toml`), and exposes commands for issues, comments, and runner management (`pidash connect`, `pidash runner ls`, `pidash doctor`, …).",
+      },
+      daemon: {
+        title: "pidash daemon",
+        body: "A long-running background process that maintains the WebSocket session with Pi Dash cloud, dispatches work to the configured agent, and streams approvals + heartbeats back. One daemon per machine.",
+      },
+      runner: {
+        title: "AI Agent runner",
+        body: "A cloud-side row that represents one agent instance bound to a project (and optionally a pod). Adding a runner mints a single-use enrollment token; running the token on the machine binds that machine as the host. A machine can host many runners.",
+      },
+    },
+    install: {
+      heading: "Install the pidash CLI",
+      body: "Run the one-liner on the machine that will host your AI agent. The installer downloads the latest signed binary, drops `pidash` on your PATH, and walks you through the device-code login.",
+      macos_linux_label: "macOS / Linux",
+      windows_label: "Windows (PowerShell)",
+      copy_command: "Copy command",
+      copied: "Copied!",
+      copy_failed: "Could not copy to clipboard",
+      prereq:
+        "Prerequisite: the agent CLI you plan to use (`codex` or `claude`) must already be installed and on PATH. Run `pidash doctor` after install to verify.",
+    },
+    add_runner: {
+      heading: "Add an AI Agent runner",
+      body: "Pair this workspace with a runner on your machine. We'll mint a one-time enrollment token and show the `pidash connect` command to paste on the host.",
+      cta: "Add runner",
     },
   },
 } as const;
