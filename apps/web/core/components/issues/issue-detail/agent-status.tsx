@@ -315,6 +315,9 @@ export function IssueAgentStatusPanel({ workspaceSlug, projectId, issueId, issue
   const activeRun = status?.active_run;
   const activeRunId = activeRun?.id;
   const activeRunStatus = activeRun?.status;
+  const shouldPollAgentStatus = Boolean(
+    ticker?.enabled || (activeRunStatus && ACTIVE_RUN_STATUSES.has(activeRunStatus))
+  );
   const view = useMemo(() => getAgentStatusView(issue, now, t), [issue, now, t]);
 
   useEffect(() => {
@@ -323,12 +326,13 @@ export function IssueAgentStatusPanel({ workspaceSlug, projectId, issueId, issue
   }, []);
 
   useEffect(() => {
-    if (!activeRunStatus || !ACTIVE_RUN_STATUSES.has(activeRunStatus)) return;
+    if (!shouldPollAgentStatus) return;
+    void issueOperations.fetch(workspaceSlug, projectId, issueId);
     const timer = window.setInterval(() => {
       void issueOperations.fetch(workspaceSlug, projectId, issueId);
     }, 15_000);
     return () => window.clearInterval(timer);
-  }, [activeRunId, activeRunStatus, issueId, issueOperations, projectId, workspaceSlug]);
+  }, [activeRunId, issueId, issueOperations, projectId, shouldPollAgentStatus, workspaceSlug]);
 
   if (!view) return null;
 

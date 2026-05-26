@@ -267,35 +267,32 @@ class RunnerSessionPollEndpoint(APIView):
             drain_for_runner_by_id,
         )
 
-        # Capture prior heartbeat so we can detect "stale -> fresh" recovery.
-        # When a runner has been silent past HEARTBEAT_GRACE, the matcher
-        # has been rejecting it for assignment; resuming polling makes it
-        # eligible again, but nothing else fires a drain — without this
-        # nudge, any QUEUED work in the pod sits until a new run is
-        # created or the runner reopens its session.
+        # Capture prior heartbeat/status so we can detect when this poll makes
+        # the runner eligible for queued work again. Stale recovery and
+        # busy->idle transitions otherwise leave QUEUED runs sitting until a
+        # new run is created or the runner reopens its session.
         now_ts = timezone.now()
         prior_hb = runner.last_heartbeat_at
+        prior_status = runner.status
         was_stale = prior_hb is None or (now_ts - prior_hb) > HEARTBEAT_GRACE
+        reports_busy = status_entry.get("status") == "busy"
+        became_available = prior_status == RunnerStatus.BUSY and not reports_busy
 
         Runner.objects.filter(pk=runner.id).update(
             last_heartbeat_at=now_ts,
-            status=(
-                RunnerStatus.BUSY
-                if status_entry.get("status") == "busy"
-                else RunnerStatus.ONLINE
-            ),
+            status=RunnerStatus.BUSY if reports_busy else RunnerStatus.ONLINE,
         )
-        if was_stale:
-            def _drain_recovered_runner(rid=runner.id):
+        if was_stale or became_available:
+            def _drain_available_runner(rid=runner.id):
                 try:
                     drain_for_runner_by_id(rid)
                 except Exception:
                     logger.exception(
-                        "drain_for_runner_by_id failed for recovered runner %s",
+                        "drain_for_runner_by_id failed for available runner %s",
                         rid,
                     )
 
-            transaction.on_commit(_drain_recovered_runner)
+            transaction.on_commit(_drain_available_runner)
         if status_entry:
             session_service.reap_stale_busy_runs(runner, status_entry)
             # Volatile observability snapshot — see

@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 # See the LICENSE file for details.
 
-"""Regression tests for the heartbeat-recovery drain trigger.
+"""Regression tests for runner poll drain triggers.
 
 The matcher rejects runners whose ``last_heartbeat_at`` is older than
 ``HEARTBEAT_GRACE`` (90 seconds). Prior to the fix, when a runner had
@@ -11,9 +11,13 @@ session, ``last_heartbeat_at`` was refreshed but **nothing triggered a
 drain** — queued runs in the pod sat indefinitely until either a new
 run was created or the runner opened a fresh session.
 
-The fix captures the prior heartbeat before the update and, on a
-stale→fresh transition, schedules ``drain_for_runner_by_id`` on commit.
-These tests guard against:
+The poll path also needs a drain when the daemon reports it has become
+idle after a busy run. Otherwise a ticker-created follow-up can land while
+the cloud still has the runner marked BUSY and then sit QUEUED forever.
+
+The fix captures prior heartbeat/status before the update and schedules
+``drain_for_runner_by_id`` on commit for stale→fresh and busy→online
+transitions. These tests guard against:
 
   * the drain trigger being silently removed
   * the trigger firing on every poll (regression: per-poll churn)
@@ -147,6 +151,46 @@ def test_drain_does_not_fire_on_fresh_heartbeat_poll(
             enrolled_runner.id,
             runner_session.id,
             runner_token,
+        )
+
+    assert resp.status_code == 200, resp.data
+    mock_drain.assert_not_called()
+
+
+@pytest.mark.unit
+def test_drain_fires_when_runner_reports_idle_after_busy(
+    db, api_client, enrolled_runner, runner_token, runner_session
+):
+    """Busy runner → idle poll → drain once for queued follow-up work."""
+    Runner.objects.filter(pk=enrolled_runner.id).update(status=RunnerStatus.BUSY)
+
+    with _patched_poll_dependencies() as mock_drain:
+        resp = _poll(
+            api_client,
+            enrolled_runner.id,
+            runner_session.id,
+            runner_token,
+            body={"status": {"status": "idle"}},
+        )
+
+    assert resp.status_code == 200, resp.data
+    mock_drain.assert_called_once_with(enrolled_runner.id)
+
+
+@pytest.mark.unit
+def test_drain_does_not_fire_while_runner_reports_busy(
+    db, api_client, enrolled_runner, runner_token, runner_session
+):
+    """Busy runner that is still busy must not be drained."""
+    Runner.objects.filter(pk=enrolled_runner.id).update(status=RunnerStatus.BUSY)
+
+    with _patched_poll_dependencies() as mock_drain:
+        resp = _poll(
+            api_client,
+            enrolled_runner.id,
+            runner_session.id,
+            runner_token,
+            body={"status": {"status": "busy"}},
         )
 
     assert resp.status_code == 200, resp.data
