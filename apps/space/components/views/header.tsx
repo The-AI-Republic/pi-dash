@@ -12,7 +12,7 @@ export function AuthHeader() {
   return (
     <div className="sticky top-0 flex w-full flex-shrink-0 items-center justify-between gap-6">
       <Link to="/">
-        <PiDashLockup height={20} width={20} className="text-primary" />
+        <PiDashLockup height={20} width={37} className="text-primary" />
       </Link>
     </div>
   );
