@@ -253,15 +253,40 @@ class RunnerSessionPollEndpoint(APIView):
 
         # 3. Update runner.last_heartbeat_at + reap stale busy runs.
         from pi_dash.runner.models import Runner
+        from pi_dash.runner.services.matcher import (
+            HEARTBEAT_GRACE,
+            drain_for_runner_by_id,
+        )
+
+        # Capture prior heartbeat so we can detect "stale -> fresh" recovery.
+        # When a runner has been silent past HEARTBEAT_GRACE, the matcher
+        # has been rejecting it for assignment; resuming polling makes it
+        # eligible again, but nothing else fires a drain — without this
+        # nudge, any QUEUED work in the pod sits until a new run is
+        # created or the runner reopens its session.
+        now_ts = timezone.now()
+        prior_hb = runner.last_heartbeat_at
+        was_stale = prior_hb is None or (now_ts - prior_hb) > HEARTBEAT_GRACE
 
         Runner.objects.filter(pk=runner.id).update(
-            last_heartbeat_at=timezone.now(),
+            last_heartbeat_at=now_ts,
             status=(
                 RunnerStatus.BUSY
                 if status_entry.get("status") == "busy"
                 else RunnerStatus.ONLINE
             ),
         )
+        if was_stale:
+            def _drain_recovered_runner(rid=runner.id):
+                try:
+                    drain_for_runner_by_id(rid)
+                except Exception:
+                    logger.exception(
+                        "drain_for_runner_by_id failed for recovered runner %s",
+                        rid,
+                    )
+
+            transaction.on_commit(_drain_recovered_runner)
         if status_entry:
             session_service.reap_stale_busy_runs(runner, status_entry)
             # Volatile observability snapshot — see
