@@ -14,6 +14,8 @@ import { GROUPED_PROFILE_SETTINGS, PROFILE_SETTINGS_CATEGORIES } from "@pi-dash/
 import { useTranslation } from "@pi-dash/i18n";
 import type { ISvgIcons } from "@pi-dash/propel/icons";
 import type { TProfileSettingsTabs } from "@pi-dash/types";
+// hooks
+import { useInstance } from "@/hooks/store/use-instance";
 // local imports
 import { SettingsSidebarItem } from "../../sidebar/item";
 import { ProfileSettingsSidebarWorkspaceOptions } from "./workspace-options";
@@ -38,13 +40,21 @@ export const ProfileSettingsSidebarItemCategories = observer(function ProfileSet
   const { activeTab, updateActiveTab } = props;
   // params
   const { profileTabId } = useParams();
+  // store
+  const { config } = useInstance();
   // translation
   const { t } = useTranslation();
+  // Password management is a self-service action; on managed/hosted
+  // deployments the credential lifecycle is owned by the upstream identity
+  // provider, so the in-app option is only shown on self-managed instances.
+  const canChangePassword = config?.is_self_managed ?? false;
 
   return (
     <div className="mt-4 flex flex-col gap-y-4">
       {PROFILE_SETTINGS_CATEGORIES.map((category) => {
-        const categoryItems = GROUPED_PROFILE_SETTINGS[category];
+        const categoryItems = GROUPED_PROFILE_SETTINGS[category].filter(
+          (item) => canChangePassword || item.key !== "security"
+        );
 
         if (categoryItems.length === 0) return null;
 

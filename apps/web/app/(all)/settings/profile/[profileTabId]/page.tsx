@@ -4,6 +4,7 @@
  * See the LICENSE file for details.
  */
 
+import { useEffect } from "react";
 import { observer } from "mobx-react";
 // pi dash imports
 import { PROFILE_SETTINGS_TABS } from "@pi-dash/constants";
@@ -15,6 +16,7 @@ import { PageHead } from "@/components/core/page-title";
 import { ProfileSettingsContent } from "@/components/settings/profile/content";
 import { ProfileSettingsSidebarRoot } from "@/components/settings/profile/sidebar";
 // hooks
+import { useInstance } from "@/hooks/store/use-instance";
 import { useUser } from "@/hooks/store/user";
 import { useAppRouter } from "@/hooks/use-app-router";
 // local imports
@@ -26,12 +28,21 @@ function ProfileSettingsPage(props: Route.ComponentProps) {
   const router = useAppRouter();
   // store hooks
   const { data: currentUser } = useUser();
+  const { config } = useInstance();
   // translation
   const { t } = useTranslation();
   // derived values
   const isAValidTab = PROFILE_SETTINGS_TABS.includes(profileTabId as TProfileSettingsTabs);
+  // Password management is owned by the upstream IdP on hosted deployments;
+  // the security tab is hidden in the sidebar there, but a direct URL nav
+  // would still load the change-password form, so we redirect away.
+  const isSecurityTabBlocked = profileTabId === "security" && config?.is_self_managed === false;
 
-  if (!currentUser || !isAValidTab)
+  useEffect(() => {
+    if (isSecurityTabBlocked) router.replace("/settings/profile/general");
+  }, [isSecurityTabBlocked, router]);
+
+  if (!currentUser || !isAValidTab || isSecurityTabBlocked)
     return (
       <div className="grid size-full place-items-center px-4">
         <LogoSpinner />
