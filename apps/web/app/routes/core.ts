@@ -119,6 +119,12 @@ export const coreRoutes: RouteConfigEntry[] = [
           route(":workspaceSlug/schedulers", "./(all)/[workspaceSlug]/schedulers/page.tsx"),
         ]),
 
+        // AI Dev Machines — explains what pidash CLI / daemon / runner is for and
+        // surfaces the install one-liner + an "add runner" entry point. Lives inside
+        // the (projects) layout so it inherits the workspace sidebar shell, matching
+        // sibling pages like Prompts and Schedulers.
+        route(":workspaceSlug/ai-dev-machines", "./(all)/[workspaceSlug]/ai-dev-machines/page.tsx"),
+
         // Workspace Views
         layout("./(all)/[workspaceSlug]/(projects)/workspace-views/layout.tsx", [
           route(":workspaceSlug/workspace-views", "./(all)/[workspaceSlug]/(projects)/workspace-views/page.tsx"),
@@ -293,10 +299,6 @@ export const coreRoutes: RouteConfigEntry[] = [
         route(":workspaceSlug/runners/approvals", "./(all)/[workspaceSlug]/runners/approvals/page.tsx"),
         route(":workspaceSlug/runners/chat/:runnerId", "./(all)/[workspaceSlug]/runners/chat/[runnerId]/page.tsx"),
       ]),
-
-      // AI Dev Machines — explains what pidash CLI / daemon / runner is for and
-      // surfaces the install one-liner + an "add runner" entry point.
-      route(":workspaceSlug/ai-dev-machines", "./(all)/[workspaceSlug]/ai-dev-machines/page.tsx"),
 
       // ====================================================================
       // SETTINGS SECTION
