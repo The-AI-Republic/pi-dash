@@ -130,22 +130,22 @@ This path is kept as a fallback; the device-code flow above is the recommended p
 The toggle lives in the General tab's **Daemon settings** card (`pidash tui` → `auto_update`). Default is **on**; press Enter to flip, then `[w]` to save. With auto-update off, the runner instead surfaces a yellow `⚠ Update v0.1.x available` advisory in the Connection card and on `pidash status`, and you apply updates manually:
 
 ```bash
-pidash update              # swap binary; tells you to run pidash restart
-pidash update --check      # report whether an update is available
 pidash update --restart    # swap and restart the daemon in one shot
+pidash update              # swap binary only; apply on the next restart
+pidash update --check      # report whether an update is available
 ```
 
 `pidash update` only works for binaries installed via cargo-dist installers such as `pidash-installer.sh`, `pidash-installer.ps1`, or the Windows MSI (it reads the cargo-dist install receipt). Source builds, zip-only installs, and `cargo install`'d binaries don't have a receipt and get a clear "reinstall via the installer if you want self-update" error.
 
 ### What the advisory states mean
 
-| State                                                     | TUI / `pidash status`                                  |
-| --------------------------------------------------------- | ------------------------------------------------------ |
-| Running version ≥ `latest_announced` and ≥ `min_required` | nothing shown                                          |
-| Newer `latest_announced`, swap already on disk            | yellow `⚠ Restart to apply v0.1.x`                     |
-| Newer `latest_announced`, auto-update on, swap pending    | yellow `⚠ Update v0.1.x pending swap`                  |
-| Newer `latest_announced`, auto-update off                 | yellow `⚠ Update v0.1.x available — run pidash update` |
-| Running version below `min_required` (cloud-set floor)    | red `⛔ Update required: cloud floor v0.1.x`           |
+| State                                                     | TUI / `pidash status`                                            |
+| --------------------------------------------------------- | ---------------------------------------------------------------- |
+| Running version ≥ `latest_announced` and ≥ `min_required` | nothing shown                                                    |
+| Newer `latest_announced`, swap already on disk            | yellow `⚠ Restart to apply v0.1.x`                               |
+| Newer `latest_announced`, auto-update on, swap pending    | yellow `⚠ Update v0.1.x pending swap`                            |
+| Newer `latest_announced`, auto-update off                 | yellow `⚠ Update v0.1.x available — run pidash update --restart` |
+| Running version below `min_required` (cloud-set floor)    | red `⛔ Update required: cloud floor v0.1.x`                     |
 
 `min_required` is advisory in the current implementation — the daemon does not refuse new tasks below the floor. The red banner is the user-facing signal that they should act before the cloud bumps the wire-protocol floor and disconnects them.
 
@@ -158,7 +158,7 @@ The Pi Dash backend reads two optional environment variables and folds them into
 | `LATEST_RUNNER_VERSION` | Drives the yellow "update available" advisory and triggers auto-swap on opted-in runners. |
 | `MIN_RUNNER_VERSION`    | Drives the red "update required" advisory.                                                |
 
-Set both after cutting a runner release (`RELEASING.md` walks through tagging). Leave them unset to skip the announcement.
+Stable runner releases set `LATEST_RUNNER_VERSION` in Cloud SSM automatically (`RELEASING.md` walks through tagging). Set `MIN_RUNNER_VERSION` manually only when you need to force a floor. Leave both unset to skip the announcement in non-Cloud environments.
 
 ## Design docs
 

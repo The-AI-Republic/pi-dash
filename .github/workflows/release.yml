@@ -290,6 +290,45 @@ jobs:
           sed -i "s|/releases/latest/download/pidash-installer.ps1|/releases/download/${{ needs.plan.outputs.tag }}/pidash-installer.ps1|" runner/install.ps1
           gh release upload "${{ needs.plan.outputs.tag }}" runner/install.sh runner/install.ps1 --clobber
 
+  publish-runner-version-advisory:
+    # Publish the Cloud advisory source of truth only. Do not restart EC2,
+    # redeploy the API, or mutate MIN_RUNNER_VERSION from a normal release.
+    needs:
+      - plan
+      - host
+    if: ${{ always() && needs.host.result == 'success' && fromJson(needs.host.outputs.val).announcement_is_prerelease == false }}
+    runs-on: "ubuntu-22.04"
+    env:
+      AWS_REGION: us-west-2
+      RELEASE_TAG: ${{ needs.plan.outputs.tag }}
+    steps:
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Publish latest runner version to Cloud SSM
+        shell: bash
+        run: |
+          set -euo pipefail
+          VERSION="${RELEASE_TAG#pidash-v}"
+          if [ -z "$VERSION" ] || [ "$VERSION" = "$RELEASE_TAG" ]; then
+            echo "::error::expected runner tag shaped pidash-vX.Y.Z, got '$RELEASE_TAG'"
+            exit 1
+          fi
+
+          for target in test prod; do
+            aws ssm put-parameter \
+              --region "$AWS_REGION" \
+              --name "/pidash/config/${target}/LATEST_RUNNER_VERSION" \
+              --type String \
+              --value "$VERSION" \
+              --overwrite
+            echo "Published LATEST_RUNNER_VERSION=$VERSION to /pidash/config/${target}/"
+          done
+
   announce:
     needs:
       - plan

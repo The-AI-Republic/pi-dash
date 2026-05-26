@@ -49,7 +49,7 @@ pub async fn run(args: Args, paths: &Paths) -> Result<()> {
         SwapOutcome::UpdateAvailable { new_version } => {
             // --check path: print and exit without touching disk.
             println!(
-                "update available: v{new_version} (running v{RUNNER_VERSION}). run `pidash update` to install."
+                "update available: v{new_version} (running v{RUNNER_VERSION}). run `pidash update --restart` to install and apply now, or `pidash update` to install without restarting."
             );
         }
         SwapOutcome::Swapped {
@@ -74,7 +74,9 @@ pub async fn run(args: Args, paths: &Paths) -> Result<()> {
                 }
                 println!("daemon restarted on the new binary ({}).", outcome.summary);
             } else {
-                println!("run `pidash restart` to apply (the running daemon is still on v{old}).");
+                println!(
+                    "run `pidash restart` to apply now, or let the next reboot/service restart pick it up (the running daemon is still on v{old})."
+                );
             }
         }
     }

@@ -54,13 +54,15 @@ The Django backend reads two env vars and folds them into every `welcome` sessio
 | `LATEST_RUNNER_VERSION` | Drives the yellow "update available" advisory. With auto-update on (default), triggers in-place binary swap. |
 | `MIN_RUNNER_VERSION`    | Drives the red "update required" advisory.                                                                   |
 
-After cutting a runner release, set `LATEST_RUNNER_VERSION` on the cloud so opted-in runners auto-update. Leave `MIN_RUNNER_VERSION` alone unless you're forcing a floor (e.g. shedding an EOL wire version).
+For stable runner releases, `.github/workflows/release.yml` automatically writes the tag version to `/pidash/config/test/LATEST_RUNNER_VERSION` and `/pidash/config/prod/LATEST_RUNNER_VERSION` in SSM. It does **not** restart or redeploy the API; running containers pick up the value on their next normal restart/deploy. Leave `MIN_RUNNER_VERSION` alone unless you're forcing a floor (e.g. shedding an EOL wire version). Runners with auto-update disabled see a `pidash update --restart` hint so they can install and apply the release in one command.
 
-Leave both unset to skip the announcement entirely.
+For self-hosted or non-Cloud environments, leave both unset to skip the announcement entirely.
 
 ### In-place updates
 
 `pidash` swaps its on-disk binary while running; the **running process is never disturbed**. The new binary takes effect on the next natural restart (`pidash restart`, host reboot, service-manager respawn after crash).
+
+`pidash update --restart` swaps the binary and restarts the daemon in one command. `pidash update` without `--restart` only swaps the binary.
 
 `pidash update` only works for installs done via cargo-dist installers (they leave a receipt). Source builds and `cargo install` builds get a clear "reinstall via the installer if you want self-update" error.
 

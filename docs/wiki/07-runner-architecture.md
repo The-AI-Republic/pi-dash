@@ -119,7 +119,7 @@ On Windows, everything goes under the user profile and IPC is via a named pipe.
 
 The cloud's `welcome` frame can include `latest_runner_version` and `min_runner_version` (driven by the cloud's `LATEST_RUNNER_VERSION` / `MIN_RUNNER_VERSION` env vars). With auto-update enabled, the daemon swaps the on-disk `pidash` binary in place; the **running process is never disturbed** — it keeps its loaded copy until the next natural restart (`pidash restart`, host reboot, service-manager respawn).
 
-`pidash update` only works for installs from cargo-dist installers (`pidash-installer.sh`, `pidash-installer.ps1`, MSI) — those leave an install receipt the updater reads. Source builds and `cargo install` builds get a clear "reinstall via the installer if you want self-update" error. See [15 — Releasing](./15-releasing.md).
+`pidash update --restart` is the one-command manual path: swap the binary, restart the daemon, and wait for it to reconnect. `pidash update` without `--restart` only swaps the binary and applies on the next natural restart. Both paths only work for installs from cargo-dist installers (`pidash-installer.sh`, `pidash-installer.ps1`, MSI) — those leave an install receipt the updater reads. Source builds and `cargo install` builds get a clear "reinstall via the installer if you want self-update" error. See [15 — Releasing](./15-releasing.md).
 
 ## Where to read next
 
