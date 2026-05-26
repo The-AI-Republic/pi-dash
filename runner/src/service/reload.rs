@@ -17,9 +17,10 @@
 //! immediately knows their edit broke the daemon, instead of discovering
 //! it later via a silent background failure.
 //!
-//! Time budget: 5 s for IPC + an additional 5 s for cloud-connected
-//! (10 s total worst case). The first stage is usually a few hundred ms on
-//! Linux/macOS; the cloud handshake is what typically eats seconds.
+//! Time budget: 5 s for IPC + an additional 30 s for cloud-connected
+//! (35 s total worst case). The first stage is usually a few hundred ms on
+//! Linux/macOS; the cloud handshake is what typically eats seconds after
+//! package swaps, service-manager restarts, DNS, or cloud deploys.
 
 use std::time::{Duration, Instant};
 
@@ -28,7 +29,7 @@ use crate::ipc::protocol::{Request, Response};
 use crate::util::paths::Paths;
 
 const IPC_TIMEOUT: Duration = Duration::from_secs(5);
-const CLOUD_TIMEOUT: Duration = Duration::from_secs(5);
+const CLOUD_TIMEOUT: Duration = Duration::from_secs(30);
 const POLL_INTERVAL: Duration = Duration::from_millis(250);
 
 /// Outcome of a reload attempt. `ok = true` means the daemon is up and

@@ -129,7 +129,6 @@ class RunnerSessionOpenEndpoint(APIView):
             )
 
             session_service.apply_hello(runner, body)
-            session_service.mark_runner_online(runner.id)
             released_chats = chat_service.release_active_chats_for_runner(
                 runner,
                 "runner opened a new session before the prior chat turn completed",
@@ -157,18 +156,10 @@ class RunnerSessionOpenEndpoint(APIView):
             new_session_id=str(new_sid),
         )
 
-        # 8. Drain queued runs into the live stream.
-        try:
-            from pi_dash.runner.services.matcher import drain_for_runner_by_id
-
-            drain_for_runner_by_id(runner.id)
-        except Exception:
-            logger.exception("drain_for_runner_by_id failed for %s", runner.id)
-
-        # 9. Drain offline buffer into live stream.
+        # 8. Drain offline buffer into live stream.
         outbox.drain_offline_into_live(runner.id)
 
-        # 10. Resume in-flight run, if any.
+        # 9. Resume in-flight run, if any.
         resume_ack = None
         in_flight = body.get("in_flight_run")
         if in_flight:
@@ -286,6 +277,21 @@ class RunnerSessionPollEndpoint(APIView):
                     "upsert_runner_live_state failed for runner %s",
                     runner.id,
                 )
+
+        # A session-open alone is not proof that the daemon is actually
+        # polling. Only dispatch work after this first poll has updated the
+        # heartbeat; otherwise a daemon that opens a session and immediately
+        # exits can pull pinned work into a session that will never read it.
+        if (
+            status_entry.get("status") != "busy"
+            and not status_entry.get("in_flight_run")
+        ):
+            try:
+                from pi_dash.runner.services.matcher import drain_for_runner_by_id
+
+                drain_for_runner_by_id(runner.id)
+            except Exception:
+                logger.exception("drain_for_runner_by_id failed for %s", runner.id)
 
         # 5. XACK explicit ids.
         if ack_ids:

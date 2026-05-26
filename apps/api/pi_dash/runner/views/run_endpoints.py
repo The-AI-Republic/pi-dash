@@ -96,6 +96,18 @@ class _RunEndpointBase(APIView):
             )
         return run, None
 
+    def _lock_non_terminal(
+        self, run: AgentRun
+    ) -> tuple[Optional[AgentRun], Optional[Response]]:
+        locked = AgentRun.objects.select_for_update().filter(pk=run.pk).first()
+        if locked is None:
+            return None, Response(
+                {"error": "run_not_found"}, status=status.HTTP_404_NOT_FOUND
+            )
+        if locked.status in run_lifecycle.TERMINAL_RUN_STATUSES:
+            return locked, Response({"ok": True, "terminal": True})
+        return locked, None
+
 
 class RunAcceptEndpoint(_RunEndpointBase):
     def post(self, request, run_id):
@@ -105,7 +117,12 @@ class RunAcceptEndpoint(_RunEndpointBase):
         with transaction.atomic():
             if not _record_dedupe(run, _idempotency_key(request)):
                 return Response({"ok": True, "duplicate": True})
-            AgentRun.objects.filter(pk=run.pk).update(status=AgentRunStatus.RUNNING)
+            locked, closed = self._lock_non_terminal(run)
+            if closed:
+                return closed
+            AgentRun.objects.filter(pk=locked.pk).update(
+                status=AgentRunStatus.RUNNING
+            )
         return Response({"ok": True})
 
 
@@ -117,8 +134,11 @@ class RunStartedEndpoint(_RunEndpointBase):
         with transaction.atomic():
             if not _record_dedupe(run, _idempotency_key(request)):
                 return Response({"ok": True, "duplicate": True})
+            locked, closed = self._lock_non_terminal(run)
+            if closed:
+                return closed
             thread_id = (request.data.get("thread_id") or "")[:128]
-            AgentRun.objects.filter(pk=run.pk).update(
+            AgentRun.objects.filter(pk=locked.pk).update(
                 status=AgentRunStatus.RUNNING,
                 thread_id=thread_id,
                 started_at=timezone.now(),
@@ -178,6 +198,9 @@ class RunApprovalEndpoint(_RunEndpointBase):
         with transaction.atomic():
             if not _record_dedupe(run, _idempotency_key(request)):
                 return Response({"ok": True, "duplicate": True})
+            locked, closed = self._lock_non_terminal(run)
+            if closed:
+                return closed
             approval_id = request.data.get("approval_id")
             kind_raw = (request.data.get("kind") or "").lower()
             kind = {
@@ -188,7 +211,7 @@ class RunApprovalEndpoint(_RunEndpointBase):
             ApprovalRequest.objects.update_or_create(
                 id=approval_id,
                 defaults={
-                    "agent_run": run,
+                    "agent_run": locked,
                     "kind": kind,
                     "payload": request.data.get("payload") or {},
                     "reason": request.data.get("reason") or "",
@@ -196,7 +219,7 @@ class RunApprovalEndpoint(_RunEndpointBase):
                     "expires_at": request.data.get("expires_at"),
                 },
             )
-            AgentRun.objects.filter(pk=run.pk).update(
+            AgentRun.objects.filter(pk=locked.pk).update(
                 status=AgentRunStatus.AWAITING_APPROVAL
             )
         return Response({"ok": True})
@@ -210,7 +233,10 @@ class RunAwaitingReauthEndpoint(_RunEndpointBase):
         with transaction.atomic():
             if not _record_dedupe(run, _idempotency_key(request)):
                 return Response({"ok": True, "duplicate": True})
-            AgentRun.objects.filter(pk=run.pk).update(
+            locked, closed = self._lock_non_terminal(run)
+            if closed:
+                return closed
+            AgentRun.objects.filter(pk=locked.pk).update(
                 status=AgentRunStatus.AWAITING_REAUTH
             )
         return Response({"ok": True})
@@ -243,6 +269,9 @@ class RunPausedEndpoint(_RunEndpointBase):
         with transaction.atomic():
             if not _record_dedupe(run, _idempotency_key(request)):
                 return Response({"ok": True, "duplicate": True})
+            _, closed = self._lock_non_terminal(run)
+            if closed:
+                return closed
             runner = getattr(request, "auth_runner", None)
             if runner is None:
                 return Response({"ok": True})
@@ -270,6 +299,9 @@ class RunFailedEndpoint(_RunEndpointBase):
             # fail-stop instead of falling back into the pod's queue with
             # a fresh session.
             if (request.data.get("reason") or "") == "resume_unavailable":
+                _, closed = self._lock_non_terminal(run)
+                if closed:
+                    return closed
                 run_lifecycle.apply_run_resume_unavailable(runner, run.id)
                 return Response({"ok": True, "rescheduled": True})
             run_lifecycle.finalize_run_terminal(
@@ -305,7 +337,12 @@ class RunResumedEndpoint(_RunEndpointBase):
         with transaction.atomic():
             if not _record_dedupe(run, _idempotency_key(request)):
                 return Response({"ok": True, "duplicate": True})
-            AgentRun.objects.filter(pk=run.pk).update(status=AgentRunStatus.RUNNING)
+            locked, closed = self._lock_non_terminal(run)
+            if closed:
+                return closed
+            AgentRun.objects.filter(pk=locked.pk).update(
+                status=AgentRunStatus.RUNNING
+            )
         return Response({"ok": True})
 
 

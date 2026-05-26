@@ -1,6 +1,9 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use std::sync::Arc;
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
 use tokio::sync::{Mutex, watch};
 use uuid::Uuid;
 
@@ -8,6 +11,8 @@ use crate::cloud::protocol::RunnerStatus;
 use crate::config::schema::Config;
 use crate::daemon::observability::TokenUsage;
 use crate::ipc::protocol::{CurrentRunSummary, RunnerStatusSnapshot};
+
+static AUTO_SWAP_IN_PROGRESS: AtomicBool = AtomicBool::new(false);
 
 /// Volatile observability fields that ride on `PollStatus`. Doubles as
 /// the in-memory storage shape (held under one `Mutex` inside `Inner`)
@@ -92,12 +97,6 @@ struct Inner {
     /// the IPC advisory shows "restart to apply" instead of "update
     /// available" because the new bytes are already on disk.
     on_disk_version: Mutex<Option<String>>,
-    /// Guard against re-entrant or overlapping auto-swap attempts.
-    /// Set atomically before kicking off `cli::update::check_or_swap`
-    /// from the welcome handler; cleared in the spawned task's `finally`
-    /// arm regardless of swap outcome. Plain `AtomicBool` is fine — the
-    /// guard never participates in cross-await borrow lifetimes.
-    swap_in_progress: std::sync::atomic::AtomicBool,
     /// Per-active-run observability snapshot. One `Mutex` over the whole
     /// struct (rather than seven `Mutex<Option<T>>` fields) so that:
     ///   1. `reset_run_snapshot()` is a single assignment — adding a
@@ -141,7 +140,6 @@ impl StateHandle {
                 runner_id: Mutex::new(None),
                 update_advisory: Mutex::new((None, None)),
                 on_disk_version: Mutex::new(None),
-                swap_in_progress: std::sync::atomic::AtomicBool::new(false),
                 run_snapshot: Mutex::new(ObservabilitySnapshot::default()),
             }),
             tx_tick,
@@ -402,22 +400,19 @@ impl StateHandle {
         self.inner.cfg.lock().await.daemon.auto_update
     }
 
-    /// Attempt to claim the auto-swap guard. Returns true if we won
-    /// the race (caller proceeds with the swap), false if another
-    /// swap is already in flight.
+    /// Attempt to claim the process-wide auto-swap guard. Returns true if
+    /// we won the race, false if any runner loop in this daemon already has
+    /// a swap in flight.
     pub fn try_claim_swap(&self) -> bool {
-        use std::sync::atomic::Ordering;
-        self.inner
-            .swap_in_progress
+        AUTO_SWAP_IN_PROGRESS
             .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
             .is_ok()
     }
 
-    /// Release the swap guard. Always paired with a prior successful
-    /// `try_claim_swap`.
+    /// Release the process-wide swap guard. Always paired with a prior
+    /// successful `try_claim_swap`.
     pub fn release_swap(&self) {
-        use std::sync::atomic::Ordering;
-        self.inner.swap_in_progress.store(false, Ordering::Release);
+        AUTO_SWAP_IN_PROGRESS.store(false, Ordering::Release);
     }
 
     /// Record the on-disk version after a successful swap.
