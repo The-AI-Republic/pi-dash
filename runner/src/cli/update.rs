@@ -170,6 +170,7 @@ impl UpdateLock {
         let lock_path = paths.data_dir.join(".update.lock");
         let file = OpenOptions::new()
             .create(true)
+            .truncate(false)
             .read(true)
             .write(true)
             .open(&lock_path)

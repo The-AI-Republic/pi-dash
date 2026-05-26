@@ -276,17 +276,6 @@ class RunnerSessionPollEndpoint(APIView):
                 else RunnerStatus.ONLINE
             ),
         )
-        if was_stale:
-            def _drain_recovered_runner(rid=runner.id):
-                try:
-                    drain_for_runner_by_id(rid)
-                except Exception:
-                    logger.exception(
-                        "drain_for_runner_by_id failed for recovered runner %s",
-                        rid,
-                    )
-
-            transaction.on_commit(_drain_recovered_runner)
         if status_entry:
             session_service.reap_stale_busy_runs(runner, status_entry)
             # Volatile observability snapshot — see
@@ -303,21 +292,6 @@ class RunnerSessionPollEndpoint(APIView):
                     runner.id,
                 )
 
-        # A session-open alone is not proof that the daemon is actually
-        # polling. Only dispatch work after this first poll has updated the
-        # heartbeat; otherwise a daemon that opens a session and immediately
-        # exits can pull pinned work into a session that will never read it.
-        if (
-            status_entry.get("status") != "busy"
-            and not status_entry.get("in_flight_run")
-        ):
-            try:
-                from pi_dash.runner.services.matcher import drain_for_runner_by_id
-
-                drain_for_runner_by_id(runner.id)
-            except Exception:
-                logger.exception("drain_for_runner_by_id failed for %s", runner.id)
-
         # 5. XACK explicit ids.
         if ack_ids:
             outbox.ack_for_session(runner.id, ack_ids)
@@ -325,6 +299,28 @@ class RunnerSessionPollEndpoint(APIView):
         # 6. XREADGROUP — first poll uses 0 (replay PEL), subsequent
         # polls use >.
         use_zero = not outbox.is_pel_drained(sid)
+
+        # A session-open alone is not proof that the daemon is actually
+        # polling. Drain on either stale-heartbeat recovery or the first
+        # real poll for this session, after the heartbeat/status update
+        # makes the idle runner assignable. Keep this as one trigger so a
+        # first poll with no prior heartbeat does not double-dispatch.
+        if (
+            (was_stale or use_zero)
+            and status_entry.get("status") != "busy"
+            and not status_entry.get("in_flight_run")
+        ):
+            def _drain_poll_ready_runner(rid=runner.id):
+                try:
+                    drain_for_runner_by_id(rid)
+                except Exception:
+                    logger.exception(
+                        "drain_for_runner_by_id failed for poll-ready runner %s",
+                        rid,
+                    )
+
+            transaction.on_commit(_drain_poll_ready_runner)
+
         block_ms = max(
             1, settings.LONG_POLL_INTERVAL_SECS * 1000
         ) if not use_zero else 0

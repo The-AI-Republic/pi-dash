@@ -110,6 +110,7 @@ def test_session_open_waits_for_first_poll_before_dispatch(
         patch("pi_dash.runner.views.sessions.outbox.is_pel_drained", return_value=False),
         patch("pi_dash.runner.views.sessions.outbox.read_for_session", return_value=[]),
         patch("pi_dash.runner.views.sessions.outbox.mark_pel_drained"),
+        patch("django.db.transaction.on_commit", side_effect=lambda fn, **kw: fn()),
     ):
         poll_resp = api_client.post(
             f"/api/v1/runner/runners/{enrolled_runner.id}/sessions/{sid}/poll",
