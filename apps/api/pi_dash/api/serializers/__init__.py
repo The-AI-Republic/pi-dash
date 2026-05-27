@@ -23,6 +23,8 @@ from .issue import (
     IssueWorkpadSerializer,
     IssueAttachmentUploadSerializer,
     IssueSearchSerializer,
+    IssueAdvancedSearchResultSerializer,
+    IssueAdvancedSearchResponseSerializer,
     IssueCommentCreateSerializer,
     IssueLinkCreateSerializer,
     IssueLinkUpdateSerializer,

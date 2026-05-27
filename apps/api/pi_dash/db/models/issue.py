@@ -8,6 +8,8 @@ from uuid import uuid4
 # Django imports
 from django.conf import settings
 from django.contrib.postgres.fields import ArrayField
+from django.contrib.postgres.indexes import GinIndex
+from django.contrib.postgres.search import SearchVector
 from django.core.exceptions import ValidationError
 from django.core.validators import MaxValueValidator, MinValueValidator, RegexValidator
 from django.db import models, transaction, connection
@@ -200,6 +202,17 @@ class Issue(ProjectBaseModel):
         verbose_name_plural = "Issues"
         db_table = "issues"
         ordering = ("-created_at",)
+        indexes = [
+            # Backs `SearchVector('name', 'description_stripped',
+            # config='english')` lookups in pi_dash.search.issue and the
+            # GlobalSearch / SearchEndpoint issue branches. Index
+            # expression must stay byte-for-byte identical to the runtime
+            # expression for the planner to use it.
+            GinIndex(
+                SearchVector("name", "description_stripped", config="english"),
+                name="issues_fts_idx",
+            ),
+        ]
 
     def save(self, *args, **kwargs):
         # Auto-resolve assigned_pod to the *project's* default pod for new
@@ -570,6 +583,15 @@ class IssueComment(ChangeTrackerMixin, ProjectBaseModel):
         verbose_name_plural = "Issue Comments"
         db_table = "issue_comments"
         ordering = ("-created_at",)
+        indexes = [
+            # Backs the comment-side OR in pi_dash.search.issue — agents
+            # often need to recover *why* (resolution discussion lives in
+            # comments) not just *what* (title/description).
+            GinIndex(
+                SearchVector("comment_stripped", config="english"),
+                name="issue_comments_fts_idx",
+            ),
+        ]
 
     def __str__(self):
         """Return issue of the comment"""

@@ -18,6 +18,7 @@ from pi_dash.api.views import (
     IssueAttachmentDetailAPIEndpoint,
     WorkspaceIssueAPIEndpoint,
     IssueSearchEndpoint,
+    IssueAdvancedSearchEndpoint,
     IssueRelationListCreateAPIEndpoint,
     IssueWorkpadAPIEndpoint,
 )
@@ -92,6 +93,11 @@ new_url_patterns = [
         "workspaces/<str:slug>/work-items/search/",
         IssueSearchEndpoint.as_view(http_method_names=["get"]),
         name="work-item-search",
+    ),
+    path(
+        "workspaces/<str:slug>/work-items/search/advanced/",
+        IssueAdvancedSearchEndpoint.as_view(http_method_names=["get"]),
+        name="work-item-search-advanced",
     ),
     path(
         "workspaces/<str:slug>/work-items/<str:project_identifier>-<str:issue_identifier>/",

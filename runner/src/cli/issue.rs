@@ -41,6 +41,11 @@ pub enum IssueCommand {
     Patch(PatchArgs),
     /// Move a work item into another project in the same workspace.
     Move(MoveArgs),
+    /// Full-text search across work item titles, descriptions, and
+    /// comments. Returns matches with snippet, state, project, timestamps,
+    /// and a relevance rank. Use it to recover historical context before
+    /// starting similar work.
+    Search(SearchArgs),
 }
 
 #[derive(Debug, Args)]
@@ -117,6 +122,37 @@ pub struct MoveArgs {
     pub project: String,
 }
 
+#[derive(Debug, Args)]
+pub struct SearchArgs {
+    /// Search pattern. Supports websearch syntax: quoted phrases, `OR`,
+    /// `-exclude`. Stem-aware (e.g. `color` finds `colors`, `colored`).
+    pub query: String,
+
+    /// Scope to a single project (slug like `ENG` or project UUID).
+    /// Omit to search the whole workspace.
+    #[arg(long)]
+    pub project: Option<String>,
+
+    /// Filter by status: `open` (in progress), `closed` (completed or
+    /// cancelled), or `all` (default).
+    #[arg(long, default_value = "all")]
+    pub status: String,
+
+    /// Lower bound on `updated_at`, ISO 8601 (e.g. `2025-01-01T00:00:00Z`).
+    #[arg(long)]
+    pub since: Option<String>,
+
+    /// Max results to return. Server default is 10, hard cap is 50 —
+    /// tuned for agent context windows.
+    #[arg(long)]
+    pub limit: Option<u32>,
+
+    /// Sort order: `rank` (relevance, default when a query is given),
+    /// `created` / `-created`, `updated` / `-updated`.
+    #[arg(long)]
+    pub sort: Option<String>,
+}
+
 pub async fn run(args: IssueArgs, paths: &crate::util::paths::Paths) -> i32 {
     let env = match CliEnv::resolve(paths) {
         Ok(e) => e,
@@ -133,6 +169,7 @@ pub async fn run(args: IssueArgs, paths: &crate::util::paths::Paths) -> i32 {
         IssueCommand::List(a) => cmd_list(&client, a).await,
         IssueCommand::Patch(p) => cmd_patch(&client, p).await,
         IssueCommand::Move(m) => cmd_move(&client, m).await,
+        IssueCommand::Search(s) => cmd_search(&client, s).await,
     };
     match result {
         Ok(()) => 0,
@@ -316,6 +353,44 @@ async fn cmd_patch(client: &ApiClient, args: PatchArgs) -> Result<(), CliError> 
         client.env.workspace_slug, issue.project_id, issue.id
     );
     let resp = client.patch(&path, &Value::Object(body)).await?;
+    println!(
+        "{}",
+        serde_json::to_string(&resp).expect("serialize JSON value")
+    );
+    Ok(())
+}
+
+async fn cmd_search(client: &ApiClient, args: SearchArgs) -> Result<(), CliError> {
+    let q = args.query.trim();
+    if q.is_empty() {
+        return Err(CliError::new(EXIT_INVALID, "search query must not be empty"));
+    }
+
+    let mut params: Vec<(&str, String)> = vec![("q", q.to_string())];
+    if let Some(p) = args.project.as_ref().map(|s| s.trim()).filter(|s| !s.is_empty()) {
+        params.push(("project", p.to_string()));
+    }
+    // Send `status` only when it differs from the server default to keep
+    // the URL terse on the common path.
+    if args.status != "all" {
+        params.push(("status", args.status));
+    }
+    if let Some(since) = args.since.as_ref() {
+        params.push(("since", since.clone()));
+    }
+    if let Some(limit) = args.limit {
+        params.push(("limit", limit.to_string()));
+    }
+    if let Some(sort) = args.sort.as_ref() {
+        params.push(("sort", sort.clone()));
+    }
+    let query = build_query_string(&params);
+
+    let path = format!(
+        "workspaces/{}/work-items/search/advanced/{query}",
+        client.env.workspace_slug
+    );
+    let resp = client.get(&path).await?;
     println!(
         "{}",
         serde_json::to_string(&resp).expect("serialize JSON value")

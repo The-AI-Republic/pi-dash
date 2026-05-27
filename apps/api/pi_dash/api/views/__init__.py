@@ -30,6 +30,7 @@ from .issue import (
     IssueAttachmentListCreateAPIEndpoint,
     IssueAttachmentDetailAPIEndpoint,
     IssueSearchEndpoint,
+    IssueAdvancedSearchEndpoint,
     IssueRelationListCreateAPIEndpoint,
     IssueWorkpadAPIEndpoint,
 )

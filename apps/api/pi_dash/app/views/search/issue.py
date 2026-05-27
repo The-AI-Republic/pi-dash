@@ -12,10 +12,13 @@ from rest_framework.response import Response
 # Module imports
 from .base import BaseAPIView
 from pi_dash.db.models import Issue, ProjectMember, IssueRelation
-from pi_dash.utils.issue_search import search_issues
+from pi_dash.search.issue import search_issues
 
 
 class IssueSearchEndpoint(BaseAPIView):
+    # See GlobalSearchEndpoint.use_read_replica — same rationale.
+    use_read_replica = True
+
     def filter_issues_by_project(self, project_id: int, issues: QuerySet) -> QuerySet:
         """
         Filter issues by project

@@ -19,6 +19,7 @@ from django.db.models import (
 )
 from django.contrib.postgres.aggregates import ArrayAgg
 from django.contrib.postgres.fields import ArrayField
+from django.contrib.postgres.search import SearchQuery
 from django.db.models.functions import Coalesce, Concat
 from django.utils import timezone
 
@@ -40,12 +41,20 @@ from pi_dash.db.models import (
     ProjectPage,
     WorkspaceMember,
 )
+from pi_dash.search.issue import ISSUE_SEARCH_VECTOR
 
 
 class GlobalSearchEndpoint(BaseAPIView):
     """Endpoint to search across multiple fields in the workspace and
     also show related workspace if found
     """
+
+    # Routes GET reads to the prod WAL standby via ReadReplicaRouter when
+    # ENABLE_READ_REPLICA=1. Search tolerates the (~tens of seconds)
+    # replication lag — historical/agent-context queries don't need
+    # read-your-writes semantics — and using the replica here dogfoods
+    # streaming replication on a non-critical path.
+    use_read_replica = True
 
     def filter_workspaces(self, query, _slug, _project_id, _workspace_search):
         fields = ["name"]
@@ -80,25 +89,20 @@ class GlobalSearchEndpoint(BaseAPIView):
         )
 
     def filter_issues(self, query, slug, project_id, workspace_search):
-        fields = ["name", "sequence_id", "project__identifier"]
-        q = Q()
-        if query:
-            for field in fields:
-                if field == "sequence_id":
-                    # Match whole integers only (exclude decimal numbers)
-                    sequences = re.findall(r"\b\d+\b", query)
-                    for sequence_id in sequences:
-                        q |= Q(**{"sequence_id": sequence_id})
-                else:
-                    q |= Q(**{f"{field}__icontains": query})
-
         issues = Issue.issue_objects.filter(
-            q,
             project__project_projectmember__member=self.request.user,
             project__project_projectmember__is_active=True,
             project__archived_at__isnull=True,
             workspace__slug=slug,
         )
+
+        if query:
+            issues = issues.annotate(_fts=ISSUE_SEARCH_VECTOR)
+            q = Q(_fts=SearchQuery(query, search_type="websearch", config="english"))
+            for sequence_id in re.findall(r"\b\d+\b", query):
+                q |= Q(sequence_id=sequence_id)
+            q |= Q(project__identifier__icontains=query)
+            issues = issues.filter(q)
 
         if workspace_search == "false" and project_id:
             issues = issues.filter(project_id=project_id)
@@ -231,25 +235,20 @@ class GlobalSearchEndpoint(BaseAPIView):
         )
 
     def filter_intakes(self, query, slug, project_id, workspace_search):
-        fields = ["name", "sequence_id", "project__identifier"]
-        q = Q()
-        if query:
-            for field in fields:
-                if field == "sequence_id":
-                    # Match whole integers only (exclude decimal numbers)
-                    sequences = re.findall(r"\b\d+\b", query)
-                    for sequence_id in sequences:
-                        q |= Q(**{"sequence_id": sequence_id})
-                else:
-                    q |= Q(**{f"{field}__icontains": query})
-
         issues = Issue.objects.filter(
-            q,
             project__project_projectmember__member=self.request.user,
             project__project_projectmember__is_active=True,
             project__archived_at__isnull=True,
             workspace__slug=slug,
         ).filter(models.Q(issue_intake__status=0) | models.Q(issue_intake__status=-2))
+
+        if query:
+            issues = issues.annotate(_fts=ISSUE_SEARCH_VECTOR)
+            q = Q(_fts=SearchQuery(query, search_type="websearch", config="english"))
+            for sequence_id in re.findall(r"\b\d+\b", query):
+                q |= Q(sequence_id=sequence_id)
+            q |= Q(project__identifier__icontains=query)
+            issues = issues.filter(q)
 
         if workspace_search == "false" and project_id:
             issues = issues.filter(project_id=project_id)
@@ -302,6 +301,9 @@ class GlobalSearchEndpoint(BaseAPIView):
 
 
 class SearchEndpoint(BaseAPIView):
+    # See GlobalSearchEndpoint.use_read_replica — same rationale.
+    use_read_replica = True
+
     def get(self, request, slug):
         query = request.query_params.get("query", False)
         query_types = request.query_params.get("query_type", "user_mention").split(",")
@@ -382,27 +384,21 @@ class SearchEndpoint(BaseAPIView):
                     response_data["project"] = list(projects)
 
                 elif query_type == "issue":
-                    fields = ["name", "sequence_id", "project__identifier"]
-                    q = Q()
-
+                    issues = Issue.issue_objects.filter(
+                        project__project_projectmember__member=self.request.user,
+                        project__project_projectmember__is_active=True,
+                        workspace__slug=slug,
+                        project_id=project_id,
+                    )
                     if query:
-                        for field in fields:
-                            if field == "sequence_id":
-                                sequences = re.findall(r"\b\d+\b", query)
-                                for sequence_id in sequences:
-                                    q |= Q(**{"sequence_id": sequence_id})
-                            else:
-                                q |= Q(**{f"{field}__icontains": query})
-
+                        issues = issues.annotate(_fts=ISSUE_SEARCH_VECTOR)
+                        q = Q(_fts=SearchQuery(query, search_type="websearch", config="english"))
+                        for sequence_id in re.findall(r"\b\d+\b", query):
+                            q |= Q(sequence_id=sequence_id)
+                        q |= Q(project__identifier__icontains=query)
+                        issues = issues.filter(q)
                     issues = (
-                        Issue.issue_objects.filter(
-                            q,
-                            project__project_projectmember__member=self.request.user,
-                            project__project_projectmember__is_active=True,
-                            workspace__slug=slug,
-                            project_id=project_id,
-                        )
-                        .order_by("-created_at")
+                        issues.order_by("-created_at")
                         .distinct()
                         .values(
                             "name",
@@ -587,26 +583,20 @@ class SearchEndpoint(BaseAPIView):
                     response_data["project"] = list(projects)
 
                 elif query_type == "issue":
-                    fields = ["name", "sequence_id", "project__identifier"]
-                    q = Q()
-
+                    issues = Issue.issue_objects.filter(
+                        project__project_projectmember__member=self.request.user,
+                        project__project_projectmember__is_active=True,
+                        workspace__slug=slug,
+                    )
                     if query:
-                        for field in fields:
-                            if field == "sequence_id":
-                                sequences = re.findall(r"\b\d+\b", query)
-                                for sequence_id in sequences:
-                                    q |= Q(**{"sequence_id": sequence_id})
-                            else:
-                                q |= Q(**{f"{field}__icontains": query})
-
+                        issues = issues.annotate(_fts=ISSUE_SEARCH_VECTOR)
+                        q = Q(_fts=SearchQuery(query, search_type="websearch", config="english"))
+                        for sequence_id in re.findall(r"\b\d+\b", query):
+                            q |= Q(sequence_id=sequence_id)
+                        q |= Q(project__identifier__icontains=query)
+                        issues = issues.filter(q)
                     issues = (
-                        Issue.issue_objects.filter(
-                            q,
-                            project__project_projectmember__member=self.request.user,
-                            project__project_projectmember__is_active=True,
-                            workspace__slug=slug,
-                        )
-                        .order_by("-created_at")
+                        issues.order_by("-created_at")
                         .distinct()
                         .values(
                             "name",

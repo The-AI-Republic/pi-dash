@@ -57,6 +57,7 @@ from pi_dash.api.serializers import (
     LabelSerializer,
     IssueAttachmentUploadSerializer,
     IssueSearchSerializer,
+    IssueAdvancedSearchResponseSerializer,
     IssueCommentCreateSerializer,
     IssueLinkCreateSerializer,
     IssueLinkUpdateSerializer,
@@ -101,6 +102,7 @@ from pi_dash.bgtasks.storage_metadata_task import get_asset_object_metadata
 from .base import BaseAPIView
 from pi_dash.utils.host import base_host
 from pi_dash.utils.issue_relation_mapper import get_actual_relation
+from pi_dash.search.issue import issue_search_queryset
 from pi_dash.utils.uuid import convert_uuid_to_integer
 from pi_dash.bgtasks.webhook_task import model_activity
 from pi_dash.app.permissions import ROLE
@@ -2389,32 +2391,18 @@ class IssueSearchEndpoint(BaseAPIView):
         if not query:
             return Response({"issues": []}, status=status.HTTP_200_OK)
 
-        # Build search query
-        fields = ["name", "sequence_id", "project__identifier"]
-        q = Q()
-        for field in fields:
-            if field == "sequence_id":
-                # Match whole integers only (exclude decimal numbers)
-                sequences = re.findall(r"\b\d+\b", query)
-                for sequence_id in sequences:
-                    q |= Q(**{"sequence_id": sequence_id})
-            else:
-                q |= Q(**{f"{field}__icontains": query})
-
-        # Filter issues
         issues = Issue.issue_objects.filter(
-            q,
             project__project_projectmember__member=self.request.user,
             project__project_projectmember__is_active=True,
             project__archived_at__isnull=True,
             workspace__slug=slug,
         )
+        issues = issue_search_queryset(issues, query)
 
         # Apply project filter if not searching across workspace
         if workspace_search == "false" and project_id:
             issues = issues.filter(project_id=project_id)
 
-        # Get results
         issue_results = issues.distinct().values(
             "name",
             "id",
@@ -2425,6 +2413,143 @@ class IssueSearchEndpoint(BaseAPIView):
         )[: int(limit)]
 
         return Response({"issues": issue_results}, status=status.HTTP_200_OK)
+
+
+class IssueAdvancedSearchEndpoint(BaseAPIView):
+    """CLI / agent-oriented work item search.
+
+    Returns richer per-result fields than ``IssueSearchEndpoint`` so the
+    pi-dash CLI / coding agent can reason about historical issues without
+    a follow-up fetch per row: composed identifier (PROJ-42), a plain-text
+    snippet around the match, state, project, timestamps, and a ts_rank
+    score for relevance ordering.
+
+    Naming: the thin legacy ``IssueSearchEndpoint`` stays at
+    ``/work-items/search/`` for existing API consumers; this endpoint sits
+    at ``/work-items/search/advanced/`` to signal richer response shape
+    and CLI-oriented filter knobs (status / since / sort).
+    """
+
+    use_read_replica = True
+
+    _CLOSED_STATE_GROUPS = ("completed", "cancelled")
+    _SORT_OPTIONS = {
+        "rank": ("-_rank", "-created_at"),
+        "-rank": ("-_rank", "-created_at"),
+        "created": ("created_at",),
+        "-created": ("-created_at",),
+        "updated": ("updated_at",),
+        "-updated": ("-updated_at",),
+    }
+    # Tuned for AI-agent consumption: 10 hits is enough top-ranked context
+    # for the typical "is there a prior issue on this?" lookup, and the
+    # 50-cap prevents an agent from accidentally pulling hundreds of
+    # marginal matches into its prompt window.
+    _DEFAULT_LIMIT = 10
+    _MAX_LIMIT = 50
+
+    def get(self, request, slug):
+        query = (request.query_params.get("q") or "").strip()
+        if not query:
+            return Response(
+                {"query": "", "count": 0, "results": []},
+                status=status.HTTP_200_OK,
+            )
+
+        project_param = request.query_params.get("project")
+        status_param = (request.query_params.get("status") or "all").lower()
+        since_param = request.query_params.get("since")
+        sort_param = (request.query_params.get("sort") or "rank").lower()
+
+        try:
+            limit = int(request.query_params.get("limit", self._DEFAULT_LIMIT))
+        except (TypeError, ValueError):
+            limit = self._DEFAULT_LIMIT
+        limit = max(1, min(self._MAX_LIMIT, limit))
+
+        issues = Issue.issue_objects.filter(
+            project__project_projectmember__member=self.request.user,
+            project__project_projectmember__is_active=True,
+            project__archived_at__isnull=True,
+            workspace__slug=slug,
+        )
+
+        if project_param:
+            try:
+                uuid.UUID(str(project_param))
+                issues = issues.filter(project_id=project_param)
+            except (ValueError, AttributeError, TypeError):
+                issues = issues.filter(project__identifier__iexact=project_param)
+
+        if status_param == "closed":
+            issues = issues.filter(state__group__in=self._CLOSED_STATE_GROUPS)
+        elif status_param == "open":
+            issues = issues.exclude(state__group__in=self._CLOSED_STATE_GROUPS)
+
+        if since_param:
+            from django.utils.dateparse import parse_datetime
+
+            since_dt = parse_datetime(since_param)
+            if since_dt is not None:
+                issues = issues.filter(updated_at__gte=since_dt)
+
+        issues = issue_search_queryset(
+            issues, query, with_rank=True, with_headline=True
+        )
+        issues = issues.order_by(*self._SORT_OPTIONS.get(sort_param, self._SORT_OPTIONS["rank"]))
+
+        rows = list(
+            issues.distinct().values(
+                "id",
+                "sequence_id",
+                "name",
+                "_headline",
+                "_rank",
+                "created_at",
+                "updated_at",
+                "completed_at",
+                "state__name",
+                "state__group",
+                "project_id",
+                "project__identifier",
+                "project__name",
+                "workspace__slug",
+            )[:limit]
+        )
+
+        results = [
+            {
+                "id": str(row["id"]),
+                "sequence_id": row["sequence_id"],
+                "identifier": f"{row['project__identifier']}-{row['sequence_id']}",
+                "name": row["name"],
+                "snippet": row["_headline"] or "",
+                "state": {
+                    "name": row["state__name"],
+                    "group": row["state__group"],
+                },
+                "project": {
+                    "id": str(row["project_id"]),
+                    "identifier": row["project__identifier"],
+                    "name": row["project__name"],
+                },
+                "workspace_slug": row["workspace__slug"],
+                "created_at": row["created_at"],
+                "updated_at": row["updated_at"],
+                "completed_at": row["completed_at"],
+                "rank": float(row["_rank"] or 0.0),
+                "url": (
+                    f"/api/workspaces/{row['workspace__slug']}"
+                    f"/work-items/{row['project__identifier']}-{row['sequence_id']}/"
+                ),
+            }
+            for row in rows
+        ]
+
+        return Response(
+            {"query": query, "count": len(results), "results": results},
+            status=status.HTTP_200_OK,
+        )
 
 
 class IssueRelationListCreateAPIEndpoint(BaseAPIView):
