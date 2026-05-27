@@ -756,9 +756,11 @@ export default {
     },
     install: {
       heading: "Install the pidash CLI",
-      body: "Run the one-liner on the machine that will host your AI agent. The installer downloads the latest signed binary, drops `pidash` on your PATH, and walks you through the device-code login.",
+      body: "Run an installer on the machine that will host your AI agent. The wrapper commands download the latest signed binary, drop `pidash` on your PATH, and walk you through the device-code login.",
       macos_linux_label: "macOS / Linux",
       windows_label: "Windows (PowerShell)",
+      windows_msi_label: "Windows (MSI)",
+      download_msi: "Download MSI",
       copy_command: "Copy command",
       copied: "Copied!",
       copy_failed: "Could not copy to clipboard",
