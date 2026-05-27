@@ -16,8 +16,10 @@ from pi_dash.search.issue import search_issues
 
 
 class IssueSearchEndpoint(BaseAPIView):
-    # See GlobalSearchEndpoint.use_read_replica — same rationale.
-    use_read_replica = True
+    # Stays on the primary — the parent / linked-issue pickers backed by
+    # this endpoint are hit right after issue creation, where replication
+    # lag would hide the new row. ``IssueAdvancedSearchEndpoint`` is the
+    # one that dogfoods the replica (agent path, lag-tolerant).
 
     def filter_issues_by_project(self, project_id: int, issues: QuerySet) -> QuerySet:
         """

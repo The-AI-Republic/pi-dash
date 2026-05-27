@@ -5,11 +5,12 @@
 # Python imports
 import json
 import uuid
-import re
 
 # Django imports
 from django.core.serializers.json import DjangoJSONEncoder
-from django.http import HttpResponseRedirect
+from django.http import Http404, HttpResponseRedirect
+from django.urls import reverse
+from django.utils.dateparse import parse_datetime
 from django.db import IntegrityError, connection, transaction
 from django.db.models import (
     Case,
@@ -84,6 +85,7 @@ from pi_dash.db.models import (
     ProjectMember,
     CycleIssue,
     State,
+    StateGroup,
     IssueAssignee,
     IssueLabel,
     IssueSubscriber,
@@ -102,7 +104,7 @@ from pi_dash.bgtasks.storage_metadata_task import get_asset_object_metadata
 from .base import BaseAPIView
 from pi_dash.utils.host import base_host
 from pi_dash.utils.issue_relation_mapper import get_actual_relation
-from pi_dash.search.issue import issue_search_queryset
+from pi_dash.search.issue import extract_snippet, issue_search_queryset
 from pi_dash.utils.uuid import convert_uuid_to_integer
 from pi_dash.bgtasks.webhook_task import model_activity
 from pi_dash.app.permissions import ROLE
@@ -2397,7 +2399,10 @@ class IssueSearchEndpoint(BaseAPIView):
             project__archived_at__isnull=True,
             workspace__slug=slug,
         )
-        issues = issue_search_queryset(issues, query)
+        # include_comments=False — this legacy endpoint is consumed by the
+        # web mention picker / issue-link picker which expect title-scoped
+        # results. The agent-oriented endpoint below opts comments in.
+        issues = issue_search_queryset(issues, query, include_comments=False)
 
         # Apply project filter if not searching across workspace
         if workspace_search == "false" and project_id:
@@ -2430,15 +2435,26 @@ class IssueAdvancedSearchEndpoint(BaseAPIView):
     and CLI-oriented filter knobs (status / since / sort).
     """
 
+    # Genuinely lag-tolerant — agents query history, not "what did I just
+    # create?" — so this endpoint dogfoods the prod WAL standby. The
+    # in-app search endpoints (top bar, mention picker) stay on the
+    # primary because users hit them right after creating issues.
     use_read_replica = True
 
-    _CLOSED_STATE_GROUPS = ("completed", "cancelled")
+    _CLOSED_STATE_GROUPS = (StateGroup.COMPLETED.value, StateGroup.CANCELLED.value)
+    # Positive list — modelling "open" as `state__group IN (open)` instead
+    # of `NOT IN (closed)` keeps stateless issues (state IS NULL) visible:
+    # SQL `NULL NOT IN (...)` evaluates to NULL → row dropped, which would
+    # silently hide just-created or state-less issues from `?status=open`.
+    _OPEN_STATE_GROUPS = (
+        StateGroup.BACKLOG.value,
+        StateGroup.UNSTARTED.value,
+        StateGroup.STARTED.value,
+        StateGroup.REVIEW.value,
+    )
     _SORT_OPTIONS = {
         "rank": ("-_rank", "-created_at"),
-        "-rank": ("-_rank", "-created_at"),
-        "created": ("created_at",),
         "-created": ("-created_at",),
-        "updated": ("updated_at",),
         "-updated": ("-updated_at",),
     }
     # Tuned for AI-agent consumption: 10 hits is enough top-ranked context
@@ -2448,6 +2464,23 @@ class IssueAdvancedSearchEndpoint(BaseAPIView):
     _DEFAULT_LIMIT = 10
     _MAX_LIMIT = 50
 
+    @extend_schema(
+        operation_id="search_work_items_advanced",
+        tags=["Work Items"],
+        description=(
+            "Full-text search across work item titles, descriptions, and "
+            "comments. Returns ranked results with match snippets, state, "
+            "project, timestamps, and ts_rank score — sized for CLI / "
+            "agent consumption (default limit 10, hard cap 50)."
+        ),
+        responses={
+            200: OpenApiResponse(
+                description="Ranked work item search results.",
+                response=IssueAdvancedSearchResponseSerializer,
+            ),
+            400: OpenApiResponse(description="Invalid query parameter."),
+        },
+    )
     def get(self, request, slug):
         query = (request.query_params.get("q") or "").strip()
         if not query:
@@ -2460,6 +2493,17 @@ class IssueAdvancedSearchEndpoint(BaseAPIView):
         status_param = (request.query_params.get("status") or "all").lower()
         since_param = request.query_params.get("since")
         sort_param = (request.query_params.get("sort") or "rank").lower()
+
+        if sort_param not in self._SORT_OPTIONS:
+            return Response(
+                {
+                    "error": (
+                        f"Unknown sort '{sort_param}'. "
+                        f"Valid: {', '.join(self._SORT_OPTIONS)}."
+                    )
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
 
         try:
             limit = int(request.query_params.get("limit", self._DEFAULT_LIMIT))
@@ -2476,27 +2520,46 @@ class IssueAdvancedSearchEndpoint(BaseAPIView):
 
         if project_param:
             try:
-                uuid.UUID(str(project_param))
+                uuid.UUID(project_param)
                 issues = issues.filter(project_id=project_param)
-            except (ValueError, AttributeError, TypeError):
-                issues = issues.filter(project__identifier__iexact=project_param)
+            except ValueError:
+                # Non-UUID — resolve as a project identifier. ``Project.resolve``
+                # honours the workspace btree index (the codebase explicitly
+                # warns against ``__iexact`` here at db/models/project.py:191
+                # — UPPER() defeats the index). Http404 propagates to DRF as
+                # a 404 with the standard "resource does not exist" body.
+                project = Project.resolve(slug, project_param)
+                issues = issues.filter(project_id=project.pk)
 
         if status_param == "closed":
             issues = issues.filter(state__group__in=self._CLOSED_STATE_GROUPS)
         elif status_param == "open":
-            issues = issues.exclude(state__group__in=self._CLOSED_STATE_GROUPS)
+            issues = issues.filter(
+                Q(state__group__in=self._OPEN_STATE_GROUPS) | Q(state__isnull=True)
+            )
 
         if since_param:
-            from django.utils.dateparse import parse_datetime
-
             since_dt = parse_datetime(since_param)
-            if since_dt is not None:
-                issues = issues.filter(updated_at__gte=since_dt)
+            if since_dt is None:
+                return Response(
+                    {
+                        "error": (
+                            "Invalid 'since' — expected ISO 8601 datetime "
+                            "(e.g. 2025-01-01T00:00:00Z)."
+                        )
+                    },
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            issues = issues.filter(updated_at__gte=since_dt)
 
         issues = issue_search_queryset(
-            issues, query, with_rank=True, with_headline=True
+            issues,
+            query,
+            with_rank=True,
+            with_headline=True,
+            include_comments=True,
         )
-        issues = issues.order_by(*self._SORT_OPTIONS.get(sort_param, self._SORT_OPTIONS["rank"]))
+        issues = issues.order_by(*self._SORT_OPTIONS[sort_param])
 
         rows = list(
             issues.distinct().values(
@@ -2523,7 +2586,7 @@ class IssueAdvancedSearchEndpoint(BaseAPIView):
                 "sequence_id": row["sequence_id"],
                 "identifier": f"{row['project__identifier']}-{row['sequence_id']}",
                 "name": row["name"],
-                "snippet": row["_headline"] or "",
+                "snippet": extract_snippet(row["_headline"]),
                 "state": {
                     "name": row["state__name"],
                     "group": row["state__group"],
@@ -2538,9 +2601,13 @@ class IssueAdvancedSearchEndpoint(BaseAPIView):
                 "updated_at": row["updated_at"],
                 "completed_at": row["completed_at"],
                 "rank": float(row["_rank"] or 0.0),
-                "url": (
-                    f"/api/workspaces/{row['workspace__slug']}"
-                    f"/work-items/{row['project__identifier']}-{row['sequence_id']}/"
+                "url": reverse(
+                    "work-item-by-identifier",
+                    kwargs={
+                        "slug": row["workspace__slug"],
+                        "project_identifier": row["project__identifier"],
+                        "issue_identifier": str(row["sequence_id"]),
+                    },
                 ),
             }
             for row in rows

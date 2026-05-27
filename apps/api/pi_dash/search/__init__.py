@@ -15,6 +15,7 @@ from .issue import (
     ISSUE_COMMENT_SEARCH_VECTOR,
     ISSUE_FTS_CONFIG,
     ISSUE_SEARCH_VECTOR,
+    extract_snippet,
     issue_search_queryset,
     search_issues,
 )
@@ -23,6 +24,7 @@ __all__ = [
     "ISSUE_COMMENT_SEARCH_VECTOR",
     "ISSUE_FTS_CONFIG",
     "ISSUE_SEARCH_VECTOR",
+    "extract_snippet",
     "issue_search_queryset",
     "search_issues",
 ]

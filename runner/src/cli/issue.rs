@@ -147,8 +147,9 @@ pub struct SearchArgs {
     #[arg(long)]
     pub limit: Option<u32>,
 
-    /// Sort order: `rank` (relevance, default when a query is given),
-    /// `created` / `-created`, `updated` / `-updated`.
+    /// Sort order: `rank` (relevance, default), `-created`
+    /// (newest first), `-updated` (most-recently-updated first). The
+    /// server rejects other values with a 400.
     #[arg(long)]
     pub sort: Option<String>,
 }

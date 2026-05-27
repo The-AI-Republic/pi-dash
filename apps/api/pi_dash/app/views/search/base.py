@@ -2,9 +2,6 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 # See the LICENSE file for details.
 
-# Python imports
-import re
-
 # Django imports
 from django.db import models
 from django.db.models import (
@@ -19,7 +16,6 @@ from django.db.models import (
 )
 from django.contrib.postgres.aggregates import ArrayAgg
 from django.contrib.postgres.fields import ArrayField
-from django.contrib.postgres.search import SearchQuery
 from django.db.models.functions import Coalesce, Concat
 from django.utils import timezone
 
@@ -41,7 +37,7 @@ from pi_dash.db.models import (
     ProjectPage,
     WorkspaceMember,
 )
-from pi_dash.search.issue import ISSUE_SEARCH_VECTOR
+from pi_dash.search.issue import issue_search_queryset
 
 
 class GlobalSearchEndpoint(BaseAPIView):
@@ -49,12 +45,11 @@ class GlobalSearchEndpoint(BaseAPIView):
     also show related workspace if found
     """
 
-    # Routes GET reads to the prod WAL standby via ReadReplicaRouter when
-    # ENABLE_READ_REPLICA=1. Search tolerates the (~tens of seconds)
-    # replication lag — historical/agent-context queries don't need
-    # read-your-writes semantics — and using the replica here dogfoods
-    # streaming replication on a non-critical path.
-    use_read_replica = True
+    # Intentionally stays on the primary: the top-bar / pickers backed by
+    # this endpoint are hit immediately after creating an issue, and
+    # replication lag would hide the just-created row. Replica dogfooding
+    # happens on ``IssueAdvancedSearchEndpoint`` (agent path, lag-tolerant)
+    # instead.
 
     def filter_workspaces(self, query, _slug, _project_id, _workspace_search):
         fields = ["name"]
@@ -96,13 +91,10 @@ class GlobalSearchEndpoint(BaseAPIView):
             workspace__slug=slug,
         )
 
-        if query:
-            issues = issues.annotate(_fts=ISSUE_SEARCH_VECTOR)
-            q = Q(_fts=SearchQuery(query, search_type="websearch", config="english"))
-            for sequence_id in re.findall(r"\b\d+\b", query):
-                q |= Q(sequence_id=sequence_id)
-            q |= Q(project__identifier__icontains=query)
-            issues = issues.filter(q)
+        # include_comments=False — the top-bar picker expects
+        # title-scoped results; comment-text widening is reserved for
+        # IssueAdvancedSearchEndpoint (agent path).
+        issues = issue_search_queryset(issues, query, include_comments=False)
 
         if workspace_search == "false" and project_id:
             issues = issues.filter(project_id=project_id)
@@ -242,13 +234,7 @@ class GlobalSearchEndpoint(BaseAPIView):
             workspace__slug=slug,
         ).filter(models.Q(issue_intake__status=0) | models.Q(issue_intake__status=-2))
 
-        if query:
-            issues = issues.annotate(_fts=ISSUE_SEARCH_VECTOR)
-            q = Q(_fts=SearchQuery(query, search_type="websearch", config="english"))
-            for sequence_id in re.findall(r"\b\d+\b", query):
-                q |= Q(sequence_id=sequence_id)
-            q |= Q(project__identifier__icontains=query)
-            issues = issues.filter(q)
+        issues = issue_search_queryset(issues, query, include_comments=False)
 
         if workspace_search == "false" and project_id:
             issues = issues.filter(project_id=project_id)
@@ -301,8 +287,8 @@ class GlobalSearchEndpoint(BaseAPIView):
 
 
 class SearchEndpoint(BaseAPIView):
-    # See GlobalSearchEndpoint.use_read_replica — same rationale.
-    use_read_replica = True
+    # See GlobalSearchEndpoint — stays on the primary to preserve
+    # read-your-writes for the mention picker / quick lookup UIs.
 
     def get(self, request, slug):
         query = request.query_params.get("query", False)
@@ -390,13 +376,7 @@ class SearchEndpoint(BaseAPIView):
                         workspace__slug=slug,
                         project_id=project_id,
                     )
-                    if query:
-                        issues = issues.annotate(_fts=ISSUE_SEARCH_VECTOR)
-                        q = Q(_fts=SearchQuery(query, search_type="websearch", config="english"))
-                        for sequence_id in re.findall(r"\b\d+\b", query):
-                            q |= Q(sequence_id=sequence_id)
-                        q |= Q(project__identifier__icontains=query)
-                        issues = issues.filter(q)
+                    issues = issue_search_queryset(issues, query, include_comments=False)
                     issues = (
                         issues.order_by("-created_at")
                         .distinct()
@@ -588,13 +568,7 @@ class SearchEndpoint(BaseAPIView):
                         project__project_projectmember__is_active=True,
                         workspace__slug=slug,
                     )
-                    if query:
-                        issues = issues.annotate(_fts=ISSUE_SEARCH_VECTOR)
-                        q = Q(_fts=SearchQuery(query, search_type="websearch", config="english"))
-                        for sequence_id in re.findall(r"\b\d+\b", query):
-                            q |= Q(sequence_id=sequence_id)
-                        q |= Q(project__identifier__icontains=query)
-                        issues = issues.filter(q)
+                    issues = issue_search_queryset(issues, query, include_comments=False)
                     issues = (
                         issues.order_by("-created_at")
                         .distinct()
