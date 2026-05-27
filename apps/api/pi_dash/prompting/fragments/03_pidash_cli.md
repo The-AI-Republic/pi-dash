@@ -1,6 +1,6 @@
 ## Pi Dash CLI (`pidash`)
 
-`pidash` is your only channel to Pi Dash during this run. Use it to read the issue, read and write comments, and move the issue between workflow states. Do not use `curl`, raw HTTP, or any other tool to reach the Pi Dash API — only the `pidash` binary is authenticated for this session.
+`pidash` is your only channel to Pi Dash during this run. Use it to read the issue, read and write comments, read and write your workpad, and move the issue between workflow states. Do not use `curl`, raw HTTP, or any other tool to reach the Pi Dash API — only the `pidash` binary is authenticated for this session.
 
 ### Environment
 
@@ -27,9 +27,18 @@ On success every command prints a single JSON document to stdout and exits `0`. 
 
 #### Comments
 
-- `pidash comment list <identifier>` — list comments on the issue. Each entry has `id` (UUID), `comment_html`, `comment_stripped`, `actor_detail`, and timestamps. Locate the `## Agent Workpad` comment by scanning `comment_stripped` for a leading `"## Agent Workpad"`.
+Comments are the human ↔ agent conversation channel. Use them to ask clarifying questions, post blocker notices, share PR links, and announce completion. **Comments are not for tracking your own progress — that's what the workpad is for.**
+
+- `pidash comment list <identifier>` — list comments on the issue. Each entry has `id` (UUID), `comment_html`, `comment_stripped`, `actor_detail`, and timestamps. Read these in chronological order to pick up any human replies since your last run.
 - `pidash comment add <identifier> --body-file <path>` — post a new comment from a file. `--body <markdown>` works for one-liners. Prefer `--body-file` for anything multi-line — shell quoting of markdown is error-prone.
-- `pidash comment update <identifier> <comment-id> --body-file <path>` — edit a comment you own. Both the issue identifier and the comment UUID are required. Use this to keep the workpad in place across turns — do not post a new workpad comment each time.
+- `pidash comment update <identifier> <comment-id> --body-file <path>` — edit a comment you own. Both the issue identifier and the comment UUID are required. Rarely needed — prefer posting a fresh comment for new information.
+
+#### Workpad
+
+The workpad is your durable per-issue scratchpad — a single markdown document the agent owns. It is the only carrier of state between runs. It is **not** visible to humans in the comment thread; treat it as your own working memory, not a message to the operator.
+
+- `pidash workpad get [<identifier>]` — fetch the current workpad body. Returns `{body, updated_at}`. Defaults `<identifier>` to `PIDASH_ISSUE_IDENTIFIER` so you can call it bare.
+- `pidash workpad update [<identifier>] --body-file <path>` — overwrite the workpad body from a file. Defaults `<identifier>` to `PIDASH_ISSUE_IDENTIFIER`. An empty file clears it. There is no "append" — always write the full body.
 
 #### States
 
@@ -45,15 +54,12 @@ The remaining `pidash` subcommands (`configure`, `install`, `uninstall`, `start`
 
 ### Typical recipes
 
-Find and update the workpad comment in place:
+Read your workpad, edit it, write it back:
 
 ```sh
-COMMENT_ID=$(pidash comment list {{ issue.identifier }} \
-  | jq -r '.[] | select(.comment_stripped | startswith("## Agent Workpad")) | .id' \
-  | head -n 1)
-
-# Edit it in place. Write the body to a file to avoid shell-quoting issues.
-pidash comment update {{ issue.identifier }} "$COMMENT_ID" --body-file ./.pidash-workpad.md
+pidash workpad get | jq -r .body > ./.pidash-workpad.md
+# …edit the file in place…
+pidash workpad update --body-file ./.pidash-workpad.md
 ```
 
 Post a blocker and move the issue to "Blocked":
@@ -63,7 +69,7 @@ pidash comment add {{ issue.identifier }} --body-file ./.pidash-blocked.md
 pidash issue patch {{ issue.identifier }} --state "Blocked"
 ```
 
-End a successful run (workpad already updated in place):
+End a successful run (workpad already written via `pidash workpad update`):
 
 ```sh
 pidash issue patch {{ issue.identifier }} --state "Done"

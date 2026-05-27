@@ -53,6 +53,7 @@ from pi_dash.api.serializers import (
     IssueRelationResponseSerializer,
     IssueRelationSerializer,
     IssueSerializer,
+    IssueWorkpadSerializer,
     LabelSerializer,
     IssueAttachmentUploadSerializer,
     IssueSearchSerializer,
@@ -2645,3 +2646,38 @@ class IssueRelationListCreateAPIEndpoint(BaseAPIView):
             serializer_class(refetched_relations, many=True).data,
             status=status.HTTP_201_CREATED,
         )
+
+
+class IssueWorkpadAPIEndpoint(BaseAPIView):
+    """Read/write the agent workpad for a single work item.
+
+    The workpad is the coding agent's durable cross-run scratchpad
+    (markdown). It is intentionally exposed through this focused endpoint
+    — and excluded from the default Issue serializer — so issue list/get
+    payloads stay small. A PATCH with an empty string clears the workpad.
+    """
+
+    model = Issue
+    permission_classes = [ProjectEntityPermission]
+    serializer_class = IssueWorkpadSerializer
+
+    def get_queryset(self):
+        return Issue.issue_objects.filter(
+            workspace__slug=self.kwargs.get("slug"),
+            project_id=self.kwargs.get("project_id"),
+        )
+
+    def get(self, request, slug, project_id, issue_id):
+        issue = Issue.issue_objects.get(
+            workspace__slug=slug, project_id=project_id, pk=issue_id
+        )
+        return Response(IssueWorkpadSerializer(issue).data, status=status.HTTP_200_OK)
+
+    def patch(self, request, slug, project_id, issue_id):
+        issue = Issue.issue_objects.get(
+            workspace__slug=slug, project_id=project_id, pk=issue_id
+        )
+        serializer = IssueWorkpadSerializer(issue, data=request.data, partial=True)
+        serializer.is_valid(raise_exception=True)
+        serializer.save()
+        return Response(serializer.data, status=status.HTTP_200_OK)

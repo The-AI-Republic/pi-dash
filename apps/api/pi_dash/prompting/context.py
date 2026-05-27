@@ -148,6 +148,10 @@ def build_context(issue: Issue, run: AgentRun) -> Dict[str, Any]:
         },
         "comments_section": _comments_section(issue),
         "parent_done_payload": _parent_done_payload(issue, run),
+        # Prior-run workpad body (empty on first run). Surfaced up front so
+        # continuation runs see their predecessor's plan/phase/notes without
+        # an extra ``pidash workpad get`` round-trip.
+        "workpad_body": issue.workpad or "",
     }
 
 

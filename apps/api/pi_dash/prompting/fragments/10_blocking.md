@@ -2,8 +2,23 @@
 
 Use this when completion is blocked by missing required tools or missing auth/permissions that cannot be resolved in-session, or when your autonomy assessment has `type = "decision"` / `type = "blocker"` and `safe_to_continue = false`.
 
-- Record the blocker in the workpad: what is missing, why it blocks required acceptance/validation, and the exact human action needed.
-- Update the workpad `### Autonomy / Escalation` section with a score, type, reason, and a single specific `question_for_human` when a decision is needed.
-- Post a `Blocked:`-prefixed comment via `pidash comment add` summarizing the blocker for reviewers.
-- If a "Blocked" state exists in "Available states" (see "Pi Dash CLI"), move the issue there via `pidash issue patch {{ issue.identifier }} --state "Blocked"`. Otherwise leave the issue in its current state.
-- Stop. Do not continue into implementation.
+1. **Update the workpad** (`pidash workpad update --body-file <path>`):
+   - `### Phase` left at the phase you were in, not "completed".
+   - `### Autonomy / Escalation` updated: `score`, `type`, `safe_to_continue: false`, `Reason:` explaining the blocker in your own words.
+   - `Awaiting human reply:` set to a one-line note about the comment you're about to post (gist + today's date). This is so the next run, after the human replies, can locate the right conversation thread quickly.
+
+2. **Post a comment to the human** via `pidash comment add {{ issue.identifier }} --body-file <path>`. Write as a colleague (see Step 0.5 step 7 for tone). Lead with what's blocking, then what you need from them. Don't use a `Blocked:` prefix or any other template — just write it.
+
+   Example (missing access):
+
+   > Blocked: I need the staging Postgres credentials to verify the migration in §2 runs cleanly before I open the PR. Could you drop them into the `pi_dash_runner` 1Password vault, or rotate me a short-lived token? Once that's in place I'll pick this back up on the next tick.
+
+   Example (decision only a human can make):
+
+   > One decision before I implement: the spec says "rate-limit the endpoint" but doesn't say at what tier. The existing API endpoints in `apps/api/pi_dash/api/views/issue.py` use `ApiKeyRateThrottle` (per-key) — should I apply the same here, or do you want a per-IP throttle? Defaulting to per-key matches the surrounding code, so I'll go with that in ~24h if I don't hear back.
+
+3. **Move issue state if a "Blocked" state exists** in "Available states" (see "Pi Dash CLI"):
+   `pidash issue patch {{ issue.identifier }} --state "Blocked"`
+   If no "Blocked" state exists in this project, leave the issue in its current state. The comment is the signal.
+
+4. **Stop.** Do not continue into implementation. Exit the run cleanly. The next agent tick fires automatically when the human replies; it will read the new comment, find the `Awaiting human reply` pointer in your workpad, and pick up where you left off.

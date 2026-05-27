@@ -25,6 +25,7 @@ mod stop;
 mod tui;
 mod uninstall;
 pub mod update;
+mod workpad;
 mod workspace;
 
 /// Re-exported for integration tests that want to exercise the daemon-entry
@@ -118,6 +119,9 @@ pub enum Command {
     /// Inspect workflow states on a project.
     State(state::StateArgs),
 
+    /// Read or overwrite the coding agent's per-issue workpad.
+    Workpad(workpad::WorkpadArgs),
+
     /// Verify the CLI's Pi Dash credentials end-to-end.
     Workspace(workspace::WorkspaceArgs),
 
@@ -156,6 +160,7 @@ pub async fn run(cli: Cli) -> Result<()> {
         Command::Issue(args) => run_crud(issue::run(args, &paths).await),
         Command::Comment(args) => run_crud(comment::run(args, &paths).await),
         Command::State(args) => run_crud(state::run(args, &paths).await),
+        Command::Workpad(args) => run_crud(workpad::run(args, &paths).await),
         Command::Workspace(args) => run_crud(workspace::run(args, &paths).await),
         Command::Run(args) => run::run(args, &paths).await,
     }
