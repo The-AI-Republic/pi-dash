@@ -70,7 +70,10 @@ class IssueSerializer(BaseSerializer):
     class Meta:
         model = Issue
         read_only_fields = ["id", "workspace", "project", "updated_by", "updated_at"]
-        exclude = ["description_json", "description_stripped"]
+        # ``workpad`` is the agent's per-issue scratchpad. It can grow to several
+        # KB of markdown, so exclude it here and expose it through the dedicated
+        # workpad endpoint to keep ``GET /work-items/<id>/`` payloads small.
+        exclude = ["description_json", "description_stripped", "workpad"]
 
     def validate(self, data):
         if (
@@ -332,6 +335,21 @@ class IssueLiteSerializer(BaseSerializer):
         model = Issue
         fields = ["id", "sequence_id", "project_id"]
         read_only_fields = fields
+
+
+class IssueWorkpadSerializer(BaseSerializer):
+    """Focused serializer for the agent workpad endpoint.
+
+    Exposes only ``body`` (mapped to ``Issue.workpad``) so the wire format
+    stays small and the caller doesn't see unrelated issue fields.
+    """
+
+    body = serializers.CharField(source="workpad", allow_blank=True, required=False)
+
+    class Meta:
+        model = Issue
+        fields = ["body", "updated_at"]
+        read_only_fields = ["updated_at"]
 
 
 class LabelCreateUpdateSerializer(BaseSerializer):
@@ -833,7 +851,9 @@ class IssueExpandSerializer(BaseSerializer):
 
     class Meta:
         model = Issue
-        fields = "__all__"
+        # Exclude the agent workpad — exposed only through the dedicated
+        # workpad endpoint to keep expand/list payloads small.
+        exclude = ["workpad"]
         read_only_fields = [
             "id",
             "workspace",

@@ -17,6 +17,9 @@ Description:
 No description provided.
 {% endif %}
 
+Comments to date (chronological — humans and the agent's own prior runs):
+{{ comments_section }}
+
 Repository:
 {% if repo.url %}
 - Remote: {{ repo.url }}
