@@ -6,7 +6,6 @@
 
 import { useEffect, useRef, useState } from "react";
 import { observer } from "mobx-react";
-import { useTheme } from "next-themes";
 // pi dash helpers
 import { useOutsideClickDetector } from "@pi-dash/hooks";
 import { PreferencesIcon } from "@pi-dash/propel/icons";
@@ -36,8 +35,6 @@ export const SidebarWrapper = observer(function SidebarWrapper(props: TSidebarWr
   // store hooks
   const { toggleSidebar, sidebarCollapsed } = useAppTheme();
   const windowSize = useSize();
-  const { resolvedTheme } = useTheme();
-  const logoSrc = resolvedTheme === "dark" ? piSymbolDark : piSymbolLight;
   // refs
   const ref = useRef<HTMLDivElement>(null);
 
@@ -61,7 +58,22 @@ export const SidebarWrapper = observer(function SidebarWrapper(props: TSidebarWr
 
           <div className="flex items-center justify-between gap-2 px-2">
             <div className="flex items-center gap-2">
-              <img src={logoSrc} alt="Pi Dash" className="h-5 w-5 object-contain" aria-hidden="true" />
+              {title === "Pi Dash" && (
+                <>
+                  <img
+                    src={piSymbolLight}
+                    alt="Pi Dash"
+                    className="h-5 w-auto object-contain dark:hidden"
+                    aria-hidden="true"
+                  />
+                  <img
+                    src={piSymbolDark}
+                    alt="Pi Dash"
+                    className="hidden h-5 w-auto object-contain dark:block"
+                    aria-hidden="true"
+                  />
+                </>
+              )}
               <span className="pt-1 text-16 font-medium text-primary">{title}</span>
             </div>
             <div className="flex items-center gap-2">
