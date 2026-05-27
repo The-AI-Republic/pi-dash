@@ -200,7 +200,7 @@ def upsert_runner_live_state(
     rather than raised so a buggy runner can't take down the cloud's
     poll handler.
     """
-    if not status_entry:
+    if not isinstance(status_entry, dict) or not status_entry:
         return
     has_snapshot = "observed_run_id" in status_entry or any(
         key in status_entry for key in (*SNAPSHOT_FIELDS, "tokens", "model")

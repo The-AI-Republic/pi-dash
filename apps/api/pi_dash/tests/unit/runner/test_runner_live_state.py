@@ -108,6 +108,17 @@ def test_upsert_no_op_for_pre_observability_poll(
 
 
 @pytest.mark.unit
+def test_upsert_no_op_for_non_object_status(
+    db, create_user, workspace, pod
+):
+    runner = _make_runner(create_user, workspace, pod)
+
+    upsert_runner_live_state(runner, 1)
+
+    assert not RunnerLiveState.objects.filter(runner=runner).exists()
+
+
+@pytest.mark.unit
 def test_upsert_creates_row_on_first_snapshot(
     db, create_user, workspace, pod
 ):

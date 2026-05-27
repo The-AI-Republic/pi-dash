@@ -158,6 +158,24 @@ def test_drain_does_not_fire_on_fresh_heartbeat_poll(db, api_client, enrolled_ru
 
 
 @pytest.mark.unit
+def test_poll_ignores_non_object_status_payload(
+    db, api_client, enrolled_runner, runner_token, runner_session
+):
+    """Malformed status payloads should not fail the poll heartbeat path."""
+    with _patched_poll_dependencies() as mock_drain:
+        resp = _poll(
+            api_client,
+            enrolled_runner.id,
+            runner_session.id,
+            runner_token,
+            body={"status": 1},
+        )
+
+    assert resp.status_code == 200, resp.data
+    mock_drain.assert_not_called()
+
+
+@pytest.mark.unit
 def test_drain_fires_when_runner_reports_idle_after_busy(db, api_client, enrolled_runner, runner_token, runner_session):
     """Busy runner → idle poll → drain once for queued follow-up work."""
     Runner.objects.filter(pk=enrolled_runner.id).update(status=RunnerStatus.BUSY)
