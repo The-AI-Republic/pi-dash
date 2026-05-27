@@ -6,21 +6,27 @@
 
 import { useState } from "react";
 import { observer } from "mobx-react";
-import { Cpu, Laptop, Terminal } from "lucide-react";
+import { Check, Copy, Cpu, Download, Laptop, Terminal } from "lucide-react";
 import { useTranslation } from "@pi-dash/i18n";
-import { Button } from "@pi-dash/propel/button";
+import { Button, getButtonStyling } from "@pi-dash/propel/button";
 import { TOAST_TYPE, setToast } from "@pi-dash/propel/toast";
 import { PageHead } from "@/components/core/page-title";
 import { AddRunnerModal } from "@/components/runners/add-runner-modal";
 import { useWorkspace } from "@/hooks/store/use-workspace";
 
-// One-liners point at the GitHub Releases ``latest`` channel. The wrapper
+// Installers point at the GitHub Releases ``latest`` channel. The wrapper
 // installers (install.sh / install.ps1) download the cargo-dist installer,
 // drop ``pidash`` on PATH, and immediately start device-code login. See
 // runner/README.md for the full matrix (tag-pinned, bare installers, etc.).
 const INSTALL_CMD_UNIX = `curl --proto '=https' --tlsv1.2 -LsSf \\
   https://github.com/The-AI-Republic/pi-dash/releases/latest/download/install.sh | sh`;
 const INSTALL_CMD_WINDOWS = `irm https://github.com/The-AI-Republic/pi-dash/releases/latest/download/install.ps1 | iex`;
+const WINDOWS_MSI_URL =
+  "https://github.com/The-AI-Republic/pi-dash/releases/latest/download/pidash-x86_64-pc-windows-msvc.msi";
+const INSTALL_CMD_WINDOWS_MSI = `$ProgressPreference = "SilentlyContinue"
+$msi = Join-Path $env:TEMP "pidash-x86_64-pc-windows-msvc.msi"
+Invoke-WebRequest -Uri "${WINDOWS_MSI_URL}" -OutFile $msi
+Start-Process msiexec.exe -Wait -ArgumentList "/i \`"$msi\`""`;
 
 // We don't render a runners list on this page, so there's nothing to refetch
 // on success — the modal still requires the callback. The AI Agents page
@@ -77,6 +83,12 @@ const AiDevMachinesPage = observer(function AiDevMachinesPage() {
 
         <InstallCommand label={t("ai_dev_machines.install.macos_linux_label")} command={INSTALL_CMD_UNIX} />
         <InstallCommand label={t("ai_dev_machines.install.windows_label")} command={INSTALL_CMD_WINDOWS} />
+        <InstallCommand
+          label={t("ai_dev_machines.install.windows_msi_label")}
+          command={INSTALL_CMD_WINDOWS_MSI}
+          href={WINDOWS_MSI_URL}
+          hrefLabel={t("ai_dev_machines.install.download_msi")}
+        />
 
         <p className="text-12 text-secondary">{t("ai_dev_machines.install.prereq")}</p>
       </section>
@@ -128,9 +140,11 @@ function ConceptCard({ icon, title, body }: ConceptCardProps) {
 type InstallCommandProps = {
   label: string;
   command: string;
+  href?: string;
+  hrefLabel?: string;
 };
 
-function InstallCommand({ label, command }: InstallCommandProps) {
+function InstallCommand({ label, command, href, hrefLabel }: InstallCommandProps) {
   const { t } = useTranslation();
   const [justCopied, setJustCopied] = useState(false);
 
@@ -150,11 +164,19 @@ function InstallCommand({ label, command }: InstallCommandProps) {
 
   return (
     <div className="rounded-md border border-subtle bg-layer-1 p-3">
-      <div className="mb-2 flex items-center justify-between gap-2">
+      <div className="mb-2 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
         <span className="text-12 font-medium text-secondary uppercase">{label}</span>
-        <Button size="sm" variant="secondary" onClick={copy}>
-          {justCopied ? t("ai_dev_machines.install.copied") : t("ai_dev_machines.install.copy_command")}
-        </Button>
+        <div className="flex flex-wrap items-center gap-2">
+          {href && hrefLabel && (
+            <a href={href} target="_blank" rel="noreferrer noopener" className={getButtonStyling("secondary", "sm")}>
+              <Download className="size-3.5 shrink-0" />
+              {hrefLabel}
+            </a>
+          )}
+          <Button size="sm" variant="secondary" onClick={copy} prependIcon={justCopied ? <Check /> : <Copy />}>
+            {justCopied ? t("ai_dev_machines.install.copied") : t("ai_dev_machines.install.copy_command")}
+          </Button>
+        </div>
       </div>
       <pre className="font-mono rounded border border-subtle bg-layer-2 p-2 text-11 whitespace-pre-wrap text-primary select-all">
         {command}
