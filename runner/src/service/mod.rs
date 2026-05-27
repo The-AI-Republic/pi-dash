@@ -3,7 +3,7 @@ use std::path::Path;
 
 use crate::util::paths::Paths;
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", test))]
 pub mod launchd;
 pub mod reload;
 #[cfg(target_os = "linux")]

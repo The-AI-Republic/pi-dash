@@ -301,10 +301,10 @@ fn parse_loaded_pid(stdout: &str) -> Option<i32> {
 }
 
 /// Extract `LastExitStatus` from `launchctl list LABEL`'s plist-style
-/// stdout. macOS launchd encodes signals as the raw signal number here:
-/// 9 means SIGKILL, 6 means SIGABRT, 11 means SIGSEGV, etc. A clean
-/// `exit(0)` is `0`. Returns `None` when the field is absent (label is
-/// loaded but has never exited).
+/// stdout. launchd exposes the wait-status integer: signal deaths live
+/// in the low bits (`9` means SIGKILL), while ordinary exits are shifted
+/// (`exit(78)` shows up as `19968`). Returns `None` when the field is
+/// absent (label is loaded but has never exited).
 fn parse_last_exit_status(stdout: &str) -> Option<i32> {
     parse_int_field(stdout, "LastExitStatus")
 }
@@ -350,18 +350,53 @@ pub async fn diagnose_recent_exit() -> Option<String> {
     if matches!(pid, Some(p) if p > 0) {
         return None;
     }
-    let status = parse_last_exit_status(&stdout)?;
-    if status == 0 {
+    let raw_status = parse_last_exit_status(&stdout)?;
+    let status = decode_launchd_exit_status(raw_status);
+    if status == LaunchdExitStatus::Exited(0) {
         return None; // clean exit — IPC must have failed for another reason
     }
-    Some(describe_exit_status(status))
+    Some(describe_exit_status(status, raw_status))
 }
 
-/// Translate a launchctl `LastExitStatus` integer into an
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LaunchdExitStatus {
+    Exited(i32),
+    Signaled { signal: i32, core_dumped: bool },
+    Other(i32),
+}
+
+/// Decode launchd's `LastExitStatus` as the raw wait status it reports
+/// in the per-label plist-style output. For example, SIGKILL is `9`,
+/// SIGABRT with a core flag is `134`, and `exit(78)` is `19968`.
+fn decode_launchd_exit_status(raw_status: i32) -> LaunchdExitStatus {
+    // Be tolerant of callers passing the legacy `launchctl list` status
+    // column form, where a signal can be represented as `-SIGNAL`.
+    if raw_status < 0 {
+        return LaunchdExitStatus::Signaled {
+            signal: -raw_status,
+            core_dumped: false,
+        };
+    }
+
+    let termsig = raw_status & 0x7f;
+    if termsig == 0 {
+        return LaunchdExitStatus::Exited((raw_status >> 8) & 0xff);
+    }
+    if termsig != 0x7f {
+        return LaunchdExitStatus::Signaled {
+            signal: termsig,
+            core_dumped: raw_status & 0x80 != 0,
+        };
+    }
+    LaunchdExitStatus::Other(raw_status)
+}
+
+/// Translate a decoded launchd `LastExitStatus` into an
 /// operator-actionable message. Pure function so it's unit-testable.
-fn describe_exit_status(status: i32) -> String {
+fn describe_exit_status(status: LaunchdExitStatus, raw_status: i32) -> String {
     match status {
-        9 => "Daemon was killed by SIGKILL (LastExitStatus=9) shortly after launchd \
+        LaunchdExitStatus::Signaled { signal: 9, .. } => format!(
+            "Daemon was killed by SIGKILL (LastExitStatus={raw_status}) shortly after launchd \
              exec'd it. On macOS this is almost always a code-signing rejection by \
              AMFI — common when a freshly built binary's signature isn't trusted \
              for launchd-spawned processes even though it runs fine from the shell. \
@@ -371,24 +406,39 @@ fn describe_exit_status(status: i32) -> String {
              Re-sign locally with `codesign --force --sign - <binary>` if needed; \
              release builds shipped via `pidash-installer.sh` are Developer-ID \
              signed and unaffected."
-            .to_string(),
-        6 => "Daemon aborted (LastExitStatus=6 = SIGABRT) shortly after launch. \
+        ),
+        LaunchdExitStatus::Signaled {
+            signal: 6,
+            core_dumped,
+        } => format!(
+            "Daemon aborted (LastExitStatus={raw_status} = SIGABRT{}) shortly after launch. \
              Most likely a Rust panic or a libc assertion. Check the daemon's \
              stderr log at `~/Library/Application Support/so.pidash.pidash/logs/runner.err.log` \
-             (macOS) for the panic message."
-            .to_string(),
-        11 => "Daemon segfaulted (LastExitStatus=11 = SIGSEGV) shortly after \
-              launch. Likely a native crash. Check the stderr log and consider \
-              running with `RUST_BACKTRACE=1` baked into the launchd plist."
-            .to_string(),
-        n if (1..32).contains(&n) => format!(
-            "Daemon was killed by signal {n} (LastExitStatus={n}) shortly after \
-             launch. Check the daemon's stderr log for context."
+             (macOS) for the panic message.",
+            if core_dumped { ", core dumped" } else { "" }
         ),
-        n => format!(
-            "Daemon exited with non-zero status {n} shortly after launch. \
+        LaunchdExitStatus::Signaled {
+            signal: 11,
+            core_dumped,
+        } => format!(
+            "Daemon segfaulted (LastExitStatus={raw_status} = SIGSEGV{}) shortly after \
+              launch. Likely a native crash. Check the stderr log and consider \
+              running with `RUST_BACKTRACE=1` baked into the launchd plist.",
+            if core_dumped { ", core dumped" } else { "" }
+        ),
+        LaunchdExitStatus::Signaled { signal, .. } => format!(
+            "Daemon was killed by signal {signal} (LastExitStatus={raw_status}) shortly after \
+             launch. Check the daemon's stderr log for context.",
+        ),
+        LaunchdExitStatus::Exited(code) => format!(
+            "Daemon exited with non-zero status {code} (LastExitStatus={raw_status}) shortly \
+             after launch. \
              Usually a config / credential error — check the daemon's stderr \
              log at `~/Library/Application Support/so.pidash.pidash/logs/runner.err.log`."
+        ),
+        LaunchdExitStatus::Other(raw) => format!(
+            "Daemon stopped with unrecognized launchd LastExitStatus={raw}. \
+             Check the daemon's stderr log at `~/Library/Application Support/so.pidash.pidash/logs/runner.err.log`."
         ),
     }
 }
@@ -628,7 +678,7 @@ mod tests {
 
     #[test]
     fn describe_exit_status_calls_out_sigkill_amfi() {
-        let msg = describe_exit_status(9);
+        let msg = describe_exit_status(decode_launchd_exit_status(9), 9);
         // The SIGKILL message MUST point at AMFI / codesign — that's
         // the load-bearing user-facing diagnosis. If someone edits
         // the message and loses that hint, this test should fail.
@@ -639,7 +689,7 @@ mod tests {
 
     #[test]
     fn describe_exit_status_calls_out_sigabrt_panic() {
-        let msg = describe_exit_status(6);
+        let msg = describe_exit_status(decode_launchd_exit_status(6), 6);
         assert!(msg.contains("SIGABRT") || msg.contains("aborted"));
         assert!(
             msg.to_lowercase().contains("panic"),
@@ -648,14 +698,52 @@ mod tests {
     }
 
     #[test]
+    fn decode_launchd_exit_status_handles_raw_wait_statuses() {
+        assert_eq!(decode_launchd_exit_status(0), LaunchdExitStatus::Exited(0));
+        // launchd's plist-style LastExitStatus uses the raw wait status:
+        // exit code 1 is 1 << 8, not plain 1.
+        assert_eq!(
+            decode_launchd_exit_status(256),
+            LaunchdExitStatus::Exited(1)
+        );
+        assert_eq!(
+            decode_launchd_exit_status(19968),
+            LaunchdExitStatus::Exited(78)
+        );
+        // Signals occupy the low bits; the core-dump bit may also be set.
+        assert_eq!(
+            decode_launchd_exit_status(9),
+            LaunchdExitStatus::Signaled {
+                signal: 9,
+                core_dumped: false
+            }
+        );
+        assert_eq!(
+            decode_launchd_exit_status(134),
+            LaunchdExitStatus::Signaled {
+                signal: 6,
+                core_dumped: true
+            }
+        );
+        assert_eq!(
+            decode_launchd_exit_status(139),
+            LaunchdExitStatus::Signaled {
+                signal: 11,
+                core_dumped: true
+            }
+        );
+    }
+
+    #[test]
     fn describe_exit_status_handles_arbitrary_signals_and_exit_codes() {
         // SIGTERM = 15: signal range, but no canned message — fall
         // through to the "killed by signal N" branch.
-        let sig = describe_exit_status(15);
+        let sig = describe_exit_status(decode_launchd_exit_status(15), 15);
         assert!(sig.contains("signal 15"));
         // Non-signal exit (e.g. config error, status 78 = EX_CONFIG).
-        let cfg = describe_exit_status(78);
+        let cfg = describe_exit_status(decode_launchd_exit_status(19968), 19968);
         assert!(cfg.contains("78"));
+        assert!(cfg.contains("19968"));
         assert!(
             cfg.to_lowercase().contains("config") || cfg.to_lowercase().contains("non-zero"),
             "high exit codes should suggest config/credential errors; got: {cfg}"
