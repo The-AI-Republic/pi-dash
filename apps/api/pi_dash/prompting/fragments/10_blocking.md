@@ -5,7 +5,7 @@ Use this when completion is blocked by missing required tools or missing auth/pe
 1. **Update the workpad** (`pidash workpad update --body-file <path>`):
    - `### Phase` left at the phase you were in, not "completed".
    - `### Autonomy / Escalation` updated: `score`, `type`, `safe_to_continue: false`, `Reason:` explaining the blocker in your own words.
-   - `Awaiting human reply:` set to a one-line note about the comment you're about to post (gist + today's date). This is so the next run, after the human replies, can locate the right conversation thread quickly.
+   - `Awaiting human reply:` set to a one-line note about the comment you're about to post (gist + today's date). This is a self-note for the *next* run — it isn't read by any code on the cloud side, but reading it as part of your workpad reconciliation in Step 1 tells you immediately that you're resuming a clarification thread (so you check the most recent human comments first) rather than starting a fresh investigation.
 
 2. **Post a comment to the human** via `pidash comment add {{ issue.identifier }} --body-file <path>`. Write as a colleague (see Step 0.5 step 7 for tone). Lead with what's blocking, then what you need from them. Don't use a `Blocked:` prefix or any other template — just write it.
 
@@ -21,4 +21,4 @@ Use this when completion is blocked by missing required tools or missing auth/pe
    `pidash issue patch {{ issue.identifier }} --state "Blocked"`
    If no "Blocked" state exists in this project, leave the issue in its current state. The comment is the signal.
 
-4. **Stop.** Do not continue into implementation. Exit the run cleanly. The next agent tick fires automatically when the human replies; it will read the new comment, find the `Awaiting human reply` pointer in your workpad, and pick up where you left off.
+4. **Stop.** Do not continue into implementation. Exit the run cleanly. The next agent tick fires automatically when the human replies (the cloud's `handle_issue_comment` listener queues a follow-up run on any non-bot comment); that run will start fresh, read the full comment thread via `pidash comment list`, see the human's reply, see your `Awaiting human reply` self-note in the workpad, and continue from where you left off.

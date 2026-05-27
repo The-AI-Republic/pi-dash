@@ -179,7 +179,10 @@ class IssueSerializer(BaseSerializer):
 
     class Meta:
         model = Issue
-        fields = "__all__"
+        # `workpad` is the agent's per-issue scratchpad and must never leak
+        # into the public/guest Space app. Use exclude so future Issue field
+        # additions still flow through without an opt-in step.
+        exclude = ["workpad"]
         read_only_fields = [
             "workspace",
             "project",
@@ -269,7 +272,9 @@ class IssueCreateSerializer(BaseSerializer):
 
     class Meta:
         model = Issue
-        fields = "__all__"
+        # Exclude the agent workpad — guest/public Space readers must never
+        # see agent-internal scratchpad state.
+        exclude = ["workpad"]
         read_only_fields = [
             "workspace",
             "project",

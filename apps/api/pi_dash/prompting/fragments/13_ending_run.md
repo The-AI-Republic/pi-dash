@@ -11,7 +11,7 @@ The workpad is the only carrier of state into the next run. The next agent will 
 - [ ] `### Analysis` is populated: `Restated problem`, `Acceptance criteria`, `Proposed approach`, `Task type`, `Risks / assumptions`, `Decision`. No placeholder text.
 - [ ] `### Plan` reflects the current plan, with checked-off items reflecting current reality. New scope discovered this run is added; obsolete items are removed or marked done.
 - [ ] `### Notes` captures anything material learned this run that the next run needs to know — non-obvious decisions, dead ends ruled out, environment quirks, file/symbol pointers used.
-- [ ] If exiting in a blocked state (see §2 below): `### Autonomy / Escalation` has `safe_to_continue: false`, `Reason:` explains why, and `Awaiting human reply:` points at the comment carrying the question (date + one-line gist), so the next run can find the answer when the human replies.
+- [ ] If exiting in a blocked state (see §2 below): `### Autonomy / Escalation` has `safe_to_continue: false`, `Reason:` explains why, and `Awaiting human reply:` carries a one-line note (date + gist) pointing at the comment you posted. This is a self-note for the next run — no code reads it; the run that picks up after the human replies should still confirm by reading the recent comments.
 
 If any item fails this check, fix the workpad before exiting — `pidash workpad update --body-file <path>`. A workpad missing required fields means the next tick has to redo investigation or re-ask the human, which is the failure mode this discipline prevents.
 

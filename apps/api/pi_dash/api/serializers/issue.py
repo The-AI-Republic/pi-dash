@@ -851,7 +851,9 @@ class IssueExpandSerializer(BaseSerializer):
 
     class Meta:
         model = Issue
-        fields = "__all__"
+        # Exclude the agent workpad — exposed only through the dedicated
+        # workpad endpoint to keep expand/list payloads small.
+        exclude = ["workpad"]
         read_only_fields = [
             "id",
             "workspace",

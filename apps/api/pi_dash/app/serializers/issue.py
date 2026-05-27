@@ -127,7 +127,10 @@ class IssueCreateSerializer(BaseSerializer):
 
     class Meta:
         model = Issue
-        fields = "__all__"
+        # Exclude the agent workpad — it's read/written via the dedicated
+        # workpad endpoint and would bloat every web-tier issue payload if
+        # included here.
+        exclude = ["workpad"]
         read_only_fields = [
             "workspace",
             "project",
@@ -831,7 +834,10 @@ class IssueStateSerializer(DynamicBaseSerializer):
 
     class Meta:
         model = Issue
-        fields = "__all__"
+        # Exclude the agent workpad — read/written via the dedicated workpad
+        # endpoint; including it here would bloat list payloads with KBs of
+        # markdown per issue.
+        exclude = ["workpad"]
 
 
 class IssueIntakeSerializer(DynamicBaseSerializer):

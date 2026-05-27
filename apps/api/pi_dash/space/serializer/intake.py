@@ -42,4 +42,6 @@ class IssueStateIntakeSerializer(BaseSerializer):
 
     class Meta:
         model = Issue
-        fields = "__all__"
+        # Exclude the agent workpad — guest/public Space readers must never
+        # see agent-internal scratchpad state.
+        exclude = ["workpad"]

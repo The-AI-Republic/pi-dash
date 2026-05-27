@@ -2674,10 +2674,33 @@ class IssueWorkpadAPIEndpoint(BaseAPIView):
         return Response(IssueWorkpadSerializer(issue).data, status=status.HTTP_200_OK)
 
     def patch(self, request, slug, project_id, issue_id):
-        issue = Issue.issue_objects.get(
-            workspace__slug=slug, project_id=project_id, pk=issue_id
+        # Require the wire field explicitly. Without this check, a caller
+        # sending the model field name `{"workpad": "..."}` (instead of the
+        # wire name `{"body": "..."}`) would silently no-op under
+        # ``partial=True`` — DRF accepts the payload, writes nothing, and
+        # returns the old value with HTTP 200.
+        if "body" not in request.data:
+            return Response(
+                {"error": "PATCH requires a `body` field in the request payload."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        # Wrap read+write under a row-level lock so two concurrent
+        # ``pidash workpad update`` calls can't lose each other's writes.
+        # The agent ticker can coalesce continuation runs but in-process
+        # rapid updates from a single agent (phase + notes in quick
+        # succession) still race without this.
+        with transaction.atomic():
+            issue = (
+                Issue.issue_objects.select_for_update()
+                .get(workspace__slug=slug, project_id=project_id, pk=issue_id)
+            )
+            serializer = IssueWorkpadSerializer(issue, data=request.data, partial=True)
+            serializer.is_valid(raise_exception=True)
+            serializer.save()
+        # Return only the timestamp — the body just came from the caller
+        # and echoing it back inflates the agent's tool-output history
+        # (workpads can grow to multiple KB of markdown).
+        return Response(
+            {"updated_at": serializer.data["updated_at"]},
+            status=status.HTTP_200_OK,
         )
-        serializer = IssueWorkpadSerializer(issue, data=request.data, partial=True)
-        serializer.is_valid(raise_exception=True)
-        serializer.save()
-        return Response(serializer.data, status=status.HTTP_200_OK)
