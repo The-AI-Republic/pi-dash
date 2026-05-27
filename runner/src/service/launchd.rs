@@ -1,10 +1,20 @@
 use anyhow::{Context, Result};
 use std::path::PathBuf;
+use std::time::{Duration, Instant};
 use tokio::process::Command;
 
 use crate::util::paths::Paths;
 
 const LABEL: &str = "so.pidash.daemon";
+
+/// Upper bound on how long `stop()` will wait for `launchctl bootout` to
+/// finish tearing the daemon down before escalating to SIGKILL. 10s is
+/// generous compared to a healthy shutdown (typically <1s) but short
+/// enough that an operator running `pidash restart` doesn't sit and wait
+/// when the daemon is genuinely stuck.
+const STOP_GRACE: Duration = Duration::from_secs(10);
+const STOP_POLL_INTERVAL: Duration = Duration::from_millis(150);
+const POST_KILL_GRACE: Duration = Duration::from_millis(500);
 
 /// Write the LaunchAgent plist. Does NOT bootstrap (load) it; that's deferred
 /// to `enable_and_start` so `pidash install` can gate activation on
@@ -100,18 +110,28 @@ pub async fn uninstall(_: &Paths) -> Result<()> {
 
 /// Bring the LaunchAgent up. Tries `bootstrap` first (which both loads and
 /// starts the service, since `RunAtLoad=true`). Falls back to
-/// `kickstart -k` ONLY when bootstrap's stderr indicates the service is
-/// already loaded — every other bootstrap failure (plist missing,
-/// malformed, permission denied, label rejected, …) is surfaced with
-/// launchctl's own stderr text so the operator can diagnose it. We
-/// deliberately do not chain to kickstart in those cases: kickstart on a
-/// not-loaded service fails with exit 113, which would hide the real
-/// bootstrap cause behind a misleading "kickstart failed" message.
+/// `kickstart -k` when the label is still loaded in the user's gui
+/// domain — either because launchctl told us so directly ("already
+/// loaded"/"already bootstrapped") or because we asked `launchctl list`
+/// and it confirmed the label is registered. Every other bootstrap
+/// failure (plist missing, malformed, permission denied, …) is surfaced
+/// with launchctl's own stderr text so the operator can diagnose it.
 ///
-/// Why both branches matter for `pidash restart`: restart = stop + start
-/// and `stop()` calls `bootout`, fully removing the service from the
-/// user's gui domain. A plain `kickstart -k` after that fails — so start
-/// MUST be able to re-bootstrap.
+/// Why the `launchctl list` check matters: `launchctl bootstrap` reports
+/// the "you raced an in-flight teardown" case as the opaque
+///   "Bootstrap failed: 5: Input/output error"
+/// rather than "already loaded." Pre-fix, restart's
+/// stop-then-immediately-start sequence would surface that EIO straight
+/// to the user even though `kickstart -k` would have recovered it.
+/// `stop()` now waits for unload to complete so the race is much rarer,
+/// but the safety net stays because operators can also call
+/// `pidash start` directly into a partially-loaded label.
+///
+/// Why kickstart isn't tried unconditionally: kickstart on a not-loaded
+/// service fails with exit 113. Chaining there for *every* bootstrap
+/// failure would mask the real cause behind a misleading "kickstart
+/// failed" message — exactly what we want to avoid for genuine plist
+/// problems.
 pub async fn start() -> Result<()> {
     let uid = get_uid();
     let domain = format!("gui/{uid}");
@@ -130,7 +150,8 @@ pub async fn start() -> Result<()> {
     }
 
     let bootstrap_stderr = String::from_utf8_lossy(&bootstrap.stderr);
-    if !is_already_loaded_error(&bootstrap_stderr) {
+    let label_loaded = probe_loaded_pid().await.is_some();
+    if !is_already_loaded_error(&bootstrap_stderr) && !label_loaded {
         anyhow::bail!(
             "launchctl bootstrap failed ({}): {}",
             bootstrap.status,
@@ -163,28 +184,129 @@ pub async fn stop() -> Result<()> {
         .output()
         .await
         .context("launchctl bootout")?;
-    if out.status.success() {
+    if !out.status.success() {
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        // Benign: bootout against a service that isn't loaded. macOS launchctl
+        // has used different exit codes for this across versions (ESRCH=3 on
+        // older releases, the same "Could not find service in domain" code as
+        // kickstart on newer ones), so we match on the stderr text — stable in
+        // launchctl's source — instead of pinning to a single exit code. Stay
+        // quiet so `pidash restart` after an update / crash doesn't spam stderr
+        // with a benign warning.
+        if is_not_loaded_error(&stderr) {
+            return Ok(());
+        }
+        // Real failure. Surface launchctl's diagnostic to stderr even when the
+        // caller `.ok()`s the Result (which `restart`, `uninstall`,
+        // `update --restart`, and `remove` all do): the old `.status()` path
+        // inherited stderr live, and operators rely on seeing it to debug a
+        // wedged bootout. Then propagate a structured error for callers that
+        // do check the Result.
+        eprintln!("{}", stderr.trim_end());
+        anyhow::bail!("launchctl bootout failed ({})", out.status);
+    }
+
+    // launchctl bootout is *asynchronous*: it returns as soon as it queues
+    // SIGTERM to the daemon, NOT after the process has actually exited.
+    // A follow-up `bootstrap` in the same restart sequence then races the
+    // still-mid-teardown label and launchctl reports the race with the
+    // misleading "Bootstrap failed: 5: Input/output error" (errno EIO),
+    // because launchd hasn't yet released the label.
+    //
+    // Wait until launchd has actually let go of the label before returning.
+    // If the daemon is wedged (e.g. stuck in a long network call inside its
+    // shutdown handler — exactly what we observed in production), escalate
+    // to SIGKILL on the captured PID rather than letting `pidash restart`
+    // fail with a launchctl error the operator can't act on.
+    wait_for_unload(STOP_GRACE).await
+}
+
+/// Poll `launchctl list LABEL` until the label is gone from the user's
+/// domain. If the polite window expires, ask launchctl to SIGKILL the
+/// service by label and re-check. Returns Err only if even SIGKILL
+/// couldn't dislodge the label; the caller (`stop()`) currently propagates
+/// that so `pidash restart` surfaces a clean "daemon would not exit"
+/// rather than the cryptic EIO from the next bootstrap.
+///
+/// Kill is routed through `launchctl kill SIGKILL <target>` rather than a
+/// direct `kill(pid, ...)` syscall: the PID we captured from `launchctl
+/// list` could be stale by the time we'd signal it (sub-second teardown
+/// race + PID reuse), and we don't want to risk killing an unrelated
+/// process. `launchctl kill` resolves the target to the live process at
+/// kill time, so the race vanishes.
+async fn wait_for_unload(timeout: Duration) -> Result<()> {
+    let deadline = Instant::now() + timeout;
+    let mut last_pid: Option<i32> = None;
+    loop {
+        match probe_loaded_pid().await {
+            None => return Ok(()),
+            Some(pid) if pid > 0 => last_pid = Some(pid),
+            Some(_) => {} // listed but no PID yet — keep polling
+        }
+        if Instant::now() >= deadline {
+            break;
+        }
+        tokio::time::sleep(STOP_POLL_INTERVAL).await;
+    }
+
+    // Tell the operator we're escalating. A daemon that wedges its
+    // shutdown handler is a real bug worth seeing; staying silent here
+    // hid it for the original reporter.
+    let pid_label = last_pid
+        .map(|p| format!("pid {p}"))
+        .unwrap_or_else(|| "no pid reported".to_string());
+    eprintln!(
+        "daemon ({pid_label}) did not exit within {}s of launchctl bootout; \
+         escalating via `launchctl kill SIGKILL`",
+        timeout.as_secs()
+    );
+
+    let target = format!("gui/{}/{LABEL}", get_uid());
+    let _ = Command::new("launchctl")
+        .args(["kill", "SIGKILL", &target])
+        .status()
+        .await;
+    tokio::time::sleep(POST_KILL_GRACE).await;
+    if probe_loaded_pid().await.is_none() {
         return Ok(());
     }
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    // Benign: bootout against a service that isn't loaded. macOS launchctl
-    // has used different exit codes for this across versions (ESRCH=3 on
-    // older releases, the same "Could not find service in domain" code as
-    // kickstart on newer ones), so we match on the stderr text — stable in
-    // launchctl's source — instead of pinning to a single exit code. Stay
-    // quiet so `pidash restart` after an update / crash doesn't spam stderr
-    // with a benign warning.
-    if is_not_loaded_error(&stderr) {
-        return Ok(());
+    let elapsed = timeout + POST_KILL_GRACE;
+    anyhow::bail!(
+        "service {LABEL} ({pid_label}) did not exit after bootout + SIGKILL within {}ms",
+        elapsed.as_millis()
+    );
+}
+
+/// Run `launchctl list LABEL` and return `Some(pid)` when the service is
+/// loaded (pid 0 if launchd hasn't assigned one yet), or `None` when
+/// launchctl exits non-zero (label not known in the user's domain).
+async fn probe_loaded_pid() -> Option<i32> {
+    let out = Command::new("launchctl")
+        .args(["list", LABEL])
+        .output()
+        .await
+        .ok()?;
+    if !out.status.success() {
+        return None;
     }
-    // Real failure. Surface launchctl's diagnostic to stderr even when the
-    // caller `.ok()`s the Result (which `restart`, `uninstall`,
-    // `update --restart`, and `remove` all do): the old `.status()` path
-    // inherited stderr live, and operators rely on seeing it to debug a
-    // wedged bootout. Then propagate a structured error for callers that
-    // do check the Result.
-    eprintln!("{}", stderr.trim_end());
-    anyhow::bail!("launchctl bootout failed ({})", out.status);
+    Some(parse_loaded_pid(&String::from_utf8_lossy(&out.stdout)).unwrap_or(0))
+}
+
+/// Extract the PID from `launchctl list LABEL`'s plist-style stdout.
+/// Returns `None` when the label is listed but no PID line is present
+/// (registered but not yet exec'd, or just-exited). Pulled out as a pure
+/// function so the parser has unit tests independent of launchctl.
+fn parse_loaded_pid(stdout: &str) -> Option<i32> {
+    for line in stdout.lines() {
+        let trimmed = line.trim();
+        if let Some(rest) = trimmed.strip_prefix("\"PID\" = ") {
+            let pid_str = rest.trim_end_matches(';').trim();
+            if let Ok(pid) = pid_str.parse::<i32>() {
+                return Some(pid);
+            }
+        }
+    }
+    None
 }
 
 /// Pattern-match `launchctl bootstrap` stderr to decide whether the
@@ -321,9 +443,12 @@ mod tests {
         assert!(is_already_loaded_error(
             "Service is already bootstrapped in domain for user gui: 501"
         ));
-        // Real bootstrap failures we MUST NOT fall through on — falling
-        // through to kickstart on these would mask the real cause behind
-        // a generic "kickstart failed: exit status: 113".
+        // The classifier rejects EIO — the "label loaded but launchctl
+        // returned EIO" recovery now flows through `probe_loaded_pid()`
+        // in `start()`, not through this matcher. Keeping the classifier
+        // strict here means a legitimately-bad bootstrap (plist missing,
+        // malformed) still produces its own error rather than a
+        // misleading "kickstart failed: exit status: 113".
         assert!(!is_already_loaded_error(
             "Bootstrap failed: 5: Input/output error"
         ));
@@ -332,6 +457,53 @@ mod tests {
         ));
         assert!(!is_already_loaded_error("Path had bad ownership/permissions"));
         assert!(!is_already_loaded_error(""));
+    }
+
+    #[test]
+    fn parse_loaded_pid_extracts_pid_from_launchctl_list_output() {
+        // Exact shape of `launchctl list so.pidash.daemon` from the
+        // reporter's session — the EIO repro we cut this fix from.
+        let stdout = r#"{
+	"StandardOutPath" = "/Users/irichard/Library/Application Support/so.pidash.pidash/logs/runner.out.log";
+	"LimitLoadToSessionType" = "Aqua";
+	"StandardErrorPath" = "/Users/irichard/Library/Application Support/so.pidash.pidash/logs/runner.err.log";
+	"Label" = "so.pidash.daemon";
+	"OnDemand" = false;
+	"LastExitStatus" = 0;
+	"PID" = 884;
+	"Program" = "/Users/irichard/.local/bin/pidash";
+};
+"#;
+        assert_eq!(parse_loaded_pid(stdout), Some(884));
+    }
+
+    #[test]
+    fn parse_loaded_pid_returns_none_when_label_listed_without_pid() {
+        // A label can be loaded but have no PID assigned yet (between
+        // bootstrap and exec) or after the process has just exited but
+        // launchd hasn't reaped the row. `wait_for_unload` treats this
+        // as "still loaded, keep polling," which depends on parse
+        // distinguishing "no PID line" from "PID = N".
+        let stdout = r#"{
+	"Label" = "so.pidash.daemon";
+	"OnDemand" = false;
+	"LastExitStatus" = 0;
+};
+"#;
+        assert_eq!(parse_loaded_pid(stdout), None);
+    }
+
+    #[test]
+    fn parse_loaded_pid_ignores_unrelated_quoted_keys() {
+        // Defence against false positives — only the "PID" key parses
+        // as a pid, not e.g. a "PPID" or "LastExitStatus" line.
+        let stdout = r#"{
+	"PPID" = 1;
+	"LastExitStatus" = 0;
+	"Label" = "so.pidash.daemon";
+};
+"#;
+        assert_eq!(parse_loaded_pid(stdout), None);
     }
 
     #[test]
