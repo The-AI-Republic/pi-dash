@@ -125,9 +125,13 @@ pub struct SharedHttpTransport {
 
 impl SharedHttpTransport {
     pub fn new(cloud_url: String) -> Result<Self> {
+        Self::new_with_timeout(cloud_url, Duration::from_secs(60))
+    }
+
+    pub fn new_with_timeout(cloud_url: String, timeout: Duration) -> Result<Self> {
         let http = Client::builder()
             .pool_idle_timeout(Duration::from_secs(60))
-            .timeout(Duration::from_secs(60))
+            .timeout(timeout)
             .user_agent(format!("pidash/{}", crate::RUNNER_VERSION))
             .build()
             .context("building shared reqwest::Client")?;
