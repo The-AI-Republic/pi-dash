@@ -82,9 +82,18 @@ class MachineTokenAdmin(admin.ModelAdmin):
 
 @admin.register(AgentRun)
 class AgentRunAdmin(admin.ModelAdmin):
-    list_display = ("id", "status", "runner", "owner", "started_at", "ended_at")
+    list_display = (
+        "id",
+        "status",
+        "runner",
+        "owner",
+        "llm_model",
+        "total_tokens",
+        "started_at",
+        "ended_at",
+    )
     list_filter = ("status",)
-    search_fields = ("id", "runner__name")
+    search_fields = ("id", "runner__name", "llm_model")
 
 
 @admin.register(AgentRunEvent)

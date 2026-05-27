@@ -1093,6 +1093,7 @@ class IssueDetailSerializer(IssueSerializer):
             "input_tokens": state.input_tokens,
             "output_tokens": state.output_tokens,
             "total_tokens": state.total_tokens,
+            "llm_model": state.llm_model,
             "turn_count": state.turn_count,
             "updated_at": self._serialize_datetime(state.updated_at),
         }
@@ -1120,6 +1121,10 @@ class IssueDetailSerializer(IssueSerializer):
             "ended_at": self._serialize_datetime(run.ended_at),
             "done_payload": run.done_payload,
             "error": run.error,
+            "llm_model": run.llm_model,
+            "input_tokens": run.input_tokens,
+            "output_tokens": run.output_tokens,
+            "total_tokens": run.total_tokens,
             "live_state": self._serialize_agent_live_state(live_state),
         }
 

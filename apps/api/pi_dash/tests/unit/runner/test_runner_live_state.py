@@ -125,6 +125,7 @@ def test_upsert_creates_row_on_first_snapshot(
             "agent_subprocess_alive": True,
             "approvals_pending": 0,
             "tokens": {"input": 100, "output": 200, "total": 300},
+            "model": "gpt-5.1-codex",
             "turn_count": 1,
         },
     )
@@ -137,6 +138,7 @@ def test_upsert_creates_row_on_first_snapshot(
     assert state.input_tokens == 100
     assert state.output_tokens == 200
     assert state.total_tokens == 300
+    assert state.llm_model == "gpt-5.1-codex"
     assert state.turn_count == 1
 
 
@@ -184,6 +186,7 @@ def test_upsert_run_id_change_wipes_snapshot_then_applies_incoming(
             "agent_pid": 1111,
             "turn_count": 5,
             "tokens": {"input": 10, "output": 20, "total": 30},
+            "model": "claude-sonnet-4-6",
         },
     )
     # Run B begins. Carries some new fields; the *unspecified* fields
@@ -204,6 +207,7 @@ def test_upsert_run_id_change_wipes_snapshot_then_applies_incoming(
     assert state.input_tokens is None
     assert state.output_tokens is None
     assert state.total_tokens is None
+    assert state.llm_model is None
 
 
 @pytest.mark.unit

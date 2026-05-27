@@ -27,6 +27,7 @@ from pi_dash.runner.models import (
     AgentRun,
     AgentRunStatus,
     Runner,
+    RunnerLiveState,
 )
 
 logger = logging.getLogger(__name__)
@@ -37,6 +38,67 @@ TERMINAL_RUN_STATUSES = (
     AgentRunStatus.CANCELLED,
     AgentRunStatus.BLOCKED,
 )
+
+
+def _normalize_model(raw: Any) -> str:
+    return str(raw or "").strip()[:128]
+
+
+def _coerce_token(raw: Any) -> Optional[int]:
+    if raw is None or raw == "":
+        return None
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        return None
+    if value < 0:
+        return None
+    return value
+
+
+def _token_updates(tokens: Any) -> Dict[str, int]:
+    if not isinstance(tokens, dict):
+        return {}
+    fields = {
+        "input_tokens": _coerce_token(
+            tokens.get("input", tokens.get("input_tokens"))
+        ),
+        "output_tokens": _coerce_token(
+            tokens.get("output", tokens.get("output_tokens"))
+        ),
+        "total_tokens": _coerce_token(
+            tokens.get("total", tokens.get("total_tokens"))
+        ),
+    }
+    return {key: value for key, value in fields.items() if value is not None}
+
+
+def _payload_usage(payload: Any) -> Any:
+    if isinstance(payload, dict):
+        return payload.get("usage")
+    return None
+
+
+def _matching_live_state(runner: Runner, run_id: UUID | str) -> Optional[RunnerLiveState]:
+    return RunnerLiveState.objects.filter(
+        runner=runner,
+        observed_run_id=run_id,
+    ).first()
+
+
+def _usage_updates_from_live_state(state: Optional[RunnerLiveState]) -> Dict[str, Any]:
+    if state is None:
+        return {}
+    updates: Dict[str, Any] = {}
+    if state.input_tokens is not None:
+        updates["input_tokens"] = state.input_tokens
+    if state.output_tokens is not None:
+        updates["output_tokens"] = state.output_tokens
+    if state.total_tokens is not None:
+        updates["total_tokens"] = state.total_tokens
+    if state.llm_model:
+        updates["llm_model"] = state.llm_model[:128]
+    return updates
 
 
 def _apply_post_run_orchestration(run: AgentRun) -> None:
@@ -77,18 +139,34 @@ def _apply_post_run_orchestration(run: AgentRun) -> None:
 
 
 def apply_run_paused(
-    runner: Runner, run_id: UUID | str, payload: Dict[str, Any]
+    runner: Runner,
+    run_id: UUID | str,
+    payload: Dict[str, Any],
+    *,
+    tokens: Any = None,
+    model: Any = None,
 ) -> None:
     """Mark run paused, post the agent's question to the issue thread,
     apply deferred-pause workspace transitions, and re-fire drain.
 
     See legacy ``RunnerConsumer._handle_run_paused``.
     """
-    updated = AgentRun.objects.filter(id=run_id, runner=runner).exclude(
-        status__in=TERMINAL_RUN_STATUSES
-    ).update(
-        status=AgentRunStatus.PAUSED_AWAITING_INPUT,
-        done_payload=payload,
+    live_state = _matching_live_state(runner, run_id)
+    usage_updates = _usage_updates_from_live_state(live_state)
+    usage_updates.update(_token_updates(_payload_usage(payload)))
+    usage_updates.update(_token_updates(tokens))
+    model_value = _normalize_model(model)
+    if model_value:
+        usage_updates["llm_model"] = model_value
+
+    updated = (
+        AgentRun.objects.filter(id=run_id, runner=runner)
+        .exclude(status__in=TERMINAL_RUN_STATUSES)
+        .update(
+            status=AgentRunStatus.PAUSED_AWAITING_INPUT,
+            done_payload=payload,
+            **usage_updates,
+        )
     )
     if not updated:
         return
@@ -268,6 +346,8 @@ def finalize_run_terminal(
     *,
     done_payload: Any = None,
     error_detail: str = "",
+    tokens: Any = None,
+    model: Any = None,
 ) -> None:
     """Stamp a terminal status and re-fire drain after commit.
 
@@ -291,6 +371,13 @@ def finalize_run_terminal(
         updates["error"] = ""
     if new_status == AgentRunStatus.FAILED and error_detail:
         updates["error"] = error_detail[:16000]
+    live_state = _matching_live_state(runner, run_id)
+    updates.update(_usage_updates_from_live_state(live_state))
+    updates.update(_token_updates(_payload_usage(done_payload)))
+    updates.update(_token_updates(tokens))
+    model_value = _normalize_model(model)
+    if model_value:
+        updates["llm_model"] = model_value
     updated = AgentRun.objects.filter(id=run_id, runner=runner).exclude(
         status__in=TERMINAL_RUN_STATUSES
     ).update(**updates)

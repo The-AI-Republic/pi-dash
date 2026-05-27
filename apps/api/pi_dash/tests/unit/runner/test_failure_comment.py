@@ -36,6 +36,7 @@ from pi_dash.runner.models import (
     AgentRunStatus,
     Pod,
     Runner,
+    RunnerLiveState,
     RunnerStatus,
 )
 from pi_dash.runner.services.run_lifecycle import finalize_run_terminal
@@ -308,3 +309,84 @@ def test_failed_finalize_with_orphan_run_no_workitem_does_not_crash(
     # Total comment count across the whole DB doesn't change for a run
     # with no work_item.
     assert IssueComment.objects.count() == 0
+
+
+@pytest.mark.unit
+def test_finalize_persists_direct_usage_metadata(
+    db, create_user, workspace, pod, issue
+):
+    runner = _make_runner(create_user, workspace, pod)
+    run = _make_run(create_user, workspace, pod, runner, issue)
+
+    finalize_run_terminal(
+        runner,
+        run.id,
+        AgentRunStatus.COMPLETED,
+        done_payload={"conclusion": "success"},
+        tokens={"input": 1000, "output": 250, "total": 1250},
+        model="gpt-5.1-codex",
+    )
+
+    run.refresh_from_db()
+    assert run.status == AgentRunStatus.COMPLETED
+    assert run.llm_model == "gpt-5.1-codex"
+    assert run.input_tokens == 1000
+    assert run.output_tokens == 250
+    assert run.total_tokens == 1250
+
+
+@pytest.mark.unit
+def test_finalize_persists_done_payload_usage_metadata(
+    db, create_user, workspace, pod, issue
+):
+    runner = _make_runner(create_user, workspace, pod)
+    run = _make_run(create_user, workspace, pod, runner, issue)
+
+    finalize_run_terminal(
+        runner,
+        run.id,
+        AgentRunStatus.COMPLETED,
+        done_payload={
+            "conclusion": "success",
+            "usage": {
+                "input_tokens": 100,
+                "output_tokens": 30,
+                "total_tokens": 130,
+            },
+        },
+    )
+
+    run.refresh_from_db()
+    assert run.status == AgentRunStatus.COMPLETED
+    assert run.input_tokens == 100
+    assert run.output_tokens == 30
+    assert run.total_tokens == 130
+
+
+@pytest.mark.unit
+def test_finalize_falls_back_to_matching_live_state_usage(
+    db, create_user, workspace, pod, issue
+):
+    runner = _make_runner(create_user, workspace, pod)
+    run = _make_run(create_user, workspace, pod, runner, issue)
+    RunnerLiveState.objects.create(
+        runner=runner,
+        observed_run_id=run.id,
+        input_tokens=10,
+        output_tokens=20,
+        total_tokens=30,
+        llm_model="claude-sonnet-4-6",
+    )
+
+    finalize_run_terminal(
+        runner,
+        run.id,
+        AgentRunStatus.CANCELLED,
+    )
+
+    run.refresh_from_db()
+    assert run.status == AgentRunStatus.CANCELLED
+    assert run.llm_model == "claude-sonnet-4-6"
+    assert run.input_tokens == 10
+    assert run.output_tokens == 20
+    assert run.total_tokens == 30

@@ -153,8 +153,9 @@ def reap_stale_busy_runs(runner: Runner, body: Dict[str, Any]) -> None:
 
 # Snapshot fields stored on RunnerLiveState. Does NOT include
 # `observed_run_id` (that field drives the wipe, it is not a wipe target).
-# Tokens travel as a nested `tokens.{input,output,total}` object on the
-# wire; they are unpacked into the three flat columns by the upsert.
+# Tokens travel as a nested `tokens.{input,output,total}` object and the
+# selected LLM travels as top-level `model`; both are unpacked into flat
+# columns by the upsert.
 SNAPSHOT_FIELDS = (
     "last_event_at",
     "last_event_kind",
@@ -165,6 +166,7 @@ SNAPSHOT_FIELDS = (
     "input_tokens",
     "output_tokens",
     "total_tokens",
+    "llm_model",
     "turn_count",
 )
 
@@ -201,7 +203,7 @@ def upsert_runner_live_state(
     if not status_entry:
         return
     has_snapshot = "observed_run_id" in status_entry or any(
-        key in status_entry for key in (*SNAPSHOT_FIELDS, "tokens")
+        key in status_entry for key in (*SNAPSHOT_FIELDS, "tokens", "model")
     )
     if not has_snapshot:
         return
@@ -243,6 +245,10 @@ def upsert_runner_live_state(
         state.output_tokens = tokens.get("output")
         state.total_tokens = tokens.get("total")
         update_fields.extend(["input_tokens", "output_tokens", "total_tokens"])
+    if "model" in status_entry:
+        model = (status_entry.get("model") or "").strip()
+        state.llm_model = model[:128] or None
+        update_fields.append("llm_model")
 
     if update_fields:
         state.save(

@@ -1014,6 +1014,8 @@ pub struct PollStatus {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tokens: Option<TokenUsage>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub turn_count: Option<u32>,
 }
 
@@ -1090,6 +1092,7 @@ impl PollStatus {
             agent_subprocess_alive: None,
             approvals_pending: None,
             tokens: None,
+            model: None,
             turn_count: None,
         }
     }
@@ -1113,6 +1116,7 @@ impl PollStatus {
             agent_subprocess_alive: None,
             approvals_pending: None,
             tokens: None,
+            model: None,
             turn_count: None,
         }
     }
@@ -1142,6 +1146,7 @@ impl PollStatus {
         me.agent_subprocess_alive = snapshot.agent_subprocess_alive;
         me.approvals_pending = Some(u32::try_from(approvals_pending).unwrap_or(u32::MAX));
         me.tokens = snapshot.tokens.map(TokenUsage::from);
+        me.model = snapshot.model;
         me.turn_count = snapshot.turn_count;
         me
     }
@@ -2030,6 +2035,7 @@ mod tests {
                 output: 200,
                 total: 300,
             }),
+            model: Some("gpt-5.1-codex".into()),
             turn_count: Some(2),
             last_exec_command: None,
         };
@@ -2044,6 +2050,7 @@ mod tests {
         );
         assert_eq!(obj.get("approvals_pending"), Some(&serde_json::json!(1)));
         assert_eq!(obj.get("turn_count"), Some(&serde_json::json!(2)));
+        assert_eq!(obj.get("model"), Some(&serde_json::json!("gpt-5.1-codex")));
         let tokens = obj.get("tokens").unwrap().as_object().unwrap();
         assert_eq!(tokens.get("input"), Some(&serde_json::json!(100)));
         assert_eq!(tokens.get("output"), Some(&serde_json::json!(200)));
