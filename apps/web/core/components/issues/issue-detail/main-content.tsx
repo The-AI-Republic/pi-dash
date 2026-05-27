@@ -32,6 +32,7 @@ import { IssueDetailWidgets } from "../issue-detail-widgets";
 import { NameDescriptionUpdateStatus } from "../issue-update-status";
 import { PeekOverviewProperties } from "../peek-overview/properties";
 import { IssueTitleInput } from "../title-input";
+import { IssueAgentStatusPanel } from "./agent-status";
 import { IssueActivity } from "./issue-activity";
 import { IssueParentDetail } from "./parent";
 import { IssueReaction } from "./reactions";
@@ -206,13 +207,22 @@ export const IssueMainContent = observer(function IssueMainContent(props: Props)
       />
 
       {windowSize[0] < 768 && (
-        <PeekOverviewProperties
-          workspaceSlug={workspaceSlug}
-          projectId={projectId}
-          issueId={issueId}
-          issueOperations={issueOperations}
-          disabled={!isEditable || isArchived}
-        />
+        <div className="space-y-5">
+          <IssueAgentStatusPanel
+            workspaceSlug={workspaceSlug}
+            projectId={projectId}
+            issueId={issueId}
+            issue={issue}
+            issueOperations={issueOperations}
+          />
+          <PeekOverviewProperties
+            workspaceSlug={workspaceSlug}
+            projectId={projectId}
+            issueId={issueId}
+            issueOperations={issueOperations}
+            disabled={!isEditable || isArchived}
+          />
+        </div>
       )}
 
       <IssueActivity workspaceSlug={workspaceSlug} projectId={projectId} issueId={issueId} disabled={isArchived} />

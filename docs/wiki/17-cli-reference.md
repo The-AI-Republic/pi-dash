@@ -228,6 +228,8 @@ pidash update [--check] [--restart]
 
 Without `--restart`, the swap only takes effect on the next natural restart (`pidash restart`, reboot, service respawn). The running process is never disturbed.
 
+For a one-command manual upgrade, run `pidash update --restart` when the runner is idle.
+
 ### `pidash remove --all`
 
 Full teardown: stop service → uninstall service unit → deregister with cloud → delete local `config.toml` + credentials.

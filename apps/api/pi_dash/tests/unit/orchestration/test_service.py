@@ -339,9 +339,10 @@ def test_comment_creates_pinned_continuation(
     """``handle_issue_comment`` is the explicit entry point Comment & Run
     invokes — comments themselves no longer fire it via post_save.
 
-    The follow-up run gets a fresh full-template render — *not* a continuation
-    prompt that embeds the new comment text. The agent reads the comment
-    thread at runtime via ``pidash comment list``. See
+    The follow-up run gets a fresh full-template render — *not* a
+    bespoke "continuation" prompt shape. Comment pre-rendering means the
+    new comment is embedded via the standard ``comments_section`` block
+    in fragment 01 just like every other comment on the issue. See
     ``.ai_design/ticking_optimization/design.md``.
     """
     from pi_dash.prompting.composer import build_first_turn
@@ -363,9 +364,10 @@ def test_comment_creates_pinned_continuation(
     assert r_next.pinned_runner_id == runner_for_workspace.id
     assert r_next.status == AgentRunStatus.QUEUED
     # The rendered prompt is the full template — same shape as a fresh
-    # first-turn render — and does not embed the comment body verbatim.
+    # first-turn render — including the inline `comments_section` block
+    # that carries the newly-posted comment.
     assert r_next.prompt == build_first_turn(issue, r_next)
-    assert "option B" not in r_next.prompt
+    assert "use option B please" in r_next.prompt
     assert "Pi Dash issue" in r_next.prompt
 
 

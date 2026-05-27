@@ -19,6 +19,7 @@ from pi_dash.api.views import (
     WorkspaceIssueAPIEndpoint,
     IssueSearchEndpoint,
     IssueRelationListCreateAPIEndpoint,
+    IssueWorkpadAPIEndpoint,
 )
 
 # Deprecated url patterns
@@ -156,6 +157,11 @@ new_url_patterns = [
         "workspaces/<str:slug>/projects/<str:project_id>/work-items/<uuid:issue_id>/relations/",
         IssueRelationListCreateAPIEndpoint.as_view(http_method_names=["get", "post"]),
         name="work-item-relation-list",
+    ),
+    path(
+        "workspaces/<str:slug>/projects/<str:project_id>/work-items/<uuid:issue_id>/workpad/",
+        IssueWorkpadAPIEndpoint.as_view(http_method_names=["get", "patch"]),
+        name="work-item-workpad",
     ),
 ]
 

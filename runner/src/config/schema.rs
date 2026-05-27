@@ -72,7 +72,7 @@ pub struct DaemonConfig {
     /// daemon is never disturbed — the new code only takes effect on
     /// the next natural restart. When `false`, the daemon surfaces an
     /// advisory in `pidash status` / TUI and waits for the operator to
-    /// run `pidash update` manually.
+    /// run `pidash update --restart` (or `pidash update` to defer restart).
     #[serde(default = "default_auto_update")]
     pub auto_update: bool,
 }

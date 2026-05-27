@@ -73,7 +73,7 @@ export function AuthHeaderBase(props: TAuthHeaderBase) {
       <PageHead title={pageTitle + " - Pi Dash"} />
       <div className="sticky top-0 flex w-full flex-shrink-0 items-center justify-between gap-6">
         <Link href="/">
-          <PiSymbol height={28} width={28} className="text-primary" />
+          <PiSymbol height={28} width={52} className="text-primary" />
         </Link>
         {additionalAction}
       </div>

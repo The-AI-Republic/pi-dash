@@ -10,7 +10,7 @@ import { Send, Square, X } from "lucide-react";
 import { useParams } from "react-router";
 import useSWR from "swr";
 import { TOAST_TYPE, setToast } from "@pi-dash/propel/toast";
-import { RunnerService } from "@pi-dash/services";
+import { RunnerService, getRunnerDetail } from "@pi-dash/services";
 import type { IAgentChatEvent, IAgentChatMessage, IAgentChatSession, IRunner } from "@pi-dash/types";
 import { Badge, Button } from "@pi-dash/ui";
 import { useAgentChatEvents } from "@/components/runners/chat/use-agent-chat-events";
@@ -97,7 +97,7 @@ const RunnerChatPage = observer(function RunnerChatPage() {
   const streamStartedAtRef = useRef(Date.now());
 
   const { data: runner } = useSWR<IRunner>(runnerId ? ["runner-detail", runnerId] : null, () =>
-    service.getDetail(runnerId!)
+    getRunnerDetail(runnerId!)
   );
   const { data: sessions, mutate: mutateSessions } = useSWR<IAgentChatSession[]>(
     workspaceId && runnerId ? ["runner-chat-sessions", workspaceId, runnerId] : null,
