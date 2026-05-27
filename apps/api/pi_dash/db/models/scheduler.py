@@ -49,6 +49,10 @@ class Scheduler(BaseModel):
         default=SchedulerSource.BUILTIN,
     )
     is_enabled = models.BooleanField(default=True)
+    # Display color, surfaced by the project calendar (PR3). Stored as a
+    # 7-char hex string ("#rrggbb"). Chosen by workspace admin from the
+    # fixed 16-color palette; freeform hex is accepted.
+    color = models.CharField(max_length=7, default="#3b82f6")
 
     class Meta:
         db_table = "schedulers"
@@ -84,7 +88,19 @@ class SchedulerBinding(WorkspaceBaseModel):
         related_name="bindings",
     )
 
-    cron = models.CharField(max_length=64)
+    # iCal-shaped recurrence (RFC 5545). Replaces the legacy cron string
+    # in migration 0140. See .ai_design/project_scheduler_calendar/decisions.md §1.
+    # - ``dtstart`` is the series anchor (tz-aware UTC).
+    # - ``tzid`` is stored for future wall-clock-aware expansion but is
+    #   currently informational; expansion runs in UTC.
+    # - ``rrule`` empty = single-shot at dtstart.
+    # - ``rdates`` / ``exdates`` are JSON arrays of ISO datetime strings.
+    dtstart = models.DateTimeField()
+    tzid = models.CharField(max_length=64, default="UTC")
+    rrule = models.TextField(blank=True, default="")
+    rdates = models.JSONField(default=list, blank=True)
+    exdates = models.JSONField(default=list, blank=True)
+
     extra_context = models.TextField(blank=True, default="")
     enabled = models.BooleanField(default=True)
 

@@ -6,7 +6,8 @@ use pidash::approval::{
     router::{ApprovalRecord, ApprovalRouter, ApprovalStatus, DecisionSource},
 };
 use pidash::cloud::protocol::{
-    ApprovalDecision, ApprovalKind, ClientMsg, Envelope, RunnerStatus, ServerMsg, WIRE_VERSION,
+    ApprovalDecision, ApprovalKind, ClientMsg, Envelope, RunEventRecord, RunnerStatus, ServerMsg,
+    WIRE_VERSION,
 };
 use pidash::config::schema::ApprovalPolicySection;
 use std::path::Path;
@@ -34,6 +35,17 @@ fn envelope_roundtrips_all_client_variants() {
             run_id: Uuid::new_v4(),
             done_payload: serde_json::json!({"conclusion": "success"}),
             ended_at: chrono::Utc::now(),
+        },
+        ClientMsg::RunEvents {
+            run_id: Uuid::new_v4(),
+            events: vec![RunEventRecord {
+                seq: 1,
+                kind: "assistant/message".into(),
+                payload: serde_json::json!({
+                    "schema": "runner_event_summary_v1",
+                    "summary": "raw method=assistant/message",
+                }),
+            }],
         },
     ];
     for v in variants {

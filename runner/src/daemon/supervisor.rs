@@ -16,6 +16,7 @@ use crate::cloud::protocol::{
     ClientMsg, FailureReason, RunnerStatus, ServerMsg, WIRE_VERSION, WorkspaceState,
 };
 use crate::config::schema::{AgentKind, Config, Credentials};
+use crate::daemon::run_event_mirror::RunEventMirror;
 use crate::daemon::runner_instance::RunnerInstance;
 use crate::daemon::runner_out::RunnerOut;
 use crate::daemon::state::StateHandle;
@@ -90,9 +91,9 @@ impl Supervisor {
                 let runner_paths = paths.for_runner(runner_cfg.runner_id);
                 let creds = load_runner_credentials(&runner_paths, &runner_cfg.name).await?;
                 let client = RunnerCloudClient::new(runner_cfg.runner_id, creds, shared.clone());
-                RunnerInstance::new_http(runner_cfg.clone(), &paths, client)
+                RunnerInstance::new_http(runner_cfg.clone(), &paths, client, config.daemon.clone())
             } else {
-                RunnerInstance::new_offline(runner_cfg.clone(), &paths)
+                RunnerInstance::new_offline(runner_cfg.clone(), &paths, config.daemon.clone())
             };
             inst.paths.ensure()?;
             instances.push(inst);
@@ -220,10 +221,30 @@ impl Supervisor {
                     inst.state.shutdown_notified(),
                     attach_body_for_instance(inst),
                 )
-                .with_state(inst.state.clone());
+                .with_state(inst.state.clone())
+                .with_teardown_rx(inst.remove_tx.subscribe());
+                let close_client = client.clone();
+                let local_state = inst.state.clone();
+                let daemon_state = state.clone();
                 let http_handle = tokio::spawn(async move {
                     if let Err(e) = http_loop.run().await {
-                        tracing::error!("http loop exited: {e:#}");
+                        if e.is_expected_teardown() {
+                            tracing::info!("http loop exited after runner teardown: {e:#}");
+                        } else {
+                            tracing::error!("http loop exited: {e:#}");
+                        }
+                        local_state.set_connected(false).await;
+                        let _ = tokio::time::timeout(
+                            Duration::from_secs(2),
+                            close_client.close_session(),
+                        )
+                        .await;
+                        if e.requires_daemon_restart() {
+                            tracing::error!(
+                                "http loop hit a local invariant failure; requesting daemon restart"
+                            );
+                            daemon_state.shutdown();
+                        }
                     }
                 });
                 http_handles.push(http_handle);
@@ -665,16 +686,18 @@ impl RunnerLoop {
                         && version_lt(crate::RUNNER_VERSION, latest)
                         && self.state.on_disk_version().await.as_deref() != Some(latest)
                         && self.state.auto_update_enabled().await
-                        && self.state.try_claim_swap()
+                        && let Some(swap_guard) = self.state.try_claim_swap()
                     {
                         let st = self.state.clone();
                         let latest_owned = latest.to_string();
+                        let paths = self.paths.clone();
                         tokio::spawn(async move {
+                            let _swap_guard = swap_guard;
                             tracing::info!(
                                 target = %latest_owned,
                                 "auto-update: swapping pidash on disk",
                             );
-                            match crate::cli::update::check_or_swap(false).await {
+                            match crate::cli::update::check_or_swap(false, &paths).await {
                                 Ok(crate::cli::update::SwapOutcome::Swapped {
                                     new_version,
                                     ..
@@ -700,7 +723,6 @@ impl RunnerLoop {
                                     );
                                 }
                             }
-                            st.release_swap();
                         });
                     }
                 }
@@ -2157,21 +2179,23 @@ impl AssignWorker {
         let mut cursor = match bridge.run_one_shot(&payload, &workspace_path).await {
             Ok(c) => c,
             Err(e) => {
+                let detail = self.build_failure_detail(&format!("{e:#}"), &bridge).await;
                 hist.append(&HistoryEntry::Footer {
                     ts: Utc::now(),
                     final_status: "failed".to_string(),
                     done_payload: None,
-                    error: Some(e.to_string()),
+                    error: Some(detail.clone()),
                 })
                 .await
                 .ok();
                 self.send(ClientMsg::RunFailed {
                     run_id,
                     reason: self.crash_reason(),
-                    detail: Some(format!("{e:#}")),
+                    detail: Some(detail),
                     ended_at: Utc::now(),
                 })
                 .await;
+                bridge.shutdown(Duration::from_secs(5)).await.ok();
                 self.state.set_current_run(None).await;
                 return Ok(());
             }
@@ -2233,6 +2257,7 @@ impl AssignWorker {
         let shutdown = self.state.shutdown_notified();
         let cancel = self.cancel.clone();
         let mut cancelled = false;
+        let mut run_events = RunEventMirror::new(cursor.run_id());
         loop {
             // Re-evaluate at every loop entry: an approval that opened on
             // the previous iteration disarms the watchdog; one that just
@@ -2242,13 +2267,16 @@ impl AssignWorker {
             } else {
                 None
             };
+            let run_event_flush_deadline = run_events.flush_deadline();
             tokio::select! {
                 biased;
                 _ = shutdown.notified(), if !cancelled => {
                     cancelled = true;
+                    run_events.flush_before_lifecycle(&self.out).await;
                     bridge.interrupt().await.ok();
                 }
                 _ = cancel.notified(), if !cancelled => {
+                    run_events.flush_before_lifecycle(&self.out).await;
                     bridge.interrupt().await.ok();
                     let _ = self.out.send(ClientMsg::RunCancelled {
                         run_id: cursor.run_id(),
@@ -2267,12 +2295,21 @@ impl AssignWorker {
                     ).await;
                     return Ok(Outcome { status_label: "cancelled".into() });
                 }
+                _ = async {
+                    match run_event_flush_deadline {
+                        Some(d) => tokio::time::sleep_until(d).await,
+                        None => std::future::pending::<()>().await,
+                    }
+                } => {
+                    run_events.flush(&self.out).await;
+                }
                 events = bridge.next_events(cursor) => {
                     let Some(events) = events else {
                         let reason = self.crash_reason();
                         let detail = self
                             .build_failure_detail("agent stdout closed", bridge)
                             .await;
+                        run_events.flush_before_lifecycle(&self.out).await;
                         self.send(ClientMsg::RunFailed {
                             run_id: cursor.run_id(),
                             reason,
@@ -2289,7 +2326,7 @@ impl AssignWorker {
                     };
                     for ev in events {
                         if let Some(out) = self
-                            .handle_bridge_event(ev, bridge, hist, workspace_root)
+                            .handle_bridge_event(ev, bridge, hist, workspace_root, &mut run_events)
                             .await?
                         {
                             return Ok(out);
@@ -2305,6 +2342,7 @@ impl AssignWorker {
                     let mins = stall_timeout.as_secs() / 60;
                     let base = format!("no agent frames for {mins} minutes");
                     let detail = self.build_failure_detail(&base, bridge).await;
+                    run_events.flush_before_lifecycle(&self.out).await;
                     self.send(ClientMsg::RunFailed {
                         run_id: cursor.run_id(),
                         reason: FailureReason::Timeout,
@@ -2407,6 +2445,7 @@ impl AssignWorker {
         bridge: &mut AgentBridge,
         hist: &mut HistoryWriter,
         workspace_root: &std::path::Path,
+        run_events: &mut RunEventMirror,
     ) -> Result<Option<Outcome>> {
         self.state.incr_current_run_events().await;
         // Observability: every bridge event bumps last_event_at + stamps
@@ -2417,8 +2456,11 @@ impl AssignWorker {
         let kind = crate::daemon::observability::kind_of(&ev);
         let summary = crate::daemon::observability::summary_of(&ev);
         self.state
-            .note_agent_event(Utc::now(), kind, Some(summary))
+            .note_agent_event(Utc::now(), &kind, Some(&summary))
             .await;
+        if run_events.push(kind, summary) {
+            run_events.flush(&self.out).await;
+        }
         if let BridgeEvent::Raw { method, params, .. } = &ev {
             match method.as_str() {
                 "codex/event/token_count" => {
@@ -2482,6 +2524,7 @@ impl AssignWorker {
                 payload,
                 reason,
             } => {
+                run_events.flush_before_lifecycle(&self.out).await;
                 let policy = Policy::new(&self.runner_config.approval_policy, workspace_root);
                 let decision = policy.evaluate(kind, &payload);
                 if let Some(auto) = decision.into_cloud() {
@@ -2569,6 +2612,7 @@ impl AssignWorker {
             }
             BridgeEvent::AwaitingReauth { run_id, detail } => {
                 self.state.set_status(RunnerStatus::AwaitingReauth).await;
+                run_events.flush_before_lifecycle(&self.out).await;
                 self.send(ClientMsg::RunAwaitingReauth {
                     run_id,
                     detail: detail.clone(),
@@ -2587,6 +2631,7 @@ impl AssignWorker {
                 run_id,
                 done_payload,
             } => {
+                run_events.flush_before_lifecycle(&self.out).await;
                 self.send(ClientMsg::RunCompleted {
                     run_id,
                     done_payload: done_payload.clone(),
@@ -2622,6 +2667,7 @@ impl AssignWorker {
                     .clone()
                     .unwrap_or_else(|| "agent reported failure".to_string());
                 let enriched = self.build_failure_detail(&base, bridge).await;
+                run_events.flush_before_lifecycle(&self.out).await;
                 self.send(ClientMsg::RunFailed {
                     run_id,
                     reason,
@@ -2645,7 +2691,9 @@ impl AssignWorker {
     }
 
     async fn send(&self, msg: ClientMsg) {
-        let _ = self.out.send(msg).await;
+        if let Err(err) = self.out.send(msg).await {
+            tracing::warn!(error = %err, "failed to send runner lifecycle message");
+        }
     }
 }
 

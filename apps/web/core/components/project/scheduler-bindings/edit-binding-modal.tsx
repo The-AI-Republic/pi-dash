@@ -7,17 +7,21 @@
 import { useEffect } from "react";
 import { observer } from "mobx-react";
 import type { SubmitHandler } from "react-hook-form";
-import { Controller, useForm } from "react-hook-form";
-// pi dash imports
+import { useForm, useWatch } from "react-hook-form";
 import { useTranslation } from "@pi-dash/i18n";
 import { Button } from "@pi-dash/propel/button";
 import { TOAST_TYPE, setToast } from "@pi-dash/propel/toast";
 import type { ISchedulerBinding } from "@pi-dash/services";
 import { SchedulerService } from "@pi-dash/services";
-import { EModalPosition, EModalWidth, Input, ModalCore, TextArea, ToggleSwitch } from "@pi-dash/ui";
+import { EModalPosition, EModalWidth, ModalCore } from "@pi-dash/ui";
+import { BindingScheduleFields } from "./binding-schedule-fields";
+import { DEFAULT_TZID } from "./constants";
+import { isoUTCToLocalInput, localToIsoUTC } from "./datetime-input";
 
 interface EditFormValues {
-  cron: string;
+  dtstart: string;
+  tzid: string;
+  rrule: string;
   extra_context: string;
   enabled: boolean;
 }
@@ -43,23 +47,30 @@ export const EditSchedulerBindingModal = observer(function EditSchedulerBindingM
     reset,
     formState: { errors, isSubmitting },
   } = useForm<EditFormValues>({
-    defaultValues: { cron: "", extra_context: "", enabled: true },
+    defaultValues: { dtstart: "", tzid: DEFAULT_TZID, rrule: "", extra_context: "", enabled: true },
   });
 
   useEffect(() => {
     if (!isOpen || !binding) return;
     reset({
-      cron: binding.cron,
+      dtstart: isoUTCToLocalInput(binding.dtstart),
+      tzid: binding.tzid || DEFAULT_TZID,
+      rrule: binding.rrule || "",
       extra_context: binding.extra_context ?? "",
       enabled: binding.enabled,
     });
   }, [isOpen, binding, reset]);
 
+  const watchedDtstart = useWatch({ control, name: "dtstart" }) ?? "";
+  const watchedRrule = useWatch({ control, name: "rrule" }) ?? "";
+
   const handleFormSubmit: SubmitHandler<EditFormValues> = async (values) => {
     if (!binding) return;
     try {
       const updated = await schedulerService.updateBinding(workspaceSlug, projectId, binding.id, {
-        cron: values.cron.trim(),
+        dtstart: localToIsoUTC(values.dtstart),
+        tzid: values.tzid.trim() || DEFAULT_TZID,
+        rrule: values.rrule.trim(),
         extra_context: values.extra_context.trim(),
         enabled: values.enabled,
       });
@@ -71,8 +82,13 @@ export const EditSchedulerBindingModal = observer(function EditSchedulerBindingM
       onUpdated(updated);
       onClose();
     } catch (e: unknown) {
-      const err = e as { error?: string; cron?: string[] } | null;
-      const detail = err?.error ?? err?.cron?.[0] ?? t("scheduler_bindings.toast.update_failed");
+      const err = e as { error?: string; rrule?: string[]; dtstart?: string[]; tzid?: string[] } | null;
+      const detail =
+        err?.error ??
+        err?.rrule?.[0] ??
+        err?.dtstart?.[0] ??
+        err?.tzid?.[0] ??
+        t("scheduler_bindings.toast.update_failed");
       setToast({
         type: TOAST_TYPE.ERROR,
         title: t("scheduler_bindings.toast.error_title"),
@@ -89,60 +105,16 @@ export const EditSchedulerBindingModal = observer(function EditSchedulerBindingM
           {binding && <span className="ml-2 text-13 text-secondary">— {binding.scheduler_name}</span>}
         </div>
 
-        <div className="flex flex-col gap-1">
-          <label htmlFor="edit-binding-cron" className="text-13 font-medium text-primary">
-            {t("scheduler_bindings.install_modal.cron_label")}
-          </label>
-          <Controller
-            control={control}
-            name="cron"
-            rules={{ required: t("scheduler_bindings.install_modal.errors.cron_required") }}
-            render={({ field }) => (
-              <Input
-                {...field}
-                id="edit-binding-cron"
-                placeholder={t("scheduler_bindings.install_modal.cron_placeholder")}
-                hasError={!!errors.cron}
-              />
-            )}
-          />
-          <p className="text-12 text-secondary">{t("scheduler_bindings.install_modal.cron_help")}</p>
-          {errors.cron && <span className="text-red-500 text-12">{errors.cron.message}</span>}
-        </div>
-
-        <div className="flex flex-col gap-1">
-          <label htmlFor="edit-binding-extra-context" className="text-13 font-medium text-primary">
-            {t("scheduler_bindings.install_modal.extra_context_label")}
-          </label>
-          <Controller
-            control={control}
-            name="extra_context"
-            render={({ field }) => (
-              <TextArea
-                {...field}
-                id="edit-binding-extra-context"
-                rows={4}
-                placeholder={t("scheduler_bindings.install_modal.extra_context_placeholder")}
-              />
-            )}
-          />
-          <p className="text-12 text-secondary">{t("scheduler_bindings.install_modal.extra_context_help")}</p>
-        </div>
-
-        <Controller
+        <BindingScheduleFields
           control={control}
-          name="enabled"
-          render={({ field }) => (
-            <div className="flex items-center justify-between gap-4">
-              <div className="flex flex-col">
-                <span className="text-13 font-medium text-primary">
-                  {t("scheduler_bindings.install_modal.enabled_label")}
-                </span>
-                <span className="text-12 text-secondary">{t("scheduler_bindings.install_modal.enabled_help")}</span>
-              </div>
-              <ToggleSwitch value={field.value} onChange={field.onChange} />
-            </div>
-          )}
+          errors={errors}
+          dtstartName="dtstart"
+          tzidName="tzid"
+          rruleName="rrule"
+          extraContextName="extra_context"
+          enabledName="enabled"
+          watchDtstart={watchedDtstart}
+          watchRrule={watchedRrule}
         />
 
         <div className="flex justify-end gap-2">

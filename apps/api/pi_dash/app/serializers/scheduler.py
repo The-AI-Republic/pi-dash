@@ -4,41 +4,70 @@
 
 """Serializers for the project-scheduler API surface.
 
-See ``.ai_design/project_scheduler/design.md`` §7.
+See ``.ai_design/project_scheduler/design.md`` §7 and
+``.ai_design/project_scheduler_calendar/decisions.md`` §1-2 for the
+iCal-shaped recurrence model that replaced cron in migration 0140.
 """
 
 from __future__ import annotations
 
-from croniter import CroniterBadCronError, croniter
+import re
+from datetime import datetime
+from typing import Iterable
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+
 from rest_framework import serializers
 
 from pi_dash.app.serializers.base import BaseSerializer
+from pi_dash.bgtasks._rrule import RRuleValidationError, validate_rrule_string
 from pi_dash.db.models.scheduler import Scheduler, SchedulerBinding
 
 
-# Bound `extra_context` so an admin doesn't accidentally (or deliberately)
-# inflate the prompt past what the model and the runner can usefully process.
-# 16 KiB is enough for several pages of project-specific context.
 EXTRA_CONTEXT_MAX_LENGTH = 16 * 1024
 
+# Cap the JSON-list extras stored on a binding — RDATE/EXDATE are
+# expanded on every fire and every occurrences-endpoint request. A
+# pathological 10k-entry list would slow each tick.
+RDATE_EXDATE_MAX_LENGTH = 256
 
-def _validate_cron_expression(value: str) -> str:
-    value = (value or "").strip()
-    if not value:
-        raise serializers.ValidationError("cron expression is required")
-    # Pin to standard 5-field cron (minute hour dom month dow). croniter
-    # silently accepts 6-field expressions with a seconds component, but
-    # the design and the Beat tick rate (1 minute) make sub-minute
-    # cadence meaningless and confusing to operators.
-    if len(value.split()) != 5:
+_HEX_COLOR_RE = re.compile(r"^#[0-9a-fA-F]{6}$")
+
+
+def _validate_color(value: str) -> str:
+    value = (value or "").strip().lower()
+    if not _HEX_COLOR_RE.match(value):
         raise serializers.ValidationError(
-            "cron must be a standard 5-field expression (minute hour day month weekday)"
+            "color must be a 7-character hex string like '#3b82f6'"
         )
-    try:
-        croniter(value)
-    except (CroniterBadCronError, ValueError) as e:
-        raise serializers.ValidationError(f"invalid cron expression: {e}")
     return value
+
+
+def _validate_iso_datetime_list(values: Iterable, field: str) -> list[str]:
+    """Validate an rdates/exdates JSON list: each item must be an ISO datetime string."""
+    if values is None:
+        return []
+    if not isinstance(values, list):
+        raise serializers.ValidationError(
+            {field: "must be a JSON array of ISO 8601 datetime strings"}
+        )
+    if len(values) > RDATE_EXDATE_MAX_LENGTH:
+        raise serializers.ValidationError(
+            {field: f"must contain at most {RDATE_EXDATE_MAX_LENGTH} entries"}
+        )
+    out: list[str] = []
+    for i, raw in enumerate(values):
+        if not isinstance(raw, str):
+            raise serializers.ValidationError(
+                {field: f"item {i} must be a string, got {type(raw).__name__}"}
+            )
+        try:
+            parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        except ValueError as e:
+            raise serializers.ValidationError(
+                {field: f"item {i} is not a valid ISO 8601 datetime: {e}"}
+            )
+        out.append(parsed.isoformat())
+    return out
 
 
 class SchedulerSerializer(BaseSerializer):
@@ -53,6 +82,7 @@ class SchedulerSerializer(BaseSerializer):
             "name",
             "description",
             "prompt",
+            "color",
             "source",
             "is_enabled",
             "active_binding_count",
@@ -76,10 +106,14 @@ class SchedulerSerializer(BaseSerializer):
             return annotated
         return obj.bindings.filter(deleted_at__isnull=True).count()
 
+    def validate_color(self, value: str) -> str:
+        return _validate_color(value)
+
 
 class SchedulerBindingSerializer(BaseSerializer):
     scheduler_slug = serializers.CharField(source="scheduler.slug", read_only=True)
     scheduler_name = serializers.CharField(source="scheduler.name", read_only=True)
+    scheduler_color = serializers.CharField(source="scheduler.color", read_only=True)
     last_run_status = serializers.SerializerMethodField()
     last_run_ended_at = serializers.SerializerMethodField()
 
@@ -90,9 +124,14 @@ class SchedulerBindingSerializer(BaseSerializer):
             "scheduler",
             "scheduler_slug",
             "scheduler_name",
+            "scheduler_color",
             "project",
             "workspace",
-            "cron",
+            "dtstart",
+            "tzid",
+            "rrule",
+            "rdates",
+            "exdates",
             "extra_context",
             "enabled",
             "next_run_at",
@@ -123,8 +162,42 @@ class SchedulerBindingSerializer(BaseSerializer):
     def get_last_run_ended_at(self, obj: SchedulerBinding):
         return obj.last_run.ended_at if obj.last_run_id else None
 
-    def validate_cron(self, value: str) -> str:
-        return _validate_cron_expression(value)
+    def validate_rrule(self, value: str) -> str:
+        value = (value or "").strip()
+        # Empty rrule means single-shot at dtstart — fine. validate_rrule_string
+        # is a no-op for empty input but the cross-field check below catches
+        # the "no rrule + no dtstart" case.
+        if value:
+            # Strip a leading "RRULE:" if a client sent the full iCal-line
+            # prefix. dateutil handles both forms but we canonicalize to the
+            # bare "FREQ=..." form for storage.
+            if value.upper().startswith("RRULE:"):
+                value = value[len("RRULE:"):]
+            try:
+                # dtstart from attrs may not be set yet at field-validation
+                # time; we pass None and the validator uses a placeholder.
+                validate_rrule_string(value)
+            except RRuleValidationError as e:
+                raise serializers.ValidationError(str(e))
+        return value
+
+    def validate_rdates(self, value):
+        return _validate_iso_datetime_list(value, "rdates")
+
+    def validate_exdates(self, value):
+        return _validate_iso_datetime_list(value, "exdates")
+
+    def validate_tzid(self, value: str) -> str:
+        value = (value or "UTC").strip()
+        if value == "UTC":
+            return value
+        try:
+            ZoneInfo(value)
+        except ZoneInfoNotFoundError:
+            raise serializers.ValidationError(
+                f"tzid {value!r} is not a recognized IANA timezone"
+            )
+        return value
 
     def validate_extra_context(self, value: str) -> str:
         if value and len(value) > EXTRA_CONTEXT_MAX_LENGTH:
@@ -143,4 +216,19 @@ class SchedulerBindingSerializer(BaseSerializer):
                     raise serializers.ValidationError(
                         {locked: f"{locked} cannot be changed; uninstall and re-install"}
                     )
+        # Cross-field RRULE validation now that we have both dtstart and rrule.
+        # Prefer attrs (incoming changes) over the instance (existing values).
+        rrule_str = attrs.get(
+            "rrule",
+            getattr(self.instance, "rrule", "") if self.instance else "",
+        )
+        dtstart = attrs.get(
+            "dtstart",
+            getattr(self.instance, "dtstart", None) if self.instance else None,
+        )
+        if rrule_str:
+            try:
+                validate_rrule_string(rrule_str, dtstart=dtstart)
+            except RRuleValidationError as e:
+                raise serializers.ValidationError({"rrule": str(e)})
         return super().validate(attrs)

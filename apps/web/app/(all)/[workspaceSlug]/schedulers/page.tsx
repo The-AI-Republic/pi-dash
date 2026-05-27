@@ -46,6 +46,7 @@ const SchedulersListPage = observer(function SchedulersListPage() {
     name: string;
     description: string;
     prompt: string;
+    color: string;
     is_enabled: boolean;
   }) => {
     try {
@@ -74,6 +75,7 @@ const SchedulersListPage = observer(function SchedulersListPage() {
     name: string;
     description: string;
     prompt: string;
+    color: string;
     is_enabled: boolean;
   }) => {
     if (!editTarget) return;
@@ -83,6 +85,7 @@ const SchedulersListPage = observer(function SchedulersListPage() {
         name: values.name,
         description: values.description,
         prompt: values.prompt,
+        color: values.color,
         is_enabled: values.is_enabled,
       });
       setEditTarget(null);

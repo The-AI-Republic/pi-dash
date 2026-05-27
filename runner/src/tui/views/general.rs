@@ -746,7 +746,7 @@ fn update_advisory_line(adv: &crate::ipc::protocol::UpdateAdvisory) -> Option<Li
         } else if adv.auto_update_enabled {
             format!("⛔ Update required: cloud floor v{min}; swap pending")
         } else {
-            format!("⛔ Update required: cloud floor v{min} — run `pidash update`")
+            format!("⛔ Update required: cloud floor v{min} — run `pidash update --restart`")
         };
         return Some(Line::from(Span::styled(
             msg,
@@ -764,7 +764,7 @@ fn update_advisory_line(adv: &crate::ipc::protocol::UpdateAdvisory) -> Option<Li
         } else if adv.auto_update_enabled {
             format!("⚠ Update v{latest} pending swap (running v{running})")
         } else {
-            format!("⚠ Update v{latest} available — run `pidash update`")
+            format!("⚠ Update v{latest} available — run `pidash update --restart`")
         };
         return Some(Line::from(Span::styled(
             msg,

@@ -7,18 +7,22 @@
 import { useEffect, useMemo, useRef } from "react";
 import { observer } from "mobx-react";
 import type { SubmitHandler } from "react-hook-form";
-import { Controller, useForm } from "react-hook-form";
-// pi dash imports
+import { Controller, useForm, useWatch } from "react-hook-form";
 import { useTranslation } from "@pi-dash/i18n";
 import { Button } from "@pi-dash/propel/button";
 import { TOAST_TYPE, setToast } from "@pi-dash/propel/toast";
 import type { IScheduler, ISchedulerBinding } from "@pi-dash/services";
 import { SchedulerService } from "@pi-dash/services";
-import { EModalPosition, EModalWidth, Input, ModalCore, TextArea, ToggleSwitch } from "@pi-dash/ui";
+import { EModalPosition, EModalWidth, ModalCore } from "@pi-dash/ui";
+import { BindingScheduleFields } from "./binding-schedule-fields";
+import { DEFAULT_TZID } from "./constants";
+import { defaultDtstartLocal, localToIsoUTC } from "./datetime-input";
 
 interface InstallFormValues {
   scheduler: string;
-  cron: string;
+  dtstart: string;
+  tzid: string;
+  rrule: string;
   extra_context: string;
   enabled: boolean;
 }
@@ -28,24 +32,19 @@ type Props = {
   onClose: () => void;
   workspaceSlug: string;
   projectId: string;
-  /**
-   * The full set of workspace schedulers. The picker filters to enabled
-   * ones not already bound to this project so the user can't double-install.
-   */
   availableSchedulers: IScheduler[];
-  /** Bindings that already exist on this project, used to filter the picker. */
   existingBindings: ISchedulerBinding[];
   onInstalled: (binding: ISchedulerBinding) => void;
 };
 
-const DEFAULT_VALUES: InstallFormValues = {
+const DEFAULT_VALUES = (): InstallFormValues => ({
   scheduler: "",
-  // 09:00 UTC daily — non-controversial default; the help text spells out
-  // the format and timezone so users editing it know what they're picking.
-  cron: "0 9 * * *",
+  dtstart: defaultDtstartLocal(),
+  tzid: Intl.DateTimeFormat().resolvedOptions().timeZone || DEFAULT_TZID,
+  rrule: "FREQ=DAILY",
   extra_context: "",
   enabled: true,
-};
+});
 
 const schedulerService = new SchedulerService();
 
@@ -58,47 +57,38 @@ export const InstallSchedulerBindingModal = observer(function InstallSchedulerBi
     handleSubmit,
     reset,
     formState: { errors, isSubmitting },
-  } = useForm<InstallFormValues>({ defaultValues: DEFAULT_VALUES });
+  } = useForm<InstallFormValues>({ defaultValues: DEFAULT_VALUES() });
 
-  // Filter to enabled workspace schedulers that don't already have a
-  // binding on this project. The cloud also enforces this with a unique
-  // constraint, but filtering client-side keeps the picker clean and
-  // means the install button is only enabled when there's something
-  // valid to install.
+  // SWR may revalidate workspaceSchedulers while the modal is open; only
+  // seed on the closed→open edge so the user's in-progress edit isn't wiped.
   const installable = useMemo(() => {
     const boundIds = new Set(existingBindings.map((b) => b.scheduler));
     return availableSchedulers.filter((s) => s.is_enabled && !boundIds.has(s.id));
   }, [availableSchedulers, existingBindings]);
 
-  // Track open/closed transitions so the seed-on-open effect doesn't
-  // re-fire when `installable` changes mid-edit. SWR can revalidate the
-  // workspace schedulers query (focus event, background refresh) while
-  // the modal is open; without this guard, the new array reference would
-  // call ``reset`` and wipe whatever the user has typed into cron /
-  // extra_context. We only want to seed defaults on the closed → open
-  // edge.
   const wasOpen = useRef(false);
   useEffect(() => {
     if (isOpen && !wasOpen.current) {
       reset({
-        ...DEFAULT_VALUES,
+        ...DEFAULT_VALUES(),
         scheduler: installable[0]?.id ?? "",
       });
     }
     wasOpen.current = isOpen;
-    // installable is intentionally NOT in deps — a fresh reference from
-    // SWR mid-edit must not re-seed. Only `isOpen` triggers the reset.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isOpen, reset]);
+
+  const watchedDtstart = useWatch({ control, name: "dtstart" }) ?? "";
+  const watchedRrule = useWatch({ control, name: "rrule" }) ?? "";
 
   const handleFormSubmit: SubmitHandler<InstallFormValues> = async (values) => {
     try {
       const binding = await schedulerService.createBinding(workspaceSlug, projectId, {
         scheduler: values.scheduler,
-        // Cloud's serializer.is_valid() requires this even though the
-        // projectId is already in the URL — see scheduler.service.ts.
         project: projectId,
-        cron: values.cron.trim(),
+        dtstart: localToIsoUTC(values.dtstart),
+        tzid: values.tzid.trim() || DEFAULT_TZID,
+        rrule: values.rrule.trim(),
         extra_context: values.extra_context.trim(),
         enabled: values.enabled,
       });
@@ -110,9 +100,20 @@ export const InstallSchedulerBindingModal = observer(function InstallSchedulerBi
       onInstalled(binding);
       onClose();
     } catch (e: unknown) {
-      const err = e as { error?: string; cron?: string[]; scheduler?: string[] } | null;
+      const err = e as {
+        error?: string;
+        rrule?: string[];
+        dtstart?: string[];
+        tzid?: string[];
+        scheduler?: string[];
+      } | null;
       const detail =
-        err?.error ?? err?.cron?.[0] ?? err?.scheduler?.[0] ?? t("scheduler_bindings.toast.install_failed");
+        err?.error ??
+        err?.rrule?.[0] ??
+        err?.dtstart?.[0] ??
+        err?.tzid?.[0] ??
+        err?.scheduler?.[0] ??
+        t("scheduler_bindings.toast.install_failed");
       setToast({
         type: TOAST_TYPE.ERROR,
         title: t("scheduler_bindings.toast.error_title"),
@@ -121,9 +122,6 @@ export const InstallSchedulerBindingModal = observer(function InstallSchedulerBi
     }
   };
 
-  // Empty-state branch: no schedulers to install. Render a helpful body
-  // pointing the operator at the workspace catalog rather than an
-  // unsubmittable form.
   if (installable.length === 0) {
     return (
       <ModalCore isOpen={isOpen} handleClose={onClose} position={EModalPosition.CENTER} width={EModalWidth.XL}>
@@ -173,60 +171,16 @@ export const InstallSchedulerBindingModal = observer(function InstallSchedulerBi
           {errors.scheduler && <span className="text-red-500 text-12">{errors.scheduler.message}</span>}
         </div>
 
-        <div className="flex flex-col gap-1">
-          <label htmlFor="binding-cron" className="text-13 font-medium text-primary">
-            {t("scheduler_bindings.install_modal.cron_label")}
-          </label>
-          <Controller
-            control={control}
-            name="cron"
-            rules={{ required: t("scheduler_bindings.install_modal.errors.cron_required") }}
-            render={({ field }) => (
-              <Input
-                {...field}
-                id="binding-cron"
-                placeholder={t("scheduler_bindings.install_modal.cron_placeholder")}
-                hasError={!!errors.cron}
-              />
-            )}
-          />
-          <p className="text-12 text-secondary">{t("scheduler_bindings.install_modal.cron_help")}</p>
-          {errors.cron && <span className="text-red-500 text-12">{errors.cron.message}</span>}
-        </div>
-
-        <div className="flex flex-col gap-1">
-          <label htmlFor="binding-extra-context" className="text-13 font-medium text-primary">
-            {t("scheduler_bindings.install_modal.extra_context_label")}
-          </label>
-          <Controller
-            control={control}
-            name="extra_context"
-            render={({ field }) => (
-              <TextArea
-                {...field}
-                id="binding-extra-context"
-                rows={4}
-                placeholder={t("scheduler_bindings.install_modal.extra_context_placeholder")}
-              />
-            )}
-          />
-          <p className="text-12 text-secondary">{t("scheduler_bindings.install_modal.extra_context_help")}</p>
-        </div>
-
-        <Controller
+        <BindingScheduleFields
           control={control}
-          name="enabled"
-          render={({ field }) => (
-            <div className="flex items-center justify-between gap-4">
-              <div className="flex flex-col">
-                <span className="text-13 font-medium text-primary">
-                  {t("scheduler_bindings.install_modal.enabled_label")}
-                </span>
-                <span className="text-12 text-secondary">{t("scheduler_bindings.install_modal.enabled_help")}</span>
-              </div>
-              <ToggleSwitch value={field.value} onChange={field.onChange} />
-            </div>
-          )}
+          errors={errors}
+          dtstartName="dtstart"
+          tzidName="tzid"
+          rruleName="rrule"
+          extraContextName="extra_context"
+          enabledName="enabled"
+          watchDtstart={watchedDtstart}
+          watchRrule={watchedRrule}
         />
 
         <div className="flex justify-end gap-2">

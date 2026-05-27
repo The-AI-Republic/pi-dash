@@ -5,21 +5,15 @@
  */
 
 import { useCallback, useMemo, useState } from "react";
+import { orderBy } from "lodash-es";
 import { observer } from "mobx-react";
-import { useParams } from "next/navigation";
 import { GripVertical, X } from "lucide-react";
 // pi dash imports
-import { WORKSPACE_SIDEBAR_DYNAMIC_NAVIGATION_ITEMS_LINKS, EUserPermissionsLevel } from "@pi-dash/constants";
 import { useTranslation } from "@pi-dash/i18n";
 import { Checkbox, EModalPosition, EModalWidth, ModalCore, Sortable } from "@pi-dash/ui";
 import { cn } from "@pi-dash/utils";
 // hooks
-import { useUserPermissions } from "@/hooks/store/user";
-import {
-  usePersonalNavigationPreferences,
-  useProjectNavigationPreferences,
-  useWorkspaceNavigationPreferences,
-} from "@/hooks/use-navigation-preferences";
+import { usePersonalNavigationPreferences, useProjectNavigationPreferences } from "@/hooks/use-navigation-preferences";
 // helpers
 import { getSidebarNavigationItemIcon } from "@/pi-dash-web/components/workspace/sidebar/helper";
 // types
@@ -30,18 +24,18 @@ type TCustomizeNavigationDialogProps = {
   onClose: () => void;
 };
 
-type TWorkspaceNavigationItem = {
-  key: string;
-  labelTranslationKey: string;
-  isPinned: boolean;
-  sortOrder: number;
-};
-
 const PERSONAL_ITEMS: Array<{ key: TPersonalNavigationItemKey; labelTranslationKey: string }> = [
   { key: "stickies", labelTranslationKey: "sidebar.stickies" },
   { key: "your_work", labelTranslationKey: "sidebar.your_work" },
   { key: "drafts", labelTranslationKey: "drafts" },
 ];
+
+// Block: e, E, +, -, . — extracted to module scope so the handler isn't recreated on every render.
+const handleKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
+  if (["e", "E", "+", "-", "."].includes(e.key)) {
+    e.preventDefault();
+  }
+};
 
 export const CustomizeNavigationDialog = observer(function CustomizeNavigationDialog(
   props: TCustomizeNavigationDialogProps
@@ -49,11 +43,7 @@ export const CustomizeNavigationDialog = observer(function CustomizeNavigationDi
   const { isOpen, onClose } = props;
   const { t } = useTranslation();
 
-  // router
-  const { workspaceSlug } = useParams();
-
   // store hooks
-  const { allowPermissions } = useUserPermissions();
   const {
     preferences: personalPreferences,
     togglePersonalItem,
@@ -65,64 +55,12 @@ export const CustomizeNavigationDialog = observer(function CustomizeNavigationDi
     updateShowLimitedProjects,
     updateLimitedProjectsCount,
   } = useProjectNavigationPreferences();
-  const {
-    preferences: workspacePreferences,
-    toggleWorkspaceItem,
-    updateWorkspaceItemOrder,
-  } = useWorkspaceNavigationPreferences();
 
   // local state for limited projects count input
   const [projectCountInput, setProjectCountInput] = useState(projectPreferences.limitedProjectsCount.toString());
 
   // Filter personal items by feature flags
   const filteredPersonalItems = PERSONAL_ITEMS;
-
-  // Filter workspace items by permissions and feature flags, then get pinned/unpinned items
-  const workspaceItems = useMemo(() => {
-    const items = WORKSPACE_SIDEBAR_DYNAMIC_NAVIGATION_ITEMS_LINKS.filter((item) => {
-      // Permission check
-      const hasPermission = allowPermissions(
-        item.access,
-        EUserPermissionsLevel.WORKSPACE,
-        workspaceSlug?.toString() || ""
-      );
-      return hasPermission;
-    }).map((item) => {
-      // Get pinned status and sort order from localStorage
-      const preference = workspacePreferences.items[item.key];
-      const isPinned = preference?.is_pinned ?? false;
-      const sortOrder = preference?.sort_order ?? 0;
-
-      return {
-        key: item.key,
-        labelTranslationKey: item.labelTranslationKey,
-        isPinned,
-        sortOrder,
-      };
-    });
-
-    return items.sort((a, b) => a.sortOrder - b.sortOrder);
-  }, [workspaceSlug, allowPermissions, workspacePreferences]);
-
-  // Handle checkbox toggle
-  const handleWorkspaceItemToggle = useCallback(
-    (itemKey: string, checked: boolean) => {
-      toggleWorkspaceItem(itemKey, checked);
-    },
-    [toggleWorkspaceItem]
-  );
-
-  // Handle reorder of pinned workspace items
-  const handleReorder = useCallback(
-    (newData: TWorkspaceNavigationItem[]) => {
-      const itemsWithOrder = newData.map((item, index) => ({
-        key: item.key,
-        sortOrder: index,
-      }));
-      updateWorkspaceItemOrder(itemsWithOrder);
-    },
-    [updateWorkspaceItemOrder]
-  );
 
   // Handle reorder of enabled personal items
   const handlePersonalReorder = useCallback(
@@ -150,16 +88,8 @@ export const CustomizeNavigationDialog = observer(function CustomizeNavigationDi
       };
     });
 
-    return items.sort((a, b) => a.sortOrder - b.sortOrder);
+    return orderBy(items, ["sortOrder"], ["asc"]);
   }, [personalPreferences, filteredPersonalItems]);
-
-  // Prevent typing invalid characters in number input
-  const handleKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
-    // Block: e, E, +, -, .
-    if (["e", "E", "+", "-", "."].includes(e.key)) {
-      e.preventDefault();
-    }
-  };
 
   // Handle project count input change
   const handleProjectCountChange = (value: string) => {
@@ -185,8 +115,8 @@ export const CustomizeNavigationDialog = observer(function CustomizeNavigationDi
           <div>
             <h2 className="text-18 font-semibold text-primary">{t("customize_navigation")}</h2>
             <p className="mt-1 text-13 text-tertiary">
-              Selected items will always stay visible in your sidebar. You can still find the others anytime from the
-              More menu. These changes are personal to you and won&apos;t affect anyone else on your workspace.
+              Toggle which personal items appear in the sidebar and configure how projects are listed. These changes are
+              personal to you and won&apos;t affect anyone else on your workspace.
             </p>
           </div>
           <button
@@ -228,36 +158,6 @@ export const CustomizeNavigationDialog = observer(function CustomizeNavigationDi
             </div>
           </div>
 
-          {/* Workspace Section */}
-          <div className="flex flex-col gap-2">
-            <h3 className="text-13 font-semibold text-placeholder">{t("workspace")}</h3>
-            <div className="rounded-md border border-subtle bg-surface-2 py-2">
-              {/* Pinned Items - Draggable */}
-              <Sortable
-                data={workspaceItems}
-                onChange={handleReorder}
-                keyExtractor={(item) => item.key}
-                id="workspace-pinned-items"
-                render={(item) => {
-                  const icon = getSidebarNavigationItemIcon(item.key);
-                  return (
-                    <div className="group flex items-center gap-2 rounded-md px-2 py-1.5 transition-all duration-200 hover:bg-surface-2">
-                      <GripVertical className="size-4 cursor-grab text-placeholder transition-colors active:cursor-grabbing" />
-                      <Checkbox
-                        checked={!!workspacePreferences.items[item.key]?.is_pinned}
-                        onChange={(e) => handleWorkspaceItemToggle(item.key, e.target.checked)}
-                      />
-                      <div className="flex flex-1 items-center gap-2">
-                        {icon}
-                        <span className="text-13 text-primary">{t(item.labelTranslationKey)}</span>
-                      </div>
-                    </div>
-                  );
-                }}
-              />
-            </div>
-          </div>
-
           {/* Projects Section */}
           <div className="flex flex-col gap-2">
             <h3 className="text-13 font-semibold text-placeholder">{t("projects")}</h3>
@@ -266,7 +166,10 @@ export const CustomizeNavigationDialog = observer(function CustomizeNavigationDi
               <div className="space-y-3">
                 {/* Navigation Mode Radio Buttons */}
                 <div className="space-y-2">
-                  <label className="flex cursor-pointer gap-2 rounded-md px-2 py-1.5 hover:bg-surface-2">
+                  <label
+                    aria-label={t("accordion_navigation_control")}
+                    className="flex cursor-pointer gap-2 rounded-md px-2 py-1.5 hover:bg-surface-2"
+                  >
                     <input
                       type="radio"
                       name="navigation-mode"
@@ -283,7 +186,10 @@ export const CustomizeNavigationDialog = observer(function CustomizeNavigationDi
                     </div>
                   </label>
 
-                  <label className="flex cursor-pointer gap-2 rounded-md px-2 py-1.5 hover:bg-surface-2">
+                  <label
+                    aria-label={t("horizontal_navigation_bar")}
+                    className="flex cursor-pointer gap-2 rounded-md px-2 py-1.5 hover:bg-surface-2"
+                  >
                     <input
                       type="radio"
                       name="navigation-mode"

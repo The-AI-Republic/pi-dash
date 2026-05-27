@@ -45,7 +45,7 @@ export const NewUserPopup = observer(function NewUserPopup() {
           <img
             src={resolveGeneralTheme(resolvedTheme) === "dark" ? PiSymbolDark : PiSymbolLight}
             height={80}
-            width={80}
+            width={147}
             alt="Pi Dash icon"
           />
         </div>

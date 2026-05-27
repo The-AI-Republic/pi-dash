@@ -16,7 +16,7 @@ use uuid::Uuid;
 use crate::approval::router::ApprovalRouter;
 use crate::cloud::http::{AckEntry, InboundEnvelope, RunnerCloudClient};
 use crate::cloud::protocol::Envelope;
-use crate::config::schema::RunnerConfig;
+use crate::config::schema::{DaemonConfig, RunnerConfig};
 use crate::daemon::runner_out::RunnerOut;
 use crate::daemon::state::StateHandle;
 use crate::util::paths::{Paths, RunnerPaths};
@@ -58,21 +58,33 @@ impl RunnerInstance {
         out_tx: mpsc::Sender<Envelope<crate::cloud::protocol::ClientMsg>>,
     ) -> Self {
         let runner_id = config.runner_id;
-        Self::new_with_out(config, paths, RunnerOut::new(runner_id, out_tx), None)
+        Self::new_with_out(
+            config,
+            paths,
+            RunnerOut::new(runner_id, out_tx),
+            None,
+            DaemonConfig::default(),
+        )
     }
 
-    pub fn new_http(config: RunnerConfig, paths: &Paths, client: RunnerCloudClient) -> Self {
+    pub fn new_http(
+        config: RunnerConfig,
+        paths: &Paths,
+        client: RunnerCloudClient,
+        daemon: DaemonConfig,
+    ) -> Self {
         Self::new_with_out(
             config,
             paths,
             RunnerOut::new_http(client.clone()),
             Some(client),
+            daemon,
         )
     }
 
-    pub fn new_offline(config: RunnerConfig, paths: &Paths) -> Self {
+    pub fn new_offline(config: RunnerConfig, paths: &Paths, daemon: DaemonConfig) -> Self {
         let runner_id = config.runner_id;
-        Self::new_with_out(config, paths, RunnerOut::offline(runner_id), None)
+        Self::new_with_out(config, paths, RunnerOut::offline(runner_id), None, daemon)
     }
 
     fn new_with_out(
@@ -80,17 +92,19 @@ impl RunnerInstance {
         paths: &Paths,
         out: RunnerOut,
         client: Option<RunnerCloudClient>,
+        daemon: DaemonConfig,
     ) -> Self {
         let runner_id = config.runner_id;
         let name = config.name.clone();
         let runner_paths = paths.for_runner(runner_id);
         // Each instance gets its own StateHandle so per-runner status
         // (current_run, approvals_pending, etc.) doesn't bleed across
-        // instances. The connection-level fields cached inside
-        // (cloud_url, name) are still set from the daemon-level config.
+        // instances. The daemon section is still the real host-wide
+        // config so auto-update, observability, and IPC status reflect
+        // operator settings instead of schema defaults.
         let state = StateHandle::new(crate::config::schema::Config {
             version: 2,
-            daemon: Default::default(),
+            daemon,
             runners: vec![config.clone()],
             cli: None,
         });
@@ -124,5 +138,61 @@ impl RunnerInstance {
 
     pub async fn take_ack_rx(&self) -> Option<mpsc::UnboundedReceiver<AckEntry>> {
         self.ack_rx.lock().await.take()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::schema::{
+        AgentSection, ApprovalPolicySection, ClaudeCodeSection, CodexSection, WorkspaceSection,
+    };
+
+    fn runner_config() -> RunnerConfig {
+        RunnerConfig {
+            name: "test-runner".into(),
+            runner_id: Uuid::new_v4(),
+            workspace_slug: Some("workspace".into()),
+            project_slug: Some("PROJECT".into()),
+            pod_id: None,
+            workspace: WorkspaceSection {
+                working_dir: std::env::temp_dir().join("pidash-runner-instance-test"),
+            },
+            agent: AgentSection::default(),
+            codex: CodexSection::default(),
+            claude_code: ClaudeCodeSection::default(),
+            approval_policy: ApprovalPolicySection::default(),
+        }
+    }
+
+    fn paths_at(base: &std::path::Path) -> Paths {
+        Paths {
+            config_dir: base.join("config"),
+            data_dir: base.join("data"),
+            runtime_dir: base.join("runtime"),
+        }
+    }
+
+    #[tokio::test]
+    async fn instance_state_uses_real_daemon_config() {
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = paths_at(tmp.path());
+        let daemon = DaemonConfig {
+            cloud_url: "https://cloud.example".into(),
+            auto_update: false,
+            ..Default::default()
+        };
+
+        let inst = RunnerInstance::new_offline(runner_config(), &paths, daemon);
+        inst.state
+            .set_update_advisory(Some("9.9.9".into()), None)
+            .await;
+        let info = inst.state.daemon_info().await;
+
+        assert_eq!(info.cloud_url, "https://cloud.example");
+        assert!(
+            !info.update.unwrap().auto_update_enabled,
+            "runner instance must honor daemon.auto_update=false"
+        );
     }
 }

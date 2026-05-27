@@ -7,13 +7,13 @@
 import { useState, useEffect } from "react";
 import { observer } from "mobx-react";
 import { useRouter } from "next/navigation";
-import { LogOut, Settings, Settings2 } from "lucide-react";
+import { ChevronsUpDown, Globe, LogOut, Settings, Settings2 } from "lucide-react";
 // pi dash imports
 import { GOD_MODE_URL } from "@pi-dash/constants";
 import { useTranslation } from "@pi-dash/i18n";
 import { TOAST_TYPE, setToast } from "@pi-dash/propel/toast";
 import { Avatar, CustomMenu } from "@pi-dash/ui";
-import { getFileURL } from "@pi-dash/utils";
+import { cn, getFileURL } from "@pi-dash/utils";
 // components
 import { CoverImage } from "@/components/common/cover-image";
 import { AppSidebarItem } from "@/components/sidebar/sidebar-item";
@@ -21,10 +21,17 @@ import { AppSidebarItem } from "@/components/sidebar/sidebar-item";
 import { useAppTheme } from "@/hooks/store/use-app-theme";
 import { useCommandPalette } from "@/hooks/store/use-command-palette";
 import { useUser } from "@/hooks/store/user";
+// pi dash web components
+import { PaidPlanUpgradeModal } from "@/pi-dash-web/components/license";
 
-export const UserMenuRoot = observer(function UserMenuRoot() {
+type Props = {
+  variant?: "compact" | "sidebar";
+};
+
+export const UserMenuRoot = observer(function UserMenuRoot({ variant = "compact" }: Props) {
   // states
   const [isUserMenuOpen, setIsUserMenuOpen] = useState(false);
+  const [isCommunityModalOpen, setIsCommunityModalOpen] = useState(false);
   // router
   const router = useRouter();
   // store hooks
@@ -47,104 +54,152 @@ export const UserMenuRoot = observer(function UserMenuRoot() {
     );
   };
 
-  // Toggle sidebar dropdown state when menu is open
+  const isSidebarVariant = variant === "sidebar";
+
+  // Only the sidebar-mounted instance participates in peek coordination. The
+  // top-nav fallback (compact variant) lives outside the sidebar, so it must
+  // not write the global peek flag — doing so would let opening the page-
+  // chrome user menu pin the sidebar peek open (and closing it force-close).
   useEffect(() => {
+    if (!isSidebarVariant) return;
     if (isUserMenuOpen) toggleAnySidebarDropdown(true);
     else toggleAnySidebarDropdown(false);
-  }, [isUserMenuOpen, toggleAnySidebarDropdown]);
+    // Always clear the flag on unmount so a route change with the menu still
+    // open doesn't leak `isAnySidebarDropdownOpen=true` for the rest of the
+    // session.
+    return () => {
+      toggleAnySidebarDropdown(false);
+    };
+  }, [isSidebarVariant, isUserMenuOpen, toggleAnySidebarDropdown]);
+
+  // The outer wrapper is rendered as a non-interactive element because
+  // CustomMenu already wraps `customButton` in its own <button>; nesting
+  // <button>s would be invalid HTML and break ARIA semantics.
+  const sidebarTrigger = (
+    <div
+      className={cn(
+        "flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left hover:bg-layer-transparent-hover",
+        isUserMenuOpen && "bg-layer-transparent-selected"
+      )}
+    >
+      <Avatar
+        name={currentUser?.display_name}
+        src={getFileURL(currentUser?.avatar_url ?? "")}
+        size={24}
+        shape="circle"
+      />
+      <div className="flex min-w-0 flex-1 flex-col">
+        <span className="truncate text-13 font-medium text-primary">{currentUser?.display_name}</span>
+        <span className="truncate text-11 text-tertiary">{currentUser?.email}</span>
+      </div>
+      <ChevronsUpDown className="size-3.5 shrink-0 text-tertiary" />
+    </div>
+  );
+
+  const compactTrigger = (
+    <AppSidebarItem
+      variant="button"
+      item={{
+        icon: (
+          <Avatar
+            name={currentUser?.display_name}
+            src={getFileURL(currentUser?.avatar_url ?? "")}
+            size={20}
+            shape="circle"
+          />
+        ),
+        isActive: isUserMenuOpen,
+      }}
+    />
+  );
 
   return (
-    <CustomMenu
-      className="flex items-center"
-      customButton={
-        <AppSidebarItem
-          variant="button"
-          item={{
-            icon: (
-              <Avatar
-                name={currentUser?.display_name}
-                src={getFileURL(currentUser?.avatar_url ?? "")}
-                size={20}
-                shape="circle"
-              />
-            ),
-            isActive: isUserMenuOpen,
-          }}
-        />
-      }
-      menuButtonOnClick={() => !isUserMenuOpen && setIsUserMenuOpen(true)}
-      onMenuClose={() => setIsUserMenuOpen(false)}
-      placement="bottom-end"
-      maxHeight="2xl"
-      optionsClassName="w-72 p-3 flex flex-col gap-y-3"
-      closeOnSelect
-    >
-      <div className="relative h-29 w-full rounded-lg">
-        <CoverImage
-          src={currentUser?.cover_image_url ?? undefined}
-          alt={currentUser?.display_name}
-          className="h-29 w-full rounded-lg"
-          showDefaultWhenEmpty
-        />
-        <div className="absolute inset-0 bg-layer-1/50" />
-        <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2">
-          <div className="flex flex-col items-center gap-y-2">
-            <div>
-              <Avatar
-                name={currentUser?.display_name}
-                src={getFileURL(currentUser?.avatar_url ?? "")}
-                size={40}
-                shape="circle"
-                className="text-18 font-medium"
-              />
-            </div>
-            <div className="text-center">
-              <p className="text-body-sm-medium">
-                {currentUser?.first_name} {currentUser?.last_name}
-              </p>
-              <p className="text-caption-md-regular">{currentUser?.email}</p>
+    <>
+      {isCommunityModalOpen && (
+        <PaidPlanUpgradeModal isOpen={isCommunityModalOpen} handleClose={() => setIsCommunityModalOpen(false)} />
+      )}
+      <CustomMenu
+        className={cn("flex items-center", isSidebarVariant && "w-full")}
+        customButton={isSidebarVariant ? sidebarTrigger : compactTrigger}
+        customButtonClassName={isSidebarVariant ? "w-full" : undefined}
+        menuButtonOnClick={() => !isUserMenuOpen && setIsUserMenuOpen(true)}
+        onMenuClose={() => setIsUserMenuOpen(false)}
+        placement={isSidebarVariant ? "top-start" : "bottom-end"}
+        maxHeight="2xl"
+        optionsClassName="w-72 p-3 flex flex-col gap-y-3"
+        closeOnSelect
+      >
+        <div className="relative h-29 w-full rounded-lg">
+          <CoverImage
+            src={currentUser?.cover_image_url ?? undefined}
+            alt={currentUser?.display_name}
+            className="h-29 w-full rounded-lg"
+            showDefaultWhenEmpty
+          />
+          <div className="absolute inset-0 bg-layer-1/50" />
+          <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2">
+            <div className="flex flex-col items-center gap-y-2">
+              <div>
+                <Avatar
+                  name={currentUser?.display_name}
+                  src={getFileURL(currentUser?.avatar_url ?? "")}
+                  size={40}
+                  shape="circle"
+                  className="text-18 font-medium"
+                />
+              </div>
+              <div className="text-center">
+                <p className="text-body-sm-medium">
+                  {currentUser?.first_name} {currentUser?.last_name}
+                </p>
+                <p className="text-caption-md-regular">{currentUser?.email}</p>
+              </div>
             </div>
           </div>
         </div>
-      </div>
-      <div>
-        <CustomMenu.MenuItem
-          onClick={() =>
-            toggleProfileSettingsModal({
-              activeTab: "general",
-              isOpen: true,
-            })
-          }
-          className="flex items-center gap-2"
-        >
-          <Settings className="size-3.5 shrink-0" />
-          {t("settings")}
+        <div>
+          <CustomMenu.MenuItem
+            onClick={() =>
+              toggleProfileSettingsModal({
+                activeTab: "general",
+                isOpen: true,
+              })
+            }
+            className="flex items-center gap-2"
+          >
+            <Settings className="size-3.5 shrink-0" />
+            {t("settings")}
+          </CustomMenu.MenuItem>
+          <CustomMenu.MenuItem
+            onClick={() =>
+              toggleProfileSettingsModal({
+                activeTab: "preferences",
+                isOpen: true,
+              })
+            }
+            className="flex items-center gap-2"
+          >
+            <Settings2 className="size-3.5 shrink-0" />
+            {t("preferences")}
+          </CustomMenu.MenuItem>
+        </div>
+        <CustomMenu.MenuItem onClick={() => setIsCommunityModalOpen(true)} className="flex items-center gap-2">
+          <Globe className="size-3.5 shrink-0" />
+          {t("sidebar.community")}
         </CustomMenu.MenuItem>
-        <CustomMenu.MenuItem
-          onClick={() =>
-            toggleProfileSettingsModal({
-              activeTab: "preferences",
-              isOpen: true,
-            })
-          }
-          className="flex items-center gap-2"
-        >
-          <Settings2 className="size-3.5 shrink-0" />
-          {t("preferences")}
+        <CustomMenu.MenuItem onClick={handleSignOut} className="flex items-center gap-2">
+          <LogOut className="size-3.5 shrink-0" />
+          {t("sign_out")}
         </CustomMenu.MenuItem>
-      </div>
-      <CustomMenu.MenuItem onClick={handleSignOut} className="flex items-center gap-2">
-        <LogOut className="size-3.5 shrink-0" />
-        {t("sign_out")}
-      </CustomMenu.MenuItem>
-      {isUserInstanceAdmin && (
-        <CustomMenu.MenuItem
-          onClick={() => router.push(GOD_MODE_URL)}
-          className="bg-accent-primary/20 text-accent-primary hover:bg-accent-primary/30 hover:text-accent-secondary"
-        >
-          {t("enter_god_mode")}
-        </CustomMenu.MenuItem>
-      )}
-    </CustomMenu>
+        {isUserInstanceAdmin && (
+          <CustomMenu.MenuItem
+            onClick={() => router.push(GOD_MODE_URL)}
+            className="bg-accent-primary/20 text-accent-primary hover:bg-accent-primary/30 hover:text-accent-secondary"
+          >
+            {t("enter_god_mode")}
+          </CustomMenu.MenuItem>
+        )}
+      </CustomMenu>
+    </>
   );
 });

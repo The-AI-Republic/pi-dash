@@ -169,7 +169,7 @@ pub struct UpdateAdvisory {
     pub min_required: Option<String>,
     /// Whether the user has the auto-update toggle enabled. Surfaced
     /// here so the TUI's banner can phrase itself appropriately
-    /// ("restart to apply" vs. "update available — run pidash update").
+    /// ("restart to apply" vs. "update available — run pidash update --restart").
     /// `#[serde(default)]` defaults to `false` for older daemons that
     /// didn't populate it.
     #[serde(default)]
@@ -255,7 +255,7 @@ impl UpdateAdvisory {
             } else if self.auto_update_enabled {
                 println!("  update: REQUIRED — cloud floor v{min}; swap pending");
             } else {
-                println!("  update: REQUIRED — cloud floor v{min}; run `pidash update`");
+                println!("  update: REQUIRED — cloud floor v{min}; run `pidash update --restart`");
             }
             return;
         }
@@ -268,7 +268,7 @@ impl UpdateAdvisory {
             } else if self.auto_update_enabled {
                 println!("  update: v{latest} pending swap (running v{running})");
             } else {
-                println!("  update: v{latest} available — run `pidash update`");
+                println!("  update: v{latest} available — run `pidash update --restart`");
             }
         }
     }

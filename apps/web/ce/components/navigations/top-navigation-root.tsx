@@ -97,9 +97,14 @@ export const TopNavigationRoot = observer(function TopNavigationRoot() {
         </Tooltip>
         <HelpMenuRoot />
         <StarUsOnGitHubLink />
-        <div className="flex size-8 items-center justify-center rounded-md hover:bg-layer-1-hover">
-          <UserMenuRoot />
-        </div>
+        {/* Fallback user menu — only when the sidebar (which hosts the canonical bottom user menu)
+            is not mounted or is collapsed. Keeps Settings/Sign-out reachable on /notifications,
+            /settings, and when the sidebar is collapsed. */}
+        {(!sidebarMounted || sidebarCollapsed) && (
+          <div className="flex size-8 items-center justify-center rounded-md hover:bg-layer-1-hover">
+            <UserMenuRoot />
+          </div>
+        )}
       </div>
     </div>
   );

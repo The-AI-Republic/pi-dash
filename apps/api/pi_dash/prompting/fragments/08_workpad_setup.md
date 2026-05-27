@@ -1,20 +1,33 @@
 ## Step 1 — Workpad setup
 
-1. Run `pidash comment list {{ issue.identifier }}` and look for a comment whose body begins with `## Agent Workpad`.
-   - If found, record its `id` — you will pass it to `pidash comment update {{ issue.identifier }} <id>` for every subsequent workpad edit.
-   - If not found, create one with `pidash comment add {{ issue.identifier }} --body-file <path>` using the structure in the "Workpad template" section. Record the returned `id`.
-2. **If the workpad existed from a prior run, treat it as your starting point and reconcile it before editing further.** This is a fresh agent session — none of the prior run's in-memory context carries over. The workpad, the comment thread, and the repo are the only sources of truth. Reconciliation:
-   - Read the existing workpad end-to-end before deciding any next step.
-   - Do not repeat investigation or validation already recorded there unless the repo state has diverged from what the workpad describes.
-   - Do not restart from scratch — pick up where the prior run left off, based on `### Phase`, `### Progress Checkpoints`, and `### Plan`.
-   - Check off any items that are already complete based on the current repo state.
-   - Expand the plan to cover any newly-visible scope (e.g., new comments since the prior run).
-   - Ensure `Acceptance Criteria` and `Validation` are current and still make sense.
-3. Set `### Phase` to `investigating` and initialize `### Progress Checkpoints` with all milestone items unchecked unless already completed. If a checkpoint does not apply to this task, mark it as `n/a` in the workpad (e.g. `- [x] pr_opened (n/a)`).
-4. Write or update the hierarchical plan in the workpad.
-5. Ensure the workpad includes an environment stamp at the top in a `text` fenced block, format: `<host>:<abs-workdir>@<short-sha>`.
-6. Capture a concrete reproduction signal (command output, failing test, screenshot description) in the workpad `Notes` section before changing code.
-7. **If `task_type == code_change`** (per your Step 0.5 analysis), before any code edits, sync with the repository. Skip this entire sub-step for `noncode` tasks — do not run `git fetch`, `git checkout`, or any other git operation here.
+{% if workpad_body %}
+The workpad already exists from a prior run. Its current body is shown below verbatim. **Treat it as your starting point and reconcile it before editing further.**
+
+```text
+{{ workpad_body }}
+```
+
+Reconciliation:
+
+- Read the workpad above end-to-end before deciding any next step.
+- Do not repeat investigation or validation already recorded there unless the repo state has diverged from what the workpad describes.
+- Do not restart from scratch — pick up where the prior run left off, based on `### Phase`, `### Progress Checkpoints`, and `### Plan`.
+- Check off any items that are already complete based on the current repo state.
+- Expand the plan to cover any newly-visible scope (e.g., new comments since the prior run).
+- Ensure `Acceptance Criteria` and `Validation` are current and still make sense.
+
+When you write your updated workpad, write the **full** body — `pidash workpad update` overwrites, there is no append.
+
+{% else %}
+This is the first run on this issue — the workpad is empty. You will create it as part of this step.
+
+{% endif %}
+1. Build the workpad body in a local file (e.g. `./.pidash-workpad.md`) following the structure in the "Workpad template" section. Initialize `### Phase` to `investigating` and `### Progress Checkpoints` with all milestone items unchecked unless already completed. If a checkpoint does not apply to this task, mark it as `n/a` in the workpad (e.g. `- [x] pr_opened (n/a)`).
+2. Write the hierarchical plan in the workpad.
+3. Ensure the workpad includes an environment stamp at the top in a `text` fenced block, format: `<host>:<abs-workdir>@<short-sha>`.
+4. Capture a concrete reproduction signal (command output, failing test, screenshot description) in the workpad `Notes` section before changing code.
+5. Persist the workpad: `pidash workpad update --body-file ./.pidash-workpad.md`. This is your single source of cross-run truth — re-run `pidash workpad update` after every meaningful change throughout the run.
+6. **If `task_type == code_change`** (per your Step 0.5 analysis), before any code edits, sync with the repository. Skip this entire sub-step for `noncode` tasks — do not run `git fetch`, `git checkout`, or any other git operation here.
    - `git fetch origin`
 {% if repo.work_branch %}
    - `git checkout {{ repo.work_branch }}` — this is the existing branch for this issue; operate on it directly. If it does not exist locally, `git checkout -b {{ repo.work_branch }} origin/{{ repo.work_branch }}`. Do not create a new feature branch.
@@ -31,4 +44,4 @@
    - `git checkout "$BASE" && git pull --rebase origin "$BASE"`.
    - Create a derived branch off `$BASE`: `BRANCH="pi-dash/{{ issue.identifier|lower }}"; git checkout -b "$BRANCH"`. Always derive — never commit on `$BASE`. Persistence (`pidash issue patch ... --git-work-branch`) happens in Step 2 *after* the first successful push, so a crashed run never leaves a recorded branch with no remote ref.
 {% endif %}
-   - Record the resulting `HEAD` short SHA in the workpad `Notes`.
+   - Record the resulting `HEAD` short SHA in the workpad `Notes` and re-run `pidash workpad update` so the stamp survives a crash.

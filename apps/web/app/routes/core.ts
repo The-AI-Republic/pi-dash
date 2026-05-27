@@ -119,6 +119,15 @@ export const coreRoutes: RouteConfigEntry[] = [
           route(":workspaceSlug/schedulers", "./(all)/[workspaceSlug]/schedulers/page.tsx"),
         ]),
 
+        // AI Dev Machines — explains what pidash CLI / daemon / runner is for and
+        // surfaces the install one-liner + an "add runner" entry point. Lives inside
+        // the (projects) layout so it inherits the workspace sidebar shell, matching
+        // sibling pages like Prompts and Schedulers. Its own layout adds the flex /
+        // scroll wrapper and gates view access to ADMIN/MEMBER.
+        layout("./(all)/[workspaceSlug]/ai-dev-machines/layout.tsx", [
+          route(":workspaceSlug/ai-dev-machines", "./(all)/[workspaceSlug]/ai-dev-machines/page.tsx"),
+        ]),
+
         // Workspace Views
         layout("./(all)/[workspaceSlug]/(projects)/workspace-views/layout.tsx", [
           route(":workspaceSlug/workspace-views", "./(all)/[workspaceSlug]/(projects)/workspace-views/page.tsx"),
@@ -230,6 +239,26 @@ export const coreRoutes: RouteConfigEntry[] = [
               "./(all)/[workspaceSlug]/(projects)/projects/(detail)/[projectId]/intake/page.tsx"
             ),
           ]),
+
+          // Schedulers list (project-scoped scheduler bindings)
+          layout("./(all)/[workspaceSlug]/(projects)/projects/(detail)/[projectId]/schedulers/layout.tsx", [
+            // Index page is a redirect to /calendar (the default landing).
+            route(
+              ":workspaceSlug/projects/:projectId/schedulers",
+              "./(all)/[workspaceSlug]/(projects)/projects/(detail)/[projectId]/schedulers/page.tsx"
+            ),
+            // List tab — the table of installed bindings.
+            route(
+              ":workspaceSlug/projects/:projectId/schedulers/list",
+              "./(all)/[workspaceSlug]/(projects)/projects/(detail)/[projectId]/schedulers/list/page.tsx"
+            ),
+            // Calendar tab — month + week views over expanded RRULE
+            // occurrences and past AgentRuns.
+            route(
+              ":workspaceSlug/projects/:projectId/schedulers/calendar",
+              "./(all)/[workspaceSlug]/(projects)/projects/(detail)/[projectId]/schedulers/calendar/page.tsx"
+            ),
+          ]),
         ]),
 
         // Project Archives - Issues, Cycles, Modules
@@ -269,7 +298,7 @@ export const coreRoutes: RouteConfigEntry[] = [
       // Runners (Pi Dash runner: connect dev machines, review runs, decide approvals)
       layout("./(all)/[workspaceSlug]/runners/layout.tsx", [
         route(":workspaceSlug/runners", "./(all)/[workspaceSlug]/runners/page.tsx"),
-        route(":workspaceSlug/runners/runs", "./(all)/[workspaceSlug]/runners/runs/page.tsx"),
+        route(":workspaceSlug/runners/runs/:runId?", "./(all)/[workspaceSlug]/runners/runs/page.tsx"),
         route(":workspaceSlug/runners/approvals", "./(all)/[workspaceSlug]/runners/approvals/page.tsx"),
         route(":workspaceSlug/runners/chat/:runnerId", "./(all)/[workspaceSlug]/runners/chat/[runnerId]/page.tsx"),
       ]),

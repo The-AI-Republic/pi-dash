@@ -13,12 +13,14 @@ import { useTranslation } from "@pi-dash/i18n";
 import { Button } from "@pi-dash/propel/button";
 import type { IScheduler } from "@pi-dash/services";
 import { EModalPosition, EModalWidth, Input, ModalCore, TextArea, ToggleSwitch } from "@pi-dash/ui";
+import { SCHEDULER_COLOR_PALETTE as COLOR_PALETTE } from "@/components/project/scheduler-bindings/constants";
 
 interface SchedulerFormValues {
   slug: string;
   name: string;
   description: string;
   prompt: string;
+  color: string;
   is_enabled: boolean;
 }
 
@@ -35,6 +37,7 @@ const emptyValues: SchedulerFormValues = {
   name: "",
   description: "",
   prompt: "",
+  color: COLOR_PALETTE[0],
   is_enabled: true,
 };
 
@@ -60,6 +63,7 @@ export const SchedulerFormModal = observer(function SchedulerFormModal(props: Pr
         name: scheduler.name,
         description: scheduler.description ?? "",
         prompt: scheduler.prompt,
+        color: scheduler.color || COLOR_PALETTE[0],
         is_enabled: scheduler.is_enabled,
       });
     } else {
@@ -180,6 +184,33 @@ export const SchedulerFormModal = observer(function SchedulerFormModal(props: Pr
           />
           <p className="text-12 text-secondary">{t("schedulers.form.prompt_help")}</p>
           {errors.prompt?.message && <p className="text-12 text-danger-primary">{errors.prompt.message}</p>}
+        </div>
+
+        <div className="flex flex-col gap-2">
+          <span className="text-13 font-medium text-primary">{t("schedulers.form.color_label")}</span>
+          <Controller
+            control={control}
+            name="color"
+            render={({ field: { value, onChange } }) => (
+              <div className="flex flex-wrap items-center gap-2">
+                {COLOR_PALETTE.map((c) => {
+                  const active = c.toLowerCase() === (value || "").toLowerCase();
+                  return (
+                    <button
+                      key={c}
+                      type="button"
+                      aria-label={`Color ${c}`}
+                      aria-pressed={active}
+                      onClick={() => onChange(c)}
+                      className={`h-6 w-6 rounded-md border ${active ? "ring-offset-surface-1 ring-primary ring-2 ring-offset-1" : "border-subtle"}`}
+                      style={{ backgroundColor: c }}
+                    />
+                  );
+                })}
+              </div>
+            )}
+          />
+          <p className="text-12 text-secondary">{t("schedulers.form.color_help")}</p>
         </div>
 
         <div className="flex items-start justify-between gap-4">

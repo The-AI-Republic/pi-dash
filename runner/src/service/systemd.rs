@@ -186,6 +186,18 @@ pub async fn status() -> Result<String> {
     Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
 }
 
+/// Best-effort diagnosis of a recently-dead daemon. On systemd we lean
+/// on `systemctl status` (rich exit-code/signal reporting + the last
+/// few journal lines) since that's already what operators reach for
+/// here; reload.rs's existing journal capture covers the common cases
+/// well enough that a hand-rolled translator would mostly duplicate it.
+/// Returns `None` so the caller falls back to its generic IPC-timeout
+/// message — we deliberately don't compete with systemd's own diagnostic
+/// output on Linux.
+pub async fn diagnose_recent_exit() -> Option<String> {
+    None
+}
+
 fn unit_path() -> Result<PathBuf> {
     let home = dirs_home()?;
     Ok(home.join(".config/systemd/user").join(UNIT_NAME))

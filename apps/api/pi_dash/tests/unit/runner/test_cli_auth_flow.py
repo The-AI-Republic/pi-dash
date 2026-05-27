@@ -10,6 +10,7 @@ runner mint + token revoke endpoints. See
 
 from __future__ import annotations
 
+import re
 from datetime import timedelta
 
 import pytest
@@ -65,8 +66,8 @@ def test_token_poll_pending_then_approved_mints_apitoken(
     assert poll2.status_code == 200, poll2.data
     assert poll2.data["access_token"].startswith("pi_dash_api_")
     assert poll2.data["user_email"] == create_user.email
-    # APIToken row exists.
-    assert APIToken.objects.filter(token=poll2.data["access_token"], user=create_user).exists()
+    minted = APIToken.objects.get(token=poll2.data["access_token"], user=create_user)
+    assert re.fullmatch(r"pidash CLI · \d{4}-\d{2}-\d{2} \d{2}:\d{2} UTC", minted.label), minted.label
     # Row marked consumed.
     row = CLIDeviceCode.objects.get(device_code=start["device_code"])
     assert row.consumed is True

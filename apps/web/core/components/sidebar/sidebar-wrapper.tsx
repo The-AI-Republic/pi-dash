@@ -17,8 +17,7 @@ import { CustomizeNavigationDialog } from "@/components/navigation/customize-nav
 import { useAppTheme } from "@/hooks/store/use-app-theme";
 import useSize from "@/hooks/use-window-size";
 // pi dash web components
-import { WorkspaceEditionBadge } from "@/pi-dash-web/components/workspace/edition-badge";
-import { AppSidebarToggleButton } from "./sidebar-toggle-button";
+import { UserMenuRoot } from "@/components/workspace/sidebar/user-menu-root";
 import { IconButton } from "@pi-dash/propel/icon-button";
 // assets
 import piSymbolDark from "@/app/assets/pi-dash-logos/pi-symbol-dark.svg?url";
@@ -66,7 +65,7 @@ export const SidebarWrapper = observer(function SidebarWrapper(props: TSidebarWr
               <span className="pt-1 text-16 font-medium text-primary">{title}</span>
             </div>
             <div className="flex items-center gap-2">
-              {title === "Projects" && (
+              {title === "Pi Dash" && (
                 <IconButton
                   size="base"
                   variant="ghost"
@@ -74,7 +73,6 @@ export const SidebarWrapper = observer(function SidebarWrapper(props: TSidebarWr
                   onClick={() => setIsCustomizeNavDialogOpen(true)}
                 />
               )}
-              <AppSidebarToggleButton />
             </div>
           </div>
           {/* Quick actions */}
@@ -90,15 +88,15 @@ export const SidebarWrapper = observer(function SidebarWrapper(props: TSidebarWr
         >
           {children}
         </ScrollArea>
-        {/* Help Section */}
-        <div className="flex h-12 items-center justify-between border-t border-subtle bg-surface-1 p-3">
-          <WorkspaceEditionBadge />
-          {/* TODO: To be checked if we need this */}
-          {/* <div className="flex items-center gap-2">
-          {!shouldRenderAppRail && <HelpMenu />}
-          {!isAppRailEnabled && <AppSidebarToggleButton />}
-        </div> */}
-        </div>
+        {/* User menu (folds Community in as a sub-item). Only mounted when the
+            sidebar is fully visible — when collapsed, TopNavigationRoot renders
+            the compact fallback instead, so there is exactly one UserMenuRoot
+            on screen at any time. */}
+        {!sidebarCollapsed && (
+          <div className="flex items-center border-t border-subtle bg-surface-1 px-2 py-2">
+            <UserMenuRoot variant="sidebar" />
+          </div>
+        )}
       </div>
     </>
   );

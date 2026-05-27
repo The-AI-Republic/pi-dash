@@ -42,6 +42,7 @@ fn non_service_commands_still_present() {
         "issue",
         "comment",
         "state",
+        "workpad",
         "workspace",
         "update",
     ] {

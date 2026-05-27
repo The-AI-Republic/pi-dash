@@ -31,6 +31,7 @@ from .issue import (
     IssueAttachmentDetailAPIEndpoint,
     IssueSearchEndpoint,
     IssueRelationListCreateAPIEndpoint,
+    IssueWorkpadAPIEndpoint,
 )
 
 from .cycle import (
