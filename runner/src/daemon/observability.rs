@@ -119,6 +119,15 @@ pub fn parse_codex_token_count(params: &serde_json::Value) -> Option<TokenUsage>
 pub struct ExecCommandHint {
     pub command: String,
     pub cwd: Option<String>,
+    pub tool_call_id: Option<String>,
+}
+
+/// Plain-data extract for a command-tool completion. Kept separate from
+/// [`ExecCommandHint`] because some protocols echo only the tool id on
+/// completion, not the command text.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExecCommandCompletionHint {
+    pub tool_call_id: Option<String>,
 }
 
 /// Single dispatch table for "what shell command did the agent just
@@ -128,8 +137,8 @@ pub struct ExecCommandHint {
 /// `assistant/message` (Bash tool_use blocks). Unit-testable in
 /// isolation; the supervisor calls this from `handle_bridge_event`
 /// without owning the routing logic itself, so a typo in either method
-/// name is caught by tests rather than by an unrenewable `last
-/// command:` field in production failures.
+/// name is caught by tests rather than by silently absent command-tool
+/// context in production failures.
 pub fn extract_exec_command_hint(
     method: &str,
     params: &serde_json::Value,
@@ -154,42 +163,107 @@ pub fn extract_exec_command_hint(
             Some(ExecCommandHint {
                 command: command.to_string(),
                 cwd,
+                tool_call_id: item
+                    .get("id")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string()),
             })
         }
-        "assistant/message" => parse_claude_bash_command(params).map(|cmd| ExecCommandHint {
-            command: cmd,
-            cwd: None,
-        }),
+        "assistant/message" => parse_claude_bash_tool_use(params),
         _ => None,
     }
 }
 
-/// Best-effort extractor for a Bash `tool_use` block in a Claude
-/// `assistant/message` Raw frame. Returns `Some(command)` if the message
-/// content array contains a `{"type":"tool_use","name":"Bash"}` block
-/// with a string `input.command`; `None` otherwise. Used to populate
-/// `last_exec_command` for failure-detail enrichment, in parallel with
-/// the codex `item/started` / `commandExecution` capture path.
+/// Extract command-tool completions from bridge Raw events. This lets the
+/// failure-detail builder say whether the last observed command had already
+/// completed before an agent/API failure occurred. Claude may echo multiple
+/// tool_result blocks in one message, so callers must consider every hint.
+pub fn extract_exec_command_completion_hints(
+    method: &str,
+    params: &serde_json::Value,
+) -> Vec<ExecCommandCompletionHint> {
+    match method {
+        "item/completed" => {
+            let Some(item) = params.get("item") else {
+                return Vec::new();
+            };
+            if item.get("type").and_then(|v| v.as_str()) != Some("commandExecution") {
+                return Vec::new();
+            }
+            vec![ExecCommandCompletionHint {
+                tool_call_id: item
+                    .get("id")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string()),
+            }]
+        }
+        "user/toolResult" => parse_claude_tool_results(params),
+        _ => Vec::new(),
+    }
+}
+
+/// Best-effort extractor for Bash `tool_use` blocks in a Claude
+/// `assistant/message` Raw frame. Returns the last valid Bash command if
+/// the message content array contains any `{"type":"tool_use","name":"Bash"}`
+/// block with a string `input.command`; `None` otherwise. Used to populate
+/// `last_exec_command` for failure-detail enrichment, in parallel with the
+/// codex `item/started` / `commandExecution` capture path.
 ///
 /// Other tool_use blocks (Read, Edit, Grep, …) are intentionally ignored
 /// — Bash is the call most likely to hang on network / sandbox issues
 /// and the only one whose `input.command` resembles a shell command we'd
 /// want to surface verbatim. Future tools can be added as new arms if
 /// they prove to be common stall sources.
-pub fn parse_claude_bash_command(message: &serde_json::Value) -> Option<String> {
+pub fn parse_claude_bash_tool_use(message: &serde_json::Value) -> Option<ExecCommandHint> {
     let content = message.get("content")?.as_array()?;
+    let mut last_bash: Option<ExecCommandHint> = None;
     for block in content {
         let is_tool_use = block.get("type").and_then(|v| v.as_str()) == Some("tool_use");
         let is_bash = block.get("name").and_then(|v| v.as_str()) == Some("Bash");
         if is_tool_use && is_bash {
-            let cmd = block.get("input")?.get("command")?.as_str()?.trim();
+            let Some(cmd) = block
+                .get("input")
+                .and_then(|input| input.get("command"))
+                .and_then(|command| command.as_str())
+                .map(str::trim)
+            else {
+                continue;
+            };
             if cmd.is_empty() {
-                return None;
+                continue;
             }
-            return Some(cmd.to_string());
+            last_bash = Some(ExecCommandHint {
+                command: cmd.to_string(),
+                cwd: None,
+                tool_call_id: block
+                    .get("id")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string()),
+            });
         }
     }
-    None
+    last_bash
+}
+
+pub fn parse_claude_tool_results(message: &serde_json::Value) -> Vec<ExecCommandCompletionHint> {
+    let Some(content) = message.get("content").and_then(|v| v.as_array()) else {
+        return Vec::new();
+    };
+    content
+        .iter()
+        .filter_map(|block| {
+            if block.get("type").and_then(|v| v.as_str()) == Some("tool_result") {
+                Some(ExecCommandCompletionHint {
+                    tool_call_id: block
+                        .get("tool_use_id")
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string()),
+                })
+            } else {
+                None
+            }
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -324,7 +398,7 @@ mod tests {
     }
 
     #[test]
-    fn parse_claude_bash_command_extracts_command() {
+    fn parse_claude_bash_tool_use_extracts_command_and_id() {
         let msg = json!({
             "id": "msg_1",
             "role": "assistant",
@@ -338,14 +412,42 @@ mod tests {
                 },
             ],
         });
-        assert_eq!(
-            parse_claude_bash_command(&msg),
-            Some("git fetch origin".to_string())
-        );
+        let hint = parse_claude_bash_tool_use(&msg).unwrap();
+        assert_eq!(hint.command, "git fetch origin");
+        assert_eq!(hint.tool_call_id.as_deref(), Some("tu_1"));
     }
 
     #[test]
-    fn parse_claude_bash_command_ignores_non_bash_tools() {
+    fn parse_claude_bash_tool_use_uses_last_bash_block() {
+        let msg = json!({
+            "content": [
+                {
+                    "type": "tool_use",
+                    "id": "tu_1",
+                    "name": "Bash",
+                    "input": {"command": "git status"},
+                },
+                {
+                    "type": "tool_use",
+                    "id": "tu_read",
+                    "name": "Read",
+                    "input": {"file_path": "/tmp/foo"},
+                },
+                {
+                    "type": "tool_use",
+                    "id": "tu_2",
+                    "name": "Bash",
+                    "input": {"command": "npm test"},
+                },
+            ],
+        });
+        let hint = parse_claude_bash_tool_use(&msg).unwrap();
+        assert_eq!(hint.command, "npm test");
+        assert_eq!(hint.tool_call_id.as_deref(), Some("tu_2"));
+    }
+
+    #[test]
+    fn parse_claude_bash_tool_use_ignores_non_bash_tools() {
         // A Read tool_use should NOT populate last_exec_command — Read
         // hangs are far rarer than Bash and we want the extractor narrow
         // to avoid noise in the failure-detail string.
@@ -358,25 +460,43 @@ mod tests {
                 },
             ],
         });
-        assert!(parse_claude_bash_command(&msg).is_none());
+        assert!(parse_claude_bash_tool_use(&msg).is_none());
     }
 
     #[test]
-    fn parse_claude_bash_command_returns_none_when_no_tool_use() {
+    fn parse_claude_bash_tool_use_returns_none_when_no_tool_use() {
         let msg = json!({
             "content": [{"type": "text", "text": "just thinking"}],
         });
-        assert!(parse_claude_bash_command(&msg).is_none());
+        assert!(parse_claude_bash_tool_use(&msg).is_none());
     }
 
     #[test]
-    fn parse_claude_bash_command_returns_none_on_empty_command() {
+    fn parse_claude_bash_tool_use_returns_none_on_empty_command() {
         let msg = json!({
             "content": [
                 {"type": "tool_use", "name": "Bash", "input": {"command": "  "}},
             ],
         });
-        assert!(parse_claude_bash_command(&msg).is_none());
+        assert!(parse_claude_bash_tool_use(&msg).is_none());
+    }
+
+    #[test]
+    fn parse_claude_tool_results_extracts_all_tool_use_ids() {
+        let msg = json!({
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "done"},
+                {"type": "tool_result", "tool_use_id": "tu_1", "content": "ok"},
+                {"type": "tool_result", "tool_use_id": "tu_2", "content": "also ok"},
+            ],
+        });
+        let hints = parse_claude_tool_results(&msg);
+        let ids = hints
+            .iter()
+            .map(|hint| hint.tool_call_id.as_deref())
+            .collect::<Vec<_>>();
+        assert_eq!(ids, vec![Some("tu_1"), Some("tu_2")]);
     }
 
     // ---- extract_exec_command_hint dispatch tests ------------------------
@@ -384,8 +504,8 @@ mod tests {
     // These guard the supervisor's wiring against method-name typos. If
     // `handle_bridge_event` ever stops passing `"item/started"` /
     // `"assistant/message"` here, the production code silently degrades to
-    // "no last command" forever — these tests catch that at compile-fixed
-    // string level.
+    // "no command-tool context" forever — these tests catch that at
+    // compile-fixed string level.
 
     #[test]
     fn extract_exec_command_hint_handles_codex_item_started() {
@@ -400,6 +520,7 @@ mod tests {
         let hint = extract_exec_command_hint("item/started", &params).unwrap();
         assert_eq!(hint.command, "git fetch origin");
         assert_eq!(hint.cwd.as_deref(), Some("/tmp/x"));
+        assert!(hint.tool_call_id.is_none());
     }
 
     #[test]
@@ -430,6 +551,7 @@ mod tests {
             "content": [
                 {
                     "type": "tool_use",
+                    "id": "tu_2",
                     "name": "Bash",
                     "input": {"command": "npm install"},
                 },
@@ -440,6 +562,33 @@ mod tests {
         // Claude tool_use blocks don't carry cwd; the working dir is
         // implicit from the run's workspace_root.
         assert!(hint.cwd.is_none());
+        assert_eq!(hint.tool_call_id.as_deref(), Some("tu_2"));
+    }
+
+    #[test]
+    fn extract_exec_command_completion_hints_handles_codex_item_completed() {
+        let params = json!({
+            "item": {"id": "it_1", "type": "commandExecution"},
+        });
+        let hints = extract_exec_command_completion_hints("item/completed", &params);
+        assert_eq!(hints.len(), 1);
+        assert_eq!(hints[0].tool_call_id.as_deref(), Some("it_1"));
+    }
+
+    #[test]
+    fn extract_exec_command_completion_hints_handles_claude_tool_results() {
+        let params = json!({
+            "content": [
+                {"type": "tool_result", "tool_use_id": "tu_3", "content": "done"},
+                {"type": "tool_result", "tool_use_id": "tu_4", "content": "also done"},
+            ],
+        });
+        let hints = extract_exec_command_completion_hints("user/toolResult", &params);
+        let ids = hints
+            .iter()
+            .map(|hint| hint.tool_call_id.as_deref())
+            .collect::<Vec<_>>();
+        assert_eq!(ids, vec![Some("tu_3"), Some("tu_4")]);
     }
 
     #[test]

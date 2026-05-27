@@ -46,10 +46,11 @@ pub struct ObservabilitySnapshot {
     pub tokens: Option<TokenUsage>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub turn_count: Option<u32>,
-    /// Last shell command the agent kicked off (for failure-detail enrichment).
-    /// Reset on rid change like the other per-run scalars; never serialised
-    /// onto the wire — only consumed locally to enrich `RunFailed.detail`
-    /// when the watchdog or stdout-close path fires.
+    /// Last shell command tool the agent kicked off (for failure-detail
+    /// enrichment), including whether a matching completion/result event was
+    /// later observed. Reset on rid change like the other per-run scalars;
+    /// never serialised onto the wire — only consumed locally to enrich
+    /// `RunFailed.detail` when the watchdog or stdout-close path fires.
     #[serde(skip)]
     pub last_exec_command: Option<ExecCommandSnapshot>,
 }
@@ -58,7 +59,9 @@ pub struct ObservabilitySnapshot {
 pub struct ExecCommandSnapshot {
     pub command: String,
     pub cwd: Option<String>,
+    pub tool_call_id: Option<String>,
     pub started_at: DateTime<Utc>,
+    pub completed_at: Option<DateTime<Utc>>,
 }
 
 #[derive(Clone)]
@@ -282,6 +285,30 @@ impl StateHandle {
     /// item is a `commandExecution`.
     pub async fn note_exec_command(&self, snapshot: ExecCommandSnapshot) {
         self.inner.run_snapshot.lock().await.last_exec_command = Some(snapshot);
+        self.tick();
+    }
+
+    /// Mark the last observed command tool completed when the protocol gives
+    /// us a matching completion/result event. Matching by tool id avoids a
+    /// later result from an older command making the current command look done.
+    pub async fn note_exec_command_completed(
+        &self,
+        tool_call_id: Option<&str>,
+        completed_at: DateTime<Utc>,
+    ) {
+        let mut snap = self.inner.run_snapshot.lock().await;
+        let Some(cmd) = snap.last_exec_command.as_mut() else {
+            return;
+        };
+        let matches = match (cmd.tool_call_id.as_deref(), tool_call_id) {
+            (Some(stored), Some(done)) => stored == done,
+            (None, None) => true,
+            _ => false,
+        };
+        if matches {
+            cmd.completed_at = Some(completed_at);
+        }
+        drop(snap);
         self.tick();
     }
 
@@ -573,13 +600,16 @@ mod tests {
             .note_exec_command(ExecCommandSnapshot {
                 command: "git fetch origin".into(),
                 cwd: Some("/tmp/x".into()),
+                tool_call_id: Some("tool-1".into()),
                 started_at: Utc::now(),
+                completed_at: None,
             })
             .await;
         let snap = state.observability_snapshot().await;
         let cmd = snap.last_exec_command.expect("snapshot lost the command");
         assert_eq!(cmd.command, "git fetch origin");
         assert_eq!(cmd.cwd.as_deref(), Some("/tmp/x"));
+        assert_eq!(cmd.tool_call_id.as_deref(), Some("tool-1"));
 
         // Rid change wipes per-run scalars including the exec command, so
         // a stalled-on-foo failure detail can't bleed into a fresh run.
@@ -587,6 +617,36 @@ mod tests {
         state.set_current_run(Some(summary(rid_b, "running"))).await;
         let snap = state.observability_snapshot().await;
         assert!(snap.last_exec_command.is_none());
+    }
+
+    #[tokio::test]
+    async fn note_exec_command_completed_marks_matching_command_only() {
+        let state = empty_state();
+        state
+            .set_current_run(Some(summary(Uuid::new_v4(), "running")))
+            .await;
+        state
+            .note_exec_command(ExecCommandSnapshot {
+                command: "npm test".into(),
+                cwd: None,
+                tool_call_id: Some("tool-1".into()),
+                started_at: Utc::now(),
+                completed_at: None,
+            })
+            .await;
+
+        state
+            .note_exec_command_completed(Some("other-tool"), Utc::now())
+            .await;
+        let snap = state.observability_snapshot().await;
+        assert!(snap.last_exec_command.unwrap().completed_at.is_none());
+
+        let done_at = Utc::now();
+        state
+            .note_exec_command_completed(Some("tool-1"), done_at)
+            .await;
+        let snap = state.observability_snapshot().await;
+        assert_eq!(snap.last_exec_command.unwrap().completed_at, Some(done_at));
     }
 
     #[tokio::test]
