@@ -40,19 +40,57 @@ def _absolute_issue_url(issue: Issue) -> str:
     return f"/{ws}/projects/{issue.project_id}/issues/{issue.id}" if ws else ""
 
 
+def _comment_author_label(actor) -> str:
+    """Render an audience-friendly author label for a comment.
+
+    Bot comments are flattened to a single ``Pi Dash Agent`` label so the
+    agent reading its own prior posts immediately recognizes them as
+    self-authored. Humans get display name → email → username, falling
+    back to "Unknown user" rather than leaking ``None``.
+    """
+    if actor is None:
+        return "Unknown"
+    if getattr(actor, "is_bot", False):
+        return "Pi Dash Agent"
+    return (
+        getattr(actor, "display_name", None)
+        or getattr(actor, "email", None)
+        or getattr(actor, "username", None)
+        or "Unknown user"
+    )
+
+
 def _comments_section(issue: Issue) -> str:
-    """Return non-bot issue comments as plain text for review prompts."""
+    """Render the issue's full comment thread as a numbered chronological log.
+
+    Includes both human-authored and agent-authored (bot) comments —
+    a continuation run needs to see its own prior question alongside the
+    human's reply so it can pick up the conversation. Each entry is
+    formatted as ``### Comment N — <author> at <ISO timestamp>`` followed
+    by the comment body, separated by blank lines.
+    """
     from pi_dash.db.models.issue import IssueComment
 
     comments = (
-        IssueComment.objects.filter(issue=issue, actor__is_bot=False)
+        IssueComment.objects.filter(issue=issue)
+        .select_related("actor")
         .order_by("created_at")
-        .values_list("comment_stripped", flat=True)
     )
-    bodies = [body.strip() for body in comments if body and body.strip()]
-    if not bodies:
-        return "(no recent human comments)"
-    return "\n\n---\n\n".join(bodies)
+    parts: list[str] = []
+    index = 0
+    for comment in comments:
+        body = (comment.comment_stripped or "").strip()
+        if not body:
+            continue
+        index += 1
+        author = _comment_author_label(comment.actor)
+        timestamp = (
+            comment.created_at.isoformat() if comment.created_at else "unknown time"
+        )
+        parts.append(f"### Comment {index} — {author} at {timestamp}\n\n{body}")
+    if not parts:
+        return "(no comments on this issue yet)"
+    return "\n\n".join(parts)
 
 
 def _parent_done_payload(issue: Issue, run: AgentRun) -> str:
