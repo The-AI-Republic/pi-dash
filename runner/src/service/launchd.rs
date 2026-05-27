@@ -297,16 +297,100 @@ async fn probe_loaded_pid() -> Option<i32> {
 /// (registered but not yet exec'd, or just-exited). Pulled out as a pure
 /// function so the parser has unit tests independent of launchctl.
 fn parse_loaded_pid(stdout: &str) -> Option<i32> {
+    parse_int_field(stdout, "PID")
+}
+
+/// Extract `LastExitStatus` from `launchctl list LABEL`'s plist-style
+/// stdout. macOS launchd encodes signals as the raw signal number here:
+/// 9 means SIGKILL, 6 means SIGABRT, 11 means SIGSEGV, etc. A clean
+/// `exit(0)` is `0`. Returns `None` when the field is absent (label is
+/// loaded but has never exited).
+fn parse_last_exit_status(stdout: &str) -> Option<i32> {
+    parse_int_field(stdout, "LastExitStatus")
+}
+
+/// Shared parser for `"<KEY>" = <int>;` lines in launchctl's output.
+fn parse_int_field(stdout: &str, key: &str) -> Option<i32> {
+    let prefix = format!("\"{key}\" = ");
     for line in stdout.lines() {
         let trimmed = line.trim();
-        if let Some(rest) = trimmed.strip_prefix("\"PID\" = ") {
-            let pid_str = rest.trim_end_matches(';').trim();
-            if let Ok(pid) = pid_str.parse::<i32>() {
-                return Some(pid);
+        if let Some(rest) = trimmed.strip_prefix(prefix.as_str()) {
+            let val = rest.trim_end_matches(';').trim();
+            if let Ok(n) = val.parse::<i32>() {
+                return Some(n);
             }
         }
     }
     None
+}
+
+/// Inspect `launchctl list LABEL` and, if the daemon is currently NOT
+/// running and its last exit looks problematic (signal-killed or
+/// non-zero), return a human-readable diagnosis pointing the operator
+/// at the likely cause. Returns `None` when the daemon is currently
+/// running, when the label isn't loaded, or when the previous exit was
+/// a clean `exit(0)`.
+///
+/// Called from `restart_and_verify` when the IPC verification times
+/// out, so users see "AMFI killed the daemon — try resigning" instead
+/// of the generic "Daemon did not answer IPC within 5s" when the
+/// underlying problem is that the daemon crashed during startup.
+pub async fn diagnose_recent_exit() -> Option<String> {
+    let out = Command::new("launchctl")
+        .args(["list", LABEL])
+        .output()
+        .await
+        .ok()?;
+    if !out.status.success() {
+        return None; // label not loaded — nothing to diagnose
+    }
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let pid = parse_loaded_pid(&stdout);
+    // If the daemon is currently running, this isn't a "daemon died" case.
+    if matches!(pid, Some(p) if p > 0) {
+        return None;
+    }
+    let status = parse_last_exit_status(&stdout)?;
+    if status == 0 {
+        return None; // clean exit — IPC must have failed for another reason
+    }
+    Some(describe_exit_status(status))
+}
+
+/// Translate a launchctl `LastExitStatus` integer into an
+/// operator-actionable message. Pure function so it's unit-testable.
+fn describe_exit_status(status: i32) -> String {
+    match status {
+        9 => "Daemon was killed by SIGKILL (LastExitStatus=9) shortly after launchd \
+             exec'd it. On macOS this is almost always a code-signing rejection by \
+             AMFI — common when a freshly built binary's signature isn't trusted \
+             for launchd-spawned processes even though it runs fine from the shell. \
+             Verify with: `codesign -v /Users/<you>/.local/bin/pidash`. \
+             For details: `log show --last 5m --predicate \
+             'subsystem == \"com.apple.kernel.amfi\"'`. \
+             Re-sign locally with `codesign --force --sign - <binary>` if needed; \
+             release builds shipped via `pidash-installer.sh` are Developer-ID \
+             signed and unaffected."
+            .to_string(),
+        6 => "Daemon aborted (LastExitStatus=6 = SIGABRT) shortly after launch. \
+             Most likely a Rust panic or a libc assertion. Check the daemon's \
+             stderr log at `~/Library/Application Support/so.pidash.pidash/logs/runner.err.log` \
+             (macOS) for the panic message."
+            .to_string(),
+        11 => "Daemon segfaulted (LastExitStatus=11 = SIGSEGV) shortly after \
+              launch. Likely a native crash. Check the stderr log and consider \
+              running with `RUST_BACKTRACE=1` baked into the launchd plist."
+            .to_string(),
+        n if (1..32).contains(&n) => format!(
+            "Daemon was killed by signal {n} (LastExitStatus={n}) shortly after \
+             launch. Check the daemon's stderr log for context."
+        ),
+        n => format!(
+            "Daemon exited with non-zero status {n} shortly after launch. \
+             Usually a config / credential error — check the daemon's stderr \
+             log at `~/Library/Application Support/so.pidash.pidash/logs/runner.err.log`."
+        ),
+    }
 }
 
 /// Pattern-match `launchctl bootstrap` stderr to decide whether the
@@ -504,6 +588,78 @@ mod tests {
 };
 "#;
         assert_eq!(parse_loaded_pid(stdout), None);
+    }
+
+    #[test]
+    fn parse_last_exit_status_extracts_signal_value() {
+        // Exact shape of `launchctl list so.pidash.daemon` after a
+        // daemon dies from SIGKILL — the AMFI repro that motivated
+        // the diagnosis path.
+        let stdout = r#"{
+	"Label" = "so.pidash.daemon";
+	"OnDemand" = false;
+	"LastExitStatus" = 9;
+	"Program" = "/Users/u/.local/bin/pidash";
+};
+"#;
+        assert_eq!(parse_last_exit_status(stdout), Some(9));
+    }
+
+    #[test]
+    fn parse_last_exit_status_returns_none_when_absent() {
+        // Fresh load, no prior exit yet — no LastExitStatus line at all.
+        let stdout = r#"{
+	"Label" = "so.pidash.daemon";
+	"OnDemand" = false;
+};
+"#;
+        assert_eq!(parse_last_exit_status(stdout), None);
+    }
+
+    #[test]
+    fn parse_last_exit_status_handles_clean_zero() {
+        let stdout = r#"{
+	"Label" = "so.pidash.daemon";
+	"LastExitStatus" = 0;
+};
+"#;
+        assert_eq!(parse_last_exit_status(stdout), Some(0));
+    }
+
+    #[test]
+    fn describe_exit_status_calls_out_sigkill_amfi() {
+        let msg = describe_exit_status(9);
+        // The SIGKILL message MUST point at AMFI / codesign — that's
+        // the load-bearing user-facing diagnosis. If someone edits
+        // the message and loses that hint, this test should fail.
+        assert!(msg.contains("SIGKILL"));
+        assert!(msg.contains("AMFI") || msg.to_lowercase().contains("code-sign"));
+        assert!(msg.contains("codesign"));
+    }
+
+    #[test]
+    fn describe_exit_status_calls_out_sigabrt_panic() {
+        let msg = describe_exit_status(6);
+        assert!(msg.contains("SIGABRT") || msg.contains("aborted"));
+        assert!(
+            msg.to_lowercase().contains("panic"),
+            "SIGABRT message should mention Rust panic as the likely cause; got: {msg}"
+        );
+    }
+
+    #[test]
+    fn describe_exit_status_handles_arbitrary_signals_and_exit_codes() {
+        // SIGTERM = 15: signal range, but no canned message — fall
+        // through to the "killed by signal N" branch.
+        let sig = describe_exit_status(15);
+        assert!(sig.contains("signal 15"));
+        // Non-signal exit (e.g. config error, status 78 = EX_CONFIG).
+        let cfg = describe_exit_status(78);
+        assert!(cfg.contains("78"));
+        assert!(
+            cfg.to_lowercase().contains("config") || cfg.to_lowercase().contains("non-zero"),
+            "high exit codes should suggest config/credential errors; got: {cfg}"
+        );
     }
 
     #[test]

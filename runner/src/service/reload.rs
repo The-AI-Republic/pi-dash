@@ -90,15 +90,30 @@ where
         Some(s) => s,
         None => {
             let state = svc.status().await.unwrap_or_else(|_| "unknown".into());
+            // Ask the backend whether the daemon died with a recognizable
+            // signature (SIGKILL = AMFI on macOS, SIGABRT = panic, etc.).
+            // Surface that ahead of the raw launchctl/systemctl dump so the
+            // operator's first read points them at the actual cause rather
+            // than "the IPC didn't answer."
+            let diagnosis = svc.diagnose_recent_exit().await;
             let journal = capture_service_detail(&svc).await;
-            return ReloadOutcome {
-                ok: false,
-                summary: "runner failed to come up".into(),
-                detail: Some(format!(
+            let detail = match diagnosis {
+                Some(diag) => format!(
+                    "Daemon did not answer IPC within {}s after restart.\n\n\
+                     Diagnosis: {diag}\n\n\
+                     Service state: {state}\n\n{journal}",
+                    IPC_TIMEOUT.as_secs()
+                ),
+                None => format!(
                     "Daemon did not answer IPC within {}s after restart.\n\
                      Service state: {state}\n\n{journal}",
                     IPC_TIMEOUT.as_secs()
-                )),
+                ),
+            };
+            return ReloadOutcome {
+                ok: false,
+                summary: "runner failed to come up".into(),
+                detail: Some(detail),
                 service_state: state,
             };
         }

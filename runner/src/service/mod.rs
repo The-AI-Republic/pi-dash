@@ -204,4 +204,22 @@ impl Service {
             Service::WindowsTask => windows::status().await,
         }
     }
+
+    /// Inspect service-manager state and, when the daemon recently
+    /// died with a problematic exit, return a human-readable diagnosis.
+    /// Returns `None` when the daemon is up, the service backend has
+    /// nothing useful to add, or the previous exit looked clean.
+    /// Called by `restart_and_verify` when IPC verification times out
+    /// so users see the actual cause (signal, exit code, missing
+    /// dependency) instead of just "Daemon did not answer IPC."
+    pub async fn diagnose_recent_exit(&self) -> Option<String> {
+        match self {
+            #[cfg(target_os = "linux")]
+            Service::Systemd => systemd::diagnose_recent_exit().await,
+            #[cfg(target_os = "macos")]
+            Service::Launchd => launchd::diagnose_recent_exit().await,
+            #[cfg(windows)]
+            Service::WindowsTask => windows::diagnose_recent_exit().await,
+        }
+    }
 }
