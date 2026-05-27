@@ -336,6 +336,28 @@ def test_finalize_persists_direct_usage_metadata(
 
 
 @pytest.mark.unit
+def test_finalize_ignores_out_of_range_usage_metadata(
+    db, create_user, workspace, pod, issue
+):
+    runner = _make_runner(create_user, workspace, pod)
+    run = _make_run(create_user, workspace, pod, runner, issue)
+
+    finalize_run_terminal(
+        runner,
+        run.id,
+        AgentRunStatus.COMPLETED,
+        done_payload={"conclusion": "success"},
+        tokens={"input": 2**63, "output": 250, "total": 2**63},
+    )
+
+    run.refresh_from_db()
+    assert run.status == AgentRunStatus.COMPLETED
+    assert run.input_tokens is None
+    assert run.output_tokens == 250
+    assert run.total_tokens is None
+
+
+@pytest.mark.unit
 def test_finalize_persists_done_payload_usage_metadata(
     db, create_user, workspace, pod, issue
 ):

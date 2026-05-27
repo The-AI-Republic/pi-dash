@@ -38,6 +38,7 @@ TERMINAL_RUN_STATUSES = (
     AgentRunStatus.CANCELLED,
     AgentRunStatus.BLOCKED,
 )
+BIGINT_MAX = 2**63 - 1
 
 
 def _normalize_model(raw: Any) -> str:
@@ -51,7 +52,7 @@ def _coerce_token(raw: Any) -> Optional[int]:
         value = int(raw)
     except (TypeError, ValueError):
         return None
-    if value < 0:
+    if value < 0 or value > BIGINT_MAX:
         return None
     return value
 

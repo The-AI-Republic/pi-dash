@@ -143,7 +143,7 @@ class RunStartedEndpoint(_RunEndpointBase):
                 "thread_id": thread_id,
                 "started_at": timezone.now(),
             }
-            model = (request.data.get("model") or "").strip()
+            model = str(request.data.get("model") or "").strip()
             if model:
                 updates["llm_model"] = model[:128]
             AgentRun.objects.filter(pk=locked.pk).update(**updates)

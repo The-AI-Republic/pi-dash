@@ -246,7 +246,7 @@ def upsert_runner_live_state(
         state.total_tokens = tokens.get("total")
         update_fields.extend(["input_tokens", "output_tokens", "total_tokens"])
     if "model" in status_entry:
-        model = (status_entry.get("model") or "").strip()
+        model = str(status_entry.get("model") or "").strip()
         state.llm_model = model[:128] or None
         update_fields.append("llm_model")
 

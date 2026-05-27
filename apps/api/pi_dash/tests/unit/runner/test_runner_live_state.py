@@ -143,6 +143,25 @@ def test_upsert_creates_row_on_first_snapshot(
 
 
 @pytest.mark.unit
+def test_upsert_coerces_non_string_model(
+    db, create_user, workspace, pod
+):
+    runner = _make_runner(create_user, workspace, pod)
+    rid = uuid.uuid4()
+
+    upsert_runner_live_state(
+        runner,
+        {
+            "observed_run_id": str(rid),
+            "model": 123,
+        },
+    )
+
+    state = RunnerLiveState.objects.get(runner=runner)
+    assert state.llm_model == "123"
+
+
+@pytest.mark.unit
 def test_upsert_partial_update_preserves_unsent_fields(
     db, create_user, workspace, pod
 ):
