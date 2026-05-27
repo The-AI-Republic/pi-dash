@@ -222,12 +222,18 @@ pub async fn stop() -> Result<()> {
 }
 
 /// Poll `launchctl list LABEL` until the label is gone from the user's
-/// domain. If the polite window expires, SIGKILL the captured PID and
-/// re-check — launchctl bootout already delivered SIGTERM, so sending
-/// another would just lengthen the wait. Returns Err only if even SIGKILL
+/// domain. If the polite window expires, ask launchctl to SIGKILL the
+/// service by label and re-check. Returns Err only if even SIGKILL
 /// couldn't dislodge the label; the caller (`stop()`) currently propagates
 /// that so `pidash restart` surfaces a clean "daemon would not exit"
 /// rather than the cryptic EIO from the next bootstrap.
+///
+/// Kill is routed through `launchctl kill SIGKILL <target>` rather than a
+/// direct `kill(pid, ...)` syscall: the PID we captured from `launchctl
+/// list` could be stale by the time we'd signal it (sub-second teardown
+/// race + PID reuse), and we don't want to risk killing an unrelated
+/// process. `launchctl kill` resolves the target to the live process at
+/// kill time, so the race vanishes.
 async fn wait_for_unload(timeout: Duration) -> Result<()> {
     let deadline = Instant::now() + timeout;
     let mut last_pid: Option<i32> = None;
@@ -242,21 +248,32 @@ async fn wait_for_unload(timeout: Duration) -> Result<()> {
         }
         tokio::time::sleep(STOP_POLL_INTERVAL).await;
     }
-    let Some(pid) = last_pid else {
-        anyhow::bail!(
-            "service {LABEL} still loaded after {}s but launchctl never reported a PID — \
-             cannot escalate teardown",
-            timeout.as_secs()
-        );
-    };
-    let _ = nix::sys::signal::kill(nix::unistd::Pid::from_raw(pid), nix::sys::signal::SIGKILL);
+
+    // Tell the operator we're escalating. A daemon that wedges its
+    // shutdown handler is a real bug worth seeing; staying silent here
+    // hid it for the original reporter.
+    let pid_label = last_pid
+        .map(|p| format!("pid {p}"))
+        .unwrap_or_else(|| "no pid reported".to_string());
+    eprintln!(
+        "daemon ({pid_label}) did not exit within {}s of launchctl bootout; \
+         escalating via `launchctl kill SIGKILL`",
+        timeout.as_secs()
+    );
+
+    let target = format!("gui/{}/{LABEL}", get_uid());
+    let _ = Command::new("launchctl")
+        .args(["kill", "SIGKILL", &target])
+        .status()
+        .await;
     tokio::time::sleep(POST_KILL_GRACE).await;
     if probe_loaded_pid().await.is_none() {
         return Ok(());
     }
+    let elapsed = timeout + POST_KILL_GRACE;
     anyhow::bail!(
-        "service {LABEL} (pid {pid}) did not exit after bootout + SIGKILL within {}s",
-        (timeout + POST_KILL_GRACE).as_secs().max(1)
+        "service {LABEL} ({pid_label}) did not exit after bootout + SIGKILL within {}ms",
+        elapsed.as_millis()
     );
 }
 
@@ -426,9 +443,12 @@ mod tests {
         assert!(is_already_loaded_error(
             "Service is already bootstrapped in domain for user gui: 501"
         ));
-        // Real bootstrap failures we MUST NOT fall through on — falling
-        // through to kickstart on these would mask the real cause behind
-        // a generic "kickstart failed: exit status: 113".
+        // The classifier rejects EIO — the "label loaded but launchctl
+        // returned EIO" recovery now flows through `probe_loaded_pid()`
+        // in `start()`, not through this matcher. Keeping the classifier
+        // strict here means a legitimately-bad bootstrap (plist missing,
+        // malformed) still produces its own error rather than a
+        // misleading "kickstart failed: exit status: 113".
         assert!(!is_already_loaded_error(
             "Bootstrap failed: 5: Input/output error"
         ));
