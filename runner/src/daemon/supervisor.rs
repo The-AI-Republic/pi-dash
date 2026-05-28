@@ -1988,9 +1988,16 @@ fn format_exec_command_detail(
     if let Some(completed_at) = cmd.completed_at {
         let runtime = (completed_at - cmd.started_at).num_seconds().max(0);
         let since_completed = (now - completed_at).num_seconds().max(0);
+        // Distinguish a clean completion from a non-success terminal
+        // (codex `failed`, Claude `is_error: true`) so the failure
+        // detail does not call an errored command a "completion".
+        let verb = match cmd.completed_success {
+            Some(false) => "exited with error",
+            Some(true) | None => "completed",
+        };
         format!(
             "last observed command tool: `{}`{cwd} \
-             (completed {since_completed}s before failure; ran {runtime}s)",
+             ({verb} {since_completed}s before failure; ran {runtime}s)",
             cmd.command
         )
     } else {
@@ -2512,6 +2519,7 @@ impl AssignWorker {
                                 tool_call_id: hint.tool_call_id,
                                 started_at: Utc::now(),
                                 completed_at: None,
+                                completed_success: None,
                             })
                             .await;
                     }
@@ -2522,7 +2530,11 @@ impl AssignWorker {
                         params,
                     ) {
                         self.state
-                            .note_exec_command_completed(hint.tool_call_id.as_deref(), Utc::now())
+                            .note_exec_command_completed(
+                                &hint.tool_call_id,
+                                hint.success,
+                                Utc::now(),
+                            )
                             .await;
                     }
                 }
@@ -2794,6 +2806,7 @@ mod tests {
                 tool_call_id: Some("tool-1".into()),
                 started_at,
                 completed_at: Some(completed_at),
+                completed_success: Some(true),
             },
             now,
         );
@@ -2814,6 +2827,7 @@ mod tests {
                 tool_call_id: Some("tool-2".into()),
                 started_at,
                 completed_at: None,
+                completed_success: None,
             },
             now,
         );
@@ -2823,6 +2837,33 @@ mod tests {
             "last observed command tool start: `git fetch origin` in `/tmp/repo` \
              (started 69s ago; no completion event observed)"
         );
+    }
+
+    #[test]
+    fn format_exec_command_detail_distinguishes_errored_completion_from_clean_one() {
+        // A command whose completion event reported a non-success
+        // terminal status (codex `failed`, Claude `is_error: true`) must
+        // not be described as a clean "completion" — that wording reads
+        // like success, which can be just as misleading as the original
+        // "still running" bug this PR fixes.
+        let started_at = Utc.with_ymd_and_hms(2026, 5, 27, 9, 11, 0).unwrap();
+        let completed_at = Utc.with_ymd_and_hms(2026, 5, 27, 9, 11, 4).unwrap();
+        let now = Utc.with_ymd_and_hms(2026, 5, 27, 9, 12, 0).unwrap();
+        let detail = format_exec_command_detail(
+            &ExecCommandSnapshot {
+                command: "npm test".into(),
+                cwd: None,
+                tool_call_id: Some("tool-x".into()),
+                started_at,
+                completed_at: Some(completed_at),
+                completed_success: Some(false),
+            },
+            now,
+        );
+
+        assert!(detail.contains("exited with error 56s before failure"));
+        assert!(detail.contains("ran 4s"));
+        assert!(!detail.contains("completed 56s"));
     }
 
     /// Build the supervisor's ``hello_runners`` map from a list of

@@ -125,9 +125,18 @@ pub struct ExecCommandHint {
 /// Plain-data extract for a command-tool completion. Kept separate from
 /// [`ExecCommandHint`] because some protocols echo only the tool id on
 /// completion, not the command text.
+///
+/// `tool_call_id` is non-optional: completion events without an id cannot
+/// be matched against any stored command, so we drop them at parse time
+/// rather than carrying a `None` that would force every consumer to
+/// re-decide what to do with it. `success` is best-effort — `Some(true)`
+/// for a clean completion, `Some(false)` for a non-success terminal state
+/// (codex `failed` status or Claude `is_error: true`), `None` when the
+/// protocol frame doesn't surface an outcome.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExecCommandCompletionHint {
-    pub tool_call_id: Option<String>,
+    pub tool_call_id: String,
+    pub success: Option<bool>,
 }
 
 /// Single dispatch table for "what shell command did the agent just
@@ -176,8 +185,14 @@ pub fn extract_exec_command_hint(
 
 /// Extract command-tool completions from bridge Raw events. This lets the
 /// failure-detail builder say whether the last observed command had already
-/// completed before an agent/API failure occurred. Claude may echo multiple
-/// tool_result blocks in one message, so callers must consider every hint.
+/// completed before an agent/API failure occurred, and whether it ended
+/// cleanly. Claude may echo multiple tool_result blocks in one message, so
+/// callers must consider every hint.
+///
+/// Hints without an explicit tool id are dropped here, not surfaced as
+/// `None`: the only useful operation on a completion hint is matching it
+/// against a stored command's id, and a `None` id can never match
+/// anything meaningful. See also [`crate::daemon::state::StateHandle::note_exec_command_completed`].
 pub fn extract_exec_command_completion_hints(
     method: &str,
     params: &serde_json::Value,
@@ -190,11 +205,21 @@ pub fn extract_exec_command_completion_hints(
             if item.get("type").and_then(|v| v.as_str()) != Some("commandExecution") {
                 return Vec::new();
             }
+            let Some(tool_call_id) = item.get("id").and_then(|v| v.as_str()) else {
+                return Vec::new();
+            };
+            // Codex item/completed carries a status string. Treat any
+            // value other than "completed" (e.g. "failed", "errored") as
+            // an unsuccessful terminal — the command did finish, but the
+            // failure-detail wording should not call it a clean
+            // completion. Missing status leaves success as `None`.
+            let success = item
+                .get("status")
+                .and_then(|v| v.as_str())
+                .map(|status| status == "completed");
             vec![ExecCommandCompletionHint {
-                tool_call_id: item
-                    .get("id")
-                    .and_then(|v| v.as_str())
-                    .map(|s| s.to_string()),
+                tool_call_id: tool_call_id.to_string(),
+                success,
             }]
         }
         "user/toolResult" => parse_claude_tool_results(params),
@@ -214,7 +239,15 @@ pub fn extract_exec_command_completion_hints(
 /// and the only one whose `input.command` resembles a shell command we'd
 /// want to surface verbatim. Future tools can be added as new arms if
 /// they prove to be common stall sources.
-pub fn parse_claude_bash_tool_use(message: &serde_json::Value) -> Option<ExecCommandHint> {
+///
+/// Last-wins limitation: when a single assistant message carries more
+/// than one Bash block, only the trailing one is stored. Earlier Bash
+/// calls in the same message are not tracked for completion — if one of
+/// them is the call that hangs, the failure-detail will name the wrong
+/// command. In practice Claude usually serialises Bash calls across
+/// successive messages, so this is a known acceptable loss of fidelity
+/// rather than a silent bug.
+fn parse_claude_bash_tool_use(message: &serde_json::Value) -> Option<ExecCommandHint> {
     let content = message.get("content")?.as_array()?;
     let mut last_bash: Option<ExecCommandHint> = None;
     for block in content {
@@ -245,23 +278,32 @@ pub fn parse_claude_bash_tool_use(message: &serde_json::Value) -> Option<ExecCom
     last_bash
 }
 
-pub fn parse_claude_tool_results(message: &serde_json::Value) -> Vec<ExecCommandCompletionHint> {
+/// Pull command-tool completion hints out of a Claude `user/toolResult`
+/// raw frame. Blocks without a `tool_use_id` are dropped — they cannot
+/// match a stored command. The `is_error` field, when present, drives
+/// the `success` flag (`is_error: true` ⇒ `Some(false)`).
+fn parse_claude_tool_results(message: &serde_json::Value) -> Vec<ExecCommandCompletionHint> {
     let Some(content) = message.get("content").and_then(|v| v.as_array()) else {
         return Vec::new();
     };
     content
         .iter()
         .filter_map(|block| {
-            if block.get("type").and_then(|v| v.as_str()) == Some("tool_result") {
-                Some(ExecCommandCompletionHint {
-                    tool_call_id: block
-                        .get("tool_use_id")
-                        .and_then(|v| v.as_str())
-                        .map(|s| s.to_string()),
-                })
-            } else {
-                None
+            if block.get("type").and_then(|v| v.as_str()) != Some("tool_result") {
+                return None;
             }
+            let tool_call_id = block
+                .get("tool_use_id")
+                .and_then(|v| v.as_str())?
+                .to_string();
+            let success = block
+                .get("is_error")
+                .and_then(|v| v.as_bool())
+                .map(|is_error| !is_error);
+            Some(ExecCommandCompletionHint {
+                tool_call_id,
+                success,
+            })
         })
         .collect()
 }
@@ -494,9 +536,45 @@ mod tests {
         let hints = parse_claude_tool_results(&msg);
         let ids = hints
             .iter()
-            .map(|hint| hint.tool_call_id.as_deref())
+            .map(|hint| hint.tool_call_id.as_str())
             .collect::<Vec<_>>();
-        assert_eq!(ids, vec![Some("tu_1"), Some("tu_2")]);
+        assert_eq!(ids, vec!["tu_1", "tu_2"]);
+        // is_error absent ⇒ success is None
+        assert!(hints.iter().all(|hint| hint.success.is_none()));
+    }
+
+    #[test]
+    fn parse_claude_tool_results_propagates_is_error_into_success() {
+        let msg = json!({
+            "content": [
+                {"type": "tool_result", "tool_use_id": "tu_ok", "is_error": false, "content": "ok"},
+                {"type": "tool_result", "tool_use_id": "tu_err", "is_error": true, "content": "boom"},
+            ],
+        });
+        let hints = parse_claude_tool_results(&msg);
+        assert_eq!(hints.len(), 2);
+        assert_eq!(hints[0].tool_call_id, "tu_ok");
+        assert_eq!(hints[0].success, Some(true));
+        assert_eq!(hints[1].tool_call_id, "tu_err");
+        assert_eq!(hints[1].success, Some(false));
+    }
+
+    #[test]
+    fn parse_claude_tool_results_drops_blocks_without_tool_use_id() {
+        // A tool_result without a tool_use_id can't match any stored
+        // command. Surfacing it as a completion hint would risk a
+        // spurious match against a stored command whose own tool_call_id
+        // was absent — exactly the regression this PR is designed to
+        // prevent. The parser must drop these blocks at the boundary.
+        let msg = json!({
+            "content": [
+                {"type": "tool_result", "content": "no id here"},
+                {"type": "tool_result", "tool_use_id": "tu_real", "content": "fine"},
+            ],
+        });
+        let hints = parse_claude_tool_results(&msg);
+        assert_eq!(hints.len(), 1);
+        assert_eq!(hints[0].tool_call_id, "tu_real");
     }
 
     // ---- extract_exec_command_hint dispatch tests ------------------------
@@ -568,11 +646,39 @@ mod tests {
     #[test]
     fn extract_exec_command_completion_hints_handles_codex_item_completed() {
         let params = json!({
-            "item": {"id": "it_1", "type": "commandExecution"},
+            "item": {"id": "it_1", "type": "commandExecution", "status": "completed"},
         });
         let hints = extract_exec_command_completion_hints("item/completed", &params);
         assert_eq!(hints.len(), 1);
-        assert_eq!(hints[0].tool_call_id.as_deref(), Some("it_1"));
+        assert_eq!(hints[0].tool_call_id, "it_1");
+        assert_eq!(hints[0].success, Some(true));
+    }
+
+    #[test]
+    fn extract_exec_command_completion_hints_marks_failed_codex_item_unsuccessful() {
+        let params = json!({
+            "item": {"id": "it_2", "type": "commandExecution", "status": "failed"},
+        });
+        let hints = extract_exec_command_completion_hints("item/completed", &params);
+        assert_eq!(hints.len(), 1);
+        assert_eq!(hints[0].tool_call_id, "it_2");
+        assert_eq!(
+            hints[0].success,
+            Some(false),
+            "a failed item/completed must not be reported as a clean completion"
+        );
+    }
+
+    #[test]
+    fn extract_exec_command_completion_hints_drops_codex_item_completed_without_id() {
+        // Without an item id there is nothing to match against the stored
+        // command; emitting a hint here would spuriously mark unrelated
+        // commands as completed.
+        let params = json!({
+            "item": {"type": "commandExecution", "status": "completed"},
+        });
+        let hints = extract_exec_command_completion_hints("item/completed", &params);
+        assert!(hints.is_empty());
     }
 
     #[test]
@@ -586,9 +692,9 @@ mod tests {
         let hints = extract_exec_command_completion_hints("user/toolResult", &params);
         let ids = hints
             .iter()
-            .map(|hint| hint.tool_call_id.as_deref())
+            .map(|hint| hint.tool_call_id.as_str())
             .collect::<Vec<_>>();
-        assert_eq!(ids, vec![Some("tu_3"), Some("tu_4")]);
+        assert_eq!(ids, vec!["tu_3", "tu_4"]);
     }
 
     #[test]
