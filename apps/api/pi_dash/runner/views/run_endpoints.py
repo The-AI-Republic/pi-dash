@@ -138,11 +138,15 @@ class RunStartedEndpoint(_RunEndpointBase):
             if closed:
                 return closed
             thread_id = (request.data.get("thread_id") or "")[:128]
-            AgentRun.objects.filter(pk=locked.pk).update(
-                status=AgentRunStatus.RUNNING,
-                thread_id=thread_id,
-                started_at=timezone.now(),
-            )
+            updates = {
+                "status": AgentRunStatus.RUNNING,
+                "thread_id": thread_id,
+                "started_at": timezone.now(),
+            }
+            model = str(request.data.get("model") or "").strip()
+            if model:
+                updates["llm_model"] = model[:128]
+            AgentRun.objects.filter(pk=locked.pk).update(**updates)
         return Response({"ok": True})
 
 
@@ -257,6 +261,8 @@ class RunCompletedEndpoint(_RunEndpointBase):
                     run.id,
                     AgentRunStatus.COMPLETED,
                     done_payload=request.data.get("done_payload"),
+                    tokens=request.data.get("tokens") or request.data.get("usage"),
+                    model=request.data.get("model"),
                 )
         return Response({"ok": True})
 
@@ -279,7 +285,13 @@ class RunPausedEndpoint(_RunEndpointBase):
             # Posts the agent's question to the issue thread,
             # applies deferred-pause workspace transitions, and re-fires
             # drain. See run_lifecycle.apply_run_paused.
-            run_lifecycle.apply_run_paused(runner, run.id, payload)
+            run_lifecycle.apply_run_paused(
+                runner,
+                run.id,
+                payload,
+                tokens=request.data.get("tokens") or request.data.get("usage"),
+                model=request.data.get("model"),
+            )
         return Response({"ok": True})
 
 
@@ -313,6 +325,8 @@ class RunFailedEndpoint(_RunEndpointBase):
                 run.id,
                 AgentRunStatus.FAILED,
                 error_detail=request.data.get("detail") or "",
+                tokens=request.data.get("tokens") or request.data.get("usage"),
+                model=request.data.get("model"),
             )
         return Response({"ok": True})
 
@@ -328,7 +342,11 @@ class RunCancelledEndpoint(_RunEndpointBase):
             runner = getattr(request, "auth_runner", None)
             if runner is not None:
                 run_lifecycle.finalize_run_terminal(
-                    runner, run.id, AgentRunStatus.CANCELLED
+                    runner,
+                    run.id,
+                    AgentRunStatus.CANCELLED,
+                    tokens=request.data.get("tokens") or request.data.get("usage"),
+                    model=request.data.get("model"),
                 )
         return Response({"ok": True})
 

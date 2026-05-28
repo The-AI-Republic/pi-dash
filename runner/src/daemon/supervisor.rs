@@ -13,7 +13,8 @@ use crate::cloud::http::{
     RunnerCloudClient, SharedHttpTransport,
 };
 use crate::cloud::protocol::{
-    ClientMsg, FailureReason, RunnerStatus, ServerMsg, WIRE_VERSION, WorkspaceState,
+    ClientMsg, FailureReason, RunnerStatus, ServerMsg, TokenUsage as WireTokenUsage, WIRE_VERSION,
+    WorkspaceState,
 };
 use crate::config::schema::{AgentKind, Config, Credentials};
 use crate::daemon::run_event_mirror::RunEventMirror;
@@ -328,33 +329,37 @@ async fn drain_in_flight_runs(runners: Arc<RwLock<HelloRunnerMap>>) -> usize {
             .collect()
     };
     let now = Utc::now();
-    let drains = snapshot.into_iter().filter_map(|(runner_id, in_flight, out)| {
-        let run_id = in_flight?;
-        let msg = ClientMsg::RunFailed {
-            run_id,
-            reason: FailureReason::DaemonRestart,
-            detail: Some("daemon shutdown requested".to_string()),
-            ended_at: now,
-        };
-        Some(async move {
-            // Per-attempt timeout so one stuck cloud client can't keep
-            // a parallel sibling from completing in time.
-            match tokio::time::timeout(Duration::from_secs(2), out.send(msg)).await {
-                Ok(Ok(())) => {
-                    tracing::info!(%runner_id, %run_id, "drained in-flight run on shutdown");
-                    true
+    let drains = snapshot
+        .into_iter()
+        .filter_map(|(runner_id, in_flight, out)| {
+            let run_id = in_flight?;
+            let msg = ClientMsg::RunFailed {
+                run_id,
+                reason: FailureReason::DaemonRestart,
+                detail: Some("daemon shutdown requested".to_string()),
+                ended_at: now,
+                tokens: None,
+                model: None,
+            };
+            Some(async move {
+                // Per-attempt timeout so one stuck cloud client can't keep
+                // a parallel sibling from completing in time.
+                match tokio::time::timeout(Duration::from_secs(2), out.send(msg)).await {
+                    Ok(Ok(())) => {
+                        tracing::info!(%runner_id, %run_id, "drained in-flight run on shutdown");
+                        true
+                    }
+                    Ok(Err(e)) => {
+                        tracing::warn!(%runner_id, %run_id, "drain send failed: {e:#}");
+                        false
+                    }
+                    Err(_) => {
+                        tracing::warn!(%runner_id, %run_id, "drain send timed out at 2s");
+                        false
+                    }
                 }
-                Ok(Err(e)) => {
-                    tracing::warn!(%runner_id, %run_id, "drain send failed: {e:#}");
-                    false
-                }
-                Err(_) => {
-                    tracing::warn!(%runner_id, %run_id, "drain send timed out at 2s");
-                    false
-                }
-            }
-        })
-    });
+            })
+        });
     futures_util::future::join_all(drains)
         .await
         .into_iter()
@@ -817,6 +822,8 @@ impl RunnerLoop {
                                     reason: FailureReason::Internal,
                                     detail: Some(format!("{e:#}")),
                                     ended_at: Utc::now(),
+                                    tokens: None,
+                                    model: None,
                                 })
                                 .await;
                             worker.state.set_current_run(None).await;
@@ -1215,10 +1222,7 @@ async fn wait_chat_done(current: &mut Option<CurrentChat>) {
     }
 }
 
-fn chat_resume_id(
-    local_session_id: Option<&str>,
-    local_thread_id: Option<&str>,
-) -> Option<String> {
+fn chat_resume_id(local_session_id: Option<&str>, local_thread_id: Option<&str>) -> Option<String> {
     local_session_id
         .filter(|s| !s.is_empty())
         .or_else(|| local_thread_id.filter(|s| !s.is_empty()))
@@ -1989,7 +1993,24 @@ struct AssignWorker {
     cancel: std::sync::Arc<tokio::sync::Notify>,
 }
 
+struct RunMetadata {
+    tokens: Option<WireTokenUsage>,
+    model: Option<String>,
+}
+
 impl AssignWorker {
+    async fn run_metadata(&self) -> RunMetadata {
+        let snapshot = self.state.observability_snapshot().await;
+        RunMetadata {
+            tokens: snapshot.tokens.map(|t| WireTokenUsage {
+                input: t.input,
+                output: t.output,
+                total: t.total,
+            }),
+            model: snapshot.model,
+        }
+    }
+
     /// Pick the right `FailureReason` when the agent subprocess crashes or
     /// exits abnormally. Codex stays on `CodexCrash` so dashboards that
     /// already filter on `"codex_crash"` keep working; Claude (and any
@@ -2051,6 +2072,8 @@ impl AssignWorker {
                     reason,
                     detail: Some(e.to_string()),
                     ended_at: Utc::now(),
+                    tokens: None,
+                    model: None,
                 })
                 .await;
                 // The supervisor stamped ``rx_in_flight = Some(run_id)``
@@ -2087,6 +2110,8 @@ impl AssignWorker {
                 reason: FailureReason::WorkspaceSetup,
                 detail: Some(format!("checkout {branch}: {e:#}")),
                 ended_at: Utc::now(),
+                tokens: None,
+                model: None,
             })
             .await;
             // Same reason as above: clear the early-stamp on failure.
@@ -2155,6 +2180,8 @@ impl AssignWorker {
                     reason,
                     detail: Some(format!("{e:#}")),
                     ended_at: Utc::now(),
+                    tokens: None,
+                    model: None,
                 })
                 .await;
                 self.state.set_current_run(None).await;
@@ -2193,6 +2220,8 @@ impl AssignWorker {
                     reason: self.crash_reason(),
                     detail: Some(detail),
                     ended_at: Utc::now(),
+                    tokens: None,
+                    model: None,
                 })
                 .await;
                 bridge.shutdown(Duration::from_secs(5)).await.ok();
@@ -2200,10 +2229,13 @@ impl AssignWorker {
                 return Ok(());
             }
         };
+        let run_model = cursor.model().map(ToOwned::to_owned);
+        self.state.set_model(run_model.clone()).await;
         self.send(ClientMsg::RunStarted {
             run_id,
             thread_id: cursor.thread_id().to_string(),
             started_at: Utc::now(),
+            model: run_model,
         })
         .await;
         hist.append(&HistoryEntry::Lifecycle {
@@ -2278,9 +2310,12 @@ impl AssignWorker {
                 _ = cancel.notified(), if !cancelled => {
                     run_events.flush_before_lifecycle(&self.out).await;
                     bridge.interrupt().await.ok();
+                    let metadata = self.run_metadata().await;
                     let _ = self.out.send(ClientMsg::RunCancelled {
                         run_id: cursor.run_id(),
                         cancelled_at: Utc::now(),
+                        tokens: metadata.tokens,
+                        model: metadata.model,
                     }).await;
                     hist.append(&HistoryEntry::Lifecycle {
                         ts: Utc::now(),
@@ -2310,11 +2345,14 @@ impl AssignWorker {
                             .build_failure_detail("agent stdout closed", bridge)
                             .await;
                         run_events.flush_before_lifecycle(&self.out).await;
+                        let metadata = self.run_metadata().await;
                         self.send(ClientMsg::RunFailed {
                             run_id: cursor.run_id(),
                             reason,
                             detail: Some(detail.clone()),
                             ended_at: Utc::now(),
+                            tokens: metadata.tokens,
+                            model: metadata.model,
                         }).await;
                         hist.append(&HistoryEntry::Footer {
                             ts: Utc::now(),
@@ -2343,11 +2381,14 @@ impl AssignWorker {
                     let base = format!("no agent frames for {mins} minutes");
                     let detail = self.build_failure_detail(&base, bridge).await;
                     run_events.flush_before_lifecycle(&self.out).await;
+                    let metadata = self.run_metadata().await;
                     self.send(ClientMsg::RunFailed {
                         run_id: cursor.run_id(),
                         reason: FailureReason::Timeout,
                         detail: Some(detail.clone()),
                         ended_at: Utc::now(),
+                        tokens: metadata.tokens,
+                        model: metadata.model,
                     }).await;
                     hist.append(&HistoryEntry::Footer {
                         ts: Utc::now(),
@@ -2632,10 +2673,13 @@ impl AssignWorker {
                 done_payload,
             } => {
                 run_events.flush_before_lifecycle(&self.out).await;
+                let metadata = self.run_metadata().await;
                 self.send(ClientMsg::RunCompleted {
                     run_id,
                     done_payload: done_payload.clone(),
                     ended_at: Utc::now(),
+                    tokens: metadata.tokens,
+                    model: metadata.model,
                 })
                 .await;
                 hist.append(&HistoryEntry::Footer {
@@ -2668,11 +2712,14 @@ impl AssignWorker {
                     .unwrap_or_else(|| "agent reported failure".to_string());
                 let enriched = self.build_failure_detail(&base, bridge).await;
                 run_events.flush_before_lifecycle(&self.out).await;
+                let metadata = self.run_metadata().await;
                 self.send(ClientMsg::RunFailed {
                     run_id,
                     reason,
                     detail: Some(enriched.clone()),
                     ended_at: Utc::now(),
+                    tokens: metadata.tokens,
+                    model: metadata.model,
                 })
                 .await;
                 hist.append(&HistoryEntry::Footer {
@@ -2879,7 +2926,6 @@ mod tests {
                 events: 0,
             }))
             .await;
-
         let runners: Arc<RwLock<HelloRunnerMap>> = Arc::new(RwLock::new(
             [&inst_busy, &inst_idle]
                 .into_iter()

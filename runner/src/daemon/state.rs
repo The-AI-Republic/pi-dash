@@ -45,6 +45,8 @@ pub struct ObservabilitySnapshot {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tokens: Option<TokenUsage>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub turn_count: Option<u32>,
     /// Last shell command the agent kicked off (for failure-detail enrichment).
     /// Reset on rid change like the other per-run scalars; never serialised
@@ -269,6 +271,11 @@ impl StateHandle {
         self.tick();
     }
 
+    pub async fn set_model(&self, model: Option<String>) {
+        self.inner.run_snapshot.lock().await.model = model.filter(|s| !s.is_empty());
+        self.tick();
+    }
+
     pub async fn incr_turn(&self) {
         let mut snap = self.inner.run_snapshot.lock().await;
         snap.turn_count = Some(snap.turn_count.unwrap_or(0).saturating_add(1));
@@ -368,20 +375,18 @@ impl StateHandle {
         // Only synthesise `update` when the cloud has actually announced
         // something. A "no advisory" daemon should not surface an empty
         // banner — keep `update: None` in that case.
-        let update = if latest_announced.is_some()
-            || min_required.is_some()
-            || on_disk_version.is_some()
-        {
-            Some(crate::ipc::protocol::UpdateAdvisory {
-                running_version: crate::RUNNER_VERSION.to_string(),
-                on_disk_version,
-                latest_announced,
-                min_required,
-                auto_update_enabled,
-            })
-        } else {
-            None
-        };
+        let update =
+            if latest_announced.is_some() || min_required.is_some() || on_disk_version.is_some() {
+                Some(crate::ipc::protocol::UpdateAdvisory {
+                    running_version: crate::RUNNER_VERSION.to_string(),
+                    on_disk_version,
+                    latest_announced,
+                    min_required,
+                    auto_update_enabled,
+                })
+            } else {
+                None
+            };
         crate::ipc::protocol::DaemonInfo {
             cloud_url,
             connected,
@@ -394,11 +399,7 @@ impl StateHandle {
     /// or both fields may be `None`; production callers pass `None` when
     /// the cloud has no `LATEST_RUNNER_VERSION` / `MIN_RUNNER_VERSION`
     /// announcement, which clears any prior advisory.
-    pub async fn set_update_advisory(
-        &self,
-        latest: Option<String>,
-        min: Option<String>,
-    ) {
+    pub async fn set_update_advisory(&self, latest: Option<String>, min: Option<String>) {
         let mut guard = self.inner.update_advisory.lock().await;
         *guard = (latest, min);
     }
@@ -547,9 +548,7 @@ mod tests {
             })
             .await;
         state.incr_turn().await;
-        state
-            .note_agent_event(Utc::now(), "raw", Some("a"))
-            .await;
+        state.note_agent_event(Utc::now(), "raw", Some("a")).await;
 
         state.set_current_run(Some(summary(rid_b, "running"))).await;
         let snap = state.observability_snapshot().await;

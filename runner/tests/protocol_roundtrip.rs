@@ -35,6 +35,8 @@ fn envelope_roundtrips_all_client_variants() {
             run_id: Uuid::new_v4(),
             done_payload: serde_json::json!({"conclusion": "success"}),
             ended_at: chrono::Utc::now(),
+            tokens: None,
+            model: None,
         },
         ClientMsg::RunEvents {
             run_id: Uuid::new_v4(),

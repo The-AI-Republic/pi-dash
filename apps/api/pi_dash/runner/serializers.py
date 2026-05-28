@@ -90,6 +90,7 @@ class RunnerLiveStateSerializer(serializers.ModelSerializer):
             "input_tokens",
             "output_tokens",
             "total_tokens",
+            "llm_model",
             "turn_count",
             "updated_at",
         ]
@@ -203,6 +204,10 @@ class AgentRunSerializer(serializers.ModelSerializer):
             "ended_at",
             "done_payload",
             "error",
+            "llm_model",
+            "input_tokens",
+            "output_tokens",
+            "total_tokens",
         ]
         read_only_fields = fields
 

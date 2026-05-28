@@ -239,7 +239,8 @@ class RunnerSessionPollEndpoint(APIView):
 
         body = request.data or {}
         ack_ids: List[str] = list(body.get("ack") or [])
-        status_entry: Dict[str, Any] = body.get("status") or {}
+        raw_status = body.get("status") or {}
+        status_entry: Dict[str, Any] = raw_status if isinstance(raw_status, dict) else {}
 
         # 2. Update session.last_seen_at.
         session.last_seen_at = timezone.now()

@@ -714,6 +714,10 @@ class AgentRun(models.Model):
     lease_expires_at = models.DateTimeField(null=True, blank=True)
     done_payload = models.JSONField(null=True, blank=True)
     error = models.TextField(blank=True, default="")
+    llm_model = models.CharField(max_length=128, blank=True, default="")
+    input_tokens = models.BigIntegerField(null=True, blank=True)
+    output_tokens = models.BigIntegerField(null=True, blank=True)
+    total_tokens = models.BigIntegerField(null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
     assigned_at = models.DateTimeField(null=True, blank=True)
     started_at = models.DateTimeField(null=True, blank=True)
@@ -1068,7 +1072,7 @@ class RunnerLiveState(models.Model):
     Holds the descriptive scalars the runner emits on every poll
     (``last_event_at``, ``last_event_kind``, ``last_event_summary``,
     ``agent_pid``, ``agent_subprocess_alive``, ``approvals_pending``,
-    streaming token counts, ``turn_count``). All fields are nullable;
+    streaming token counts, ``llm_model``, ``turn_count``). All fields are nullable;
     NULL is the canonical "unknown" sentinel for both the watchdog and
     the UI. See ``.ai_design/runner_agent_bridge/design.md`` §4.5.1.
 
@@ -1105,6 +1109,7 @@ class RunnerLiveState(models.Model):
     input_tokens = models.BigIntegerField(null=True, blank=True)
     output_tokens = models.BigIntegerField(null=True, blank=True)
     total_tokens = models.BigIntegerField(null=True, blank=True)
+    llm_model = models.CharField(max_length=128, null=True, blank=True)
     turn_count = models.PositiveIntegerField(null=True, blank=True)
     updated_at = models.DateTimeField(auto_now=True)
 

@@ -77,6 +77,13 @@ pub struct RunEventRecord {
     pub payload: serde_json::Value,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TokenUsage {
+    pub input: u64,
+    pub output: u64,
+    pub total: u64,
+}
+
 /// Messages the runner sends to the cloud.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -111,6 +118,8 @@ pub enum ClientMsg {
         run_id: Uuid,
         thread_id: String,
         started_at: DateTime<Utc>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        model: Option<String>,
     },
     RunEvent {
         run_id: Uuid,
@@ -138,6 +147,10 @@ pub enum ClientMsg {
         run_id: Uuid,
         done_payload: serde_json::Value,
         ended_at: DateTime<Utc>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tokens: Option<TokenUsage>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        model: Option<String>,
     },
     /// Agent yielded with a question for the human (Codex tool-call path).
     /// Cloud transitions the run to PAUSED_AWAITING_INPUT and waits for a
@@ -148,16 +161,28 @@ pub enum ClientMsg {
         run_id: Uuid,
         payload: serde_json::Value,
         paused_at: DateTime<Utc>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tokens: Option<TokenUsage>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        model: Option<String>,
     },
     RunFailed {
         run_id: Uuid,
         reason: FailureReason,
         detail: Option<String>,
         ended_at: DateTime<Utc>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tokens: Option<TokenUsage>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        model: Option<String>,
     },
     RunCancelled {
         run_id: Uuid,
         cancelled_at: DateTime<Utc>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tokens: Option<TokenUsage>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        model: Option<String>,
     },
     RunResumed {
         run_id: Uuid,

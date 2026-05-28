@@ -83,6 +83,7 @@ impl Bridge {
         Ok(BridgeCursor {
             run_id: payload.run_id,
             thread_id,
+            model: payload.model.clone().or_else(|| self.model_default.clone()),
             seq: 0,
             pending_command: None,
             pending_command_approval_id: None,
@@ -212,6 +213,7 @@ impl Bridge {
 pub struct BridgeCursor {
     pub run_id: Uuid,
     pub thread_id: String,
+    pub model: Option<String>,
     pub seq: u64,
     /// Most recent in-progress `commandExecution` item observed on
     /// `item/started`. Captured so we can synthesize an `ApprovalRequest`
@@ -318,7 +320,9 @@ impl BridgeCursor {
                                 .or_else(|| {
                                     conclusion.map(|c| format!("turn ended with conclusion={c:?}"))
                                 })
-                                .or_else(|| turn_error.map(|e| format!("turn completed with error: {e}")))
+                                .or_else(|| {
+                                    turn_error.map(|e| format!("turn completed with error: {e}"))
+                                })
                                 .or_else(|| Some("turn/completed without conclusion".to_string())),
                         }]
                     }
@@ -495,6 +499,7 @@ mod translate_tests {
         BridgeCursor {
             run_id: Uuid::new_v4(),
             thread_id: "th_test".into(),
+            model: None,
             seq: 0,
             pending_command: None,
             pending_command_approval_id: None,

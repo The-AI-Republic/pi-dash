@@ -445,6 +445,7 @@ mod tests {
                         output: 20,
                         total: 30,
                     }),
+                    model: Some("gpt-5.1-codex".into()),
                     turn_count: Some(2),
                     last_exec_command: None,
                 }),

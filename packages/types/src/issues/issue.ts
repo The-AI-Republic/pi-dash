@@ -121,6 +121,10 @@ export type TIssueAgentRunSummary = {
   ended_at: string | null;
   done_payload: Record<string, unknown> | null;
   error: string;
+  llm_model: string;
+  input_tokens: number | null;
+  output_tokens: number | null;
+  total_tokens: number | null;
   live_state?: IRunnerLiveState | null;
 };
 

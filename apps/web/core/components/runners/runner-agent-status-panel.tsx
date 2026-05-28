@@ -112,6 +112,7 @@ export function RunnerAgentStatusPanel({ runner, liveState }: RunnerAgentStatusP
 
   const lastEventLabel = formatRelative(liveState?.last_event_at ?? null);
   const tokensLabel = liveState?.total_tokens != null ? formatNumber(liveState.total_tokens) : "—";
+  const modelLabel = liveState?.llm_model?.trim() || "—";
 
   return (
     <div className="border-custom-border-200 space-y-3 rounded border p-4">
@@ -145,6 +146,11 @@ export function RunnerAgentStatusPanel({ runner, liveState }: RunnerAgentStatusP
 
         <dt className="text-custom-text-300">Tokens</dt>
         <dd className="font-mono">{tokensLabel}</dd>
+
+        <dt className="text-custom-text-300">Model</dt>
+        <dd className="font-mono truncate" title={modelLabel === "—" ? undefined : modelLabel}>
+          {modelLabel}
+        </dd>
 
         <dt className="text-custom-text-300">Turn</dt>
         <dd className="font-mono">{liveState?.turn_count != null ? liveState.turn_count : "—"}</dd>

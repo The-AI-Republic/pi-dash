@@ -267,6 +267,13 @@ impl AgentCursor {
             AgentCursor::ClaudeCode(c) => &c.thread_id,
         }
     }
+
+    pub fn model(&self) -> Option<&str> {
+        match self {
+            AgentCursor::Codex(c) => c.model.as_deref(),
+            AgentCursor::ClaudeCode(c) => c.model.as_deref(),
+        }
+    }
 }
 
 impl AgentBridge {
@@ -413,8 +420,7 @@ fn selected_model(
 #[cfg(test)]
 mod tests {
     use super::{
-        STDERR_LINE_CAP_BYTES, StderrBuffer, sanitize_stderr_line, selected_model,
-        strip_ansi_codes,
+        STDERR_LINE_CAP_BYTES, StderrBuffer, sanitize_stderr_line, selected_model, strip_ansi_codes,
     };
 
     #[test]
@@ -469,8 +475,7 @@ mod tests {
     fn sanitize_drops_codex_info_tracing_lines() {
         // The exact pattern that flooded the failure-comment field —
         // codex's per-event INFO log, ANSI-colored. Should be dropped.
-        let input =
-            "\x1b[2m2026-05-03T07:27:06.636239Z\x1b[0m \x1b[32m INFO\x1b[0m \
+        let input = "\x1b[2m2026-05-03T07:27:06.636239Z\x1b[0m \x1b[32m INFO\x1b[0m \
              session_loop{thread_id=abc}: codex.sse_event";
         assert_eq!(sanitize_stderr_line(input), None);
     }
@@ -485,11 +490,7 @@ mod tests {
         // useful diagnostic content.
         for level in ["INFO", "DEBUG", "TRACE", "WARN"] {
             let input = format!("2026-05-03T07:27:06.636239Z {level} something");
-            assert_eq!(
-                sanitize_stderr_line(&input),
-                None,
-                "should drop {level}",
-            );
+            assert_eq!(sanitize_stderr_line(&input), None, "should drop {level}",);
         }
     }
 

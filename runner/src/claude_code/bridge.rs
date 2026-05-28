@@ -36,6 +36,7 @@ pub struct Bridge {
     /// `--resume`. The process can receive multiple user turns on stdin; the
     /// session id belongs to that process, not to an individual turn.
     session_id: Option<String>,
+    model: Option<String>,
     init_seen: bool,
     /// Events received while we were waiting synchronously for `system/init`
     /// on the first real turn. Drained by `next_events` before touching the
@@ -67,6 +68,7 @@ impl Bridge {
             session_id: resume_session_id
                 .filter(|s| !s.is_empty())
                 .map(ToOwned::to_owned),
+            model: model_default.filter(|s| !s.is_empty()),
             init_seen: false,
             pending: VecDeque::new(),
         })
@@ -78,6 +80,7 @@ impl Bridge {
         Self {
             proc,
             session_id: None,
+            model: _model_default.filter(|s| !s.is_empty()),
             init_seen: false,
             pending: VecDeque::new(),
         }
@@ -112,6 +115,7 @@ impl Bridge {
         Ok(BridgeCursor {
             run_id: payload.run_id,
             thread_id,
+            model: self.model.clone(),
             suppress_init: true,
             terminal: false,
             seq: 0,
@@ -140,6 +144,13 @@ impl Bridge {
                         .session_id
                         .clone()
                         .unwrap_or_else(|| format!("claude-{run_id}"));
+                    self.model = sys
+                        .rest
+                        .get("model")
+                        .and_then(|v| v.as_str())
+                        .filter(|s| !s.is_empty())
+                        .map(ToOwned::to_owned)
+                        .or_else(|| self.model.clone());
                     self.session_id = Some(thread_id.clone());
                     self.init_seen = true;
                     return Ok(thread_id);
@@ -215,6 +226,7 @@ impl Bridge {
 pub struct BridgeCursor {
     pub run_id: Uuid,
     pub thread_id: String,
+    pub model: Option<String>,
     /// Drop `system/init` if Claude emits it again on a later turn. The bridge
     /// already recorded the session id and the cloud does not need a duplicate
     /// raw init event in the chat stream.
