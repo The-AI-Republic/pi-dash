@@ -2,9 +2,6 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 # See the LICENSE file for details.
 
-# Python imports
-import re
-
 # Django imports
 from django.db import models
 from django.db.models import (
@@ -40,12 +37,19 @@ from pi_dash.db.models import (
     ProjectPage,
     WorkspaceMember,
 )
+from pi_dash.search.issue import issue_search_queryset
 
 
 class GlobalSearchEndpoint(BaseAPIView):
     """Endpoint to search across multiple fields in the workspace and
     also show related workspace if found
     """
+
+    # Intentionally stays on the primary: the top-bar / pickers backed by
+    # this endpoint are hit immediately after creating an issue, and
+    # replication lag would hide the just-created row. Replica dogfooding
+    # happens on ``IssueAdvancedSearchEndpoint`` (agent path, lag-tolerant)
+    # instead.
 
     def filter_workspaces(self, query, _slug, _project_id, _workspace_search):
         fields = ["name"]
@@ -80,25 +84,17 @@ class GlobalSearchEndpoint(BaseAPIView):
         )
 
     def filter_issues(self, query, slug, project_id, workspace_search):
-        fields = ["name", "sequence_id", "project__identifier"]
-        q = Q()
-        if query:
-            for field in fields:
-                if field == "sequence_id":
-                    # Match whole integers only (exclude decimal numbers)
-                    sequences = re.findall(r"\b\d+\b", query)
-                    for sequence_id in sequences:
-                        q |= Q(**{"sequence_id": sequence_id})
-                else:
-                    q |= Q(**{f"{field}__icontains": query})
-
         issues = Issue.issue_objects.filter(
-            q,
             project__project_projectmember__member=self.request.user,
             project__project_projectmember__is_active=True,
             project__archived_at__isnull=True,
             workspace__slug=slug,
         )
+
+        # include_comments=False — the top-bar picker expects
+        # title-scoped results; comment-text widening is reserved for
+        # IssueAdvancedSearchEndpoint (agent path).
+        issues = issue_search_queryset(issues, query, include_comments=False)
 
         if workspace_search == "false" and project_id:
             issues = issues.filter(project_id=project_id)
@@ -231,25 +227,14 @@ class GlobalSearchEndpoint(BaseAPIView):
         )
 
     def filter_intakes(self, query, slug, project_id, workspace_search):
-        fields = ["name", "sequence_id", "project__identifier"]
-        q = Q()
-        if query:
-            for field in fields:
-                if field == "sequence_id":
-                    # Match whole integers only (exclude decimal numbers)
-                    sequences = re.findall(r"\b\d+\b", query)
-                    for sequence_id in sequences:
-                        q |= Q(**{"sequence_id": sequence_id})
-                else:
-                    q |= Q(**{f"{field}__icontains": query})
-
         issues = Issue.objects.filter(
-            q,
             project__project_projectmember__member=self.request.user,
             project__project_projectmember__is_active=True,
             project__archived_at__isnull=True,
             workspace__slug=slug,
         ).filter(models.Q(issue_intake__status=0) | models.Q(issue_intake__status=-2))
+
+        issues = issue_search_queryset(issues, query, include_comments=False)
 
         if workspace_search == "false" and project_id:
             issues = issues.filter(project_id=project_id)
@@ -302,6 +287,9 @@ class GlobalSearchEndpoint(BaseAPIView):
 
 
 class SearchEndpoint(BaseAPIView):
+    # See GlobalSearchEndpoint — stays on the primary to preserve
+    # read-your-writes for the mention picker / quick lookup UIs.
+
     def get(self, request, slug):
         query = request.query_params.get("query", False)
         query_types = request.query_params.get("query_type", "user_mention").split(",")
@@ -382,27 +370,15 @@ class SearchEndpoint(BaseAPIView):
                     response_data["project"] = list(projects)
 
                 elif query_type == "issue":
-                    fields = ["name", "sequence_id", "project__identifier"]
-                    q = Q()
-
-                    if query:
-                        for field in fields:
-                            if field == "sequence_id":
-                                sequences = re.findall(r"\b\d+\b", query)
-                                for sequence_id in sequences:
-                                    q |= Q(**{"sequence_id": sequence_id})
-                            else:
-                                q |= Q(**{f"{field}__icontains": query})
-
+                    issues = Issue.issue_objects.filter(
+                        project__project_projectmember__member=self.request.user,
+                        project__project_projectmember__is_active=True,
+                        workspace__slug=slug,
+                        project_id=project_id,
+                    )
+                    issues = issue_search_queryset(issues, query, include_comments=False)
                     issues = (
-                        Issue.issue_objects.filter(
-                            q,
-                            project__project_projectmember__member=self.request.user,
-                            project__project_projectmember__is_active=True,
-                            workspace__slug=slug,
-                            project_id=project_id,
-                        )
-                        .order_by("-created_at")
+                        issues.order_by("-created_at")
                         .distinct()
                         .values(
                             "name",
@@ -587,26 +563,14 @@ class SearchEndpoint(BaseAPIView):
                     response_data["project"] = list(projects)
 
                 elif query_type == "issue":
-                    fields = ["name", "sequence_id", "project__identifier"]
-                    q = Q()
-
-                    if query:
-                        for field in fields:
-                            if field == "sequence_id":
-                                sequences = re.findall(r"\b\d+\b", query)
-                                for sequence_id in sequences:
-                                    q |= Q(**{"sequence_id": sequence_id})
-                            else:
-                                q |= Q(**{f"{field}__icontains": query})
-
+                    issues = Issue.issue_objects.filter(
+                        project__project_projectmember__member=self.request.user,
+                        project__project_projectmember__is_active=True,
+                        workspace__slug=slug,
+                    )
+                    issues = issue_search_queryset(issues, query, include_comments=False)
                     issues = (
-                        Issue.issue_objects.filter(
-                            q,
-                            project__project_projectmember__member=self.request.user,
-                            project__project_projectmember__is_active=True,
-                            workspace__slug=slug,
-                        )
-                        .order_by("-created_at")
+                        issues.order_by("-created_at")
                         .distinct()
                         .values(
                             "name",

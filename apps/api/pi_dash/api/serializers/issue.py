@@ -899,3 +899,47 @@ class IssueSearchSerializer(serializers.Serializer):
     project__identifier = serializers.CharField(required=True, help_text="Project identifier")
     project_id = serializers.CharField(required=True, help_text="Project ID")
     workspace__slug = serializers.CharField(required=True, help_text="Workspace slug")
+
+
+class IssueAdvancedSearchStateSerializer(serializers.Serializer):
+    name = serializers.CharField(allow_null=True)
+    group = serializers.CharField(allow_null=True)
+
+
+class IssueAdvancedSearchProjectSerializer(serializers.Serializer):
+    id = serializers.CharField()
+    identifier = serializers.CharField()
+    name = serializers.CharField()
+
+
+class IssueAdvancedSearchResultSerializer(serializers.Serializer):
+    """One match from the CLI / agent-oriented work-item search endpoint.
+
+    Shape is optimized for agents / pi-dash CLI consumption: composed
+    human identifier (PROJ-42), a plain-text snippet around the match, a
+    relevance score, and the timestamps needed to reason about chronology.
+    """
+
+    id = serializers.CharField(help_text="Issue UUID")
+    sequence_id = serializers.IntegerField(help_text="Per-project sequence number")
+    identifier = serializers.CharField(help_text="Composed identifier, e.g. PROJ-42")
+    name = serializers.CharField(help_text="Issue title")
+    snippet = serializers.CharField(
+        allow_blank=True,
+        allow_null=True,
+        help_text="Plain-text excerpt of description_stripped around the match",
+    )
+    state = IssueAdvancedSearchStateSerializer(allow_null=True)
+    project = IssueAdvancedSearchProjectSerializer()
+    workspace_slug = serializers.CharField()
+    created_at = serializers.DateTimeField()
+    updated_at = serializers.DateTimeField()
+    completed_at = serializers.DateTimeField(allow_null=True)
+    rank = serializers.FloatField(help_text="ts_rank score (higher = more relevant)")
+    url = serializers.CharField(help_text="Canonical API URL for the issue")
+
+
+class IssueAdvancedSearchResponseSerializer(serializers.Serializer):
+    query = serializers.CharField()
+    count = serializers.IntegerField()
+    results = IssueAdvancedSearchResultSerializer(many=True)

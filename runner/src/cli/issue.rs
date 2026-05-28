@@ -41,6 +41,11 @@ pub enum IssueCommand {
     Patch(PatchArgs),
     /// Move a work item into another project in the same workspace.
     Move(MoveArgs),
+    /// Full-text search across work item titles, descriptions, and
+    /// comments. Returns matches with snippet, state, project, timestamps,
+    /// and a relevance rank. Use it to recover historical context before
+    /// starting similar work.
+    Search(SearchArgs),
 }
 
 #[derive(Debug, Args)]
@@ -117,6 +122,38 @@ pub struct MoveArgs {
     pub project: String,
 }
 
+#[derive(Debug, Args)]
+pub struct SearchArgs {
+    /// Search pattern. Supports websearch syntax: quoted phrases, `OR`,
+    /// `-exclude`. Stem-aware (e.g. `color` finds `colors`, `colored`).
+    pub query: String,
+
+    /// Scope to a single project (slug like `ENG` or project UUID).
+    /// Omit to search the whole workspace.
+    #[arg(long)]
+    pub project: Option<String>,
+
+    /// Filter by status: `open` (in progress), `closed` (completed or
+    /// cancelled), or `all` (default).
+    #[arg(long, default_value = "all")]
+    pub status: String,
+
+    /// Lower bound on `updated_at`, ISO 8601 (e.g. `2025-01-01T00:00:00Z`).
+    #[arg(long)]
+    pub since: Option<String>,
+
+    /// Max results to return. Server default is 10, hard cap is 50 —
+    /// tuned for agent context windows.
+    #[arg(long)]
+    pub limit: Option<u32>,
+
+    /// Sort order: `rank` (relevance, default), `-created`
+    /// (newest first), `-updated` (most-recently-updated first). The
+    /// server rejects other values with a 400.
+    #[arg(long)]
+    pub sort: Option<String>,
+}
+
 pub async fn run(args: IssueArgs, paths: &crate::util::paths::Paths) -> i32 {
     let env = match CliEnv::resolve(paths) {
         Ok(e) => e,
@@ -133,6 +170,7 @@ pub async fn run(args: IssueArgs, paths: &crate::util::paths::Paths) -> i32 {
         IssueCommand::List(a) => cmd_list(&client, a).await,
         IssueCommand::Patch(p) => cmd_patch(&client, p).await,
         IssueCommand::Move(m) => cmd_move(&client, m).await,
+        IssueCommand::Search(s) => cmd_search(&client, s).await,
     };
     match result {
         Ok(()) => 0,
@@ -323,6 +361,59 @@ async fn cmd_patch(client: &ApiClient, args: PatchArgs) -> Result<(), CliError> 
     Ok(())
 }
 
+/// Build the ordered (key, value) param list for `pidash issue search`.
+///
+/// Pulled out of `cmd_search` so the URL contract is testable without a
+/// network round-trip — the order matters because `build_query_string`
+/// preserves it, and the agent prompt fragment documents specific
+/// flag names.
+///
+/// Returns `Err(CliError)` if the trimmed query is empty (the only
+/// pre-flight validation; `status` / `sort` / `since` validation is the
+/// server's job, so the same string gets a 400 response that the agent
+/// can parse).
+fn build_search_params(args: &SearchArgs) -> Result<Vec<(&'static str, String)>, CliError> {
+    let q = args.query.trim();
+    if q.is_empty() {
+        return Err(CliError::new(EXIT_INVALID, "search query must not be empty"));
+    }
+
+    let mut params: Vec<(&'static str, String)> = vec![("q", q.to_string())];
+    if let Some(p) = args.project.as_ref().map(|s| s.trim()).filter(|s| !s.is_empty()) {
+        params.push(("project", p.to_string()));
+    }
+    // Send `status` only when it differs from the server default to keep
+    // the URL terse on the common path.
+    if args.status != "all" {
+        params.push(("status", args.status.clone()));
+    }
+    if let Some(since) = args.since.as_ref() {
+        params.push(("since", since.clone()));
+    }
+    if let Some(limit) = args.limit {
+        params.push(("limit", limit.to_string()));
+    }
+    if let Some(sort) = args.sort.as_ref() {
+        params.push(("sort", sort.clone()));
+    }
+    Ok(params)
+}
+
+async fn cmd_search(client: &ApiClient, args: SearchArgs) -> Result<(), CliError> {
+    let params = build_search_params(&args)?;
+    let query = build_query_string(&params);
+    let path = format!(
+        "workspaces/{}/work-items/search/advanced/{query}",
+        client.env.workspace_slug
+    );
+    let resp = client.get(&path).await?;
+    println!(
+        "{}",
+        serde_json::to_string(&resp).expect("serialize JSON value")
+    );
+    Ok(())
+}
+
 async fn cmd_move(client: &ApiClient, args: MoveArgs) -> Result<(), CliError> {
     if args.project.trim().is_empty() {
         return Err(CliError::new(EXIT_INVALID, "--project must not be empty"));
@@ -377,5 +468,102 @@ mod tests {
             build_query_string(&params),
             "?cursor=abc%3Ddef%26ghi&per_page=50"
         );
+    }
+
+    fn search_args(query: &str) -> SearchArgs {
+        SearchArgs {
+            query: query.to_string(),
+            project: None,
+            status: "all".to_string(),
+            since: None,
+            limit: None,
+            sort: None,
+        }
+    }
+
+    #[test]
+    fn build_search_params_rejects_empty_query() {
+        let args = search_args("");
+        let err = build_search_params(&args).expect_err("empty query must be invalid");
+        assert_eq!(err.exit_code, EXIT_INVALID);
+        assert!(err.message.contains("search query"));
+    }
+
+    #[test]
+    fn build_search_params_rejects_whitespace_query() {
+        let args = search_args("   ");
+        assert!(build_search_params(&args).is_err());
+    }
+
+    #[test]
+    fn build_search_params_minimum_only_carries_q() {
+        let args = search_args("hello world");
+        let params = build_search_params(&args).expect("valid args");
+        // Common-path URLs stay terse — `status=all` is the server
+        // default and is intentionally omitted.
+        assert_eq!(params, vec![("q", "hello world".to_string())]);
+    }
+
+    #[test]
+    fn build_search_params_carries_all_flags_in_documented_order() {
+        // Order matters: the URL contract is documented (q first, then
+        // project, status, since, limit, sort) and tests should pin it
+        // so a future re-shuffle here is caught before it lands.
+        let args = SearchArgs {
+            query: "cache".to_string(),
+            project: Some("ENG".to_string()),
+            status: "closed".to_string(),
+            since: Some("2025-01-01T00:00:00Z".to_string()),
+            limit: Some(5),
+            sort: Some("-created".to_string()),
+        };
+        let params = build_search_params(&args).expect("valid args");
+        assert_eq!(
+            params,
+            vec![
+                ("q", "cache".to_string()),
+                ("project", "ENG".to_string()),
+                ("status", "closed".to_string()),
+                ("since", "2025-01-01T00:00:00Z".to_string()),
+                ("limit", "5".to_string()),
+                ("sort", "-created".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn build_search_params_url_targets_advanced_endpoint() {
+        // End-to-end string check: the resulting query string lands on
+        // the documented advanced-search path with the documented param
+        // names. Catches any future rename of `q` → `query` etc. that
+        // would silently break the prompt-fragment contract.
+        let args = SearchArgs {
+            query: "x".to_string(),
+            project: None,
+            status: "open".to_string(),
+            since: None,
+            limit: Some(10),
+            sort: None,
+        };
+        let params = build_search_params(&args).expect("valid args");
+        let query_string = build_query_string(&params);
+        assert_eq!(query_string, "?q=x&status=open&limit=10");
+    }
+
+    #[test]
+    fn build_search_params_omits_empty_project() {
+        // `--project ""` (or trailing whitespace) must not survive into
+        // the URL — the server treats missing project as workspace-wide
+        // and an empty-string param would 400.
+        let args = SearchArgs {
+            query: "x".to_string(),
+            project: Some("   ".to_string()),
+            status: "all".to_string(),
+            since: None,
+            limit: None,
+            sort: None,
+        };
+        let params = build_search_params(&args).expect("valid args");
+        assert!(params.iter().all(|(k, _)| *k != "project"));
     }
 }
