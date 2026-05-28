@@ -38,15 +38,17 @@ gets a fix or feature on its own cadence.
 5. When green, the GitHub Release will be at
    `https://github.com/The-AI-Republic/pi-dash/releases/tag/pidash-v0.1.2`
    with a `pidash-installer.sh` and platform-specific archives.
-6. Announce the new version to running runners by setting
-   `LATEST_RUNNER_VERSION=0.1.2` (and optionally `MIN_RUNNER_VERSION=0.1.2`
-   if this is a breaking-protocol or security release) on the Pi Dash
-   API service. Runners with `auto_update` enabled — the default — will
-   swap the on-disk binary on their next session bootstrap and surface
+6. The release workflow automatically writes
+   `LATEST_RUNNER_VERSION=0.1.2` to the Cloud SSM parameters for test and
+   prod. It does not restart or redeploy the API; the currently running
+   containers pick the value up on their next normal restart/deploy. Set
+   `MIN_RUNNER_VERSION=0.1.2` manually only for a breaking-protocol or
+   security release. Runners with `auto_update` enabled — the default —
+   will swap the on-disk binary on their next session bootstrap and surface
    a "restart to apply" advisory in `pidash status` / the TUI. Runners
-   with `auto_update` disabled show an "update available — run `pidash
-update`" banner instead. See `runner/README.md` (Auto-update) for
-   the full rendering matrix.
+   with `auto_update` disabled show an "update available — run
+   `pidash update --restart`" banner instead. See `runner/README.md`
+   (Auto-update) for the full rendering matrix.
 
 ## Cutting a platform release
 
@@ -89,6 +91,16 @@ Release is marked as a prerelease, and Docker images skip the `:stable` /
 `:latest` tags (they only get the explicit version tag).
 
 ## What you need set up before the first real release
+
+For runner release advisories:
+
+1. **AWS SSM credentials in GitHub Actions secrets for this repo**
+   - `AWS_ACCESS_KEY_ID`
+   - `AWS_SECRET_ACCESS_KEY`
+   - IAM permission: `ssm:PutParameter` on
+     `/pidash/config/test/LATEST_RUNNER_VERSION` and
+     `/pidash/config/prod/LATEST_RUNNER_VERSION`.
+   - The workflow intentionally does not restart EC2 or redeploy the API.
 
 For platform releases (cargo-dist runner releases already work):
 

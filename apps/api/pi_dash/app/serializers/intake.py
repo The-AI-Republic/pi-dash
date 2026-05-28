@@ -134,4 +134,6 @@ class IssueStateIntakeSerializer(BaseSerializer):
 
     class Meta:
         model = Issue
-        fields = "__all__"
+        # Exclude the agent workpad — accessed only via the dedicated workpad
+        # endpoint, never as part of an intake payload.
+        exclude = ["workpad"]

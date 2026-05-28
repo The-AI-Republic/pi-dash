@@ -177,6 +177,11 @@ class Issue(ProjectBaseModel):
             ),
         ],
     )
+    # Agent workpad: durable cross-run scratchpad written by the coding agent.
+    # Markdown body, opaque to the server. Kept out of the default Issue
+    # serializer to avoid bloating list/get responses — read/write via the
+    # dedicated workpad endpoint.
+    workpad = models.TextField(blank=True, default="")
     # Pod this issue's agent runs dispatch to. NULL means "use the workspace
     # default pod at run time." See .ai_design/issue_runner/design.md §4.4.
     # PROTECT is safe because pods are soft-deleted, never physically removed.

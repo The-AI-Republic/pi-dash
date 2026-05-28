@@ -20,6 +20,7 @@ from .issue import (
     IssueActivitySerializer,
     IssueExpandSerializer,
     IssueLiteSerializer,
+    IssueWorkpadSerializer,
     IssueAttachmentUploadSerializer,
     IssueSearchSerializer,
     IssueCommentCreateSerializer,

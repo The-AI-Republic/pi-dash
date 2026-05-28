@@ -27,19 +27,19 @@ When the runner opens a session, the cloud returns a `welcome` payload. Key fiel
 | `latest_runner_version` | env `LATEST_RUNNER_VERSION` | Newest runner version that exists. Drives the yellow "update available" advisory and, with auto-update on, triggers in-place binary swap.                                                                          |
 | `min_runner_version`    | env `MIN_RUNNER_VERSION`    | Cloud-set floor. Below this version, runner shows a red "update required" banner. Advisory in the current implementation — does **not** refuse new tasks yet, but it's the signal that the floor is about to bite. |
 
-Both version envs are optional. Leave them unset to skip the announcement.
+Both version envs are optional. In non-Cloud environments, leave them unset to skip the announcement.
 
 ## Auto-update advisory states
 
 What the runner shows in TUI / `pidash status` based on the welcome contents:
 
-| Running version vs. cloud advisory                 | Banner                                                 |
-| -------------------------------------------------- | ------------------------------------------------------ |
-| `>= latest_announced` and `>= min_required`        | (nothing)                                              |
-| `< latest_announced`, swap already on disk         | yellow `⚠ Restart to apply vX.Y.Z`                     |
-| `< latest_announced`, auto-update on, swap pending | yellow `⚠ Update vX.Y.Z pending swap`                  |
-| `< latest_announced`, auto-update off              | yellow `⚠ Update vX.Y.Z available — run pidash update` |
-| `< min_required`                                   | red `⛔ Update required: cloud floor vX.Y.Z`           |
+| Running version vs. cloud advisory                 | Banner                                                           |
+| -------------------------------------------------- | ---------------------------------------------------------------- |
+| `>= latest_announced` and `>= min_required`        | (nothing)                                                        |
+| `< latest_announced`, swap already on disk         | yellow `⚠ Restart to apply vX.Y.Z`                               |
+| `< latest_announced`, auto-update on, swap pending | yellow `⚠ Update vX.Y.Z pending swap`                            |
+| `< latest_announced`, auto-update off              | yellow `⚠ Update vX.Y.Z available — run pidash update --restart` |
+| `< min_required`                                   | red `⛔ Update required: cloud floor vX.Y.Z`                     |
 
 The toggle lives in TUI → General → Daemon settings → `auto_update`. Default **on**.
 
@@ -71,7 +71,7 @@ Schemas are typed in `pi_dash/runner/serializers.py` and mirrored in `runner/src
 
 - **Additive** (new optional fields) → no bump. The other side just ignores them.
 - **Renamed / repurposed / removed required field** → bump.
-- When you bump, **ship both sides in the same release window** and update `LATEST_RUNNER_VERSION` / `MIN_RUNNER_VERSION` envs on the cloud so old runners get nudged forward.
+- When you bump, **ship both sides in the same release window**. Stable runner releases update Cloud's `LATEST_RUNNER_VERSION` SSM parameter automatically; set `MIN_RUNNER_VERSION` manually only when old runners must be forced forward.
 - The Rust `protocol.rs` test (`tests/protocol_roundtrip.rs`) round-trips every variant — keep it green.
 
 ## Where to read next

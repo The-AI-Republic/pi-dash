@@ -1,4 +1,4 @@
-//! `pidash restart` — stop then start the installed service.
+//! `pidash restart` — restart the installed service and verify daemon health.
 
 use anyhow::Result;
 use clap::Args as ClapArgs;
@@ -8,9 +8,18 @@ use crate::util::paths::Paths;
 #[derive(Debug, ClapArgs)]
 pub struct Args {}
 
-pub async fn run(_args: Args, _paths: &Paths) -> Result<()> {
-    let svc = crate::service::detect();
-    // Tolerant: stop is a no-op if the service isn't currently running.
-    svc.stop().await.ok();
-    svc.start().await
+pub async fn run(_args: Args, paths: &Paths) -> Result<()> {
+    println!("restarting daemon...");
+    let outcome =
+        crate::service::reload::restart_and_verify_with_progress(paths, |msg| eprintln!("{msg}"))
+            .await;
+    if outcome.ok {
+        println!("daemon restarted ({}).", outcome.summary);
+        return Ok(());
+    }
+    anyhow::bail!(
+        "daemon restart did not complete cleanly: {}\n{}",
+        outcome.summary,
+        outcome.detail.unwrap_or_default()
+    )
 }

@@ -74,7 +74,7 @@ pidash runner list         # runners on this host
 pidash runner add --project <ID>
 pidash runner remove <name>
 pidash restart / stop
-pidash update              # self-update
+pidash update --restart    # self-update and restart when idle
 pidash --help
 ```
 

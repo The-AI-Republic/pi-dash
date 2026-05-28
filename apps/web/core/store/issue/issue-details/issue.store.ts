@@ -101,9 +101,9 @@ export class IssueStore implements IIssueStore {
     // store handlers from issue detail
     // parent
     if (issue && issue?.parent && issue?.parent?.id && issue?.parent?.project_id) {
-      this.issueService.retrieve(workspaceSlug, issue.parent.project_id, issue?.parent?.id).then((res) => {
-        this.rootIssueDetailStore.rootIssueStore.issues.addIssue([res]);
-      });
+      this.issueService
+        .retrieve(workspaceSlug, issue.parent.project_id, issue?.parent?.id)
+        .then((res) => this.rootIssueDetailStore.rootIssueStore.issues.addIssue([res]));
     }
     // assignees
     // labels
@@ -170,6 +170,12 @@ export class IssueStore implements IIssueStore {
       is_draft: issue?.is_draft,
       is_subscribed: issue?.is_subscribed,
       is_epic: issue?.is_epic,
+      is_intake: issue?.is_intake,
+      is_synced: issue?.is_synced,
+      git_work_branch: issue?.git_work_branch,
+      agent_ticker: issue?.agent_ticker,
+      agent_status: issue?.agent_status,
+      state__group: issue?.state__group,
     };
 
     this.rootIssueDetailStore.rootIssueStore.issues.addIssue([issuePayload]);
@@ -188,6 +194,8 @@ export class IssueStore implements IIssueStore {
       currentStore.updateIssue(workspaceSlug, projectId, issueId, data),
       this.rootIssueDetailStore.activity.fetchActivities(workspaceSlug, projectId, issueId),
     ]);
+
+    if ("state_id" in data) await this.fetchIssue(workspaceSlug, projectId, issueId);
   };
 
   removeIssue = async (workspaceSlug: string, projectId: string, issueId: string) => {
@@ -286,9 +294,9 @@ export class IssueStore implements IIssueStore {
 
     // handle parent issue if exists
     if (issue?.parent && issue?.parent?.id && issue?.parent?.project_id) {
-      this.issueService.retrieve(workspaceSlug, issue.parent.project_id, issue.parent.id).then((res) => {
-        this.rootIssueDetailStore.rootIssueStore.issues.addIssue([res]);
-      });
+      this.issueService
+        .retrieve(workspaceSlug, issue.parent.project_id, issue.parent.id)
+        .then((res) => this.rootIssueDetailStore.rootIssueStore.issues.addIssue([res]));
     }
 
     // add identifiers to map

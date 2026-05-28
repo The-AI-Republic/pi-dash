@@ -21,20 +21,20 @@ import useLocalStorage from "@/hooks/use-local-storage";
 // pi-dash-web imports
 import { SidebarItem } from "@/pi-dash-web/components/workspace/sidebar/sidebar-item";
 
-const MORE_ITEM_KEYS = ["projects", "prompts", "schedulers", "analytics", "archives"];
+const MORE_ITEM_KEYS = ["projects", "prompts", "schedulers", "ai-dev-machines", "analytics", "archives"];
 
-const MORE_STATIC_KEYS = ["analytics", "archives"];
+const MORE_STATIC_KEYS = ["ai_dev_machines", "analytics", "archives"];
 
 // Path segments that, when visited, should auto-open the More disclosure so
 // the active row is visible.
-const MORE_PATH_SEGMENTS = ["/prompts", "/schedulers", "/analytics", "/archives"];
+const MORE_PATH_SEGMENTS = ["/prompts", "/schedulers", "/ai-dev-machines", "/analytics", "/archives"];
 
 export const SidebarMoreSection = observer(function SidebarMoreSection() {
   const { t } = useTranslation();
   const pathname = usePathname();
   const { setValue: toggleMoreMenu, storedValue: isMoreMenuOpen } = useLocalStorage<boolean>(
     "is_sidebar_more_menu_open",
-    true
+    false
   );
 
   const items = MORE_ITEM_KEYS.map(

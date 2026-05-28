@@ -91,9 +91,9 @@ impl Supervisor {
                 let runner_paths = paths.for_runner(runner_cfg.runner_id);
                 let creds = load_runner_credentials(&runner_paths, &runner_cfg.name).await?;
                 let client = RunnerCloudClient::new(runner_cfg.runner_id, creds, shared.clone());
-                RunnerInstance::new_http(runner_cfg.clone(), &paths, client)
+                RunnerInstance::new_http(runner_cfg.clone(), &paths, client, config.daemon.clone())
             } else {
-                RunnerInstance::new_offline(runner_cfg.clone(), &paths)
+                RunnerInstance::new_offline(runner_cfg.clone(), &paths, config.daemon.clone())
             };
             inst.paths.ensure()?;
             instances.push(inst);
@@ -221,10 +221,30 @@ impl Supervisor {
                     inst.state.shutdown_notified(),
                     attach_body_for_instance(inst),
                 )
-                .with_state(inst.state.clone());
+                .with_state(inst.state.clone())
+                .with_teardown_rx(inst.remove_tx.subscribe());
+                let close_client = client.clone();
+                let local_state = inst.state.clone();
+                let daemon_state = state.clone();
                 let http_handle = tokio::spawn(async move {
                     if let Err(e) = http_loop.run().await {
-                        tracing::error!("http loop exited: {e:#}");
+                        if e.is_expected_teardown() {
+                            tracing::info!("http loop exited after runner teardown: {e:#}");
+                        } else {
+                            tracing::error!("http loop exited: {e:#}");
+                        }
+                        local_state.set_connected(false).await;
+                        let _ = tokio::time::timeout(
+                            Duration::from_secs(2),
+                            close_client.close_session(),
+                        )
+                        .await;
+                        if e.requires_daemon_restart() {
+                            tracing::error!(
+                                "http loop hit a local invariant failure; requesting daemon restart"
+                            );
+                            daemon_state.shutdown();
+                        }
                     }
                 });
                 http_handles.push(http_handle);
@@ -666,16 +686,18 @@ impl RunnerLoop {
                         && version_lt(crate::RUNNER_VERSION, latest)
                         && self.state.on_disk_version().await.as_deref() != Some(latest)
                         && self.state.auto_update_enabled().await
-                        && self.state.try_claim_swap()
+                        && let Some(swap_guard) = self.state.try_claim_swap()
                     {
                         let st = self.state.clone();
                         let latest_owned = latest.to_string();
+                        let paths = self.paths.clone();
                         tokio::spawn(async move {
+                            let _swap_guard = swap_guard;
                             tracing::info!(
                                 target = %latest_owned,
                                 "auto-update: swapping pidash on disk",
                             );
-                            match crate::cli::update::check_or_swap(false).await {
+                            match crate::cli::update::check_or_swap(false, &paths).await {
                                 Ok(crate::cli::update::SwapOutcome::Swapped {
                                     new_version,
                                     ..
@@ -701,7 +723,6 @@ impl RunnerLoop {
                                     );
                                 }
                             }
-                            st.release_swap();
                         });
                     }
                 }
@@ -2158,21 +2179,23 @@ impl AssignWorker {
         let mut cursor = match bridge.run_one_shot(&payload, &workspace_path).await {
             Ok(c) => c,
             Err(e) => {
+                let detail = self.build_failure_detail(&format!("{e:#}"), &bridge).await;
                 hist.append(&HistoryEntry::Footer {
                     ts: Utc::now(),
                     final_status: "failed".to_string(),
                     done_payload: None,
-                    error: Some(e.to_string()),
+                    error: Some(detail.clone()),
                 })
                 .await
                 .ok();
                 self.send(ClientMsg::RunFailed {
                     run_id,
                     reason: self.crash_reason(),
-                    detail: Some(format!("{e:#}")),
+                    detail: Some(detail),
                     ended_at: Utc::now(),
                 })
                 .await;
+                bridge.shutdown(Duration::from_secs(5)).await.ok();
                 self.state.set_current_run(None).await;
                 return Ok(());
             }
@@ -2668,7 +2691,9 @@ impl AssignWorker {
     }
 
     async fn send(&self, msg: ClientMsg) {
-        let _ = self.out.send(msg).await;
+        if let Err(err) = self.out.send(msg).await {
+            tracing::warn!(error = %err, "failed to send runner lifecycle message");
+        }
     }
 }
 

@@ -21,7 +21,7 @@ export const InstanceNotReady = observer(function InstanceNotReady() {
       <div className="relative w-auto max-w-2xl space-y-8 py-10">
         <div className="relative flex flex-col items-center justify-center space-y-4">
           <h1 className="pb-3 text-24 font-bold">Welcome aboard Pi Dash!</h1>
-          <img src={piSymbol} alt="Pi Dash logo" className="h-32 w-32" />
+          <img src={piSymbol} alt="Pi Dash logo" className="h-32 w-auto" />
           <p className="text-14 font-medium text-placeholder">Get started by setting up your instance and workspace</p>
         </div>
 

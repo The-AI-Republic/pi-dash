@@ -27,6 +27,8 @@ const STATUS_BADGE_VARIANT: Record<TAgentRunStatus, TBadgeVariant> = {
   running: "primary",
   awaiting_approval: "accent-warning",
   awaiting_reauth: "accent-warning",
+  paused_awaiting_input: "accent-warning",
+  blocked: "accent-warning",
   completed: "accent-success",
   failed: "accent-destructive",
   cancelled: "accent-neutral",

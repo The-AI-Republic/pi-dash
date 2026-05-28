@@ -5,6 +5,7 @@
  */
 
 import type { TIssuePriorities } from "../issues";
+import type { IRunnerLiveState, TAgentRunStatus } from "../runner";
 import type { TStateGroups } from "../state";
 import type { TIssuePublicComment } from "./activity/issue_comment";
 import type { TIssueAttachment } from "./issue_attachment";
@@ -98,9 +99,43 @@ type IssueRelation = {
   sequence_id: number;
 };
 
+export type TIssueAgentTicker = {
+  enabled: boolean;
+  user_disabled: boolean;
+  tick_count: number;
+  max_ticks: number;
+  interval_seconds: number;
+  next_run_at: string | null;
+  last_tick_at: string | null;
+  disarm_reason?: "" | "left_ticking_state" | "cap_hit" | "terminal_signal" | "user_disabled";
+};
+
+export type TIssueAgentRunSummary = {
+  id: string;
+  status: TAgentRunStatus;
+  runner: string | null;
+  runner_name: string | null;
+  created_at: string;
+  assigned_at: string | null;
+  started_at: string | null;
+  ended_at: string | null;
+  done_payload: Record<string, unknown> | null;
+  error: string;
+  live_state?: IRunnerLiveState | null;
+};
+
+export type TIssueAgentStatus = {
+  ticker: TIssueAgentTicker | null;
+  active_run: TIssueAgentRunSummary | null;
+  latest_run: TIssueAgentRunSummary | null;
+  run_count: number;
+};
+
 export type TIssue = TBaseIssue & {
   description_html?: string;
   is_subscribed?: boolean;
+  agent_ticker?: TIssueAgentTicker | null;
+  agent_status?: TIssueAgentStatus | null;
   parent?: Partial<TBaseIssue>;
   issue_reactions?: TIssueReaction[];
   issue_attachments?: TIssueAttachment[];

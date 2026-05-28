@@ -56,6 +56,14 @@ pub async fn status() -> Result<String> {
     run_schtasks(&["/Query", "/TN", TASK_NAME, "/FO", "LIST", "/V"]).await
 }
 
+/// Stub on Windows — `schtasks /Query` doesn't surface a comparable
+/// "LastExitStatus" field, and we don't have a Windows-specific
+/// diagnostic library shipped yet. Returns `None` so the caller falls
+/// back to its generic message.
+pub async fn diagnose_recent_exit() -> Option<String> {
+    None
+}
+
 fn validate_exe_path(path: &Path) -> Result<&str> {
     let s = path
         .to_str()

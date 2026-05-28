@@ -129,11 +129,18 @@ export type TAgentRunStatus =
   | "running"
   | "awaiting_approval"
   | "awaiting_reauth"
+  | "paused_awaiting_input"
+  | "blocked"
   | "completed"
   | "failed"
   | "cancelled";
 
-export const AGENT_RUN_TERMINAL_STATUSES: readonly TAgentRunStatus[] = ["completed", "failed", "cancelled"] as const;
+export const AGENT_RUN_TERMINAL_STATUSES: readonly TAgentRunStatus[] = [
+  "blocked",
+  "completed",
+  "failed",
+  "cancelled",
+] as const;
 
 export interface IAgentRunEvent {
   id: number;

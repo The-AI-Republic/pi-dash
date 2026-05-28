@@ -89,6 +89,10 @@ export const GeneralProfileSettingsForm = observer(function GeneralProfileSettin
   const { config } = useInstance();
 
   const isSMTPConfigured = config?.is_smtp_configured || false;
+  // Account deactivation is a self-service action; on managed/hosted
+  // deployments the account lifecycle is owned by the upstream identity
+  // provider, so the in-app option is only shown on self-managed instances.
+  const canSelfDeactivate = config?.is_self_managed ?? false;
 
   const handleProfilePictureDelete = async (url: string | null | undefined) => {
     if (!url) return;
@@ -190,7 +194,9 @@ export const GeneralProfileSettingsForm = observer(function GeneralProfileSettin
 
   return (
     <>
-      <DeactivateAccountModal isOpen={deactivateAccountModal} onClose={() => setDeactivateAccountModal(false)} />
+      {canSelfDeactivate && (
+        <DeactivateAccountModal isOpen={deactivateAccountModal} onClose={() => setDeactivateAccountModal(false)} />
+      )}
       <ChangeEmailModal isOpen={isChangeEmailModalOpen} onClose={() => setIsChangeEmailModalOpen(false)} />
       <Controller
         control={control}
@@ -400,17 +406,19 @@ export const GeneralProfileSettingsForm = observer(function GeneralProfileSettin
           </div>
         </div>
       </form>
-      <div className="mt-10">
-        <SettingsBoxedControlItem
-          title={t("deactivate_account")}
-          description={t("deactivate_account_description")}
-          control={
-            <Button variant="error-outline" onClick={() => setDeactivateAccountModal(true)}>
-              {t("deactivate_account")}
-            </Button>
-          }
-        />
-      </div>
+      {canSelfDeactivate && (
+        <div className="mt-10">
+          <SettingsBoxedControlItem
+            title={t("deactivate_account")}
+            description={t("deactivate_account_description")}
+            control={
+              <Button variant="error-outline" onClick={() => setDeactivateAccountModal(true)}>
+                {t("deactivate_account")}
+              </Button>
+            }
+          />
+        </div>
+      )}
     </>
   );
 });

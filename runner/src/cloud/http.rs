@@ -20,7 +20,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow};
 use chrono::{DateTime, Utc};
-use reqwest::header::{AUTHORIZATION, CONTENT_TYPE};
+use reqwest::header::{AUTHORIZATION, CONTENT_TYPE, HeaderMap, RETRY_AFTER};
 use reqwest::{Client, StatusCode};
 use serde::{Deserialize, Serialize};
 use serde_json::Value as Json;
@@ -62,6 +62,10 @@ pub enum TransportError {
     Server { status: u16, body: String },
     #[error("protocol: {0}")]
     Protocol(String),
+    #[error("local: {0}")]
+    Local(String),
+    #[error("local teardown: {0}")]
+    LocalTeardown(String),
 }
 
 impl TransportError {
@@ -89,7 +93,20 @@ impl TransportError {
                 | TransportError::RunnerRevoked
                 | TransportError::RunnerIdMismatch
                 | TransportError::InvalidRefreshToken
+                | TransportError::Local(_)
+                | TransportError::LocalTeardown(_)
         )
+    }
+
+    /// True when a local daemon invariant broke and a process restart is
+    /// the right self-healing action.
+    pub fn requires_daemon_restart(&self) -> bool {
+        matches!(self, TransportError::Local(_))
+    }
+
+    /// True when a local runner teardown intentionally closed the mailbox.
+    pub fn is_expected_teardown(&self) -> bool {
+        matches!(self, TransportError::LocalTeardown(_))
     }
 }
 
@@ -108,9 +125,13 @@ pub struct SharedHttpTransport {
 
 impl SharedHttpTransport {
     pub fn new(cloud_url: String) -> Result<Self> {
+        Self::new_with_timeout(cloud_url, Duration::from_secs(60))
+    }
+
+    pub fn new_with_timeout(cloud_url: String, timeout: Duration) -> Result<Self> {
         let http = Client::builder()
             .pool_idle_timeout(Duration::from_secs(60))
-            .timeout(Duration::from_secs(60))
+            .timeout(timeout)
             .user_agent(format!("pidash/{}", crate::RUNNER_VERSION))
             .build()
             .context("building shared reqwest::Client")?;
@@ -810,7 +831,8 @@ impl RunnerCloudClient {
         Ok(())
     }
 
-    /// One-shot POST that auto-refreshes once on `401 access_token_expired`.
+    /// POST with bounded retry/backoff and one access-token refresh on
+    /// `401 access_token_expired`.
     async fn post_authed_with_retry<F: Fn(&Json) -> bool>(
         &self,
         url: &str,
@@ -819,8 +841,25 @@ impl RunnerCloudClient {
         _accept: F,
     ) -> Result<Json, TransportError> {
         let mut attempt: u8 = 0;
+        let mut refreshed_access_token = false;
+        let mut delay = POST_RETRY_INITIAL_DELAY;
         loop {
-            let token = self.ensure_access_token().await?;
+            let token = match self.ensure_access_token().await {
+                Ok(token) => token,
+                Err(err) if should_retry_post_error(&err, attempt) => {
+                    tracing::warn!(
+                        attempt = attempt + 1,
+                        max_attempts = POST_RETRY_ATTEMPTS,
+                        error = %err,
+                        "runner POST auth setup failed; retrying"
+                    );
+                    sleep(delay).await;
+                    attempt = attempt.saturating_add(1);
+                    delay = (delay * 2).min(POST_RETRY_MAX_DELAY);
+                    continue;
+                }
+                Err(err) => return Err(err),
+            };
             let req = self
                 .inner
                 .transport
@@ -828,29 +867,97 @@ impl RunnerCloudClient {
                 .post(url)
                 .header(AUTHORIZATION, format!("Bearer {}", token.raw))
                 .header("Idempotency-Key", idempotency_key);
-            let resp = req
-                .json(&body)
-                .send()
-                .await
-                .map_err(|e| TransportError::Network(e.to_string()))?;
+            let resp = match req.json(&body).send().await {
+                Ok(resp) => resp,
+                Err(err) => {
+                    let err = TransportError::Network(err.to_string());
+                    if should_retry_post_error(&err, attempt) {
+                        tracing::warn!(
+                            attempt = attempt + 1,
+                            max_attempts = POST_RETRY_ATTEMPTS,
+                            error = %err,
+                            "runner POST failed; retrying"
+                        );
+                        sleep(delay).await;
+                        attempt = attempt.saturating_add(1);
+                        delay = (delay * 2).min(POST_RETRY_MAX_DELAY);
+                        continue;
+                    }
+                    return Err(err);
+                }
+            };
             let status = resp.status();
             if status.is_success() {
                 let v: Json = resp.json().await.unwrap_or(Json::Null);
                 return Ok(v);
             }
-            if status == StatusCode::UNAUTHORIZED && attempt == 0 {
+            if status == StatusCode::UNAUTHORIZED && !refreshed_access_token {
                 let txt = resp.text().await.unwrap_or_default();
                 if txt.contains("access_token_expired") {
-                    self.refresh().await?;
-                    attempt += 1;
+                    if let Err(err) = self.refresh().await {
+                        if should_retry_post_error(&err, attempt) {
+                            tracing::warn!(
+                                attempt = attempt + 1,
+                                max_attempts = POST_RETRY_ATTEMPTS,
+                                error = %err,
+                                "runner POST token refresh failed; retrying"
+                            );
+                            sleep(delay).await;
+                            attempt = attempt.saturating_add(1);
+                            delay = (delay * 2).min(POST_RETRY_MAX_DELAY);
+                            continue;
+                        }
+                        return Err(err);
+                    }
+                    refreshed_access_token = true;
                     continue;
                 }
                 return Err(map_auth_error(status, &txt));
             }
+            let retry_after = retry_after_delay(resp.headers());
             let txt = resp.text().await.unwrap_or_default();
-            return Err(map_auth_error(status, &txt));
+            let err = map_auth_error(status, &txt);
+            if should_retry_post_error(&err, attempt) {
+                let sleep_for = retry_after.unwrap_or(delay);
+                tracing::warn!(
+                    attempt = attempt + 1,
+                    max_attempts = POST_RETRY_ATTEMPTS,
+                    delay_ms = sleep_for.as_millis(),
+                    error = %err,
+                    "runner POST returned retryable status; retrying"
+                );
+                sleep(sleep_for).await;
+                attempt = attempt.saturating_add(1);
+                delay = (delay * 2).min(POST_RETRY_MAX_DELAY);
+                continue;
+            }
+            return Err(err);
         }
     }
+}
+
+fn should_retry_post_error(err: &TransportError, attempt: u8) -> bool {
+    if attempt >= POST_RETRY_ATTEMPTS {
+        return false;
+    }
+    match err {
+        TransportError::Network(_) | TransportError::RateLimited => true,
+        TransportError::Server { status, .. } => *status >= 500,
+        _ => false,
+    }
+}
+
+fn retry_after_delay(headers: &HeaderMap) -> Option<Duration> {
+    let raw = headers.get(RETRY_AFTER)?.to_str().ok()?.trim();
+    if let Ok(seconds) = raw.parse::<u64>() {
+        return Some(Duration::from_secs(seconds).min(POST_RETRY_MAX_DELAY));
+    }
+    let retry_at = DateTime::parse_from_rfc2822(raw).ok()?.with_timezone(&Utc);
+    let delay = retry_at
+        .signed_duration_since(Utc::now())
+        .to_std()
+        .unwrap_or_default();
+    Some(delay.min(POST_RETRY_MAX_DELAY))
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -1081,6 +1188,7 @@ pub struct HttpLoop {
     /// which is identical to the v3 wire shape — used by tests and any
     /// caller that doesn't want to thread state through.
     pub state: Option<crate::daemon::state::StateHandle>,
+    teardown_rx: Option<watch::Receiver<bool>>,
     inline_acks: VecDeque<String>,
     /// Bounded mid-dedupe (design.md §8 / Decision 21). At-least-once
     /// delivery + the PEL-replay path (`use_zero=True` on the first
@@ -1112,6 +1220,9 @@ const MAX_LONG_POLL_INTERVAL_SECS: u64 = 55;
 /// Fallback when welcome carries no value or the cloud cannot be
 /// trusted. Matches the server's documented default.
 const DEFAULT_LONG_POLL_INTERVAL_SECS: u64 = 25;
+const POST_RETRY_ATTEMPTS: u8 = 8;
+const POST_RETRY_INITIAL_DELAY: Duration = Duration::from_millis(500);
+const POST_RETRY_MAX_DELAY: Duration = Duration::from_secs(30);
 
 /// Bounded "have we seen this mid before?" set. Cap-bounded ring of
 /// recent mids; when the ring is full, the oldest entry is evicted
@@ -1196,6 +1307,7 @@ impl HttpLoop {
             shutdown,
             attach_body,
             state: None,
+            teardown_rx: None,
             inline_acks: VecDeque::new(),
             mid_dedupe: MidDedupe::with_capacity(MID_DEDUPE_CAPACITY),
             long_poll_interval_secs: DEFAULT_LONG_POLL_INTERVAL_SECS,
@@ -1208,6 +1320,22 @@ impl HttpLoop {
     pub fn with_state(mut self, state: crate::daemon::state::StateHandle) -> Self {
         self.state = Some(state);
         self
+    }
+
+    /// Attach the per-runner teardown latch. When the runner is deliberately
+    /// removed, its mailbox closes; treat that as expected teardown rather
+    /// than a daemon-level invariant failure.
+    pub fn with_teardown_rx(mut self, teardown_rx: watch::Receiver<bool>) -> Self {
+        self.teardown_rx = Some(teardown_rx);
+        self
+    }
+
+    fn mailbox_closed_error(&self, err: impl std::fmt::Display) -> TransportError {
+        if self.teardown_rx.as_ref().is_some_and(|rx| *rx.borrow()) {
+            TransportError::LocalTeardown(format!("runner mailbox closed after teardown: {err}"))
+        } else {
+            TransportError::Local(format!("runner mailbox closed: {err}"))
+        }
     }
 
     /// Build a fresh `AttachBody` snapshotting the current status and
@@ -1239,9 +1367,7 @@ impl HttpLoop {
         loop {
             let attempt = async {
                 self.client.ensure_access_token().await?;
-                self.client
-                    .open_session(self.current_attach_body())
-                    .await
+                self.client.open_session(self.current_attach_body()).await
             };
             let shutdown = self.shutdown.clone();
             match tokio::select! {
@@ -1296,23 +1422,23 @@ impl HttpLoop {
             latest_runner_version: session.welcome.latest_runner_version.clone(),
             min_runner_version: session.welcome.min_runner_version.clone(),
         };
-        let _ = self
-            .mailbox
+        self.mailbox
             .send(InboundEnvelope {
                 stream_id: None,
                 env: Envelope::for_runner(self.client.runner_id(), welcome_body),
             })
-            .await;
+            .await
+            .map_err(|e| self.mailbox_closed_error(e))?;
         if let Some(resume_body) = session.resume_ack
             && let Ok(parsed) = serde_json::from_value::<ServerMsg>(resume_body.clone())
         {
-            let _ = self
-                .mailbox
+            self.mailbox
                 .send(InboundEnvelope {
                     stream_id: None,
                     env: Envelope::for_runner(self.client.runner_id(), parsed),
                 })
-                .await;
+                .await
+                .map_err(|e| self.mailbox_closed_error(e))?;
         }
 
         let mut backoff_secs = 1u64;
@@ -1346,11 +1472,7 @@ impl HttpLoop {
                         "session evicted ({reason}); reopening",
                     );
                     sleep(backoff).await;
-                    if let Err(e) = self
-                        .client
-                        .open_session(self.current_attach_body())
-                        .await
-                    {
+                    if let Err(e) = self.client.open_session(self.current_attach_body()).await {
                         tracing::warn!(
                             runner = %self.client.runner_id(),
                             "reopen after eviction failed: {e}",
@@ -1402,12 +1524,12 @@ impl HttpLoop {
             .poll(acks, status, self.long_poll_interval_secs)
             .await?;
         for msg in resp.messages {
-            self.dispatch(msg).await;
+            self.dispatch(msg).await?;
         }
         Ok(())
     }
 
-    async fn dispatch(&mut self, msg: PollMessage) {
+    async fn dispatch(&mut self, msg: PollMessage) -> Result<(), TransportError> {
         let stream_id = msg.stream_id.clone();
         let runner_id = self.client.runner_id();
         // At-least-once delivery (design.md §8): a frame the daemon
@@ -1423,7 +1545,7 @@ impl HttpLoop {
                 "dropping duplicate inbound frame"
             );
             self.inline_acks.push_back(stream_id);
-            return;
+            return Ok(());
         }
         // Decode the body's "type" field via the ServerMsg enum.
         let parsed: Result<ServerMsg, _> = serde_json::from_value(msg.body.clone());
@@ -1450,6 +1572,7 @@ impl HttpLoop {
                     .await
                 {
                     tracing::warn!(runner = %runner_id, "mailbox send failed: {e}");
+                    return Err(self.mailbox_closed_error(e));
                 }
             }
             Err(err) => {
@@ -1460,6 +1583,7 @@ impl HttpLoop {
                 );
             }
         }
+        Ok(())
     }
 }
 
@@ -1729,10 +1853,52 @@ mod tests {
     fn fatal_classification() {
         assert!(TransportError::RunnerRevoked.is_fatal_for_runner());
         assert!(TransportError::RefreshTokenReplayed.is_fatal_for_runner());
+        let teardown = TransportError::LocalTeardown("runner removed".into());
+        assert!(teardown.is_fatal_for_runner());
+        assert!(teardown.is_expected_teardown());
+        assert!(!teardown.requires_daemon_restart());
         // SessionEvicted is recoverable — the run loop has a dedicated
         // arm that reopens the session. See `HttpLoop::run`.
         assert!(!TransportError::SessionEvicted { reason: "x".into() }.is_fatal_for_runner());
         assert!(!TransportError::Network("net".into()).is_fatal_for_runner());
+    }
+
+    #[test]
+    fn retry_after_delay_parses_and_caps_delta_seconds() {
+        let mut headers = HeaderMap::new();
+        headers.insert(RETRY_AFTER, "7".parse().unwrap());
+        assert_eq!(retry_after_delay(&headers), Some(Duration::from_secs(7)));
+
+        headers.insert(RETRY_AFTER, "9999".parse().unwrap());
+        assert_eq!(retry_after_delay(&headers), Some(POST_RETRY_MAX_DELAY));
+    }
+
+    #[test]
+    fn post_retry_classification_is_limited_to_transient_failures() {
+        assert!(should_retry_post_error(
+            &TransportError::Network("timeout".into()),
+            0
+        ));
+        assert!(should_retry_post_error(&TransportError::RateLimited, 0));
+        assert!(should_retry_post_error(
+            &TransportError::Server {
+                status: 503,
+                body: "unavailable".into()
+            },
+            0
+        ));
+        assert!(!should_retry_post_error(
+            &TransportError::Server {
+                status: 400,
+                body: "bad request".into()
+            },
+            0
+        ));
+        assert!(!should_retry_post_error(&TransportError::RunnerRevoked, 0));
+        assert!(!should_retry_post_error(
+            &TransportError::Network("timeout".into()),
+            POST_RETRY_ATTEMPTS
+        ));
     }
 
     fn sample_attach_body() -> AttachBody {

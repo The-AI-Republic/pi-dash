@@ -17,7 +17,7 @@ runs that miss their session on disk fail-stop instead of recovering.
 from __future__ import annotations
 
 import logging
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 from uuid import UUID
 
 from django.db import transaction
@@ -30,6 +30,13 @@ from pi_dash.runner.models import (
 )
 
 logger = logging.getLogger(__name__)
+
+TERMINAL_RUN_STATUSES = (
+    AgentRunStatus.COMPLETED,
+    AgentRunStatus.FAILED,
+    AgentRunStatus.CANCELLED,
+    AgentRunStatus.BLOCKED,
+)
 
 
 def _apply_post_run_orchestration(run: AgentRun) -> None:
@@ -77,10 +84,14 @@ def apply_run_paused(
 
     See legacy ``RunnerConsumer._handle_run_paused``.
     """
-    AgentRun.objects.filter(id=run_id, runner=runner).update(
+    updated = AgentRun.objects.filter(id=run_id, runner=runner).exclude(
+        status__in=TERMINAL_RUN_STATUSES
+    ).update(
         status=AgentRunStatus.PAUSED_AWAITING_INPUT,
         done_payload=payload,
     )
+    if not updated:
+        return
     try:
         run = AgentRun.objects.select_related("work_item").get(id=run_id)
     except AgentRun.DoesNotExist:
@@ -134,14 +145,29 @@ def apply_run_paused(
     transaction.on_commit(_pause_and_drain)
 
 
-def apply_run_resume_unavailable(runner: Runner, run_id: UUID | str) -> None:
+def apply_run_resume_unavailable(
+    runner: Runner,
+    run_id: UUID | str,
+    *,
+    locked_run: Optional[AgentRun] = None,
+) -> None:
     """Re-queue a run whose pinned session disappeared.
 
     Drops the runner / pin / assigned_at and clears the parent's
     ``thread_id`` so the next dispatch builds a fresh-session Assign.
     See legacy ``RunnerConsumer._handle_resume_unavailable``.
+
+    Must be called inside ``transaction.atomic()`` because the fallback
+    lookup takes a row lock.
     """
-    run = AgentRun.objects.filter(id=run_id, runner=runner).first()
+    run = locked_run
+    if run is None:
+        run = (
+            AgentRun.objects.select_for_update()
+            .filter(id=run_id, runner=runner)
+            .exclude(status__in=TERMINAL_RUN_STATUSES)
+            .first()
+        )
     if run is None:
         return
     run.status = AgentRunStatus.QUEUED
@@ -249,6 +275,12 @@ def finalize_run_terminal(
     ``resume_unavailable`` special case is handled in
     :func:`apply_run_resume_unavailable`; callers should branch on
     that BEFORE calling this helper.
+
+    Terminal transitions are first-writer-wins. Runner messages can be
+    delayed across session eviction, watchdog reaping, user cancellation,
+    and daemon restart. Once the cloud has closed the run, a later terminal
+    or non-terminal message must be acknowledged by the endpoint but must
+    not rewrite the final row.
     """
     updates: Dict[str, Any] = {
         "status": new_status,
@@ -256,9 +288,18 @@ def finalize_run_terminal(
     }
     if new_status == AgentRunStatus.COMPLETED:
         updates["done_payload"] = done_payload
+        updates["error"] = ""
     if new_status == AgentRunStatus.FAILED and error_detail:
         updates["error"] = error_detail[:16000]
-    AgentRun.objects.filter(id=run_id, runner=runner).update(**updates)
+    updated = AgentRun.objects.filter(id=run_id, runner=runner).exclude(
+        status__in=TERMINAL_RUN_STATUSES
+    ).update(**updates)
+    if not updated:
+        logger.info(
+            "run_lifecycle: ignoring late terminal transition for closed run %s",
+            run_id,
+        )
+        return
 
     if new_status == AgentRunStatus.FAILED:
         try:

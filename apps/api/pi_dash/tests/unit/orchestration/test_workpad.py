@@ -4,12 +4,11 @@
 
 import pytest
 
-from pi_dash.db.models import Issue, IssueComment, Project, State
+from pi_dash.db.models import Issue, Project, State
 from pi_dash.orchestration.workpad import (
-    WORKPAD_MARKER,
     get_agent_system_user,
-    get_or_create_workpad,
-    update_workpad_body,
+    get_workpad,
+    set_workpad,
 )
 
 
@@ -34,28 +33,31 @@ def issue(workspace, project, state, create_user):
 
 
 @pytest.mark.unit
-def test_creates_workpad_on_first_call(issue):
-    workpad = get_or_create_workpad(issue)
-    assert workpad.pk is not None
-    assert workpad.comment_stripped.startswith(WORKPAD_MARKER)
-    assert IssueComment.objects.filter(issue=issue).count() == 1
+def test_workpad_empty_by_default(issue):
+    assert get_workpad(issue) == ""
 
 
 @pytest.mark.unit
-def test_reuses_existing_workpad(issue):
-    first = get_or_create_workpad(issue)
-    second = get_or_create_workpad(issue)
-    assert first.pk == second.pk
-    assert IssueComment.objects.filter(issue=issue).count() == 1
+def test_set_workpad_persists_body(issue):
+    set_workpad(issue, "## Agent Workpad\n\n### Phase\n- implementing\n")
+    issue.refresh_from_db()
+    assert "implementing" in issue.workpad
 
 
 @pytest.mark.unit
-def test_update_replaces_body(issue):
-    get_or_create_workpad(issue)
-    updated = update_workpad_body(issue, f"{WORKPAD_MARKER}\n\n### Phase\n- implementing")
-    updated.refresh_from_db()
-    assert "implementing" in updated.comment_stripped
-    assert IssueComment.objects.filter(issue=issue).count() == 1
+def test_set_workpad_overwrites(issue):
+    set_workpad(issue, "first")
+    set_workpad(issue, "second")
+    issue.refresh_from_db()
+    assert issue.workpad == "second"
+
+
+@pytest.mark.unit
+def test_set_workpad_clears_with_empty_string(issue):
+    set_workpad(issue, "something")
+    set_workpad(issue, "")
+    issue.refresh_from_db()
+    assert issue.workpad == ""
 
 
 @pytest.mark.unit
