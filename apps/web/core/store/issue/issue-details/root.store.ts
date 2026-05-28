@@ -32,7 +32,12 @@ import type { IIssueCommentStore, IIssueCommentStoreActions, TCommentLoader } fr
 import { IssueCommentReactionStore } from "./comment_reaction.store";
 import type { IIssueCommentReactionStore, IIssueCommentReactionStoreActions } from "./comment_reaction.store";
 import { IssueStore } from "./issue.store";
-import type { IIssueStore, IIssueStoreActions } from "./issue.store";
+import type {
+  IIssueStore,
+  IIssueStoreActions,
+  TFetchIssueOptions,
+  TFetchIssueWithIdentifierOptions,
+} from "./issue.store";
 import { IssueLinkStore } from "./link.store";
 import type { IIssueLinkStore, IIssueLinkStoreActions } from "./link.store";
 import { IssueReactionStore } from "./reaction.store";
@@ -259,8 +264,8 @@ export abstract class IssueDetail implements IIssueDetail {
     this.openWidgets = state;
     if (this.lastWidgetAction) this.lastWidgetAction = null;
   };
-  setLastWidgetAction = (action: TWorkItemWidgets) => {
-    this.openWidgets = [action];
+  setLastWidgetAction = (widget: TWorkItemWidgets) => {
+    this.openWidgets = [widget];
   };
   toggleOpenWidget = (state: TWorkItemWidgets) => {
     if (this.openWidgets && this.openWidgets.includes(state))
@@ -270,10 +275,14 @@ export abstract class IssueDetail implements IIssueDetail {
   setIssueLinkData = (issueLinkData: TIssueLink | null) => (this.issueLinkData = issueLinkData);
 
   // issue
-  fetchIssue = async (workspaceSlug: string, projectId: string, issueId: string) =>
-    this.issue.fetchIssue(workspaceSlug, projectId, issueId);
-  fetchIssueWithIdentifier = async (workspaceSlug: string, projectIdentifier: string, sequenceId: string) =>
-    this.issue.fetchIssueWithIdentifier(workspaceSlug, projectIdentifier, sequenceId);
+  fetchIssue = async (workspaceSlug: string, projectId: string, issueId: string, options?: TFetchIssueOptions) =>
+    this.issue.fetchIssue(workspaceSlug, projectId, issueId, options);
+  fetchIssueWithIdentifier = async (
+    workspaceSlug: string,
+    projectIdentifier: string,
+    sequenceId: string,
+    options?: TFetchIssueWithIdentifierOptions
+  ) => this.issue.fetchIssueWithIdentifier(workspaceSlug, projectIdentifier, sequenceId, options);
   updateIssue = async (workspaceSlug: string, projectId: string, issueId: string, data: Partial<TIssue>) =>
     this.issue.updateIssue(workspaceSlug, projectId, issueId, data);
   removeIssue = async (workspaceSlug: string, projectId: string, issueId: string) =>

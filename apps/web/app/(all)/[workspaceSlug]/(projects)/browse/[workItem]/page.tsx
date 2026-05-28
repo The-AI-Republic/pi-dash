@@ -41,6 +41,7 @@ export const IssueDetailsPage = observer(function IssueDetailsPage({ params }: R
   // store hooks
   const { t } = useTranslation();
   const {
+    fetchIssue,
     fetchIssueWithIdentifier,
     issue: { getIssueById },
   } = useIssueDetail();
@@ -52,7 +53,7 @@ export const IssueDetailsPage = observer(function IssueDetailsPage({ params }: R
   // fetching issue details
   const { data, isLoading, error } = useSWR<TIssue, Error>(
     `ISSUE_DETAIL_${workspaceSlug}_${projectIdentifier}_${sequence_id}`,
-    () => fetchIssueWithIdentifier(workspaceSlug.toString(), projectIdentifier, sequence_id)
+    () => fetchIssueWithIdentifier(workspaceSlug.toString(), projectIdentifier, sequence_id, { lite: true })
   );
 
   // derived values
@@ -90,6 +91,14 @@ export const IssueDetailsPage = observer(function IssueDetailsPage({ params }: R
       router.push(`/${workspaceSlug}/projects/${data.project_id}/intake/?currentTab=open&inboxIssueId=${data?.id}`);
     }
   }, [workspaceSlug, data, router]);
+
+  useEffect(() => {
+    if (!workspaceSlug || !projectId || !issueId || data?.is_intake) return;
+
+    void fetchIssue(workspaceSlug.toString(), projectId.toString(), issueId.toString(), {
+      skipActivityAndComments: true,
+    }).catch(() => undefined);
+  }, [workspaceSlug, projectId, issueId, data?.is_intake, fetchIssue]);
 
   if (error && !isLoading) {
     return (

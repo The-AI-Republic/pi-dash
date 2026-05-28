@@ -1211,6 +1211,34 @@ class IssueDetailIdentifierEndpoint(BaseAPIView):
             raise ValueError("Invalid integer string")
         return int(s)
 
+    def is_lite_request(self, request):
+        return request.GET.get("lite", "").lower() in ("1", "true", "yes")
+
+    def serialize_lite_issue(self, issue):
+        if issue.external_source == "github":
+            from pi_dash.db.models import GithubIssueSync
+
+            is_synced = GithubIssueSync.objects.filter(issue=issue).exists()
+        else:
+            is_synced = False
+
+        return {
+            "id": issue.id,
+            "sequence_id": issue.sequence_id,
+            "name": issue.name,
+            "description_html": issue.description_html,
+            "sort_order": issue.sort_order,
+            "project_id": issue.project_id,
+            "created_at": issue.created_at,
+            "updated_at": issue.updated_at,
+            "created_by": issue.created_by_id,
+            "updated_by": issue.updated_by_id,
+            "is_draft": issue.is_draft,
+            "is_intake": issue.is_intake,
+            "is_synced": is_synced,
+            "archived_at": issue.archived_at,
+        }
+
     def get(self, request, slug, project_identifier, issue_identifier):
         # Check if the issue identifier is a valid integer
         try:
@@ -1236,139 +1264,171 @@ class IssueDetailIdentifierEndpoint(BaseAPIView):
                 status=status.HTTP_403_FORBIDDEN,
             )
 
-        # Fetch the issue
-        issue = (
-            Issue.objects.filter(project_id=project.id)
-            .filter(workspace__slug=slug)
-            .select_related("workspace", "project", "state", "parent", "agent_ticker")
-            .prefetch_related("assignees", "labels", "issue_module__module")
-            .annotate(
-                cycle_id=Subquery(
-                    CycleIssue.objects.filter(issue=OuterRef("id"), deleted_at__isnull=True).values("cycle_id")[:1]
+        if self.is_lite_request(request):
+            issue = (
+                Issue.objects.filter(project_id=project.id)
+                .filter(workspace__slug=slug)
+                .filter(sequence_id=issue_identifier)
+                .only(
+                    "id",
+                    "sequence_id",
+                    "name",
+                    "description_html",
+                    "sort_order",
+                    "project_id",
+                    "workspace_id",
+                    "created_at",
+                    "updated_at",
+                    "created_by_id",
+                    "updated_by_id",
+                    "is_draft",
+                    "archived_at",
+                    "external_source",
                 )
-            )
-            .annotate(
-                link_count=Coalesce(
-                    Subquery(
-                        IssueLink.objects.filter(issue=OuterRef("id"))
-                        .order_by()
-                        .values("issue")
-                        .annotate(count=Count("id"))
-                        .values("count"),
-                        output_field=IntegerField(),
-                    ),
-                    0,
-                )
-            )
-            .annotate(
-                attachment_count=Coalesce(
-                    Subquery(
-                        FileAsset.objects.filter(
-                            issue_id=OuterRef("id"),
-                            entity_type=FileAsset.EntityTypeContext.ISSUE_ATTACHMENT,
+                .annotate(
+                    is_intake=Exists(
+                        IntakeIssue.objects.filter(
+                            issue=OuterRef("id"),
+                            status__in=[-2, 0],
+                            workspace__slug=slug,
+                            project_id=project.id,
                         )
-                        .order_by()
-                        .values("issue_id")
-                        .annotate(count=Count("id"))
-                        .values("count"),
-                        output_field=IntegerField(),
-                    ),
-                    0,
-                )
-            )
-            .annotate(
-                sub_issues_count=Coalesce(
-                    Subquery(
-                        Issue.issue_objects.filter(parent=OuterRef("id"))
-                        .order_by()
-                        .values("parent")
-                        .annotate(count=Count("id"))
-                        .values("count"),
-                        output_field=IntegerField(),
-                    ),
-                    0,
-                )
-            )
-            .filter(sequence_id=issue_identifier)
-            # Keep multi-value properties as correlated subqueries; joining them
-            # into this single-issue query inflates planner cost enough to trip
-            # PostgreSQL JIT and add seconds of compile time.
-            .annotate(
-                label_ids=Coalesce(
-                    Subquery(
-                        IssueLabel.objects.filter(issue_id=OuterRef("id"), deleted_at__isnull=True)
-                        .order_by()
-                        .values("issue_id")
-                        .annotate(arr=ArrayAgg("label_id", distinct=True))
-                        .values("arr"),
-                        output_field=ArrayField(UUIDField()),
-                    ),
-                    Value([], output_field=ArrayField(UUIDField())),
-                ),
-                assignee_ids=Coalesce(
-                    Subquery(
-                        IssueAssignee.objects.filter(
-                            issue_id=OuterRef("id"),
-                            assignee__member_project__is_active=True,
-                            deleted_at__isnull=True,
-                        )
-                        .order_by()
-                        .values("issue_id")
-                        .annotate(arr=ArrayAgg("assignee_id", distinct=True))
-                        .values("arr"),
-                        output_field=ArrayField(UUIDField()),
-                    ),
-                    Value([], output_field=ArrayField(UUIDField())),
-                ),
-                module_ids=Coalesce(
-                    Subquery(
-                        ModuleIssue.objects.filter(
-                            issue_id=OuterRef("id"),
-                            module__archived_at__isnull=True,
-                            deleted_at__isnull=True,
-                        )
-                        .order_by()
-                        .values("issue_id")
-                        .annotate(arr=ArrayAgg("module_id", distinct=True))
-                        .values("arr"),
-                        output_field=ArrayField(UUIDField()),
-                    ),
-                    Value([], output_field=ArrayField(UUIDField())),
-                ),
-            )
-            .prefetch_related(
-                Prefetch(
-                    "issue_reactions",
-                    queryset=IssueReaction.objects.select_related("issue", "actor"),
-                )
-            )
-            .prefetch_related(
-                Prefetch(
-                    "issue_link",
-                    queryset=IssueLink.objects.select_related("created_by"),
-                )
-            )
-            .annotate(
-                is_subscribed=Exists(
-                    IssueSubscriber.objects.filter(
-                        workspace__slug=slug,
-                        project_id=project.id,
-                        issue_id=OuterRef("id"),
-                        subscriber=request.user,
                     )
                 )
-            )
-            .annotate(
-                is_intake=Exists(
-                    IntakeIssue.objects.filter(
-                        issue=OuterRef("id"),
-                        status__in=[-2, 0],
-                        workspace__slug=slug,
-                        project_id=project.id,
+            ).first()
+        else:
+            issue = (
+                Issue.objects.filter(project_id=project.id)
+                .filter(workspace__slug=slug)
+                .select_related("workspace", "project", "state", "parent", "agent_ticker")
+                .prefetch_related("assignees", "labels", "issue_module__module")
+                .annotate(
+                    cycle_id=Subquery(
+                        CycleIssue.objects.filter(issue=OuterRef("id"), deleted_at__isnull=True).values("cycle_id")[:1]
                     )
                 )
-            )
-        ).first()
+                .annotate(
+                    link_count=Coalesce(
+                        Subquery(
+                            IssueLink.objects.filter(issue=OuterRef("id"))
+                            .order_by()
+                            .values("issue")
+                            .annotate(count=Count("id"))
+                            .values("count"),
+                            output_field=IntegerField(),
+                        ),
+                        0,
+                    )
+                )
+                .annotate(
+                    attachment_count=Coalesce(
+                        Subquery(
+                            FileAsset.objects.filter(
+                                issue_id=OuterRef("id"),
+                                entity_type=FileAsset.EntityTypeContext.ISSUE_ATTACHMENT,
+                            )
+                            .order_by()
+                            .values("issue_id")
+                            .annotate(count=Count("id"))
+                            .values("count"),
+                            output_field=IntegerField(),
+                        ),
+                        0,
+                    )
+                )
+                .annotate(
+                    sub_issues_count=Coalesce(
+                        Subquery(
+                            Issue.issue_objects.filter(parent=OuterRef("id"))
+                            .order_by()
+                            .values("parent")
+                            .annotate(count=Count("id"))
+                            .values("count"),
+                            output_field=IntegerField(),
+                        ),
+                        0,
+                    )
+                )
+                .filter(sequence_id=issue_identifier)
+                # Keep multi-value properties as correlated subqueries; joining them
+                # into this single-issue query inflates planner cost enough to trip
+                # PostgreSQL JIT and add seconds of compile time.
+                .annotate(
+                    label_ids=Coalesce(
+                        Subquery(
+                            IssueLabel.objects.filter(issue_id=OuterRef("id"), deleted_at__isnull=True)
+                            .order_by()
+                            .values("issue_id")
+                            .annotate(arr=ArrayAgg("label_id", distinct=True))
+                            .values("arr"),
+                            output_field=ArrayField(UUIDField()),
+                        ),
+                        Value([], output_field=ArrayField(UUIDField())),
+                    ),
+                    assignee_ids=Coalesce(
+                        Subquery(
+                            IssueAssignee.objects.filter(
+                                issue_id=OuterRef("id"),
+                                assignee__member_project__is_active=True,
+                                deleted_at__isnull=True,
+                            )
+                            .order_by()
+                            .values("issue_id")
+                            .annotate(arr=ArrayAgg("assignee_id", distinct=True))
+                            .values("arr"),
+                            output_field=ArrayField(UUIDField()),
+                        ),
+                        Value([], output_field=ArrayField(UUIDField())),
+                    ),
+                    module_ids=Coalesce(
+                        Subquery(
+                            ModuleIssue.objects.filter(
+                                issue_id=OuterRef("id"),
+                                module__archived_at__isnull=True,
+                                deleted_at__isnull=True,
+                            )
+                            .order_by()
+                            .values("issue_id")
+                            .annotate(arr=ArrayAgg("module_id", distinct=True))
+                            .values("arr"),
+                            output_field=ArrayField(UUIDField()),
+                        ),
+                        Value([], output_field=ArrayField(UUIDField())),
+                    ),
+                )
+                .prefetch_related(
+                    Prefetch(
+                        "issue_reactions",
+                        queryset=IssueReaction.objects.select_related("issue", "actor"),
+                    )
+                )
+                .prefetch_related(
+                    Prefetch(
+                        "issue_link",
+                        queryset=IssueLink.objects.select_related("created_by"),
+                    )
+                )
+                .annotate(
+                    is_subscribed=Exists(
+                        IssueSubscriber.objects.filter(
+                            workspace__slug=slug,
+                            project_id=project.id,
+                            issue_id=OuterRef("id"),
+                            subscriber=request.user,
+                        )
+                    )
+                )
+                .annotate(
+                    is_intake=Exists(
+                        IntakeIssue.objects.filter(
+                            issue=OuterRef("id"),
+                            status__in=[-2, 0],
+                            workspace__slug=slug,
+                            project_id=project.id,
+                        )
+                    )
+                )
+            ).first()
 
         # Check if the issue exists
         if not issue:
@@ -1391,7 +1451,7 @@ class IssueDetailIdentifierEndpoint(BaseAPIView):
                 is_active=True,
             ).exists()
             and not project.guest_view_all_features
-            and not issue.created_by == request.user
+            and issue.created_by_id != request.user.id
         ):
             return Response(
                 {"error": "You are not allowed to view this issue"},
@@ -1405,6 +1465,9 @@ class IssueDetailIdentifierEndpoint(BaseAPIView):
             user_id=str(request.user.id),
             project_id=str(project.id),
         )
+
+        if self.is_lite_request(request):
+            return Response(self.serialize_lite_issue(issue), status=status.HTTP_200_OK)
 
         # Serialize the issue
         serializer = IssueDetailSerializer(issue, expand=self.expand)
