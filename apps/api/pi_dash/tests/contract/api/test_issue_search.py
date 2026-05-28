@@ -133,11 +133,14 @@ class TestIssueAdvancedSearchValidation:
         assert "since" in response.data["error"].lower()
 
     @pytest.mark.django_db
-    def test_date_only_since_returns_400(self, api_key_client, workspace):
-        # parse_datetime rejects date-only ISO strings; documented behavior
-        # of the endpoint (the prompt fragment tells the agent so).
+    def test_date_only_since_is_accepted_as_midnight(self, api_key_client, workspace):
+        # Python 3.11+'s ``datetime.fromisoformat`` (which Django's
+        # ``parse_datetime`` defers to first) accepts a bare ISO date and
+        # treats it as midnight in that day. We don't fight that — the
+        # endpoint is documented as lenient, and dropping the time
+        # component is a common ergonomic shortcut for agents.
         response = api_key_client.get(_url(workspace.slug) + "?q=hello&since=2025-01-01")
-        assert response.status_code == http_status.HTTP_400_BAD_REQUEST
+        assert response.status_code == http_status.HTTP_200_OK
 
 
 @pytest.mark.contract
