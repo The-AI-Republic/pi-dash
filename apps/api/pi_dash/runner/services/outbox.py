@@ -278,7 +278,6 @@ def claim_pending_for_new_session(
             logger.exception("xautoclaim failed for runner %s", runner_id)
             return claimed
         if not result:
-            delete_consumer(runner_id, old_consumer, client=client)
             return claimed
         # xautoclaim returns (next_cursor, claimed_ids[, deleted_ids])
         next_cursor = result[0]
@@ -286,7 +285,7 @@ def claim_pending_for_new_session(
         if isinstance(next_cursor, bytes):
             next_cursor = next_cursor.decode()
         claimed += len(claimed_ids)
-        if next_cursor == "0-0" or not claimed_ids:
+        if next_cursor == "0-0":
             delete_consumer(runner_id, old_consumer, client=client)
             return claimed
         cursor = next_cursor
@@ -319,6 +318,16 @@ def delete_consumer(
             consumer,
         )
         return 0
+
+
+def _consumer_info_value(entry, key: str, default=0):
+    if isinstance(entry, dict):
+        return entry.get(key, entry.get(key.encode(), default))
+    try:
+        entry = dict(entry)
+    except (TypeError, ValueError):
+        return default
+    return entry.get(key, entry.get(key.encode(), default))
 
 
 def reap_idle_consumers(
@@ -354,9 +363,9 @@ def reap_idle_consumers(
 
     removed = 0
     for entry in consumers or []:
-        name = entry.get("name") if isinstance(entry, dict) else None
-        pending = entry.get("pending", 0) if isinstance(entry, dict) else 0
-        idle = entry.get("idle", 0) if isinstance(entry, dict) else 0
+        name = _consumer_info_value(entry, "name", None)
+        pending = _consumer_info_value(entry, "pending", 0)
+        idle = _consumer_info_value(entry, "idle", 0)
         if isinstance(name, bytes):
             name = name.decode()
         if not name or name in keep or int(pending or 0) > 0:

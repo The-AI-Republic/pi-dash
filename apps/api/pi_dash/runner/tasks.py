@@ -178,15 +178,20 @@ def sweep_old_streams() -> int:
             outbox.consumer_name(session_id)
         )
 
-    for rid, keep_consumers in active_consumers_by_runner.items():
-        try:
-            removed = outbox.safe_trim_runner_stream(
-                rid, time_cutoff_id=time_cutoff_id
-            )
-            if removed:
-                trimmed_count += removed
-        except Exception:
-            logger.exception("safe_trim_runner_stream failed for %s", rid)
+    runner_ids_with_sessions = set(
+        RunnerSession.objects.values_list("runner_id", flat=True).distinct()
+    )
+    for rid in runner_ids_with_sessions:
+        keep_consumers = active_consumers_by_runner.get(rid, set())
+        if keep_consumers:
+            try:
+                removed = outbox.safe_trim_runner_stream(
+                    rid, time_cutoff_id=time_cutoff_id
+                )
+                if removed:
+                    trimmed_count += removed
+            except Exception:
+                logger.exception("safe_trim_runner_stream failed for %s", rid)
         try:
             reaped_consumers += outbox.reap_idle_consumers(
                 rid,

@@ -14,13 +14,8 @@ from pythonjsonlogger.jsonlogger import JsonFormatter
 from celery.signals import after_setup_logger, after_setup_task_logger
 from celery.schedules import crontab
 
-# Module imports
-from pi_dash.settings.redis import redis_instance
-
 # Set the default Django settings module for the 'celery' program.
 os.environ.setdefault("DJANGO_SETTINGS_MODULE", "pi_dash.settings.production")
-
-ri = redis_instance()
 
 app = Celery("pi_dash")
 

@@ -24,6 +24,7 @@ from typing import Any, Dict, List
 from django.conf import settings
 from django.db import transaction
 from django.utils import timezone
+from redis.exceptions import RedisError
 from rest_framework import status
 from rest_framework.response import Response
 from rest_framework.views import APIView
@@ -35,6 +36,7 @@ from pi_dash.runner.services import outbox, session_service
 
 logger = logging.getLogger(__name__)
 _POLL_SLICE_MS = 1000
+_REDIS_SIDE_EFFECT_ERRORS = (RedisError, OSError)
 
 
 class _SessionEvictedDuringPoll(Exception):
@@ -45,7 +47,7 @@ def _session_open_side_effect(runner_id, label: str, func, *args, **kwargs):
     started = time.monotonic()
     try:
         return func(*args, **kwargs)
-    except Exception:
+    except _REDIS_SIDE_EFFECT_ERRORS:
         logger.exception(
             "runner session-open Redis side effect failed runner=%s step=%s",
             runner_id,
@@ -424,9 +426,9 @@ class RunnerSessionPollEndpoint(APIView):
             )
 
         pubsub = client.pubsub(ignore_subscribe_messages=True)
-        pubsub.subscribe(outbox.session_eviction_channel(runner_id))
-        deadline = time.monotonic() + (block_ms / 1000.0)
         try:
+            pubsub.subscribe(outbox.session_eviction_channel(runner_id))
+            deadline = time.monotonic() + (block_ms / 1000.0)
             while True:
                 remaining_ms = max(0, int((deadline - time.monotonic()) * 1000))
                 # CRITICAL: bail BEFORE calling Redis when the deadline

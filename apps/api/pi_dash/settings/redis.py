@@ -30,6 +30,17 @@ def _int_setting(name: str, default: int) -> int:
         return default
 
 
+def _optional_int_setting(name: str) -> int | None:
+    raw = getattr(settings, name, None)
+    if raw in (None, ""):
+        return None
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        return None
+    return value if value > 0 else None
+
+
 def close_redis_instance():
     """Close the cached Redis client for this process.
 
@@ -49,12 +60,12 @@ def redis_instance():
     """Return a process-local Redis client with bounded socket timeouts."""
 
     if not settings.REDIS_URL:
-        return None
+        raise RuntimeError("REDIS_URL is required to create a Redis client")
 
     connect_timeout = _float_setting("REDIS_SOCKET_CONNECT_TIMEOUT", 2.0)
     socket_timeout = _float_setting("REDIS_SOCKET_TIMEOUT", 5.0)
     health_check_interval = _int_setting("REDIS_HEALTH_CHECK_INTERVAL", 30)
-    max_connections = _int_setting("REDIS_MAX_CONNECTIONS", 128)
+    max_connections = _optional_int_setting("REDIS_MAX_CONNECTIONS")
     key = (
         settings.REDIS_URL,
         bool(settings.REDIS_SSL),
@@ -78,22 +89,22 @@ def redis_instance():
             "socket_connect_timeout": connect_timeout,
             "socket_timeout": socket_timeout,
             "health_check_interval": health_check_interval,
-            "max_connections": max_connections,
         }
+        if max_connections is not None:
+            kwargs["max_connections"] = max_connections
         # connect to redis
         if settings.REDIS_SSL:
             url = urlparse(settings.REDIS_URL)
             _redis_client = redis.Redis(
                 host=url.hostname,
                 port=url.port,
-                username=url.username,
                 password=url.password,
-                db=(int((url.path or "/0").lstrip("/") or "0")),
+                db=0,
                 ssl=True,
                 ssl_cert_reqs=None,
                 **kwargs,
             )
         else:
-            _redis_client = redis.Redis.from_url(settings.REDIS_URL, **kwargs)
+            _redis_client = redis.Redis.from_url(settings.REDIS_URL, db=0, **kwargs)
         _redis_client_key = key
         return _redis_client

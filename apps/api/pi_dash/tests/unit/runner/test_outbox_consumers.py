@@ -70,6 +70,32 @@ def test_claim_pending_keeps_old_consumer_when_handoff_fails(monkeypatch):
 
 
 @pytest.mark.unit
+def test_claim_pending_keeps_scanning_empty_nonterminal_pages(monkeypatch):
+    client = _FakeRedis(
+        autoclaim_results=[
+            (b"250-0", []),
+            (b"0-0", [b"300-0"]),
+        ]
+    )
+    monkeypatch.setattr(outbox, "redis_instance", lambda: client)
+
+    claimed = outbox.claim_pending_for_new_session(
+        "runner-1",
+        old_consumer="consumer-old",
+        new_consumer="consumer-new",
+    )
+
+    assert claimed == 1
+    assert client.deleted == [
+        (
+            "runner_stream:runner-1",
+            "runner-group:runner-1",
+            "consumer-old",
+        )
+    ]
+
+
+@pytest.mark.unit
 def test_reap_idle_consumers_drops_only_stale_zero_pending_consumers(monkeypatch):
     client = _FakeRedis(
         consumers=[
@@ -84,6 +110,32 @@ def test_reap_idle_consumers_drops_only_stale_zero_pending_consumers(monkeypatch
     removed = outbox.reap_idle_consumers(
         "runner-1",
         keep_consumers={"consumer-active"},
+        min_idle_ms=120_000,
+    )
+
+    assert removed == 1
+    assert client.deleted == [
+        (
+            "runner_stream:runner-1",
+            "runner-group:runner-1",
+            "consumer-stale",
+        )
+    ]
+
+
+@pytest.mark.unit
+def test_reap_idle_consumers_handles_bytes_keyed_consumer_info(monkeypatch):
+    client = _FakeRedis(
+        consumers=[
+            {b"name": b"consumer-stale", b"pending": 0, b"idle": 900_000},
+            [(b"name", b"consumer-fresh"), (b"pending", 0), (b"idle", 1_000)],
+        ]
+    )
+    monkeypatch.setattr(outbox, "redis_instance", lambda: client)
+
+    removed = outbox.reap_idle_consumers(
+        "runner-1",
+        keep_consumers=set(),
         min_idle_ms=120_000,
     )
 

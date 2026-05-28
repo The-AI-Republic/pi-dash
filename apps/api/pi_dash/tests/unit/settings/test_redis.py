@@ -30,12 +30,70 @@ def test_redis_instance_reuses_process_local_client_with_timeouts():
     assert second is client
     from_url.assert_called_once_with(
         "redis://:password@redis.example.test:6379/5",
+        db=0,
         socket_connect_timeout=1.25,
         socket_timeout=2.5,
         health_check_interval=15,
         max_connections=32,
     )
     redis_settings.close_redis_instance()
+
+
+@pytest.mark.unit
+@override_settings(
+    REDIS_URL="redis://:password@redis.example.test:6379/5",
+    REDIS_SSL=False,
+    REDIS_MAX_CONNECTIONS=None,
+)
+def test_redis_instance_does_not_cap_connections_by_default():
+    redis_settings.close_redis_instance()
+    client = Mock()
+    with patch(
+        "pi_dash.settings.redis.redis.Redis.from_url",
+        return_value=client,
+    ) as from_url:
+        assert redis_settings.redis_instance() is client
+
+    assert "max_connections" not in from_url.call_args.kwargs
+    redis_settings.close_redis_instance()
+
+
+@pytest.mark.unit
+@override_settings(
+    REDIS_URL="rediss://serviceuser:password@redis.example.test:6380/5",
+    REDIS_SSL=True,
+    REDIS_SOCKET_CONNECT_TIMEOUT=1.25,
+    REDIS_SOCKET_TIMEOUT=2.5,
+    REDIS_HEALTH_CHECK_INTERVAL=15,
+    REDIS_MAX_CONNECTIONS=None,
+)
+def test_redis_instance_ssl_preserves_default_user_and_db_zero():
+    redis_settings.close_redis_instance()
+    client = Mock()
+    with patch("pi_dash.settings.redis.redis.Redis", return_value=client) as redis_cls:
+        assert redis_settings.redis_instance() is client
+
+    redis_cls.assert_called_once_with(
+        host="redis.example.test",
+        port=6380,
+        password="password",
+        db=0,
+        ssl=True,
+        ssl_cert_reqs=None,
+        socket_connect_timeout=1.25,
+        socket_timeout=2.5,
+        health_check_interval=15,
+    )
+    redis_settings.close_redis_instance()
+
+
+@pytest.mark.unit
+@override_settings(REDIS_URL=None, REDIS_SSL=False)
+def test_redis_instance_requires_redis_url():
+    redis_settings.close_redis_instance()
+
+    with pytest.raises(RuntimeError, match="REDIS_URL"):
+        redis_settings.redis_instance()
 
 
 @pytest.mark.unit
