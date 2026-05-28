@@ -14,6 +14,7 @@ import os
 os.environ.setdefault("WEB_URL", "http://localhost")
 os.environ.setdefault("APP_BASE_URL", "http://localhost")
 os.environ.setdefault("EMAIL_HOST", "localhost")
+os.environ.setdefault("API_KEY_RATE_LIMIT", "100000/minute")
 
 from .common import *  # noqa: E402,F401,F403
 
