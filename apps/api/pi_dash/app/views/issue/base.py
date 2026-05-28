@@ -15,6 +15,7 @@ from django.db.models import (
     Exists,
     F,
     Func,
+    IntegerField,
     OuterRef,
     Prefetch,
     Q,
@@ -1239,61 +1240,98 @@ class IssueDetailIdentifierEndpoint(BaseAPIView):
         issue = (
             Issue.objects.filter(project_id=project.id)
             .filter(workspace__slug=slug)
-            .select_related("workspace", "project", "state", "parent")
+            .select_related("workspace", "project", "state", "parent", "agent_ticker")
             .prefetch_related("assignees", "labels", "issue_module__module")
-            .annotate(cycle_id=Subquery(CycleIssue.objects.filter(issue=OuterRef("id")).values("cycle_id")[:1]))
             .annotate(
-                link_count=IssueLink.objects.filter(issue=OuterRef("id"))
-                .order_by()
-                .annotate(count=Func(F("id"), function="Count"))
-                .values("count")
-            )
-            .annotate(
-                attachment_count=FileAsset.objects.filter(
-                    issue_id=OuterRef("id"),
-                    entity_type=FileAsset.EntityTypeContext.ISSUE_ATTACHMENT,
+                cycle_id=Subquery(
+                    CycleIssue.objects.filter(issue=OuterRef("id"), deleted_at__isnull=True).values("cycle_id")[:1]
                 )
-                .order_by()
-                .annotate(count=Func(F("id"), function="Count"))
-                .values("count")
             )
             .annotate(
-                sub_issues_count=Issue.issue_objects.filter(parent=OuterRef("id"))
-                .order_by()
-                .annotate(count=Func(F("id"), function="Count"))
-                .values("count")
+                link_count=Coalesce(
+                    Subquery(
+                        IssueLink.objects.filter(issue=OuterRef("id"))
+                        .order_by()
+                        .values("issue")
+                        .annotate(count=Count("id"))
+                        .values("count"),
+                        output_field=IntegerField(),
+                    ),
+                    0,
+                )
+            )
+            .annotate(
+                attachment_count=Coalesce(
+                    Subquery(
+                        FileAsset.objects.filter(
+                            issue_id=OuterRef("id"),
+                            entity_type=FileAsset.EntityTypeContext.ISSUE_ATTACHMENT,
+                        )
+                        .order_by()
+                        .values("issue_id")
+                        .annotate(count=Count("id"))
+                        .values("count"),
+                        output_field=IntegerField(),
+                    ),
+                    0,
+                )
+            )
+            .annotate(
+                sub_issues_count=Coalesce(
+                    Subquery(
+                        Issue.issue_objects.filter(parent=OuterRef("id"))
+                        .order_by()
+                        .values("parent")
+                        .annotate(count=Count("id"))
+                        .values("count"),
+                        output_field=IntegerField(),
+                    ),
+                    0,
+                )
             )
             .filter(sequence_id=issue_identifier)
+            # Keep multi-value properties as correlated subqueries; joining them
+            # into this single-issue query inflates planner cost enough to trip
+            # PostgreSQL JIT and add seconds of compile time.
             .annotate(
                 label_ids=Coalesce(
-                    ArrayAgg(
-                        "labels__id",
-                        distinct=True,
-                        filter=Q(~Q(labels__id__isnull=True) & Q(label_issue__deleted_at__isnull=True)),
+                    Subquery(
+                        IssueLabel.objects.filter(issue_id=OuterRef("id"), deleted_at__isnull=True)
+                        .order_by()
+                        .values("issue_id")
+                        .annotate(arr=ArrayAgg("label_id", distinct=True))
+                        .values("arr"),
+                        output_field=ArrayField(UUIDField()),
                     ),
                     Value([], output_field=ArrayField(UUIDField())),
                 ),
                 assignee_ids=Coalesce(
-                    ArrayAgg(
-                        "assignees__id",
-                        distinct=True,
-                        filter=Q(
-                            ~Q(assignees__id__isnull=True)
-                            & Q(assignees__member_project__is_active=True)
-                            & Q(issue_assignee__deleted_at__isnull=True)
-                        ),
+                    Subquery(
+                        IssueAssignee.objects.filter(
+                            issue_id=OuterRef("id"),
+                            assignee__member_project__is_active=True,
+                            deleted_at__isnull=True,
+                        )
+                        .order_by()
+                        .values("issue_id")
+                        .annotate(arr=ArrayAgg("assignee_id", distinct=True))
+                        .values("arr"),
+                        output_field=ArrayField(UUIDField()),
                     ),
                     Value([], output_field=ArrayField(UUIDField())),
                 ),
                 module_ids=Coalesce(
-                    ArrayAgg(
-                        "issue_module__module_id",
-                        distinct=True,
-                        filter=Q(
-                            ~Q(issue_module__module_id__isnull=True)
-                            & Q(issue_module__module__archived_at__isnull=True)
-                            & Q(issue_module__deleted_at__isnull=True)
-                        ),
+                    Subquery(
+                        ModuleIssue.objects.filter(
+                            issue_id=OuterRef("id"),
+                            module__archived_at__isnull=True,
+                            deleted_at__isnull=True,
+                        )
+                        .order_by()
+                        .values("issue_id")
+                        .annotate(arr=ArrayAgg("module_id", distinct=True))
+                        .values("arr"),
+                        output_field=ArrayField(UUIDField()),
                     ),
                     Value([], output_field=ArrayField(UUIDField())),
                 ),
@@ -1315,7 +1353,7 @@ class IssueDetailIdentifierEndpoint(BaseAPIView):
                     IssueSubscriber.objects.filter(
                         workspace__slug=slug,
                         project_id=project.id,
-                        issue__sequence_id=issue_identifier,
+                        issue_id=OuterRef("id"),
                         subscriber=request.user,
                     )
                 )
