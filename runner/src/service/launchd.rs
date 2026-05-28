@@ -16,6 +16,15 @@ const STOP_GRACE: Duration = Duration::from_secs(10);
 const STOP_POLL_INTERVAL: Duration = Duration::from_millis(150);
 const POST_KILL_GRACE: Duration = Duration::from_millis(500);
 
+/// Upper bound on how long `start()` will wait for `launchctl bootstrap`
+/// (or the `kickstart -k` fallback) to actually produce a running daemon
+/// before giving up. 30s covers launchd's worst-case shutdown cycle for
+/// the kickstart path: SIGTERM → up to TimeoutTerminateSec (20s default
+/// on macOS) → SIGKILL → reap → exec, plus headroom. A healthy restart
+/// returns in well under a second.
+const START_GRACE: Duration = Duration::from_secs(30);
+const START_POLL_INTERVAL: Duration = Duration::from_millis(150);
+
 /// Write the LaunchAgent plist. Does NOT bootstrap (load) it; that's deferred
 /// to `enable_and_start` so `pidash install` can gate activation on
 /// `pidash configure` completing first.
@@ -108,35 +117,45 @@ pub async fn uninstall(_: &Paths) -> Result<()> {
     Ok(())
 }
 
-/// Bring the LaunchAgent up. Tries `bootstrap` first (which both loads and
-/// starts the service, since `RunAtLoad=true`). Falls back to
-/// `kickstart -k` when the label is still loaded in the user's gui
-/// domain — either because launchctl told us so directly ("already
-/// loaded"/"already bootstrapped") or because we asked `launchctl list`
-/// and it confirmed the label is registered. Every other bootstrap
-/// failure (plist missing, malformed, permission denied, …) is surfaced
-/// with launchctl's own stderr text so the operator can diagnose it.
+/// Bring the LaunchAgent up. Tries `bootstrap` first; falls back to
+/// `kickstart -k` when the label is already loaded. Then waits until
+/// `launchctl list` reports a fresh PID before returning, so callers
+/// can treat a successful return as "daemon is actually exec'd."
 ///
-/// Why the `launchctl list` check matters: `launchctl bootstrap` reports
-/// the "you raced an in-flight teardown" case as the opaque
-///   "Bootstrap failed: 5: Input/output error"
-/// rather than "already loaded." Pre-fix, restart's
-/// stop-then-immediately-start sequence would surface that EIO straight
-/// to the user even though `kickstart -k` would have recovered it.
-/// `stop()` now waits for unload to complete so the race is much rarer,
-/// but the safety net stays because operators can also call
-/// `pidash start` directly into a partially-loaded label.
+/// # Why the fallback-and-wait dance
 ///
-/// Why kickstart isn't tried unconditionally: kickstart on a not-loaded
-/// service fails with exit 113. Chaining there for *every* bootstrap
-/// failure would mask the real cause behind a misleading "kickstart
-/// failed" message — exactly what we want to avoid for genuine plist
-/// problems.
+/// Both `launchctl bootstrap` and `launchctl kickstart -k` are
+/// asynchronous: they return once launchd accepts the request, before
+/// the new process is exec'd. The `kickstart -k` case is the painful
+/// one — SIGTERM → exit → respawn can take 10+ s when the previous
+/// daemon is wedged (active agent run, slow network call, post-wake
+/// socket drain). Without the wait, `restart_and_verify`'s IPC clock
+/// starts before the daemon exists and we surface a misleading
+/// `Daemon did not answer IPC within 5s`.
+///
+/// The fallback exists because `launchctl bootstrap` reports the
+/// "raced an in-flight teardown" case as the opaque
+/// `Bootstrap failed: 5: Input/output error` rather than "already
+/// loaded." `stop()` now waits for unload to complete so the race
+/// is rare, but the `probe_loaded_pid` check stays as a safety net
+/// for operators calling `pidash start` into a partially-loaded label.
+///
+/// We do NOT chain to kickstart unconditionally: kickstart on a
+/// not-loaded service fails with exit 113, which would mask genuine
+/// plist errors (missing, malformed, permission denied) behind a
+/// confusing "kickstart failed."
 pub async fn start() -> Result<()> {
     let uid = get_uid();
     let domain = format!("gui/{uid}");
     let target = format!("{domain}/{LABEL}");
     let plist = plist_path()?;
+
+    // Snapshot the pre-action PID so `wait_for_running` can tell a fresh
+    // daemon from the one we're about to kick. None = no daemon before.
+    // If another caller restarts the daemon between this snapshot and
+    // our bootstrap/kickstart, the freshness predicate still works
+    // correctly: any later PID we see will differ from this snapshot.
+    let pre_pid = probe_loaded_pid().await.filter(|p| *p > 0);
 
     let bootstrap = Command::new("launchctl")
         .arg("bootstrap")
@@ -146,11 +165,11 @@ pub async fn start() -> Result<()> {
         .await
         .context("launchctl bootstrap")?;
     if bootstrap.status.success() {
-        return Ok(());
+        return wait_for_running(pre_pid, START_GRACE).await;
     }
 
     let bootstrap_stderr = String::from_utf8_lossy(&bootstrap.stderr);
-    let label_loaded = probe_loaded_pid().await.is_some();
+    let label_loaded = pre_pid.is_some() || probe_loaded_pid().await.is_some();
     if !is_already_loaded_error(&bootstrap_stderr) && !label_loaded {
         anyhow::bail!(
             "launchctl bootstrap failed ({}): {}",
@@ -164,16 +183,63 @@ pub async fn start() -> Result<()> {
         .output()
         .await
         .context("launchctl kickstart")?;
-    if kickstart.status.success() {
-        return Ok(());
+    if !kickstart.status.success() {
+        let kickstart_stderr = String::from_utf8_lossy(&kickstart.stderr);
+        anyhow::bail!(
+            "launchctl kickstart failed ({}): {} (bootstrap also failed: {})",
+            kickstart.status,
+            kickstart_stderr.trim(),
+            bootstrap_stderr.trim()
+        );
     }
-    let kickstart_stderr = String::from_utf8_lossy(&kickstart.stderr);
+    wait_for_running(pre_pid, START_GRACE).await
+}
+
+/// Poll `launchctl list LABEL` until [`is_fresh_pid`] accepts what we
+/// see. Returns an error on timeout but does NOT signal the daemon: at
+/// this point the caller has *just* asked launchd to start it, and any
+/// failure to actually exec is launchd's to report (next `pidash status`
+/// will pick up a non-zero LastExitStatus). Sending SIGKILL here would
+/// race a daemon that's legitimately mid-init.
+async fn wait_for_running(pre_pid: Option<i32>, timeout: Duration) -> Result<()> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        if is_fresh_pid(probe_loaded_pid().await, pre_pid) {
+            return Ok(());
+        }
+        if Instant::now() >= deadline {
+            break;
+        }
+        tokio::time::sleep(START_POLL_INTERVAL).await;
+    }
+    let pre_desc = pre_pid
+        .map(|p| format!("pre-action pid was {p}"))
+        .unwrap_or_else(|| "no daemon was registered before this start".to_string());
     anyhow::bail!(
-        "launchctl kickstart failed ({}): {} (bootstrap also failed: {})",
-        kickstart.status,
-        kickstart_stderr.trim(),
-        bootstrap_stderr.trim()
+        "service {LABEL} did not report a fresh PID within {}s of \
+         bootstrap/kickstart ({pre_desc}). The launchd request was \
+         accepted but the daemon never exec'd in time — check \
+         `launchctl list {LABEL}` and the daemon's stderr log.",
+        timeout.as_secs()
     );
+}
+
+/// Decide whether the latest `launchctl list` probe shows a daemon we
+/// should accept as the post-start instance. `current` is whatever
+/// `probe_loaded_pid` just returned; `pre` is what we captured before
+/// bootstrap/kickstart.
+///
+/// Accept = the daemon exists (PID > 0) AND its PID differs from the
+/// pre-action snapshot — meaning launchd actually went through a
+/// respawn cycle, not just kept the old process running.
+///
+/// Caveat: if launchd were to re-assign the *same* PID to the new
+/// daemon (theoretical — macOS uses a pseudo-random PID walk and does
+/// not reuse PIDs back-to-back), this would never return true and
+/// `wait_for_running` would time out on a daemon that's actually
+/// healthy. Not seen in practice and not worth pre-engineering for.
+fn is_fresh_pid(current: Option<i32>, pre: Option<i32>) -> bool {
+    matches!(current, Some(pid) if pid > 0 && Some(pid) != pre)
 }
 
 pub async fn stop() -> Result<()> {
@@ -625,6 +691,44 @@ mod tests {
 };
 "#;
         assert_eq!(parse_loaded_pid(stdout), None);
+    }
+
+    #[test]
+    fn is_fresh_pid_accepts_any_positive_pid_on_fresh_install() {
+        // Install path: no daemon registered before `start()` ran. The
+        // first PID launchd assigns is by definition fresh, whatever
+        // its value.
+        assert!(is_fresh_pid(Some(1234), None));
+        assert!(is_fresh_pid(Some(2), None));
+    }
+
+    #[test]
+    fn is_fresh_pid_accepts_only_a_different_pid_on_restart() {
+        // Restart path: pre-action PID was 884. While we're still
+        // looking at PID 884 (kickstart hasn't actually killed it yet,
+        // or has killed it and respawned with the same PID), reject.
+        // Once we see a different PID, accept.
+        assert!(!is_fresh_pid(Some(884), Some(884)));
+        assert!(is_fresh_pid(Some(12345), Some(884)));
+    }
+
+    #[test]
+    fn is_fresh_pid_rejects_no_pid_yet() {
+        // launchctl listed the label but hasn't assigned a PID — the
+        // transient window between load and exec. Keep polling.
+        assert!(!is_fresh_pid(Some(0), Some(884)));
+        assert!(!is_fresh_pid(Some(0), None));
+    }
+
+    #[test]
+    fn is_fresh_pid_rejects_label_gone() {
+        // probe_loaded_pid returns None when launchctl reports the
+        // label isn't in the domain at all — e.g. bootstrap silently
+        // didn't take, or someone else just `bootout`'d it. Keep
+        // polling: the bootstrap/kickstart we issued may still be in
+        // flight.
+        assert!(!is_fresh_pid(None, None));
+        assert!(!is_fresh_pid(None, Some(884)));
     }
 
     #[test]
