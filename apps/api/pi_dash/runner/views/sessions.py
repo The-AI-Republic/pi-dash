@@ -43,14 +43,14 @@ class _SessionEvictedDuringPoll(Exception):
     pass
 
 
-def _session_open_side_effect(runner_id, label: str, func, *args, **kwargs):
+def _session_open_side_effect(log_runner_id, label: str, func, *args, **kwargs):
     started = time.monotonic()
     try:
         return func(*args, **kwargs)
     except _REDIS_SIDE_EFFECT_ERRORS:
         logger.exception(
             "runner session-open Redis side effect failed runner=%s step=%s",
-            runner_id,
+            log_runner_id,
             label,
         )
         return None
@@ -60,7 +60,7 @@ def _session_open_side_effect(runner_id, label: str, func, *args, **kwargs):
         if elapsed_ms >= warn_ms:
             logger.warning(
                 "runner session-open Redis side effect slow runner=%s step=%s duration_ms=%s",
-                runner_id,
+                log_runner_id,
                 label,
                 elapsed_ms,
             )
