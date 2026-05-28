@@ -18,6 +18,9 @@ import useSize from "@/hooks/use-window-size";
 // pi dash web components
 import { UserMenuRoot } from "@/components/workspace/sidebar/user-menu-root";
 import { IconButton } from "@pi-dash/propel/icon-button";
+// assets
+import piSymbolDark from "@/app/assets/pi-dash-logos/pi-symbol-dark.svg?url";
+import piSymbolLight from "@/app/assets/pi-dash-logos/pi-symbol-light.svg?url";
 
 type TSidebarWrapperProps = {
   title: string;
@@ -54,7 +57,25 @@ export const SidebarWrapper = observer(function SidebarWrapper(props: TSidebarWr
           {/* Workspace switcher and settings */}
 
           <div className="flex items-center justify-between gap-2 px-2">
-            <span className="pt-1 text-16 font-medium text-primary">{title}</span>
+            <div className="flex items-center gap-2">
+              {title === "Pi Dash" && (
+                <>
+                  <img
+                    src={piSymbolLight}
+                    alt="Pi Dash"
+                    className="h-5 w-auto object-contain dark:hidden"
+                    aria-hidden="true"
+                  />
+                  <img
+                    src={piSymbolDark}
+                    alt="Pi Dash"
+                    className="hidden h-5 w-auto object-contain dark:block"
+                    aria-hidden="true"
+                  />
+                </>
+              )}
+              <span className="pt-1 text-16 font-medium text-primary">{title}</span>
+            </div>
             <div className="flex items-center gap-2">
               {title === "Pi Dash" && (
                 <IconButton
