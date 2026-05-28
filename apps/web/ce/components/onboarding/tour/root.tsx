@@ -10,6 +10,8 @@ import { observer } from "mobx-react";
 import { Button } from "@pi-dash/propel/button";
 import { CloseIcon, PiSymbol } from "@pi-dash/propel/icons";
 // assets
+// TODO(onboarding): replace these reused Plane-era screenshots with Pi Dash-native captures
+// (runner CLI, runner chat, workpad) once design provides them.
 import CyclesTour from "@/app/assets/onboarding/cycles.webp?url";
 import IssuesTour from "@/app/assets/onboarding/issues.webp?url";
 import ModulesTour from "@/app/assets/onboarding/modules.webp?url";
@@ -25,7 +27,7 @@ export type TOnboardingTourProps = {
   onComplete: () => void;
 };
 
-export type TTourSteps = "welcome" | "work-items" | "cycles" | "modules" | "views" | "pages";
+export type TTourSteps = "welcome" | "work-items" | "runners" | "chat" | "workpads" | "pages";
 
 const TOUR_STEPS: {
   key: TTourSteps;
@@ -37,44 +39,46 @@ const TOUR_STEPS: {
 }[] = [
   {
     key: "work-items",
-    title: "Plan with work items",
+    title: "Plan work your agents can run",
     description:
-      "The work item is the building block of the Pi Dash. Most concepts in Pi Dash are either associated with work items and their properties.",
+      "Work items are the unit of work in Pi Dash. Describe what needs to happen, attach context, and hand it to a coding agent — or keep it for your team.",
     image: IssuesTour,
-    nextStep: "cycles",
+    nextStep: "runners",
   },
   {
-    key: "cycles",
-    title: "Move with cycles",
+    key: "runners",
+    title: "Connect a Pi Dash Runner",
     description:
-      "Cycles help you and your team to progress faster, similar to the sprints commonly used in agile development.",
+      "Install the Pi Dash Runner on your dev machine to plug in Claude Code or Codex. The runner picks up work items you dispatch and executes them in the background.",
     image: CyclesTour,
     prevStep: "work-items",
-    nextStep: "modules",
+    nextStep: "chat",
   },
   {
-    key: "modules",
-    title: "Break into modules",
-    description: "Modules break your big thing into Projects or Features, to help you organize better.",
-    image: ModulesTour,
-    prevStep: "cycles",
-    nextStep: "views",
-  },
-  {
-    key: "views",
-    title: "Views",
+    key: "chat",
+    title: "Steer agents from Runner Chat",
     description:
-      "Create custom filters to display only the work items that matter to you. Save and share your filters in just a few clicks.",
+      "Talk to your agents while they work. Answer questions, redirect mid-task, or review what they are doing — all in a live chat tied to each runner session.",
+    image: ModulesTour,
+    prevStep: "runners",
+    nextStep: "workpads",
+  },
+  {
+    key: "workpads",
+    title: "Collaborate in the workpad",
+    description:
+      "Every work item has a workpad — a shared Markdown space where you and your agent build context together. Plans, decisions, and handoff notes stay with the issue.",
     image: ViewsTour,
-    prevStep: "modules",
+    prevStep: "chat",
     nextStep: "pages",
   },
   {
     key: "pages",
     title: "Document with pages",
-    description: "Use Pages to quickly jot down work items when you're in a meeting or starting a day.",
+    description:
+      "Use Pages for specs, runbooks, and notes your team and your agents can reference. A good place to capture context that spans multiple work items.",
     image: PagesTour,
-    prevStep: "views",
+    prevStep: "workpads",
   },
 ];
 
@@ -102,8 +106,8 @@ export const TourRoot = observer(function TourRoot(props: TOnboardingTourProps) 
                 Welcome to Pi Dash, {currentUser?.first_name} {currentUser?.last_name}
               </h3>
               <p className="mt-3 text-13 text-secondary">
-                We{"'"}re glad that you decided to try out Pi Dash. You can now manage your projects with ease. Get
-                started by creating a project.
+                Pi Dash is where you plan work and dispatch it to AI coding agents. Define what needs to be done,
+                connect a runner, and watch your agents execute it — with you in the loop the whole way.
               </p>
               <div className="flex h-full items-end">
                 <div className="mt-12 flex items-center gap-6">
