@@ -11,6 +11,7 @@ Registered via ``apps/api/pi_dash/celery.py`` and the existing
 from __future__ import annotations
 
 import logging
+from collections import defaultdict
 from datetime import timedelta
 
 from celery import shared_task
@@ -166,21 +167,38 @@ def sweep_old_streams() -> int:
     cutoff = int(getattr(settings, "RUNNER_STREAM_MIN_RETENTION_SECS", 3600))
     time_cutoff_id = outbox.id_for_secs_ago(cutoff)
     trimmed_count = 0
+    reaped_consumers = 0
 
-    active_runner_ids = list(
-        RunnerSession.objects.filter(revoked_at__isnull=True).values_list(
-            "runner_id", flat=True
+    active_consumers_by_runner = defaultdict(set)
+    active_sessions = RunnerSession.objects.filter(
+        revoked_at__isnull=True
+    ).values_list("runner_id", "id")
+    for runner_id, session_id in active_sessions:
+        active_consumers_by_runner[runner_id].add(
+            outbox.consumer_name(session_id)
         )
+
+    runner_ids_with_sessions = set(
+        RunnerSession.objects.values_list("runner_id", flat=True).distinct()
     )
-    for rid in set(active_runner_ids):
+    for rid in runner_ids_with_sessions:
+        keep_consumers = active_consumers_by_runner.get(rid, set())
+        if keep_consumers:
+            try:
+                removed = outbox.safe_trim_runner_stream(
+                    rid, time_cutoff_id=time_cutoff_id
+                )
+                if removed:
+                    trimmed_count += removed
+            except Exception:
+                logger.exception("safe_trim_runner_stream failed for %s", rid)
         try:
-            removed = outbox.safe_trim_runner_stream(
-                rid, time_cutoff_id=time_cutoff_id
+            reaped_consumers += outbox.reap_idle_consumers(
+                rid,
+                keep_consumers=keep_consumers,
             )
-            if removed:
-                trimmed_count += removed
         except Exception:
-            logger.exception("safe_trim_runner_stream failed for %s", rid)
+            logger.exception("reap_idle_consumers failed for %s", rid)
 
     # Orphaned-stream deletion for runners flagged for cleanup.
     for rid in outbox.due_runners_for_stream_cleanup():
@@ -189,6 +207,8 @@ def sweep_old_streams() -> int:
             outbox.remove_stream_cleanup_marker(rid)
         except Exception:
             logger.exception("delete_runner_stream failed for %s", rid)
+    if reaped_consumers:
+        logger.info("sweep_old_streams reaped %s idle consumer(s)", reaped_consumers)
     return trimmed_count
 
 

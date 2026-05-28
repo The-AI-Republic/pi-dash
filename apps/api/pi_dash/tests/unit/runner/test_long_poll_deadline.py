@@ -27,8 +27,29 @@ from typing import Any
 from unittest.mock import patch
 
 import pytest
+from redis.exceptions import ConnectionError as RedisConnectionError
 
-from pi_dash.runner.views.sessions import RunnerSessionPollEndpoint
+from pi_dash.runner.views.sessions import (
+    RunnerSessionPollEndpoint,
+    _session_open_side_effect,
+)
+
+
+@pytest.mark.unit
+def test_session_open_side_effect_returns_none_on_redis_error():
+    def _raise():
+        raise TimeoutError("redis timed out")
+
+    assert _session_open_side_effect("runner-1", "claim", _raise) is None
+
+
+@pytest.mark.unit
+def test_session_open_side_effect_reraises_programming_errors():
+    def _raise():
+        raise TypeError("wrong helper signature")
+
+    with pytest.raises(TypeError, match="wrong helper signature"):
+        _session_open_side_effect("runner-1", "claim", _raise)
 
 
 @pytest.mark.unit
@@ -131,3 +152,37 @@ def test_initial_pel_replay_still_reads_with_zero_budget():
             "use_zero": True,
         }
     ]
+
+
+@pytest.mark.unit
+def test_pubsub_is_closed_when_subscribe_fails():
+    endpoint = RunnerSessionPollEndpoint()
+    runner_id = "11111111-1111-1111-1111-111111111111"
+    session_id = "22222222-2222-2222-2222-222222222222"
+
+    class _FailingPubsub:
+        closed = False
+
+        def subscribe(self, _channel):
+            raise RedisConnectionError("too many connections")
+
+        def close(self):
+            self.closed = True
+
+    pubsub = _FailingPubsub()
+
+    class _FakeRedis:
+        def pubsub(self, ignore_subscribe_messages=True):
+            return pubsub
+
+    with patch("pi_dash.settings.redis.redis_instance", return_value=_FakeRedis()):
+        with pytest.raises(RedisConnectionError, match="too many connections"):
+            endpoint._read_with_eviction_awareness(
+                runner_id=runner_id,
+                session_id=session_id,
+                sid=session_id,
+                block_ms=100,
+                use_zero=False,
+            )
+
+    assert pubsub.closed is True
