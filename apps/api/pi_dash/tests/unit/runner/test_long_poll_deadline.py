@@ -28,7 +28,18 @@ from unittest.mock import patch
 
 import pytest
 
-from pi_dash.runner.views.sessions import RunnerSessionPollEndpoint
+from pi_dash.runner.views.sessions import (
+    RunnerSessionPollEndpoint,
+    _session_open_side_effect,
+)
+
+
+@pytest.mark.unit
+def test_session_open_side_effect_returns_none_on_redis_error():
+    def _raise():
+        raise TimeoutError("redis timed out")
+
+    assert _session_open_side_effect("runner-1", "claim", _raise) is None
 
 
 @pytest.mark.unit

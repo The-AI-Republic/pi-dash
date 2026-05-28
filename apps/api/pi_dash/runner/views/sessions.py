@@ -41,6 +41,29 @@ class _SessionEvictedDuringPoll(Exception):
     pass
 
 
+def _session_open_side_effect(runner_id, label: str, func, *args, **kwargs):
+    started = time.monotonic()
+    try:
+        return func(*args, **kwargs)
+    except Exception:
+        logger.exception(
+            "runner session-open Redis side effect failed runner=%s step=%s",
+            runner_id,
+            label,
+        )
+        return None
+    finally:
+        elapsed_ms = int((time.monotonic() - started) * 1000)
+        warn_ms = int(getattr(settings, "RUNNER_SESSION_OPEN_REDIS_WARN_MS", 500))
+        if elapsed_ms >= warn_ms:
+            logger.warning(
+                "runner session-open Redis side effect slow runner=%s step=%s duration_ms=%s",
+                runner_id,
+                label,
+                elapsed_ms,
+            )
+
+
 def _check_protocol_header(request) -> Response | None:
     raw = (request.headers.get("X-Runner-Protocol-Version") or "").strip()
     if not raw:
@@ -105,7 +128,12 @@ class RunnerSessionOpenEndpoint(APIView):
         # slow XCLAIM inside would leave Postgres ``idle in transaction`` until
         # Redis returns — observed jamming a row for an hour, blocking every
         # subsequent poll / open / delete on it.
-        outbox.ensure_stream_group(runner.id)
+        _session_open_side_effect(
+            runner.id,
+            "ensure_stream_group",
+            outbox.ensure_stream_group,
+            runner.id,
+        )
 
         old_session_id = None
         new_sid = _uuid.uuid4()
@@ -140,20 +168,36 @@ class RunnerSessionOpenEndpoint(APIView):
         # visible, and the row lock is released, so a Redis hang here can no
         # longer wedge the database.
         if old_session_id:
-            outbox.clear_session_marker(_uuid.UUID(old_session_id))
-        outbox.claim_pending_for_new_session(
+            _session_open_side_effect(
+                runner.id,
+                "clear_session_marker",
+                outbox.clear_session_marker,
+                _uuid.UUID(old_session_id),
+            )
+        _session_open_side_effect(
+            runner.id,
+            "claim_pending_for_new_session",
+            outbox.claim_pending_for_new_session,
             runner_id=runner.id,
             old_consumer=outbox.consumer_name(old_session_id) if old_session_id else None,
             new_consumer=outbox.consumer_name(new_sid),
         )
-        outbox.publish_session_eviction(
+        _session_open_side_effect(
+            runner.id,
+            "publish_session_eviction",
+            outbox.publish_session_eviction,
             runner.id,
             old_session_id=old_session_id,
             new_session_id=str(new_sid),
         )
 
         # 8. Drain offline buffer into live stream.
-        outbox.drain_offline_into_live(runner.id)
+        _session_open_side_effect(
+            runner.id,
+            "drain_offline_into_live",
+            outbox.drain_offline_into_live,
+            runner.id,
+        )
 
         # 9. Resume in-flight run, if any.
         resume_ack = None

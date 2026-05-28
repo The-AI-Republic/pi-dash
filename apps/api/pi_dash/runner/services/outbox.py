@@ -278,6 +278,7 @@ def claim_pending_for_new_session(
             logger.exception("xautoclaim failed for runner %s", runner_id)
             return claimed
         if not result:
+            delete_consumer(runner_id, old_consumer, client=client)
             return claimed
         # xautoclaim returns (next_cursor, claimed_ids[, deleted_ids])
         next_cursor = result[0]
@@ -286,8 +287,84 @@ def claim_pending_for_new_session(
             next_cursor = next_cursor.decode()
         claimed += len(claimed_ids)
         if next_cursor == "0-0" or not claimed_ids:
+            delete_consumer(runner_id, old_consumer, client=client)
             return claimed
         cursor = next_cursor
+
+
+def delete_consumer(
+    runner_id: UUID | str,
+    consumer: Optional[str],
+    *,
+    client=None,
+) -> int:
+    """Delete an idle Redis stream consumer after its PEL has been handed off."""
+    if not consumer:
+        return 0
+    client = client or redis_instance()
+    if client is None:
+        return 0
+    try:
+        return int(
+            client.xgroup_delconsumer(
+                stream_key(runner_id),
+                group_name(runner_id),
+                consumer,
+            )
+        )
+    except Exception:
+        logger.exception(
+            "xgroup delconsumer failed for runner %s consumer %s",
+            runner_id,
+            consumer,
+        )
+        return 0
+
+
+def reap_idle_consumers(
+    runner_id: UUID | str,
+    *,
+    keep_consumers: Iterable[str] = (),
+    min_idle_ms: Optional[int] = None,
+) -> int:
+    """Drop old zero-pending Redis stream consumers for one runner.
+
+    Redis keeps a consumer entry forever unless it is explicitly deleted.
+    A reconnecting runner creates one consumer per session, so session-open
+    retry loops can leave hundreds of zero-pending consumers behind.
+    """
+    client = redis_instance()
+    if client is None:
+        return 0
+    if min_idle_ms is None:
+        poll_secs = int(getattr(settings, "LONG_POLL_INTERVAL_SECS", 25))
+        min_idle_ms = int(
+            getattr(
+                settings,
+                "RUNNER_STREAM_CONSUMER_IDLE_MS",
+                max(poll_secs * 4 * 1000, 120_000),
+            )
+        )
+    keep = set(keep_consumers)
+    try:
+        consumers = client.xinfo_consumers(stream_key(runner_id), group_name(runner_id))
+    except Exception:
+        logger.exception("xinfo consumers failed for runner %s", runner_id)
+        return 0
+
+    removed = 0
+    for entry in consumers or []:
+        name = entry.get("name") if isinstance(entry, dict) else None
+        pending = entry.get("pending", 0) if isinstance(entry, dict) else 0
+        idle = entry.get("idle", 0) if isinstance(entry, dict) else 0
+        if isinstance(name, bytes):
+            name = name.decode()
+        if not name or name in keep or int(pending or 0) > 0:
+            continue
+        if int(idle or 0) < min_idle_ms:
+            continue
+        removed += delete_consumer(runner_id, str(name), client=client)
+    return removed
 
 
 def mark_pel_drained(session_id: UUID | str) -> None:
