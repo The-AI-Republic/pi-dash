@@ -5,7 +5,7 @@
 from rest_framework.response import Response
 from rest_framework import status
 from typing import Dict, List, Any
-from django.db.models import QuerySet, Q, Count
+from django.db.models import QuerySet, Q, Count, Sum
 from django.http import HttpRequest
 from django.db.models.functions import TruncMonth
 from django.utils import timezone
@@ -26,6 +26,7 @@ from pi_dash.utils.build_chart import build_analytics_chart
 from pi_dash.utils.date_utils import (
     get_analytics_filters,
 )
+from pi_dash.runner.models import AgentRun
 
 
 class AdvanceAnalyticsBaseView(BaseAPIView):
@@ -63,6 +64,37 @@ class AdvanceAnalyticsEndpoint(AdvanceAnalyticsBaseView):
             # "filter_count": get_previous_count(),
         }
 
+    def get_agent_run_usage_stats(self) -> Dict[str, Dict[str, int]]:
+        project_ids = self.request.GET.get("project_ids", None)
+        if project_ids:
+            project_ids = [str(project_id) for project_id in project_ids.split(",")]
+
+        queryset = AgentRun.objects.filter(
+            workspace__slug=self._workspace_slug,
+            pod__project__project_projectmember__member=self.request.user,
+            pod__project__project_projectmember__is_active=True,
+            pod__project__deleted_at__isnull=True,
+            pod__project__archived_at__isnull=True,
+        )
+        if project_ids:
+            queryset = queryset.filter(pod__project_id__in=project_ids)
+        if self.filters["analytics_date_range"]:
+            queryset = queryset.filter(
+                created_at__gte=self.filters["analytics_date_range"]["current"]["gte"],
+                created_at__lte=self.filters["analytics_date_range"]["current"]["lte"],
+            )
+
+        totals = queryset.aggregate(
+            input_tokens=Sum("input_tokens", default=0),
+            output_tokens=Sum("output_tokens", default=0),
+            total_tokens=Sum("total_tokens", default=0),
+        )
+        return {
+            "agent_run_input_tokens": {"count": totals["input_tokens"] or 0},
+            "agent_run_output_tokens": {"count": totals["output_tokens"] or 0},
+            "agent_run_total_tokens": {"count": totals["total_tokens"] or 0},
+        }
+
     def get_overview_data(self) -> Dict[str, Dict[str, int]]:
         members_query = WorkspaceMember.objects.filter(
             workspace__slug=self._workspace_slug, is_active=True, member__is_bot=False
@@ -88,6 +120,7 @@ class AdvanceAnalyticsEndpoint(AdvanceAnalyticsBaseView):
                     issue_intake__status__in=["-2", "-1", "0", "1", "2"]  # TODO: Add description for reference.
                 )
             ),
+            **self.get_agent_run_usage_stats(),
         }
 
     def get_work_items_stats(self) -> Dict[str, Dict[str, int]]:
