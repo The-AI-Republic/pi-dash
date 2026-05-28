@@ -91,10 +91,10 @@ class GlobalSearchEndpoint(BaseAPIView):
             workspace__slug=slug,
         )
 
-        # include_comments=False — the top-bar picker expects
-        # title-scoped results; comment-text widening is reserved for
-        # IssueAdvancedSearchEndpoint (agent path).
-        issues = issue_search_queryset(issues, query, include_comments=False)
+        # Topbar issue search should surface issues by title, body, or
+        # comments. The UI only renders issue rows, so a comment match
+        # returns its parent issue here.
+        issues = issue_search_queryset(issues, query, include_comments=True)
 
         if workspace_search == "false" and project_id:
             issues = issues.filter(project_id=project_id)

@@ -37,6 +37,7 @@ export function PowerKModalSearchMenu(props: Props) {
   const [resultsCount, setResultsCount] = useState(0);
   const [isSearching, setIsSearching] = useState(false);
   const [results, setResults] = useState<IWorkspaceSearchResults>(WORKSPACE_DEFAULT_SEARCH_RESULT);
+  const [resultsSearchTerm, setResultsSearchTerm] = useState("");
   const debouncedSearchTerm = useDebounce(searchTerm, 500);
   // navigation
   const { workspaceSlug, projectId } = useParams();
@@ -48,27 +49,36 @@ export function PowerKModalSearchMenu(props: Props) {
     setIsSearching(true);
 
     if (debouncedSearchTerm) {
+      setResults(WORKSPACE_DEFAULT_SEARCH_RESULT);
+      setResultsCount(0);
+      setResultsSearchTerm("");
       workspaceService
         .searchWorkspace(workspaceSlug.toString(), {
           ...(projectId ? { project_id: projectId.toString() } : {}),
           search: debouncedSearchTerm,
           workspace_search: !projectId ? true : isWorkspaceLevel,
         })
-        .then((results) => {
-          setResults(results);
-          const count = Object.keys(results.results).reduce(
-            (accumulator, key) => results.results[key as keyof typeof results.results]?.length + accumulator,
+        .then((searchResults) => {
+          setResults(searchResults);
+          const count = Object.keys(searchResults.results).reduce(
+            (accumulator, key) =>
+              searchResults.results[key as keyof typeof searchResults.results]?.length + accumulator,
             0
           );
           setResultsCount(count);
+          setResultsSearchTerm(debouncedSearchTerm);
+          return searchResults;
         })
         .catch(() => {
           setResults(WORKSPACE_DEFAULT_SEARCH_RESULT);
           setResultsCount(0);
+          setResultsSearchTerm("");
         })
         .finally(() => setIsSearching(false));
     } else {
       setResults(WORKSPACE_DEFAULT_SEARCH_RESULT);
+      setResultsCount(0);
+      setResultsSearchTerm("");
       setIsSearching(false);
     }
   }, [debouncedSearchTerm, isWorkspaceLevel, projectId, workspaceSlug, activePage]);
@@ -109,7 +119,14 @@ export function PowerKModalSearchMenu(props: Props) {
         />
       )}
 
-      {searchTerm.trim() !== "" && <PowerKModalSearchResults closePalette={handleClosePalette} results={results} />}
+      {searchTerm.trim() !== "" && (
+        <PowerKModalSearchResults
+          closePalette={handleClosePalette}
+          matchedSearchTerm={resultsSearchTerm}
+          results={results}
+          searchTerm={searchTerm}
+        />
+      )}
     </>
   );
 }
