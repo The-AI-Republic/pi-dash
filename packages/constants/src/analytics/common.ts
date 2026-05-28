@@ -77,6 +77,18 @@ export const ANALYTICS_INSIGHTS_FIELDS: Record<TAnalyticsTabsBase, IInsightField
         entity: "sidebar.intake",
       },
     },
+    {
+      key: "agent_run_input_tokens",
+      i18nKey: "workspace_analytics.agent_run_input_tokens",
+    },
+    {
+      key: "agent_run_output_tokens",
+      i18nKey: "workspace_analytics.agent_run_output_tokens",
+    },
+    {
+      key: "agent_run_total_tokens",
+      i18nKey: "workspace_analytics.agent_run_total_tokens",
+    },
   ],
   "work-items": [
     {
