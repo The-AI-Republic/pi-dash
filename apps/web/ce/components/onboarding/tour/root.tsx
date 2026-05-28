@@ -49,7 +49,7 @@ const TOUR_STEPS: {
     key: "runners",
     title: "Connect a Pi Dash Runner",
     description:
-      "Install the Pi Dash Runner on your dev machine to plug in Claude Code, Codex, or other coding agents. The runner picks up work items you dispatch and executes them in the background.",
+      "Install the Pi Dash Runner on your dev machine to plug in Claude Code or Codex. The runner picks up work items you dispatch and executes them in the background.",
     image: CyclesTour,
     prevStep: "work-items",
     nextStep: "chat",
