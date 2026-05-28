@@ -46,6 +46,7 @@ export const IssueDetailsPage = observer(function IssueDetailsPage({ params }: R
     fetchIssueWithIdentifier,
     issue: { getIssueById },
   } = useIssueDetail();
+  const { fetchIssue: fetchEpic } = useIssueDetail(EIssueServiceType.EPICS);
   const { getProjectById, getProjectByIdentifier } = useProject();
   const { toggleIssueDetailSidebar, issueDetailSidebarCollapsed } = useAppTheme();
 
@@ -78,10 +79,15 @@ export const IssueDetailsPage = observer(function IssueDetailsPage({ params }: R
   } = useSWR<TIssue, Error>(
     shouldHydrateIssue ? `ISSUE_DETAIL_HYDRATE_${workspaceSlug}_${projectId}_${issueId}` : null,
     () =>
-      fetchIssue(workspaceSlug.toString(), projectId.toString(), issueId?.toString() ?? "", {
-        preserveSubscription: true,
-        skipActivityAndComments: true,
-      }),
+      (liteIssue?.is_epic ? fetchEpic : fetchIssue)(
+        workspaceSlug.toString(),
+        projectId.toString(),
+        issueId?.toString() ?? "",
+        {
+          preserveSubscription: true,
+          skipActivityAndComments: true,
+        }
+      ),
     { revalidateOnFocus: false }
   );
   const isMetadataHydrating = shouldHydrateIssue && isHydratingIssue && !hydratedIssue;
@@ -113,7 +119,7 @@ export const IssueDetailsPage = observer(function IssueDetailsPage({ params }: R
         `/${workspaceSlug}/projects/${liteIssue.project_id}/intake/?currentTab=open&inboxIssueId=${liteIssue?.id}`
       );
     }
-  }, [workspaceSlug, liteIssue, router]);
+  }, [workspaceSlug, liteIssue?.id, liteIssue?.is_intake, liteIssue?.project_id, router]);
 
   if ((error && !isLoading) || hydrationError) {
     return (
@@ -122,7 +128,7 @@ export const IssueDetailsPage = observer(function IssueDetailsPage({ params }: R
         title={t("issue.empty_state.issue_detail.title")}
         description={t("issue.empty_state.issue_detail.description")}
         primaryButton={{
-          text: hydrationError ? "Retry" : t("issue.empty_state.issue_detail.primary_button.text"),
+          text: hydrationError ? t("common.retry") : t("issue.empty_state.issue_detail.primary_button.text"),
           onClick: () => {
             if (hydrationError) void retryIssueHydration();
             else router.push(`/${workspaceSlug}/workspace-views/all-issues/`);

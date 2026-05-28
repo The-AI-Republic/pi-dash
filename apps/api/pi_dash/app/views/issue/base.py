@@ -1281,7 +1281,6 @@ class IssueDetailIdentifierEndpoint(BaseAPIView):
                     "is_draft",
                     "archived_at",
                     "external_source",
-                    "type_id",
                 )
                 .annotate(
                     is_epic=Coalesce(
@@ -1318,35 +1317,47 @@ class IssueDetailIdentifierEndpoint(BaseAPIView):
                     )
                 )
                 .annotate(
-                    link_count=Subquery(
-                        IssueLink.objects.filter(issue=OuterRef("id"))
-                        .order_by()
-                        .values("issue")
-                        .annotate(count=Count("id"))
-                        .values("count"),
+                    link_count=Coalesce(
+                        Subquery(
+                            IssueLink.objects.filter(issue=OuterRef("id"))
+                            .order_by()
+                            .values("issue")
+                            .annotate(count=Count("id"))
+                            .values("count"),
+                            output_field=IntegerField(),
+                        ),
+                        Value(0),
                         output_field=IntegerField(),
                     )
                 )
                 .annotate(
-                    attachment_count=Subquery(
-                        FileAsset.objects.filter(
-                            issue_id=OuterRef("id"),
-                            entity_type=FileAsset.EntityTypeContext.ISSUE_ATTACHMENT,
-                        )
-                        .order_by()
-                        .values("issue_id")
-                        .annotate(count=Count("id"))
-                        .values("count"),
+                    attachment_count=Coalesce(
+                        Subquery(
+                            FileAsset.objects.filter(
+                                issue_id=OuterRef("id"),
+                                entity_type=FileAsset.EntityTypeContext.ISSUE_ATTACHMENT,
+                            )
+                            .order_by()
+                            .values("issue_id")
+                            .annotate(count=Count("id"))
+                            .values("count"),
+                            output_field=IntegerField(),
+                        ),
+                        Value(0),
                         output_field=IntegerField(),
                     )
                 )
                 .annotate(
-                    sub_issues_count=Subquery(
-                        Issue.issue_objects.filter(parent=OuterRef("id"))
-                        .order_by()
-                        .values("parent")
-                        .annotate(count=Count("id"))
-                        .values("count"),
+                    sub_issues_count=Coalesce(
+                        Subquery(
+                            Issue.issue_objects.filter(parent=OuterRef("id"))
+                            .order_by()
+                            .values("parent")
+                            .annotate(count=Count("id"))
+                            .values("count"),
+                            output_field=IntegerField(),
+                        ),
+                        Value(0),
                         output_field=IntegerField(),
                     )
                 )

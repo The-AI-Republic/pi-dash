@@ -524,6 +524,7 @@ export default {
     filters: "Filters",
     display: "Display",
     load_more: "Load more",
+    retry: "Retry",
     activity: "Activity",
     analytics: "Analytics",
     dates: "Dates",
