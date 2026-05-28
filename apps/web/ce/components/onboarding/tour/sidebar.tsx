@@ -5,7 +5,7 @@
  */
 
 // pi dash imports
-import { CycleIcon, ModuleIcon, PageIcon, ViewsIcon, WorkItemsIcon } from "@pi-dash/propel/icons";
+import { AiIcon, CommentFillIcon, PageIcon, StickyNoteIcon, WorkItemsIcon } from "@pi-dash/propel/icons";
 import type { ISvgIcons } from "@pi-dash/propel/icons";
 // types
 import type { TTourSteps } from "./root";
@@ -21,19 +21,19 @@ const sidebarOptions: {
     Icon: WorkItemsIcon,
   },
   {
-    key: "cycles",
-    label: "Cycles",
-    Icon: CycleIcon,
+    key: "runners",
+    label: "Runners",
+    Icon: AiIcon,
   },
   {
-    key: "modules",
-    label: "Modules",
-    Icon: ModuleIcon,
+    key: "chat",
+    label: "Runner chat",
+    Icon: CommentFillIcon,
   },
   {
-    key: "views",
-    label: "Views",
-    Icon: ViewsIcon,
+    key: "workpads",
+    label: "Workpads",
+    Icon: StickyNoteIcon,
   },
   {
     key: "pages",
@@ -57,17 +57,17 @@ export function TourSidebar({ step, setStep }: Props) {
       </h3>
       <div className="mt-8 space-y-5">
         {sidebarOptions.map((option) => (
-          <h5
+          <button
             key={option.key}
-            className={`flex cursor-pointer items-center gap-2 border-l-[3px] py-0.5 pr-2 pl-3 text-13 font-medium capitalize ${
+            type="button"
+            className={`flex w-full cursor-pointer items-center gap-2 border-l-[3px] py-0.5 pr-2 pl-3 text-left text-13 font-medium capitalize ${
               step === option.key ? "border-accent-strong text-accent-primary" : "border-transparent text-secondary"
             }`}
             onClick={() => setStep(option.key)}
-            role="button"
           >
             <option.Icon className="h-4 w-4" aria-hidden="true" />
             {option.label}
-          </h5>
+          </button>
         ))}
       </div>
     </div>
