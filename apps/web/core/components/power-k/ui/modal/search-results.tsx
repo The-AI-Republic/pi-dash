@@ -17,16 +17,20 @@ import { POWER_K_SEARCH_RESULTS_GROUPS_MAP } from "./search-results-map";
 
 type Props = {
   closePalette: () => void;
+  matchedSearchTerm: string;
   results: IWorkspaceSearchResults;
+  searchTerm: string;
 };
 
 export const PowerKModalSearchResults = observer(function PowerKModalSearchResults(props: Props) {
-  const { closePalette, results } = props;
+  const { closePalette, matchedSearchTerm, results, searchTerm } = props;
   // router
   const router = useAppRouter();
   const { projectId: routerProjectId } = useParams();
   // derived values
   const projectId = routerProjectId?.toString();
+  const resultSearchTerm = matchedSearchTerm.trim();
+  const shouldTrustServerResults = resultSearchTerm !== "" && resultSearchTerm === searchTerm.trim();
 
   return (
     <>
@@ -55,6 +59,7 @@ export const PowerKModalSearchResults = observer(function PowerKModalSearchResul
                   key={item.id}
                   label={currentSection.itemName(item)}
                   icon={currentSection.icon}
+                  keywords={shouldTrustServerResults ? [resultSearchTerm] : undefined}
                   onSelect={() => {
                     closePalette();
                     router.push(currentSection.path(item, projectId));
