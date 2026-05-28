@@ -48,10 +48,11 @@ pub struct ObservabilitySnapshot {
     pub model: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub turn_count: Option<u32>,
-    /// Last shell command the agent kicked off (for failure-detail enrichment).
-    /// Reset on rid change like the other per-run scalars; never serialised
-    /// onto the wire — only consumed locally to enrich `RunFailed.detail`
-    /// when the watchdog or stdout-close path fires.
+    /// Last shell command tool the agent kicked off (for failure-detail
+    /// enrichment), including whether a matching completion/result event was
+    /// later observed. Reset on rid change like the other per-run scalars;
+    /// never serialised onto the wire — only consumed locally to enrich
+    /// `RunFailed.detail` when the watchdog or stdout-close path fires.
     #[serde(skip)]
     pub last_exec_command: Option<ExecCommandSnapshot>,
 }
@@ -60,7 +61,15 @@ pub struct ObservabilitySnapshot {
 pub struct ExecCommandSnapshot {
     pub command: String,
     pub cwd: Option<String>,
+    pub tool_call_id: Option<String>,
     pub started_at: DateTime<Utc>,
+    pub completed_at: Option<DateTime<Utc>>,
+    /// `Some(true)` when the matching completion event reported a clean
+    /// terminal status, `Some(false)` for a non-success terminal (codex
+    /// `failed` status, Claude `is_error: true`). `None` when no
+    /// completion has been observed yet or the protocol frame didn't
+    /// surface an outcome.
+    pub completed_success: Option<bool>,
 }
 
 #[derive(Clone)]
@@ -289,6 +298,31 @@ impl StateHandle {
     /// item is a `commandExecution`.
     pub async fn note_exec_command(&self, snapshot: ExecCommandSnapshot) {
         self.inner.run_snapshot.lock().await.last_exec_command = Some(snapshot);
+        self.tick();
+    }
+
+    /// Mark the last observed command tool completed when the protocol gives
+    /// us a matching completion/result event. Matching requires both the
+    /// stored command and the completion hint to carry the same explicit
+    /// tool id — a stored command without an id is never marked completed
+    /// by a completion event, even one that also lacks an id. This avoids
+    /// the regression where a malformed `tool_result` (missing
+    /// `tool_use_id`) could mark an unrelated stored command as done.
+    pub async fn note_exec_command_completed(
+        &self,
+        tool_call_id: &str,
+        success: Option<bool>,
+        completed_at: DateTime<Utc>,
+    ) {
+        let mut snap = self.inner.run_snapshot.lock().await;
+        let Some(cmd) = snap.last_exec_command.as_mut() else {
+            return;
+        };
+        if cmd.tool_call_id.as_deref() == Some(tool_call_id) {
+            cmd.completed_at = Some(completed_at);
+            cmd.completed_success = success;
+        }
+        drop(snap);
         self.tick();
     }
 
@@ -572,13 +606,17 @@ mod tests {
             .note_exec_command(ExecCommandSnapshot {
                 command: "git fetch origin".into(),
                 cwd: Some("/tmp/x".into()),
+                tool_call_id: Some("tool-1".into()),
                 started_at: Utc::now(),
+                completed_at: None,
+                completed_success: None,
             })
             .await;
         let snap = state.observability_snapshot().await;
         let cmd = snap.last_exec_command.expect("snapshot lost the command");
         assert_eq!(cmd.command, "git fetch origin");
         assert_eq!(cmd.cwd.as_deref(), Some("/tmp/x"));
+        assert_eq!(cmd.tool_call_id.as_deref(), Some("tool-1"));
 
         // Rid change wipes per-run scalars including the exec command, so
         // a stalled-on-foo failure detail can't bleed into a fresh run.
@@ -586,6 +624,100 @@ mod tests {
         state.set_current_run(Some(summary(rid_b, "running"))).await;
         let snap = state.observability_snapshot().await;
         assert!(snap.last_exec_command.is_none());
+    }
+
+    #[tokio::test]
+    async fn note_exec_command_completed_marks_matching_command_only() {
+        let state = empty_state();
+        state
+            .set_current_run(Some(summary(Uuid::new_v4(), "running")))
+            .await;
+        state
+            .note_exec_command(ExecCommandSnapshot {
+                command: "npm test".into(),
+                cwd: None,
+                tool_call_id: Some("tool-1".into()),
+                started_at: Utc::now(),
+                completed_at: None,
+                completed_success: None,
+            })
+            .await;
+
+        state
+            .note_exec_command_completed("other-tool", Some(true), Utc::now())
+            .await;
+        let snap = state.observability_snapshot().await;
+        let cmd = snap.last_exec_command.unwrap();
+        assert!(cmd.completed_at.is_none());
+        assert!(cmd.completed_success.is_none());
+
+        let done_at = Utc::now();
+        state
+            .note_exec_command_completed("tool-1", Some(true), done_at)
+            .await;
+        let snap = state.observability_snapshot().await;
+        let cmd = snap.last_exec_command.unwrap();
+        assert_eq!(cmd.completed_at, Some(done_at));
+        assert_eq!(cmd.completed_success, Some(true));
+    }
+
+    #[tokio::test]
+    async fn note_exec_command_completed_does_not_match_when_stored_id_is_absent() {
+        // Regression guard: a stored command whose `tool_call_id` is
+        // `None` (e.g. codex `item/started` arrived without an `id`
+        // field) must never be marked completed by a completion event,
+        // even one that also lacks a tool id. The previous behaviour
+        // returned `true` on `(None, None)`, which let a malformed
+        // `tool_result` spuriously close out an unrelated command.
+        let state = empty_state();
+        state
+            .set_current_run(Some(summary(Uuid::new_v4(), "running")))
+            .await;
+        state
+            .note_exec_command(ExecCommandSnapshot {
+                command: "cat .pidash-workpad.md".into(),
+                cwd: None,
+                tool_call_id: None,
+                started_at: Utc::now(),
+                completed_at: None,
+                completed_success: None,
+            })
+            .await;
+
+        state
+            .note_exec_command_completed("tu_anything", Some(true), Utc::now())
+            .await;
+        let snap = state.observability_snapshot().await;
+        let cmd = snap.last_exec_command.unwrap();
+        assert!(
+            cmd.completed_at.is_none(),
+            "stored command without an id must not be marked completed by any incoming id"
+        );
+    }
+
+    #[tokio::test]
+    async fn note_exec_command_completed_captures_unsuccessful_outcome() {
+        let state = empty_state();
+        state
+            .set_current_run(Some(summary(Uuid::new_v4(), "running")))
+            .await;
+        state
+            .note_exec_command(ExecCommandSnapshot {
+                command: "npm test".into(),
+                cwd: None,
+                tool_call_id: Some("tool-x".into()),
+                started_at: Utc::now(),
+                completed_at: None,
+                completed_success: None,
+            })
+            .await;
+        state
+            .note_exec_command_completed("tool-x", Some(false), Utc::now())
+            .await;
+        let snap = state.observability_snapshot().await;
+        let cmd = snap.last_exec_command.unwrap();
+        assert!(cmd.completed_at.is_some());
+        assert_eq!(cmd.completed_success, Some(false));
     }
 
     #[tokio::test]
