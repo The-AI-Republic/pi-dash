@@ -35,6 +35,15 @@ from pi_dash.db.models import IssueComment
 
 ISSUE_FTS_CONFIG = "english"
 
+# ``Issue.sequence_id`` is a Postgres ``int4`` (``models.IntegerField``);
+# any wider integer pushed into the equality predicate triggers
+# ``value … out of range for type integer`` and the endpoint 500s. The
+# 20-char query guard below does not bound the *value* of an extracted
+# digit token, only the length of the query string — so a realistic
+# query like ``error 9999999999`` still blew up before this cap was
+# added.
+_SEQUENCE_ID_MAX = 2_147_483_647
+
 # Headline delimiters used by ``SearchHeadline`` so the view can detect
 # whether ``ts_headline`` actually highlighted anything — Postgres returns
 # a leading-text excerpt with no markers when nothing matched, which is
@@ -60,6 +69,12 @@ def _matching_comment_issue_ids(search_query):
     Uses ``IssueComment.objects`` (a SoftDeletionManager), so soft-deleted
     comments are automatically excluded.
 
+    ``.order_by()`` (with no args) strips the model-default
+    ``("-created_at",)`` ordering — without it Django emits
+    ``ORDER BY created_at DESC`` *inside* the ``IN (...)`` subquery, which
+    is wasted CPU (ordering is irrelevant for set membership) and trips
+    Postgres planner warnings in some configurations.
+
     Known limitation: this does NOT filter ``IssueComment.access``, so a
     user who can see an issue (project member) but not its INTERNAL
     comments will still surface the issue via comment-text match. Fixing
@@ -70,6 +85,7 @@ def _matching_comment_issue_ids(search_query):
     return (
         IssueComment.objects.annotate(_cfts=ISSUE_COMMENT_SEARCH_VECTOR)
         .filter(_cfts=search_query)
+        .order_by()
         .values("issue_id")
     )
 
@@ -87,15 +103,24 @@ def _build_search_filter(query, search_query, include_comments):
          enabled by callers that want to widen results to comment text.
       4. Legacy ``sequence_id`` exact-int branch (guarded on query
          length ≤ 20 to avoid scanning numeric tokens out of pasted
-         logs/stack traces).
+         logs/stack traces, and on per-token value ≤ INT4 max so a
+         large numeric paste doesn't 500 the endpoint).
       5. Legacy ``project__identifier`` icontains for short codes.
     """
     q = Q(_fts=search_query) | Q(name__icontains=query)
     if include_comments:
         q |= Q(id__in=_matching_comment_issue_ids(search_query))
     if len(query) <= 20:
-        for sequence_id in re.findall(r"\b\d+\b", query):
-            q |= Q(sequence_id=sequence_id)
+        for token in re.findall(r"\b\d+\b", query):
+            # Skip the int() entirely for tokens that can't possibly
+            # fit in int4 — cheap before the parse, and protects us
+            # from arbitrarily long digit runs without an upper bound
+            # on string length.
+            if len(token) > 10:
+                continue
+            value = int(token)
+            if value <= _SEQUENCE_ID_MAX:
+                q |= Q(sequence_id=value)
     q |= Q(project__identifier__icontains=query)
     return q
 
