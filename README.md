@@ -176,7 +176,7 @@ Pi Dash does not ship an AI agent — you bring your own. Ensure your chosen age
 [`pi-dash-skill`](https://github.com/The-AI-Republic/pi-dash-skill) packages a portable agent skill so Claude Code or Codex can create, list, move, and inspect Pi Dash issues directly from a coding session via the `pidash` CLI.
 
 ```bash
-npx @pi-dash/skill-installer           # installs to Claude Code, Codex, or both
+npx @airepublic/pidash-skill-installer           # installs to Claude Code, Codex, or both
 ```
 
 The installer prompts for a target (default: all) and fetches the skill from GitHub on demand — no clone required. Pass `--all`, `--claude-code`, or `--codex` to skip the prompt.
