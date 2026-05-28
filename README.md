@@ -171,6 +171,18 @@ Pi Dash does not ship an AI agent — you bring your own. Ensure your chosen age
 
 `pidash doctor` verifies the configured agent is on `PATH` and the cloud is reachable before you go live.
 
+### 4. Pi Dash skill for the coding agent (optional)
+
+[`pi-dash-skill`](https://github.com/The-AI-Republic/pi-dash-skill) packages a portable agent skill so Claude Code or Codex can create, list, move, and inspect Pi Dash issues directly from a coding session via the `pidash` CLI.
+
+```bash
+git clone https://github.com/The-AI-Republic/pi-dash-skill.git
+cd pi-dash-skill
+node install.mjs           # installs to Claude Code, Codex, or both
+```
+
+Codex users can also install without cloning by asking `$skill-installer` from inside a Codex session. See the [pi-dash-skill README](https://github.com/The-AI-Republic/pi-dash-skill#readme) for env-var overrides (`CLAUDE_HOME` / `CODEX_HOME`), non-interactive flags, and the full set of install paths.
+
 ## ⚙️ Built with
 
 [![React Router](https://img.shields.io/badge/-React%20Router-CA4245?logo=react-router&style=for-the-badge&logoColor=white)](https://reactrouter.com/)
