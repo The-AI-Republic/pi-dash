@@ -60,7 +60,7 @@ def test_redis_instance_does_not_cap_connections_by_default():
 
 @pytest.mark.unit
 @override_settings(
-    REDIS_URL="rediss://serviceuser:password@redis.example.test:6380/5",
+    REDIS_URL="rediss://serviceuser:p%40ssword@redis.example.test:6380/5",
     REDIS_SSL=True,
     REDIS_SOCKET_CONNECT_TIMEOUT=1.25,
     REDIS_SOCKET_TIMEOUT=2.5,
@@ -76,7 +76,7 @@ def test_redis_instance_ssl_preserves_default_user_and_db_zero():
     redis_cls.assert_called_once_with(
         host="redis.example.test",
         port=6380,
-        password="password",
+        password="p@ssword",
         db=0,
         ssl=True,
         ssl_cert_reqs=None,

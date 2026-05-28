@@ -3,7 +3,7 @@
 # See the LICENSE file for details.
 
 import threading
-from urllib.parse import urlparse
+from urllib.parse import unquote, urlparse
 
 import redis
 from django.conf import settings
@@ -95,10 +95,11 @@ def redis_instance():
         # connect to redis
         if settings.REDIS_SSL:
             url = urlparse(settings.REDIS_URL)
+            password = unquote(url.password) if url.password is not None else None
             _redis_client = redis.Redis(
                 host=url.hostname,
                 port=url.port,
-                password=url.password,
+                password=password,
                 db=0,
                 ssl=True,
                 ssl_cert_reqs=None,
