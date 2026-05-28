@@ -4,7 +4,7 @@
  * See the LICENSE file for details.
  */
 
-import { action, computed, makeObservable, observable } from "mobx";
+import { action as mobxAction, computed, makeObservable, observable } from "mobx";
 // types
 import type {
   TIssue,
@@ -36,6 +36,7 @@ import type {
   IIssueStore,
   IIssueStoreActions,
   TFetchIssueOptions,
+  TFetchIssueWithIdentifier,
   TFetchIssueWithIdentifierOptions,
 } from "./issue.store";
 import { IssueLinkStore } from "./link.store";
@@ -194,21 +195,21 @@ export abstract class IssueDetail implements IIssueDetail {
       isAnyModalOpen: computed,
       isPeekOpen: computed,
       // action
-      setPeekIssue: action,
-      setIssueLinkData: action,
-      toggleCreateIssueModal: action,
-      toggleIssueLinkModal: action,
-      toggleParentIssueModal: action,
-      toggleDeleteIssueModal: action,
-      toggleArchiveIssueModal: action,
-      toggleRelationModal: action,
-      toggleSubIssuesModal: action,
-      toggleDeleteAttachmentModal: action,
-      setOpenWidgets: action,
-      setLastWidgetAction: action,
-      toggleOpenWidget: action,
-      setRelationKey: action,
-      setIssueCrudOperationState: action,
+      setPeekIssue: mobxAction,
+      setIssueLinkData: mobxAction,
+      toggleCreateIssueModal: mobxAction,
+      toggleIssueLinkModal: mobxAction,
+      toggleParentIssueModal: mobxAction,
+      toggleDeleteIssueModal: mobxAction,
+      toggleArchiveIssueModal: mobxAction,
+      toggleRelationModal: mobxAction,
+      toggleSubIssuesModal: mobxAction,
+      toggleDeleteAttachmentModal: mobxAction,
+      setOpenWidgets: mobxAction,
+      setLastWidgetAction: mobxAction,
+      toggleOpenWidget: mobxAction,
+      setRelationKey: mobxAction,
+      setIssueCrudOperationState: mobxAction,
     });
 
     // store
@@ -264,8 +265,8 @@ export abstract class IssueDetail implements IIssueDetail {
     this.openWidgets = state;
     if (this.lastWidgetAction) this.lastWidgetAction = null;
   };
-  setLastWidgetAction = (widget: TWorkItemWidgets) => {
-    this.openWidgets = [widget];
+  setLastWidgetAction = (action: TWorkItemWidgets) => {
+    this.openWidgets = [action];
   };
   toggleOpenWidget = (state: TWorkItemWidgets) => {
     if (this.openWidgets && this.openWidgets.includes(state))
@@ -277,12 +278,18 @@ export abstract class IssueDetail implements IIssueDetail {
   // issue
   fetchIssue = async (workspaceSlug: string, projectId: string, issueId: string, options?: TFetchIssueOptions) =>
     this.issue.fetchIssue(workspaceSlug, projectId, issueId, options);
-  fetchIssueWithIdentifier = async (
+  fetchIssueWithIdentifier = ((
     workspaceSlug: string,
     projectIdentifier: string,
     sequenceId: string,
     options?: TFetchIssueWithIdentifierOptions
-  ) => this.issue.fetchIssueWithIdentifier(workspaceSlug, projectIdentifier, sequenceId, options);
+  ) =>
+    this.issue.fetchIssueWithIdentifier(
+      workspaceSlug,
+      projectIdentifier,
+      sequenceId,
+      options
+    )) as TFetchIssueWithIdentifier;
   updateIssue = async (workspaceSlug: string, projectId: string, issueId: string, data: Partial<TIssue>) =>
     this.issue.updateIssue(workspaceSlug, projectId, issueId, data);
   removeIssue = async (workspaceSlug: string, projectId: string, issueId: string) =>

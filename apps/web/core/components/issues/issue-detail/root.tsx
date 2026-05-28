@@ -12,6 +12,7 @@ import { useTranslation } from "@pi-dash/i18n";
 import { TOAST_TYPE, setPromiseToast, setToast } from "@pi-dash/propel/toast";
 import type { TIssue } from "@pi-dash/types";
 import { EIssuesStoreType } from "@pi-dash/types";
+import { Loader } from "@pi-dash/ui";
 // assets
 import emptyIssue from "@/app/assets/empty-state/issue.svg?url";
 // components
@@ -56,11 +57,12 @@ export type TIssueDetailRoot = {
   projectId: string;
   issueId: string;
   is_archived?: boolean;
+  isMetadataHydrating?: boolean;
 };
 
 export const IssueDetailRoot = observer(function IssueDetailRoot(props: TIssueDetailRoot) {
   const { t } = useTranslation();
-  const { workspaceSlug, projectId, issueId, is_archived = false } = props;
+  const { workspaceSlug, projectId, issueId, is_archived = false, isMetadataHydrating = false } = props;
   // router
   const router = useAppRouter();
   // hooks
@@ -84,16 +86,16 @@ export const IssueDetailRoot = observer(function IssueDetailRoot(props: TIssueDe
 
   const issueOperations: TIssueOperations = useMemo(
     () => ({
-      fetch: async (workspaceSlug: string, projectId: string, issueId: string) => {
+      fetch: async (opWorkspaceSlug: string, opProjectId: string, opIssueId: string) => {
         try {
-          await fetchIssue(workspaceSlug, projectId, issueId);
+          await fetchIssue(opWorkspaceSlug, opProjectId, opIssueId);
         } catch (error) {
           console.error("Error fetching the parent issue:", error);
         }
       },
-      update: async (workspaceSlug: string, projectId: string, issueId: string, data: Partial<TIssue>) => {
+      update: async (opWorkspaceSlug: string, opProjectId: string, opIssueId: string, data: Partial<TIssue>) => {
         try {
-          await updateIssue(workspaceSlug, projectId, issueId, data);
+          await updateIssue(opWorkspaceSlug, opProjectId, opIssueId, data);
         } catch (error) {
           console.log("Error in updating issue:", error);
           setToast({
@@ -103,10 +105,10 @@ export const IssueDetailRoot = observer(function IssueDetailRoot(props: TIssueDe
           });
         }
       },
-      remove: async (workspaceSlug: string, projectId: string, issueId: string) => {
+      remove: async (opWorkspaceSlug: string, opProjectId: string, opIssueId: string) => {
         try {
-          if (is_archived) await removeArchivedIssue(workspaceSlug, projectId, issueId);
-          else await removeIssue(workspaceSlug, projectId, issueId);
+          if (is_archived) await removeArchivedIssue(opWorkspaceSlug, opProjectId, opIssueId);
+          else await removeIssue(opWorkspaceSlug, opProjectId, opIssueId);
           setToast({
             title: t("common.success"),
             type: TOAST_TYPE.SUCCESS,
@@ -121,16 +123,16 @@ export const IssueDetailRoot = observer(function IssueDetailRoot(props: TIssueDe
           });
         }
       },
-      archive: async (workspaceSlug: string, projectId: string, issueId: string) => {
+      archive: async (opWorkspaceSlug: string, opProjectId: string, opIssueId: string) => {
         try {
-          await archiveIssue(workspaceSlug, projectId, issueId);
+          await archiveIssue(opWorkspaceSlug, opProjectId, opIssueId);
         } catch (error) {
           console.log("Error in archiving issue:", error);
         }
       },
-      addCycleToIssue: async (workspaceSlug: string, projectId: string, cycleId: string, issueId: string) => {
+      addCycleToIssue: async (opWorkspaceSlug: string, opProjectId: string, cycleId: string, opIssueId: string) => {
         try {
-          await addCycleToIssue(workspaceSlug, projectId, cycleId, issueId);
+          await addCycleToIssue(opWorkspaceSlug, opProjectId, cycleId, opIssueId);
         } catch (_error) {
           setToast({
             type: TOAST_TYPE.ERROR,
@@ -139,9 +141,9 @@ export const IssueDetailRoot = observer(function IssueDetailRoot(props: TIssueDe
           });
         }
       },
-      addIssueToCycle: async (workspaceSlug: string, projectId: string, cycleId: string, issueIds: string[]) => {
+      addIssueToCycle: async (opWorkspaceSlug: string, opProjectId: string, cycleId: string, issueIds: string[]) => {
         try {
-          await addIssueToCycle(workspaceSlug, projectId, cycleId, issueIds);
+          await addIssueToCycle(opWorkspaceSlug, opProjectId, cycleId, issueIds);
         } catch (_error) {
           setToast({
             type: TOAST_TYPE.ERROR,
@@ -150,9 +152,14 @@ export const IssueDetailRoot = observer(function IssueDetailRoot(props: TIssueDe
           });
         }
       },
-      removeIssueFromCycle: async (workspaceSlug: string, projectId: string, cycleId: string, issueId: string) => {
+      removeIssueFromCycle: async (
+        opWorkspaceSlug: string,
+        opProjectId: string,
+        cycleId: string,
+        opIssueId: string
+      ) => {
         try {
-          const removeFromCyclePromise = removeIssueFromCycle(workspaceSlug, projectId, cycleId, issueId);
+          const removeFromCyclePromise = removeIssueFromCycle(opWorkspaceSlug, opProjectId, cycleId, opIssueId);
           setPromiseToast(removeFromCyclePromise, {
             loading: t("issue.remove.cycle.loading"),
             success: {
@@ -169,9 +176,14 @@ export const IssueDetailRoot = observer(function IssueDetailRoot(props: TIssueDe
           console.log("Error in removing issue from cycle:", error);
         }
       },
-      removeIssueFromModule: async (workspaceSlug: string, projectId: string, moduleId: string, issueId: string) => {
+      removeIssueFromModule: async (
+        opWorkspaceSlug: string,
+        opProjectId: string,
+        moduleId: string,
+        opIssueId: string
+      ) => {
         try {
-          const removeFromModulePromise = removeIssueFromModule(workspaceSlug, projectId, moduleId, issueId);
+          const removeFromModulePromise = removeIssueFromModule(opWorkspaceSlug, opProjectId, moduleId, opIssueId);
           setPromiseToast(removeFromModulePromise, {
             loading: t("issue.remove.module.loading"),
             success: {
@@ -189,13 +201,19 @@ export const IssueDetailRoot = observer(function IssueDetailRoot(props: TIssueDe
         }
       },
       changeModulesInIssue: async (
-        workspaceSlug: string,
-        projectId: string,
-        issueId: string,
+        opWorkspaceSlug: string,
+        opProjectId: string,
+        opIssueId: string,
         addModuleIds: string[],
         removeModuleIds: string[]
       ) => {
-        const promise = await changeModulesInIssue(workspaceSlug, projectId, issueId, addModuleIds, removeModuleIds);
+        const promise = await changeModulesInIssue(
+          opWorkspaceSlug,
+          opProjectId,
+          opIssueId,
+          addModuleIds,
+          removeModuleIds
+        );
         return promise;
       },
     }),
@@ -224,6 +242,7 @@ export const IssueDetailRoot = observer(function IssueDetailRoot(props: TIssueDe
     workspaceSlug,
     projectId
   );
+  const isMetadataEditable = !is_archived && isEditable && !isMetadataHydrating;
 
   return (
     <>
@@ -247,19 +266,30 @@ export const IssueDetailRoot = observer(function IssueDetailRoot(props: TIssueDe
               issueOperations={issueOperations}
               isEditable={isEditable}
               isArchived={is_archived}
+              isMetadataHydrating={isMetadataHydrating}
             />
           </div>
           <div
             className="fixed right-0 z-[5] h-full w-full min-w-[300px] border-l border-subtle bg-surface-1 sm:w-1/2 md:relative md:w-1/4 lg:min-w-80 xl:min-w-96"
             style={issueDetailSidebarCollapsed ? { right: `-${window?.innerWidth || 0}px` } : {}}
           >
-            <IssueDetailsSidebar
-              workspaceSlug={workspaceSlug}
-              projectId={projectId}
-              issueId={issueId}
-              issueOperations={issueOperations}
-              isEditable={!is_archived && isEditable}
-            />
+            {isMetadataHydrating ? (
+              <Loader className="h-full w-full space-y-3 p-6">
+                <Loader.Item height="30px" />
+                <Loader.Item height="30px" />
+                <Loader.Item height="30px" />
+                <Loader.Item height="30px" />
+                <Loader.Item height="30px" />
+              </Loader>
+            ) : (
+              <IssueDetailsSidebar
+                workspaceSlug={workspaceSlug}
+                projectId={projectId}
+                issueId={issueId}
+                issueOperations={issueOperations}
+                isEditable={isMetadataEditable}
+              />
+            )}
           </div>
         </div>
       )}

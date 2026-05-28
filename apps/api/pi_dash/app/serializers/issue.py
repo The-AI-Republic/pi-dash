@@ -5,7 +5,7 @@
 # Django imports
 from django.utils import timezone
 from django.core.validators import URLValidator
-from django.core.exceptions import ValidationError
+from django.core.exceptions import ObjectDoesNotExist, ValidationError
 from django.db import IntegrityError
 
 # Third Party imports
@@ -61,6 +61,11 @@ _LOCKED_COMMENT_FIELDS = {"comment_html", "comment_json", "comment_stripped"}
 def _issue_is_actively_synced(issue) -> bool:
     if issue is None or issue.external_source != "github":
         return False
+
+    annotated_is_synced = getattr(issue, "is_synced", None)
+    if annotated_is_synced is not None:
+        return bool(annotated_is_synced)
+
     from pi_dash.db.models import GithubIssueSync
 
     return GithubIssueSync.objects.filter(issue=issue).exists()
@@ -1065,7 +1070,11 @@ class IssueDetailSerializer(IssueSerializer):
         never been moved to In Progress). See
         ``.ai_design/issue_ticking_system/design.md`` §8.1.
         """
-        ticker = getattr(obj, "agent_ticker", None)
+        try:
+            ticker = obj.agent_ticker
+        except ObjectDoesNotExist:
+            return None
+
         if ticker is None:
             return None
         return {

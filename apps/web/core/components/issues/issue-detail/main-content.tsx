@@ -47,10 +47,19 @@ type Props = {
   issueOperations: TIssueOperations;
   isEditable: boolean;
   isArchived: boolean;
+  isMetadataHydrating?: boolean;
 };
 
 export const IssueMainContent = observer(function IssueMainContent(props: Props) {
-  const { workspaceSlug, projectId, issueId, issueOperations, isEditable, isArchived } = props;
+  const {
+    workspaceSlug,
+    projectId,
+    issueId,
+    issueOperations,
+    isEditable,
+    isArchived,
+    isMetadataHydrating = false,
+  } = props;
   // refs
   const editorRef = useRef<EditorRefApi>(null);
   // states
@@ -170,7 +179,7 @@ export const IssueMainContent = observer(function IssueMainContent(props: Props)
               projectId={projectId}
               issueId={issueId}
               currentUser={currentUser}
-              disabled={isArchived}
+              disabled={isArchived || isMetadataHydrating}
             />
           )}
           {isEditable && (
@@ -201,7 +210,7 @@ export const IssueMainContent = observer(function IssueMainContent(props: Props)
         workspaceSlug={workspaceSlug}
         projectId={projectId}
         issueId={issueId}
-        disabled={!isEditable || isArchived}
+        disabled={!isEditable || isArchived || isMetadataHydrating}
         renderWidgetModals={!isPeekModeActive}
         issueServiceType={EIssueServiceType.ISSUES}
       />
@@ -220,7 +229,7 @@ export const IssueMainContent = observer(function IssueMainContent(props: Props)
             projectId={projectId}
             issueId={issueId}
             issueOperations={issueOperations}
-            disabled={!isEditable || isArchived}
+            disabled={!isEditable || isArchived || isMetadataHydrating}
           />
         </div>
       )}

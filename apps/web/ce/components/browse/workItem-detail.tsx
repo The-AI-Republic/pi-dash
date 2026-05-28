@@ -13,10 +13,11 @@ export type TWorkItemDetailRoot = {
   projectId: string;
   issueId: string;
   issue: TIssue | undefined;
+  isMetadataHydrating?: boolean;
 };
 
 export const WorkItemDetailRoot = observer(function WorkItemDetailRoot(props: TWorkItemDetailRoot) {
-  const { workspaceSlug, projectId, issueId, issue } = props;
+  const { workspaceSlug, projectId, issueId, issue, isMetadataHydrating = false } = props;
 
   return (
     <IssueDetailRoot
@@ -24,6 +25,7 @@ export const WorkItemDetailRoot = observer(function WorkItemDetailRoot(props: TW
       projectId={projectId.toString()}
       issueId={issueId.toString()}
       is_archived={!!issue?.archived_at}
+      isMetadataHydrating={isMetadataHydrating}
     />
   );
 });

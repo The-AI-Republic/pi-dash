@@ -11,6 +11,7 @@ from django.contrib.postgres.aggregates import ArrayAgg
 from django.contrib.postgres.fields import ArrayField
 from django.core.serializers.json import DjangoJSONEncoder
 from django.db.models import (
+    BooleanField,
     Count,
     Exists,
     F,
@@ -41,6 +42,7 @@ from pi_dash.app.serializers import (
     IssueSerializer,
     ProjectUserPropertySerializer,
 )
+from pi_dash.app.serializers.issue import _issue_is_actively_synced
 from pi_dash.bgtasks.issue_activities_task import issue_activity
 from pi_dash.bgtasks.issue_description_version_task import issue_description_version_task
 from pi_dash.bgtasks.recent_visited_task import recent_visited_task
@@ -51,6 +53,7 @@ from pi_dash.db.models import (
     IntakeIssue,
     Issue,
     IssueAssignee,
+    GithubIssueSync,
     IssueLabel,
     IssueLink,
     IssueReaction,
@@ -1215,13 +1218,6 @@ class IssueDetailIdentifierEndpoint(BaseAPIView):
         return request.GET.get("lite", "").lower() in ("1", "true", "yes")
 
     def serialize_lite_issue(self, issue):
-        if issue.external_source == "github":
-            from pi_dash.db.models import GithubIssueSync
-
-            is_synced = GithubIssueSync.objects.filter(issue=issue).exists()
-        else:
-            is_synced = False
-
         return {
             "id": issue.id,
             "sequence_id": issue.sequence_id,
@@ -1234,8 +1230,9 @@ class IssueDetailIdentifierEndpoint(BaseAPIView):
             "created_by": issue.created_by_id,
             "updated_by": issue.updated_by_id,
             "is_draft": issue.is_draft,
+            "is_epic": bool(getattr(issue, "is_epic", False)),
             "is_intake": issue.is_intake,
-            "is_synced": is_synced,
+            "is_synced": _issue_is_actively_synced(issue),
             "archived_at": issue.archived_at,
         }
 
@@ -1284,14 +1281,27 @@ class IssueDetailIdentifierEndpoint(BaseAPIView):
                     "is_draft",
                     "archived_at",
                     "external_source",
+                    "type_id",
                 )
                 .annotate(
+                    is_epic=Coalesce(
+                        F("type__is_epic"),
+                        Value(False),
+                        output_field=BooleanField(),
+                    ),
                     is_intake=Exists(
                         IntakeIssue.objects.filter(
                             issue=OuterRef("id"),
                             status__in=[-2, 0],
                             workspace__slug=slug,
                             project_id=project.id,
+                        )
+                    )
+                )
+                .annotate(
+                    is_synced=Exists(
+                        GithubIssueSync.objects.filter(
+                            issue=OuterRef("id"),
                         )
                     )
                 )
@@ -1304,49 +1314,40 @@ class IssueDetailIdentifierEndpoint(BaseAPIView):
                 .prefetch_related("assignees", "labels", "issue_module__module")
                 .annotate(
                     cycle_id=Subquery(
-                        CycleIssue.objects.filter(issue=OuterRef("id"), deleted_at__isnull=True).values("cycle_id")[:1]
+                        CycleIssue.objects.filter(issue=OuterRef("id")).values("cycle_id")[:1]
                     )
                 )
                 .annotate(
-                    link_count=Coalesce(
-                        Subquery(
-                            IssueLink.objects.filter(issue=OuterRef("id"))
-                            .order_by()
-                            .values("issue")
-                            .annotate(count=Count("id"))
-                            .values("count"),
-                            output_field=IntegerField(),
-                        ),
-                        0,
+                    link_count=Subquery(
+                        IssueLink.objects.filter(issue=OuterRef("id"))
+                        .order_by()
+                        .values("issue")
+                        .annotate(count=Count("id"))
+                        .values("count"),
+                        output_field=IntegerField(),
                     )
                 )
                 .annotate(
-                    attachment_count=Coalesce(
-                        Subquery(
-                            FileAsset.objects.filter(
-                                issue_id=OuterRef("id"),
-                                entity_type=FileAsset.EntityTypeContext.ISSUE_ATTACHMENT,
-                            )
-                            .order_by()
-                            .values("issue_id")
-                            .annotate(count=Count("id"))
-                            .values("count"),
-                            output_field=IntegerField(),
-                        ),
-                        0,
+                    attachment_count=Subquery(
+                        FileAsset.objects.filter(
+                            issue_id=OuterRef("id"),
+                            entity_type=FileAsset.EntityTypeContext.ISSUE_ATTACHMENT,
+                        )
+                        .order_by()
+                        .values("issue_id")
+                        .annotate(count=Count("id"))
+                        .values("count"),
+                        output_field=IntegerField(),
                     )
                 )
                 .annotate(
-                    sub_issues_count=Coalesce(
-                        Subquery(
-                            Issue.issue_objects.filter(parent=OuterRef("id"))
-                            .order_by()
-                            .values("parent")
-                            .annotate(count=Count("id"))
-                            .values("count"),
-                            output_field=IntegerField(),
-                        ),
-                        0,
+                    sub_issues_count=Subquery(
+                        Issue.issue_objects.filter(parent=OuterRef("id"))
+                        .order_by()
+                        .values("parent")
+                        .annotate(count=Count("id"))
+                        .values("count"),
+                        output_field=IntegerField(),
                     )
                 )
                 .filter(sequence_id=issue_identifier)
