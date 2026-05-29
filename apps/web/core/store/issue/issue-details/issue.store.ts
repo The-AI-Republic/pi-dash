@@ -14,9 +14,58 @@ import { IssueArchiveService, WorkspaceDraftService, IssueService } from "@/serv
 // types
 import type { IIssueDetail } from "./root.store";
 
+export type TFetchIssueOptions = {
+  preserveSubscription?: boolean;
+  skipActivityAndComments?: boolean;
+};
+
+export type TFetchIssueWithIdentifierOptions = {
+  lite?: boolean;
+};
+
+export type TIssueLite = Pick<
+  TIssue,
+  | "id"
+  | "sequence_id"
+  | "name"
+  | "sort_order"
+  | "project_id"
+  | "created_at"
+  | "updated_at"
+  | "created_by"
+  | "updated_by"
+  | "is_draft"
+  | "is_epic"
+  | "archived_at"
+  | "is_intake"
+  | "is_synced"
+> & {
+  description_html: string;
+};
+
+export type TFetchIssueWithIdentifier = {
+  (
+    workspaceSlug: string,
+    project_identifier: string,
+    sequence_id: string,
+    options: { lite: true }
+  ): Promise<TIssueLite>;
+  (
+    workspaceSlug: string,
+    project_identifier: string,
+    sequence_id: string,
+    options?: TFetchIssueWithIdentifierOptions
+  ): Promise<TIssue>;
+};
+
 export interface IIssueStoreActions {
   // actions
-  fetchIssue: (workspaceSlug: string, projectId: string, issueId: string) => Promise<TIssue>;
+  fetchIssue: (
+    workspaceSlug: string,
+    projectId: string,
+    issueId: string,
+    options?: TFetchIssueOptions
+  ) => Promise<TIssue>;
   updateIssue: (workspaceSlug: string, projectId: string, issueId: string, data: Partial<TIssue>) => Promise<void>;
   removeIssue: (workspaceSlug: string, projectId: string, issueId: string) => Promise<void>;
   archiveIssue: (workspaceSlug: string, projectId: string, issueId: string) => Promise<void>;
@@ -31,7 +80,7 @@ export interface IIssueStoreActions {
     removeModuleIds: string[]
   ) => Promise<void>;
   removeIssueFromModule: (workspaceSlug: string, projectId: string, moduleId: string, issueId: string) => Promise<void>;
-  fetchIssueWithIdentifier: (workspaceSlug: string, project_identifier: string, sequence_id: string) => Promise<TIssue>;
+  fetchIssueWithIdentifier: TFetchIssueWithIdentifier;
 }
 
 export interface IIssueStore extends IIssueStoreActions {
@@ -84,7 +133,7 @@ export class IssueStore implements IIssueStore {
   });
 
   // actions
-  fetchIssue = async (workspaceSlug: string, projectId: string, issueId: string) => {
+  fetchIssue = async (workspaceSlug: string, projectId: string, issueId: string, options: TFetchIssueOptions = {}) => {
     const query = {
       expand: "issue_reactions,issue_attachments,issue_link,parent",
     };
@@ -94,9 +143,7 @@ export class IssueStore implements IIssueStore {
 
     if (!issue) throw new Error("Work item not found");
 
-    const issuePayload = this.addIssueToStore(issue);
-
-    this.rootIssueDetailStore.rootIssueStore.issues.addIssue([issuePayload]);
+    this.addIssueToStore(issue);
 
     // store handlers from issue detail
     // parent
@@ -118,13 +165,20 @@ export class IssueStore implements IIssueStore {
     // fetch issue attachments
     if (issue.issue_attachments) this.rootIssueDetailStore.addAttachments(issueId, issue.issue_attachments);
 
-    this.rootIssueDetailStore.addSubscription(issueId, issue.is_subscribed);
+    if (
+      !options.preserveSubscription ||
+      this.rootIssueDetailStore.subscription.getSubscriptionByIssueId(issueId) === undefined
+    ) {
+      this.rootIssueDetailStore.addSubscription(issueId, issue.is_subscribed);
+    }
 
-    // fetch issue activity
-    this.rootIssueDetailStore.activity.fetchActivities(workspaceSlug, projectId, issueId);
+    if (!options.skipActivityAndComments) {
+      // fetch issue activity
+      this.rootIssueDetailStore.activity.fetchActivities(workspaceSlug, projectId, issueId);
 
-    // fetch issue comments
-    this.rootIssueDetailStore.comment.fetchComments(workspaceSlug, projectId, issueId);
+      // fetch issue comments
+      this.rootIssueDetailStore.comment.fetchComments(workspaceSlug, projectId, issueId);
+    }
 
     // fetch sub issues
     this.rootIssueDetailStore.subIssues.fetchSubIssues(workspaceSlug, projectId, issueId);
@@ -178,10 +232,14 @@ export class IssueStore implements IIssueStore {
       state__group: issue?.state__group,
     };
 
-    this.rootIssueDetailStore.rootIssueStore.issues.addIssue([issuePayload]);
+    const compactIssuePayload = Object.fromEntries(
+      Object.entries(issuePayload).filter(([, value]) => value !== undefined)
+    ) as TIssue;
+
+    this.rootIssueDetailStore.rootIssueStore.issues.addIssue([compactIssuePayload]);
     this.fetchingIssueDetails = undefined;
 
-    return issuePayload;
+    return compactIssuePayload;
   };
 
   updateIssue = async (workspaceSlug: string, projectId: string, issueId: string, data: Partial<TIssue>) => {
@@ -275,10 +333,17 @@ export class IssueStore implements IIssueStore {
     return currentModule;
   };
 
-  fetchIssueWithIdentifier = async (workspaceSlug: string, project_identifier: string, sequence_id: string) => {
-    const query = {
-      expand: "issue_reactions,issue_attachments,issue_link,parent",
-    };
+  fetchIssueWithIdentifier = (async (
+    workspaceSlug: string,
+    project_identifier: string,
+    sequence_id: string,
+    options: TFetchIssueWithIdentifierOptions = {}
+  ): Promise<TIssue | TIssueLite> => {
+    const query = options.lite
+      ? { lite: true }
+      : {
+          expand: "issue_reactions,issue_attachments,issue_link,parent",
+        };
     const issue = await this.issueService.retrieveWithIdentifier(workspaceSlug, project_identifier, sequence_id, query);
     const issueIdentifier = `${project_identifier}-${sequence_id}`;
     const issueId = issue?.id;
@@ -289,8 +354,21 @@ export class IssueStore implements IIssueStore {
 
     if (!issue || !projectId || !issueId) throw new Error("Issue not found");
 
-    const issuePayload = this.addIssueToStore(issue);
-    this.rootIssueDetailStore.rootIssueStore.issues.addIssue([issuePayload]);
+    this.addIssueToStore(issue);
+
+    // add identifiers to map
+    rootWorkItemDetailStore.rootIssueStore.issues.addIssueIdentifier(issueIdentifier, issueId);
+
+    if (issue.is_subscribed !== undefined) rootWorkItemDetailStore.addSubscription(issueId, issue.is_subscribed);
+
+    if (options.lite) {
+      if (!issue.is_intake) {
+        // start the visible activity/comment stream as soon as the core issue is known
+        rootWorkItemDetailStore.activity.fetchActivities(workspaceSlug, projectId, issueId);
+        rootWorkItemDetailStore.comment.fetchComments(workspaceSlug, projectId, issueId);
+      }
+      return issue as TIssueLite;
+    }
 
     // handle parent issue if exists
     if (issue?.parent && issue?.parent?.id && issue?.parent?.project_id) {
@@ -299,32 +377,10 @@ export class IssueStore implements IIssueStore {
         .then((res) => this.rootIssueDetailStore.rootIssueStore.issues.addIssue([res]));
     }
 
-    // add identifiers to map
-    rootWorkItemDetailStore.rootIssueStore.issues.addIssueIdentifier(issueIdentifier, issueId);
-
     // add related data
     if (issue.issue_reactions) rootWorkItemDetailStore.addReactions(issue.id, issue.issue_reactions);
     if (issue.issue_link) rootWorkItemDetailStore.addLinks(issue.id, issue.issue_link);
     if (issue.issue_attachments) rootWorkItemDetailStore.addAttachments(issue.id, issue.issue_attachments);
-    rootWorkItemDetailStore.addSubscription(issue.id, issue.is_subscribed);
-
-    // fetch related data
-    // issue reactions
-    if (issue.issue_reactions) rootWorkItemDetailStore.addReactions(issueId, issue.issue_reactions);
-
-    // fetch issue links
-    if (issue.issue_link) rootWorkItemDetailStore.addLinks(issueId, issue.issue_link);
-
-    // fetch issue attachments
-    if (issue.issue_attachments) rootWorkItemDetailStore.addAttachments(issueId, issue.issue_attachments);
-
-    rootWorkItemDetailStore.addSubscription(issueId, issue.is_subscribed);
-
-    // fetch issue activity
-    rootWorkItemDetailStore.activity.fetchActivities(workspaceSlug, projectId, issueId);
-
-    // fetch issue comments
-    rootWorkItemDetailStore.comment.fetchComments(workspaceSlug, projectId, issueId);
 
     // fetch sub issues
     rootWorkItemDetailStore.subIssues.fetchSubIssues(workspaceSlug, projectId, issueId);
@@ -332,10 +388,16 @@ export class IssueStore implements IIssueStore {
     // fetch issue relations
     rootWorkItemDetailStore.relation.fetchRelations(workspaceSlug, projectId, issueId);
 
+    // fetch issue activity
+    rootWorkItemDetailStore.activity.fetchActivities(workspaceSlug, projectId, issueId);
+
+    // fetch issue comments
+    rootWorkItemDetailStore.comment.fetchComments(workspaceSlug, projectId, issueId);
+
     // fetching states
     // TODO: check if this function is required
     rootWorkItemDetailStore.rootIssueStore.rootStore.state.fetchProjectStates(workspaceSlug, projectId);
 
     return issue;
-  };
+  }) as TFetchIssueWithIdentifier;
 }

@@ -24,6 +24,7 @@ import { useAppTheme } from "@/hooks/store/use-app-theme";
 import { useIssueDetail } from "@/hooks/store/use-issue-detail";
 import { useProject } from "@/hooks/store/use-project";
 import { useAppRouter } from "@/hooks/use-app-router";
+import type { TIssueLite } from "@/store/issue/issue-details/issue.store";
 // layouts
 import { ProjectAuthWrapper } from "@/layouts/auth-layout/project-wrapper";
 // pi dash web imports
@@ -41,28 +42,55 @@ export const IssueDetailsPage = observer(function IssueDetailsPage({ params }: R
   // store hooks
   const { t } = useTranslation();
   const {
+    fetchIssue,
     fetchIssueWithIdentifier,
     issue: { getIssueById },
   } = useIssueDetail();
+  const { fetchIssue: fetchEpic } = useIssueDetail(EIssueServiceType.EPICS);
   const { getProjectById, getProjectByIdentifier } = useProject();
   const { toggleIssueDetailSidebar, issueDetailSidebarCollapsed } = useAppTheme();
 
   const [projectIdentifier, sequence_id] = workItem.split("-");
 
   // fetching issue details
-  const { data, isLoading, error } = useSWR<TIssue, Error>(
-    `ISSUE_DETAIL_${workspaceSlug}_${projectIdentifier}_${sequence_id}`,
-    () => fetchIssueWithIdentifier(workspaceSlug.toString(), projectIdentifier, sequence_id)
+  const {
+    data: liteIssue,
+    isLoading,
+    error,
+  } = useSWR<TIssueLite, Error>(`ISSUE_DETAIL_${workspaceSlug}_${projectIdentifier}_${sequence_id}`, () =>
+    fetchIssueWithIdentifier(workspaceSlug.toString(), projectIdentifier, sequence_id, { lite: true })
   );
 
   // derived values
   const projectDetails = getProjectByIdentifier(projectIdentifier);
-  const issueId = data?.id;
-  const projectId = data?.project_id ?? projectDetails?.id ?? "";
+  const issueId = liteIssue?.id;
+  const projectId = liteIssue?.project_id ?? projectDetails?.id ?? "";
   const issue = getIssueById(issueId?.toString() || "") || undefined;
   const project = (issue?.project_id && getProjectById(issue?.project_id)) || undefined;
   const issueLoader = !issue || isLoading;
   const pageTitle = project && issue ? `${project?.identifier}-${issue?.sequence_id} ${issue?.name}` : undefined;
+  const shouldHydrateIssue = !!workspaceSlug && !!projectId && !!issueId && !liteIssue?.is_intake;
+
+  const {
+    data: hydratedIssue,
+    isLoading: isHydratingIssue,
+    error: hydrationError,
+    mutate: retryIssueHydration,
+  } = useSWR<TIssue, Error>(
+    shouldHydrateIssue ? `ISSUE_DETAIL_HYDRATE_${workspaceSlug}_${projectId}_${issueId}` : null,
+    () =>
+      (liteIssue?.is_epic ? fetchEpic : fetchIssue)(
+        workspaceSlug.toString(),
+        projectId.toString(),
+        issueId?.toString() ?? "",
+        {
+          preserveSubscription: true,
+          skipActivityAndComments: true,
+        }
+      ),
+    { revalidateOnFocus: false }
+  );
+  const isMetadataHydrating = shouldHydrateIssue && isHydratingIssue && !hydratedIssue;
 
   useWorkItemProperties(
     projectId,
@@ -86,20 +114,25 @@ export const IssueDetailsPage = observer(function IssueDetailsPage({ params }: R
   }, [issueDetailSidebarCollapsed, toggleIssueDetailSidebar]);
 
   useEffect(() => {
-    if (data?.is_intake) {
-      router.push(`/${workspaceSlug}/projects/${data.project_id}/intake/?currentTab=open&inboxIssueId=${data?.id}`);
+    if (liteIssue?.is_intake) {
+      router.push(
+        `/${workspaceSlug}/projects/${liteIssue.project_id}/intake/?currentTab=open&inboxIssueId=${liteIssue?.id}`
+      );
     }
-  }, [workspaceSlug, data, router]);
+  }, [workspaceSlug, liteIssue?.id, liteIssue?.is_intake, liteIssue?.project_id, router]);
 
-  if (error && !isLoading) {
+  if ((error && !isLoading) || hydrationError) {
     return (
       <EmptyState
         image={resolvedTheme === "dark" ? emptyIssueDark : emptyIssueLight}
         title={t("issue.empty_state.issue_detail.title")}
         description={t("issue.empty_state.issue_detail.description")}
         primaryButton={{
-          text: t("issue.empty_state.issue_detail.primary_button.text"),
-          onClick: () => router.push(`/${workspaceSlug}/workspace-views/all-issues/`),
+          text: hydrationError ? t("common.retry") : t("issue.empty_state.issue_detail.primary_button.text"),
+          onClick: () => {
+            if (hydrationError) void retryIssueHydration();
+            else router.push(`/${workspaceSlug}/workspace-views/all-issues/`);
+          },
         }}
       />
     );
@@ -134,6 +167,7 @@ export const IssueDetailsPage = observer(function IssueDetailsPage({ params }: R
             projectId={projectId.toString()}
             issueId={issueId.toString()}
             issue={issue}
+            isMetadataHydrating={isMetadataHydrating}
           />
         </ProjectAuthWrapper>
       )}
