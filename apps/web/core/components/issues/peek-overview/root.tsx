@@ -4,9 +4,10 @@
  * See the LICENSE file for details.
  */
 
-import { useState, useMemo, useCallback } from "react";
+import { useState, useMemo, useCallback, useEffect } from "react";
 import { observer } from "mobx-react";
 import { usePathname } from "next/navigation";
+import { useParams, useSearchParams } from "react-router";
 // Pi Dash imports
 import useSWR from "swr";
 import { EUserPermissions, EUserPermissionsLevel } from "@pi-dash/constants";
@@ -24,6 +25,8 @@ import { useWorkItemProperties } from "@/pi-dash-web/hooks/use-issue-properties"
 import type { TIssueOperations } from "../issue-detail";
 import { IssueView } from "./view";
 
+const PEEK_QUERY_KEY = "peekId";
+
 export const IssuePeekOverview = observer(function IssuePeekOverview(props: IWorkItemPeekOverview) {
   const {
     embedIssue = false,
@@ -34,6 +37,11 @@ export const IssuePeekOverview = observer(function IssuePeekOverview(props: IWor
   const { t } = useTranslation();
   // router
   const pathname = usePathname();
+  const routeParams = useParams();
+  const [searchParams, setSearchParams] = useSearchParams();
+  const urlWorkspaceSlug = routeParams.workspaceSlug?.toString();
+  const urlProjectId = routeParams.projectId?.toString();
+  const urlPeekId = searchParams.get(PEEK_QUERY_KEY) ?? undefined;
   // store hook
   const { allowPermissions } = useUserPermissions();
 
@@ -64,15 +72,52 @@ export const IssuePeekOverview = observer(function IssuePeekOverview(props: IWor
     if (embedIssue) embedRemoveCurrentNotification?.();
   }, [embedIssue, embedRemoveCurrentNotification, setPeekIssue]);
 
+  // URL <-> peek store sync (only on routes that carry workspaceSlug + projectId).
+  // Lets a peeked issue be deep-linked: ?peekId=<issueId> opens it as a side panel.
+  const canSyncPeekUrl = !embedIssue && !!urlWorkspaceSlug && !!urlProjectId;
+  // URL -> store
+  useEffect(() => {
+    if (!canSyncPeekUrl) return;
+    if (urlPeekId) {
+      if (peekIssue?.issueId !== urlPeekId) {
+        setPeekIssue({
+          workspaceSlug: urlWorkspaceSlug!,
+          projectId: urlProjectId!,
+          issueId: urlPeekId,
+          isArchived: pathname?.includes("/archives/") ?? false,
+        });
+      }
+    } else if (peekIssue?.issueId) {
+      setPeekIssue(undefined);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [urlPeekId, urlWorkspaceSlug, urlProjectId, canSyncPeekUrl, pathname]);
+  // store -> URL
+  useEffect(() => {
+    if (!canSyncPeekUrl) return;
+    const targetPeekId = peekIssue?.issueId;
+    if (targetPeekId === urlPeekId) return;
+    setSearchParams(
+      (prev) => {
+        const next = new URLSearchParams(prev);
+        if (targetPeekId) next.set(PEEK_QUERY_KEY, targetPeekId);
+        else next.delete(PEEK_QUERY_KEY);
+        return next;
+      },
+      { replace: true, preventScrollReset: true }
+    );
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [peekIssue?.issueId, canSyncPeekUrl]);
+
   const issueOperations: TIssueOperations = useMemo(
     () => ({
       fetch: async (workspaceSlug: string, projectId: string, issueId: string) => {
         try {
           setError(false);
           await fetchIssue(workspaceSlug, projectId, issueId);
-        } catch (error) {
+        } catch (err) {
           setError(true);
-          console.error("Error fetching the parent issue", error);
+          console.error("Error fetching the parent issue", err);
         }
       },
       update: async (workspaceSlug: string, projectId: string, issueId: string, data: Partial<TIssue>) => {
@@ -110,8 +155,8 @@ export const IssuePeekOverview = observer(function IssuePeekOverview(props: IWor
         try {
           if (!issues?.archiveIssue) return;
           await issues.archiveIssue(workspaceSlug, projectId, issueId);
-        } catch (error) {
-          console.error("Error archiving the issue", error);
+        } catch (err) {
+          console.error("Error archiving the issue", err);
         }
       },
       restore: async (workspaceSlug: string, projectId: string, issueId: string) => {
@@ -169,8 +214,8 @@ export const IssuePeekOverview = observer(function IssuePeekOverview(props: IWor
           });
           await removeFromCyclePromise;
           fetchActivities(workspaceSlug, projectId, issueId);
-        } catch (error) {
-          console.error("Error removing issue from cycle", error);
+        } catch (err) {
+          console.error("Error removing issue from cycle", err);
         }
       },
       changeModulesInIssue: async (
@@ -206,8 +251,8 @@ export const IssuePeekOverview = observer(function IssuePeekOverview(props: IWor
           });
           await removeFromModulePromise;
           fetchActivities(workspaceSlug, projectId, issueId);
-        } catch (error) {
-          console.error("Error removing issue from module", error);
+        } catch (err) {
+          console.error("Error removing issue from module", err);
         }
       },
     }),
