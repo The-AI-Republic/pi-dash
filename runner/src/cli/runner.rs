@@ -103,9 +103,7 @@ pub async fn run(args: RunnerArgs, paths: &Paths) -> Result<()> {
 /// the cloud to mint a runner under the caller's identity. Replaces
 /// the legacy connection-secret-bearer flow.
 pub async fn add(args: AddArgs, paths: &Paths) -> Result<RunnerConfig> {
-    let api_token = ensure_cli_token(paths, args.url.as_deref()).await?;
-
-    // Cap check is local + cheap; do it before the network call.
+    // Cap check is local + cheap; do it before auth or any network call.
     let existing_count = if paths.config_path().exists() {
         file::load_config(paths)?.runners.len()
     } else {
@@ -116,6 +114,8 @@ pub async fn add(args: AddArgs, paths: &Paths) -> Result<RunnerConfig> {
             "daemon already at the {MAX_RUNNERS_PER_DAEMON}-runner cap; remove one with `pidash runner remove <NAME>` first"
         );
     }
+
+    let api_token = ensure_cli_token(paths, args.url.as_deref()).await?;
 
     let cloud_url = if paths.config_path().exists() {
         file::load_config(paths)?.daemon.cloud_url
@@ -255,7 +255,7 @@ async fn ensure_cli_token(paths: &Paths, cloud_url: Option<&str>) -> Result<Stri
     crate::cli::auth::login::run_auth_only(
         crate::cli::auth::login::Args {
             url: cloud_url.map(|u| u.trim_end_matches('/').to_string()),
-            no_browser: !std::io::stdout().is_terminal(),
+            no_browser: !std::io::stderr().is_terminal() && !std::io::stdin().is_terminal(),
             no_runner_prompt: true,
         },
         paths,

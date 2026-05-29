@@ -142,7 +142,7 @@ fn paths(root: &std::path::Path) -> Paths {
     }
 }
 
-fn write_config_at_runner_cap(paths: &Paths, cloud_url: &str) {
+fn write_config_with_runner_count(paths: &Paths, cloud_url: &str, runner_count: usize) {
     std::fs::create_dir_all(&paths.config_dir).unwrap();
     std::fs::create_dir_all(&paths.data_dir).unwrap();
     std::fs::create_dir_all(&paths.runtime_dir).unwrap();
@@ -155,7 +155,7 @@ version = 2
 cloud_url = "{cloud_url}"
 "#
     );
-    for i in 0..MAX_RUNNERS_PER_DAEMON {
+    for i in 0..runner_count {
         toml.push_str(&format!(
             r#"
 [[runner]]
@@ -174,11 +174,10 @@ working_dir = "/tmp/pidash-runner-{i:03}"
 }
 
 #[tokio::test]
-async fn runner_add_bootstraps_auth_when_cli_token_is_missing() {
-    let fake = start_fake().await;
+async fn runner_add_checks_local_cap_before_auth_bootstrap() {
     let tmp = tempdir().unwrap();
     let paths = paths(tmp.path());
-    write_config_at_runner_cap(&paths, &format!("http://{}", fake.addr));
+    write_config_with_runner_count(&paths, "http://127.0.0.1:9", MAX_RUNNERS_PER_DAEMON);
 
     let err = pidash::cli::runner::add(
         AddArgs {
@@ -193,11 +192,46 @@ async fn runner_add_bootstraps_auth_when_cli_token_is_missing() {
         &paths,
     )
     .await
-    .expect_err("runner add should reach the cap check after auth bootstrap");
+    .expect_err("runner add should fail at the local cap before auth");
 
     let msg = format!("{err:#}");
     assert!(
         msg.contains("daemon already at the 50-runner cap"),
+        "unexpected cap error: {msg}",
+    );
+
+    let config = std::fs::read_to_string(paths.config_path()).unwrap();
+    assert!(
+        !config.contains("token = \"cli-token\""),
+        "cap failure should not run auth bootstrap"
+    );
+}
+
+#[tokio::test]
+async fn runner_add_bootstraps_auth_when_cli_token_is_missing() {
+    let fake = start_fake().await;
+    let tmp = tempdir().unwrap();
+    let paths = paths(tmp.path());
+    write_config_with_runner_count(&paths, &format!("http://{}", fake.addr), 0);
+
+    let err = pidash::cli::runner::add(
+        AddArgs {
+            url: None,
+            name: None,
+            project: "TEST".to_string(),
+            workspace: None,
+            pod: None,
+            working_dir: None,
+            agent: AgentKind::Codex,
+        },
+        &paths,
+    )
+    .await
+    .expect_err("fake cloud should reject runner creation after auth bootstrap");
+
+    let msg = format!("{err:#}");
+    assert!(
+        msg.contains("cloud rejected runner creation"),
         "unexpected error after auth bootstrap: {msg}",
     );
 
@@ -219,6 +253,14 @@ async fn runner_add_bootstraps_auth_when_cli_token_is_missing() {
                 && r.api_key.as_deref() == Some("cli-token")
         }),
         "workspace binding was not resolved with the new token: {recorded:?}",
+    );
+    assert!(
+        recorded.iter().any(|r| {
+            r.method == "POST"
+                && r.path == "/api/v1/runner/runners/"
+                && r.api_key.as_deref() == Some("cli-token")
+        }),
+        "runner creation was not attempted with the bootstrapped token: {recorded:?}",
     );
     assert!(
         !recorded

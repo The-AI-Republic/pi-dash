@@ -2914,7 +2914,7 @@ export default {
       add_runner: "Dodaj runnera",
       how_it_works_title: "Jak dodać runnera",
       how_it_works_body:
-        '1. Kliknij "Dodaj runnera", wybierz projekt + pod i zatwierdź. Chmura generuje jednorazowy token rejestracji powiązany z tym runnerem.\n2. Na maszynie, która będzie hostować runnera, uruchom wyświetlone polecenie `pidash connect --url ... --token ... --host-label ...`.\n3. Demon rejestruje się, a runner pojawia się jako online.\n\nKażdy runner ma swój własny token. Pierwszy runner zarejestrowany na hoście inicjuje również token maszyny używany przez CLI `pidash` do poleceń innych niż runner.\n\nWymaganie wstępne: CLI agenta (codex / claude) musi być już zainstalowane na hoście.',
+        '1. Click "Add runner", pick a project + pod and generate the CLI command.\n2. On the machine that will host the runner, run the displayed `pidash runner add` command. If the host is not logged in yet, the CLI starts `pidash auth login` first.\n3. The daemon registers the runner and it shows online here.\n\nPrerequisite: the agent CLI (codex / claude) must already be installed on the host.',
       connected_runners: "Runnery",
       columns: {
         name: "Nazwa",
@@ -2927,7 +2927,7 @@ export default {
       revive: "Przywróć",
       revoke: "Unieważnij",
       delete: "Usuń",
-      empty: 'Brak runnerów. Kliknij "Dodaj runnera", aby wygenerować pierwszy token rejestracji dla runnera.',
+      empty: 'No runners yet. Click "Add runner" to generate your first runner command.',
       delete_confirm_title: "Usunąć runnera?",
       delete_confirm_body:
         "Wiersz runnera zostanie usunięty, a demon zostanie wymuszony offline. Historyczne uruchomienia zostaną zachowane z odwołaniem null do runnera.",
@@ -2941,7 +2941,7 @@ export default {
       copy_failed: "Nie udało się skopiować do schowka",
     },
     machine_token_note: {
-      body: "Gdy runner rejestruje się po raz pierwszy na nowym hoście (tj. nowym ``host_label``), chmura wydaje również token maszyny używany przez CLI ``pidash`` do poleceń innych niż runner (issue, comment, state). Kolejne runnery na tym samym hoście ponownie używają tego tokena.",
+      body: "`pidash runner add` starts `pidash auth login` first when the host is not logged in yet. Run it again for each project or pod this machine should serve.",
     },
     pods: {
       title: "Pody",
@@ -2962,14 +2962,12 @@ export default {
         codex: "Codex",
       },
       errors: {
-        create_failed: "Nie udało się wygenerować tokena rejestracyjnego.",
         project_required: "Wybierz projekt.",
         load_projects_failed: "Nie udało się załadować projektów.",
         load_pods_failed: "Nie udało się załadować podów.",
       },
       title: "Dodaj runnera",
-      subtitle:
-        "Wygeneruj jednorazowy token rejestracyjny dla nowego runnera. Uruchom wyświetlone polecenie `pidash connect` na maszynie, która będzie go hostować.",
+      subtitle: "Generate a `pidash runner add` command for the machine that will host this runner.",
       project_label: "Projekt",
       project_help: "Projekt, nad którym będzie pracował ten runner.",
       pod_label: "Pod (opcjonalnie)",
@@ -2978,22 +2976,23 @@ export default {
       name_label: "Nazwa (opcjonalnie)",
       name_placeholder: "my-laptop-runner",
       name_help: "Przypisywany automatycznie, jeśli pozostawisz puste, np. ``runner_001``.",
-      host_label_label: "Etykieta hosta (opcjonalnie)",
-      host_label_placeholder: "my-laptop",
-      host_label_help:
-        "Dowolna nazwa hosta wbudowana w sugerowane polecenie. Demon zastąpi ją rzeczywistą nazwą hosta, jeśli pominiesz flagę.",
       working_dir_label: "Katalog roboczy (opcjonalnie)",
       working_dir_placeholder: "lokalny katalog roboczy projektu",
       working_dir_help:
         "Lokalna ścieżka, w której demon uruchamia CLI agenta — zazwyczaj repozytorium projektu na dysku. Domyślnie ustawiana jest na piaskownicę w katalogu danych runnera, co rzadko jest pożądane.",
       agent_label: "Agent",
-      agent_help:
-        "Którego CLI agenta AI będzie obsługiwać ten runner. Wbudowane w wyświetlane polecenie ``pidash connect``.",
+      agent_help: "Which AI agent CLI this runner will drive. Baked into the displayed ``pidash runner add`` command.",
       cancel: "Anuluj",
-      submitting: "Mintowanie…",
-      submit: "Wygeneruj token rejestracyjny",
+      back: "Back",
+      submit: "Generate command",
       token_warning: "Skopiuj to teraz — token rejestracyjny nie zostanie pokazany ponownie.",
       token_instructions: "Uruchom to na maszynie, która będzie hostować runnera:",
+      cloud_url_origin_warning:
+        "Using the current browser origin as the cloud URL because VITE_API_BASE_URL is not configured.",
+      shell_label: "Shell",
+      shell_posix: "macOS/Linux",
+      shell_powershell: "PowerShell",
+      shell_cmd: "Command Prompt",
       copied: "Skopiowano!",
       copy_command: "Kopiuj polecenie",
     },

@@ -68,10 +68,8 @@ export class RunnerService extends APIService {
   }
 
   /** ``POST /api/runners/<id>/revive/`` — mint a fresh enrollment token
-   * on an existing PENDING-or-REVOKED runner row. The response payload
-   * is identical to ``createRunnerInvite`` so the same install-command
-   * panel can render it. 409 if the runner is currently active — revoke
-   * it first. */
+   * on an existing PENDING-or-REVOKED runner row. 409 if the runner is
+   * currently active — revoke it first. */
   async reviveRunner(runnerId: string): Promise<IRunnerInvite> {
     return this.post(`/api/runners/${runnerId}/revive/`, {})
       .then((r) => r?.data)
@@ -93,30 +91,6 @@ export class RunnerService extends APIService {
 
   async getDetail(runnerId: string): Promise<IRunner> {
     return this.get(`/api/runners/${runnerId}/`)
-      .then((r) => r?.data)
-      .catch((e) => {
-        throw e?.response?.data;
-      });
-  }
-
-  /** ``POST /api/runners/invites/`` — create a per-runner enrollment
-   * invite. Each runner has its own enrollment token; the daemon
-   * exchanges it for a long-lived refresh token via ``pidash connect``.
-   * Replaces the legacy connection-level ``POST /api/runners/connections/``
-   * — see ``.ai_design/move_to_https/design.md`` §5.1.
-   */
-  async createRunnerInvite(input: {
-    workspaceId: string;
-    projectIdentifier: string;
-    podName?: string;
-    name?: string;
-  }): Promise<IRunnerInvite> {
-    return this.post("/api/runners/invites/", {
-      workspace: input.workspaceId,
-      project: input.projectIdentifier,
-      pod: input.podName ?? "",
-      name: input.name ?? "",
-    })
       .then((r) => r?.data)
       .catch((e) => {
         throw e?.response?.data;

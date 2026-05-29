@@ -648,10 +648,6 @@ export default {
       name_label: "Name (optional)",
       name_help: "Auto-assigned if blank, e.g. ``runner_001``.",
       name_placeholder: "my-laptop-runner",
-      host_label_label: "Host label (optional)",
-      host_label_help:
-        "Free-form host name baked into the suggested command. The daemon will substitute its actual hostname if you leave the flag off.",
-      host_label_placeholder: "my-laptop",
       working_dir_label: "Working directory (optional)",
       working_dir_help:
         "Local path the daemon runs the agent CLI in — usually the project repo on disk. Defaults to a sandbox under the runner's data dir, which is rarely what you want.",
@@ -663,11 +659,17 @@ export default {
         codex: "Codex",
       },
       submit: "Generate command",
-      submitting: "Generating…",
       cancel: "Cancel",
+      back: "Back",
       done: "Done",
       token_warning: "Copy this once — the enrollment token will not be shown again.",
       token_instructions: "Run this on the machine that will host the runner:",
+      cloud_url_origin_warning:
+        "Using the current browser origin as the cloud URL because VITE_API_BASE_URL is not configured.",
+      shell_label: "Shell",
+      shell_posix: "macOS/Linux",
+      shell_powershell: "PowerShell",
+      shell_cmd: "Command Prompt",
       copy_command: "Copy command",
       copied: "Copied!",
       runner_id_label: "Runner id",
@@ -675,7 +677,6 @@ export default {
         project_required: "Pick a project.",
         load_projects_failed: "Could not load projects.",
         load_pods_failed: "Could not load pods.",
-        create_failed: "Could not generate the runner command.",
       },
     },
     machine_token_note: {

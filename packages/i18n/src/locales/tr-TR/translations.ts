@@ -2925,7 +2925,7 @@ export default {
       add_runner: "Runner ekle",
       how_it_works_title: "Runner nasıl eklenir",
       how_it_works_body:
-        "1. \"Runner ekle\"ye tıklayın, bir proje + pod seçin ve gönderin. Bulut, bu runner'a bağlı tek kullanımlık bir kayıt token'ı oluşturur.\n2. Runner'ı barındıracak makinede, görüntülenen `pidash connect --url ... --token ... --host-label ...` komutunu çalıştırın.\n3. Daemon kaydolur ve runner burada çevrimiçi görünür.\n\nHer runner'ın kendi token'ı vardır. Bir ana bilgisayarda kaydolan ilk runner, aynı zamanda `pidash` CLI tarafından runner olmayan komutlar için kullanılan bir makine token'ı başlatır.\n\nÖn koşul: aracı CLI (codex / claude) ana bilgisayara zaten yüklenmiş olmalıdır.",
+        '1. Click "Add runner", pick a project + pod and generate the CLI command.\n2. On the machine that will host the runner, run the displayed `pidash runner add` command. If the host is not logged in yet, the CLI starts `pidash auth login` first.\n3. The daemon registers the runner and it shows online here.\n\nPrerequisite: the agent CLI (codex / claude) must already be installed on the host.',
       connected_runners: "Runner'lar",
       columns: {
         name: "Ad",
@@ -2938,7 +2938,7 @@ export default {
       revive: "Canlandır",
       revoke: "İptal et",
       delete: "Sil",
-      empty: 'Henüz runner yok. İlk runner başına kayıt token\'ınızı oluşturmak için "Runner ekle"ye tıklayın.',
+      empty: 'No runners yet. Click "Add runner" to generate your first runner command.',
       delete_confirm_title: "Runner silinsin mi?",
       delete_confirm_body:
         "Runner satırı kaldırılır ve daemon çevrimdışı olmaya zorlanır. Geçmiş çalıştırmalar, null runner referansı ile korunur.",
@@ -2952,7 +2952,7 @@ export default {
       copy_failed: "Panoya kopyalanamadı",
     },
     machine_token_note: {
-      body: "Bir runner ilk kez yeni bir ana bilgisayara (yani yeni bir ``host_label``) kaydolduğunda, bulut ayrıca ``pidash`` CLI tarafından runner olmayan komutlar (issue, comment, state) için kullanılan bir makine token'ı yayınlar. Aynı ana bilgisayardaki sonraki runner'lar bu token'ı yeniden kullanır.",
+      body: "`pidash runner add` starts `pidash auth login` first when the host is not logged in yet. Run it again for each project or pod this machine should serve.",
     },
     pods: {
       title: "Pod'lar",
@@ -2973,14 +2973,12 @@ export default {
         codex: "Codex",
       },
       errors: {
-        create_failed: "Kayıt token'ı oluşturulamadı.",
         project_required: "Bir proje seçin.",
         load_projects_failed: "Projeler yüklenemedi.",
         load_pods_failed: "Pod'lar yüklenemedi.",
       },
       title: "Runner ekle",
-      subtitle:
-        "Yeni bir runner için tek kullanımlık kayıt token'ı oluşturun. Görüntülenen `pidash connect` komutunu, runner'ı barındıracak makinede çalıştıracaksınız.",
+      subtitle: "Generate a `pidash runner add` command for the machine that will host this runner.",
       project_label: "Proje",
       project_help: "Bu runner'ın üzerinde çalışacağı proje.",
       pod_label: "Pod (isteğe bağlı)",
@@ -2989,22 +2987,23 @@ export default {
       name_label: "Ad (isteğe bağlı)",
       name_placeholder: "my-laptop-runner",
       name_help: "Boş bırakılırsa otomatik atanır, örn. ``runner_001``.",
-      host_label_label: "Ana bilgisayar etiketi (isteğe bağlı)",
-      host_label_placeholder: "my-laptop",
-      host_label_help:
-        "Önerilen komuta gömülü serbest biçimli ana bilgisayar adı. Bayrağı kapatırsanız arka plan programı gerçek ana bilgisayar adını kullanır.",
       working_dir_label: "Çalışma dizini (isteğe bağlı)",
       working_dir_placeholder: "yerel geliştirme makinesi proje çalışma dizini",
       working_dir_help:
         "Arka plan programının aracı CLI'sini çalıştırdığı yerel yol — genellikle diskteki proje deposu. Varsayılan olarak çalıştırıcının veri dizini altındaki bir kum havuzudur, bu nadiren istediğiniz şeydir.",
       agent_label: "Aracı",
-      agent_help:
-        "Bu çalıştırıcının hangi AI aracı CLI'sini yönlendireceği. Görüntülenen ``pidash connect`` komutuna gömülüdür.",
+      agent_help: "Which AI agent CLI this runner will drive. Baked into the displayed ``pidash runner add`` command.",
       cancel: "İptal",
-      submitting: "Basılıyor…",
-      submit: "Kayıt tokeni bas",
+      back: "Back",
+      submit: "Generate command",
       token_warning: "Bunu bir kez kopyalayın — kayıt tokeni bir daha gösterilmeyecek.",
       token_instructions: "Bunu çalıştırıcıyı barındıracak makinede çalıştırın:",
+      cloud_url_origin_warning:
+        "Using the current browser origin as the cloud URL because VITE_API_BASE_URL is not configured.",
+      shell_label: "Shell",
+      shell_posix: "macOS/Linux",
+      shell_powershell: "PowerShell",
+      shell_cmd: "Command Prompt",
       copied: "Kopyalandı!",
       copy_command: "Komutu kopyala",
     },

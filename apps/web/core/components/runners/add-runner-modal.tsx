@@ -64,6 +64,7 @@ export const AddRunnerModal = observer(function AddRunnerModal(props: Props) {
   }, []);
 
   const cloudUrl = API_BASE_URL || origin;
+  const isUsingBrowserOrigin = !API_BASE_URL;
 
   const {
     control,
@@ -71,7 +72,7 @@ export const AddRunnerModal = observer(function AddRunnerModal(props: Props) {
     reset,
     watch,
     setValue,
-    formState: { errors, isSubmitting },
+    formState: { errors },
   } = useForm<FormValues>({ defaultValues: DEFAULT_VALUES });
 
   const [runnerCommand, setRunnerCommand] = useState<RunnerCommandValues | null>(null);
@@ -299,12 +300,10 @@ export const AddRunnerModal = observer(function AddRunnerModal(props: Props) {
           </div>
 
           <div className="flex justify-end gap-2">
-            <Button variant="secondary" onClick={onClose} disabled={isSubmitting}>
+            <Button variant="secondary" onClick={onClose}>
               {t("runners.add_modal.cancel")}
             </Button>
-            <Button type="submit" loading={isSubmitting} disabled={isSubmitting}>
-              {isSubmitting ? t("runners.add_modal.submitting") : t("runners.add_modal.submit")}
-            </Button>
+            <Button type="submit">{t("runners.add_modal.submit")}</Button>
           </div>
         </form>
       ) : (
@@ -324,9 +323,13 @@ export const AddRunnerModal = observer(function AddRunnerModal(props: Props) {
             name={runnerCommand.name}
             workingDir={runnerCommand.workingDir}
             agent={runnerCommand.agent}
+            isUsingBrowserOrigin={isUsingBrowserOrigin}
           />
 
-          <div className="flex justify-end">
+          <div className="flex justify-end gap-2">
+            <Button variant="secondary" onClick={() => setRunnerCommand(null)}>
+              {t("runners.add_modal.back")}
+            </Button>
             <Button onClick={onClose}>{t("runners.add_modal.done")}</Button>
           </div>
         </div>

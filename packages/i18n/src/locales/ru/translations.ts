@@ -3137,7 +3137,7 @@ export default {
       add_runner: "Добавить runner",
       how_it_works_title: "Как добавить runner",
       how_it_works_body:
-        '1. Нажмите "Добавить runner", выберите проект + под и отправьте. Облако создает одноразовый токен регистрации, привязанный к этому runner.\n2. На машине, которая будет хостить runner, выполните отображаемую команду `pidash connect --url ... --token ... --host-label ...`.\n3. Демон регистрируется, и runner отображается здесь как онлайн.\n\nКаждый runner имеет свой собственный токен. Первый runner, зарегистрированный на хосте, также создает машинный токен, используемый CLI `pidash` для команд, не связанных с runner.\n\nПредварительное требование: CLI агента (codex / claude) уже должен быть установлен на хосте.',
+        '1. Click "Add runner", pick a project + pod and generate the CLI command.\n2. On the machine that will host the runner, run the displayed `pidash runner add` command. If the host is not logged in yet, the CLI starts `pidash auth login` first.\n3. The daemon registers the runner and it shows online here.\n\nPrerequisite: the agent CLI (codex / claude) must already be installed on the host.',
       connected_runners: "Runners",
       columns: {
         name: "Имя",
@@ -3150,7 +3150,7 @@ export default {
       revive: "Восстановить",
       revoke: "Отозвать",
       delete: "Удалить",
-      empty: 'Пока нет runners. Нажмите "Add runner", чтобы создать первый одноразовый токен регистрации для runner.',
+      empty: 'No runners yet. Click "Add runner" to generate your first runner command.',
       delete_confirm_title: "Удалить runner?",
       delete_confirm_body:
         "Строка runner удаляется, а демон принудительно переводится в офлайн. Исторические запуски сохраняются с нулевой ссылкой на runner.",
@@ -3164,7 +3164,7 @@ export default {
       copy_failed: "Не удалось скопировать в буфер обмена",
     },
     machine_token_note: {
-      body: "При первой регистрации раннера на новом хосте (т.е. новом ``host_label``), облако также выдает машинный токен, используемый CLI ``pidash`` для команд, не связанных с раннером (issue, comment, state). Последующие раннеры на том же хосте повторно используют этот токен.",
+      body: "`pidash runner add` starts `pidash auth login` first when the host is not logged in yet. Run it again for each project or pod this machine should serve.",
     },
     pods: {
       title: "Группы",
@@ -3185,14 +3185,12 @@ export default {
         codex: "Codex",
       },
       errors: {
-        create_failed: "Не удалось создать токен регистрации.",
         project_required: "Выберите проект.",
         load_projects_failed: "Не удалось загрузить проекты.",
         load_pods_failed: "Не удалось загрузить группы.",
       },
       title: "Добавить раннер",
-      subtitle:
-        "Создайте одноразовый токен регистрации для нового раннера. Выполните отображаемую команду `pidash connect` на машине, которая будет его хостить.",
+      subtitle: "Generate a `pidash runner add` command for the machine that will host this runner.",
       project_label: "Проект",
       project_help: "Проект, над которым будет работать этот раннер.",
       pod_label: "Группа (необязательно)",
@@ -3201,22 +3199,23 @@ export default {
       name_label: "Имя (необязательно)",
       name_placeholder: "my-laptop-runner",
       name_help: "Назначается автоматически, если оставить пустым, например ``runner_001``.",
-      host_label_label: "Метка хоста (необязательно)",
-      host_label_placeholder: "my-laptop",
-      host_label_help:
-        "Произвольное имя хоста, встроенное в предлагаемую команду. Демон подставит фактическое имя хоста, если вы опустите флаг.",
       working_dir_label: "Рабочий каталог (необязательно)",
       working_dir_placeholder: "рабочий каталог проекта на локальной машине разработчика",
       working_dir_help:
         "Локальный путь, в котором демон запускает CLI агента — обычно это репозиторий проекта на диске. По умолчанию используется песочница в каталоге данных раннера, что редко является желаемым.",
       agent_label: "Агент",
-      agent_help:
-        "Какой CLI AI-агента будет управлять этим раннером. Встроено в отображаемую команду ``pidash connect``.",
+      agent_help: "Which AI agent CLI this runner will drive. Baked into the displayed ``pidash runner add`` command.",
       cancel: "Отмена",
-      submitting: "Выпуск токена…",
-      submit: "Выпустить токен регистрации",
+      back: "Back",
+      submit: "Generate command",
       token_warning: "Скопируйте это сейчас — токен регистрации больше не будет показан.",
       token_instructions: "Запустите это на машине, которая будет хостить раннер:",
+      cloud_url_origin_warning:
+        "Using the current browser origin as the cloud URL because VITE_API_BASE_URL is not configured.",
+      shell_label: "Shell",
+      shell_posix: "macOS/Linux",
+      shell_powershell: "PowerShell",
+      shell_cmd: "Command Prompt",
       copied: "Скопировано!",
       copy_command: "Скопировать команду",
     },

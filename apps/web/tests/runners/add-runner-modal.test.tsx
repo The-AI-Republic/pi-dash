@@ -8,14 +8,17 @@ import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-const { listPods, listProjects, setToast } = vi.hoisted(() => ({
+const { apiBaseUrl, listPods, listProjects, setToast } = vi.hoisted(() => ({
+  apiBaseUrl: { value: "http://localhost:8000" },
   listPods: vi.fn(),
   listProjects: vi.fn(),
   setToast: vi.fn(),
 }));
 
 vi.mock("@pi-dash/constants", () => ({
-  API_BASE_URL: "http://localhost:8000",
+  get API_BASE_URL() {
+    return apiBaseUrl.value;
+  },
 }));
 
 vi.mock("@pi-dash/services", () => ({
@@ -110,6 +113,7 @@ const PODS = [
 
 describe("AddRunnerModal", () => {
   beforeEach(() => {
+    apiBaseUrl.value = "http://localhost:8000";
     listPods.mockReset().mockResolvedValue(PODS);
     listProjects.mockReset().mockResolvedValue(PROJECTS);
     setToast.mockReset();
@@ -155,5 +159,62 @@ describe("AddRunnerModal", () => {
     expect(command.textContent).toContain("--agent codex");
     expect(command.textContent).not.toContain("pidash connect");
     expect(command.textContent).not.toContain("--token");
+  });
+
+  it("lets the user go back and edit the form after generating a command", async () => {
+    const user = userEvent.setup();
+    const runnerName = "browserx-local";
+    renderModal();
+
+    await screen.findByRole("option", { name: "BrowserX" });
+
+    await user.selectOptions(screen.getAllByTestId("select")[0], "BROWSERX");
+    await user.type(screen.getByPlaceholderText("runners.add_modal.name_placeholder"), runnerName);
+    await user.click(screen.getByRole("button", { name: "runners.add_modal.submit" }));
+
+    await screen.findByText((_content: string, node: Element | null) => node?.tagName.toLowerCase() === "pre");
+    await user.click(screen.getByRole("button", { name: "runners.add_modal.back" }));
+
+    expect(screen.getByPlaceholderText("runners.add_modal.name_placeholder")).toHaveValue(runnerName);
+  });
+
+  it("renders PowerShell-safe quoting for Windows users", async () => {
+    const user = userEvent.setup();
+    renderModal();
+
+    await screen.findByRole("option", { name: "BrowserX" });
+
+    const selects = screen.getAllByTestId("select");
+    await user.selectOptions(selects[0], "BROWSERX");
+    await user.type(screen.getByPlaceholderText("runners.add_modal.name_placeholder"), "rich's runner");
+    await user.type(
+      screen.getByPlaceholderText("runners.add_modal.working_dir_placeholder"),
+      String.raw`C:\\Users\\rich\\My Project`
+    );
+    await user.click(screen.getByRole("button", { name: "runners.add_modal.submit" }));
+    await user.click(screen.getByRole("button", { name: "runners.add_modal.shell_powershell" }));
+
+    const command = await screen.findByText(
+      (_content: string, node: Element | null) => node?.tagName.toLowerCase() === "pre"
+    );
+    expect(command.textContent).toContain("--name 'rich''s runner'");
+    expect(command.textContent).toContain(String.raw`--working-dir 'C:\\Users\\rich\\My Project'`);
+    expect(command.textContent).not.toContain("'\\''");
+  });
+
+  it("warns when the command URL falls back to the browser origin", async () => {
+    apiBaseUrl.value = "";
+    const user = userEvent.setup();
+    renderModal();
+
+    await screen.findByRole("option", { name: "BrowserX" });
+    await user.selectOptions(screen.getAllByTestId("select")[0], "BROWSERX");
+    await user.click(screen.getByRole("button", { name: "runners.add_modal.submit" }));
+
+    const command = await screen.findByText(
+      (_content: string, node: Element | null) => node?.tagName.toLowerCase() === "pre"
+    );
+    expect(command.textContent).toContain(`--url ${window.location.origin}`);
+    expect(screen.getByText("runners.add_modal.cloud_url_origin_warning")).toBeInTheDocument();
   });
 });

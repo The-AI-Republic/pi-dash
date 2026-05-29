@@ -2959,7 +2959,7 @@ export default {
       add_runner: "Adaugă runner",
       how_it_works_title: "Cum să adaugi un runner",
       how_it_works_body:
-        '1. Faceți clic pe "Adaugă runner", alegeți un proiect + pod și trimiteți. Cloud-ul generează un token de înscriere unic, legat de acel runner.\n2. Pe mașina care va găzdui runner-ul, rulați comanda afișată `pidash connect --url ... --token ... --host-label ...`.\n3. Daemon-ul se înscrie și runner-ul apare online aici.\n\nFiecare runner are propriul token. Primul runner înscris pe un host inițializează și un token de mașină folosit de CLI-ul `pidash` pentru comenzi non-runner.\n\nCondiție prealabilă: CLI-ul agent (codex / claude) trebuie să fie deja instalat pe host.',
+        '1. Click "Add runner", pick a project + pod and generate the CLI command.\n2. On the machine that will host the runner, run the displayed `pidash runner add` command. If the host is not logged in yet, the CLI starts `pidash auth login` first.\n3. The daemon registers the runner and it shows online here.\n\nPrerequisite: the agent CLI (codex / claude) must already be installed on the host.',
       connected_runners: "Runneri",
       columns: {
         name: "Nume",
@@ -2972,8 +2972,7 @@ export default {
       revive: "Reactivează",
       revoke: "Revocă",
       delete: "Șterge",
-      empty:
-        'Încă nu există runneri. Faceți clic pe "Adaugă runner" pentru a genera primul token de înscriere per runner.',
+      empty: 'No runners yet. Click "Add runner" to generate your first runner command.',
       delete_confirm_title: "Ștergeți runner-ul?",
       delete_confirm_body:
         "Rândul runner-ului este eliminat, iar daemon-ul este forțat să intre offline. Rulările istorice sunt păstrate cu o referință null la runner.",
@@ -2987,7 +2986,7 @@ export default {
       copy_failed: "Nu s-a putut copia în clipboard",
     },
     machine_token_note: {
-      body: "Prima dată când un runner se înregistrează pe o gazdă nouă (adică un nou ``host_label``), cloudul emite și un token de mașină folosit de CLI-ul ``pidash`` pentru comenzi non-runner (issue, comment, state). Runnerii ulteriori de pe aceeași gazdă reutilizează acel token.",
+      body: "`pidash runner add` starts `pidash auth login` first when the host is not logged in yet. Run it again for each project or pod this machine should serve.",
     },
     pods: {
       title: "Poduri",
@@ -3008,14 +3007,12 @@ export default {
         codex: "Codex",
       },
       errors: {
-        create_failed: "Nu s-a putut emite tokenul de înscriere.",
         project_required: "Selectați un proiect.",
         load_projects_failed: "Nu s-au putut încărca proiectele.",
         load_pods_failed: "Nu s-au putut încărca podurile.",
       },
       title: "Adăugare runner",
-      subtitle:
-        "Emiteți un token de înscriere unic pentru un runner nou. Veți rula comanda `pidash connect` afișată pe mașina care îl va găzdui.",
+      subtitle: "Generate a `pidash runner add` command for the machine that will host this runner.",
       project_label: "Proiect",
       project_help: "Proiectul pe care va lucra acest runner.",
       pod_label: "Pod (opțional)",
@@ -3024,21 +3021,23 @@ export default {
       name_label: "Nume (opțional)",
       name_placeholder: "my-laptop-runner",
       name_help: "Atribuit automat dacă este gol, de ex. ``runner_001``.",
-      host_label_label: "Etichetă gazdă (opțional)",
-      host_label_placeholder: "laptopul-meu",
-      host_label_help:
-        "Nume de gazdă liber, încorporat în comanda sugerată. Daemonul va înlocui cu numele său real de gazdă dacă omiteți flagul.",
       working_dir_label: "Director de lucru (opțional)",
       working_dir_placeholder: "director de lucru al proiectului pe mașina locală de dezvoltare",
       working_dir_help:
         "Calea locală în care daemonul rulează CLI-ul agentului — de obicei depozitul proiectului pe disc. Implicit este un sandbox în directorul de date al runnerului, ceea ce rareori doriți.",
       agent_label: "Agent",
-      agent_help: "Ce CLI de agent AI va conduce acest runner. Încorporat în comanda ``pidash connect`` afișată.",
+      agent_help: "Which AI agent CLI this runner will drive. Baked into the displayed ``pidash runner add`` command.",
       cancel: "Anulează",
-      submitting: "Se emite…",
-      submit: "Emite token de înscriere",
+      back: "Back",
+      submit: "Generate command",
       token_warning: "Copiați acest token o singură dată — tokenul de înscriere nu va mai fi afișat.",
       token_instructions: "Rulați aceasta pe mașina care va găzdui runnerul:",
+      cloud_url_origin_warning:
+        "Using the current browser origin as the cloud URL because VITE_API_BASE_URL is not configured.",
+      shell_label: "Shell",
+      shell_posix: "macOS/Linux",
+      shell_powershell: "PowerShell",
+      shell_cmd: "Command Prompt",
       copied: "Copiat!",
       copy_command: "Copiază comanda",
     },

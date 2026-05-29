@@ -2949,7 +2949,7 @@ export default {
       add_runner: "Runner hinzufügen",
       how_it_works_title: "So fügen Sie einen Runner hinzu",
       how_it_works_body:
-        "1. Klicken Sie auf „Runner hinzufügen“, wählen Sie ein Projekt und einen Pod aus und senden Sie ab. Die Cloud erstellt ein einmaliges Registrierungstoken, das an diesen Runner gebunden ist.\n2. Führen Sie auf dem Rechner, der den Runner hosten soll, den angezeigten Befehl `pidash connect --url ... --token ... --host-label ...` aus.\n3. Der Daemon registriert sich und der Runner wird hier als online angezeigt.\n\nJeder Runner hat sein eigenes Token. Der erste Runner, der auf einem Host registriert wird, erstellt auch ein Maschinentoken, das von der `pidash` CLI für Nicht-Runner-Befehle verwendet wird.\n\nVoraussetzung: Die Agent-CLI (codex / claude) muss bereits auf dem Host installiert sein.",
+        '1. Click "Add runner", pick a project + pod and generate the CLI command.\n2. On the machine that will host the runner, run the displayed `pidash runner add` command. If the host is not logged in yet, the CLI starts `pidash auth login` first.\n3. The daemon registers the runner and it shows online here.\n\nPrerequisite: the agent CLI (codex / claude) must already be installed on the host.',
       connected_runners: "Runner",
       columns: {
         name: "Name",
@@ -2962,8 +2962,7 @@ export default {
       revive: "Reaktivieren",
       revoke: "Widerrufen",
       delete: "Löschen",
-      empty:
-        "Noch keine Runner. Klicken Sie auf „Runner hinzufügen“, um Ihr erstes Registrierungstoken pro Runner zu erstellen.",
+      empty: 'No runners yet. Click "Add runner" to generate your first runner command.',
       delete_confirm_title: "Runner löschen?",
       delete_confirm_body:
         "Die Runner-Zeile wird entfernt und der Daemon wird offline geschaltet. Historische Ausführungen bleiben mit einer Null-Referenz auf den Runner erhalten.",
@@ -2977,7 +2976,7 @@ export default {
       copy_failed: "Konnte nicht in die Zwischenablage kopiert werden",
     },
     machine_token_note: {
-      body: "Wenn sich ein Runner zum ersten Mal auf einem neuen Host registriert (d. h. einer neuen ``host_label``), stellt die Cloud auch ein Maschinentoken aus, das von der ``pidash`` CLI für Nicht-Runner-Befehle (Issue, Kommentar, Status) verwendet wird. Nachfolgende Runner auf demselben Host verwenden dieses Token erneut.",
+      body: "`pidash runner add` starts `pidash auth login` first when the host is not logged in yet. Run it again for each project or pod this machine should serve.",
     },
     pods: {
       title: "Pods",
@@ -2998,14 +2997,12 @@ export default {
         codex: "Codex",
       },
       errors: {
-        create_failed: "Registrierungstoken konnte nicht erstellt werden.",
         project_required: "Wählen Sie ein Projekt aus.",
         load_projects_failed: "Projekte konnten nicht geladen werden.",
         load_pods_failed: "Pods konnten nicht geladen werden.",
       },
       title: "Runner hinzufügen",
-      subtitle:
-        "Erstellen Sie ein einmaliges Registrierungstoken für einen neuen Runner. Führen Sie den angezeigten Befehl `pidash connect` auf dem Rechner aus, der den Runner hosten wird.",
+      subtitle: "Generate a `pidash runner add` command for the machine that will host this runner.",
       project_label: "Projekt",
       project_help: "Das Projekt, an dem dieser Runner arbeiten wird.",
       pod_label: "Pod (optional)",
@@ -3014,22 +3011,23 @@ export default {
       name_label: "Name (optional)",
       name_placeholder: "my-laptop-runner",
       name_help: "Wird automatisch vergeben, wenn das Feld leer ist, z. B. ``runner_001``.",
-      host_label_label: "Host-Label (optional)",
-      host_label_placeholder: "my-laptop",
-      host_label_help:
-        "Freiform-Hostname, der in den vorgeschlagenen Befehl eingebettet wird. Der Daemon ersetzt ihn durch den tatsächlichen Hostnamen, wenn Sie das Flag weglassen.",
       working_dir_label: "Arbeitsverzeichnis (optional)",
       working_dir_placeholder: "Lokales Projekt-Arbeitsverzeichnis",
       working_dir_help:
         "Lokaler Pfad, in dem der Daemon die Agent-CLI ausführt – normalerweise das Projekt-Repository auf der Festplatte. Standardmäßig wird ein Sandbox-Verzeichnis unter dem Datenverzeichnis des Runners verwendet, was selten gewünscht ist.",
       agent_label: "Agent",
-      agent_help:
-        "Welche KI-Agent-CLI dieser Runner steuern wird. Eingebettet in den angezeigten Befehl ``pidash connect``.",
+      agent_help: "Which AI agent CLI this runner will drive. Baked into the displayed ``pidash runner add`` command.",
       cancel: "Abbrechen",
-      submitting: "Minting…",
-      submit: "Enrollment-Token minten",
+      back: "Back",
+      submit: "Generate command",
       token_warning: "Kopieren Sie dies einmal – der Enrollment-Token wird nicht erneut angezeigt.",
       token_instructions: "Führen Sie dies auf dem Rechner aus, der den Runner hosten wird:",
+      cloud_url_origin_warning:
+        "Using the current browser origin as the cloud URL because VITE_API_BASE_URL is not configured.",
+      shell_label: "Shell",
+      shell_posix: "macOS/Linux",
+      shell_powershell: "PowerShell",
+      shell_cmd: "Command Prompt",
       copied: "Kopiert!",
       copy_command: "Befehl kopieren",
     },

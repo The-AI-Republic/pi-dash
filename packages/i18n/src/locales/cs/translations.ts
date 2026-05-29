@@ -2910,7 +2910,7 @@ export default {
       add_runner: "Přidat runnera",
       how_it_works_title: "Jak přidat runnera",
       how_it_works_body:
-        "1. Klikněte na „Přidat runnera“, vyberte projekt + pod a odešlete. Cloud vygeneruje jednorázový registrační token vázaný na tohoto runnera.\n2. Na stroji, který bude runnera hostovat, spusťte zobrazený příkaz `pidash connect --url ... --token ... --host-label ...`.\n3. Daemon se zaregistruje a runner se zde zobrazí jako online.\n\nKaždý runner má svůj vlastní token. První runner zaregistrovaný na hostiteli také vytvoří strojový token používaný CLI `pidash` pro příkazy nesouvisející s runnerem.\n\nPředpoklad: CLI agenta (codex / claude) musí být již nainstalováno na hostiteli.",
+        '1. Click "Add runner", pick a project + pod and generate the CLI command.\n2. On the machine that will host the runner, run the displayed `pidash runner add` command. If the host is not logged in yet, the CLI starts `pidash auth login` first.\n3. The daemon registers the runner and it shows online here.\n\nPrerequisite: the agent CLI (codex / claude) must already be installed on the host.',
       connected_runners: "Runnery",
       columns: {
         name: "Název",
@@ -2923,8 +2923,7 @@ export default {
       revive: "Obnovit",
       revoke: "Odvolat",
       delete: "Smazat",
-      empty:
-        "Zatím žádní runnery. Klikněte na „Přidat runnera“ pro vytvoření prvního registračního tokenu pro runnera.",
+      empty: 'No runners yet. Click "Add runner" to generate your first runner command.',
       delete_confirm_title: "Smazat runnera?",
       delete_confirm_body:
         "Řádek runnera bude odstraněn a daemon bude nuceně offline. Historické běhy zůstanou zachovány s odkazem na null runnera.",
@@ -2938,7 +2937,7 @@ export default {
       copy_failed: "Nepodařilo se zkopírovat do schránky",
     },
     machine_token_note: {
-      body: "Při prvním zaregistrování runnera na novém hostiteli (tj. novém ``host_label``) cloud také vydá strojový token používaný CLI ``pidash`` pro příkazy nesouvisející s runnerem (issue, comment, state). Další runnery na stejném hostiteli tento token znovu používají.",
+      body: "`pidash runner add` starts `pidash auth login` first when the host is not logged in yet. Run it again for each project or pod this machine should serve.",
     },
     pods: {
       title: "Pody",
@@ -2959,14 +2958,12 @@ export default {
         codex: "Codex",
       },
       errors: {
-        create_failed: "Nepodařilo se vytvořit registrační token.",
         project_required: "Vyberte projekt.",
         load_projects_failed: "Nepodařilo se načíst projekty.",
         load_pods_failed: "Nepodařilo se načíst pody.",
       },
       title: "Přidat běžce",
-      subtitle:
-        "Vytvořte jednorázový registrační token pro nového běžce. Na stroji, který jej bude hostit, spustíte zobrazený příkaz `pidash connect`.",
+      subtitle: "Generate a `pidash runner add` command for the machine that will host this runner.",
       project_label: "Projekt",
       project_help: "Projekt, na kterém bude tento běžec pracovat.",
       pod_label: "Pod (volitelné)",
@@ -2975,21 +2972,23 @@ export default {
       name_label: "Název (volitelné)",
       name_placeholder: "my-laptop-runner",
       name_help: "Pokud je prázdné, automaticky se přiřadí, např. ``runner_001``.",
-      host_label_label: "Označení hostitele (volitelné)",
-      host_label_placeholder: "my-laptop",
-      host_label_help:
-        "Volný název hostitele vložený do navrhovaného příkazu. Pokud příznak vynecháte, démon nahradí svůj skutečný název hostitele.",
       working_dir_label: "Pracovní adresář (volitelné)",
       working_dir_placeholder: "pracovní adresář projektu na místním vývojovém stroji",
       working_dir_help:
         "Místní cesta, ve které démon spouští CLI agenta — obvykle repozitář projektu na disku. Výchozí je sandbox v datovém adresáři runneru, což je zřídka to, co chcete.",
       agent_label: "Agent",
-      agent_help: "Které CLI AI agenta bude tento runner řídit. Je součástí zobrazeného příkazu ``pidash connect``.",
+      agent_help: "Which AI agent CLI this runner will drive. Baked into the displayed ``pidash runner add`` command.",
       cancel: "Zrušit",
-      submitting: "Razení…",
-      submit: "Razit registrační token",
+      back: "Back",
+      submit: "Generate command",
       token_warning: "Zkopírujte to hned — registrační token už nebude znovu zobrazen.",
       token_instructions: "Spusťte to na stroji, který bude hostit runner:",
+      cloud_url_origin_warning:
+        "Using the current browser origin as the cloud URL because VITE_API_BASE_URL is not configured.",
+      shell_label: "Shell",
+      shell_posix: "macOS/Linux",
+      shell_powershell: "PowerShell",
+      shell_cmd: "Command Prompt",
       copied: "Zkopírováno!",
       copy_command: "Zkopírovat příkaz",
     },
