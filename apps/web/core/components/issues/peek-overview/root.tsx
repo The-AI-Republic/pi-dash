@@ -25,7 +25,8 @@ import { useWorkItemProperties } from "@/pi-dash-web/hooks/use-issue-properties"
 import type { TIssueOperations } from "../issue-detail";
 import { IssueView } from "./view";
 
-const PEEK_QUERY_KEY = "peekId";
+const PEEK_QUERY_KEY = "peekIssueId";
+const PEEK_PROJECT_QUERY_KEY = "peekProjectId";
 
 export const IssuePeekOverview = observer(function IssuePeekOverview(props: IWorkItemPeekOverview) {
   const {
@@ -42,6 +43,7 @@ export const IssuePeekOverview = observer(function IssuePeekOverview(props: IWor
   const urlWorkspaceSlug = routeParams.workspaceSlug?.toString();
   const urlProjectId = routeParams.projectId?.toString();
   const urlPeekId = searchParams.get(PEEK_QUERY_KEY) || undefined;
+  const urlPeekProjectId = searchParams.get(PEEK_PROJECT_QUERY_KEY) || undefined;
   // store hook
   const { allowPermissions } = useUserPermissions();
 
@@ -72,18 +74,21 @@ export const IssuePeekOverview = observer(function IssuePeekOverview(props: IWor
     if (embedIssue) embedRemoveCurrentNotification?.();
   }, [embedIssue, embedRemoveCurrentNotification, setPeekIssue]);
 
-  // URL <-> peek store sync (only on routes that carry workspaceSlug + projectId).
-  // Lets a peeked issue be deep-linked: ?peekId=<issueId> opens it as a side panel.
-  const canSyncPeekUrl = !embedIssue && !!urlWorkspaceSlug && !!urlProjectId;
+  // URL <-> peek store sync. Works on any route that carries workspaceSlug:
+  //   ?peekIssueId=<id>                            — when the peek belongs to the URL's project
+  //   ?peekIssueId=<id>&peekProjectId=<projectId>  — workspace-level routes, or cross-project peeks
+  const canSyncPeekUrl = !embedIssue && !!urlWorkspaceSlug;
   const isArchivedRoute = storeType === EIssuesStoreType.ARCHIVED;
   // URL -> store
   useEffect(() => {
     if (!canSyncPeekUrl) return;
     if (urlPeekId) {
-      if (peekIssue?.issueId !== urlPeekId) {
+      const peekedProjectId = urlPeekProjectId ?? urlProjectId;
+      if (!peekedProjectId) return;
+      if (peekIssue?.issueId !== urlPeekId || peekIssue?.projectId !== peekedProjectId) {
         setPeekIssue({
           workspaceSlug: urlWorkspaceSlug!,
-          projectId: urlProjectId!,
+          projectId: peekedProjectId,
           issueId: urlPeekId,
           isArchived: isArchivedRoute,
         });
@@ -92,26 +97,32 @@ export const IssuePeekOverview = observer(function IssuePeekOverview(props: IWor
       setPeekIssue(undefined);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [urlPeekId, urlWorkspaceSlug, urlProjectId, canSyncPeekUrl, isArchivedRoute]);
-  // store -> URL: only persist peeks that belong to the current route's project,
-  // so stale store values (carried in from home/profile/notifications) can't write
-  // their issueId into a different project's URL.
+  }, [urlPeekId, urlPeekProjectId, urlWorkspaceSlug, urlProjectId, canSyncPeekUrl, isArchivedRoute]);
+  // store -> URL: only persist peeks that "belong" to this route — same projectId
+  // on project routes, or any peek on workspace-level routes (where there is no
+  // path-level projectId to compare against). Prevents a stale peek carried over
+  // from another route from poisoning the current project's URL.
   useEffect(() => {
     if (!canSyncPeekUrl) return;
-    const isOurPeek = peekIssue?.projectId === urlProjectId;
+    const isOurPeek = !!peekIssue && (!urlProjectId || peekIssue.projectId === urlProjectId);
     const targetPeekId = isOurPeek ? peekIssue?.issueId : undefined;
-    if (targetPeekId === urlPeekId) return;
+    const targetPeekProjectId = isOurPeek ? peekIssue?.projectId : undefined;
+    const desiredProjectParam =
+      targetPeekProjectId && targetPeekProjectId !== urlProjectId ? targetPeekProjectId : undefined;
+    if (targetPeekId === urlPeekId && desiredProjectParam === urlPeekProjectId) return;
     setSearchParams(
       (prev) => {
         const next = new URLSearchParams(prev);
         if (targetPeekId) next.set(PEEK_QUERY_KEY, targetPeekId);
         else next.delete(PEEK_QUERY_KEY);
+        if (desiredProjectParam) next.set(PEEK_PROJECT_QUERY_KEY, desiredProjectParam);
+        else next.delete(PEEK_PROJECT_QUERY_KEY);
         return next;
       },
       { replace: true, preventScrollReset: true }
     );
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [peekIssue?.issueId, peekIssue?.projectId, urlProjectId, canSyncPeekUrl]);
+  }, [peekIssue?.issueId, peekIssue?.projectId, urlProjectId, urlPeekId, urlPeekProjectId, canSyncPeekUrl]);
 
   const issueOperations: TIssueOperations = useMemo(
     () => ({

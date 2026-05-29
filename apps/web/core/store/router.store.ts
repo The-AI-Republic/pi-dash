@@ -23,7 +23,7 @@ export interface IRouterStore {
   globalViewId: string | undefined;
   profileViewId: TProfileViews | undefined;
   userId: string | undefined;
-  peekId: string | undefined;
+  peekIssueId: string | undefined;
   issueId: string | undefined;
   inboxId: string | undefined;
   webhookId: string | undefined;
@@ -50,7 +50,7 @@ export class RouterStore implements IRouterStore {
       globalViewId: computed,
       profileViewId: computed,
       userId: computed,
-      peekId: computed,
+      peekIssueId: computed,
       issueId: computed,
       inboxId: computed,
       webhookId: computed,
@@ -144,8 +144,8 @@ export class RouterStore implements IRouterStore {
    * Returns the peek id from the query
    * @returns string|undefined
    */
-  get peekId() {
-    return this.query?.peekId?.toString();
+  get peekIssueId() {
+    return this.query?.peekIssueId?.toString();
   }
 
   /**
