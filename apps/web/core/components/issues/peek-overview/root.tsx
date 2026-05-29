@@ -4,10 +4,9 @@
  * See the LICENSE file for details.
  */
 
-import { useState, useMemo, useCallback, useEffect } from "react";
+import { useState, useMemo, useCallback } from "react";
 import { observer } from "mobx-react";
 import { usePathname } from "next/navigation";
-import { useParams, useSearchParams } from "react-router";
 // Pi Dash imports
 import useSWR from "swr";
 import { EUserPermissions, EUserPermissionsLevel } from "@pi-dash/constants";
@@ -25,9 +24,6 @@ import { useWorkItemProperties } from "@/pi-dash-web/hooks/use-issue-properties"
 import type { TIssueOperations } from "../issue-detail";
 import { IssueView } from "./view";
 
-const PEEK_QUERY_KEY = "peekIssueId";
-const PEEK_PROJECT_QUERY_KEY = "peekProjectId";
-
 export const IssuePeekOverview = observer(function IssuePeekOverview(props: IWorkItemPeekOverview) {
   const {
     embedIssue = false,
@@ -38,12 +34,6 @@ export const IssuePeekOverview = observer(function IssuePeekOverview(props: IWor
   const { t } = useTranslation();
   // router
   const pathname = usePathname();
-  const routeParams = useParams();
-  const [searchParams, setSearchParams] = useSearchParams();
-  const urlWorkspaceSlug = routeParams.workspaceSlug?.toString();
-  const urlProjectId = routeParams.projectId?.toString();
-  const urlPeekId = searchParams.get(PEEK_QUERY_KEY) || undefined;
-  const urlPeekProjectId = searchParams.get(PEEK_PROJECT_QUERY_KEY) || undefined;
   // store hook
   const { allowPermissions } = useUserPermissions();
 
@@ -73,56 +63,6 @@ export const IssuePeekOverview = observer(function IssuePeekOverview(props: IWor
     setPeekIssue(undefined);
     if (embedIssue) embedRemoveCurrentNotification?.();
   }, [embedIssue, embedRemoveCurrentNotification, setPeekIssue]);
-
-  // URL <-> peek store sync. Works on any route that carries workspaceSlug:
-  //   ?peekIssueId=<id>                            — when the peek belongs to the URL's project
-  //   ?peekIssueId=<id>&peekProjectId=<projectId>  — workspace-level routes, or cross-project peeks
-  const canSyncPeekUrl = !embedIssue && !!urlWorkspaceSlug;
-  const isArchivedRoute = storeType === EIssuesStoreType.ARCHIVED;
-  // URL -> store
-  useEffect(() => {
-    if (!canSyncPeekUrl) return;
-    if (urlPeekId) {
-      const peekedProjectId = urlPeekProjectId ?? urlProjectId;
-      if (!peekedProjectId) return;
-      if (peekIssue?.issueId !== urlPeekId || peekIssue?.projectId !== peekedProjectId) {
-        setPeekIssue({
-          workspaceSlug: urlWorkspaceSlug!,
-          projectId: peekedProjectId,
-          issueId: urlPeekId,
-          isArchived: isArchivedRoute,
-        });
-      }
-    } else if (peekIssue?.issueId) {
-      setPeekIssue(undefined);
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [urlPeekId, urlPeekProjectId, urlWorkspaceSlug, urlProjectId, canSyncPeekUrl, isArchivedRoute]);
-  // store -> URL: only persist peeks that "belong" to this route — same projectId
-  // on project routes, or any peek on workspace-level routes (where there is no
-  // path-level projectId to compare against). Prevents a stale peek carried over
-  // from another route from poisoning the current project's URL.
-  useEffect(() => {
-    if (!canSyncPeekUrl) return;
-    const isOurPeek = !!peekIssue && (!urlProjectId || peekIssue.projectId === urlProjectId);
-    const targetPeekId = isOurPeek ? peekIssue?.issueId : undefined;
-    const targetPeekProjectId = isOurPeek ? peekIssue?.projectId : undefined;
-    const desiredProjectParam =
-      targetPeekProjectId && targetPeekProjectId !== urlProjectId ? targetPeekProjectId : undefined;
-    if (targetPeekId === urlPeekId && desiredProjectParam === urlPeekProjectId) return;
-    setSearchParams(
-      (prev) => {
-        const next = new URLSearchParams(prev);
-        if (targetPeekId) next.set(PEEK_QUERY_KEY, targetPeekId);
-        else next.delete(PEEK_QUERY_KEY);
-        if (desiredProjectParam) next.set(PEEK_PROJECT_QUERY_KEY, desiredProjectParam);
-        else next.delete(PEEK_PROJECT_QUERY_KEY);
-        return next;
-      },
-      { replace: true, preventScrollReset: true }
-    );
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [peekIssue?.issueId, peekIssue?.projectId, urlProjectId, urlPeekId, urlPeekProjectId, canSyncPeekUrl]);
 
   const issueOperations: TIssueOperations = useMemo(
     () => ({
