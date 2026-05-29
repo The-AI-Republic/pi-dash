@@ -2014,14 +2014,34 @@ fn format_exec_command_detail(
     }
 }
 
-fn diagnostic_signal_from_stderr(lines: &[String]) -> Option<String> {
-    lines
-        .iter()
-        .rev()
-        .find_map(|line| diagnostic_signal_from_stderr_line(line))
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum DiagnosticSignalPriority {
+    ExitStatus,
+    TextError,
+    JsonError,
 }
 
-fn diagnostic_signal_from_stderr_line(line: &str) -> Option<String> {
+fn diagnostic_signal_from_stderr(lines: &[String]) -> Option<String> {
+    let mut best: Option<(DiagnosticSignalPriority, String)> = None;
+    for line in lines.iter().rev() {
+        let Some((priority, signal)) = diagnostic_signal_from_stderr_line(line) else {
+            continue;
+        };
+        if priority == DiagnosticSignalPriority::JsonError {
+            return Some(signal);
+        }
+        if best
+            .as_ref()
+            .map(|(best_priority, _)| priority > *best_priority)
+            .unwrap_or(true)
+        {
+            best = Some((priority, signal));
+        }
+    }
+    best.map(|(_, signal)| signal)
+}
+
+fn diagnostic_signal_from_stderr_line(line: &str) -> Option<(DiagnosticSignalPriority, String)> {
     let trimmed = line.trim();
     if trimmed.is_empty() {
         return None;
@@ -2030,10 +2050,17 @@ fn diagnostic_signal_from_stderr_line(line: &str) -> Option<String> {
     if let Ok(value) = serde_json::from_str::<serde_json::Value>(trimmed)
         && let Some(message) = json_error_message(&value)
     {
-        return Some(format!("stderr JSON error: {message}"));
+        return Some((
+            DiagnosticSignalPriority::JsonError,
+            format!("stderr JSON error: {message}"),
+        ));
     }
 
     let lower = trimmed.to_ascii_lowercase();
+    let has_exit_code = lower.contains("exit code");
+    let generic_exit_status = lower.starts_with("process exited with code")
+        || lower.starts_with("exited with code")
+        || lower.starts_with("exit code ");
     let looks_relevant = lower.contains("error")
         || lower.contains("failed")
         || lower.contains("failure")
@@ -2041,12 +2068,18 @@ fn diagnostic_signal_from_stderr_line(line: &str) -> Option<String> {
         || lower.contains("timed out")
         || lower.contains("timeout")
         || lower.contains("panic")
-        || lower.contains("exit code")
+        || has_exit_code
+        || generic_exit_status
         || lower.contains("not logged in")
         || lower.contains("unauthorized")
         || lower.contains("forbidden");
     if looks_relevant {
-        Some(format!("stderr: {trimmed}"))
+        let priority = if generic_exit_status {
+            DiagnosticSignalPriority::ExitStatus
+        } else {
+            DiagnosticSignalPriority::TextError
+        };
+        Some((priority, format!("stderr: {trimmed}")))
     } else {
         None
     }
@@ -3021,6 +3054,20 @@ mod tests {
         ];
         let signal = diagnostic_signal_from_stderr(&lines).unwrap();
         assert_eq!(signal, "stderr: gh: error: HTTP 401: Bad credentials");
+    }
+
+    #[test]
+    fn diagnostic_signal_prefers_substantive_error_over_exit_status() {
+        let lines = vec![
+            "gh: error: HTTP 401: Bad credentials".to_string(),
+            "Process exited with code 1".to_string(),
+        ];
+        let signal = diagnostic_signal_from_stderr(&lines).unwrap();
+        assert_eq!(signal, "stderr: gh: error: HTTP 401: Bad credentials");
+
+        let fallback = diagnostic_signal_from_stderr(&["Process exited with code 1".to_string()])
+            .expect("exit status should remain useful as a fallback");
+        assert_eq!(fallback, "stderr: Process exited with code 1");
     }
 
     #[test]
