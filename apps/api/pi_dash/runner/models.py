@@ -111,12 +111,8 @@ class Pod(models.Model):
             ),
         ]
         indexes = [
-            models.Index(
-                fields=["project", "is_default"], name="pod_project_is_def_idx"
-            ),
-            models.Index(
-                fields=["workspace", "is_default"], name="pod_workspc_is_def_idx"
-            ),
+            models.Index(fields=["project", "is_default"], name="pod_project_is_def_idx"),
+            models.Index(fields=["workspace", "is_default"], name="pod_workspc_is_def_idx"),
         ]
 
     def __str__(self) -> str:
@@ -138,13 +134,7 @@ class Pod(models.Model):
             elif self.workspace_id != self.project.workspace_id:
                 from django.core.exceptions import ValidationError
 
-                raise ValidationError(
-                    {
-                        "workspace": (
-                            "pod.workspace must match pod.project.workspace"
-                        )
-                    }
-                )
+                raise ValidationError({"workspace": ("pod.workspace must match pod.project.workspace")})
 
     def save(self, *args, **kwargs):
         # Auto-fill workspace from project so callers don't have to set
@@ -159,13 +149,7 @@ class Pod(models.Model):
             elif self.workspace_id != project_workspace_id:
                 from django.core.exceptions import ValidationError
 
-                raise ValidationError(
-                    {
-                        "workspace": (
-                            "pod.workspace must match pod.project.workspace"
-                        )
-                    }
-                )
+                raise ValidationError({"workspace": ("pod.workspace must match pod.project.workspace")})
         super().save(*args, **kwargs)
 
     @classmethod
@@ -191,6 +175,10 @@ class RunnerStatus(models.TextChoices):
     OFFLINE = "offline", "Offline"
     BUSY = "busy", "Busy"
     REVOKED = "revoked", "Revoked"
+
+
+class Visibility(models.IntegerChoices):
+    PRIVATE = 0, "Private"
 
 
 class AgentRunStatus(models.TextChoices):
@@ -242,20 +230,65 @@ class AgentChatMessageStatus(models.TextChoices):
     CANCELLED = "cancelled", "Cancelled"
 
 
+class DevMachine(models.Model):
+    """Physical dev machine that hosts one or more local runners.
+
+    A machine is user-scoped, not workspace-scoped: the same laptop can host
+    runners for multiple workspaces. Runner rows carry the workspace boundary.
+    """
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    owner = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="dev_machines",
+    )
+    host_label = models.CharField(max_length=255, blank=True, default="")
+    label = models.CharField(max_length=128, blank=True, default="")
+    visibility = models.PositiveSmallIntegerField(
+        choices=Visibility.choices,
+        default=Visibility.PRIVATE,
+        db_index=True,
+    )
+    last_seen_at = models.DateTimeField(null=True, blank=True)
+    revoked_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "dev_machine"
+        ordering = ("-last_seen_at", "-created_at")
+        constraints = [
+            models.UniqueConstraint(
+                fields=["owner", "host_label"],
+                condition=models.Q(revoked_at__isnull=True),
+                name="dev_machine_one_active_per_owner_host",
+            ),
+        ]
+        indexes = [
+            models.Index(
+                fields=["owner", "visibility"],
+                name="dev_machine_owner_vis_idx",
+            ),
+            models.Index(fields=["host_label"], name="dev_machine_host_idx"),
+        ]
+
+    def __str__(self) -> str:
+        return self.label or self.host_label or str(self.id)
+
+
 class Runner(models.Model):
     """First-class trust and worker entity (per-runner HTTPS transport).
 
     Each runner owns its own refresh token, access-token generation, and
-    revocation state. The legacy ``Connection`` row that used to wrap a
-    machine + N runners is gone; a runner is the unit of trust, auth, and
-    delivery ownership. See ``.ai_design/move_to_https/design.md`` §4-§6.
+    revocation state. ``DevMachine`` now captures the physical host grouping
+    so multiple runner rows can live on one machine while runner remains the
+    cloud-visible management and dispatch unit.
     """
 
     MAX_PER_USER = 5
 
-    id = models.UUIDField(
-        primary_key=True, default=uuid.uuid4, editable=False, db_index=True
-    )
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False, db_index=True)
     owner = models.ForeignKey(
         settings.AUTH_USER_MODEL,
         on_delete=models.CASCADE,
@@ -264,6 +297,13 @@ class Runner(models.Model):
     workspace = models.ForeignKey(
         "db.Workspace",
         on_delete=models.CASCADE,
+        related_name="runners",
+    )
+    dev_machine = models.ForeignKey(
+        DevMachine,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
         related_name="runners",
     )
     # Every runner belongs to exactly one pod (§4.2). PROTECT because pods are
@@ -276,6 +316,11 @@ class Runner(models.Model):
     name = models.CharField(max_length=128)
     # Free-form host hint reported at enrollment time; surfaced in the UI.
     host_label = models.CharField(max_length=255, blank=True, default="")
+    visibility = models.PositiveSmallIntegerField(
+        choices=Visibility.choices,
+        default=Visibility.PRIVATE,
+        db_index=True,
+    )
     # Refresh-token hash and rotation state per ``design.md`` §5.3 / §6.1.
     refresh_token_hash = models.CharField(max_length=128, blank=True, default="", db_index=True)
     refresh_token_fingerprint = models.CharField(max_length=16, blank=True, default="")
@@ -323,6 +368,10 @@ class Runner(models.Model):
             models.Index(fields=["owner", "status"]),
             models.Index(fields=["workspace", "status"]),
             models.Index(fields=["pod", "status"], name="runner_pod_status_idx"),
+            models.Index(
+                fields=["dev_machine", "status"],
+                name="runner_dev_machine_status_idx",
+            ),
         ]
 
     def __str__(self) -> str:
@@ -339,10 +388,7 @@ class Runner(models.Model):
         if self.pod_id is None and self.workspace_id is not None:
             from pi_dash.db.models.project import Project
 
-            project_ids = list(
-                Project.objects.filter(workspace_id=self.workspace_id)
-                .values_list("id", flat=True)[:2]
-            )
+            project_ids = list(Project.objects.filter(workspace_id=self.workspace_id).values_list("id", flat=True)[:2])
             if len(project_ids) == 1:
                 default = Pod.default_for_project_id(project_ids[0])
                 if default is not None:
@@ -445,9 +491,9 @@ class Runner(models.Model):
             # for cascade delete, `manual_revoke` / `membership_revoked`
             # / `refresh_token_replayed` for revoke flows; `user_revoke`
             # is the deliberate "do NOT match the synthesizer" signal).
-            RunnerSession.objects.filter(
-                runner=self, revoked_at__isnull=True
-            ).update(revoked_at=now, revoked_reason=stored_reason)
+            RunnerSession.objects.filter(runner=self, revoked_at__isnull=True).update(
+                revoked_at=now, revoked_reason=stored_reason
+            )
 
             active_runs = list(
                 AgentRun.objects.select_for_update()
@@ -455,9 +501,7 @@ class Runner(models.Model):
                 .values_list("pk", "pod_id")
             )
             if active_runs:
-                AgentRun.objects.filter(
-                    pk__in=[pk for pk, _ in active_runs]
-                ).update(
+                AgentRun.objects.filter(pk__in=[pk for pk, _ in active_runs]).update(
                     status=AgentRunStatus.CANCELLED,
                     ended_at=now,
                     error="runner revoked",
@@ -465,14 +509,12 @@ class Runner(models.Model):
                 affected_pod_ids = {pid for _, pid in active_runs if pid is not None}
 
             pinned_pod_ids = list(
-                AgentRun.objects.filter(
-                    pinned_runner=self, status=AgentRunStatus.QUEUED
-                ).values_list("pod_id", flat=True)
+                AgentRun.objects.filter(pinned_runner=self, status=AgentRunStatus.QUEUED).values_list(
+                    "pod_id", flat=True
+                )
             )
             if pinned_pod_ids:
-                AgentRun.objects.filter(
-                    pinned_runner=self, status=AgentRunStatus.QUEUED
-                ).update(pinned_runner=None)
+                AgentRun.objects.filter(pinned_runner=self, status=AgentRunStatus.QUEUED).update(pinned_runner=None)
                 affected_pod_ids.update(pid for pid in pinned_pod_ids if pid is not None)
 
         for pod_id in affected_pod_ids:
@@ -485,9 +527,8 @@ class Runner(models.Model):
             schedule_stream_cleanup_for_runner,
         )
 
-        transaction.on_commit(
-            lambda rid=self.pk: schedule_stream_cleanup_for_runner(rid)
-        )
+        transaction.on_commit(lambda rid=self.pk: schedule_stream_cleanup_for_runner(rid))
+
 
 class RunnerSession(models.Model):
     """Per-runner cloud session: owns delivery for one runner.
@@ -501,9 +542,7 @@ class RunnerSession(models.Model):
     """
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
-    runner = models.ForeignKey(
-        "Runner", on_delete=models.CASCADE, related_name="sessions"
-    )
+    runner = models.ForeignKey("Runner", on_delete=models.CASCADE, related_name="sessions")
     protocol_version = models.PositiveIntegerField(default=4)
     created_at = models.DateTimeField(auto_now_add=True)
     last_seen_at = models.DateTimeField(null=True, blank=True)
@@ -557,9 +596,7 @@ class RunMessageDedupe(models.Model):
     cached response status without re-applying the side effects.
     """
 
-    run = models.ForeignKey(
-        "AgentRun", on_delete=models.CASCADE, related_name="message_dedupes"
-    )
+    run = models.ForeignKey("AgentRun", on_delete=models.CASCADE, related_name="message_dedupes")
     message_id = models.CharField(max_length=128)
     created_at = models.DateTimeField(auto_now_add=True)
 
@@ -625,9 +662,7 @@ class MachineToken(models.Model):
 
 
 class AgentRun(models.Model):
-    id = models.UUIDField(
-        primary_key=True, default=uuid.uuid4, editable=False, db_index=True
-    )
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False, db_index=True)
     workspace = models.ForeignKey(
         "db.Workspace",
         on_delete=models.CASCADE,
@@ -732,9 +767,7 @@ class AgentRun(models.Model):
             models.Index(fields=["workspace", "status"]),
             models.Index(fields=["work_item", "status"]),
             models.Index(fields=["pod", "status"], name="agent_run_pod_status_idx"),
-            models.Index(
-                fields=["created_by", "status"], name="agent_run_created_status_idx"
-            ),
+            models.Index(fields=["created_by", "status"], name="agent_run_created_status_idx"),
         ]
 
     def save(self, *args, **kwargs):
@@ -748,11 +781,7 @@ class AgentRun(models.Model):
         # The pre-refactor "workspace default pod" lookup is gone — see
         # §8 of the new_pod_project_relationship design.
         if self.pod_id is None and self.work_item_id is not None:
-            project_id = (
-                self.work_item.project_id
-                if hasattr(self.work_item, "project_id")
-                else None
-            )
+            project_id = self.work_item.project_id if hasattr(self.work_item, "project_id") else None
             if project_id is not None:
                 default = Pod.default_for_project_id(project_id)
                 if default is not None:
@@ -760,10 +789,7 @@ class AgentRun(models.Model):
         if self.pod_id is None and self.workspace_id is not None:
             from pi_dash.db.models.project import Project
 
-            project_ids = list(
-                Project.objects.filter(workspace_id=self.workspace_id)
-                .values_list("id", flat=True)[:2]
-            )
+            project_ids = list(Project.objects.filter(workspace_id=self.workspace_id).values_list("id", flat=True)[:2])
             if len(project_ids) == 1:
                 default = Pod.default_for_project_id(project_ids[0])
                 if default is not None:
@@ -801,9 +827,7 @@ class AgentRunEvent(models.Model):
     """Append-only transcript of events streamed from the runner."""
 
     id = models.BigAutoField(primary_key=True)
-    agent_run = models.ForeignKey(
-        AgentRun, on_delete=models.CASCADE, related_name="events"
-    )
+    agent_run = models.ForeignKey(AgentRun, on_delete=models.CASCADE, related_name="events")
     seq = models.PositiveIntegerField()
     kind = models.CharField(max_length=64)
     payload = models.JSONField(default=dict, blank=True)
@@ -816,12 +840,8 @@ class AgentRunEvent(models.Model):
 
 
 class ApprovalRequest(models.Model):
-    id = models.UUIDField(
-        primary_key=True, default=uuid.uuid4, editable=False, db_index=True
-    )
-    agent_run = models.ForeignKey(
-        AgentRun, on_delete=models.CASCADE, related_name="approvals"
-    )
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False, db_index=True)
+    agent_run = models.ForeignKey(AgentRun, on_delete=models.CASCADE, related_name="approvals")
     kind = models.CharField(max_length=24, choices=ApprovalKind.choices)
     payload = models.JSONField(default=dict, blank=True)
     reason = models.TextField(blank=True, default="")
@@ -856,9 +876,7 @@ class AgentChatSession(models.Model):
         on_delete=models.CASCADE,
         related_name="agent_chat_sessions",
     )
-    runner = models.ForeignKey(
-        Runner, on_delete=models.CASCADE, related_name="chat_sessions"
-    )
+    runner = models.ForeignKey(Runner, on_delete=models.CASCADE, related_name="chat_sessions")
     created_by = models.ForeignKey(
         settings.AUTH_USER_MODEL,
         on_delete=models.PROTECT,
@@ -914,12 +932,8 @@ class AgentChatSession(models.Model):
 
 class AgentChatMessage(models.Model):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
-    session = models.ForeignKey(
-        AgentChatSession, on_delete=models.CASCADE, related_name="messages"
-    )
-    role = models.CharField(
-        max_length=16, choices=AgentChatMessageRole.choices, db_index=True
-    )
+    session = models.ForeignKey(AgentChatSession, on_delete=models.CASCADE, related_name="messages")
+    role = models.CharField(max_length=16, choices=AgentChatMessageRole.choices, db_index=True)
     content = models.TextField(blank=True, default="")
     content_parts = models.JSONField(default=list, blank=True)
     status = models.CharField(
@@ -961,9 +975,7 @@ class AgentChatMessage(models.Model):
 
 class AgentChatEvent(models.Model):
     id = models.BigAutoField(primary_key=True)
-    session = models.ForeignKey(
-        AgentChatSession, on_delete=models.CASCADE, related_name="events"
-    )
+    session = models.ForeignKey(AgentChatSession, on_delete=models.CASCADE, related_name="events")
     message = models.ForeignKey(
         AgentChatMessage,
         null=True,
@@ -1001,9 +1013,7 @@ class AgentChatEvent(models.Model):
 
 class AgentChatApprovalRequest(models.Model):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
-    session = models.ForeignKey(
-        AgentChatSession, on_delete=models.CASCADE, related_name="approvals"
-    )
+    session = models.ForeignKey(AgentChatSession, on_delete=models.CASCADE, related_name="approvals")
     local_approval_id = models.CharField(max_length=160)
     kind = models.CharField(max_length=24, choices=ApprovalKind.choices)
     payload = models.JSONField(default=dict, blank=True)
@@ -1044,9 +1054,7 @@ class AgentChatApprovalRequest(models.Model):
 
 
 class ChatMessageDedupe(models.Model):
-    session = models.ForeignKey(
-        AgentChatSession, on_delete=models.CASCADE, related_name="message_dedupes"
-    )
+    session = models.ForeignKey(AgentChatSession, on_delete=models.CASCADE, related_name="message_dedupes")
     message_id = models.CharField(max_length=128)
     created_at = models.DateTimeField(auto_now_add=True)
 
