@@ -2760,6 +2760,8 @@ export default {
   },
   run_ai: {
     run_button: "Run AI",
+    run_button_tooltip:
+      "Manually trigger an extra AI agent run. (Issues in the In Progress state already tick an agent run every few hours.)",
     comment_button: "Comment & Run",
     modal_title: "Comment & Run",
     modal_description: "Post a comment on this work item and start an AI agent run with the comment as the prompt.",
