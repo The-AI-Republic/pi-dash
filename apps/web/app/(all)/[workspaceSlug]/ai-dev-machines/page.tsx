@@ -28,11 +28,6 @@ $msi = Join-Path $env:TEMP "pidash-x86_64-pc-windows-msvc.msi"
 Invoke-WebRequest -Uri "${WINDOWS_MSI_URL}" -OutFile $msi
 Start-Process msiexec.exe -Wait -ArgumentList "/i \`"$msi\`""`;
 
-// We don't render a runners list on this page, so there's nothing to refetch
-// on success — the modal still requires the callback. The AI Agents page
-// itself shows the newly enrolled row.
-const noopOnCreated = () => {};
-
 const AiDevMachinesPage = observer(function AiDevMachinesPage() {
   const { currentWorkspace } = useWorkspace();
   const { t } = useTranslation();
@@ -112,7 +107,6 @@ const AiDevMachinesPage = observer(function AiDevMachinesPage() {
           onClose={() => setAddOpen(false)}
           workspaceId={workspaceId}
           workspaceSlug={workspaceSlug}
-          onCreated={noopOnCreated}
         />
       )}
     </div>

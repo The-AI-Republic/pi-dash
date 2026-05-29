@@ -10,14 +10,14 @@ import type { SubmitHandler } from "react-hook-form";
 import { Controller, useForm } from "react-hook-form";
 import useSWR from "swr";
 // pi dash imports
+import { API_BASE_URL } from "@pi-dash/constants";
 import { useTranslation } from "@pi-dash/i18n";
 import { Button } from "@pi-dash/propel/button";
-import { TOAST_TYPE, setToast } from "@pi-dash/propel/toast";
-import { PodService, RunnerService } from "@pi-dash/services";
-import type { IPod, IRunnerInvite, TPartialProject } from "@pi-dash/types";
+import { PodService } from "@pi-dash/services";
+import type { IPod, TPartialProject } from "@pi-dash/types";
 import { CustomSelect, EModalPosition, EModalWidth, Input, ModalCore } from "@pi-dash/ui";
 // app
-import { RunnerEnrollmentCommand } from "@/components/runners/runner-enrollment-command";
+import { RunnerCliCommand } from "@/components/runners/runner-cli-command";
 import { ProjectService } from "@/services/project";
 
 type Props = {
@@ -25,8 +25,6 @@ type Props = {
   onClose: () => void;
   workspaceId: string;
   workspaceSlug: string;
-  /** Refetch the runners list so the new pending row shows up. */
-  onCreated: () => void;
 };
 
 // Mirrors the runner CLI's ``--agent`` value-enum (kebab-case). Keep in
@@ -39,35 +37,33 @@ interface FormValues {
   projectIdentifier: string;
   podName: string;
   name: string;
-  hostLabel: string;
   workingDir: string;
   agent: TAgent;
 }
 
-type CommandOptions = Pick<FormValues, "hostLabel" | "workingDir" | "agent">;
+type RunnerCommandValues = Pick<FormValues, "projectIdentifier" | "podName" | "name" | "workingDir" | "agent">;
 
 const DEFAULT_VALUES: FormValues = {
   projectIdentifier: "",
   podName: "",
   name: "",
-  hostLabel: "",
   workingDir: "",
   agent: DEFAULT_AGENT,
 };
 
-const DEFAULT_COMMAND_OPTIONS: CommandOptions = {
-  hostLabel: "",
-  workingDir: "",
-  agent: DEFAULT_AGENT,
-};
-
-const runnerService = new RunnerService();
 const podService = new PodService();
 const projectService = new ProjectService();
 
 export const AddRunnerModal = observer(function AddRunnerModal(props: Props) {
-  const { isOpen, onClose, workspaceId, workspaceSlug, onCreated } = props;
+  const { isOpen, onClose, workspaceId, workspaceSlug } = props;
   const { t } = useTranslation();
+  const [origin, setOrigin] = useState(() => (typeof window !== "undefined" ? window.location.origin : ""));
+
+  useEffect(() => {
+    if (typeof window !== "undefined") setOrigin(window.location.origin);
+  }, []);
+
+  const cloudUrl = API_BASE_URL || origin;
 
   const {
     control,
@@ -78,16 +74,14 @@ export const AddRunnerModal = observer(function AddRunnerModal(props: Props) {
     formState: { errors, isSubmitting },
   } = useForm<FormValues>({ defaultValues: DEFAULT_VALUES });
 
-  const [invite, setInvite] = useState<IRunnerInvite | null>(null);
-  const [commandOptions, setCommandOptions] = useState<CommandOptions>(DEFAULT_COMMAND_OPTIONS);
+  const [runnerCommand, setRunnerCommand] = useState<RunnerCommandValues | null>(null);
 
   // Reset everything on close→open. State persists between consecutive
-  // opens otherwise (RHF + local invite state would carry the stale
+  // opens otherwise (RHF + local command state would carry the stale
   // last-submission and confuse the next user).
   useEffect(() => {
     if (!isOpen) return;
-    setInvite(null);
-    setCommandOptions(DEFAULT_COMMAND_OPTIONS);
+    setRunnerCommand(null);
     reset(DEFAULT_VALUES);
   }, [isOpen, reset]);
 
@@ -145,29 +139,14 @@ export const AddRunnerModal = observer(function AddRunnerModal(props: Props) {
       ? t("runners.add_modal.agent_options.claude_code")
       : t("runners.add_modal.agent_options.codex");
 
-  const onSubmit: SubmitHandler<FormValues> = async (values) => {
-    try {
-      const result = await runnerService.createRunnerInvite({
-        workspaceId,
-        projectIdentifier: values.projectIdentifier,
-        podName: values.podName || undefined,
-        name: values.name.trim() || undefined,
-      });
-      setCommandOptions({
-        hostLabel: values.hostLabel,
-        workingDir: values.workingDir,
-        agent: values.agent,
-      });
-      setInvite(result);
-      onCreated();
-    } catch (e: unknown) {
-      const err = e as { error?: string } | null;
-      setToast({
-        type: TOAST_TYPE.ERROR,
-        title: t("runners.toast.error_title"),
-        message: err?.error ?? t("runners.add_modal.errors.create_failed"),
-      });
-    }
+  const onSubmit: SubmitHandler<FormValues> = (values) => {
+    setRunnerCommand({
+      projectIdentifier: values.projectIdentifier,
+      podName: values.podName,
+      name: values.name,
+      workingDir: values.workingDir,
+      agent: values.agent,
+    });
   };
 
   // Two layouts: form (before submit) and command panel (after).
@@ -175,7 +154,7 @@ export const AddRunnerModal = observer(function AddRunnerModal(props: Props) {
   // need RHF/Controller wiring.
   return (
     <ModalCore isOpen={isOpen} handleClose={onClose} position={EModalPosition.CENTER} width={EModalWidth.XXL}>
-      {invite === null ? (
+      {runnerCommand === null ? (
         <form onSubmit={handleSubmit(onSubmit)} className="flex flex-col gap-5 p-5">
           <div>
             <div className="text-18 font-medium text-primary">{t("runners.add_modal.title")}</div>
@@ -272,24 +251,6 @@ export const AddRunnerModal = observer(function AddRunnerModal(props: Props) {
           </div>
 
           <div className="flex flex-col gap-1">
-            <label htmlFor="add-runner-host-label" className="text-13 font-medium text-primary">
-              {t("runners.add_modal.host_label_label")}
-            </label>
-            <Controller
-              control={control}
-              name="hostLabel"
-              render={({ field }) => (
-                <Input
-                  {...field}
-                  id="add-runner-host-label"
-                  placeholder={t("runners.add_modal.host_label_placeholder")}
-                />
-              )}
-            />
-            <p className="text-12 text-secondary">{t("runners.add_modal.host_label_help")}</p>
-          </div>
-
-          <div className="flex flex-col gap-1">
             <label htmlFor="add-runner-working-dir" className="text-13 font-medium text-primary">
               {t("runners.add_modal.working_dir_label")}
             </label>
@@ -351,17 +312,18 @@ export const AddRunnerModal = observer(function AddRunnerModal(props: Props) {
           <div>
             <div className="text-18 font-medium text-primary">{t("runners.add_modal.title")}</div>
             <p className="mt-1 text-13 text-secondary">
-              {t("runners.add_modal.runner_id_label")}: <code className="text-12">{invite.runner_id}</code>
-              <br />
-              {invite.name}
+              {t("runners.add_modal.project_label")}: <code className="text-12">{runnerCommand.projectIdentifier}</code>
             </p>
           </div>
 
-          <RunnerEnrollmentCommand
-            invite={invite}
-            hostLabel={commandOptions.hostLabel}
-            workingDir={commandOptions.workingDir}
-            agent={commandOptions.agent}
+          <RunnerCliCommand
+            cloudUrl={cloudUrl}
+            workspaceSlug={workspaceSlug}
+            projectIdentifier={runnerCommand.projectIdentifier}
+            podName={runnerCommand.podName}
+            name={runnerCommand.name}
+            workingDir={runnerCommand.workingDir}
+            agent={runnerCommand.agent}
           />
 
           <div className="flex justify-end">

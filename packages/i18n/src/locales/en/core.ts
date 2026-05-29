@@ -532,12 +532,12 @@ export default {
       add_runner: "Add runner",
       how_it_works_title: "How to add a runner",
       how_it_works_body:
-        '1. Click "Add runner", pick a project + pod and submit. The cloud mints a one-time enrollment token bound to that runner.\n2. On the machine that will host the runner, run the displayed `pidash connect --url ... --token ... --host-label ...` command.\n3. The daemon enrolls and the runner shows online here.\n\nEach runner has its own token. The first runner enrolled on a host also bootstraps a machine token used by the `pidash` CLI for non-runner commands.\n\nPrerequisite: the agent CLI (codex / claude) must already be installed on the host.',
+        '1. Click "Add runner", pick a project + pod and generate the CLI command.\n2. On the machine that will host the runner, run the displayed `pidash runner add` command. If the host is not logged in yet, the CLI starts `pidash auth login` first.\n3. The daemon registers the runner and it shows online here.\n\nPrerequisite: the agent CLI (codex / claude) must already be installed on the host.',
       project_placeholder: "Select a project",
       copied: "Copied!",
       copy_failed: "Could not copy to clipboard",
       connected_runners: "Runners",
-      empty: 'No runners yet. Click "Add runner" to mint your first per-runner enrollment token.',
+      empty: 'No runners yet. Click "Add runner" to generate your first runner command.',
       columns: {
         name: "Name",
         status: "Status",
@@ -639,8 +639,7 @@ export default {
     },
     add_modal: {
       title: "Add runner",
-      subtitle:
-        "Mint a one-time enrollment token for a new runner. You'll run the displayed `pidash connect` command on the machine that will host it.",
+      subtitle: "Generate a `pidash runner add` command for the machine that will host this runner.",
       project_label: "Project",
       project_help: "The project this runner will work on.",
       pod_label: "Pod (optional)",
@@ -658,13 +657,13 @@ export default {
         "Local path the daemon runs the agent CLI in — usually the project repo on disk. Defaults to a sandbox under the runner's data dir, which is rarely what you want.",
       working_dir_placeholder: "local dev machine project working dir",
       agent_label: "Agent",
-      agent_help: "Which AI agent CLI this runner will drive. Baked into the displayed ``pidash connect`` command.",
+      agent_help: "Which AI agent CLI this runner will drive. Baked into the displayed ``pidash runner add`` command.",
       agent_options: {
         claude_code: "Claude Code",
         codex: "Codex",
       },
-      submit: "Mint enrollment token",
-      submitting: "Minting…",
+      submit: "Generate command",
+      submitting: "Generating…",
       cancel: "Cancel",
       done: "Done",
       token_warning: "Copy this once — the enrollment token will not be shown again.",
@@ -676,12 +675,12 @@ export default {
         project_required: "Pick a project.",
         load_projects_failed: "Could not load projects.",
         load_pods_failed: "Could not load pods.",
-        create_failed: "Could not mint the enrollment token.",
+        create_failed: "Could not generate the runner command.",
       },
     },
     machine_token_note: {
       title: "Machine tokens",
-      body: "The first time a runner enrolls on a new host (i.e., a new ``host_label``), the cloud also issues a machine token used by the ``pidash`` CLI for non-runner commands (issue, comment, state). Subsequent runners on the same host reuse that token.",
+      body: "`pidash runner add` starts `pidash auth login` first when the host is not logged in yet. Run it again for each project or pod this machine should serve.",
     },
     runs: {
       columns: {
@@ -743,7 +742,7 @@ export default {
       body: "Pi Dash hands AI agents (Claude Code, Codex, …) the keys to a real dev machine so they can pick up work items, write code, and open changes. Three pieces work together to make that possible:",
       cli: {
         title: "pidash CLI",
-        body: "The command-line tool installed on each dev machine. Handles authentication with the cloud, manages local config (`~/.pidash/config.toml`), and exposes commands for issues, comments, and runner management (`pidash connect`, `pidash runner ls`, `pidash doctor`, …).",
+        body: "The command-line tool installed on each dev machine. Handles authentication with the cloud, manages local config (`~/.pidash/config.toml`), and exposes commands for issues, comments, and runner management (`pidash auth login`, `pidash runner add`, `pidash doctor`, …).",
       },
       daemon: {
         title: "pidash daemon",
@@ -751,7 +750,7 @@ export default {
       },
       runner: {
         title: "AI Agent runner",
-        body: "A cloud-side row that represents one agent instance bound to a project (and optionally a pod). Adding a runner mints a single-use enrollment token; running the token on the machine binds that machine as the host. A machine can host many runners.",
+        body: "A cloud-side row that represents one agent instance bound to a project (and optionally a pod). Running `pidash runner add` on a logged-in machine creates the row and binds that machine as the host. A machine can host many runners.",
       },
     },
     install: {
@@ -769,7 +768,7 @@ export default {
     },
     add_runner: {
       heading: "Add an AI Agent runner",
-      body: "Pair this workspace with a runner on your machine. We'll mint a one-time enrollment token and show the `pidash connect` command to paste on the host.",
+      body: "Pair this workspace with a runner on your machine. We'll generate the `pidash runner add` command to paste on the host.",
       cta: "Add runner",
     },
   },

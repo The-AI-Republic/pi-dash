@@ -69,7 +69,37 @@ struct TokenError {
 }
 
 pub async fn run(args: Args, paths: &Paths) -> Result<()> {
-    let cloud_url = resolve_cloud_url(&args, paths)?;
+    let no_runner_prompt = args.no_runner_prompt;
+    let outcome = login_and_bind_workspace(&args, paths).await?;
+
+    if no_runner_prompt {
+        return Ok(());
+    }
+    if !std::io::stdout().is_terminal() {
+        return Ok(());
+    }
+    maybe_offer_runner_add(
+        paths,
+        &outcome.cloud_url,
+        &outcome.access_token,
+        &outcome.workspace_slug,
+    )
+    .await?;
+    Ok(())
+}
+
+pub async fn run_auth_only(args: Args, paths: &Paths) -> Result<()> {
+    login_and_bind_workspace(&args, paths).await.map(|_| ())
+}
+
+struct LoginOutcome {
+    cloud_url: String,
+    access_token: String,
+    workspace_slug: String,
+}
+
+async fn login_and_bind_workspace(args: &Args, paths: &Paths) -> Result<LoginOutcome> {
+    let cloud_url = resolve_cloud_url(args, paths)?;
     crate::cli::connect::validate_cloud_url(&cloud_url)?;
 
     let client = reqwest::Client::builder()
@@ -105,14 +135,11 @@ pub async fn run(args: Args, paths: &Paths) -> Result<()> {
         resolve_workspace_binding(paths, &cloud_url, &token.access_token).await?;
     println!("  Workspace: {workspace_slug}");
 
-    if args.no_runner_prompt {
-        return Ok(());
-    }
-    if !std::io::stdout().is_terminal() {
-        return Ok(());
-    }
-    maybe_offer_runner_add(paths, &cloud_url, &token.access_token, &workspace_slug).await?;
-    Ok(())
+    Ok(LoginOutcome {
+        cloud_url,
+        access_token: token.access_token,
+        workspace_slug,
+    })
 }
 
 fn resolve_cloud_url(args: &Args, paths: &Paths) -> Result<String> {
@@ -431,6 +458,7 @@ async fn maybe_offer_runner_add(
     println!("Registering runner under project {}...", project.identifier);
     crate::cli::runner::add(
         crate::cli::runner::AddArgs {
+            url: None,
             name: None,
             project: project.identifier.clone(),
             workspace: Some(workspace_slug.to_string()),
@@ -505,4 +533,3 @@ fn pick_project(projects: &[ProjectRow]) -> Result<Option<&ProjectRow>> {
     }
     Ok(Some(&projects[idx - 1]))
 }
-

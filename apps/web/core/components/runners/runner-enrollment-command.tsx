@@ -13,9 +13,8 @@ import type { IRunnerInvite } from "@pi-dash/types";
 
 type Props = {
   invite: IRunnerInvite;
-  /** Optional CLI flags surfaced for parity with the create-runner modal.
-   * The host_label / working_dir / agent flags don't change anything
-   * server-side — they're CLI-only, so we keep the input simple here. */
+  /** Optional legacy ``pidash connect`` flags. These are CLI-only and
+   * do not change the already-minted invite server-side. */
   hostLabel?: string;
   workingDir?: string;
   /** Agent kind in the runner CLI's kebab-case value-enum spelling
@@ -26,8 +25,8 @@ type Props = {
 
 /**
  * Displays the ``pidash connect --url ... --token ...`` command for a
- * freshly minted enrollment token. Shared between the add-runner flow
- * and the revive flow so both surface the same install instructions.
+ * freshly minted enrollment token. Used by token-based revive and
+ * legacy enrollment flows.
  */
 export function RunnerEnrollmentCommand(props: Props) {
   const { invite, hostLabel, workingDir, agent } = props;

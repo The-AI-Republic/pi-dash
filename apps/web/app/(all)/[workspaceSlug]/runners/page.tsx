@@ -307,7 +307,6 @@ const RunnersListPage = observer(function RunnersListPage() {
           onClose={() => setAddOpen(false)}
           workspaceId={workspaceId}
           workspaceSlug={workspaceSlug}
-          onCreated={() => mutateRunners()}
         />
       )}
       {workspaceSlug && (
