@@ -54,9 +54,7 @@ def enrolled_runner(db, api_client, pending_runner):
 
 
 @pytest.mark.unit
-def test_revoke_keeps_row_and_marks_revoked(
-    db, session_client, enrolled_runner
-):
+def test_revoke_keeps_row_and_marks_revoked(db, session_client, enrolled_runner):
     resp = session_client.post(f"/api/runners/{enrolled_runner.id}/revoke/")
     assert resp.status_code == 200, resp.data
     assert resp.data["status"] == RunnerStatus.REVOKED
@@ -91,9 +89,7 @@ def test_revive_404_for_unknown_runner(db, session_client):
 
 
 @pytest.mark.unit
-def test_revive_pending_mints_new_enrollment_token(
-    db, session_client, pending_runner
-):
+def test_revive_pending_mints_new_enrollment_token(db, session_client, pending_runner):
     runner, original = pending_runner
     original_hash = runner.enrollment_token_hash
     resp = session_client.post(f"/api/runners/{runner.id}/revive/")
@@ -109,9 +105,7 @@ def test_revive_pending_mints_new_enrollment_token(
 
 
 @pytest.mark.unit
-def test_revive_revoked_runner_resets_state(
-    db, api_client, session_client, enrolled_runner
-):
+def test_revive_revoked_runner_resets_state(db, api_client, session_client, enrolled_runner):
     # Revoke first, then revive.
     revoke = session_client.post(f"/api/runners/{enrolled_runner.id}/revoke/")
     assert revoke.status_code == 200
@@ -149,9 +143,7 @@ def test_revive_rejects_active_runner(db, session_client, enrolled_runner):
 
 
 @pytest.mark.unit
-def test_revive_clears_force_refresh_directive(
-    db, session_client, enrolled_runner
-):
+def test_revive_clears_force_refresh_directive(db, session_client, enrolled_runner):
     RunnerForceRefresh.objects.create(runner=enrolled_runner, min_rtg=99)
     session_client.post(f"/api/runners/{enrolled_runner.id}/revoke/")
     resp = session_client.post(f"/api/runners/{enrolled_runner.id}/revive/")
@@ -160,9 +152,7 @@ def test_revive_clears_force_refresh_directive(
 
 
 @pytest.mark.unit
-def test_revoke_forbidden_for_non_owner_non_admin(
-    db, api_client, create_user, enrolled_runner
-):
+def test_revoke_404_for_non_owner_private_runner(db, api_client, create_user, enrolled_runner):
     from pi_dash.db.models import User
 
     # ``username`` is unique; ``create_user`` already produced a user
@@ -174,13 +164,11 @@ def test_revoke_forbidden_for_non_owner_non_admin(
     )
     api_client.force_authenticate(user=other)
     resp = api_client.post(f"/api/runners/{enrolled_runner.id}/revoke/")
-    assert resp.status_code == 403
+    assert resp.status_code == 404
 
 
 @pytest.mark.unit
-def test_revive_forbidden_for_non_owner_non_admin(
-    db, api_client, pending_runner
-):
+def test_revive_404_for_non_owner_private_runner(db, api_client, pending_runner):
     from pi_dash.db.models import User
 
     runner, _ = pending_runner
@@ -192,4 +180,4 @@ def test_revive_forbidden_for_non_owner_non_admin(
     )
     api_client.force_authenticate(user=other)
     resp = api_client.post(f"/api/runners/{runner.id}/revive/")
-    assert resp.status_code == 403
+    assert resp.status_code == 404

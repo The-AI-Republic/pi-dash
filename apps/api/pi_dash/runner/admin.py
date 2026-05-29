@@ -12,11 +12,27 @@ from pi_dash.runner.models import (
     AgentRun,
     AgentRunEvent,
     ApprovalRequest,
+    DevMachine,
     MachineToken,
     Runner,
     RunnerForceRefresh,
     RunnerSession,
 )
+
+
+@admin.register(DevMachine)
+class DevMachineAdmin(admin.ModelAdmin):
+    list_display = (
+        "id",
+        "owner",
+        "host_label",
+        "visibility",
+        "last_seen_at",
+        "revoked_at",
+    )
+    list_filter = ("visibility", "revoked_at")
+    search_fields = ("owner__email", "host_label", "label")
+    readonly_fields = ("created_at", "updated_at")
 
 
 @admin.register(Runner)
@@ -25,13 +41,15 @@ class RunnerAdmin(admin.ModelAdmin):
         "name",
         "owner",
         "workspace",
+        "dev_machine",
+        "visibility",
         "status",
         "host_label",
         "refresh_token_generation",
         "last_heartbeat_at",
         "revoked_at",
     )
-    list_filter = ("status", "workspace")
+    list_filter = ("status", "visibility", "workspace")
     search_fields = ("name", "owner__email", "host_label")
     readonly_fields = (
         "refresh_token_hash",
