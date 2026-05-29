@@ -15,7 +15,7 @@ import type { EIssueLayoutTypes } from "@pi-dash/types";
 import { EIssuesStoreType, STATIC_VIEW_TYPES } from "@pi-dash/types";
 // assets
 // components
-import { IssuePeekOverview } from "@/components/issues/peek-overview";
+import { IssuePeekOverview, IssuePeekUrlSync } from "@/components/issues/peek-overview";
 import { WorkspaceActiveLayout } from "@/components/views/helper";
 import { WorkspaceLevelWorkItemFiltersHOC } from "@/components/work-item-filters/filters-hoc/workspace-level";
 import { WorkItemFiltersRow } from "@/components/work-item-filters/filters-row";
@@ -170,6 +170,7 @@ export const AllIssueLayoutRoot = observer(function AllIssueLayoutRoot(props: Pr
               />
             </div>
             {/* peek overview */}
+            <IssuePeekUrlSync />
             <IssuePeekOverview />
           </div>
         )}
