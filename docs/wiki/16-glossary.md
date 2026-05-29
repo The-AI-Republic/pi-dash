@@ -82,8 +82,8 @@ Token pair held by each registered runner. Refresh is long-lived and rotatable; 
 **Device-code flow**
 Browser-based login that requires no token paste. Same UX as `gh auth login` / `stripe login`. Recommended.
 
-**Enrollment token** (legacy)
-One-shot token generated from the web UI ("Add connection"). Used by the legacy `pidash connect` flow on headless hosts.
+**Enrollment token** (deprecated)
+One-shot token used by the hidden `pidash connect` compatibility path. New runner setup uses `pidash auth login` and `pidash runner add`.
 
 **Plan**
 The current subscription tier of an account on Pi Dash Cloud. Source-of-truth is the home-page OIDC; cached as a JWT `plan` claim on `Account`. No webhooks. Upgrade UI deep-links back to home-page.

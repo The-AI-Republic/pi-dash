@@ -47,10 +47,10 @@ The toggle lives in TUI → General → Daemon settings → `auto_update`. Defau
 
 The runner does **not** carry a long-lived password. Authentication is a two-token model:
 
-1. **Refresh token** — issued during enrollment (device-code or legacy enrollment-token), stored on disk at `0600`.
+1. **Refresh token** — issued during `pidash runner add`, stored on disk at `0600`.
 2. **Access token** — short-lived, derived from the refresh token, used per request to the cloud.
 
-`pidash runner add` mints the runner-side credentials cloud-side using the CLI token from `pidash auth login`. The legacy `pidash connect --token <ONE_TIME_TOKEN>` flow is still supported for headless / scripted hosts where the browser flow is awkward.
+`pidash runner add` mints the runner-side credentials cloud-side using the CLI token from `pidash auth login`.
 
 See [11 — Authentication](./11-authentication.md) for the full flow.
 

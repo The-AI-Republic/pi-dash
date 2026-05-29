@@ -63,7 +63,8 @@ pub enum Command {
     /// `pidash runner add` to register runners.
     Auth(auth::AuthArgs),
 
-    /// Enroll this dev machine with Pi Dash cloud (one-time pairing).
+    /// Deprecated compatibility path for one-time enrollment tokens.
+    #[command(hide = true)]
     Connect(connect::Args),
 
     /// Manage local CLI configuration.

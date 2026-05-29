@@ -1,9 +1,7 @@
-//! Add-runner modal.
+//! Deprecated token-compatibility add-runner modal.
 //!
-//! Mirrors `pidash connect` for the second-enrollment case: enroll an
-//! additional runner against this machine's existing config, persist
-//! the per-runner credentials, append a `[[runner]]` block, and restart
-//! the daemon.
+//! New runners should be added with `pidash runner add`. This modal is
+//! kept only for existing one-time enrollment/revive tokens.
 //!
 //! Three fields: enrollment token (masked), host label (defaults to
 //! hostname), working_dir, Submit. The cloud assigns workspace +
@@ -150,17 +148,17 @@ impl Renderable for AddRunnerView {
 
         let mut lines: Vec<Line<'_>> = vec![
             Line::from(Span::styled(
-                "Add a runner to this machine",
+                "Legacy token enrollment",
                 Style::default()
                     .fg(Color::Cyan)
                     .add_modifier(Modifier::BOLD),
             )),
             Line::from(Span::styled(
-                "Generate an enrollment token in the cloud UI (Workspace → Runners → Add connection).",
+                "Prefer `pidash runner add --project <PROJECT>` outside the TUI.",
                 Style::default().add_modifier(Modifier::DIM),
             )),
             Line::from(Span::styled(
-                "The cloud assigns the workspace and project from the token.",
+                "Paste a token here only for compatibility or revive flows.",
                 Style::default().add_modifier(Modifier::DIM),
             )),
             Line::raw(""),

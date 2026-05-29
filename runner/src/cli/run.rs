@@ -25,14 +25,12 @@ pub async fn run(args: Args, paths: &Paths) -> Result<()> {
     if !config_path.exists() {
         anyhow::bail!(
             "no config.toml at {config_path:?}. \
-             Run `pidash auth login --url <URL>` (then `pidash runner add`) \
-             or `pidash connect --url <URL> --token <ONE_TIME_TOKEN>` to enroll."
+             Run `pidash auth login --url <URL>`, then `pidash runner add --project <PROJECT>`."
         );
     }
 
-    let config = crate::config::file::load_config(paths).context(
-        "failed to load config.toml; re-run enrollment if the file is corrupt",
-    )?;
+    let config = crate::config::file::load_config(paths)
+        .context("failed to load config.toml; re-run enrollment if the file is corrupt")?;
     config
         .validate()
         .context("config.toml failed validation; refusing to start the daemon")?;

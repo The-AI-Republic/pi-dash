@@ -86,6 +86,6 @@ Full command + flag reference: [17 — `pidash` CLI reference](./17-cli-referenc
 - **Run fails immediately** → `pidash doctor` (usually agent not on `PATH`, or git clone auth).
 - **Command not found** → open a new terminal.
 - **Browser auth not approving** → use the same browser you signed up in.
-- **Headless host** → use enrollment token: in web UI **Runners → Add connection**, then `pidash connect --url https://pidash.airepublic.com --token <TOKEN>`.
+- **Headless host** → run `pidash auth login --no-browser --url https://pidash.airepublic.com`, approve the printed URL from another browser, then run `pidash runner add --project <PROJECT_ID>`.
 
 Discussions: <https://github.com/The-AI-Republic/pi-dash/discussions> · Bugs: <https://github.com/The-AI-Republic/pi-dash/issues>

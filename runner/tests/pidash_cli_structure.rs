@@ -5,7 +5,7 @@
 //!
 //! - every verb promised in the design doc is registered at the top level
 //! - the `service` subgroup is gone
-//! - `__run` is registered but hidden from `--help`
+//! - compatibility/internal commands are registered but hidden from `--help`
 //!
 //! See `.ai_design/runner_install_ux/cli-restructure-and-install-flow.md`.
 
@@ -75,13 +75,30 @@ fn internal_run_command_exists_but_is_hidden() {
 }
 
 #[test]
-fn binary_help_omits_internal_run() {
+fn legacy_connect_command_exists_but_is_hidden() {
+    let cmd = Cli::command();
+    let sub = cmd
+        .find_subcommand("connect")
+        .expect("`connect` remains registered for compatibility token redemption");
+    assert!(
+        sub.is_hide_set(),
+        "`connect` must be hidden from --help; new setup uses `pidash auth login` and `pidash runner add`",
+    );
+}
+
+#[test]
+fn binary_help_omits_hidden_commands() {
     // Render long help the way clap would print it on `pidash --help`, then
-    // scan for `__run`. Hidden subcommands are excluded from both summaries.
+    // scan for hidden commands. Hidden subcommands are excluded from both
+    // summaries.
     let mut cmd = Cli::command();
     let help = cmd.render_long_help().to_string();
     assert!(
         !help.contains("__run"),
         "--help output must not mention the internal `__run` subcommand:\n{help}",
+    );
+    assert!(
+        !help.contains("\n  connect") && !help.contains("\n    connect"),
+        "--help output must not mention the deprecated `connect` subcommand:\n{help}",
     );
 }

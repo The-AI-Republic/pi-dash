@@ -417,7 +417,7 @@ impl RunnerStatusTab {
                 )),
                 Line::raw(""),
                 Line::from(Span::styled(
-                    "Press [a] to register a runner under this connection.",
+                    "Run `pidash runner add --project <PROJECT>` to register a runner.",
                     Style::default().add_modifier(Modifier::DIM),
                 )),
             ])
@@ -492,8 +492,6 @@ fn render_unregistered_placeholder(area: Rect, buf: &mut Buffer) {
 
 fn hotkeys_card(focused: bool) -> Paragraph<'static> {
     Paragraph::new(Line::from(vec![
-        Span::styled("[a] add", Style::default().fg(Color::Green)),
-        Span::raw("   "),
         Span::styled("[d] remove", Style::default().fg(Color::Red)),
         Span::raw("   ←/→ card   ↑/↓ list   ↵ edit   [w] save   [r] refresh"),
     ]))

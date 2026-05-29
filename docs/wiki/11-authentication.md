@@ -60,16 +60,16 @@ pidash auth login --url https://your-pidash-instance.com
 
 This is the same UX as `gh auth login` or `stripe login`. Bare `pidash` (no subcommand) drops into this flow when no config exists — useful after MSI install on Windows.
 
-### B. Legacy enrollment-token flow
+### B. Headless login
 
-For headless / scripted hosts where the browser flow is awkward:
+For headless hosts where opening a browser automatically is awkward:
 
 ```bash
-# In the Pi Dash web UI: Runners admin → "Add connection" → copy one-time token
-pidash connect --url https://pidash.example.com --token <ONE_TIME_TOKEN>
+pidash auth login --no-browser --url https://pidash.example.com
+pidash runner add --project <PROJECT_ID>
 ```
 
-The token is one-shot — it's burned on first use cloud-side.
+The CLI prints the verification URL and user code; approve it from any browser signed in to Pi Dash.
 
 ## Runner credential model
 

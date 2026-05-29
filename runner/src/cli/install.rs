@@ -1,10 +1,9 @@
 //! `pidash install` — write or refresh the OS service unit.
 //!
-//! In the connection-first design, enrollment lives in
-//! `pidash connect` and runner CRUD in `pidash runner add|list|remove`.
-//! `install` is the small piece in between: write the systemd / launchd
-//! unit so the daemon survives reboots. Safe to run repeatedly (e.g.
-//! after upgrading the binary).
+//! Runner enrollment now lives in `pidash auth login` and
+//! `pidash runner add`. `install` writes the systemd / launchd unit so
+//! the daemon survives reboots. Safe to run repeatedly (e.g. after
+//! upgrading the binary).
 
 use anyhow::Result;
 use clap::Args as ClapArgs;
@@ -28,9 +27,9 @@ pub async fn run(args: Args, paths: &Paths) -> Result<()> {
     if !enrolled {
         println!("Service unit written.");
         println!();
-        println!("This machine is not enrolled yet. Next:");
-        println!("  pidash connect --url <URL> --token <ONE_TIME_TOKEN>");
-        println!("  pidash runner add --name <NAME> --project <PROJECT>");
+        println!("This machine is not configured yet. Next:");
+        println!("  pidash auth login --url <URL>");
+        println!("  pidash runner add --project <PROJECT>");
         println!();
         return Ok(());
     }
