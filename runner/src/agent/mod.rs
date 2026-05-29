@@ -118,8 +118,12 @@ pub type StderrRing = Arc<Mutex<StderrBuffer>>;
 /// Returns `None` to mean "drop this line entirely."
 pub fn sanitize_stderr_line(line: &str) -> Option<String> {
     let stripped = strip_ansi_codes(line);
-    let trimmed = stripped.trim_end();
+    let without_telemetry = strip_codex_telemetry_suffix(&stripped);
+    let trimmed = without_telemetry.trim_end();
     if trimmed.is_empty() {
+        return None;
+    }
+    if is_codex_transcript_wrapper(trimmed) {
         return None;
     }
     if is_noisy_tracing(trimmed) {
@@ -151,6 +155,26 @@ fn strip_ansi_codes(s: &str) -> String {
         }
     }
     out
+}
+
+/// Codex sometimes mirrors app telemetry key/value fields onto stderr
+/// after a tool output snippet, e.g. `mcp_server=... event.timestamp=...`.
+/// That suffix buries the useful line in failure details. Strip it when it
+/// trails real content, or let the caller drop the now-empty line.
+fn strip_codex_telemetry_suffix(s: &str) -> &str {
+    if let Some(idx) = s.find("mcp_server=") {
+        let before = &s[..idx];
+        if idx == 0 || before.chars().last().is_some_and(char::is_whitespace) {
+            return before;
+        }
+    }
+    s
+}
+
+/// Drop Codex transcript wrapper lines that describe token accounting or
+/// output framing rather than the underlying failure.
+fn is_codex_transcript_wrapper(line: &str) -> bool {
+    line.starts_with("Original token count:") || line == "Output:" || line.starts_with("Wall time:")
 }
 
 /// True for lines that match `tracing-subscriber`'s default text
@@ -523,6 +547,42 @@ mod tests {
         let gh = "gh: error: HTTP 401: Bad credentials";
         assert!(sanitize_stderr_line(panic).is_some());
         assert!(sanitize_stderr_line(gh).is_some());
+    }
+
+    #[test]
+    fn sanitize_drops_codex_transcript_wrappers() {
+        for line in [
+            "Original token count: 85",
+            "Output:",
+            "Wall time: 0.0000 seconds",
+        ] {
+            assert_eq!(sanitize_stderr_line(line), None, "should drop {line}");
+        }
+        assert_eq!(
+            sanitize_stderr_line("Process exited with code 1"),
+            Some("Process exited with code 1".into())
+        );
+    }
+
+    #[test]
+    fn sanitize_strips_codex_telemetry_suffix() {
+        let noisy = "gh: error: HTTP 401 mcp_server= mcp_server_origin= event.timestamp=2026-05-29T05:25:42.074Z conversation.id=abc";
+        assert_eq!(
+            sanitize_stderr_line(noisy),
+            Some("gh: error: HTTP 401".into())
+        );
+        assert_eq!(
+            sanitize_stderr_line(
+                " mcp_server= mcp_server_origin= event.timestamp=2026-05-29T05:25:42.074Z"
+            ),
+            None
+        );
+        assert_eq!(
+            sanitize_stderr_line(
+                "mcp_server= mcp_server_origin= event.timestamp=2026-05-29T05:25:42.074Z"
+            ),
+            None
+        );
     }
 
     #[test]
