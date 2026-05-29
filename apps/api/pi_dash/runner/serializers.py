@@ -22,7 +22,9 @@ from pi_dash.runner.models import (
 # Mirrors the runner-side charset rule in `runner/src/util/runner_name.rs`.
 RUNNER_NAME_CHARSET = RegexValidator(
     regex=r"^[A-Za-z0-9_-]+$",
-    message=("runner_name may only contain letters, digits, underscore, and dash"),
+    message=(
+        "runner_name may only contain letters, digits, underscore, and dash"
+    ),
 )
 
 
@@ -32,7 +34,9 @@ class PodSerializer(serializers.ModelSerializer):
     # and to backfill the project field when the user picks a pod first.
     # ``project_identifier`` is the human-friendly slug; ``project`` is
     # the FK uuid kept for callers that want it.
-    project_identifier = serializers.CharField(source="project.identifier", read_only=True)
+    project_identifier = serializers.CharField(
+        source="project.identifier", read_only=True
+    )
 
     class Meta:
         model = Pod
@@ -120,8 +124,6 @@ class RunnerSerializer(serializers.ModelSerializer):
             "capabilities",
             "last_heartbeat_at",
             "owner",
-            "dev_machine",
-            "visibility",
             "pod",
             "pod_detail",
             "live_state",
@@ -141,8 +143,6 @@ class RunnerSerializer(serializers.ModelSerializer):
             "capabilities",
             "last_heartbeat_at",
             "owner",
-            "dev_machine",
-            "visibility",
             "pod_detail",
             "live_state",
             "enrolled_at",

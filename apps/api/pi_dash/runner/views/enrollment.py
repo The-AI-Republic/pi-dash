@@ -33,7 +33,6 @@ from pi_dash.runner.authentication import (
     RunnerRefreshTokenAuthentication,
 )
 from pi_dash.runner.models import (
-    DevMachine,
     MachineToken,
     Pod,
     Runner,
@@ -47,7 +46,6 @@ from pi_dash.runner.serializers import (
 from pi_dash.runner.services import tokens
 from pi_dash.runner.services.permissions import (
     can_manage_runner,
-    can_view_runner,
     is_workspace_member,
 )
 from pi_dash.runner.services.pubsub import close_runner_session, send_to_runner
@@ -55,41 +53,9 @@ from pi_dash.runner.services.pubsub import close_runner_session, send_to_runner
 logger = logging.getLogger(__name__)
 
 
-def _get_or_create_dev_machine(*, user, host_label: str) -> Optional[DevMachine]:
-    host_label = (host_label or "").strip()[:255]
-    if not host_label:
-        return None
-    now = timezone.now()
-    locked = (
-        DevMachine.objects.select_for_update()
-        .filter(owner=user, host_label=host_label, revoked_at__isnull=True)
-        .first()
-    )
-    if locked is not None:
-        locked.last_seen_at = now
-        if not locked.label:
-            locked.label = host_label[:128]
-            locked.save(update_fields=["last_seen_at", "label", "updated_at"])
-        else:
-            locked.save(update_fields=["last_seen_at", "updated_at"])
-        return locked
-    try:
-        with transaction.atomic():
-            return DevMachine.objects.create(
-                owner=user,
-                host_label=host_label,
-                label=host_label[:128],
-                last_seen_at=now,
-            )
-    except IntegrityError:
-        return (
-            DevMachine.objects.select_for_update()
-            .filter(owner=user, host_label=host_label, revoked_at__isnull=True)
-            .first()
-        )
-
-
-def _maybe_mint_machine_token(*, user, workspace, host_label: str) -> Optional[tokens.MintedToken]:
+def _maybe_mint_machine_token(
+    *, user, workspace, host_label: str
+) -> Optional[tokens.MintedToken]:
     """Bootstrap a MachineToken if the user has none for this host.
 
     ``design.md`` §5.1: bootstrap runs inside the enrollment transaction
@@ -110,16 +76,15 @@ def _maybe_mint_machine_token(*, user, workspace, host_label: str) -> Optional[t
         return None
     minted = tokens.mint_machine_token()
     try:
-        with transaction.atomic():
-            MachineToken.objects.create(
-                user=user,
-                workspace=workspace,
-                host_label=host_label,
-                token_hash=minted.hashed,
-                token_fingerprint=minted.fingerprint,
-                label=f"machine: {host_label[:96]}",
-                is_service=True,
-            )
+        MachineToken.objects.create(
+            user=user,
+            workspace=workspace,
+            host_label=host_label,
+            token_hash=minted.hashed,
+            token_fingerprint=minted.fingerprint,
+            label=f"machine: {host_label[:96]}",
+            is_service=True,
+        )
     except IntegrityError:
         return None
     return minted
@@ -158,7 +123,9 @@ class RunnerInviteEndpoint(APIView):
             )
         from pi_dash.db.models.project import Project
 
-        project = Project.objects.filter(workspace_id=workspace_id, identifier=project_identifier).first()
+        project = Project.objects.filter(
+            workspace_id=workspace_id, identifier=project_identifier
+        ).first()
         if project is None:
             return Response(
                 {"error": "project not found in workspace"},
@@ -167,7 +134,9 @@ class RunnerInviteEndpoint(APIView):
         pod_name = (request.data.get("pod") or "").strip()
         pod: Optional[Pod] = None
         if pod_name:
-            pod = Pod.objects.filter(project=project, name=pod_name, deleted_at__isnull=True).first()
+            pod = Pod.objects.filter(
+                project=project, name=pod_name, deleted_at__isnull=True
+            ).first()
         if pod is None:
             pod = Pod.default_for_project_id(project.id)
         if pod is None:
@@ -266,12 +235,7 @@ class RunnerEnrollEndpoint(APIView):
                 workspace_id=str(runner.workspace_id),
                 rtg=1,
             )
-            dev_machine = _get_or_create_dev_machine(
-                user=runner.owner,
-                host_label=host_label,
-            )
             update_fields = [
-                "dev_machine",
                 "host_label",
                 "enrolled_at",
                 "enrollment_token_hash",
@@ -281,7 +245,6 @@ class RunnerEnrollEndpoint(APIView):
                 "refresh_token_generation",
                 "previous_refresh_token_hash",
             ]
-            runner.dev_machine = dev_machine
             runner.host_label = host_label or runner.host_label
             runner.enrolled_at = timezone.now()
             runner.enrollment_token_hash = ""
@@ -304,7 +267,11 @@ class RunnerEnrollEndpoint(APIView):
                     host_label=host_label,
                 )
 
-        project_identifier = runner.pod.project.identifier if runner.pod and runner.pod.project_id else ""
+        project_identifier = (
+            runner.pod.project.identifier
+            if runner.pod and runner.pod.project_id
+            else ""
+        )
         body = {
             "runner_id": str(runner.id),
             "runner_name": runner.name,
@@ -348,7 +315,12 @@ class RunnerRefreshEndpoint(APIView):
         presented_hash = tokens.hash_token(raw)
 
         with transaction.atomic():
-            runner = Runner.objects.select_for_update().select_related("workspace").filter(id=runner_id).first()
+            runner = (
+                Runner.objects.select_for_update()
+                .select_related("workspace")
+                .filter(id=runner_id)
+                .first()
+            )
             if runner is None:
                 return Response(
                     {"error": "invalid_refresh_token"},
@@ -362,7 +334,10 @@ class RunnerRefreshEndpoint(APIView):
 
             if presented_hash == runner.refresh_token_hash:
                 pass  # Current generation; happy path.
-            elif runner.previous_refresh_token_hash and presented_hash == runner.previous_refresh_token_hash:
+            elif (
+                runner.previous_refresh_token_hash
+                and presented_hash == runner.previous_refresh_token_hash
+            ):
                 runner.revoke(reason="refresh_token_replayed")
                 return Response(
                     {"error": "refresh_token_replayed"},
@@ -385,7 +360,9 @@ class RunnerRefreshEndpoint(APIView):
             runner.previous_refresh_token_hash = runner.refresh_token_hash
             runner.refresh_token_hash = new_refresh.hashed
             runner.refresh_token_fingerprint = new_refresh.fingerprint
-            runner.refresh_token_generation = runner.refresh_token_generation + 1
+            runner.refresh_token_generation = (
+                runner.refresh_token_generation + 1
+            )
             runner.save(
                 update_fields=[
                     "previous_refresh_token_hash",
@@ -444,11 +421,13 @@ class RunnerReviveEndpoint(APIView):
                 .first()
             )
             if runner is None:
-                return Response({"error": "not found"}, status=status.HTTP_404_NOT_FOUND)
-            if not can_view_runner(request.user, runner):
-                return Response({"error": "not found"}, status=status.HTTP_404_NOT_FOUND)
+                return Response(
+                    {"error": "not found"}, status=status.HTTP_404_NOT_FOUND
+                )
             if not can_manage_runner(request.user, runner):
-                return Response({"error": "forbidden"}, status=status.HTTP_403_FORBIDDEN)
+                return Response(
+                    {"error": "forbidden"}, status=status.HTTP_403_FORBIDDEN
+                )
             if runner.revoked_at is None and runner.enrolled_at is not None:
                 return Response(
                     {"error": "runner is currently active; revoke it first"},
@@ -484,7 +463,11 @@ class RunnerReviveEndpoint(APIView):
             # Drop any leftover force-refresh directive — we are at rtg=0.
             RunnerForceRefresh.objects.filter(runner=runner).delete()
 
-        project_identifier = runner.pod.project.identifier if runner.pod and runner.pod.project_id else ""
+        project_identifier = (
+            runner.pod.project.identifier
+            if runner.pod and runner.pod.project_id
+            else ""
+        )
         body = RunnerEnrollmentInviteSerializer(
             {
                 "runner_id": runner.id,
@@ -629,7 +612,9 @@ class RunnerCreateEndpoint(APIView):
                 )
             workspace = memberships[0].workspace
 
-        project = Project.objects.filter(workspace_id=workspace.id, identifier=project_identifier).first()
+        project = Project.objects.filter(
+            workspace_id=workspace.id, identifier=project_identifier
+        ).first()
         if project is None:
             return Response(
                 {"error": "project_not_found"},
@@ -638,7 +623,9 @@ class RunnerCreateEndpoint(APIView):
 
         pod: Optional[Pod] = None
         if pod_name:
-            pod = Pod.objects.filter(project=project, name=pod_name, deleted_at__isnull=True).first()
+            pod = Pod.objects.filter(
+                project=project, name=pod_name, deleted_at__isnull=True
+            ).first()
         if pod is None:
             pod = Pod.default_for_project_id(project.id)
         if pod is None:
@@ -664,14 +651,9 @@ class RunnerCreateEndpoint(APIView):
             try:
                 with transaction.atomic():
                     refresh = tokens.mint_refresh_token()
-                    dev_machine = _get_or_create_dev_machine(
-                        user=request.user,
-                        host_label=host_label,
-                    )
                     runner = Runner.objects.create(
                         owner=request.user,
                         workspace_id=workspace.id,
-                        dev_machine=dev_machine,
                         pod=pod,
                         name=name,
                         host_label=host_label,
@@ -857,7 +839,9 @@ class MachineTokenRedeemEndpoint(APIView):
         host_label = (payload.get("host_label") or "")[:255]
 
         with transaction.atomic():
-            minted = _maybe_mint_machine_token(user=user, workspace=workspace, host_label=host_label)
+            minted = _maybe_mint_machine_token(
+                user=user, workspace=workspace, host_label=host_label
+            )
         if minted is None:
             return Response(
                 {"error": "machine_token_already_active"},

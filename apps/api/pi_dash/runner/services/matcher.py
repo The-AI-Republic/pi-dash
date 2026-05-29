@@ -31,7 +31,6 @@ from pi_dash.runner.models import (
     Runner,
     RunnerStatus,
 )
-from pi_dash.runner.services.permissions import filter_runs_usable_by_runner
 
 logger = logging.getLogger(__name__)
 
@@ -146,7 +145,7 @@ def next_for_runner(runner: Runner) -> Optional[AgentRun]:
 
     Must be called inside a ``transaction.atomic()`` block.
     """
-    qs = (
+    return (
         AgentRun.objects.select_for_update(skip_locked=True)
         .filter(
             pod=runner.pod,
@@ -155,20 +154,14 @@ def next_for_runner(runner: Runner) -> Optional[AgentRun]:
         .filter(
             Q(pinned_runner=runner) | Q(pinned_runner__isnull=True),
         )
-    )
-    qs = filter_runs_usable_by_runner(qs, runner)
-    return (
-        qs
         # Pinned-to-me sorts before unpinned via an integer rank: 0 for the
         # personal queue, 1 for the pod queue. ``order_by`` on the rank then
         # ``created_at`` gives FIFO inside each tier.
-        .annotate(
-            _is_mine=models.Case(
-                models.When(pinned_runner=runner, then=models.Value(0)),
-                default=models.Value(1),
-                output_field=models.IntegerField(),
-            )
-        )
+        .annotate(_is_mine=models.Case(
+            models.When(pinned_runner=runner, then=models.Value(0)),
+            default=models.Value(1),
+            output_field=models.IntegerField(),
+        ))
         .order_by("_is_mine", "created_at")
         .first()
     )
@@ -214,9 +207,13 @@ def drain_pod(pod: Pod) -> int:
             assignments.append((runner, run))
 
     for runner, run in assignments:
-        transaction.on_commit(lambda r=run, rn=runner: send_to_runner(rn.id, _build_assign_msg(r)))
+        transaction.on_commit(
+            lambda r=run, rn=runner: send_to_runner(rn.id, _build_assign_msg(r))
+        )
     if assignments:
-        logger.info("drain_pod: pod=%s assigned %d run(s)", pod.id, len(assignments))
+        logger.info(
+            "drain_pod: pod=%s assigned %d run(s)", pod.id, len(assignments)
+        )
     return len(assignments)
 
 
@@ -269,8 +266,12 @@ def drain_for_runner(runner: Runner) -> bool:
         assignment = (locked, run)
 
     runner_obj, run = assignment
-    transaction.on_commit(lambda r=run, rn=runner_obj: send_to_runner(rn.id, _build_assign_msg(r)))
-    logger.info("drain_for_runner: runner=%s assigned run=%s", runner_obj.id, run.id)
+    transaction.on_commit(
+        lambda r=run, rn=runner_obj: send_to_runner(rn.id, _build_assign_msg(r))
+    )
+    logger.info(
+        "drain_for_runner: runner=%s assigned run=%s", runner_obj.id, run.id
+    )
     return True
 
 
@@ -348,7 +349,9 @@ def can_register_another(user_id, workspace_id) -> bool:
 
 def count_active(user_id, workspace_id) -> int:
     return (
-        Runner.objects.filter(owner_id=user_id, workspace_id=workspace_id).exclude(status=RunnerStatus.REVOKED).count()
+        Runner.objects.filter(owner_id=user_id, workspace_id=workspace_id)
+        .exclude(status=RunnerStatus.REVOKED)
+        .count()
     )
 
 

@@ -28,8 +28,6 @@ from pi_dash.runner.models import (
 )
 from pi_dash.runner.services import matcher
 from pi_dash.runner.services.permissions import (
-    can_use_runner,
-    can_view_runner,
     is_workspace_admin,
     is_workspace_member,
 )
@@ -49,22 +47,16 @@ def event_channel(session_id) -> str:
 def can_read_chat(user, session: AgentChatSession) -> bool:
     if not is_workspace_member(user, session.workspace_id):
         return False
-    if not can_view_runner(user, session.runner):
-        return False
     return session.created_by_id == user.id or is_workspace_admin(user, session.workspace_id)
 
 
 def can_send_chat(user, session: AgentChatSession) -> bool:
-    if not is_workspace_member(user, session.workspace_id):
-        return False
-    return session.created_by_id == user.id and can_use_runner(user, session.runner)
+    return is_workspace_member(user, session.workspace_id)
 
 
 def can_decide_chat_approval(user, approval: AgentChatApprovalRequest) -> bool:
     session = approval.session
     if not is_workspace_member(user, session.workspace_id):
-        return False
-    if not can_view_runner(user, session.runner):
         return False
     return session.created_by_id == user.id or is_workspace_admin(user, session.workspace_id)
 

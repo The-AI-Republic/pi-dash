@@ -48,11 +48,8 @@ from pi_dash.runner.serializers import (
 )
 from pi_dash.runner.services import chat as chat_service
 from pi_dash.runner.services.permissions import (
-    can_use_runner,
-    can_view_runner,
     is_workspace_admin,
     is_workspace_member,
-    runner_visible_to_user_q,
 )
 from pi_dash.runner.services.pubsub import send_to_runner
 
@@ -141,17 +138,14 @@ class AgentChatSessionListEndpoint(APIView):
                 return Response({"error": "forbidden"}, status=status.HTTP_403_FORBIDDEN)
             qs = qs.filter(workspace_id=workspace_id)
         if runner_id:
-            runner = Runner.objects.filter(pk=runner_id).first()
-            if runner is None:
+            runner_workspace_id = Runner.objects.filter(pk=runner_id).values_list("workspace_id", flat=True).first()
+            if runner_workspace_id is None:
                 qs = qs.none()
-            elif workspace_id and str(runner.workspace_id) != str(workspace_id):
+            elif workspace_id and str(runner_workspace_id) != str(workspace_id):
                 qs = qs.none()
-            elif not workspace_id and not is_workspace_member(request.user, runner.workspace_id):
+            elif not workspace_id and not is_workspace_member(request.user, runner_workspace_id):
                 return Response({"error": "forbidden"}, status=status.HTTP_403_FORBIDDEN)
-            elif not can_view_runner(request.user, runner):
-                qs = qs.none()
             qs = qs.filter(runner_id=runner_id)
-        qs = qs.filter(runner_visible_to_user_q(request.user, prefix="runner__"))
         if not workspace_id or not is_workspace_admin(request.user, workspace_id):
             qs = qs.filter(created_by=request.user)
         qs = qs.order_by("-last_message_at", "-created_at")[:100]
@@ -170,8 +164,6 @@ class AgentChatSessionListEndpoint(APIView):
         with transaction.atomic():
             runner = Runner.objects.select_for_update().filter(pk=runner_id, workspace_id=workspace_id).first()
             if runner is None:
-                return Response({"error": "runner_not_found"}, status=status.HTTP_404_NOT_FOUND)
-            if not can_use_runner(request.user, runner):
                 return Response({"error": "runner_not_found"}, status=status.HTTP_404_NOT_FOUND)
             if _runner_unavailable(runner):
                 return Response(
@@ -426,7 +418,6 @@ class AgentChatApprovalListEndpoint(APIView):
             if not is_workspace_member(request.user, workspace_id):
                 return Response({"error": "forbidden"}, status=status.HTTP_403_FORBIDDEN)
             qs = qs.filter(session__workspace_id=workspace_id)
-            qs = qs.filter(runner_visible_to_user_q(request.user, prefix="session__runner__"))
             if not is_workspace_admin(request.user, workspace_id):
                 qs = qs.filter(session__created_by=request.user)
         else:
@@ -438,7 +429,6 @@ class AgentChatApprovalListEndpoint(APIView):
                     session__workspace__workspace_member__deleted_at__isnull=True,
                 )
             ).distinct()
-            qs = qs.filter(runner_visible_to_user_q(request.user, prefix="session__runner__"))
         return Response(AgentChatApprovalRequestSerializer(qs[:200], many=True).data)
 
 
