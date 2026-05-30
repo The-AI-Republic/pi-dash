@@ -188,7 +188,9 @@ describe("AddRunnerModal", () => {
     await user.type(screen.getByPlaceholderText("runners.add_modal.name_placeholder"), "test runner");
     await user.click(screen.getByRole("button", { name: "runners.add_modal.submit" }));
 
-    expect(await screen.findByText("runners.add_modal.errors.name_invalid")).toBeInTheDocument();
+    const error = await screen.findByText("runners.add_modal.errors.name_invalid");
+    expect(error).toBeInTheDocument();
+    expect(error).toHaveClass("text-danger-primary");
     expect(
       screen.queryByText((_content: string, node: Element | null) => node?.tagName.toLowerCase() === "pre")
     ).not.toBeInTheDocument();

@@ -197,10 +197,10 @@ export const AddRunnerModal = observer(function AddRunnerModal(props: Props) {
             />
             <p className="text-12 text-secondary">{t("runners.add_modal.project_help")}</p>
             {errors.projectIdentifier && (
-              <span className="text-red-500 text-12">{errors.projectIdentifier.message}</span>
+              <span className="text-12 text-danger-primary">{errors.projectIdentifier.message}</span>
             )}
             {projectsError && (
-              <span className="text-red-500 text-12">{t("runners.add_modal.errors.load_projects_failed")}</span>
+              <span className="text-12 text-danger-primary">{t("runners.add_modal.errors.load_projects_failed")}</span>
             )}
           </div>
 
@@ -235,7 +235,7 @@ export const AddRunnerModal = observer(function AddRunnerModal(props: Props) {
             />
             <p className="text-12 text-secondary">{t("runners.add_modal.pod_help")}</p>
             {podsError && (
-              <span className="text-red-500 text-12">{t("runners.add_modal.errors.load_pods_failed")}</span>
+              <span className="text-12 text-danger-primary">{t("runners.add_modal.errors.load_pods_failed")}</span>
             )}
           </div>
 
@@ -259,7 +259,7 @@ export const AddRunnerModal = observer(function AddRunnerModal(props: Props) {
               )}
             />
             <p className="text-12 text-secondary">{t("runners.add_modal.name_help")}</p>
-            {errors.name && <span className="text-red-500 text-12">{errors.name.message}</span>}
+            {errors.name && <span className="text-12 text-danger-primary">{errors.name.message}</span>}
           </div>
 
           <div className="flex flex-col gap-1">
