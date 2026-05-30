@@ -32,6 +32,7 @@ type Props = {
 const AGENT_OPTIONS = ["claude-code", "codex"] as const;
 type TAgent = (typeof AGENT_OPTIONS)[number];
 const DEFAULT_AGENT: TAgent = "claude-code";
+const RUNNER_NAME_WHITESPACE_RE = /\s/;
 const RUNNER_NAME_RE = /^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$/;
 
 interface FormValues {
@@ -249,6 +250,7 @@ export const AddRunnerModal = observer(function AddRunnerModal(props: Props) {
                 validate: (value) => {
                   const trimmed = value.trim();
                   if (!trimmed) return true;
+                  if (RUNNER_NAME_WHITESPACE_RE.test(trimmed)) return t("runners.add_modal.errors.name_invalid");
                   return RUNNER_NAME_RE.test(trimmed) || t("runners.add_modal.errors.name_invalid");
                 },
               }}

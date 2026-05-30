@@ -2958,7 +2958,7 @@ export default {
       errors: {
         project_required: "Vyberte projekt.",
         name_invalid:
-          "Runner name must start with a letter, digit, or underscore and contain only letters, digits, underscore, dot, or dash.",
+          "Runner name cannot contain spaces. It must start with a letter, digit, or underscore and contain only letters, digits, underscore, dot, or dash.",
         load_projects_failed: "Nepodarilo sa načítať projekty.",
         load_pods_failed: "Nepodarilo sa načítať pody.",
       },
@@ -2972,7 +2972,7 @@ export default {
       name_label: "Názov (voliteľné)",
       name_placeholder: "my-laptop-runner",
       name_help:
-        "Auto-assigned if blank. If provided, use letters, digits, underscore, dot, or dash; start with a letter, digit, or underscore.",
+        "Auto-assigned if blank. No spaces. If provided, use letters, digits, underscore, dot, or dash; start with a letter, digit, or underscore.",
       working_dir_label: "Pracovný adresár (voliteľné)",
       working_dir_placeholder: "pracovný adresár projektu na lokálnom vývojovom stroji",
       working_dir_help:

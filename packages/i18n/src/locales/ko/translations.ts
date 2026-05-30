@@ -2961,7 +2961,7 @@ export default {
       errors: {
         project_required: "프로젝트를 선택하세요.",
         name_invalid:
-          "Runner name must start with a letter, digit, or underscore and contain only letters, digits, underscore, dot, or dash.",
+          "Runner name cannot contain spaces. It must start with a letter, digit, or underscore and contain only letters, digits, underscore, dot, or dash.",
         load_projects_failed: "프로젝트를 불러올 수 없습니다.",
         load_pods_failed: "포드를 불러올 수 없습니다.",
       },
@@ -2975,7 +2975,7 @@ export default {
       name_label: "이름(선택 사항)",
       name_placeholder: "my-laptop-runner",
       name_help:
-        "Auto-assigned if blank. If provided, use letters, digits, underscore, dot, or dash; start with a letter, digit, or underscore.",
+        "Auto-assigned if blank. No spaces. If provided, use letters, digits, underscore, dot, or dash; start with a letter, digit, or underscore.",
       working_dir_label: "작업 디렉터리(선택 사항)",
       working_dir_placeholder: "로컬 개발 머신 프로젝트 작업 디렉터리",
       working_dir_help:

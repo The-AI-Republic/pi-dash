@@ -2959,7 +2959,7 @@ export default {
       errors: {
         project_required: "Wybierz projekt.",
         name_invalid:
-          "Runner name must start with a letter, digit, or underscore and contain only letters, digits, underscore, dot, or dash.",
+          "Runner name cannot contain spaces. It must start with a letter, digit, or underscore and contain only letters, digits, underscore, dot, or dash.",
         load_projects_failed: "Nie udało się załadować projektów.",
         load_pods_failed: "Nie udało się załadować podów.",
       },
@@ -2973,7 +2973,7 @@ export default {
       name_label: "Nazwa (opcjonalnie)",
       name_placeholder: "my-laptop-runner",
       name_help:
-        "Auto-assigned if blank. If provided, use letters, digits, underscore, dot, or dash; start with a letter, digit, or underscore.",
+        "Auto-assigned if blank. No spaces. If provided, use letters, digits, underscore, dot, or dash; start with a letter, digit, or underscore.",
       working_dir_label: "Katalog roboczy (opcjonalnie)",
       working_dir_placeholder: "lokalny katalog roboczy projektu",
       working_dir_help:

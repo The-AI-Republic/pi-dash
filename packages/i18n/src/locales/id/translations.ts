@@ -2998,7 +2998,7 @@ export default {
       errors: {
         project_required: "Pilih proyek.",
         name_invalid:
-          "Runner name must start with a letter, digit, or underscore and contain only letters, digits, underscore, dot, or dash.",
+          "Runner name cannot contain spaces. It must start with a letter, digit, or underscore and contain only letters, digits, underscore, dot, or dash.",
         load_projects_failed: "Tidak dapat memuat proyek.",
         load_pods_failed: "Tidak dapat memuat pod.",
       },
@@ -3012,7 +3012,7 @@ export default {
       name_label: "Nama (opsional)",
       name_placeholder: "my-laptop-runner",
       name_help:
-        "Auto-assigned if blank. If provided, use letters, digits, underscore, dot, or dash; start with a letter, digit, or underscore.",
+        "Auto-assigned if blank. No spaces. If provided, use letters, digits, underscore, dot, or dash; start with a letter, digit, or underscore.",
       working_dir_label: "Direktori kerja (opsional)",
       working_dir_placeholder: "direktori kerja proyek mesin pengembangan lokal",
       working_dir_help:
