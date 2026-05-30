@@ -2909,7 +2909,6 @@ export default {
     list: {
       delete_failed: "Nepodarilo sa odstrániť runnera",
       revoke_failed: "Nepodarilo sa zrušiť runnera",
-      revive_failed: "Nepodarilo sa obnoviť runnera",
       add_runner: "Pridať runnera",
       how_it_works_title: "Ako pridať runnera",
       how_it_works_body:
@@ -2923,7 +2922,6 @@ export default {
         last_heartbeat: "Posledný heartbeat",
       },
       columns_pod: "Pod",
-      revive: "Obnoviť",
       revoke: "Zrušiť",
       delete: "Odstrániť",
       empty: 'No runners yet. Click "Add runner" to generate your first runner command.',
@@ -2932,10 +2930,7 @@ export default {
         "Riadok runnera sa odstráni a daemon je nútene offline. Historické behy sú zachované s odkazom na null runnera.",
       revoke_confirm_title: "Zrušiť runnera?",
       revoke_confirm_body:
-        "Prihlasovacie údaje runnera sú zneplatnené a všetky prebiehajúce behy sú zrušené, ale riadok zostáva v zozname. Neskôr ho môžete obnoviť a vytvoriť nový registračný token na tom istom riadku.",
-      revive_modal_title: "Nový registračný token",
-      revive_modal_body:
-        "Spustite príkaz nižšie na hostiteľovi, ktorý by mal prevziať tohto runnera. Skopírujte ho teraz – token sa už znova nezobrazí.",
+        "The runner's credentials are invalidated and any in-flight runs are cancelled, but the row stays in the list. To attach it again, delete it and add a new runner from the target machine.",
       project_placeholder: "Vyberte projekt",
       copy_failed: "Nepodarilo sa skopírovať do schránky",
     },

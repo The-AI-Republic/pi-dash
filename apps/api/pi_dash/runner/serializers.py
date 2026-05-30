@@ -170,18 +170,6 @@ class RunnerEnrollRequestSerializer(serializers.Serializer):
     version = serializers.CharField(max_length=32, allow_blank=True, default="")
 
 
-class RunnerEnrollmentInviteSerializer(serializers.Serializer):
-    """Web-UI response when a workspace admin mints a runner invite."""
-
-    runner_id = serializers.UUIDField()
-    name = serializers.CharField()
-    workspace_slug = serializers.CharField()
-    project_identifier = serializers.CharField()
-    pod_id = serializers.UUIDField()
-    enrollment_token = serializers.CharField()
-    enrollment_expires_at = serializers.CharField()
-
-
 class AgentRunSerializer(serializers.ModelSerializer):
     pod_detail = PodMiniSerializer(source="pod", read_only=True)
 

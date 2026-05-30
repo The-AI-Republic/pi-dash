@@ -2949,7 +2949,6 @@ export default {
     list: {
       delete_failed: "Gagal menghapus runner",
       revoke_failed: "Gagal mencabut runner",
-      revive_failed: "Gagal menghidupkan kembali runner",
       add_runner: "Tambah runner",
       how_it_works_title: "Cara menambahkan runner",
       how_it_works_body:
@@ -2963,7 +2962,6 @@ export default {
         last_heartbeat: "Detak jantung terakhir",
       },
       columns_pod: "Pod",
-      revive: "Hidupkan kembali",
       revoke: "Cabut",
       delete: "Hapus",
       empty: 'No runners yet. Click "Add runner" to generate your first runner command.',
@@ -2972,10 +2970,7 @@ export default {
         "Baris runner dihapus dan daemon dipaksa offline. Proses historis tetap disimpan dengan referensi runner null.",
       revoke_confirm_title: "Cabut runner?",
       revoke_confirm_body:
-        "Kredensial runner dinonaktifkan dan semua proses yang sedang berjalan dibatalkan, tetapi baris tetap ada di daftar. Anda dapat menghidupkannya kembali nanti untuk membuat token pendaftaran baru pada baris yang sama.",
-      revive_modal_title: "Token pendaftaran baru",
-      revive_modal_body:
-        "Jalankan perintah di bawah pada host yang seharusnya mengambil runner ini. Salin sekarang — token tidak akan ditampilkan lagi.",
+        "The runner's credentials are invalidated and any in-flight runs are cancelled, but the row stays in the list. To attach it again, delete it and add a new runner from the target machine.",
       project_placeholder: "Pilih proyek",
       copy_failed: "Tidak dapat menyalin ke clipboard",
     },

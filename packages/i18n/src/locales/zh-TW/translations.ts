@@ -2881,7 +2881,6 @@ export default {
     list: {
       delete_failed: "刪除執行器失敗",
       revoke_failed: "撤銷執行器失敗",
-      revive_failed: "恢復執行器失敗",
       add_runner: "新增執行器",
       how_it_works_title: "如何新增執行器",
       how_it_works_body:
@@ -2895,7 +2894,6 @@ export default {
         last_heartbeat: "最後心跳",
       },
       columns_pod: "Pod",
-      revive: "恢復",
       revoke: "撤銷",
       delete: "刪除",
       empty: 'No runners yet. Click "Add runner" to generate your first runner command.',
@@ -2903,9 +2901,7 @@ export default {
       delete_confirm_body: "執行器列將被移除，守護程序被迫離線。歷史運行記錄會保留，但執行器參考設為空值。",
       revoke_confirm_title: "撤銷執行器？",
       revoke_confirm_body:
-        "執行器的憑證將被失效，任何進行中的運行將被取消，但該列仍保留在列表中。您可以稍後恢復它，在同一列上產生新的註冊令牌。",
-      revive_modal_title: "新的註冊令牌",
-      revive_modal_body: "在應接管此執行器的主機上執行以下命令。請立即複製——令牌將不會再次顯示。",
+        "The runner's credentials are invalidated and any in-flight runs are cancelled, but the row stays in the list. To attach it again, delete it and add a new runner from the target machine.",
       project_placeholder: "選擇專案",
       copy_failed: "無法複製到剪貼簿",
     },

@@ -2912,7 +2912,6 @@ export default {
     list: {
       delete_failed: "러너 삭제 실패",
       revoke_failed: "러너 권한 취소 실패",
-      revive_failed: "러너 복구 실패",
       add_runner: "러너 추가",
       how_it_works_title: "러너 추가 방법",
       how_it_works_body:
@@ -2926,7 +2925,6 @@ export default {
         last_heartbeat: "마지막 하트비트",
       },
       columns_pod: "포드",
-      revive: "복구",
       revoke: "권한 취소",
       delete: "삭제",
       empty: 'No runners yet. Click "Add runner" to generate your first runner command.',
@@ -2935,10 +2933,7 @@ export default {
         "러너 행이 제거되고 데몬이 강제로 오프라인 상태가 됩니다. 기록된 실행은 null 러너 참조로 보존됩니다.",
       revoke_confirm_title: "러너 권한을 취소하시겠습니까?",
       revoke_confirm_body:
-        "러너의 자격 증명이 무효화되고 진행 중인 실행이 취소되지만, 행은 목록에 남아 있습니다. 나중에 복구하여 동일한 행에 새 등록 토큰을 생성할 수 있습니다.",
-      revive_modal_title: "새 등록 토큰",
-      revive_modal_body:
-        "이 러너를 할당받을 호스트에서 아래 명령을 실행하세요. 지금 복사하세요 — 토큰이 다시 표시되지 않습니다.",
+        "The runner's credentials are invalidated and any in-flight runs are cancelled, but the row stays in the list. To attach it again, delete it and add a new runner from the target machine.",
       project_placeholder: "프로젝트 선택",
       copy_failed: "클립보드에 복사할 수 없습니다",
     },

@@ -2931,7 +2931,6 @@ export default {
     list: {
       delete_failed: "ランナーの削除に失敗しました",
       revoke_failed: "ランナーの失効に失敗しました",
-      revive_failed: "ランナーの復活に失敗しました",
       add_runner: "ランナーを追加",
       how_it_works_title: "ランナーの追加方法",
       how_it_works_body:
@@ -2945,7 +2944,6 @@ export default {
         last_heartbeat: "最終ハートビート",
       },
       columns_pod: "ポッド",
-      revive: "復活",
       revoke: "失効",
       delete: "削除",
       empty: 'No runners yet. Click "Add runner" to generate your first runner command.',
@@ -2954,10 +2952,7 @@ export default {
         "ランナーの行が削除され、デーモンは強制的にオフラインになります。過去の実行はランナー参照がnullのまま保持されます。",
       revoke_confirm_title: "ランナーを失効しますか？",
       revoke_confirm_body:
-        "ランナーの認証情報が無効化され、進行中の実行はキャンセルされますが、行はリストに残ります。後で復活させて、同じ行に新しい登録トークンを発行できます。",
-      revive_modal_title: "新しい登録トークン",
-      revive_modal_body:
-        "このランナーを引き継ぐホストで以下のコマンドを実行してください。今すぐコピーしてください。トークンは再度表示されません。",
+        "The runner's credentials are invalidated and any in-flight runs are cancelled, but the row stays in the list. To attach it again, delete it and add a new runner from the target machine.",
       project_placeholder: "プロジェクトを選択",
       copy_failed: "クリップボードにコピーできませんでした",
     },

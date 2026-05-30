@@ -3133,7 +3133,6 @@ export default {
     list: {
       delete_failed: "Не удалось удалить runner",
       revoke_failed: "Не удалось отозвать runner",
-      revive_failed: "Не удалось восстановить runner",
       add_runner: "Добавить runner",
       how_it_works_title: "Как добавить runner",
       how_it_works_body:
@@ -3147,7 +3146,6 @@ export default {
         last_heartbeat: "Последний heartbeat",
       },
       columns_pod: "Под",
-      revive: "Восстановить",
       revoke: "Отозвать",
       delete: "Удалить",
       empty: 'No runners yet. Click "Add runner" to generate your first runner command.',
@@ -3156,10 +3154,7 @@ export default {
         "Строка runner удаляется, а демон принудительно переводится в офлайн. Исторические запуски сохраняются с нулевой ссылкой на runner.",
       revoke_confirm_title: "Отозвать runner?",
       revoke_confirm_body:
-        "Учетные данные runner аннулируются, а все выполняющиеся запуски отменяются, но строка остается в списке. Вы можете восстановить его позже, чтобы создать новый токен регистрации в той же строке.",
-      revive_modal_title: "Новый токен регистрации",
-      revive_modal_body:
-        "Выполните команду ниже на хосте, который должен принять этого runner. Скопируйте ее сейчас — токен больше не будет показан.",
+        "The runner's credentials are invalidated and any in-flight runs are cancelled, but the row stays in the list. To attach it again, delete it and add a new runner from the target machine.",
       project_placeholder: "Выберите проект",
       copy_failed: "Не удалось скопировать в буфер обмена",
     },

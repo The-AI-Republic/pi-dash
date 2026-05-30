@@ -2943,7 +2943,6 @@ export default {
     list: {
       delete_failed: "Không thể xóa runner",
       revoke_failed: "Không thể thu hồi runner",
-      revive_failed: "Không thể khôi phục runner",
       add_runner: "Thêm runner",
       how_it_works_title: "Cách thêm runner",
       how_it_works_body:
@@ -2957,7 +2956,6 @@ export default {
         last_heartbeat: "Lần heartbeat cuối",
       },
       columns_pod: "Pod",
-      revive: "Khôi phục",
       revoke: "Thu hồi",
       delete: "Xóa",
       empty: 'No runners yet. Click "Add runner" to generate your first runner command.',
@@ -2966,10 +2964,7 @@ export default {
         "Hàng runner bị xóa và daemon bị buộc ngoại tuyến. Các lần chạy lịch sử được giữ lại với tham chiếu runner null.",
       revoke_confirm_title: "Thu hồi runner?",
       revoke_confirm_body:
-        "Thông tin xác thực của runner bị vô hiệu hóa và mọi lần chạy đang thực hiện bị hủy, nhưng hàng vẫn ở trong danh sách. Bạn có thể khôi phục nó sau để tạo mã thông báo đăng ký mới trên cùng hàng đó.",
-      revive_modal_title: "Mã thông báo đăng ký mới",
-      revive_modal_body:
-        "Chạy lệnh bên dưới trên máy chủ sẽ nhận runner này. Sao chép ngay bây giờ — mã thông báo sẽ không được hiển thị lại.",
+        "The runner's credentials are invalidated and any in-flight runs are cancelled, but the row stays in the list. To attach it again, delete it and add a new runner from the target machine.",
       project_placeholder: "Chọn một dự án",
       copy_failed: "Không thể sao chép vào bộ nhớ tạm",
     },

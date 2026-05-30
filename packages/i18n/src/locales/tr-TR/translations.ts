@@ -2921,7 +2921,6 @@ export default {
     list: {
       delete_failed: "Runner silinemedi",
       revoke_failed: "Runner iptal edilemedi",
-      revive_failed: "Runner canlandırılamadı",
       add_runner: "Runner ekle",
       how_it_works_title: "Runner nasıl eklenir",
       how_it_works_body:
@@ -2935,7 +2934,6 @@ export default {
         last_heartbeat: "Son kalp atışı",
       },
       columns_pod: "Pod",
-      revive: "Canlandır",
       revoke: "İptal et",
       delete: "Sil",
       empty: 'No runners yet. Click "Add runner" to generate your first runner command.',
@@ -2944,10 +2942,7 @@ export default {
         "Runner satırı kaldırılır ve daemon çevrimdışı olmaya zorlanır. Geçmiş çalıştırmalar, null runner referansı ile korunur.",
       revoke_confirm_title: "Runner iptal edilsin mi?",
       revoke_confirm_body:
-        "Runner'ın kimlik bilgileri geçersiz kılınır ve devam eden tüm çalıştırmalar iptal edilir, ancak satır listede kalır. Daha sonra canlandırarak aynı satırda yeni bir kayıt token'ı oluşturabilirsiniz.",
-      revive_modal_title: "Yeni kayıt token'ı",
-      revive_modal_body:
-        "Bu runner'ı alması gereken ana bilgisayarda aşağıdaki komutu çalıştırın. Şimdi kopyalayın — token bir daha gösterilmeyecek.",
+        "The runner's credentials are invalidated and any in-flight runs are cancelled, but the row stays in the list. To attach it again, delete it and add a new runner from the target machine.",
       project_placeholder: "Bir proje seçin",
       copy_failed: "Panoya kopyalanamadı",
     },

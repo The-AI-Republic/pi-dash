@@ -2945,7 +2945,6 @@ export default {
     list: {
       delete_failed: "Löschen des Runners fehlgeschlagen",
       revoke_failed: "Widerruf des Runners fehlgeschlagen",
-      revive_failed: "Reaktivierung des Runners fehlgeschlagen",
       add_runner: "Runner hinzufügen",
       how_it_works_title: "So fügen Sie einen Runner hinzu",
       how_it_works_body:
@@ -2959,7 +2958,6 @@ export default {
         last_heartbeat: "Letzter Heartbeat",
       },
       columns_pod: "Pod",
-      revive: "Reaktivieren",
       revoke: "Widerrufen",
       delete: "Löschen",
       empty: 'No runners yet. Click "Add runner" to generate your first runner command.',
@@ -2968,10 +2966,7 @@ export default {
         "Die Runner-Zeile wird entfernt und der Daemon wird offline geschaltet. Historische Ausführungen bleiben mit einer Null-Referenz auf den Runner erhalten.",
       revoke_confirm_title: "Runner widerrufen?",
       revoke_confirm_body:
-        "Die Anmeldeinformationen des Runners werden ungültig gemacht und alle laufenden Ausführungen werden abgebrochen, aber die Zeile bleibt in der Liste. Sie können sie später reaktivieren, um ein neues Registrierungstoken für dieselbe Zeile zu erstellen.",
-      revive_modal_title: "Neues Registrierungstoken",
-      revive_modal_body:
-        "Führen Sie den folgenden Befehl auf dem Host aus, der diesen Runner übernehmen soll. Kopieren Sie ihn jetzt – das Token wird nicht erneut angezeigt.",
+        "The runner's credentials are invalidated and any in-flight runs are cancelled, but the row stays in the list. To attach it again, delete it and add a new runner from the target machine.",
       project_placeholder: "Projekt auswählen",
       copy_failed: "Konnte nicht in die Zwischenablage kopiert werden",
     },

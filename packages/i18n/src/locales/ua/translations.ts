@@ -3125,7 +3125,6 @@ export default {
     list: {
       delete_failed: "Не вдалося видалити виконавця",
       revoke_failed: "Не вдалося відкликати виконавця",
-      revive_failed: "Не вдалося відновити виконавця",
       add_runner: "Додати виконавця",
       how_it_works_title: "Як додати виконавця",
       how_it_works_body:
@@ -3139,7 +3138,6 @@ export default {
         last_heartbeat: "Останній heartbeat",
       },
       columns_pod: "Под",
-      revive: "Відновити",
       revoke: "Відкликати",
       delete: "Видалити",
       empty: 'No runners yet. Click "Add runner" to generate your first runner command.',
@@ -3148,10 +3146,7 @@ export default {
         "Рядок виконавця видаляється, а демон примусово переводиться в офлайн. Історичні запуски зберігаються з нульовим посиланням на виконавця.",
       revoke_confirm_title: "Відкликати виконавця?",
       revoke_confirm_body:
-        "Облікові дані виконавця анулюються, а будь-які поточні запуски скасовуються, але рядок залишається у списку. Ви можете відновити його пізніше, щоб створити новий токен реєстрації в тому ж рядку.",
-      revive_modal_title: "Новий токен реєстрації",
-      revive_modal_body:
-        "Виконайте команду нижче на хості, який має підхопити цього виконавця. Скопіюйте її зараз — токен більше не буде показано.",
+        "The runner's credentials are invalidated and any in-flight runs are cancelled, but the row stays in the list. To attach it again, delete it and add a new runner from the target machine.",
       project_placeholder: "Виберіть проєкт",
       copy_failed: "Не вдалося скопіювати в буфер обміну",
     },

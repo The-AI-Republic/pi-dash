@@ -2861,7 +2861,6 @@ export default {
     list: {
       delete_failed: "删除 runner 失败",
       revoke_failed: "撤销 runner 失败",
-      revive_failed: "恢复 runner 失败",
       add_runner: "添加 runner",
       how_it_works_title: "如何添加 runner",
       how_it_works_body:
@@ -2875,7 +2874,6 @@ export default {
         last_heartbeat: "最后心跳",
       },
       columns_pod: "Pod",
-      revive: "恢复",
       revoke: "撤销",
       delete: "删除",
       empty: 'No runners yet. Click "Add runner" to generate your first runner command.',
@@ -2883,9 +2881,7 @@ export default {
       delete_confirm_body: "runner 行将被移除，守护进程强制离线。历史运行记录保留，但 runner 引用置为空。",
       revoke_confirm_title: "撤销 runner？",
       revoke_confirm_body:
-        "runner 的凭据将失效，正在进行的运行将被取消，但该行仍保留在列表中。您可以稍后恢复它，以在同一行上生成新的注册令牌。",
-      revive_modal_title: "新注册令牌",
-      revive_modal_body: "在应接管此 runner 的主机上运行以下命令。请立即复制——令牌将不再显示。",
+        "The runner's credentials are invalidated and any in-flight runs are cancelled, but the row stays in the list. To attach it again, delete it and add a new runner from the target machine.",
       project_placeholder: "选择项目",
       copy_failed: "无法复制到剪贴板",
     },

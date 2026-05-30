@@ -557,13 +557,8 @@ export default {
       revoke: "Revoke",
       revoke_confirm_title: "Revoke runner?",
       revoke_confirm_body:
-        "The runner's credentials are invalidated and any in-flight runs are cancelled, but the row stays in the list. You can revive it later to mint a fresh enrollment token on the same row.",
+        "The runner's credentials are invalidated and any in-flight runs are cancelled, but the row stays in the list. To attach it again, delete it and add a new runner from the target machine.",
       revoke_failed: "Failed to revoke runner",
-      revive: "Revive",
-      revive_failed: "Failed to revive runner",
-      revive_modal_title: "New enrollment token",
-      revive_modal_body:
-        "Run the command below on the host that should pick up this runner. Copy it now — the token will not be shown again.",
       status: {
         online: "online",
         busy: "busy",
@@ -572,37 +567,6 @@ export default {
       },
       columns_pod: "Pod",
       columns_connection: "Connection",
-    },
-    connections: {
-      title: "Connections",
-      help: "A connection pairs one dev machine with this workspace. Each can host multiple runners.",
-      add: "Add connection",
-      adding: "Creating…",
-      name_placeholder: "optional name (defaults to connection_NNN)",
-      empty: "No connections yet. Click Add connection to pair your first dev machine.",
-      create_failed: "Failed to create connection",
-      token_warning: "Copy this once — the enrollment token will not be shown again.",
-      token_run_instructions: "Run this on the machine that will host the runner:",
-      copy_command: "Copy command",
-      next_step_runner: "Then add a runner under this connection:",
-      copy_runner_command: "Copy runner command",
-      dismiss_token: "I've saved this — hide it",
-      status: {
-        pending: "pending enrollment",
-        active: "active",
-      },
-      columns: {
-        name: "Name",
-        host: "Host",
-        status: "Status",
-        runner_count: "Runners",
-        last_seen: "Last seen",
-      },
-      delete: "Delete",
-      delete_confirm_title: "Delete connection?",
-      delete_confirm_body:
-        "The connection and every runner under it will be removed. Historic runs are preserved with a null runner reference.",
-      delete_failed: "Failed to delete connection",
     },
     pods: {
       title: "Pods",

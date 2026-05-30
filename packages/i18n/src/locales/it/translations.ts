@@ -2954,7 +2954,6 @@ export default {
     list: {
       delete_failed: "Impossibile eliminare il runner",
       revoke_failed: "Impossibile revocare il runner",
-      revive_failed: "Impossibile riattivare il runner",
       add_runner: "Aggiungi runner",
       how_it_works_title: "Come aggiungere un runner",
       how_it_works_body:
@@ -2968,7 +2967,6 @@ export default {
         last_heartbeat: "Ultimo heartbeat",
       },
       columns_pod: "Pod",
-      revive: "Riattiva",
       revoke: "Revoca",
       delete: "Elimina",
       empty: 'No runners yet. Click "Add runner" to generate your first runner command.',
@@ -2977,10 +2975,7 @@ export default {
         "La riga del runner viene rimossa e il demone viene forzato offline. Le esecuzioni storiche vengono conservate con un riferimento runner nullo.",
       revoke_confirm_title: "Revocare il runner?",
       revoke_confirm_body:
-        "Le credenziali del runner vengono invalidate e tutte le esecuzioni in corso vengono annullate, ma la riga rimane nell'elenco. Puoi riattivarla in seguito per generare un nuovo token di registrazione sulla stessa riga.",
-      revive_modal_title: "Nuovo token di registrazione",
-      revive_modal_body:
-        "Esegui il comando seguente sull'host che dovrebbe riprendere questo runner. Copialo ora: il token non verrà più mostrato.",
+        "The runner's credentials are invalidated and any in-flight runs are cancelled, but the row stays in the list. To attach it again, delete it and add a new runner from the target machine.",
       project_placeholder: "Seleziona un progetto",
       copy_failed: "Impossibile copiare negli appunti",
     },

@@ -2969,7 +2969,6 @@ export default {
     list: {
       delete_failed: "Échec de la suppression du runner",
       revoke_failed: "Échec de la révocation du runner",
-      revive_failed: "Échec de la réactivation du runner",
       add_runner: "Ajouter un runner",
       how_it_works_title: "Comment ajouter un runner",
       how_it_works_body:
@@ -2983,7 +2982,6 @@ export default {
         last_heartbeat: "Dernier heartbeat",
       },
       columns_pod: "Pod",
-      revive: "Réactiver",
       revoke: "Révoquer",
       delete: "Supprimer",
       empty: 'No runners yet. Click "Add runner" to generate your first runner command.',
@@ -2992,10 +2990,7 @@ export default {
         "La ligne du runner est supprimée et le démon est mis hors ligne. Les exécutions historiques sont conservées avec une référence de runner nulle.",
       revoke_confirm_title: "Révoquer le runner ?",
       revoke_confirm_body:
-        "Les identifiants du runner sont invalidés et toute exécution en cours est annulée, mais la ligne reste dans la liste. Vous pouvez la réactiver plus tard pour générer un nouveau jeton d'inscription sur la même ligne.",
-      revive_modal_title: "Nouveau jeton d'inscription",
-      revive_modal_body:
-        "Exécutez la commande ci-dessous sur l'hôte qui doit prendre en charge ce runner. Copiez-la maintenant — le jeton ne sera plus affiché.",
+        "The runner's credentials are invalidated and any in-flight runs are cancelled, but the row stays in the list. To attach it again, delete it and add a new runner from the target machine.",
       project_placeholder: "Sélectionnez un projet",
       copy_failed: "Impossible de copier dans le presse-papiers",
     },

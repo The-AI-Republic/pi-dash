@@ -2955,7 +2955,6 @@ export default {
     list: {
       delete_failed: "Eroare la ștergerea runner-ului",
       revoke_failed: "Eroare la revocarea runner-ului",
-      revive_failed: "Eroare la reactivarea runner-ului",
       add_runner: "Adaugă runner",
       how_it_works_title: "Cum să adaugi un runner",
       how_it_works_body:
@@ -2969,7 +2968,6 @@ export default {
         last_heartbeat: "Ultimul heartbeat",
       },
       columns_pod: "Pod",
-      revive: "Reactivează",
       revoke: "Revocă",
       delete: "Șterge",
       empty: 'No runners yet. Click "Add runner" to generate your first runner command.',
@@ -2978,10 +2976,7 @@ export default {
         "Rândul runner-ului este eliminat, iar daemon-ul este forțat să intre offline. Rulările istorice sunt păstrate cu o referință null la runner.",
       revoke_confirm_title: "Revocați runner-ul?",
       revoke_confirm_body:
-        "Credențialele runner-ului sunt invalidate, iar orice rulări în curs sunt anulate, dar rândul rămâne în listă. Îl puteți reactiva mai târziu pentru a genera un token de înscriere nou pe același rând.",
-      revive_modal_title: "Token de înscriere nou",
-      revive_modal_body:
-        "Rulați comanda de mai jos pe gazda care ar trebui să preia acest runner. Copiați-o acum — tokenul nu va mai fi afișat.",
+        "The runner's credentials are invalidated and any in-flight runs are cancelled, but the row stays in the list. To attach it again, delete it and add a new runner from the target machine.",
       project_placeholder: "Selectați un proiect",
       copy_failed: "Nu s-a putut copia în clipboard",
     },
