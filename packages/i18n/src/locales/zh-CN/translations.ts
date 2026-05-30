@@ -2908,6 +2908,8 @@ export default {
       },
       errors: {
         project_required: "请选择一个项目。",
+        name_invalid:
+          "Runner name must start with a letter, digit, or underscore and contain only letters, digits, underscore, dot, or dash.",
         load_projects_failed: "无法加载项目。",
         load_pods_failed: "无法加载 Pods。",
       },
@@ -2920,7 +2922,8 @@ export default {
       pod_help: "默认为项目的默认 Pod。",
       name_label: "名称（可选）",
       name_placeholder: "my-laptop-runner",
-      name_help: "如果留空则自动分配，例如 ``runner_001``。",
+      name_help:
+        "Auto-assigned if blank. If provided, use letters, digits, underscore, dot, or dash; start with a letter, digit, or underscore.",
       working_dir_label: "工作目录（可选）",
       working_dir_placeholder: "本地开发机项目工作目录",
       working_dir_help:

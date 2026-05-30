@@ -610,7 +610,8 @@ export default {
       pod_help: "Defaults to the project's default pod.",
       pod_default_option: "(default pod)",
       name_label: "Name (optional)",
-      name_help: "Auto-assigned if blank, e.g. ``runner_001``.",
+      name_help:
+        "Auto-assigned if blank. If provided, use letters, digits, underscore, dot, or dash; start with a letter, digit, or underscore.",
       name_placeholder: "my-laptop-runner",
       working_dir_label: "Working directory (optional)",
       working_dir_help:
@@ -639,6 +640,8 @@ export default {
       runner_id_label: "Runner id",
       errors: {
         project_required: "Pick a project.",
+        name_invalid:
+          "Runner name must start with a letter, digit, or underscore and contain only letters, digits, underscore, dot, or dash.",
         load_projects_failed: "Could not load projects.",
         load_pods_failed: "Could not load pods.",
       },

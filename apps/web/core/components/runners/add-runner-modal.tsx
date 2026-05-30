@@ -32,6 +32,7 @@ type Props = {
 const AGENT_OPTIONS = ["claude-code", "codex"] as const;
 type TAgent = (typeof AGENT_OPTIONS)[number];
 const DEFAULT_AGENT: TAgent = "claude-code";
+const RUNNER_NAME_RE = /^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$/;
 
 interface FormValues {
   projectIdentifier: string;
@@ -144,7 +145,7 @@ export const AddRunnerModal = observer(function AddRunnerModal(props: Props) {
     setRunnerCommand({
       projectIdentifier: values.projectIdentifier,
       podName: values.podName,
-      name: values.name,
+      name: values.name.trim(),
       workingDir: values.workingDir,
       agent: values.agent,
     });
@@ -244,11 +245,19 @@ export const AddRunnerModal = observer(function AddRunnerModal(props: Props) {
             <Controller
               control={control}
               name="name"
+              rules={{
+                validate: (value) => {
+                  const trimmed = value.trim();
+                  if (!trimmed) return true;
+                  return RUNNER_NAME_RE.test(trimmed) || t("runners.add_modal.errors.name_invalid");
+                },
+              }}
               render={({ field }) => (
                 <Input {...field} id="add-runner-name" placeholder={t("runners.add_modal.name_placeholder")} />
               )}
             />
             <p className="text-12 text-secondary">{t("runners.add_modal.name_help")}</p>
+            {errors.name && <span className="text-red-500 text-12">{errors.name.message}</span>}
           </div>
 
           <div className="flex flex-col gap-1">

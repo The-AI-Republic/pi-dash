@@ -19,6 +19,7 @@ use crate::config::file;
 use crate::config::schema::{AgentKind, MAX_RUNNERS_PER_DAEMON, RunnerConfig};
 use crate::util::confirm::maybe_confirm;
 use crate::util::paths::Paths;
+use crate::util::runner_name;
 
 #[derive(Debug, ClapArgs)]
 pub struct RunnerArgs {
@@ -103,6 +104,19 @@ pub async fn run(args: RunnerArgs, paths: &Paths) -> Result<()> {
 /// the cloud to mint a runner under the caller's identity. Replaces
 /// the legacy connection-secret-bearer flow.
 pub async fn add(args: AddArgs, paths: &Paths) -> Result<RunnerConfig> {
+    let runner_name = args
+        .name
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    if let Some(name) = runner_name {
+        runner_name::validate(name).with_context(|| {
+            format!(
+                "invalid --name {name:?}; use an identifier like `test-runner`, or omit --name to let Pi Dash assign one"
+            )
+        })?;
+    }
+
     // Cap check is local + cheap; do it before auth or any network call.
     let existing_count = if paths.config_path().exists() {
         file::load_config(paths)?.runners.len()
@@ -152,7 +166,7 @@ pub async fn add(args: AddArgs, paths: &Paths) -> Result<RunnerConfig> {
         workspace_arg.as_deref(),
         &args.project,
         &host_label,
-        args.name.as_deref(),
+        runner_name,
         args.pod.as_deref(),
     )
     .await

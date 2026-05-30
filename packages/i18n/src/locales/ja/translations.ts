@@ -2979,6 +2979,8 @@ export default {
       },
       errors: {
         project_required: "プロジェクトを選択してください。",
+        name_invalid:
+          "Runner name must start with a letter, digit, or underscore and contain only letters, digits, underscore, dot, or dash.",
         load_projects_failed: "プロジェクトを読み込めませんでした。",
         load_pods_failed: "ポッドを読み込めませんでした。",
       },
@@ -2991,7 +2993,8 @@ export default {
       pod_help: "デフォルトではプロジェクトのデフォルトポッドになります。",
       name_label: "名前（オプション）",
       name_placeholder: "my-laptop-runner",
-      name_help: "空白の場合は自動割り当て（例：``runner_001``）。",
+      name_help:
+        "Auto-assigned if blank. If provided, use letters, digits, underscore, dot, or dash; start with a letter, digit, or underscore.",
       working_dir_label: "作業ディレクトリ（オプション）",
       working_dir_placeholder: "ローカル開発マシンのプロジェクト作業ディレクトリ",
       working_dir_help:

@@ -426,7 +426,10 @@ class RunnerCreateEndpoint(APIView):
             return Response(
                 {
                     "error": "invalid_runner_name",
-                    "error_description": "name must start with [A-Za-z0-9_] and contain only A-Z, a-z, 0-9, _, ., -",
+                    "error_description": (
+                        "name must start with a letter, digit, or underscore "
+                        "and contain only letters, digits, underscore, dot, or dash"
+                    ),
                 },
                 status=status.HTTP_400_BAD_REQUEST,
             )

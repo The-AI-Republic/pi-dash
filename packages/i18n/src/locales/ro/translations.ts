@@ -3003,6 +3003,8 @@ export default {
       },
       errors: {
         project_required: "Selectați un proiect.",
+        name_invalid:
+          "Runner name must start with a letter, digit, or underscore and contain only letters, digits, underscore, dot, or dash.",
         load_projects_failed: "Nu s-au putut încărca proiectele.",
         load_pods_failed: "Nu s-au putut încărca podurile.",
       },
@@ -3015,7 +3017,8 @@ export default {
       pod_help: "Implicit, podul implicit al proiectului.",
       name_label: "Nume (opțional)",
       name_placeholder: "my-laptop-runner",
-      name_help: "Atribuit automat dacă este gol, de ex. ``runner_001``.",
+      name_help:
+        "Auto-assigned if blank. If provided, use letters, digits, underscore, dot, or dash; start with a letter, digit, or underscore.",
       working_dir_label: "Director de lucru (opțional)",
       working_dir_placeholder: "director de lucru al proiectului pe mașina locală de dezvoltare",
       working_dir_help:

@@ -208,6 +208,44 @@ async fn runner_add_checks_local_cap_before_auth_bootstrap() {
 }
 
 #[tokio::test]
+async fn runner_add_rejects_invalid_name_before_auth_bootstrap() {
+    let tmp = tempdir().unwrap();
+    let paths = paths(tmp.path());
+    write_config_with_runner_count(&paths, "http://127.0.0.1:9", 0);
+
+    let err = pidash::cli::runner::add(
+        AddArgs {
+            url: None,
+            name: Some("test runner".to_string()),
+            project: "TEST".to_string(),
+            workspace: None,
+            pod: None,
+            working_dir: None,
+            agent: AgentKind::Codex,
+        },
+        &paths,
+    )
+    .await
+    .expect_err("invalid runner name should fail before auth");
+
+    let msg = format!("{err:#}");
+    assert!(
+        msg.contains("invalid --name \"test runner\""),
+        "unexpected name error: {msg}",
+    );
+    assert!(
+        msg.contains("runner name must start"),
+        "unexpected validation error: {msg}",
+    );
+
+    let config = std::fs::read_to_string(paths.config_path()).unwrap();
+    assert!(
+        !config.contains("token = "),
+        "name validation failure should not run auth bootstrap"
+    );
+}
+
+#[tokio::test]
 async fn runner_add_bootstraps_auth_when_cli_token_is_missing() {
     let fake = start_fake().await;
     let tmp = tempdir().unwrap();

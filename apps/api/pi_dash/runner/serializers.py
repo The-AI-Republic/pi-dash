@@ -19,11 +19,13 @@ from pi_dash.runner.models import (
 )
 
 
-# Mirrors the runner-side charset rule in `runner/src/util/runner_name.rs`.
+# Mirrors the runner-side charset rule in `runner/src/util/runner_name.rs`
+# and the CLI-created runner endpoint's `_RUNNER_NAME_RE`.
 RUNNER_NAME_CHARSET = RegexValidator(
-    regex=r"^[A-Za-z0-9_-]+$",
+    regex=r"^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$",
     message=(
-        "runner_name may only contain letters, digits, underscore, and dash"
+        "runner_name must start with a letter, digit, or underscore "
+        "and contain only letters, digits, underscore, dot, or dash"
     ),
 )
 

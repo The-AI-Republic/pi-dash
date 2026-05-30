@@ -2969,6 +2969,8 @@ export default {
       },
       errors: {
         project_required: "Bir proje seçin.",
+        name_invalid:
+          "Runner name must start with a letter, digit, or underscore and contain only letters, digits, underscore, dot, or dash.",
         load_projects_failed: "Projeler yüklenemedi.",
         load_pods_failed: "Pod'lar yüklenemedi.",
       },
@@ -2981,7 +2983,8 @@ export default {
       pod_help: "Varsayılan olarak projenin varsayılan pod'u kullanılır.",
       name_label: "Ad (isteğe bağlı)",
       name_placeholder: "my-laptop-runner",
-      name_help: "Boş bırakılırsa otomatik atanır, örn. ``runner_001``.",
+      name_help:
+        "Auto-assigned if blank. If provided, use letters, digits, underscore, dot, or dash; start with a letter, digit, or underscore.",
       working_dir_label: "Çalışma dizini (isteğe bağlı)",
       working_dir_placeholder: "yerel geliştirme makinesi proje çalışma dizini",
       working_dir_help:

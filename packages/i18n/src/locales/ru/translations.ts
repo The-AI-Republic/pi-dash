@@ -3181,6 +3181,8 @@ export default {
       },
       errors: {
         project_required: "Выберите проект.",
+        name_invalid:
+          "Runner name must start with a letter, digit, or underscore and contain only letters, digits, underscore, dot, or dash.",
         load_projects_failed: "Не удалось загрузить проекты.",
         load_pods_failed: "Не удалось загрузить группы.",
       },
@@ -3193,7 +3195,8 @@ export default {
       pod_help: "По умолчанию используется группа проекта по умолчанию.",
       name_label: "Имя (необязательно)",
       name_placeholder: "my-laptop-runner",
-      name_help: "Назначается автоматически, если оставить пустым, например ``runner_001``.",
+      name_help:
+        "Auto-assigned if blank. If provided, use letters, digits, underscore, dot, or dash; start with a letter, digit, or underscore.",
       working_dir_label: "Рабочий каталог (необязательно)",
       working_dir_placeholder: "рабочий каталог проекта на локальной машине разработчика",
       working_dir_help:

@@ -2991,6 +2991,8 @@ export default {
       },
       errors: {
         project_required: "Chọn một dự án.",
+        name_invalid:
+          "Runner name must start with a letter, digit, or underscore and contain only letters, digits, underscore, dot, or dash.",
         load_projects_failed: "Không thể tải danh sách dự án.",
         load_pods_failed: "Không thể tải pods.",
       },
@@ -3003,7 +3005,8 @@ export default {
       pod_help: "Mặc định là pod mặc định của dự án.",
       name_label: "Tên (tùy chọn)",
       name_placeholder: "my-laptop-runner",
-      name_help: "Tự động gán nếu để trống, ví dụ: ``runner_001``.",
+      name_help:
+        "Auto-assigned if blank. If provided, use letters, digits, underscore, dot, or dash; start with a letter, digit, or underscore.",
       working_dir_label: "Thư mục làm việc (tùy chọn)",
       working_dir_placeholder: "thư mục làm việc dự án trên máy dev cục bộ",
       working_dir_help:

@@ -3173,6 +3173,8 @@ export default {
       },
       errors: {
         project_required: "Виберіть проєкт.",
+        name_invalid:
+          "Runner name must start with a letter, digit, or underscore and contain only letters, digits, underscore, dot, or dash.",
         load_projects_failed: "Не вдалося завантажити проєкти.",
         load_pods_failed: "Не вдалося завантажити поди.",
       },
@@ -3185,7 +3187,8 @@ export default {
       pod_help: "За замовчуванням використовується под проєкту за замовчуванням.",
       name_label: "Назва (необов'язково)",
       name_placeholder: "my-laptop-runner",
-      name_help: "Автоматично призначається, якщо поле порожнє, напр. ``runner_001``.",
+      name_help:
+        "Auto-assigned if blank. If provided, use letters, digits, underscore, dot, or dash; start with a letter, digit, or underscore.",
       working_dir_label: "Робочий каталог (необов'язково)",
       working_dir_placeholder: "робочий каталог проекту на локальній машині розробника",
       working_dir_help:

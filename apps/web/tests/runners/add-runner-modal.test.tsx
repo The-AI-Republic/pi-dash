@@ -178,6 +178,22 @@ describe("AddRunnerModal", () => {
     expect(screen.getByPlaceholderText("runners.add_modal.name_placeholder")).toHaveValue(runnerName);
   });
 
+  it("blocks invalid runner names before generating a command", async () => {
+    const user = userEvent.setup();
+    renderModal();
+
+    await screen.findByRole("option", { name: "BrowserX" });
+
+    await user.selectOptions(screen.getAllByTestId("select")[0], "BROWSERX");
+    await user.type(screen.getByPlaceholderText("runners.add_modal.name_placeholder"), "test runner");
+    await user.click(screen.getByRole("button", { name: "runners.add_modal.submit" }));
+
+    expect(await screen.findByText("runners.add_modal.errors.name_invalid")).toBeInTheDocument();
+    expect(
+      screen.queryByText((_content: string, node: Element | null) => node?.tagName.toLowerCase() === "pre")
+    ).not.toBeInTheDocument();
+  });
+
   it("renders PowerShell-safe quoting for Windows users", async () => {
     const user = userEvent.setup();
     renderModal();
@@ -186,7 +202,7 @@ describe("AddRunnerModal", () => {
 
     const selects = screen.getAllByTestId("select");
     await user.selectOptions(selects[0], "BROWSERX");
-    await user.type(screen.getByPlaceholderText("runners.add_modal.name_placeholder"), "rich's runner");
+    await user.type(screen.getByPlaceholderText("runners.add_modal.name_placeholder"), "rich.runner");
     await user.type(
       screen.getByPlaceholderText("runners.add_modal.working_dir_placeholder"),
       String.raw`C:\\Users\\rich\\My Project`
@@ -197,7 +213,7 @@ describe("AddRunnerModal", () => {
     const command = await screen.findByText(
       (_content: string, node: Element | null) => node?.tagName.toLowerCase() === "pre"
     );
-    expect(command.textContent).toContain("--name 'rich''s runner'");
+    expect(command.textContent).toContain("--name rich.runner");
     expect(command.textContent).toContain(String.raw`--working-dir 'C:\\Users\\rich\\My Project'`);
     expect(command.textContent).not.toContain("'\\''");
   });

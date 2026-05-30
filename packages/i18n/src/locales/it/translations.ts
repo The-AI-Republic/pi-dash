@@ -3002,6 +3002,8 @@ export default {
       },
       errors: {
         project_required: "Seleziona un progetto.",
+        name_invalid:
+          "Runner name must start with a letter, digit, or underscore and contain only letters, digits, underscore, dot, or dash.",
         load_projects_failed: "Impossibile caricare i progetti.",
         load_pods_failed: "Impossibile caricare i pod.",
       },
@@ -3014,7 +3016,8 @@ export default {
       pod_help: "Per impostazione predefinita, utilizza il pod predefinito del progetto.",
       name_label: "Nome (opzionale)",
       name_placeholder: "my-laptop-runner",
-      name_help: "Assegnato automaticamente se vuoto, ad es. ``runner_001``.",
+      name_help:
+        "Auto-assigned if blank. If provided, use letters, digits, underscore, dot, or dash; start with a letter, digit, or underscore.",
       working_dir_label: "Directory di lavoro (opzionale)",
       working_dir_placeholder: "directory di lavoro del progetto sulla macchina di sviluppo locale",
       working_dir_help:
