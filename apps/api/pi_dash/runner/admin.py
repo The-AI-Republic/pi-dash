@@ -86,6 +86,7 @@ class MachineTokenAdmin(admin.ModelAdmin):
     list_display = (
         "id",
         "user",
+        "dev_machine",
         "workspace",
         "host_label",
         "is_service",
@@ -94,7 +95,7 @@ class MachineTokenAdmin(admin.ModelAdmin):
         "revoked_at",
     )
     list_filter = ("is_service",)
-    search_fields = ("user__email", "host_label")
+    search_fields = ("user__email", "host_label", "dev_machine__host_label")
     readonly_fields = ("token_hash", "token_fingerprint", "created_at")
 
 

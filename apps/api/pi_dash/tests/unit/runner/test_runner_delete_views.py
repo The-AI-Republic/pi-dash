@@ -25,7 +25,7 @@ import pytest
 from django.urls import reverse
 from django.utils import timezone
 
-from pi_dash.runner.models import Pod, Runner, RunnerStatus
+from pi_dash.runner.models import DevMachine, MachineToken, Pod, Runner, RunnerStatus
 from pi_dash.runner.services.runner_delete import parse_purge_local
 
 
@@ -34,13 +34,14 @@ def pod(project):
     return Pod.default_for_project(project)
 
 
-def _make_runner(user, workspace, pod, name="r1"):
+def _make_runner(user, workspace, pod, name="r1", dev_machine=None, status=RunnerStatus.ONLINE):
     return Runner.objects.create(
         owner=user,
         workspace=workspace,
         pod=pod,
         name=name,
-        status=RunnerStatus.ONLINE,
+        dev_machine=dev_machine,
+        status=status,
         last_heartbeat_at=timezone.now(),
     )
 
@@ -132,6 +133,43 @@ def test_runner_list_hides_other_users_private_runners(db, session_client, creat
     assert str(theirs.id) not in ids
     detail = session_client.get(reverse("runner-detail", kwargs={"runner_id": theirs.id}))
     assert detail.status_code == 404
+
+
+@pytest.mark.unit
+def test_dev_machine_list_shows_current_users_workspace_machines(db, session_client, create_user, workspace, pod):
+    from uuid import uuid4
+
+    from pi_dash.db.models import User, WorkspaceMember
+
+    mine = DevMachine.objects.create(owner=create_user, host_label="thinkcentre.local", label="ThinkCentre")
+    token_only = DevMachine.objects.create(owner=create_user, host_label="laptop.local", label="Laptop")
+    _make_runner(create_user, workspace, pod, "mine-online", dev_machine=mine, status=RunnerStatus.ONLINE)
+    _make_runner(create_user, workspace, pod, "mine-offline", dev_machine=mine, status=RunnerStatus.OFFLINE)
+    MachineToken.objects.create(
+        user=create_user,
+        workspace=workspace,
+        dev_machine=token_only,
+        host_label="laptop.local",
+        token_hash="hashed-token",
+    )
+
+    other = User.objects.create(
+        email=f"machine-owner-{uuid4().hex[:8]}@example.com",
+        username=f"machine_owner_{uuid4().hex[:8]}",
+    )
+    WorkspaceMember.objects.create(workspace=workspace, member=other, role=15)
+    theirs = DevMachine.objects.create(owner=other, host_label="theirs.local", label="Theirs")
+    _make_runner(other, workspace, pod, "theirs", dev_machine=theirs)
+
+    resp = session_client.get(reverse("dev-machine-list"), {"workspace": str(workspace.id)})
+
+    assert resp.status_code == 200
+    rows = {row["id"]: row for row in resp.data}
+    assert str(mine.id) in rows
+    assert str(token_only.id) in rows
+    assert str(theirs.id) not in rows
+    assert rows[str(mine.id)]["runner_count"] == 2
+    assert rows[str(mine.id)]["online_runner_count"] == 1
 
 
 @pytest.mark.unit

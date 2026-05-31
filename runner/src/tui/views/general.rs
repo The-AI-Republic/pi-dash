@@ -906,6 +906,7 @@ pub async fn submit_register(
         version: 2,
         daemon: crate::config::schema::DaemonConfig {
             cloud_url: cloud_url.clone(),
+            dev_machine_id: None,
             log_level: "info".to_string(),
             log_retention_days: 14,
             agent_observability_v1: false,

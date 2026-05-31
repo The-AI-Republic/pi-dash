@@ -11,6 +11,7 @@ import type {
   IAgentChatMessage,
   IAgentChatSession,
   IApprovalRequest,
+  IDevMachine,
   IRunner,
   TApprovalDecision,
 } from "@pi-dash/types";
@@ -28,6 +29,14 @@ export class RunnerService extends APIService {
   async list(workspaceId?: string): Promise<IRunner[]> {
     const params = workspaceId ? { params: { workspace: workspaceId } } : {};
     return this.get("/api/runners/", params)
+      .then((r) => r?.data)
+      .catch((e) => {
+        throw e?.response?.data;
+      });
+  }
+
+  async listDevMachines(workspaceId: string): Promise<IDevMachine[]> {
+    return this.get("/api/runners/dev-machines/", { params: { workspace: workspaceId } })
       .then((r) => r?.data)
       .catch((e) => {
         throw e?.response?.data;

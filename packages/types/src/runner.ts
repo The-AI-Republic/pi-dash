@@ -52,6 +52,20 @@ export interface IRunnerLiveState {
   updated_at: string;
 }
 
+export interface IDevMachine {
+  id: string;
+  host_label: string;
+  label: string;
+  visibility: number;
+  runner_count: number;
+  online_runner_count: number;
+  last_seen_at: string | null;
+  last_heartbeat_at: string | null;
+  revoked_at: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
 export interface IRunner {
   id: string;
   name: string;

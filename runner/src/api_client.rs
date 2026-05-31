@@ -307,6 +307,7 @@ mod resolve_tests {
             version: 2,
             daemon: DaemonConfig {
                 cloud_url: "https://cloud.example/".into(),
+                dev_machine_id: None,
                 log_level: "info".into(),
                 log_retention_days: 14,
                 agent_observability_v1: false,

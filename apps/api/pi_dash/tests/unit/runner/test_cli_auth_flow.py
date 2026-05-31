@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import re
 from datetime import timedelta
+from uuid import uuid4
 
 import pytest
 from django.utils import timezone
@@ -139,11 +140,13 @@ def test_revoke_marks_token_inactive_idempotently(db, api_key_client, api_token)
 
 @pytest.mark.unit
 def test_runner_create_succeeds_with_api_key(db, api_key_client, create_user, workspace, project):
+    dev_machine_id = uuid4()
     resp = api_key_client.post(
         "/api/v1/runner/runners/",
         {
             "workspace_slug": workspace.slug,
             "project": project.identifier,
+            "dev_machine_id": str(dev_machine_id),
             "host_label": "test-host",
         },
         format="json",
@@ -159,10 +162,42 @@ def test_runner_create_succeeds_with_api_key(db, api_key_client, create_user, wo
     runner = Runner.objects.get(id=body["runner_id"])
     assert runner.visibility == Visibility.PRIVATE
     assert runner.dev_machine is not None
+    assert runner.dev_machine_id == dev_machine_id
     assert runner.dev_machine.owner_id == create_user.id
     assert runner.dev_machine.host_label == "test-host"
     assert runner.dev_machine.visibility == Visibility.PRIVATE
-    assert DevMachine.objects.filter(owner=create_user, host_label="test-host").count() == 1
+    assert DevMachine.objects.filter(owner=create_user, id=dev_machine_id).count() == 1
+
+
+@pytest.mark.unit
+def test_runner_create_uses_stable_dev_machine_id_not_host_label(
+    db, api_key_client, create_user, workspace, project
+):
+    first_machine_id = uuid4()
+    second_machine_id = uuid4()
+    for dev_machine_id, name in [
+        (first_machine_id, "runner_a"),
+        (second_machine_id, "runner_b"),
+    ]:
+        resp = api_key_client.post(
+            "/api/v1/runner/runners/",
+            {
+                "workspace_slug": workspace.slug,
+                "project": project.identifier,
+                "dev_machine_id": str(dev_machine_id),
+                "host_label": "same-hostname",
+                "name": name,
+            },
+            format="json",
+        )
+        assert resp.status_code == 201, resp.data
+
+    assert DevMachine.objects.filter(owner=create_user, host_label="same-hostname").count() == 2
+    assert set(
+        Runner.objects.filter(name__in=["runner_a", "runner_b"]).values_list(
+            "dev_machine_id", flat=True
+        )
+    ) == {first_machine_id, second_machine_id}
 
 
 @pytest.mark.unit

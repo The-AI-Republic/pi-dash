@@ -243,6 +243,8 @@ class DevMachine(models.Model):
         on_delete=models.CASCADE,
         related_name="dev_machines",
     )
+    # Stable identity is the UUID primary key. host_label is a mutable display
+    # hint reported by the local CLI, and is not unique.
     host_label = models.CharField(max_length=255, blank=True, default="")
     label = models.CharField(max_length=128, blank=True, default="")
     visibility = models.PositiveSmallIntegerField(
@@ -258,18 +260,12 @@ class DevMachine(models.Model):
     class Meta:
         db_table = "dev_machine"
         ordering = ("-last_seen_at", "-created_at")
-        constraints = [
-            models.UniqueConstraint(
-                fields=["owner", "host_label"],
-                condition=models.Q(revoked_at__isnull=True),
-                name="dev_machine_one_active_per_owner_host",
-            ),
-        ]
         indexes = [
             models.Index(
                 fields=["owner", "visibility"],
                 name="dev_machine_owner_vis_idx",
             ),
+            models.Index(fields=["owner", "host_label"], name="dev_machine_owner_host_idx"),
             models.Index(fields=["host_label"], name="dev_machine_host_idx"),
         ]
 
@@ -616,7 +612,7 @@ class MachineToken(models.Model):
 
     See ``.ai_design/move_to_https/design.md`` §5.6. Independent of
     runner transport: a machine has at most one active MachineToken
-    per ``(user, workspace, host_label)`` regardless of how many
+    per workspace/dev-machine regardless of how many
     runners it hosts.
     """
 
@@ -624,6 +620,13 @@ class MachineToken(models.Model):
     user = models.ForeignKey(
         settings.AUTH_USER_MODEL,
         on_delete=models.CASCADE,
+        related_name="machine_tokens",
+    )
+    dev_machine = models.ForeignKey(
+        DevMachine,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
         related_name="machine_tokens",
     )
     workspace = models.ForeignKey(
@@ -646,12 +649,18 @@ class MachineToken(models.Model):
         constraints = [
             models.UniqueConstraint(
                 fields=["user", "workspace", "host_label"],
-                condition=models.Q(revoked_at__isnull=True),
+                condition=models.Q(revoked_at__isnull=True, dev_machine__isnull=True),
                 name="machine_token_one_active_per_user_ws_host",
+            ),
+            models.UniqueConstraint(
+                fields=["workspace", "dev_machine"],
+                condition=models.Q(revoked_at__isnull=True, dev_machine__isnull=False),
+                name="machine_token_one_active_per_ws_dev_machine",
             ),
         ]
         indexes = [
             models.Index(fields=["user", "workspace", "revoked_at"]),
+            models.Index(fields=["dev_machine", "revoked_at"], name="machine_token_dev_rev_idx"),
         ]
 
     def revoke(self) -> None:

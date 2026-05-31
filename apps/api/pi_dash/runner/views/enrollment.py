@@ -48,24 +48,64 @@ from pi_dash.runner.services.pubsub import close_runner_session, send_to_runner
 logger = logging.getLogger(__name__)
 
 
-def _get_or_create_dev_machine(*, user, host_label: str) -> Optional[DevMachine]:
+class DevMachineOwnershipError(Exception):
+    pass
+
+
+def _touch_dev_machine(machine: DevMachine, *, host_label: str) -> DevMachine:
     host_label = (host_label or "").strip()[:255]
+    now = timezone.now()
+    update_fields = ["last_seen_at", "updated_at"]
+    machine.last_seen_at = now
+    if host_label and machine.host_label != host_label:
+        machine.host_label = host_label
+        update_fields.append("host_label")
+    if host_label and not machine.label:
+        machine.label = host_label[:128]
+        update_fields.append("label")
+    machine.save(update_fields=update_fields)
+    return machine
+
+
+def _get_or_create_dev_machine(
+    *,
+    user,
+    dev_machine_id: Optional[_uuid.UUID],
+    host_label: str,
+) -> Optional[DevMachine]:
+    host_label = (host_label or "").strip()[:255]
+    now = timezone.now()
+    if dev_machine_id is not None:
+        locked = DevMachine.objects.select_for_update().filter(pk=dev_machine_id).first()
+        if locked is not None:
+            if locked.owner_id != user.id:
+                raise DevMachineOwnershipError
+            return _touch_dev_machine(locked, host_label=host_label)
+        try:
+            with transaction.atomic():
+                return DevMachine.objects.create(
+                    id=dev_machine_id,
+                    owner=user,
+                    host_label=host_label,
+                    label=host_label[:128],
+                    last_seen_at=now,
+                )
+        except IntegrityError:
+            locked = DevMachine.objects.select_for_update().filter(pk=dev_machine_id).first()
+            if locked is None or locked.owner_id != user.id:
+                raise DevMachineOwnershipError
+            return _touch_dev_machine(locked, host_label=host_label)
+
     if not host_label:
         return None
-    now = timezone.now()
     locked = (
         DevMachine.objects.select_for_update()
         .filter(owner=user, host_label=host_label, revoked_at__isnull=True)
+        .order_by("created_at")
         .first()
     )
     if locked is not None:
-        locked.last_seen_at = now
-        if not locked.label:
-            locked.label = host_label[:128]
-            locked.save(update_fields=["last_seen_at", "label", "updated_at"])
-        else:
-            locked.save(update_fields=["last_seen_at", "updated_at"])
-        return locked
+        return _touch_dev_machine(locked, host_label=host_label)
     try:
         with transaction.atomic():
             return DevMachine.objects.create(
@@ -75,30 +115,40 @@ def _get_or_create_dev_machine(*, user, host_label: str) -> Optional[DevMachine]
                 last_seen_at=now,
             )
     except IntegrityError:
+        # Legacy callers without a stable id can still race on old database
+        # states that have the prior owner/host constraint. Reuse the winner.
         return (
             DevMachine.objects.select_for_update()
             .filter(owner=user, host_label=host_label, revoked_at__isnull=True)
+            .order_by("created_at")
             .first()
         )
 
 
-def _maybe_mint_machine_token(*, user, workspace, host_label: str) -> Optional[tokens.MintedToken]:
+def _maybe_mint_machine_token(
+    *,
+    user,
+    workspace,
+    dev_machine: Optional[DevMachine],
+    host_label: str,
+) -> Optional[tokens.MintedToken]:
     """Bootstrap a MachineToken if the user has none for this host.
 
     ``design.md`` §5.1: bootstrap runs inside the enrollment transaction
     so two concurrent enrollments cannot both mint a token. The unique
     constraint backs us up; the lock prevents the steady-state race.
     """
-    locked = (
-        MachineToken.objects.select_for_update()
-        .filter(
-            user=user,
-            workspace=workspace,
-            host_label=host_label,
-            revoked_at__isnull=True,
-        )
-        .first()
-    )
+    filters = {
+        "user": user,
+        "workspace": workspace,
+        "revoked_at__isnull": True,
+    }
+    if dev_machine is not None:
+        filters["dev_machine"] = dev_machine
+    else:
+        filters["host_label"] = host_label
+        filters["dev_machine__isnull"] = True
+    locked = MachineToken.objects.select_for_update().filter(**filters).first()
     if locked is not None:
         return None
     minted = tokens.mint_machine_token()
@@ -106,6 +156,7 @@ def _maybe_mint_machine_token(*, user, workspace, host_label: str) -> Optional[t
         with transaction.atomic():
             MachineToken.objects.create(
                 user=user,
+                dev_machine=dev_machine,
                 workspace=workspace,
                 host_label=host_label,
                 token_hash=minted.hashed,
@@ -144,7 +195,7 @@ class RunnerEnrollEndpoint(APIView):
 
     Exchanges a one-time enrollment token for the runner's long-lived
     refresh token and a short-lived access token. Bootstraps a
-    ``MachineToken`` for ``(user, workspace, host_label)`` if none
+    ``MachineToken`` for the workspace/dev-machine if none
     exists; otherwise the response omits ``machine_token``.
     """
 
@@ -161,6 +212,7 @@ class RunnerEnrollEndpoint(APIView):
         data = serializer.validated_data
 
         token_hash = tokens.hash_token(data["enrollment_token"])
+        dev_machine_id = data.get("dev_machine_id")
         host_label = (data.get("host_label") or "")[:255]
         body_name = (data.get("name") or "").strip()[:128]
 
@@ -194,10 +246,17 @@ class RunnerEnrollEndpoint(APIView):
                 workspace_id=str(runner.workspace_id),
                 rtg=1,
             )
-            dev_machine = _get_or_create_dev_machine(
-                user=runner.owner,
-                host_label=host_label,
-            )
+            try:
+                dev_machine = _get_or_create_dev_machine(
+                    user=runner.owner,
+                    dev_machine_id=dev_machine_id,
+                    host_label=host_label,
+                )
+            except DevMachineOwnershipError:
+                return Response(
+                    {"error": "dev_machine_not_found"},
+                    status=status.HTTP_404_NOT_FOUND,
+                )
             update_fields = [
                 "dev_machine",
                 "host_label",
@@ -229,6 +288,7 @@ class RunnerEnrollEndpoint(APIView):
                 machine_minted = _maybe_mint_machine_token(
                     user=runner.owner,
                     workspace=runner.workspace,
+                    dev_machine=dev_machine,
                     host_label=host_label,
                 )
 
@@ -276,7 +336,12 @@ class RunnerRefreshEndpoint(APIView):
         presented_hash = tokens.hash_token(raw)
 
         with transaction.atomic():
-            runner = Runner.objects.select_for_update().select_related("workspace").filter(id=runner_id).first()
+            runner = (
+                Runner.objects.select_for_update()
+                .select_related("workspace")
+                .filter(id=runner_id)
+                .first()
+            )
             if runner is None:
                 return Response(
                     {"error": "invalid_refresh_token"},
@@ -285,6 +350,14 @@ class RunnerRefreshEndpoint(APIView):
             if runner.revoked_at is not None:
                 return Response(
                     {"error": "runner_revoked"},
+                    status=status.HTTP_401_UNAUTHORIZED,
+                )
+            if runner.dev_machine_id is not None and DevMachine.objects.filter(
+                pk=runner.dev_machine_id,
+                revoked_at__isnull=False,
+            ).exists():
+                return Response(
+                    {"error": "dev_machine_revoked"},
                     status=status.HTTP_401_UNAUTHORIZED,
                 )
 
@@ -439,6 +512,7 @@ class RunnerCreateEndpoint(APIView):
 
         workspace_slug = (request.data.get("workspace_slug") or "").strip()
         project_identifier = (request.data.get("project") or "").strip()
+        dev_machine_id_raw = (request.data.get("dev_machine_id") or "").strip()
         host_label = (request.data.get("host_label") or "").strip()[:255]
         body_name = (request.data.get("name") or "").strip()[:128]
         pod_name = (request.data.get("pod") or "").strip()
@@ -448,6 +522,15 @@ class RunnerCreateEndpoint(APIView):
                 {"error": "project is required"},
                 status=status.HTTP_400_BAD_REQUEST,
             )
+        dev_machine_id: Optional[_uuid.UUID] = None
+        if dev_machine_id_raw:
+            try:
+                dev_machine_id = _uuid.UUID(dev_machine_id_raw)
+            except (TypeError, ValueError, AttributeError):
+                return Response(
+                    {"error": "invalid_dev_machine_id"},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
         if body_name and not _RUNNER_NAME_RE.match(body_name):
             return Response(
                 {
@@ -491,7 +574,9 @@ class RunnerCreateEndpoint(APIView):
                 return Response(
                     {
                         "error": "workspace_slug_required",
-                        "error_description": "Caller belongs to multiple workspaces — pass workspace_slug to pick one.",
+                        "error_description": (
+                            "Caller belongs to multiple workspaces — pass workspace_slug to pick one."
+                        ),
                     },
                     status=status.HTTP_400_BAD_REQUEST,
                 )
@@ -534,6 +619,7 @@ class RunnerCreateEndpoint(APIView):
                     refresh = tokens.mint_refresh_token()
                     dev_machine = _get_or_create_dev_machine(
                         user=request.user,
+                        dev_machine_id=dev_machine_id,
                         host_label=host_label,
                     )
                     runner = Runner.objects.create(
@@ -558,9 +644,15 @@ class RunnerCreateEndpoint(APIView):
                         machine_minted = _maybe_mint_machine_token(
                             user=runner.owner,
                             workspace=runner.workspace,
+                            dev_machine=dev_machine,
                             host_label=host_label,
                         )
                 break
+            except DevMachineOwnershipError:
+                return Response(
+                    {"error": "dev_machine_not_found"},
+                    status=status.HTTP_404_NOT_FOUND,
+                )
             except IntegrityError as exc:
                 last_exc = exc
                 if body_name:
@@ -725,7 +817,12 @@ class MachineTokenRedeemEndpoint(APIView):
         host_label = (payload.get("host_label") or "")[:255]
 
         with transaction.atomic():
-            minted = _maybe_mint_machine_token(user=user, workspace=workspace, host_label=host_label)
+            minted = _maybe_mint_machine_token(
+                user=user,
+                workspace=workspace,
+                dev_machine=None,
+                host_label=host_label,
+            )
         if minted is None:
             return Response(
                 {"error": "machine_token_already_active"},

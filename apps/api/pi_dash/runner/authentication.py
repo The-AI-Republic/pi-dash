@@ -79,7 +79,7 @@ class RunnerAccessTokenAuthentication(authentication.BaseAuthentication):
 
         runner_id = payload.get("sub")
         try:
-            runner = Runner.objects.select_related("workspace", "pod").get(
+            runner = Runner.objects.select_related("workspace", "pod", "dev_machine").get(
                 id=runner_id
             )
         except Runner.DoesNotExist:
@@ -90,6 +90,8 @@ class RunnerAccessTokenAuthentication(authentication.BaseAuthentication):
         # token issued before revocation survives until expiry.
         if runner.revoked_at is not None:
             raise exceptions.AuthenticationFailed("runner_revoked")
+        if runner.dev_machine_id is not None and runner.dev_machine.revoked_at is not None:
+            raise exceptions.AuthenticationFailed("dev_machine_revoked")
 
         rtg = int(payload.get("rtg") or 0)
         if rtg < (runner.refresh_token_generation - 1):
@@ -155,13 +157,15 @@ class MachineTokenAuthentication(authentication.BaseAuthentication):
             return None
         token_hash = hash_token(raw)
         try:
-            token = MachineToken.objects.select_related("user", "workspace").get(
+            token = MachineToken.objects.select_related("user", "workspace", "dev_machine").get(
                 token_hash=token_hash
             )
         except MachineToken.DoesNotExist:
             raise exceptions.AuthenticationFailed("machine_token_invalid")
         if token.revoked_at is not None:
             raise exceptions.AuthenticationFailed("machine_token_revoked")
+        if token.dev_machine_id is not None and token.dev_machine.revoked_at is not None:
+            raise exceptions.AuthenticationFailed("dev_machine_revoked")
         if not is_workspace_member(token.user, token.workspace_id):
             token.revoke()
             raise exceptions.AuthenticationFailed("membership_revoked")

@@ -17,6 +17,7 @@ use crate::config::schema::{
     Config, DaemonConfig, RunnerConfig, WorkspaceSection,
 };
 use crate::util::paths::Paths;
+use uuid::Uuid;
 
 /// Read the user's CLI token from `[cli].token` in `config.toml`.
 /// Returns `Ok(None)` when no config exists yet or the section is
@@ -49,6 +50,7 @@ pub fn write_cli_token(paths: &Paths, cloud_url: &str, token: &str) -> Result<()
             version: 2,
             daemon: DaemonConfig {
                 cloud_url: cloud_url.to_string(),
+                dev_machine_id: None,
                 log_level: "info".to_string(),
                 log_retention_days: 14,
                 agent_observability_v1: false,
@@ -78,6 +80,20 @@ pub fn write_cli_token(paths: &Paths, cloud_url: &str, token: &str) -> Result<()
     });
     file::write_config(paths, &cfg)?;
     Ok(())
+}
+
+/// Return the stable cloud identity for this dev machine, minting and
+/// persisting it once when an older config does not have one yet.
+pub fn ensure_dev_machine_id(paths: &Paths) -> Result<Uuid> {
+    let cfg = file::mutate_config(paths, |cfg| {
+        if cfg.daemon.dev_machine_id.is_none() {
+            cfg.daemon.dev_machine_id = Some(Uuid::new_v4());
+        }
+        Ok(())
+    })?;
+    cfg.daemon
+        .dev_machine_id
+        .ok_or_else(|| anyhow::anyhow!("dev_machine_id was not persisted to config.toml"))
 }
 
 /// Read `[cli].workspace_slug` from `config.toml`.
@@ -202,6 +218,7 @@ pub async fn apply_enroll_response(
             version: 2,
             daemon: DaemonConfig {
                 cloud_url: bootstrap_cloud_url.clone(),
+                dev_machine_id: None,
                 log_level: "info".to_string(),
                 log_retention_days: 14,
                 agent_observability_v1: false,
@@ -396,6 +413,18 @@ mod tests {
         write_cli_token(&paths, "https://example.com", "pi_dash_api_xxx").unwrap();
         let token = load_cli_token(&paths).unwrap();
         assert_eq!(token.as_deref(), Some("pi_dash_api_xxx"));
+    }
+
+    #[test]
+    fn ensure_dev_machine_id_mints_once_and_persists() {
+        let tmp = tempdir().unwrap();
+        let paths = paths_for(tmp.path());
+        write_cli_token(&paths, "https://example.com", "pi_dash_api_xxx").unwrap();
+        let first = ensure_dev_machine_id(&paths).unwrap();
+        let second = ensure_dev_machine_id(&paths).unwrap();
+        let cfg = file::load_config(&paths).unwrap();
+        assert_eq!(first, second);
+        assert_eq!(cfg.daemon.dev_machine_id, Some(first));
     }
 
     #[test]

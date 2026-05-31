@@ -342,6 +342,7 @@ mod tests {
             version: 2,
             daemon: DaemonConfig {
                 cloud_url: "http://127.0.0.1:1".into(),
+                dev_machine_id: None,
                 log_level: "info".into(),
                 log_retention_days: 14,
                 agent_observability_v1: false,

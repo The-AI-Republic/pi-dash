@@ -1645,46 +1645,46 @@ fn map_session_error(status: StatusCode, body: &str) -> TransportError {
     map_auth_error(status, body)
 }
 
-/// Public helper to enroll a runner — replaces the legacy `enroll.rs`
-/// connection-flow body.
-/// CLI-initiated runner creation.
+/// Inputs for CLI-initiated runner creation.
+pub struct CreateRunnerRequest<'a> {
+    pub api_token: &'a str,
+    pub dev_machine_id: &'a Uuid,
+    pub workspace_slug: Option<&'a str>,
+    pub project: &'a str,
+    pub host_label: &'a str,
+    pub name: Option<&'a str>,
+    pub pod: Option<&'a str>,
+}
+
+/// Public helper to create a runner with the user-scoped CLI `APIToken`.
 ///
-/// `pidash auth login` populates `[cli].token` with a user-scoped
-/// `APIToken`. Once that token exists, `pidash runner add` can mint a
-/// runner directly without the one-time enrollment-token paste — we POST
-/// to `/api/v1/runner/runners/` with `X-Api-Key`, and the cloud returns
-/// the same `EnrollResponse` shape `enroll_runner` would have.
-///
-/// `workspace_slug` is optional: the cloud falls back to the caller's
-/// single workspace membership when omitted. Multi-workspace callers
-/// must pass an explicit slug.
+/// `pidash auth login` populates `[cli].token`. Once that token exists,
+/// `pidash runner add` can mint a runner directly without the one-time
+/// enrollment-token paste. `workspace_slug` is optional: the cloud falls back
+/// to the caller's single workspace membership when omitted.
 pub async fn create_runner(
     transport: &SharedHttpTransport,
-    api_token: &str,
-    workspace_slug: Option<&str>,
-    project: &str,
-    host_label: &str,
-    name: Option<&str>,
-    pod: Option<&str>,
+    req: CreateRunnerRequest<'_>,
 ) -> Result<EnrollResponse, TransportError> {
     let url = format!("{}/api/v1/runner/runners/", transport.cloud_url());
     let mut body = serde_json::json!({
-        "project": project,
-        "host_label": host_label,
+        "project": req.project,
+        "dev_machine_id": req.dev_machine_id,
+        "host_label": req.host_label,
     });
-    if let Some(ws) = workspace_slug {
+    if let Some(ws) = req.workspace_slug {
         body["workspace_slug"] = Json::String(ws.to_string());
     }
-    if let Some(n) = name {
+    if let Some(n) = req.name {
         body["name"] = Json::String(n.to_string());
     }
-    if let Some(p) = pod {
+    if let Some(p) = req.pod {
         body["pod"] = Json::String(p.to_string());
     }
     let resp = transport
         .http()
         .post(&url)
-        .header("X-Api-Key", api_token)
+        .header("X-Api-Key", req.api_token)
         .json(&body)
         .send()
         .await

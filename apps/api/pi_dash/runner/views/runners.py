@@ -3,14 +3,15 @@
 # See the LICENSE file for details.
 
 from django.db import transaction
+from django.db.models import Count, Max, Q
 from rest_framework import status
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from pi_dash.authentication.session import BaseSessionAuthentication
-from pi_dash.runner.models import Pod, Runner
-from pi_dash.runner.serializers import RunnerSerializer
+from pi_dash.runner.models import DevMachine, MachineToken, Pod, Runner, RunnerStatus, Visibility
+from pi_dash.runner.serializers import DevMachineSerializer, RunnerSerializer
 from pi_dash.runner.services.permissions import (
     can_manage_runner,
     can_view_runner,
@@ -25,6 +26,72 @@ from pi_dash.runner.services.runner_delete import (
     delete_runner as delete_runner_svc,
     parse_purge_local,
 )
+
+
+class DevMachineListEndpoint(APIView):
+    """List the caller's dev machines that are attached to a workspace.
+
+    ``DevMachine`` is user-scoped, but the product page is workspace-scoped.
+    A machine appears here when it has at least one visible runner or active
+    machine token in the requested workspace.
+    """
+
+    authentication_classes = [BaseSessionAuthentication]
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        workspace_id = request.query_params.get("workspace")
+        if not workspace_id:
+            return Response(
+                {"error": "workspace is required"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if not is_workspace_member(request.user, workspace_id):
+            return Response({"error": "forbidden"}, status=status.HTTP_403_FORBIDDEN)
+
+        runner_machine_ids = (
+            Runner.objects.filter(
+                workspace_id=workspace_id,
+                owner=request.user,
+                visibility=Visibility.PRIVATE,
+                dev_machine__isnull=False,
+            )
+            .values_list("dev_machine_id", flat=True)
+            .distinct()
+        )
+        token_machine_ids = (
+            MachineToken.objects.filter(
+                workspace_id=workspace_id,
+                user=request.user,
+                revoked_at__isnull=True,
+                dev_machine__isnull=False,
+            )
+            .values_list("dev_machine_id", flat=True)
+            .distinct()
+        )
+        workspace_runner_filter = Q(
+            runners__workspace_id=workspace_id,
+            runners__owner=request.user,
+            runners__visibility=Visibility.PRIVATE,
+        )
+        online_runner_filter = workspace_runner_filter & Q(
+            runners__revoked_at__isnull=True,
+            runners__status__in=[RunnerStatus.ONLINE, RunnerStatus.BUSY],
+        )
+        qs = (
+            DevMachine.objects.filter(
+                Q(id__in=runner_machine_ids) | Q(id__in=token_machine_ids),
+                owner=request.user,
+                visibility=Visibility.PRIVATE,
+            )
+            .annotate(
+                runner_count=Count("runners", filter=workspace_runner_filter, distinct=True),
+                online_runner_count=Count("runners", filter=online_runner_filter, distinct=True),
+                last_heartbeat_at=Max("runners__last_heartbeat_at", filter=workspace_runner_filter),
+            )
+            .order_by("-last_seen_at", "-created_at")
+        )
+        return Response(DevMachineSerializer(qs, many=True).data)
 
 
 class RunnerListEndpoint(APIView):
