@@ -4,10 +4,11 @@
 
 """Runner-as-trust-unit enrollment + refresh endpoints.
 
-See ``.ai_design/move_to_https/design.md`` §5. The web UI mints a
-one-time enrollment token attached to a Runner row in PENDING state;
-the daemon redeems it for a refresh token + access token via
-``POST /api/v1/runner/runners/enroll/``. Subsequent refreshes hit
+The active onboarding flow is ``pidash auth login`` followed by
+``pidash runner add``, which calls ``RunnerCreateEndpoint`` with a
+user-scoped API token. ``RunnerEnrollEndpoint`` remains available only
+to redeem already-minted legacy one-time enrollment tokens. Subsequent
+refreshes hit
 ``POST /api/v1/runner/runners/<rid>/refresh/`` and rotate the refresh
 token in lock-step on the server.
 """
@@ -38,18 +39,10 @@ from pi_dash.runner.models import (
     Pod,
     Runner,
     RunnerForceRefresh,
-    RunnerStatus,
 )
-from pi_dash.runner.serializers import (
-    RunnerEnrollRequestSerializer,
-    RunnerEnrollmentInviteSerializer,
-)
+from pi_dash.runner.serializers import RunnerEnrollRequestSerializer
 from pi_dash.runner.services import tokens
-from pi_dash.runner.services.permissions import (
-    can_manage_runner,
-    can_view_runner,
-    is_workspace_member,
-)
+from pi_dash.runner.services.permissions import is_workspace_member
 from pi_dash.runner.services.pubsub import close_runner_session, send_to_runner
 
 logger = logging.getLogger(__name__)
@@ -126,89 +119,24 @@ def _maybe_mint_machine_token(*, user, workspace, host_label: str) -> Optional[t
 
 
 class RunnerInviteEndpoint(APIView):
-    """``POST /api/runners/invites/`` — web UI mints a runner enrollment token.
+    """Deprecated token mint endpoint.
 
-    Creates a new ``Runner`` row in PENDING state (no refresh token yet)
-    and returns a one-time enrollment token plus the runner row's
-    ``runner_id`` so the daemon can identify itself on enroll.
+    The cloud UI no longer creates legacy token commands. Keep the
+    route only so old clients receive a deliberate response instead of
+    accidentally minting new one-time enrollment tokens.
     """
 
     authentication_classes = [BaseSessionAuthentication]
     permission_classes = [IsAuthenticated]
 
     def post(self, request):
-        workspace_id_raw = request.data.get("workspace")
-        project_identifier = (request.data.get("project") or "").strip()
-        if not workspace_id_raw or not project_identifier:
-            return Response(
-                {"error": "workspace and project are required"},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
-        try:
-            workspace_id = _uuid.UUID(str(workspace_id_raw))
-        except (ValueError, AttributeError):
-            return Response(
-                {"error": "workspace must be a UUID"},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
-        if not is_workspace_member(request.user, workspace_id):
-            return Response(
-                {"error": "workspace not found"},
-                status=status.HTTP_404_NOT_FOUND,
-            )
-        from pi_dash.db.models.project import Project
-
-        project = Project.objects.filter(workspace_id=workspace_id, identifier=project_identifier).first()
-        if project is None:
-            return Response(
-                {"error": "project not found in workspace"},
-                status=status.HTTP_404_NOT_FOUND,
-            )
-        pod_name = (request.data.get("pod") or "").strip()
-        pod: Optional[Pod] = None
-        if pod_name:
-            pod = Pod.objects.filter(project=project, name=pod_name, deleted_at__isnull=True).first()
-        if pod is None:
-            pod = Pod.default_for_project_id(project.id)
-        if pod is None:
-            return Response(
-                {"error": "project has no default pod"},
-                status=status.HTTP_409_CONFLICT,
-            )
-
-        name = (request.data.get("name") or "").strip()[:128]
-        if not name:
-            count = Runner.objects.filter(pod=pod).count()
-            name = f"runner_{count + 1:03d}"
-
-        enrollment = tokens.mint_enrollment_token()
-        try:
-            runner = Runner.objects.create(
-                owner=request.user,
-                workspace_id=workspace_id,
-                pod=pod,
-                name=name,
-                enrollment_token_hash=enrollment.hashed,
-                enrollment_token_fingerprint=enrollment.fingerprint,
-            )
-        except IntegrityError:
-            return Response(
-                {"error": "runner_name_taken"},
-                status=status.HTTP_409_CONFLICT,
-            )
-
-        body = RunnerEnrollmentInviteSerializer(
+        return Response(
             {
-                "runner_id": runner.id,
-                "name": runner.name,
-                "workspace_slug": runner.workspace.slug,
-                "project_identifier": project.identifier,
-                "pod_id": pod.id,
-                "enrollment_token": enrollment.raw,
-                "enrollment_expires_at": enrollment.expires_at.isoformat(),
-            }
-        ).data
-        return Response(body, status=status.HTTP_201_CREATED)
+                "error": "legacy_enrollment_disabled",
+                "error_description": "Use `pidash auth login` and `pidash runner add` to register runners.",
+            },
+            status=status.HTTP_410_GONE,
+        )
 
 
 class RunnerEnrollEndpoint(APIView):
@@ -413,90 +341,28 @@ class RunnerRefreshEndpoint(APIView):
 
 
 class RunnerReviveEndpoint(APIView):
-    """``POST /api/runners/<runner_id>/revive/`` — mint a fresh enrollment token.
+    """Deprecated token-based revive endpoint.
 
-    Two recovery cases the legacy invite flow cannot serve without
-    spawning a duplicate Runner row:
-
-    - **Stale PENDING**: ``RunnerInviteEndpoint`` minted a token, the
-      operator lost it before running ``pidash connect``. The row sits
-      in PENDING (``enrolled_at IS NULL``) with a hash nobody holds the
-      preimage for.
-    - **Revoked**: an active runner was revoked (manual or replay) and
-      the operator wants to reuse the same name / pod / id rather than
-      start over.
-
-    Either case resets the row to PENDING and returns a fresh
-    enrollment-token payload identical to ``RunnerInviteEndpoint`` so
-    the web UI can reuse the same install-command panel. Refuses
-    actively-enrolled runners — revoke first, then revive.
+    Existing enrollment tokens can still be redeemed by
+    ``RunnerEnrollEndpoint``, but the cloud no longer mints fresh
+    legacy token commands. Operators should delete stale/revoked
+    runners and add a new runner from the target authenticated machine.
     """
 
     authentication_classes = [BaseSessionAuthentication]
     permission_classes = [IsAuthenticated]
 
     def post(self, request, runner_id):
-        with transaction.atomic():
-            runner = (
-                Runner.objects.select_for_update()
-                .select_related("workspace", "pod__project")
-                .filter(pk=runner_id)
-                .first()
-            )
-            if runner is None:
-                return Response({"error": "not found"}, status=status.HTTP_404_NOT_FOUND)
-            if not can_view_runner(request.user, runner):
-                return Response({"error": "not found"}, status=status.HTTP_404_NOT_FOUND)
-            if not can_manage_runner(request.user, runner):
-                return Response({"error": "forbidden"}, status=status.HTTP_403_FORBIDDEN)
-            if runner.revoked_at is None and runner.enrolled_at is not None:
-                return Response(
-                    {"error": "runner is currently active; revoke it first"},
-                    status=status.HTTP_409_CONFLICT,
-                )
-
-            enrollment = tokens.mint_enrollment_token()
-            runner.enrollment_token_hash = enrollment.hashed
-            runner.enrollment_token_fingerprint = enrollment.fingerprint
-            runner.enrolled_at = None
-            runner.refresh_token_hash = ""
-            runner.refresh_token_fingerprint = ""
-            runner.previous_refresh_token_hash = ""
-            runner.refresh_token_generation = 0
-            runner.revoked_at = None
-            runner.revoked_reason = ""
-            runner.status = RunnerStatus.OFFLINE
-            runner.save(
-                update_fields=[
-                    "enrollment_token_hash",
-                    "enrollment_token_fingerprint",
-                    "enrolled_at",
-                    "refresh_token_hash",
-                    "refresh_token_fingerprint",
-                    "previous_refresh_token_hash",
-                    "refresh_token_generation",
-                    "revoked_at",
-                    "revoked_reason",
-                    "status",
-                    "updated_at",
-                ]
-            )
-            # Drop any leftover force-refresh directive — we are at rtg=0.
-            RunnerForceRefresh.objects.filter(runner=runner).delete()
-
-        project_identifier = runner.pod.project.identifier if runner.pod and runner.pod.project_id else ""
-        body = RunnerEnrollmentInviteSerializer(
+        return Response(
             {
-                "runner_id": runner.id,
-                "name": runner.name,
-                "workspace_slug": runner.workspace.slug,
-                "project_identifier": project_identifier,
-                "pod_id": runner.pod_id,
-                "enrollment_token": enrollment.raw,
-                "enrollment_expires_at": enrollment.expires_at.isoformat(),
-            }
-        ).data
-        return Response(body, status=status.HTTP_201_CREATED)
+                "error": "legacy_enrollment_disabled",
+                "error_description": (
+                    "Delete this runner and run `pidash runner add` "
+                    "from the authenticated target machine."
+                ),
+            },
+            status=status.HTTP_410_GONE,
+        )
 
 
 class RunnerSelfRevokeEndpoint(APIView):
@@ -544,12 +410,11 @@ _MAX_AUTO_NAME_RETRIES = 5
 class RunnerCreateEndpoint(APIView):
     """``POST /api/v1/runner/runners/`` — CLI-initiated runner creation.
 
-    The dual of ``RunnerInviteEndpoint`` + ``RunnerEnrollEndpoint`` for
-    callers that already have a user-scoped CLI token (issued by
+    The active replacement for the legacy invite/enroll token pair.
+    Callers already have a user-scoped CLI token (issued by
     ``pidash auth login``). One round-trip mints the Runner row, marks
     it enrolled, and returns the same shape as ``RunnerEnrollEndpoint``
-    so the daemon code path can be reused verbatim. No one-time
-    enrollment-token paste required.
+    so the daemon code path can be reused verbatim.
 
     Auth: ``X-Api-Key`` (APIToken). The token's user must be a member
     of the target workspace and the workspace must contain the named
@@ -587,7 +452,10 @@ class RunnerCreateEndpoint(APIView):
             return Response(
                 {
                     "error": "invalid_runner_name",
-                    "error_description": "name must start with [A-Za-z0-9_] and contain only A-Z, a-z, 0-9, _, ., -",
+                    "error_description": (
+                        "name must start with a letter, digit, or underscore "
+                        "and contain only letters, digits, underscore, dot, or dash"
+                    ),
                 },
                 status=status.HTTP_400_BAD_REQUEST,
             )

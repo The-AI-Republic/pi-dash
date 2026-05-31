@@ -2912,11 +2912,10 @@ export default {
     list: {
       delete_failed: "러너 삭제 실패",
       revoke_failed: "러너 권한 취소 실패",
-      revive_failed: "러너 복구 실패",
       add_runner: "러너 추가",
       how_it_works_title: "러너 추가 방법",
       how_it_works_body:
-        '1. "러너 추가"를 클릭하고 프로젝트 + 포드를 선택한 후 제출합니다. 클라우드가 해당 러너에 바인딩된 일회용 등록 토큰을 생성합니다.\n2. 러너를 호스팅할 머신에서 표시된 `pidash connect --url ... --token ... --host-label ...` 명령을 실행합니다.\n3. 데몬이 등록되고 러너가 여기에 온라인으로 표시됩니다.\n\n각 러너는 자체 토큰을 가지고 있습니다. 호스트에 등록된 첫 번째 러너는 또한 `pidash` CLI가 비러너 명령에 사용하는 머신 토큰을 부트스트랩합니다.\n\n전제 조건: 에이전트 CLI(codex / claude)가 호스트에 이미 설치되어 있어야 합니다.',
+        '1. Click "Add runner", pick a project + pod and generate the CLI command.\n2. On the machine that will host the runner, run the displayed `pidash runner add` command. If the host is not logged in yet, the CLI starts `pidash auth login` first.\n3. The daemon registers the runner and it shows online here.\n\nPrerequisite: the agent CLI (codex / claude) must already be installed on the host.',
       connected_runners: "러너",
       columns: {
         name: "이름",
@@ -2926,24 +2925,20 @@ export default {
         last_heartbeat: "마지막 하트비트",
       },
       columns_pod: "포드",
-      revive: "복구",
       revoke: "권한 취소",
       delete: "삭제",
-      empty: '아직 러너가 없습니다. "러너 추가"를 클릭하여 첫 번째 러너별 등록 토큰을 생성하세요.',
+      empty: 'No runners yet. Click "Add runner" to generate your first runner command.',
       delete_confirm_title: "러너를 삭제하시겠습니까?",
       delete_confirm_body:
         "러너 행이 제거되고 데몬이 강제로 오프라인 상태가 됩니다. 기록된 실행은 null 러너 참조로 보존됩니다.",
       revoke_confirm_title: "러너 권한을 취소하시겠습니까?",
       revoke_confirm_body:
-        "러너의 자격 증명이 무효화되고 진행 중인 실행이 취소되지만, 행은 목록에 남아 있습니다. 나중에 복구하여 동일한 행에 새 등록 토큰을 생성할 수 있습니다.",
-      revive_modal_title: "새 등록 토큰",
-      revive_modal_body:
-        "이 러너를 할당받을 호스트에서 아래 명령을 실행하세요. 지금 복사하세요 — 토큰이 다시 표시되지 않습니다.",
+        "The runner's credentials are invalidated and any in-flight runs are cancelled, but the row stays in the list. To attach it again, delete it and add a new runner from the target machine.",
       project_placeholder: "프로젝트 선택",
       copy_failed: "클립보드에 복사할 수 없습니다",
     },
     machine_token_note: {
-      body: "러너가 새 호스트(즉, 새 ``host_label``)에 처음 등록되면 클라우드는 또한 ``pidash`` CLI가 비러너 명령(issue, comment, state)에 사용하는 머신 토큰을 발급합니다. 동일한 호스트의 후속 러너는 해당 토큰을 재사용합니다.",
+      body: "`pidash runner add` starts `pidash auth login` first when the host is not logged in yet. Run it again for each project or pod this machine should serve.",
     },
     pods: {
       title: "포드",
@@ -2964,13 +2959,14 @@ export default {
         codex: "Codex",
       },
       errors: {
-        create_failed: "등록 토큰을 생성할 수 없습니다.",
         project_required: "프로젝트를 선택하세요.",
+        name_invalid:
+          "Runner name cannot contain spaces. It must start with a letter, digit, or underscore and contain only letters, digits, underscore, dot, or dash.",
         load_projects_failed: "프로젝트를 불러올 수 없습니다.",
         load_pods_failed: "포드를 불러올 수 없습니다.",
       },
       title: "러너 추가",
-      subtitle: "새 러너의 일회용 등록 토큰을 생성합니다. 호스트할 머신에서 표시된 `pidash connect` 명령을 실행합니다.",
+      subtitle: "Generate a `pidash runner add` command for the machine that will host this runner.",
       project_label: "프로젝트",
       project_help: "이 러너가 작업할 프로젝트입니다.",
       pod_label: "포드(선택 사항)",
@@ -2978,22 +2974,25 @@ export default {
       pod_help: "프로젝트의 기본 포드로 기본 설정됩니다.",
       name_label: "이름(선택 사항)",
       name_placeholder: "my-laptop-runner",
-      name_help: "비워두면 자동 할당됩니다(예: ``runner_001``).",
-      host_label_label: "호스트 레이블(선택 사항)",
-      host_label_placeholder: "my-laptop",
-      host_label_help:
-        "제안된 명령에 포함된 자유 형식 호스트 이름입니다. 플래그를 생략하면 데몬이 실제 호스트 이름으로 대체합니다.",
+      name_help:
+        "Auto-assigned if blank. No spaces. If provided, use letters, digits, underscore, dot, or dash; start with a letter, digit, or underscore.",
       working_dir_label: "작업 디렉터리(선택 사항)",
       working_dir_placeholder: "로컬 개발 머신 프로젝트 작업 디렉터리",
       working_dir_help:
         "데몬이 에이전트 CLI를 실행하는 로컬 경로 — 일반적으로 디스크의 프로젝트 저장소입니다. 기본값은 러너의 데이터 디렉터리 아래 샌드박스로, 원하는 경우는 거의 없습니다.",
       agent_label: "에이전트",
-      agent_help: "이 러너가 구동할 AI 에이전트 CLI입니다. 표시된 ``pidash connect`` 명령에 포함됩니다.",
+      agent_help: "Which AI agent CLI this runner will drive. Baked into the displayed ``pidash runner add`` command.",
       cancel: "취소",
-      submitting: "발행 중…",
-      submit: "등록 토큰 발행",
+      back: "Back",
+      submit: "Generate command",
       token_warning: "한 번 복사하세요 — 등록 토큰은 다시 표시되지 않습니다.",
       token_instructions: "러너를 호스팅할 머신에서 다음을 실행하세요:",
+      cloud_url_origin_warning:
+        "Using the current browser origin as the cloud URL because VITE_API_BASE_URL is not configured.",
+      shell_label: "Shell",
+      shell_posix: "macOS/Linux",
+      shell_powershell: "PowerShell",
+      shell_cmd: "Command Prompt",
       copied: "복사됨!",
       copy_command: "명령 복사",
     },

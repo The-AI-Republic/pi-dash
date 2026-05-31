@@ -22,7 +22,7 @@ import { useCycle } from "@/hooks/store/use-cycle";
 import { useIssues } from "@/hooks/store/use-issues";
 import { IssuesStoreContext } from "@/hooks/use-issue-layout-store";
 // local imports
-import { IssuePeekOverview } from "../../peek-overview";
+import { IssuePeekOverview, IssuePeekUrlSync } from "../../peek-overview";
 import { CycleCalendarLayout } from "../calendar/roots/cycle-root";
 import { BaseGanttRoot } from "../gantt";
 import { CycleKanBanLayout } from "../kanban/roots/cycle-root";
@@ -123,6 +123,7 @@ export const CycleLayoutRoot = observer(function CycleLayoutRoot() {
                 <CycleIssueLayout activeLayout={activeLayout} cycleId={cycleId} isCompletedCycle={isCompletedCycle} />
               </div>
               {/* peek overview */}
+              <IssuePeekUrlSync />
               <IssuePeekOverview />
             </div>
           </>

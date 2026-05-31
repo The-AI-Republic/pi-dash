@@ -35,8 +35,9 @@ from pi_dash.runner.views import (
 
 urlpatterns = [
     path("", RunnerListEndpoint.as_view(), name="runner-list"),
-    # Mint a runner-enrollment invite (one-time token). Replaces the
-    # legacy ``connections/`` create flow.
+    # Deprecated token-mint route retained only to return a clear 410.
+    # New runners are created by `pidash runner add` through the
+    # API-token authenticated v1 endpoint.
     path(
         "invites/",
         RunnerInviteEndpoint.as_view(),

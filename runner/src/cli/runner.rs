@@ -9,6 +9,7 @@
 
 use anyhow::{Context, Result};
 use clap::{Args as ClapArgs, Subcommand};
+use std::io::IsTerminal;
 use std::path::PathBuf;
 
 use crate::cli::runner_ops;
@@ -18,6 +19,7 @@ use crate::config::file;
 use crate::config::schema::{AgentKind, MAX_RUNNERS_PER_DAEMON, RunnerConfig};
 use crate::util::confirm::maybe_confirm;
 use crate::util::paths::Paths;
+use crate::util::runner_name;
 
 #[derive(Debug, ClapArgs)]
 pub struct RunnerArgs {
@@ -37,6 +39,11 @@ pub enum RunnerCommand {
 
 #[derive(Debug, Clone, ClapArgs)]
 pub struct AddArgs {
+    /// Pi Dash cloud base URL. Used when this host is not logged in yet
+    /// and `runner add` needs to start `pidash auth login` first.
+    #[arg(long)]
+    pub url: Option<String>,
+
     /// Human-friendly name. Auto-generated when omitted.
     #[arg(long)]
     pub name: Option<String>,
@@ -97,15 +104,20 @@ pub async fn run(args: RunnerArgs, paths: &Paths) -> Result<()> {
 /// the cloud to mint a runner under the caller's identity. Replaces
 /// the legacy connection-secret-bearer flow.
 pub async fn add(args: AddArgs, paths: &Paths) -> Result<RunnerConfig> {
-    let api_token = runner_ops::load_cli_token(paths)
-        .context("reading [cli].token from config.toml")?
-        .ok_or_else(|| {
-            anyhow::anyhow!(
-                "no CLI token configured — run `pidash auth login` to authenticate this host first"
+    let runner_name = args
+        .name
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    if let Some(name) = runner_name {
+        runner_name::validate(name).with_context(|| {
+            format!(
+                "invalid --name {name:?}; use an identifier like `test-runner`, or omit --name to let Pi Dash assign one"
             )
         })?;
+    }
 
-    // Cap check is local + cheap; do it before the network call.
+    // Cap check is local + cheap; do it before auth or any network call.
     let existing_count = if paths.config_path().exists() {
         file::load_config(paths)?.runners.len()
     } else {
@@ -117,6 +129,8 @@ pub async fn add(args: AddArgs, paths: &Paths) -> Result<RunnerConfig> {
         );
     }
 
+    let api_token = ensure_cli_token(paths, args.url.as_deref(), args.workspace.as_deref()).await?;
+
     let cloud_url = if paths.config_path().exists() {
         file::load_config(paths)?.daemon.cloud_url
     } else {
@@ -124,6 +138,14 @@ pub async fn add(args: AddArgs, paths: &Paths) -> Result<RunnerConfig> {
             "no [daemon].cloud_url configured — run `pidash auth login --url <URL>` first"
         )
     };
+    if let Some(url) = args.url.as_deref() {
+        let requested = url.trim_end_matches('/');
+        if cloud_url != requested {
+            anyhow::bail!(
+                "this host is already configured for cloud {cloud_url} — refusing --url {requested}"
+            );
+        }
+    }
 
     let host_label = hostname_or_unknown();
     let transport =
@@ -144,7 +166,7 @@ pub async fn add(args: AddArgs, paths: &Paths) -> Result<RunnerConfig> {
         workspace_arg.as_deref(),
         &args.project,
         &host_label,
-        args.name.as_deref(),
+        runner_name,
         args.pod.as_deref(),
     )
     .await
@@ -234,6 +256,37 @@ pub async fn add(args: AddArgs, paths: &Paths) -> Result<RunnerConfig> {
         }
     }
     Ok(applied.runner)
+}
+
+async fn ensure_cli_token(
+    paths: &Paths,
+    cloud_url: Option<&str>,
+    workspace: Option<&str>,
+) -> Result<String> {
+    if let Some(token) =
+        runner_ops::load_cli_token(paths).context("reading [cli].token from config.toml")?
+    {
+        return Ok(token);
+    }
+
+    println!("No Pi Dash auth token found; starting `pidash auth login` first.");
+    crate::cli::auth::login::run_auth_only(
+        crate::cli::auth::login::Args {
+            url: cloud_url.map(|u| u.trim_end_matches('/').to_string()),
+            no_browser: !std::io::stderr().is_terminal() && !std::io::stdin().is_terminal(),
+            no_runner_prompt: true,
+            workspace: workspace.map(str::to_string),
+        },
+        paths,
+    )
+    .await
+    .context("auth login before runner add failed")?;
+
+    runner_ops::load_cli_token(paths)
+        .context("reading [cli].token from config.toml after auth login")?
+        .ok_or_else(|| {
+            anyhow::anyhow!("auth login completed but no CLI token was written to config.toml")
+        })
 }
 
 fn hostname_or_unknown() -> String {

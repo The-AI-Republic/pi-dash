@@ -2954,11 +2954,10 @@ export default {
     list: {
       delete_failed: "Impossibile eliminare il runner",
       revoke_failed: "Impossibile revocare il runner",
-      revive_failed: "Impossibile riattivare il runner",
       add_runner: "Aggiungi runner",
       how_it_works_title: "Come aggiungere un runner",
       how_it_works_body:
-        "1. Clicca su \"Aggiungi runner\", scegli un progetto + pod e invia. Il cloud genera un token di registrazione monouso legato a quel runner.\n2. Sulla macchina che ospiterà il runner, esegui il comando visualizzato `pidash connect --url ... --token ... --host-label ...`.\n3. Il demone si registra e il runner appare online qui.\n\nOgni runner ha il proprio token. Il primo runner registrato su un host avvia anche un token macchina utilizzato dalla CLI `pidash` per comandi non runner.\n\nPrerequisito: la CLI dell'agente (codex / claude) deve essere già installata sull'host.",
+        '1. Click "Add runner", pick a project + pod and generate the CLI command.\n2. On the machine that will host the runner, run the displayed `pidash runner add` command. If the host is not logged in yet, the CLI starts `pidash auth login` first.\n3. The daemon registers the runner and it shows online here.\n\nPrerequisite: the agent CLI (codex / claude) must already be installed on the host.',
       connected_runners: "Runner",
       columns: {
         name: "Nome",
@@ -2968,25 +2967,20 @@ export default {
         last_heartbeat: "Ultimo heartbeat",
       },
       columns_pod: "Pod",
-      revive: "Riattiva",
       revoke: "Revoca",
       delete: "Elimina",
-      empty:
-        'Nessun runner ancora. Clicca su "Aggiungi runner" per generare il tuo primo token di registrazione per runner.',
+      empty: 'No runners yet. Click "Add runner" to generate your first runner command.',
       delete_confirm_title: "Eliminare il runner?",
       delete_confirm_body:
         "La riga del runner viene rimossa e il demone viene forzato offline. Le esecuzioni storiche vengono conservate con un riferimento runner nullo.",
       revoke_confirm_title: "Revocare il runner?",
       revoke_confirm_body:
-        "Le credenziali del runner vengono invalidate e tutte le esecuzioni in corso vengono annullate, ma la riga rimane nell'elenco. Puoi riattivarla in seguito per generare un nuovo token di registrazione sulla stessa riga.",
-      revive_modal_title: "Nuovo token di registrazione",
-      revive_modal_body:
-        "Esegui il comando seguente sull'host che dovrebbe riprendere questo runner. Copialo ora: il token non verrà più mostrato.",
+        "The runner's credentials are invalidated and any in-flight runs are cancelled, but the row stays in the list. To attach it again, delete it and add a new runner from the target machine.",
       project_placeholder: "Seleziona un progetto",
       copy_failed: "Impossibile copiare negli appunti",
     },
     machine_token_note: {
-      body: "La prima volta che un runner si registra su un nuovo host (cioè un nuovo ``host_label``), il cloud emette anche un token macchina utilizzato dalla CLI ``pidash`` per comandi non runner (issue, comment, state). I runner successivi sullo stesso host riutilizzano quel token.",
+      body: "`pidash runner add` starts `pidash auth login` first when the host is not logged in yet. Run it again for each project or pod this machine should serve.",
     },
     pods: {
       title: "Pod",
@@ -3007,14 +3001,14 @@ export default {
         codex: "Codex",
       },
       errors: {
-        create_failed: "Impossibile creare il token di registrazione.",
         project_required: "Seleziona un progetto.",
+        name_invalid:
+          "Runner name cannot contain spaces. It must start with a letter, digit, or underscore and contain only letters, digits, underscore, dot, or dash.",
         load_projects_failed: "Impossibile caricare i progetti.",
         load_pods_failed: "Impossibile caricare i pod.",
       },
       title: "Aggiungi runner",
-      subtitle:
-        "Crea un token di registrazione monouso per un nuovo runner. Eseguirai il comando `pidash connect` visualizzato sulla macchina che lo ospiterà.",
+      subtitle: "Generate a `pidash runner add` command for the machine that will host this runner.",
       project_label: "Progetto",
       project_help: "Il progetto su cui lavorerà questo runner.",
       pod_label: "Pod (opzionale)",
@@ -3022,23 +3016,25 @@ export default {
       pod_help: "Per impostazione predefinita, utilizza il pod predefinito del progetto.",
       name_label: "Nome (opzionale)",
       name_placeholder: "my-laptop-runner",
-      name_help: "Assegnato automaticamente se vuoto, ad es. ``runner_001``.",
-      host_label_label: "Etichetta host (opzionale)",
-      host_label_placeholder: "my-laptop",
-      host_label_help:
-        "Nome host libero incorporato nel comando suggerito. Il demone sostituirà il suo nome host effettivo se si lascia il flag vuoto.",
+      name_help:
+        "Auto-assigned if blank. No spaces. If provided, use letters, digits, underscore, dot, or dash; start with a letter, digit, or underscore.",
       working_dir_label: "Directory di lavoro (opzionale)",
       working_dir_placeholder: "directory di lavoro del progetto sulla macchina di sviluppo locale",
       working_dir_help:
         "Percorso locale in cui il demone esegue la CLI dell'agente — di solito il repository del progetto su disco. Per impostazione predefinita, viene utilizzata una sandbox nella directory dati del runner, cosa che raramente è quella desiderata.",
       agent_label: "Agente",
-      agent_help:
-        "Quale CLI dell'agente AI questo runner guiderà. Incorporato nel comando ``pidash connect`` visualizzato.",
+      agent_help: "Which AI agent CLI this runner will drive. Baked into the displayed ``pidash runner add`` command.",
       cancel: "Annulla",
-      submitting: "Generazione in corso…",
-      submit: "Genera token di iscrizione",
+      back: "Back",
+      submit: "Generate command",
       token_warning: "Copia questo una volta — il token di iscrizione non verrà più mostrato.",
       token_instructions: "Esegui questo sul computer che ospiterà il runner:",
+      cloud_url_origin_warning:
+        "Using the current browser origin as the cloud URL because VITE_API_BASE_URL is not configured.",
+      shell_label: "Shell",
+      shell_posix: "macOS/Linux",
+      shell_powershell: "PowerShell",
+      shell_cmd: "Command Prompt",
       copied: "Copiato!",
       copy_command: "Copia comando",
     },

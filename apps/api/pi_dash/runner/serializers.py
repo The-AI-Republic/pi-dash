@@ -19,10 +19,14 @@ from pi_dash.runner.models import (
 )
 
 
-# Mirrors the runner-side charset rule in `runner/src/util/runner_name.rs`.
+# Mirrors the runner-side charset rule in `runner/src/util/runner_name.rs`
+# and the CLI-created runner endpoint's `_RUNNER_NAME_RE`.
 RUNNER_NAME_CHARSET = RegexValidator(
-    regex=r"^[A-Za-z0-9_-]+$",
-    message=("runner_name may only contain letters, digits, underscore, and dash"),
+    regex=r"^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$",
+    message=(
+        "runner_name must start with a letter, digit, or underscore "
+        "and contain only letters, digits, underscore, dot, or dash"
+    ),
 )
 
 
@@ -168,18 +172,6 @@ class RunnerEnrollRequestSerializer(serializers.Serializer):
     os = serializers.CharField(max_length=32, allow_blank=True, default="")
     arch = serializers.CharField(max_length=32, allow_blank=True, default="")
     version = serializers.CharField(max_length=32, allow_blank=True, default="")
-
-
-class RunnerEnrollmentInviteSerializer(serializers.Serializer):
-    """Web-UI response when a workspace admin mints a runner invite."""
-
-    runner_id = serializers.UUIDField()
-    name = serializers.CharField()
-    workspace_slug = serializers.CharField()
-    project_identifier = serializers.CharField()
-    pod_id = serializers.UUIDField()
-    enrollment_token = serializers.CharField()
-    enrollment_expires_at = serializers.CharField()
 
 
 class AgentRunSerializer(serializers.ModelSerializer):

@@ -159,8 +159,9 @@ class RunnerRevokeEndpoint(APIView):
     row returns 200 with the current state without re-emitting the
     revoke control frame or re-closing the (already closed) session.
     Use this when an operator wants to stop a runner permanently but
-    keep its history visible in the list — paired with the ``revive``
-    endpoint that mints a fresh enrollment token on the same row.
+    keep its history visible in the list. To attach replacement local
+    execution capacity, add a new runner from the target authenticated
+    machine with ``pidash runner add``.
     """
 
     authentication_classes = [BaseSessionAuthentication]

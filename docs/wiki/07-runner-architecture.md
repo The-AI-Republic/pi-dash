@@ -34,7 +34,6 @@ The `pidash` binary is a clap subcommand router:
 ```
 pidash auth login / logout / status      ← device-code login, token mgmt
 pidash runner add / list / remove        ← register a runner on this host
-pidash connect                            ← legacy enrollment-token flow
 pidash configure                          ← (re)write config
 pidash install / uninstall                ← install OS service unit
 pidash start / stop / restart             ← daemon lifecycle

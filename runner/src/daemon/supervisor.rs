@@ -2000,18 +2000,188 @@ fn format_exec_command_detail(
             Some(true) | None => "completed",
         };
         format!(
-            "last observed command tool: `{}`{cwd} \
+            "command context: last observed command tool `{}`{cwd} \
              ({verb} {since_completed}s before failure; ran {runtime}s)",
             cmd.command
         )
     } else {
         let elapsed = (now - cmd.started_at).num_seconds().max(0);
         format!(
-            "last observed command tool start: `{}`{cwd} \
-             (started {elapsed}s ago; no completion event observed)",
+            "command context: last command frame `{}`{cwd} \
+             (started {elapsed}s ago; no completion frame observed)",
             cmd.command
         )
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum DiagnosticSignalPriority {
+    ExitStatus,
+    TextError,
+    JsonError,
+}
+
+fn diagnostic_signal_from_stderr(lines: &[String]) -> Option<String> {
+    let mut best: Option<(DiagnosticSignalPriority, String)> = None;
+    for line in lines.iter().rev() {
+        let Some((priority, signal)) = diagnostic_signal_from_stderr_line(line) else {
+            continue;
+        };
+        if priority == DiagnosticSignalPriority::JsonError {
+            return Some(signal);
+        }
+        if best
+            .as_ref()
+            .map(|(best_priority, _)| priority > *best_priority)
+            .unwrap_or(true)
+        {
+            best = Some((priority, signal));
+        }
+    }
+    best.map(|(_, signal)| signal)
+}
+
+fn diagnostic_signal_from_stderr_line(line: &str) -> Option<(DiagnosticSignalPriority, String)> {
+    let trimmed = line.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    if let Ok(value) = serde_json::from_str::<serde_json::Value>(trimmed)
+        && let Some(message) = json_error_message(&value)
+    {
+        return Some((
+            DiagnosticSignalPriority::JsonError,
+            format!("stderr JSON error: {message}"),
+        ));
+    }
+
+    let lower = trimmed.to_ascii_lowercase();
+    let has_exit_code = lower.contains("exit code");
+    let generic_exit_status = lower.starts_with("process exited with code")
+        || lower.starts_with("exited with code")
+        || lower.starts_with("exit code ");
+    let looks_relevant = lower.contains("error")
+        || lower.contains("failed")
+        || lower.contains("failure")
+        || lower.contains("denied")
+        || lower.contains("timed out")
+        || lower.contains("timeout")
+        || lower.contains("panic")
+        || has_exit_code
+        || generic_exit_status
+        || lower.contains("not logged in")
+        || lower.contains("unauthorized")
+        || lower.contains("forbidden");
+    if looks_relevant {
+        let priority = if generic_exit_status {
+            DiagnosticSignalPriority::ExitStatus
+        } else {
+            DiagnosticSignalPriority::TextError
+        };
+        Some((priority, format!("stderr: {trimmed}")))
+    } else {
+        None
+    }
+}
+
+fn json_error_message(value: &serde_json::Value) -> Option<String> {
+    for key in ["error", "detail", "message"] {
+        let Some(v) = value.get(key) else {
+            continue;
+        };
+        if let Some(s) = v.as_str()
+            && !s.trim().is_empty()
+        {
+            return Some(s.trim().to_string());
+        }
+        if let Some(s) = v.get("message").and_then(|m| m.as_str())
+            && !s.trim().is_empty()
+        {
+            return Some(s.trim().to_string());
+        }
+    }
+    None
+}
+
+fn core_error_summary(base: &str, diagnostic_signal: Option<&str>) -> String {
+    let Some(signal) = diagnostic_signal else {
+        return base.to_string();
+    };
+    signal
+        .strip_prefix("stderr JSON error: ")
+        .or_else(|| signal.strip_prefix("stderr: "))
+        .unwrap_or(signal)
+        .to_string()
+}
+
+fn assemble_failure_detail(
+    base: &str,
+    last_cmd: Option<&crate::daemon::state::ExecCommandSnapshot>,
+    stderr: &crate::agent::StderrSnapshot,
+    now: DateTime<Utc>,
+) -> String {
+    const DETAIL_BYTES_CAP: usize = 4096;
+    const STDERR_TAIL_LINES: usize = 10;
+
+    let diagnostic_signal = diagnostic_signal_from_stderr(&stderr.lines);
+    let core = core_error_summary(base, diagnostic_signal.as_deref());
+
+    let mut trace: Vec<String> = vec![format!("- watchdog: {base}")];
+    if let Some(signal) = diagnostic_signal {
+        trace.push(format!("- diagnostic signal: {signal}"));
+    }
+    if let Some(cmd) = last_cmd {
+        trace.push(format!("- {}", format_exec_command_detail(cmd, now)));
+    }
+    // The stderr ring has already filtered codex tracing noise;
+    // `stderr.dropped` is the running count of lines we rejected so
+    // the user has an honest signal of how much was suppressed.
+    // Emit the section if either we have content to show OR a
+    // non-zero dropped count (the latter alone tells the operator
+    // "the agent was emitting noise but no signal").
+    if !stderr.lines.is_empty() || stderr.dropped > 0 {
+        let shown = stderr.lines.len().min(STDERR_TAIL_LINES);
+        let suffix = if stderr.dropped > 0 {
+            format!(
+                " (plus {} low-signal line(s) filtered from agent stderr)",
+                stderr.dropped
+            )
+        } else {
+            String::new()
+        };
+        if shown > 0 {
+            let tail = stderr
+                .lines
+                .iter()
+                .rev()
+                .take(STDERR_TAIL_LINES)
+                .rev()
+                .map(|line| format!("  {line}"))
+                .collect::<Vec<_>>()
+                .join("\n");
+            trace.push(format!(
+                "- stderr context ({shown} line(s){suffix}):\n{tail}"
+            ));
+        } else {
+            // Filter dropped everything — surface that fact alone
+            // rather than emitting an empty stderr block.
+            trace.push(format!("- stderr context: empty after filtering{suffix}"));
+        }
+    }
+
+    let mut joined = format!("Core error: {core}\n\nError trace:\n{}", trace.join("\n"));
+    if joined.len() > DETAIL_BYTES_CAP {
+        // Truncate on a char boundary, leaving a sentinel so consumers
+        // can tell the body was clipped.
+        let mut end = DETAIL_BYTES_CAP;
+        while !joined.is_char_boundary(end) && end > 0 {
+            end -= 1;
+        }
+        joined.truncate(end);
+        joined.push('…');
+    }
+    joined
 }
 
 /// Owns one `Assign`'s lifecycle. Spawned as a task from `RunnerLoop`, so the
@@ -2412,7 +2582,7 @@ impl AssignWorker {
                     }
                 } => {
                     let mins = stall_timeout.as_secs() / 60;
-                    let base = format!("no agent frames for {mins} minutes");
+                    let base = format!("agent stalled for {mins} minutes without new agent events");
                     let detail = self.build_failure_detail(&base, bridge).await;
                     run_events.flush_before_lifecycle(&self.out).await;
                     let metadata = self.run_metadata().await;
@@ -2438,71 +2608,20 @@ impl AssignWorker {
 
     /// Build a `RunFailed.detail` string that includes whatever local
     /// context might help the cloud / UI explain what went wrong:
-    /// - the supervisor's own classifier message (e.g. `"no agent frames
-    ///   for 5 minutes"`),
-    /// - the most recent shell command tool the agent kicked off,
-    /// - the last few lines of agent stderr.
+    /// - the supervisor's own classifier message,
+    /// - the strongest diagnostic signal we can infer from stderr,
+    /// - the most recent shell command tool the agent kicked off as context,
+    /// - the last few filtered lines of agent stderr.
     ///
     /// All inputs are optional and the assembly degrades gracefully when
-    /// they're missing — for a healthy code-edit task the result is just
-    /// the base string. The total payload is bounded so a runaway stderr
-    /// dump can't balloon a `RunFailed` body.
+    /// they're missing. The first line is the best root-cause summary we
+    /// have; supporting context is listed under `Error trace:`. The total
+    /// payload is bounded so a runaway stderr dump can't balloon a
+    /// `RunFailed` body.
     async fn build_failure_detail(&self, base: &str, bridge: &AgentBridge) -> String {
-        const DETAIL_BYTES_CAP: usize = 4096;
-        const STDERR_TAIL_LINES: usize = 10;
-
         let last_cmd = self.state.observability_snapshot().await.last_exec_command;
         let stderr = bridge.recent_stderr().await;
-
-        let mut parts: Vec<String> = vec![base.to_string()];
-        if let Some(cmd) = last_cmd {
-            parts.push(format_exec_command_detail(&cmd, Utc::now()));
-        }
-        // The stderr ring has already filtered codex tracing noise;
-        // `stderr.dropped` is the running count of lines we rejected so
-        // the user has an honest signal of how much was suppressed.
-        // Emit the section if either we have content to show OR a
-        // non-zero dropped count (the latter alone tells the operator
-        // "the agent was emitting noise but no signal").
-        if !stderr.lines.is_empty() || stderr.dropped > 0 {
-            let shown = stderr.lines.len().min(STDERR_TAIL_LINES);
-            let tail = stderr
-                .lines
-                .iter()
-                .rev()
-                .take(STDERR_TAIL_LINES)
-                .rev()
-                .cloned()
-                .collect::<Vec<_>>()
-                .join("\n  ");
-            let suffix = if stderr.dropped > 0 {
-                format!(
-                    " (plus {} noise line(s) filtered from codex tracing)",
-                    stderr.dropped
-                )
-            } else {
-                String::new()
-            };
-            if shown > 0 {
-                parts.push(format!("stderr tail ({shown} line(s){suffix}):\n  {tail}"));
-            } else {
-                // Filter dropped everything — surface that fact alone
-                // rather than emitting an empty stderr block.
-                parts.push(format!("stderr: empty after filtering{suffix}"));
-            }
-        }
-        let mut joined = parts.join("; ");
-        if joined.len() > DETAIL_BYTES_CAP {
-            // Truncate on a char boundary, leaving a sentinel so consumers
-            // can tell the body was clipped.
-            let mut end = DETAIL_BYTES_CAP;
-            while !joined.is_char_boundary(end) && end > 0 {
-                end -= 1;
-            }
-            joined.truncate(end);
-            joined.push('…');
-        }
-        joined
+        assemble_failure_detail(base, last_cmd.as_ref(), &stderr, Utc::now())
     }
 
     async fn handle_bridge_event(
@@ -2881,8 +3000,8 @@ mod tests {
 
         assert_eq!(
             detail,
-            "last observed command tool start: `git fetch origin` in `/tmp/repo` \
-             (started 69s ago; no completion event observed)"
+            "command context: last command frame `git fetch origin` in `/tmp/repo` \
+             (started 69s ago; no completion frame observed)"
         );
     }
 
@@ -2911,6 +3030,102 @@ mod tests {
         assert!(detail.contains("exited with error 56s before failure"));
         assert!(detail.contains("ran 4s"));
         assert!(!detail.contains("completed 56s"));
+    }
+
+    #[test]
+    fn diagnostic_signal_prefers_json_error_messages() {
+        let lines = vec![
+            "pidash 0.1.10".to_string(),
+            "Process exited with code 1".to_string(),
+            r#"{"error":"GET https://pidash.airepublic.com/api/v1/users/me/: error sending request"}"#.to_string(),
+        ];
+        let signal = diagnostic_signal_from_stderr(&lines).unwrap();
+        assert_eq!(
+            signal,
+            "stderr JSON error: GET https://pidash.airepublic.com/api/v1/users/me/: error sending request"
+        );
+    }
+
+    #[test]
+    fn diagnostic_signal_keeps_non_json_errors() {
+        let lines = vec![
+            "pidash 0.1.10".to_string(),
+            "gh: error: HTTP 401: Bad credentials".to_string(),
+        ];
+        let signal = diagnostic_signal_from_stderr(&lines).unwrap();
+        assert_eq!(signal, "stderr: gh: error: HTTP 401: Bad credentials");
+    }
+
+    #[test]
+    fn diagnostic_signal_prefers_substantive_error_over_exit_status() {
+        let lines = vec![
+            "gh: error: HTTP 401: Bad credentials".to_string(),
+            "Process exited with code 1".to_string(),
+        ];
+        let signal = diagnostic_signal_from_stderr(&lines).unwrap();
+        assert_eq!(signal, "stderr: gh: error: HTTP 401: Bad credentials");
+
+        let fallback = diagnostic_signal_from_stderr(&["Process exited with code 1".to_string()])
+            .expect("exit status should remain useful as a fallback");
+        assert_eq!(fallback, "stderr: Process exited with code 1");
+    }
+
+    #[test]
+    fn assemble_failure_detail_puts_core_error_first_and_trace_second() {
+        let started_at = Utc.with_ymd_and_hms(2026, 5, 29, 5, 25, 53).unwrap();
+        let now = Utc.with_ymd_and_hms(2026, 5, 29, 5, 30, 57).unwrap();
+        let cmd = ExecCommandSnapshot {
+            command: "pidash workspace me".into(),
+            cwd: Some("/work".into()),
+            tool_call_id: Some("call-1".into()),
+            started_at,
+            completed_at: None,
+            completed_success: None,
+        };
+        let stderr = crate::agent::StderrSnapshot {
+            lines: vec![
+                "pidash 0.1.10".into(),
+                "Process exited with code 1".into(),
+                r#"{"error":"GET https://pidash.airepublic.com/api/v1/users/me/: error sending request"}"#.into(),
+            ],
+            dropped: 42,
+        };
+
+        let detail = assemble_failure_detail(
+            "agent stalled for 5 minutes without new agent events",
+            Some(&cmd),
+            &stderr,
+            now,
+        );
+
+        let mut lines = detail.lines();
+        assert_eq!(
+            lines.next(),
+            Some(
+                "Core error: GET https://pidash.airepublic.com/api/v1/users/me/: error sending request"
+            )
+        );
+        assert!(detail.contains("\n\nError trace:\n"));
+        assert!(
+            detail.contains("- watchdog: agent stalled for 5 minutes without new agent events")
+        );
+        assert!(detail.contains("- diagnostic signal: stderr JSON error: GET https://pidash.airepublic.com/api/v1/users/me/: error sending request"));
+        assert!(
+            detail
+                .contains("- command context: last command frame `pidash workspace me` in `/work`")
+        );
+        assert!(detail.contains(
+            "- stderr context (3 line(s) (plus 42 low-signal line(s) filtered from agent stderr))"
+        ));
+    }
+
+    #[test]
+    fn assemble_failure_detail_uses_watchdog_when_no_better_signal_exists() {
+        let stderr = crate::agent::StderrSnapshot::default();
+        let detail = assemble_failure_detail("agent stdout closed", None, &stderr, Utc::now());
+
+        assert!(detail.starts_with("Core error: agent stdout closed\n\nError trace:\n"));
+        assert!(detail.contains("- watchdog: agent stdout closed"));
     }
 
     /// Build the supervisor's ``hello_runners`` map from a list of

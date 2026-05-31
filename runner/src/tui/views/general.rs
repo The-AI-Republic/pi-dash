@@ -450,12 +450,14 @@ impl GeneralTab {
         let cur = focus.current();
         let mut lines: Vec<Line<'static>> = vec![
             Line::from(Span::styled(
-                "This dev machine isn't enrolled yet.",
+                "This dev machine isn't configured yet.",
                 Style::default()
                     .fg(Color::Yellow)
                     .add_modifier(Modifier::BOLD),
             )),
-            Line::from("Fill in the form below and press [Connect] to enroll."),
+            Line::from("Recommended setup: run `pidash auth login --url <URL>` outside the TUI,"),
+            Line::from("then run `pidash runner add --project <PROJECT>`."),
+            Line::from("Use this legacy token form only for compatibility/revive flows."),
             Line::raw(""),
         ];
         lines.push(form_line(
@@ -481,7 +483,7 @@ impl GeneralTab {
             Style::default().add_modifier(Modifier::DIM),
         )));
         lines.push(Line::from(Span::styled(
-            "Get an enrollment token from the Pi Dash web UI: Workspace → Runners → Add connection",
+            "Enrollment-token setup is deprecated; new runners should use `pidash runner add`.",
             Style::default().add_modifier(Modifier::DIM),
         )));
         if let Some(e) = &reg.error {

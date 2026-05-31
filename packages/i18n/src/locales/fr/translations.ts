@@ -2969,11 +2969,10 @@ export default {
     list: {
       delete_failed: "Échec de la suppression du runner",
       revoke_failed: "Échec de la révocation du runner",
-      revive_failed: "Échec de la réactivation du runner",
       add_runner: "Ajouter un runner",
       how_it_works_title: "Comment ajouter un runner",
       how_it_works_body:
-        "1. Cliquez sur « Ajouter un runner », choisissez un projet + un pod et soumettez. Le cloud génère un jeton d'inscription à usage unique lié à ce runner.\n2. Sur la machine qui hébergera le runner, exécutez la commande affichée `pidash connect --url ... --token ... --host-label ...`.\n3. Le démon s'inscrit et le runner apparaît en ligne ici.\n\nChaque runner possède son propre jeton. Le premier runner inscrit sur un hôte initialise également un jeton machine utilisé par l'interface CLI `pidash` pour les commandes non-runner.\n\nPrérequis : l'interface CLI de l'agent (codex / claude) doit déjà être installée sur l'hôte.",
+        '1. Click "Add runner", pick a project + pod and generate the CLI command.\n2. On the machine that will host the runner, run the displayed `pidash runner add` command. If the host is not logged in yet, the CLI starts `pidash auth login` first.\n3. The daemon registers the runner and it shows online here.\n\nPrerequisite: the agent CLI (codex / claude) must already be installed on the host.',
       connected_runners: "Runners",
       columns: {
         name: "Nom",
@@ -2983,25 +2982,20 @@ export default {
         last_heartbeat: "Dernier heartbeat",
       },
       columns_pod: "Pod",
-      revive: "Réactiver",
       revoke: "Révoquer",
       delete: "Supprimer",
-      empty:
-        "Aucun runner pour l'instant. Cliquez sur « Ajouter un runner » pour générer votre premier jeton d'inscription par runner.",
+      empty: 'No runners yet. Click "Add runner" to generate your first runner command.',
       delete_confirm_title: "Supprimer le runner ?",
       delete_confirm_body:
         "La ligne du runner est supprimée et le démon est mis hors ligne. Les exécutions historiques sont conservées avec une référence de runner nulle.",
       revoke_confirm_title: "Révoquer le runner ?",
       revoke_confirm_body:
-        "Les identifiants du runner sont invalidés et toute exécution en cours est annulée, mais la ligne reste dans la liste. Vous pouvez la réactiver plus tard pour générer un nouveau jeton d'inscription sur la même ligne.",
-      revive_modal_title: "Nouveau jeton d'inscription",
-      revive_modal_body:
-        "Exécutez la commande ci-dessous sur l'hôte qui doit prendre en charge ce runner. Copiez-la maintenant — le jeton ne sera plus affiché.",
+        "The runner's credentials are invalidated and any in-flight runs are cancelled, but the row stays in the list. To attach it again, delete it and add a new runner from the target machine.",
       project_placeholder: "Sélectionnez un projet",
       copy_failed: "Impossible de copier dans le presse-papiers",
     },
     machine_token_note: {
-      body: "La première fois qu'un runner s'inscrit sur un nouvel hôte (c'est-à-dire un nouveau ``host_label``), le cloud émet également un jeton machine utilisé par l'interface CLI ``pidash`` pour les commandes non-runner (issue, comment, state). Les runners suivants sur le même hôte réutilisent ce jeton.",
+      body: "`pidash runner add` starts `pidash auth login` first when the host is not logged in yet. Run it again for each project or pod this machine should serve.",
     },
     pods: {
       title: "Pods",
@@ -3022,14 +3016,14 @@ export default {
         codex: "Codex",
       },
       errors: {
-        create_failed: "Impossible de générer le jeton d'inscription.",
         project_required: "Choisissez un projet.",
+        name_invalid:
+          "Runner name cannot contain spaces. It must start with a letter, digit, or underscore and contain only letters, digits, underscore, dot, or dash.",
         load_projects_failed: "Impossible de charger les projets.",
         load_pods_failed: "Impossible de charger les pods.",
       },
       title: "Ajouter un runner",
-      subtitle:
-        "Générez un jeton d'inscription à usage unique pour un nouveau runner. Vous exécuterez la commande `pidash connect` affichée sur la machine qui l'hébergera.",
+      subtitle: "Generate a `pidash runner add` command for the machine that will host this runner.",
       project_label: "Projet",
       project_help: "Le projet sur lequel ce runner travaillera.",
       pod_label: "Pod (facultatif)",
@@ -3037,23 +3031,25 @@ export default {
       pod_help: "Par défaut, le pod par défaut du projet.",
       name_label: "Nom (facultatif)",
       name_placeholder: "my-laptop-runner",
-      name_help: "Attribué automatiquement si vide, ex. ``runner_001``.",
-      host_label_label: "Étiquette d'hôte (facultatif)",
-      host_label_placeholder: "my-laptop",
-      host_label_help:
-        "Nom d'hôte libre intégré dans la commande suggérée. Le démon substituera son nom d'hôte réel si vous omettez le drapeau.",
+      name_help:
+        "Auto-assigned if blank. No spaces. If provided, use letters, digits, underscore, dot, or dash; start with a letter, digit, or underscore.",
       working_dir_label: "Répertoire de travail (facultatif)",
       working_dir_placeholder: "répertoire de travail du projet sur la machine de développement locale",
       working_dir_help:
         "Chemin local dans lequel le démon exécute l'interface CLI de l'agent — généralement le dépôt du projet sur le disque. Par défaut, un bac à sable sous le répertoire de données du runner, ce qui est rarement ce que vous souhaitez.",
       agent_label: "Agent",
-      agent_help:
-        "Quelle interface CLI d'agent IA ce runner pilotera. Intégré dans la commande ``pidash connect`` affichée.",
+      agent_help: "Which AI agent CLI this runner will drive. Baked into the displayed ``pidash runner add`` command.",
       cancel: "Annuler",
-      submitting: "Création du jeton…",
-      submit: "Créer le jeton d'inscription",
+      back: "Back",
+      submit: "Generate command",
       token_warning: "Copiez-le une fois — le jeton d'inscription ne sera plus affiché.",
       token_instructions: "Exécutez ceci sur la machine qui hébergera le runner :",
+      cloud_url_origin_warning:
+        "Using the current browser origin as the cloud URL because VITE_API_BASE_URL is not configured.",
+      shell_label: "Shell",
+      shell_posix: "macOS/Linux",
+      shell_powershell: "PowerShell",
+      shell_cmd: "Command Prompt",
       copied: "Copié !",
       copy_command: "Copier la commande",
     },

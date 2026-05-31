@@ -63,7 +63,8 @@ pub enum Command {
     /// `pidash runner add` to register runners.
     Auth(auth::AuthArgs),
 
-    /// Enroll this dev machine with Pi Dash cloud (one-time pairing).
+    /// Deprecated compatibility path for one-time enrollment tokens.
+    #[command(hide = true)]
     Connect(connect::Args),
 
     /// Manage local CLI configuration.
@@ -178,6 +179,7 @@ async fn run_default(paths: &crate::util::paths::Paths) -> Result<()> {
                 url: None,
                 no_browser: false,
                 no_runner_prompt: false,
+                workspace: None,
             }),
         };
         return auth::run(args, paths).await;
