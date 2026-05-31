@@ -52,5 +52,5 @@ fi
 # auth — there's no one to approve the device code. Point at the
 # headless path instead.
 echo "No terminal detected — skipping auto-auth."
-echo "Run \`pidash auth login\` from a terminal, or use the headless"
-echo "enrollment path: \`pidash connect --url <URL> --token <TOKEN>\`."
+echo "Run \`pidash auth login --no-browser --url <URL>\`, approve the printed"
+echo "URL from another browser, then run \`pidash runner add --project <PROJECT>\`."

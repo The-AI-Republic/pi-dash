@@ -111,18 +111,6 @@ pidash runner add --project X    # add another runner
 pidash runner list / remove      # manage runners
 ```
 
-### Alternative: legacy enrollment-token flow
-
-For headless / scripted setup where you can't run the browser flow, the original `pidash connect` enrollment-token paste still works:
-
-```bash
-# Generate a one-time enrollment token from the Pi Dash web UI
-# (Runners admin → "Add connection"), then on the target host:
-pidash connect --url https://pidash.example.com --token <ONE_TIME_TOKEN>
-```
-
-This path is kept as a fallback; the device-code flow above is the recommended path for everyone with browser access.
-
 ## Auto-update
 
 `pidash` keeps itself current. When the cloud announces a newer `latest_runner_version` in the welcome frame, the running daemon swaps the on-disk `pidash` binary in place. The currently-running process is **never disturbed** — it keeps its loaded copy until the next natural restart (`pidash restart`, host reboot, or a service-manager respawn after a crash). This gives you the Claude-Code-style "always current" experience without ever killing in-flight work.

@@ -2949,11 +2949,10 @@ export default {
     list: {
       delete_failed: "Gagal menghapus runner",
       revoke_failed: "Gagal mencabut runner",
-      revive_failed: "Gagal menghidupkan kembali runner",
       add_runner: "Tambah runner",
       how_it_works_title: "Cara menambahkan runner",
       how_it_works_body:
-        '1. Klik "Tambah runner", pilih proyek + pod dan kirim. Cloud membuat token pendaftaran satu kali yang terikat pada runner tersebut.\n2. Pada mesin yang akan menjadi host runner, jalankan perintah `pidash connect --url ... --token ... --host-label ...` yang ditampilkan.\n3. Daemon mendaftar dan runner muncul online di sini.\n\nSetiap runner memiliki token sendiri. Runner pertama yang didaftarkan pada host juga mem-bootstrap token mesin yang digunakan oleh CLI `pidash` untuk perintah non-runner.\n\nPrasyarat: CLI agen (codex / claude) harus sudah terinstal di host.',
+        '1. Click "Add runner", pick a project + pod and generate the CLI command.\n2. On the machine that will host the runner, run the displayed `pidash runner add` command. If the host is not logged in yet, the CLI starts `pidash auth login` first.\n3. The daemon registers the runner and it shows online here.\n\nPrerequisite: the agent CLI (codex / claude) must already be installed on the host.',
       connected_runners: "Runner",
       columns: {
         name: "Nama",
@@ -2963,24 +2962,20 @@ export default {
         last_heartbeat: "Detak jantung terakhir",
       },
       columns_pod: "Pod",
-      revive: "Hidupkan kembali",
       revoke: "Cabut",
       delete: "Hapus",
-      empty: 'Belum ada runner. Klik "Tambah runner" untuk membuat token pendaftaran per-runner pertama Anda.',
+      empty: 'No runners yet. Click "Add runner" to generate your first runner command.',
       delete_confirm_title: "Hapus runner?",
       delete_confirm_body:
         "Baris runner dihapus dan daemon dipaksa offline. Proses historis tetap disimpan dengan referensi runner null.",
       revoke_confirm_title: "Cabut runner?",
       revoke_confirm_body:
-        "Kredensial runner dinonaktifkan dan semua proses yang sedang berjalan dibatalkan, tetapi baris tetap ada di daftar. Anda dapat menghidupkannya kembali nanti untuk membuat token pendaftaran baru pada baris yang sama.",
-      revive_modal_title: "Token pendaftaran baru",
-      revive_modal_body:
-        "Jalankan perintah di bawah pada host yang seharusnya mengambil runner ini. Salin sekarang — token tidak akan ditampilkan lagi.",
+        "The runner's credentials are invalidated and any in-flight runs are cancelled, but the row stays in the list. To attach it again, delete it and add a new runner from the target machine.",
       project_placeholder: "Pilih proyek",
       copy_failed: "Tidak dapat menyalin ke clipboard",
     },
     machine_token_note: {
-      body: "Saat pertama kali runner mendaftar di host baru (yaitu, ``host_label`` baru), cloud juga mengeluarkan token mesin yang digunakan oleh CLI ``pidash`` untuk perintah non-runner (issue, comment, state). Runner berikutnya di host yang sama menggunakan kembali token tersebut.",
+      body: "`pidash runner add` starts `pidash auth login` first when the host is not logged in yet. Run it again for each project or pod this machine should serve.",
     },
     pods: {
       title: "Pod",
@@ -3001,14 +2996,14 @@ export default {
         codex: "Codex",
       },
       errors: {
-        create_failed: "Tidak dapat membuat token pendaftaran.",
         project_required: "Pilih proyek.",
+        name_invalid:
+          "Runner name cannot contain spaces. It must start with a letter, digit, or underscore and contain only letters, digits, underscore, dot, or dash.",
         load_projects_failed: "Tidak dapat memuat proyek.",
         load_pods_failed: "Tidak dapat memuat pod.",
       },
       title: "Tambah runner",
-      subtitle:
-        "Buat token pendaftaran satu kali untuk runner baru. Anda akan menjalankan perintah `pidash connect` yang ditampilkan di mesin yang akan menjadi hostnya.",
+      subtitle: "Generate a `pidash runner add` command for the machine that will host this runner.",
       project_label: "Proyek",
       project_help: "Proyek tempat runner ini akan bekerja.",
       pod_label: "Pod (opsional)",
@@ -3016,23 +3011,25 @@ export default {
       pod_help: "Default ke pod default proyek.",
       name_label: "Nama (opsional)",
       name_placeholder: "my-laptop-runner",
-      name_help: "Otomatis ditetapkan jika kosong, mis. ``runner_001``.",
-      host_label_label: "Label host (opsional)",
-      host_label_placeholder: "laptop-saya",
-      host_label_help:
-        "Nama host bebas yang disematkan ke dalam perintah yang disarankan. Daemon akan mengganti dengan nama host sebenarnya jika Anda tidak menyertakan flag.",
+      name_help:
+        "Auto-assigned if blank. No spaces. If provided, use letters, digits, underscore, dot, or dash; start with a letter, digit, or underscore.",
       working_dir_label: "Direktori kerja (opsional)",
       working_dir_placeholder: "direktori kerja proyek mesin pengembangan lokal",
       working_dir_help:
         "Jalur lokal tempat daemon menjalankan CLI agen — biasanya repositori proyek di disk. Defaultnya adalah sandbox di bawah direktori data runner, yang jarang Anda inginkan.",
       agent_label: "Agen",
-      agent_help:
-        "CLI agen AI mana yang akan dijalankan oleh runner ini. Disematkan ke dalam perintah ``pidash connect`` yang ditampilkan.",
+      agent_help: "Which AI agent CLI this runner will drive. Baked into the displayed ``pidash runner add`` command.",
       cancel: "Batal",
-      submitting: "Mencetak…",
-      submit: "Cetak token pendaftaran",
+      back: "Back",
+      submit: "Generate command",
       token_warning: "Salin ini sekali — token pendaftaran tidak akan ditampilkan lagi.",
       token_instructions: "Jalankan ini di mesin yang akan menjadi host runner:",
+      cloud_url_origin_warning:
+        "Using the current browser origin as the cloud URL because VITE_API_BASE_URL is not configured.",
+      shell_label: "Shell",
+      shell_posix: "macOS/Linux",
+      shell_powershell: "PowerShell",
+      shell_cmd: "Command Prompt",
       copied: "Disalin!",
       copy_command: "Salin perintah",
     },

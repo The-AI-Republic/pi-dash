@@ -60,28 +60,6 @@ pidash auth logout [--local-only]
 | -------------- | ---------------------------------------------------------------------------------- |
 | `--local-only` | Skip server-side revoke, just clear local token. Useful when cloud is unreachable. |
 
-### `pidash connect` _(legacy enrollment-token flow)_
-
-Original pairing flow. Use only when device-code login isn't an option (headless / scripted hosts). Generate the token in the cloud UI: **Runners → Add connection**.
-
-```
-pidash connect --url <URL> --token <TOKEN> [--host-label <LABEL>]
-               [--working-dir <PATH>] [--agent codex|claude-code]
-               [--skip-service] [--skip-linger]
-```
-
-| Flag                   | Purpose                                                               |
-| ---------------------- | --------------------------------------------------------------------- |
-| `--url <URL>`          | Cloud base URL (required).                                            |
-| `--token <TOKEN>`      | One-time enrollment token (required, single-use).                     |
-| `--host-label <LABEL>` | Free-form host label. Defaults to hostname.                           |
-| `--working-dir <PATH>` | Runner's working dir. Defaults to `data_dir/runners/<rid>/workspace`. |
-| `--agent <KIND>`       | `codex` or `claude-code`. Defaults to `codex`.                        |
-| `--skip-service`       | Skip the post-enroll doctor + service install (CI).                   |
-| `--skip-linger`        | Skip `loginctl enable-linger` on Linux (avoid sudo prompt).           |
-
----
-
 ## Local config
 
 ### `pidash config set default-project <PROJECT>`

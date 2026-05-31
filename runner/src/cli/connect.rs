@@ -1,15 +1,9 @@
-//! ``pidash connect`` — enroll a runner with the cloud.
+//! ``pidash connect`` - deprecated one-time-token compatibility path.
 //!
-//! In the per-runner trust model (`.ai_design/move_to_https/design.md`
-//! §5.1), each runner has its own enrollment token + refresh credential.
-//! On a fresh machine, the first ``pidash connect`` creates
-//! ``config.toml`` and (where supported) installs the systemd unit. On
-//! a machine that already has a ``config.toml``, subsequent
-//! ``pidash connect`` calls append a new ``[[runner]]`` block to the
-//! existing config and write per-runner credentials under
-//! ``data_dir/runners/<rid>/credentials.toml`` — the supervisor picks
-//! the new entry up on next reload. Cloud URL must match the
-//! existing config; pointing one host at two clouds isn't supported.
+//! New runner setup should use ``pidash auth login`` followed by
+//! ``pidash runner add``. This command remains executable only so
+//! existing one-time enrollment or revive tokens can still be redeemed
+//! during the transition.
 
 use anyhow::{Context, Result};
 use chrono::Utc;
@@ -35,9 +29,7 @@ pub struct Args {
     #[arg(long)]
     pub url: String,
 
-    /// One-time enrollment token shown by the cloud's "Add connection"
-    /// button. Consumed on first use; if you lose it, delete the pending
-    /// connection in the cloud UI and create a new one.
+    /// Deprecated one-time enrollment token. Consumed on first use.
     #[arg(long)]
     pub token: String,
 
@@ -68,6 +60,13 @@ pub struct Args {
 }
 
 pub async fn run(args: Args, paths: &Paths) -> Result<()> {
+    eprintln!(
+        "Warning: `pidash connect` is deprecated and hidden from normal help. \
+         For new runners, run `pidash auth login --url <URL>` and then \
+         `pidash runner add --project <PROJECT>`. This command remains only \
+         for existing one-time enrollment or revive tokens."
+    );
+
     validate_cloud_url(&args.url)?;
 
     // First enrollment vs. add-another. ``existing_config`` carries the
@@ -398,7 +397,7 @@ pub(crate) fn validate_cloud_url(url: &str) -> Result<()> {
 #[derive(thiserror::Error, Debug)]
 pub enum EnrollAdditionalError {
     #[error(
-        "this machine has no config.toml — run `pidash connect` first to enroll the first runner"
+        "this legacy token path requires an existing config.toml; for first setup run `pidash auth login` and then `pidash runner add`"
     )]
     NoExistingConfig,
     #[error("loading config.toml failed: {0}")]
@@ -454,8 +453,8 @@ pub async fn enroll_additional_runner(
     if !paths.config_path().exists() {
         return Err(EnrollAdditionalError::NoExistingConfig);
     }
-    let mut cfg =
-        file::load_config(paths).map_err(|e| EnrollAdditionalError::LoadConfigFailed(format!("{e:#}")))?;
+    let mut cfg = file::load_config(paths)
+        .map_err(|e| EnrollAdditionalError::LoadConfigFailed(format!("{e:#}")))?;
 
     if let Some(new_wd) = working_dir.as_ref() {
         assert_no_workspace_collision(&cfg.runners, new_wd)
@@ -491,7 +490,8 @@ pub async fn enroll_additional_runner(
         return Ok(existing.clone());
     }
 
-    let working_dir = working_dir.unwrap_or_else(|| paths.runner_dir(resp.runner_id).join("workspace"));
+    let working_dir =
+        working_dir.unwrap_or_else(|| paths.runner_dir(resp.runner_id).join("workspace"));
     let new_runner = RunnerConfig {
         name: resp.runner_name.clone(),
         runner_id: resp.runner_id,
