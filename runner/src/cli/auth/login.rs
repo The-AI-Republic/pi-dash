@@ -40,6 +40,10 @@ pub struct Args {
     /// a TTY. Useful when scripting an auth-only setup.
     #[arg(long)]
     pub no_runner_prompt: bool,
+
+    /// Workspace slug to bind this CLI install to after login.
+    #[arg(long, hide = true)]
+    pub workspace: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -131,8 +135,13 @@ async fn login_and_bind_workspace(args: &Args, paths: &Paths) -> Result<LoginOut
     // v1: a CLI install is bound to one workspace. Resolve which one
     // (auto-pick if there's only one membership; prompt otherwise),
     // persist the choice, and use it for any subsequent runner-add.
-    let workspace_slug =
-        resolve_workspace_binding(paths, &cloud_url, &token.access_token).await?;
+    let workspace_slug = resolve_workspace_binding(
+        paths,
+        &cloud_url,
+        &token.access_token,
+        args.workspace.as_deref(),
+    )
+    .await?;
     println!("  Workspace: {workspace_slug}");
 
     Ok(LoginOutcome {
@@ -305,12 +314,14 @@ async fn poll_for_token(
 /// Rules:
 /// - 0 memberships → bail; the user must be invited first.
 /// - 1 membership → silently use it (no prompt).
-/// - ≥2 memberships → if a stored slug is still valid, keep it; else
-///   prompt the user to pick.
+/// - explicit slug → validate membership and use it without prompting.
+/// - ≥2 memberships without explicit slug → if a stored slug is still valid,
+///   keep it; else prompt the user to pick.
 async fn resolve_workspace_binding(
     paths: &Paths,
     cloud_url: &str,
     api_token: &str,
+    explicit_workspace: Option<&str>,
 ) -> Result<String> {
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(15))
@@ -324,9 +335,18 @@ async fn resolve_workspace_binding(
         );
     }
 
+    let explicit_workspace = explicit_workspace.map(str::trim).filter(|s| !s.is_empty());
     let stored = runner_ops::load_cli_workspace(paths)?;
 
-    let chosen_slug = if workspaces.len() == 1 {
+    let chosen_slug = if let Some(slug) = explicit_workspace {
+        if workspaces.iter().any(|w| w.slug == slug) {
+            slug.to_string()
+        } else {
+            anyhow::bail!(
+                "workspace {slug:?} is not available for this account — check --workspace or ask an admin to invite you"
+            );
+        }
+    } else if workspaces.len() == 1 {
         workspaces[0].slug.clone()
     } else if let Some(slug) = stored.as_deref()
         && workspaces.iter().any(|w| w.slug == slug)

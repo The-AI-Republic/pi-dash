@@ -13,6 +13,7 @@ struct RecordedRequest {
     method: String,
     path: String,
     api_key: Option<String>,
+    body: String,
 }
 
 struct Fake {
@@ -22,10 +23,16 @@ struct Fake {
 }
 
 async fn start_fake() -> Fake {
+    start_fake_with_workspaces(r#"{"workspaces":[{"slug":"acme","name":"Acme"}]}"#.to_string())
+        .await
+}
+
+async fn start_fake_with_workspaces(workspaces_body: String) -> Fake {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let recorded: Arc<Mutex<Vec<RecordedRequest>>> = Arc::new(Mutex::new(Vec::new()));
     let recorded_srv = recorded.clone();
+    let workspaces_body = Arc::new(workspaces_body);
     let _handle = tokio::spawn(async move {
         loop {
             let (socket, _) = match listener.accept().await {
@@ -33,8 +40,9 @@ async fn start_fake() -> Fake {
                 Err(_) => return,
             };
             let recorded = recorded_srv.clone();
+            let workspaces_body = workspaces_body.clone();
             tokio::spawn(async move {
-                handle_conn(socket, recorded).await;
+                handle_conn(socket, recorded, workspaces_body).await;
             });
         }
     });
@@ -45,7 +53,11 @@ async fn start_fake() -> Fake {
     }
 }
 
-async fn handle_conn(mut socket: TcpStream, recorded: Arc<Mutex<Vec<RecordedRequest>>>) {
+async fn handle_conn(
+    mut socket: TcpStream,
+    recorded: Arc<Mutex<Vec<RecordedRequest>>>,
+    workspaces_body: Arc<String>,
+) {
     let mut buf = Vec::with_capacity(4096);
     let mut chunk = [0_u8; 2048];
     let mut headers_end = None;
@@ -67,6 +79,7 @@ async fn handle_conn(mut socket: TcpStream, recorded: Arc<Mutex<Vec<RecordedRequ
 
     let Some(idx) = headers_end else { return };
     let head = String::from_utf8_lossy(&buf[..idx]).to_string();
+    let body = String::from_utf8_lossy(&buf[idx + 4..]).to_string();
     let mut lines = head.lines();
     let request_line = lines.next().unwrap_or_default();
     let mut parts = request_line.split_whitespace();
@@ -86,6 +99,7 @@ async fn handle_conn(mut socket: TcpStream, recorded: Arc<Mutex<Vec<RecordedRequ
         method: method.clone(),
         path: path.clone(),
         api_key,
+        body,
     });
 
     let body = match (method.as_str(), path.as_str()) {
@@ -95,7 +109,7 @@ async fn handle_conn(mut socket: TcpStream, recorded: Arc<Mutex<Vec<RecordedRequ
         ("POST", "/api/v1/auth/device/token/") => {
             r#"{"access_token":"cli-token","user_email":"dev@example.com"}"#
         }
-        ("GET", "/api/v1/auth/workspaces/") => r#"{"workspaces":[{"slug":"acme","name":"Acme"}]}"#,
+        ("GET", "/api/v1/auth/workspaces/") => workspaces_body.as_str(),
         _ => r#"{"error":"unexpected_request"}"#,
     };
     let status = if body.contains("unexpected_request") {
@@ -306,4 +320,50 @@ async fn runner_add_bootstraps_auth_when_cli_token_is_missing() {
             .any(|r| r.path == "/api/v1/runner/projects/"),
         "auth bootstrap must suppress login's inline runner prompt: {recorded:?}",
     );
+}
+
+#[tokio::test]
+async fn runner_add_auth_bootstrap_uses_explicit_workspace_without_prompt() {
+    let fake = start_fake_with_workspaces(
+        r#"{"workspaces":[{"slug":"acme","name":"Acme"},{"slug":"beta","name":"Beta"}]}"#
+            .to_string(),
+    )
+    .await;
+    let tmp = tempdir().unwrap();
+    let paths = paths(tmp.path());
+    write_config_with_runner_count(&paths, &format!("http://{}", fake.addr), 0);
+
+    let err = pidash::cli::runner::add(
+        AddArgs {
+            url: None,
+            name: None,
+            project: "TEST".to_string(),
+            workspace: Some("beta".to_string()),
+            pod: None,
+            working_dir: None,
+            agent: AgentKind::Codex,
+        },
+        &paths,
+    )
+    .await
+    .expect_err("fake cloud should reject runner creation after auth bootstrap");
+
+    let msg = format!("{err:#}");
+    assert!(
+        msg.contains("cloud rejected runner creation"),
+        "unexpected error after auth bootstrap: {msg}",
+    );
+
+    let config = std::fs::read_to_string(paths.config_path()).unwrap();
+    assert!(config.contains("token = \"cli-token\""));
+    assert!(config.contains("workspace_slug = \"beta\""));
+
+    let recorded = fake.recorded.lock().unwrap();
+    let create_req = recorded
+        .iter()
+        .find(|r| r.method == "POST" && r.path == "/api/v1/runner/runners/")
+        .expect("runner creation was not attempted");
+    let body: serde_json::Value =
+        serde_json::from_str(&create_req.body).expect("runner create body should be JSON");
+    assert_eq!(body["workspace_slug"], "beta");
 }

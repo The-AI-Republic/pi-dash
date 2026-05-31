@@ -129,7 +129,7 @@ pub async fn add(args: AddArgs, paths: &Paths) -> Result<RunnerConfig> {
         );
     }
 
-    let api_token = ensure_cli_token(paths, args.url.as_deref()).await?;
+    let api_token = ensure_cli_token(paths, args.url.as_deref(), args.workspace.as_deref()).await?;
 
     let cloud_url = if paths.config_path().exists() {
         file::load_config(paths)?.daemon.cloud_url
@@ -258,7 +258,11 @@ pub async fn add(args: AddArgs, paths: &Paths) -> Result<RunnerConfig> {
     Ok(applied.runner)
 }
 
-async fn ensure_cli_token(paths: &Paths, cloud_url: Option<&str>) -> Result<String> {
+async fn ensure_cli_token(
+    paths: &Paths,
+    cloud_url: Option<&str>,
+    workspace: Option<&str>,
+) -> Result<String> {
     if let Some(token) =
         runner_ops::load_cli_token(paths).context("reading [cli].token from config.toml")?
     {
@@ -271,6 +275,7 @@ async fn ensure_cli_token(paths: &Paths, cloud_url: Option<&str>) -> Result<Stri
             url: cloud_url.map(|u| u.trim_end_matches('/').to_string()),
             no_browser: !std::io::stderr().is_terminal() && !std::io::stdin().is_terminal(),
             no_runner_prompt: true,
+            workspace: workspace.map(str::to_string),
         },
         paths,
     )
