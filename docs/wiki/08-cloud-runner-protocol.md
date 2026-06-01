@@ -11,7 +11,7 @@ The schema lives in `runner/src/cloud/protocol.rs` (Rust side) and is consumed b
 History:
 
 - **v1 – v3** — WebSocket transport. Long-lived connection from runner to cloud carrying session frames and run dispatches.
-- **v4** — moved to **per-runner HTTPS long-poll**. Runner authenticates per request with a short-lived access token; long-poll holds open for new work. No persistent WS connection from the runner side.
+- **v4** — moved to **per-runner HTTPS long-poll**. The dev machine authenticates per request with its shared `MachineToken`; the specific runner is identified by URL `runner_id` or `X-Runner-Id`. No persistent WS connection from the runner side.
 
 The Channels WebSocket routing in `apps/api/pi_dash/runner/routing.py` still exists for backward compatibility and for editor channels — but new runners ride on the HTTP path.
 
@@ -45,12 +45,12 @@ The toggle lives in TUI → General → Daemon settings → `auto_update`. Defau
 
 ## Authentication
 
-The runner does **not** carry a long-lived password. Authentication is a two-token model:
+The runner does **not** carry a per-runner password. Authentication is a dev-machine token model:
 
-1. **Refresh token** — issued during `pidash runner add`, stored on disk at `0600`.
-2. **Access token** — short-lived, derived from the refresh token, used per request to the cloud.
+1. **MachineToken** — issued during `pidash auth login`, stored once in `[cli].token`.
+2. **Runner identity** — URL `runner_id` for runner/session endpoints, or `X-Runner-Id` for run/chat lifecycle posts.
 
-`pidash runner add` mints the runner-side credentials cloud-side using the CLI token from `pidash auth login`.
+`pidash runner add` uses the MachineToken to create a new runner row under the current dev machine; it does not mint a separate runtime credential per runner.
 
 See [11 — Authentication](./11-authentication.md) for the full flow.
 

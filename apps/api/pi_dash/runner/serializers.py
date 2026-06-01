@@ -13,6 +13,7 @@ from pi_dash.runner.models import (
     AgentRun,
     AgentRunEvent,
     ApprovalRequest,
+    DevMachine,
     Pod,
     Runner,
     RunnerLiveState,
@@ -36,9 +37,7 @@ class PodSerializer(serializers.ModelSerializer):
     # and to backfill the project field when the user picks a pod first.
     # ``project_identifier`` is the human-friendly slug; ``project`` is
     # the FK uuid kept for callers that want it.
-    project_identifier = serializers.CharField(
-        source="project.identifier", read_only=True
-    )
+    project_identifier = serializers.CharField(source="project.identifier", read_only=True)
 
     class Meta:
         model = Pod
@@ -99,6 +98,29 @@ class RunnerLiveStateSerializer(serializers.ModelSerializer):
         read_only_fields = fields
 
 
+class DevMachineSerializer(serializers.ModelSerializer):
+    runner_count = serializers.IntegerField(read_only=True)
+    online_runner_count = serializers.IntegerField(read_only=True)
+    last_heartbeat_at = serializers.DateTimeField(read_only=True)
+
+    class Meta:
+        model = DevMachine
+        fields = [
+            "id",
+            "host_label",
+            "label",
+            "visibility",
+            "runner_count",
+            "online_runner_count",
+            "last_seen_at",
+            "last_heartbeat_at",
+            "revoked_at",
+            "created_at",
+            "updated_at",
+        ]
+        read_only_fields = fields
+
+
 class PodMiniSerializer(serializers.ModelSerializer):
     class Meta:
         model = Pod
@@ -126,6 +148,8 @@ class RunnerSerializer(serializers.ModelSerializer):
             "capabilities",
             "last_heartbeat_at",
             "owner",
+            "dev_machine",
+            "visibility",
             "pod",
             "pod_detail",
             "live_state",
@@ -145,6 +169,8 @@ class RunnerSerializer(serializers.ModelSerializer):
             "capabilities",
             "last_heartbeat_at",
             "owner",
+            "dev_machine",
+            "visibility",
             "pod_detail",
             "live_state",
             "enrolled_at",
@@ -159,6 +185,7 @@ class RunnerEnrollRequestSerializer(serializers.Serializer):
     """``POST /api/v1/runner/runners/enroll/`` body."""
 
     enrollment_token = serializers.CharField(min_length=16, max_length=128)
+    dev_machine_id = serializers.UUIDField(required=False)
     host_label = serializers.CharField(max_length=255)
     name = serializers.CharField(
         max_length=128,

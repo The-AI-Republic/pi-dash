@@ -75,7 +75,7 @@ working_dir = "/tmp/wd"
         ),
     )
     .unwrap();
-    let args = RunArgs { offline: true };
+    let args = RunArgs { offline: false };
     let err = pidash::cli::run_for_tests(args, &paths)
         .await
         .expect_err("__run with config but no per-runner creds should fail");

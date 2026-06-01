@@ -37,14 +37,8 @@ def _make_runner(user, workspace, pod, name, online=True, heartbeat_ago_s=1):
         workspace=workspace,
         pod=pod,
         name=name,
-        status=(
-            RunnerStatus.ONLINE if online else RunnerStatus.OFFLINE
-        ),
-        last_heartbeat_at=(
-            timezone.now() - timezone.timedelta(seconds=heartbeat_ago_s)
-            if online
-            else None
-        ),
+        status=(RunnerStatus.ONLINE if online else RunnerStatus.OFFLINE),
+        last_heartbeat_at=(timezone.now() - timezone.timedelta(seconds=heartbeat_ago_s) if online else None),
     )
 
 
@@ -55,9 +49,7 @@ def _stub_send_to_runner():
     Patches at the source (``pubsub.send_to_runner``) because matcher.py
     imports it lazily inside ``drain_pod`` to avoid an import cycle.
     """
-    with patch(
-        "pi_dash.runner.services.pubsub.send_to_runner"
-    ) as mock:
+    with patch("pi_dash.runner.services.pubsub.send_to_runner") as mock:
         yield mock
 
 
@@ -71,9 +63,7 @@ def _run_on_commit_immediately():
     refiring) without switching the whole test to
     ``django_db(transaction=True)``.
     """
-    with patch(
-        "django.db.transaction.on_commit", side_effect=lambda fn, **kw: fn()
-    ):
+    with patch("django.db.transaction.on_commit", side_effect=lambda fn, **kw: fn()):
         yield
 
 
@@ -89,9 +79,7 @@ def test_select_runner_in_pod_none_when_empty(db, pod):
 
 
 @pytest.mark.unit
-def test_select_runner_in_pod_picks_freshest_heartbeat(
-    db, create_user, workspace, pod
-):
+def test_select_runner_in_pod_picks_freshest_heartbeat(db, create_user, workspace, pod):
     from django.db import transaction
 
     _make_runner(create_user, workspace, pod, "old", heartbeat_ago_s=20)
@@ -120,27 +108,19 @@ def test_select_runner_in_pod_excludes_busy(db, create_user, workspace, pod):
 
 
 @pytest.mark.unit
-def test_select_runner_in_pod_excludes_other_pod(
-    db, create_user, workspace, project
-):
+def test_select_runner_in_pod_excludes_other_pod(db, create_user, workspace, project):
     """Runners in a different pod within the same project are not selected."""
     from django.db import transaction
 
-    pod_a = Pod.objects.create(
-        project=project, name=f"{project.identifier}_a", created_by=create_user
-    )
-    pod_b = Pod.objects.create(
-        project=project, name=f"{project.identifier}_b", created_by=create_user
-    )
+    pod_a = Pod.objects.create(project=project, name=f"{project.identifier}_a", created_by=create_user)
+    pod_b = Pod.objects.create(project=project, name=f"{project.identifier}_b", created_by=create_user)
     _make_runner(create_user, workspace, pod_b, "only-in-b")
     with transaction.atomic():
         assert matcher.select_runner_in_pod(pod_a) is None
 
 
 @pytest.mark.unit
-def test_select_runner_in_pod_skips_stale_heartbeat(
-    db, create_user, workspace, pod
-):
+def test_select_runner_in_pod_skips_stale_heartbeat(db, create_user, workspace, pod):
     from django.db import transaction
 
     _make_runner(create_user, workspace, pod, "stale", heartbeat_ago_s=120)
@@ -179,9 +159,7 @@ def test_next_queued_run_fifo(db, create_user, workspace, pod):
 
 
 @pytest.mark.unit
-def test_drain_pod_assigns_queued_to_idle_runner(
-    db, create_user, workspace, pod, _stub_send_to_runner
-):
+def test_drain_pod_assigns_queued_to_idle_runner(db, create_user, workspace, pod, _stub_send_to_runner):
     runner = _make_runner(create_user, workspace, pod, "r1")
     run = AgentRun.objects.create(
         workspace=workspace,
@@ -203,9 +181,37 @@ def test_drain_pod_assigns_queued_to_idle_runner(
 
 
 @pytest.mark.unit
-def test_drain_pod_stops_when_all_runners_busy(
-    db, create_user, workspace, pod, _stub_send_to_runner
-):
+def test_private_runner_does_not_take_other_users_run(db, create_user, workspace, pod, _stub_send_to_runner):
+    from uuid import uuid4
+
+    from pi_dash.db.models import User, WorkspaceMember
+
+    _make_runner(create_user, workspace, pod, "owner-runner")
+    other = User.objects.create(
+        email=f"other-{uuid4().hex[:8]}@example.com",
+        username=f"other_{uuid4().hex[:8]}",
+    )
+    WorkspaceMember.objects.create(workspace=workspace, member=other, role=15)
+    run = AgentRun.objects.create(
+        workspace=workspace,
+        owner=other,
+        created_by=other,
+        pod=pod,
+        status=AgentRunStatus.QUEUED,
+        prompt="not mine",
+    )
+
+    n = matcher.drain_pod(pod)
+
+    assert n == 0
+    run.refresh_from_db()
+    assert run.status == AgentRunStatus.QUEUED
+    assert run.runner_id is None
+    assert not _stub_send_to_runner.called
+
+
+@pytest.mark.unit
+def test_drain_pod_stops_when_all_runners_busy(db, create_user, workspace, pod, _stub_send_to_runner):
     _make_runner(create_user, workspace, pod, "only-runner")
     run_a = AgentRun.objects.create(
         workspace=workspace,
@@ -232,9 +238,7 @@ def test_drain_pod_stops_when_all_runners_busy(
 
 
 @pytest.mark.unit
-def test_drain_pod_noop_when_no_runners(
-    db, create_user, workspace, pod, _stub_send_to_runner
-):
+def test_drain_pod_noop_when_no_runners(db, create_user, workspace, pod, _stub_send_to_runner):
     AgentRun.objects.create(
         workspace=workspace,
         owner=create_user,
@@ -261,10 +265,10 @@ def test_drain_pod_by_id_returns_zero_when_missing(db):
 # ---------------------------------------------------------------------------
 
 
-def _make_run(user, workspace, pod, *, prompt="x", pinned_runner=None,
-              status=AgentRunStatus.QUEUED):
+def _make_run(user, workspace, pod, *, prompt="x", pinned_runner=None, status=AgentRunStatus.QUEUED):
     return AgentRun.objects.create(
         owner=user,
+        created_by=user,
         workspace=workspace,
         pod=pod,
         prompt=prompt,
@@ -274,15 +278,11 @@ def _make_run(user, workspace, pod, *, prompt="x", pinned_runner=None,
 
 
 @pytest.mark.unit
-def test_next_for_runner_prefers_personal_queue(
-    db, create_user, workspace, pod
-):
+def test_next_for_runner_prefers_personal_queue(db, create_user, workspace, pod):
     rA = _make_runner(create_user, workspace, pod, "agentA")
     # Older unpinned run + newer run pinned to me → pinned wins.
     older = _make_run(create_user, workspace, pod, prompt="older unpinned")
-    pinned = _make_run(
-        create_user, workspace, pod, prompt="mine", pinned_runner=rA
-    )
+    pinned = _make_run(create_user, workspace, pod, prompt="mine", pinned_runner=rA)
     from django.db import transaction
 
     with transaction.atomic():
@@ -293,9 +293,7 @@ def test_next_for_runner_prefers_personal_queue(
 
 
 @pytest.mark.unit
-def test_next_for_runner_falls_back_to_pod_queue(
-    db, create_user, workspace, pod
-):
+def test_next_for_runner_falls_back_to_pod_queue(db, create_user, workspace, pod):
     rA = _make_runner(create_user, workspace, pod, "agentA")
     unpinned = _make_run(create_user, workspace, pod, prompt="any")
     from django.db import transaction
@@ -307,9 +305,7 @@ def test_next_for_runner_falls_back_to_pod_queue(
 
 
 @pytest.mark.unit
-def test_next_for_runner_excludes_pinned_to_others(
-    db, create_user, workspace, pod
-):
+def test_next_for_runner_excludes_pinned_to_others(db, create_user, workspace, pod):
     rA = _make_runner(create_user, workspace, pod, "agentA")
     rB = _make_runner(create_user, workspace, pod, "agentB")
     _make_run(create_user, workspace, pod, prompt="for B", pinned_runner=rB)
@@ -322,15 +318,14 @@ def test_next_for_runner_excludes_pinned_to_others(
 
 
 @pytest.mark.unit
-def test_drain_pod_skips_pinned_to_busy_runner(
-    db, create_user, workspace, pod
-):
+def test_drain_pod_skips_pinned_to_busy_runner(db, create_user, workspace, pod):
     """Head-of-line is not blocked when the head run is pinned to a busy runner."""
     rA = _make_runner(create_user, workspace, pod, "agentA")
     rB = _make_runner(create_user, workspace, pod, "agentB")
     # Make rA busy.
     AgentRun.objects.create(
         owner=create_user,
+        created_by=create_user,
         workspace=workspace,
         pod=pod,
         prompt="agentA's current",
@@ -338,9 +333,7 @@ def test_drain_pod_skips_pinned_to_busy_runner(
         status=AgentRunStatus.RUNNING,
     )
     # Older pinned-to-busy-A run + newer unpinned run.
-    pinned_for_a = _make_run(
-        create_user, workspace, pod, prompt="for A later", pinned_runner=rA
-    )
+    pinned_for_a = _make_run(create_user, workspace, pod, prompt="for A later", pinned_runner=rA)
     unpinned = _make_run(create_user, workspace, pod, prompt="anyone")
 
     n = matcher.drain_pod(pod)
@@ -355,14 +348,10 @@ def test_drain_pod_skips_pinned_to_busy_runner(
 
 
 @pytest.mark.unit
-def test_drain_for_runner_picks_personal_first(
-    db, create_user, workspace, pod
-):
+def test_drain_for_runner_picks_personal_first(db, create_user, workspace, pod):
     rA = _make_runner(create_user, workspace, pod, "agentA")
     older_unpinned = _make_run(create_user, workspace, pod, prompt="any")
-    pinned = _make_run(
-        create_user, workspace, pod, prompt="mine", pinned_runner=rA
-    )
+    pinned = _make_run(create_user, workspace, pod, prompt="mine", pinned_runner=rA)
 
     assigned = matcher.drain_for_runner(rA)
     assert assigned is True
@@ -375,12 +364,11 @@ def test_drain_for_runner_picks_personal_first(
 
 
 @pytest.mark.unit
-def test_drain_for_runner_returns_false_when_busy(
-    db, create_user, workspace, pod
-):
+def test_drain_for_runner_returns_false_when_busy(db, create_user, workspace, pod):
     rA = _make_runner(create_user, workspace, pod, "agentA")
     AgentRun.objects.create(
         owner=create_user,
+        created_by=create_user,
         workspace=workspace,
         pod=pod,
         prompt="busy",
@@ -403,9 +391,7 @@ def test_drain_for_runner_returns_false_when_busy(
 
 
 @pytest.mark.unit
-def test_drain_for_runner_does_not_rebuild_prompt_for_followup(
-    db, create_user, workspace, pod
-):
+def test_drain_for_runner_does_not_rebuild_prompt_for_followup(db, create_user, workspace, pod):
     """Follow-up runs ship the prompt as recorded at creation time.
 
     A late-arriving comment between run-creation and dispatch is *not* swept
@@ -419,9 +405,7 @@ def test_drain_for_runner_does_not_rebuild_prompt_for_followup(
 
     rA = _make_runner(create_user, workspace, pod, "rA")
     with impersonate(create_user):
-        project = Project.objects.create(
-            name="P", identifier="P", workspace=workspace, created_by=create_user
-        )
+        project = Project.objects.create(name="P", identifier="P", workspace=workspace, created_by=create_user)
         todo = State.objects.create(name="Todo", project=project, group="unstarted")
         issue = Issue.objects.create(
             name="task",
@@ -432,6 +416,7 @@ def test_drain_for_runner_does_not_rebuild_prompt_for_followup(
         )
     parent = AgentRun.objects.create(
         owner=create_user,
+        created_by=create_user,
         workspace=workspace,
         pod=pod,
         work_item=issue,
@@ -443,6 +428,7 @@ def test_drain_for_runner_does_not_rebuild_prompt_for_followup(
     )
     queued = AgentRun.objects.create(
         owner=create_user,
+        created_by=create_user,
         workspace=workspace,
         pod=pod,
         work_item=issue,
@@ -453,8 +439,11 @@ def test_drain_for_runner_does_not_rebuild_prompt_for_followup(
     )
     with impersonate(create_user):
         IssueComment.objects.create(
-            issue=issue, project=issue.project, workspace=issue.workspace,
-            actor=create_user, comment_html="<p>arrived after queue</p>",
+            issue=issue,
+            project=issue.project,
+            workspace=issue.workspace,
+            actor=create_user,
+            comment_html="<p>arrived after queue</p>",
         )
 
     assert matcher.drain_for_runner(rA) is True
@@ -463,9 +452,7 @@ def test_drain_for_runner_does_not_rebuild_prompt_for_followup(
 
 
 @pytest.mark.unit
-def test_drain_does_not_rebuild_first_turn_prompt(
-    db, create_user, workspace, pod
-):
+def test_drain_does_not_rebuild_first_turn_prompt(db, create_user, workspace, pod):
     """A fresh run (parent_run is None) keeps its as-stored prompt."""
     rA = _make_runner(create_user, workspace, pod, "rA")
     run = _make_run(create_user, workspace, pod, prompt="original first-turn body")

@@ -2,22 +2,19 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 # See the LICENSE file for details.
 
-"""Token minting + hashing + JWT helpers for the per-runner transport.
+"""Token minting + hashing helpers for runner auth.
 
-Three token kinds are minted server-side under the new HTTPS long-poll
-transport (see ``.ai_design/move_to_https/design.md``):
+MachineToken is the active shared dev-machine credential. Refresh/access
+tokens remain for already-minted legacy ``pidash connect`` enrollments.
 
 - **Enrollment token** (``apd_en_…``) — short-lived, one-time. Created
-  alongside a Runner row in PENDING state. Shown to the user once in
-  the cloud UI as part of the runner-enroll install command.
-- **Refresh token** (``rt_…``) — long-lived per-runner credential
-  stored on disk at 0600. Rotated on every successful refresh.
-- **Machine token** (``mt_…``) — separate machine-scoped CLI
-  credential, independent of runner transport.
+  for deprecated token-based runner setup/recovery.
+- **Machine token** (``mt_…``) — long-lived dev-machine credential used by
+  the CLI and all runners on that machine.
+- **Refresh token** (``rt_…``) — legacy long-lived per-runner credential.
 
-Access tokens are short-lived JWTs minted at refresh time and never
-persisted on disk; see :func:`mint_access_token` /
-:func:`decode_access_token`.
+Access tokens are legacy short-lived JWTs minted at refresh time; see
+:func:`mint_access_token` / :func:`decode_access_token`.
 """
 
 from __future__ import annotations
@@ -110,9 +107,7 @@ def _key_ring() -> Dict[str, Dict[str, str]]:
     """
     keys = getattr(settings, "RUNNER_ACCESS_TOKEN_KEYS", None)
     if not keys:
-        derived = hashlib.sha256(
-            ("runner/access-token/" + settings.SECRET_KEY).encode()
-        ).hexdigest()
+        derived = hashlib.sha256(("runner/access-token/" + settings.SECRET_KEY).encode()).hexdigest()
         return {"default": {"secret": derived, "status": "active"}}
     return {
         entry["kid"]: {
@@ -154,9 +149,7 @@ def mint_access_token(
     - ``rtg`` is the refresh-token generation that minted this token;
       verifiers reject if ``rtg < runner.refresh_token_generation - 1``
     """
-    ttl = ttl_secs if ttl_secs is not None else int(
-        getattr(settings, "ACCESS_TOKEN_TTL_SECS", 3600)
-    )
+    ttl = ttl_secs if ttl_secs is not None else int(getattr(settings, "ACCESS_TOKEN_TTL_SECS", 3600))
     now = int(time.time())
     payload: Dict[str, Any] = {
         "iss": ACCESS_TOKEN_ISS,

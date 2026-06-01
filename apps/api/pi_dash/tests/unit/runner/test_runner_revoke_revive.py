@@ -47,9 +47,7 @@ def enrolled_runner(db, api_client, pending_runner):
 
 
 @pytest.mark.unit
-def test_revoke_keeps_row_and_marks_revoked(
-    db, session_client, enrolled_runner
-):
+def test_revoke_keeps_row_and_marks_revoked(db, session_client, enrolled_runner):
     resp = session_client.post(f"/api/runners/{enrolled_runner.id}/revoke/")
     assert resp.status_code == 200, resp.data
     assert resp.data["status"] == RunnerStatus.REVOKED
@@ -87,9 +85,7 @@ def test_invite_endpoint_is_disabled(db, session_client, workspace, project):
 
 
 @pytest.mark.unit
-def test_revive_endpoint_is_disabled_for_pending_runner(
-    db, session_client, pending_runner
-):
+def test_revive_endpoint_is_disabled_for_pending_runner(db, session_client, pending_runner):
     runner, original = pending_runner
     resp = session_client.post(f"/api/runners/{runner.id}/revive/")
     assert resp.status_code == 410, resp.data
@@ -99,9 +95,7 @@ def test_revive_endpoint_is_disabled_for_pending_runner(
 
 
 @pytest.mark.unit
-def test_revive_endpoint_is_disabled_for_revoked_runner(
-    db, session_client, enrolled_runner
-):
+def test_revive_endpoint_is_disabled_for_revoked_runner(db, session_client, enrolled_runner):
     revoke = session_client.post(f"/api/runners/{enrolled_runner.id}/revoke/")
     assert revoke.status_code == 200
     enrolled_runner.refresh_from_db()
@@ -115,9 +109,7 @@ def test_revive_endpoint_is_disabled_for_revoked_runner(
 
 
 @pytest.mark.unit
-def test_revoke_forbidden_for_non_owner_non_admin(
-    db, api_client, create_user, enrolled_runner
-):
+def test_revoke_404_for_non_owner_private_runner(db, api_client, create_user, enrolled_runner):
     from pi_dash.db.models import User
 
     # ``username`` is unique; ``create_user`` already produced a user
@@ -129,7 +121,7 @@ def test_revoke_forbidden_for_non_owner_non_admin(
     )
     api_client.force_authenticate(user=other)
     resp = api_client.post(f"/api/runners/{enrolled_runner.id}/revoke/")
-    assert resp.status_code == 403
+    assert resp.status_code == 404
 
 
 @pytest.mark.unit

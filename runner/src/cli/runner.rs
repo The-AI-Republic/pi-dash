@@ -13,7 +13,7 @@ use std::io::IsTerminal;
 use std::path::PathBuf;
 
 use crate::cli::runner_ops;
-use crate::cloud::http::{SharedHttpTransport, create_runner};
+use crate::cloud::http::{CreateRunnerRequest, SharedHttpTransport, create_runner};
 use crate::cloud::runners::{delete_runner, probe_cloud_reachable};
 use crate::config::file;
 use crate::config::schema::{AgentKind, MAX_RUNNERS_PER_DAEMON, RunnerConfig};
@@ -100,9 +100,9 @@ pub async fn run(args: RunnerArgs, paths: &Paths) -> Result<()> {
 /// Library entry point: exposed so the TUI's add-runner form can reuse the
 /// same enrollment logic without going through clap.
 ///
-/// Uses the user-scoped CLI token written by `pidash auth login` to ask
-/// the cloud to mint a runner under the caller's identity. Replaces
-/// the legacy connection-secret-bearer flow.
+/// Uses the shared dev-machine token written by `pidash auth login` to ask
+/// the cloud to create a runner under this host. Older configs with a
+/// user-scoped API token are upgraded when the cloud returns a machine token.
 pub async fn add(args: AddArgs, paths: &Paths) -> Result<RunnerConfig> {
     let runner_name = args
         .name
@@ -148,6 +148,8 @@ pub async fn add(args: AddArgs, paths: &Paths) -> Result<RunnerConfig> {
     }
 
     let host_label = hostname_or_unknown();
+    let dev_machine_id =
+        runner_ops::ensure_dev_machine_id(paths).context("ensuring local dev-machine identity")?;
     let transport =
         SharedHttpTransport::new(cloud_url.clone()).context("building HTTP transport for cloud")?;
     // Workspace resolution order:
@@ -162,12 +164,15 @@ pub async fn add(args: AddArgs, paths: &Paths) -> Result<RunnerConfig> {
         .or(runner_ops::load_cli_workspace(paths)?);
     let resp = create_runner(
         &transport,
-        &api_token,
-        workspace_arg.as_deref(),
-        &args.project,
-        &host_label,
-        runner_name,
-        args.pod.as_deref(),
+        CreateRunnerRequest {
+            api_token: &api_token,
+            dev_machine_id: &dev_machine_id,
+            workspace_slug: workspace_arg.as_deref(),
+            project: &args.project,
+            host_label: &host_label,
+            name: runner_name,
+            pod: args.pod.as_deref(),
+        },
     )
     .await
     .with_context(|| format!("cloud rejected runner creation against {cloud_url}"))?;

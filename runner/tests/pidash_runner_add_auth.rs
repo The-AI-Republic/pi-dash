@@ -99,7 +99,7 @@ async fn handle_conn(
         method: method.clone(),
         path: path.clone(),
         api_key,
-        body,
+        body: body.clone(),
     });
 
     let body = match (method.as_str(), path.as_str()) {
@@ -110,6 +110,13 @@ async fn handle_conn(
             r#"{"access_token":"cli-token","user_email":"dev@example.com"}"#
         }
         ("GET", "/api/v1/auth/workspaces/") => workspaces_body.as_str(),
+        ("POST", "/api/v1/auth/machine-token/") => {
+            if body.contains(r#""workspace_slug":"beta""#) {
+                r#"{"machine_token":"mt-dev-token","workspace_slug":"beta"}"#
+            } else {
+                r#"{"machine_token":"mt-dev-token","workspace_slug":"acme"}"#
+            }
+        }
         _ => r#"{"error":"unexpected_request"}"#,
     };
     let status = if body.contains("unexpected_request") {
@@ -288,7 +295,7 @@ async fn runner_add_bootstraps_auth_when_cli_token_is_missing() {
     );
 
     let config = std::fs::read_to_string(paths.config_path()).unwrap();
-    assert!(config.contains("token = \"cli-token\""));
+    assert!(config.contains("token = \"mt-dev-token\""));
     assert!(config.contains("workspace_slug = \"acme\""));
 
     let recorded = fake.recorded.lock().unwrap();
@@ -310,7 +317,7 @@ async fn runner_add_bootstraps_auth_when_cli_token_is_missing() {
         recorded.iter().any(|r| {
             r.method == "POST"
                 && r.path == "/api/v1/runner/runners/"
-                && r.api_key.as_deref() == Some("cli-token")
+                && r.api_key.as_deref() == Some("mt-dev-token")
         }),
         "runner creation was not attempted with the bootstrapped token: {recorded:?}",
     );
@@ -355,7 +362,7 @@ async fn runner_add_auth_bootstrap_uses_explicit_workspace_without_prompt() {
     );
 
     let config = std::fs::read_to_string(paths.config_path()).unwrap();
-    assert!(config.contains("token = \"cli-token\""));
+    assert!(config.contains("token = \"mt-dev-token\""));
     assert!(config.contains("workspace_slug = \"beta\""));
 
     let recorded = fake.recorded.lock().unwrap();

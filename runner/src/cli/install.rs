@@ -21,7 +21,7 @@ pub struct Args {
 
 pub async fn run(args: Args, paths: &Paths) -> Result<()> {
     let svc = crate::service::detect();
-    let enrolled = paths.config_path().exists() && paths.credentials_path().exists();
+    let enrolled = machine_is_configured(paths);
 
     svc.write_unit(paths).await?;
     if !enrolled {
@@ -42,4 +42,20 @@ pub async fn run(args: Args, paths: &Paths) -> Result<()> {
     println!("Service unit refreshed and daemon restarted.");
     println!();
     Ok(())
+}
+
+fn machine_is_configured(paths: &Paths) -> bool {
+    let Ok(cfg) = crate::config::file::load_config(paths) else {
+        return false;
+    };
+    if cfg.runners.is_empty() {
+        return false;
+    }
+    let has_shared_machine_token = cfg
+        .cli
+        .as_ref()
+        .and_then(|cli| cli.token.as_deref())
+        .map(|token| token.starts_with("mt_"))
+        .unwrap_or(false);
+    has_shared_machine_token || paths.credentials_path().exists()
 }

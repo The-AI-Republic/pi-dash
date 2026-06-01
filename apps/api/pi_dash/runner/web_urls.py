@@ -21,6 +21,9 @@ from pi_dash.runner.views import (
     AgentRunReleasePinEndpoint,
     ApprovalDecideEndpoint,
     ApprovalListEndpoint,
+    DevMachineListEndpoint,
+    DevMachineRevokeEndpoint,
+    DevMachineRotateEndpoint,
     MachineTokenTicketEndpoint,
     PodDetailEndpoint,
     PodListEndpoint,
@@ -35,6 +38,17 @@ from pi_dash.runner.views import (
 
 urlpatterns = [
     path("", RunnerListEndpoint.as_view(), name="runner-list"),
+    path("dev-machines/", DevMachineListEndpoint.as_view(), name="dev-machine-list"),
+    path(
+        "dev-machines/<uuid:machine_id>/revoke/",
+        DevMachineRevokeEndpoint.as_view(),
+        name="dev-machine-revoke",
+    ),
+    path(
+        "dev-machines/<uuid:machine_id>/rotate/",
+        DevMachineRotateEndpoint.as_view(),
+        name="dev-machine-rotate",
+    ),
     # Deprecated token-mint route retained only to return a clear 410.
     # New runners are created by `pidash runner add` through the
     # API-token authenticated v1 endpoint.

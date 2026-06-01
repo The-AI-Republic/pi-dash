@@ -205,6 +205,7 @@ pub async fn run(args: Args, paths: &Paths) -> Result<()> {
             version: 2,
             daemon: DaemonConfig {
                 cloud_url: args.url.clone(),
+                dev_machine_id: None,
                 log_level: "info".to_string(),
                 log_retention_days: 14,
                 agent_observability_v1: false,

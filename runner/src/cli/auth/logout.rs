@@ -1,6 +1,6 @@
-//! `pidash auth logout` — revoke CLI token server-side and clear it
-//! locally. Leaves `[[runner]]` blocks + per-runner credentials
-//! untouched: the daemon keeps running under its own identity.
+//! `pidash auth logout` — revoke the shared dev-machine token server-side
+//! and clear it locally. Leaves `[[runner]]` blocks untouched, but a daemon
+//! restart needs `pidash auth login` before runners can reconnect.
 
 use anyhow::{Context, Result};
 use clap::Args as ClapArgs;
@@ -68,10 +68,12 @@ pub async fn run(args: Args, paths: &Paths) -> Result<()> {
     {
         println!();
         println!(
-            "Runner credentials on this host are unchanged ({} runner(s) still configured).",
+            "{} runner(s) are still configured on this host.",
             c.runners.len()
         );
-        println!("Run `pidash runner remove <name>` to remove a runner.");
+        println!(
+            "Run `pidash auth login` before reconnecting them, or `pidash runner remove <name>` to remove one."
+        );
     }
     Ok(())
 }
