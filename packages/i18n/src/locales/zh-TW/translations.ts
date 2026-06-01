@@ -5,6 +5,8 @@
  */
 
 export default {
+  pod: "Pod",
+  pod_default_badge: "Default",
   sidebar: {
     projects: "專案",
     pages: "頁面",

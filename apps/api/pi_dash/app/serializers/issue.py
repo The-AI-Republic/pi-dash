@@ -43,6 +43,7 @@ from pi_dash.db.models import (
     ProjectMember,
     EstimatePoint,
 )
+from pi_dash.runner.models import Pod
 from pi_dash.utils.content_validator import (
     validate_html_content,
     validate_binary_data,
@@ -117,6 +118,13 @@ class IssueCreateSerializer(BaseSerializer):
     parent_id = serializers.PrimaryKeyRelatedField(
         source="parent", queryset=Issue.objects.all(), required=False, allow_null=True
     )
+    # Pod this issue's runs dispatch to. Exposed under the ``*_id`` convention
+    # (like state_id / parent_id) so the web client routes it the same way as
+    # every other FK. The bare ``assigned_pod`` model field is removed from the
+    # auto-generated set below so this is the single read/write key.
+    assigned_pod_id = serializers.PrimaryKeyRelatedField(
+        source="assigned_pod", queryset=Pod.objects.all(), required=False, allow_null=True
+    )
     label_ids = serializers.ListField(
         child=serializers.PrimaryKeyRelatedField(queryset=Label.objects.all()),
         write_only=True,
@@ -134,8 +142,9 @@ class IssueCreateSerializer(BaseSerializer):
         model = Issue
         # Exclude the agent workpad — it's read/written via the dedicated
         # workpad endpoint and would bloat every web-tier issue payload if
-        # included here.
-        exclude = ["workpad"]
+        # included here. ``assigned_pod`` is excluded too because it's surfaced
+        # explicitly as ``assigned_pod_id`` above (the *_id FK convention).
+        exclude = ["workpad", "assigned_pod"]
         read_only_fields = [
             "workspace",
             "project",
@@ -202,11 +211,24 @@ class IssueCreateSerializer(BaseSerializer):
                 project_id = getattr(proj, "id", proj)
             if project_id is not None and str(pod.project_id) != str(project_id):
                 raise serializers.ValidationError(
-                    {"assigned_pod": "pod is in a different project"}
+                    {"assigned_pod_id": "pod is in a different project"}
                 )
             if pod.deleted_at is not None:
                 raise serializers.ValidationError(
-                    {"assigned_pod": "pod has been deleted"}
+                    {"assigned_pod_id": "pod has been deleted"}
+                )
+            # Block mid-flight reassignment. Once a run is queued/executing its
+            # pod FK is immutable, so re-pointing the issue would silently take
+            # effect only on the *next* dispatch — confusing and unsafe. Only
+            # reject when the pod actually changes; re-sending the current pod
+            # (the web form re-PATCHes the full editable set on blur) is a no-op.
+            if (
+                self.instance is not None
+                and str(pod.id) != str(self.instance.assigned_pod_id)
+                and self.instance.has_active_run
+            ):
+                raise serializers.ValidationError(
+                    {"assigned_pod_id": "cannot reassign pod while the issue has an active run"}
                 )
 
         # Validate description content for security
@@ -866,6 +888,10 @@ class IssueIntakeSerializer(DynamicBaseSerializer):
 class IssueSerializer(DynamicBaseSerializer):
     # ids
     cycle_id = serializers.PrimaryKeyRelatedField(read_only=True)
+    # FK id only (PK-only optimization — no extra query). Lets the UI show and
+    # round-trip the issue's current pod. Reassignment while a run is active is
+    # rejected server-side in IssueCreateSerializer.validate.
+    assigned_pod_id = serializers.PrimaryKeyRelatedField(source="assigned_pod", read_only=True)
     module_ids = serializers.ListField(child=serializers.UUIDField(), required=False)
 
     # Many to many
@@ -897,6 +923,7 @@ class IssueSerializer(DynamicBaseSerializer):
             "project_id",
             "parent_id",
             "cycle_id",
+            "assigned_pod_id",
             "module_ids",
             "label_ids",
             "assignee_ids",

@@ -79,7 +79,7 @@ def test_issue_create_serializer_rejects_cross_project_pod(
             "name": "An issue",
             "project": str(project.id),
             "state": str(state.id),
-            "assigned_pod": str(other_pod.id),
+            "assigned_pod_id": str(other_pod.id),
         },
         context={
             "project_id": str(project.id),
@@ -88,7 +88,7 @@ def test_issue_create_serializer_rejects_cross_project_pod(
     )
     valid = serializer.is_valid()
     assert not valid, serializer.errors
-    err = serializer.errors.get("assigned_pod") or serializer.errors
+    err = serializer.errors.get("assigned_pod_id") or serializer.errors
     assert any("different project" in str(e) for e in err)
 
 
@@ -118,7 +118,7 @@ def test_issue_create_serializer_accepts_same_project_pod(
                 "name": "An issue",
                 "project": str(project.id),
                 "state": str(state.id),
-                "assigned_pod": str(same_pod.id),
+                "assigned_pod_id": str(same_pod.id),
             },
             context={
                 "project_id": str(project.id),

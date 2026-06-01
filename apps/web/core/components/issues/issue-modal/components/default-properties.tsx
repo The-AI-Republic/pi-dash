@@ -22,6 +22,7 @@ import { DateDropdown } from "@/components/dropdowns/date";
 import { EstimateDropdown } from "@/components/dropdowns/estimate";
 import { MemberDropdown } from "@/components/dropdowns/member/dropdown";
 import { ModuleDropdown } from "@/components/dropdowns/module/dropdown";
+import { PodDropdown } from "@/components/dropdowns/pod/dropdown";
 import { PriorityDropdown } from "@/components/dropdowns/priority";
 import { StateDropdown } from "@/components/dropdowns/state/dropdown";
 import { ParentIssuesListModal } from "@/components/issues/parent-issues-list-modal";
@@ -101,6 +102,24 @@ export const IssueDefaultProperties = observer(function IssueDefaultProperties(p
               projectId={projectId ?? undefined}
               buttonVariant="border-with-text"
               tabIndex={getIndex("state_id")}
+              isForWorkItemCreation={!id}
+            />
+          </div>
+        )}
+      />
+      <Controller
+        control={control}
+        name="assigned_pod_id"
+        render={({ field: { value, onChange } }) => (
+          <div className="h-7">
+            <PodDropdown
+              value={value}
+              onChange={(podId) => {
+                onChange(podId);
+                handleFormChange();
+              }}
+              projectId={projectId ?? undefined}
+              buttonVariant="border-with-text"
               isForWorkItemCreation={!id}
             />
           </div>
