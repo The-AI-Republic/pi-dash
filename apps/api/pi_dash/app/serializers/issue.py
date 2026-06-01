@@ -43,6 +43,7 @@ from pi_dash.db.models import (
     ProjectMember,
     EstimatePoint,
 )
+from pi_dash.runner.models import Pod
 from pi_dash.utils.content_validator import (
     validate_html_content,
     validate_binary_data,
@@ -117,6 +118,18 @@ class IssueCreateSerializer(BaseSerializer):
     parent_id = serializers.PrimaryKeyRelatedField(
         source="parent", queryset=Issue.objects.all(), required=False, allow_null=True
     )
+    # Pod this issue's runs dispatch to. Exposed under the ``*_id`` convention
+    # (like state_id / parent_id) so the web client routes it the same way as
+    # every other FK. The bare ``assigned_pod`` model field is removed from the
+    # auto-generated set below so this is the single read/write key.
+    # ``all_objects`` (not the default manager, which hides soft-deleted pods)
+    # so a tombstoned pod id still resolves and validate() can return the
+    # friendly "pod has been deleted" message instead of DRF's generic
+    # "object does not exist". Cross-project / deleted pods are rejected in
+    # validate(), not here.
+    assigned_pod_id = serializers.PrimaryKeyRelatedField(
+        source="assigned_pod", queryset=Pod.all_objects.all(), required=False, allow_null=True
+    )
     label_ids = serializers.ListField(
         child=serializers.PrimaryKeyRelatedField(queryset=Label.objects.all()),
         write_only=True,
@@ -134,8 +147,9 @@ class IssueCreateSerializer(BaseSerializer):
         model = Issue
         # Exclude the agent workpad — it's read/written via the dedicated
         # workpad endpoint and would bloat every web-tier issue payload if
-        # included here.
-        exclude = ["workpad"]
+        # included here. ``assigned_pod`` is excluded too because it's surfaced
+        # explicitly as ``assigned_pod_id`` above (the *_id FK convention).
+        exclude = ["workpad", "assigned_pod"]
         read_only_fields = [
             "workspace",
             "project",
@@ -191,23 +205,36 @@ class IssueCreateSerializer(BaseSerializer):
         # the same workspace would be a cross-project routing escape hatch
         # — a Project P issue could end up assigned to Project Q's pod and
         # dispatch would happily route P's runs to Q's runners.
-        if "assigned_pod" in attrs and attrs["assigned_pod"] is not None:
-            pod = attrs["assigned_pod"]
-            project_id = self.context.get("project_id")
-            if project_id is None and self.instance is not None:
-                project_id = self.instance.project_id
-            # ``project`` may also be present in attrs on issue create.
-            if project_id is None and "project" in attrs and attrs["project"] is not None:
-                proj = attrs["project"]
-                project_id = getattr(proj, "id", proj)
-            if project_id is not None and str(pod.project_id) != str(project_id):
-                raise serializers.ValidationError(
-                    {"assigned_pod": "pod is in a different project"}
-                )
-            if pod.deleted_at is not None:
-                raise serializers.ValidationError(
-                    {"assigned_pod": "pod has been deleted"}
-                )
+        if "assigned_pod" in attrs:
+            pod = attrs["assigned_pod"]  # may be None when clearing the pod
+            if pod is not None:
+                project_id = self.context.get("project_id")
+                if project_id is None and self.instance is not None:
+                    project_id = self.instance.project_id
+                # ``project`` may also be present in attrs on issue create.
+                if project_id is None and "project" in attrs and attrs["project"] is not None:
+                    proj = attrs["project"]
+                    project_id = getattr(proj, "id", proj)
+                if project_id is not None and str(pod.project_id) != str(project_id):
+                    raise serializers.ValidationError(
+                        {"assigned_pod_id": "pod is in a different project"}
+                    )
+                if pod.deleted_at is not None:
+                    raise serializers.ValidationError(
+                        {"assigned_pod_id": "pod has been deleted"}
+                    )
+            # Block mid-flight *reassignment* — changing OR clearing the pod once
+            # a run is active. The run's pod FK is immutable, so a change would
+            # silently take effect only on the *next* dispatch (and clearing to
+            # null would re-route the next run to the project default). Initial
+            # assignment (no prior pod) is allowed; re-sending the current pod
+            # (the web form re-PATCHes the full editable set on blur) is a no-op.
+            if self.instance is not None and self.instance.assigned_pod_id is not None:
+                new_pod_id = pod.id if pod is not None else None
+                if str(new_pod_id) != str(self.instance.assigned_pod_id) and self.instance.has_active_run:
+                    raise serializers.ValidationError(
+                        {"assigned_pod_id": "cannot reassign pod while the issue has an active run"}
+                    )
 
         # Validate description content for security
         if "description_html" in attrs and attrs["description_html"]:
@@ -866,6 +893,10 @@ class IssueIntakeSerializer(DynamicBaseSerializer):
 class IssueSerializer(DynamicBaseSerializer):
     # ids
     cycle_id = serializers.PrimaryKeyRelatedField(read_only=True)
+    # FK id only (PK-only optimization — no extra query). Lets the UI show and
+    # round-trip the issue's current pod. Reassignment while a run is active is
+    # rejected server-side in IssueCreateSerializer.validate.
+    assigned_pod_id = serializers.PrimaryKeyRelatedField(source="assigned_pod", read_only=True)
     module_ids = serializers.ListField(child=serializers.UUIDField(), required=False)
 
     # Many to many
@@ -897,6 +928,7 @@ class IssueSerializer(DynamicBaseSerializer):
             "project_id",
             "parent_id",
             "cycle_id",
+            "assigned_pod_id",
             "module_ids",
             "label_ids",
             "assignee_ids",

@@ -197,6 +197,25 @@ class Issue(ProjectBaseModel):
 
     issue_objects = IssueManager()
 
+    @property
+    def has_active_run(self) -> bool:
+        """True when this issue has a non-terminal (active) AgentRun.
+
+        Used to block pod reassignment mid-flight: once a run is queued or
+        executing, that run's pod FK is immutable, so changing
+        ``assigned_pod`` would silently desync the issue from its live run
+        (the change would only take effect on the *next* dispatch). Reuses
+        the canonical ``NON_TERMINAL_STATUSES`` set rather than redefining
+        "active" here. Lazy imports mirror ``save()`` to avoid an app-load
+        cycle with the runner app.
+        """
+        from pi_dash.runner.models import AgentRun
+        from pi_dash.runner.services.matcher import NON_TERMINAL_STATUSES
+
+        return AgentRun.objects.filter(
+            work_item=self, status__in=NON_TERMINAL_STATUSES
+        ).exists()
+
     class Meta:
         verbose_name = "Issue"
         verbose_name_plural = "Issues"

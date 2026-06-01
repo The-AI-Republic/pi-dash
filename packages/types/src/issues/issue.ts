@@ -65,6 +65,11 @@ export type TBaseIssue = {
   module_ids: string[] | null;
   type_id: string | null;
 
+  // Pod (runner queue) this issue's agent runs dispatch to. Null falls back to
+  // the project's default pod, resolved server-side. Reassignment is rejected
+  // by the backend once the issue has an active run.
+  assigned_pod_id?: string | null;
+
   created_at: string;
   updated_at: string;
   start_date: string | null;

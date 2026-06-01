@@ -5,6 +5,8 @@
  */
 
 export default {
+  pod: "Pod",
+  pod_default_badge: "Default",
   submit: "Submit",
   cancel: "Cancel",
   loading: "Loading",
