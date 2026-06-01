@@ -53,7 +53,7 @@ export const ActiveCycleProductivity = observer(function ActiveCycleProductivity
     <div className="flex min-h-[17rem] flex-col gap-5 rounded-lg border border-subtle bg-surface-1 px-3.5 py-4">
       <div className="relative flex items-center justify-between gap-4">
         <Link href={`/${workspaceSlug}/projects/${projectId}/cycles/${cycle?.id}`}>
-          <h3 className="text-14 font-semibold text-tertiary">{t("project_cycles.active_cycle.issue_burndown")}</h3>
+          <h3 className="text-14 font-semibold text-tertiary">{t("Work item burndown")}</h3>
         </Link>
         <EstimateTypeDropdown value={estimateType} onChange={onChange} cycleId={cycle.id} projectId={projectId} />
       </div>
@@ -94,7 +94,7 @@ export const ActiveCycleProductivity = observer(function ActiveCycleProductivity
         ) : (
           <>
             <div className="flex h-full w-full items-center justify-center">
-              <SimpleEmptyState title={t("active_cycle.empty_state.chart.title")} assetPath={resolvedPath} />
+              <SimpleEmptyState title={t("Add work items to the cycle to view the burndown chart.")} assetPath={resolvedPath} />
             </div>
           </>
         )}

@@ -59,16 +59,16 @@ const PromptsListPage = observer(function PromptsListPage() {
       mutate();
       setToast({
         type: TOAST_TYPE.SUCCESS,
-        title: t("prompts.toast.created_title"),
-        message: t("prompts.toast.created_message"),
+        title: t("Workspace override created"),
+        message: t("We copied the current Pi Dash default. Edit and save to customize it."),
       });
       navigate(`/${slug}/prompts/${created.id}`);
     } catch (e: unknown) {
       const err = e as { error?: string } | null;
       setToast({
         type: TOAST_TYPE.ERROR,
-        title: t("prompts.toast.error_title"),
-        message: err?.error ?? t("prompts.toast.customize_failed"),
+        title: t("Something went wrong"),
+        message: err?.error ?? t("Could not create the workspace override."),
       });
     } finally {
       setCustomizing(false);
@@ -84,22 +84,22 @@ const PromptsListPage = observer(function PromptsListPage() {
       mutate();
       setToast({
         type: TOAST_TYPE.SUCCESS,
-        title: t("prompts.toast.reverted_title"),
-        message: t("prompts.toast.reverted_message"),
+        title: t("Reverted to Pi Dash default"),
+        message: t("This workspace is back on the shared default template."),
       });
     } catch (e: unknown) {
       const err = e as { error?: string } | null;
       setToast({
         type: TOAST_TYPE.ERROR,
-        title: t("prompts.toast.error_title"),
-        message: err?.error ?? t("prompts.toast.revert_failed"),
+        title: t("Something went wrong"),
+        message: err?.error ?? t("Could not revert the prompt."),
       });
     } finally {
       setArchiving(false);
     }
   }
 
-  const pageTitle = currentWorkspace?.name ? `${currentWorkspace.name} · ${t("prompts.title")}` : t("prompts.title");
+  const pageTitle = currentWorkspace?.name ? `${currentWorkspace.name} · ${t("Prompts")}` : t("Prompts");
 
   return (
     <div className="flex flex-col gap-6 p-6">
@@ -107,12 +107,12 @@ const PromptsListPage = observer(function PromptsListPage() {
 
       <header className="flex items-start justify-between gap-4">
         <div>
-          <h1 className="text-16 font-semibold text-primary">{t("prompts.title")}</h1>
-          <p className="mt-1 text-13 text-secondary">{t("prompts.subtitle")}</p>
+          <h1 className="text-16 font-semibold text-primary">{t("Prompts")}</h1>
+          <p className="mt-1 text-13 text-secondary">{t("System prompt templates that get rendered against each issue before an agent run. Workspace admins can customize the default for this workspace.")}</p>
         </div>
         {canEdit && !workspaceOverride && (
           <Button onClick={handleCustomize} loading={customizing} disabled={customizing}>
-            {t("prompts.customize")}
+            {t("Customize for this workspace")}
           </Button>
         )}
       </header>
@@ -121,10 +121,10 @@ const PromptsListPage = observer(function PromptsListPage() {
         <table className="w-full text-13">
           <thead className="bg-layer-1 text-left text-secondary">
             <tr>
-              <th className="px-3 py-2">{t("prompts.columns.name")}</th>
-              <th className="px-3 py-2">{t("prompts.columns.scope")}</th>
-              <th className="px-3 py-2">{t("prompts.columns.version")}</th>
-              <th className="px-3 py-2">{t("prompts.columns.updated")}</th>
+              <th className="px-3 py-2">{t("Name")}</th>
+              <th className="px-3 py-2">{t("Scope")}</th>
+              <th className="px-3 py-2">{t("Version")}</th>
+              <th className="px-3 py-2">{t("Updated")}</th>
               <th className="px-3 py-2"></th>
             </tr>
           </thead>
@@ -150,7 +150,7 @@ const PromptsListPage = observer(function PromptsListPage() {
             {rows.length === 0 && (
               <tr>
                 <td colSpan={5} className="px-3 py-8 text-center text-secondary">
-                  {t("prompts.list.empty")}
+                  {t("No prompt templates available. The Pi Dash default will be seeded on the next migrate.")}
                 </td>
               </tr>
             )}
@@ -163,11 +163,11 @@ const PromptsListPage = observer(function PromptsListPage() {
         handleClose={() => (archiving ? null : setArchiveTarget(null))}
         handleSubmit={confirmArchive}
         isSubmitting={archiving}
-        title={t("prompts.revert.confirm_title")}
-        content={t("prompts.revert.confirm_body")}
+        title={t("Revert to the Pi Dash default?")}
+        content={t("This archives your workspace-scoped template. New agent runs in this workspace will use the Pi Dash default until you create another override.")}
         primaryButtonText={{
-          default: t("prompts.revert.confirm"),
-          loading: t("prompts.revert.confirm"),
+          default: t("Revert"),
+          loading: t("Revert"),
         }}
       />
     </div>
@@ -189,11 +189,11 @@ function TemplateRow({ template, slug, canEdit, onArchive }: RowProps) {
       <td className="px-3 py-2">
         {template.is_global_default ? (
           <Badge variant="accent-neutral" size="sm">
-            {t("prompts.scope.default")}
+            {t("Pi Dash default")}
           </Badge>
         ) : (
           <Badge variant="accent-primary" size="sm">
-            {t("prompts.scope.workspace")}
+            {t("Workspace override")}
           </Badge>
         )}
       </td>
@@ -202,11 +202,11 @@ function TemplateRow({ template, slug, canEdit, onArchive }: RowProps) {
       <td className="px-3 py-2 text-right">
         <div className="flex items-center justify-end gap-2">
           <Link to={`/${slug}/prompts/${template.id}`} className="text-13 text-secondary hover:text-primary">
-            {canEdit && !template.is_global_default ? t("prompts.actions.edit") : t("prompts.actions.view")}
+            {canEdit && !template.is_global_default ? t("Edit") : t("View")}
           </Link>
           {canEdit && onArchive && (
             <Button variant="tertiary-danger" size="sm" onClick={onArchive}>
-              {t("prompts.actions.revert")}
+              {t("Revert to default")}
             </Button>
           )}
         </div>

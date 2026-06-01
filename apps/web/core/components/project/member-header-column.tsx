@@ -110,7 +110,7 @@ export const MemberHeaderColumn = observer(function MemberHeaderColumn(props: Pr
             <CustomMenu.MenuItem className="mt-0.5" key={property} onClick={handleClearSorting}>
               <div className="flex items-center gap-2 px-1">
                 <Eraser className="h-3 w-3" />
-                <span>{t("common.actions.clear_sorting")}</span>
+                <span>{t("Clear sorting")}</span>
               </div>
             </CustomMenu.MenuItem>
           )}

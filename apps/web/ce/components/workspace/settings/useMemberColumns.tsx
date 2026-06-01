@@ -44,7 +44,7 @@ export const useMemberColumns = () => {
   const columns = [
     {
       key: "Full name",
-      content: t("workspace_settings.settings.members.details.full_name"),
+      content: t("Full name"),
       thClassName: "text-left",
       thRender: () => (
         <MemberHeaderColumn
@@ -66,7 +66,7 @@ export const useMemberColumns = () => {
 
     {
       key: "Display name",
-      content: t("workspace_settings.settings.members.details.display_name"),
+      content: t("Display name"),
       tdRender: (rowData: RowData) => (
         <div className={`w-32 ${isSuspended(rowData) ? "text-placeholder" : ""}`}>{rowData.member.display_name}</div>
       ),
@@ -81,7 +81,7 @@ export const useMemberColumns = () => {
 
     {
       key: "Email address",
-      content: t("workspace_settings.settings.members.details.email_address"),
+      content: t("Email address"),
       tdRender: (rowData: RowData) => (
         <div className={`w-48 truncate ${isSuspended(rowData) ? "text-placeholder" : ""}`}>{rowData.member.email}</div>
       ),
@@ -96,7 +96,7 @@ export const useMemberColumns = () => {
 
     {
       key: "Account type",
-      content: t("workspace_settings.settings.members.details.account_type"),
+      content: t("Account type"),
       thRender: () => (
         <MemberHeaderColumn
           property="role"
@@ -109,7 +109,7 @@ export const useMemberColumns = () => {
 
     {
       key: "Authentication",
-      content: t("workspace_settings.settings.members.details.authentication"),
+      content: t("Authentication"),
       tdRender: (rowData: RowData) => {
         if (isSuspended(rowData)) return null;
         const loginMedium = rowData.member.last_login_medium;
@@ -120,7 +120,7 @@ export const useMemberColumns = () => {
 
     {
       key: "Joining date",
-      content: t("workspace_settings.settings.members.details.joining_date"),
+      content: t("Joining date"),
       tdRender: (rowData: RowData) =>
         isSuspended(rowData) ? null : <div>{renderFormattedDate(rowData?.member?.joining_date)}</div>,
       thRender: () => (

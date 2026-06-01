@@ -62,8 +62,8 @@ export const ActivityProfileSettings = observer(function ActivityProfileSettings
     return (
       <div className="flex size-full flex-col gap-y-7">
         <ProfileSettingsHeading
-          title={t("account_settings.activity.heading")}
-          description={t("account_settings.activity.description")}
+          title={t("Activity")}
+          description={t("Track your recent actions and changes across all projects and work items.")}
         />
         <DetailedEmptyState
           title={""}
@@ -79,14 +79,14 @@ export const ActivityProfileSettings = observer(function ActivityProfileSettings
   return (
     <div className="size-full">
       <ProfileSettingsHeading
-        title={t("account_settings.activity.heading")}
-        description={t("account_settings.activity.description")}
+        title={t("Activity")}
+        description={t("Track your recent actions and changes across all projects and work items.")}
       />
       <div className="mt-7 w-full">{activityPages}</div>
       {isLoadMoreVisible && (
         <div className="mt-4 flex w-full items-center justify-center">
           <Button variant="ghost" onClick={handleLoadMore} appendIcon={<ChevronDown />}>
-            {t("load_more")}
+            {t("Load more")}
           </Button>
         </div>
       )}

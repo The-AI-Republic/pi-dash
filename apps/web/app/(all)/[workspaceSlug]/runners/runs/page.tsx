@@ -34,6 +34,19 @@ const STATUS_BADGE_VARIANT: Record<TAgentRunStatus, TBadgeVariant> = {
   cancelled: "accent-neutral",
 };
 
+const RUN_STATUS_I18N_LABELS: Record<TAgentRunStatus, string> = {
+  queued: "queued",
+  assigned: "assigned",
+  running: "running",
+  awaiting_approval: "awaiting approval",
+  awaiting_reauth: "awaiting reauth",
+  paused_awaiting_input: "paused awaiting input",
+  blocked: "blocked",
+  completed: "completed",
+  failed: "failed",
+  cancelled: "cancelled",
+};
+
 function isTerminal(status: TAgentRunStatus): boolean {
   return AGENT_RUN_TERMINAL_STATUSES.includes(status);
 }
@@ -80,8 +93,8 @@ export const RunnerRunsPage = observer(function RunnerRunsPage() {
       const err = e as { error?: string } | null;
       setToast({
         type: TOAST_TYPE.ERROR,
-        title: t("runners.toast.error_title"),
-        message: err?.error ?? t("runners.runs.cancel_failed"),
+        title: t("Error!"),
+        message: err?.error ?? t("Failed to cancel run"),
       });
     } finally {
       setCancelling(false);
@@ -89,8 +102,8 @@ export const RunnerRunsPage = observer(function RunnerRunsPage() {
   }
 
   const pageTitle = currentWorkspace?.name
-    ? t("runners.page_title", { workspace: currentWorkspace.name })
-    : t("runners.title");
+    ? t("{workspace} - AI Agents", { workspace: currentWorkspace.name })
+    : t("AI Agents");
 
   return (
     <div className="flex flex-col gap-6">
@@ -101,9 +114,9 @@ export const RunnerRunsPage = observer(function RunnerRunsPage() {
           <table className="w-full text-13">
             <thead className="bg-layer-1 text-left text-secondary">
               <tr>
-                <th className="px-3 py-2">{t("runners.runs.columns.started")}</th>
-                <th className="px-3 py-2">{t("runners.runs.columns.status")}</th>
-                <th className="px-3 py-2">{t("runners.runs.columns.prompt")}</th>
+                <th className="px-3 py-2">{t("Started")}</th>
+                <th className="px-3 py-2">{t("Status")}</th>
+                <th className="px-3 py-2">{t("Prompt")}</th>
               </tr>
             </thead>
             <tbody>
@@ -118,7 +131,7 @@ export const RunnerRunsPage = observer(function RunnerRunsPage() {
                   <td className="px-3 py-2 whitespace-nowrap">{new Date(r.created_at).toLocaleString()}</td>
                   <td className="px-3 py-2">
                     <Badge variant={STATUS_BADGE_VARIANT[r.status]} size="sm">
-                      {t(`runners.runs.status.${r.status}`)}
+                      {t(RUN_STATUS_I18N_LABELS[r.status])}
                     </Badge>
                   </td>
                   <td className="font-mono max-w-[180px] truncate px-3 py-2 text-11">{r.prompt}</td>
@@ -127,7 +140,7 @@ export const RunnerRunsPage = observer(function RunnerRunsPage() {
               {(runs ?? []).length === 0 && (
                 <tr>
                   <td colSpan={3} className="px-3 py-8 text-center text-secondary">
-                    {t("runners.runs.empty")}
+                    {t("No runs yet.")}
                   </td>
                 </tr>
               )}
@@ -137,9 +150,9 @@ export const RunnerRunsPage = observer(function RunnerRunsPage() {
 
         <div className="rounded-md border border-subtle p-4">
           {selected && detailError ? (
-            <div className="text-13 text-danger-primary">{t("runners.runs.detail_load_failed")}</div>
+            <div className="text-13 text-danger-primary">{t("This run is not available. It may have been deleted or belong to a different workspace.")}</div>
           ) : !detail ? (
-            <div className="text-13 text-secondary">{t("runners.runs.select_run")}</div>
+            <div className="text-13 text-secondary">{t("Select a run on the left.")}</div>
           ) : (
             <div className="flex flex-col gap-3">
               <div className="flex items-center justify-between">
@@ -147,29 +160,29 @@ export const RunnerRunsPage = observer(function RunnerRunsPage() {
                   <div className="font-mono text-11">{detail.id}</div>
                   <div className="mt-1">
                     <Badge variant={STATUS_BADGE_VARIANT[detail.status]} size="sm">
-                      {t(`runners.runs.status.${detail.status}`)}
+                      {t(RUN_STATUS_I18N_LABELS[detail.status])}
                     </Badge>
                   </div>
                 </div>
                 {!isTerminal(detail.status) && (
                   <Button variant="tertiary-danger" size="sm" onClick={() => setCancelTarget(detail)}>
-                    {t("runners.runs.cancel")}
+                    {t("Cancel run")}
                   </Button>
                 )}
               </div>
               <div className="text-13">
-                <div className="text-secondary">{t("runners.runs.prompt")}</div>
+                <div className="text-secondary">{t("Prompt")}</div>
                 <pre className="mt-1 rounded bg-layer-1 p-2 text-11 whitespace-pre-wrap">{detail.prompt}</pre>
               </div>
               {detail.error && (
                 <div className="text-13">
-                  <div className="text-danger-primary">{t("runners.runs.error")}</div>
+                  <div className="text-danger-primary">{t("Error")}</div>
                   <pre className="mt-1 rounded bg-danger-subtle p-2 text-11 whitespace-pre-wrap">{detail.error}</pre>
                 </div>
               )}
               {detail.done_payload && (
                 <div className="text-13">
-                  <div className="text-secondary">{t("runners.runs.done_payload")}</div>
+                  <div className="text-secondary">{t("Done payload")}</div>
                   <pre className="mt-1 rounded bg-layer-1 p-2 text-11 whitespace-pre-wrap">
                     {JSON.stringify(detail.done_payload, null, 2)}
                   </pre>
@@ -177,15 +190,15 @@ export const RunnerRunsPage = observer(function RunnerRunsPage() {
               )}
               <div className="text-13">
                 <div className="text-secondary">
-                  {t("runners.runs.events_count", { count: detail.events?.length ?? 0 })}
+                  {t("Events ({count})", { count: detail.events?.length ?? 0 })}
                 </div>
                 <div className="mt-1 max-h-[420px] overflow-auto rounded border border-subtle">
                   <table className="w-full text-11">
                     <thead className="bg-layer-1 text-left text-secondary">
                       <tr>
-                        <th className="px-2 py-1">{t("runners.runs.event_columns.seq")}</th>
-                        <th className="px-2 py-1">{t("runners.runs.event_columns.kind")}</th>
-                        <th className="px-2 py-1">{t("runners.runs.event_columns.at")}</th>
+                        <th className="px-2 py-1">{t("seq")}</th>
+                        <th className="px-2 py-1">{t("kind")}</th>
+                        <th className="px-2 py-1">{t("at")}</th>
                       </tr>
                     </thead>
                     <tbody>
@@ -210,9 +223,9 @@ export const RunnerRunsPage = observer(function RunnerRunsPage() {
         handleClose={() => (cancelling ? null : setCancelTarget(null))}
         handleSubmit={confirmCancel}
         isSubmitting={cancelling}
-        title={t("runners.runs.cancel_confirm_title")}
-        content={t("runners.runs.cancel_confirm_body")}
-        primaryButtonText={{ default: t("runners.runs.cancel"), loading: t("runners.runs.cancel") }}
+        title={t("Cancel run?")}
+        content={t("The runner will stop this run as soon as it gets the signal.")}
+        primaryButtonText={{ default: t("Cancel run"), loading: t("Cancel run") }}
       />
     </div>
   );

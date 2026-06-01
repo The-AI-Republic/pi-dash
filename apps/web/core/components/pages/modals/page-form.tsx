@@ -35,8 +35,8 @@ const PAGE_ACCESS_SPECIFIERS: {
   i18n_label: string;
   icon: LucideIcon | React.FC<ISvgIcons>;
 }[] = [
-  { key: EPageAccess.PUBLIC, i18n_label: "common.access.public", icon: GlobeIcon },
-  { key: EPageAccess.PRIVATE, i18n_label: "common.access.private", icon: LockIcon },
+  { key: EPageAccess.PUBLIC, i18n_label: "Public", icon: GlobeIcon },
+  { key: EPageAccess.PRIVATE, i18n_label: "Private", icon: LockIcon },
 ];
 
 export function PageForm(props: Props) {

@@ -67,10 +67,10 @@ export const PrevExports = observer(function PrevExports(props: Props) {
     <div>
       <div className="flex items-center justify-between border-b border-subtle pb-3.5">
         <div className="flex items-center gap-2">
-          <h3 className="text-h6-medium text-primary">{t("workspace_settings.settings.exports.previous_exports")}</h3>
+          <h3 className="text-h6-medium text-primary">{t("Previous exports")}</h3>
           <Button variant="tertiary" className="shrink-0" onClick={handleRefresh}>
             <RefreshCw className={`h-3 w-3 ${refreshing ? "animate-spin" : ""}`} />
-            {refreshing ? t("refreshing") : t("refresh_status")}
+            {refreshing ? t("Refreshing") : t("Refresh status")}
           </Button>
         </div>
         {!!exporterServices?.results?.length && (
@@ -82,7 +82,7 @@ export const PrevExports = observer(function PrevExports(props: Props) {
               onClick={() => exporterServices?.prev_page_results && setCursor(exporterServices?.prev_cursor)}
               prependIcon={<MoveLeft />}
             >
-              {t("prev")}
+              {t("Prev")}
             </Button>
             <Button
               variant="secondary"
@@ -91,7 +91,7 @@ export const PrevExports = observer(function PrevExports(props: Props) {
               onClick={() => exporterServices?.next_page_results && setCursor(exporterServices?.next_cursor)}
               appendIcon={<MoveRight />}
             >
-              {t("next")}
+              {t("Next")}
             </Button>
           </div>
         )}
@@ -117,8 +117,8 @@ export const PrevExports = observer(function PrevExports(props: Props) {
             <div className="flex h-full w-full items-center justify-center">
               <EmptyStateCompact
                 assetKey="export"
-                title={t("settings_empty_state.exports.title")}
-                description={t("settings_empty_state.exports.description")}
+                title={t("No exports yet")}
+                description={t("You don't have any export records right now. Once you export data, all records will appear here.")}
                 align="start"
                 rootClassName="py-20"
               />

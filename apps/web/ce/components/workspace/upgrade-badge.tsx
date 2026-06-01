@@ -29,7 +29,7 @@ export function UpgradeBadge(props: TUpgradeBadge) {
         className
       )}
     >
-      {t("sidebar.pro")}
+      {t("Pro")}
     </div>
   );
 }

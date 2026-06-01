@@ -28,15 +28,15 @@ export const ProjectAccessRestriction = observer(function ProjectAccessRestricti
     return (
       <div className="grid h-full w-full place-items-center bg-surface-1">
         <EmptyStateDetailed
-          title={t("project_empty_state.no_access.title")}
-          description={t("project_empty_state.no_access.join_description")}
+          title={t("Seems like you don’t have access to this Project")}
+          description={t("Click the button below to join it.")}
           assetKey="no-access"
           assetClassName="size-40"
           actions={[
             {
               label: isJoinButtonDisabled
-                ? t("project_empty_state.no_access.cta_loading")
-                : t("project_empty_state.no_access.cta_primary"),
+                ? t("Joining project")
+                : t("Join project"),
               onClick: handleJoinProject,
               disabled: isJoinButtonDisabled,
             },
@@ -51,8 +51,8 @@ export const ProjectAccessRestriction = observer(function ProjectAccessRestricti
     return (
       <div className="grid h-full w-full place-items-center bg-surface-1">
         <EmptyStateDetailed
-          title={t("project_empty_state.no_access.title")}
-          description={t("project_empty_state.no_access.restricted_description")}
+          title={t("Seems like you don’t have access to this Project")}
+          description={t("Contact admin to request for access and you can continue here.")}
           assetKey="no-access"
           assetClassName="size-40"
         />
@@ -66,8 +66,8 @@ export const ProjectAccessRestriction = observer(function ProjectAccessRestricti
   return (
     <div className="grid h-full w-full place-items-center bg-surface-1">
       <EmptyStateDetailed
-        title={t("project_empty_state.invalid_project.title")}
-        description={t("project_empty_state.invalid_project.description")}
+        title={t("Project not found")}
+        description={t("The project you are looking for does not exist.")}
         assetKey="project"
         assetClassName="size-40"
       />

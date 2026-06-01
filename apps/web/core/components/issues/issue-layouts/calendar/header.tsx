@@ -117,7 +117,7 @@ export const CalendarHeader = observer(function CalendarHeader(props: ICalendarH
           className="rounded-sm bg-layer-transparent px-2.5 py-1 text-11 font-medium text-secondary hover:bg-layer-transparent-hover hover:text-primary"
           onClick={handleToday}
         >
-          {t("common.today")}
+          {t("Today")}
         </button>
         <CalendarOptionsDropdown issuesFilterStore={issuesFilterStore} updateFilters={updateFilters} />
       </div>

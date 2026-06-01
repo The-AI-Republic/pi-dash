@@ -58,8 +58,8 @@ const ActiveCyclesComponent = observer(function ActiveCyclesComponent({
     return (
       <EmptyStateDetailed
         assetKey="cycle"
-        title={t("project_cycles.empty_state.active.title")}
-        description={t("project_cycles.empty_state.active.description")}
+        title={t("No active cycle")}
+        description={t("An active cycle includes any period that encompasses today's date within its range. Find the progress and details of the active cycle here.")}
         rootClassName="py-10 h-auto"
       />
     );
@@ -122,7 +122,7 @@ export const ActiveCycleRoot = observer(function ActiveCycleRoot(props: IActiveC
           {({ open }) => (
             <>
               <Disclosure.Button className="sticky top-0 z-[2] w-full flex-shrink-0 cursor-pointer border-b border-subtle bg-layer-1">
-                <CycleListGroupHeader title={t("project_cycles.active_cycle.label")} type="current" isExpanded={open} />
+                <CycleListGroupHeader title={t("Active cycle")} type="current" isExpanded={open} />
               </Disclosure.Button>
               <Disclosure.Panel>
                 <ActiveCyclesComponent

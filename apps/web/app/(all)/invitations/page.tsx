@@ -68,8 +68,8 @@ function UserInvitationsPage() {
     if (invitationsRespond.length === 0) {
       setToast({
         type: TOAST_TYPE.ERROR,
-        title: t("error"),
-        message: t("please_select_at_least_one_invitation"),
+        title: t("Error"),
+        message: t("Please select at least one invitation."),
       });
       return;
     }
@@ -92,8 +92,8 @@ function UserInvitationsPage() {
           .catch(() => {
             setToast({
               type: TOAST_TYPE.ERROR,
-              title: t("error"),
-              message: t("something_went_wrong_please_try_again"),
+              title: t("Error"),
+              message: t("Something went wrong. Please try again."),
             });
             setIsJoiningWorkspaces(false);
           });
@@ -101,8 +101,8 @@ function UserInvitationsPage() {
       .catch((_err) => {
         setToast({
           type: TOAST_TYPE.ERROR,
-          title: t("error"),
-          message: t("something_went_wrong_please_try_again"),
+          title: t("Error"),
+          message: t("Something went wrong. Please try again."),
         });
         setIsJoiningWorkspaces(false);
       });
@@ -127,8 +127,8 @@ function UserInvitationsPage() {
           invitations.length > 0 ? (
             <div className="relative flex h-full justify-center px-8 pb-8 sm:w-10/12 sm:items-center sm:justify-start sm:p-0 sm:pr-[8.33%] md:w-9/12 lg:w-4/5">
               <div className="w-full space-y-10">
-                <h5 className="text-16">{t("we_see_that_someone_has_invited_you_to_join_a_workspace")}</h5>
-                <h4 className="text-20 font-semibold">{t("join_a_workspace")}</h4>
+                <h5 className="text-16">{t("We see that someone has invited you to join a workspace")}</h5>
+                <h4 className="text-20 font-semibold">{t("Join a workspace")}</h4>
                 <div className="max-h-[37vh] space-y-4 overflow-y-auto md:w-3/5">
                   {invitations.map((invitation) => {
                     const isSelected = invitationsRespond.includes(invitation.id);
@@ -168,12 +168,12 @@ function UserInvitationsPage() {
                     disabled={isJoiningWorkspaces || invitationsRespond.length === 0}
                     loading={isJoiningWorkspaces}
                   >
-                    {t("accept_and_join")}
+                    {t("Accept & Join")}
                   </Button>
                   <Link href={`/${redirectWorkspaceSlug}`}>
                     <span>
                       <Button variant="secondary" size="lg">
-                        {t("go_home")}
+                        {t("Go Home")}
                       </Button>
                     </span>
                   </Link>
@@ -183,11 +183,11 @@ function UserInvitationsPage() {
           ) : (
             <div className="fixed top-0 left-0 grid h-full w-full place-items-center">
               <EmptyState
-                title={t("no_pending_invites")}
-                description={t("you_can_see_here_if_someone_invites_you_to_a_workspace")}
+                title={t("No pending invites")}
+                description={t("You can see here if someone invites you to a workspace")}
                 image={emptyInvitation}
                 primaryButton={{
-                  text: t("back_to_home"),
+                  text: t("Back to home"),
                   onClick: () => router.push("/"),
                 }}
               />

@@ -29,7 +29,7 @@ export function PowerKModalHeader(props: Props) {
   // derived values
   const placeholder = activePage
     ? t(POWER_K_MODAL_PAGE_DETAILS[activePage].i18n_placeholder)
-    : t("power_k.page_placeholders.default");
+    : t("Type a command or search");
 
   return (
     <div className="border-b border-subtle">

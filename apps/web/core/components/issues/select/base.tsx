@@ -186,7 +186,7 @@ export const WorkItemLabelSelectBase = observer(function WorkItemLabelSelectBase
             )}
           >
             <LabelPropertyIcon className="h-3 w-3 flex-shrink-0" />
-            <span>{t("labels")}</span>
+            <span>{t("Labels")}</span>
           </div>
         )}
       </button>
@@ -206,7 +206,7 @@ export const WorkItemLabelSelectBase = observer(function WorkItemLabelSelectBase
                 ref={inputRef}
                 className="w-full bg-transparent py-1 text-11 text-secondary placeholder:text-placeholder focus:outline-none"
                 onChange={(event) => setQuery(event.target.value)}
-                placeholder={t("search")}
+                placeholder={t("Search")}
                 displayValue={(assigned: any) => assigned?.name}
                 onKeyDown={searchInputKeyDown}
               />
@@ -302,14 +302,14 @@ export const WorkItemLabelSelectBase = observer(function WorkItemLabelSelectBase
                         + Add <span className="text-primary">&quot;{query}&quot;</span> to labels
                       </>
                     ) : (
-                      t("label.create.type")
+                      t("Type to add a new label")
                     )}
                   </p>
                 ) : (
-                  <p className="px-1.5 py-1 text-placeholder italic">{t("no_matching_results")}</p>
+                  <p className="px-1.5 py-1 text-placeholder italic">{t("No matching results")}</p>
                 )
               ) : (
-                <p className="px-1.5 py-1 text-placeholder italic">{t("loading")}</p>
+                <p className="px-1.5 py-1 text-placeholder italic">{t("Loading")}</p>
               )}
             </div>
           </div>

@@ -20,7 +20,7 @@ function WorkspaceDashboardPage() {
   const { currentWorkspace } = useWorkspace();
   const { t } = useTranslation();
   // derived values
-  const pageTitle = currentWorkspace?.name ? `${currentWorkspace?.name} - ${t("home.title")}` : undefined;
+  const pageTitle = currentWorkspace?.name ? `${currentWorkspace?.name} - ${t("Home")}` : undefined;
 
   return (
     <>

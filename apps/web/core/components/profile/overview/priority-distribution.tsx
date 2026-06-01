@@ -28,7 +28,7 @@ export function ProfilePriorityDistribution({ userProfile }: Props) {
   const { t } = useTranslation();
   return (
     <div className="flex flex-col space-y-2">
-      <h3 className="text-16 font-medium">{t("profile.stats.priority_distribution.title")}</h3>
+      <h3 className="text-16 font-medium">{t("Work items by Priority")}</h3>
       {userProfile ? (
         <Card>
           {userProfile.priority_distribution.length > 0 ? (
@@ -54,7 +54,7 @@ export function ProfilePriorityDistribution({ userProfile }: Props) {
               ]}
               xAxis={{
                 key: "name",
-                label: t("profile.stats.priority_distribution.priority"),
+                label: t("Priority"),
               }}
               yAxis={{
                 key: "count",
@@ -66,7 +66,7 @@ export function ProfilePriorityDistribution({ userProfile }: Props) {
             <EmptyStateCompact
               assetKey="priority"
               assetClassName="size-20"
-              title={t("workspace_empty_state.your_work_by_priority.title")}
+              title={t("No work item assigned yet")}
             />
           )}
         </Card>

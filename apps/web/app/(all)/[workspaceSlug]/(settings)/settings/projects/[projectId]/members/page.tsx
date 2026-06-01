@@ -48,7 +48,7 @@ function MembersSettingsPage({ params }: Route.ComponentProps) {
   return (
     <SettingsContentWrapper header={<MembersProjectSettingsHeader />} hugging>
       <PageHead title={pageTitle} />
-      <SettingsHeading title={t("common.members")} />
+      <SettingsHeading title={t("Members")} />
       <ProjectSettingsMemberDefaults projectId={projectId} workspaceSlug={workspaceSlug} />
       <ProjectTeamspaceList projectId={projectId} workspaceSlug={workspaceSlug} />
       <ProjectMemberList projectId={projectId} workspaceSlug={workspaceSlug} />

@@ -303,7 +303,7 @@ export const SidebarProjectsListItem = observer(function SidebarProjectsListItem
               <Tooltip
                 isMobile={isMobile}
                 tooltipContent={
-                  project.sort_order === null ? t("join_the_project_to_rearrange") : t("drag_to_rearrange")
+                  project.sort_order === null ? t("Join the project to rearrange") : t("Drag to rearrange")
                 }
                 position="top-end"
                 disabled={isDragging}
@@ -333,8 +333,8 @@ export const SidebarProjectsListItem = observer(function SidebarProjectsListItem
                     className={cn("flex w-full flex-grow items-center gap-1.5 text-left select-none", {})}
                     aria-label={
                       isProjectListOpen
-                        ? t("aria_labels.projects_sidebar.close_project_menu")
-                        : t("aria_labels.projects_sidebar.open_project_menu")
+                        ? t("Close project menu")
+                        : t("Open project menu")
                     }
                   >
                     <div className="grid size-4 flex-shrink-0 place-items-center">
@@ -371,7 +371,7 @@ export const SidebarProjectsListItem = observer(function SidebarProjectsListItem
                   )}
                   customButtonClassName="grid place-items-center"
                   placement="bottom-start"
-                  ariaLabel={t("aria_labels.projects_sidebar.toggle_quick_actions_menu")}
+                  ariaLabel={t("Toggle quick actions menu")}
                   useCaptureForOutsideClick
                   closeOnSelect
                   onMenuClose={() => setIsMenuActive(false)}
@@ -399,14 +399,14 @@ export const SidebarProjectsListItem = observer(function SidebarProjectsListItem
                         <div className="flex h-4 w-4 cursor-pointer items-center justify-center rounded-sm text-secondary transition-all duration-300 hover:bg-layer-1">
                           <Share2 className="h-3.5 w-3.5 stroke-[1.5]" />
                         </div>
-                        <div>{t("publish_project")}</div>
+                        <div>{t("Publish project")}</div>
                       </div>
                     </CustomMenu.MenuItem>
                   )}
                   <CustomMenu.MenuItem onClick={handleCopyText}>
                     <span className="flex items-center justify-start gap-2">
                       <LinkIcon className="h-3.5 w-3.5 stroke-[1.5]" />
-                      <span>{t("copy_link")}</span>
+                      <span>{t("Copy link")}</span>
                     </span>
                   </CustomMenu.MenuItem>
                   {isAuthorized && (
@@ -417,7 +417,7 @@ export const SidebarProjectsListItem = observer(function SidebarProjectsListItem
                     >
                       <div className="flex cursor-pointer items-center justify-start gap-2">
                         <ArchiveIcon className="h-3.5 w-3.5 stroke-[1.5]" />
-                        <span>{t("archives")}</span>
+                        <span>{t("Archives")}</span>
                       </div>
                     </CustomMenu.MenuItem>
                   )}
@@ -428,7 +428,7 @@ export const SidebarProjectsListItem = observer(function SidebarProjectsListItem
                   >
                     <div className="flex cursor-pointer items-center justify-start gap-2">
                       <Settings className="h-3.5 w-3.5 stroke-[1.5]" />
-                      <span>{t("settings")}</span>
+                      <span>{t("Settings")}</span>
                     </div>
                   </CustomMenu.MenuItem>
                   {/* leave project */}
@@ -439,7 +439,7 @@ export const SidebarProjectsListItem = observer(function SidebarProjectsListItem
                     >
                       <div className="flex items-center justify-start gap-2">
                         <LogOut className="h-3.5 w-3.5 stroke-[1.5]" />
-                        <span>{t("leave_project")}</span>
+                        <span>{t("Leave project")}</span>
                       </div>
                     </CustomMenu.MenuItem>
                   )}
@@ -458,8 +458,8 @@ export const SidebarProjectsListItem = observer(function SidebarProjectsListItem
                     })}
                     aria-label={t(
                       isProjectListOpen
-                        ? "aria_labels.projects_sidebar.close_project_menu"
-                        : "aria_labels.projects_sidebar.open_project_menu"
+                        ? "Close project menu"
+                        : "Open project menu"
                     )}
                   />
                 )}

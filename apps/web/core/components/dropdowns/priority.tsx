@@ -81,8 +81,8 @@ function BorderButton(props: ButtonProps) {
 
   return (
     <Tooltip
-      tooltipHeading={t("priority")}
-      tooltipContent={priorityDetails?.title ?? t("common.none")}
+      tooltipHeading={t("Priority")}
+      tooltipContent={priorityDetails?.title ?? t("None")}
       disabled={!showTooltip}
       isMobile={isMobile}
       renderByDefault={renderToolTipByDefault}
@@ -172,8 +172,8 @@ function BackgroundButton(props: ButtonProps) {
 
   return (
     <Tooltip
-      tooltipHeading={t("priority")}
-      tooltipContent={t(priorityDetails?.key ?? "none")}
+      tooltipHeading={t("Priority")}
+      tooltipContent={t(priorityDetails?.key ?? "None")}
       disabled={!showTooltip}
       isMobile={isMobile}
       renderByDefault={renderToolTipByDefault}
@@ -223,7 +223,7 @@ function BackgroundButton(props: ButtonProps) {
               "text-placeholder": !priority || priority === "none",
             })}
           >
-            {priorityDetails?.title ?? t("common.priority") ?? placeholder}
+            {priorityDetails?.title ?? t("Priority") ?? placeholder}
           </span>
         )}
         {dropdownArrow && (
@@ -256,8 +256,8 @@ function TransparentButton(props: ButtonProps) {
 
   return (
     <Tooltip
-      tooltipHeading={t("priority")}
-      tooltipContent={priorityDetails?.title ?? t("common.none")}
+      tooltipHeading={t("Priority")}
+      tooltipContent={priorityDetails?.title ?? t("None")}
       disabled={!showTooltip}
       isMobile={isMobile}
       renderByDefault={renderToolTipByDefault}
@@ -307,7 +307,7 @@ function TransparentButton(props: ButtonProps) {
               "text-placeholder": !priority || priority === "none",
             })}
           >
-            {priorityDetails?.title ?? t("common.priority") ?? placeholder}
+            {priorityDetails?.title ?? t("Priority") ?? placeholder}
           </span>
         )}
         {dropdownArrow && (
@@ -334,7 +334,7 @@ export function PriorityDropdown(props: Props) {
     highlightUrgent = true,
     onChange,
     onClose,
-    placeholder = t("common.priority"),
+    placeholder = t("Priority"),
     placement,
     showTooltip = false,
     tabIndex,
@@ -478,7 +478,7 @@ export function PriorityDropdown(props: Props) {
                 className="w-full bg-transparent py-1 text-11 text-secondary placeholder:text-placeholder focus:outline-none"
                 value={query}
                 onChange={(e) => setQuery(e.target.value)}
-                placeholder={t("search")}
+                placeholder={t("Search")}
                 displayValue={(assigned: any) => assigned?.name}
                 onKeyDown={searchInputKeyDown}
               />
@@ -506,7 +506,7 @@ export function PriorityDropdown(props: Props) {
                   </Combobox.Option>
                 ))
               ) : (
-                <p className="px-1.5 py-1 text-placeholder italic">{t("no_matching_results")}</p>
+                <p className="px-1.5 py-1 text-placeholder italic">{t("No matching results")}</p>
               )}
             </div>
           </div>

@@ -91,7 +91,7 @@ export const ProfileIssuesMobileHeader = observer(function ProfileIssuesMobileHe
         placement="bottom-start"
         customButton={
           <div className="flex-center flex text-13 text-secondary">
-            {t("common.layout")}
+            {t("Layout")}
             <ChevronDownIcon className="my-auto ml-2 h-4 w-4 text-secondary" strokeWidth={2} />
           </div>
         }
@@ -116,11 +116,11 @@ export const ProfileIssuesMobileHeader = observer(function ProfileIssuesMobileHe
       </CustomMenu>
       <div className="flex flex-grow items-center justify-center border-l border-subtle text-13 text-secondary">
         <FiltersDropdown
-          title={t("common.display")}
+          title={t("Display")}
           placement="bottom-end"
           menuButton={
             <div className="flex-center flex text-13 text-secondary">
-              {t("common.display")}
+              {t("Display")}
               <ChevronDownIcon className="ml-2 h-4 w-4 text-secondary" strokeWidth={2} />
             </div>
           }

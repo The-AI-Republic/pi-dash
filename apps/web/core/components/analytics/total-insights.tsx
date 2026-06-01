@@ -30,8 +30,8 @@ const getInsightLabel = (
 ) => {
   if (analyticsType === "work-items") {
     return isEpic
-      ? t(item.i18nKey, { entity: t("common.epics") })
-      : t(item.i18nKey, { entity: t("common.work_items") });
+      ? t(item.i18nKey, { entity: t("Epics") })
+      : t(item.i18nKey, { entity: t("Work items") });
   }
 
   // Get the base translation with entity

@@ -25,40 +25,40 @@ export const SITES_ISSUE_LAYOUTS: {
   {
     key: "list",
     icon: "List",
-    titleTranslationKey: "issue.layouts.list",
+    titleTranslationKey: "List",
   },
   {
     key: "kanban",
     icon: "Kanban",
-    titleTranslationKey: "issue.layouts.kanban",
+    titleTranslationKey: "Board",
   },
 ];
 
 export const ISSUE_LAYOUT_MAP: TIssueLayoutMap = {
   [EIssueLayoutTypes.LIST]: {
     key: EIssueLayoutTypes.LIST,
-    i18n_title: "issue.layouts.title.list",
-    i18n_label: "issue.layouts.list",
+    i18n_title: "List Layout",
+    i18n_label: "List",
   },
   [EIssueLayoutTypes.KANBAN]: {
     key: EIssueLayoutTypes.KANBAN,
-    i18n_title: "issue.layouts.title.kanban",
-    i18n_label: "issue.layouts.kanban",
+    i18n_title: "Board Layout",
+    i18n_label: "Board",
   },
   [EIssueLayoutTypes.CALENDAR]: {
     key: EIssueLayoutTypes.CALENDAR,
-    i18n_title: "issue.layouts.title.calendar",
-    i18n_label: "issue.layouts.calendar",
+    i18n_title: "Calendar Layout",
+    i18n_label: "Calendar",
   },
   [EIssueLayoutTypes.SPREADSHEET]: {
     key: EIssueLayoutTypes.SPREADSHEET,
-    i18n_title: "issue.layouts.title.spreadsheet",
-    i18n_label: "issue.layouts.spreadsheet",
+    i18n_title: "Table Layout",
+    i18n_label: "Table",
   },
   [EIssueLayoutTypes.GANTT]: {
     key: EIssueLayoutTypes.GANTT,
-    i18n_title: "issue.layouts.title.gantt",
-    i18n_label: "issue.layouts.gantt",
+    i18n_title: "Timeline Layout",
+    i18n_label: "Timeline",
   },
 };
 

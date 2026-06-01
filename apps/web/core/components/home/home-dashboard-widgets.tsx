@@ -107,8 +107,8 @@ export const DashboardWidgets = observer(function DashboardWidgets() {
       ) : (
         <div className="grid h-full w-full place-items-center">
           <SimpleEmptyState
-            title={t("home.empty.widgets.title")}
-            description={t("home.empty.widgets.description")}
+            title={t("It's Quiet Without Widgets, Turn Them On")}
+            description={t("It looks like all your widgets are turned off. Enable them\nnow to enhance your experience!")}
             assetPath={noWidgetsResolvedPath}
           />
         </div>

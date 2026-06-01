@@ -94,6 +94,8 @@ vi.mock("@pi-dash/ui", async () => {
 import { AddRunnerModal } from "@/components/runners/add-runner-modal";
 
 const PROJECTS = [{ id: "project-1", identifier: "BROWSERX", name: "BrowserX" }];
+const RUNNER_NAME_ERROR =
+  "Runner name cannot contain spaces. It must start with a letter, digit, or underscore and contain only letters, digits, underscore, dot, or dash.";
 
 const PODS = [
   {
@@ -140,10 +142,10 @@ describe("AddRunnerModal", () => {
     const selects = screen.getAllByTestId("select");
     await user.selectOptions(selects[0], "BROWSERX");
     await user.selectOptions(selects[1], "pod-a");
-    await user.type(screen.getByPlaceholderText("runners.add_modal.name_placeholder"), runnerName);
-    await user.type(screen.getByPlaceholderText("runners.add_modal.working_dir_placeholder"), workingDir);
+    await user.type(screen.getByPlaceholderText("my-laptop-runner"), runnerName);
+    await user.type(screen.getByPlaceholderText("local dev machine project working dir"), workingDir);
     await user.selectOptions(selects[2], "codex");
-    await user.click(screen.getByRole("button", { name: "runners.add_modal.submit" }));
+    await user.click(screen.getByRole("button", { name: "Generate command" }));
 
     const command = await screen.findByText(
       (_content: string, node: Element | null) => node?.tagName.toLowerCase() === "pre"
@@ -169,13 +171,13 @@ describe("AddRunnerModal", () => {
     await screen.findByRole("option", { name: "BrowserX" });
 
     await user.selectOptions(screen.getAllByTestId("select")[0], "BROWSERX");
-    await user.type(screen.getByPlaceholderText("runners.add_modal.name_placeholder"), runnerName);
-    await user.click(screen.getByRole("button", { name: "runners.add_modal.submit" }));
+    await user.type(screen.getByPlaceholderText("my-laptop-runner"), runnerName);
+    await user.click(screen.getByRole("button", { name: "Generate command" }));
 
     await screen.findByText((_content: string, node: Element | null) => node?.tagName.toLowerCase() === "pre");
-    await user.click(screen.getByRole("button", { name: "runners.add_modal.back" }));
+    await user.click(screen.getByRole("button", { name: "Back" }));
 
-    expect(screen.getByPlaceholderText("runners.add_modal.name_placeholder")).toHaveValue(runnerName);
+    expect(screen.getByPlaceholderText("my-laptop-runner")).toHaveValue(runnerName);
   });
 
   it("blocks invalid runner names before generating a command", async () => {
@@ -185,10 +187,10 @@ describe("AddRunnerModal", () => {
     await screen.findByRole("option", { name: "BrowserX" });
 
     await user.selectOptions(screen.getAllByTestId("select")[0], "BROWSERX");
-    await user.type(screen.getByPlaceholderText("runners.add_modal.name_placeholder"), "test runner");
-    await user.click(screen.getByRole("button", { name: "runners.add_modal.submit" }));
+    await user.type(screen.getByPlaceholderText("my-laptop-runner"), "test runner");
+    await user.click(screen.getByRole("button", { name: "Generate command" }));
 
-    const error = await screen.findByText("runners.add_modal.errors.name_invalid");
+    const error = await screen.findByText(RUNNER_NAME_ERROR);
     expect(error).toBeInTheDocument();
     expect(error).toHaveClass("text-danger-primary");
     expect(
@@ -204,13 +206,13 @@ describe("AddRunnerModal", () => {
 
     const selects = screen.getAllByTestId("select");
     await user.selectOptions(selects[0], "BROWSERX");
-    await user.type(screen.getByPlaceholderText("runners.add_modal.name_placeholder"), "rich.runner");
+    await user.type(screen.getByPlaceholderText("my-laptop-runner"), "rich.runner");
     await user.type(
-      screen.getByPlaceholderText("runners.add_modal.working_dir_placeholder"),
+      screen.getByPlaceholderText("local dev machine project working dir"),
       String.raw`C:\\Users\\rich\\My Project`
     );
-    await user.click(screen.getByRole("button", { name: "runners.add_modal.submit" }));
-    await user.click(screen.getByRole("button", { name: "runners.add_modal.shell_powershell" }));
+    await user.click(screen.getByRole("button", { name: "Generate command" }));
+    await user.click(screen.getByRole("button", { name: "PowerShell" }));
 
     const command = await screen.findByText(
       (_content: string, node: Element | null) => node?.tagName.toLowerCase() === "pre"
@@ -227,12 +229,14 @@ describe("AddRunnerModal", () => {
 
     await screen.findByRole("option", { name: "BrowserX" });
     await user.selectOptions(screen.getAllByTestId("select")[0], "BROWSERX");
-    await user.click(screen.getByRole("button", { name: "runners.add_modal.submit" }));
+    await user.click(screen.getByRole("button", { name: "Generate command" }));
 
     const command = await screen.findByText(
       (_content: string, node: Element | null) => node?.tagName.toLowerCase() === "pre"
     );
     expect(command.textContent).toContain(`--url ${window.location.origin}`);
-    expect(screen.getByText("runners.add_modal.cloud_url_origin_warning")).toBeInTheDocument();
+    expect(
+      screen.getByText("Using the current browser origin as the cloud URL because VITE_API_BASE_URL is not configured.")
+    ).toBeInTheDocument();
   });
 });

@@ -55,7 +55,7 @@ const NoLabel = observer(function NoLabel({ isMobile, noLabelBorder, fullWidth, 
   return (
     <Tooltip
       position="top"
-      tooltipHeading={t("common.labels")}
+      tooltipHeading={t("Labels")}
       tooltipContent="None"
       isMobile={isMobile}
       renderByDefault={false}
@@ -97,7 +97,7 @@ function LabelSummary({ isMobile, fullWidth, noLabelBorder, disabled, projectLab
       <Tooltip
         isMobile={isMobile}
         position="top"
-        tooltipHeading={t("common.labels")}
+        tooltipHeading={t("Labels")}
         tooltipContent={projectLabels
           ?.filter((l) => value.includes(l?.id))
           .map((l) => l?.name)
@@ -135,7 +135,7 @@ const LabelItem = observer(function LabelItem({
   return (
     <Tooltip
       position="top"
-      tooltipHeading={t("common.labels")}
+      tooltipHeading={t("Labels")}
       tooltipContent={label?.name ?? ""}
       isMobile={isMobile}
       renderByDefault={renderByDefault}

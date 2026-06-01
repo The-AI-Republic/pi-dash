@@ -56,43 +56,43 @@ function formatRelativePast(timestamp: string | null | undefined, now: number, t
   const diffMs = now - new Date(timestamp).getTime();
   if (Number.isNaN(diffMs) || diffMs < 0) return null;
   const minutes = Math.max(1, Math.round(diffMs / 60000));
-  if (minutes < 60) return t("issue_agent_status.relative.minutes_ago", { count: minutes });
+  if (minutes < 60) return t("{count}m ago", { count: minutes });
   const hours = Math.round(minutes / 60);
-  if (hours < 24) return t("issue_agent_status.relative.hours_ago", { count: hours });
-  return t("issue_agent_status.relative.days_ago", { count: Math.round(hours / 24) });
+  if (hours < 24) return t("{count}h ago", { count: hours });
+  return t("{count}d ago", { count: Math.round(hours / 24) });
 }
 
 function formatUntil(timestamp: string | null | undefined, now: number, t: TranslationFn): string | null {
   if (!timestamp) return null;
   const diffMs = new Date(timestamp).getTime() - now;
   if (Number.isNaN(diffMs)) return null;
-  if (diffMs <= 0) return t("issue_agent_status.relative.due_now");
+  if (diffMs <= 0) return t("due now");
   const minutes = Math.max(1, Math.ceil(diffMs / 60000));
-  if (minutes < 60) return t("issue_agent_status.relative.minutes", { count: minutes });
+  if (minutes < 60) return t("{count}m", { count: minutes });
   const hours = Math.floor(minutes / 60);
   const remainingMinutes = minutes % 60;
   if (hours < 24)
     return remainingMinutes > 0
-      ? t("issue_agent_status.relative.hours_minutes", { hours, minutes: remainingMinutes })
-      : t("issue_agent_status.relative.hours", { count: hours });
+      ? t("{hours}h {minutes}m", { hours, minutes: remainingMinutes })
+      : t("{count}h", { count: hours });
   const days = Math.floor(hours / 24);
   const remainingHours = hours % 24;
   return remainingHours > 0
-    ? t("issue_agent_status.relative.days_hours", { days, hours: remainingHours })
-    : t("issue_agent_status.relative.days", { count: days });
+    ? t("{days}d {hours}h", { days, hours: remainingHours })
+    : t("{count}d", { count: days });
 }
 
 function formatRunDone(count: number, t: TranslationFn): string {
   const safeCount = Math.max(1, count);
-  return t(safeCount === 1 ? "issue_agent_status.details.run_done_one" : "issue_agent_status.details.run_done_many", {
+  return t(safeCount === 1 ? "{count} run is done" : "{count} runs are done", {
     count: safeCount,
   });
 }
 
 function formatTickBudget(ticker: TIssueAgentTicker | null | undefined, t: TranslationFn): string | null {
   if (!ticker) return null;
-  if (ticker.max_ticks === -1) return t("issue_agent_status.details.tick_no_cap", { count: ticker.tick_count });
-  return t("issue_agent_status.details.tick_budget", { count: ticker.tick_count, max: ticker.max_ticks });
+  if (ticker.max_ticks === -1) return t("Tick {count}, no cap", { count: ticker.tick_count });
+  return t("Tick {count} of {max}", { count: ticker.tick_count, max: ticker.max_ticks });
 }
 
 function getPayloadString(payload: Record<string, unknown> | null | undefined, key: string): string | null {
@@ -128,7 +128,7 @@ function getLiveDetail(run: TIssueAgentRunSummary, now: number, t: TranslationFn
     return `${truncate(liveState.last_event_summary)} (${lastActivity})`;
   }
   if (liveState.last_event_summary) return truncate(liveState.last_event_summary);
-  if (lastActivity) return t("issue_agent_status.details.last_activity", { time: lastActivity });
+  if (lastActivity) return t("Last activity {time}", { time: lastActivity });
   return null;
 }
 
@@ -140,11 +140,11 @@ function getRunView(
   t: TranslationFn
 ): AgentStatusView {
   const liveDetail = getLiveDetail(run, now, t);
-  const runnerDetail = run.runner_name ? t("issue_agent_status.details.runner", { name: run.runner_name }) : null;
+  const runnerDetail = run.runner_name ? t("Runner: {name}", { name: run.runner_name }) : null;
   const nextTick = formatUntil(ticker?.next_run_at, now, t);
   const doneDetail =
     ticker?.enabled && nextTick
-      ? t("issue_agent_status.details.run_done_next_tick", {
+      ? t("{runs}, next ticking in {nextTick}", {
           runs: formatRunDone(runCount, t),
           nextTick,
         })
@@ -160,81 +160,81 @@ function getRunView(
   switch (run.status) {
     case "queued":
       return {
-        title: t("issue_agent_status.titles.queued"),
-        detail: runnerDetail ?? t("issue_agent_status.details.waiting_for_runner"),
-        badge: t("issue_agent_status.badges.queued"),
+        title: t("AI agent is queued"),
+        detail: runnerDetail ?? t("Waiting for an available runner."),
+        badge: t("Queued"),
         badgeVariant: "neutral",
         icon: Clock3,
         iconClassName: "text-tertiary",
       };
     case "assigned":
       return {
-        title: t("issue_agent_status.titles.assigned"),
+        title: t("AI agent is starting on this issue"),
         detail: runnerDetail,
-        badge: t("issue_agent_status.badges.assigned"),
+        badge: t("Assigned"),
         badgeVariant: "brand",
         icon: LoaderCircle,
         iconClassName: "animate-spin text-accent-primary",
       };
     case "running":
       return {
-        title: t("issue_agent_status.titles.running"),
+        title: t("AI agent is working on this issue"),
         detail: liveDetail ?? runnerDetail,
-        badge: t("issue_agent_status.badges.running"),
+        badge: t("Working"),
         badgeVariant: "brand",
         icon: LoaderCircle,
         iconClassName: "animate-spin text-accent-primary",
       };
     case "awaiting_approval":
       return {
-        title: t("issue_agent_status.titles.awaiting_approval"),
+        title: t("AI agent is waiting for approval"),
         detail: liveDetail ?? runnerDetail,
-        badge: t("issue_agent_status.badges.awaiting_approval"),
+        badge: t("Approval"),
         badgeVariant: "warning",
         icon: CirclePause,
         iconClassName: "text-warning-primary",
       };
     case "awaiting_reauth":
       return {
-        title: t("issue_agent_status.titles.awaiting_reauth"),
+        title: t("AI agent needs re-auth"),
         detail: runnerDetail,
-        badge: t("issue_agent_status.badges.awaiting_reauth"),
+        badge: t("Re-auth"),
         badgeVariant: "warning",
         icon: CircleAlert,
         iconClassName: "text-warning-primary",
       };
     case "paused_awaiting_input":
       return {
-        title: t("issue_agent_status.titles.paused_awaiting_input"),
+        title: t("AI agent is waiting for input"),
         detail: pausedDetail ? truncate(pausedDetail) : runnerDetail,
-        badge: t("issue_agent_status.badges.paused_awaiting_input"),
+        badge: t("Paused"),
         badgeVariant: "warning",
         icon: CirclePause,
         iconClassName: "text-warning-primary",
       };
     case "blocked":
       return {
-        title: t("issue_agent_status.titles.blocked"),
+        title: t("AI agent is blocked on this issue"),
         detail: blockedDetail ? truncate(blockedDetail) : runnerDetail,
-        badge: t("issue_agent_status.badges.blocked"),
+        badge: t("Blocked"),
         badgeVariant: "warning",
         icon: CircleAlert,
         iconClassName: "text-warning-primary",
       };
     case "failed":
       return {
-        title: t("issue_agent_status.titles.failed"),
-        detail: run.error ? truncate(run.error) : t("issue_agent_status.details.latest_run_failed"),
-        badge: t("issue_agent_status.badges.failed"),
+        title: t("AI agent run failed"),
+        detail: run.error ? truncate(run.error) : t("The latest run did not complete."),
+        badge: t("Failed"),
         badgeVariant: "danger",
         icon: CircleAlert,
         iconClassName: "text-danger-primary",
       };
     case "cancelled":
       return {
-        title: t("issue_agent_status.titles.cancelled"),
+        title: t("AI agent run was cancelled"),
         detail: formatRelativePast(run.ended_at, now, t),
-        badge: t("issue_agent_status.badges.cancelled"),
+        badge: t("Cancelled"),
         badgeVariant: "neutral",
         icon: CirclePause,
         iconClassName: "text-tertiary",
@@ -242,9 +242,9 @@ function getRunView(
     case "completed":
     default:
       return {
-        title: t("issue_agent_status.titles.completed"),
+        title: t("AI agent run completed"),
         detail: doneDetail,
-        badge: t("issue_agent_status.badges.completed"),
+        badge: t("Done"),
         badgeVariant: "success",
         icon: CircleCheck,
         iconClassName: "text-success-primary",
@@ -256,11 +256,11 @@ function getTickerOnlyView(ticker: TIssueAgentTicker, now: number, t: Translatio
   const nextTick = formatUntil(ticker.next_run_at, now, t);
   if (ticker.enabled) {
     return {
-      title: t("issue_agent_status.titles.scheduled"),
+      title: t("AI agent ticking is scheduled"),
       detail: nextTick
-        ? t("issue_agent_status.details.next_tick_in", { nextTick })
-        : t("issue_agent_status.details.waiting_for_next_tick"),
-      badge: t("issue_agent_status.badges.scheduled"),
+        ? t("Next ticking in {nextTick}", { nextTick })
+        : t("Waiting for the next scheduled tick."),
+      badge: t("Scheduled"),
       badgeVariant: "brand",
       icon: Clock3,
       iconClassName: "text-accent-primary",
@@ -269,9 +269,9 @@ function getTickerOnlyView(ticker: TIssueAgentTicker, now: number, t: Translatio
 
   if (ticker.user_disabled || ticker.disarm_reason === "user_disabled") {
     return {
-      title: t("issue_agent_status.titles.disabled"),
-      detail: t("issue_agent_status.details.disabled"),
-      badge: t("issue_agent_status.badges.disabled"),
+      title: t("AI agent ticking is disabled"),
+      detail: t("Automatic runs are turned off for this issue."),
+      badge: t("Disabled"),
       badgeVariant: "neutral",
       icon: CirclePause,
       iconClassName: "text-tertiary",
@@ -280,9 +280,9 @@ function getTickerOnlyView(ticker: TIssueAgentTicker, now: number, t: Translatio
 
   if (ticker.disarm_reason === "cap_hit") {
     return {
-      title: t("issue_agent_status.titles.cap_hit"),
+      title: t("AI agent run limit reached"),
       detail: formatTickBudget(ticker, t),
-      badge: t("issue_agent_status.badges.limit"),
+      badge: t("Limit"),
       badgeVariant: "warning",
       icon: CircleAlert,
       iconClassName: "text-warning-primary",
@@ -290,9 +290,9 @@ function getTickerOnlyView(ticker: TIssueAgentTicker, now: number, t: Translatio
   }
 
   return {
-    title: t("issue_agent_status.titles.off"),
+    title: t("AI agent ticking is off"),
     detail: formatTickBudget(ticker, t),
-    badge: t("issue_agent_status.badges.off"),
+    badge: t("Off"),
     badgeVariant: "neutral",
     icon: CirclePause,
     iconClassName: "text-tertiary",
@@ -370,19 +370,19 @@ export function IssueAgentStatusPanel({ workspaceSlug, projectId, issueId, issue
         <div className="mt-3 grid grid-cols-2 gap-2 text-caption-sm-medium text-tertiary">
           {status?.run_count ? (
             <div className="rounded-sm bg-layer-2 px-2 py-1">
-              <span className="block text-placeholder">{t("issue_agent_status.stats.runs")}</span>
+              <span className="block text-placeholder">{t("Runs")}</span>
               <span className="text-primary">{status.run_count}</span>
             </div>
           ) : null}
           {nextTick ? (
             <div className="rounded-sm bg-layer-2 px-2 py-1">
-              <span className="block text-placeholder">{t("issue_agent_status.stats.next_tick")}</span>
+              <span className="block text-placeholder">{t("Next tick")}</span>
               <span className="text-primary">{nextTick}</span>
             </div>
           ) : null}
           {tickBudget ? (
             <div className="rounded-sm bg-layer-2 px-2 py-1">
-              <span className="block text-placeholder">{t("issue_agent_status.stats.budget")}</span>
+              <span className="block text-placeholder">{t("Budget")}</span>
               <span className="text-primary">{tickBudget}</span>
             </div>
           ) : null}

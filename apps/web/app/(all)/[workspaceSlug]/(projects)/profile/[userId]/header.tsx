@@ -51,7 +51,7 @@ export const UserProfileHeader = observer(function UserProfileHeader(props: TUse
 
   const isCurrentUser = currentUser?.id === userId;
 
-  const breadcrumbLabel = isCurrentUser ? t("profile.page_label") : `${userName} ${t("profile.work")}`;
+  const breadcrumbLabel = isCurrentUser ? t("Your work") : `${userName} ${t("Work")}`;
 
   return (
     <Header>

@@ -62,7 +62,7 @@ export const IssueAttachmentDeleteModal = observer(function IssueAttachmentDelet
       handleSubmit={() => handleDeletion(attachment.id)}
       isSubmitting={loader}
       isOpen={isOpen}
-      title={t("attachment.delete")}
+      title={t("Delete attachment")}
       content={
         <>
           {/* TODO: Translate here */}

@@ -18,16 +18,16 @@ export const KanbanQuickAddIssueForm = observer(function KanbanQuickAddIssueForm
           <h4 className="text-11 leading-5 font-medium text-tertiary">{projectDetail?.identifier ?? "..."}</h4>
           <input
             autoComplete="off"
-            placeholder={isEpic ? t("epic.title.label") : t("issue.title.label")}
+            placeholder={isEpic ? t("Epic Title") : t("Work item title")}
             {...register("name", {
-              required: isEpic ? t("epic.title.required") : t("issue.title.required"),
+              required: isEpic ? t("Epic title is required.") : t("Work item title is required."),
             })}
             className="w-full rounded-md bg-transparent px-2 py-1.5 pl-0 text-13 leading-5 font-medium text-secondary outline-none"
           />
         </div>
       </form>
       <div className="bg-layer-3 px-3 py-2 text-11 text-tertiary italic">
-        {isEpic ? t("epic.add.press_enter") : t("issue.add.press_enter")}
+        {isEpic ? t("Press 'Enter' to add another epic") : t("Press 'Enter' to add another work item")}
       </div>
     </div>
   );

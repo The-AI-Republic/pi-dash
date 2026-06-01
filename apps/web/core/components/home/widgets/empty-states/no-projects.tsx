@@ -137,7 +137,7 @@ export const NoProjectsEmptyState = observer(function NoProjectsEmptyState() {
   return (
     <div>
       <div className="mb-4 flex items-center justify-between">
-        <div className="text-14 font-semibold text-tertiary">{t("home.empty.quickstart_guide")}</div>
+        <div className="text-14 font-semibold text-tertiary">{t("Your quickstart guide")}</div>
         <button
           className="flex items-center gap-1 text-13 font-medium text-tertiary"
           onClick={() => {
@@ -146,7 +146,7 @@ export const NoProjectsEmptyState = observer(function NoProjectsEmptyState() {
           }}
         >
           <CloseIcon className="size-4" />
-          {t("home.empty.not_right_now")}
+          {t("Not right now")}
         </button>
       </div>
       <div className="grid grid-cols-1 gap-4 md:grid-cols-2">

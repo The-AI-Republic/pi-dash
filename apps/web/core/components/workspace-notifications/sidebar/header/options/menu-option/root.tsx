@@ -42,7 +42,7 @@ export const NotificationHeaderMenuOption = observer(function NotificationHeader
     {
       key: "menu-unread",
       type: "menu-item",
-      label: t("notification.options.show_unread"),
+      label: t("Show unread"),
       isActive: filters?.read,
       prependIcon: <CheckCircle className="h-3 w-3 flex-shrink-0" />,
       appendIcon: filters?.read ? <CheckIcon className="h-3 w-3" /> : undefined,
@@ -51,7 +51,7 @@ export const NotificationHeaderMenuOption = observer(function NotificationHeader
     {
       key: "menu-archived",
       type: "menu-item",
-      label: t("notification.options.show_archived"),
+      label: t("Show archived"),
       isActive: filters?.archived,
       prependIcon: <ArchiveIcon className="h-3 w-3 flex-shrink-0" />,
       appendIcon: filters?.archived ? <CheckIcon className="h-3 w-3" /> : undefined,
@@ -64,7 +64,7 @@ export const NotificationHeaderMenuOption = observer(function NotificationHeader
     {
       key: "menu-snoozed",
       type: "menu-item",
-      label: t("notification.options.show_snoozed"),
+      label: t("Show snoozed"),
       isActive: filters?.snoozed,
       prependIcon: <Clock className="h-3 w-3 flex-shrink-0" />,
       appendIcon: filters?.snoozed ? <CheckIcon className="h-3 w-3" /> : undefined,

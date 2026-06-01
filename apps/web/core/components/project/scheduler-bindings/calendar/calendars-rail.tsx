@@ -33,8 +33,8 @@ export function CalendarsRail({ schedulers, isVisible, onToggle, onShowAll, onHi
   if (schedulers.length === 0) {
     return (
       <aside className="hidden w-60 flex-shrink-0 border-l border-subtle p-4 md:block">
-        <div className="text-13 font-medium text-primary">{t("scheduler_bindings.calendar.rail_title")}</div>
-        <p className="mt-2 text-12 text-secondary">{t("scheduler_bindings.calendar.rail_empty")}</p>
+        <div className="text-13 font-medium text-primary">{t("Calendars")}</div>
+        <p className="mt-2 text-12 text-secondary">{t("Install a scheduler from the List tab to see it here.")}</p>
       </aside>
     );
   }
@@ -42,14 +42,14 @@ export function CalendarsRail({ schedulers, isVisible, onToggle, onShowAll, onHi
   return (
     <aside className="hidden w-60 flex-shrink-0 border-l border-subtle md:block">
       <div className="flex items-center justify-between px-4 py-3">
-        <div className="text-13 font-medium text-primary">{t("scheduler_bindings.calendar.rail_title")}</div>
+        <div className="text-13 font-medium text-primary">{t("Calendars")}</div>
         <div className="flex items-center gap-1 text-12 text-secondary">
           <button type="button" onClick={onShowAll} className="hover:text-primary">
-            {t("scheduler_bindings.calendar.show_all")}
+            {t("Show all")}
           </button>
           <span>/</span>
           <button type="button" onClick={onHideAll} className="hover:text-primary">
-            {t("scheduler_bindings.calendar.hide_all")}
+            {t("Hide all")}
           </button>
         </div>
       </div>

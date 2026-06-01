@@ -35,8 +35,8 @@ const SchedulerBindingsSettingsPage = observer(function SchedulerBindingsSetting
   const canManage = allowPermissions([EUserPermissions.ADMIN], EUserPermissionsLevel.PROJECT, slug, project);
 
   const pageTitle = currentProjectDetails?.name
-    ? `${currentProjectDetails.name} · ${t("scheduler_bindings.title")}`
-    : t("scheduler_bindings.title");
+    ? `${currentProjectDetails.name} · ${t("Schedulers")}`
+    : t("Schedulers");
 
   if (workspaceUserInfo && !canManage) {
     return <NotAuthorizedView section="settings" isProjectView className="h-auto" />;

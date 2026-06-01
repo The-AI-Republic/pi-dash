@@ -141,7 +141,7 @@ export const ActiveCycleStats = observer(function ActiveCycleStats(props: Active
               )
             }
           >
-            {t("project_cycles.active_cycle.priority_issue")}
+            {t("Priority work items")}
           </Tab>
           <Tab
             className={({ selected }) =>
@@ -154,7 +154,7 @@ export const ActiveCycleStats = observer(function ActiveCycleStats(props: Active
               )
             }
           >
-            {t("project_cycles.active_cycle.assignees")}
+            {t("Assignees")}
           </Tab>
           <Tab
             className={({ selected }) =>
@@ -167,7 +167,7 @@ export const ActiveCycleStats = observer(function ActiveCycleStats(props: Active
               )
             }
           >
-            {t("project_cycles.active_cycle.labels")}
+            {t("Labels")}
           </Tab>
         </Tab.List>
 
@@ -252,7 +252,7 @@ export const ActiveCycleStats = observer(function ActiveCycleStats(props: Active
                 ) : (
                   <div className="flex h-full w-full items-center justify-center">
                     <SimpleEmptyState
-                      title={t("active_cycle.empty_state.priority_issue.title")}
+                      title={t("Observe high priority work items tackled in the cycle at a glance.")}
                       assetPath={priorityResolvedPath}
                     />
                   </div>
@@ -304,7 +304,7 @@ export const ActiveCycleStats = observer(function ActiveCycleStats(props: Active
                             <div className="h-5 w-5 rounded-full border-2 border-subtle bg-layer-1">
                               <img src={userImage} height="100%" width="100%" className="rounded-full" alt="User" />
                             </div>
-                            <span>{t("no_assignee")}</span>
+                            <span>{t("No assignee")}</span>
                           </div>
                         }
                         completed={assignee.completed_issues}
@@ -315,7 +315,7 @@ export const ActiveCycleStats = observer(function ActiveCycleStats(props: Active
               ) : (
                 <div className="flex h-full w-full items-center justify-center">
                   <SimpleEmptyState
-                    title={t("active_cycle.empty_state.assignee.title")}
+                    title={t("Add assignees to work items to see a breakdown of work by assignees.")}
                     assetPath={assigneesResolvedPath}
                   />
                 </div>
@@ -360,7 +360,7 @@ export const ActiveCycleStats = observer(function ActiveCycleStats(props: Active
                 ))
               ) : (
                 <div className="flex h-full w-full items-center justify-center">
-                  <SimpleEmptyState title={t("active_cycle.empty_state.label.title")} assetPath={labelsResolvedPath} />
+                  <SimpleEmptyState title={t("Add labels to work items to see the breakdown of work by labels.")} assetPath={labelsResolvedPath} />
                 </div>
               )
             ) : (

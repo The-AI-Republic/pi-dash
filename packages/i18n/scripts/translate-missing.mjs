@@ -9,7 +9,6 @@ import ts from "typescript";
 
 const repoRoot = path.resolve(import.meta.dirname, "../../..");
 const localesRoot = path.join(repoRoot, "packages/i18n/src/locales");
-const localeFiles = ["core", "translations", "accessibility", "editor", "empty-state"];
 const targetLocaleFile = "translations.ts";
 const fallbackLanguage = "en";
 const defaultBatchSize = 30;
@@ -239,102 +238,21 @@ function objectLiteralToObject(objectLiteral) {
   return result;
 }
 
-function mergeObjects(...objects) {
-  const result = {};
-
-  for (const object of objects) {
-    mergeInto(result, object);
-  }
-
-  return result;
-}
-
-function mergeInto(target, source) {
-  for (const [key, value] of Object.entries(source)) {
-    if (
-      value &&
-      typeof value === "object" &&
-      !Array.isArray(value) &&
-      target[key] &&
-      typeof target[key] === "object" &&
-      !Array.isArray(target[key])
-    ) {
-      mergeInto(target[key], value);
-    } else {
-      target[key] = cloneValue(value);
-    }
-  }
-}
-
-function cloneValue(value) {
-  if (!value || typeof value !== "object" || Array.isArray(value)) return value;
-
-  return Object.entries(value).reduce((acc, [key, entryValue]) => {
-    acc[key] = cloneValue(entryValue);
-    return acc;
-  }, {});
-}
-
-function getPath(object, keyPath) {
-  const parts = keyPath.split(".");
-  let current = object;
-
-  for (const part of parts) {
-    if (!current || typeof current !== "object" || !Object.prototype.hasOwnProperty.call(current, part)) {
-      return undefined;
-    }
-    current = current[part];
-  }
-
-  return current;
-}
-
-function setPath(object, keyPath, value) {
-  const parts = keyPath.split(".");
-  let current = object;
-
-  for (const part of parts.slice(0, -1)) {
-    if (!current[part] || typeof current[part] !== "object") {
-      current[part] = {};
-    }
-    current = current[part];
-  }
-
-  current[parts.at(-1)] = value;
-}
-
-function collectEmptyLeaves(object, prefix = "", result = []) {
+function collectEmptyEntries(object, result = []) {
   for (const [key, value] of Object.entries(object)) {
-    const keyPath = prefix ? `${prefix}.${key}` : key;
     if (value === "") {
-      result.push(keyPath);
-    } else if (value && typeof value === "object" && !Array.isArray(value)) {
-      collectEmptyLeaves(value, keyPath, result);
+      result.push(key);
     }
   }
 
   return result;
 }
 
-function formatObject(value, indent = 2) {
-  const entries = Object.entries(value);
+function formatFlatObject(object) {
+  const entries = Object.entries(object);
   if (entries.length === 0) return "{}";
 
-  const pad = " ".repeat(indent);
-  const lines = ["{"];
-
-  for (const [key, entryValue] of entries) {
-    const property = /^[A-Za-z_$][\w$]*$/.test(key) ? key : JSON.stringify(key);
-
-    if (entryValue && typeof entryValue === "object" && !Array.isArray(entryValue)) {
-      lines.push(`${pad}${property}: ${formatObject(entryValue, indent + 2)},`);
-    } else {
-      lines.push(`${pad}${property}: ${JSON.stringify(entryValue)},`);
-    }
-  }
-
-  lines.push(`${" ".repeat(indent - 2)}}`);
-  return lines.join("\n");
+  return ["{", ...entries.map(([key, value]) => `  ${JSON.stringify(key)}: ${JSON.stringify(value)},`), "}"].join("\n");
 }
 
 function localeFileContent(object) {
@@ -344,13 +262,8 @@ function localeFileContent(object) {
  * See the LICENSE file for details.
  */
 
-export default ${formatObject(object)} as const;
+export default ${formatFlatObject(object)} as const;
 `;
-}
-
-function loadMergedLocale(language) {
-  const languageDir = path.join(localesRoot, language);
-  return mergeObjects(...localeFiles.map((file) => readObjectLiteral(path.join(languageDir, `${file}.ts`))));
 }
 
 function chunkArray(items, size) {
@@ -543,14 +456,14 @@ function collectIcuArguments(ast, result) {
   }
 }
 
-async function translateLanguage(config, language, englishTranslations) {
+async function translateLanguage(config, language) {
   const languageDir = path.join(localesRoot, language.value);
   const targetPath = path.join(languageDir, targetLocaleFile);
   const targetTranslations = readObjectLiteral(targetPath);
-  const missingKeys = collectEmptyLeaves(targetTranslations);
+  const missingKeys = collectEmptyEntries(targetTranslations);
   const items = missingKeys
-    .map((key) => ({ key, source: getPath(englishTranslations, key) }))
-    .filter((item) => typeof item.source === "string" && item.source.length > 0)
+    .map((key) => ({ key, source: key }))
+    .filter((item) => item.source.length > 0)
     .slice(0, config.limit || undefined);
 
   if (items.length === 0) {
@@ -569,7 +482,7 @@ async function translateLanguage(config, language, englishTranslations) {
     const validTranslations = validateTranslations(batch, translations, language);
 
     for (const [key, translation] of Object.entries(validTranslations)) {
-      setPath(targetTranslations, key, translation);
+      targetTranslations[key] = translation;
       translatedCount += 1;
     }
   }
@@ -634,7 +547,6 @@ async function translateReadme(config, language) {
 
 async function main() {
   const config = configFromArgs();
-  const englishTranslations = loadMergedLocale(fallbackLanguage);
 
   console.log(
     `i18n: provider=${config.provider} model=${config.model || "(dry-run)"} languages=${config.languages
@@ -645,7 +557,7 @@ async function main() {
   );
 
   for (const language of config.languages) {
-    await translateLanguage(config, language, englishTranslations);
+    await translateLanguage(config, language);
   }
 
   if (!config.skipReadme) {

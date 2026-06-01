@@ -8,7 +8,12 @@ import { observer } from "mobx-react";
 import { usePathname } from "next/navigation";
 import { useParams } from "react-router";
 // pi dash imports
-import { EUserPermissionsLevel, GROUPED_WORKSPACE_SETTINGS, WORKSPACE_SETTINGS_CATEGORIES } from "@pi-dash/constants";
+import {
+  EUserPermissionsLevel,
+  GROUPED_WORKSPACE_SETTINGS,
+  WORKSPACE_SETTINGS_CATEGORIES,
+  WORKSPACE_SETTINGS_CATEGORY_I18N_LABELS,
+} from "@pi-dash/constants";
 import { useTranslation } from "@pi-dash/i18n";
 import { joinUrlPath } from "@pi-dash/utils";
 // components
@@ -39,7 +44,9 @@ export const WorkspaceSettingsSidebarItemCategories = observer(function Workspac
 
         return (
           <div key={category} className="shrink-0 py-3 first:pt-0 last:pb-0">
-            <div className="p-2 text-caption-md-medium text-tertiary capitalize">{t(category)}</div>
+            <div className="p-2 text-caption-md-medium text-tertiary capitalize">
+              {t(WORKSPACE_SETTINGS_CATEGORY_I18N_LABELS[category])}
+            </div>
             <div className="flex flex-col">
               {accessibleItems.map((item) => {
                 const isItemActive =

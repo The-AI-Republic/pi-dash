@@ -32,7 +32,7 @@ function ExportsPage() {
     EUserPermissionsLevel.WORKSPACE
   );
   const pageTitle = currentWorkspace?.name
-    ? `${currentWorkspace.name} - ${t("workspace_settings.settings.exports.title")}`
+    ? `${currentWorkspace.name} - ${t("Exports")}`
     : undefined;
 
   // if user is not authorized to view this page
@@ -49,8 +49,8 @@ function ExportsPage() {
         })}
       >
         <SettingsHeading
-          title={t("workspace_settings.settings.exports.heading")}
-          description={t("workspace_settings.settings.exports.description")}
+          title={t("Exports")}
+          description={t("Export your project data in various formats and access your export history with download links.")}
         />
         <ExportGuide />
       </div>

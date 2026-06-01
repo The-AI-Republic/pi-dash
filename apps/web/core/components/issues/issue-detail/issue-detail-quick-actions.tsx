@@ -78,12 +78,12 @@ export const IssueDetailQuickActions = observer(function IssueDetailQuickActions
       await copyTextToClipboard(`${originURL}${workItemLink}`);
       setToast({
         type: TOAST_TYPE.SUCCESS,
-        title: t("common.link_copied"),
-        message: t("common.copied_to_clipboard"),
+        title: t("Link copied!"),
+        message: t("Work item link copied to clipboard"),
       });
     } catch (_error) {
       setToast({
-        title: t("toast.error"),
+        title: t("Error!"),
         type: TOAST_TYPE.ERROR,
       });
     }
@@ -100,9 +100,9 @@ export const IssueDetailQuickActions = observer(function IssueDetailQuickActions
       router.push(redirectionPath);
     } catch (_error) {
       setToast({
-        title: t("toast.error "),
+        title: t("Error!"),
         type: TOAST_TYPE.ERROR,
-        message: t("entity.delete.failed", { entity: t("issue.label", { count: 1 }) }),
+        message: t("{entity} delete failed", { entity: t("{count, plural, one {Work item} other {Work items}}", { count: 1 }) }),
       });
     }
   };
@@ -113,9 +113,9 @@ export const IssueDetailQuickActions = observer(function IssueDetailQuickActions
       router.push(`/${workspaceSlug}/projects/${projectId}/issues`);
     } catch (_error) {
       setToast({
-        title: t("toast.error"),
+        title: t("Error!"),
         type: TOAST_TYPE.ERROR,
-        message: t("issue.archive.failed.message"),
+        message: t("Work item could not be archived. Please try again."),
       });
     }
   };
@@ -126,15 +126,15 @@ export const IssueDetailQuickActions = observer(function IssueDetailQuickActions
       await restoreIssue(workspaceSlug.toString(), projectId.toString(), issueId.toString());
       setToast({
         type: TOAST_TYPE.SUCCESS,
-        title: t("issue.restore.success.title"),
-        message: t("issue.restore.success.message"),
+        title: t("Restore success"),
+        message: t("Your work item can be found in project work items."),
       });
       router.push(workItemLink);
     } catch (_error) {
       setToast({
-        title: t("toast.error"),
+        title: t("Error!"),
         type: TOAST_TYPE.ERROR,
-        message: t("issue.restore.failed.message"),
+        message: t("Work item could not be restored. Please try again."),
       });
     }
   };
@@ -147,7 +147,7 @@ export const IssueDetailQuickActions = observer(function IssueDetailQuickActions
             <IssueSubscription workspaceSlug={workspaceSlug} projectId={projectId} issueId={issueId} />
           )}
           <div className="flex flex-wrap items-center gap-2 text-tertiary">
-            <Tooltip tooltipContent={t("common.actions.copy_link")} isMobile={isMobile}>
+            <Tooltip tooltipContent={t("Copy link")} isMobile={isMobile}>
               <IconButton variant="secondary" size="lg" onClick={handleCopyText} icon={CopyLinkIcon} />
             </Tooltip>
             <WorkItemDetailQuickActions

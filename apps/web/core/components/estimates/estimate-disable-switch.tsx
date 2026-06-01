@@ -38,17 +38,17 @@ export const EstimateDisableSwitch = observer(function EstimateDisableSwitch(pro
       setToast({
         type: TOAST_TYPE.SUCCESS,
         title: currentProjectActiveEstimate
-          ? t("project_settings.estimates.toasts.disabled.success.title")
-          : t("project_settings.estimates.toasts.enabled.success.title"),
+          ? t("Success!")
+          : t("Success!"),
         message: currentProjectActiveEstimate
-          ? t("project_settings.estimates.toasts.disabled.success.message")
-          : t("project_settings.estimates.toasts.enabled.success.message"),
+          ? t("Estimates have been disabled.")
+          : t("Estimates have been enabled."),
       });
     } catch (_err) {
       setToast({
         type: TOAST_TYPE.ERROR,
-        title: t("project_settings.estimates.toasts.disabled.error.title"),
-        message: t("project_settings.estimates.toasts.disabled.error.message"),
+        title: t("Error!"),
+        message: t("Estimate could not be disabled. Please try again"),
       });
     }
   };

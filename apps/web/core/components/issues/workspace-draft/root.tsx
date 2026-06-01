@@ -67,13 +67,13 @@ export const WorkspaceDraftIssuesRoot = observer(function WorkspaceDraftIssuesRo
   if (workspaceProjectIds?.length === 0)
     return (
       <EmptyStateDetailed
-        title={t("workspace_projects.empty_state.no_projects.title")}
-        description={t("workspace_projects.empty_state.no_projects.description")}
+        title={t("No project")}
+        description={t("To create work items or manage your work, you need to create a project or be a part of one.")}
         assetKey="project"
         assetClassName="size-40"
         actions={[
           {
-            label: t("workspace_projects.empty_state.no_projects.primary_button.text"),
+            label: t("Start your first project"),
             onClick: () => {
               toggleCreateProjectModal(true);
             },

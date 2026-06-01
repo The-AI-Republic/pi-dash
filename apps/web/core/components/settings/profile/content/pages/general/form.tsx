@@ -143,7 +143,7 @@ export const GeneralProfileSettingsForm = observer(function GeneralProfileSettin
       console.error("Error handling cover image:", error);
       setToast({
         type: TOAST_TYPE.ERROR,
-        title: t("toast.error"),
+        title: t("Error!"),
         message: error instanceof Error ? error.message : "Failed to process cover image",
       });
       setIsLoading(false);
@@ -252,7 +252,7 @@ export const GeneralProfileSettingsForm = observer(function GeneralProfileSettin
                 name="cover_image_url"
                 render={({ field: { value, onChange } }) => (
                   <ImagePickerPopover
-                    label={t("change_cover")}
+                    label={t("Change cover")}
                     control={control}
                     onChange={(imageUrl) => onChange(imageUrl)}
                     value={value}
@@ -274,7 +274,7 @@ export const GeneralProfileSettingsForm = observer(function GeneralProfileSettin
             <div className="grid grid-cols-1 gap-x-6 gap-y-4 sm:grid-cols-2 xl:grid-cols-3">
               <div className="flex flex-col gap-1">
                 <h4 className="text-13 font-medium text-secondary">
-                  {t("first_name")}&nbsp;
+                  {t("First name")}&nbsp;
                   <span className="text-danger-primary">*</span>
                 </h4>
                 <Controller
@@ -303,7 +303,7 @@ export const GeneralProfileSettingsForm = observer(function GeneralProfileSettin
                 {errors.first_name && <span className="text-11 text-danger-primary">{errors.first_name.message}</span>}
               </div>
               <div className="flex flex-col gap-1">
-                <h4 className="text-13 font-medium text-secondary">{t("last_name")}</h4>
+                <h4 className="text-13 font-medium text-secondary">{t("Last name")}</h4>
                 <Controller
                   control={control}
                   name="last_name"
@@ -330,7 +330,7 @@ export const GeneralProfileSettingsForm = observer(function GeneralProfileSettin
               </div>
               <div className="flex flex-col gap-1">
                 <h4 className="text-13 font-medium text-secondary">
-                  {t("display_name")}&nbsp;
+                  {t("Display name")}&nbsp;
                   <span className="text-danger-primary">*</span>
                 </h4>
                 <Controller
@@ -361,7 +361,7 @@ export const GeneralProfileSettingsForm = observer(function GeneralProfileSettin
               </div>
               <div className="flex flex-col gap-1">
                 <h4 className="text-13 font-medium text-secondary">
-                  {t("auth.common.email.label")}&nbsp;
+                  {t("Email")}&nbsp;
                   <span className="text-danger-primary">*</span>
                 </h4>
                 <Controller
@@ -393,7 +393,7 @@ export const GeneralProfileSettingsForm = observer(function GeneralProfileSettin
                     className="btn w-fit text-11 text-secondary underline"
                     onClick={() => setIsChangeEmailModalOpen(true)}
                   >
-                    {t("account_settings.profile.change_email_modal.title")}
+                    {t("Change email")}
                   </button>
                 )}
               </div>
@@ -401,7 +401,7 @@ export const GeneralProfileSettingsForm = observer(function GeneralProfileSettin
           </div>
           <div>
             <Button variant="primary" type="submit" loading={isLoading}>
-              {isLoading ? t("saving") : t("save_changes")}
+              {isLoading ? t("Saving") : t("Save changes")}
             </Button>
           </div>
         </div>
@@ -409,11 +409,11 @@ export const GeneralProfileSettingsForm = observer(function GeneralProfileSettin
       {canSelfDeactivate && (
         <div className="mt-10">
           <SettingsBoxedControlItem
-            title={t("deactivate_account")}
-            description={t("deactivate_account_description")}
+            title={t("Deactivate account")}
+            description={t("When deactivating an account, all of the data and resources within that account will be permanently removed and cannot be recovered.")}
             control={
               <Button variant="error-outline" onClick={() => setDeactivateAccountModal(true)}>
-                {t("deactivate_account")}
+                {t("Deactivate account")}
               </Button>
             }
           />

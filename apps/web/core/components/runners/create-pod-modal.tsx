@@ -73,8 +73,8 @@ export const CreatePodModal = observer(function CreatePodModal(props: Props) {
       const err = e as { error?: string } | null;
       setToast({
         type: TOAST_TYPE.ERROR,
-        title: t("runners.toast.error_title"),
-        message: err?.error ?? t("runners.create_pod_modal.errors.create_failed"),
+        title: t("Error!"),
+        message: err?.error ?? t("Could not create the pod."),
       });
     }
   };
@@ -83,23 +83,23 @@ export const CreatePodModal = observer(function CreatePodModal(props: Props) {
     <ModalCore isOpen={isOpen} handleClose={onClose} position={EModalPosition.CENTER} width={EModalWidth.XXL}>
       <form onSubmit={handleSubmit(onSubmit)} className="flex flex-col gap-5 p-5">
         <div>
-          <div className="text-18 font-medium text-primary">{t("runners.create_pod_modal.title")}</div>
-          <p className="mt-1 text-13 text-secondary">{t("runners.create_pod_modal.subtitle")}</p>
+          <div className="text-18 font-medium text-primary">{t("Create new pod")}</div>
+          <p className="mt-1 text-13 text-secondary">{t("Pods group runners under a project. Pick a project, then give the pod a name.")}</p>
         </div>
 
         <div className="flex flex-col gap-1">
           <label htmlFor="create-pod-project" className="text-13 font-medium text-primary">
-            {t("runners.create_pod_modal.project_label")}
+            {t("Project")}
           </label>
           <Controller
             control={control}
             name="projectId"
-            rules={{ required: t("runners.create_pod_modal.errors.project_required") }}
+            rules={{ required: t("Pick a project.") }}
             render={({ field }) => (
               <CustomSelect
                 value={field.value}
                 label={
-                  projects?.find((p) => p.id === field.value)?.name ?? t("runners.create_pod_modal.project_placeholder")
+                  projects?.find((p) => p.id === field.value)?.name ?? t("Select a project")
                 }
                 onChange={field.onChange}
                 buttonClassName="border border-subtle"
@@ -118,34 +118,34 @@ export const CreatePodModal = observer(function CreatePodModal(props: Props) {
               </CustomSelect>
             )}
           />
-          <p className="text-12 text-secondary">{t("runners.create_pod_modal.project_help")}</p>
+          <p className="text-12 text-secondary">{t("The project this pod belongs to. The name will be prefixed with the project identifier.")}</p>
           {errors.projectId && <span className="text-red-500 text-12">{errors.projectId.message}</span>}
           {projectsError && (
-            <span className="text-red-500 text-12">{t("runners.create_pod_modal.errors.load_projects_failed")}</span>
+            <span className="text-red-500 text-12">{t("Could not load projects.")}</span>
           )}
         </div>
 
         <div className="flex flex-col gap-1">
           <label htmlFor="create-pod-name" className="text-13 font-medium text-primary">
-            {t("runners.create_pod_modal.name_label")}
+            {t("Name")}
           </label>
           <Controller
             control={control}
             name="name"
             rules={{
-              validate: (v) => v.trim().length > 0 || t("runners.create_pod_modal.errors.name_required"),
+              validate: (v) => v.trim().length > 0 || t("Name is required."),
             }}
             render={({ field }) => (
-              <Input {...field} id="create-pod-name" placeholder={t("runners.create_pod_modal.name_placeholder")} />
+              <Input {...field} id="create-pod-name" placeholder={t("beefy")} />
             )}
           />
-          <p className="text-12 text-secondary">{t("runners.create_pod_modal.name_help")}</p>
+          <p className="text-12 text-secondary">{t("Letters, digits, dashes, and underscores. The project prefix is added automatically.")}</p>
           {errors.name && <span className="text-red-500 text-12">{errors.name.message}</span>}
         </div>
 
         <div className="flex flex-col gap-1">
           <label htmlFor="create-pod-description" className="text-13 font-medium text-primary">
-            {t("runners.create_pod_modal.description_label")}
+            {t("Description (optional)")}
           </label>
           <Controller
             control={control}
@@ -154,7 +154,7 @@ export const CreatePodModal = observer(function CreatePodModal(props: Props) {
               <Input
                 {...field}
                 id="create-pod-description"
-                placeholder={t("runners.create_pod_modal.description_placeholder")}
+                placeholder={t("Where this pod runs, what it's for, etc.")}
               />
             )}
           />
@@ -162,10 +162,10 @@ export const CreatePodModal = observer(function CreatePodModal(props: Props) {
 
         <div className="flex justify-end gap-2">
           <Button variant="secondary" onClick={onClose} disabled={isSubmitting}>
-            {t("runners.create_pod_modal.cancel")}
+            {t("Cancel")}
           </Button>
           <Button type="submit" loading={isSubmitting} disabled={isSubmitting}>
-            {isSubmitting ? t("runners.create_pod_modal.submitting") : t("runners.create_pod_modal.submit")}
+            {isSubmitting ? t("Creating…") : t("Create pod")}
           </Button>
         </div>
       </form>

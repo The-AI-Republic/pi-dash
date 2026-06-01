@@ -30,7 +30,7 @@ function FeaturesIntakeSettingsPage({ params }: Route.ComponentProps) {
   const { t } = useTranslation();
   // derived values
   const pageTitle = currentProjectDetails?.name
-    ? `${currentProjectDetails?.name} settings - ${t("project_settings.features.intake.short_title")}`
+    ? `${currentProjectDetails?.name} settings - ${t("Intake")}`
     : undefined;
   const canPerformProjectAdminActions = allowPermissions([EUserPermissions.ADMIN], EUserPermissionsLevel.PROJECT);
 
@@ -43,13 +43,13 @@ function FeaturesIntakeSettingsPage({ params }: Route.ComponentProps) {
       <PageHead title={pageTitle} />
       <section className="w-full">
         <SettingsHeading
-          title={t("project_settings.features.intake.title")}
-          description={t("project_settings.features.intake.description")}
+          title={t("Intake")}
+          description={t("Let non-members share bugs, feedback, and suggestions; without disrupting your workflow.")}
         />
         <div className="mt-7">
           <ProjectSettingsFeatureControlItem
-            title={t("project_settings.features.intake.toggle_title")}
-            description={t("project_settings.features.intake.toggle_description")}
+            title={t("Enable intake")}
+            description={t("Let project members create in app intake requests.")}
             featureProperty="inbox_view"
             projectId={projectId}
             value={!!currentProjectDetails?.inbox_view}

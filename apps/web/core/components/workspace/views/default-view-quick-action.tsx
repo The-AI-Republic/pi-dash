@@ -44,13 +44,13 @@ export const DefaultWorkspaceViewQuickActions = observer(function DefaultWorkspa
     {
       key: "open-new-tab",
       action: handleOpenInNewTab,
-      title: t("open_in_new_tab"),
+      title: t("Open in new tab"),
       icon: NewTabIcon,
     },
     {
       key: "copy-link",
       action: handleCopyText,
-      title: t("copy_link"),
+      title: t("Copy link"),
       icon: LinkIcon,
     },
   ];

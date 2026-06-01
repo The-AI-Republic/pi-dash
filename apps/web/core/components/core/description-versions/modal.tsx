@@ -68,7 +68,7 @@ export const DescriptionVersionsModal = observer(function DescriptionVersionsMod
     editorRef.current.copyMarkdownToClipboard();
     setToast({
       type: TOAST_TYPE.SUCCESS,
-      title: t("toast.success"),
+      title: t("Success!"),
       message: "Markdown copied to clipboard.",
     });
   }, [t]);
@@ -82,7 +82,7 @@ export const DescriptionVersionsModal = observer(function DescriptionVersionsMod
         <div className="flex items-center justify-between gap-2 py-0.5">
           <div className="flex flex-shrink-0 items-center gap-2 text-13">
             <p className="flex items-center gap-1">
-              {t("description_versions.edited_by")}
+              {t("Edited by")}
               <span className="flex-shrink-0">
                 <Avatar
                   size="sm"
@@ -156,12 +156,12 @@ export const DescriptionVersionsModal = observer(function DescriptionVersionsMod
         {/* End version description */}
         {/* Footer */}
         <div className="flex items-center justify-between gap-2 border-t-[0.5px] border-subtle pt-4">
-          <Tooltip tooltipContent={t("common.actions.copy_markdown")}>
+          <Tooltip tooltipContent={t("Copy markdown")}>
             <IconButton type="button" variant="ghost" size="base" onClick={handleCopyMarkdown} icon={CopyIcon} />
           </Tooltip>
           <div className="flex items-center gap-2">
             <Button variant="secondary" size="lg" onClick={handleClose} tabIndex={1}>
-              {t("common.cancel")}
+              {t("Cancel")}
             </Button>
             {!isRestoreDisabled && (
               <Button
@@ -172,7 +172,7 @@ export const DescriptionVersionsModal = observer(function DescriptionVersionsMod
                   handleClose();
                 }}
               >
-                {t("common.actions.restore")}
+                {t("Restore")}
               </Button>
             )}
           </div>

@@ -24,9 +24,9 @@ import { useModule } from "@/hooks/store/use-module";
 import { useProject } from "@/hooks/store/use-project";
 
 const SUPPORTED_LAYOUTS = [
-  { key: "list", i18n_title: "issue.layouts.list", icon: ListLayoutIcon },
-  { key: "kanban", i18n_title: "issue.layouts.kanban", icon: BoardLayoutIcon },
-  { key: "calendar", i18n_title: "issue.layouts.calendar", icon: CalendarLayoutIcon },
+  { key: "list", i18n_title: "List", icon: ListLayoutIcon },
+  { key: "kanban", i18n_title: "Board", icon: BoardLayoutIcon },
+  { key: "calendar", i18n_title: "Calendar", icon: CalendarLayoutIcon },
 ];
 
 export const ModuleIssuesMobileHeader = observer(function ModuleIssuesMobileHeader() {

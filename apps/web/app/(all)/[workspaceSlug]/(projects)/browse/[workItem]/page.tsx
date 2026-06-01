@@ -125,10 +125,10 @@ export const IssueDetailsPage = observer(function IssueDetailsPage({ params }: R
     return (
       <EmptyState
         image={resolvedTheme === "dark" ? emptyIssueDark : emptyIssueLight}
-        title={t("issue.empty_state.issue_detail.title")}
-        description={t("issue.empty_state.issue_detail.description")}
+        title={t("Work item does not exist")}
+        description={t("The work item you are looking for does not exist, has been archived, or has been deleted.")}
         primaryButton={{
-          text: hydrationError ? t("common.retry") : t("issue.empty_state.issue_detail.primary_button.text"),
+          text: hydrationError ? t("Retry") : t("View other work items"),
           onClick: () => {
             if (hydrationError) void retryIssueHydration();
             else router.push(`/${workspaceSlug}/workspace-views/all-issues/`);

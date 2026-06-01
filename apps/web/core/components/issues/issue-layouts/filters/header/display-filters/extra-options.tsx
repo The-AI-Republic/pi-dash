@@ -18,11 +18,11 @@ const ISSUE_EXTRA_OPTIONS: {
 }[] = [
   {
     key: "sub_issue",
-    titleTranslationKey: "issue.display.extra.show_sub_issues",
+    titleTranslationKey: "Show sub-work items",
   }, // in spreadsheet its always false
   {
     key: "show_empty_groups",
-    titleTranslationKey: "issue.display.extra.show_empty_groups",
+    titleTranslationKey: "Show empty groups",
   }, // filter on front-end
 ];
 

@@ -167,8 +167,8 @@ export const WorkItemStateDropdownBase = observer(function WorkItemStateDropdown
           <DropdownButton
             className={buttonClassName}
             isActive={isOpen}
-            tooltipHeading={t("state")}
-            tooltipContent={selectedState?.name ?? t("state")}
+            tooltipHeading={t("State")}
+            tooltipContent={selectedState?.name ?? t("State")}
             showTooltip={showTooltip}
             variant={buttonVariant}
             renderToolTipByDefault={renderByDefault}
@@ -185,7 +185,7 @@ export const WorkItemStateDropdownBase = observer(function WorkItemStateDropdown
                   />
                 )}
                 {BUTTON_VARIANTS_WITH_TEXT.includes(buttonVariant) && (
-                  <span className="flex-grow truncate text-left">{selectedState?.name ?? t("state")}</span>
+                  <span className="flex-grow truncate text-left">{selectedState?.name ?? t("State")}</span>
                 )}
                 {dropdownArrow && (
                   <ChevronDownIcon
@@ -229,7 +229,7 @@ export const WorkItemStateDropdownBase = observer(function WorkItemStateDropdown
                 className="w-full bg-transparent py-1 text-11 text-secondary placeholder:text-placeholder focus:outline-none"
                 value={query}
                 onChange={(e) => setQuery(e.target.value)}
-                placeholder={t("common.search.label")}
+                placeholder={t("Search")}
                 displayValue={(assigned: any) => assigned?.name}
                 onKeyDown={searchInputKeyDown}
               />
@@ -247,10 +247,10 @@ export const WorkItemStateDropdownBase = observer(function WorkItemStateDropdown
                     />
                   ))
                 ) : (
-                  <p className="px-1.5 py-1 text-placeholder italic">{t("no_matching_results")}</p>
+                  <p className="px-1.5 py-1 text-placeholder italic">{t("No matching results")}</p>
                 )
               ) : (
-                <p className="px-1.5 py-1 text-placeholder italic">{t("loading")}</p>
+                <p className="px-1.5 py-1 text-placeholder italic">{t("Loading")}</p>
               )}
             </div>
           </div>

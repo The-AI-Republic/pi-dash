@@ -94,8 +94,8 @@ export const InstallSchedulerBindingModal = observer(function InstallSchedulerBi
       });
       setToast({
         type: TOAST_TYPE.SUCCESS,
-        title: t("scheduler_bindings.toast.installed_title"),
-        message: t("scheduler_bindings.toast.installed_message"),
+        title: t("Scheduler installed"),
+        message: t("It will fire on the configured schedule."),
       });
       onInstalled(binding);
       onClose();
@@ -113,10 +113,10 @@ export const InstallSchedulerBindingModal = observer(function InstallSchedulerBi
         err?.dtstart?.[0] ??
         err?.tzid?.[0] ??
         err?.scheduler?.[0] ??
-        t("scheduler_bindings.toast.install_failed");
+        t("Could not install the scheduler.");
       setToast({
         type: TOAST_TYPE.ERROR,
-        title: t("scheduler_bindings.toast.error_title"),
+        title: t("Something went wrong"),
         message: detail,
       });
     }
@@ -127,12 +127,12 @@ export const InstallSchedulerBindingModal = observer(function InstallSchedulerBi
       <ModalCore isOpen={isOpen} handleClose={onClose} position={EModalPosition.CENTER} width={EModalWidth.XL}>
         <div className="flex flex-col gap-4 p-5">
           <div className="text-18 font-medium text-primary">
-            {t("scheduler_bindings.install_modal.none_available_title")}
+            {t("No schedulers available")}
           </div>
-          <p className="text-13 text-secondary">{t("scheduler_bindings.install_modal.none_available_body")}</p>
+          <p className="text-13 text-secondary">{t("Either every workspace scheduler is already installed on this project, or your workspace admin hasn't enabled any. Visit Workspace → Schedulers to manage the catalog.")}</p>
           <div className="flex justify-end">
             <Button variant="secondary" onClick={onClose}>
-              {t("scheduler_bindings.install_modal.cancel")}
+              {t("Cancel")}
             </Button>
           </div>
         </div>
@@ -143,16 +143,16 @@ export const InstallSchedulerBindingModal = observer(function InstallSchedulerBi
   return (
     <ModalCore isOpen={isOpen} handleClose={onClose} position={EModalPosition.CENTER} width={EModalWidth.XXL}>
       <form onSubmit={handleSubmit(handleFormSubmit)} className="flex flex-col gap-5 p-5">
-        <div className="text-18 font-medium text-primary">{t("scheduler_bindings.install_modal.title")}</div>
+        <div className="text-18 font-medium text-primary">{t("Install scheduler")}</div>
 
         <div className="flex flex-col gap-1">
           <label htmlFor="binding-scheduler" className="text-13 font-medium text-primary">
-            {t("scheduler_bindings.install_modal.scheduler_label")}
+            {t("Scheduler")}
           </label>
           <Controller
             control={control}
             name="scheduler"
-            rules={{ required: t("scheduler_bindings.install_modal.errors.scheduler_required") }}
+            rules={{ required: t("Pick a scheduler.") }}
             render={({ field }) => (
               <select
                 {...field}
@@ -167,7 +167,7 @@ export const InstallSchedulerBindingModal = observer(function InstallSchedulerBi
               </select>
             )}
           />
-          <p className="text-12 text-secondary">{t("scheduler_bindings.install_modal.scheduler_help")}</p>
+          <p className="text-12 text-secondary">{t("Pick from your workspace's enabled schedulers. Already-installed ones aren't listed.")}</p>
           {errors.scheduler && <span className="text-red-500 text-12">{errors.scheduler.message}</span>}
         </div>
 
@@ -185,12 +185,12 @@ export const InstallSchedulerBindingModal = observer(function InstallSchedulerBi
 
         <div className="flex justify-end gap-2">
           <Button variant="secondary" onClick={onClose} disabled={isSubmitting}>
-            {t("scheduler_bindings.install_modal.cancel")}
+            {t("Cancel")}
           </Button>
           <Button type="submit" loading={isSubmitting} disabled={isSubmitting}>
             {isSubmitting
-              ? t("scheduler_bindings.install_modal.installing")
-              : t("scheduler_bindings.install_modal.install")}
+              ? t("Installing…")
+              : t("Install")}
           </Button>
         </div>
       </form>

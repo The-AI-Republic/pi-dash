@@ -99,9 +99,9 @@ export const IssueDetailsSidebar = observer(function IssueDetailsSidebar(props: 
               issueOperations={issueOperations}
             />
           )}
-          <h5 className="mt-5 text-body-xs-medium">{t("common.properties")}</h5>
+          <h5 className="mt-5 text-body-xs-medium">{t("Properties")}</h5>
           <div className={`mt-4 mb-2 space-y-2.5 truncate ${!isEditable ? "opacity-60" : ""}`}>
-            <SidebarPropertyListItem icon={StatePropertyIcon} label={t("common.state")}>
+            <SidebarPropertyListItem icon={StatePropertyIcon} label={t("State")}>
               <StateDropdown
                 value={issue?.state_id}
                 onChange={(val) => issueOperations.update(workspaceSlug, projectId, issueId, { state_id: val })}
@@ -116,13 +116,13 @@ export const IssueDetailsSidebar = observer(function IssueDetailsSidebar(props: 
               />
             </SidebarPropertyListItem>
 
-            <SidebarPropertyListItem icon={MembersPropertyIcon} label={t("common.assignees")}>
+            <SidebarPropertyListItem icon={MembersPropertyIcon} label={t("Assignees")}>
               <MemberDropdown
                 value={issue?.assignee_ids ?? undefined}
                 onChange={(val) => issueOperations.update(workspaceSlug, projectId, issueId, { assignee_ids: val })}
                 disabled={!isEditable}
                 projectId={projectId?.toString() ?? ""}
-                placeholder={t("issue.add.assignee")}
+                placeholder={t("Add assignees")}
                 multiple
                 buttonVariant={issue?.assignee_ids?.length > 1 ? "transparent-without-text" : "transparent-with-text"}
                 className="group w-full grow"
@@ -134,7 +134,7 @@ export const IssueDetailsSidebar = observer(function IssueDetailsSidebar(props: 
               />
             </SidebarPropertyListItem>
 
-            <SidebarPropertyListItem icon={PriorityPropertyIcon} label={t("common.priority")}>
+            <SidebarPropertyListItem icon={PriorityPropertyIcon} label={t("Priority")}>
               <PriorityDropdown
                 value={issue?.priority}
                 onChange={(val) => issueOperations.update(workspaceSlug, projectId, issueId, { priority: val })}
@@ -147,7 +147,7 @@ export const IssueDetailsSidebar = observer(function IssueDetailsSidebar(props: 
             </SidebarPropertyListItem>
 
             {createdByDetails && (
-              <SidebarPropertyListItem icon={UserCirclePropertyIcon} label={t("common.created_by")}>
+              <SidebarPropertyListItem icon={UserCirclePropertyIcon} label={t("Created by")}>
                 <div className="flex gap-2 px-2">
                   <ButtonAvatars showTooltip userIds={createdByDetails.id} />
                   <span className="grow truncate text-body-xs-regular leading-5">{createdByDetails?.display_name}</span>
@@ -155,9 +155,9 @@ export const IssueDetailsSidebar = observer(function IssueDetailsSidebar(props: 
               </SidebarPropertyListItem>
             )}
 
-            <SidebarPropertyListItem icon={StartDatePropertyIcon} label={t("common.order_by.start_date")}>
+            <SidebarPropertyListItem icon={StartDatePropertyIcon} label={t("Start date")}>
               <DateDropdown
-                placeholder={t("issue.add.start_date")}
+                placeholder={t("Add start date")}
                 value={issue.start_date}
                 onChange={(val) =>
                   issueOperations.update(workspaceSlug, projectId, issueId, {
@@ -175,10 +175,10 @@ export const IssueDetailsSidebar = observer(function IssueDetailsSidebar(props: 
               />
             </SidebarPropertyListItem>
 
-            <SidebarPropertyListItem icon={DueDatePropertyIcon} label={t("common.order_by.due_date")}>
+            <SidebarPropertyListItem icon={DueDatePropertyIcon} label={t("Due date")}>
               <div className="flex w-full items-center gap-2">
                 <DateDropdown
-                  placeholder={t("issue.add.due_date")}
+                  placeholder={t("Add due date")}
                   value={issue.target_date}
                   onChange={(val) =>
                     issueOperations.update(workspaceSlug, projectId, issueId, {
@@ -202,7 +202,7 @@ export const IssueDetailsSidebar = observer(function IssueDetailsSidebar(props: 
             </SidebarPropertyListItem>
 
             {projectId && areEstimateEnabledByProjectId(projectId) && (
-              <SidebarPropertyListItem icon={EstimatePropertyIcon} label={t("common.estimate")}>
+              <SidebarPropertyListItem icon={EstimatePropertyIcon} label={t("Estimate")}>
                 <EstimateDropdown
                   value={issue?.estimate_point ?? undefined}
                   onChange={(val: string | undefined) =>
@@ -214,7 +214,7 @@ export const IssueDetailsSidebar = observer(function IssueDetailsSidebar(props: 
                   className="group w-full grow"
                   buttonContainerClassName="w-full text-left h-7.5"
                   buttonClassName={`text-body-xs-regular ${issue?.estimate_point !== null ? "" : "text-placeholder"}`}
-                  placeholder={t("common.none")}
+                  placeholder={t("None")}
                   hideIcon
                   dropdownArrow
                   dropdownArrowClassName="h-3.5 w-3.5 hidden group-hover:inline"
@@ -223,7 +223,7 @@ export const IssueDetailsSidebar = observer(function IssueDetailsSidebar(props: 
             )}
 
             {projectDetails?.module_view && (
-              <SidebarPropertyListItem icon={ModuleIcon} label={t("common.modules")}>
+              <SidebarPropertyListItem icon={ModuleIcon} label={t("Modules")}>
                 <IssueModuleSelect
                   className="w-full grow"
                   workspaceSlug={workspaceSlug}
@@ -238,7 +238,7 @@ export const IssueDetailsSidebar = observer(function IssueDetailsSidebar(props: 
             {projectDetails?.cycle_view && (
               <SidebarPropertyListItem
                 icon={CycleIcon}
-                label={t("common.cycle")}
+                label={t("Cycle")}
                 appendElement={<TransferHopInfo workItem={issue} />}
               >
                 <IssueCycleSelect
@@ -252,7 +252,7 @@ export const IssueDetailsSidebar = observer(function IssueDetailsSidebar(props: 
               </SidebarPropertyListItem>
             )}
 
-            <SidebarPropertyListItem icon={ParentPropertyIcon} label={t("common.parent")}>
+            <SidebarPropertyListItem icon={ParentPropertyIcon} label={t("Parent")}>
               <IssueParentSelectRoot
                 className="h-7.5 w-full grow"
                 workspaceSlug={workspaceSlug}
@@ -263,7 +263,7 @@ export const IssueDetailsSidebar = observer(function IssueDetailsSidebar(props: 
               />
             </SidebarPropertyListItem>
 
-            <SidebarPropertyListItem icon={LabelPropertyIcon} label={t("common.labels")}>
+            <SidebarPropertyListItem icon={LabelPropertyIcon} label={t("Labels")}>
               <IssueLabel
                 workspaceSlug={workspaceSlug}
                 projectId={projectId}

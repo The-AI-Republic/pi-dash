@@ -40,7 +40,7 @@ function AnalyticsPage({ params }: Route.ComponentProps) {
   const { allowPermissions } = useUserPermissions();
 
   const pageTitle = currentWorkspace?.name
-    ? t(`workspace_analytics.page_label`, { workspace: currentWorkspace?.name })
+    ? t("{workspace} - Analytics", { workspace: currentWorkspace?.name })
     : undefined;
 
   // permissions
@@ -118,8 +118,8 @@ function AnalyticsPage({ params }: Route.ComponentProps) {
           ) : (
             <EmptyStateDetailed
               assetKey="project"
-              title={t("workspace_projects.empty_state.no_projects.title")}
-              description={t("workspace_projects.empty_state.no_projects.description")}
+              title={t("No project")}
+              description={t("To create work items or manage your work, you need to create a project or be a part of one.")}
               actions={[
                 {
                   label: "Create a project",

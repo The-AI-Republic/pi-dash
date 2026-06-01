@@ -41,15 +41,15 @@ export const NotificationsProfileSettingsForm = observer(function NotificationsP
         [key]: value,
       });
       setToast({
-        title: t("success"),
+        title: t("Success"),
         type: TOAST_TYPE.SUCCESS,
-        message: t("email_notification_setting_updated_successfully"),
+        message: t("Email notification setting updated successfully"),
       });
     } catch (_error) {
       setToast({
-        title: t("error"),
+        title: t("Error"),
         type: TOAST_TYPE.ERROR,
-        message: t("failed_to_update_email_notification_setting"),
+        message: t("Failed to update email notification setting"),
       });
     }
   };
@@ -61,8 +61,8 @@ export const NotificationsProfileSettingsForm = observer(function NotificationsP
   return (
     <div className="flex flex-col gap-y-1">
       <SettingsControlItem
-        title={t("property_changes")}
-        description={t("property_changes_description")}
+        title={t("Property changes")}
+        description={t("Notify me when work items' properties like assignees, priority, estimates or anything else changes.")}
         control={
           <Controller
             control={control}
@@ -81,8 +81,8 @@ export const NotificationsProfileSettingsForm = observer(function NotificationsP
         }
       />
       <SettingsControlItem
-        title={t("state_change")}
-        description={t("state_change_description")}
+        title={t("State change")}
+        description={t("Notify me when the work items moves to a different state")}
         control={
           <Controller
             control={control}
@@ -102,8 +102,8 @@ export const NotificationsProfileSettingsForm = observer(function NotificationsP
       />
       <div className="border-l-3 border-subtle-1 pl-3">
         <SettingsControlItem
-          title={t("issue_completed")}
-          description={t("issue_completed_description")}
+          title={t("Work item completed")}
+          description={t("Notify me only when a work item is completed")}
           control={
             <Controller
               control={control}
@@ -123,8 +123,8 @@ export const NotificationsProfileSettingsForm = observer(function NotificationsP
         />
       </div>
       <SettingsControlItem
-        title={t("comments")}
-        description={t("comments_description")}
+        title={t("Comments")}
+        description={t("Notify me when someone leaves a comment on the work item")}
         control={
           <Controller
             control={control}
@@ -143,8 +143,8 @@ export const NotificationsProfileSettingsForm = observer(function NotificationsP
         }
       />
       <SettingsControlItem
-        title={t("mentions")}
-        description={t("mentions_description")}
+        title={t("Mentions")}
+        description={t("Notify me only when someone mentions me in the comments or description")}
         control={
           <Controller
             control={control}

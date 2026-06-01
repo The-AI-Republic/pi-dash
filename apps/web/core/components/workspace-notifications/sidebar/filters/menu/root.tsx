@@ -32,7 +32,7 @@ export const NotificationFilter = observer(function NotificationFilter() {
     <PopoverMenu
       data={translatedFilterTypeOptions}
       button={
-        <Tooltip tooltipContent={t("notification.options.filters")} isMobile={isMobile} position="bottom">
+        <Tooltip tooltipContent={t("Inbox Filters")} isMobile={isMobile} position="bottom">
           <IconButton size="base" variant="ghost" icon={ListFilter} />
         </Tooltip>
       }

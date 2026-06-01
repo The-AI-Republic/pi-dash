@@ -66,31 +66,31 @@ export const ISSUE_DISPLAY_FILTERS_BY_LAYOUT: {
 export const ISSUE_PRIORITY_FILTERS: TIssueFilterPriorityObject[] = [
   {
     key: "urgent",
-    titleTranslationKey: "issue.priority.urgent",
+    titleTranslationKey: "Urgent",
     className: "bg-layer-2 text-priority-urgent border-strong",
     icon: "error",
   },
   {
     key: "high",
-    titleTranslationKey: "issue.priority.high",
+    titleTranslationKey: "High",
     className: "bg-layer-2 text-priority-high border-strong",
     icon: "signal_cellular_alt",
   },
   {
     key: "medium",
-    titleTranslationKey: "issue.priority.medium",
+    titleTranslationKey: "Medium",
     className: "bg-layer-2 text-priority-medium border-strong",
     icon: "signal_cellular_alt_2_bar",
   },
   {
     key: "low",
-    titleTranslationKey: "issue.priority.low",
+    titleTranslationKey: "Low",
     className: "bg-layer-2 text-priority-low border-strong",
     icon: "signal_cellular_alt_1_bar",
   },
   {
     key: "none",
-    titleTranslationKey: "common.none",
+    titleTranslationKey: "None",
     className: "bg-layer-2 text-priority-none border-strong",
     icon: "block",
   },
@@ -322,16 +322,16 @@ export type TActivityFilterOptionsKey = Exclude<TActivityFilters, EActivityFilte
 
 export const ACTIVITY_FILTER_TYPE_OPTIONS: Record<TActivityFilterOptionsKey, { labelTranslationKey: string }> = {
   [EActivityFilterType.ACTIVITY]: {
-    labelTranslationKey: "common.updates",
+    labelTranslationKey: "Updates",
   },
   [EActivityFilterType.COMMENT]: {
-    labelTranslationKey: "common.comments",
+    labelTranslationKey: "Comments",
   },
   [EActivityFilterType.STATE]: {
-    labelTranslationKey: "common.state",
+    labelTranslationKey: "State",
   },
   [EActivityFilterType.ASSIGNEE]: {
-    labelTranslationKey: "common.assignee",
+    labelTranslationKey: "Assignee",
   },
 };
 

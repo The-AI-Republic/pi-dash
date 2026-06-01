@@ -93,7 +93,7 @@ export const IssueParentDetail = observer(function IssueParentDetail(props: TIss
         </ControlLink>
 
         <CustomMenu ellipsis optionsClassName="p-1.5">
-          <div className="border-b border-strong text-11 font-medium text-secondary">{t("issue.sibling.label")}</div>
+          <div className="border-b border-strong text-11 font-medium text-secondary">{t("Sibling work items")}</div>
 
           <IssueParentSiblings workspaceSlug={workspaceSlug} currentIssue={issue} parentIssue={parentIssue} />
 
@@ -102,7 +102,7 @@ export const IssueParentDetail = observer(function IssueParentDetail(props: TIss
             className="flex items-center gap-2 py-2 text-danger-primary"
           >
             <MinusCircle className="h-4 w-4" />
-            <span>{t("issue.remove.parent.label")}</span>
+            <span>{t("Remove parent work item")}</span>
           </CustomMenu.MenuItem>
         </CustomMenu>
       </div>

@@ -87,9 +87,9 @@ export const DeleteIssueModal = observer(function DeleteIssueModal(props: Props)
         .then(() => {
           setToast({
             type: TOAST_TYPE.SUCCESS,
-            title: t("common.success"),
-            message: t("entity.delete.success", {
-              entity: isSubIssue ? t("common.sub_work_item") : isEpic ? t("common.epic") : t("common.work_item"),
+            title: t("Success!"),
+            message: t("{entity} deleted successfully", {
+              entity: isSubIssue ? t("Sub-work item") : isEpic ? t("Epic") : t("Work item"),
             }),
           });
           onClose();
@@ -116,7 +116,7 @@ export const DeleteIssueModal = observer(function DeleteIssueModal(props: Props)
       handleSubmit={handleIssueDelete}
       isSubmitting={isDeleting}
       isOpen={isOpen}
-      title={t("entity.delete.label", { entity: isEpic ? t("common.epic") : t("common.work_item") })}
+      title={t("Delete {entity}", { entity: isEpic ? t("Epic") : t("Work item") })}
       content={
         <>
           {/* TODO: Translate here */}

@@ -48,7 +48,7 @@ export const StickiesTruncated = observer(function StickiesTruncated(props: Stic
           )}
           onClick={handleClose}
         >
-          {t("show_all")}
+          {t("Show all")}
         </Link>
       }
     >

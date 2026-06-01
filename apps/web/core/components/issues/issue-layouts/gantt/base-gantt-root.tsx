@@ -102,7 +102,7 @@ export const BaseGanttRoot = observer(function BaseGanttRoot(props: IBaseGanttRo
       issues.updateIssueDates(workspaceSlug.toString(), updates, projectId.toString()).catch(() => {
         setToast({
           type: TOAST_TYPE.ERROR,
-          title: t("toast.error"),
+          title: t("Error!"),
           message: "Error while updating work item dates, Please try again Later",
         });
       }),
@@ -130,8 +130,8 @@ export const BaseGanttRoot = observer(function BaseGanttRoot(props: IBaseGanttRo
         <div className="h-full w-full">
           <GanttChartRoot
             border={false}
-            title={isEpic ? t("epic.label", { count: 2 }) : t("issue.label", { count: 2 })}
-            loaderTitle={isEpic ? t("epic.label", { count: 2 }) : t("issue.label", { count: 2 })}
+            title={isEpic ? t("{count, plural, one {Epic} other {Epics}}", { count: 2 }) : t("{count, plural, one {Work item} other {Work items}}", { count: 2 })}
+            loaderTitle={isEpic ? t("{count, plural, one {Epic} other {Epics}}", { count: 2 }) : t("{count, plural, one {Work item} other {Work items}}", { count: 2 })}
             blockIds={issuesIds}
             blockUpdateHandler={updateIssueBlockStructure}
             blockToRender={(data: TIssue) => <IssueGanttBlock issueId={data.id} isEpic={isEpic} />}

@@ -99,9 +99,9 @@ export const IssueDetailRoot = observer(function IssueDetailRoot(props: TIssueDe
         } catch (error) {
           console.log("Error in updating issue:", error);
           setToast({
-            title: t("common.error.label"),
+            title: t("Error!"),
             type: TOAST_TYPE.ERROR,
-            message: t("entity.update.failed", { entity: t("issue.label") }),
+            message: t("{entity} update failed", { entity: t("{count, plural, one {Work item} other {Work items}}") }),
           });
         }
       },
@@ -110,16 +110,16 @@ export const IssueDetailRoot = observer(function IssueDetailRoot(props: TIssueDe
           if (is_archived) await removeArchivedIssue(opWorkspaceSlug, opProjectId, opIssueId);
           else await removeIssue(opWorkspaceSlug, opProjectId, opIssueId);
           setToast({
-            title: t("common.success"),
+            title: t("Success!"),
             type: TOAST_TYPE.SUCCESS,
-            message: t("entity.delete.success", { entity: t("issue.label") }),
+            message: t("{entity} deleted successfully", { entity: t("{count, plural, one {Work item} other {Work items}}") }),
           });
         } catch (error) {
           console.log("Error in deleting issue:", error);
           setToast({
-            title: t("common.error.label"),
+            title: t("Error!"),
             type: TOAST_TYPE.ERROR,
-            message: t("entity.delete.failed", { entity: t("issue.label") }),
+            message: t("{entity} delete failed", { entity: t("{count, plural, one {Work item} other {Work items}}") }),
           });
         }
       },
@@ -136,8 +136,8 @@ export const IssueDetailRoot = observer(function IssueDetailRoot(props: TIssueDe
         } catch (_error) {
           setToast({
             type: TOAST_TYPE.ERROR,
-            title: t("common.error.label"),
-            message: t("issue.add.cycle.failed"),
+            title: t("Error!"),
+            message: t("Work item could not be added to the cycle. Please try again."),
           });
         }
       },
@@ -147,8 +147,8 @@ export const IssueDetailRoot = observer(function IssueDetailRoot(props: TIssueDe
         } catch (_error) {
           setToast({
             type: TOAST_TYPE.ERROR,
-            title: t("common.error.label"),
-            message: t("issue.add.cycle.failed"),
+            title: t("Error!"),
+            message: t("Work item could not be added to the cycle. Please try again."),
           });
         }
       },
@@ -161,14 +161,14 @@ export const IssueDetailRoot = observer(function IssueDetailRoot(props: TIssueDe
         try {
           const removeFromCyclePromise = removeIssueFromCycle(opWorkspaceSlug, opProjectId, cycleId, opIssueId);
           setPromiseToast(removeFromCyclePromise, {
-            loading: t("issue.remove.cycle.loading"),
+            loading: t("Removing work item from the cycle"),
             success: {
-              title: t("common.success"),
-              message: () => t("issue.remove.cycle.success"),
+              title: t("Success!"),
+              message: () => t("Work item removed from the cycle successfully."),
             },
             error: {
-              title: t("common.error.label"),
-              message: () => t("issue.remove.cycle.failed"),
+              title: t("Error!"),
+              message: () => t("Work item could not be removed from the cycle. Please try again."),
             },
           });
           await removeFromCyclePromise;
@@ -185,14 +185,14 @@ export const IssueDetailRoot = observer(function IssueDetailRoot(props: TIssueDe
         try {
           const removeFromModulePromise = removeIssueFromModule(opWorkspaceSlug, opProjectId, moduleId, opIssueId);
           setPromiseToast(removeFromModulePromise, {
-            loading: t("issue.remove.module.loading"),
+            loading: t("Removing work item from the module"),
             success: {
-              title: t("common.success"),
-              message: () => t("issue.remove.module.success"),
+              title: t("Success!"),
+              message: () => t("Work item removed from the module successfully."),
             },
             error: {
-              title: t("common.error.label"),
-              message: () => t("issue.remove.module.failed"),
+              title: t("Error!"),
+              message: () => t("Work item could not be removed from the module. Please try again."),
             },
           });
           await removeFromModulePromise;
@@ -249,10 +249,10 @@ export const IssueDetailRoot = observer(function IssueDetailRoot(props: TIssueDe
       {!issue ? (
         <EmptyState
           image={emptyIssue}
-          title={t("issue.empty_state.issue_detail.title")}
-          description={t("issue.empty_state.issue_detail.description")}
+          title={t("Work item does not exist")}
+          description={t("The work item you are looking for does not exist, has been archived, or has been deleted.")}
           primaryButton={{
-            text: t("issue.empty_state.issue_detail.primary_button.text"),
+            text: t("View other work items"),
             onClick: () => router.push(`/${workspaceSlug}/projects/${projectId}/issues`),
           }}
         />

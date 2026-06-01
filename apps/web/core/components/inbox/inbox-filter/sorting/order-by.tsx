@@ -39,7 +39,7 @@ export const InboxIssueOrderByDropdown = observer(function InboxIssueOrderByDrop
       ) : (
         <ArrowDownWideNarrow className="size-3" />
       )}
-      {t(orderByDetails?.i18n_label || "inbox_issue.order_by.created_at")}
+      {t(orderByDetails?.i18n_label || "Created at")}
       <ChevronDownIcon className="size-3" strokeWidth={2} />
     </div>
   );

@@ -270,7 +270,7 @@ export const IssueProperties = observer(function IssueProperties(props: IIssuePr
             value={issue.start_date ?? null}
             onChange={handleStartDate}
             maxDate={maxDate}
-            placeholder={t("common.order_by.start_date")}
+            placeholder={t("Start date")}
             icon={<StartDatePropertyIcon className="h-3 w-3 flex-shrink-0" />}
             buttonVariant={issue.start_date ? "border-with-text" : "border-without-text"}
             optionsClassName="z-10"
@@ -293,7 +293,7 @@ export const IssueProperties = observer(function IssueProperties(props: IIssuePr
             value={issue?.target_date ?? null}
             onChange={handleTargetDate}
             minDate={minDate}
-            placeholder={t("common.order_by.due_date")}
+            placeholder={t("Due date")}
             icon={<DueDatePropertyIcon className="h-3 w-3 shrink-0" />}
             buttonVariant={issue.target_date ? "border-with-text" : "border-without-text"}
             buttonClassName={
@@ -321,7 +321,7 @@ export const IssueProperties = observer(function IssueProperties(props: IIssuePr
             buttonVariant={issue.assignee_ids?.length > 0 ? "transparent-without-text" : "border-without-text"}
             buttonClassName={issue.assignee_ids?.length > 0 ? "hover:bg-transparent px-0" : ""}
             showTooltip={issue?.assignee_ids?.length === 0}
-            placeholder={t("common.assignees")}
+            placeholder={t("Assignees")}
             optionsClassName="z-10"
             tooltipContent=""
             renderByDefault={isMobile}
@@ -399,7 +399,7 @@ export const IssueProperties = observer(function IssueProperties(props: IIssuePr
           shouldRenderProperty={(properties) => !!properties.sub_issue_count && !!subIssueCount}
         >
           <Tooltip
-            tooltipHeading={t("common.sub_work_items")}
+            tooltipHeading={t("Sub-work items")}
             tooltipContent={`${subIssueCount}`}
             isMobile={isMobile}
             renderByDefault={false}
@@ -432,7 +432,7 @@ export const IssueProperties = observer(function IssueProperties(props: IIssuePr
         shouldRenderProperty={(properties) => !!properties.attachment_count && !!issue.attachment_count}
       >
         <Tooltip
-          tooltipHeading={t("common.attachments")}
+          tooltipHeading={t("Attachments")}
           tooltipContent={`${issue.attachment_count}`}
           isMobile={isMobile}
           renderByDefault={false}
@@ -455,7 +455,7 @@ export const IssueProperties = observer(function IssueProperties(props: IIssuePr
         shouldRenderProperty={(properties) => !!properties.link && !!issue.link_count}
       >
         <Tooltip
-          tooltipHeading={t("common.links")}
+          tooltipHeading={t("Links")}
           tooltipContent={`${issue.link_count}`}
           isMobile={isMobile}
           renderByDefault={false}

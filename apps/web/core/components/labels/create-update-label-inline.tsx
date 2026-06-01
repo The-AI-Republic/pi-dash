@@ -75,15 +75,15 @@ export const CreateUpdateLabelInline = observer(
 
       const labelError = errorData.name?.includes(errorCodes.LABEL_NAME_ALREADY_EXISTS);
       if (labelError) {
-        return t("label.create.already_exists");
+        return t("Label already exists");
       }
 
       // Fallback to general error messages
       if (operation === "create") {
-        return errorData?.detail ?? errorData?.error ?? t("common.something_went_wrong");
+        return errorData?.detail ?? errorData?.error ?? t("Something went wrong");
       }
 
-      return errorData?.error ?? t("project_settings.labels.toast.error");
+      return errorData?.error ?? t("Error while updating the label");
     };
 
     const handleLabelCreate: SubmitHandler<IIssueLabel> = async (formData) => {
@@ -212,10 +212,10 @@ export const CreateUpdateLabelInline = observer(
               control={control}
               name="name"
               rules={{
-                required: t("project_settings.labels.label_title_is_required"),
+                required: t("Label title is required"),
                 maxLength: {
                   value: 255,
-                  message: t("project_settings.labels.label_max_char"),
+                  message: t("Label name should not exceed 255 characters"),
                 },
               }}
               render={({ field: { value, onChange, ref } }) => (
@@ -228,14 +228,14 @@ export const CreateUpdateLabelInline = observer(
                   onChange={onChange}
                   ref={ref}
                   hasError={Boolean(errors.name)}
-                  placeholder={t("project_settings.labels.label_title")}
+                  placeholder={t("Label title")}
                   className="w-full"
                 />
               )}
             />
           </div>
           <Button variant="secondary" onClick={() => handleClose()}>
-            {t("cancel")}
+            {t("Cancel")}
           </Button>
           <Button
             variant="primary"
@@ -245,7 +245,7 @@ export const CreateUpdateLabelInline = observer(
             }}
             loading={isSubmitting}
           >
-            {isUpdating ? (isSubmitting ? t("updating") : t("update")) : isSubmitting ? t("adding") : t("add")}
+            {isUpdating ? (isSubmitting ? t("Updating") : t("Update")) : isSubmitting ? t("Adding") : t("Add")}
           </Button>
         </div>
         {errors.name?.message && <p className="p-0.5 pl-8 text-13 text-danger-primary">{errors.name?.message}</p>}

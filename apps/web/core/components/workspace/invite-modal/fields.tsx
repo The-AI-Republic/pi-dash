@@ -54,10 +54,10 @@ export const InvitationFields = observer(function InvitationFields(props: TInvit
               control={control}
               name={`emails.${index}.email`}
               rules={{
-                required: t("workspace_settings.settings.members.modal.errors.required"),
+                required: t("We need an email address to invite them."),
                 pattern: {
                   value: /^[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}$/i,
-                  message: t("workspace_settings.settings.members.modal.errors.invalid"),
+                  message: t("Email is invalid"),
                 },
               }}
               render={({ field: { value, onChange, ref } }) => (
@@ -70,7 +70,7 @@ export const InvitationFields = observer(function InvitationFields(props: TInvit
                     onChange={onChange}
                     ref={ref}
                     hasError={Boolean(errors.emails?.[index]?.email)}
-                    placeholder={t("workspace_settings.settings.members.modal.placeholder")}
+                    placeholder={t("name@company.com")}
                     className="w-full text-caption-sm-regular sm:text-body-xs-regular"
                   />
                   {errors.emails?.[index]?.email && (

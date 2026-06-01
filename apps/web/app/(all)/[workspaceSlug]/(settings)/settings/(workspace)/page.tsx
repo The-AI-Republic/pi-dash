@@ -22,7 +22,7 @@ function GeneralWorkspaceSettingsPage() {
   const { t } = useTranslation();
   // derived values
   const pageTitle = currentWorkspace?.name
-    ? t("workspace_settings.page_label", { workspace: currentWorkspace.name })
+    ? t("{workspace} - General settings", { workspace: currentWorkspace.name })
     : undefined;
 
   return (

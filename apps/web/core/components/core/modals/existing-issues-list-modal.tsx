@@ -84,8 +84,8 @@ export function ExistingIssuesListModal(props: Props) {
     if (selectedIssues.length === 0) {
       setToast({
         type: TOAST_TYPE.ERROR,
-        title: t("toast.error"),
-        message: t("issue.select.error"),
+        title: t("Error!"),
+        message: t("Please select at least one work item"),
       });
 
       return;
@@ -153,7 +153,7 @@ export function ExistingIssuesListModal(props: Props) {
           />
           <Combobox.Input
             className="h-12 w-full border-0 bg-transparent pr-4 pl-11 text-13 text-primary outline-none placeholder:text-placeholder focus:ring-0"
-            placeholder={t("common.search.placeholder")}
+            placeholder={t("Type to search")}
             value={searchTerm}
             onChange={(e) => setSearchTerm(e.target.value)}
             tabIndex={baseTabIndex}
@@ -188,7 +188,7 @@ export function ExistingIssuesListModal(props: Props) {
             </div>
           ) : (
             <div className="w-min rounded-md border border-subtle bg-layer-1 p-2 text-11 whitespace-nowrap">
-              {t("issue.select.empty")}
+              {t("No work items selected")}
             </div>
           )}
           {workspaceLevelToggle && (
@@ -204,7 +204,7 @@ export function ExistingIssuesListModal(props: Props) {
                   onClick={() => setIsWorkspaceLevel((prevData) => !prevData)}
                   className="flex-shrink-0"
                 >
-                  {t("common.workspace_level")}
+                  {t("Workspace level")}
                 </button>
               </div>
             </Tooltip>
@@ -309,11 +309,11 @@ export function ExistingIssuesListModal(props: Props) {
           disabled={filteredIssues.length === 0}
           className={filteredIssues.length === 0 ? "p-0" : ""}
         >
-          {selectedIssues.length === issues.length ? t("issue.select.deselect_all") : t("issue.select.select_all")}
+          {selectedIssues.length === issues.length ? t("Deselect all") : t("Select all")}
         </Button>
         <div className="flex items-center justify-end gap-2">
           <Button variant="secondary" size="lg" onClick={handleClose}>
-            {t("common.cancel")}
+            {t("Cancel")}
           </Button>
           <Button
             variant="primary"
@@ -322,7 +322,7 @@ export function ExistingIssuesListModal(props: Props) {
             loading={isSubmitting}
             disabled={isSubmitting || selectedIssues.length === 0}
           >
-            {isSubmitting ? t("common.adding") : t("issue.select.add_selected")}
+            {isSubmitting ? t("Adding") : t("Add selected work items")}
           </Button>
         </div>
       </div>

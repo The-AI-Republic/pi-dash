@@ -202,7 +202,7 @@ export const InboxIssueCreateRoot = observer(function InboxIssueCreateRoot(props
         <form ref={formRef} onSubmit={handleFormSubmit} className="flex w-full flex-col">
           <div className="space-y-5 rounded-t-lg bg-surface-1 p-5">
             <div className="flex items-center justify-between gap-2">
-              <h3 className="text-18 font-medium text-secondary">{t("inbox_issue.modal.title")}</h3>
+              <h3 className="text-18 font-medium text-secondary">{t("Create intake work item")}</h3>
               {duplicateIssues?.length > 0 && (
                 <DeDupeButtonRoot
                   workspaceSlug={workspaceSlug}
@@ -240,7 +240,7 @@ export const InboxIssueCreateRoot = observer(function InboxIssueCreateRoot(props
               tabIndex={getIndex("create_more")}
             >
               <ToggleSwitch value={createMore} onChange={() => {}} size="sm" />
-              <span className="text-11">{t("create_more")}</span>
+              <span className="text-11">{t("Create more")}</span>
             </div>
             <div className="flex items-center gap-3">
               <Button
@@ -260,7 +260,7 @@ export const InboxIssueCreateRoot = observer(function InboxIssueCreateRoot(props
                 }}
                 tabIndex={getIndex("discard_button")}
               >
-                {t("discard")}
+                {t("Discard")}
               </Button>
               <Button
                 variant="primary"
@@ -271,7 +271,7 @@ export const InboxIssueCreateRoot = observer(function InboxIssueCreateRoot(props
                 tabIndex={getIndex("submit_button")}
                 size="lg"
               >
-                {formSubmitting ? t("creating") : t("create_work_item")}
+                {formSubmitting ? t("Creating") : t("Create work item")}
               </Button>
             </div>
           </div>

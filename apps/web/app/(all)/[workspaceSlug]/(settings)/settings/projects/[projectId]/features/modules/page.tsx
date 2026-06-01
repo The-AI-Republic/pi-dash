@@ -30,7 +30,7 @@ function FeaturesModulesSettingsPage({ params }: Route.ComponentProps) {
   const { t } = useTranslation();
   // derived values
   const pageTitle = currentProjectDetails?.name
-    ? `${currentProjectDetails?.name} settings - ${t("project_settings.features.modules.short_title")}`
+    ? `${currentProjectDetails?.name} settings - ${t("Modules")}`
     : undefined;
   const canPerformProjectAdminActions = allowPermissions([EUserPermissions.ADMIN], EUserPermissionsLevel.PROJECT);
 
@@ -43,13 +43,13 @@ function FeaturesModulesSettingsPage({ params }: Route.ComponentProps) {
       <PageHead title={pageTitle} />
       <section className="w-full">
         <SettingsHeading
-          title={t("project_settings.features.modules.title")}
-          description={t("project_settings.features.modules.description")}
+          title={t("Modules")}
+          description={t("Organize work into sub-projects with dedicated leads and assignees.")}
         />
         <div className="mt-7">
           <ProjectSettingsFeatureControlItem
-            title={t("project_settings.features.modules.toggle_title")}
-            description={t("project_settings.features.modules.toggle_description")}
+            title={t("Enable modules")}
+            description={t("Project members will be able to create and edit modules.")}
             featureProperty="module_view"
             projectId={projectId}
             value={!!currentProjectDetails?.module_view}

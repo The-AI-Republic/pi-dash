@@ -35,11 +35,11 @@ type IInboxSidebarProps = {
 const tabNavigationOptions: { key: TInboxIssueCurrentTab; i18n_label: string }[] = [
   {
     key: EInboxIssueCurrentTab.OPEN,
-    i18n_label: "inbox_issue.tabs.open",
+    i18n_label: "Open",
   },
   {
     key: EInboxIssueCurrentTab.CLOSED,
-    i18n_label: "inbox_issue.tabs.closed",
+    i18n_label: "Closed",
   },
 ];
 
@@ -140,20 +140,20 @@ export const InboxSidebar = observer(function InboxSidebar(props: IInboxSidebarP
                 {getAppliedFiltersCount > 0 ? (
                   <EmptyStateDetailed
                     assetKey="search"
-                    title={t("common_empty_state.search.title")}
-                    description={t("common_empty_state.search.description")}
+                    title={t("No matching results.")}
+                    description={t("No results found. Try adjusting your search terms.")}
                     assetClassName="size-20"
                     rootClassName="px-page-x"
                   />
                 ) : currentTab === EInboxIssueCurrentTab.OPEN ? (
                   <EmptyStateDetailed
                     assetKey="inbox"
-                    title={t("project_empty_state.intake_sidebar.title")}
-                    description={t("project_empty_state.intake_sidebar.description")}
+                    title={t("Log Intake requests")}
+                    description={t("Submit new requests to be reviewed, prioritized, and tracked within your project's workflow.")}
                     assetClassName="size-20"
                     actions={[
                       {
-                        label: t("project_empty_state.intake_sidebar.cta_primary"),
+                        label: t("Create Intake request"),
                         onClick: () => router.push(`/${workspaceSlug}/projects/${projectId}/intake`),
                         variant: "primary",
                       },

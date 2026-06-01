@@ -7,8 +7,9 @@ import ts from "typescript";
 const repoRoot = path.resolve(import.meta.dirname, "../../..");
 const localesRoot = path.join(repoRoot, "packages/i18n/src/locales");
 const sourceRoots = ["apps", "packages"].map((root) => path.join(repoRoot, root));
-const existingLocaleFiles = ["core", "translations", "accessibility", "editor", "empty-state"];
 const targetLocaleFile = "translations.ts";
+const fallbackLanguage = "en";
+const auxiliaryLocaleFiles = ["core", "accessibility", "editor", "empty-state"];
 const languages = [
   "en",
   "fr",
@@ -43,6 +44,21 @@ const ignoredDirs = new Set([
   "storybook-static",
 ]);
 const sourceExtensions = new Set([".ts", ".tsx"]);
+const translatablePropertyNames = new Set([
+  "i18n_description",
+  "i18n_indicator",
+  "i18n_key",
+  "i18nKey",
+  "i18n_label",
+  "i18n_message",
+  "i18n_name",
+  "i18n_placeholder",
+  "i18n_title",
+  "labelTranslationKey",
+  "titleTranslationKey",
+  "tooltipTranslationKey",
+  "translationKey",
+]);
 
 function readFileIfExists(filePath) {
   return fs.existsSync(filePath) ? fs.readFileSync(filePath, "utf8") : null;
@@ -51,7 +67,11 @@ function readFileIfExists(filePath) {
 function walkFiles(dir, files = []) {
   if (!fs.existsSync(dir)) return files;
 
-  for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+  const entries = fs
+    .readdirSync(dir, { withFileTypes: true })
+    .toSorted((left, right) => left.name.localeCompare(right.name));
+
+  for (const entry of entries) {
     if (entry.isDirectory()) {
       if (!ignoredDirs.has(entry.name)) {
         walkFiles(path.join(dir, entry.name), files);
@@ -75,40 +95,6 @@ function isStringLike(node) {
   return ts.isStringLiteral(node) || ts.isNoSubstitutionTemplateLiteral(node);
 }
 
-function collectUsedTranslationKeys() {
-  const keys = new Map();
-  const files = sourceRoots.flatMap((root) => walkFiles(root));
-
-  for (const filePath of files) {
-    const sourceText = fs.readFileSync(filePath, "utf8");
-    const sourceFile = ts.createSourceFile(filePath, sourceText, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
-
-    function visit(node) {
-      if (
-        ts.isCallExpression(node) &&
-        ts.isIdentifier(node.expression) &&
-        node.expression.text === "t" &&
-        node.arguments.length > 0 &&
-        isStringLike(node.arguments[0])
-      ) {
-        const key = node.arguments[0].text.trim();
-        if (key) {
-          const location = sourceFile.getLineAndCharacterOfPosition(node.arguments[0].getStart(sourceFile));
-          const references = keys.get(key) || [];
-          references.push(`${path.relative(repoRoot, filePath)}:${location.line + 1}:${location.character + 1}`);
-          keys.set(key, references);
-        }
-      }
-
-      ts.forEachChild(node, visit);
-    }
-
-    visit(sourceFile);
-  }
-
-  return keys;
-}
-
 function unwrapExpression(expression) {
   let current = expression;
   while (ts.isAsExpression(current) || ts.isSatisfiesExpression?.(current) || ts.isParenthesizedExpression(current)) {
@@ -122,6 +108,103 @@ function propertyNameToString(name) {
     return name.text;
   }
   return null;
+}
+
+function collectStringLikeExpressions(node, addMessage) {
+  const current = unwrapExpression(node);
+
+  if (isStringLike(current)) {
+    addMessage(current.text, current);
+    return;
+  }
+
+  if (ts.isPropertyAssignment(current)) {
+    collectStringLikeExpressions(current.initializer, addMessage);
+    return;
+  }
+
+  if (ts.isObjectLiteralExpression(current)) {
+    for (const property of current.properties) {
+      if (ts.isPropertyAssignment(property)) {
+        collectStringLikeExpressions(property.initializer, addMessage);
+      }
+    }
+    return;
+  }
+
+  ts.forEachChild(current, (child) => collectStringLikeExpressions(child, addMessage));
+}
+
+function isTranslatableVariableName(name) {
+  return /I18N|I18n|i18n/.test(name);
+}
+
+function isTranslatablePropertyName(name) {
+  return name.startsWith("i18n_") || translatablePropertyNames.has(name);
+}
+
+function collectUsedMessages() {
+  const messages = new Map();
+  const files = sourceRoots.flatMap((root) => walkFiles(root));
+
+  function addMessage(sourceFile, filePath, message, node) {
+    if (typeof message !== "string" || message.length === 0) return;
+
+    const location = sourceFile.getLineAndCharacterOfPosition(node.getStart(sourceFile));
+    const references = messages.get(message) || [];
+    references.push(`${path.relative(repoRoot, filePath)}:${location.line + 1}:${location.character + 1}`);
+    messages.set(message, references);
+  }
+
+  for (const filePath of files) {
+    const sourceText = fs.readFileSync(filePath, "utf8");
+    const sourceFile = ts.createSourceFile(filePath, sourceText, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
+
+    function visit(node) {
+      if (
+        ts.isCallExpression(node) &&
+        ts.isIdentifier(node.expression) &&
+        node.expression.text === "t" &&
+        node.arguments.length > 0
+      ) {
+        collectStringLikeExpressions(node.arguments[0], (message, messageNode) =>
+          addMessage(sourceFile, filePath, message, messageNode)
+        );
+      }
+
+      if (ts.isPropertyAssignment(node)) {
+        const propertyName = propertyNameToString(node.name);
+        if (propertyName && isTranslatablePropertyName(propertyName)) {
+          collectStringLikeExpressions(node.initializer, (message, messageNode) =>
+            addMessage(sourceFile, filePath, message, messageNode)
+          );
+        }
+      }
+
+      if (
+        ts.isVariableDeclaration(node) &&
+        ts.isIdentifier(node.name) &&
+        isTranslatableVariableName(node.name.text) &&
+        node.initializer
+      ) {
+        collectStringLikeExpressions(node.initializer, (message, messageNode) =>
+          addMessage(sourceFile, filePath, message, messageNode)
+        );
+      }
+
+      if (ts.isFunctionDeclaration(node) && node.name && isTranslatableVariableName(node.name.text)) {
+        collectStringLikeExpressions(node, (message, messageNode) =>
+          addMessage(sourceFile, filePath, message, messageNode)
+        );
+      }
+
+      ts.forEachChild(node, visit);
+    }
+
+    visit(sourceFile);
+  }
+
+  return messages;
 }
 
 function readObjectLiteral(filePath) {
@@ -162,117 +245,24 @@ function objectLiteralToObject(objectLiteral) {
   return result;
 }
 
-function hasPath(object, keyPath) {
-  const parts = keyPath.split(".");
-  let current = object;
-
-  for (const part of parts) {
-    if (!current || typeof current !== "object" || !Object.prototype.hasOwnProperty.call(current, part)) {
-      return false;
+function flattenObject(object, prefix = "", result = {}) {
+  for (const [key, value] of Object.entries(object)) {
+    const keyPath = prefix ? `${prefix}.${key}` : key;
+    if (typeof value === "string") {
+      result[keyPath] = value;
+    } else if (value && typeof value === "object" && !Array.isArray(value)) {
+      flattenObject(value, keyPath, result);
     }
-    current = current[part];
-  }
-
-  return true;
-}
-
-function hasShapeConflict(object, keyPath) {
-  const parts = keyPath.split(".");
-  let current = object;
-
-  for (const part of parts.slice(0, -1)) {
-    if (!current || typeof current !== "object" || !Object.prototype.hasOwnProperty.call(current, part)) {
-      return false;
-    }
-
-    current = current[part];
-    if (!current || typeof current !== "object") {
-      return true;
-    }
-  }
-
-  const leaf = parts.at(-1);
-  return (
-    current &&
-    typeof current === "object" &&
-    Object.prototype.hasOwnProperty.call(current, leaf) &&
-    current[leaf] &&
-    typeof current[leaf] === "object"
-  );
-}
-
-function setPath(object, keyPath, value) {
-  const parts = keyPath.split(".");
-  let current = object;
-
-  for (const part of parts.slice(0, -1)) {
-    if (!current[part] || typeof current[part] !== "object") {
-      current[part] = {};
-    }
-    current = current[part];
-  }
-
-  const leaf = parts.at(-1);
-  if (!Object.prototype.hasOwnProperty.call(current, leaf)) {
-    current[leaf] = value;
-  }
-}
-
-function mergeObjects(...objects) {
-  const result = {};
-
-  for (const object of objects) {
-    mergeInto(result, object);
   }
 
   return result;
 }
 
-function mergeInto(target, source) {
-  for (const [key, value] of Object.entries(source)) {
-    if (
-      value &&
-      typeof value === "object" &&
-      !Array.isArray(value) &&
-      target[key] &&
-      typeof target[key] === "object" &&
-      !Array.isArray(target[key])
-    ) {
-      mergeInto(target[key], value);
-    } else {
-      target[key] = cloneValue(value);
-    }
-  }
-}
-
-function cloneValue(value) {
-  if (!value || typeof value !== "object" || Array.isArray(value)) return value;
-
-  return Object.entries(value).reduce((acc, [key, entryValue]) => {
-    acc[key] = cloneValue(entryValue);
-    return acc;
-  }, {});
-}
-
-function formatObject(value, indent = 2) {
-  const entries = Object.entries(value);
+function formatFlatObject(object) {
+  const entries = Object.entries(object);
   if (entries.length === 0) return "{}";
 
-  const pad = " ".repeat(indent);
-  const lines = ["{"];
-
-  for (const [key, entryValue] of entries) {
-    const property = /^[A-Za-z_$][\w$]*$/.test(key) ? key : JSON.stringify(key);
-
-    if (entryValue && typeof entryValue === "object" && !Array.isArray(entryValue)) {
-      lines.push(`${pad}${property}: ${formatObject(entryValue, indent + 2)},`);
-    } else {
-      lines.push(`${pad}${property}: ${JSON.stringify(entryValue)},`);
-    }
-  }
-
-  lines.push(`${" ".repeat(indent - 2)}}`);
-  return lines.join("\n");
+  return ["{", ...entries.map(([key, value]) => `  ${JSON.stringify(key)}: ${JSON.stringify(value)},`), "}"].join("\n");
 }
 
 function localeFileContent(object) {
@@ -282,68 +272,57 @@ function localeFileContent(object) {
  * See the LICENSE file for details.
  */
 
-export default ${formatObject(object)} as const;
+export default ${formatFlatObject(object)} as const;
 `;
 }
 
+function syncAuxiliaryLocaleFiles(languageDir) {
+  for (const file of auxiliaryLocaleFiles) {
+    const filePath = path.join(languageDir, `${file}.ts`);
+    if (fs.existsSync(filePath)) {
+      fs.writeFileSync(filePath, localeFileContent({}));
+    }
+  }
+}
+
 function main() {
-  const usedKeyReferences = collectUsedTranslationKeys();
-  const usedKeys = Array.from(usedKeyReferences.keys());
-  const conflictReferences = new Map();
-  let totalAdded = 0;
-  let totalConflicts = 0;
+  const usedMessageReferences = collectUsedMessages();
+  const usedMessages = Array.from(usedMessageReferences.keys()).toSorted((left, right) => left.localeCompare(right));
+  let totalPlaceholders = 0;
 
   for (const language of languages) {
     const languageDir = path.join(localesRoot, language);
     const targetPath = path.join(languageDir, targetLocaleFile);
     fs.mkdirSync(languageDir, { recursive: true });
 
-    const localeObjects = existingLocaleFiles.map((file) => readObjectLiteral(path.join(languageDir, `${file}.ts`)));
-    const localeTranslations = mergeObjects(...localeObjects);
-    const targetTranslations = readObjectLiteral(targetPath);
-    let addedForLanguage = 0;
-    let conflictsForLanguage = 0;
+    const existingTranslations = flattenObject(readObjectLiteral(targetPath));
+    const nextTranslations = {};
+    let emptyPlaceholders = 0;
 
-    for (const key of usedKeys) {
-      if (hasShapeConflict(localeTranslations, key)) {
-        conflictsForLanguage += 1;
-        conflictReferences.set(key, usedKeyReferences.get(key) || []);
-        continue;
-      }
-
-      if (!hasPath(localeTranslations, key)) {
-        setPath(targetTranslations, key, "");
-        setPath(localeTranslations, key, "");
-        addedForLanguage += 1;
+    for (const message of usedMessages) {
+      if (language === fallbackLanguage) {
+        nextTranslations[message] = message;
+      } else {
+        const existingValue = existingTranslations[message];
+        nextTranslations[message] = typeof existingValue === "string" && existingValue.length > 0 ? existingValue : "";
+        if (nextTranslations[message] === "") emptyPlaceholders += 1;
       }
     }
 
-    if (addedForLanguage > 0) {
-      fs.writeFileSync(targetPath, localeFileContent(targetTranslations));
-      console.log(`i18n: added ${addedForLanguage} placeholder keys to ${language}/${targetLocaleFile}`);
-    }
+    fs.writeFileSync(targetPath, localeFileContent(nextTranslations));
+    syncAuxiliaryLocaleFiles(languageDir);
+    totalPlaceholders += emptyPlaceholders;
 
-    totalAdded += addedForLanguage;
-    totalConflicts += conflictsForLanguage;
-  }
-
-  if (conflictReferences.size > 0) {
-    console.error("i18n: skipped keys with shape conflicts:");
-    for (const [key, references] of Array.from(conflictReferences.entries()).toSorted(([a], [b]) =>
-      a.localeCompare(b)
-    )) {
-      const referenceText = references.length > 0 ? ` (${references.slice(0, 5).join(", ")})` : "";
-      console.error(`i18n:   ${key}${referenceText}`);
-    }
+    console.log(
+      `i18n: synced ${usedMessages.length} source messages to ${language}/${targetLocaleFile}${
+        language === fallbackLanguage ? "" : `; ${emptyPlaceholders} empty placeholders`
+      }`
+    );
   }
 
   console.log(
-    `i18n: scanned ${usedKeys.length} literal translation keys; added ${totalAdded} placeholders; skipped ${totalConflicts} shape conflicts`
+    `i18n: scanned ${usedMessages.length} source messages; wrote ${totalPlaceholders} non-English placeholders`
   );
-
-  if (conflictReferences.size > 0 && process.env.I18N_SYNC_ALLOW_CONFLICTS !== "1") {
-    throw new Error("i18n sync found shape conflicts. Rename the key or set I18N_SYNC_ALLOW_CONFLICTS=1 to override.");
-  }
 }
 
 main();

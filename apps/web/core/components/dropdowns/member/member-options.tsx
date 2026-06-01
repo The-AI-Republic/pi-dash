@@ -111,7 +111,7 @@ export const MemberOptions = observer(function MemberOptions(props: Props) {
                 isUserSuspended(userId, workspaceSlug?.toString()) ? "text-placeholder" : ""
               )}
             >
-              {currentUser?.id === userId ? t("you") : userDetails?.display_name}
+              {currentUser?.id === userId ? t("You") : userDetails?.display_name}
             </span>
           </div>
         ),
@@ -146,7 +146,7 @@ export const MemberOptions = observer(function MemberOptions(props: Props) {
             className="w-full bg-transparent py-1 text-11 text-secondary placeholder:text-placeholder focus:outline-none"
             value={query}
             onChange={(e) => setQuery(e.target.value)}
-            placeholder={t("search")}
+            placeholder={t("Search")}
             displayValue={(assigned: any) => assigned?.name}
             onKeyDown={searchInputKeyDown}
           />
@@ -187,10 +187,10 @@ export const MemberOptions = observer(function MemberOptions(props: Props) {
                   )
               )
             ) : (
-              <p className="px-1.5 py-1 text-placeholder italic">{t("no_matching_results")}</p>
+              <p className="px-1.5 py-1 text-placeholder italic">{t("No matching results")}</p>
             )
           ) : (
-            <p className="px-1.5 py-1 text-placeholder italic">{t("loading")}</p>
+            <p className="px-1.5 py-1 text-placeholder italic">{t("Loading")}</p>
           )}
         </div>
       </div>

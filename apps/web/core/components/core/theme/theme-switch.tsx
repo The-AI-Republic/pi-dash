@@ -51,7 +51,7 @@ export function ThemeSwitch(props: Props) {
             {t(value.key)}
           </div>
         ) : (
-          t("select_your_theme")
+          t("Select your theme")
         )
       }
       onChange={onChange}

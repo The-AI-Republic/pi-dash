@@ -176,10 +176,10 @@ export const SendProjectInvitationModal = observer(function SendProjectInvitatio
       <form onSubmit={handleSubmit(onSubmit)} className="p-5">
         <div className="space-y-5">
           <h3 className="text-16 leading-6 font-medium text-primary">
-            {t("project_settings.members.invite_members.title")}
+            {t("Invite members")}
           </h3>
           <div className="mt-2">
-            <p className="text-13 text-secondary">{t("project_settings.members.invite_members.sub_heading")}</p>
+            <p className="text-13 text-secondary">{t("Invite members to work on your project.")}</p>
           </div>
 
           <div className="mb-3 space-y-4">
@@ -294,16 +294,16 @@ export const SendProjectInvitationModal = observer(function SendProjectInvitatio
             onClick={appendField}
           >
             <PlusIcon className="h-4 w-4" />
-            {t("common.add_more")}
+            {t("Add more")}
           </button>
           <div className="flex items-center gap-2">
             <Button variant="secondary" size="lg" onClick={handleClose}>
-              {t("cancel")}
+              {t("Cancel")}
             </Button>
             <Button variant="primary" size="lg" type="submit" loading={isSubmitting}>
               {isSubmitting
-                ? `${fields && fields.length > 1 ? `${t("add_members")}...` : `${t("add_member")}...`}`
-                : `${fields && fields.length > 1 ? t("add_members") : t("add_member")}`}
+                ? `${fields && fields.length > 1 ? `${t("Add members")}...` : `${t("Add member")}...`}`
+                : `${fields && fields.length > 1 ? t("Add members") : t("Add member")}`}
             </Button>
           </div>
         </div>

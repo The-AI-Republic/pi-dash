@@ -44,6 +44,13 @@ const DEV_MACHINE_STATUS_BADGE_VARIANT: Record<DevMachineStatus, TBadgeVariant> 
   revoked: "accent-warning",
 };
 
+const DEV_MACHINE_STATUS_I18N_LABELS: Record<DevMachineStatus, string> = {
+  active: "Active",
+  offline: "Offline",
+  registered: "Registered",
+  revoked: "Revoked",
+};
+
 function getDevMachineStatus(machine: IDevMachine): DevMachineStatus {
   if (machine.revoked_at) return "revoked";
   if (machine.online_runner_count > 0) return "active";
@@ -70,8 +77,8 @@ const AiDevMachinesPage = observer(function AiDevMachinesPage() {
   const workspaceId = currentWorkspace?.id;
   const workspaceSlug = currentWorkspace?.slug;
   const pageTitle = currentWorkspace?.name
-    ? t("ai_dev_machines.page_title", { workspace: currentWorkspace.name })
-    : t("ai_dev_machines.title");
+    ? t("{workspace} - AI Dev Machines", { workspace: currentWorkspace.name })
+    : t("AI Dev Machines");
 
   const [addOpen, setAddOpen] = useState(false);
   const [rotateMachine, setRotateMachine] = useState<IDevMachine | null>(null);
@@ -99,8 +106,8 @@ const AiDevMachinesPage = observer(function AiDevMachinesPage() {
       const err = e as { error?: string } | null;
       setToast({
         type: TOAST_TYPE.ERROR,
-        title: t("runners.toast.error_title"),
-        message: err?.error ?? t("ai_dev_machines.list.rotate_failed"),
+        title: t("Error!"),
+        message: err?.error ?? t("Could not rotate the dev machine token."),
       });
     } finally {
       setRotating(false);
@@ -118,8 +125,8 @@ const AiDevMachinesPage = observer(function AiDevMachinesPage() {
       const err = e as { error?: string } | null;
       setToast({
         type: TOAST_TYPE.ERROR,
-        title: t("runners.toast.error_title"),
-        message: err?.error ?? t("ai_dev_machines.list.revoke_failed"),
+        title: t("Error!"),
+        message: err?.error ?? t("Could not revoke the dev machine."),
       });
     } finally {
       setRevoking(false);
@@ -131,28 +138,28 @@ const AiDevMachinesPage = observer(function AiDevMachinesPage() {
       <PageHead title={pageTitle} />
 
       <header>
-        <h1 className="text-16 font-semibold text-primary">{t("ai_dev_machines.title")}</h1>
+        <h1 className="text-16 font-semibold text-primary">{t("AI Dev Machines")}</h1>
       </header>
 
       {/* Intro — what the CLI / daemon / runner each are */}
       <section className="flex flex-col gap-4">
-        <h2 className="text-14 font-semibold text-primary">{t("ai_dev_machines.intro.heading")}</h2>
-        <p className="text-13 text-secondary">{t("ai_dev_machines.intro.body")}</p>
+        <h2 className="text-14 font-semibold text-primary">{t("What is the pidash CLI, daemon, and runner?")}</h2>
+        <p className="text-13 text-secondary">{t("Pi Dash hands AI agents (Claude Code, Codex, …) the keys to a real dev machine so they can pick up work items, write code, and open changes. Three pieces work together to make that possible:")}</p>
         <div className="grid grid-cols-1 gap-3 md:grid-cols-3">
           <ConceptCard
             icon={<Terminal className="size-4" />}
-            title={t("ai_dev_machines.intro.cli.title")}
-            body={t("ai_dev_machines.intro.cli.body")}
+            title={t("pidash CLI")}
+            body={t("The command-line tool installed on each dev machine. Handles authentication with the cloud, manages local config (`~/.pidash/config.toml`), and exposes commands for issues, comments, and runner management (`pidash auth login`, `pidash runner add`, `pidash doctor`, …).")}
           />
           <ConceptCard
             icon={<Cpu className="size-4" />}
-            title={t("ai_dev_machines.intro.daemon.title")}
-            body={t("ai_dev_machines.intro.daemon.body")}
+            title={t("pidash daemon")}
+            body={t("A long-running background process that maintains the WebSocket session with Pi Dash cloud, dispatches work to the configured agent, and streams approvals + heartbeats back. One daemon per machine.")}
           />
           <ConceptCard
             icon={<Laptop className="size-4" />}
-            title={t("ai_dev_machines.intro.runner.title")}
-            body={t("ai_dev_machines.intro.runner.body")}
+            title={t("AI Agent runner")}
+            body={t("A cloud-side row that represents one agent instance bound to a project (and optionally a pod). Running `pidash runner add` on a logged-in machine creates the row and binds that machine as the host. A machine can host many runners.")}
           />
         </div>
       </section>
@@ -160,22 +167,22 @@ const AiDevMachinesPage = observer(function AiDevMachinesPage() {
       <section className="flex flex-col gap-3">
         <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
           <div>
-            <h2 className="text-14 font-semibold text-primary">{t("ai_dev_machines.list.heading")}</h2>
-            <p className="mt-1 text-13 text-secondary">{t("ai_dev_machines.list.body")}</p>
+            <h2 className="text-14 font-semibold text-primary">{t("Dev machines")}</h2>
+            <p className="mt-1 text-13 text-secondary">{t("Machines that have authenticated with Pi Dash or host runners for this workspace.")}</p>
           </div>
           <Button onClick={() => setAddOpen(true)} disabled={!workspaceId}>
-            {t("ai_dev_machines.list.add_runner")}
+            {t("Add runner")}
           </Button>
         </div>
         <div className="overflow-x-auto rounded-md border border-subtle">
           <table className="w-full text-13">
             <thead className="bg-layer-1 text-left text-secondary">
               <tr>
-                <th className="px-3 py-2">{t("ai_dev_machines.list.columns.machine")}</th>
-                <th className="px-3 py-2">{t("ai_dev_machines.list.columns.status")}</th>
-                <th className="px-3 py-2">{t("ai_dev_machines.list.columns.runners")}</th>
-                <th className="px-3 py-2">{t("ai_dev_machines.list.columns.last_seen")}</th>
-                <th className="px-3 py-2">{t("ai_dev_machines.list.columns.last_heartbeat")}</th>
+                <th className="px-3 py-2">{t("Machine")}</th>
+                <th className="px-3 py-2">{t("Status")}</th>
+                <th className="px-3 py-2">{t("Runners")}</th>
+                <th className="px-3 py-2">{t("Last seen")}</th>
+                <th className="px-3 py-2">{t("Last heartbeat")}</th>
                 <th className="px-3 py-2"></th>
               </tr>
             </thead>
@@ -183,14 +190,14 @@ const AiDevMachinesPage = observer(function AiDevMachinesPage() {
               {devMachinesError && (
                 <tr>
                   <td colSpan={6} className="px-3 py-8 text-center text-danger-primary">
-                    {t("ai_dev_machines.list.load_failed")}
+                    {t("Could not load dev machines.")}
                   </td>
                 </tr>
               )}
               {!devMachinesError && !devMachines && (
                 <tr>
                   <td colSpan={6} className="px-3 py-8 text-center text-secondary">
-                    {t("ai_dev_machines.list.loading")}
+                    {t("Loading dev machines...")}
                   </td>
                 </tr>
               )}
@@ -204,25 +211,25 @@ const AiDevMachinesPage = observer(function AiDevMachinesPage() {
                       <td className="px-3 py-2">
                         <div className="font-medium text-primary">{name}</div>
                         <div className="font-mono text-11 text-secondary">
-                          {hostLabel || t("ai_dev_machines.list.machine_id", { id: shortMachineId(machine.id) })}
+                          {hostLabel || t("id {id}", { id: shortMachineId(machine.id) })}
                         </div>
                       </td>
                       <td className="px-3 py-2">
                         <Badge variant={DEV_MACHINE_STATUS_BADGE_VARIANT[status]} size="sm">
-                          {t(`ai_dev_machines.list.status.${status}`)}
+                          {t(DEV_MACHINE_STATUS_I18N_LABELS[status])}
                         </Badge>
                       </td>
                       <td className="px-3 py-2">
-                        {t("ai_dev_machines.list.runner_count", {
+                        {t("{active} active / {total} total", {
                           active: machine.online_runner_count,
                           total: machine.runner_count,
                         })}
                       </td>
                       <td className="px-3 py-2">
-                        {formatDateTime(machine.last_seen_at, t("ai_dev_machines.list.never"))}
+                        {formatDateTime(machine.last_seen_at, t("Never"))}
                       </td>
                       <td className="px-3 py-2">
-                        {formatDateTime(machine.last_heartbeat_at, t("ai_dev_machines.list.never"))}
+                        {formatDateTime(machine.last_heartbeat_at, t("Never"))}
                       </td>
                       <td className="px-3 py-2 text-right">
                         <div className="flex justify-end gap-2">
@@ -234,7 +241,7 @@ const AiDevMachinesPage = observer(function AiDevMachinesPage() {
                                 prependIcon={<RotateCw />}
                                 onClick={() => setRotateMachine(machine)}
                               >
-                                {t("ai_dev_machines.list.rotate")}
+                                {t("Rotate")}
                               </Button>
                               <Button
                                 size="sm"
@@ -242,7 +249,7 @@ const AiDevMachinesPage = observer(function AiDevMachinesPage() {
                                 prependIcon={<Ban />}
                                 onClick={() => setRevokeMachine(machine)}
                               >
-                                {t("ai_dev_machines.list.revoke")}
+                                {t("Revoke")}
                               </Button>
                             </>
                           )}
@@ -254,7 +261,7 @@ const AiDevMachinesPage = observer(function AiDevMachinesPage() {
               {!devMachinesError && devMachines && devMachines.length === 0 && (
                 <tr>
                   <td colSpan={6} className="px-3 py-8 text-center text-secondary">
-                    {t("ai_dev_machines.list.empty")}
+                    {t("No dev machines registered for this workspace yet.")}
                   </td>
                 </tr>
               )}
@@ -265,19 +272,19 @@ const AiDevMachinesPage = observer(function AiDevMachinesPage() {
 
       {/* Install command — copy / paste */}
       <section className="flex flex-col gap-3">
-        <h2 className="text-14 font-semibold text-primary">{t("ai_dev_machines.install.heading")}</h2>
-        <p className="text-13 text-secondary">{t("ai_dev_machines.install.body")}</p>
+        <h2 className="text-14 font-semibold text-primary">{t("Install the pidash CLI")}</h2>
+        <p className="text-13 text-secondary">{t("Run an installer on the machine that will host your AI agent. The wrapper commands download the latest signed binary, drop `pidash` on your PATH, and walk you through the device-code login.")}</p>
 
-        <InstallCommand label={t("ai_dev_machines.install.macos_linux_label")} command={INSTALL_CMD_UNIX} />
-        <InstallCommand label={t("ai_dev_machines.install.windows_label")} command={INSTALL_CMD_WINDOWS} />
+        <InstallCommand label={t("macOS / Linux")} command={INSTALL_CMD_UNIX} />
+        <InstallCommand label={t("Windows (PowerShell)")} command={INSTALL_CMD_WINDOWS} />
         <InstallCommand
-          label={t("ai_dev_machines.install.windows_msi_label")}
+          label={t("Windows (MSI)")}
           command={INSTALL_CMD_WINDOWS_MSI}
           href={WINDOWS_MSI_URL}
-          hrefLabel={t("ai_dev_machines.install.download_msi")}
+          hrefLabel={t("Download MSI")}
         />
 
-        <p className="text-12 text-secondary">{t("ai_dev_machines.install.prereq")}</p>
+        <p className="text-12 text-secondary">{t("Prerequisite: the agent CLI you plan to use (`codex` or `claude`) must already be installed and on PATH. Run `pidash doctor` after install to verify.")}</p>
       </section>
 
       {workspaceId && workspaceSlug && (
@@ -293,19 +300,19 @@ const AiDevMachinesPage = observer(function AiDevMachinesPage() {
         handleClose={() => (rotating ? null : setRotateMachine(null))}
         handleSubmit={confirmRotateMachine}
         isSubmitting={rotating}
-        title={t("ai_dev_machines.list.rotate_confirm_title")}
-        content={t("ai_dev_machines.list.rotate_confirm_body")}
+        title={t("Rotate dev machine token?")}
+        content={t("The active auth token for this dev machine will be invalidated. Runners on that machine will stop connecting until `pidash auth login` is run there again.")}
         variant="primary"
-        primaryButtonText={{ default: t("ai_dev_machines.list.rotate"), loading: t("ai_dev_machines.list.rotate") }}
+        primaryButtonText={{ default: t("Rotate"), loading: t("Rotate") }}
       />
       <AlertModalCore
         isOpen={!!revokeMachine}
         handleClose={() => (revoking ? null : setRevokeMachine(null))}
         handleSubmit={confirmRevokeMachine}
         isSubmitting={revoking}
-        title={t("ai_dev_machines.list.revoke_confirm_title")}
-        content={t("ai_dev_machines.list.revoke_confirm_body")}
-        primaryButtonText={{ default: t("ai_dev_machines.list.revoke"), loading: t("ai_dev_machines.list.revoke") }}
+        title={t("Revoke dev machine?")}
+        content={t("This permanently revokes the dev machine, invalidates its auth token, and revokes runners hosted on it. Use this when the machine should no longer be trusted.")}
+        primaryButtonText={{ default: t("Revoke"), loading: t("Revoke") }}
       />
     </div>
   );
@@ -348,8 +355,8 @@ function InstallCommand({ label, command, href, hrefLabel }: InstallCommandProps
     } catch {
       setToast({
         type: TOAST_TYPE.ERROR,
-        title: t("runners.toast.error_title"),
-        message: t("ai_dev_machines.install.copy_failed"),
+        title: t("Error!"),
+        message: t("Could not copy to clipboard"),
       });
     }
   };
@@ -366,7 +373,7 @@ function InstallCommand({ label, command, href, hrefLabel }: InstallCommandProps
             </a>
           )}
           <Button size="sm" variant="secondary" onClick={copy} prependIcon={justCopied ? <Check /> : <Copy />}>
-            {justCopied ? t("ai_dev_machines.install.copied") : t("ai_dev_machines.install.copy_command")}
+            {justCopied ? t("Copied!") : t("Copy command")}
           </Button>
         </div>
       </div>

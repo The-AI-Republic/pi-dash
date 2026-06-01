@@ -34,7 +34,7 @@ const ActiveProjects = observer(function ActiveProjects() {
   );
   return (
     <AnalyticsSectionWrapper
-      title={`${t("workspace_analytics.active_projects")}`}
+      title={`${t("Active Projects")}`}
       subtitle={selectedDurationLabel}
       className="md:col-span-2"
     >

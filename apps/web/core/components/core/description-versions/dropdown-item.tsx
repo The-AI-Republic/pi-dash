@@ -31,13 +31,13 @@ export const DescriptionVersionsDropdownItem = observer(function DescriptionVers
     <CustomMenu.MenuItem key={version.id} className="flex items-center gap-1" onClick={() => onClick(version.id)}>
       <span className="flex-shrink-0">
         <Avatar
-          name={versionCreator?.display_name ?? t("common.deactivated_user")}
+          name={versionCreator?.display_name ?? t("Deactivated user")}
           size="sm"
           src={getFileURL(versionCreator?.avatar_url ?? "")}
         />
       </span>
       <p className="flex items-center gap-1.5 text-11 text-secondary">
-        <span className="font-medium">{versionCreator?.display_name ?? t("common.deactivated_user")}</span>
+        <span className="font-medium">{versionCreator?.display_name ?? t("Deactivated user")}</span>
         <span>{calculateTimeAgo(version.last_saved_at)}</span>
       </p>
     </CustomMenu.MenuItem>

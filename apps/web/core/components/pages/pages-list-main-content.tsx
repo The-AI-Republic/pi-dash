@@ -80,11 +80,11 @@ export const PagesListMainContent = observer(function PagesListMainContent(props
       return (
         <EmptyStateDetailed
           assetKey="page"
-          title={t("project_empty_state.pages.title")}
-          description={t("project_empty_state.pages.description")}
+          title={t("Document everything — from notes to PRDs")}
+          description={t("Pages let you capture and organize information in one place. Write meeting notes, project documentation, and PRDs, embed work items, and structure them with ready-to-use components.")}
           actions={[
             {
-              label: t("project_empty_state.pages.cta_primary"),
+              label: t("Create your first Page"),
               onClick: () => {
                 handleCreatePage();
               },
@@ -99,11 +99,11 @@ export const PagesListMainContent = observer(function PagesListMainContent(props
       return (
         <EmptyStateDetailed
           assetKey="page"
-          title={t("project_empty_state.pages.title")}
-          description={t("project_empty_state.pages.description")}
+          title={t("Document everything — from notes to PRDs")}
+          description={t("Pages let you capture and organize information in one place. Write meeting notes, project documentation, and PRDs, embed work items, and structure them with ready-to-use components.")}
           actions={[
             {
-              label: t("project_empty_state.pages.cta_primary"),
+              label: t("Create your first Page"),
               onClick: () => {
                 handleCreatePage();
               },
@@ -117,11 +117,11 @@ export const PagesListMainContent = observer(function PagesListMainContent(props
       return (
         <EmptyStateDetailed
           assetKey="page"
-          title={t("project_empty_state.pages.title")}
-          description={t("project_empty_state.pages.description")}
+          title={t("Document everything — from notes to PRDs")}
+          description={t("Pages let you capture and organize information in one place. Write meeting notes, project documentation, and PRDs, embed work items, and structure them with ready-to-use components.")}
           actions={[
             {
-              label: t("project_empty_state.pages.cta_primary"),
+              label: t("Create your first Page"),
               onClick: () => {
                 handleCreatePage();
               },
@@ -135,8 +135,8 @@ export const PagesListMainContent = observer(function PagesListMainContent(props
       return (
         <EmptyStateDetailed
           assetKey="page"
-          title={t("project_empty_state.archive_pages.title")}
-          description={t("project_empty_state.archive_pages.description")}
+          title={t("No archived pages yet")}
+          description={t("Archive pages not on your radar. Access them here when needed.")}
         />
       );
   }
@@ -145,8 +145,8 @@ export const PagesListMainContent = observer(function PagesListMainContent(props
     return (
       <EmptyStateDetailed
         assetKey="search"
-        title={t("common_empty_state.search.title")}
-        description={t("common_empty_state.search.description")}
+        title={t("No matching results.")}
+        description={t("No results found. Try adjusting your search terms.")}
       />
     );
 

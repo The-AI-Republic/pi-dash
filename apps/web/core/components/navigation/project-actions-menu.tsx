@@ -57,7 +57,7 @@ export function ProjectActionsMenu({
       className="flex-shrink-0"
       customButtonClassName="grid place-items-center"
       placement="bottom-start"
-      ariaLabel={t("aria_labels.projects_sidebar.toggle_quick_actions_menu")}
+      ariaLabel={t("Toggle quick actions menu")}
       useCaptureForOutsideClick
       closeOnSelect
       onMenuClose={() => setIsMenuActive(false)}
@@ -69,14 +69,14 @@ export function ProjectActionsMenu({
             <div className="flex h-4 w-4 cursor-pointer items-center justify-center rounded-sm text-secondary transition-all duration-300 hover:bg-layer-1">
               <Share2 className="h-3.5 w-3.5 stroke-[1.5]" />
             </div>
-            <div>{t("publish_project")}</div>
+            <div>{t("Publish project")}</div>
           </div>
         </CustomMenu.MenuItem>
       )}
       <CustomMenu.MenuItem onClick={onCopyText}>
         <span className="flex items-center justify-start gap-2">
           <LinkIcon className="h-3.5 w-3.5 stroke-[1.5]" />
-          <span>{t("copy_link")}</span>
+          <span>{t("Copy link")}</span>
         </span>
       </CustomMenu.MenuItem>
       {isAuthorized && (
@@ -87,7 +87,7 @@ export function ProjectActionsMenu({
         >
           <div className="flex cursor-pointer items-center justify-start gap-2">
             <ArchiveIcon className="h-3.5 w-3.5 stroke-[1.5]" />
-            <span>{t("archives")}</span>
+            <span>{t("Archives")}</span>
           </div>
         </CustomMenu.MenuItem>
       )}
@@ -98,7 +98,7 @@ export function ProjectActionsMenu({
       >
         <div className="flex cursor-pointer items-center justify-start gap-2">
           <Settings className="h-3.5 w-3.5 stroke-[1.5]" />
-          <span>{t("settings")}</span>
+          <span>{t("Settings")}</span>
         </div>
       </CustomMenu.MenuItem>
       {/* Leave project */}
@@ -109,7 +109,7 @@ export function ProjectActionsMenu({
         >
           <div className="flex items-center justify-start gap-2">
             <LogOut className="h-3.5 w-3.5 stroke-[1.5]" />
-            <span>{t("leave_project")}</span>
+            <span>{t("Leave project")}</span>
           </div>
         </CustomMenu.MenuItem>
       )}

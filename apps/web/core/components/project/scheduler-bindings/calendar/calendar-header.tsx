@@ -30,7 +30,7 @@ export function SchedulerCalendarHeader({ view, viewDate, onChangeView, onChange
           onClick={() => onChangeDate(new Date())}
           className="rounded-md border border-subtle px-2.5 py-1 text-13 text-primary hover:bg-layer-1"
         >
-          {t("scheduler_bindings.calendar.today")}
+          {t("Today")}
         </button>
         <button
           type="button"
@@ -62,7 +62,7 @@ export function SchedulerCalendarHeader({ view, viewDate, onChangeView, onChange
               view === v ? "bg-layer-2 text-primary" : "text-secondary hover:text-primary"
             )}
           >
-            {v === "month" ? t("scheduler_bindings.calendar.month") : t("scheduler_bindings.calendar.week")}
+            {v === "month" ? t("Month") : t("Week")}
           </button>
         ))}
       </div>

@@ -67,7 +67,7 @@ const VersionHistoryItem = observer(function VersionHistoryItem(props: VersionHi
             name={versionCreator?.display_name}
             className="shrink-0"
           />
-          <span>{versionCreator?.display_name ?? t("common.deactivated_user")}</span>
+          <span>{versionCreator?.display_name ?? t("Deactivated user")}</span>
         </p>
       </Link>
     </li>
@@ -110,7 +110,7 @@ export const PageNavigationPaneInfoTabVersionHistory = observer(function PageNav
 
   return (
     <div>
-      <p className="text-11 font-medium text-secondary">{t("page_navigation_pane.tabs.info.version_history.label")}</p>
+      <p className="text-11 font-medium text-secondary">{t("Version history")}</p>
       <div className="mt-3">
         <ul className="relative">
           {/* timeline line */}
@@ -130,7 +130,7 @@ export const PageNavigationPaneInfoTabVersionHistory = observer(function PageNav
                 "bg-layer-transparent-selected hover:bg-layer-transparent-selected": !activeVersion,
               })}
             >
-              {t("page_navigation_pane.tabs.info.version_history.current_version")}
+              {t("Current version")}
             </Link>
           </li>
           {versionsList?.map((version) => (

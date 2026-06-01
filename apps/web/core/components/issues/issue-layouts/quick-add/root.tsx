@@ -110,10 +110,10 @@ export const QuickAddIssueRoot = observer(function QuickAddIssueRoot(props: TQui
     if (quickAddCallback) {
       const quickAddPromise = quickAddCallback(projectId.toString(), { ...payload });
       setPromiseToast<any>(quickAddPromise, {
-        loading: isEpic ? t("epic.adding") : t("issue.adding"),
+        loading: isEpic ? t("Adding epic") : t("Adding work item"),
         success: {
-          title: t("common.success"),
-          message: () => `${isEpic ? t("epic.create.success") : t("issue.create.success")}`,
+          title: t("Success!"),
+          message: () => `${isEpic ? t("Epic created successfully") : t("Work item created successfully")}`,
           actionItems: (data) => (
             // TODO: Translate here
             <CreateIssueToastActionItems
@@ -125,8 +125,8 @@ export const QuickAddIssueRoot = observer(function QuickAddIssueRoot(props: TQui
           ),
         },
         error: {
-          title: t("common.error.label"),
-          message: (err) => err?.message || t("common.error.message"),
+          title: t("Error!"),
+          message: (err) => err?.message || t("Some error occurred. Please try again."),
         },
       });
 
@@ -166,7 +166,7 @@ export const QuickAddIssueRoot = observer(function QuickAddIssueRoot(props: TQui
               onClick={() => handleIsOpen(true)}
             >
               <PlusIcon className="h-3.5 w-3.5 stroke-2" />
-              <span className="text-13 font-medium">{t(`${isEpic ? "epic.new" : "issue.new"}`)}</span>
+              <span className="text-13 font-medium">{t(isEpic ? "New Epic" : "New work item")}</span>
             </button>
           )}
         </>

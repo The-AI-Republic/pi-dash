@@ -75,11 +75,11 @@ export const ProjectIssuesMobileHeader = observer(function ProjectIssuesMobileHe
         />
         <div className="flex flex-grow items-center justify-center border-l border-subtle text-13 text-secondary">
           <FiltersDropdown
-            title={t("common.display")}
+            title={t("Display")}
             placement="bottom-end"
             menuButton={
               <span className="flex items-center text-13 text-secondary">
-                {t("common.display")}
+                {t("Display")}
                 <ChevronDownIcon className="ml-2 h-4 w-4 text-secondary" />
               </span>
             }
@@ -102,7 +102,7 @@ export const ProjectIssuesMobileHeader = observer(function ProjectIssuesMobileHe
           onClick={() => setAnalyticsModal(true)}
           className="flex flex-grow justify-center border-l border-subtle text-13 text-secondary"
         >
-          {t("common.analytics")}
+          {t("Analytics")}
         </button>
       </div>
     </>

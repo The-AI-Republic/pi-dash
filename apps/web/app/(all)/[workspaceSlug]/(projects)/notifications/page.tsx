@@ -22,7 +22,7 @@ function WorkspaceDashboardPage({ params }: Route.ComponentProps) {
   const { currentWorkspace } = useWorkspace();
   // derived values
   const pageTitle = currentWorkspace?.name
-    ? t("notification.page_label", { workspace: currentWorkspace?.name })
+    ? t("{workspace} - Inbox", { workspace: currentWorkspace?.name })
     : undefined;
 
   return (

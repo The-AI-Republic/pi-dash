@@ -47,11 +47,11 @@ function ProjectInboxPage({ params }: Route.ComponentProps) {
     return (
       <div className="flex h-full w-full items-center justify-center">
         <DetailedEmptyState
-          title={t("disabled_project.empty_state.inbox.title")}
-          description={t("disabled_project.empty_state.inbox.description")}
+          title={t("Intake is not enabled for the project.")}
+          description={t("Intake helps you manage incoming requests to your project and add them as work items in your workflow. Enable intake from project settings to manage requests.")}
           assetPath={resolvedPath}
           primaryButton={{
-            text: t("disabled_project.empty_state.inbox.primary_button.text"),
+            text: t("Manage features"),
             onClick: () => {
               router.push(`/${workspaceSlug}/settings/projects/${projectId}/features`);
             },
@@ -63,10 +63,10 @@ function ProjectInboxPage({ params }: Route.ComponentProps) {
 
   // derived values
   const pageTitle = currentProjectDetails?.name
-    ? t("inbox_issue.page_label", {
+    ? t("{workspace} - Intake", {
         workspace: currentProjectDetails?.name,
       })
-    : t("inbox_issue.page_label", {
+    : t("{workspace} - Intake", {
         workspace: "Pi Dash",
       });
 

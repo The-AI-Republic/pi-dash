@@ -14,8 +14,8 @@ export const ProfileSettingsDefaultPreferencesList = observer(function ProfileSe
       <ThemeSwitcher
         option={{
           id: "theme",
-          title: "theme",
-          description: "select_or_customize_your_interface_color_scheme",
+          i18n_title: "Theme",
+          i18n_description: "Select or customize your interface color scheme.",
         }}
       />
     </div>

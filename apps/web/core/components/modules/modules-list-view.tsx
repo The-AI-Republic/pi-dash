@@ -57,11 +57,11 @@ export const ModulesListView = observer(function ModulesListView() {
     return (
       <EmptyStateDetailed
         assetKey="module"
-        title={t("project_empty_state.modules.title")}
-        description={t("project_empty_state.modules.description")}
+        title={t("Map your project goals to Modules and track easily.")}
+        description={t("Modules are made up of interconnected work items. They assist in monitoring progress through project phases, each with specific deadlines and analytics to indicate how close you are to achieving those phases.")}
         actions={[
           {
-            label: t("project_empty_state.modules.cta_primary"),
+            label: t("Set your first module"),
             onClick: () => toggleCreateModuleModal(true),
             disabled: !canPerformEmptyStateActions,
             variant: "primary",
@@ -75,8 +75,8 @@ export const ModulesListView = observer(function ModulesListView() {
     return (
       <EmptyStateDetailed
         assetKey="search"
-        title={t("common_empty_state.search.title")}
-        description={t("common_empty_state.search.description")}
+        title={t("No matching results.")}
+        description={t("No results found. Try adjusting your search terms.")}
       />
     );
 

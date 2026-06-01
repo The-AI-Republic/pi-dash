@@ -31,13 +31,13 @@ export const GlobalViewEmptyState = observer(function GlobalViewEmptyState() {
   if (workspaceProjectIds?.length === 0) {
     return (
       <EmptyStateDetailed
-        title={t("workspace_projects.empty_state.no_projects.title")}
-        description={t("workspace_projects.empty_state.no_projects.description")}
+        title={t("No project")}
+        description={t("To create work items or manage your work, you need to create a project or be a part of one.")}
         assetKey="project"
         assetClassName="size-40"
         actions={[
           {
-            label: t("workspace_projects.empty_state.no_projects.primary_button.text"),
+            label: t("Start your first project"),
             onClick: () => {
               toggleCreateProjectModal(true);
             },
@@ -51,13 +51,13 @@ export const GlobalViewEmptyState = observer(function GlobalViewEmptyState() {
 
   return (
     <EmptyStateDetailed
-      title={t(`workspace_empty_state.views.title`)}
-      description={t(`workspace_empty_state.views.description`)}
+      title={t("No Views yet")}
+      description={t("Add work items to your project and use views to filter, sort, and monitor progress effortlessly.")}
       assetKey="project"
       assetClassName="size-40"
       actions={[
         {
-          label: t(`workspace_empty_state.views.cta_primary`),
+          label: t("Add work item"),
           onClick: () => {
             toggleCreateIssueModal(true, EIssuesStoreType.PROJECT);
           },

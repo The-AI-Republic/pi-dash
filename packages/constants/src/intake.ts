@@ -15,59 +15,59 @@ export const INBOX_STATUS: {
 }[] = [
   {
     key: "pending",
-    i18n_title: "inbox_issue.status.pending.title",
+    i18n_title: "Pending",
     status: EInboxIssueStatus.PENDING,
-    i18n_description: () => `inbox_issue.status.pending.description`,
+    i18n_description: () => "Pending",
   },
   {
     key: "declined",
-    i18n_title: "inbox_issue.status.declined.title",
+    i18n_title: "Declined",
     status: EInboxIssueStatus.DECLINED,
-    i18n_description: () => `inbox_issue.status.declined.description`,
+    i18n_description: () => "Declined",
   },
   {
     key: "snoozed",
-    i18n_title: "inbox_issue.status.snoozed.title",
+    i18n_title: "Snoozed",
     status: EInboxIssueStatus.SNOOZED,
-    i18n_description: () => `inbox_issue.status.snoozed.description`,
+    i18n_description: () => "{days, plural, one{# day} other{# days}} to go",
   },
   {
     key: "accepted",
-    i18n_title: "inbox_issue.status.accepted.title",
+    i18n_title: "Accepted",
     status: EInboxIssueStatus.ACCEPTED,
-    i18n_description: () => `inbox_issue.status.accepted.description`,
+    i18n_description: () => "Accepted",
   },
   {
     key: "duplicate",
-    i18n_title: "inbox_issue.status.duplicate.title",
+    i18n_title: "Duplicate",
     status: EInboxIssueStatus.DUPLICATE,
-    i18n_description: () => `inbox_issue.status.duplicate.description`,
+    i18n_description: () => "Duplicate",
   },
 ];
 
 export const INBOX_ISSUE_ORDER_BY_OPTIONS = [
   {
     key: "issue__created_at",
-    i18n_label: "inbox_issue.order_by.created_at",
+    i18n_label: "Created at",
   },
   {
     key: "issue__updated_at",
-    i18n_label: "inbox_issue.order_by.updated_at",
+    i18n_label: "Updated at",
   },
   {
     key: "issue__sequence_id",
-    i18n_label: "inbox_issue.order_by.id",
+    i18n_label: "ID",
   },
 ];
 
 export const INBOX_ISSUE_SORT_BY_OPTIONS = [
   {
     key: "asc",
-    i18n_label: "common.sort.asc",
+    i18n_label: "Ascending",
   },
   {
     key: "desc",
-    i18n_label: "common.sort.desc",
+    i18n_label: "Descending",
   },
 ];
 

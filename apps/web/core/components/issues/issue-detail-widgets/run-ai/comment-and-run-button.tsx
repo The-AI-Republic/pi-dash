@@ -44,7 +44,7 @@ export const CommentAndRunActionButton = observer(function CommentAndRunActionBu
     <>
       <Button variant="primary" size={size} onClick={handleClick} disabled={disabled} className={className}>
         <MessageSquarePlus className="h-3.5 w-3.5 flex-shrink-0" strokeWidth={2} />
-        <span className="text-body-xs-medium">{t("run_ai.comment_button")}</span>
+        <span className="text-body-xs-medium">{t("Comment & Run")}</span>
       </Button>
       <CommentAndRunModal
         isOpen={isOpen}

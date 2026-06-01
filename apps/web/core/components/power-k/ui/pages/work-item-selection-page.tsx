@@ -152,13 +152,13 @@ export function WorkItemSelectionPage(props: Props) {
               })
             );
           }}
-          emptyText={t("command_k.empty_state.search.title") as string}
+          emptyText={t("Search for issue id or issue title") as string}
         />
       ) : (
         !isLoading &&
         !isSearching && (
           <div className="flex flex-col items-center justify-center px-3 py-8 text-center">
-            <SimpleEmptyState title={t("command_k.empty_state.search.title")} assetPath={resolvedPath} />
+            <SimpleEmptyState title={t("Search for issue id or issue title")} assetPath={resolvedPath} />
           </div>
         )
       )} */}

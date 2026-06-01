@@ -129,8 +129,8 @@ export const ProjectMultiSelectModal = observer(function ProjectMultiSelectModal
           {filteredProjectIds.length === 0 ? (
             <div className="flex flex-col items-center justify-center px-3 py-8 text-center">
               <SimpleEmptyState
-                title={t("workspace_projects.empty_state.filter.title")}
-                description={t("workspace_projects.empty_state.filter.description")}
+                title={t("No matching projects")}
+                description={t("No projects detected with the matching criteria. \n Create a new project instead.")}
                 assetPath={filteredProjectResolvedPath}
               />
             </div>
@@ -175,7 +175,7 @@ export const ProjectMultiSelectModal = observer(function ProjectMultiSelectModal
       </Combobox>
       <div className="flex items-center justify-end gap-2 border-t border-subtle p-3">
         <Button variant="secondary" size="lg" onClick={handleClose}>
-          {t("cancel")}
+          {t("Cancel")}
         </Button>
         <Button
           ref={moveButtonRef}
@@ -185,7 +185,7 @@ export const ProjectMultiSelectModal = observer(function ProjectMultiSelectModal
           loading={isSubmitting}
           disabled={!areSelectedProjectsChanged}
         >
-          {isSubmitting ? t("confirming") : t("confirm")}
+          {isSubmitting ? t("Confirming") : t("Confirm")}
         </Button>
       </div>
     </ModalCore>

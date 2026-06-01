@@ -38,7 +38,7 @@ export function ForgotPasswordPopover() {
           ref={setReferenceElement}
           className="text-11 font-medium text-accent-primary outline-none"
         >
-          {t("auth.common.forgot_password")}
+          {t("Forgot your password?")}
         </button>
       </Popover.Button>
       <Popover.Panel className="fixed z-10">
@@ -50,12 +50,12 @@ export function ForgotPasswordPopover() {
             {...attributes.popper}
           >
             <span className="flex-shrink-0">🤥</span>
-            <p className="text-11">{t("auth.forgot_password.errors.smtp_not_enabled")}</p>
+            <p className="text-11">{t("We see that your god hasn't enabled SMTP, we will not be able to send a password reset link")}</p>
             <button
               type="button"
               className="grid size-3 flex-shrink-0 place-items-center"
               onClick={() => close()}
-              aria-label={t("aria_labels.auth_forms.close_popover")}
+              aria-label={t("Close popover")}
             >
               <CloseIcon className="size-3 text-secondary" />
             </button>

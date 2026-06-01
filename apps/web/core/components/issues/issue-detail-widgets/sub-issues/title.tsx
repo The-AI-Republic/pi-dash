@@ -45,12 +45,12 @@ export const SubIssuesCollapsibleTitle = observer(function SubIssuesCollapsibleT
   return (
     <CollapsibleButton
       isOpen={isOpen}
-      title={`${issueServiceType === EIssueServiceType.EPICS ? t("issue.label", { count: 1 }) : t("common.sub_work_items")}`}
+      title={`${issueServiceType === EIssueServiceType.EPICS ? t("{count, plural, one {Work item} other {Work items}}", { count: 1 }) : t("Sub-work items")}`}
       indicatorElement={
         <div className="flex items-center gap-1.5 text-13 text-tertiary">
           <CircularProgressIndicator size={18} percentage={percentage} strokeWidth={3} />
           <span>
-            {completedCount}/{totalCount} {t("common.done")}
+            {completedCount}/{totalCount} {t("Done")}
           </span>
         </div>
       }

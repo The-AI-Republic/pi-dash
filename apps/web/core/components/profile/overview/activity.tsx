@@ -43,7 +43,7 @@ export const ProfileActivity = observer(function ProfileActivity() {
 
   return (
     <div className="space-y-2">
-      <h3 className="text-16 font-medium">{t("profile.stats.recent_activity.title")}</h3>
+      <h3 className="text-16 font-medium">{t("Recent activity")}</h3>
       <Card>
         {userProfileActivity ? (
           userProfileActivity.results.length > 0 ? (
@@ -77,7 +77,7 @@ export const ProfileActivity = observer(function ProfileActivity() {
               ))}
             </div>
           ) : (
-            <EmptyStateCompact title={t("no_data_yet")} assetKey="unknown" assetClassName="size-20" />
+            <EmptyStateCompact title={t("No Data yet")} assetKey="unknown" assetClassName="size-20" />
           )
         ) : (
           <Loader className="space-y-5">

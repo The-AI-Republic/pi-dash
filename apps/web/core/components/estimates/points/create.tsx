@@ -98,7 +98,7 @@ export const EstimatePointCreate = observer(function EstimatePointCreate(props: 
           if (estimateInputValue && !isNaN(Number(estimateInputValue))) {
             if (Number(estimateInputValue) <= 0) {
               if (handleEstimatePointError)
-                handleEstimatePointError(estimateInputValue, t("project_settings.estimates.validation.min_length"));
+                handleEstimatePointError(estimateInputValue, t("Estimate needs to be greater than 0."));
               return;
             } else {
               isEstimateValid = true;
@@ -125,8 +125,8 @@ export const EstimatePointCreate = observer(function EstimatePointCreate(props: 
               handleEstimatePointError && handleEstimatePointError(estimateInputValue, undefined, "delete");
               setToast({
                 type: TOAST_TYPE.SUCCESS,
-                title: t("project_settings.estimates.toasts.created.success.title"),
-                message: t("project_settings.estimates.toasts.created.success.message"),
+                title: t("Estimate created"),
+                message: t("The estimate has been created successfully"),
               });
               handleClose();
             } catch {
@@ -134,12 +134,12 @@ export const EstimatePointCreate = observer(function EstimatePointCreate(props: 
               handleEstimatePointError &&
                 handleEstimatePointError(
                   estimateInputValue,
-                  t("project_settings.estimates.validation.unable_to_process")
+                  t("We are unable to process your request, please try again.")
                 );
               setToast({
                 type: TOAST_TYPE.ERROR,
-                title: t("project_settings.estimates.toasts.created.error.title"),
-                message: t("project_settings.estimates.toasts.created.error.message"),
+                title: t("Estimate creation failed"),
+                message: t("We were unable to create the new estimate, please try again."),
               });
             }
           } else {
@@ -154,16 +154,16 @@ export const EstimatePointCreate = observer(function EstimatePointCreate(props: 
             handleEstimatePointError(
               estimateInputValue,
               [EEstimateSystem.POINTS, EEstimateSystem.TIME].includes(estimateType)
-                ? t("project_settings.estimates.validation.numeric")
-                : t("project_settings.estimates.validation.character")
+                ? t("Estimate needs to be a numeric value.")
+                : t("Estimate needs to be a character value.")
             );
         }
       } else
         handleEstimatePointError &&
-          handleEstimatePointError(estimateInputValue, t("project_settings.estimates.validation.already_exists"));
+          handleEstimatePointError(estimateInputValue, t("Estimate value already exists."));
     } else
       handleEstimatePointError &&
-        handleEstimatePointError(estimateInputValue, t("project_settings.estimates.validation.empty"));
+        handleEstimatePointError(estimateInputValue, t("Estimate value cannot be empty."));
   };
 
   return (

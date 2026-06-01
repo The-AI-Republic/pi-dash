@@ -59,7 +59,7 @@ export function DownloadActivityButton() {
 
   return (
     <Button onClick={handleDownload} loading={isDownloading}>
-      {isDownloading ? t("profile.stats.recent_activity.button_loading") : t("profile.stats.recent_activity.button")}
+      {isDownloading ? t("Downloading") : t("Download today's activity")}
     </Button>
   );
 }

@@ -71,13 +71,13 @@ export const ProfileSettingsLanguageAndTimezonePreferencesList = observer(
     return (
       <div className="flex flex-col gap-y-1">
         <SettingsControlItem
-          title={t("timezone")}
-          description={t("timezone_setting")}
+          title={t("Timezone")}
+          description={t("Current timezone setting.")}
           control={<TimezoneSelect value={user?.user_timezone || "Asia/Kolkata"} onChange={handleTimezoneChange} />}
         />
         <SettingsControlItem
-          title={t("language")}
-          description={t("language_setting")}
+          title={t("Language")}
+          description={t("Choose the language used in the user interface.")}
           control={
             <CustomSelect
               value={profile?.language}

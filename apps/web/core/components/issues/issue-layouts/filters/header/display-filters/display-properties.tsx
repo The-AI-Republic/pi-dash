@@ -52,7 +52,7 @@ export const FilterDisplayProperties = observer(function FilterDisplayProperties
     }
   }).map((property) => {
     if (isEpic && property.key === "sub_issue_count") {
-      return { ...property, titleTranslationKey: "issue.display.properties.work_item_count" };
+      return { ...property, titleTranslationKey: "Work item count" };
     }
     return property;
   });
@@ -60,7 +60,7 @@ export const FilterDisplayProperties = observer(function FilterDisplayProperties
   return (
     <>
       <FilterHeader
-        title={t("issue.display.properties.label")}
+        title={t("Display Properties")}
         isPreviewEnabled={previewEnabled}
         handleIsPreviewEnabled={() => setPreviewEnabled(!previewEnabled)}
       />

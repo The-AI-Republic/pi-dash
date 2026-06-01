@@ -49,7 +49,7 @@ export const IssueAttachmentsCollapsibleTitle = observer(function IssueAttachmen
   return (
     <CollapsibleButton
       isOpen={isOpen}
-      title={t("common.attachments")}
+      title={t("Attachments")}
       indicatorElement={indicatorElement}
       actionItemElement={
         !disabled && (

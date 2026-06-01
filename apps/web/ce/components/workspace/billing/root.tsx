@@ -47,8 +47,8 @@ export const BillingRoot = observer(function BillingRoot() {
     <section className="relative scrollbar-hide size-full overflow-y-auto">
       <div>
         <SettingsHeading
-          title={t("workspace_settings.settings.billing_and_plans.heading")}
-          description={t("workspace_settings.settings.billing_and_plans.description")}
+          title={t("Billing & Plans")}
+          description={t("Choose your plan, manage subscriptions, and easily upgrade as your needs grow.")}
         />
         <div className="mt-6">
           <SettingsBoxedControlItem

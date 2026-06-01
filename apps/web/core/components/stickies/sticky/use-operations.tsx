@@ -48,8 +48,8 @@ export const useStickyOperations = (props: TProps) => {
     if (data.name && data.name.length > 100) {
       setToast({
         type: TOAST_TYPE.ERROR,
-        title: t("stickies.toasts.not_updated.title"),
-        message: t("stickies.toasts.errors.wrong_name"),
+        title: t("Sticky not updated"),
+        message: t("The sticky name cannot be longer than 100 characters."),
       });
       return false;
     }
@@ -70,9 +70,9 @@ export const useStickyOperations = (props: TProps) => {
             const latestSticky = stickies[workspaceStickIds[0]];
             if (latestSticky && (!latestSticky.description_html || isCommentEmpty(latestSticky.description_html))) {
               setToast({
-                message: t("stickies.toasts.errors.already_exists"),
+                message: t("There already exists a sticky with no description"),
                 type: TOAST_TYPE.WARNING,
-                title: t("stickies.toasts.not_created.title"),
+                title: t("Sticky not created"),
               });
               return;
             }
@@ -82,15 +82,15 @@ export const useStickyOperations = (props: TProps) => {
           await createSticky(workspaceSlug, payload);
           setToast({
             type: TOAST_TYPE.SUCCESS,
-            title: t("stickies.toasts.created.title"),
-            message: t("stickies.toasts.created.message"),
+            title: t("Sticky created"),
+            message: t("The sticky has been successfully created"),
           });
         } catch (error: any) {
           console.error("Error in creating sticky:", error);
           setToast({
             type: TOAST_TYPE.ERROR,
-            title: t("stickies.toasts.not_created.title"),
-            message: error?.data?.error ?? t("stickies.toasts.not_created.message"),
+            title: t("Sticky not created"),
+            message: error?.data?.error ?? t("The sticky could not be created"),
           });
         }
       },
@@ -103,8 +103,8 @@ export const useStickyOperations = (props: TProps) => {
           console.error("Error in updating sticky:", error);
           setToast({
             type: TOAST_TYPE.ERROR,
-            title: t("stickies.toasts.not_updated.title"),
-            message: t("stickies.toasts.not_updated.message"),
+            title: t("Sticky not updated"),
+            message: t("The sticky could not be updated"),
           });
         }
       },
@@ -114,15 +114,15 @@ export const useStickyOperations = (props: TProps) => {
           await deleteSticky(workspaceSlug, stickyId);
           setToast({
             type: TOAST_TYPE.SUCCESS,
-            title: t("stickies.toasts.removed.title"),
-            message: t("stickies.toasts.removed.message"),
+            title: t("Sticky removed"),
+            message: t("The sticky has been successfully removed"),
           });
         } catch (error) {
           console.error("Error in removing sticky:", error);
           setToast({
             type: TOAST_TYPE.ERROR,
-            title: t("stickies.toasts.not_removed.title"),
-            message: t("stickies.toasts.not_removed.message"),
+            title: t("Sticky not removed"),
+            message: t("The sticky could not be removed"),
           });
         }
       },
@@ -139,8 +139,8 @@ export const useStickyOperations = (props: TProps) => {
           console.error("Error in updating sticky position:", error);
           setToast({
             type: TOAST_TYPE.ERROR,
-            title: t("stickies.toasts.not_updated.title"),
-            message: t("stickies.toasts.not_updated.message"),
+            title: t("Sticky not updated"),
+            message: t("The sticky could not be updated"),
           });
         }
       },

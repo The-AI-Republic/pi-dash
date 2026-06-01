@@ -70,7 +70,7 @@ export const EstimatePointItemPreview = observer(function EstimatePointItemPrevi
             {estimatePoint?.value ? (
               `${estimateType === EEstimateSystem.TIME ? convertMinutesToHoursMinutesString(Number(estimatePoint?.value)) : estimatePoint?.value}`
             ) : (
-              <span className="text-placeholder">{t("project_settings.estimates.create.enter_estimate_point")}</span>
+              <span className="text-placeholder">{t("Enter estimate")}</span>
             )}
           </div>
           <div

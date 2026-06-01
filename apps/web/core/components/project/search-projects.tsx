@@ -64,7 +64,7 @@ export const ProjectSearch = observer(function ProjectSearch() {
         <input
           ref={inputRef}
           className="w-full max-w-[234px] border-none bg-transparent text-13 text-primary placeholder:text-placeholder focus:outline-none"
-          placeholder={t("common.search.label")}
+          placeholder={t("Search")}
           value={searchQuery}
           onChange={(e) => updateSearchQuery(e.target.value)}
           onKeyDown={handleInputKeyDown}

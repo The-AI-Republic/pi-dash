@@ -26,8 +26,8 @@ export const CYCLE_GROUP_COLORS: {
 export const CYCLE_GROUP_I18N_LABELS: {
   [key in TCycleGroups]: string;
 } = {
-  current: "current",
-  upcoming: "common.upcoming",
-  completed: "common.completed",
-  draft: "project_cycles.status.draft",
+  current: "Current",
+  upcoming: "Upcoming",
+  completed: "Completed",
+  draft: "Draft",
 };

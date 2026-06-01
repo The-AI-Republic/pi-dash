@@ -73,8 +73,8 @@ export const AutoArchiveAutomation = observer(function AutoArchiveAutomation(pro
             <ArchiveRestore className="size-4 shrink-0 text-primary" />
           </div>
           <SettingsControlItem
-            title={t("project_settings.automations.auto-archive.title")}
-            description={t("project_settings.automations.auto-archive.description")}
+            title={t("Auto-archive closed work items")}
+            description={t("Pi Dash will auto archive work items that have been completed or canceled.")}
             control={
               <ToggleSwitch value={autoArchiveStatus} onChange={handleToggleArchive} size="sm" disabled={!isAdmin} />
             }
@@ -85,7 +85,7 @@ export const AutoArchiveAutomation = observer(function AutoArchiveAutomation(pro
             <div className="ml-13">
               <div className="flex w-full items-center justify-between gap-2 rounded-sm border border-subtle bg-surface-2 px-5 py-4">
                 <div className="w-1/2 text-13 font-medium">
-                  {t("project_settings.automations.auto-archive.duration")}
+                  {t("Auto-archive work items that are closed for")}
                 </div>
                 <div className="w-1/2">
                   <CustomSelect
@@ -109,7 +109,7 @@ export const AutoArchiveAutomation = observer(function AutoArchiveAutomation(pro
                         className="flex w-full items-center rounded-sm px-1 py-1.5 text-13 text-secondary select-none hover:bg-layer-1"
                         onClick={() => setmonthModal(true)}
                       >
-                        {t("common.customize_time_range")}
+                        {t("Customize time range")}
                       </button>
                     </>
                   </CustomSelect>

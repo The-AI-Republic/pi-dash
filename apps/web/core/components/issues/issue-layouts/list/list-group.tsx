@@ -138,7 +138,7 @@ export const ListGroup = observer(function ListGroup(props: Props) {
       }
       onClick={() => loadMoreIssues(group.id)}
     >
-      {t("common.load_more")} &darr;
+      {t("Load more")} &darr;
     </div>
   );
 
@@ -220,7 +220,7 @@ export const ListGroup = observer(function ListGroup(props: Props) {
             if (group.dropErrorMessage)
               setToast({
                 type: TOAST_TYPE.WARNING,
-                title: t("common.warning"),
+                title: t("Warning"),
                 message: group.dropErrorMessage,
               });
             return;

@@ -67,13 +67,13 @@ const WorkItemsInsightTable = observer(function WorkItemsInsightTable() {
   const columnsLabels: Record<keyof Omit<WorkItemInsightColumns, "project_id" | "avatar_url" | "assignee_id">, string> =
     useMemo(
       () => ({
-        backlog_work_items: t("workspace_projects.state.backlog"),
-        started_work_items: t("workspace_projects.state.started"),
-        un_started_work_items: t("workspace_projects.state.unstarted"),
-        completed_work_items: t("workspace_projects.state.completed"),
-        cancelled_work_items: t("workspace_projects.state.cancelled"),
-        project__name: t("common.project"),
-        display_name: t("common.assignee"),
+        backlog_work_items: t("Backlog"),
+        started_work_items: t("Started"),
+        un_started_work_items: t("Unstarted"),
+        completed_work_items: t("Completed"),
+        cancelled_work_items: t("Cancelled"),
+        project__name: t("Project"),
+        display_name: t("Assignee"),
       }),
       [t]
     );
@@ -201,7 +201,7 @@ const WorkItemsInsightTable = observer(function WorkItemsInsightTable() {
       isLoading={isLoading}
       columns={columns}
       columnsLabels={columnsLabels}
-      headerText={isPeekView ? t("common.assignee") : t("common.projects")}
+      headerText={isPeekView ? t("Assignee") : t("Projects")}
       onExport={(rows) => workItemsData && exportCSV(rows, columns, workspaceSlug)}
     />
   );

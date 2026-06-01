@@ -45,7 +45,7 @@ export const ProjectsBaseHeader = observer(function ProjectsBaseHeader() {
           <Breadcrumbs.Item
             component={
               <BreadcrumbLink
-                label={t("workspace_projects.label", { count: 2 })}
+                label={t("{count, plural, one {Project} other {Projects}}", { count: 2 })}
                 icon={<ProjectIcon className="h-4 w-4 text-tertiary" />}
               />
             }
@@ -68,8 +68,8 @@ export const ProjectsBaseHeader = observer(function ProjectsBaseHeader() {
             data-ph-element={PROJECT_TRACKER_ELEMENTS.CREATE_HEADER_BUTTON}
             className="items-center gap-1"
           >
-            <span className="hidden sm:inline-block">{t("workspace_projects.create.label")}</span>
-            <span className="inline-block sm:hidden">{t("workspace_projects.label", { count: 1 })}</span>
+            <span className="hidden sm:inline-block">{t("Add Project")}</span>
+            <span className="inline-block sm:hidden">{t("{count, plural, one {Project} other {Projects}}", { count: 1 })}</span>
           </Button>
         ) : (
           <></>

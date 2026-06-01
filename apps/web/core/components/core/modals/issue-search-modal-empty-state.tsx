@@ -40,13 +40,13 @@ export function IssueSearchModalEmptyState({ issues, searchTerm, debouncedSearch
   if (issues.length === 0 && searchTerm !== "" && debouncedSearchTerm !== "" && !isSearching) {
     return (
       <EmptyStateContainer>
-        <SimpleEmptyState title={t("issue_relation.empty_state.no_issues.title")} assetPath={issuesResolvedPath} />
+        <SimpleEmptyState title={t("No work items found")} assetPath={issuesResolvedPath} />
       </EmptyStateContainer>
     );
   } else if (issues.length === 0) {
     return (
       <EmptyStateContainer>
-        <SimpleEmptyState title={t("issue_relation.empty_state.search.title")} assetPath={searchResolvedPath} />
+        <SimpleEmptyState title={t("No matching work items found")} assetPath={searchResolvedPath} />
       </EmptyStateContainer>
     );
   }

@@ -31,10 +31,10 @@ function ProjectCreateButtons(props: Props) {
   return (
     <div className="flex justify-end gap-2 border-t border-subtle py-4">
       <Button variant="secondary" size="lg" onClick={handleClose} tabIndex={getIndex("cancel")}>
-        {t("common.cancel")}
+        {t("Cancel")}
       </Button>
       <Button variant="primary" size="lg" type="submit" loading={isSubmitting} tabIndex={getIndex("submit")}>
-        {isSubmitting ? t("creating") : t("create_project")}
+        {isSubmitting ? t("Creating") : t("Create project")}
       </Button>
     </div>
   );

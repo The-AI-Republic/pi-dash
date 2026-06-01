@@ -65,7 +65,7 @@ export const SubIssueFilters = observer(function SubIssueFilters(props: TSubIssu
               <input
                 type="text"
                 className="w-full bg-surface-2 outline-none placeholder:text-placeholder"
-                placeholder={t("common.search.label")}
+                placeholder={t("Search")}
                 value={filtersSearchQuery}
                 onChange={(e) => setFiltersSearchQuery(e.target.value)}
               />

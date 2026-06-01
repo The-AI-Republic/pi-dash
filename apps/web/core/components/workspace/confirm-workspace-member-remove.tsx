@@ -59,7 +59,7 @@ export const ConfirmWorkspaceMemberRemove = observer(function ConfirmWorkspaceMe
             <div className="mt-2">
               {currentUser?.id === userDetails.id ? (
                 <p className="text-body-xs-regular text-secondary">
-                  {t("workspace_settings.settings.members.leave_confirmation")}
+                  {t("Are you sure you want to leave the workspace? You will no longer have access to this workspace. This action cannot be undone.")}
                 </p>
               ) : (
                 <p className="text-body-xs-regular text-secondary">
@@ -74,16 +74,16 @@ export const ConfirmWorkspaceMemberRemove = observer(function ConfirmWorkspaceMe
       </div>
       <div className="flex justify-end gap-2 p-4 sm:px-6">
         <Button variant="secondary" size="lg" onClick={handleClose}>
-          {t("cancel")}
+          {t("Cancel")}
         </Button>
         <Button variant="error-fill" size="lg" tabIndex={1} onClick={handleDeletion} loading={isRemoving}>
           {currentUser?.id === userDetails.id
             ? isRemoving
-              ? t("leaving")
-              : t("leave")
+              ? t("Leaving")
+              : t("Leave")
             : isRemoving
-              ? t("removing")
-              : t("remove")}
+              ? t("Removing")
+              : t("Remove")}
         </Button>
       </div>
     </ModalCore>

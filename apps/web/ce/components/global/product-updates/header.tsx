@@ -15,13 +15,13 @@ export const ProductUpdatesHeader = observer(function ProductUpdatesHeader() {
   return (
     <div className="mx-6 my-4 flex flex-shrink-0 items-center justify-between gap-2">
       <div className="flex w-full items-center">
-        <div className="flex gap-2 text-18 font-medium">{t("whats_new")}</div>
+        <div className="flex gap-2 text-18 font-medium">{t("What's new?")}</div>
         <div
           className={cn(
             "mx-2 rounded-full bg-accent-primary/20 px-2 py-0.5 text-center text-11 font-medium text-accent-primary"
           )}
         >
-          {t("version")}: v{packageJson.version}
+          {t("Version")}: v{packageJson.version}
         </div>
       </div>
     </div>

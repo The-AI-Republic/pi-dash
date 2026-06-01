@@ -76,8 +76,8 @@ export const EditSchedulerBindingModal = observer(function EditSchedulerBindingM
       });
       setToast({
         type: TOAST_TYPE.SUCCESS,
-        title: t("scheduler_bindings.toast.updated_title"),
-        message: t("scheduler_bindings.toast.updated_message"),
+        title: t("Install updated"),
+        message: t("Subsequent runs use the new settings."),
       });
       onUpdated(updated);
       onClose();
@@ -88,10 +88,10 @@ export const EditSchedulerBindingModal = observer(function EditSchedulerBindingM
         err?.rrule?.[0] ??
         err?.dtstart?.[0] ??
         err?.tzid?.[0] ??
-        t("scheduler_bindings.toast.update_failed");
+        t("Could not update the install.");
       setToast({
         type: TOAST_TYPE.ERROR,
-        title: t("scheduler_bindings.toast.error_title"),
+        title: t("Something went wrong"),
         message: detail,
       });
     }
@@ -101,7 +101,7 @@ export const EditSchedulerBindingModal = observer(function EditSchedulerBindingM
     <ModalCore isOpen={isOpen} handleClose={onClose} position={EModalPosition.CENTER} width={EModalWidth.XXL}>
       <form onSubmit={handleSubmit(handleFormSubmit)} className="flex flex-col gap-5 p-5">
         <div className="text-18 font-medium text-primary">
-          {t("scheduler_bindings.edit_modal.title")}
+          {t("Edit scheduler install")}
           {binding && <span className="ml-2 text-13 text-secondary">— {binding.scheduler_name}</span>}
         </div>
 
@@ -119,10 +119,10 @@ export const EditSchedulerBindingModal = observer(function EditSchedulerBindingM
 
         <div className="flex justify-end gap-2">
           <Button variant="secondary" onClick={onClose} disabled={isSubmitting}>
-            {t("scheduler_bindings.install_modal.cancel")}
+            {t("Cancel")}
           </Button>
           <Button type="submit" loading={isSubmitting} disabled={isSubmitting}>
-            {isSubmitting ? t("scheduler_bindings.edit_modal.saving") : t("scheduler_bindings.edit_modal.save")}
+            {isSubmitting ? t("Saving…") : t("Save")}
           </Button>
         </div>
       </form>

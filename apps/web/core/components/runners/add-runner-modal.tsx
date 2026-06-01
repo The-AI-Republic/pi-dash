@@ -139,8 +139,8 @@ export const AddRunnerModal = observer(function AddRunnerModal(props: Props) {
 
   const agentOptionLabel = (value: TAgent): string =>
     value === "claude-code"
-      ? t("runners.add_modal.agent_options.claude_code")
-      : t("runners.add_modal.agent_options.codex");
+      ? t("Claude Code")
+      : t("Codex");
 
   const onSubmit: SubmitHandler<FormValues> = (values) => {
     setRunnerCommand({
@@ -160,23 +160,23 @@ export const AddRunnerModal = observer(function AddRunnerModal(props: Props) {
       {runnerCommand === null ? (
         <form onSubmit={handleSubmit(onSubmit)} className="flex flex-col gap-5 p-5">
           <div>
-            <div className="text-18 font-medium text-primary">{t("runners.add_modal.title")}</div>
-            <p className="mt-1 text-13 text-secondary">{t("runners.add_modal.subtitle")}</p>
+            <div className="text-18 font-medium text-primary">{t("Add runner")}</div>
+            <p className="mt-1 text-13 text-secondary">{t("Generate a `pidash runner add` command for the machine that will host this runner.")}</p>
           </div>
 
           <div className="flex flex-col gap-1">
             <label htmlFor="add-runner-project" className="text-13 font-medium text-primary">
-              {t("runners.add_modal.project_label")}
+              {t("Project")}
             </label>
             <Controller
               control={control}
               name="projectIdentifier"
-              rules={{ required: t("runners.add_modal.errors.project_required") }}
+              rules={{ required: t("Pick a project.") }}
               render={({ field }) => (
                 <CustomSelect
                   value={field.value}
                   label={
-                    projects?.find((p) => p.identifier === field.value)?.name ?? t("runners.list.project_placeholder")
+                    projects?.find((p) => p.identifier === field.value)?.name ?? t("Select a project")
                   }
                   onChange={field.onChange}
                   buttonClassName="border border-subtle"
@@ -195,18 +195,18 @@ export const AddRunnerModal = observer(function AddRunnerModal(props: Props) {
                 </CustomSelect>
               )}
             />
-            <p className="text-12 text-secondary">{t("runners.add_modal.project_help")}</p>
+            <p className="text-12 text-secondary">{t("The project this runner will work on.")}</p>
             {errors.projectIdentifier && (
               <span className="text-12 text-danger-primary">{errors.projectIdentifier.message}</span>
             )}
             {projectsError && (
-              <span className="text-12 text-danger-primary">{t("runners.add_modal.errors.load_projects_failed")}</span>
+              <span className="text-12 text-danger-primary">{t("Could not load projects.")}</span>
             )}
           </div>
 
           <div className="flex flex-col gap-1">
             <label htmlFor="add-runner-pod" className="text-13 font-medium text-primary">
-              {t("runners.add_modal.pod_label")}
+              {t("Pod (optional)")}
             </label>
             <Controller
               control={control}
@@ -214,7 +214,7 @@ export const AddRunnerModal = observer(function AddRunnerModal(props: Props) {
               render={({ field }) => (
                 <CustomSelect
                   value={field.value}
-                  label={field.value || t("runners.add_modal.pod_default_option")}
+                  label={field.value || t("(default pod)")}
                   onChange={field.onChange}
                   buttonClassName="border border-subtle"
                   input
@@ -222,7 +222,7 @@ export const AddRunnerModal = observer(function AddRunnerModal(props: Props) {
                   placement="bottom-start"
                 >
                   <>
-                    <CustomSelect.Option value="">{t("runners.add_modal.pod_default_option")}</CustomSelect.Option>
+                    <CustomSelect.Option value="">{t("(default pod)")}</CustomSelect.Option>
                     {podsForPicker.map((pod) => (
                       <CustomSelect.Option key={pod.id} value={pod.name}>
                         {pod.name}
@@ -233,15 +233,15 @@ export const AddRunnerModal = observer(function AddRunnerModal(props: Props) {
                 </CustomSelect>
               )}
             />
-            <p className="text-12 text-secondary">{t("runners.add_modal.pod_help")}</p>
+            <p className="text-12 text-secondary">{t("Defaults to the project's default pod.")}</p>
             {podsError && (
-              <span className="text-12 text-danger-primary">{t("runners.add_modal.errors.load_pods_failed")}</span>
+              <span className="text-12 text-danger-primary">{t("Could not load pods.")}</span>
             )}
           </div>
 
           <div className="flex flex-col gap-1">
             <label htmlFor="add-runner-name" className="text-13 font-medium text-primary">
-              {t("runners.add_modal.name_label")}
+              {t("Name (optional)")}
             </label>
             <Controller
               control={control}
@@ -250,21 +250,21 @@ export const AddRunnerModal = observer(function AddRunnerModal(props: Props) {
                 validate: (value) => {
                   const trimmed = value.trim();
                   if (!trimmed) return true;
-                  if (RUNNER_NAME_WHITESPACE_RE.test(trimmed)) return t("runners.add_modal.errors.name_invalid");
-                  return RUNNER_NAME_RE.test(trimmed) || t("runners.add_modal.errors.name_invalid");
+                  if (RUNNER_NAME_WHITESPACE_RE.test(trimmed)) return t("Runner name cannot contain spaces. It must start with a letter, digit, or underscore and contain only letters, digits, underscore, dot, or dash.");
+                  return RUNNER_NAME_RE.test(trimmed) || t("Runner name cannot contain spaces. It must start with a letter, digit, or underscore and contain only letters, digits, underscore, dot, or dash.");
                 },
               }}
               render={({ field }) => (
-                <Input {...field} id="add-runner-name" placeholder={t("runners.add_modal.name_placeholder")} />
+                <Input {...field} id="add-runner-name" placeholder={t("my-laptop-runner")} />
               )}
             />
-            <p className="text-12 text-secondary">{t("runners.add_modal.name_help")}</p>
+            <p className="text-12 text-secondary">{t("Auto-assigned if blank. No spaces. If provided, use letters, digits, underscore, dot, or dash; start with a letter, digit, or underscore.")}</p>
             {errors.name && <span className="text-12 text-danger-primary">{errors.name.message}</span>}
           </div>
 
           <div className="flex flex-col gap-1">
             <label htmlFor="add-runner-working-dir" className="text-13 font-medium text-primary">
-              {t("runners.add_modal.working_dir_label")}
+              {t("Working directory (optional)")}
             </label>
             <Controller
               control={control}
@@ -273,16 +273,16 @@ export const AddRunnerModal = observer(function AddRunnerModal(props: Props) {
                 <Input
                   {...field}
                   id="add-runner-working-dir"
-                  placeholder={t("runners.add_modal.working_dir_placeholder")}
+                  placeholder={t("local dev machine project working dir")}
                 />
               )}
             />
-            <p className="text-12 text-secondary">{t("runners.add_modal.working_dir_help")}</p>
+            <p className="text-12 text-secondary">{t("Local path the daemon runs the agent CLI in — usually the project repo on disk. Defaults to a sandbox under the runner's data dir, which is rarely what you want.")}</p>
           </div>
 
           <div className="flex flex-col gap-1">
             <label htmlFor="add-runner-agent" className="text-13 font-medium text-primary">
-              {t("runners.add_modal.agent_label")}
+              {t("Agent")}
             </label>
             <Controller
               control={control}
@@ -307,22 +307,22 @@ export const AddRunnerModal = observer(function AddRunnerModal(props: Props) {
                 </CustomSelect>
               )}
             />
-            <p className="text-12 text-secondary">{t("runners.add_modal.agent_help")}</p>
+            <p className="text-12 text-secondary">{t("Which AI agent CLI this runner will drive. Baked into the displayed ``pidash runner add`` command.")}</p>
           </div>
 
           <div className="flex justify-end gap-2">
             <Button variant="secondary" onClick={onClose}>
-              {t("runners.add_modal.cancel")}
+              {t("Cancel")}
             </Button>
-            <Button type="submit">{t("runners.add_modal.submit")}</Button>
+            <Button type="submit">{t("Generate command")}</Button>
           </div>
         </form>
       ) : (
         <div className="flex flex-col gap-4 p-5">
           <div>
-            <div className="text-18 font-medium text-primary">{t("runners.add_modal.title")}</div>
+            <div className="text-18 font-medium text-primary">{t("Add runner")}</div>
             <p className="mt-1 text-13 text-secondary">
-              {t("runners.add_modal.project_label")}: <code className="text-12">{runnerCommand.projectIdentifier}</code>
+              {t("Project")}: <code className="text-12">{runnerCommand.projectIdentifier}</code>
             </p>
           </div>
 
@@ -339,9 +339,9 @@ export const AddRunnerModal = observer(function AddRunnerModal(props: Props) {
 
           <div className="flex justify-end gap-2">
             <Button variant="secondary" onClick={() => setRunnerCommand(null)}>
-              {t("runners.add_modal.back")}
+              {t("Back")}
             </Button>
-            <Button onClick={onClose}>{t("runners.add_modal.done")}</Button>
+            <Button onClick={onClose}>{t("Done")}</Button>
           </div>
         </div>
       )}
