@@ -4,10 +4,10 @@
 
 """External runner-facing API (daemon traffic) — mounted at ``/api/v1/runner/``.
 
-See ``.ai_design/move_to_https/design.md`` §5 / §7. Per-runner trust:
-the daemon authenticates as a Runner with a per-runner refresh+access
-token pair (no Connection layer), opens one session per runner, and
-long-polls that session for control-plane messages.
+See ``.ai_design/move_to_https/design.md`` §5 / §7. The daemon
+authenticates with a shared dev-machine MachineToken, identifies the
+speaking runner by URL/header, opens one session per runner, and long-polls
+that session for control-plane messages.
 """
 
 from django.urls import path

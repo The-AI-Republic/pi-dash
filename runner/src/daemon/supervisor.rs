@@ -10,7 +10,7 @@ use crate::approval::policy::Policy;
 use crate::approval::router::{ApprovalRecord, ApprovalRouter, ApprovalStatus, DecisionSource};
 use crate::cloud::http::{
     AckEntry, AttachBody, CredentialsHandle, HttpLoop, InboundEnvelope, PollStatus,
-    RunnerCloudClient, SharedHttpTransport,
+    RunnerCloudClient, RunnerCredentials, SharedHttpTransport,
 };
 use crate::cloud::protocol::{
     ClientMsg, FailureReason, RunnerStatus, ServerMsg, TokenUsage as WireTokenUsage, WIRE_VERSION,
@@ -86,11 +86,23 @@ impl Supervisor {
             Some(SharedHttpTransport::new(config.daemon.cloud_url.clone())?)
         };
 
+        let shared_machine_token = config
+            .cli
+            .as_ref()
+            .and_then(|cli| cli.token.as_deref())
+            .filter(|token| token.starts_with("mt_"))
+            .map(str::to_string);
+
         let mut instances: Vec<RunnerInstance> = Vec::new();
         for runner_cfg in &config.runners {
             let inst = if let Some(shared) = &transport {
                 let runner_paths = paths.for_runner(runner_cfg.runner_id);
-                let creds = load_runner_credentials(&runner_paths, &runner_cfg.name).await?;
+                let creds = load_runner_credentials(
+                    &runner_paths,
+                    &runner_cfg.name,
+                    shared_machine_token.as_deref(),
+                )
+                .await?;
                 let client = RunnerCloudClient::new(runner_cfg.runner_id, creds, shared.clone());
                 RunnerInstance::new_http(runner_cfg.clone(), &paths, client, config.daemon.clone())
             } else {
@@ -411,7 +423,19 @@ async fn hello_emitter(
 async fn load_runner_credentials(
     runner_paths: &RunnerPaths,
     runner_name: &str,
+    shared_machine_token: Option<&str>,
 ) -> Result<CredentialsHandle> {
+    if let Some(token) = shared_machine_token {
+        return Ok(CredentialsHandle::new(
+            runner_paths.credentials_path(),
+            RunnerCredentials {
+                runner_id: runner_paths.runner_id,
+                name: runner_name.to_string(),
+                refresh_token: token.to_string(),
+                refresh_token_generation: 0,
+            },
+        ));
+    }
     crate::cloud::http::load_runner_credentials_from(runner_paths.credentials_path(), runner_name)
         .await
         .map_err(|e| anyhow::anyhow!("{e}"))

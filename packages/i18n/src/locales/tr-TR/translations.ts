@@ -5,6 +5,8 @@
  */
 
 export default {
+  pod: "Pod",
+  pod_default_badge: "Default",
   sidebar: {
     projects: "Projeler",
     pages: "Sayfalar",
@@ -25,6 +27,10 @@ export default {
     upgrade: "Yükselt",
     stickies: "Yapışkan notlar",
     prompts: "Prompts",
+    ai_dev_machines: "AI Dev Machines",
+    tooltips: {
+      ai_dev_machines: "Install the pidash CLI and register dev machines as AI agent runners",
+    },
   },
   auth: {
     common: {
@@ -2921,11 +2927,10 @@ export default {
     list: {
       delete_failed: "Runner silinemedi",
       revoke_failed: "Runner iptal edilemedi",
-      revive_failed: "Runner canlandırılamadı",
       add_runner: "Runner ekle",
       how_it_works_title: "Runner nasıl eklenir",
       how_it_works_body:
-        "1. \"Runner ekle\"ye tıklayın, bir proje + pod seçin ve gönderin. Bulut, bu runner'a bağlı tek kullanımlık bir kayıt token'ı oluşturur.\n2. Runner'ı barındıracak makinede, görüntülenen `pidash connect --url ... --token ... --host-label ...` komutunu çalıştırın.\n3. Daemon kaydolur ve runner burada çevrimiçi görünür.\n\nHer runner'ın kendi token'ı vardır. Bir ana bilgisayarda kaydolan ilk runner, aynı zamanda `pidash` CLI tarafından runner olmayan komutlar için kullanılan bir makine token'ı başlatır.\n\nÖn koşul: aracı CLI (codex / claude) ana bilgisayara zaten yüklenmiş olmalıdır.",
+        '1. Click "Add runner", pick a project + pod and generate the CLI command.\n2. On the machine that will host the runner, run the displayed `pidash runner add` command. If the host is not logged in yet, the CLI starts `pidash auth login` first.\n3. The daemon registers the runner and it shows online here.\n\nPrerequisite: the agent CLI (codex / claude) must already be installed on the host.',
       connected_runners: "Runner'lar",
       columns: {
         name: "Ad",
@@ -2935,24 +2940,20 @@ export default {
         last_heartbeat: "Son kalp atışı",
       },
       columns_pod: "Pod",
-      revive: "Canlandır",
       revoke: "İptal et",
       delete: "Sil",
-      empty: 'Henüz runner yok. İlk runner başına kayıt token\'ınızı oluşturmak için "Runner ekle"ye tıklayın.',
+      empty: 'No runners yet. Click "Add runner" to generate your first runner command.',
       delete_confirm_title: "Runner silinsin mi?",
       delete_confirm_body:
         "Runner satırı kaldırılır ve daemon çevrimdışı olmaya zorlanır. Geçmiş çalıştırmalar, null runner referansı ile korunur.",
       revoke_confirm_title: "Runner iptal edilsin mi?",
       revoke_confirm_body:
-        "Runner'ın kimlik bilgileri geçersiz kılınır ve devam eden tüm çalıştırmalar iptal edilir, ancak satır listede kalır. Daha sonra canlandırarak aynı satırda yeni bir kayıt token'ı oluşturabilirsiniz.",
-      revive_modal_title: "Yeni kayıt token'ı",
-      revive_modal_body:
-        "Bu runner'ı alması gereken ana bilgisayarda aşağıdaki komutu çalıştırın. Şimdi kopyalayın — token bir daha gösterilmeyecek.",
+        "The runner's credentials are invalidated and any in-flight runs are cancelled, but the row stays in the list. To attach it again, delete it and add a new runner from the target machine.",
       project_placeholder: "Bir proje seçin",
       copy_failed: "Panoya kopyalanamadı",
     },
     machine_token_note: {
-      body: "Bir runner ilk kez yeni bir ana bilgisayara (yani yeni bir ``host_label``) kaydolduğunda, bulut ayrıca ``pidash`` CLI tarafından runner olmayan komutlar (issue, comment, state) için kullanılan bir makine token'ı yayınlar. Aynı ana bilgisayardaki sonraki runner'lar bu token'ı yeniden kullanır.",
+      body: "`pidash runner add` starts `pidash auth login` first when the host is not logged in yet. Run it again for each project or pod this machine should serve.",
     },
     pods: {
       title: "Pod'lar",
@@ -2973,14 +2974,14 @@ export default {
         codex: "Codex",
       },
       errors: {
-        create_failed: "Kayıt token'ı oluşturulamadı.",
         project_required: "Bir proje seçin.",
+        name_invalid:
+          "Runner name cannot contain spaces. It must start with a letter, digit, or underscore and contain only letters, digits, underscore, dot, or dash.",
         load_projects_failed: "Projeler yüklenemedi.",
         load_pods_failed: "Pod'lar yüklenemedi.",
       },
       title: "Runner ekle",
-      subtitle:
-        "Yeni bir runner için tek kullanımlık kayıt token'ı oluşturun. Görüntülenen `pidash connect` komutunu, runner'ı barındıracak makinede çalıştıracaksınız.",
+      subtitle: "Generate a `pidash runner add` command for the machine that will host this runner.",
       project_label: "Proje",
       project_help: "Bu runner'ın üzerinde çalışacağı proje.",
       pod_label: "Pod (isteğe bağlı)",
@@ -2988,23 +2989,25 @@ export default {
       pod_help: "Varsayılan olarak projenin varsayılan pod'u kullanılır.",
       name_label: "Ad (isteğe bağlı)",
       name_placeholder: "my-laptop-runner",
-      name_help: "Boş bırakılırsa otomatik atanır, örn. ``runner_001``.",
-      host_label_label: "Ana bilgisayar etiketi (isteğe bağlı)",
-      host_label_placeholder: "my-laptop",
-      host_label_help:
-        "Önerilen komuta gömülü serbest biçimli ana bilgisayar adı. Bayrağı kapatırsanız arka plan programı gerçek ana bilgisayar adını kullanır.",
+      name_help:
+        "Auto-assigned if blank. No spaces. If provided, use letters, digits, underscore, dot, or dash; start with a letter, digit, or underscore.",
       working_dir_label: "Çalışma dizini (isteğe bağlı)",
       working_dir_placeholder: "yerel geliştirme makinesi proje çalışma dizini",
       working_dir_help:
         "Arka plan programının aracı CLI'sini çalıştırdığı yerel yol — genellikle diskteki proje deposu. Varsayılan olarak çalıştırıcının veri dizini altındaki bir kum havuzudur, bu nadiren istediğiniz şeydir.",
       agent_label: "Aracı",
-      agent_help:
-        "Bu çalıştırıcının hangi AI aracı CLI'sini yönlendireceği. Görüntülenen ``pidash connect`` komutuna gömülüdür.",
+      agent_help: "Which AI agent CLI this runner will drive. Baked into the displayed ``pidash runner add`` command.",
       cancel: "İptal",
-      submitting: "Basılıyor…",
-      submit: "Kayıt tokeni bas",
+      back: "Back",
+      submit: "Generate command",
       token_warning: "Bunu bir kez kopyalayın — kayıt tokeni bir daha gösterilmeyecek.",
       token_instructions: "Bunu çalıştırıcıyı barındıracak makinede çalıştırın:",
+      cloud_url_origin_warning:
+        "Using the current browser origin as the cloud URL because VITE_API_BASE_URL is not configured.",
+      shell_label: "Shell",
+      shell_posix: "macOS/Linux",
+      shell_powershell: "PowerShell",
+      shell_cmd: "Command Prompt",
       copied: "Kopyalandı!",
       copy_command: "Komutu kopyala",
     },
@@ -3050,6 +3053,73 @@ export default {
       cancel: "İptal",
       submitting: "Oluşturuluyor…",
       submit: "Pod oluştur",
+    },
+  },
+  ai_dev_machines: {
+    title: "AI Dev Machines",
+    page_title: "{workspace} - AI Dev Machines",
+    list: {
+      heading: "Dev machines",
+      body: "Machines that have authenticated with Pi Dash or host runners for this workspace.",
+      add_runner: "Add runner",
+      rotate: "Rotate",
+      revoke: "Revoke",
+      loading: "Loading dev machines...",
+      load_failed: "Could not load dev machines.",
+      rotate_failed: "Could not rotate the dev machine token.",
+      revoke_failed: "Could not revoke the dev machine.",
+      empty: "No dev machines registered for this workspace yet.",
+      never: "Never",
+      machine_id: "id {id}",
+      runner_count: "{active} active / {total} total",
+      rotate_confirm_title: "Rotate dev machine token?",
+      rotate_confirm_body:
+        "The active auth token for this dev machine will be invalidated. Runners on that machine will stop connecting until `pidash auth login` is run there again.",
+      revoke_confirm_title: "Revoke dev machine?",
+      revoke_confirm_body:
+        "This permanently revokes the dev machine, invalidates its auth token, and revokes runners hosted on it. Use this when the machine should no longer be trusted.",
+      columns: {
+        machine: "Machine",
+        status: "Status",
+        runners: "Runners",
+        last_seen: "Last seen",
+        last_heartbeat: "Last heartbeat",
+      },
+      status: {
+        active: "Active",
+        offline: "Offline",
+        registered: "Registered",
+        revoked: "Revoked",
+      },
+    },
+    intro: {
+      heading: "What is the pidash CLI, daemon, and runner?",
+      body: "Pi Dash hands AI agents (Claude Code, Codex, …) the keys to a real dev machine so they can pick up work items, write code, and open changes. Three pieces work together to make that possible:",
+      cli: {
+        title: "pidash CLI",
+        body: "The command-line tool installed on each dev machine. Handles authentication with the cloud, manages local config (`~/.pidash/config.toml`), and exposes commands for issues, comments, and runner management (`pidash auth login`, `pidash runner add`, `pidash doctor`, …).",
+      },
+      daemon: {
+        title: "pidash daemon",
+        body: "A long-running background process that maintains the WebSocket session with Pi Dash cloud, dispatches work to the configured agent, and streams approvals + heartbeats back. One daemon per machine.",
+      },
+      runner: {
+        title: "AI Agent runner",
+        body: "A cloud-side row that represents one agent instance bound to a project (and optionally a pod). Running `pidash runner add` on a logged-in machine creates the row and binds that machine as the host. A machine can host many runners.",
+      },
+    },
+    install: {
+      heading: "Install the pidash CLI",
+      body: "Run an installer on the machine that will host your AI agent. The wrapper commands download the latest signed binary, drop `pidash` on your PATH, and walk you through the device-code login.",
+      macos_linux_label: "macOS / Linux",
+      windows_label: "Windows (PowerShell)",
+      windows_msi_label: "Windows (MSI)",
+      download_msi: "Download MSI",
+      copy_command: "Copy command",
+      copied: "Copied!",
+      copy_failed: "Could not copy to clipboard",
+      prereq:
+        "Prerequisite: the agent CLI you plan to use (`codex` or `claude`) must already be installed and on PATH. Run `pidash doctor` after install to verify.",
     },
   },
   schedulers: {

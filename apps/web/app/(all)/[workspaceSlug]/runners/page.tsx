@@ -11,14 +11,12 @@ import useSWR from "swr";
 import { useTranslation } from "@pi-dash/i18n";
 import { TOAST_TYPE, setToast } from "@pi-dash/propel/toast";
 import { PodService, RunnerService } from "@pi-dash/services";
-import { EModalPosition, EModalWidth, ModalCore } from "@pi-dash/ui";
-import type { IPod, IRunner, IRunnerInvite, TRunnerStatus } from "@pi-dash/types";
+import type { IPod, IRunner, TRunnerStatus } from "@pi-dash/types";
 import type { TBadgeVariant } from "@pi-dash/ui";
 import { AlertModalCore, Badge, Button, Tooltip } from "@pi-dash/ui";
 import { PageHead } from "@/components/core/page-title";
 import { AddRunnerModal } from "@/components/runners/add-runner-modal";
 import { CreatePodModal } from "@/components/runners/create-pod-modal";
-import { RunnerEnrollmentCommand } from "@/components/runners/runner-enrollment-command";
 import { RunnersTabs } from "@/components/runners/runners-tabs";
 import { useSelectedPodFilter } from "@/hooks/use-selected-pod-filter";
 import { useWorkspace } from "@/hooks/store/use-workspace";
@@ -33,13 +31,6 @@ const STATUS_BADGE_VARIANT: Record<TRunnerStatus, TBadgeVariant> = {
   revoked: "accent-warning",
 };
 
-// A runner is "revivable" when it has never enrolled or has been
-// revoked — i.e., it's not currently holding live credentials.
-// ``revoke`` is the inverse: only meaningful when the runner is
-// active (enrolled and not yet revoked).
-function isRevivable(r: IRunner): boolean {
-  return r.status === "revoked" || r.enrolled_at === null;
-}
 function isRevocable(r: IRunner): boolean {
   return r.status !== "revoked" && r.enrolled_at !== null;
 }
@@ -74,8 +65,6 @@ const RunnersListPage = observer(function RunnersListPage() {
   const [deleting, setDeleting] = useState(false);
   const [revokeRunner, setRevokeRunner] = useState<IRunner | null>(null);
   const [revoking, setRevoking] = useState(false);
-  const [reviving, setReviving] = useState<string | null>(null);
-  const [reviveInvite, setReviveInvite] = useState<IRunnerInvite | null>(null);
 
   async function confirmDeleteRunner() {
     if (!deleteRunner) return;
@@ -112,24 +101,6 @@ const RunnersListPage = observer(function RunnersListPage() {
       });
     } finally {
       setRevoking(false);
-    }
-  }
-
-  async function reviveRunner(runner: IRunner) {
-    setReviving(runner.id);
-    try {
-      const invite = await service.reviveRunner(runner.id);
-      setReviveInvite(invite);
-      mutateRunners();
-    } catch (e: unknown) {
-      const err = e as { error?: string } | null;
-      setToast({
-        type: TOAST_TYPE.ERROR,
-        title: t("runners.toast.error_title"),
-        message: err?.error ?? t("runners.list.revive_failed"),
-      });
-    } finally {
-      setReviving(null);
     }
   }
 
@@ -266,17 +237,6 @@ const RunnersListPage = observer(function RunnersListPage() {
                   </td>
                   <td className="px-3 py-2 text-right">
                     <div className="flex justify-end gap-2">
-                      {isRevivable(r) && (
-                        <Button
-                          variant="neutral-primary"
-                          size="sm"
-                          onClick={() => reviveRunner(r)}
-                          disabled={reviving === r.id}
-                          loading={reviving === r.id}
-                        >
-                          {t("runners.list.revive")}
-                        </Button>
-                      )}
                       {isRevocable(r) && (
                         <Button variant="outline-danger" size="sm" onClick={() => setRevokeRunner(r)}>
                           {t("runners.list.revoke")}
@@ -307,7 +267,6 @@ const RunnersListPage = observer(function RunnersListPage() {
           onClose={() => setAddOpen(false)}
           workspaceId={workspaceId}
           workspaceSlug={workspaceSlug}
-          onCreated={() => mutateRunners()}
         />
       )}
       {workspaceSlug && (
@@ -336,30 +295,6 @@ const RunnersListPage = observer(function RunnersListPage() {
         content={t("runners.list.revoke_confirm_body")}
         primaryButtonText={{ default: t("runners.list.revoke"), loading: t("runners.list.revoke") }}
       />
-      <ModalCore
-        isOpen={!!reviveInvite}
-        handleClose={() => setReviveInvite(null)}
-        position={EModalPosition.CENTER}
-        width={EModalWidth.XXL}
-      >
-        {reviveInvite && (
-          <div className="flex flex-col gap-4 p-5">
-            <div>
-              <div className="text-18 font-medium text-primary">{t("runners.list.revive_modal_title")}</div>
-              <p className="mt-1 text-13 text-secondary">
-                {t("runners.add_modal.runner_id_label")}: <code className="text-12">{reviveInvite.runner_id}</code>
-                <br />
-                {reviveInvite.name}
-              </p>
-              <p className="mt-2 text-13 text-secondary">{t("runners.list.revive_modal_body")}</p>
-            </div>
-            <RunnerEnrollmentCommand invite={reviveInvite} />
-            <div className="flex justify-end">
-              <Button onClick={() => setReviveInvite(null)}>{t("runners.add_modal.done")}</Button>
-            </div>
-          </div>
-        )}
-      </ModalCore>
     </div>
   );
 });

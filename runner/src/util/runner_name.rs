@@ -1,7 +1,9 @@
 //! `runner.name` rules: charset validation + default-name generator.
 //!
-//! Mirror of the cloud-side regex in `apps/api/pi_dash/runner/serializers.py`
-//! (`RUNNER_NAME_CHARSET`). Charset is `[A-Za-z0-9_-]`, length 1..=128.
+//! Mirror of the cloud-side regex in
+//! `apps/api/pi_dash/runner/views/enrollment.py` (`_RUNNER_NAME_RE`):
+//! start with `[A-Za-z0-9_]`, then continue with `[A-Za-z0-9_.-]`,
+//! length 1..=128.
 //!
 //! Defaults follow the scheme `pidash_runner_<3 random chars from [A-Za-z0-9]>`.
 //! The collision domain is per-workspace (enforced by the cloud DB's
@@ -30,7 +32,7 @@ pub enum NameValidationError {
     #[error("runner name is longer than {MAX_LEN} characters")]
     TooLong,
     #[error(
-        "runner name may only contain letters, digits, underscore, and dash (no spaces or other characters)"
+        "runner name must start with a letter, digit, or underscore and contain only letters, digits, underscore, dot, or dash"
     )]
     BadChar,
 }
@@ -45,10 +47,14 @@ pub fn validate(name: &str) -> Result<(), NameValidationError> {
     if name.len() > MAX_LEN {
         return Err(NameValidationError::TooLong);
     }
-    if !name
-        .chars()
-        .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
-    {
+    let mut chars = name.chars();
+    let Some(first) = chars.next() else {
+        return Err(NameValidationError::Empty);
+    };
+    if !(first.is_ascii_alphanumeric() || first == '_') {
+        return Err(NameValidationError::BadChar);
+    }
+    if !chars.all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '.' || c == '-') {
         return Err(NameValidationError::BadChar);
     }
     Ok(())
@@ -75,10 +81,11 @@ mod tests {
             "laptop",
             "my-laptop",
             "my_laptop",
+            "my.laptop",
             "pidash_runner_aB3",
             "CAPS",
             "abc123",
-            "a-b_c-1",
+            "a-b_c.1",
             &"a".repeat(128),
         ] {
             assert!(validate(name).is_ok(), "expected ok: {name:?}");
@@ -115,7 +122,7 @@ mod tests {
     fn names_with_disallowed_chars_are_rejected() {
         for bad in [
             "has space",
-            "dot.separated",
+            "-starts-with-dash",
             "slash/separator",
             "emoji-💥",
             "semicolon;",

@@ -12,6 +12,9 @@ from rest_framework.exceptions import AuthenticationFailed
 
 # Module imports
 from pi_dash.db.models import APIToken
+from pi_dash.runner.models import MachineToken
+from pi_dash.runner.services.permissions import is_workspace_member
+from pi_dash.runner.services.tokens import hash_token
 
 
 class APIKeyAuthentication(authentication.BaseAuthentication):
@@ -41,11 +44,33 @@ class APIKeyAuthentication(authentication.BaseAuthentication):
         api_token.save(update_fields=["last_used"])
         return (api_token.user, api_token.token)
 
+    def validate_machine_token(self, request, token):
+        token_hash = hash_token(token)
+        try:
+            machine_token = MachineToken.objects.select_related("user", "workspace", "dev_machine").get(
+                token_hash=token_hash
+            )
+        except MachineToken.DoesNotExist:
+            raise AuthenticationFailed("Given API token is not valid")
+        if machine_token.revoked_at is not None:
+            raise AuthenticationFailed("Given API token is not valid")
+        if machine_token.dev_machine_id is not None and machine_token.dev_machine.revoked_at is not None:
+            raise AuthenticationFailed("Given API token is not valid")
+        if not is_workspace_member(machine_token.user, machine_token.workspace_id):
+            machine_token.revoke()
+            raise AuthenticationFailed("Given API token is not valid")
+        MachineToken.objects.filter(pk=machine_token.pk).update(last_used_at=timezone.now())
+        request.auth_machine_token = machine_token
+        return (machine_token.user, token)
+
     def authenticate(self, request):
         token = self.get_api_token(request=request)
         if not token:
             return None
 
-        # Validate the API token
-        user, token = self.validate_api_token(token)
+        if token.startswith("mt_"):
+            user, token = self.validate_machine_token(request, token)
+        else:
+            # Validate the API token
+            user, token = self.validate_api_token(token)
         return user, token

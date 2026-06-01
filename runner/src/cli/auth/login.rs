@@ -40,6 +40,10 @@ pub struct Args {
     /// a TTY. Useful when scripting an auth-only setup.
     #[arg(long)]
     pub no_runner_prompt: bool,
+
+    /// Workspace slug to bind this CLI install to after login.
+    #[arg(long, hide = true)]
+    pub workspace: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -64,12 +68,48 @@ struct TokenSuccess {
 }
 
 #[derive(Debug, Deserialize)]
+struct MachineTokenResponse {
+    machine_token: String,
+    workspace_slug: String,
+}
+
+#[derive(Debug, Deserialize)]
 struct TokenError {
     error: String,
 }
 
 pub async fn run(args: Args, paths: &Paths) -> Result<()> {
-    let cloud_url = resolve_cloud_url(&args, paths)?;
+    let no_runner_prompt = args.no_runner_prompt;
+    let outcome = login_and_bind_workspace(&args, paths).await?;
+
+    if no_runner_prompt {
+        return Ok(());
+    }
+    if !std::io::stdout().is_terminal() {
+        return Ok(());
+    }
+    maybe_offer_runner_add(
+        paths,
+        &outcome.cloud_url,
+        &outcome.access_token,
+        &outcome.workspace_slug,
+    )
+    .await?;
+    Ok(())
+}
+
+pub async fn run_auth_only(args: Args, paths: &Paths) -> Result<()> {
+    login_and_bind_workspace(&args, paths).await.map(|_| ())
+}
+
+struct LoginOutcome {
+    cloud_url: String,
+    access_token: String,
+    workspace_slug: String,
+}
+
+async fn login_and_bind_workspace(args: &Args, paths: &Paths) -> Result<LoginOutcome> {
+    let cloud_url = resolve_cloud_url(args, paths)?;
     crate::cli::connect::validate_cloud_url(&cloud_url)?;
 
     let client = reqwest::Client::builder()
@@ -88,8 +128,12 @@ pub async fn run(args: Args, paths: &Paths) -> Result<()> {
 
     let token = poll_for_token(&client, &cloud_url, &start).await?;
 
+    // Persist the short-lived bridge APIToken just long enough to seed the
+    // local config and workspace binding. It is replaced below by a shared
+    // dev-machine MachineToken, which is the credential used by both the CLI
+    // and all runners hosted by this install.
     runner_ops::write_cli_token(paths, &cloud_url, &token.access_token)
-        .context("writing [cli].token to config.toml")?;
+        .context("writing temporary [cli].token to config.toml")?;
 
     println!();
     if let Some(email) = token.user_email.as_deref() {
@@ -101,18 +145,38 @@ pub async fn run(args: Args, paths: &Paths) -> Result<()> {
     // v1: a CLI install is bound to one workspace. Resolve which one
     // (auto-pick if there's only one membership; prompt otherwise),
     // persist the choice, and use it for any subsequent runner-add.
-    let workspace_slug =
-        resolve_workspace_binding(paths, &cloud_url, &token.access_token).await?;
-    println!("  Workspace: {workspace_slug}");
+    let workspace_slug = resolve_workspace_binding(
+        paths,
+        &cloud_url,
+        &token.access_token,
+        args.workspace.as_deref(),
+    )
+    .await?;
+    let dev_machine_id =
+        runner_ops::ensure_dev_machine_id(paths).context("ensuring local dev-machine identity")?;
+    let host_label = crate::util::hostname::default_hostname();
+    let machine_token = exchange_for_machine_token(
+        &client,
+        &cloud_url,
+        &token.access_token,
+        &workspace_slug,
+        &dev_machine_id,
+        &host_label,
+    )
+    .await?;
+    runner_ops::write_cli_token(paths, &cloud_url, &machine_token.machine_token)
+        .context("writing dev-machine token to config.toml")?;
+    if machine_token.workspace_slug != workspace_slug {
+        runner_ops::write_cli_workspace(paths, &machine_token.workspace_slug)
+            .context("writing returned workspace binding to config.toml")?;
+    }
+    println!("  Workspace: {}", machine_token.workspace_slug);
 
-    if args.no_runner_prompt {
-        return Ok(());
-    }
-    if !std::io::stdout().is_terminal() {
-        return Ok(());
-    }
-    maybe_offer_runner_add(paths, &cloud_url, &token.access_token, &workspace_slug).await?;
-    Ok(())
+    Ok(LoginOutcome {
+        cloud_url,
+        access_token: machine_token.machine_token,
+        workspace_slug: machine_token.workspace_slug,
+    })
 }
 
 fn resolve_cloud_url(args: &Args, paths: &Paths) -> Result<String> {
@@ -128,9 +192,7 @@ fn resolve_cloud_url(args: &Args, paths: &Paths) -> Result<String> {
     if std::io::stdin().is_terminal() {
         return prompt_for_cloud_url();
     }
-    anyhow::bail!(
-        "no cloud URL configured — pass --url https://your-pi-dash-instance.example.com"
-    );
+    anyhow::bail!("no cloud URL configured — pass --url https://your-pi-dash-instance.example.com");
 }
 
 fn prompt_for_cloud_url() -> Result<String> {
@@ -278,12 +340,14 @@ async fn poll_for_token(
 /// Rules:
 /// - 0 memberships → bail; the user must be invited first.
 /// - 1 membership → silently use it (no prompt).
-/// - ≥2 memberships → if a stored slug is still valid, keep it; else
-///   prompt the user to pick.
+/// - explicit slug → validate membership and use it without prompting.
+/// - ≥2 memberships without explicit slug → if a stored slug is still valid,
+///   keep it; else prompt the user to pick.
 async fn resolve_workspace_binding(
     paths: &Paths,
     cloud_url: &str,
     api_token: &str,
+    explicit_workspace: Option<&str>,
 ) -> Result<String> {
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(15))
@@ -297,9 +361,18 @@ async fn resolve_workspace_binding(
         );
     }
 
+    let explicit_workspace = explicit_workspace.map(str::trim).filter(|s| !s.is_empty());
     let stored = runner_ops::load_cli_workspace(paths)?;
 
-    let chosen_slug = if workspaces.len() == 1 {
+    let chosen_slug = if let Some(slug) = explicit_workspace {
+        if workspaces.iter().any(|w| w.slug == slug) {
+            slug.to_string()
+        } else {
+            anyhow::bail!(
+                "workspace {slug:?} is not available for this account — check --workspace or ask an admin to invite you"
+            );
+        }
+    } else if workspaces.len() == 1 {
         workspaces[0].slug.clone()
     } else if let Some(slug) = stored.as_deref()
         && workspaces.iter().any(|w| w.slug == slug)
@@ -309,9 +382,7 @@ async fn resolve_workspace_binding(
     } else {
         if stored.is_some() {
             println!();
-            println!(
-                "(Previous workspace binding is no longer valid — pick a new one.)"
-            );
+            println!("(Previous workspace binding is no longer valid — pick a new one.)");
         }
         let picked = pick_workspace(&workspaces)?;
         picked.slug.clone()
@@ -350,9 +421,38 @@ async fn fetch_workspaces(
         let body = resp.text().await.unwrap_or_default();
         anyhow::bail!("workspace list failed: HTTP {status}: {body}");
     }
-    let parsed: WorkspaceListResponse =
-        resp.json().await.context("parsing workspace list")?;
+    let parsed: WorkspaceListResponse = resp.json().await.context("parsing workspace list")?;
     Ok(parsed.workspaces)
+}
+
+async fn exchange_for_machine_token(
+    client: &reqwest::Client,
+    cloud_url: &str,
+    api_token: &str,
+    workspace_slug: &str,
+    dev_machine_id: &uuid::Uuid,
+    host_label: &str,
+) -> Result<MachineTokenResponse> {
+    let url = format!("{cloud_url}/api/v1/auth/machine-token/");
+    let resp = client
+        .post(&url)
+        .header("X-Api-Key", api_token)
+        .json(&serde_json::json!({
+            "workspace_slug": workspace_slug,
+            "dev_machine_id": dev_machine_id,
+            "host_label": host_label,
+        }))
+        .send()
+        .await
+        .with_context(|| format!("POST {url}"))?;
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+        anyhow::bail!("machine-token exchange failed: HTTP {status}: {body}");
+    }
+    resp.json::<MachineTokenResponse>()
+        .await
+        .context("parsing machine-token exchange response")
 }
 
 fn pick_workspace(workspaces: &[WorkspaceRow]) -> Result<&WorkspaceRow> {
@@ -393,7 +493,9 @@ async fn maybe_offer_runner_add(
     if existing_runners > 0 {
         println!();
         println!("This host already has {existing_runners} runner(s) registered.");
-        println!("Use `pidash runner add` to register another, or `pidash runner list` to see them.");
+        println!(
+            "Use `pidash runner add` to register another, or `pidash runner list` to see them."
+        );
         return Ok(());
     }
 
@@ -401,16 +503,17 @@ async fn maybe_offer_runner_add(
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(15))
         .build()?;
-    let projects =
-        match fetch_projects(&client, cloud_url, api_token).await {
-            Ok(p) => p,
-            Err(e) => {
-                // Non-fatal: we logged in fine, the picker just can't run.
-                println!();
-                println!("(Couldn't list projects: {e}. You can run `pidash runner add --project <SLUG>` later.)");
-                return Ok(());
-            }
-        };
+    let projects = match fetch_projects(&client, cloud_url, api_token).await {
+        Ok(p) => p,
+        Err(e) => {
+            // Non-fatal: we logged in fine, the picker just can't run.
+            println!();
+            println!(
+                "(Couldn't list projects: {e}. You can run `pidash runner add --project <SLUG>` later.)"
+            );
+            return Ok(());
+        }
+    };
 
     if projects.is_empty() {
         println!();
@@ -431,6 +534,7 @@ async fn maybe_offer_runner_add(
     println!("Registering runner under project {}...", project.identifier);
     crate::cli::runner::add(
         crate::cli::runner::AddArgs {
+            url: None,
             name: None,
             project: project.identifier.clone(),
             workspace: Some(workspace_slug.to_string()),
@@ -474,7 +578,10 @@ async fn fetch_projects(
 fn pick_project(projects: &[ProjectRow]) -> Result<Option<&ProjectRow>> {
     use std::io::BufRead;
     if projects.len() == 1 {
-        print!("Register this host for project '{}'? [Y/n] ", projects[0].identifier);
+        print!(
+            "Register this host for project '{}'? [Y/n] ",
+            projects[0].identifier
+        );
         std::io::stdout().flush().ok();
         let stdin = std::io::stdin();
         let mut line = String::new();
@@ -505,4 +612,3 @@ fn pick_project(projects: &[ProjectRow]) -> Result<Option<&ProjectRow>> {
     }
     Ok(Some(&projects[idx - 1]))
 }
-

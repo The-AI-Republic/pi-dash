@@ -6,9 +6,9 @@
 // Three top-level types:
 //
 // * [`SharedHttpTransport`] — daemon-shared `reqwest::Client` pool.
-// * [`RunnerCloudClient`] — one per `RunnerInstance`. Owns that runner's
-//   refresh + access tokens, the on-disk credentials handle, and the
-//   single-flight refresh gate. All POSTs flow through it.
+// * [`RunnerCloudClient`] — one per `RunnerInstance`. Presents the shared
+//   dev-machine token on new installs, while still understanding legacy
+//   per-runner refresh credentials. All POSTs flow through it.
 // * [`HttpLoop`] — one per `RunnerInstance`. Opens a session, polls
 //   forever, and dispatches `ForceRefresh` / `Revoke` inline; everything
 //   else lands in the runner's mailbox.
@@ -46,6 +46,10 @@ pub enum TransportError {
     RefreshTokenReplayed,
     #[error("auth: membership_revoked")]
     MembershipRevoked,
+    #[error("auth: machine_token_revoked")]
+    MachineTokenRevoked,
+    #[error("auth: dev_machine_revoked")]
+    DevMachineRevoked,
     #[error("auth: runner_revoked")]
     RunnerRevoked,
     #[error("auth: runner_id_mismatch")]
@@ -90,6 +94,8 @@ impl TransportError {
             self,
             TransportError::RefreshTokenReplayed
                 | TransportError::MembershipRevoked
+                | TransportError::MachineTokenRevoked
+                | TransportError::DevMachineRevoked
                 | TransportError::RunnerRevoked
                 | TransportError::RunnerIdMismatch
                 | TransportError::InvalidRefreshToken
@@ -151,7 +157,7 @@ impl SharedHttpTransport {
 }
 
 // ---------------------------------------------------------------------------
-// Per-runner credentials handle
+// Runtime credential handle
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -339,6 +345,8 @@ impl TransportErrorCode {
             "auth: access_token_expired" => TransportError::AccessTokenExpired,
             "auth: refresh_token_replayed" => TransportError::RefreshTokenReplayed,
             "auth: membership_revoked" => TransportError::MembershipRevoked,
+            "auth: machine_token_revoked" => TransportError::MachineTokenRevoked,
+            "auth: dev_machine_revoked" => TransportError::DevMachineRevoked,
             "auth: runner_revoked" => TransportError::RunnerRevoked,
             "auth: runner_id_mismatch" => TransportError::RunnerIdMismatch,
             "auth: invalid_refresh_token" => TransportError::InvalidRefreshToken,
@@ -377,8 +385,9 @@ impl RunnerCloudClient {
             .map(|t| t.expires_at)
     }
 
-    /// Ensure we have a non-expired access token. Refreshes if the
-    /// current one is missing or about to expire.
+    /// Ensure we have a bearer token. New installs use the shared
+    /// dev-machine token directly; legacy installs refresh per-runner
+    /// credentials into short-lived access tokens.
     pub async fn ensure_access_token(&self) -> Result<AccessToken, TransportError> {
         {
             let guard = self.inner.state.lock().await;
@@ -391,7 +400,7 @@ impl RunnerCloudClient {
         self.refresh().await?;
         let guard = self.inner.state.lock().await;
         guard.access_token.clone().ok_or(TransportError::Protocol(
-            "no access token after refresh".into(),
+            "no bearer token after refresh".into(),
         ))
     }
 
@@ -435,6 +444,14 @@ impl RunnerCloudClient {
 
     async fn do_refresh(&self) -> Result<(), TransportError> {
         let creds = self.inner.creds.snapshot().await;
+        if creds.refresh_token.starts_with("mt_") {
+            let mut state = self.inner.state.lock().await;
+            state.access_token = Some(AccessToken {
+                raw: creds.refresh_token,
+                expires_at: Utc::now() + chrono::Duration::days(3650),
+            });
+            return Ok(());
+        }
         let url = format!(
             "{}/api/v1/runner/runners/{}/refresh/",
             self.inner.transport.cloud_url(),
@@ -508,6 +525,7 @@ impl RunnerCloudClient {
             .http()
             .post(&url)
             .header(AUTHORIZATION, format!("Bearer {}", token.raw))
+            .header("X-Runner-Id", self.inner.runner_id.to_string())
             .header("X-Runner-Protocol-Version", WIRE_VERSION.to_string())
             .json(&body)
             .send()
@@ -554,6 +572,7 @@ impl RunnerCloudClient {
             .http()
             .delete(&url)
             .header(AUTHORIZATION, format!("Bearer {}", token.raw))
+            .header("X-Runner-Id", self.inner.runner_id.to_string())
             .send()
             .await;
         let mut state = self.inner.state.lock().await;
@@ -597,6 +616,7 @@ impl RunnerCloudClient {
             .http()
             .post(&url)
             .header(AUTHORIZATION, format!("Bearer {token_raw}"))
+            .header("X-Runner-Id", self.inner.runner_id.to_string())
             .json(&body)
             .timeout(request_timeout)
             .send()
@@ -866,6 +886,7 @@ impl RunnerCloudClient {
                 .http()
                 .post(url)
                 .header(AUTHORIZATION, format!("Bearer {}", token.raw))
+                .header("X-Runner-Id", self.inner.runner_id.to_string())
                 .header("Idempotency-Key", idempotency_key);
             let resp = match req.json(&body).send().await {
                 Ok(resp) => resp,
@@ -1403,7 +1424,7 @@ impl HttpLoop {
     }
 
     pub async fn run(mut self) -> Result<(), TransportError> {
-        // 1. Bootstrap: ensure access token, open session. Both calls
+        // 1. Bootstrap: ensure bearer token, open session. Both calls
         // can hit transient network blips (request timeout, connection
         // reset, brief 5xx during cloud restart) — retry with backoff
         // so a single startup glitch doesn't kill the loop forever. Only
@@ -1617,6 +1638,12 @@ fn map_auth_error(status: StatusCode, body: &str) -> TransportError {
         if body.contains("membership_revoked") {
             return TransportError::MembershipRevoked;
         }
+        if body.contains("machine_token_revoked") {
+            return TransportError::MachineTokenRevoked;
+        }
+        if body.contains("dev_machine_revoked") {
+            return TransportError::DevMachineRevoked;
+        }
         if body.contains("runner_revoked") {
             return TransportError::RunnerRevoked;
         }
@@ -1645,46 +1672,46 @@ fn map_session_error(status: StatusCode, body: &str) -> TransportError {
     map_auth_error(status, body)
 }
 
-/// Public helper to enroll a runner — replaces the legacy `enroll.rs`
-/// connection-flow body.
-/// CLI-initiated runner creation.
+/// Inputs for CLI-initiated runner creation.
+pub struct CreateRunnerRequest<'a> {
+    pub api_token: &'a str,
+    pub dev_machine_id: &'a Uuid,
+    pub workspace_slug: Option<&'a str>,
+    pub project: &'a str,
+    pub host_label: &'a str,
+    pub name: Option<&'a str>,
+    pub pod: Option<&'a str>,
+}
+
+/// Public helper to create a runner with the user-scoped CLI `APIToken`.
 ///
-/// `pidash auth login` populates `[cli].token` with a user-scoped
-/// `APIToken`. Once that token exists, `pidash runner add` can mint a
-/// runner directly without the one-time enrollment-token paste — we POST
-/// to `/api/v1/runner/runners/` with `X-Api-Key`, and the cloud returns
-/// the same `EnrollResponse` shape `enroll_runner` would have.
-///
-/// `workspace_slug` is optional: the cloud falls back to the caller's
-/// single workspace membership when omitted. Multi-workspace callers
-/// must pass an explicit slug.
+/// `pidash auth login` populates `[cli].token`. Once that token exists,
+/// `pidash runner add` can mint a runner directly without the one-time
+/// enrollment-token paste. `workspace_slug` is optional: the cloud falls back
+/// to the caller's single workspace membership when omitted.
 pub async fn create_runner(
     transport: &SharedHttpTransport,
-    api_token: &str,
-    workspace_slug: Option<&str>,
-    project: &str,
-    host_label: &str,
-    name: Option<&str>,
-    pod: Option<&str>,
+    req: CreateRunnerRequest<'_>,
 ) -> Result<EnrollResponse, TransportError> {
     let url = format!("{}/api/v1/runner/runners/", transport.cloud_url());
     let mut body = serde_json::json!({
-        "project": project,
-        "host_label": host_label,
+        "project": req.project,
+        "dev_machine_id": req.dev_machine_id,
+        "host_label": req.host_label,
     });
-    if let Some(ws) = workspace_slug {
+    if let Some(ws) = req.workspace_slug {
         body["workspace_slug"] = Json::String(ws.to_string());
     }
-    if let Some(n) = name {
+    if let Some(n) = req.name {
         body["name"] = Json::String(n.to_string());
     }
-    if let Some(p) = pod {
+    if let Some(p) = req.pod {
         body["pod"] = Json::String(p.to_string());
     }
     let resp = transport
         .http()
         .post(&url)
-        .header("X-Api-Key", api_token)
+        .header("X-Api-Key", req.api_token)
         .json(&body)
         .send()
         .await
@@ -1799,6 +1826,7 @@ pub async fn revoke_runner_self(client: &RunnerCloudClient) -> Result<(), Transp
         .http()
         .delete(&url)
         .header("Authorization", format!("Bearer {}", token.raw))
+        .header("X-Runner-Id", client.runner_id().to_string())
         .send()
         .await
         .map_err(|e| TransportError::Network(e.to_string()))?;
@@ -1850,6 +1878,16 @@ mod tests {
     fn auth_error_mapping() {
         let err = map_auth_error(StatusCode::UNAUTHORIZED, "{\"error\":\"runner_revoked\"}");
         assert!(matches!(err, TransportError::RunnerRevoked));
+        let err = map_auth_error(
+            StatusCode::UNAUTHORIZED,
+            "{\"error\":\"machine_token_revoked\"}",
+        );
+        assert!(matches!(err, TransportError::MachineTokenRevoked));
+        let err = map_auth_error(
+            StatusCode::UNAUTHORIZED,
+            "{\"error\":\"dev_machine_revoked\"}",
+        );
+        assert!(matches!(err, TransportError::DevMachineRevoked));
         let err = map_auth_error(StatusCode::FORBIDDEN, "{\"error\":\"runner_id_mismatch\"}");
         assert!(matches!(err, TransportError::RunnerIdMismatch));
     }
@@ -1858,6 +1896,8 @@ mod tests {
     fn fatal_classification() {
         assert!(TransportError::RunnerRevoked.is_fatal_for_runner());
         assert!(TransportError::RefreshTokenReplayed.is_fatal_for_runner());
+        assert!(TransportError::MachineTokenRevoked.is_fatal_for_runner());
+        assert!(TransportError::DevMachineRevoked.is_fatal_for_runner());
         let teardown = TransportError::LocalTeardown("runner removed".into());
         assert!(teardown.is_fatal_for_runner());
         assert!(teardown.is_expected_teardown());

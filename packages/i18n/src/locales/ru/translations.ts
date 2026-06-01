@@ -5,6 +5,8 @@
  */
 
 export default {
+  pod: "Pod",
+  pod_default_badge: "Default",
   sidebar: {
     projects: "Проекты",
     pages: "Страницы",
@@ -25,6 +27,10 @@ export default {
     upgrade: "Обновить",
     stickies: "Стикеры",
     prompts: "Prompts",
+    ai_dev_machines: "AI Dev Machines",
+    tooltips: {
+      ai_dev_machines: "Install the pidash CLI and register dev machines as AI agent runners",
+    },
   },
   auth: {
     common: {
@@ -3133,11 +3139,10 @@ export default {
     list: {
       delete_failed: "Не удалось удалить runner",
       revoke_failed: "Не удалось отозвать runner",
-      revive_failed: "Не удалось восстановить runner",
       add_runner: "Добавить runner",
       how_it_works_title: "Как добавить runner",
       how_it_works_body:
-        '1. Нажмите "Добавить runner", выберите проект + под и отправьте. Облако создает одноразовый токен регистрации, привязанный к этому runner.\n2. На машине, которая будет хостить runner, выполните отображаемую команду `pidash connect --url ... --token ... --host-label ...`.\n3. Демон регистрируется, и runner отображается здесь как онлайн.\n\nКаждый runner имеет свой собственный токен. Первый runner, зарегистрированный на хосте, также создает машинный токен, используемый CLI `pidash` для команд, не связанных с runner.\n\nПредварительное требование: CLI агента (codex / claude) уже должен быть установлен на хосте.',
+        '1. Click "Add runner", pick a project + pod and generate the CLI command.\n2. On the machine that will host the runner, run the displayed `pidash runner add` command. If the host is not logged in yet, the CLI starts `pidash auth login` first.\n3. The daemon registers the runner and it shows online here.\n\nPrerequisite: the agent CLI (codex / claude) must already be installed on the host.',
       connected_runners: "Runners",
       columns: {
         name: "Имя",
@@ -3147,24 +3152,20 @@ export default {
         last_heartbeat: "Последний heartbeat",
       },
       columns_pod: "Под",
-      revive: "Восстановить",
       revoke: "Отозвать",
       delete: "Удалить",
-      empty: 'Пока нет runners. Нажмите "Add runner", чтобы создать первый одноразовый токен регистрации для runner.',
+      empty: 'No runners yet. Click "Add runner" to generate your first runner command.',
       delete_confirm_title: "Удалить runner?",
       delete_confirm_body:
         "Строка runner удаляется, а демон принудительно переводится в офлайн. Исторические запуски сохраняются с нулевой ссылкой на runner.",
       revoke_confirm_title: "Отозвать runner?",
       revoke_confirm_body:
-        "Учетные данные runner аннулируются, а все выполняющиеся запуски отменяются, но строка остается в списке. Вы можете восстановить его позже, чтобы создать новый токен регистрации в той же строке.",
-      revive_modal_title: "Новый токен регистрации",
-      revive_modal_body:
-        "Выполните команду ниже на хосте, который должен принять этого runner. Скопируйте ее сейчас — токен больше не будет показан.",
+        "The runner's credentials are invalidated and any in-flight runs are cancelled, but the row stays in the list. To attach it again, delete it and add a new runner from the target machine.",
       project_placeholder: "Выберите проект",
       copy_failed: "Не удалось скопировать в буфер обмена",
     },
     machine_token_note: {
-      body: "При первой регистрации раннера на новом хосте (т.е. новом ``host_label``), облако также выдает машинный токен, используемый CLI ``pidash`` для команд, не связанных с раннером (issue, comment, state). Последующие раннеры на том же хосте повторно используют этот токен.",
+      body: "`pidash runner add` starts `pidash auth login` first when the host is not logged in yet. Run it again for each project or pod this machine should serve.",
     },
     pods: {
       title: "Группы",
@@ -3185,14 +3186,14 @@ export default {
         codex: "Codex",
       },
       errors: {
-        create_failed: "Не удалось создать токен регистрации.",
         project_required: "Выберите проект.",
+        name_invalid:
+          "Runner name cannot contain spaces. It must start with a letter, digit, or underscore and contain only letters, digits, underscore, dot, or dash.",
         load_projects_failed: "Не удалось загрузить проекты.",
         load_pods_failed: "Не удалось загрузить группы.",
       },
       title: "Добавить раннер",
-      subtitle:
-        "Создайте одноразовый токен регистрации для нового раннера. Выполните отображаемую команду `pidash connect` на машине, которая будет его хостить.",
+      subtitle: "Generate a `pidash runner add` command for the machine that will host this runner.",
       project_label: "Проект",
       project_help: "Проект, над которым будет работать этот раннер.",
       pod_label: "Группа (необязательно)",
@@ -3200,23 +3201,25 @@ export default {
       pod_help: "По умолчанию используется группа проекта по умолчанию.",
       name_label: "Имя (необязательно)",
       name_placeholder: "my-laptop-runner",
-      name_help: "Назначается автоматически, если оставить пустым, например ``runner_001``.",
-      host_label_label: "Метка хоста (необязательно)",
-      host_label_placeholder: "my-laptop",
-      host_label_help:
-        "Произвольное имя хоста, встроенное в предлагаемую команду. Демон подставит фактическое имя хоста, если вы опустите флаг.",
+      name_help:
+        "Auto-assigned if blank. No spaces. If provided, use letters, digits, underscore, dot, or dash; start with a letter, digit, or underscore.",
       working_dir_label: "Рабочий каталог (необязательно)",
       working_dir_placeholder: "рабочий каталог проекта на локальной машине разработчика",
       working_dir_help:
         "Локальный путь, в котором демон запускает CLI агента — обычно это репозиторий проекта на диске. По умолчанию используется песочница в каталоге данных раннера, что редко является желаемым.",
       agent_label: "Агент",
-      agent_help:
-        "Какой CLI AI-агента будет управлять этим раннером. Встроено в отображаемую команду ``pidash connect``.",
+      agent_help: "Which AI agent CLI this runner will drive. Baked into the displayed ``pidash runner add`` command.",
       cancel: "Отмена",
-      submitting: "Выпуск токена…",
-      submit: "Выпустить токен регистрации",
+      back: "Back",
+      submit: "Generate command",
       token_warning: "Скопируйте это сейчас — токен регистрации больше не будет показан.",
       token_instructions: "Запустите это на машине, которая будет хостить раннер:",
+      cloud_url_origin_warning:
+        "Using the current browser origin as the cloud URL because VITE_API_BASE_URL is not configured.",
+      shell_label: "Shell",
+      shell_posix: "macOS/Linux",
+      shell_powershell: "PowerShell",
+      shell_cmd: "Command Prompt",
       copied: "Скопировано!",
       copy_command: "Скопировать команду",
     },
@@ -3262,6 +3265,73 @@ export default {
       cancel: "Отмена",
       submitting: "Создание…",
       submit: "Создать под",
+    },
+  },
+  ai_dev_machines: {
+    title: "AI Dev Machines",
+    page_title: "{workspace} - AI Dev Machines",
+    list: {
+      heading: "Dev machines",
+      body: "Machines that have authenticated with Pi Dash or host runners for this workspace.",
+      add_runner: "Add runner",
+      rotate: "Rotate",
+      revoke: "Revoke",
+      loading: "Loading dev machines...",
+      load_failed: "Could not load dev machines.",
+      rotate_failed: "Could not rotate the dev machine token.",
+      revoke_failed: "Could not revoke the dev machine.",
+      empty: "No dev machines registered for this workspace yet.",
+      never: "Never",
+      machine_id: "id {id}",
+      runner_count: "{active} active / {total} total",
+      rotate_confirm_title: "Rotate dev machine token?",
+      rotate_confirm_body:
+        "The active auth token for this dev machine will be invalidated. Runners on that machine will stop connecting until `pidash auth login` is run there again.",
+      revoke_confirm_title: "Revoke dev machine?",
+      revoke_confirm_body:
+        "This permanently revokes the dev machine, invalidates its auth token, and revokes runners hosted on it. Use this when the machine should no longer be trusted.",
+      columns: {
+        machine: "Machine",
+        status: "Status",
+        runners: "Runners",
+        last_seen: "Last seen",
+        last_heartbeat: "Last heartbeat",
+      },
+      status: {
+        active: "Active",
+        offline: "Offline",
+        registered: "Registered",
+        revoked: "Revoked",
+      },
+    },
+    intro: {
+      heading: "What is the pidash CLI, daemon, and runner?",
+      body: "Pi Dash hands AI agents (Claude Code, Codex, …) the keys to a real dev machine so they can pick up work items, write code, and open changes. Three pieces work together to make that possible:",
+      cli: {
+        title: "pidash CLI",
+        body: "The command-line tool installed on each dev machine. Handles authentication with the cloud, manages local config (`~/.pidash/config.toml`), and exposes commands for issues, comments, and runner management (`pidash auth login`, `pidash runner add`, `pidash doctor`, …).",
+      },
+      daemon: {
+        title: "pidash daemon",
+        body: "A long-running background process that maintains the WebSocket session with Pi Dash cloud, dispatches work to the configured agent, and streams approvals + heartbeats back. One daemon per machine.",
+      },
+      runner: {
+        title: "AI Agent runner",
+        body: "A cloud-side row that represents one agent instance bound to a project (and optionally a pod). Running `pidash runner add` on a logged-in machine creates the row and binds that machine as the host. A machine can host many runners.",
+      },
+    },
+    install: {
+      heading: "Install the pidash CLI",
+      body: "Run an installer on the machine that will host your AI agent. The wrapper commands download the latest signed binary, drop `pidash` on your PATH, and walk you through the device-code login.",
+      macos_linux_label: "macOS / Linux",
+      windows_label: "Windows (PowerShell)",
+      windows_msi_label: "Windows (MSI)",
+      download_msi: "Download MSI",
+      copy_command: "Copy command",
+      copied: "Copied!",
+      copy_failed: "Could not copy to clipboard",
+      prereq:
+        "Prerequisite: the agent CLI you plan to use (`codex` or `claude`) must already be installed and on PATH. Run `pidash doctor` after install to verify.",
     },
   },
   schedulers: {

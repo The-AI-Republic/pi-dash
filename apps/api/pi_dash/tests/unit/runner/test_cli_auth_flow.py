@@ -12,11 +12,15 @@ from __future__ import annotations
 
 import re
 from datetime import timedelta
+from uuid import uuid4
 
 import pytest
 from django.utils import timezone
 
+from pi_dash.authentication.services.cli_tokens import CLI_DEVICE_API_TOKEN_DESCRIPTION
 from pi_dash.db.models import APIToken, CLIDeviceCode
+from pi_dash.runner.models import DevMachine, MachineToken, Runner, Visibility
+from pi_dash.runner.services import tokens as runner_tokens
 
 
 # -------------------- device-code flow --------------------
@@ -37,21 +41,15 @@ def test_device_start_returns_user_code_and_device_code(db, api_client):
 
 
 @pytest.mark.unit
-def test_token_poll_pending_then_approved_mints_apitoken(
-    db, api_client, session_client, create_user
-):
+def test_token_poll_pending_then_approved_mints_apitoken(db, api_client, session_client, create_user):
     start = api_client.post("/api/v1/auth/device/start/", {}, format="json").data
     # First poll: pending (no approval yet).
-    poll1 = api_client.post(
-        "/api/v1/auth/device/token/", {"device_code": start["device_code"]}, format="json"
-    )
+    poll1 = api_client.post("/api/v1/auth/device/token/", {"device_code": start["device_code"]}, format="json")
     assert poll1.status_code == 400
     assert poll1.data["error"] == "authorization_pending"
 
     # Operator approves via the web session.
-    approve = session_client.post(
-        "/api/v1/auth/device/approve/", {"user_code": start["user_code"]}, format="json"
-    )
+    approve = session_client.post("/api/v1/auth/device/approve/", {"user_code": start["user_code"]}, format="json")
     assert approve.status_code == 200, approve.data
     assert approve.data["user_email"] == create_user.email
 
@@ -60,9 +58,7 @@ def test_token_poll_pending_then_approved_mints_apitoken(
     CLIDeviceCode.objects.filter(device_code=start["device_code"]).update(
         last_polled_at=timezone.now() - timedelta(seconds=30)
     )
-    poll2 = api_client.post(
-        "/api/v1/auth/device/token/", {"device_code": start["device_code"]}, format="json"
-    )
+    poll2 = api_client.post("/api/v1/auth/device/token/", {"device_code": start["device_code"]}, format="json")
     assert poll2.status_code == 200, poll2.data
     assert poll2.data["access_token"].startswith("pi_dash_api_")
     assert poll2.data["user_email"] == create_user.email
@@ -76,20 +72,14 @@ def test_token_poll_pending_then_approved_mints_apitoken(
 @pytest.mark.unit
 def test_token_poll_rejects_consumed_code(db, api_client, session_client):
     start = api_client.post("/api/v1/auth/device/start/", {}, format="json").data
-    session_client.post(
-        "/api/v1/auth/device/approve/", {"user_code": start["user_code"]}, format="json"
-    )
+    session_client.post("/api/v1/auth/device/approve/", {"user_code": start["user_code"]}, format="json")
     CLIDeviceCode.objects.filter(device_code=start["device_code"]).update(
         last_polled_at=timezone.now() - timedelta(seconds=30)
     )
-    first = api_client.post(
-        "/api/v1/auth/device/token/", {"device_code": start["device_code"]}, format="json"
-    )
+    first = api_client.post("/api/v1/auth/device/token/", {"device_code": start["device_code"]}, format="json")
     assert first.status_code == 200, first.data
     # Second exchange of the same device code must fail.
-    second = api_client.post(
-        "/api/v1/auth/device/token/", {"device_code": start["device_code"]}, format="json"
-    )
+    second = api_client.post("/api/v1/auth/device/token/", {"device_code": start["device_code"]}, format="json")
     assert second.status_code == 400
     assert second.data["error"] == "invalid_grant"
 
@@ -97,14 +87,10 @@ def test_token_poll_rejects_consumed_code(db, api_client, session_client):
 @pytest.mark.unit
 def test_token_poll_returns_slow_down_when_polled_too_fast(db, api_client):
     start = api_client.post("/api/v1/auth/device/start/", {}, format="json").data
-    first = api_client.post(
-        "/api/v1/auth/device/token/", {"device_code": start["device_code"]}, format="json"
-    )
+    first = api_client.post("/api/v1/auth/device/token/", {"device_code": start["device_code"]}, format="json")
     assert first.status_code == 400
     # Immediate second poll → slow_down.
-    second = api_client.post(
-        "/api/v1/auth/device/token/", {"device_code": start["device_code"]}, format="json"
-    )
+    second = api_client.post("/api/v1/auth/device/token/", {"device_code": start["device_code"]}, format="json")
     assert second.status_code == 400
     assert second.data["error"] == "slow_down"
 
@@ -115,18 +101,14 @@ def test_token_poll_expired(db, api_client):
     CLIDeviceCode.objects.filter(device_code=start["device_code"]).update(
         expires_at=timezone.now() - timedelta(seconds=1)
     )
-    resp = api_client.post(
-        "/api/v1/auth/device/token/", {"device_code": start["device_code"]}, format="json"
-    )
+    resp = api_client.post("/api/v1/auth/device/token/", {"device_code": start["device_code"]}, format="json")
     assert resp.status_code == 410
     assert resp.data["error"] == "expired_token"
 
 
 @pytest.mark.unit
 def test_approve_rejects_unknown_code(db, session_client):
-    resp = session_client.post(
-        "/api/v1/auth/device/approve/", {"user_code": "ZZZZ-9999"}, format="json"
-    )
+    resp = session_client.post("/api/v1/auth/device/approve/", {"user_code": "ZZZZ-9999"}, format="json")
     assert resp.status_code == 404
 
 
@@ -134,9 +116,7 @@ def test_approve_rejects_unknown_code(db, session_client):
 def test_approve_normalizes_dashes_and_case(db, api_client, session_client):
     start = api_client.post("/api/v1/auth/device/start/", {}, format="json").data
     code = start["user_code"].replace("-", "").lower()
-    resp = session_client.post(
-        "/api/v1/auth/device/approve/", {"user_code": code}, format="json"
-    )
+    resp = session_client.post("/api/v1/auth/device/approve/", {"user_code": code}, format="json")
     assert resp.status_code == 200, resp.data
 
 
@@ -157,16 +137,52 @@ def test_revoke_marks_token_inactive_idempotently(db, api_key_client, api_token)
     assert resp.status_code == 200
 
 
+@pytest.mark.unit
+def test_machine_token_exchange_consumes_device_flow_api_token(db, api_client, create_user, workspace):
+    api_token = APIToken.objects.create(
+        user=create_user,
+        workspace=workspace,
+        user_type=0,
+        label="pidash CLI bridge",
+        description=CLI_DEVICE_API_TOKEN_DESCRIPTION,
+    )
+    dev_machine_id = uuid4()
+    api_client.credentials(HTTP_X_API_KEY=api_token.token)
+
+    resp = api_client.post(
+        "/api/v1/auth/machine-token/",
+        {
+            "workspace_slug": workspace.slug,
+            "dev_machine_id": str(dev_machine_id),
+            "host_label": "test-host",
+        },
+        format="json",
+    )
+
+    assert resp.status_code == 201, resp.data
+    assert resp.data["machine_token"].startswith("mt_")
+    api_token.refresh_from_db()
+    assert api_token.is_active is False
+    assert MachineToken.objects.filter(
+        user=create_user,
+        workspace=workspace,
+        dev_machine_id=dev_machine_id,
+        revoked_at__isnull=True,
+    ).exists()
+
+
 # -------------------- CLI-initiated runner mint --------------------
 
 
 @pytest.mark.unit
-def test_runner_create_succeeds_with_api_key(db, api_key_client, workspace, project):
+def test_runner_create_succeeds_with_api_key(db, api_key_client, create_user, workspace, project):
+    dev_machine_id = uuid4()
     resp = api_key_client.post(
         "/api/v1/runner/runners/",
         {
             "workspace_slug": workspace.slug,
             "project": project.identifier,
+            "dev_machine_id": str(dev_machine_id),
             "host_label": "test-host",
         },
         format="json",
@@ -174,11 +190,161 @@ def test_runner_create_succeeds_with_api_key(db, api_key_client, workspace, proj
     assert resp.status_code == 201, resp.data
     body = resp.data
     assert body["runner_id"]
-    assert body["refresh_token"]
-    assert body["access_token"]
+    assert body["refresh_token"] == ""
+    assert body["access_token"] == ""
+    assert body["machine_token"].startswith("mt_")
+    assert body["machine_token_minted"] is True
     assert body["workspace_slug"] == workspace.slug
     assert body["project_identifier"] == project.identifier
     assert body["protocol_version"] == 4
+    runner = Runner.objects.get(id=body["runner_id"])
+    assert runner.visibility == Visibility.PRIVATE
+    assert runner.dev_machine is not None
+    assert runner.dev_machine_id == dev_machine_id
+    assert runner.dev_machine.owner_id == create_user.id
+    assert runner.dev_machine.host_label == "test-host"
+    assert runner.dev_machine.visibility == Visibility.PRIVATE
+    assert DevMachine.objects.filter(owner=create_user, id=dev_machine_id).count() == 1
+    assert (
+        MachineToken.objects.filter(
+            user=create_user,
+            workspace=workspace,
+            dev_machine_id=dev_machine_id,
+            revoked_at__isnull=True,
+        ).count()
+        == 1
+    )
+
+    session = api_key_client.post(
+        f"/api/v1/runner/runners/{runner.id}/sessions/",
+        {
+            "version": "test",
+            "os": "linux",
+            "arch": "x86_64",
+            "status": "idle",
+            "project_slug": project.identifier,
+            "host_label": "test-host",
+            "agent_versions": {},
+        },
+        format="json",
+        HTTP_AUTHORIZATION=f"Bearer {body['machine_token']}",
+        HTTP_X_RUNNER_PROTOCOL_VERSION="4",
+    )
+    assert session.status_code == 201, session.data
+    assert session.data["welcome"]["rid"] == str(runner.id)
+
+
+@pytest.mark.unit
+def test_runner_create_with_machine_token_reuses_shared_dev_machine_token(
+    db, api_client, create_user, workspace, project
+):
+    dev_machine_id = uuid4()
+    DevMachine.objects.create(
+        id=dev_machine_id,
+        owner=create_user,
+        host_label="shared-host",
+        label="shared-host",
+    )
+    raw_machine_token = "mt_shared_test_token"
+    MachineToken.objects.create(
+        user=create_user,
+        workspace=workspace,
+        dev_machine_id=dev_machine_id,
+        host_label="shared-host",
+        token_hash=runner_tokens.hash_token(raw_machine_token),
+        token_fingerprint=runner_tokens.fingerprint(raw_machine_token),
+        label="machine: shared-host",
+        is_service=True,
+    )
+
+    for name in ["runner_a", "runner_b"]:
+        resp = api_client.post(
+            "/api/v1/runner/runners/",
+            {
+                "workspace_slug": workspace.slug,
+                "project": project.identifier,
+                "dev_machine_id": str(dev_machine_id),
+                "host_label": "shared-host",
+                "name": name,
+            },
+            format="json",
+            HTTP_X_API_KEY=raw_machine_token,
+        )
+        assert resp.status_code == 201, resp.data
+        assert resp.data["refresh_token"] == ""
+        assert resp.data["access_token"] == ""
+        assert resp.data["machine_token_minted"] is False
+        assert "machine_token" not in resp.data
+
+    assert (
+        MachineToken.objects.filter(
+            user=create_user,
+            workspace=workspace,
+            dev_machine_id=dev_machine_id,
+            revoked_at__isnull=True,
+        ).count()
+        == 1
+    )
+    assert set(Runner.objects.filter(name__in=["runner_a", "runner_b"]).values_list("dev_machine_id", flat=True)) == {
+        dev_machine_id,
+    }
+
+
+@pytest.mark.unit
+def test_runner_create_consumes_legacy_cli_api_token(db, api_client, create_user, workspace, project):
+    api_token = APIToken.objects.create(
+        user=create_user,
+        workspace=workspace,
+        user_type=0,
+        label="pidash CLI bridge",
+        description=CLI_DEVICE_API_TOKEN_DESCRIPTION,
+    )
+    api_client.credentials(HTTP_X_API_KEY=api_token.token)
+
+    resp = api_client.post(
+        "/api/v1/runner/runners/",
+        {
+            "workspace_slug": workspace.slug,
+            "project": project.identifier,
+            "dev_machine_id": str(uuid4()),
+            "host_label": "test-host",
+            "name": "legacy_cli_token_runner",
+        },
+        format="json",
+    )
+
+    assert resp.status_code == 201, resp.data
+    assert resp.data["machine_token"].startswith("mt_")
+    api_token.refresh_from_db()
+    assert api_token.is_active is False
+
+
+@pytest.mark.unit
+def test_runner_create_uses_stable_dev_machine_id_not_host_label(db, api_key_client, create_user, workspace, project):
+    first_machine_id = uuid4()
+    second_machine_id = uuid4()
+    for dev_machine_id, name in [
+        (first_machine_id, "runner_a"),
+        (second_machine_id, "runner_b"),
+    ]:
+        resp = api_key_client.post(
+            "/api/v1/runner/runners/",
+            {
+                "workspace_slug": workspace.slug,
+                "project": project.identifier,
+                "dev_machine_id": str(dev_machine_id),
+                "host_label": "same-hostname",
+                "name": name,
+            },
+            format="json",
+        )
+        assert resp.status_code == 201, resp.data
+
+    assert DevMachine.objects.filter(owner=create_user, host_label="same-hostname").count() == 2
+    assert set(Runner.objects.filter(name__in=["runner_a", "runner_b"]).values_list("dev_machine_id", flat=True)) == {
+        first_machine_id,
+        second_machine_id,
+    }
 
 
 @pytest.mark.unit
@@ -214,9 +380,7 @@ def test_runner_create_requires_auth(db, api_client, workspace, project):
 
 
 @pytest.mark.unit
-def test_runner_create_infers_workspace_when_caller_has_one(
-    db, api_key_client, workspace, project
-):
+def test_runner_create_infers_workspace_when_caller_has_one(db, api_key_client, workspace, project):
     """The documented onboarding flow: `pidash runner add --project X`
     (without --workspace) must succeed when the caller belongs to
     exactly one workspace. The `workspace` fixture wires a single
@@ -232,9 +396,7 @@ def test_runner_create_infers_workspace_when_caller_has_one(
 
 
 @pytest.mark.unit
-def test_runner_create_400_when_workspace_ambiguous(
-    db, api_key_client, create_user, workspace, project
-):
+def test_runner_create_400_when_workspace_ambiguous(db, api_key_client, create_user, workspace, project):
     """If the caller belongs to multiple workspaces and omits
     `workspace_slug`, we should refuse with a specific error rather
     than guessing wrong.
@@ -274,9 +436,7 @@ def test_runner_create_rejects_invalid_name(db, api_key_client, workspace, proje
 
 
 @pytest.mark.unit
-def test_runner_create_400_when_no_workspace_membership(
-    db, api_client, create_user, workspace, project
-):
+def test_runner_create_400_when_no_workspace_membership(db, api_client, create_user, workspace, project):
     """A token bound to a user with no workspace memberships at all
     should get a clear `no_workspace_membership` error, not a 500.
     """
@@ -313,9 +473,7 @@ def test_workspaces_list_returns_single_membership(db, api_key_client, workspace
 
 
 @pytest.mark.unit
-def test_workspaces_list_returns_multiple_in_join_order(
-    db, api_key_client, create_user, workspace
-):
+def test_workspaces_list_returns_multiple_in_join_order(db, api_key_client, create_user, workspace):
     """Multi-workspace caller sees every active membership, ordered by
     join time. The CLI's picker renders them in this order so the list
     is stable across calls.
@@ -332,9 +490,7 @@ def test_workspaces_list_returns_multiple_in_join_order(
 
 
 @pytest.mark.unit
-def test_workspaces_list_excludes_inactive_memberships(
-    db, api_key_client, create_user, workspace
-):
+def test_workspaces_list_excludes_inactive_memberships(db, api_key_client, create_user, workspace):
     """Soft-removed memberships (`is_active=False`) must not surface
     in the picker — otherwise the user could pick a workspace they no
     longer have access to and hit a confusing 403 on the next call.
@@ -342,9 +498,7 @@ def test_workspaces_list_excludes_inactive_memberships(
     from pi_dash.db.models.workspace import Workspace, WorkspaceMember
 
     inactive = Workspace.objects.create(name="gone-ws", owner=create_user, slug="gone-ws")
-    WorkspaceMember.objects.create(
-        workspace=inactive, member=create_user, role=20, is_active=False
-    )
+    WorkspaceMember.objects.create(workspace=inactive, member=create_user, role=20, is_active=False)
 
     resp = api_key_client.get("/api/v1/auth/workspaces/")
     assert resp.status_code == 200, resp.data
@@ -363,9 +517,7 @@ def test_workspaces_list_requires_auth(db, api_client):
 
 
 @pytest.mark.unit
-def test_approve_rejects_second_user_takeover(
-    db, api_client, session_client, create_user
-):
+def test_approve_rejects_second_user_takeover(db, api_client, session_client, create_user):
     """Once user A approves a code, user B (a different logged-in
     session) cannot re-approve and steal the eventual token.
     """
@@ -373,17 +525,13 @@ def test_approve_rejects_second_user_takeover(
 
     start = api_client.post("/api/v1/auth/device/start/", {}, format="json").data
     # User A approves.
-    first = session_client.post(
-        "/api/v1/auth/device/approve/", {"user_code": start["user_code"]}, format="json"
-    )
+    first = session_client.post("/api/v1/auth/device/approve/", {"user_code": start["user_code"]}, format="json")
     assert first.status_code == 200, first.data
 
     # User B (different account) tries to approve the same code.
     user_b = User.objects.create(email="b@example.com", username="b")
     api_client.force_authenticate(user=user_b)
-    second = api_client.post(
-        "/api/v1/auth/device/approve/", {"user_code": start["user_code"]}, format="json"
-    )
+    second = api_client.post("/api/v1/auth/device/approve/", {"user_code": start["user_code"]}, format="json")
     assert second.status_code == 409
     api_client.force_authenticate(user=None)
 
@@ -392,9 +540,7 @@ def test_approve_rejects_second_user_takeover(
     CLIDeviceCode.objects.filter(device_code=start["device_code"]).update(
         last_polled_at=timezone.now() - timedelta(seconds=30)
     )
-    poll = api_client.post(
-        "/api/v1/auth/device/token/", {"device_code": start["device_code"]}, format="json"
-    )
+    poll = api_client.post("/api/v1/auth/device/token/", {"device_code": start["device_code"]}, format="json")
     assert poll.status_code == 200
     assert poll.data["user_email"] == create_user.email
 
@@ -405,13 +551,9 @@ def test_approve_idempotent_for_same_user(db, api_client, session_client, create
     might double-click Approve in the browser.
     """
     start = api_client.post("/api/v1/auth/device/start/", {}, format="json").data
-    a = session_client.post(
-        "/api/v1/auth/device/approve/", {"user_code": start["user_code"]}, format="json"
-    )
+    a = session_client.post("/api/v1/auth/device/approve/", {"user_code": start["user_code"]}, format="json")
     assert a.status_code == 200
-    b = session_client.post(
-        "/api/v1/auth/device/approve/", {"user_code": start["user_code"]}, format="json"
-    )
+    b = session_client.post("/api/v1/auth/device/approve/", {"user_code": start["user_code"]}, format="json")
     assert b.status_code == 200
 
 
@@ -426,9 +568,7 @@ def test_slow_down_does_not_update_last_polled_at(db, api_client):
     """
     start = api_client.post("/api/v1/auth/device/start/", {}, format="json").data
     # First poll establishes last_polled_at.
-    first = api_client.post(
-        "/api/v1/auth/device/token/", {"device_code": start["device_code"]}, format="json"
-    )
+    first = api_client.post("/api/v1/auth/device/token/", {"device_code": start["device_code"]}, format="json")
     assert first.status_code == 400
     row = CLIDeviceCode.objects.get(device_code=start["device_code"])
     first_polled = row.last_polled_at
@@ -436,9 +576,7 @@ def test_slow_down_does_not_update_last_polled_at(db, api_client):
 
     # Second poll within the min-gap returns slow_down — and must leave
     # last_polled_at frozen at the previous value.
-    second = api_client.post(
-        "/api/v1/auth/device/token/", {"device_code": start["device_code"]}, format="json"
-    )
+    second = api_client.post("/api/v1/auth/device/token/", {"device_code": start["device_code"]}, format="json")
     assert second.status_code == 400
     assert second.data["error"] == "slow_down"
     row.refresh_from_db()

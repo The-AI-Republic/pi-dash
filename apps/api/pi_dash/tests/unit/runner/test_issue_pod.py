@@ -18,7 +18,7 @@ from pi_dash.db.models import (
     WorkspaceMember,
 )
 from pi_dash.db.models.issue import Issue
-from pi_dash.runner.models import Pod
+from pi_dash.runner.models import AgentRun, AgentRunStatus, Pod
 
 
 @pytest.fixture
@@ -100,7 +100,7 @@ def test_create_serializer_rejects_pod_in_other_project(
     serializer = IssueCreateSerializer(
         data={
             "name": "Bad",
-            "assigned_pod": str(other_pod.id),
+            "assigned_pod_id": str(other_pod.id),
         },
         context={
             "project_id": project.id,
@@ -108,7 +108,7 @@ def test_create_serializer_rejects_pod_in_other_project(
         },
     )
     assert serializer.is_valid() is False
-    assert "assigned_pod" in serializer.errors
+    assert "assigned_pod_id" in serializer.errors
 
 
 @pytest.mark.unit
@@ -129,14 +129,227 @@ def test_create_serializer_rejects_soft_deleted_pod(
     extra.save(update_fields=["deleted_at"])
 
     serializer = IssueCreateSerializer(
-        data={"name": "Bad2", "assigned_pod": str(extra.id)},
+        data={"name": "Bad2", "assigned_pod_id": str(extra.id)},
         context={
             "project_id": project.id,
             "workspace_id": project.workspace_id,
         },
     )
     assert serializer.is_valid() is False
-    assert "assigned_pod" in serializer.errors
+    # The field uses Pod.all_objects so the tombstone resolves and validate()
+    # returns the friendly message (not DRF's generic "object does not exist").
+    assert "deleted" in str(serializer.errors["assigned_pod_id"]).lower()
+
+
+@pytest.mark.unit
+def test_create_serializer_accepts_assigned_pod_id(
+    db, create_user, project, state
+):
+    """The write key is ``assigned_pod_id`` (the *_id FK convention)."""
+    from pi_dash.app.serializers.issue import IssueCreateSerializer
+
+    custom = Pod.objects.create(
+        workspace=project.workspace,
+        project=project,
+        name=f"{project.identifier}_custom",
+        created_by=create_user,
+    )
+    serializer = IssueCreateSerializer(
+        data={"name": "Pinned", "assigned_pod_id": str(custom.id)},
+        context={
+            "project_id": project.id,
+            "workspace_id": project.workspace_id,
+        },
+    )
+    assert serializer.is_valid(), serializer.errors
+    # source="assigned_pod" maps the *_id key onto the model field.
+    assert serializer.validated_data["assigned_pod"] == custom
+
+
+def _make_active_run(user, issue):
+    """Seed a non-terminal (active) run occupying the issue's run slot."""
+    return AgentRun.objects.create(
+        owner=user,
+        created_by=user,
+        workspace=issue.workspace,
+        pod=issue.assigned_pod,
+        work_item=issue,
+        prompt="x",
+        status=AgentRunStatus.RUNNING,
+    )
+
+
+@pytest.mark.unit
+def test_reassign_pod_allowed_without_active_run(
+    db, create_user, project, state
+):
+    from pi_dash.app.serializers.issue import IssueCreateSerializer
+
+    issue = Issue.objects.create(
+        name="Repoint",
+        project=project,
+        workspace=project.workspace,
+        created_by=create_user,
+    )
+    target = Pod.objects.create(
+        workspace=project.workspace,
+        project=project,
+        name=f"{project.identifier}_target",
+        created_by=create_user,
+    )
+    serializer = IssueCreateSerializer(
+        instance=issue,
+        data={"assigned_pod_id": str(target.id)},
+        partial=True,
+        context={"project_id": project.id, "workspace_id": project.workspace_id},
+    )
+    assert serializer.is_valid(), serializer.errors
+
+
+@pytest.mark.unit
+def test_reassign_pod_blocked_with_active_run(
+    db, create_user, project, state
+):
+    from pi_dash.app.serializers.issue import IssueCreateSerializer
+
+    issue = Issue.objects.create(
+        name="Running",
+        project=project,
+        workspace=project.workspace,
+        created_by=create_user,
+    )
+    _make_active_run(create_user, issue)
+    target = Pod.objects.create(
+        workspace=project.workspace,
+        project=project,
+        name=f"{project.identifier}_target",
+        created_by=create_user,
+    )
+    serializer = IssueCreateSerializer(
+        instance=issue,
+        data={"assigned_pod_id": str(target.id)},
+        partial=True,
+        context={"project_id": project.id, "workspace_id": project.workspace_id},
+    )
+    assert serializer.is_valid() is False
+    assert "assigned_pod_id" in serializer.errors
+
+
+@pytest.mark.unit
+def test_resend_same_pod_allowed_with_active_run(
+    db, create_user, project, state
+):
+    """Re-PATCHing the *current* pod is a no-op even mid-flight (the web form
+    re-sends the full editable set on blur)."""
+    from pi_dash.app.serializers.issue import IssueCreateSerializer
+
+    issue = Issue.objects.create(
+        name="RunningNoop",
+        project=project,
+        workspace=project.workspace,
+        created_by=create_user,
+    )
+    _make_active_run(create_user, issue)
+    serializer = IssueCreateSerializer(
+        instance=issue,
+        data={"assigned_pod_id": str(issue.assigned_pod_id)},
+        partial=True,
+        context={"project_id": project.id, "workspace_id": project.workspace_id},
+    )
+    assert serializer.is_valid(), serializer.errors
+
+
+@pytest.mark.unit
+def test_first_pod_assignment_allowed_with_active_run(
+    db, create_user, project, state
+):
+    """Setting a pod on an issue that currently has NO pod is an initial
+    assignment, not a reassignment — allowed even with an active run.
+
+    Reachable because soft-deleting a pod nulls assigned_pod on its issues
+    (runner/views/pods.py) while a run may still be live.
+    """
+    from pi_dash.app.serializers.issue import IssueCreateSerializer
+
+    issue = Issue.objects.create(
+        name="NoPod",
+        project=project,
+        workspace=project.workspace,
+        created_by=create_user,
+    )
+    run_pod = issue.assigned_pod  # auto-resolved default
+    # Null the issue's pod (simulating the pod-soft-delete cleanup path).
+    issue.assigned_pod = None
+    issue.save(update_fields=["assigned_pod"])
+    AgentRun.objects.create(
+        owner=create_user,
+        created_by=create_user,
+        workspace=issue.workspace,
+        pod=run_pod,
+        work_item=issue,
+        prompt="x",
+        status=AgentRunStatus.RUNNING,
+    )
+    target = Pod.objects.create(
+        workspace=project.workspace,
+        project=project,
+        name=f"{project.identifier}_first",
+        created_by=create_user,
+    )
+    serializer = IssueCreateSerializer(
+        instance=issue,
+        data={"assigned_pod_id": str(target.id)},
+        partial=True,
+        context={"project_id": project.id, "workspace_id": project.workspace_id},
+    )
+    assert serializer.is_valid(), serializer.errors
+
+
+@pytest.mark.unit
+def test_clearing_pod_blocked_with_active_run(
+    db, create_user, project, state
+):
+    """Clearing the pod (assigned_pod_id=null) is a reassignment too — the
+    next dispatch would re-route to the project default — so it's blocked
+    while a run is active."""
+    from pi_dash.app.serializers.issue import IssueCreateSerializer
+
+    issue = Issue.objects.create(
+        name="ClearBusy",
+        project=project,
+        workspace=project.workspace,
+        created_by=create_user,
+    )
+    _make_active_run(create_user, issue)
+    serializer = IssueCreateSerializer(
+        instance=issue,
+        data={"assigned_pod_id": None},
+        partial=True,
+        context={"project_id": project.id, "workspace_id": project.workspace_id},
+    )
+    assert serializer.is_valid() is False
+    assert "assigned_pod_id" in serializer.errors
+
+
+@pytest.mark.unit
+def test_clearing_pod_allowed_without_active_run(
+    db, create_user, project, state
+):
+    from pi_dash.app.serializers.issue import IssueCreateSerializer
+
+    issue = Issue.objects.create(
+        name="ClearIdle",
+        project=project,
+        workspace=project.workspace,
+        created_by=create_user,
+    )
+    serializer = IssueCreateSerializer(
+        instance=issue,
+        data={"assigned_pod_id": None},
+        partial=True,
+        context={"project_id": project.id, "workspace_id": project.workspace_id},
+    )
+    assert serializer.is_valid(), serializer.errors
 
 
 @pytest.mark.unit

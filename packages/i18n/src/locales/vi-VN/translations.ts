@@ -5,6 +5,8 @@
  */
 
 export default {
+  pod: "Pod",
+  pod_default_badge: "Default",
   sidebar: {
     projects: "Dự án",
     pages: "Trang",
@@ -25,6 +27,10 @@ export default {
     upgrade: "Nâng cấp",
     stickies: "Ghi chú",
     prompts: "Prompts",
+    ai_dev_machines: "AI Dev Machines",
+    tooltips: {
+      ai_dev_machines: "Install the pidash CLI and register dev machines as AI agent runners",
+    },
   },
   auth: {
     common: {
@@ -2943,11 +2949,10 @@ export default {
     list: {
       delete_failed: "Không thể xóa runner",
       revoke_failed: "Không thể thu hồi runner",
-      revive_failed: "Không thể khôi phục runner",
       add_runner: "Thêm runner",
       how_it_works_title: "Cách thêm runner",
       how_it_works_body:
-        '1. Nhấp "Thêm runner", chọn một dự án + pod và gửi. Đám mây tạo một mã thông báo đăng ký một lần gắn với runner đó.\n2. Trên máy sẽ chạy runner, chạy lệnh `pidash connect --url ... --token ... --host-label ...` được hiển thị.\n3. Daemon đăng ký và runner hiển thị trực tuyến tại đây.\n\nMỗi runner có mã thông báo riêng. Runner đầu tiên đăng ký trên một máy chủ cũng khởi tạo một mã thông báo máy được sử dụng bởi CLI `pidash` cho các lệnh không phải runner.\n\nĐiều kiện tiên quyết: CLI tác nhân (codex / claude) phải được cài đặt sẵn trên máy chủ.',
+        '1. Click "Add runner", pick a project + pod and generate the CLI command.\n2. On the machine that will host the runner, run the displayed `pidash runner add` command. If the host is not logged in yet, the CLI starts `pidash auth login` first.\n3. The daemon registers the runner and it shows online here.\n\nPrerequisite: the agent CLI (codex / claude) must already be installed on the host.',
       connected_runners: "Các runner",
       columns: {
         name: "Tên",
@@ -2957,24 +2962,20 @@ export default {
         last_heartbeat: "Lần heartbeat cuối",
       },
       columns_pod: "Pod",
-      revive: "Khôi phục",
       revoke: "Thu hồi",
       delete: "Xóa",
-      empty: 'Chưa có runner nào. Nhấp "Thêm runner" để tạo mã thông báo đăng ký cho runner đầu tiên.',
+      empty: 'No runners yet. Click "Add runner" to generate your first runner command.',
       delete_confirm_title: "Xóa runner?",
       delete_confirm_body:
         "Hàng runner bị xóa và daemon bị buộc ngoại tuyến. Các lần chạy lịch sử được giữ lại với tham chiếu runner null.",
       revoke_confirm_title: "Thu hồi runner?",
       revoke_confirm_body:
-        "Thông tin xác thực của runner bị vô hiệu hóa và mọi lần chạy đang thực hiện bị hủy, nhưng hàng vẫn ở trong danh sách. Bạn có thể khôi phục nó sau để tạo mã thông báo đăng ký mới trên cùng hàng đó.",
-      revive_modal_title: "Mã thông báo đăng ký mới",
-      revive_modal_body:
-        "Chạy lệnh bên dưới trên máy chủ sẽ nhận runner này. Sao chép ngay bây giờ — mã thông báo sẽ không được hiển thị lại.",
+        "The runner's credentials are invalidated and any in-flight runs are cancelled, but the row stays in the list. To attach it again, delete it and add a new runner from the target machine.",
       project_placeholder: "Chọn một dự án",
       copy_failed: "Không thể sao chép vào bộ nhớ tạm",
     },
     machine_token_note: {
-      body: "Lần đầu tiên một runner đăng ký trên một host mới (tức là một ``host_label`` mới), cloud cũng cấp một machine token được sử dụng bởi CLI ``pidash`` cho các lệnh không phải runner (issue, comment, state). Các runner sau đó trên cùng host sẽ tái sử dụng token đó.",
+      body: "`pidash runner add` starts `pidash auth login` first when the host is not logged in yet. Run it again for each project or pod this machine should serve.",
     },
     pods: {
       title: "Pods",
@@ -2995,14 +2996,14 @@ export default {
         codex: "Codex",
       },
       errors: {
-        create_failed: "Không thể tạo token đăng ký.",
         project_required: "Chọn một dự án.",
+        name_invalid:
+          "Runner name cannot contain spaces. It must start with a letter, digit, or underscore and contain only letters, digits, underscore, dot, or dash.",
         load_projects_failed: "Không thể tải danh sách dự án.",
         load_pods_failed: "Không thể tải pods.",
       },
       title: "Thêm runner",
-      subtitle:
-        "Tạo một token đăng ký một lần cho runner mới. Bạn sẽ chạy lệnh `pidash connect` được hiển thị trên máy sẽ chạy runner đó.",
+      subtitle: "Generate a `pidash runner add` command for the machine that will host this runner.",
       project_label: "Dự án",
       project_help: "Dự án mà runner này sẽ làm việc.",
       pod_label: "Pod (tùy chọn)",
@@ -3010,22 +3011,25 @@ export default {
       pod_help: "Mặc định là pod mặc định của dự án.",
       name_label: "Tên (tùy chọn)",
       name_placeholder: "my-laptop-runner",
-      name_help: "Tự động gán nếu để trống, ví dụ: ``runner_001``.",
-      host_label_label: "Nhãn host (tùy chọn)",
-      host_label_placeholder: "my-laptop",
-      host_label_help:
-        "Tên máy chủ tự do được nhúng vào lệnh đề xuất. Daemon sẽ thay thế tên máy chủ thực tế nếu bạn bỏ cờ.",
+      name_help:
+        "Auto-assigned if blank. No spaces. If provided, use letters, digits, underscore, dot, or dash; start with a letter, digit, or underscore.",
       working_dir_label: "Thư mục làm việc (tùy chọn)",
       working_dir_placeholder: "thư mục làm việc dự án trên máy dev cục bộ",
       working_dir_help:
         "Đường dẫn cục bộ mà daemon chạy agent CLI — thường là kho lưu trữ dự án trên đĩa. Mặc định là một sandbox trong thư mục dữ liệu của runner, điều này hiếm khi bạn muốn.",
       agent_label: "Tác nhân",
-      agent_help: "CLI tác nhân AI nào mà runner này sẽ điều khiển. Được nhúng vào lệnh ``pidash connect`` hiển thị.",
+      agent_help: "Which AI agent CLI this runner will drive. Baked into the displayed ``pidash runner add`` command.",
       cancel: "Hủy",
-      submitting: "Đang tạo…",
-      submit: "Tạo token đăng ký",
+      back: "Back",
+      submit: "Generate command",
       token_warning: "Sao chép một lần — token đăng ký sẽ không được hiển thị lại.",
       token_instructions: "Chạy lệnh này trên máy sẽ chạy runner:",
+      cloud_url_origin_warning:
+        "Using the current browser origin as the cloud URL because VITE_API_BASE_URL is not configured.",
+      shell_label: "Shell",
+      shell_posix: "macOS/Linux",
+      shell_powershell: "PowerShell",
+      shell_cmd: "Command Prompt",
       copied: "Đã sao chép!",
       copy_command: "Sao chép lệnh",
     },
@@ -3071,6 +3075,73 @@ export default {
       cancel: "Hủy",
       submitting: "Đang tạo…",
       submit: "Tạo pod",
+    },
+  },
+  ai_dev_machines: {
+    title: "AI Dev Machines",
+    page_title: "{workspace} - AI Dev Machines",
+    list: {
+      heading: "Dev machines",
+      body: "Machines that have authenticated with Pi Dash or host runners for this workspace.",
+      add_runner: "Add runner",
+      rotate: "Rotate",
+      revoke: "Revoke",
+      loading: "Loading dev machines...",
+      load_failed: "Could not load dev machines.",
+      rotate_failed: "Could not rotate the dev machine token.",
+      revoke_failed: "Could not revoke the dev machine.",
+      empty: "No dev machines registered for this workspace yet.",
+      never: "Never",
+      machine_id: "id {id}",
+      runner_count: "{active} active / {total} total",
+      rotate_confirm_title: "Rotate dev machine token?",
+      rotate_confirm_body:
+        "The active auth token for this dev machine will be invalidated. Runners on that machine will stop connecting until `pidash auth login` is run there again.",
+      revoke_confirm_title: "Revoke dev machine?",
+      revoke_confirm_body:
+        "This permanently revokes the dev machine, invalidates its auth token, and revokes runners hosted on it. Use this when the machine should no longer be trusted.",
+      columns: {
+        machine: "Machine",
+        status: "Status",
+        runners: "Runners",
+        last_seen: "Last seen",
+        last_heartbeat: "Last heartbeat",
+      },
+      status: {
+        active: "Active",
+        offline: "Offline",
+        registered: "Registered",
+        revoked: "Revoked",
+      },
+    },
+    intro: {
+      heading: "What is the pidash CLI, daemon, and runner?",
+      body: "Pi Dash hands AI agents (Claude Code, Codex, …) the keys to a real dev machine so they can pick up work items, write code, and open changes. Three pieces work together to make that possible:",
+      cli: {
+        title: "pidash CLI",
+        body: "The command-line tool installed on each dev machine. Handles authentication with the cloud, manages local config (`~/.pidash/config.toml`), and exposes commands for issues, comments, and runner management (`pidash auth login`, `pidash runner add`, `pidash doctor`, …).",
+      },
+      daemon: {
+        title: "pidash daemon",
+        body: "A long-running background process that maintains the WebSocket session with Pi Dash cloud, dispatches work to the configured agent, and streams approvals + heartbeats back. One daemon per machine.",
+      },
+      runner: {
+        title: "AI Agent runner",
+        body: "A cloud-side row that represents one agent instance bound to a project (and optionally a pod). Running `pidash runner add` on a logged-in machine creates the row and binds that machine as the host. A machine can host many runners.",
+      },
+    },
+    install: {
+      heading: "Install the pidash CLI",
+      body: "Run an installer on the machine that will host your AI agent. The wrapper commands download the latest signed binary, drop `pidash` on your PATH, and walk you through the device-code login.",
+      macos_linux_label: "macOS / Linux",
+      windows_label: "Windows (PowerShell)",
+      windows_msi_label: "Windows (MSI)",
+      download_msi: "Download MSI",
+      copy_command: "Copy command",
+      copied: "Copied!",
+      copy_failed: "Could not copy to clipboard",
+      prereq:
+        "Prerequisite: the agent CLI you plan to use (`codex` or `claude`) must already be installed and on PATH. Run `pidash doctor` after install to verify.",
     },
   },
   schedulers: {

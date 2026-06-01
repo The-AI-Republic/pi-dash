@@ -5,6 +5,8 @@
  */
 
 export default {
+  pod: "Pod",
+  pod_default_badge: "Default",
   sidebar: {
     projects: "專案",
     pages: "頁面",
@@ -25,6 +27,10 @@ export default {
     upgrade: "升級",
     stickies: "便利貼",
     prompts: "Prompts",
+    ai_dev_machines: "AI Dev Machines",
+    tooltips: {
+      ai_dev_machines: "Install the pidash CLI and register dev machines as AI agent runners",
+    },
   },
   auth: {
     common: {
@@ -2881,11 +2887,10 @@ export default {
     list: {
       delete_failed: "刪除執行器失敗",
       revoke_failed: "撤銷執行器失敗",
-      revive_failed: "恢復執行器失敗",
       add_runner: "新增執行器",
       how_it_works_title: "如何新增執行器",
       how_it_works_body:
-        "1. 點擊「新增執行器」，選擇專案和 Pod 並提交。雲端會產生一個一次性註冊令牌，綁定到該執行器。\n2. 在將託管執行器的機器上，執行顯示的 `pidash connect --url ... --token ... --host-label ...` 命令。\n3. 守護程序會註冊，執行器會在此顯示為在線。\n\n每個執行器都有自己的令牌。在主機上註冊的第一個執行器也會引導一個機器令牌，供 `pidash` CLI 用於非執行器命令。\n\n先決條件：代理 CLI（codex / claude）必須已安裝在主機上。",
+        '1. Click "Add runner", pick a project + pod and generate the CLI command.\n2. On the machine that will host the runner, run the displayed `pidash runner add` command. If the host is not logged in yet, the CLI starts `pidash auth login` first.\n3. The daemon registers the runner and it shows online here.\n\nPrerequisite: the agent CLI (codex / claude) must already be installed on the host.',
       connected_runners: "執行器",
       columns: {
         name: "名稱",
@@ -2895,22 +2900,19 @@ export default {
         last_heartbeat: "最後心跳",
       },
       columns_pod: "Pod",
-      revive: "恢復",
       revoke: "撤銷",
       delete: "刪除",
-      empty: "尚無執行器。點擊「新增執行器」來產生您的第一個每個執行器的註冊令牌。",
+      empty: 'No runners yet. Click "Add runner" to generate your first runner command.',
       delete_confirm_title: "刪除執行器？",
       delete_confirm_body: "執行器列將被移除，守護程序被迫離線。歷史運行記錄會保留，但執行器參考設為空值。",
       revoke_confirm_title: "撤銷執行器？",
       revoke_confirm_body:
-        "執行器的憑證將被失效，任何進行中的運行將被取消，但該列仍保留在列表中。您可以稍後恢復它，在同一列上產生新的註冊令牌。",
-      revive_modal_title: "新的註冊令牌",
-      revive_modal_body: "在應接管此執行器的主機上執行以下命令。請立即複製——令牌將不會再次顯示。",
+        "The runner's credentials are invalidated and any in-flight runs are cancelled, but the row stays in the list. To attach it again, delete it and add a new runner from the target machine.",
       project_placeholder: "選擇專案",
       copy_failed: "無法複製到剪貼簿",
     },
     machine_token_note: {
-      body: "當執行器首次在新主機（即新的 ``host_label``）上註冊時，雲端也會發出一個機器令牌，供 ``pidash`` CLI 用於非執行器命令（issue、comment、state）。同一主機上的後續執行器會重複使用該令牌。",
+      body: "`pidash runner add` starts `pidash auth login` first when the host is not logged in yet. Run it again for each project or pod this machine should serve.",
     },
     pods: {
       title: "Pod",
@@ -2931,13 +2933,14 @@ export default {
         codex: "Codex",
       },
       errors: {
-        create_failed: "無法鑄造註冊令牌。",
         project_required: "請選擇一個專案。",
+        name_invalid:
+          "Runner name cannot contain spaces. It must start with a letter, digit, or underscore and contain only letters, digits, underscore, dot, or dash.",
         load_projects_failed: "無法載入專案。",
         load_pods_failed: "無法載入 Pod。",
       },
       title: "新增執行器",
-      subtitle: "為新執行器鑄造一次性註冊令牌。您將在託管它的機器上執行顯示的 `pidash connect` 命令。",
+      subtitle: "Generate a `pidash runner add` command for the machine that will host this runner.",
       project_label: "專案",
       project_help: "此執行器將工作的專案。",
       pod_label: "Pod (選填)",
@@ -2945,21 +2948,25 @@ export default {
       pod_help: "預設為該專案的預設 Pod。",
       name_label: "名稱 (選填)",
       name_placeholder: "my-laptop-runner",
-      name_help: "若留空則自動指派，例如 ``runner_001``。",
-      host_label_label: "主機標籤 (選填)",
-      host_label_placeholder: "my-laptop",
-      host_label_help: "內嵌於建議命令中的自由格式主機名稱。若您省略該旗標，守護行程將替換為其實際主機名稱。",
+      name_help:
+        "Auto-assigned if blank. No spaces. If provided, use letters, digits, underscore, dot, or dash; start with a letter, digit, or underscore.",
       working_dir_label: "工作目錄 (選填)",
       working_dir_placeholder: "本機開發機器專案工作目錄",
       working_dir_help:
         "守護程式執行代理 CLI 的本地路徑——通常是磁碟上的專案倉庫。預設為執行器資料目錄下的沙盒，這很少是你想要的。",
       agent_label: "代理",
-      agent_help: "此執行器將驅動哪個 AI 代理 CLI。內建於顯示的 ``pidash connect`` 指令中。",
+      agent_help: "Which AI agent CLI this runner will drive. Baked into the displayed ``pidash runner add`` command.",
       cancel: "取消",
-      submitting: "產生中…",
-      submit: "產生註冊令牌",
+      back: "Back",
+      submit: "Generate command",
       token_warning: "請立即複製——註冊令牌將不會再次顯示。",
       token_instructions: "在將託管執行器的機器上執行此指令：",
+      cloud_url_origin_warning:
+        "Using the current browser origin as the cloud URL because VITE_API_BASE_URL is not configured.",
+      shell_label: "Shell",
+      shell_posix: "macOS/Linux",
+      shell_powershell: "PowerShell",
+      shell_cmd: "Command Prompt",
       copied: "已複製！",
       copy_command: "複製指令",
     },
@@ -3005,6 +3012,73 @@ export default {
       cancel: "取消",
       submitting: "建立中…",
       submit: "建立 Pod",
+    },
+  },
+  ai_dev_machines: {
+    title: "AI Dev Machines",
+    page_title: "{workspace} - AI Dev Machines",
+    list: {
+      heading: "Dev machines",
+      body: "Machines that have authenticated with Pi Dash or host runners for this workspace.",
+      add_runner: "Add runner",
+      rotate: "Rotate",
+      revoke: "Revoke",
+      loading: "Loading dev machines...",
+      load_failed: "Could not load dev machines.",
+      rotate_failed: "Could not rotate the dev machine token.",
+      revoke_failed: "Could not revoke the dev machine.",
+      empty: "No dev machines registered for this workspace yet.",
+      never: "Never",
+      machine_id: "id {id}",
+      runner_count: "{active} active / {total} total",
+      rotate_confirm_title: "Rotate dev machine token?",
+      rotate_confirm_body:
+        "The active auth token for this dev machine will be invalidated. Runners on that machine will stop connecting until `pidash auth login` is run there again.",
+      revoke_confirm_title: "Revoke dev machine?",
+      revoke_confirm_body:
+        "This permanently revokes the dev machine, invalidates its auth token, and revokes runners hosted on it. Use this when the machine should no longer be trusted.",
+      columns: {
+        machine: "Machine",
+        status: "Status",
+        runners: "Runners",
+        last_seen: "Last seen",
+        last_heartbeat: "Last heartbeat",
+      },
+      status: {
+        active: "Active",
+        offline: "Offline",
+        registered: "Registered",
+        revoked: "Revoked",
+      },
+    },
+    intro: {
+      heading: "What is the pidash CLI, daemon, and runner?",
+      body: "Pi Dash hands AI agents (Claude Code, Codex, …) the keys to a real dev machine so they can pick up work items, write code, and open changes. Three pieces work together to make that possible:",
+      cli: {
+        title: "pidash CLI",
+        body: "The command-line tool installed on each dev machine. Handles authentication with the cloud, manages local config (`~/.pidash/config.toml`), and exposes commands for issues, comments, and runner management (`pidash auth login`, `pidash runner add`, `pidash doctor`, …).",
+      },
+      daemon: {
+        title: "pidash daemon",
+        body: "A long-running background process that maintains the WebSocket session with Pi Dash cloud, dispatches work to the configured agent, and streams approvals + heartbeats back. One daemon per machine.",
+      },
+      runner: {
+        title: "AI Agent runner",
+        body: "A cloud-side row that represents one agent instance bound to a project (and optionally a pod). Running `pidash runner add` on a logged-in machine creates the row and binds that machine as the host. A machine can host many runners.",
+      },
+    },
+    install: {
+      heading: "Install the pidash CLI",
+      body: "Run an installer on the machine that will host your AI agent. The wrapper commands download the latest signed binary, drop `pidash` on your PATH, and walk you through the device-code login.",
+      macos_linux_label: "macOS / Linux",
+      windows_label: "Windows (PowerShell)",
+      windows_msi_label: "Windows (MSI)",
+      download_msi: "Download MSI",
+      copy_command: "Copy command",
+      copied: "Copied!",
+      copy_failed: "Could not copy to clipboard",
+      prereq:
+        "Prerequisite: the agent CLI you plan to use (`codex` or `claude`) must already be installed and on PATH. Run `pidash doctor` after install to verify.",
     },
   },
   schedulers: {

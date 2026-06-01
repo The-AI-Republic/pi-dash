@@ -1,11 +1,11 @@
 //! Shared local-side plumbing for both `pidash connect` (legacy
 //! enrollment-token flow) and `pidash runner add` (CLI-token flow).
 //!
-//! After a successful cloud-side mint (`EnrollResponse`), both paths
-//! need to do the same local work: write `[[runner]]` to `config.toml`,
-//! drop per-runner `credentials.toml`, and install the OS service unit
-//! on first add. That shared work lives here so the two paths can't
-//! drift.
+//! After a successful cloud-side mint (`EnrollResponse`), both paths need
+//! to write `[[runner]]` to `config.toml` and install the OS service unit
+//! on first add. Legacy `pidash connect` responses also write per-runner
+//! `credentials.toml`; new `pidash runner add` responses rely on the
+//! shared dev-machine token in `[cli].token`.
 
 use anyhow::{Context, Result};
 use std::path::PathBuf;
@@ -17,6 +17,7 @@ use crate::config::schema::{
     Config, DaemonConfig, RunnerConfig, WorkspaceSection,
 };
 use crate::util::paths::Paths;
+use uuid::Uuid;
 
 /// Read the user's CLI token from `[cli].token` in `config.toml`.
 /// Returns `Ok(None)` when no config exists yet or the section is
@@ -49,6 +50,7 @@ pub fn write_cli_token(paths: &Paths, cloud_url: &str, token: &str) -> Result<()
             version: 2,
             daemon: DaemonConfig {
                 cloud_url: cloud_url.to_string(),
+                dev_machine_id: None,
                 log_level: "info".to_string(),
                 log_retention_days: 14,
                 agent_observability_v1: false,
@@ -78,6 +80,20 @@ pub fn write_cli_token(paths: &Paths, cloud_url: &str, token: &str) -> Result<()
     });
     file::write_config(paths, &cfg)?;
     Ok(())
+}
+
+/// Return the stable cloud identity for this dev machine, minting and
+/// persisting it once when an older config does not have one yet.
+pub fn ensure_dev_machine_id(paths: &Paths) -> Result<Uuid> {
+    let cfg = file::mutate_config(paths, |cfg| {
+        if cfg.daemon.dev_machine_id.is_none() {
+            cfg.daemon.dev_machine_id = Some(Uuid::new_v4());
+        }
+        Ok(())
+    })?;
+    cfg.daemon
+        .dev_machine_id
+        .ok_or_else(|| anyhow::anyhow!("dev_machine_id was not persisted to config.toml"))
 }
 
 /// Read `[cli].workspace_slug` from `config.toml`.
@@ -163,8 +179,9 @@ pub struct AppliedRunner {
 /// Apply an `EnrollResponse` (from either the legacy enroll endpoint or
 /// the new CLI-initiated create endpoint) to local disk:
 ///
-/// 1. Write the per-runner refresh credential.
-/// 2. Append a new `[[runner]]` block to `config.toml`.
+/// 1. Append a new `[[runner]]` block to `config.toml`.
+/// 2. Write legacy per-runner refresh credentials only when the cloud
+///    returns them.
 ///
 /// The caller is responsible for:
 /// - Validating the cloud URL up front.
@@ -202,6 +219,7 @@ pub async fn apply_enroll_response(
             version: 2,
             daemon: DaemonConfig {
                 cloud_url: bootstrap_cloud_url.clone(),
+                dev_machine_id: None,
                 log_level: "info".to_string(),
                 log_retention_days: 14,
                 agent_observability_v1: false,
@@ -248,6 +266,29 @@ pub async fn apply_enroll_response(
     // `Err(persist_err)` arm there.)
     let runner_paths = paths.for_runner(resp.runner_id);
     runner_paths.ensure()?;
+    if let Some(machine_token) = resp
+        .machine_token
+        .as_deref()
+        .filter(|t| !t.trim().is_empty())
+    {
+        write_cli_token(paths, cloud_url, machine_token)
+            .context("writing shared dev-machine token to [cli].token")?;
+    }
+    if resp.refresh_token.trim().is_empty() {
+        let has_machine_token = load_cli_token(paths)?
+            .as_deref()
+            .map(|token| token.starts_with("mt_"))
+            .unwrap_or(false);
+        if !has_machine_token {
+            anyhow::bail!(
+                "cloud did not return per-runner credentials and no dev-machine token is configured"
+            );
+        }
+        return Ok(AppliedRunner {
+            runner: new_runner,
+            is_first_runner,
+        });
+    }
     write_runner_credentials(
         runner_paths.credentials_path(),
         RunnerCredentials {
@@ -396,6 +437,18 @@ mod tests {
         write_cli_token(&paths, "https://example.com", "pi_dash_api_xxx").unwrap();
         let token = load_cli_token(&paths).unwrap();
         assert_eq!(token.as_deref(), Some("pi_dash_api_xxx"));
+    }
+
+    #[test]
+    fn ensure_dev_machine_id_mints_once_and_persists() {
+        let tmp = tempdir().unwrap();
+        let paths = paths_for(tmp.path());
+        write_cli_token(&paths, "https://example.com", "pi_dash_api_xxx").unwrap();
+        let first = ensure_dev_machine_id(&paths).unwrap();
+        let second = ensure_dev_machine_id(&paths).unwrap();
+        let cfg = file::load_config(&paths).unwrap();
+        assert_eq!(first, second);
+        assert_eq!(cfg.daemon.dev_machine_id, Some(first));
     }
 
     #[test]

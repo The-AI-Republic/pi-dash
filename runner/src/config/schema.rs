@@ -57,6 +57,10 @@ pub struct CliSection {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DaemonConfig {
     pub cloud_url: String,
+    /// Stable local identity for this dev machine. Minted once by the CLI and
+    /// sent to the cloud on `pidash runner add`; host_label stays display-only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dev_machine_id: Option<Uuid>,
     #[serde(default = "default_log_level")]
     pub log_level: String,
     #[serde(default = "default_retention_days")]
@@ -93,6 +97,7 @@ impl Default for DaemonConfig {
     fn default() -> Self {
         Self {
             cloud_url: String::new(),
+            dev_machine_id: None,
             log_level: default_log_level(),
             log_retention_days: default_retention_days(),
             agent_observability_v1: false,
@@ -517,6 +522,7 @@ mod tests {
             version: 2,
             daemon: DaemonConfig {
                 cloud_url: "https://x".into(),
+                dev_machine_id: None,
                 log_level: "info".into(),
                 log_retention_days: 14,
                 agent_observability_v1: false,

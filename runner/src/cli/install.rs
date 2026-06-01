@@ -1,10 +1,9 @@
 //! `pidash install` — write or refresh the OS service unit.
 //!
-//! In the connection-first design, enrollment lives in
-//! `pidash connect` and runner CRUD in `pidash runner add|list|remove`.
-//! `install` is the small piece in between: write the systemd / launchd
-//! unit so the daemon survives reboots. Safe to run repeatedly (e.g.
-//! after upgrading the binary).
+//! Runner enrollment now lives in `pidash auth login` and
+//! `pidash runner add`. `install` writes the systemd / launchd unit so
+//! the daemon survives reboots. Safe to run repeatedly (e.g. after
+//! upgrading the binary).
 
 use anyhow::Result;
 use clap::Args as ClapArgs;
@@ -22,15 +21,15 @@ pub struct Args {
 
 pub async fn run(args: Args, paths: &Paths) -> Result<()> {
     let svc = crate::service::detect();
-    let enrolled = paths.config_path().exists() && paths.credentials_path().exists();
+    let enrolled = machine_is_configured(paths);
 
     svc.write_unit(paths).await?;
     if !enrolled {
         println!("Service unit written.");
         println!();
-        println!("This machine is not enrolled yet. Next:");
-        println!("  pidash connect --url <URL> --token <ONE_TIME_TOKEN>");
-        println!("  pidash runner add --name <NAME> --project <PROJECT>");
+        println!("This machine is not configured yet. Next:");
+        println!("  pidash auth login --url <URL>");
+        println!("  pidash runner add --project <PROJECT>");
         println!();
         return Ok(());
     }
@@ -43,4 +42,20 @@ pub async fn run(args: Args, paths: &Paths) -> Result<()> {
     println!("Service unit refreshed and daemon restarted.");
     println!();
     Ok(())
+}
+
+fn machine_is_configured(paths: &Paths) -> bool {
+    let Ok(cfg) = crate::config::file::load_config(paths) else {
+        return false;
+    };
+    if cfg.runners.is_empty() {
+        return false;
+    }
+    let has_shared_machine_token = cfg
+        .cli
+        .as_ref()
+        .and_then(|cli| cli.token.as_deref())
+        .map(|token| token.starts_with("mt_"))
+        .unwrap_or(false);
+    has_shared_machine_token || paths.credentials_path().exists()
 }

@@ -7,6 +7,7 @@ from .device import (
     DeviceCodeTokenEndpoint,
     DeviceCodeApproveEndpoint,
     DeviceCodeRevokeEndpoint,
+    DeviceMachineTokenEndpoint,
     WorkspaceListEndpoint,
 )
 
@@ -15,5 +16,6 @@ __all__ = [
     "DeviceCodeTokenEndpoint",
     "DeviceCodeApproveEndpoint",
     "DeviceCodeRevokeEndpoint",
+    "DeviceMachineTokenEndpoint",
     "WorkspaceListEndpoint",
 ]

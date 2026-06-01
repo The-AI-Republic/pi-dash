@@ -25,8 +25,9 @@ import pytest
 from django.urls import reverse
 from django.utils import timezone
 
-from pi_dash.runner.models import Pod, Runner, RunnerStatus
+from pi_dash.runner.models import DevMachine, MachineToken, Pod, Runner, RunnerStatus
 from pi_dash.runner.services.runner_delete import parse_purge_local
+from pi_dash.runner.services.tokens import hash_token
 
 
 @pytest.fixture
@@ -34,13 +35,14 @@ def pod(project):
     return Pod.default_for_project(project)
 
 
-def _make_runner(user, workspace, pod, name="r1"):
+def _make_runner(user, workspace, pod, name="r1", dev_machine=None, status=RunnerStatus.ONLINE):
     return Runner.objects.create(
         owner=user,
         workspace=workspace,
         pod=pod,
         name=name,
-        status=RunnerStatus.ONLINE,
+        dev_machine=dev_machine,
+        status=status,
         last_heartbeat_at=timezone.now(),
     )
 
@@ -60,21 +62,17 @@ def _stub_outbox_send():
     ``pi_dash.runner.services.pubsub.enqueue_for_runner`` — patching
     the source module would not intercept the local reference.
     """
-    with patch(
-        "pi_dash.runner.services.pubsub.send_to_runner"
-    ) as mock_st, patch(
-        "pi_dash.runner.services.pubsub.enqueue_for_runner"
-    ) as mock_eq, patch(
-        "pi_dash.runner.services.pubsub.close_runner_session"
-    ) as mock_cl:
+    with (
+        patch("pi_dash.runner.services.pubsub.send_to_runner") as mock_st,
+        patch("pi_dash.runner.services.pubsub.enqueue_for_runner") as mock_eq,
+        patch("pi_dash.runner.services.pubsub.close_runner_session") as mock_cl,
+    ):
         yield {"send_to_runner": mock_st, "enqueue": mock_eq, "close": mock_cl}
 
 
 @pytest.fixture(autouse=True)
 def _run_on_commit_immediately():
-    with patch(
-        "django.db.transaction.on_commit", side_effect=lambda fn, **kw: fn()
-    ):
+    with patch("django.db.transaction.on_commit", side_effect=lambda fn, **kw: fn()):
         yield
 
 
@@ -115,6 +113,67 @@ def test_parse_purge_local_rejects_garbage():
 
 
 @pytest.mark.unit
+def test_runner_list_hides_other_users_private_runners(db, session_client, create_user, workspace, pod):
+    from uuid import uuid4
+
+    from pi_dash.db.models import User, WorkspaceMember
+
+    mine = _make_runner(create_user, workspace, pod, "mine")
+    other = User.objects.create(
+        email=f"runner-owner-{uuid4().hex[:8]}@example.com",
+        username=f"runner_owner_{uuid4().hex[:8]}",
+    )
+    WorkspaceMember.objects.create(workspace=workspace, member=other, role=15)
+    theirs = _make_runner(other, workspace, pod, "theirs")
+
+    resp = session_client.get(reverse("runner-list"), {"workspace": str(workspace.id)})
+
+    assert resp.status_code == 200
+    ids = {row["id"] for row in resp.data}
+    assert str(mine.id) in ids
+    assert str(theirs.id) not in ids
+    detail = session_client.get(reverse("runner-detail", kwargs={"runner_id": theirs.id}))
+    assert detail.status_code == 404
+
+
+@pytest.mark.unit
+def test_dev_machine_list_shows_current_users_workspace_machines(db, session_client, create_user, workspace, pod):
+    from uuid import uuid4
+
+    from pi_dash.db.models import User, WorkspaceMember
+
+    mine = DevMachine.objects.create(owner=create_user, host_label="thinkcentre.local", label="ThinkCentre")
+    token_only = DevMachine.objects.create(owner=create_user, host_label="laptop.local", label="Laptop")
+    _make_runner(create_user, workspace, pod, "mine-online", dev_machine=mine, status=RunnerStatus.ONLINE)
+    _make_runner(create_user, workspace, pod, "mine-offline", dev_machine=mine, status=RunnerStatus.OFFLINE)
+    MachineToken.objects.create(
+        user=create_user,
+        workspace=workspace,
+        dev_machine=token_only,
+        host_label="laptop.local",
+        token_hash="hashed-token",
+    )
+
+    other = User.objects.create(
+        email=f"machine-owner-{uuid4().hex[:8]}@example.com",
+        username=f"machine_owner_{uuid4().hex[:8]}",
+    )
+    WorkspaceMember.objects.create(workspace=workspace, member=other, role=15)
+    theirs = DevMachine.objects.create(owner=other, host_label="theirs.local", label="Theirs")
+    _make_runner(other, workspace, pod, "theirs", dev_machine=theirs)
+
+    resp = session_client.get(reverse("dev-machine-list"), {"workspace": str(workspace.id)})
+
+    assert resp.status_code == 200
+    rows = {row["id"]: row for row in resp.data}
+    assert str(mine.id) in rows
+    assert str(token_only.id) in rows
+    assert str(theirs.id) not in rows
+    assert rows[str(mine.id)]["runner_count"] == 2
+    assert rows[str(mine.id)]["online_runner_count"] == 1
+
+
+@pytest.mark.unit
 def test_web_delete_default_emits_remove_runner_and_drops_row(
     db, session_client, create_user, workspace, pod, _stub_outbox_send
 ):
@@ -133,14 +192,9 @@ def test_web_delete_default_emits_remove_runner_and_drops_row(
 
 
 @pytest.mark.unit
-def test_web_delete_purge_false_emits_revoke_only(
-    db, session_client, create_user, workspace, pod, _stub_outbox_send
-):
+def test_web_delete_purge_false_emits_revoke_only(db, session_client, create_user, workspace, pod, _stub_outbox_send):
     r = _make_runner(create_user, workspace, pod, "web-no-purge")
-    url = (
-        reverse("runner-detail", kwargs={"runner_id": r.id})
-        + "?purge_local=false"
-    )
+    url = reverse("runner-detail", kwargs={"runner_id": r.id}) + "?purge_local=false"
     resp = session_client.delete(url)
     assert resp.status_code == 204
     assert not Runner.objects.filter(pk=r.id).exists()
@@ -175,9 +229,7 @@ def _capture_revoke_reason(monkeypatch_target, captured: dict):
 
 
 @pytest.mark.unit
-def test_delete_propagates_canonical_reason_when_purging(
-    db, create_user, workspace, pod, _stub_outbox_send
-):
+def test_delete_propagates_canonical_reason_when_purging(db, create_user, workspace, pod, _stub_outbox_send):
     """purge_local=True must hand a canonical reason to ``runner.revoke``.
 
     The Rust synthesizer in ``runner/src/cloud/http.rs`` matches the
@@ -193,18 +245,14 @@ def test_delete_propagates_canonical_reason_when_purging(
     from pi_dash.runner.services.runner_delete import delete_runner
 
     captured: dict = {}
-    with patch.object(
-        Runner, "revoke", new=_capture_revoke_reason(Runner, captured)
-    ):
+    with patch.object(Runner, "revoke", new=_capture_revoke_reason(Runner, captured)):
         r = _make_runner(create_user, workspace, pod, "purge-true")
         delete_runner(r, purge_local=True)
     assert captured["reason"] == "runner_removed"
 
 
 @pytest.mark.unit
-def test_delete_uses_non_canonical_reason_when_not_purging(
-    db, create_user, workspace, pod, _stub_outbox_send
-):
+def test_delete_uses_non_canonical_reason_when_not_purging(db, create_user, workspace, pod, _stub_outbox_send):
     """purge_local=False must NOT trigger the daemon's local-wipe synthesizer.
 
     The synthesizer matches a small canonical set of reasons (see
@@ -218,23 +266,16 @@ def test_delete_uses_non_canonical_reason_when_not_purging(
     from pi_dash.runner.services.runner_delete import delete_runner
 
     captured: dict = {}
-    with patch.object(
-        Runner, "revoke", new=_capture_revoke_reason(Runner, captured)
-    ):
+    with patch.object(Runner, "revoke", new=_capture_revoke_reason(Runner, captured)):
         r = _make_runner(create_user, workspace, pod, "purge-false")
         delete_runner(r, purge_local=False)
     assert captured["reason"] == "user_revoke"
 
 
 @pytest.mark.unit
-def test_web_delete_purge_invalid_returns_400(
-    db, session_client, create_user, workspace, pod
-):
+def test_web_delete_purge_invalid_returns_400(db, session_client, create_user, workspace, pod):
     r = _make_runner(create_user, workspace, pod, "web-bad-flag")
-    url = (
-        reverse("runner-detail", kwargs={"runner_id": r.id})
-        + "?purge_local=maybe"
-    )
+    url = reverse("runner-detail", kwargs={"runner_id": r.id}) + "?purge_local=maybe"
     resp = session_client.delete(url)
     assert resp.status_code == 400
     # Row must still exist — the validation runs before any destructive work.
@@ -242,25 +283,21 @@ def test_web_delete_purge_invalid_returns_400(
 
 
 @pytest.mark.unit
-def test_web_delete_forbidden_when_not_owner_or_admin(
-    db, api_client, workspace, pod, create_user
-):
-    """A workspace member who is neither owner nor admin can't delete."""
+def test_web_delete_404_for_non_owner_private_runner(db, api_client, workspace, pod, create_user):
+    """A workspace member who does not own a private runner cannot see it."""
     from pi_dash.db.models import User, WorkspaceMember
 
     # ``username`` is unique on the User model; the conftest's
     # ``create_user`` fixture already created a user with the default
     # empty username, so this second user must pick its own to avoid a
     # collision on the unique constraint.
-    other = User.objects.create_user(
-        email="other-web-forbidden@example.com", username="other-web-forbidden"
-    )
+    other = User.objects.create_user(email="other-web-forbidden@example.com", username="other-web-forbidden")
     WorkspaceMember.objects.create(workspace=workspace, member=other, role=15)
     r = _make_runner(create_user, workspace, pod, "web-forbidden")
     api_client.force_authenticate(user=other)
     url = reverse("runner-detail", kwargs={"runner_id": r.id})
     resp = api_client.delete(url)
-    assert resp.status_code == 403
+    assert resp.status_code == 404
     assert Runner.objects.filter(pk=r.id).exists()
 
 
@@ -284,14 +321,9 @@ def test_v1_delete_default_emits_remove_runner_and_drops_row(
 
 
 @pytest.mark.unit
-def test_v1_delete_purge_false_emits_revoke_only(
-    db, api_key_client, create_user, workspace, pod, _stub_outbox_send
-):
+def test_v1_delete_purge_false_emits_revoke_only(db, api_key_client, create_user, workspace, pod, _stub_outbox_send):
     r = _make_runner(create_user, workspace, pod, "v1-no-purge")
-    url = (
-        reverse("api-runner-delete", kwargs={"runner_id": r.id})
-        + "?purge_local=false"
-    )
+    url = reverse("api-runner-delete", kwargs={"runner_id": r.id}) + "?purge_local=false"
     resp = api_key_client.delete(url)
     assert resp.status_code == 204
     types_enqueued = [
@@ -303,9 +335,7 @@ def test_v1_delete_purge_false_emits_revoke_only(
 
 
 @pytest.mark.unit
-def test_v1_delete_unauthenticated_returns_401_or_403(
-    db, api_client, create_user, workspace, pod
-):
+def test_v1_delete_unauthenticated_returns_401_or_403(db, api_client, create_user, workspace, pod):
     r = _make_runner(create_user, workspace, pod, "v1-unauth")
     url = reverse("api-runner-delete", kwargs={"runner_id": r.id})
     resp = api_client.delete(url)
@@ -314,18 +344,13 @@ def test_v1_delete_unauthenticated_returns_401_or_403(
 
 
 @pytest.mark.unit
-def test_v1_delete_forbidden_when_token_user_cannot_manage(
-    db, api_client, workspace, pod, create_user
-):
-    """An API key whose owner is not the runner owner / a workspace
-    admin must not be able to delete via the v1 surface either."""
+def test_v1_delete_404_when_token_user_cannot_view_private_runner(db, api_client, workspace, pod, create_user):
+    """An API key whose owner is not the private runner owner cannot see it."""
     from pi_dash.db.models import APIToken, User, WorkspaceMember
 
     # Pick an explicit username to avoid colliding with the ``create_user``
     # fixture's default empty-string username on the unique constraint.
-    other = User.objects.create_user(
-        email="other-v1-forbidden@example.com", username="other-v1-forbidden"
-    )
+    other = User.objects.create_user(email="other-v1-forbidden@example.com", username="other-v1-forbidden")
     WorkspaceMember.objects.create(workspace=workspace, member=other, role=15)
     other_token = APIToken.objects.create(
         user=other,
@@ -336,19 +361,118 @@ def test_v1_delete_forbidden_when_token_user_cannot_manage(
     api_client.credentials(HTTP_X_API_KEY=other_token.token)
     url = reverse("api-runner-delete", kwargs={"runner_id": r.id})
     resp = api_client.delete(url)
-    assert resp.status_code == 403
+    assert resp.status_code == 404
     assert Runner.objects.filter(pk=r.id).exists()
 
 
 @pytest.mark.unit
-def test_v1_delete_404_when_runner_missing(
-    db, api_key_client
-):
+def test_v1_delete_404_when_runner_missing(db, api_key_client):
     """Unknown UUIDs return 404 even with valid auth."""
     import uuid
 
-    url = reverse(
-        "api-runner-delete", kwargs={"runner_id": uuid.uuid4()}
-    )
+    url = reverse("api-runner-delete", kwargs={"runner_id": uuid.uuid4()})
     resp = api_key_client.delete(url)
     assert resp.status_code == 404
+
+
+# ---- dev machine actions ---------------------------------------------------
+
+
+def _make_machine_token(user, workspace, machine, raw="mt_test"):
+    return MachineToken.objects.create(
+        user=user,
+        workspace=workspace,
+        dev_machine=machine,
+        host_label=machine.host_label or "test-host",
+        token_hash=hash_token(raw),
+        token_fingerprint=raw[-8:],
+    )
+
+
+@pytest.mark.unit
+def test_dev_machine_rotate_revokes_tokens_without_revoking_machine_or_runners(
+    db, session_client, create_user, workspace, pod
+):
+    machine = DevMachine.objects.create(owner=create_user, host_label="host-a")
+    token = _make_machine_token(create_user, workspace, machine)
+    runner = _make_runner(create_user, workspace, pod, "rotate-runner", dev_machine=machine)
+
+    with patch("pi_dash.runner.views.runners.send_runner_revoke") as send_revoke, patch(
+        "pi_dash.runner.views.runners.close_runner_session"
+    ) as close_session:
+        resp = session_client.post(
+            reverse("dev-machine-rotate", kwargs={"machine_id": machine.id}),
+            {"workspace": str(workspace.id)},
+            format="json",
+        )
+
+    assert resp.status_code == 200, resp.data
+    machine.refresh_from_db()
+    token.refresh_from_db()
+    runner.refresh_from_db()
+    assert machine.revoked_at is None
+    assert token.revoked_at is not None
+    assert runner.revoked_at is None
+    assert runner.status == RunnerStatus.ONLINE
+    send_revoke.assert_called_once_with(runner.pk, reason="machine token rotated")
+    close_session.assert_called_once_with(runner.pk)
+
+
+@pytest.mark.unit
+def test_dev_machine_revoke_revokes_tokens_machine_and_hosted_runners(
+    db, session_client, create_user, workspace, pod
+):
+    machine = DevMachine.objects.create(owner=create_user, host_label="host-b")
+    token = _make_machine_token(create_user, workspace, machine, raw="mt_revoke")
+    runner = _make_runner(create_user, workspace, pod, "revoke-runner", dev_machine=machine)
+
+    with patch("pi_dash.runner.views.runners.send_runner_revoke") as send_revoke, patch(
+        "pi_dash.runner.views.runners.close_runner_session"
+    ) as close_session:
+        resp = session_client.post(
+            reverse("dev-machine-revoke", kwargs={"machine_id": machine.id}),
+            {"workspace": str(workspace.id)},
+            format="json",
+        )
+
+    assert resp.status_code == 200, resp.data
+    machine.refresh_from_db()
+    token.refresh_from_db()
+    runner.refresh_from_db()
+    assert machine.revoked_at is not None
+    assert token.revoked_at is not None
+    assert runner.status == RunnerStatus.REVOKED
+    assert runner.revoked_reason == "dev_machine_revoked"
+    send_revoke.assert_called_once_with(runner.pk, reason="dev machine revoked")
+    close_session.assert_called_once_with(runner.pk)
+
+
+@pytest.mark.unit
+def test_dev_machine_actions_hide_other_users_private_machines(
+    db, session_client, workspace, pod
+):
+    from pi_dash.db.models import User, WorkspaceMember
+
+    other = User.objects.create_user(
+        email="other-dev-machine@example.com",
+        username="other-dev-machine",
+    )
+    WorkspaceMember.objects.create(workspace=workspace, member=other, role=15)
+    machine = DevMachine.objects.create(owner=other, host_label="host-c")
+    token = _make_machine_token(other, workspace, machine, raw="mt_other")
+    runner = _make_runner(other, workspace, pod, "other-runner", dev_machine=machine)
+
+    for route_name in ("dev-machine-rotate", "dev-machine-revoke"):
+        resp = session_client.post(
+            reverse(route_name, kwargs={"machine_id": machine.id}),
+            {"workspace": str(workspace.id)},
+            format="json",
+        )
+        assert resp.status_code == 404
+
+    machine.refresh_from_db()
+    token.refresh_from_db()
+    runner.refresh_from_db()
+    assert machine.revoked_at is None
+    assert token.revoked_at is None
+    assert runner.revoked_at is None
