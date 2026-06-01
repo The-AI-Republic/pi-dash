@@ -27,6 +27,7 @@ from django.utils import timezone
 
 from pi_dash.runner.models import DevMachine, MachineToken, Pod, Runner, RunnerStatus
 from pi_dash.runner.services.runner_delete import parse_purge_local
+from pi_dash.runner.services.tokens import hash_token
 
 
 @pytest.fixture
@@ -372,3 +373,106 @@ def test_v1_delete_404_when_runner_missing(db, api_key_client):
     url = reverse("api-runner-delete", kwargs={"runner_id": uuid.uuid4()})
     resp = api_key_client.delete(url)
     assert resp.status_code == 404
+
+
+# ---- dev machine actions ---------------------------------------------------
+
+
+def _make_machine_token(user, workspace, machine, raw="mt_test"):
+    return MachineToken.objects.create(
+        user=user,
+        workspace=workspace,
+        dev_machine=machine,
+        host_label=machine.host_label or "test-host",
+        token_hash=hash_token(raw),
+        token_fingerprint=raw[-8:],
+    )
+
+
+@pytest.mark.unit
+def test_dev_machine_rotate_revokes_tokens_without_revoking_machine_or_runners(
+    db, session_client, create_user, workspace, pod
+):
+    machine = DevMachine.objects.create(owner=create_user, host_label="host-a")
+    token = _make_machine_token(create_user, workspace, machine)
+    runner = _make_runner(create_user, workspace, pod, "rotate-runner", dev_machine=machine)
+
+    with patch("pi_dash.runner.views.runners.send_runner_revoke") as send_revoke, patch(
+        "pi_dash.runner.views.runners.close_runner_session"
+    ) as close_session:
+        resp = session_client.post(
+            reverse("dev-machine-rotate", kwargs={"machine_id": machine.id}),
+            {"workspace": str(workspace.id)},
+            format="json",
+        )
+
+    assert resp.status_code == 200, resp.data
+    machine.refresh_from_db()
+    token.refresh_from_db()
+    runner.refresh_from_db()
+    assert machine.revoked_at is None
+    assert token.revoked_at is not None
+    assert runner.revoked_at is None
+    assert runner.status == RunnerStatus.ONLINE
+    send_revoke.assert_called_once_with(runner.pk, reason="machine token rotated")
+    close_session.assert_called_once_with(runner.pk)
+
+
+@pytest.mark.unit
+def test_dev_machine_revoke_revokes_tokens_machine_and_hosted_runners(
+    db, session_client, create_user, workspace, pod
+):
+    machine = DevMachine.objects.create(owner=create_user, host_label="host-b")
+    token = _make_machine_token(create_user, workspace, machine, raw="mt_revoke")
+    runner = _make_runner(create_user, workspace, pod, "revoke-runner", dev_machine=machine)
+
+    with patch("pi_dash.runner.views.runners.send_runner_revoke") as send_revoke, patch(
+        "pi_dash.runner.views.runners.close_runner_session"
+    ) as close_session:
+        resp = session_client.post(
+            reverse("dev-machine-revoke", kwargs={"machine_id": machine.id}),
+            {"workspace": str(workspace.id)},
+            format="json",
+        )
+
+    assert resp.status_code == 200, resp.data
+    machine.refresh_from_db()
+    token.refresh_from_db()
+    runner.refresh_from_db()
+    assert machine.revoked_at is not None
+    assert token.revoked_at is not None
+    assert runner.status == RunnerStatus.REVOKED
+    assert runner.revoked_reason == "dev_machine_revoked"
+    send_revoke.assert_called_once_with(runner.pk, reason="dev machine revoked")
+    close_session.assert_called_once_with(runner.pk)
+
+
+@pytest.mark.unit
+def test_dev_machine_actions_hide_other_users_private_machines(
+    db, session_client, workspace, pod
+):
+    from pi_dash.db.models import User, WorkspaceMember
+
+    other = User.objects.create_user(
+        email="other-dev-machine@example.com",
+        username="other-dev-machine",
+    )
+    WorkspaceMember.objects.create(workspace=workspace, member=other, role=15)
+    machine = DevMachine.objects.create(owner=other, host_label="host-c")
+    token = _make_machine_token(other, workspace, machine, raw="mt_other")
+    runner = _make_runner(other, workspace, pod, "other-runner", dev_machine=machine)
+
+    for route_name in ("dev-machine-rotate", "dev-machine-revoke"):
+        resp = session_client.post(
+            reverse(route_name, kwargs={"machine_id": machine.id}),
+            {"workspace": str(workspace.id)},
+            format="json",
+        )
+        assert resp.status_code == 404
+
+    machine.refresh_from_db()
+    token.refresh_from_db()
+    runner.refresh_from_db()
+    assert machine.revoked_at is None
+    assert token.revoked_at is None
+    assert runner.revoked_at is None

@@ -4,6 +4,7 @@
 
 from django.db import transaction
 from django.db.models import Count, Max, Q
+from django.utils import timezone
 from rest_framework import status
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
@@ -14,6 +15,7 @@ from pi_dash.runner.models import DevMachine, MachineToken, Pod, Runner, RunnerS
 from pi_dash.runner.serializers import DevMachineSerializer, RunnerSerializer
 from pi_dash.runner.services.permissions import (
     can_manage_runner,
+    can_view_dev_machine,
     can_view_runner,
     is_workspace_member,
     runner_visible_to_user_q,
@@ -32,7 +34,7 @@ class DevMachineListEndpoint(APIView):
     """List the caller's dev machines that are attached to a workspace.
 
     ``DevMachine`` is user-scoped, but the product page is workspace-scoped.
-    A machine appears here when it has at least one visible runner or active
+    A machine appears here when it has at least one visible runner or known
     machine token in the requested workspace.
     """
 
@@ -63,7 +65,6 @@ class DevMachineListEndpoint(APIView):
             MachineToken.objects.filter(
                 workspace_id=workspace_id,
                 user=request.user,
-                revoked_at__isnull=True,
                 dev_machine__isnull=False,
             )
             .values_list("dev_machine_id", flat=True)
@@ -92,6 +93,126 @@ class DevMachineListEndpoint(APIView):
             .order_by("-last_seen_at", "-created_at")
         )
         return Response(DevMachineSerializer(qs, many=True).data)
+
+
+def _request_workspace_id(request):
+    return (request.data.get("workspace") or request.query_params.get("workspace") or "").strip()
+
+
+def _machine_is_in_workspace_scope(user, machine: DevMachine, workspace_id) -> bool:
+    """True when the workspace-scoped dev-machine page may act on machine."""
+    if not can_view_dev_machine(user, machine):
+        return False
+    runner_exists = Runner.objects.filter(
+        workspace_id=workspace_id,
+        owner=user,
+        visibility=Visibility.PRIVATE,
+        dev_machine=machine,
+    ).exists()
+    token_exists = MachineToken.objects.filter(
+        workspace_id=workspace_id,
+        user=user,
+        dev_machine=machine,
+    ).exists()
+    return runner_exists or token_exists
+
+
+def _serialize_dev_machine(machine: DevMachine, user, workspace_id):
+    workspace_runner_filter = Q(
+        runners__workspace_id=workspace_id,
+        runners__owner=user,
+        runners__visibility=Visibility.PRIVATE,
+    )
+    online_runner_filter = workspace_runner_filter & Q(
+        runners__revoked_at__isnull=True,
+        runners__status__in=[RunnerStatus.ONLINE, RunnerStatus.BUSY],
+    )
+    row = (
+        DevMachine.objects.filter(pk=machine.pk)
+        .annotate(
+            runner_count=Count("runners", filter=workspace_runner_filter, distinct=True),
+            online_runner_count=Count("runners", filter=online_runner_filter, distinct=True),
+            last_heartbeat_at=Max("runners__last_heartbeat_at", filter=workspace_runner_filter),
+        )
+        .first()
+    )
+    return DevMachineSerializer(row or machine).data
+
+
+class DevMachineRevokeEndpoint(APIView):
+    """Revoke a dev machine and invalidate all active tokens for it."""
+
+    authentication_classes = [BaseSessionAuthentication]
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, machine_id):
+        workspace_id = _request_workspace_id(request)
+        if not workspace_id:
+            return Response(
+                {"error": "workspace is required"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if not is_workspace_member(request.user, workspace_id):
+            return Response({"error": "forbidden"}, status=status.HTTP_403_FORBIDDEN)
+
+        with transaction.atomic():
+            machine = DevMachine.objects.select_for_update().filter(pk=machine_id).first()
+            if machine is None or not _machine_is_in_workspace_scope(request.user, machine, workspace_id):
+                return Response({"error": "not found"}, status=status.HTTP_404_NOT_FOUND)
+
+            now = timezone.now()
+            if machine.revoked_at is None:
+                machine.revoked_at = now
+                machine.save(update_fields=["revoked_at", "updated_at"])
+            MachineToken.objects.filter(dev_machine=machine, revoked_at__isnull=True).update(revoked_at=now)
+            runners = list(Runner.objects.select_for_update().filter(dev_machine=machine, revoked_at__isnull=True))
+
+            # Enqueue before Runner.revoke() closes sessions; this mirrors runner-delete.
+            for runner in runners:
+                send_runner_revoke(runner.pk, reason="dev machine revoked")
+            for runner in runners:
+                runner.revoke(reason="dev_machine_revoked")
+                close_runner_session(runner.pk)
+
+        return Response(_serialize_dev_machine(machine, request.user, workspace_id), status=status.HTTP_200_OK)
+
+
+class DevMachineRotateEndpoint(APIView):
+    """Invalidate active dev-machine tokens without revoking the machine row."""
+
+    authentication_classes = [BaseSessionAuthentication]
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, machine_id):
+        workspace_id = _request_workspace_id(request)
+        if not workspace_id:
+            return Response(
+                {"error": "workspace is required"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if not is_workspace_member(request.user, workspace_id):
+            return Response({"error": "forbidden"}, status=status.HTTP_403_FORBIDDEN)
+
+        with transaction.atomic():
+            machine = DevMachine.objects.select_for_update().filter(pk=machine_id).first()
+            if machine is None or not _machine_is_in_workspace_scope(request.user, machine, workspace_id):
+                return Response({"error": "not found"}, status=status.HTTP_404_NOT_FOUND)
+            if machine.revoked_at is not None:
+                return Response(
+                    {"error": "dev_machine_revoked"},
+                    status=status.HTTP_409_CONFLICT,
+                )
+
+            now = timezone.now()
+            MachineToken.objects.filter(dev_machine=machine, revoked_at__isnull=True).update(revoked_at=now)
+            runner_ids = list(
+                Runner.objects.filter(dev_machine=machine, revoked_at__isnull=True).values_list("pk", flat=True)
+            )
+            for runner_id in runner_ids:
+                send_runner_revoke(runner_id, reason="machine token rotated")
+                close_runner_session(runner_id)
+
+        return Response(_serialize_dev_machine(machine, request.user, workspace_id), status=status.HTTP_200_OK)
 
 
 class RunnerListEndpoint(APIView):

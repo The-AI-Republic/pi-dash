@@ -6,7 +6,7 @@
 
 import { useState } from "react";
 import { observer } from "mobx-react";
-import { Check, Copy, Cpu, Download, Laptop, Terminal } from "lucide-react";
+import { Ban, Check, Copy, Cpu, Download, Laptop, RotateCw, Terminal } from "lucide-react";
 import useSWR from "swr";
 import { useTranslation } from "@pi-dash/i18n";
 import { Button, getButtonStyling } from "@pi-dash/propel/button";
@@ -14,7 +14,7 @@ import { TOAST_TYPE, setToast } from "@pi-dash/propel/toast";
 import { RunnerService } from "@pi-dash/services";
 import type { IDevMachine } from "@pi-dash/types";
 import type { TBadgeVariant } from "@pi-dash/ui";
-import { Badge } from "@pi-dash/ui";
+import { AlertModalCore, Badge } from "@pi-dash/ui";
 import { PageHead } from "@/components/core/page-title";
 import { AddRunnerModal } from "@/components/runners/add-runner-modal";
 import { useWorkspace } from "@/hooks/store/use-workspace";
@@ -74,11 +74,57 @@ const AiDevMachinesPage = observer(function AiDevMachinesPage() {
     : t("ai_dev_machines.title");
 
   const [addOpen, setAddOpen] = useState(false);
-  const { data: devMachines, error: devMachinesError } = useSWR<IDevMachine[]>(
+  const [rotateMachine, setRotateMachine] = useState<IDevMachine | null>(null);
+  const [revokeMachine, setRevokeMachine] = useState<IDevMachine | null>(null);
+  const [rotating, setRotating] = useState(false);
+  const [revoking, setRevoking] = useState(false);
+  const {
+    data: devMachines,
+    error: devMachinesError,
+    mutate: mutateDevMachines,
+  } = useSWR<IDevMachine[]>(
     workspaceId ? ["dev-machines", workspaceId] : null,
     () => service.listDevMachines(workspaceId!),
     { refreshInterval: 5_000 }
   );
+
+  async function confirmRotateMachine() {
+    if (!rotateMachine || !workspaceId) return;
+    setRotating(true);
+    try {
+      await service.rotateDevMachine(rotateMachine.id, workspaceId);
+      setRotateMachine(null);
+      mutateDevMachines();
+    } catch (e: unknown) {
+      const err = e as { error?: string } | null;
+      setToast({
+        type: TOAST_TYPE.ERROR,
+        title: t("runners.toast.error_title"),
+        message: err?.error ?? t("ai_dev_machines.list.rotate_failed"),
+      });
+    } finally {
+      setRotating(false);
+    }
+  }
+
+  async function confirmRevokeMachine() {
+    if (!revokeMachine || !workspaceId) return;
+    setRevoking(true);
+    try {
+      await service.revokeDevMachine(revokeMachine.id, workspaceId);
+      setRevokeMachine(null);
+      mutateDevMachines();
+    } catch (e: unknown) {
+      const err = e as { error?: string } | null;
+      setToast({
+        type: TOAST_TYPE.ERROR,
+        title: t("runners.toast.error_title"),
+        message: err?.error ?? t("ai_dev_machines.list.revoke_failed"),
+      });
+    } finally {
+      setRevoking(false);
+    }
+  }
 
   return (
     <div className="flex flex-col gap-8 p-6">
@@ -130,19 +176,20 @@ const AiDevMachinesPage = observer(function AiDevMachinesPage() {
                 <th className="px-3 py-2">{t("ai_dev_machines.list.columns.runners")}</th>
                 <th className="px-3 py-2">{t("ai_dev_machines.list.columns.last_seen")}</th>
                 <th className="px-3 py-2">{t("ai_dev_machines.list.columns.last_heartbeat")}</th>
+                <th className="px-3 py-2"></th>
               </tr>
             </thead>
             <tbody>
               {devMachinesError && (
                 <tr>
-                  <td colSpan={5} className="px-3 py-8 text-center text-danger-primary">
+                  <td colSpan={6} className="px-3 py-8 text-center text-danger-primary">
                     {t("ai_dev_machines.list.load_failed")}
                   </td>
                 </tr>
               )}
               {!devMachinesError && !devMachines && (
                 <tr>
-                  <td colSpan={5} className="px-3 py-8 text-center text-secondary">
+                  <td colSpan={6} className="px-3 py-8 text-center text-secondary">
                     {t("ai_dev_machines.list.loading")}
                   </td>
                 </tr>
@@ -177,12 +224,36 @@ const AiDevMachinesPage = observer(function AiDevMachinesPage() {
                       <td className="px-3 py-2">
                         {formatDateTime(machine.last_heartbeat_at, t("ai_dev_machines.list.never"))}
                       </td>
+                      <td className="px-3 py-2 text-right">
+                        <div className="flex justify-end gap-2">
+                          {!machine.revoked_at && (
+                            <>
+                              <Button
+                                size="sm"
+                                variant="secondary"
+                                prependIcon={<RotateCw />}
+                                onClick={() => setRotateMachine(machine)}
+                              >
+                                {t("ai_dev_machines.list.rotate")}
+                              </Button>
+                              <Button
+                                size="sm"
+                                variant="error-outline"
+                                prependIcon={<Ban />}
+                                onClick={() => setRevokeMachine(machine)}
+                              >
+                                {t("ai_dev_machines.list.revoke")}
+                              </Button>
+                            </>
+                          )}
+                        </div>
+                      </td>
                     </tr>
                   );
                 })}
               {!devMachinesError && devMachines && devMachines.length === 0 && (
                 <tr>
-                  <td colSpan={5} className="px-3 py-8 text-center text-secondary">
+                  <td colSpan={6} className="px-3 py-8 text-center text-secondary">
                     {t("ai_dev_machines.list.empty")}
                   </td>
                 </tr>
@@ -217,6 +288,25 @@ const AiDevMachinesPage = observer(function AiDevMachinesPage() {
           workspaceSlug={workspaceSlug}
         />
       )}
+      <AlertModalCore
+        isOpen={!!rotateMachine}
+        handleClose={() => (rotating ? null : setRotateMachine(null))}
+        handleSubmit={confirmRotateMachine}
+        isSubmitting={rotating}
+        title={t("ai_dev_machines.list.rotate_confirm_title")}
+        content={t("ai_dev_machines.list.rotate_confirm_body")}
+        variant="primary"
+        primaryButtonText={{ default: t("ai_dev_machines.list.rotate"), loading: t("ai_dev_machines.list.rotate") }}
+      />
+      <AlertModalCore
+        isOpen={!!revokeMachine}
+        handleClose={() => (revoking ? null : setRevokeMachine(null))}
+        handleSubmit={confirmRevokeMachine}
+        isSubmitting={revoking}
+        title={t("ai_dev_machines.list.revoke_confirm_title")}
+        content={t("ai_dev_machines.list.revoke_confirm_body")}
+        primaryButtonText={{ default: t("ai_dev_machines.list.revoke"), loading: t("ai_dev_machines.list.revoke") }}
+      />
     </div>
   );
 });

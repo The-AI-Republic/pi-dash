@@ -43,6 +43,22 @@ export class RunnerService extends APIService {
       });
   }
 
+  async revokeDevMachine(machineId: string, workspaceId: string): Promise<IDevMachine> {
+    return this.post(`/api/runners/dev-machines/${machineId}/revoke/`, { workspace: workspaceId })
+      .then((r) => r?.data)
+      .catch((e) => {
+        throw e?.response?.data;
+      });
+  }
+
+  async rotateDevMachine(machineId: string, workspaceId: string): Promise<IDevMachine> {
+    return this.post(`/api/runners/dev-machines/${machineId}/rotate/`, { workspace: workspaceId })
+      .then((r) => r?.data)
+      .catch((e) => {
+        throw e?.response?.data;
+      });
+  }
+
   /**
    * Hard-delete a runner cloud-side. Pass ``purgeLocal: true`` to also
    * cascade the teardown to the daemon (strips the ``[[runner]]``

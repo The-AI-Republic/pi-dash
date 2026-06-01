@@ -50,6 +50,8 @@ from .run_endpoints import (
 )
 from .runners import (
     DevMachineListEndpoint,
+    DevMachineRevokeEndpoint,
+    DevMachineRotateEndpoint,
     RunnerDetailEndpoint,
     RunnerListEndpoint,
     RunnerRevokeEndpoint,
@@ -100,6 +102,8 @@ __all__ = [
     "PodListEndpoint",
     "ProjectListEndpoint",
     "DevMachineListEndpoint",
+    "DevMachineRevokeEndpoint",
+    "DevMachineRotateEndpoint",
     "RunnerDetailEndpoint",
     "RunnerListEndpoint",
     "AgentRunCancelEndpoint",

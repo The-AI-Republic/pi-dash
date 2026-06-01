@@ -709,12 +709,22 @@ export default {
       heading: "Dev machines",
       body: "Machines that have authenticated with Pi Dash or host runners for this workspace.",
       add_runner: "Add runner",
+      rotate: "Rotate",
+      revoke: "Revoke",
       loading: "Loading dev machines...",
       load_failed: "Could not load dev machines.",
+      rotate_failed: "Could not rotate the dev machine token.",
+      revoke_failed: "Could not revoke the dev machine.",
       empty: "No dev machines registered for this workspace yet.",
       never: "Never",
       machine_id: "id {id}",
       runner_count: "{active} active / {total} total",
+      rotate_confirm_title: "Rotate dev machine token?",
+      rotate_confirm_body:
+        "The active auth token for this dev machine will be invalidated. Runners on that machine will stop connecting until `pidash auth login` is run there again.",
+      revoke_confirm_title: "Revoke dev machine?",
+      revoke_confirm_body:
+        "This permanently revokes the dev machine, invalidates its auth token, and revokes runners hosted on it. Use this when the machine should no longer be trusted.",
       columns: {
         machine: "Machine",
         status: "Status",
