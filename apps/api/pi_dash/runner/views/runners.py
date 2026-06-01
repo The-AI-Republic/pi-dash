@@ -3,6 +3,7 @@
 # See the LICENSE file for details.
 
 from django.db import transaction
+from django.db.models import Q
 from rest_framework import status
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
@@ -11,7 +12,7 @@ from rest_framework.views import APIView
 from pi_dash.authentication.session import BaseSessionAuthentication
 from pi_dash.runner.models import AgentRun, Pod, Runner
 from pi_dash.runner.serializers import RunnerSerializer
-from pi_dash.runner.services.matcher import BUSY_STATUSES
+from pi_dash.runner.services.matcher import NON_TERMINAL_STATUSES
 from pi_dash.runner.services.permissions import (
     can_manage_runner,
     is_workspace_member,
@@ -118,21 +119,25 @@ class RunnerDetailEndpoint(APIView):
                         {"error": "pod is in a different workspace"},
                         status=status.HTTP_400_BAD_REQUEST,
                     )
-                # Refuse to move a runner that is actively serving a run.
-                # The run's pod FK is immutable, so a move would leave the
-                # active run pointing at the old pod while its runner now
-                # belongs to a new one — the old pod's queue silently loses
-                # the runner mid-flight, and pinned follow-ups would resolve
-                # to a runner sitting in a different pod. Only block a real
-                # move (re-sending the current pod stays a no-op). BUSY_STATUSES
-                # is the "runner is currently serving a run" set — a paused run
-                # (PAUSED_AWAITING_INPUT) frees the runner, so it doesn't block.
+                # Refuse to move a runner that has a non-terminal run *bound*
+                # to it — either one it is actively serving (``runner=``) or
+                # one reserved for it (``pinned_runner=``, e.g. a queued or
+                # paused follow-up). A run's pod FK is immutable, so a move
+                # would strand that run in the old pod: the new pod's queue
+                # can't see it (``next_for_runner`` only scans the runner's
+                # current pod) and the old pod's drain skips pinned runs, so it
+                # never dispatches. Unpinned queued runs are NOT bound to this
+                # runner (any runner in the pod can take them), so they don't
+                # block. Only a real move is guarded — re-sending the current
+                # pod stays a no-op. Mirrors the issue-side reassignment guard,
+                # which also keys on NON_TERMINAL_STATUSES.
                 if new_pod.id != runner.pod_id and AgentRun.objects.filter(
-                    runner=runner, status__in=BUSY_STATUSES
+                    Q(runner=runner) | Q(pinned_runner=runner),
+                    status__in=NON_TERMINAL_STATUSES,
                 ).exists():
                     return Response(
                         {
-                            "error": "runner is serving an active run; wait for it to finish or cancel it first",
+                            "error": "runner has an in-flight or queued run; wait for it to finish or cancel it first",
                             "code": "runner_busy",
                         },
                         status=status.HTTP_409_CONFLICT,
