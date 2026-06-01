@@ -27,6 +27,7 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from pi_dash.api.middleware.api_authentication import APIKeyAuthentication
+from pi_dash.authentication.services.cli_tokens import deactivate_api_token
 from pi_dash.authentication.session import BaseSessionAuthentication
 from pi_dash.runner.authentication import (
     RunnerAccessTokenAuthentication,
@@ -680,6 +681,7 @@ class RunnerCreateEndpoint(APIView):
                             dev_machine=dev_machine,
                             host_label=host_label,
                         )
+                        deactivate_api_token(request.auth, only_cli_device_tokens=True)
                 break
             except DevMachineOwnershipError:
                 return Response(

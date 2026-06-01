@@ -25,6 +25,7 @@ KNOWN_REVOKE_REASONS = frozenset(
         "membership_revoked",
         "refresh_token_replayed",
         "runner_removed",
+        "dev_machine_revoked",
         "self_revoked",
         "user_revoke",
     }

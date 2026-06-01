@@ -25,6 +25,10 @@ export default {
     upgrade: "Upgrade",
     stickies: "Catatan tempel",
     prompts: "Prompts",
+    ai_dev_machines: "AI Dev Machines",
+    tooltips: {
+      ai_dev_machines: "Install the pidash CLI and register dev machines as AI agent runners",
+    },
   },
   auth: {
     common: {
@@ -3075,6 +3079,73 @@ export default {
       cancel: "Batal",
       submitting: "Membuat…",
       submit: "Buat pod",
+    },
+  },
+  ai_dev_machines: {
+    title: "AI Dev Machines",
+    page_title: "{workspace} - AI Dev Machines",
+    list: {
+      heading: "Dev machines",
+      body: "Machines that have authenticated with Pi Dash or host runners for this workspace.",
+      add_runner: "Add runner",
+      rotate: "Rotate",
+      revoke: "Revoke",
+      loading: "Loading dev machines...",
+      load_failed: "Could not load dev machines.",
+      rotate_failed: "Could not rotate the dev machine token.",
+      revoke_failed: "Could not revoke the dev machine.",
+      empty: "No dev machines registered for this workspace yet.",
+      never: "Never",
+      machine_id: "id {id}",
+      runner_count: "{active} active / {total} total",
+      rotate_confirm_title: "Rotate dev machine token?",
+      rotate_confirm_body:
+        "The active auth token for this dev machine will be invalidated. Runners on that machine will stop connecting until `pidash auth login` is run there again.",
+      revoke_confirm_title: "Revoke dev machine?",
+      revoke_confirm_body:
+        "This permanently revokes the dev machine, invalidates its auth token, and revokes runners hosted on it. Use this when the machine should no longer be trusted.",
+      columns: {
+        machine: "Machine",
+        status: "Status",
+        runners: "Runners",
+        last_seen: "Last seen",
+        last_heartbeat: "Last heartbeat",
+      },
+      status: {
+        active: "Active",
+        offline: "Offline",
+        registered: "Registered",
+        revoked: "Revoked",
+      },
+    },
+    intro: {
+      heading: "What is the pidash CLI, daemon, and runner?",
+      body: "Pi Dash hands AI agents (Claude Code, Codex, …) the keys to a real dev machine so they can pick up work items, write code, and open changes. Three pieces work together to make that possible:",
+      cli: {
+        title: "pidash CLI",
+        body: "The command-line tool installed on each dev machine. Handles authentication with the cloud, manages local config (`~/.pidash/config.toml`), and exposes commands for issues, comments, and runner management (`pidash auth login`, `pidash runner add`, `pidash doctor`, …).",
+      },
+      daemon: {
+        title: "pidash daemon",
+        body: "A long-running background process that maintains the WebSocket session with Pi Dash cloud, dispatches work to the configured agent, and streams approvals + heartbeats back. One daemon per machine.",
+      },
+      runner: {
+        title: "AI Agent runner",
+        body: "A cloud-side row that represents one agent instance bound to a project (and optionally a pod). Running `pidash runner add` on a logged-in machine creates the row and binds that machine as the host. A machine can host many runners.",
+      },
+    },
+    install: {
+      heading: "Install the pidash CLI",
+      body: "Run an installer on the machine that will host your AI agent. The wrapper commands download the latest signed binary, drop `pidash` on your PATH, and walk you through the device-code login.",
+      macos_linux_label: "macOS / Linux",
+      windows_label: "Windows (PowerShell)",
+      windows_msi_label: "Windows (MSI)",
+      download_msi: "Download MSI",
+      copy_command: "Copy command",
+      copied: "Copied!",
+      copy_failed: "Could not copy to clipboard",
+      prereq:
+        "Prerequisite: the agent CLI you plan to use (`codex` or `claude`) must already be installed and on PATH. Run `pidash doctor` after install to verify.",
     },
   },
   schedulers: {

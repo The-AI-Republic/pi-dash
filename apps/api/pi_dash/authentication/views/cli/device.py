@@ -39,6 +39,10 @@ from rest_framework.views import APIView
 # Module imports
 from pi_dash.api.middleware.api_authentication import APIKeyAuthentication
 from pi_dash.authentication.session import BaseSessionAuthentication
+from pi_dash.authentication.services.cli_tokens import (
+    CLI_DEVICE_API_TOKEN_DESCRIPTION,
+    deactivate_api_token,
+)
 from pi_dash.db.models import APIToken, CLIDeviceCode, WorkspaceMember
 from pi_dash.authentication.utils.host import base_host
 from pi_dash.runner.models import DevMachine, MachineToken
@@ -356,7 +360,7 @@ class DeviceCodeTokenEndpoint(APIView):
                 workspace=row.workspace,
                 user_type=0,  # Human
                 label=f"pidash CLI · {now.strftime('%Y-%m-%d %H:%M')} UTC",
-                description="Issued by pidash auth login (device-code flow).",
+                description=CLI_DEVICE_API_TOKEN_DESCRIPTION,
             )
             row.consumed = True
             row.save(update_fields=["consumed", "last_polled_at", "updated_at"])
@@ -459,6 +463,8 @@ class DeviceMachineTokenEndpoint(APIView):
                     dev_machine=dev_machine,
                     host_label=host_label,
                 )
+                if getattr(request, "auth_machine_token", None) is None:
+                    deactivate_api_token(request.auth, only_cli_device_tokens=True)
         except DevMachineOwnershipError:
             return Response(
                 {"error": "dev_machine_not_found"},

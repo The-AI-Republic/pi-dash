@@ -17,6 +17,7 @@ from uuid import uuid4
 import pytest
 from django.utils import timezone
 
+from pi_dash.authentication.services.cli_tokens import CLI_DEVICE_API_TOKEN_DESCRIPTION
 from pi_dash.db.models import APIToken, CLIDeviceCode
 from pi_dash.runner.models import DevMachine, MachineToken, Runner, Visibility
 from pi_dash.runner.services import tokens as runner_tokens
@@ -136,6 +137,40 @@ def test_revoke_marks_token_inactive_idempotently(db, api_key_client, api_token)
     assert resp.status_code == 200
 
 
+@pytest.mark.unit
+def test_machine_token_exchange_consumes_device_flow_api_token(db, api_client, create_user, workspace):
+    api_token = APIToken.objects.create(
+        user=create_user,
+        workspace=workspace,
+        user_type=0,
+        label="pidash CLI bridge",
+        description=CLI_DEVICE_API_TOKEN_DESCRIPTION,
+    )
+    dev_machine_id = uuid4()
+    api_client.credentials(HTTP_X_API_KEY=api_token.token)
+
+    resp = api_client.post(
+        "/api/v1/auth/machine-token/",
+        {
+            "workspace_slug": workspace.slug,
+            "dev_machine_id": str(dev_machine_id),
+            "host_label": "test-host",
+        },
+        format="json",
+    )
+
+    assert resp.status_code == 201, resp.data
+    assert resp.data["machine_token"].startswith("mt_")
+    api_token.refresh_from_db()
+    assert api_token.is_active is False
+    assert MachineToken.objects.filter(
+        user=create_user,
+        workspace=workspace,
+        dev_machine_id=dev_machine_id,
+        revoked_at__isnull=True,
+    ).exists()
+
+
 # -------------------- CLI-initiated runner mint --------------------
 
 
@@ -253,6 +288,35 @@ def test_runner_create_with_machine_token_reuses_shared_dev_machine_token(
     assert set(Runner.objects.filter(name__in=["runner_a", "runner_b"]).values_list("dev_machine_id", flat=True)) == {
         dev_machine_id,
     }
+
+
+@pytest.mark.unit
+def test_runner_create_consumes_legacy_cli_api_token(db, api_client, create_user, workspace, project):
+    api_token = APIToken.objects.create(
+        user=create_user,
+        workspace=workspace,
+        user_type=0,
+        label="pidash CLI bridge",
+        description=CLI_DEVICE_API_TOKEN_DESCRIPTION,
+    )
+    api_client.credentials(HTTP_X_API_KEY=api_token.token)
+
+    resp = api_client.post(
+        "/api/v1/runner/runners/",
+        {
+            "workspace_slug": workspace.slug,
+            "project": project.identifier,
+            "dev_machine_id": str(uuid4()),
+            "host_label": "test-host",
+            "name": "legacy_cli_token_runner",
+        },
+        format="json",
+    )
+
+    assert resp.status_code == 201, resp.data
+    assert resp.data["machine_token"].startswith("mt_")
+    api_token.refresh_from_db()
+    assert api_token.is_active is False
 
 
 @pytest.mark.unit

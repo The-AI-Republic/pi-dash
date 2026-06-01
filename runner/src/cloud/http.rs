@@ -46,6 +46,10 @@ pub enum TransportError {
     RefreshTokenReplayed,
     #[error("auth: membership_revoked")]
     MembershipRevoked,
+    #[error("auth: machine_token_revoked")]
+    MachineTokenRevoked,
+    #[error("auth: dev_machine_revoked")]
+    DevMachineRevoked,
     #[error("auth: runner_revoked")]
     RunnerRevoked,
     #[error("auth: runner_id_mismatch")]
@@ -90,6 +94,8 @@ impl TransportError {
             self,
             TransportError::RefreshTokenReplayed
                 | TransportError::MembershipRevoked
+                | TransportError::MachineTokenRevoked
+                | TransportError::DevMachineRevoked
                 | TransportError::RunnerRevoked
                 | TransportError::RunnerIdMismatch
                 | TransportError::InvalidRefreshToken
@@ -339,6 +345,8 @@ impl TransportErrorCode {
             "auth: access_token_expired" => TransportError::AccessTokenExpired,
             "auth: refresh_token_replayed" => TransportError::RefreshTokenReplayed,
             "auth: membership_revoked" => TransportError::MembershipRevoked,
+            "auth: machine_token_revoked" => TransportError::MachineTokenRevoked,
+            "auth: dev_machine_revoked" => TransportError::DevMachineRevoked,
             "auth: runner_revoked" => TransportError::RunnerRevoked,
             "auth: runner_id_mismatch" => TransportError::RunnerIdMismatch,
             "auth: invalid_refresh_token" => TransportError::InvalidRefreshToken,
@@ -1630,6 +1638,12 @@ fn map_auth_error(status: StatusCode, body: &str) -> TransportError {
         if body.contains("membership_revoked") {
             return TransportError::MembershipRevoked;
         }
+        if body.contains("machine_token_revoked") {
+            return TransportError::MachineTokenRevoked;
+        }
+        if body.contains("dev_machine_revoked") {
+            return TransportError::DevMachineRevoked;
+        }
         if body.contains("runner_revoked") {
             return TransportError::RunnerRevoked;
         }
@@ -1864,6 +1878,16 @@ mod tests {
     fn auth_error_mapping() {
         let err = map_auth_error(StatusCode::UNAUTHORIZED, "{\"error\":\"runner_revoked\"}");
         assert!(matches!(err, TransportError::RunnerRevoked));
+        let err = map_auth_error(
+            StatusCode::UNAUTHORIZED,
+            "{\"error\":\"machine_token_revoked\"}",
+        );
+        assert!(matches!(err, TransportError::MachineTokenRevoked));
+        let err = map_auth_error(
+            StatusCode::UNAUTHORIZED,
+            "{\"error\":\"dev_machine_revoked\"}",
+        );
+        assert!(matches!(err, TransportError::DevMachineRevoked));
         let err = map_auth_error(StatusCode::FORBIDDEN, "{\"error\":\"runner_id_mismatch\"}");
         assert!(matches!(err, TransportError::RunnerIdMismatch));
     }
@@ -1872,6 +1896,8 @@ mod tests {
     fn fatal_classification() {
         assert!(TransportError::RunnerRevoked.is_fatal_for_runner());
         assert!(TransportError::RefreshTokenReplayed.is_fatal_for_runner());
+        assert!(TransportError::MachineTokenRevoked.is_fatal_for_runner());
+        assert!(TransportError::DevMachineRevoked.is_fatal_for_runner());
         let teardown = TransportError::LocalTeardown("runner removed".into());
         assert!(teardown.is_fatal_for_runner());
         assert!(teardown.is_expected_teardown());
