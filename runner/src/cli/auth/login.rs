@@ -68,6 +68,12 @@ struct TokenSuccess {
 }
 
 #[derive(Debug, Deserialize)]
+struct MachineTokenResponse {
+    machine_token: String,
+    workspace_slug: String,
+}
+
+#[derive(Debug, Deserialize)]
 struct TokenError {
     error: String,
 }
@@ -122,8 +128,12 @@ async fn login_and_bind_workspace(args: &Args, paths: &Paths) -> Result<LoginOut
 
     let token = poll_for_token(&client, &cloud_url, &start).await?;
 
+    // Persist the short-lived bridge APIToken just long enough to seed the
+    // local config and workspace binding. It is replaced below by a shared
+    // dev-machine MachineToken, which is the credential used by both the CLI
+    // and all runners hosted by this install.
     runner_ops::write_cli_token(paths, &cloud_url, &token.access_token)
-        .context("writing [cli].token to config.toml")?;
+        .context("writing temporary [cli].token to config.toml")?;
 
     println!();
     if let Some(email) = token.user_email.as_deref() {
@@ -142,12 +152,30 @@ async fn login_and_bind_workspace(args: &Args, paths: &Paths) -> Result<LoginOut
         args.workspace.as_deref(),
     )
     .await?;
-    println!("  Workspace: {workspace_slug}");
+    let dev_machine_id =
+        runner_ops::ensure_dev_machine_id(paths).context("ensuring local dev-machine identity")?;
+    let host_label = crate::util::hostname::default_hostname();
+    let machine_token = exchange_for_machine_token(
+        &client,
+        &cloud_url,
+        &token.access_token,
+        &workspace_slug,
+        &dev_machine_id,
+        &host_label,
+    )
+    .await?;
+    runner_ops::write_cli_token(paths, &cloud_url, &machine_token.machine_token)
+        .context("writing dev-machine token to config.toml")?;
+    if machine_token.workspace_slug != workspace_slug {
+        runner_ops::write_cli_workspace(paths, &machine_token.workspace_slug)
+            .context("writing returned workspace binding to config.toml")?;
+    }
+    println!("  Workspace: {}", machine_token.workspace_slug);
 
     Ok(LoginOutcome {
         cloud_url,
-        access_token: token.access_token,
-        workspace_slug,
+        access_token: machine_token.machine_token,
+        workspace_slug: machine_token.workspace_slug,
     })
 }
 
@@ -164,9 +192,7 @@ fn resolve_cloud_url(args: &Args, paths: &Paths) -> Result<String> {
     if std::io::stdin().is_terminal() {
         return prompt_for_cloud_url();
     }
-    anyhow::bail!(
-        "no cloud URL configured — pass --url https://your-pi-dash-instance.example.com"
-    );
+    anyhow::bail!("no cloud URL configured — pass --url https://your-pi-dash-instance.example.com");
 }
 
 fn prompt_for_cloud_url() -> Result<String> {
@@ -356,9 +382,7 @@ async fn resolve_workspace_binding(
     } else {
         if stored.is_some() {
             println!();
-            println!(
-                "(Previous workspace binding is no longer valid — pick a new one.)"
-            );
+            println!("(Previous workspace binding is no longer valid — pick a new one.)");
         }
         let picked = pick_workspace(&workspaces)?;
         picked.slug.clone()
@@ -397,9 +421,38 @@ async fn fetch_workspaces(
         let body = resp.text().await.unwrap_or_default();
         anyhow::bail!("workspace list failed: HTTP {status}: {body}");
     }
-    let parsed: WorkspaceListResponse =
-        resp.json().await.context("parsing workspace list")?;
+    let parsed: WorkspaceListResponse = resp.json().await.context("parsing workspace list")?;
     Ok(parsed.workspaces)
+}
+
+async fn exchange_for_machine_token(
+    client: &reqwest::Client,
+    cloud_url: &str,
+    api_token: &str,
+    workspace_slug: &str,
+    dev_machine_id: &uuid::Uuid,
+    host_label: &str,
+) -> Result<MachineTokenResponse> {
+    let url = format!("{cloud_url}/api/v1/auth/machine-token/");
+    let resp = client
+        .post(&url)
+        .header("X-Api-Key", api_token)
+        .json(&serde_json::json!({
+            "workspace_slug": workspace_slug,
+            "dev_machine_id": dev_machine_id,
+            "host_label": host_label,
+        }))
+        .send()
+        .await
+        .with_context(|| format!("POST {url}"))?;
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+        anyhow::bail!("machine-token exchange failed: HTTP {status}: {body}");
+    }
+    resp.json::<MachineTokenResponse>()
+        .await
+        .context("parsing machine-token exchange response")
 }
 
 fn pick_workspace(workspaces: &[WorkspaceRow]) -> Result<&WorkspaceRow> {
@@ -440,7 +493,9 @@ async fn maybe_offer_runner_add(
     if existing_runners > 0 {
         println!();
         println!("This host already has {existing_runners} runner(s) registered.");
-        println!("Use `pidash runner add` to register another, or `pidash runner list` to see them.");
+        println!(
+            "Use `pidash runner add` to register another, or `pidash runner list` to see them."
+        );
         return Ok(());
     }
 
@@ -448,16 +503,17 @@ async fn maybe_offer_runner_add(
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(15))
         .build()?;
-    let projects =
-        match fetch_projects(&client, cloud_url, api_token).await {
-            Ok(p) => p,
-            Err(e) => {
-                // Non-fatal: we logged in fine, the picker just can't run.
-                println!();
-                println!("(Couldn't list projects: {e}. You can run `pidash runner add --project <SLUG>` later.)");
-                return Ok(());
-            }
-        };
+    let projects = match fetch_projects(&client, cloud_url, api_token).await {
+        Ok(p) => p,
+        Err(e) => {
+            // Non-fatal: we logged in fine, the picker just can't run.
+            println!();
+            println!(
+                "(Couldn't list projects: {e}. You can run `pidash runner add --project <SLUG>` later.)"
+            );
+            return Ok(());
+        }
+    };
 
     if projects.is_empty() {
         println!();
@@ -522,7 +578,10 @@ async fn fetch_projects(
 fn pick_project(projects: &[ProjectRow]) -> Result<Option<&ProjectRow>> {
     use std::io::BufRead;
     if projects.len() == 1 {
-        print!("Register this host for project '{}'? [Y/n] ", projects[0].identifier);
+        print!(
+            "Register this host for project '{}'? [Y/n] ",
+            projects[0].identifier
+        );
         std::io::stdout().flush().ok();
         let stdin = std::io::stdin();
         let mut line = String::new();

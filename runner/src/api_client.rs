@@ -65,7 +65,8 @@ impl std::error::Error for CliError {}
 /// **Resolution order** (see `CliEnv::resolve`):
 ///   1. The runner config file at `~/.config/pidash/config.toml`.
 ///      `api_url` ← `[daemon].cloud_url`,
-///      `workspace_slug` ← primary `[[runner]].workspace_slug`,
+///      `workspace_slug` ← `[cli].workspace_slug` (falling back to the
+///      primary `[[runner]].workspace_slug` for old configs),
 ///      `token` ← `[cli].token`.
 ///   2. If the file is missing, OR any required field is absent from
 ///      it, fall through to the corresponding env var
@@ -115,9 +116,10 @@ impl CliEnv {
             .map(|c| c.daemon.cloud_url.trim().to_string())
             .filter(|s| !s.is_empty());
         let from_cfg_workspace = cfg.as_ref().and_then(|c| {
-            c.runners
-                .first()
-                .and_then(|r| r.workspace_slug.as_deref())
+            c.cli
+                .as_ref()
+                .and_then(|s| s.workspace_slug.as_deref())
+                .or_else(|| c.runners.first().and_then(|r| r.workspace_slug.as_deref()))
                 .map(str::to_string)
                 .filter(|s| !s.is_empty())
         });

@@ -18,7 +18,8 @@ import pytest
 from django.utils import timezone
 
 from pi_dash.db.models import APIToken, CLIDeviceCode
-from pi_dash.runner.models import DevMachine, Runner, Visibility
+from pi_dash.runner.models import DevMachine, MachineToken, Runner, Visibility
+from pi_dash.runner.services import tokens as runner_tokens
 
 
 # -------------------- device-code flow --------------------
@@ -154,8 +155,10 @@ def test_runner_create_succeeds_with_api_key(db, api_key_client, create_user, wo
     assert resp.status_code == 201, resp.data
     body = resp.data
     assert body["runner_id"]
-    assert body["refresh_token"]
-    assert body["access_token"]
+    assert body["refresh_token"] == ""
+    assert body["access_token"] == ""
+    assert body["machine_token"].startswith("mt_")
+    assert body["machine_token_minted"] is True
     assert body["workspace_slug"] == workspace.slug
     assert body["project_identifier"] == project.identifier
     assert body["protocol_version"] == 4
@@ -167,12 +170,93 @@ def test_runner_create_succeeds_with_api_key(db, api_key_client, create_user, wo
     assert runner.dev_machine.host_label == "test-host"
     assert runner.dev_machine.visibility == Visibility.PRIVATE
     assert DevMachine.objects.filter(owner=create_user, id=dev_machine_id).count() == 1
+    assert (
+        MachineToken.objects.filter(
+            user=create_user,
+            workspace=workspace,
+            dev_machine_id=dev_machine_id,
+            revoked_at__isnull=True,
+        ).count()
+        == 1
+    )
+
+    session = api_key_client.post(
+        f"/api/v1/runner/runners/{runner.id}/sessions/",
+        {
+            "version": "test",
+            "os": "linux",
+            "arch": "x86_64",
+            "status": "idle",
+            "project_slug": project.identifier,
+            "host_label": "test-host",
+            "agent_versions": {},
+        },
+        format="json",
+        HTTP_AUTHORIZATION=f"Bearer {body['machine_token']}",
+        HTTP_X_RUNNER_PROTOCOL_VERSION="4",
+    )
+    assert session.status_code == 201, session.data
+    assert session.data["welcome"]["rid"] == str(runner.id)
 
 
 @pytest.mark.unit
-def test_runner_create_uses_stable_dev_machine_id_not_host_label(
-    db, api_key_client, create_user, workspace, project
+def test_runner_create_with_machine_token_reuses_shared_dev_machine_token(
+    db, api_client, create_user, workspace, project
 ):
+    dev_machine_id = uuid4()
+    DevMachine.objects.create(
+        id=dev_machine_id,
+        owner=create_user,
+        host_label="shared-host",
+        label="shared-host",
+    )
+    raw_machine_token = "mt_shared_test_token"
+    MachineToken.objects.create(
+        user=create_user,
+        workspace=workspace,
+        dev_machine_id=dev_machine_id,
+        host_label="shared-host",
+        token_hash=runner_tokens.hash_token(raw_machine_token),
+        token_fingerprint=runner_tokens.fingerprint(raw_machine_token),
+        label="machine: shared-host",
+        is_service=True,
+    )
+
+    for name in ["runner_a", "runner_b"]:
+        resp = api_client.post(
+            "/api/v1/runner/runners/",
+            {
+                "workspace_slug": workspace.slug,
+                "project": project.identifier,
+                "dev_machine_id": str(dev_machine_id),
+                "host_label": "shared-host",
+                "name": name,
+            },
+            format="json",
+            HTTP_X_API_KEY=raw_machine_token,
+        )
+        assert resp.status_code == 201, resp.data
+        assert resp.data["refresh_token"] == ""
+        assert resp.data["access_token"] == ""
+        assert resp.data["machine_token_minted"] is False
+        assert "machine_token" not in resp.data
+
+    assert (
+        MachineToken.objects.filter(
+            user=create_user,
+            workspace=workspace,
+            dev_machine_id=dev_machine_id,
+            revoked_at__isnull=True,
+        ).count()
+        == 1
+    )
+    assert set(Runner.objects.filter(name__in=["runner_a", "runner_b"]).values_list("dev_machine_id", flat=True)) == {
+        dev_machine_id,
+    }
+
+
+@pytest.mark.unit
+def test_runner_create_uses_stable_dev_machine_id_not_host_label(db, api_key_client, create_user, workspace, project):
     first_machine_id = uuid4()
     second_machine_id = uuid4()
     for dev_machine_id, name in [
@@ -193,11 +277,10 @@ def test_runner_create_uses_stable_dev_machine_id_not_host_label(
         assert resp.status_code == 201, resp.data
 
     assert DevMachine.objects.filter(owner=create_user, host_label="same-hostname").count() == 2
-    assert set(
-        Runner.objects.filter(name__in=["runner_a", "runner_b"]).values_list(
-            "dev_machine_id", flat=True
-        )
-    ) == {first_machine_id, second_machine_id}
+    assert set(Runner.objects.filter(name__in=["runner_a", "runner_b"]).values_list("dev_machine_id", flat=True)) == {
+        first_machine_id,
+        second_machine_id,
+    }
 
 
 @pytest.mark.unit

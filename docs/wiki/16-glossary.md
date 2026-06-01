@@ -74,10 +74,10 @@ The runner's ability to swap its on-disk binary in place when the cloud advertis
 ## Auth
 
 **CLI token**
-The user-identifying token minted by `pidash auth login` (device-code flow). Stored at `~/.config/pidash/config.toml` (`0600`). Authorizes `pidash runner add`.
+The dev-machine `MachineToken` minted by `pidash auth login` (device-code flow). Stored at `~/.config/pidash/config.toml` (`0600`). Authorizes CLI commands and every runner on that dev machine.
 
-**Refresh token / access token (per runner)**
-Token pair held by each registered runner. Refresh is long-lived and rotatable; access is short-lived and used per request. Logic in `pi_dash/runner/services/tokens.py`.
+**MachineToken**
+One shared `mt_...` credential per dev machine/workspace. Runner runtime requests pair this token with an explicit runner id, so runners remain separate management units without separate secrets.
 
 **Device-code flow**
 Browser-based login that requires no token paste. Same UX as `gh auth login` / `stripe login`. Recommended.

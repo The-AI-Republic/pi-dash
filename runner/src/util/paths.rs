@@ -131,7 +131,7 @@ impl RunnerPaths {
         self.base_dir.join("identity.toml")
     }
 
-    /// `<base>/credentials.toml` — per-runner refresh-token state.
+    /// `<base>/credentials.toml` — legacy per-runner refresh-token state.
     pub fn credentials_path(&self) -> PathBuf {
         self.base_dir.join("credentials.toml")
     }

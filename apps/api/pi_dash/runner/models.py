@@ -274,12 +274,13 @@ class DevMachine(models.Model):
 
 
 class Runner(models.Model):
-    """First-class trust and worker entity (per-runner HTTPS transport).
+    """Cloud-visible worker entity under a dev machine.
 
-    Each runner owns its own refresh token, access-token generation, and
-    revocation state. ``DevMachine`` now captures the physical host grouping
-    so multiple runner rows can live on one machine while runner remains the
-    cloud-visible management and dispatch unit.
+    ``DevMachine`` owns the shared runtime credential. ``Runner`` remains the
+    management and dispatch unit, so multiple runner rows can live on one
+    machine while work assignment, sessions, and status stay per-runner.
+    Legacy refresh/access-token columns remain for already-minted
+    ``pidash connect`` compatibility paths.
     """
 
     MAX_PER_USER = 5
@@ -317,7 +318,9 @@ class Runner(models.Model):
         default=Visibility.PRIVATE,
         db_index=True,
     )
-    # Refresh-token hash and rotation state per ``design.md`` §5.3 / §6.1.
+    # Legacy refresh-token hash and rotation state for old `pidash connect`
+    # enrollments. New `pidash runner add` installs authenticate with the
+    # dev-machine MachineToken instead.
     refresh_token_hash = models.CharField(max_length=128, blank=True, default="", db_index=True)
     refresh_token_fingerprint = models.CharField(max_length=16, blank=True, default="")
     refresh_token_generation = models.PositiveIntegerField(default=0)
@@ -326,8 +329,8 @@ class Runner(models.Model):
     previous_refresh_token_hash = models.CharField(max_length=128, blank=True, default="")
     # Reserved for future Ed25519 / sidecar-verifier rollout.
     access_token_signing_key_version = models.PositiveIntegerField(default=1)
-    # One-time enrollment token state; cleared once the daemon exchanges
-    # it for the long-lived refresh token.
+    # One-time enrollment token state for the deprecated `pidash connect`
+    # compatibility path.
     enrollment_token_hash = models.CharField(max_length=128, blank=True, default="")
     enrollment_token_fingerprint = models.CharField(max_length=16, blank=True, default="")
     enrolled_at = models.DateTimeField(null=True, blank=True)
@@ -608,12 +611,10 @@ class RunMessageDedupe(models.Model):
 
 
 class MachineToken(models.Model):
-    """Machine-scoped CLI credential ("pidash auth login").
+    """Machine-scoped credential shared by CLI and runner runtime.
 
-    See ``.ai_design/move_to_https/design.md`` §5.6. Independent of
-    runner transport: a machine has at most one active MachineToken
-    per workspace/dev-machine regardless of how many
-    runners it hosts.
+    A machine has at most one active MachineToken per workspace/dev-machine
+    regardless of how many runners it hosts.
     """
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)

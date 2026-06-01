@@ -22,6 +22,7 @@ to invalidate the caller's CLI token server-side.
 
 # Python imports
 import logging
+import uuid as _uuid
 from datetime import timedelta
 
 # Django imports
@@ -40,6 +41,9 @@ from pi_dash.api.middleware.api_authentication import APIKeyAuthentication
 from pi_dash.authentication.session import BaseSessionAuthentication
 from pi_dash.db.models import APIToken, CLIDeviceCode, WorkspaceMember
 from pi_dash.authentication.utils.host import base_host
+from pi_dash.runner.models import DevMachine, MachineToken
+from pi_dash.runner.services import tokens as runner_tokens
+from pi_dash.runner.services.permissions import is_workspace_member
 
 logger = logging.getLogger("pi_dash.auth.cli")
 
@@ -56,6 +60,69 @@ DEVICE_CODE_MIN_POLL_GAP = timedelta(seconds=3)
 # collision still 500s the request, which we'd rather convert into a
 # retry. Bounded so a pathological alphabet exhaustion can't loop.
 DEVICE_CODE_START_MAX_RETRIES = 5
+
+
+class DevMachineOwnershipError(Exception):
+    pass
+
+
+def _touch_dev_machine(machine: DevMachine, *, host_label: str) -> DevMachine:
+    host_label = (host_label or "").strip()[:255]
+    now = timezone.now()
+    update_fields = ["last_seen_at", "updated_at"]
+    machine.last_seen_at = now
+    if host_label and machine.host_label != host_label:
+        machine.host_label = host_label
+        update_fields.append("host_label")
+    if host_label and not machine.label:
+        machine.label = host_label[:128]
+        update_fields.append("label")
+    machine.save(update_fields=update_fields)
+    return machine
+
+
+def _get_or_create_dev_machine(*, user, dev_machine_id: _uuid.UUID, host_label: str) -> DevMachine:
+    host_label = (host_label or "").strip()[:255]
+    now = timezone.now()
+    locked = DevMachine.objects.select_for_update().filter(pk=dev_machine_id).first()
+    if locked is not None:
+        if locked.owner_id != user.id:
+            raise DevMachineOwnershipError
+        return _touch_dev_machine(locked, host_label=host_label)
+    try:
+        with transaction.atomic():
+            return DevMachine.objects.create(
+                id=dev_machine_id,
+                owner=user,
+                host_label=host_label,
+                label=host_label[:128],
+                last_seen_at=now,
+            )
+    except IntegrityError:
+        locked = DevMachine.objects.select_for_update().filter(pk=dev_machine_id).first()
+        if locked is None or locked.owner_id != user.id:
+            raise DevMachineOwnershipError
+        return _touch_dev_machine(locked, host_label=host_label)
+
+
+def _rotate_machine_token(*, user, workspace, dev_machine: DevMachine, host_label: str) -> runner_tokens.MintedToken:
+    MachineToken.objects.select_for_update().filter(
+        workspace=workspace,
+        dev_machine=dev_machine,
+        revoked_at__isnull=True,
+    ).update(revoked_at=timezone.now())
+    minted = runner_tokens.mint_machine_token()
+    MachineToken.objects.create(
+        user=user,
+        dev_machine=dev_machine,
+        workspace=workspace,
+        host_label=host_label[:255],
+        token_hash=minted.hashed,
+        token_fingerprint=minted.fingerprint,
+        label=f"machine: {host_label[:96]}",
+        is_service=True,
+    )
+    return minted
 
 
 class DeviceCodeStartThrottle(AnonRateThrottle):
@@ -327,12 +394,86 @@ class WorkspaceListEndpoint(APIView):
             .select_related("workspace")
             .order_by("created_at")
         )
-        workspaces = [
-            {"slug": m.workspace.slug, "name": m.workspace.name}
-            for m in members
-            if m.workspace is not None
-        ]
+        workspaces = [{"slug": m.workspace.slug, "name": m.workspace.name} for m in members if m.workspace is not None]
         return Response({"workspaces": workspaces}, status=status.HTTP_200_OK)
+
+
+class DeviceMachineTokenEndpoint(APIView):
+    """Exchange the just-minted device-flow APIToken for a dev-machine token.
+
+    The APIToken is an in-memory bridge used only to finish workspace
+    selection. The CLI persists the returned ``mt_...`` token as
+    ``[cli].token``; both CLI commands and all local runners then share that
+    one dev-machine credential.
+    """
+
+    permission_classes = [IsAuthenticated]
+    authentication_classes = [APIKeyAuthentication]
+
+    def post(self, request):
+        from pi_dash.db.models.workspace import Workspace
+
+        workspace_slug = (request.data.get("workspace_slug") or "").strip()
+        dev_machine_id_raw = (request.data.get("dev_machine_id") or "").strip()
+        host_label = (request.data.get("host_label") or "").strip()[:255]
+        if not workspace_slug:
+            return Response(
+                {"error": "workspace_slug is required"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if not dev_machine_id_raw:
+            return Response(
+                {"error": "dev_machine_id is required"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if not host_label:
+            return Response(
+                {"error": "host_label is required"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        try:
+            dev_machine_id = _uuid.UUID(dev_machine_id_raw)
+        except (TypeError, ValueError, AttributeError):
+            return Response(
+                {"error": "invalid_dev_machine_id"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        workspace = Workspace.objects.filter(slug=workspace_slug).first()
+        if workspace is None or not is_workspace_member(request.user, workspace.id):
+            return Response(
+                {"error": "workspace_not_found"},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+
+        try:
+            with transaction.atomic():
+                dev_machine = _get_or_create_dev_machine(
+                    user=request.user,
+                    dev_machine_id=dev_machine_id,
+                    host_label=host_label,
+                )
+                minted = _rotate_machine_token(
+                    user=request.user,
+                    workspace=workspace,
+                    dev_machine=dev_machine,
+                    host_label=host_label,
+                )
+        except DevMachineOwnershipError:
+            return Response(
+                {"error": "dev_machine_not_found"},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+
+        return Response(
+            {
+                "machine_token": minted.raw,
+                "workspace_slug": workspace.slug,
+                "dev_machine_id": str(dev_machine.id),
+                "host_label": dev_machine.host_label,
+            },
+            status=status.HTTP_201_CREATED,
+        )
 
 
 class DeviceCodeRevokeEndpoint(APIView):
@@ -347,6 +488,10 @@ class DeviceCodeRevokeEndpoint(APIView):
     authentication_classes = [APIKeyAuthentication]
 
     def post(self, request):
+        machine_token = getattr(request, "auth_machine_token", None)
+        if machine_token is not None:
+            machine_token.revoke()
+            return Response({"ok": True}, status=status.HTTP_200_OK)
         # request.auth is the raw token string (see APIKeyAuthentication).
         raw_token = request.auth
         try:

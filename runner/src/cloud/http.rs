@@ -6,9 +6,9 @@
 // Three top-level types:
 //
 // * [`SharedHttpTransport`] — daemon-shared `reqwest::Client` pool.
-// * [`RunnerCloudClient`] — one per `RunnerInstance`. Owns that runner's
-//   refresh + access tokens, the on-disk credentials handle, and the
-//   single-flight refresh gate. All POSTs flow through it.
+// * [`RunnerCloudClient`] — one per `RunnerInstance`. Presents the shared
+//   dev-machine token on new installs, while still understanding legacy
+//   per-runner refresh credentials. All POSTs flow through it.
 // * [`HttpLoop`] — one per `RunnerInstance`. Opens a session, polls
 //   forever, and dispatches `ForceRefresh` / `Revoke` inline; everything
 //   else lands in the runner's mailbox.
@@ -151,7 +151,7 @@ impl SharedHttpTransport {
 }
 
 // ---------------------------------------------------------------------------
-// Per-runner credentials handle
+// Runtime credential handle
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -377,8 +377,9 @@ impl RunnerCloudClient {
             .map(|t| t.expires_at)
     }
 
-    /// Ensure we have a non-expired access token. Refreshes if the
-    /// current one is missing or about to expire.
+    /// Ensure we have a bearer token. New installs use the shared
+    /// dev-machine token directly; legacy installs refresh per-runner
+    /// credentials into short-lived access tokens.
     pub async fn ensure_access_token(&self) -> Result<AccessToken, TransportError> {
         {
             let guard = self.inner.state.lock().await;
@@ -391,7 +392,7 @@ impl RunnerCloudClient {
         self.refresh().await?;
         let guard = self.inner.state.lock().await;
         guard.access_token.clone().ok_or(TransportError::Protocol(
-            "no access token after refresh".into(),
+            "no bearer token after refresh".into(),
         ))
     }
 
@@ -435,6 +436,14 @@ impl RunnerCloudClient {
 
     async fn do_refresh(&self) -> Result<(), TransportError> {
         let creds = self.inner.creds.snapshot().await;
+        if creds.refresh_token.starts_with("mt_") {
+            let mut state = self.inner.state.lock().await;
+            state.access_token = Some(AccessToken {
+                raw: creds.refresh_token,
+                expires_at: Utc::now() + chrono::Duration::days(3650),
+            });
+            return Ok(());
+        }
         let url = format!(
             "{}/api/v1/runner/runners/{}/refresh/",
             self.inner.transport.cloud_url(),
@@ -508,6 +517,7 @@ impl RunnerCloudClient {
             .http()
             .post(&url)
             .header(AUTHORIZATION, format!("Bearer {}", token.raw))
+            .header("X-Runner-Id", self.inner.runner_id.to_string())
             .header("X-Runner-Protocol-Version", WIRE_VERSION.to_string())
             .json(&body)
             .send()
@@ -554,6 +564,7 @@ impl RunnerCloudClient {
             .http()
             .delete(&url)
             .header(AUTHORIZATION, format!("Bearer {}", token.raw))
+            .header("X-Runner-Id", self.inner.runner_id.to_string())
             .send()
             .await;
         let mut state = self.inner.state.lock().await;
@@ -597,6 +608,7 @@ impl RunnerCloudClient {
             .http()
             .post(&url)
             .header(AUTHORIZATION, format!("Bearer {token_raw}"))
+            .header("X-Runner-Id", self.inner.runner_id.to_string())
             .json(&body)
             .timeout(request_timeout)
             .send()
@@ -866,6 +878,7 @@ impl RunnerCloudClient {
                 .http()
                 .post(url)
                 .header(AUTHORIZATION, format!("Bearer {}", token.raw))
+                .header("X-Runner-Id", self.inner.runner_id.to_string())
                 .header("Idempotency-Key", idempotency_key);
             let resp = match req.json(&body).send().await {
                 Ok(resp) => resp,
@@ -1403,7 +1416,7 @@ impl HttpLoop {
     }
 
     pub async fn run(mut self) -> Result<(), TransportError> {
-        // 1. Bootstrap: ensure access token, open session. Both calls
+        // 1. Bootstrap: ensure bearer token, open session. Both calls
         // can hit transient network blips (request timeout, connection
         // reset, brief 5xx during cloud restart) — retry with backoff
         // so a single startup glitch doesn't kill the loop forever. Only
@@ -1799,6 +1812,7 @@ pub async fn revoke_runner_self(client: &RunnerCloudClient) -> Result<(), Transp
         .http()
         .delete(&url)
         .header("Authorization", format!("Bearer {}", token.raw))
+        .header("X-Runner-Id", client.runner_id().to_string())
         .send()
         .await
         .map_err(|e| TransportError::Network(e.to_string()))?;

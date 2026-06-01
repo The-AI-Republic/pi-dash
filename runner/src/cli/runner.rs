@@ -100,9 +100,9 @@ pub async fn run(args: RunnerArgs, paths: &Paths) -> Result<()> {
 /// Library entry point: exposed so the TUI's add-runner form can reuse the
 /// same enrollment logic without going through clap.
 ///
-/// Uses the user-scoped CLI token written by `pidash auth login` to ask
-/// the cloud to mint a runner under the caller's identity. Replaces
-/// the legacy connection-secret-bearer flow.
+/// Uses the shared dev-machine token written by `pidash auth login` to ask
+/// the cloud to create a runner under this host. Older configs with a
+/// user-scoped API token are upgraded when the cloud returns a machine token.
 pub async fn add(args: AddArgs, paths: &Paths) -> Result<RunnerConfig> {
     let runner_name = args
         .name

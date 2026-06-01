@@ -1,11 +1,11 @@
 //! Shared local-side plumbing for both `pidash connect` (legacy
 //! enrollment-token flow) and `pidash runner add` (CLI-token flow).
 //!
-//! After a successful cloud-side mint (`EnrollResponse`), both paths
-//! need to do the same local work: write `[[runner]]` to `config.toml`,
-//! drop per-runner `credentials.toml`, and install the OS service unit
-//! on first add. That shared work lives here so the two paths can't
-//! drift.
+//! After a successful cloud-side mint (`EnrollResponse`), both paths need
+//! to write `[[runner]]` to `config.toml` and install the OS service unit
+//! on first add. Legacy `pidash connect` responses also write per-runner
+//! `credentials.toml`; new `pidash runner add` responses rely on the
+//! shared dev-machine token in `[cli].token`.
 
 use anyhow::{Context, Result};
 use std::path::PathBuf;
@@ -179,8 +179,9 @@ pub struct AppliedRunner {
 /// Apply an `EnrollResponse` (from either the legacy enroll endpoint or
 /// the new CLI-initiated create endpoint) to local disk:
 ///
-/// 1. Write the per-runner refresh credential.
-/// 2. Append a new `[[runner]]` block to `config.toml`.
+/// 1. Append a new `[[runner]]` block to `config.toml`.
+/// 2. Write legacy per-runner refresh credentials only when the cloud
+///    returns them.
 ///
 /// The caller is responsible for:
 /// - Validating the cloud URL up front.
@@ -265,6 +266,29 @@ pub async fn apply_enroll_response(
     // `Err(persist_err)` arm there.)
     let runner_paths = paths.for_runner(resp.runner_id);
     runner_paths.ensure()?;
+    if let Some(machine_token) = resp
+        .machine_token
+        .as_deref()
+        .filter(|t| !t.trim().is_empty())
+    {
+        write_cli_token(paths, cloud_url, machine_token)
+            .context("writing shared dev-machine token to [cli].token")?;
+    }
+    if resp.refresh_token.trim().is_empty() {
+        let has_machine_token = load_cli_token(paths)?
+            .as_deref()
+            .map(|token| token.starts_with("mt_"))
+            .unwrap_or(false);
+        if !has_machine_token {
+            anyhow::bail!(
+                "cloud did not return per-runner credentials and no dev-machine token is configured"
+            );
+        }
+        return Ok(AppliedRunner {
+            runner: new_runner,
+            is_first_runner,
+        });
+    }
     write_runner_credentials(
         runner_paths.credentials_path(),
         RunnerCredentials {

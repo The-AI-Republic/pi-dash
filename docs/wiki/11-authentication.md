@@ -73,17 +73,17 @@ The CLI prints the verification URL and user code; approve it from any browser s
 
 ## Runner credential model
 
-After enrollment, the runner holds a **refresh / access token pair**:
+After login, the dev machine holds one shared **MachineToken**. The CLI and every runner on that local machine use the same token; the runner identity is carried separately by URL `runner_id` or `X-Runner-Id`.
 
-| Token                          | Lifetime              | Use                                                                                                        |
-| ------------------------------ | --------------------- | ---------------------------------------------------------------------------------------------------------- |
-| **CLI token**                  | Long-lived            | Identifies the _user_ on this host. Authorizes `runner add`. Stored once at login.                         |
-| **Refresh token** (per-runner) | Long-lived, rotatable | Identifies the _runner registration_. Stored at `0600`. Minted by `pidash runner add` using the CLI token. |
-| **Access token** (per-runner)  | Short-lived           | Derived from refresh token. Sent on each cloud request.                                                    |
+| Token                        | Lifetime   | Use                                                                                                         |
+| ---------------------------- | ---------- | ----------------------------------------------------------------------------------------------------------- |
+| **MachineToken** (`mt_...`)  | Long-lived | Identifies the authenticated dev machine + user + workspace. Stored once in `[cli].token` at login.         |
+| **Runner id**                | Stable     | Identifies the specific runner under that dev machine. Sent in runner URLs or `X-Runner-Id`, not secret.    |
+| **Enrollment/refresh token** | Legacy     | Kept only for already-minted `pidash connect` compatibility paths. New `pidash runner add` does not use it. |
 
-Cloud-side, refresh/access lifecycle is handled by `pi_dash/runner/services/tokens.py`.
+Cloud-side, MachineToken lifecycle is stored in `runner.MachineToken`; legacy refresh/access helpers remain in `pi_dash/runner/services/tokens.py` for compatibility.
 
-`pidash auth logout` revokes the CLI token cloud-side. `pidash runner remove` revokes the runner credentials.
+`pidash auth logout` revokes the dev-machine token cloud-side. `pidash runner remove` removes one runner row/local instance without rotating the shared machine token.
 
 ## On-disk security
 
@@ -93,6 +93,6 @@ Cloud-side, refresh/access lifecycle is handled by `pi_dash/runner/services/toke
 
 ## Where to read next
 
-- [08 — Cloud ↔ runner protocol](./08-cloud-runner-protocol.md) — how the access token is presented per request
+- [08 — Cloud ↔ runner protocol](./08-cloud-runner-protocol.md) — how the machine token and runner id are presented per request
 - [07 — Runner architecture](./07-runner-architecture.md) — `runner/src/cli/auth/` and `runner/src/config/`
 - [06 — Backend architecture](./06-backend-architecture.md) — `pi_dash/authentication/` module structure
