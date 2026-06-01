@@ -4,7 +4,7 @@
  * See the LICENSE file for details.
  */
 
-import { useEffect, useRef } from "react";
+import { useEffect } from "react";
 import useSWR from "swr";
 // pi dash imports
 import { PodService } from "@pi-dash/services";
@@ -31,16 +31,16 @@ export function PodDropdown(props: TPodDropdownProps) {
     projectId ? ["issue-pods", projectId] : null,
     projectId ? () => podService.list(undefined, projectId) : null
   );
-  // Pre-select the default pod exactly once on create, only while the field is
-  // still empty (never clobber a user's explicit pick or an existing issue).
-  const didPreselect = useRef(false);
+  // Pre-select the project's default pod on create whenever the field is empty
+  // and pods are loaded. Gating on `value` (not a once-only ref) means a
+  // project switch or "create more" reset — which clears assigned_pod_id back
+  // to null — re-defaults to the NEW project's pod instead of leaving it blank
+  // or stranding the previous project's pod. The dropdown has no clear action,
+  // so `value` only goes null via those resets, never by user intent → no loop.
   useEffect(() => {
-    if (!isForWorkItemCreation || didPreselect.current || value || !pods?.length) return;
+    if (!isForWorkItemCreation || value || !pods?.length) return;
     const defaultPod = pods.find((pod) => pod.is_default) ?? pods[0];
-    if (defaultPod) {
-      didPreselect.current = true;
-      onChange(defaultPod.id);
-    }
+    if (defaultPod) onChange(defaultPod.id);
   }, [isForWorkItemCreation, value, pods, onChange]);
 
   return <PodDropdownBase {...props} pods={pods ?? []} isInitializing={isLoading} />;

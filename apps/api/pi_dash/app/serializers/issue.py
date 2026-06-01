@@ -122,8 +122,13 @@ class IssueCreateSerializer(BaseSerializer):
     # (like state_id / parent_id) so the web client routes it the same way as
     # every other FK. The bare ``assigned_pod`` model field is removed from the
     # auto-generated set below so this is the single read/write key.
+    # ``all_objects`` (not the default manager, which hides soft-deleted pods)
+    # so a tombstoned pod id still resolves and validate() can return the
+    # friendly "pod has been deleted" message instead of DRF's generic
+    # "object does not exist". Cross-project / deleted pods are rejected in
+    # validate(), not here.
     assigned_pod_id = serializers.PrimaryKeyRelatedField(
-        source="assigned_pod", queryset=Pod.objects.all(), required=False, allow_null=True
+        source="assigned_pod", queryset=Pod.all_objects.all(), required=False, allow_null=True
     )
     label_ids = serializers.ListField(
         child=serializers.PrimaryKeyRelatedField(queryset=Label.objects.all()),
@@ -200,36 +205,36 @@ class IssueCreateSerializer(BaseSerializer):
         # the same workspace would be a cross-project routing escape hatch
         # — a Project P issue could end up assigned to Project Q's pod and
         # dispatch would happily route P's runs to Q's runners.
-        if "assigned_pod" in attrs and attrs["assigned_pod"] is not None:
-            pod = attrs["assigned_pod"]
-            project_id = self.context.get("project_id")
-            if project_id is None and self.instance is not None:
-                project_id = self.instance.project_id
-            # ``project`` may also be present in attrs on issue create.
-            if project_id is None and "project" in attrs and attrs["project"] is not None:
-                proj = attrs["project"]
-                project_id = getattr(proj, "id", proj)
-            if project_id is not None and str(pod.project_id) != str(project_id):
-                raise serializers.ValidationError(
-                    {"assigned_pod_id": "pod is in a different project"}
-                )
-            if pod.deleted_at is not None:
-                raise serializers.ValidationError(
-                    {"assigned_pod_id": "pod has been deleted"}
-                )
-            # Block mid-flight reassignment. Once a run is queued/executing its
-            # pod FK is immutable, so re-pointing the issue would silently take
-            # effect only on the *next* dispatch — confusing and unsafe. Only
-            # reject when the pod actually changes; re-sending the current pod
+        if "assigned_pod" in attrs:
+            pod = attrs["assigned_pod"]  # may be None when clearing the pod
+            if pod is not None:
+                project_id = self.context.get("project_id")
+                if project_id is None and self.instance is not None:
+                    project_id = self.instance.project_id
+                # ``project`` may also be present in attrs on issue create.
+                if project_id is None and "project" in attrs and attrs["project"] is not None:
+                    proj = attrs["project"]
+                    project_id = getattr(proj, "id", proj)
+                if project_id is not None and str(pod.project_id) != str(project_id):
+                    raise serializers.ValidationError(
+                        {"assigned_pod_id": "pod is in a different project"}
+                    )
+                if pod.deleted_at is not None:
+                    raise serializers.ValidationError(
+                        {"assigned_pod_id": "pod has been deleted"}
+                    )
+            # Block mid-flight *reassignment* — changing OR clearing the pod once
+            # a run is active. The run's pod FK is immutable, so a change would
+            # silently take effect only on the *next* dispatch (and clearing to
+            # null would re-route the next run to the project default). Initial
+            # assignment (no prior pod) is allowed; re-sending the current pod
             # (the web form re-PATCHes the full editable set on blur) is a no-op.
-            if (
-                self.instance is not None
-                and str(pod.id) != str(self.instance.assigned_pod_id)
-                and self.instance.has_active_run
-            ):
-                raise serializers.ValidationError(
-                    {"assigned_pod_id": "cannot reassign pod while the issue has an active run"}
-                )
+            if self.instance is not None and self.instance.assigned_pod_id is not None:
+                new_pod_id = pod.id if pod is not None else None
+                if str(new_pod_id) != str(self.instance.assigned_pod_id) and self.instance.has_active_run:
+                    raise serializers.ValidationError(
+                        {"assigned_pod_id": "cannot reassign pod while the issue has an active run"}
+                    )
 
         # Validate description content for security
         if "description_html" in attrs and attrs["description_html"]:
