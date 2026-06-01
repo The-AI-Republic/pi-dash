@@ -11,8 +11,17 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from pi_dash.authentication.session import BaseSessionAuthentication
-from pi_dash.runner.models import DevMachine, MachineToken, Pod, Runner, RunnerStatus, Visibility
+from pi_dash.runner.models import (
+    AgentRun,
+    DevMachine,
+    MachineToken,
+    Pod,
+    Runner,
+    RunnerStatus,
+    Visibility,
+)
 from pi_dash.runner.serializers import DevMachineSerializer, RunnerSerializer
+from pi_dash.runner.services.matcher import NON_TERMINAL_STATUSES
 from pi_dash.runner.services.permissions import (
     can_manage_runner,
     can_view_dev_machine,
@@ -303,6 +312,29 @@ class RunnerDetailEndpoint(APIView):
                     return Response(
                         {"error": "pod is in a different workspace"},
                         status=status.HTTP_400_BAD_REQUEST,
+                    )
+                # Refuse to move a runner that has a non-terminal run *bound*
+                # to it — either one it is actively serving (``runner=``) or
+                # one reserved for it (``pinned_runner=``, e.g. a queued or
+                # paused follow-up). A run's pod FK is immutable, so a move
+                # would strand that run in the old pod: the new pod's queue
+                # can't see it (``next_for_runner`` only scans the runner's
+                # current pod) and the old pod's drain skips pinned runs, so it
+                # never dispatches. Unpinned queued runs are NOT bound to this
+                # runner (any runner in the pod can take them), so they don't
+                # block. Only a real move is guarded — re-sending the current
+                # pod stays a no-op. Mirrors the issue-side reassignment guard,
+                # which also keys on NON_TERMINAL_STATUSES.
+                if new_pod.id != runner.pod_id and AgentRun.objects.filter(
+                    Q(runner=runner) | Q(pinned_runner=runner),
+                    status__in=NON_TERMINAL_STATUSES,
+                ).exists():
+                    return Response(
+                        {
+                            "error": "runner has an in-flight or queued run; wait for it to finish or cancel it first",
+                            "code": "runner_busy",
+                        },
+                        status=status.HTTP_409_CONFLICT,
                     )
                 runner.pod = new_pod
                 updates.append("pod")
