@@ -14,7 +14,6 @@ Project: {{ project.name }} ({{ project.identifier }})
 {% if project.description %}
 {{ project.description }}
 {% endif %}
-
 Issue Description:
 {% if issue.description %}
 {{ issue.description }}
