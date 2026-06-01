@@ -9,8 +9,9 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from pi_dash.authentication.session import BaseSessionAuthentication
-from pi_dash.runner.models import Pod, Runner
+from pi_dash.runner.models import AgentRun, Pod, Runner
 from pi_dash.runner.serializers import RunnerSerializer
+from pi_dash.runner.services.matcher import BUSY_STATUSES
 from pi_dash.runner.services.permissions import (
     can_manage_runner,
     is_workspace_member,
@@ -116,6 +117,25 @@ class RunnerDetailEndpoint(APIView):
                     return Response(
                         {"error": "pod is in a different workspace"},
                         status=status.HTTP_400_BAD_REQUEST,
+                    )
+                # Refuse to move a runner that is actively serving a run.
+                # The run's pod FK is immutable, so a move would leave the
+                # active run pointing at the old pod while its runner now
+                # belongs to a new one — the old pod's queue silently loses
+                # the runner mid-flight, and pinned follow-ups would resolve
+                # to a runner sitting in a different pod. Only block a real
+                # move (re-sending the current pod stays a no-op). BUSY_STATUSES
+                # is the "runner is currently serving a run" set — a paused run
+                # (PAUSED_AWAITING_INPUT) frees the runner, so it doesn't block.
+                if new_pod.id != runner.pod_id and AgentRun.objects.filter(
+                    runner=runner, status__in=BUSY_STATUSES
+                ).exists():
+                    return Response(
+                        {
+                            "error": "runner is serving an active run; wait for it to finish or cancel it first",
+                            "code": "runner_busy",
+                        },
+                        status=status.HTTP_409_CONFLICT,
                     )
                 runner.pod = new_pod
                 updates.append("pod")
