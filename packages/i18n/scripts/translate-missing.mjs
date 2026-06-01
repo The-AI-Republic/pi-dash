@@ -283,7 +283,7 @@ function buildMessages(language, items) {
         "Translate from English into the requested target language.",
         "Preserve ICU MessageFormat placeholders and plural/select syntax exactly.",
         "Preserve product names, code identifiers, markdown links, HTML tags, and keyboard shortcuts unless natural localization requires surrounding words to change.",
-        "Return only valid JSON. The JSON object must map each input key to its translated string.",
+        "Return only valid JSON. The JSON object must map each input id to its translated string.",
       ].join(" "),
     },
     {
@@ -292,7 +292,7 @@ function buildMessages(language, items) {
         {
           target_language: language.label,
           target_locale: language.value,
-          items,
+          items: items.map((item) => ({ id: item.id, source: item.source })),
         },
         null,
         2
@@ -396,7 +396,7 @@ function validateTranslations(items, translations, language) {
   const valid = {};
 
   for (const item of items) {
-    const translation = translations[item.key];
+    const translation = translations[item.id];
     if (typeof translation !== "string") {
       console.warn(`i18n: ${language.value} missing translation in response for ${item.key}`);
       continue;
@@ -462,7 +462,7 @@ async function translateLanguage(config, language) {
   const targetTranslations = readObjectLiteral(targetPath);
   const missingKeys = collectEmptyEntries(targetTranslations);
   const items = missingKeys
-    .map((key) => ({ key, source: key }))
+    .map((key, index) => ({ id: `message_${index + 1}`, key, source: key }))
     .filter((item) => item.source.length > 0)
     .slice(0, config.limit || undefined);
 

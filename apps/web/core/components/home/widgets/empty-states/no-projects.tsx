@@ -50,12 +50,12 @@ export const NoProjectsEmptyState = observer(function NoProjectsEmptyState() {
   const EMPTY_STATE_DATA = [
     {
       id: "create-project",
-      title: "home.empty.create_project.title",
-      description: "home.empty.create_project.description",
+      title: "Create a project",
+      description: "Most things start with a project in Pi Dash.",
       icon: <ProjectIcon className="size-4" />,
       flag: "projects",
       cta: {
-        text: "home.empty.create_project.cta",
+        text: "Get started",
         onClick: (e: React.MouseEvent<HTMLButtonElement, MouseEvent>) => {
           if (!canCreateProject) return;
           e.preventDefault();
@@ -67,32 +67,32 @@ export const NoProjectsEmptyState = observer(function NoProjectsEmptyState() {
     },
     {
       id: "invite-team",
-      title: "home.empty.invite_team.title",
-      description: "home.empty.invite_team.description",
+      title: "Invite your team",
+      description: "Build, ship, and manage with coworkers.",
       icon: <MembersPropertyIcon className="size-4" />,
       flag: "visited_members",
       cta: {
-        text: "home.empty.invite_team.cta",
+        text: "Get them in",
         link: `/${workspaceSlug}/settings/members`,
         disabled: !isWorkspaceAdmin,
       },
     },
     {
       id: "configure-workspace",
-      title: "home.empty.configure_workspace.title",
-      description: "home.empty.configure_workspace.description",
+      title: "Set up your workspace.",
+      description: "Turn features on or off or go beyond that.",
       icon: <Hotel className="size-4" />,
       flag: "visited_workspace",
       cta: {
-        text: "home.empty.configure_workspace.cta",
+        text: "Configure this workspace",
         link: "settings",
         disabled: !isWorkspaceAdmin,
       },
     },
     {
       id: "personalize-account",
-      title: "home.empty.personalize_account.title",
-      description: "home.empty.personalize_account.description",
+      title: "Make Pi Dash yours.",
+      description: "Choose your picture, colors, and more.",
       icon:
         currentUser?.avatar_url && currentUser?.avatar_url.trim() !== "" ? (
           <Link href={`/${workspaceSlug}/profile/${currentUser?.id}`}>
@@ -113,7 +113,7 @@ export const NoProjectsEmptyState = observer(function NoProjectsEmptyState() {
         ),
       flag: "visited_profile",
       cta: {
-        text: "home.empty.personalize_account.cta",
+        text: "Personalize now",
         link: `/settings/profile/general`,
         disabled: false,
       },

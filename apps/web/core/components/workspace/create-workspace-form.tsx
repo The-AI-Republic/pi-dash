@@ -47,8 +47,8 @@ export const CreateWorkspaceForm = observer(function CreateWorkspaceForm(props: 
     setDefaultValues,
     secondaryButton,
     primaryButtonText = {
-      loading: "workspace_creation.button.loading",
-      default: "workspace_creation.button.default",
+      loading: "Creating workspace",
+      default: "Create workspace",
     },
   } = props;
   // states

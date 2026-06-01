@@ -29,7 +29,7 @@ export const AuthEmailForm = observer(function AuthEmailForm(props: TAuthEmailFo
   // pi dash hooks
   const { t } = useTranslation();
   const emailError = useMemo(
-    () => (email && !checkEmailValidity(email) ? { email: "auth.common.email.errors.invalid" } : undefined),
+    () => (email && !checkEmailValidity(email) ? { email: "Email is invalid" } : undefined),
     [email]
   );
 
