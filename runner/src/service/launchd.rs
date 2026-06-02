@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 use tokio::process::Command;
 
@@ -149,6 +149,18 @@ pub async fn start() -> Result<()> {
     let domain = format!("gui/{uid}");
     let target = format!("{domain}/{LABEL}");
     let plist = plist_path()?;
+
+    // Precondition: the plist must exist on disk before we ask launchctl
+    // to bootstrap it. macOS reports a missing plist as the same opaque
+    // `Bootstrap failed: 5: Input/output error` that we elsewhere treat
+    // as "raced an in-flight teardown" — without this check we pass the
+    // cryptic EIO straight through to the operator. `pidash update` only
+    // swaps the binary and never rewrites the plist, so an operator who
+    // ran `pidash update` then `pidash restart` against a machine whose
+    // plist had been removed (manual cleanup, an older `pidash uninstall`,
+    // or never written for the current install location) would see the
+    // EIO without any hint that the fix is `pidash install`.
+    ensure_plist_present(&plist)?;
 
     // Snapshot the pre-action PID so `wait_for_running` can tell a fresh
     // daemon from the one we're about to kick. None = no daemon before.
@@ -539,6 +551,24 @@ pub async fn status() -> Result<String> {
     Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
 }
 
+/// Verify the LaunchAgent plist exists before we hand its path to
+/// `launchctl bootstrap`. Pulled out as a pure function so the
+/// missing-plist error message is unit-testable without spawning
+/// launchctl. The hint deliberately names `pidash install` (the
+/// command that writes the plist) and contrasts it with
+/// `pidash update` (the command that does NOT) so operators who
+/// hit this after an update know the difference.
+fn ensure_plist_present(plist: &Path) -> Result<()> {
+    if plist.exists() {
+        return Ok(());
+    }
+    anyhow::bail!(
+        "launchd plist missing at {}. Run `pidash install` to (re)write it; \
+         `pidash update` only swaps the binary and does not touch the plist.",
+        plist.display()
+    )
+}
+
 fn plist_path() -> Result<PathBuf> {
     let home = std::env::var_os("HOME")
         .map(PathBuf::from)
@@ -852,6 +882,40 @@ mod tests {
             cfg.to_lowercase().contains("config") || cfg.to_lowercase().contains("non-zero"),
             "high exit codes should suggest config/credential errors; got: {cfg}"
         );
+    }
+
+    #[test]
+    fn ensure_plist_present_errors_with_install_hint_when_missing() {
+        // Use a path that's guaranteed not to exist. The error must point
+        // the operator at `pidash install` (the command that writes the
+        // plist) and include the missing path so they can confirm what
+        // they're looking for. This replaces the cryptic
+        // `Bootstrap failed: 5: Input/output error` that launchctl
+        // returns for a missing plist.
+        let missing = std::env::temp_dir().join("pidash-ensure-plist-missing-DNE.plist");
+        let _ = std::fs::remove_file(&missing);
+        let err = ensure_plist_present(&missing).expect_err("missing plist must error");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("pidash install"),
+            "missing-plist error must point at `pidash install`; got: {msg}"
+        );
+        assert!(
+            msg.contains(&missing.display().to_string()),
+            "missing-plist error must include the path; got: {msg}"
+        );
+    }
+
+    #[test]
+    fn ensure_plist_present_ok_when_file_exists() {
+        // tempdir-free: just write into the OS temp dir under a unique
+        // name and clean up. The function only checks `exists()` so we
+        // don't care about the file's contents.
+        let present = std::env::temp_dir().join("pidash-ensure-plist-present-OK.plist");
+        std::fs::write(&present, b"x").unwrap();
+        let result = ensure_plist_present(&present);
+        let _ = std::fs::remove_file(&present);
+        assert!(result.is_ok(), "existing plist must pass; got: {result:?}");
     }
 
     #[test]
