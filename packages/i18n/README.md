@@ -53,6 +53,7 @@ export default {
 For English, the value is the same as the key. For non-English locales, new values are empty placeholders until translated.
 
 The sync command is manual. It does not run during `pnpm build`.
+It formats generated locale files before exiting.
 
 ## Translating Missing Values
 
@@ -97,6 +98,7 @@ Supported options:
 The script logs progress for each batch and writes successful batches to disk immediately. If a provider times out,
 rerun the same command to continue from the remaining empty placeholders. Use `--continue-on-error` to skip failed
 batches during a large run and leave those placeholders empty for a later retry.
+Generated locale files and translated README files are formatted before the command exits.
 
 Environment variables:
 

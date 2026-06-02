@@ -2,6 +2,7 @@
 
 import fs from "node:fs";
 import path from "node:path";
+import { spawnSync } from "node:child_process";
 import ts from "typescript";
 
 const repoRoot = path.resolve(import.meta.dirname, "../../..");
@@ -276,19 +277,46 @@ export default ${formatFlatObject(object)} as const;
 `;
 }
 
+function formatGeneratedFiles(filePaths) {
+  const uniquePaths = Array.from(new Set(filePaths)).filter((filePath) => fs.existsSync(filePath));
+  if (uniquePaths.length === 0) return;
+
+  const relativePaths = uniquePaths.map((filePath) => path.relative(repoRoot, filePath));
+  const result = spawnSync("pnpm", ["exec", "oxfmt", ...relativePaths], {
+    cwd: repoRoot,
+    stdio: "inherit",
+  });
+
+  if (result.error) {
+    throw result.error;
+  }
+
+  if (result.status !== 0) {
+    throw new Error("Failed to format generated i18n files with oxfmt.");
+  }
+
+  console.log(`i18n: formatted ${uniquePaths.length} generated files`);
+}
+
 function syncAuxiliaryLocaleFiles(languageDir) {
+  const writtenPaths = [];
+
   for (const file of auxiliaryLocaleFiles) {
     const filePath = path.join(languageDir, `${file}.ts`);
     if (fs.existsSync(filePath)) {
       fs.writeFileSync(filePath, localeFileContent({}));
+      writtenPaths.push(filePath);
     }
   }
+
+  return writtenPaths;
 }
 
 function main() {
   const usedMessageReferences = collectUsedMessages();
   const usedMessages = Array.from(usedMessageReferences.keys()).toSorted((left, right) => left.localeCompare(right));
   let totalPlaceholders = 0;
+  const writtenFiles = [];
 
   for (const language of languages) {
     const languageDir = path.join(localesRoot, language);
@@ -310,7 +338,7 @@ function main() {
     }
 
     fs.writeFileSync(targetPath, localeFileContent(nextTranslations));
-    syncAuxiliaryLocaleFiles(languageDir);
+    writtenFiles.push(targetPath, ...syncAuxiliaryLocaleFiles(languageDir));
     totalPlaceholders += emptyPlaceholders;
 
     console.log(
@@ -319,6 +347,8 @@ function main() {
       }`
     );
   }
+
+  formatGeneratedFiles(writtenFiles);
 
   console.log(
     `i18n: scanned ${usedMessages.length} source messages; wrote ${totalPlaceholders} non-English placeholders`

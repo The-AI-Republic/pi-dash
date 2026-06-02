@@ -4,6 +4,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import process from "node:process";
+import { spawnSync } from "node:child_process";
 import { IntlMessageFormat } from "intl-messageformat";
 import ts from "typescript";
 
@@ -269,6 +270,27 @@ export default ${formatFlatObject(object)} as const;
 `;
 }
 
+function formatGeneratedFiles(filePaths) {
+  const uniquePaths = Array.from(new Set(filePaths)).filter((filePath) => fs.existsSync(filePath));
+  if (uniquePaths.length === 0) return;
+
+  const relativePaths = uniquePaths.map((filePath) => path.relative(repoRoot, filePath));
+  const result = spawnSync("pnpm", ["exec", "oxfmt", ...relativePaths], {
+    cwd: repoRoot,
+    stdio: "inherit",
+  });
+
+  if (result.error) {
+    throw result.error;
+  }
+
+  if (result.status !== 0) {
+    throw new Error("Failed to format generated i18n files with oxfmt.");
+  }
+
+  console.log(`i18n: formatted ${uniquePaths.length} generated files`);
+}
+
 function chunkArray(items, size) {
   const chunks = [];
   for (let index = 0; index < items.length; index += size) {
@@ -459,7 +481,7 @@ function collectIcuArguments(ast, result) {
   }
 }
 
-async function translateLanguage(config, language) {
+async function translateLanguage(config, language, writtenFiles) {
   const languageDir = path.join(localesRoot, language.value);
   const targetPath = path.join(languageDir, targetLocaleFile);
   const targetTranslations = readObjectLiteral(targetPath);
@@ -512,6 +534,7 @@ async function translateLanguage(config, language) {
     const batchTranslatedCount = Object.keys(validTranslations).length;
     if (batchTranslatedCount > 0) {
       fs.writeFileSync(targetPath, localeFileContent(targetTranslations));
+      writtenFiles.add(targetPath);
     }
 
     console.log(
@@ -551,7 +574,7 @@ function buildReadmeMessages(language, sourceMarkdown, existingTranslation) {
   ];
 }
 
-async function translateReadme(config, language) {
+async function translateReadme(config, language, writtenFiles) {
   const targetPath = readmeTranslationTargets.get(language.value);
   if (!targetPath) return;
 
@@ -570,11 +593,13 @@ async function translateReadme(config, language) {
   }
 
   fs.writeFileSync(targetPath, `${translatedMarkdown.trim()}\n`);
+  writtenFiles.add(targetPath);
   console.log(`i18n: ${language.value} updated ${path.relative(repoRoot, targetPath)}`);
 }
 
 async function main() {
   const config = configFromArgs();
+  const writtenFiles = new Set();
 
   console.log(
     `i18n: provider=${config.provider} model=${config.model || "(dry-run)"} languages=${config.languages
@@ -584,29 +609,45 @@ async function main() {
     }`
   );
 
-  for (const language of config.languages) {
-    await translateLanguage(config, language);
-  }
-
-  if (!config.skipReadme) {
-    const readmeFailures = [];
-
+  try {
     for (const language of config.languages) {
-      try {
-        await translateReadme(config, language);
-      } catch (error) {
-        if (readmeTranslationTargets.has(language.value)) {
-          readmeFailures.push(language.value);
-          console.error(`i18n: ${language.value} README translation failed: ${formatErrorMessage(error)}`);
-        } else {
-          throw error;
+      await translateLanguage(config, language, writtenFiles);
+    }
+
+    if (!config.skipReadme) {
+      const readmeFailures = [];
+
+      for (const language of config.languages) {
+        try {
+          await translateReadme(config, language, writtenFiles);
+        } catch (error) {
+          if (readmeTranslationTargets.has(language.value)) {
+            readmeFailures.push(language.value);
+            console.error(`i18n: ${language.value} README translation failed: ${formatErrorMessage(error)}`);
+          } else {
+            throw error;
+          }
         }
+      }
+
+      if (readmeFailures.length > 0) {
+        throw new Error(`README translation failed for: ${readmeFailures.join(", ")}`);
+      }
+    }
+  } catch (error) {
+    if (!config.dryRun) {
+      try {
+        formatGeneratedFiles(writtenFiles);
+      } catch (formatError) {
+        console.error(`i18n: generated file formatting failed: ${formatErrorMessage(formatError)}`);
       }
     }
 
-    if (readmeFailures.length > 0) {
-      throw new Error(`README translation failed for: ${readmeFailures.join(", ")}`);
-    }
+    throw error;
+  }
+
+  if (!config.dryRun) {
+    formatGeneratedFiles(writtenFiles);
   }
 }
 
