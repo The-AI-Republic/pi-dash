@@ -569,6 +569,15 @@ fn ensure_plist_present(plist: &Path) -> Result<()> {
 ///
 /// We only rewrite when missing (not unconditionally on every restart) so
 /// operators hand-editing the plist for debugging don't get clobbered.
+///
+/// Gated to `target_os = "macos"` (not the module's broader `macos || test`
+/// gate) because the only call site is also `cfg(target_os = "macos")`. The
+/// module's `test` arm exists so the path/exit-status parsers are unit-
+/// testable on Linux CI runners; this self-heal does macOS-specific I/O
+/// (`write_unit` renders the launchd plist) and has no Linux test path of
+/// its own, so compiling it on Linux would just produce a dead-code warning
+/// under `-D dead-code`.
+#[cfg(target_os = "macos")]
 pub(crate) async fn rewrite_unit_if_missing(paths: &Paths) -> Result<bool> {
     let plist = plist_path()?;
     if plist.exists() {
