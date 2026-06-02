@@ -40,14 +40,14 @@ export function IssueGitAdvanced(props: Props) {
         aria-expanded={open}
       >
         <ChevronRight className={`h-3 w-3 transition-transform ${open ? "rotate-90" : ""}`} />
-        {t("issue_advanced_git") || "Advanced — git"}
+        {t("Advanced — git")}
       </button>
       {open && (
         <div className="mt-2 flex flex-col gap-1">
           <label htmlFor="git_work_branch" className="text-11 text-secondary">
-            {t("git_work_branch") || "Work branch"}
+            {t("Work branch")}
             <span className="pl-1 text-placeholder">
-              {t("git_work_branch_hint") || "(optional — pin this issue to an existing remote branch)"}
+              {t("(optional — pin this issue to an existing remote branch)")}
             </span>
           </label>
           <Controller
@@ -56,11 +56,11 @@ export function IssueGitAdvanced(props: Props) {
             rules={{
               maxLength: {
                 value: 128,
-                message: t("git_work_branch_too_long") || "Branch name is too long",
+                message: t("Branch name is too long"),
               },
               pattern: {
                 value: /^[A-Za-z0-9._/-]*$/,
-                message: t("git_work_branch_invalid_chars") || "Only letters, numbers, and . _ / - are allowed",
+                message: t("Only letters, numbers, and . _ / - are allowed"),
               },
             }}
             render={({ field: { value, onChange }, fieldState: { error } }) => (
@@ -75,7 +75,7 @@ export function IssueGitAdvanced(props: Props) {
                     handleFormChange();
                   }}
                   hasError={Boolean(error)}
-                  placeholder={t("git_work_branch_placeholder") || "Leave empty to create a new branch"}
+                  placeholder={t("Leave empty to create a new branch")}
                   className="w-full"
                 />
                 {error?.message && <span className="text-11 text-danger-primary">{error.message}</span>}

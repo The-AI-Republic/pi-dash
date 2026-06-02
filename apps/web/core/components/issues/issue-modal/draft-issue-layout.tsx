@@ -88,8 +88,8 @@ export const DraftIssueLayout = observer(function DraftIssueLayout(props: DraftI
       .then((res) => {
         setToast({
           type: TOAST_TYPE.SUCCESS,
-          title: `${t("success")}!`,
-          message: t("workspace_draft_issues.toasts.created.success"),
+          title: `${t("Success")}!`,
+          message: t("Draft created"),
         });
         onChange(null);
         setIssueDiscardModal(false);
@@ -99,8 +99,8 @@ export const DraftIssueLayout = observer(function DraftIssueLayout(props: DraftI
       .catch((_error) => {
         setToast({
           type: TOAST_TYPE.ERROR,
-          title: `${t("error")}!`,
-          message: t("workspace_draft_issues.toasts.created.error"),
+          title: `${t("Error")}!`,
+          message: t("Work item could not be created. Please try again."),
         });
       });
 

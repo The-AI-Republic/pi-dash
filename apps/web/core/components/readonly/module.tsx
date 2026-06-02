@@ -52,7 +52,7 @@ export const ReadonlyModule = observer(function ReadonlyModule(props: TReadonlyM
     return (
       <div className={cn("flex items-center gap-1 text-body-xs-regular", className)}>
         {!hideIcon && <Layers className="size-4 flex-shrink-0" />}
-        <span className="flex-grow truncate">{placeholder ?? t("common.none")}</span>
+        <span className="flex-grow truncate">{placeholder ?? t("None")}</span>
       </div>
     );
   }

@@ -81,8 +81,8 @@ export const WorkspaceInvitationsListItem = observer(function WorkspaceInvitatio
       await copyTextToClipboard(inviteLink);
       setToast({
         type: TOAST_TYPE.SUCCESS,
-        title: t("common.link_copied"),
-        message: t("entity.link_copied_to_clipboard", { entity: t("common.invite") }),
+        title: t("Link copied!"),
+        message: t("{entity} link copied to clipboard", { entity: t("Invite") }),
       });
     } catch (error) {
       console.error("Error generating invite link:", error);
@@ -93,7 +93,7 @@ export const WorkspaceInvitationsListItem = observer(function WorkspaceInvitatio
     {
       key: "copy-link",
       action: () => void handleCopyText(),
-      title: t("common.actions.copy_link"),
+      title: t("Copy link"),
       icon: LinkIcon,
       shouldRender: !!invitationDetails.invite_link,
     },
@@ -102,7 +102,7 @@ export const WorkspaceInvitationsListItem = observer(function WorkspaceInvitatio
       action: () => {
         setRemoveMemberModal(true);
       },
-      title: t("common.remove"),
+      title: t("Remove"),
       icon: TrashIcon,
       shouldRender: isAdmin,
       className: "text-danger-primary",
@@ -132,7 +132,7 @@ export const WorkspaceInvitationsListItem = observer(function WorkspaceInvitatio
         </div>
         <div className="flex items-center gap-2 text-11">
           <div className="flex items-center justify-center rounded-sm bg-label-yellow-bg-strong/20 px-2.5 py-1 text-center text-caption-sm-medium text-label-yellow-text">
-            <p>{t("common.pending")}</p>
+            <p>{t("Pending")}</p>
           </div>
           <CustomSelect
             customButton={

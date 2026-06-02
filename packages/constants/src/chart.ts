@@ -46,7 +46,7 @@ export const CHART_COLOR_PALETTES: {
 }[] = [
   {
     key: "modern",
-    i18n_label: "dashboards.widget.color_palettes.modern",
+    i18n_label: "Modern",
     light: [
       "#6172E8",
       "#8B6EDB",
@@ -74,7 +74,7 @@ export const CHART_COLOR_PALETTES: {
   },
   {
     key: "horizon",
-    i18n_label: "dashboards.widget.color_palettes.horizon",
+    i18n_label: "Horizon",
     light: [
       "#E76E50",
       "#289D90",
@@ -102,7 +102,7 @@ export const CHART_COLOR_PALETTES: {
   },
   {
     key: "earthen",
-    i18n_label: "dashboards.widget.color_palettes.earthen",
+    i18n_label: "Earthen",
     light: [
       "#386641",
       "#6A994E",

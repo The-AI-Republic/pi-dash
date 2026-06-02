@@ -83,7 +83,7 @@ export function ViewAppliedFiltersList(props: Props) {
       {isEditingAllowed && (
         <button type="button" onClick={handleClearAllFilters}>
           <Tag>
-            {t("common.clear_all")}
+            {t("Clear all")}
             <CloseIcon height={12} width={12} strokeWidth={2} />
           </Tag>
         </button>

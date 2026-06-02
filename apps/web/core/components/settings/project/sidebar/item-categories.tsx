@@ -8,7 +8,12 @@ import { observer } from "mobx-react";
 import { usePathname } from "next/navigation";
 import { useParams } from "react-router";
 // pi dash imports
-import { EUserPermissionsLevel, GROUPED_PROJECT_SETTINGS, PROJECT_SETTINGS_CATEGORIES } from "@pi-dash/constants";
+import {
+  EUserPermissionsLevel,
+  GROUPED_PROJECT_SETTINGS,
+  PROJECT_SETTINGS_CATEGORIES,
+  PROJECT_SETTINGS_CATEGORY_I18N_LABELS,
+} from "@pi-dash/constants";
 import { useTranslation } from "@pi-dash/i18n";
 // components
 import { SettingsSidebarItem } from "@/components/settings/sidebar/item";
@@ -45,7 +50,9 @@ export const ProjectSettingsSidebarItemCategories = observer(function ProjectSet
 
         return (
           <div key={category} className="shrink-0 py-3 first:pt-0 last:pb-0">
-            <div className="p-2 text-caption-md-medium text-tertiary capitalize">{t(category)}</div>
+            <div className="p-2 text-caption-md-medium text-tertiary capitalize">
+              {t(PROJECT_SETTINGS_CATEGORY_I18N_LABELS[category])}
+            </div>
             <div className="flex flex-col">
               {accessibleItems.map((item) => {
                 const isItemActive =

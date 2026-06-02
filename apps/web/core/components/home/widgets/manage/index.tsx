@@ -25,7 +25,7 @@ export const ManageWidgetsModal = observer(function ManageWidgetsModal(props: TP
   return (
     <ModalCore isOpen={isModalOpen} handleClose={handleOnClose} width={EModalWidth.MD}>
       <div className="p-4">
-        <div className="text-18 font-medium"> {t("home.manage_widgets")}</div>
+        <div className="text-18 font-medium"> {t("Manage widgets")}</div>
         <WidgetList workspaceSlug={workspaceSlug} />
       </div>
     </ModalCore>

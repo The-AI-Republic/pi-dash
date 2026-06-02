@@ -32,7 +32,7 @@ export const NotificationSidebarHeader = observer(function NotificationSidebarHe
           <Breadcrumbs.Item
             component={
               <BreadcrumbLink
-                label={t("notification.label")}
+                label={t("Inbox")}
                 icon={<InboxIcon className="h-4 w-4 text-primary" />}
                 disableTooltip
               />

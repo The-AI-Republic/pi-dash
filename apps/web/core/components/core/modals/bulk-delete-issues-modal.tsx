@@ -148,9 +148,9 @@ export const BulkDeleteIssuesModal = observer(function BulkDeleteIssuesModal(pro
     ) : (
       <div className="flex flex-col items-center justify-center px-3 py-8 text-center">
         {query === "" ? (
-          <SimpleEmptyState title={t("issue_relation.empty_state.no_issues.title")} assetPath={issuesResolvedPath} />
+          <SimpleEmptyState title={t("No work items found")} assetPath={issuesResolvedPath} />
         ) : (
-          <SimpleEmptyState title={t("issue_relation.empty_state.search.title")} assetPath={searchResolvedPath} />
+          <SimpleEmptyState title={t("No matching work items found")} assetPath={searchResolvedPath} />
         )}
       </div>
     );

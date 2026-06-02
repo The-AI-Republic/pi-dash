@@ -75,7 +75,7 @@ export const SidebarChart = observer(function SidebarChart(props: ProgressChartP
               <ProgressChart
                 distribution={completionChartDistributionData}
                 totalIssues={estimateType === "points" ? totalEstimatePoints : totalIssues}
-                plotTitle={estimateType === "points" ? t("points") : t("work_items")}
+                plotTitle={estimateType === "points" ? t("Points") : t("Work items")}
               />
             </Fragment>
           ) : (

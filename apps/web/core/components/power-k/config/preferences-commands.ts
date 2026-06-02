@@ -44,8 +44,8 @@ export const usePowerKPreferencesCommands = (): TPowerKCommandConfig[] => {
         .catch(() => {
           setToast({
             type: TOAST_TYPE.ERROR,
-            title: t("toast.error"),
-            message: t("power_k.preferences_actions.toast.theme.error"),
+            title: t("Error!"),
+            message: t("Failed to update theme. Please try again."),
           });
           return;
         });
@@ -60,16 +60,16 @@ export const usePowerKPreferencesCommands = (): TPowerKCommandConfig[] => {
         .then(() => {
           setToast({
             type: TOAST_TYPE.SUCCESS,
-            title: t("toast.success"),
-            message: t("power_k.preferences_actions.toast.timezone.success"),
+            title: t("Success!"),
+            message: t("Timezone updated successfully."),
           });
           return;
         })
         .catch(() => {
           setToast({
             type: TOAST_TYPE.ERROR,
-            title: t("toast.error"),
-            message: t("power_k.preferences_actions.toast.timezone.error"),
+            title: t("Error!"),
+            message: t("Failed to update timezone. Please try again."),
           });
           return;
         });
@@ -84,16 +84,16 @@ export const usePowerKPreferencesCommands = (): TPowerKCommandConfig[] => {
         .then(() => {
           setToast({
             type: TOAST_TYPE.SUCCESS,
-            title: t("toast.success"),
-            message: t("power_k.preferences_actions.toast.generic.success"),
+            title: t("Success!"),
+            message: t("Preferences updated successfully."),
           });
           return;
         })
         .catch(() => {
           setToast({
             type: TOAST_TYPE.ERROR,
-            title: t("toast.error"),
-            message: t("power_k.preferences_actions.toast.generic.error"),
+            title: t("Error!"),
+            message: t("Failed to update preferences. Please try again."),
           });
           return;
         });
@@ -108,7 +108,7 @@ export const usePowerKPreferencesCommands = (): TPowerKCommandConfig[] => {
       group: "preferences",
       type: "change-page",
       page: "update-theme",
-      i18n_title: "power_k.preferences_actions.update_theme",
+      i18n_title: "Change interface theme",
       icon: Palette,
       onSelect: (data) => {
         const theme = data as string;
@@ -123,7 +123,7 @@ export const usePowerKPreferencesCommands = (): TPowerKCommandConfig[] => {
       group: "preferences",
       page: "update-timezone",
       type: "change-page",
-      i18n_title: "power_k.preferences_actions.update_timezone",
+      i18n_title: "Change timezone",
       icon: Earth,
       onSelect: (data) => {
         const timezone = data as string;
@@ -138,7 +138,7 @@ export const usePowerKPreferencesCommands = (): TPowerKCommandConfig[] => {
       group: "preferences",
       page: "update-start-of-week",
       type: "change-page",
-      i18n_title: "power_k.preferences_actions.update_start_of_week",
+      i18n_title: "Change first day of week",
       icon: Calendar,
       onSelect: (data) => {
         const startOfWeek = data as EStartOfTheWeek;
@@ -153,7 +153,7 @@ export const usePowerKPreferencesCommands = (): TPowerKCommandConfig[] => {
       group: "preferences",
       page: "update-language",
       type: "change-page",
-      i18n_title: "power_k.preferences_actions.update_language",
+      i18n_title: "Change interface language",
       icon: Languages,
       onSelect: (data) => {
         const language = data as string;

@@ -21,7 +21,7 @@ export function EstimateNumberInput(props: TEstimateNumberInputProps) {
       value={value}
       onChange={(e) => handleEstimateInputValue(e.target.value)}
       className="w-full border-none bg-transparent px-2 py-2 text-13 focus:border-0 focus:ring-0 focus:outline-none"
-      placeholder={t("project_settings.estimates.create.enter_estimate_point")}
+      placeholder={t("Enter estimate")}
       autoFocus
       step="any"
     />

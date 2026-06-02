@@ -86,7 +86,7 @@ const HeaderFilters = observer(function HeaderFilters({
       <div className={cn(filterClassname)}>
         <FiltersDropdown
           icon={<ListFilter className="h-3 w-3" />}
-          title={t("common.filters")}
+          title={t("Filters")}
           placement="bottom-end"
           isFiltersApplied={isFiltersApplied}
           menuButton={filterMenuButton || null}

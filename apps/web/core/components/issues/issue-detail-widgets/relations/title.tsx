@@ -49,7 +49,7 @@ export const RelationsCollapsibleTitle = observer(function RelationsCollapsibleT
   return (
     <CollapsibleButton
       isOpen={isOpen}
-      title={t("common.relations")}
+      title={t("Relations")}
       indicatorElement={indicatorElement}
       actionItemElement={
         !disabled && <RelationActionButton issueId={issueId} disabled={disabled} issueServiceType={issueServiceType} />

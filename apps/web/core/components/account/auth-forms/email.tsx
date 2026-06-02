@@ -29,7 +29,7 @@ export const AuthEmailForm = observer(function AuthEmailForm(props: TAuthEmailFo
   // pi dash hooks
   const { t } = useTranslation();
   const emailError = useMemo(
-    () => (email && !checkEmailValidity(email) ? { email: "auth.common.email.errors.invalid" } : undefined),
+    () => (email && !checkEmailValidity(email) ? { email: "Email is invalid" } : undefined),
     [email]
   );
 
@@ -52,7 +52,7 @@ export const AuthEmailForm = observer(function AuthEmailForm(props: TAuthEmailFo
     <form onSubmit={handleFormSubmit} className="space-y-4">
       <div className="space-y-1">
         <label htmlFor="email" className="text-13 font-medium text-tertiary">
-          {t("auth.common.email.label")}
+          {t("Email")}
         </label>
         <div
           className={cn(
@@ -72,7 +72,7 @@ export const AuthEmailForm = observer(function AuthEmailForm(props: TAuthEmailFo
             type="email"
             value={email}
             onChange={(e) => setEmail(e.target.value)}
-            placeholder={t("auth.common.email.placeholder")}
+            placeholder={t("name@company.com")}
             className={`h-10 w-full border-0 disable-autofill-style placeholder:text-placeholder autofill:bg-danger-primary focus:bg-none active:bg-transparent`}
             autoComplete="off"
             autoFocus
@@ -86,7 +86,7 @@ export const AuthEmailForm = observer(function AuthEmailForm(props: TAuthEmailFo
                 inputRef.current?.focus();
               }}
               className="absolute right-3 grid size-5 place-items-center"
-              aria-label={t("aria_labels.auth_forms.clear_email")}
+              aria-label={t("Clear email")}
               tabIndex={-1}
             >
               <XCircle className="size-5 stroke-placeholder" />
@@ -101,7 +101,7 @@ export const AuthEmailForm = observer(function AuthEmailForm(props: TAuthEmailFo
         )}
       </div>
       <Button type="submit" variant="primary" className="w-full" size="xl" disabled={isButtonDisabled}>
-        {isSubmitting ? <Spinner height="20px" width="20px" /> : t("common.continue")}
+        {isSubmitting ? <Spinner height="20px" width="20px" /> : t("Continue")}
       </Button>
     </form>
   );

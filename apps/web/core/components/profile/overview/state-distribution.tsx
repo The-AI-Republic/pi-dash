@@ -24,7 +24,7 @@ export function ProfileStateDistribution({ stateDistribution, userProfile }: Pro
 
   return (
     <div className="flex flex-col space-y-2">
-      <h3 className="text-16 font-medium">{t("profile.stats.state_distribution.title")}</h3>
+      <h3 className="text-16 font-medium">{t("Work items by state")}</h3>
       <Card className="h-full">
         {userProfile.state_distribution.length > 0 ? (
           <div className="grid h-[300px] w-full grid-cols-1 gap-x-6 md:grid-cols-2">
@@ -81,7 +81,7 @@ export function ProfileStateDistribution({ stateDistribution, userProfile }: Pro
           <EmptyStateCompact
             assetKey="priority"
             assetClassName="size-20"
-            title={t("workspace_empty_state.your_work_by_priority.title")}
+            title={t("No work item assigned yet")}
           />
         )}
       </Card>

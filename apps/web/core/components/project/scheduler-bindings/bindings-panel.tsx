@@ -61,22 +61,22 @@ export const SchedulerBindingsPanel = observer(function SchedulerBindingsPanel(p
       <div className="flex flex-col gap-6 p-6">
         <header className="flex items-start justify-between gap-4">
           <div>
-            <h1 className="text-16 font-semibold text-primary">{t("scheduler_bindings.title")}</h1>
-            <p className="mt-1 text-13 text-secondary">{t("scheduler_bindings.subtitle")}</p>
+            <h1 className="text-16 font-semibold text-primary">{t("Schedulers")}</h1>
+            <p className="mt-1 text-13 text-secondary">{t("Schedulers installed on this project. Each install fires its prompt against the project on the configured cron.")}</p>
           </div>
-          {canManage && <Button onClick={() => setInstallOpen(true)}>{t("scheduler_bindings.install")}</Button>}
+          {canManage && <Button onClick={() => setInstallOpen(true)}>{t("Install scheduler")}</Button>}
         </header>
 
         <section className="rounded-md border border-subtle">
           <table className="w-full text-13">
             <thead className="bg-layer-1 text-left text-secondary">
               <tr>
-                <th className="px-3 py-2">{t("scheduler_bindings.columns.name")}</th>
-                <th className="px-3 py-2">{t("scheduler_bindings.columns.schedule")}</th>
-                <th className="px-3 py-2">{t("scheduler_bindings.columns.next_run")}</th>
-                <th className="px-3 py-2">{t("scheduler_bindings.columns.last_run")}</th>
-                <th className="px-3 py-2">{t("scheduler_bindings.columns.status")}</th>
-                <th className="px-3 py-2">{t("scheduler_bindings.columns.updated")}</th>
+                <th className="px-3 py-2">{t("Scheduler")}</th>
+                <th className="px-3 py-2">{t("Schedule")}</th>
+                <th className="px-3 py-2">{t("Next run")}</th>
+                <th className="px-3 py-2">{t("Last run")}</th>
+                <th className="px-3 py-2">{t("Status")}</th>
+                <th className="px-3 py-2">{t("Updated")}</th>
                 <th className="px-3 py-2"></th>
               </tr>
             </thead>
@@ -116,17 +116,17 @@ export const SchedulerBindingsPanel = observer(function SchedulerBindingsPanel(p
                       );
                       setToast({
                         type: TOAST_TYPE.SUCCESS,
-                        title: t("scheduler_bindings.toast.updated_title"),
+                        title: t("Install updated"),
                         message: next
-                          ? t("scheduler_bindings.toast.enabled_message")
-                          : t("scheduler_bindings.toast.disabled_message"),
+                          ? t("Scheduler enabled — it will fire on the next scheduled tick.")
+                          : t("Scheduler disabled — it will not fire until re-enabled."),
                       });
                     } catch (e: unknown) {
                       const err = e as { error?: string } | null;
                       setToast({
                         type: TOAST_TYPE.ERROR,
-                        title: t("scheduler_bindings.toast.error_title"),
-                        message: err?.error ?? t("scheduler_bindings.toast.update_failed"),
+                        title: t("Something went wrong"),
+                        message: err?.error ?? t("Could not update the install."),
                       });
                     }
                   }}
@@ -135,7 +135,7 @@ export const SchedulerBindingsPanel = observer(function SchedulerBindingsPanel(p
               {rows.length === 0 && (
                 <tr>
                   <td colSpan={7} className="px-3 py-8 text-center text-secondary">
-                    {t("scheduler_bindings.list.empty")}
+                    {t("No schedulers installed on this project yet. Click “Install scheduler” to add one from the workspace catalog.")}
                   </td>
                 </tr>
               )}
@@ -185,13 +185,13 @@ function BindingRow({ binding, canManage, onEdit, onUninstall, onToggle }: RowPr
   const { t } = useTranslation();
   const [toggling, setToggling] = useState(false);
 
-  const formatTs = (ts: string | null) => (ts ? new Date(ts).toLocaleString() : t("scheduler_bindings.list.none_yet"));
+  const formatTs = (ts: string | null) => (ts ? new Date(ts).toLocaleString() : t("(never)"));
 
   // Humanize the RRULE for display. The rrule lib emits English; localized
   // output would need a per-locale gettext setup we haven't built yet.
   const scheduleText = useMemo(() => {
     const human = humanizeRrule(binding.rrule, binding.dtstart);
-    return human ?? t("scheduler_bindings.list.single_shot");
+    return human ?? t("Once at dtstart");
   }, [binding.rrule, binding.dtstart, t]);
 
   // Wraps the parent's onToggle so the switch can render a disabled state
@@ -234,11 +234,11 @@ function BindingRow({ binding, canManage, onEdit, onUninstall, onToggle }: RowPr
             onChange={handleToggle}
             disabled={toggling || !canManage}
             aria-label={
-              binding.enabled ? t("scheduler_bindings.actions.disable") : t("scheduler_bindings.actions.enable")
+              binding.enabled ? t("Disable scheduler") : t("Enable scheduler")
             }
           />
           <span className="text-12 text-secondary">
-            {binding.enabled ? t("scheduler_bindings.status.enabled") : t("scheduler_bindings.status.disabled")}
+            {binding.enabled ? t("Enabled") : t("Disabled")}
           </span>
         </div>
       </td>
@@ -247,10 +247,10 @@ function BindingRow({ binding, canManage, onEdit, onUninstall, onToggle }: RowPr
         {canManage && (
           <div className="flex items-center justify-end gap-2">
             <Button variant="link-neutral" size="sm" onClick={onEdit}>
-              {t("scheduler_bindings.actions.edit")}
+              {t("Edit")}
             </Button>
             <Button variant="tertiary-danger" size="sm" onClick={onUninstall}>
-              {t("scheduler_bindings.actions.uninstall")}
+              {t("Uninstall")}
             </Button>
           </div>
         )}

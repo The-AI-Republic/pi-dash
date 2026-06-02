@@ -27,7 +27,7 @@ export const ReadonlyDate = observer(function ReadonlyDate(props: TReadonlyDateP
   return (
     <div className={cn("flex items-center gap-1 text-13", className)}>
       {!hideIcon && <CalendarLayoutIcon className="size-4 flex-shrink-0" />}
-      <span className="flex-grow truncate">{formattedDate ?? placeholder ?? t("common.none")}</span>
+      <span className="flex-grow truncate">{formattedDate ?? placeholder ?? t("None")}</span>
     </div>
   );
 });

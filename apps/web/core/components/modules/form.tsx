@@ -108,7 +108,7 @@ export function ModuleForm(props: Props) {
             />
           )}
           <h3 className="text-18 font-medium text-secondary">
-            {status ? t("common.update") : t("common.create")} {t("common.module").toLowerCase()}
+            {status ? t("Update") : t("Create")} {t("Module").toLowerCase()}
           </h3>
         </div>
         <div className="space-y-3">
@@ -117,10 +117,10 @@ export function ModuleForm(props: Props) {
               control={control}
               name="name"
               rules={{
-                required: t("title_is_required"),
+                required: t("Title is required"),
                 maxLength: {
                   value: 255,
-                  message: t("title_should_be_less_than_255_characters"),
+                  message: t("Title should be less than 255 characters"),
                 },
               }}
               render={({ field: { value, onChange } }) => (
@@ -131,7 +131,7 @@ export function ModuleForm(props: Props) {
                   value={value}
                   onChange={onChange}
                   hasError={Boolean(errors?.name)}
-                  placeholder={t("title")}
+                  placeholder={t("Title")}
                   className="w-full text-14"
                   tabIndex={getIndex("name")}
                   autoFocus
@@ -150,7 +150,7 @@ export function ModuleForm(props: Props) {
                   name="description"
                   value={value}
                   onChange={onChange}
-                  placeholder={t("description")}
+                  placeholder={t("Description")}
                   className="min-h-24 w-full resize-none text-14"
                   hasError={Boolean(errors?.description)}
                   tabIndex={getIndex("description")}
@@ -179,8 +179,8 @@ export function ModuleForm(props: Props) {
                         onChangeEndDate(val?.to ? renderFormattedPayloadDate(val.to) : null);
                       }}
                       placeholder={{
-                        from: t("start_date"),
-                        to: t("end_date"),
+                        from: t("Start date"),
+                        to: t("End date"),
                       }}
                       hideIcon={{
                         to: true,
@@ -205,7 +205,7 @@ export function ModuleForm(props: Props) {
                     projectId={projectId}
                     multiple={false}
                     buttonVariant="border-with-text"
-                    placeholder={t("lead")}
+                    placeholder={t("Lead")}
                     tabIndex={getIndex("lead")}
                   />
                 </div>
@@ -223,7 +223,7 @@ export function ModuleForm(props: Props) {
                     multiple
                     buttonVariant={value && value.length > 0 ? "transparent-without-text" : "border-with-text"}
                     buttonClassName={value && value.length > 0 ? "hover:bg-transparent px-0" : ""}
-                    placeholder={t("members")}
+                    placeholder={t("Members")}
                     tabIndex={getIndex("member_ids")}
                   />
                 </div>
@@ -234,16 +234,16 @@ export function ModuleForm(props: Props) {
       </div>
       <div className="flex items-center justify-end gap-2 border-t-[0.5px] border-subtle px-5 py-4">
         <Button variant="secondary" size="lg" onClick={handleClose} tabIndex={getIndex("cancel")}>
-          {t("cancel")}
+          {t("Cancel")}
         </Button>
         <Button variant="primary" size="lg" type="submit" loading={isSubmitting} tabIndex={getIndex("submit")}>
           {status
             ? isSubmitting
-              ? t("updating")
-              : t("project_module.update_module")
+              ? t("Updating")
+              : t("Update Module")
             : isSubmitting
-              ? t("creating")
-              : t("project_module.create_module")}
+              ? t("Creating")
+              : t("Create Module")}
         </Button>
       </div>
     </form>

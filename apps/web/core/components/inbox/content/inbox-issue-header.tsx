@@ -178,8 +178,8 @@ export const InboxIssueActionsHeader = observer(function InboxIssueActionsHeader
     copyUrlToClipboard(path).then(() =>
       setToast({
         type: TOAST_TYPE.SUCCESS,
-        title: t("common.link_copied"),
-        message: t("common.copied_to_clipboard"),
+        title: t("Link copied!"),
+        message: t("Work item link copied to clipboard"),
       })
     );
 
@@ -258,12 +258,12 @@ export const InboxIssueActionsHeader = observer(function InboxIssueActionsHeader
           withDraftIssueWrapper={false}
           fetchIssueDetails={false}
           showActionItemsOnUpdate
-          modalTitle={t("inbox_issue.actions.move", {
+          modalTitle={t("Move {value} to project work items", {
             value: `${currentProjectDetails?.identifier}-${issue?.sequence_id}`,
           })}
           primaryButtonText={{
-            default: t("add_to_project"),
-            loading: t("adding"),
+            default: t("Add to project"),
+            loading: t("Adding"),
           }}
         />
         <DeclineIssueModal
@@ -333,12 +333,12 @@ export const InboxIssueActionsHeader = observer(function InboxIssueActionsHeader
                   handleActionWithPermission(
                     isProjectAdmin,
                     () => setAcceptIssueModal(true),
-                    t("inbox_issue.errors.accept_permission")
+                    t("Only project admins can accept work items")
                   )
                 }
               >
                 <CheckCircleFilledIcon className="size-4 shrink-0 text-success-secondary" />
-                {t("inbox_issue.actions.accept")}
+                {t("Accept")}
               </Button>
             )}
 
@@ -350,12 +350,12 @@ export const InboxIssueActionsHeader = observer(function InboxIssueActionsHeader
                   handleActionWithPermission(
                     isProjectAdmin,
                     () => setDeclineIssueModal(true),
-                    t("inbox_issue.errors.decline_permission")
+                    t("Only project admins can deny work items")
                   )
                 }
               >
                 <CloseCircleFilledIcon className="size-4 shrink-0 text-danger-secondary" />
-                {t("inbox_issue.actions.decline")}
+                {t("Decline")}
               </Button>
             )}
 
@@ -367,11 +367,11 @@ export const InboxIssueActionsHeader = observer(function InboxIssueActionsHeader
                   prependIcon={<LinkIcon className="h-2.5 w-2.5" />}
                   onClick={() => handleCopyIssueLink(workItemLink)}
                 >
-                  {t("inbox_issue.actions.copy")}
+                  {t("Copy work item link")}
                 </Button>
                 <ControlLink href={workItemLink} onClick={() => router.push(workItemLink)} target="_self">
                   <Button variant="secondary" size="lg" prependIcon={<NewTabIcon className="h-2.5 w-2.5" />}>
-                    {t("inbox_issue.actions.open")}
+                    {t("Open work item")}
                   </Button>
                 </ControlLink>
               </div>
@@ -389,15 +389,15 @@ export const InboxIssueActionsHeader = observer(function InboxIssueActionsHeader
                           handleActionWithPermission(
                             isProjectAdmin,
                             handleIssueSnoozeAction,
-                            t("inbox_issue.errors.snooze_permission")
+                            t("Only project admins can snooze/Un-snooze work items")
                           )
                         }
                       >
                         <div className="flex items-center gap-2">
                           <Clock size={14} strokeWidth={2} />
                           {inboxIssue?.snoozed_till && numberOfDaysLeft && numberOfDaysLeft > 0
-                            ? t("inbox_issue.actions.unsnooze")
-                            : t("inbox_issue.actions.snooze")}
+                            ? t("Un snooze")
+                            : t("Snooze")}
                         </div>
                       </CustomMenu.MenuItem>
                     )}
@@ -413,21 +413,21 @@ export const InboxIssueActionsHeader = observer(function InboxIssueActionsHeader
                       >
                         <div className="flex items-center gap-2">
                           <FileStack size={14} strokeWidth={2} />
-                          {t("inbox_issue.actions.mark_as_duplicate")}
+                          {t("Mark as duplicate")}
                         </div>
                       </CustomMenu.MenuItem>
                     )}
                     <CustomMenu.MenuItem onClick={() => handleCopyIssueLink(workItemLink)}>
                       <div className="flex items-center gap-2">
                         <CopyIcon width={14} height={14} strokeWidth={2} />
-                        {t("inbox_issue.actions.copy")}
+                        {t("Copy work item link")}
                       </div>
                     </CustomMenu.MenuItem>
                     {canDelete && (
                       <CustomMenu.MenuItem onClick={() => setDeleteIssueModal(true)}>
                         <div className="flex items-center gap-2">
                           <TrashIcon width={14} height={14} strokeWidth={2} />
-                          {t("inbox_issue.actions.delete")}
+                          {t("Delete")}
                         </div>
                       </CustomMenu.MenuItem>
                     )}

@@ -38,7 +38,7 @@ export const RunAIActionButton = observer(function RunAIActionButton(props: Prop
       loading={isSubmitting}
     >
       <AiIcon className="h-3.5 w-3.5 flex-shrink-0" />
-      <span className="text-body-xs-medium">{t("run_ai.run_button")}</span>
+      <span className="text-body-xs-medium">{t("Run AI")}</span>
     </Button>
   );
 });

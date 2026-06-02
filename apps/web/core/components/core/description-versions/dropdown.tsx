@@ -45,12 +45,12 @@ export const DescriptionVersionsDropdown = observer(function DescriptionVersions
             <History className="size-3.5" />
           </span>
           <p className="text-11">
-            {t("description_versions.last_edited_by")}{" "}
-            <span className="font-medium">{lastUpdatedByUserDisplayName ?? t("common.deactivated_user")}</span>{" "}
+            {t("Last edited by")}{" "}
+            <span className="font-medium">{lastUpdatedByUserDisplayName ?? t("Deactivated user")}</span>{" "}
             {calculateTimeAgo(lastUpdatedAt)}
             {entityInformation.isExternallySynced ? (
               <span className="ml-1 text-tertiary">
-                ({t("edit_disabled_for_external_import_issue") || "edit disabled for external import issue"})
+                ({t("edit disabled for external import issue") || "edit disabled for external import issue"})
               </span>
             ) : null}
           </p>
@@ -63,7 +63,7 @@ export const DescriptionVersionsDropdown = observer(function DescriptionVersions
       disabled={disabled}
       closeOnSelect
     >
-      <p className="mb-1 text-11 font-medium text-tertiary">{t("description_versions.previously_edited_by")}</p>
+      <p className="mb-1 text-11 font-medium text-tertiary">{t("Previously edited by")}</p>
       {versions?.map((version) => (
         <DescriptionVersionsDropdownItem key={version.id} onClick={onVersionClick} version={version} />
       ))}

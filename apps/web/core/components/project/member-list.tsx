@@ -82,7 +82,7 @@ export const ProjectMemberList = observer(function ProjectMemberList(props: TPro
         workspaceSlug={workspaceSlug}
       />
       <div className="flex items-center justify-between gap-4 overflow-x-hidden border-b border-subtle py-2">
-        <div className="text-14 font-semibold">{t("common.members")}</div>
+        <div className="text-14 font-semibold">{t("Members")}</div>
         <div className="flex items-center gap-2">
           <div className="flex items-center justify-start gap-1.5 rounded-md border border-subtle bg-surface-1 px-2 py-1">
             <SearchIcon className="h-3.5 w-3.5" />
@@ -107,7 +107,7 @@ export const ProjectMemberList = observer(function ProjectMemberList(props: TPro
               }}
               data-ph-element={MEMBER_TRACKER_ELEMENTS.HEADER_ADD_BUTTON}
             >
-              {t("add_member")}
+              {t("Add member")}
             </Button>
           )}
         </div>
@@ -124,7 +124,7 @@ export const ProjectMemberList = observer(function ProjectMemberList(props: TPro
             />
           )}
           {searchedProjectMembers.length === 0 && (
-            <h4 className="mt-16 text-center text-13 text-placeholder">{t("no_matching_members")}</h4>
+            <h4 className="mt-16 text-center text-13 text-placeholder">{t("No matching members")}</h4>
           )}
         </div>
       )}

@@ -30,7 +30,7 @@ function FeaturesPagesSettingsPage({ params }: Route.ComponentProps) {
   const { t } = useTranslation();
   // derived values
   const pageTitle = currentProjectDetails?.name
-    ? `${currentProjectDetails?.name} settings - ${t("project_settings.features.pages.short_title")}`
+    ? `${currentProjectDetails?.name} settings - ${t("Pages")}`
     : undefined;
   const canPerformProjectAdminActions = allowPermissions([EUserPermissions.ADMIN], EUserPermissionsLevel.PROJECT);
 
@@ -43,13 +43,13 @@ function FeaturesPagesSettingsPage({ params }: Route.ComponentProps) {
       <PageHead title={pageTitle} />
       <section className="w-full">
         <SettingsHeading
-          title={t("project_settings.features.pages.title")}
-          description={t("project_settings.features.pages.description")}
+          title={t("Pages")}
+          description={t("Create and edit free-form content; notes, docs, anything.")}
         />
         <div className="mt-7">
           <ProjectSettingsFeatureControlItem
-            title={t("project_settings.features.pages.toggle_title")}
-            description={t("project_settings.features.pages.toggle_description")}
+            title={t("Enable pages")}
+            description={t("Project members will be able to create and edit pages.")}
             featureProperty="page_view"
             projectId={projectId}
             value={!!currentProjectDetails?.page_view}

@@ -156,7 +156,7 @@ export const IssueDefaultProperties = observer(function IssueDefaultProperties(p
               }}
               buttonVariant={value?.length > 0 ? "transparent-without-text" : "border-with-text"}
               buttonClassName={value?.length > 0 ? "hover:bg-transparent" : ""}
-              placeholder={t("assignees")}
+              placeholder={t("Assignees")}
               multiple
               tabIndex={getIndex("assignee_ids")}
             />
@@ -194,7 +194,7 @@ export const IssueDefaultProperties = observer(function IssueDefaultProperties(p
               }}
               buttonVariant="border-with-text"
               maxDate={maxDate ?? undefined}
-              placeholder={t("start_date")}
+              placeholder={t("Start date")}
               tabIndex={getIndex("start_date")}
             />
           </div>
@@ -213,7 +213,7 @@ export const IssueDefaultProperties = observer(function IssueDefaultProperties(p
               }}
               buttonVariant="border-with-text"
               minDate={minDate ?? undefined}
-              placeholder={t("due_date")}
+              placeholder={t("Due date")}
               tabIndex={getIndex("target_date")}
             />
           </div>
@@ -231,7 +231,7 @@ export const IssueDefaultProperties = observer(function IssueDefaultProperties(p
                   onChange(cycleId);
                   handleFormChange();
                 }}
-                placeholder={t("cycle.label", { count: 1 })}
+                placeholder={t("{count, plural, one {Cycle} other {Cycles}}", { count: 1 })}
                 value={value}
                 buttonVariant="border-with-text"
                 tabIndex={getIndex("cycle_id")}
@@ -253,7 +253,7 @@ export const IssueDefaultProperties = observer(function IssueDefaultProperties(p
                   onChange(moduleIds);
                   handleFormChange();
                 }}
-                placeholder={t("modules")}
+                placeholder={t("Modules")}
                 buttonVariant="border-with-text"
                 tabIndex={getIndex("module_ids")}
                 multiple
@@ -278,7 +278,7 @@ export const IssueDefaultProperties = observer(function IssueDefaultProperties(p
                 projectId={projectId}
                 buttonVariant="border-with-text"
                 tabIndex={getIndex("estimate_point")}
-                placeholder={t("estimate")}
+                placeholder={t("Estimate")}
               />
             </div>
           )}
@@ -310,7 +310,7 @@ export const IssueDefaultProperties = observer(function IssueDefaultProperties(p
           >
             <>
               <CustomMenu.MenuItem className="!p-1" onClick={() => setParentIssueListModalOpen(true)}>
-                {t("change_parent_issue")}
+                {t("Change parent work item")}
               </CustomMenu.MenuItem>
               <Controller
                 control={control}
@@ -323,7 +323,7 @@ export const IssueDefaultProperties = observer(function IssueDefaultProperties(p
                       handleFormChange();
                     }}
                   >
-                    {t("remove_parent_issue")}
+                    {t("Remove parent work item")}
                   </CustomMenu.MenuItem>
                 )}
               />
@@ -336,7 +336,7 @@ export const IssueDefaultProperties = observer(function IssueDefaultProperties(p
             onClick={() => setParentIssueListModalOpen(true)}
           >
             <ParentPropertyIcon className="h-3 w-3 flex-shrink-0" />
-            <span className="whitespace-nowrap">{t("add_parent")}</span>
+            <span className="whitespace-nowrap">{t("Add parent")}</span>
           </button>
         )}
       </div>

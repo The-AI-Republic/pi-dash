@@ -85,7 +85,7 @@ export const GanttChartSidebar = observer(function GanttChartSidebar(props: Prop
           )}
           <h6>{title}</h6>
         </div>
-        <h6>{t("common.duration")}</h6>
+        <h6>{t("Duration")}</h6>
       </Row>
 
       <Row variant={ERowVariant.HUGGING} className="h-max min-h-full bg-surface-1">

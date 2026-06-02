@@ -63,8 +63,8 @@ export const ExtendedProjectSidebar = observer(function ExtendedProjectSidebar()
       updateProjectView(workspaceSlug.toString(), sourceId, { sort_order: updatedSortOrder }).catch(() => {
         setToast({
           type: TOAST_TYPE.ERROR,
-          title: t("error"),
-          message: t("something_went_wrong"),
+          title: t("Error"),
+          message: t("Something went wrong"),
         });
       });
   };
@@ -88,8 +88,8 @@ export const ExtendedProjectSidebar = observer(function ExtendedProjectSidebar()
     await copyUrlToClipboard(`${workspaceSlug}/projects/${projectId}/issues`);
     setToast({
       type: TOAST_TYPE.SUCCESS,
-      title: t("link_copied"),
-      message: t("project_link_copied_to_clipboard"),
+      title: t("Link copied"),
+      message: t("Project link copied to clipboard"),
     });
   };
   return (
@@ -113,7 +113,7 @@ export const ExtendedProjectSidebar = observer(function ExtendedProjectSidebar()
           <div className="flex items-center justify-between">
             <span className="py-1.5 text-13 font-semibold text-tertiary">Projects</span>
             {isAuthorizedUser && (
-              <Tooltip tooltipHeading={t("create_project")} tooltipContent="">
+              <Tooltip tooltipHeading={t("Create project")} tooltipContent="">
                 <button
                   type="button"
                   data-ph-element={PROJECT_TRACKER_ELEMENTS.EXTENDED_SIDEBAR_ADD_BUTTON}
@@ -131,7 +131,7 @@ export const ExtendedProjectSidebar = observer(function ExtendedProjectSidebar()
             <SearchIcon className="h-3.5 w-3.5 text-placeholder" />
             <input
               className="w-full max-w-[234px] border-none bg-transparent text-13 outline-none placeholder:text-placeholder"
-              placeholder={t("search")}
+              placeholder={t("Search")}
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
             />
@@ -140,8 +140,8 @@ export const ExtendedProjectSidebar = observer(function ExtendedProjectSidebar()
         {filteredProjects.length === 0 ? (
           <div className="mt-4 flex flex-col items-center p-10">
             <EmptyStateCompact
-              title={t("common_empty_state.search.title")}
-              description={t("common_empty_state.search.description")}
+              title={t("No matching results.")}
+              description={t("No results found. Try adjusting your search terms.")}
               assetKey="search"
               assetClassName="size-20"
               align="center"

@@ -112,8 +112,8 @@ export const ExportForm = observer(function ExportForm(props: Props) {
         setExportLoading(false);
         setToast({
           type: TOAST_TYPE.SUCCESS,
-          title: t("workspace_settings.settings.exports.modal.toasts.success.title"),
-          message: t("workspace_settings.settings.exports.modal.toasts.success.message", {
+          title: t("Export successful"),
+          message: t("You will be able to download the exported {entity} from the previous export.", {
             entity:
               formData.provider.provider === "csv"
                 ? "CSV"
@@ -128,8 +128,8 @@ export const ExportForm = observer(function ExportForm(props: Props) {
         setExportLoading(false);
         setToast({
           type: TOAST_TYPE.ERROR,
-          title: t("error"),
-          message: t("workspace_settings.settings.exports.modal.toasts.error.message"),
+          title: t("Error"),
+          message: t("Export was unsuccessful. Please try again."),
         });
       }
     } else {
@@ -148,7 +148,7 @@ export const ExportForm = observer(function ExportForm(props: Props) {
         {/* Project Selector */}
         <SettingsBoxedControlItem
           className="rounded-none border-0 border-b"
-          title={t("workspace_settings.settings.exports.exporting_projects")}
+          title={t("Exporting project")}
           control={
             <Controller
               control={control}
@@ -182,7 +182,7 @@ export const ExportForm = observer(function ExportForm(props: Props) {
         {/* Format Selector */}
         <SettingsBoxedControlItem
           className="rounded-none border-0 border-b"
-          title={t("workspace_settings.settings.exports.format")}
+          title={t("Format")}
           control={
             <Controller
               control={control}
@@ -209,21 +209,21 @@ export const ExportForm = observer(function ExportForm(props: Props) {
         />
         <div className="px-4 py-3">
           <Button variant="primary" size="lg" type="submit" loading={exportLoading}>
-            {exportLoading ? `${t("workspace_settings.settings.exports.exporting")}...` : t("export")}
+            {exportLoading ? `${t("Exporting")}...` : t("Export")}
           </Button>
         </div>
       </div>
       {/* Rich Filters */}
       {/* <div className="w-full">
         <div className="flex items-center gap-2 mb-2">
-          <div className="text-13 font-medium text-secondary leading-tight">{t("common.filters")}</div>
+          <div className="text-13 font-medium text-secondary leading-tight">{t("Filters")}</div>
           <Tooltip
             tooltipContent={
               <div className="max-w-[238px] flex gap-2">
                 <div className=" rounded-sm bg-layer-1 flex items-center justify-center p-1 h-5 aspect-square">
                   <Info className="h-3 w-3" />
                 </div>
-                {t("workspace_settings.settings.exports.filters_info")}
+                {t("Use filters to export only matching work items.")}
               </div>
             }
             position="top"

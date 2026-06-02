@@ -68,7 +68,7 @@ export const ReadonlyState = observer(function ReadonlyState(props: TReadonlySta
           color={state?.color}
         />
       )}
-      <span className="flex-grow truncate">{state?.name ?? placeholder ?? t("common.none")}</span>
+      <span className="flex-grow truncate">{state?.name ?? placeholder ?? t("None")}</span>
     </div>
   );
 });

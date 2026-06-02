@@ -64,16 +64,16 @@ export const ForgotPasswordForm = observer(function ForgotPasswordForm() {
       .then(() => {
         setToast({
           type: TOAST_TYPE.SUCCESS,
-          title: t("auth.forgot_password.toast.success.title"),
-          message: t("auth.forgot_password.toast.success.message"),
+          title: t("Email sent"),
+          message: t("Check your inbox for a link to reset your password. If it doesn't appear within a few minutes, check your spam folder."),
         });
         setResendCodeTimer(30);
       })
       .catch((err) => {
         setToast({
           type: TOAST_TYPE.ERROR,
-          title: t("auth.forgot_password.toast.error.title"),
-          message: err?.error ?? t("auth.forgot_password.toast.error.message"),
+          title: t("Error!"),
+          message: err?.error ?? t("Something went wrong. Please try again."),
         });
       });
   };
@@ -84,14 +84,14 @@ export const ForgotPasswordForm = observer(function ForgotPasswordForm() {
       <form onSubmit={handleSubmit(handleForgotPassword)} className="space-y-4">
         <div className="space-y-1">
           <label className="text-13 font-medium text-tertiary" htmlFor="email">
-            {t("auth.common.email.label")}
+            {t("Email")}
           </label>
           <Controller
             control={control}
             name="email"
             rules={{
-              required: t("auth.common.email.errors.required"),
-              validate: (value) => checkEmailValidity(value) || t("auth.common.email.errors.invalid"),
+              required: t("Email is required"),
+              validate: (value) => checkEmailValidity(value) || t("Email is invalid"),
             }}
             render={({ field: { value, onChange, ref } }) => (
               <Input
@@ -102,7 +102,7 @@ export const ForgotPasswordForm = observer(function ForgotPasswordForm() {
                 onChange={onChange}
                 ref={ref}
                 hasError={Boolean(errors.email)}
-                placeholder={t("auth.common.email.placeholder")}
+                placeholder={t("name@company.com")}
                 className="h-10 w-full border border-strong !bg-surface-1 pr-12 placeholder:text-placeholder"
                 autoComplete="off"
                 disabled={resendTimerCode > 0}
@@ -112,7 +112,7 @@ export const ForgotPasswordForm = observer(function ForgotPasswordForm() {
           {resendTimerCode > 0 && (
             <p className="flex w-full items-start gap-1 px-1 text-11 font-medium text-success-primary">
               <CircleCheck height={12} width={12} className="mt-0.5" />
-              {t("auth.forgot_password.email_sent")}
+              {t("We sent the reset link to your email address")}
             </p>
           )}
         </div>
@@ -125,11 +125,11 @@ export const ForgotPasswordForm = observer(function ForgotPasswordForm() {
           loading={isSubmitting || resendTimerCode > 0}
         >
           {resendTimerCode > 0
-            ? t("auth.common.resend_in", { seconds: resendTimerCode })
-            : t("auth.forgot_password.send_reset_link")}
+            ? t("Resend in {seconds} seconds", { seconds: resendTimerCode })
+            : t("Send reset link")}
         </Button>
         <Link href="/" className={cn("w-full", getButtonStyling("link", "lg"))}>
-          {t("auth.common.back_to_sign_in")}
+          {t("Back to sign in")}
         </Link>
       </form>
     </FormContainer>

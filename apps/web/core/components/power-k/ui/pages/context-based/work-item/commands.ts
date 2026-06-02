@@ -123,16 +123,16 @@ export const usePowerKWorkItemContextBasedCommands = (): TPowerKCommandConfig[] 
       }
       setToast({
         type: TOAST_TYPE.SUCCESS,
-        title: t("toast.success"),
+        title: t("Success!"),
         message: isSubscribed
-          ? t("issue.subscription.actions.unsubscribed")
-          : t("issue.subscription.actions.subscribed"),
+          ? t("Work item unsubscribed successfully")
+          : t("Work item subscribed successfully"),
       });
     } catch {
       setToast({
         type: TOAST_TYPE.ERROR,
-        title: t("toast.error"),
-        message: t("common.error.message"),
+        title: t("Error!"),
+        message: t("Some error occurred. Please try again."),
       });
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -148,13 +148,13 @@ export const usePowerKWorkItemContextBasedCommands = (): TPowerKCommandConfig[] 
       .then(() => {
         setToast({
           type: TOAST_TYPE.SUCCESS,
-          title: t("power_k.contextual_actions.work_item.copy_id_toast_success"),
+          title: t("Work item ID copied to clipboard."),
         });
       })
       .catch(() => {
         setToast({
           type: TOAST_TYPE.ERROR,
-          title: t("power_k.contextual_actions.work_item.copy_id_toast_error"),
+          title: t("Some error occurred while copying the work item ID to clipboard."),
         });
       });
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -165,13 +165,13 @@ export const usePowerKWorkItemContextBasedCommands = (): TPowerKCommandConfig[] 
       .then(() => {
         setToast({
           type: TOAST_TYPE.SUCCESS,
-          title: t("power_k.contextual_actions.work_item.copy_title_toast_success"),
+          title: t("Work item title copied to clipboard."),
         });
       })
       .catch(() => {
         setToast({
           type: TOAST_TYPE.ERROR,
-          title: t("power_k.contextual_actions.work_item.copy_title_toast_error"),
+          title: t("Some error occurred while copying the work item title to clipboard."),
         });
       });
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -183,13 +183,13 @@ export const usePowerKWorkItemContextBasedCommands = (): TPowerKCommandConfig[] 
       .then(() => {
         setToast({
           type: TOAST_TYPE.SUCCESS,
-          title: t("power_k.contextual_actions.work_item.copy_url_toast_success"),
+          title: t("Work item URL copied to clipboard."),
         });
       })
       .catch(() => {
         setToast({
           type: TOAST_TYPE.ERROR,
-          title: t("power_k.contextual_actions.work_item.copy_url_toast_error"),
+          title: t("Some error occurred while copying the work item URL to clipboard."),
         });
       });
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -198,7 +198,7 @@ export const usePowerKWorkItemContextBasedCommands = (): TPowerKCommandConfig[] 
   return [
     {
       id: "change_work_item_state",
-      i18n_title: "power_k.contextual_actions.work_item.change_state",
+      i18n_title: "Change state",
       icon: DoubleCircleIcon,
       group: "contextual",
       contextType: "work-item",
@@ -218,7 +218,7 @@ export const usePowerKWorkItemContextBasedCommands = (): TPowerKCommandConfig[] 
     },
     {
       id: "change_work_item_priority",
-      i18n_title: "power_k.contextual_actions.work_item.change_priority",
+      i18n_title: "Change priority",
       icon: Signal,
       group: "contextual",
       contextType: "work-item",
@@ -238,7 +238,7 @@ export const usePowerKWorkItemContextBasedCommands = (): TPowerKCommandConfig[] 
     },
     {
       id: "change_work_item_assignees",
-      i18n_title: "power_k.contextual_actions.work_item.change_assignees",
+      i18n_title: "Assign to",
       icon: Users,
       group: "contextual",
       contextType: "work-item",
@@ -256,8 +256,8 @@ export const usePowerKWorkItemContextBasedCommands = (): TPowerKCommandConfig[] 
     {
       id: "assign_work_item_to_me",
       i18n_title: isCurrentUserAssigned
-        ? "power_k.contextual_actions.work_item.unassign_from_me"
-        : "power_k.contextual_actions.work_item.assign_to_me",
+        ? "Un-assign from me"
+        : "Assign to me",
       icon: isCurrentUserAssigned ? UserMinus2 : UserPlus2,
       group: "contextual",
       contextType: "work-item",
@@ -273,7 +273,7 @@ export const usePowerKWorkItemContextBasedCommands = (): TPowerKCommandConfig[] 
     },
     {
       id: "change_work_item_estimate",
-      i18n_title: "power_k.contextual_actions.work_item.change_estimate",
+      i18n_title: "Change estimate",
       icon: Triangle,
       group: "contextual",
       contextType: "work-item",
@@ -293,7 +293,7 @@ export const usePowerKWorkItemContextBasedCommands = (): TPowerKCommandConfig[] 
     },
     {
       id: "add_work_item_to_cycle",
-      i18n_title: "power_k.contextual_actions.work_item.add_to_cycle",
+      i18n_title: "Add to cycle",
       icon: ContrastIcon,
       group: "contextual",
       contextType: "work-item",
@@ -333,7 +333,7 @@ export const usePowerKWorkItemContextBasedCommands = (): TPowerKCommandConfig[] 
     },
     {
       id: "add_work_item_to_modules",
-      i18n_title: "power_k.contextual_actions.work_item.add_to_modules",
+      i18n_title: "Add to modules",
       icon: DiceIcon,
       group: "contextual",
       contextType: "work-item",
@@ -365,7 +365,7 @@ export const usePowerKWorkItemContextBasedCommands = (): TPowerKCommandConfig[] 
     },
     {
       id: "add_work_item_labels",
-      i18n_title: "power_k.contextual_actions.work_item.add_labels",
+      i18n_title: "Add labels",
       icon: TagIcon,
       group: "contextual",
       contextType: "work-item",
@@ -389,8 +389,8 @@ export const usePowerKWorkItemContextBasedCommands = (): TPowerKCommandConfig[] 
     {
       id: "subscribe_work_item",
       i18n_title: isSubscribed
-        ? "power_k.contextual_actions.work_item.unsubscribe"
-        : "power_k.contextual_actions.work_item.subscribe",
+        ? "Unsubscribe from notifications"
+        : "Subscribe to notifications",
       icon: isSubscribed ? BellOff : Bell,
       group: "contextual",
       contextType: "work-item",
@@ -403,7 +403,7 @@ export const usePowerKWorkItemContextBasedCommands = (): TPowerKCommandConfig[] 
     },
     {
       id: "delete_work_item",
-      i18n_title: "power_k.contextual_actions.work_item.delete",
+      i18n_title: "Delete",
       icon: TrashIcon,
       group: "contextual",
       contextType: "work-item",
@@ -416,7 +416,7 @@ export const usePowerKWorkItemContextBasedCommands = (): TPowerKCommandConfig[] 
     },
     {
       id: "copy_work_item_id",
-      i18n_title: "power_k.contextual_actions.work_item.copy_id",
+      i18n_title: "Copy ID",
       icon: TicketCheck,
       group: "contextual",
       contextType: "work-item",
@@ -429,7 +429,7 @@ export const usePowerKWorkItemContextBasedCommands = (): TPowerKCommandConfig[] 
     },
     {
       id: "copy_work_item_title",
-      i18n_title: "power_k.contextual_actions.work_item.copy_title",
+      i18n_title: "Copy title",
       icon: Type,
       group: "contextual",
       contextType: "work-item",
@@ -442,7 +442,7 @@ export const usePowerKWorkItemContextBasedCommands = (): TPowerKCommandConfig[] 
     },
     {
       id: "copy_work_item_url",
-      i18n_title: "power_k.contextual_actions.work_item.copy_url",
+      i18n_title: "Copy URL",
       icon: LinkIcon,
       group: "contextual",
       contextType: "work-item",

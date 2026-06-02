@@ -26,42 +26,42 @@ export const MODULE_STATUS: {
   bgColor: string;
 }[] = [
   {
-    i18n_label: "project_modules.status.backlog",
+    i18n_label: "Backlog",
     value: "backlog",
     color: MODULE_STATUS_COLORS.backlog,
     textColor: "text-placeholder",
     bgColor: "bg-layer-1",
   },
   {
-    i18n_label: "project_modules.status.planned",
+    i18n_label: "Planned",
     value: "planned",
     color: MODULE_STATUS_COLORS.planned,
     textColor: "text-blue-500",
     bgColor: "bg-indigo-50",
   },
   {
-    i18n_label: "project_modules.status.in_progress",
+    i18n_label: "In Progress",
     value: "in-progress",
     color: MODULE_STATUS_COLORS["in-progress"],
     textColor: "text-amber-500",
     bgColor: "bg-amber-50",
   },
   {
-    i18n_label: "project_modules.status.paused",
+    i18n_label: "Paused",
     value: "paused",
     color: MODULE_STATUS_COLORS.paused,
     textColor: "text-tertiary",
     bgColor: "bg-surface-2",
   },
   {
-    i18n_label: "project_modules.status.completed",
+    i18n_label: "Completed",
     value: "completed",
     color: MODULE_STATUS_COLORS.completed,
     textColor: "text-success-primary",
     bgColor: "bg-success-subtle",
   },
   {
-    i18n_label: "project_modules.status.cancelled",
+    i18n_label: "Cancelled",
     value: "cancelled",
     color: MODULE_STATUS_COLORS.cancelled,
     textColor: "text-danger-primary",
@@ -75,15 +75,15 @@ export const MODULE_VIEW_LAYOUTS: {
 }[] = [
   {
     key: "list",
-    i18n_title: "project_modules.layout.list",
+    i18n_title: "List layout",
   },
   {
     key: "board",
-    i18n_title: "project_modules.layout.board",
+    i18n_title: "Gallery layout",
   },
   {
     key: "gantt",
-    i18n_title: "project_modules.layout.timeline",
+    i18n_title: "Timeline layout",
   },
 ];
 
@@ -93,26 +93,26 @@ export const MODULE_ORDER_BY_OPTIONS: {
 }[] = [
   {
     key: "name",
-    i18n_label: "project_modules.order_by.name",
+    i18n_label: "Name",
   },
   {
     key: "progress",
-    i18n_label: "project_modules.order_by.progress",
+    i18n_label: "Progress",
   },
   {
     key: "issues_length",
-    i18n_label: "project_modules.order_by.issues",
+    i18n_label: "Number of work items",
   },
   {
     key: "target_date",
-    i18n_label: "project_modules.order_by.due_date",
+    i18n_label: "Due date",
   },
   {
     key: "created_at",
-    i18n_label: "project_modules.order_by.created_at",
+    i18n_label: "Created date",
   },
   {
     key: "sort_order",
-    i18n_label: "project_modules.order_by.manual",
+    i18n_label: "Manual",
   },
 ];

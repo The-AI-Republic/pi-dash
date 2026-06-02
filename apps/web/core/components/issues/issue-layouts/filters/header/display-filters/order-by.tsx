@@ -31,7 +31,7 @@ export const FilterOrderBy = observer(function FilterOrderBy(props: Props) {
   return (
     <>
       <FilterHeader
-        title={t("common.order_by.label")}
+        title={t("Order by")}
         isPreviewEnabled={previewEnabled}
         handleIsPreviewEnabled={() => setPreviewEnabled(!previewEnabled)}
       />

@@ -71,8 +71,8 @@ export const WebhookForm = observer(function WebhookForm(props: Props) {
       <div className="space-y-5">
         <div className="text-18 font-medium text-secondary">
           {data
-            ? t("workspace_settings.settings.webhooks.modal.details")
-            : t("workspace_settings.settings.webhooks.modal.title")}
+            ? t("Webhook details")
+            : t("Create webhook")}
         </div>
         <div className="space-y-3">
           <div className="space-y-1">
@@ -80,7 +80,7 @@ export const WebhookForm = observer(function WebhookForm(props: Props) {
               control={control}
               name="url"
               rules={{
-                required: t("workspace_settings.settings.webhooks.modal.error"),
+                required: t("URL is required"),
               }}
               render={({ field: { onChange, value } }) => (
                 <WebhookInput value={value} onChange={onChange} hasError={Boolean(errors.url)} />
@@ -104,17 +104,17 @@ export const WebhookForm = observer(function WebhookForm(props: Props) {
             loading={isSubmitting}
             data-ph-element={WORKSPACE_SETTINGS_TRACKER_ELEMENTS.WEBHOOK_UPDATE_BUTTON}
           >
-            {isSubmitting ? t("updating") : t("update")}
+            {isSubmitting ? t("Updating") : t("Update")}
           </Button>
         </div>
       ) : (
         <div className="flex items-center justify-end gap-2 border-t-[0.5px] border-subtle px-5 py-4">
           <Button variant="secondary" size="lg" onClick={handleClose}>
-            {t("cancel")}
+            {t("Cancel")}
           </Button>
           {!webhookSecretKey && (
             <Button type="submit" variant="primary" size="lg" loading={isSubmitting} className="capitalize">
-              {isSubmitting ? t("common.creating") : t("common.create")}
+              {isSubmitting ? t("Creating") : t("Create")}
             </Button>
           )}
         </div>

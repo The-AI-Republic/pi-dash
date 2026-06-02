@@ -80,7 +80,7 @@ export const PagesListHeaderRoot = observer(function PagesListHeaderRoot(props: 
           />
           <FiltersDropdown
             icon={<ListFilter className="h-3 w-3" />}
-            title={t("common.filters")}
+            title={t("Filters")}
             placement="bottom-end"
             isFiltersApplied={isFiltersApplied}
           >

@@ -40,7 +40,7 @@ function ProfileSettingsPage(props: Route.ComponentProps) {
 
   return (
     <>
-      <PageHead title={`${t("profile.label")} - ${t("general_settings")}`} />
+      <PageHead title={`${t("Profile")} - ${t("General settings")}`} />
       <div className="relative size-full">
         <div className="flex size-full">
           <ProfileSettingsSidebarRoot

@@ -134,10 +134,10 @@ describe("CreatePodModal", () => {
     renderModal();
     await screen.findByRole("option", { name: "Web app" });
 
-    await user.click(screen.getByRole("button", { name: "runners.create_pod_modal.submit" }));
+    await user.click(screen.getByRole("button", { name: "Create pod" }));
 
     expect(podCreate).not.toHaveBeenCalled();
-    expect(await screen.findByText("runners.create_pod_modal.errors.project_required")).toBeInTheDocument();
+    expect(await screen.findByText("Pick a project.")).toBeInTheDocument();
   });
 
   it("blocks submit when name is empty / whitespace and shows name_required", async () => {
@@ -147,11 +147,11 @@ describe("CreatePodModal", () => {
 
     await user.selectOptions(screen.getByTestId("select"), "proj-1");
     // whitespace-only — RHF validate() trims and rejects
-    await user.type(screen.getByPlaceholderText("runners.create_pod_modal.name_placeholder"), "   ");
-    await user.click(screen.getByRole("button", { name: "runners.create_pod_modal.submit" }));
+    await user.type(screen.getByPlaceholderText("beefy"), "   ");
+    await user.click(screen.getByRole("button", { name: "Create pod" }));
 
     expect(podCreate).not.toHaveBeenCalled();
-    expect(await screen.findByText("runners.create_pod_modal.errors.name_required")).toBeInTheDocument();
+    expect(await screen.findByText("Name is required.")).toBeInTheDocument();
   });
 
   it("submits with trimmed name + project id and closes on success", async () => {
@@ -161,8 +161,8 @@ describe("CreatePodModal", () => {
     await screen.findByRole("option", { name: "Web app" });
 
     await user.selectOptions(screen.getByTestId("select"), "proj-1");
-    await user.type(screen.getByPlaceholderText("runners.create_pod_modal.name_placeholder"), "  beefy  ");
-    await user.click(screen.getByRole("button", { name: "runners.create_pod_modal.submit" }));
+    await user.type(screen.getByPlaceholderText("beefy"), "  beefy  ");
+    await user.click(screen.getByRole("button", { name: "Create pod" }));
 
     await waitFor(() => {
       expect(podCreate).toHaveBeenCalledWith({
@@ -183,12 +183,12 @@ describe("CreatePodModal", () => {
     await screen.findByRole("option", { name: "Web app" });
 
     await user.selectOptions(screen.getByTestId("select"), "proj-1");
-    await user.type(screen.getByPlaceholderText("runners.create_pod_modal.name_placeholder"), "beefy");
+    await user.type(screen.getByPlaceholderText("beefy"), "beefy");
     await user.type(
-      screen.getByPlaceholderText("runners.create_pod_modal.description_placeholder"),
+      screen.getByPlaceholderText("Where this pod runs, what it's for, etc."),
       "the spare laptop"
     );
-    await user.click(screen.getByRole("button", { name: "runners.create_pod_modal.submit" }));
+    await user.click(screen.getByRole("button", { name: "Create pod" }));
 
     await waitFor(() => {
       expect(podCreate).toHaveBeenCalledWith({
@@ -206,8 +206,8 @@ describe("CreatePodModal", () => {
     await screen.findByRole("option", { name: "Web app" });
 
     await user.selectOptions(screen.getByTestId("select"), "proj-1");
-    await user.type(screen.getByPlaceholderText("runners.create_pod_modal.name_placeholder"), "beefy");
-    await user.click(screen.getByRole("button", { name: "runners.create_pod_modal.submit" }));
+    await user.type(screen.getByPlaceholderText("beefy"), "beefy");
+    await user.click(screen.getByRole("button", { name: "Create pod" }));
 
     await waitFor(() => {
       expect(setToast).toHaveBeenCalledWith(
@@ -228,14 +228,14 @@ describe("CreatePodModal", () => {
     await screen.findByRole("option", { name: "Web app" });
 
     await user.selectOptions(screen.getByTestId("select"), "proj-1");
-    await user.type(screen.getByPlaceholderText("runners.create_pod_modal.name_placeholder"), "beefy");
-    await user.click(screen.getByRole("button", { name: "runners.create_pod_modal.submit" }));
+    await user.type(screen.getByPlaceholderText("beefy"), "beefy");
+    await user.click(screen.getByRole("button", { name: "Create pod" }));
 
     await waitFor(() => {
       expect(setToast).toHaveBeenCalledWith(
         expect.objectContaining({
           type: "ERROR",
-          message: "runners.create_pod_modal.errors.create_failed",
+          message: "Could not create the pod.",
         })
       );
     });

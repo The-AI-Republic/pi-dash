@@ -44,8 +44,8 @@ export function DeleteApiTokenModal(props: Props) {
       .then(() => {
         setToast({
           type: TOAST_TYPE.SUCCESS,
-          title: t("workspace_settings.settings.api_tokens.delete.success.title"),
-          message: t("workspace_settings.settings.api_tokens.delete.success.message"),
+          title: t("Success!"),
+          message: t("The token has been successfully deleted"),
         });
 
         mutate<IApiToken[]>(
@@ -60,8 +60,8 @@ export function DeleteApiTokenModal(props: Props) {
       .catch((err) => {
         setToast({
           type: TOAST_TYPE.ERROR,
-          title: t("workspace_settings.settings.api_tokens.delete.error.title"),
-          message: err?.message ?? t("workspace_settings.settings.api_tokens.delete.error.message"),
+          title: t("Error!"),
+          message: err?.message ?? t("The token could not be deleted"),
         });
         setDeleteLoading(false);
       });
@@ -73,8 +73,8 @@ export function DeleteApiTokenModal(props: Props) {
       handleSubmit={handleDeletion}
       isSubmitting={deleteLoading}
       isOpen={isOpen}
-      title={t("workspace_settings.settings.api_tokens.delete.title")}
-      content={<>{t("workspace_settings.settings.api_tokens.delete.description")} </>}
+      title={t("Delete personal access token")}
+      content={<>{t("Any application using this token will no longer have the access to Pi Dash data. This action cannot be undone.")} </>}
     />
   );
 }

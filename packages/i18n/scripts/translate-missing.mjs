@@ -4,18 +4,18 @@
 import fs from "node:fs";
 import path from "node:path";
 import process from "node:process";
+import { spawnSync } from "node:child_process";
 import { IntlMessageFormat } from "intl-messageformat";
 import ts from "typescript";
 
 const repoRoot = path.resolve(import.meta.dirname, "../../..");
 const localesRoot = path.join(repoRoot, "packages/i18n/src/locales");
-const localeFiles = ["core", "translations", "accessibility", "editor", "empty-state"];
 const targetLocaleFile = "translations.ts";
 const fallbackLanguage = "en";
-const defaultBatchSize = 30;
+const defaultBatchSize = 10;
 const defaultRequestTimeoutMs = 180000;
 const defaultRetryCount = 2;
-const defaultRetryDelayMs = 2000;
+const defaultRetryDelayMs = 5000;
 const readmeTranslationTargets = new Map([
   ["es", path.join(repoRoot, "packages/i18n/README.es.md")],
   ["zh-CN", path.join(repoRoot, "packages/i18n/README.zh-CN.md")],
@@ -105,6 +105,7 @@ function configFromArgs() {
     args.retry_delay_ms || process.env.I18N_TRANSLATION_RETRY_DELAY_MS || defaultRetryDelayMs
   );
   const skipReadme = args.skip_readme === true || process.env.I18N_TRANSLATION_SKIP_README === "1";
+  const continueOnError = args.continue_on_error === true || process.env.I18N_TRANSLATION_CONTINUE_ON_ERROR === "1";
 
   if (!model && !dryRun) {
     throw new Error("Missing model. Pass --model or set I18N_TRANSLATION_MODEL.");
@@ -130,6 +131,7 @@ function configFromArgs() {
     retryCount: Number.isFinite(retryCount) && retryCount >= 0 ? retryCount : defaultRetryCount,
     retryDelayMs: Number.isFinite(retryDelayMs) && retryDelayMs >= 0 ? retryDelayMs : defaultRetryDelayMs,
     skipReadme,
+    continueOnError,
   };
 }
 
@@ -146,10 +148,11 @@ function usage() {
     "  --base-url <openai-compatible-chat-completions-url>",
     "  --languages fr,es,ja",
     "  --limit 100",
-    "  --batch-size 30",
+    "  --batch-size 10",
     "  --request-timeout-ms 180000",
     "  --retry-count 2",
-    "  --retry-delay-ms 2000",
+    "  --retry-delay-ms 5000",
+    "  --continue-on-error",
     "  --dry-run",
     "  --skip-readme",
   ].join("\n");
@@ -239,102 +242,21 @@ function objectLiteralToObject(objectLiteral) {
   return result;
 }
 
-function mergeObjects(...objects) {
-  const result = {};
-
-  for (const object of objects) {
-    mergeInto(result, object);
-  }
-
-  return result;
-}
-
-function mergeInto(target, source) {
-  for (const [key, value] of Object.entries(source)) {
-    if (
-      value &&
-      typeof value === "object" &&
-      !Array.isArray(value) &&
-      target[key] &&
-      typeof target[key] === "object" &&
-      !Array.isArray(target[key])
-    ) {
-      mergeInto(target[key], value);
-    } else {
-      target[key] = cloneValue(value);
-    }
-  }
-}
-
-function cloneValue(value) {
-  if (!value || typeof value !== "object" || Array.isArray(value)) return value;
-
-  return Object.entries(value).reduce((acc, [key, entryValue]) => {
-    acc[key] = cloneValue(entryValue);
-    return acc;
-  }, {});
-}
-
-function getPath(object, keyPath) {
-  const parts = keyPath.split(".");
-  let current = object;
-
-  for (const part of parts) {
-    if (!current || typeof current !== "object" || !Object.prototype.hasOwnProperty.call(current, part)) {
-      return undefined;
-    }
-    current = current[part];
-  }
-
-  return current;
-}
-
-function setPath(object, keyPath, value) {
-  const parts = keyPath.split(".");
-  let current = object;
-
-  for (const part of parts.slice(0, -1)) {
-    if (!current[part] || typeof current[part] !== "object") {
-      current[part] = {};
-    }
-    current = current[part];
-  }
-
-  current[parts.at(-1)] = value;
-}
-
-function collectEmptyLeaves(object, prefix = "", result = []) {
+function collectEmptyEntries(object, result = []) {
   for (const [key, value] of Object.entries(object)) {
-    const keyPath = prefix ? `${prefix}.${key}` : key;
     if (value === "") {
-      result.push(keyPath);
-    } else if (value && typeof value === "object" && !Array.isArray(value)) {
-      collectEmptyLeaves(value, keyPath, result);
+      result.push(key);
     }
   }
 
   return result;
 }
 
-function formatObject(value, indent = 2) {
-  const entries = Object.entries(value);
+function formatFlatObject(object) {
+  const entries = Object.entries(object);
   if (entries.length === 0) return "{}";
 
-  const pad = " ".repeat(indent);
-  const lines = ["{"];
-
-  for (const [key, entryValue] of entries) {
-    const property = /^[A-Za-z_$][\w$]*$/.test(key) ? key : JSON.stringify(key);
-
-    if (entryValue && typeof entryValue === "object" && !Array.isArray(entryValue)) {
-      lines.push(`${pad}${property}: ${formatObject(entryValue, indent + 2)},`);
-    } else {
-      lines.push(`${pad}${property}: ${JSON.stringify(entryValue)},`);
-    }
-  }
-
-  lines.push(`${" ".repeat(indent - 2)}}`);
-  return lines.join("\n");
+  return ["{", ...entries.map(([key, value]) => `  ${JSON.stringify(key)}: ${JSON.stringify(value)},`), "}"].join("\n");
 }
 
 function localeFileContent(object) {
@@ -344,13 +266,29 @@ function localeFileContent(object) {
  * See the LICENSE file for details.
  */
 
-export default ${formatObject(object)} as const;
+export default ${formatFlatObject(object)} as const;
 `;
 }
 
-function loadMergedLocale(language) {
-  const languageDir = path.join(localesRoot, language);
-  return mergeObjects(...localeFiles.map((file) => readObjectLiteral(path.join(languageDir, `${file}.ts`))));
+function formatGeneratedFiles(filePaths) {
+  const uniquePaths = Array.from(new Set(filePaths)).filter((filePath) => fs.existsSync(filePath));
+  if (uniquePaths.length === 0) return;
+
+  const relativePaths = uniquePaths.map((filePath) => path.relative(repoRoot, filePath));
+  const result = spawnSync("pnpm", ["exec", "oxfmt", ...relativePaths], {
+    cwd: repoRoot,
+    stdio: "inherit",
+  });
+
+  if (result.error) {
+    throw result.error;
+  }
+
+  if (result.status !== 0) {
+    throw new Error("Failed to format generated i18n files with oxfmt.");
+  }
+
+  console.log(`i18n: formatted ${uniquePaths.length} generated files`);
 }
 
 function chunkArray(items, size) {
@@ -370,7 +308,7 @@ function buildMessages(language, items) {
         "Translate from English into the requested target language.",
         "Preserve ICU MessageFormat placeholders and plural/select syntax exactly.",
         "Preserve product names, code identifiers, markdown links, HTML tags, and keyboard shortcuts unless natural localization requires surrounding words to change.",
-        "Return only valid JSON. The JSON object must map each input key to its translated string.",
+        "Return only valid JSON. The JSON object must map each input id to its translated string.",
       ].join(" "),
     },
     {
@@ -379,7 +317,7 @@ function buildMessages(language, items) {
         {
           target_language: language.label,
           target_locale: language.value,
-          items,
+          items: items.map((item) => ({ id: item.id, source: item.source })),
         },
         null,
         2
@@ -483,7 +421,7 @@ function validateTranslations(items, translations, language) {
   const valid = {};
 
   for (const item of items) {
-    const translation = translations[item.key];
+    const translation = translations[item.id];
     if (typeof translation !== "string") {
       console.warn(`i18n: ${language.value} missing translation in response for ${item.key}`);
       continue;
@@ -543,14 +481,14 @@ function collectIcuArguments(ast, result) {
   }
 }
 
-async function translateLanguage(config, language, englishTranslations) {
+async function translateLanguage(config, language, writtenFiles) {
   const languageDir = path.join(localesRoot, language.value);
   const targetPath = path.join(languageDir, targetLocaleFile);
   const targetTranslations = readObjectLiteral(targetPath);
-  const missingKeys = collectEmptyLeaves(targetTranslations);
+  const missingKeys = collectEmptyEntries(targetTranslations);
   const items = missingKeys
-    .map((key) => ({ key, source: getPath(englishTranslations, key) }))
-    .filter((item) => typeof item.source === "string" && item.source.length > 0)
+    .map((key, index) => ({ id: `message_${index + 1}`, key, source: key }))
+    .filter((item) => item.source.length > 0)
     .slice(0, config.limit || undefined);
 
   if (items.length === 0) {
@@ -564,18 +502,44 @@ async function translateLanguage(config, language, englishTranslations) {
   }
 
   let translatedCount = 0;
-  for (const batch of chunkArray(items, config.batchSize)) {
-    const translations = await requestTranslations(config, language, batch);
-    const validTranslations = validateTranslations(batch, translations, language);
+  const batches = chunkArray(items, config.batchSize);
+  console.log(
+    `i18n: ${language.value} translating ${items.length} placeholders in ${batches.length} batches of up to ${config.batchSize}`
+  );
+
+  for (const [batchIndex, batch] of batches.entries()) {
+    const batchNumber = batchIndex + 1;
+    console.log(`i18n: ${language.value} batch ${batchNumber}/${batches.length} requesting ${batch.length} messages`);
+
+    let validTranslations;
+    try {
+      const translations = await requestTranslations(config, language, batch);
+      validTranslations = validateTranslations(batch, translations, language);
+    } catch (error) {
+      if (!config.continueOnError) {
+        throw error;
+      }
+
+      console.error(
+        `i18n: ${language.value} batch ${batchNumber}/${batches.length} failed: ${formatErrorMessage(error)}`
+      );
+      continue;
+    }
 
     for (const [key, translation] of Object.entries(validTranslations)) {
-      setPath(targetTranslations, key, translation);
+      targetTranslations[key] = translation;
       translatedCount += 1;
     }
-  }
 
-  if (translatedCount > 0) {
-    fs.writeFileSync(targetPath, localeFileContent(targetTranslations));
+    const batchTranslatedCount = Object.keys(validTranslations).length;
+    if (batchTranslatedCount > 0) {
+      fs.writeFileSync(targetPath, localeFileContent(targetTranslations));
+      writtenFiles.add(targetPath);
+    }
+
+    console.log(
+      `i18n: ${language.value} batch ${batchNumber}/${batches.length} translated ${batchTranslatedCount}/${batch.length}; ${translatedCount}/${items.length} total`
+    );
   }
 
   console.log(`i18n: ${language.value} translated ${translatedCount}/${items.length} placeholders`);
@@ -610,7 +574,7 @@ function buildReadmeMessages(language, sourceMarkdown, existingTranslation) {
   ];
 }
 
-async function translateReadme(config, language) {
+async function translateReadme(config, language, writtenFiles) {
   const targetPath = readmeTranslationTargets.get(language.value);
   if (!targetPath) return;
 
@@ -629,12 +593,13 @@ async function translateReadme(config, language) {
   }
 
   fs.writeFileSync(targetPath, `${translatedMarkdown.trim()}\n`);
+  writtenFiles.add(targetPath);
   console.log(`i18n: ${language.value} updated ${path.relative(repoRoot, targetPath)}`);
 }
 
 async function main() {
   const config = configFromArgs();
-  const englishTranslations = loadMergedLocale(fallbackLanguage);
+  const writtenFiles = new Set();
 
   console.log(
     `i18n: provider=${config.provider} model=${config.model || "(dry-run)"} languages=${config.languages
@@ -644,29 +609,45 @@ async function main() {
     }`
   );
 
-  for (const language of config.languages) {
-    await translateLanguage(config, language, englishTranslations);
-  }
-
-  if (!config.skipReadme) {
-    const readmeFailures = [];
-
+  try {
     for (const language of config.languages) {
-      try {
-        await translateReadme(config, language);
-      } catch (error) {
-        if (readmeTranslationTargets.has(language.value)) {
-          readmeFailures.push(language.value);
-          console.error(`i18n: ${language.value} README translation failed: ${formatErrorMessage(error)}`);
-        } else {
-          throw error;
+      await translateLanguage(config, language, writtenFiles);
+    }
+
+    if (!config.skipReadme) {
+      const readmeFailures = [];
+
+      for (const language of config.languages) {
+        try {
+          await translateReadme(config, language, writtenFiles);
+        } catch (error) {
+          if (readmeTranslationTargets.has(language.value)) {
+            readmeFailures.push(language.value);
+            console.error(`i18n: ${language.value} README translation failed: ${formatErrorMessage(error)}`);
+          } else {
+            throw error;
+          }
         }
+      }
+
+      if (readmeFailures.length > 0) {
+        throw new Error(`README translation failed for: ${readmeFailures.join(", ")}`);
+      }
+    }
+  } catch (error) {
+    if (!config.dryRun) {
+      try {
+        formatGeneratedFiles(writtenFiles);
+      } catch (formatError) {
+        console.error(`i18n: generated file formatting failed: ${formatErrorMessage(formatError)}`);
       }
     }
 
-    if (readmeFailures.length > 0) {
-      throw new Error(`README translation failed for: ${readmeFailures.join(", ")}`);
-    }
+    throw error;
+  }
+
+  if (!config.dryRun) {
+    formatGeneratedFiles(writtenFiles);
   }
 }
 

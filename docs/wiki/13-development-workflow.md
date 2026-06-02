@@ -21,7 +21,7 @@ pnpm --filter web dev
 pnpm --filter @pi-dash/ui storybook    # Storybook on :6006
 
 # i18n:
-pnpm i18n:sync                   # propagate new keys across all locales
+pnpm i18n:sync                   # sync source English messages across all locales
 pnpm i18n:translate              # auto-translate missing keys
 ```
 

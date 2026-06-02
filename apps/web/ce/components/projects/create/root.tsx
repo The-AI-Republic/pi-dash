@@ -54,8 +54,8 @@ export const CreateProjectForm = observer(function CreateProjectForm(props: TCre
     addProjectToFavorites(workspaceSlug.toString(), projectId).catch(() => {
       setToast({
         type: TOAST_TYPE.ERROR,
-        title: t("toast.error"),
-        message: t("failed_to_remove_project_from_favorites"),
+        title: t("Error!"),
+        message: t("Couldn't remove the project from favorites. Please try again."),
       });
     });
   };
@@ -93,8 +93,8 @@ export const CreateProjectForm = observer(function CreateProjectForm(props: TCre
           formData.cover_image_asset = null;
           setToast({
             type: TOAST_TYPE.WARNING,
-            title: t("warning"),
-            message: t("cover_image_upload_skipped"),
+            title: t("Warning"),
+            message: t("Cover image upload skipped — using a default cover."),
           });
         }
       } else {
@@ -114,8 +114,8 @@ export const CreateProjectForm = observer(function CreateProjectForm(props: TCre
       }
       setToast({
         type: TOAST_TYPE.SUCCESS,
-        title: t("success"),
-        message: t("project_created_successfully"),
+        title: t("Success"),
+        message: t("Project created successfully"),
       });
       if (setToFavorite) {
         handleAddToFavorites(res.id);
@@ -133,23 +133,23 @@ export const CreateProjectForm = observer(function CreateProjectForm(props: TCre
           if (nameError) {
             setToast({
               type: TOAST_TYPE.ERROR,
-              title: t("toast.error"),
-              message: t("project_name_already_taken"),
+              title: t("Error!"),
+              message: t("The project name is already taken."),
             });
           }
 
           if (identifierError) {
             setToast({
               type: TOAST_TYPE.ERROR,
-              title: t("toast.error"),
-              message: t("project_identifier_already_taken"),
+              title: t("Error!"),
+              message: t("The project identifier is already taken."),
             });
           }
         } else {
           setToast({
             type: TOAST_TYPE.ERROR,
-            title: t("toast.error"),
-            message: t("something_went_wrong"),
+            title: t("Error!"),
+            message: t("Something went wrong"),
           });
         }
       } catch (error) {
@@ -157,8 +157,8 @@ export const CreateProjectForm = observer(function CreateProjectForm(props: TCre
         console.error("Error processing API error:", error);
         setToast({
           type: TOAST_TYPE.ERROR,
-          title: t("toast.error"),
-          message: t("something_went_wrong"),
+          title: t("Error!"),
+          message: t("Something went wrong"),
         });
       }
     }

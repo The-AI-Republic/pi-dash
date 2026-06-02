@@ -34,23 +34,23 @@ export const useRelationOperations = (
         await copyUrlToClipboard(path);
         setToast({
           type: TOAST_TYPE.SUCCESS,
-          title: t("common.link_copied"),
-          message: t("entity.link_copied_to_clipboard", { entity: entityName }),
+          title: t("Link copied!"),
+          message: t("{entity} link copied to clipboard", { entity: entityName }),
         });
       },
       update: async (workspaceSlug, projectId, issueId, data) => {
         try {
           await updateIssue(workspaceSlug, projectId, issueId, data);
           setToast({
-            title: t("toast.success"),
+            title: t("Success!"),
             type: TOAST_TYPE.SUCCESS,
-            message: t("entity.update.success", { entity: entityName }),
+            message: t("{entity} updated successfully", { entity: entityName }),
           });
         } catch (_error) {
           setToast({
-            title: t("toast.error"),
+            title: t("Error!"),
             type: TOAST_TYPE.ERROR,
-            message: t("entity.update.failed", { entity: entityName }),
+            message: t("{entity} update failed", { entity: entityName }),
           });
         }
       },

@@ -59,7 +59,7 @@ const RunnersLayout = observer(function RunnersLayout() {
       <div className="flex h-full w-full overflow-hidden">
         <aside className="bg-layer-0 w-[280px] shrink-0 border-r border-subtle">
           <div className="flex h-12 items-center border-b border-subtle px-4 text-14 font-semibold text-primary">
-            {t("runners.title")}
+            {t("AI Agents")}
           </div>
           <nav className="flex flex-col gap-1 p-2">
             <NavLink

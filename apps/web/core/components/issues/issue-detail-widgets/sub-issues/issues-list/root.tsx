@@ -91,19 +91,19 @@ export const SubIssuesListRoot = observer(function SubIssuesListRoot(props: Prop
         <SectionEmptyState
           title={
             !isSubWorkItems
-              ? t("sub_work_item.empty_state.list_filters.title")
-              : t("sub_work_item.empty_state.sub_list_filters.title")
+              ? t("You don't have work items that match the filters you've applied.")
+              : t("You don't have sub-work items that match the filters you've applied.")
           }
           description={
             !isSubWorkItems
-              ? t("sub_work_item.empty_state.list_filters.description")
-              : t("sub_work_item.empty_state.sub_list_filters.description")
+              ? t("To see all work items, clear all applied filters.")
+              : t("To see all sub-work items, clear all applied filters.")
           }
           icon={<ListFilter />}
           customClassName={storeType !== EIssuesStoreType.EPIC ? "border-none" : ""}
           actionElement={
             <Button variant="secondary" onClick={() => resetFilters(rootIssueId)}>
-              {t("sub_work_item.empty_state.list_filters.action")}
+              {t("Clear filters")}
             </Button>
           }
         />

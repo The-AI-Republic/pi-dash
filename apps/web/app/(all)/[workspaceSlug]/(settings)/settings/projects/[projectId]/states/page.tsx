@@ -46,14 +46,14 @@ function StatesSettingsPage({ params }: Route.ComponentProps) {
       members_can_edit_states: !membersCanEditStates,
     });
     setPromiseToast(promise, {
-      loading: t("project_settings.states.members_edit.toast.loading"),
+      loading: t("Updating project setting..."),
       success: {
-        title: t("project_settings.states.members_edit.toast.success_title"),
-        message: () => t("project_settings.states.members_edit.toast.success_message"),
+        title: t("Success!"),
+        message: () => t("Project setting updated."),
       },
       error: {
-        title: t("project_settings.states.members_edit.toast.error_title"),
-        message: () => t("project_settings.states.members_edit.toast.error_message"),
+        title: t("Error!"),
+        message: () => t("Something went wrong while updating the project setting. Please try again."),
       },
     });
   };
@@ -67,14 +67,14 @@ function StatesSettingsPage({ params }: Route.ComponentProps) {
       <PageHead title={pageTitle} />
       <div className="w-full">
         <SettingsHeading
-          title={t("project_settings.states.heading")}
-          description={t("project_settings.states.description")}
+          title={t("States")}
+          description={t("Define and customize workflow states to track the progress of your work items.")}
         />
         {isAdmin && (
           <div className="mt-6">
             <SettingsBoxedControlItem
-              title={t("project_settings.states.members_edit.title")}
-              description={t("project_settings.states.members_edit.description")}
+              title={t("Let members edit states")}
+              description={t("When enabled, project members can add, edit, reorder, and delete workflow states. When disabled, only admins can manage states.")}
               control={
                 <ToggleSwitch value={membersCanEditStates} onChange={handleMembersCanEditStatesToggle} size="sm" />
               }

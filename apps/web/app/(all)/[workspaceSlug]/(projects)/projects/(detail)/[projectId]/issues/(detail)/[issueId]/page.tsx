@@ -53,10 +53,10 @@ export default function IssueDetailsPage({ loaderData }: Route.ComponentProps) {
       <div className="flex size-full items-center justify-center">
         <EmptyState
           image={resolvedTheme === "dark" ? emptyIssueDark : emptyIssueLight}
-          title={t("issue.empty_state.issue_detail.title")}
-          description={t("issue.empty_state.issue_detail.description")}
+          title={t("Work item does not exist")}
+          description={t("The work item you are looking for does not exist, has been archived, or has been deleted.")}
           primaryButton={{
-            text: t("issue.empty_state.issue_detail.primary_button.text"),
+            text: t("View other work items"),
             onClick: () => router.push(`/${loaderData.workspaceSlug}/workspace-views/all-issues/`),
           }}
         />

@@ -46,7 +46,7 @@ export function DeclineIssueModal(props: Props) {
       handleSubmit={handleDecline}
       isSubmitting={isDeclining}
       isOpen={isOpen}
-      title={t("inbox_issue.modals.decline.title")}
+      title={t("Decline work item")}
       // TODO: Need to translate the confirmation message
       content={
         <>
@@ -58,8 +58,8 @@ export function DeclineIssueModal(props: Props) {
         </>
       }
       primaryButtonText={{
-        loading: t("declining"),
-        default: t("decline"),
+        loading: t("Declining"),
+        default: t("Decline"),
       }}
     />
   );

@@ -32,6 +32,28 @@ const defaultValues: TUniqueCodeValuesForm = { email: "", code: "" };
 // service initialization
 const authService = new AuthService();
 
+const CHANGE_EMAIL_I18N = {
+  title: "Change email",
+  description: "Enter a new email address to receive a verification link.",
+  "toasts.success_title": "Success!",
+  "toasts.success_message": "Email updated successfully. Please sign in again.",
+  "form.email.label": "New email",
+  "form.email.placeholder": "Enter your email",
+  "form.email.errors.required": "Email is required",
+  "form.email.errors.invalid": "Email is invalid",
+  "form.email.errors.exists": "Email already exists. Please use a different one.",
+  "form.email.errors.validation_failed": "Email validation failed. Please try again.",
+  "form.code.label": "Unique code",
+  "form.code.placeholder": "123456",
+  "form.code.helper_text": "Verification code sent to your new email.",
+  "form.code.errors.required": "Unique code is required",
+  "form.code.errors.invalid": "Invalid verification code. Please try again.",
+  "actions.continue": "Continue",
+  "actions.confirm": "Confirm",
+  "actions.cancel": "Cancel",
+  "states.sending": "Sending",
+} as const;
+
 export const ChangeEmailModal = observer(function ChangeEmailModal(props: Props) {
   const { isOpen, onClose } = props;
   // states
@@ -39,7 +61,7 @@ export const ChangeEmailModal = observer(function ChangeEmailModal(props: Props)
   // store hooks
   const { signOut } = useUser();
   const { t } = useTranslation();
-  const changeEmailT = (path: string) => t(`account_settings.profile.change_email_modal.${path}`);
+  const changeEmailT = (path: keyof typeof CHANGE_EMAIL_I18N) => t(CHANGE_EMAIL_I18N[path]);
   // form info
   const {
     handleSubmit,
@@ -61,8 +83,8 @@ export const ChangeEmailModal = observer(function ChangeEmailModal(props: Props)
     await signOut().catch(() =>
       setToast({
         type: TOAST_TYPE.ERROR,
-        title: t("auth.sign_out.toast.error.title"),
-        message: t("auth.sign_out.toast.error.message"),
+        title: t("Error!"),
+        message: t("Failed to sign out. Please try again."),
       })
     );
   };

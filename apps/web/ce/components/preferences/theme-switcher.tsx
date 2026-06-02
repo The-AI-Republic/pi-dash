@@ -23,8 +23,8 @@ import { useUserProfile } from "@/hooks/store/user";
 export const ThemeSwitcher = observer(function ThemeSwitcher(props: {
   option: {
     id: string;
-    title: string;
-    description: string;
+    i18n_title: string;
+    i18n_description: string;
   };
 }) {
   // store hooks
@@ -85,8 +85,8 @@ export const ThemeSwitcher = observer(function ThemeSwitcher(props: {
   return (
     <>
       <SettingsControlItem
-        title={t(props.option.title)}
-        description={t(props.option.description)}
+        title={t(props.option.i18n_title)}
+        description={t(props.option.i18n_description)}
         control={
           <ThemeSwitch
             value={currentTheme}

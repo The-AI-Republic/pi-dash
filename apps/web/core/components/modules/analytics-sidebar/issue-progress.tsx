@@ -33,8 +33,8 @@ type TModuleAnalyticsProgress = {
 };
 
 const moduleBurnDownChartOptions = [
-  { value: "burndown", i18n_label: "issues" },
-  { value: "points", i18n_label: "points" },
+  { value: "burndown", i18n_label: "Work items" },
+  { value: "points", i18n_label: "Points" },
 ];
 
 export const ModuleAnalyticsProgress = observer(function ModuleAnalyticsProgress(props: TModuleAnalyticsProgress) {
@@ -139,7 +139,7 @@ export const ModuleAnalyticsProgress = observer(function ModuleAnalyticsProgress
                         value={plotType}
                         label={
                           <span>
-                            {t(moduleBurnDownChartOptions.find((v) => v.value === plotType)?.i18n_label || "none")}
+                            {t(moduleBurnDownChartOptions.find((v) => v.value === plotType)?.i18n_label || "None")}
                           </span>
                         }
                         onChange={onChange}
@@ -170,8 +170,8 @@ export const ModuleAnalyticsProgress = observer(function ModuleAnalyticsProgress
                   <AlertCircle height={14} width={14} className="text-secondary" />
                   <span className="text-11 text-secondary italic">
                     {moduleDetails?.start_date && moduleDetails?.target_date
-                      ? t("project_module.empty_state.sidebar.in_active")
-                      : t("project_module.empty_state.sidebar.invalid_date")}
+                      ? t("This module isn't active yet.")
+                      : t("Invalid date. Please enter valid date.")}
                   </span>
                 </div>
               </div>

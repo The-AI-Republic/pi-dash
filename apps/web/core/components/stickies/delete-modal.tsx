@@ -31,8 +31,8 @@ export const StickyDeleteModal = observer(function StickyDeleteModal(props: ISti
     } catch {
       setToast({
         type: TOAST_TYPE.ERROR,
-        title: t("stickies.toasts.not_removed.title"),
-        message: t("stickies.toasts.not_removed.message"),
+        title: t("Sticky not removed"),
+        message: t("The sticky could not be removed"),
       });
     } finally {
       setLoader(false);
@@ -45,8 +45,8 @@ export const StickyDeleteModal = observer(function StickyDeleteModal(props: ISti
       handleSubmit={formSubmit}
       isSubmitting={loader}
       isOpen={isOpen}
-      title={t("stickies.delete")}
-      content={t("stickies.delete_confirmation")}
+      title={t("Delete sticky")}
+      content={t("Are you sure you want to delete this sticky?")}
     />
   );
 });

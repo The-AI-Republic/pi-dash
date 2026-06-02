@@ -22,7 +22,7 @@ export const ProfileSettingsSidebarWorkspaceOptions = observer(function ProfileS
 
   return (
     <div className="shrink-0">
-      <div className="p-2 text-caption-md-medium text-tertiary capitalize">{t("workspace")}</div>
+      <div className="p-2 text-caption-md-medium text-tertiary capitalize">{t("Workspace")}</div>
       <div className="flex flex-col">
         {Object.values(workspaces).map((workspace) => (
           <SettingsSidebarItem
@@ -39,14 +39,14 @@ export const ProfileSettingsSidebarWorkspaceOptions = observer(function ProfileS
             as="link"
             href="/create-workspace/"
             icon={CirclePlus}
-            label={t("create_workspace")}
+            label={t("Create workspace")}
             isActive={false}
           />
           <SettingsSidebarItem
             as="link"
             href="/invitations/"
             icon={Mails}
-            label={t("workspace_invites")}
+            label={t("Workspace invites")}
             isActive={false}
           />
         </div>

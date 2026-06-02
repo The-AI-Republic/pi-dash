@@ -101,14 +101,14 @@ export const CycleSidebarHeader = observer(function CycleSidebarHeader(props: Pr
       submitChanges(payload);
       setToast({
         type: TOAST_TYPE.SUCCESS,
-        title: t("project_cycles.action.update.success.title"),
-        message: t("project_cycles.action.update.success.description"),
+        title: t("Success!"),
+        message: t("Cycle updated successfully."),
       });
     } else {
       setToast({
         type: TOAST_TYPE.ERROR,
-        title: t("project_cycles.action.update.failed.title"),
-        message: t("project_cycles.action.update.error.already_exists"),
+        title: t("Error!"),
+        message: t("You already have a cycle on the given dates, if you want to create a draft cycle, you can do that by removing both the dates."),
       });
     }
     return isDateValid;
@@ -172,10 +172,10 @@ export const CycleSidebarHeader = observer(function CycleSidebarHeader(props: Pr
                       }
                     }}
                     placeholder={{
-                      from: t("project_cycles.start_date"),
-                      to: t("project_cycles.end_date"),
+                      from: t("Start date"),
+                      to: t("End date"),
                     }}
-                    customTooltipHeading={t("project_cycles.in_your_timezone")}
+                    customTooltipHeading={t("In your timezone")}
                     customTooltipContent={
                       <span className="flex gap-1">
                         {renderFormattedDateInUserTimezone(cycleDetails.start_date ?? "")}

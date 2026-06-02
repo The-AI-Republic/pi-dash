@@ -27,8 +27,8 @@ export const NotificationEmptyState = observer(function NotificationEmptyState({
         assetClassName="size-24"
         title={
           currentNotificationTab === ENotificationTab.ALL
-            ? t("workspace_empty_state.inbox_sidebar_all.title")
-            : t("workspace_empty_state.inbox_sidebar_mentions.title")
+            ? t("Updates for your subscribed work items will appear here")
+            : t("Mentions for your work items will appear here")
         }
         className="max-w-56"
       />

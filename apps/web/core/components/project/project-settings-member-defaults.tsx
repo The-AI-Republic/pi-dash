@@ -109,9 +109,9 @@ export const ProjectSettingsMemberDefaults = observer(function ProjectSettingsMe
     })
       .then(() => {
         setToast({
-          title: `${t("success")}!`,
+          title: `${t("Success")}!`,
           type: TOAST_TYPE.SUCCESS,
-          message: t("project_settings.general.toast.success"),
+          message: t("Project updated successfully"),
         });
       })
       .catch((err) => {
@@ -127,9 +127,9 @@ export const ProjectSettingsMemberDefaults = observer(function ProjectSettingsMe
     })
       .then(() => {
         setToast({
-          title: `${t("success")}!`,
+          title: `${t("Success")}!`,
           type: TOAST_TYPE.SUCCESS,
-          message: t("project_settings.general.toast.success"),
+          message: t("Project updated successfully"),
         });
       })
       .catch((err) => {

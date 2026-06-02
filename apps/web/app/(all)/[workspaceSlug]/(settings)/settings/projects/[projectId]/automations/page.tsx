@@ -62,8 +62,8 @@ function AutomationSettingsPage({ params }: Route.ComponentProps) {
       <PageHead title={pageTitle} />
       <section className={`w-full ${canPerformProjectAdminActions ? "" : "opacity-60"}`}>
         <SettingsHeading
-          title={t("project_settings.automations.heading")}
-          description={t("project_settings.automations.description")}
+          title={t("Automations")}
+          description={t("Configure automated actions to streamline your project management workflow and reduce manual tasks.")}
         />
         <div className="mt-6">
           <AutoArchiveAutomation handleChange={handleChange} />

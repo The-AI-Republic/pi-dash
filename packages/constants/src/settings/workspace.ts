@@ -20,45 +20,51 @@ export const WORKSPACE_SETTINGS_CATEGORIES: WORKSPACE_SETTINGS_CATEGORY[] = [
   WORKSPACE_SETTINGS_CATEGORY.DEVELOPER,
 ];
 
+export const WORKSPACE_SETTINGS_CATEGORY_I18N_LABELS: Record<WORKSPACE_SETTINGS_CATEGORY, string> = {
+  [WORKSPACE_SETTINGS_CATEGORY.ADMINISTRATION]: "Administration",
+  [WORKSPACE_SETTINGS_CATEGORY.FEATURES]: "Features",
+  [WORKSPACE_SETTINGS_CATEGORY.DEVELOPER]: "Developer",
+};
+
 export const WORKSPACE_SETTINGS: Record<TWorkspaceSettingsTabs, TWorkspaceSettingsItem> = {
   general: {
     key: "general",
-    i18n_label: "workspace_settings.settings.general.title",
+    i18n_label: "General",
     href: `/settings`,
     access: [EUserWorkspaceRoles.ADMIN, EUserWorkspaceRoles.MEMBER],
     highlight: (pathname: string, baseUrl: string) => pathname === `${baseUrl}/settings/`,
   },
   members: {
     key: "members",
-    i18n_label: "workspace_settings.settings.members.title",
+    i18n_label: "Members",
     href: `/settings/members`,
     access: [EUserWorkspaceRoles.ADMIN, EUserWorkspaceRoles.MEMBER],
     highlight: (pathname: string, baseUrl: string) => pathname === `${baseUrl}/settings/members/`,
   },
   "billing-and-plans": {
     key: "billing-and-plans",
-    i18n_label: "workspace_settings.settings.billing_and_plans.title",
+    i18n_label: "Billing & Plans",
     href: `/settings/billing`,
     access: [EUserWorkspaceRoles.ADMIN],
     highlight: (pathname: string, baseUrl: string) => pathname === `${baseUrl}/settings/billing/`,
   },
   export: {
     key: "export",
-    i18n_label: "workspace_settings.settings.exports.title",
+    i18n_label: "Exports",
     href: `/settings/exports`,
     access: [EUserWorkspaceRoles.ADMIN, EUserWorkspaceRoles.MEMBER],
     highlight: (pathname: string, baseUrl: string) => pathname === `${baseUrl}/settings/exports/`,
   },
   webhooks: {
     key: "webhooks",
-    i18n_label: "workspace_settings.settings.webhooks.title",
+    i18n_label: "Webhooks",
     href: `/settings/webhooks`,
     access: [EUserWorkspaceRoles.ADMIN],
     highlight: (pathname: string, baseUrl: string) => pathname === `${baseUrl}/settings/webhooks/`,
   },
   integrations: {
     key: "integrations",
-    i18n_label: "integrations",
+    i18n_label: "Integrations",
     href: `/settings/integrations`,
     access: [EUserWorkspaceRoles.ADMIN],
     highlight: (pathname: string, baseUrl: string) => pathname === `${baseUrl}/settings/integrations/`,

@@ -94,12 +94,12 @@ export const PageNavigationPaneRoot = observer(function PageNavigationPaneRoot(p
       }}
     >
       <div className="mb-3.5 px-3.5">
-        <Tooltip tooltipContent={t("page_navigation_pane.close_button")}>
+        <Tooltip tooltipContent={t("Close navigation pane")}>
           <button
             type="button"
             className="grid size-3.5 place-items-center text-secondary transition-colors hover:text-primary"
             onClick={handleClose}
-            aria-label={t("page_navigation_pane.close_button")}
+            aria-label={t("Close navigation pane")}
           >
             <ArrowRightCircle className="size-3.5" />
           </button>

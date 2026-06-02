@@ -199,7 +199,7 @@ export const SubIssuesListItem = observer(function SubIssuesListItem(props: Prop
                   >
                     <div className="flex items-center gap-2">
                       <EditIcon className="h-3.5 w-3.5" strokeWidth={2} />
-                      <span>{t("issue.edit")}</span>
+                      <span>{t("Edit work item")}</span>
                     </div>
                   </CustomMenu.MenuItem>
                 )}
@@ -211,7 +211,7 @@ export const SubIssuesListItem = observer(function SubIssuesListItem(props: Prop
                 >
                   <div className="flex items-center gap-2">
                     <LinkIcon className="h-3.5 w-3.5" strokeWidth={2} />
-                    <span>{t("issue.copy_link")}</span>
+                    <span>{t("Copy work item link")}</span>
                   </div>
                 </CustomMenu.MenuItem>
 
@@ -225,8 +225,8 @@ export const SubIssuesListItem = observer(function SubIssuesListItem(props: Prop
                     <div className="flex items-center gap-2">
                       <CloseIcon className="h-3.5 w-3.5" strokeWidth={2} />
                       {issueServiceType === EIssueServiceType.ISSUES
-                        ? t("issue.remove.parent.label")
-                        : t("issue.remove.label")}
+                        ? t("Remove parent work item")
+                        : t("Remove work item")}
                     </div>
                   </CustomMenu.MenuItem>
                 )}
@@ -240,7 +240,7 @@ export const SubIssuesListItem = observer(function SubIssuesListItem(props: Prop
                   >
                     <div className="flex items-center gap-2">
                       <TrashIcon className="h-3.5 w-3.5" strokeWidth={2} />
-                      <span>{t("issue.delete.label")}</span>
+                      <span>{t("Delete work item")}</span>
                     </div>
                   </CustomMenu.MenuItem>
                 )}

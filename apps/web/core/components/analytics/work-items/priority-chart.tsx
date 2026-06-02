@@ -221,7 +221,7 @@ const PriorityChart = observer(function PriorityChart(props: Props) {
             }}
             yAxis={{
               key: "count",
-              label: t("common.no_of", { entity: yAxisLabel.replace("_", " ") }),
+              label: t("No. of {entity}", { entity: yAxisLabel.replace("_", " ") }),
               offset: -60,
               dx: -26,
             }}
@@ -236,7 +236,7 @@ const PriorityChart = observer(function PriorityChart(props: Props) {
                 prependIcon={<Download className="h-3.5 w-3.5" />}
                 onClick={() => exportCSV(table.getRowModel().rows, [...defaultColumns, ...columns], workspaceSlug)}
               >
-                <div>{t("exporter.csv.short_description")}</div>
+                <div>{t("Export as csv")}</div>
               </Button>
             )}
           />
@@ -246,7 +246,7 @@ const PriorityChart = observer(function PriorityChart(props: Props) {
           assetKey="unknown"
           assetClassName="size-20"
           rootClassName="border border-subtle px-5 py-10 md:py-20 md:px-20"
-          title={t("workspace_empty_state.analytics_work_items.title")}
+          title={t("Create projects with work items and assignees to start tracking performance, progress, and team impact here.")}
         />
       )}
     </div>

@@ -36,7 +36,7 @@ export const WorkspaceEditionBadge = observer(function WorkspaceEditionBadge() {
           size="lg"
           onClick={() => setIsPaidPlanPurchaseModalOpen(true)}
           aria-haspopup="dialog"
-          aria-label={t("aria_labels.projects_sidebar.edition_badge")}
+          aria-label={t("Open paid plans' modal")}
         >
           Community
         </Button>

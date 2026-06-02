@@ -247,7 +247,7 @@ export const PageEditorBody = observer(function PageEditorBody(props: Props) {
                 <div
                   className="max-h-[50vh] !cursor-pointer overflow-hidden"
                   role="button"
-                  aria-label={t("page_navigation_pane.outline_floating_button")}
+                  aria-label={t("Open outline")}
                   onClick={handleOpenNavigationPane}
                 >
                   <PageContentBrowser className="overflow-y-auto" editorRef={editorRef} showOutline />

@@ -119,18 +119,18 @@ export const StickiesList = observer(function StickiesList(props: TProps) {
           <>
             {searchQuery ? (
               <SimpleEmptyState
-                title={t("stickies.empty_state.search.title")}
-                description={t("stickies.empty_state.search.description")}
+                title={t("That doesn't match any of your stickies.")}
+                description={t("Try a different term or let us know\nif you are sure your search is right.")}
                 assetPath={stickiesSearchResolvedPath}
               />
             ) : (
               <DetailedEmptyState
-                title={t("stickies.empty_state.general.title")}
-                description={t("stickies.empty_state.general.description")}
+                title={t("Stickies are quick notes and to-dos you take down on the fly.")}
+                description={t("Capture your thoughts and ideas effortlessly by creating stickies that you can access anytime and from anywhere.")}
                 assetPath={stickiesResolvedPath}
                 primaryButton={{
                   prependIcon: <PlusIcon className="size-4" />,
-                  text: t("stickies.empty_state.general.primary_button.text"),
+                  text: t("Add sticky"),
                   onClick: () => {
                     toggleShowNewSticky(true);
                     stickyOperations.create();

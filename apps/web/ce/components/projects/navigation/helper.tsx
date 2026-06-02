@@ -22,7 +22,7 @@ export const getProjectFeatureNavigation = (
   }
 ): TNavigationItem[] => [
   {
-    i18n_key: "sidebar.work_items",
+    i18n_key: "Work Items",
     key: EProjectFeatureKey.WORK_ITEMS,
     name: "Work items",
     href: `/${workspaceSlug}/projects/${projectId}/issues`,
@@ -32,7 +32,7 @@ export const getProjectFeatureNavigation = (
     sortOrder: 1,
   },
   {
-    i18n_key: "sidebar.cycles",
+    i18n_key: "Cycles",
     key: EProjectFeatureKey.CYCLES,
     name: "Cycles",
     href: `/${workspaceSlug}/projects/${projectId}/cycles`,
@@ -42,7 +42,7 @@ export const getProjectFeatureNavigation = (
     sortOrder: 2,
   },
   {
-    i18n_key: "sidebar.modules",
+    i18n_key: "Modules",
     key: EProjectFeatureKey.MODULES,
     name: "Modules",
     href: `/${workspaceSlug}/projects/${projectId}/modules`,
@@ -52,7 +52,7 @@ export const getProjectFeatureNavigation = (
     sortOrder: 3,
   },
   {
-    i18n_key: "sidebar.views",
+    i18n_key: "Views",
     key: EProjectFeatureKey.VIEWS,
     name: "Views",
     href: `/${workspaceSlug}/projects/${projectId}/views`,
@@ -62,7 +62,7 @@ export const getProjectFeatureNavigation = (
     sortOrder: 4,
   },
   {
-    i18n_key: "sidebar.pages",
+    i18n_key: "Pages",
     key: EProjectFeatureKey.PAGES,
     name: "Pages",
     href: `/${workspaceSlug}/projects/${projectId}/pages`,
@@ -72,7 +72,7 @@ export const getProjectFeatureNavigation = (
     sortOrder: 5,
   },
   {
-    i18n_key: "sidebar.intake",
+    i18n_key: "Intake",
     key: EProjectFeatureKey.INTAKE,
     name: "Intake",
     href: `/${workspaceSlug}/projects/${projectId}/intake`,

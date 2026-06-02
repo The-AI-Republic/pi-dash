@@ -110,8 +110,8 @@ export function PodDropdownBase(props: TPodDropdownBaseProps) {
       <DropdownButton
         className={buttonClassName}
         isActive={isOpen}
-        tooltipHeading={t("pod")}
-        tooltipContent={selectedPod?.name ?? t("pod")}
+        tooltipHeading={t("Pod")}
+        tooltipContent={selectedPod?.name ?? t("Pod")}
         showTooltip={showTooltip}
         variant={buttonVariant}
         renderToolTipByDefault={renderByDefault}
@@ -122,7 +122,7 @@ export function PodDropdownBase(props: TPodDropdownBaseProps) {
           <>
             {!hideIcon && <Container className="size-3.5 flex-shrink-0" />}
             {BUTTON_VARIANTS_WITH_TEXT.includes(buttonVariant) && (
-              <span className="flex-grow truncate text-left">{selectedPod?.name ?? t("pod")}</span>
+              <span className="flex-grow truncate text-left">{selectedPod?.name ?? t("Pod")}</span>
             )}
             {dropdownArrow && (
               <ChevronDownIcon className={cn("h-2.5 w-2.5 flex-shrink-0", dropdownArrowClassName)} aria-hidden="true" />
@@ -162,7 +162,7 @@ export function PodDropdownBase(props: TPodDropdownBaseProps) {
                 className="w-full bg-transparent py-1 text-11 text-secondary placeholder:text-placeholder focus:outline-none"
                 value={query}
                 onChange={(e) => setQuery(e.target.value)}
-                placeholder={t("common.search.label")}
+                placeholder={t("Search")}
                 onKeyDown={searchInputKeyDown}
               />
             </div>
@@ -186,7 +186,7 @@ export function PodDropdownBase(props: TPodDropdownBaseProps) {
                           <span className="flex-grow truncate">{pod.name}</span>
                           {pod.is_default && (
                             <span className="flex-shrink-0 rounded-sm bg-surface-2 px-1 py-0.5 text-9 text-tertiary uppercase">
-                              {t("pod_default_badge")}
+                              {t("Default")}
                             </span>
                           )}
                         </div>
@@ -196,7 +196,7 @@ export function PodDropdownBase(props: TPodDropdownBaseProps) {
                   </Combobox.Option>
                 ))
               ) : (
-                <p className="px-1.5 py-1 text-placeholder italic">{t("no_matching_results")}</p>
+                <p className="px-1.5 py-1 text-placeholder italic">{t("No matching results")}</p>
               )}
             </div>
           </div>

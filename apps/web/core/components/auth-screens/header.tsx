@@ -16,15 +16,15 @@ import { useInstance } from "@/hooks/store/use-instance";
 
 const authContentMap = {
   [EAuthModes.SIGN_IN]: {
-    pageTitle: "Sign up",
-    text: "auth.common.new_to_pi_dash",
-    linkText: "Sign up",
+    i18n_pageTitle: "Sign up",
+    i18n_text: "New to Pi Dash?",
+    i18n_linkText: "Sign up",
     linkHref: "/sign-up",
   },
   [EAuthModes.SIGN_UP]: {
-    pageTitle: "Sign in",
-    text: "auth.common.already_have_an_account",
-    linkText: "Sign in",
+    i18n_pageTitle: "Sign in",
+    i18n_text: "Already have an account?",
+    i18n_linkText: "Sign in",
     linkHref: "/sign-in",
   },
 };
@@ -42,17 +42,17 @@ export const AuthHeader = observer(function AuthHeader({ type }: AuthHeaderProps
 
   return (
     <AuthHeaderBase
-      pageTitle={t(authContentMap[type].pageTitle)}
+      pageTitle={t(authContentMap[type].i18n_pageTitle)}
       additionalAction={
         enableSignUpConfig && (
           <div className="flex flex-col items-end text-center text-13 font-medium text-tertiary sm:flex-row sm:items-center sm:gap-2">
-            <span className="text-body-sm-regular text-tertiary">{t(authContentMap[type].text)}</span>
+            <span className="text-body-sm-regular text-tertiary">{t(authContentMap[type].i18n_text)}</span>
             <Link
               data-ph-element={AUTH_TRACKER_ELEMENTS.NAVIGATE_TO_SIGN_UP}
               href={authContentMap[type].linkHref}
               className="text-body-sm-semibold text-accent-primary hover:underline"
             >
-              {t(authContentMap[type].linkText)}
+              {t(authContentMap[type].i18n_linkText)}
             </Link>
           </div>
         )

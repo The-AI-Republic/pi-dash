@@ -49,7 +49,7 @@ export const IssueLinksCollapsibleTitle = observer(function IssueLinksCollapsibl
   return (
     <CollapsibleButton
       isOpen={isOpen}
-      title={t("common.links")}
+      title={t("Links")}
       indicatorElement={indicatorElement}
       actionItemElement={
         !disabled && <IssueLinksActionButton issueServiceType={issueServiceType} disabled={disabled} />

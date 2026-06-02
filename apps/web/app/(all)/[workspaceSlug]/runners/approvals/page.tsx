@@ -18,15 +18,15 @@ import { useWorkspace } from "@/hooks/store/use-workspace";
 
 const service = new RunnerService();
 
-function kindKey(kind: TApprovalKind): string {
-  switch (kind) {
-    case "command_execution":
-    case "file_change":
-    case "network_access":
-      return `runners.approvals.kinds.${kind}`;
-    default:
-      return "runners.approvals.kinds.other";
-  }
+const APPROVAL_KIND_I18N_LABELS: Record<TApprovalKind | "other", string> = {
+  command_execution: "The runner wants to run a shell command",
+  file_change: "The runner wants to modify a file",
+  network_access: "The runner wants to make a network call",
+  other: "The runner is requesting approval",
+};
+
+function approvalKindI18nLabel(kind: TApprovalKind): string {
+  return APPROVAL_KIND_I18N_LABELS[kind] ?? APPROVAL_KIND_I18N_LABELS.other;
 }
 
 export const ApprovalsPage = observer(function ApprovalsPage() {
@@ -37,8 +37,8 @@ export const ApprovalsPage = observer(function ApprovalsPage() {
   });
   const [pending, setPending] = useState<string | null>(null);
   const pageTitle = currentWorkspace?.name
-    ? t("runners.page_title", { workspace: currentWorkspace.name })
-    : t("runners.title");
+    ? t("{workspace} - AI Agents", { workspace: currentWorkspace.name })
+    : t("AI Agents");
 
   async function decide(id: string, decision: TApprovalDecision) {
     setPending(id);
@@ -49,8 +49,8 @@ export const ApprovalsPage = observer(function ApprovalsPage() {
       const err = e as { error?: string } | null;
       setToast({
         type: TOAST_TYPE.ERROR,
-        title: t("runners.toast.error_title"),
-        message: err?.error ?? t("runners.approvals.decision_failed"),
+        title: t("Error!"),
+        message: err?.error ?? t("Failed to record decision"),
       });
     } finally {
       setPending(null);
@@ -65,7 +65,7 @@ export const ApprovalsPage = observer(function ApprovalsPage() {
       <RunnersTabs />
       {rows.length === 0 ? (
         <div className="rounded-md border border-subtle p-8 text-center text-13 text-secondary">
-          {t("runners.approvals.empty")}
+          {t("No pending approvals.")}
         </div>
       ) : (
         <div className="flex flex-col gap-4">
@@ -74,17 +74,17 @@ export const ApprovalsPage = observer(function ApprovalsPage() {
               <div className="flex items-start justify-between">
                 <div>
                   <div className="text-11 text-secondary">
-                    {t("runners.approvals.run_meta", {
+                    {t("Run {runId} · requested {at}", {
                       runId: a.agent_run,
                       at: new Date(a.requested_at).toLocaleTimeString(),
                     })}
                   </div>
-                  <div className="text-13 font-medium text-primary">{t(kindKey(a.kind))}</div>
+                  <div className="text-13 font-medium text-primary">{t(approvalKindI18nLabel(a.kind))}</div>
                   {a.reason && <div className="mt-1 text-13 text-secondary">{a.reason}</div>}
                 </div>
                 {a.expires_at && (
                   <div className="text-11 text-secondary">
-                    {t("runners.approvals.expires", { at: new Date(a.expires_at).toLocaleTimeString() })}
+                    {t("expires {at}", { at: new Date(a.expires_at).toLocaleTimeString() })}
                   </div>
                 )}
               </div>
@@ -93,7 +93,7 @@ export const ApprovalsPage = observer(function ApprovalsPage() {
               </pre>
               <div className="mt-3 flex gap-2">
                 <Button onClick={() => decide(a.id, "accept")} loading={pending === a.id} size="sm">
-                  {t("runners.approvals.accept_once")}
+                  {t("Accept once")}
                 </Button>
                 <Button
                   onClick={() => decide(a.id, "accept_for_session")}
@@ -101,7 +101,7 @@ export const ApprovalsPage = observer(function ApprovalsPage() {
                   variant="accent-primary"
                   size="sm"
                 >
-                  {t("runners.approvals.accept_for_session")}
+                  {t("Accept for session")}
                 </Button>
                 <Button
                   onClick={() => decide(a.id, "decline")}
@@ -109,7 +109,7 @@ export const ApprovalsPage = observer(function ApprovalsPage() {
                   variant="outline-danger"
                   size="sm"
                 >
-                  {t("runners.approvals.decline")}
+                  {t("Decline")}
                 </Button>
               </div>
             </div>

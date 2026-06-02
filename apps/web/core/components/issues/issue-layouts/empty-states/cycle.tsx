@@ -86,14 +86,14 @@ export const CycleEmptyState = observer(function CycleEmptyState() {
           // TODO: Empty state ux copy needs to be updated
           <EmptyStateDetailed
             assetKey="work-item"
-            title={t("project_cycles.empty_state.completed_no_issues.title")}
-            description={t("project_cycles.empty_state.completed_no_issues.description")}
+            title={t("No work items in the cycle")}
+            description={t("No work items in the cycle. Work items are either transferred or hidden. To see hidden work items if any, update your display properties accordingly.")}
           />
         ) : cycleWorkItemFilter?.hasActiveFilters ? (
           <EmptyStateDetailed
             assetKey="search"
-            title={t("common_empty_state.search.title")}
-            description={t("common_empty_state.search.description")}
+            title={t("No matching results.")}
+            description={t("No results found. Try adjusting your search terms.")}
             actions={[
               {
                 label: "Clear filters",
@@ -106,11 +106,11 @@ export const CycleEmptyState = observer(function CycleEmptyState() {
         ) : (
           <EmptyStateDetailed
             assetKey="work-item"
-            title={t("project_empty_state.cycle_work_items.title")}
-            description={t("project_empty_state.cycle_work_items.description")}
+            title={t("No work items to show in this cycle")}
+            description={t("Create work items to begin monitoring your team's progress this cycle and achieve your goals on time.")}
             actions={[
               {
-                label: t("project_empty_state.cycle_work_items.cta_primary"),
+                label: t("Create work item"),
                 onClick: () => {
                   toggleCreateIssueModal(true, EIssuesStoreType.CYCLE);
                 },
@@ -119,7 +119,7 @@ export const CycleEmptyState = observer(function CycleEmptyState() {
                 "data-ph-element": WORK_ITEM_TRACKER_ELEMENTS.EMPTY_STATE_ADD_BUTTON.CYCLE,
               },
               {
-                label: t("project_empty_state.cycle_work_items.cta_secondary"),
+                label: t("Add existing work item"),
                 onClick: () => setCycleIssuesListModal(true),
                 disabled: !canPerformEmptyStateActions,
                 variant: "secondary",

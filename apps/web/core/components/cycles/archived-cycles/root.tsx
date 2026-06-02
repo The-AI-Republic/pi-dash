@@ -75,8 +75,8 @@ export const ArchivedCycleLayoutRoot = observer(function ArchivedCycleLayoutRoot
         <div className="h-full place-items-center">
           <EmptyStateDetailed
             assetKey="archived-cycle"
-            title={t("workspace_empty_state.archive_cycles.title")}
-            description={t("workspace_empty_state.archive_cycles.description")}
+            title={t("No archived cycles yet")}
+            description={t("To tidy up your project, archive completed cycles. Find them here once archived.")}
           />
         </div>
       ) : (

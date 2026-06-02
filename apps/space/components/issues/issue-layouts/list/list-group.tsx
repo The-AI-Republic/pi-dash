@@ -105,7 +105,7 @@ export const ListGroup = observer(function ListGroup(props: Props) {
       onClick={() => loadMoreIssues(group.id)}
       role="button"
     >
-      {t("common.load_more")} &darr;
+      {t("Load more")} &darr;
     </div>
   );
 

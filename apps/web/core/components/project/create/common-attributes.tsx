@@ -64,10 +64,10 @@ function ProjectCommonAttributes(props: Props) {
           control={control}
           name="name"
           rules={{
-            required: t("name_is_required"),
+            required: t("Name is required"),
             maxLength: {
               value: 255,
-              message: t("title_should_be_less_than_255_characters"),
+              message: t("Title should be less than 255 characters"),
             },
           }}
           render={({ field: { value, onChange } }) => (
@@ -78,7 +78,7 @@ function ProjectCommonAttributes(props: Props) {
               value={value}
               onChange={handleNameChange(onChange)}
               hasError={Boolean(errors.name)}
-              placeholder={t("project_name")}
+              placeholder={t("Project name")}
               className="focus:border-blue-400 w-full"
               tabIndex={getIndex("name")}
             />
@@ -91,17 +91,17 @@ function ProjectCommonAttributes(props: Props) {
           control={control}
           name="identifier"
           rules={{
-            required: t("project_id_is_required"),
+            required: t("Project ID is required"),
             // allow only alphanumeric & non-latin characters
             validate: (value) =>
-              /^[ÇŞĞIİÖÜA-Z0-9]+$/.test(value.toUpperCase()) || t("only_alphanumeric_non_latin_characters_allowed"),
+              /^[ÇŞĞIİÖÜA-Z0-9]+$/.test(value.toUpperCase()) || t("Only Alphanumeric & Non-latin characters are allowed."),
             minLength: {
               value: 1,
-              message: t("project_id_min_char"),
+              message: t("Project ID must at least be of 1 character"),
             },
             maxLength: {
               value: 10,
-              message: t("project_id_max_char"),
+              message: t("Project ID must at most be of 10 characters"),
             },
           }}
           render={({ field: { value, onChange } }) => (
@@ -112,7 +112,7 @@ function ProjectCommonAttributes(props: Props) {
               value={value}
               onChange={handleIdentifierChange(onChange)}
               hasError={Boolean(errors.identifier)}
-              placeholder={t("project_id")}
+              placeholder={t("Project ID")}
               className={cn("focus:border-blue-400 w-full pr-7 text-11", {
                 uppercase: value,
               })}
@@ -122,7 +122,7 @@ function ProjectCommonAttributes(props: Props) {
         />
         <Tooltip
           isMobile={isMobile}
-          tooltipContent={t("project_id_tooltip_content")}
+          tooltipContent={t("Helps you identify work items in the project uniquely. Max 10 characters.")}
           className="text-13"
           position="right-start"
         >
@@ -139,7 +139,7 @@ function ProjectCommonAttributes(props: Props) {
               id="description"
               name="description"
               value={value}
-              placeholder={t("description")}
+              placeholder={t("Description")}
               onChange={(e) => {
                 onChange(e);
                 handleFormOnChange?.();
@@ -158,7 +158,7 @@ function ProjectCommonAttributes(props: Props) {
           rules={{
             maxLength: {
               value: 512,
-              message: t("repo_url_too_long") || "Repository URL is too long",
+              message: t("Repository URL is too long"),
             },
           }}
           render={({ field: { value, onChange } }) => (
@@ -173,7 +173,7 @@ function ProjectCommonAttributes(props: Props) {
               }}
               hasError={Boolean(errors?.repo_url)}
               placeholder={
-                t("git_repository_url_placeholder") || "Git repository URL (e.g. git@github.com:org/repo.git)"
+                t("Git repository URL (e.g. git@github.com:org/repo.git)")
               }
               className="focus:border-blue-400 w-full"
               tabIndex={getIndex("repo_url")}
@@ -189,11 +189,11 @@ function ProjectCommonAttributes(props: Props) {
           rules={{
             maxLength: {
               value: 128,
-              message: t("base_branch_too_long") || "Base branch is too long",
+              message: t("Base branch is too long"),
             },
             pattern: {
               value: /^[A-Za-z0-9._/-]*$/,
-              message: t("base_branch_invalid_chars") || "Only letters, numbers, and . _ / - are allowed",
+              message: t("Only letters, numbers, and . _ / - are allowed"),
             },
           }}
           render={({ field: { value, onChange } }) => (
@@ -207,7 +207,7 @@ function ProjectCommonAttributes(props: Props) {
                 handleFormOnChange?.();
               }}
               hasError={Boolean(errors?.base_branch)}
-              placeholder={t("base_branch_placeholder") || "Base branch (leave empty to use remote default)"}
+              placeholder={t("Base branch (leave empty to use remote default)")}
               className="focus:border-blue-400 w-full"
               tabIndex={getIndex("base_branch")}
             />

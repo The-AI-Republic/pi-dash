@@ -160,7 +160,7 @@ export const IssueTitleInput = observer(function IssueTitleInput(props: IssueTit
           value={title}
           onChange={handleTitleChange}
           maxLength={255}
-          placeholder={t("issue.title.label")}
+          placeholder={t("Work item title")}
           onFocus={() => setIsLengthVisible(true)}
           onBlur={() => setIsLengthVisible(false)}
         />
@@ -179,7 +179,7 @@ export const IssueTitleInput = observer(function IssueTitleInput(props: IssueTit
         </div>
       </div>
       {title?.length === 0 && (
-        <span className="text-13 font-medium text-danger-primary">{t("form.title.required")}</span>
+        <span className="text-13 font-medium text-danger-primary">{t("Title is required")}</span>
       )}
     </div>
   );

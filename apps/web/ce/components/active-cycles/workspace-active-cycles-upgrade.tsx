@@ -28,41 +28,41 @@ import { useUser } from "@/hooks/store/user";
 export const WORKSPACE_ACTIVE_CYCLES_DETAILS = [
   {
     key: "10000_feet_view",
-    title: "10,000-feet view of all active cycles.",
-    description:
+    i18n_title: "10,000-feet view of all active cycles.",
+    i18n_description:
       "Zoom out to see running cycles across all your projects at once instead of going from Cycle to Cycle in each project.",
     icon: Folder,
   },
   {
     key: "get_snapshot_of_each_active_cycle",
-    title: "Get a snapshot of each active cycle.",
-    description:
+    i18n_title: "Get a snapshot of each active cycle.",
+    i18n_description:
       "Track high-level metrics for all active cycles, see their state of progress, and get a sense of scope against deadlines.",
     icon: CircleDashed,
   },
   {
     key: "compare_burndowns",
-    title: "Compare burndowns.",
-    description: "Monitor how each of your teams are performing with a peek into each cycle’s burndown report.",
+    i18n_title: "Compare burndowns.",
+    i18n_description: "Monitor how each of your teams are performing with a peek into each cycle’s burndown report.",
     icon: BarChart4,
   },
   {
     key: "quickly_see_make_or_break_issues",
-    title: "Quickly see make-or-break work items. ",
-    description:
+    i18n_title: "Quickly see make-or-break work items. ",
+    i18n_description:
       "Preview high-priority work items for each cycle against due dates. See all of them per cycle in one click.",
     icon: AlertOctagon,
   },
   {
     key: "zoom_into_cycles_that_need_attention",
-    title: "Zoom into cycles that need attention. ",
-    description: "Investigate the state of any cycle that doesn’t conform to expectations in one click.",
+    i18n_title: "Zoom into cycles that need attention. ",
+    i18n_description: "Investigate the state of any cycle that doesn’t conform to expectations in one click.",
     icon: SearchIcon,
   },
   {
     key: "stay_ahead_of_blockers",
-    title: "Stay ahead of blockers.",
-    description:
+    i18n_title: "Stay ahead of blockers.",
+    i18n_description:
       "Spot challenges from one project to another and see inter-cycle dependencies that aren’t obvious from any other view.",
     icon: Microscope,
   },
@@ -87,8 +87,8 @@ export const WorkspaceActiveCyclesUpgrade = observer(function WorkspaceActiveCyc
       >
         <div className="relative flex flex-col justify-center gap-7 px-14 lg:w-1/2">
           <div className="flex max-w-64 flex-col gap-2">
-            <h2 className="text-20 font-semibold">{t("on_demand_snapshots_of_all_your_cycles")}</h2>
-            <p className="text-14 font-medium text-tertiary">{t("active_cycles_description")}</p>
+            <h2 className="text-20 font-semibold">{t("On-demand snapshots of all your cycles")}</h2>
+            <p className="text-14 font-medium text-tertiary">{t("Monitor cycles across projects, track high-priority work items, and zoom in cycles that need attention.")}</p>
           </div>
           <div className="flex items-center gap-3">
             <a
@@ -98,7 +98,7 @@ export const WorkspaceActiveCyclesUpgrade = observer(function WorkspaceActiveCyc
               rel="noreferrer"
             >
               <ProIcon className="h-3.5 w-3.5 text-on-color" />
-              {t("upgrade")}
+              {t("Upgrade")}
             </a>
           </div>
           <span className="absolute top-0 left-0">
@@ -120,12 +120,12 @@ export const WorkspaceActiveCyclesUpgrade = observer(function WorkspaceActiveCyc
       </div>
       <div className="grid h-full grid-cols-1 gap-5 pb-8 lg:grid-cols-2 xl:grid-cols-3">
         {WORKSPACE_ACTIVE_CYCLES_DETAILS.map((item) => (
-          <div key={item.title} className="flex min-h-32 w-full flex-col gap-2 rounded-md bg-layer-1 p-4">
+          <div key={item.i18n_title} className="flex min-h-32 w-full flex-col gap-2 rounded-md bg-layer-1 p-4">
             <div className="flex justify-between gap-2">
-              <h3 className="font-medium">{t(item.key)}</h3>
+              <h3 className="font-medium">{t(item.i18n_title)}</h3>
               <item.icon className="text-blue-500 mt-1 h-4 w-4" />
             </div>
-            <span className="text-13 text-tertiary">{t(`${item.key}_description`)}</span>
+            <span className="text-13 text-tertiary">{t(item.i18n_description)}</span>
           </div>
         ))}
       </div>

@@ -38,8 +38,8 @@ export const ProjectArchivedEmptyState = observer(function ProjectArchivedEmptyS
       {archivedWorkItemFilter?.hasActiveFilters ? (
         <EmptyStateDetailed
           assetKey="search"
-          title={t("common_empty_state.search.title")}
-          description={t("common_empty_state.search.description")}
+          title={t("No matching results.")}
+          description={t("No results found. Try adjusting your search terms.")}
           actions={[
             {
               label: "Clear filters",
@@ -52,11 +52,11 @@ export const ProjectArchivedEmptyState = observer(function ProjectArchivedEmptyS
       ) : (
         <EmptyStateDetailed
           assetKey="archived-work-item"
-          title={t("workspace_empty_state.archive_work_items.title")}
-          description={t("workspace_empty_state.archive_work_items.description")}
+          title={t("No archived work items yet")}
+          description={t("Manually or through automation, you can archive work items that are completed or cancelled. Find them here once archived.")}
           actions={[
             {
-              label: t("workspace_empty_state.archive_work_items.cta_primary"),
+              label: t("Set automation"),
               onClick: () => router.push(`/${workspaceSlug}/settings/projects/${projectId}/automations`),
               disabled: !canPerformEmptyStateActions,
               variant: "primary",

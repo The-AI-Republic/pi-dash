@@ -99,9 +99,9 @@ export function RunnerCliCommand(props: Props) {
   }, [agent, cloudUrl, name, podName, projectIdentifier, shell, workspaceSlug, workingDir]);
 
   const shellLabel = (value: TShell): string => {
-    if (value === "powershell") return t("runners.add_modal.shell_powershell");
-    if (value === "cmd") return t("runners.add_modal.shell_cmd");
-    return t("runners.add_modal.shell_posix");
+    if (value === "powershell") return t("PowerShell");
+    if (value === "cmd") return t("Command Prompt");
+    return t("macOS/Linux");
   };
 
   const copy = async () => {
@@ -112,17 +112,17 @@ export function RunnerCliCommand(props: Props) {
     } catch {
       setToast({
         type: TOAST_TYPE.ERROR,
-        title: t("runners.toast.error_title"),
-        message: t("runners.list.copy_failed"),
+        title: t("Error!"),
+        message: t("Could not copy to clipboard"),
       });
     }
   };
 
   return (
     <div className="border-custom-primary-100/40 bg-custom-primary-100/10 rounded border p-3 text-13 text-primary">
-      <p className="text-secondary">{t("runners.add_modal.token_instructions")}</p>
+      <p className="text-secondary">{t("Run this on the machine that will host the runner:")}</p>
       <div className="mt-3 flex flex-wrap items-center gap-2">
-        <span className="text-12 text-secondary">{t("runners.add_modal.shell_label")}</span>
+        <span className="text-12 text-secondary">{t("Shell")}</span>
         <div className="inline-flex overflow-hidden rounded border border-subtle bg-layer-1">
           {SHELL_OPTIONS.map((option) => (
             <button
@@ -143,11 +143,11 @@ export function RunnerCliCommand(props: Props) {
         {command}
       </pre>
       {isUsingBrowserOrigin && (
-        <p className="mt-2 text-12 text-secondary">{t("runners.add_modal.cloud_url_origin_warning")}</p>
+        <p className="mt-2 text-12 text-secondary">{t("Using the current browser origin as the cloud URL because VITE_API_BASE_URL is not configured.")}</p>
       )}
       <div className="mt-2">
         <Button size="sm" onClick={copy}>
-          {justCopied ? t("runners.add_modal.copied") : t("runners.add_modal.copy_command")}
+          {justCopied ? t("Copied!") : t("Copy command")}
         </Button>
       </div>
     </div>

@@ -169,7 +169,7 @@ export const RelationIssueListItem = observer(function RelationIssueListItem(pro
                   <CustomMenu.MenuItem onClick={handleEditIssue}>
                     <div className="flex items-center gap-2">
                       <EditIcon className="h-3.5 w-3.5" strokeWidth={2} />
-                      <span>{t("common.actions.edit")}</span>
+                      <span>{t("Edit")}</span>
                     </div>
                   </CustomMenu.MenuItem>
                 )}
@@ -177,7 +177,7 @@ export const RelationIssueListItem = observer(function RelationIssueListItem(pro
                 <CustomMenu.MenuItem onClick={handleCopyIssueLink}>
                   <div className="flex items-center gap-2">
                     <LinkIcon className="h-3.5 w-3.5" strokeWidth={2} />
-                    <span>{t("common.actions.copy_link")}</span>
+                    <span>{t("Copy link")}</span>
                   </div>
                 </CustomMenu.MenuItem>
 
@@ -185,7 +185,7 @@ export const RelationIssueListItem = observer(function RelationIssueListItem(pro
                   <CustomMenu.MenuItem onClick={handleRemoveRelation}>
                     <div className="flex items-center gap-2">
                       <CloseIcon className="h-3.5 w-3.5" strokeWidth={2} />
-                      <span>{t("common.actions.remove_relation")}</span>
+                      <span>{t("Remove relation")}</span>
                     </div>
                   </CustomMenu.MenuItem>
                 )}
@@ -194,7 +194,7 @@ export const RelationIssueListItem = observer(function RelationIssueListItem(pro
                   <CustomMenu.MenuItem onClick={handleDeleteIssue}>
                     <div className="flex items-center gap-2">
                       <TrashIcon className="h-3.5 w-3.5" strokeWidth={2} />
-                      <span>{t("common.actions.delete")}</span>
+                      <span>{t("Delete")}</span>
                     </div>
                   </CustomMenu.MenuItem>
                 )}

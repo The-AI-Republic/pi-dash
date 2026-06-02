@@ -78,7 +78,7 @@ export const StickySearch = observer(function StickySearch() {
         <input
           ref={inputRef}
           className="w-full max-w-[234px] border-none bg-transparent text-13 text-primary placeholder:text-placeholder focus:outline-none"
-          placeholder={t("stickies.search_placeholder")}
+          placeholder={t("Search by title")}
           value={searchQuery}
           onChange={(e) => {
             updateSearchQuery(e.target.value);

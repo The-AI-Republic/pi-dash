@@ -178,10 +178,10 @@ export const WorkspaceDetails = observer(function WorkspaceDetails() {
                 {workspaceLogo && workspaceLogo !== "" ? (
                   <>
                     <EditIcon className="h-3 w-3" />
-                    {t("workspace_settings.settings.general.edit_logo")}
+                    {t("Edit logo")}
                   </>
                 ) : (
-                  t("workspace_settings.settings.general.upload_logo")
+                  t("Upload logo")
                 )}
               </button>
             )}
@@ -190,7 +190,7 @@ export const WorkspaceDetails = observer(function WorkspaceDetails() {
         <div className="flex flex-col gap-7">
           <div className="grid-col grid w-full grid-cols-1 items-center justify-between gap-10 xl:grid-cols-2 2xl:grid-cols-3">
             <div className="flex flex-col gap-2">
-              <h4 className="text-body-sm-medium text-tertiary">{t("workspace_settings.settings.general.name")}</h4>
+              <h4 className="text-body-sm-medium text-tertiary">{t("Workspace name")}</h4>
               <Controller
                 control={control}
                 name="name"
@@ -206,7 +206,7 @@ export const WorkspaceDetails = observer(function WorkspaceDetails() {
                     onChange={onChange}
                     ref={ref}
                     hasError={Boolean(errors.name)}
-                    placeholder={t("workspace_settings.settings.general.name")}
+                    placeholder={t("Workspace name")}
                     className="w-full rounded-md"
                     disabled={!isAdmin}
                   />
@@ -216,7 +216,7 @@ export const WorkspaceDetails = observer(function WorkspaceDetails() {
             </div>
             <div className="flex flex-col gap-2">
               <h4 className="text-body-sm-medium text-tertiary">
-                {t("workspace_settings.settings.general.company_size")}
+                {t("Company size")}
               </h4>
               <Controller
                 name="organization_size"
@@ -227,7 +227,7 @@ export const WorkspaceDetails = observer(function WorkspaceDetails() {
                     onChange={onChange}
                     label={
                       ORGANIZATION_SIZE.find((c) => c === value) ??
-                      t("workspace_settings.settings.general.errors.company_size.select_a_range")
+                      t("Select organization size")
                     }
                     buttonClassName="border border-subtle bg-layer-2 !shadow-none !rounded-md"
                     input
@@ -243,7 +243,7 @@ export const WorkspaceDetails = observer(function WorkspaceDetails() {
               />
             </div>
             <div className="flex flex-col gap-2">
-              <h4 className="text-body-sm-medium text-tertiary">{t("workspace_settings.settings.general.url")}</h4>
+              <h4 className="text-body-sm-medium text-tertiary">{t("Workspace URL")}</h4>
               <Controller
                 control={control}
                 name="url"
@@ -267,7 +267,7 @@ export const WorkspaceDetails = observer(function WorkspaceDetails() {
             </div>
             <div className="flex flex-col gap-2">
               <h4 className="text-body-sm-medium text-tertiary">
-                {t("workspace_settings.settings.general.workspace_timezone")}
+                {t("Workspace Timezone")}
               </h4>
               <Controller
                 name="timezone"
@@ -291,7 +291,7 @@ export const WorkspaceDetails = observer(function WorkspaceDetails() {
               }}
               loading={isLoading}
             >
-              {isLoading ? t("updating") : t("workspace_settings.settings.general.update_workspace")}
+              {isLoading ? t("Updating") : t("Update workspace")}
             </Button>
           </div>
         )}

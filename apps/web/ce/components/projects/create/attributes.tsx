@@ -45,7 +45,7 @@ function ProjectAttributes(props: Props) {
                         {t(currentNetwork.i18n_label)}
                       </>
                     ) : (
-                      <span className="text-placeholder">{t("select_network")}</span>
+                      <span className="text-placeholder">{t("Select network")}</span>
                     )}
                   </div>
                 }
@@ -81,7 +81,7 @@ function ProjectAttributes(props: Props) {
                 <MemberDropdown
                   value={value ?? null}
                   onChange={(lead) => onChange(lead === value ? null : lead)}
-                  placeholder={t("lead")}
+                  placeholder={t("Lead")}
                   multiple={false}
                   buttonVariant="border-with-text"
                   tabIndex={getIndex("lead")}

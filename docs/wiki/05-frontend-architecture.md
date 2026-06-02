@@ -88,12 +88,12 @@ Crossing the ceiling fails `pnpm check:lint`. After cleanups, **lower** the ceil
 
 ## i18n
 
-Translations live in `packages/i18n/src/locales/<lang>/`. When you add a key, add it to **every** language file (English as placeholder is fine) — the loader asserts nested-structure parity and will fail at runtime if a key is missing in some language.
+Translations live in `packages/i18n/src/locales/<lang>/`. UI code uses source English text directly as the message id, for example `t("Create project")`. Run sync after adding copy; it rewrites flat locale maps and adds empty placeholders for non-English locales.
 
 Useful scripts:
 
 ```bash
-pnpm i18n:sync         # propagate new keys across all locales
+pnpm i18n:sync         # sync source English messages across all locales
 pnpm i18n:translate    # auto-translate missing keys
 ```
 

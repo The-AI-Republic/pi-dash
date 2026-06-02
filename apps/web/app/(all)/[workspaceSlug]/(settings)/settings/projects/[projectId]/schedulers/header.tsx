@@ -20,7 +20,7 @@ export function SchedulersProjectSettingsHeader() {
             <Breadcrumbs.Item
               component={
                 <BreadcrumbLink
-                  label={t("scheduler_bindings.tab_label")}
+                  label={t("Schedulers")}
                   icon={<CalendarClock className="size-4 text-tertiary" />}
                 />
               }

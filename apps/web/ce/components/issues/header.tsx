@@ -100,7 +100,7 @@ export const IssuesHeader = observer(function IssuesHeader() {
             rel="noopener noreferrer"
           >
             <Circle className="h-1.5 w-1.5 fill-accent-primary" strokeWidth={2} />
-            {t("workspace_projects.network.public.title")}
+            {t("Public")}
             <NewTabIcon className="hidden h-3 w-3 group-hover:block" strokeWidth={2} />
           </a>
         ) : (
@@ -125,8 +125,8 @@ export const IssuesHeader = observer(function IssuesHeader() {
             }}
             data-ph-element={WORK_ITEM_TRACKER_ELEMENTS.HEADER_ADD_BUTTON.WORK_ITEMS}
           >
-            <div className="block sm:hidden">{t("issue.label", { count: 1 })}</div>
-            <div className="hidden sm:block">{t("issue.add.label")}</div>
+            <div className="block sm:hidden">{t("{count, plural, one {Work item} other {Work items}}", { count: 1 })}</div>
+            <div className="hidden sm:block">{t("Add work item")}</div>
           </Button>
         )}
       </Header.RightItem>

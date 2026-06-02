@@ -108,7 +108,7 @@ export const CalendarIssueBlocks = observer(function CalendarIssueBlocks(props: 
             className="w-min rounded-sm px-1.5 py-1 text-11 font-medium whitespace-nowrap text-accent-primary hover:bg-layer-1 hover:text-accent-secondary"
             onClick={() => loadMoreIssues(formattedDatePayload)}
           >
-            {t("common.load_more")}
+            {t("Load more")}
           </button>
         </div>
       )}

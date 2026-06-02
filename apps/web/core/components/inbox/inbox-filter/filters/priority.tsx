@@ -38,7 +38,7 @@ export const FilterPriority = observer(function FilterPriority(props: Props) {
   return (
     <>
       <FilterHeader
-        title={`${t("common.priority")}${appliedFiltersCount > 0 ? ` (${appliedFiltersCount})` : ""}`}
+        title={`${t("Priority")}${appliedFiltersCount > 0 ? ` (${appliedFiltersCount})` : ""}`}
         isPreviewEnabled={previewEnabled}
         handleIsPreviewEnabled={() => setPreviewEnabled(!previewEnabled)}
       />
@@ -55,7 +55,7 @@ export const FilterPriority = observer(function FilterPriority(props: Props) {
               />
             ))
           ) : (
-            <p className="text-11 text-placeholder italic">{t("common.search.no_matches_found")}</p>
+            <p className="text-11 text-placeholder italic">{t("No matches found")}</p>
           )}
         </div>
       )}

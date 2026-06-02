@@ -126,7 +126,7 @@ export const GlobalIssuesHeader = observer(function GlobalIssuesHeader() {
         <Header.LeftItem>
           <Breadcrumbs>
             <Breadcrumbs.Item
-              component={<BreadcrumbLink label={t("views")} icon={<ViewsIcon className="h-4 w-4 text-tertiary" />} />}
+              component={<BreadcrumbLink label={t("Views")} icon={<ViewsIcon className="h-4 w-4 text-tertiary" />} />}
             />
             <Breadcrumbs.Item
               component={
@@ -160,7 +160,7 @@ export const GlobalIssuesHeader = observer(function GlobalIssuesHeader() {
           )}
           {globalViewId && <WorkItemFiltersToggle entityType={EIssuesStoreType.GLOBAL} entityId={globalViewId} />}
           {!isLocked && (
-            <FiltersDropdown title={t("common.display")} placement="bottom-end">
+            <FiltersDropdown title={t("Display")} placement="bottom-end">
               <DisplayFiltersSelection
                 layoutDisplayFiltersOptions={currentLayoutFilters}
                 displayFilters={issueFilters?.displayFilters ?? {}}
@@ -176,7 +176,7 @@ export const GlobalIssuesHeader = observer(function GlobalIssuesHeader() {
             data-ph-element={GLOBAL_VIEW_TRACKER_ELEMENTS.RIGHT_HEADER_ADD_BUTTON}
             onClick={() => setCreateViewModal(true)}
           >
-            {t("workspace_views.add_view")}
+            {t("Add view")}
           </Button>
           <div className="hidden md:block">
             {viewDetails && <WorkspaceViewQuickActions workspaceSlug={workspaceSlug?.toString()} view={viewDetails} />}

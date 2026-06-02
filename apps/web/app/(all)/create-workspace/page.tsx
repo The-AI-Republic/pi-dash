@@ -42,8 +42,8 @@ const CreateWorkspacePage = observer(function CreateWorkspacePage() {
 
   // methods
   const getMailtoHref = () => {
-    const subject = t("workspace_creation.request_email.subject");
-    const body = t("workspace_creation.request_email.body", {
+    const subject = t("Requesting a new workspace");
+    const body = t("Hi instance admin(s),\n\nPlease create a new workspace with the URL [/workspace-name] for [purpose of creating the workspace].\n\nThanks,\n{firstName} {lastName}\n{email}", {
       firstName: currentUser?.first_name || "",
       lastName: currentUser?.last_name || "",
       email: currentUser?.email || "",
@@ -80,23 +80,23 @@ const CreateWorkspacePage = observer(function CreateWorkspacePage() {
                 alt="Workspace creation disabled"
               />
               <div className="text-center text-16 font-medium">
-                {t("workspace_creation.errors.creation_disabled.title")}
+                {t("Only your instance admin can create workspaces")}
               </div>
               <p className="text-center text-13 break-words text-tertiary">
-                {t("workspace_creation.errors.creation_disabled.description")}
+                {t("If you know your instance admin's email address, click the button below to get in touch with them.")}
               </p>
               <div className="mt-6 flex gap-4">
                 <Button variant="primary" onClick={() => router.back()}>
-                  {t("common.go_back")}
+                  {t("Go back")}
                 </Button>
                 <a href={getMailtoHref()} className={getButtonStyling("secondary", "base")}>
-                  {t("workspace_creation.errors.creation_disabled.request_button")}
+                  {t("Request instance admin")}
                 </a>
               </div>
             </div>
           ) : (
             <div className="w-full space-y-7 sm:space-y-10">
-              <h4 className="text-20 font-semibold">{t("workspace_creation.heading")}</h4>
+              <h4 className="text-20 font-semibold">{t("Create your workspace")}</h4>
               <div className="sm:w-3/4 md:w-2/5">
                 <CreateWorkspaceForm
                   onSubmit={onSubmit}

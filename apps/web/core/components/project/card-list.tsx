@@ -58,13 +58,13 @@ export const ProjectCardList = observer(function ProjectCardList(props: TProject
   if (workspaceProjectIds?.length === 0 && !currentWorkspaceDisplayFilters?.archived_projects)
     return (
       <EmptyStateDetailed
-        title={t("workspace_projects.empty_state.general.title")}
-        description={t("workspace_projects.empty_state.general.description")}
+        title={t("No active projects")}
+        description={t("Think of each project as the parent for goal-oriented work. Projects are where Jobs, Cycles, and Modules live and, along with your colleagues, help you achieve that goal. Create a new project or filter for archived projects.")}
         assetKey="project"
         assetClassName="size-40"
         actions={[
           {
-            label: t("workspace_projects.empty_state.general.primary_button.text"),
+            label: t("Start your first project"),
             onClick: () => {
               toggleCreateProjectModal(true);
             },
@@ -81,14 +81,14 @@ export const ProjectCardList = observer(function ProjectCardList(props: TProject
         title={
           currentWorkspaceDisplayFilters?.archived_projects &&
           calculateTotalFilters(currentWorkspaceFilters ?? {}) === 0
-            ? t("workspace_empty_state.projects_archived.title")
-            : t("common_empty_state.search.title")
+            ? t("No projects archived")
+            : t("No matching results.")
         }
         description={
           currentWorkspaceDisplayFilters?.archived_projects &&
           calculateTotalFilters(currentWorkspaceFilters ?? {}) === 0
-            ? t("workspace_empty_state.projects_archived.description")
-            : t("common_empty_state.search.description")
+            ? t("Looks like all your projects are still active—great job!")
+            : t("No results found. Try adjusting your search terms.")
         }
         assetKey={
           currentWorkspaceDisplayFilters?.archived_projects &&

@@ -54,7 +54,7 @@ function ProjectCyclesPage({ params }: Route.ComponentProps) {
   const resolvedEmptyState = resolvedTheme === "light" ? lightEmptyState : darkEmptyState;
   const totalCycles = currentProjectCycleIds?.length ?? 0;
   const project = getProjectById(projectId);
-  const pageTitle = project?.name ? `${project?.name} - ${t("common.cycles", { count: 2 })}` : undefined;
+  const pageTitle = project?.name ? `${project?.name} - ${t("Cycles", { count: 2 })}` : undefined;
   const hasAdminLevelPermission = allowPermissions([EUserProjectRoles.ADMIN], EUserPermissionsLevel.PROJECT);
   const hasMemberLevelPermission = allowPermissions(
     [EUserProjectRoles.ADMIN, EUserProjectRoles.MEMBER],
@@ -75,11 +75,11 @@ function ProjectCyclesPage({ params }: Route.ComponentProps) {
     return (
       <div className="flex h-full w-full items-center justify-center">
         <DetailedEmptyState
-          title={t("disabled_project.empty_state.cycle.title")}
-          description={t("disabled_project.empty_state.cycle.description")}
+          title={t("Cycles is not enabled for this project.")}
+          description={t("Break work down by timeboxed chunks, work backwards from your project deadline to set dates, and make tangible progress as a team. Enable the cycles feature for your project to start using them.")}
           assetPath={resolvedEmptyState}
           primaryButton={{
-            text: t("disabled_project.empty_state.cycle.primary_button.text"),
+            text: t("Manage features"),
             onClick: () => {
               router.push(`/${workspaceSlug}/settings/projects/${projectId}/features`);
             },
@@ -105,11 +105,11 @@ function ProjectCyclesPage({ params }: Route.ComponentProps) {
           <div className="h-full place-items-center">
             <EmptyStateDetailed
               assetKey="cycle"
-              title={t("project_empty_state.cycles.title")}
-              description={t("project_empty_state.cycles.description")}
+              title={t("Group and timebox your work in Cycles.")}
+              description={t("Break work down by timeboxed chunks, work backwards from your project deadline to set dates, and make tangible progress as a team.")}
               actions={[
                 {
-                  label: t("project_empty_state.cycles.cta_primary"),
+                  label: t("Set your first cycle"),
                   onClick: () => setCreateModal(true),
                   variant: "primary",
                   disabled: !hasMemberLevelPermission,

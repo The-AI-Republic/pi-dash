@@ -42,7 +42,7 @@ export const IssueTitleInput = observer(function IssueTitleInput(props: TIssueTi
 
   const validateWhitespace = (value: string) => {
     if (value.trim() === "") {
-      return t("title_is_required");
+      return t("Title is required");
     }
     return undefined;
   };
@@ -53,10 +53,10 @@ export const IssueTitleInput = observer(function IssueTitleInput(props: TIssueTi
         name="name"
         rules={{
           validate: validateWhitespace,
-          required: t("title_is_required"),
+          required: t("Title is required"),
           maxLength: {
             value: 255,
-            message: t("title_should_be_less_than_255_characters"),
+            message: t("Title should be less than 255 characters"),
           },
         }}
         render={({ field: { value, onChange, ref } }) => (
@@ -71,7 +71,7 @@ export const IssueTitleInput = observer(function IssueTitleInput(props: TIssueTi
             }}
             ref={issueTitleRef || ref}
             hasError={Boolean(errors.name)}
-            placeholder={t("title")}
+            placeholder={t("Title")}
             className="w-full text-body-sm-regular"
             autoFocus
             tabIndex={getIndex("name")}

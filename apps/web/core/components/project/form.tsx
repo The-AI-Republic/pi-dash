@@ -97,8 +97,8 @@ export function ProjectDetailsForm(props: IProjectDetailsForm) {
       .then(() => {
         setToast({
           type: TOAST_TYPE.SUCCESS,
-          title: t("toast.success"),
-          message: t("project_settings.general.toast.success"),
+          title: t("Success!"),
+          message: t("Project updated successfully"),
         });
         return undefined;
       })
@@ -114,23 +114,23 @@ export function ProjectDetailsForm(props: IProjectDetailsForm) {
             if (nameError) {
               setToast({
                 type: TOAST_TYPE.ERROR,
-                title: t("toast.error"),
-                message: t("project_name_already_taken"),
+                title: t("Error!"),
+                message: t("The project name is already taken."),
               });
             }
 
             if (identifierError) {
               setToast({
                 type: TOAST_TYPE.ERROR,
-                title: t("toast.error"),
-                message: t("project_identifier_already_taken"),
+                title: t("Error!"),
+                message: t("The project identifier is already taken."),
               });
             }
           } else {
             setToast({
               type: TOAST_TYPE.ERROR,
-              title: t("toast.error"),
-              message: t("something_went_wrong"),
+              title: t("Error!"),
+              message: t("Something went wrong"),
             });
           }
         } catch (error) {
@@ -138,8 +138,8 @@ export function ProjectDetailsForm(props: IProjectDetailsForm) {
           console.error("Error processing API error:", error);
           setToast({
             type: TOAST_TYPE.ERROR,
-            title: t("toast.error"),
-            message: t("something_went_wrong"),
+            title: t("Error!"),
+            message: t("Something went wrong"),
           });
         }
       });
@@ -165,8 +165,8 @@ export function ProjectDetailsForm(props: IProjectDetailsForm) {
     if (!url) {
       setToast({
         type: TOAST_TYPE.ERROR,
-        title: t("toast.error"),
-        message: t("git_repository_url_required") || "Enter a Git repository URL first.",
+        title: t("Error!"),
+        message: t("Enter a Git repository URL first.") || "Enter a Git repository URL first.",
       });
       return;
     }
@@ -233,7 +233,7 @@ export function ProjectDetailsForm(props: IProjectDetailsForm) {
       console.error("Error handling cover image:", error);
       setToast({
         type: TOAST_TYPE.ERROR,
-        title: t("toast.error"),
+        title: t("Error!"),
         message: error instanceof Error ? error.message : "Failed to process cover image",
       });
       setIsLoading(false);
@@ -244,7 +244,7 @@ export function ProjectDetailsForm(props: IProjectDetailsForm) {
       await projectService
         .checkProjectIdentifierAvailability(workspaceSlug, payload.identifier ?? "")
         .then(async (res) => {
-          if (res.exists) setError("identifier", { message: t("common.identifier_already_exists") });
+          if (res.exists) setError("identifier", { message: t("Identifier already exists") });
           else await handleUpdateChange(payload);
           return undefined;
         });
@@ -315,7 +315,7 @@ export function ProjectDetailsForm(props: IProjectDetailsForm) {
                 name="cover_image_url"
                 render={({ field: { value, onChange } }) => (
                   <ImagePickerPopover
-                    label={t("change_cover")}
+                    label={t("Change cover")}
                     control={control}
                     onChange={onChange}
                     value={value ?? null}
@@ -330,12 +330,12 @@ export function ProjectDetailsForm(props: IProjectDetailsForm) {
       </div>
       <div className="mt-8 flex flex-col gap-8">
         <div className="flex flex-col gap-1">
-          <h4 className="text-13">{t("common.project_name")}</h4>
+          <h4 className="text-13">{t("Project name")}</h4>
           <Controller
             control={control}
             name="name"
             rules={{
-              required: t("name_is_required"),
+              required: t("Name is required"),
               maxLength: {
                 value: 255,
                 message: "Project name should be less than 255 characters",
@@ -351,7 +351,7 @@ export function ProjectDetailsForm(props: IProjectDetailsForm) {
                 onChange={onChange}
                 hasError={Boolean(errors.name)}
                 className="rounded-md !p-3 font-medium"
-                placeholder={t("common.project_name")}
+                placeholder={t("Project name")}
                 disabled={!isAdmin}
               />
             )}
@@ -359,7 +359,7 @@ export function ProjectDetailsForm(props: IProjectDetailsForm) {
           <span className="text-11 text-danger-primary">{errors?.name?.message}</span>
         </div>
         <div className="flex flex-col gap-1">
-          <h4 className="text-13">{t("description")}</h4>
+          <h4 className="text-13">{t("Description")}</h4>
           <Controller
             name="description"
             control={control}
@@ -368,7 +368,7 @@ export function ProjectDetailsForm(props: IProjectDetailsForm) {
                 id="description"
                 name="description"
                 value={value}
-                placeholder={t("project_description_placeholder")}
+                placeholder={t("Enter project description")}
                 onChange={onChange}
                 className="min-h-[102px] text-13 font-medium"
                 hasError={Boolean(errors?.description)}
@@ -379,7 +379,7 @@ export function ProjectDetailsForm(props: IProjectDetailsForm) {
         </div>
         <div className="grid grid-cols-1 gap-6 md:grid-cols-3">
           <div className="flex flex-col gap-1 md:col-span-2">
-            <h4 className="text-13">{t("git_repository_url") || "Git repository URL"}</h4>
+            <h4 className="text-13">{t("Git repository URL")}</h4>
             <div className="flex items-stretch gap-2">
               <Controller
                 name="repo_url"
@@ -387,7 +387,7 @@ export function ProjectDetailsForm(props: IProjectDetailsForm) {
                 rules={{
                   maxLength: {
                     value: 512,
-                    message: t("repo_url_too_long") || "Repository URL is too long",
+                    message: t("Repository URL is too long"),
                   },
                 }}
                 render={({ field: { value, onChange } }) => (
@@ -398,7 +398,7 @@ export function ProjectDetailsForm(props: IProjectDetailsForm) {
                     value={value ?? ""}
                     onChange={onChange}
                     hasError={Boolean(errors?.repo_url)}
-                    placeholder={t("git_repository_url_placeholder") || "e.g. https://github.com/org/repo"}
+                    placeholder={t("e.g. https://github.com/org/repo")}
                     className="w-full font-medium"
                     disabled={!isAdmin}
                   />
@@ -412,28 +412,28 @@ export function ProjectDetailsForm(props: IProjectDetailsForm) {
                 type="button"
                 className="shrink-0"
               >
-                {isAlreadyBound ? t("bound") || "Bound" : t("bind") || "Bind"}
+                {isAlreadyBound ? t("Bound") || "Bound" : t("Bind") || "Bind"}
               </Button>
             </div>
             <span className="text-11 text-danger-primary">{errors?.repo_url?.message}</span>
             <p className="text-11 text-tertiary">
-              {t("git_repository_url_bind_hint") ||
+              {t("Bind verifies the URL with GitHub and links this project to that repository. Only github.com URLs are supported. The URL is saved only when you click Bind.") ||
                 "Bind verifies the URL with GitHub and links this project to that repository. Only github.com URLs are supported. The URL is saved only when you click Bind."}
             </p>
           </div>
           <div className="flex flex-col gap-1">
-            <h4 className="text-13">{t("base_branch") || "Base branch"}</h4>
+            <h4 className="text-13">{t("Base branch")}</h4>
             <Controller
               name="base_branch"
               control={control}
               rules={{
                 maxLength: {
                   value: 128,
-                  message: t("base_branch_too_long") || "Base branch is too long",
+                  message: t("Base branch is too long"),
                 },
                 pattern: {
                   value: /^[A-Za-z0-9._/-]*$/,
-                  message: t("base_branch_invalid_chars") || "Only letters, numbers, and . _ / - are allowed",
+                  message: t("Only letters, numbers, and . _ / - are allowed"),
                 },
               }}
               render={({ field: { value, onChange } }) => (
@@ -444,7 +444,7 @@ export function ProjectDetailsForm(props: IProjectDetailsForm) {
                   value={value ?? ""}
                   onChange={onChange}
                   hasError={Boolean(errors?.base_branch)}
-                  placeholder={t("base_branch_placeholder") || "Leave empty to use remote default"}
+                  placeholder={t("Leave empty to use remote default")}
                   className="w-full font-medium"
                   disabled={!isAdmin}
                 />
@@ -461,15 +461,15 @@ export function ProjectDetailsForm(props: IProjectDetailsForm) {
                 control={control}
                 name="identifier"
                 rules={{
-                  required: t("project_id_is_required"),
-                  validate: (value) => /^[ÇŞĞIİÖÜA-Z0-9]+$/.test(value.toUpperCase()) || t("project_id_allowed_char"),
+                  required: t("Project ID is required"),
+                  validate: (value) => /^[ÇŞĞIİÖÜA-Z0-9]+$/.test(value.toUpperCase()) || t("Only Alphanumeric & Non-latin characters are allowed."),
                   minLength: {
                     value: 1,
-                    message: t("project_id_min_char"),
+                    message: t("Project ID must at least be of 1 character"),
                   },
                   maxLength: {
                     value: 10,
-                    message: t("project_id_max_char"),
+                    message: t("Project ID must at most be of 10 characters"),
                   },
                 }}
                 render={({ field: { value, ref } }) => (
@@ -481,7 +481,7 @@ export function ProjectDetailsForm(props: IProjectDetailsForm) {
                     onChange={handleIdentifierChange}
                     ref={ref}
                     hasError={Boolean(errors.identifier)}
-                    placeholder={t("project_settings.general.enter_project_id")}
+                    placeholder={t("Enter project ID")}
                     className="w-full font-medium"
                     disabled={!isAdmin}
                   />
@@ -489,7 +489,7 @@ export function ProjectDetailsForm(props: IProjectDetailsForm) {
               />
               <Tooltip
                 isMobile={isMobile}
-                tooltipContent={t("project_id_tooltip_content")}
+                tooltipContent={t("Helps you identify work items in the project uniquely. Max 10 characters.")}
                 className="text-13"
                 position="right-start"
               >
@@ -501,7 +501,7 @@ export function ProjectDetailsForm(props: IProjectDetailsForm) {
             </span>
           </div>
           <div className="flex flex-col gap-1">
-            <h4 className="text-13">{t("workspace_projects.network.label")}</h4>
+            <h4 className="text-13">{t("Network")}</h4>
             <Controller
               name="network"
               control={control}
@@ -519,7 +519,7 @@ export function ProjectDetailsForm(props: IProjectDetailsForm) {
                             {t(selectedNetwork.i18n_label)}
                           </>
                         ) : (
-                          <span className="text-placeholder">{t("select_network")}</span>
+                          <span className="text-placeholder">{t("Select network")}</span>
                         )}
                       </div>
                     }
@@ -545,11 +545,11 @@ export function ProjectDetailsForm(props: IProjectDetailsForm) {
             />
           </div>
           <div className="col-span-1 flex flex-col gap-1 sm:col-span-2 xl:col-span-1">
-            <h4 className="text-13">{t("common.project_timezone")}</h4>
+            <h4 className="text-13">{t("Project Timezone")}</h4>
             <Controller
               name="timezone"
               control={control}
-              rules={{ required: t("project_settings.general.please_select_a_timezone") }}
+              rules={{ required: t("Please select a timezone") }}
               render={({ field: { value, onChange } }) => (
                 <>
                   <TimezoneSelect
@@ -570,10 +570,10 @@ export function ProjectDetailsForm(props: IProjectDetailsForm) {
         <div className="flex items-center justify-between py-2">
           <>
             <Button variant="primary" size="lg" type="submit" loading={isLoading} disabled={!isAdmin}>
-              {isLoading ? t("updating") : t("common.update_project")}
+              {isLoading ? t("Updating") : t("Update project")}
             </Button>
             <span className="text-13 text-placeholder italic">
-              {t("common.created_on")} {renderFormattedDate(project?.created_at)}
+              {t("Created on")} {renderFormattedDate(project?.created_at)}
             </span>
           </>
         </div>
