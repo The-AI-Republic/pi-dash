@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 use tokio::process::Command;
 
@@ -149,6 +149,16 @@ pub async fn start() -> Result<()> {
     let domain = format!("gui/{uid}");
     let target = format!("{domain}/{LABEL}");
     let plist = plist_path()?;
+
+    // Precondition: the plist must exist before we hand its path to
+    // launchctl. macOS reports "plist not found" as the opaque
+    // `Bootstrap failed: 5: Input/output error` — indistinguishable
+    // from the teardown-race EIO without out-of-band knowledge — so
+    // surface it here with an actionable hint. `pidash restart` rewrites
+    // the plist via `reload::restart_and_verify_with_progress` before
+    // reaching this point; this bail only fires for direct `pidash start`
+    // callers on a plist-less machine.
+    ensure_plist_present(&plist)?;
 
     // Snapshot the pre-action PID so `wait_for_running` can tell a fresh
     // daemon from the one we're about to kick. None = no daemon before.
@@ -539,6 +549,44 @@ pub async fn status() -> Result<String> {
     Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
 }
 
+/// Pure path-existence check, extracted so the error message is unit-testable.
+fn ensure_plist_present(plist: &Path) -> Result<()> {
+    if plist.exists() {
+        return Ok(());
+    }
+    anyhow::bail!(
+        "launchd plist missing at {}. Run `pidash install` to (re)write it; \
+         `pidash update` only swaps the binary and does not touch the plist.",
+        plist.display()
+    );
+}
+
+/// Self-heal entry point used by `reload::restart_and_verify_with_progress`:
+/// returns `Ok(true)` when the plist was missing and got rewritten, `Ok(false)`
+/// when it was already present. Lets `pidash restart` after `pidash update` on
+/// a plist-less machine recover transparently instead of bailing with the
+/// `ensure_plist_present` error the operator would have to act on by hand.
+///
+/// We only rewrite when missing (not unconditionally on every restart) so
+/// operators hand-editing the plist for debugging don't get clobbered.
+///
+/// Gated to `target_os = "macos"` (not the module's broader `macos || test`
+/// gate) because the only call site is also `cfg(target_os = "macos")`. The
+/// module's `test` arm exists so the path/exit-status parsers are unit-
+/// testable on Linux CI runners; this self-heal does macOS-specific I/O
+/// (`write_unit` renders the launchd plist) and has no Linux test path of
+/// its own, so compiling it on Linux would just produce a dead-code warning
+/// under `-D dead-code`.
+#[cfg(target_os = "macos")]
+pub(crate) async fn rewrite_unit_if_missing(paths: &Paths) -> Result<bool> {
+    let plist = plist_path()?;
+    if plist.exists() {
+        return Ok(false);
+    }
+    write_unit(paths).await?;
+    Ok(true)
+}
+
 fn plist_path() -> Result<PathBuf> {
     let home = std::env::var_os("HOME")
         .map(PathBuf::from)
@@ -852,6 +900,38 @@ mod tests {
             cfg.to_lowercase().contains("config") || cfg.to_lowercase().contains("non-zero"),
             "high exit codes should suggest config/credential errors; got: {cfg}"
         );
+    }
+
+    #[test]
+    fn ensure_plist_present_errors_with_install_hint_when_missing() {
+        // The error must point the operator at `pidash install` (the
+        // command that writes the plist) and include the missing path,
+        // replacing the cryptic `Bootstrap failed: 5: Input/output error`
+        // launchctl returns for a missing plist. Use a tempdir-scoped
+        // path so parallel test invocations can't collide.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let missing = dir.path().join("so.pidash.daemon.plist");
+        let err = ensure_plist_present(&missing).expect_err("missing plist must error");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("pidash install"),
+            "missing-plist error must point at `pidash install`; got: {msg}"
+        );
+        assert!(
+            msg.contains(&missing.display().to_string()),
+            "missing-plist error must include the path; got: {msg}"
+        );
+    }
+
+    #[test]
+    fn ensure_plist_present_ok_when_file_exists() {
+        // The function only checks `exists()` so the contents don't
+        // matter. tempdir-scoped so parallel runs can't race on the
+        // same path.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let present = dir.path().join("so.pidash.daemon.plist");
+        std::fs::write(&present, b"x").unwrap();
+        assert!(ensure_plist_present(&present).is_ok());
     }
 
     #[test]
