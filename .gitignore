@@ -119,4 +119,5 @@ scripts/
 !packages/i18n/scripts/translate-missing.mjs
 
 # Rust
+/target/
 /runner/target/
