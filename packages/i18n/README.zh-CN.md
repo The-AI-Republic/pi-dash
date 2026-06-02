@@ -10,28 +10,30 @@ Pi Dash 共享的 UI 翻译包。
 
 ```ts
 export default {
-  common: {
-    save: "Save",
-  },
+  "Save changes": "Enregistrer les modifications",
 } as const;
 ```
 
-UI 代码通过点路径 key 读取翻译：
+UI 代码使用源英文文本作为消息 ID：
 
 ```tsx
 const { t } = useTranslation();
 
-return <button>{t("common.save")}</button>;
+return <button>{t("Save changes")}</button>;
 ```
 
-`t("...")` 不会在运行时创建 key。缺失的 key 会先回退到英文，再回退到 key 字符串本身。空字符串会被视为缺失值，因此未翻译的占位符不会渲染成空白 UI。
+缺失或空的目标翻译会回退到英文，即返回源消息 ID。支持 ICU MessageFormat 参数：
 
-## 添加 Key
+```tsx
+t("Delete {count, plural, one {# work item} other {# work items}}", { count });
+```
+
+## 添加文案
 
 添加新的 UI 文案时，用 `t("...")` 包裹它：
 
 ```tsx
-t("new_feature.title");
+t("Create project");
 ```
 
 然后在仓库根目录运行手动同步命令：
@@ -40,9 +42,15 @@ t("new_feature.title");
 pnpm i18n:sync
 ```
 
-该命令会扫描字面量 `t("...")` 调用，并把缺失的 key 作为空字符串占位符添加到每个 locale 的 `translations.ts`。
+该命令会扫描字面量 `t("...")` 调用、条件 `t(...)` 中的字符串字面量、`i18n_*` 对象字段、`*TranslationKey` 字段以及 `I18N` 命名的本地映射。它会将每个 locale 的 `translations.ts` 重写为扁平对象：
 
-如果新 key 与现有对象路径或字符串路径冲突，同步命令会打印冲突 key 和调用位置，然后以错误退出。请重命名 key 来避免冲突。只有在你明确想跳过这些 key 时，才使用 `I18N_SYNC_ALLOW_CONFLICTS=1`。
+```ts
+export default {
+  "Create project": "",
+} as const;
+```
+
+对于英文 locale，值与键相同。对于非英文 locale，新值在翻译前为空占位符。
 
 同步命令是手动命令。它不会在 `pnpm build` 期间运行。
 
@@ -77,13 +85,16 @@ pnpm i18n:translate -- --provider fireworks --model "$MODEL" --api-key "$FIREWOR
 --base-url <openai-compatible-chat-completions-url>
 --languages fr,es,ja
 --limit 100
---batch-size 30
+--batch-size 10
 --request-timeout-ms 180000
 --retry-count 2
---retry-delay-ms 2000
+--retry-delay-ms 5000
+--continue-on-error
 --dry-run
 --skip-readme
 ```
+
+脚本会记录每个批次的进度，并立即将成功的批次写入磁盘。如果提供者超时，重新运行相同的命令即可从剩余的空占位符继续。使用 `--continue-on-error` 可以在大规模运行中跳过失败的批次，将那些占位符留空以便稍后重试。
 
 环境变量：
 
@@ -98,12 +109,13 @@ I18N_TRANSLATION_BATCH_SIZE
 I18N_TRANSLATION_REQUEST_TIMEOUT_MS
 I18N_TRANSLATION_RETRY_COUNT
 I18N_TRANSLATION_RETRY_DELAY_MS
+I18N_TRANSLATION_CONTINUE_ON_ERROR
 I18N_TRANSLATION_SKIP_README
 OPENAI_API_KEY
 FIREWORKS_API_KEY
 ```
 
-翻译器只会填充目标 locale `translations.ts` 文件中的空字符串。它使用合并后的英文 locale 作为源文本，并拒绝会改变 ICU MessageFormat 参数名称或参数类型的模型输出。
+翻译器只会填充目标 locale `translations.ts` 文件中的空字符串。它使用源英文消息 ID 作为源文本，并拒绝会改变 ICU MessageFormat 参数名称或参数类型的模型输出。
 
 同一个命令也会使用 `README.md` 作为英文源文档来更新已翻译的 README。当前维护的 README 翻译包括：
 
@@ -114,7 +126,7 @@ FIREWORKS_API_KEY
 
 ## 推荐流程
 
-1. 使用 `t("some.key")` 添加或更新 UI 代码。
+1. 使用 `t("Source English copy")` 添加或更新 UI 代码。
 2. 运行 `pnpm i18n:sync`。
 3. 检查 `packages/i18n/src/locales/*/translations.ts` 中新增的空占位符。
 4. 运行 `pnpm i18n:translate -- --provider openai --model "$MODEL"`，或手动翻译。
