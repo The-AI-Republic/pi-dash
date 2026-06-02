@@ -11,10 +11,10 @@ const repoRoot = path.resolve(import.meta.dirname, "../../..");
 const localesRoot = path.join(repoRoot, "packages/i18n/src/locales");
 const targetLocaleFile = "translations.ts";
 const fallbackLanguage = "en";
-const defaultBatchSize = 30;
+const defaultBatchSize = 10;
 const defaultRequestTimeoutMs = 180000;
 const defaultRetryCount = 2;
-const defaultRetryDelayMs = 2000;
+const defaultRetryDelayMs = 5000;
 const readmeTranslationTargets = new Map([
   ["es", path.join(repoRoot, "packages/i18n/README.es.md")],
   ["zh-CN", path.join(repoRoot, "packages/i18n/README.zh-CN.md")],
@@ -104,6 +104,7 @@ function configFromArgs() {
     args.retry_delay_ms || process.env.I18N_TRANSLATION_RETRY_DELAY_MS || defaultRetryDelayMs
   );
   const skipReadme = args.skip_readme === true || process.env.I18N_TRANSLATION_SKIP_README === "1";
+  const continueOnError = args.continue_on_error === true || process.env.I18N_TRANSLATION_CONTINUE_ON_ERROR === "1";
 
   if (!model && !dryRun) {
     throw new Error("Missing model. Pass --model or set I18N_TRANSLATION_MODEL.");
@@ -129,6 +130,7 @@ function configFromArgs() {
     retryCount: Number.isFinite(retryCount) && retryCount >= 0 ? retryCount : defaultRetryCount,
     retryDelayMs: Number.isFinite(retryDelayMs) && retryDelayMs >= 0 ? retryDelayMs : defaultRetryDelayMs,
     skipReadme,
+    continueOnError,
   };
 }
 
@@ -145,10 +147,11 @@ function usage() {
     "  --base-url <openai-compatible-chat-completions-url>",
     "  --languages fr,es,ja",
     "  --limit 100",
-    "  --batch-size 30",
+    "  --batch-size 10",
     "  --request-timeout-ms 180000",
     "  --retry-count 2",
-    "  --retry-delay-ms 2000",
+    "  --retry-delay-ms 5000",
+    "  --continue-on-error",
     "  --dry-run",
     "  --skip-readme",
   ].join("\n");
@@ -477,18 +480,43 @@ async function translateLanguage(config, language) {
   }
 
   let translatedCount = 0;
-  for (const batch of chunkArray(items, config.batchSize)) {
-    const translations = await requestTranslations(config, language, batch);
-    const validTranslations = validateTranslations(batch, translations, language);
+  const batches = chunkArray(items, config.batchSize);
+  console.log(
+    `i18n: ${language.value} translating ${items.length} placeholders in ${batches.length} batches of up to ${config.batchSize}`
+  );
+
+  for (const [batchIndex, batch] of batches.entries()) {
+    const batchNumber = batchIndex + 1;
+    console.log(`i18n: ${language.value} batch ${batchNumber}/${batches.length} requesting ${batch.length} messages`);
+
+    let validTranslations;
+    try {
+      const translations = await requestTranslations(config, language, batch);
+      validTranslations = validateTranslations(batch, translations, language);
+    } catch (error) {
+      if (!config.continueOnError) {
+        throw error;
+      }
+
+      console.error(
+        `i18n: ${language.value} batch ${batchNumber}/${batches.length} failed: ${formatErrorMessage(error)}`
+      );
+      continue;
+    }
 
     for (const [key, translation] of Object.entries(validTranslations)) {
       targetTranslations[key] = translation;
       translatedCount += 1;
     }
-  }
 
-  if (translatedCount > 0) {
-    fs.writeFileSync(targetPath, localeFileContent(targetTranslations));
+    const batchTranslatedCount = Object.keys(validTranslations).length;
+    if (batchTranslatedCount > 0) {
+      fs.writeFileSync(targetPath, localeFileContent(targetTranslations));
+    }
+
+    console.log(
+      `i18n: ${language.value} batch ${batchNumber}/${batches.length} translated ${batchTranslatedCount}/${batch.length}; ${translatedCount}/${items.length} total`
+    );
   }
 
   console.log(`i18n: ${language.value} translated ${translatedCount}/${items.length} placeholders`);

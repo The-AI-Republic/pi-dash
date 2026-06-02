@@ -85,13 +85,18 @@ Supported options:
 --base-url <openai-compatible-chat-completions-url>
 --languages fr,es,ja
 --limit 100
---batch-size 30
+--batch-size 10
 --request-timeout-ms 180000
 --retry-count 2
---retry-delay-ms 2000
+--retry-delay-ms 5000
+--continue-on-error
 --dry-run
 --skip-readme
 ```
+
+The script logs progress for each batch and writes successful batches to disk immediately. If a provider times out,
+rerun the same command to continue from the remaining empty placeholders. Use `--continue-on-error` to skip failed
+batches during a large run and leave those placeholders empty for a later retry.
 
 Environment variables:
 
@@ -106,6 +111,7 @@ I18N_TRANSLATION_BATCH_SIZE
 I18N_TRANSLATION_REQUEST_TIMEOUT_MS
 I18N_TRANSLATION_RETRY_COUNT
 I18N_TRANSLATION_RETRY_DELAY_MS
+I18N_TRANSLATION_CONTINUE_ON_ERROR
 I18N_TRANSLATION_SKIP_README
 OPENAI_API_KEY
 FIREWORKS_API_KEY
