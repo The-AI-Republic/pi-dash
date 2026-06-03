@@ -11,6 +11,7 @@ use anyhow::{Context, Result};
 use clap::{Args as ClapArgs, Subcommand};
 use std::io::IsTerminal;
 use std::path::PathBuf;
+use std::process::Stdio;
 
 use crate::cli::runner_ops;
 use crate::cloud::http::{CreateRunnerRequest, SharedHttpTransport, create_runner};
@@ -20,6 +21,7 @@ use crate::config::schema::{AgentKind, MAX_RUNNERS_PER_DAEMON, RunnerConfig};
 use crate::util::confirm::maybe_confirm;
 use crate::util::paths::Paths;
 use crate::util::runner_name;
+use crate::util::shell::login_shell_command;
 
 #[derive(Debug, ClapArgs)]
 pub struct RunnerArgs {
@@ -260,7 +262,51 @@ pub async fn add(args: AddArgs, paths: &Paths) -> Result<RunnerConfig> {
             }
         }
     }
+
+    // The runner is fully persisted by this point, so this guidance is
+    // purely advisory and never fails the add (issue PDASHOSS01-15): if
+    // the selected agent's CLI isn't installed, point the operator at
+    // its install page so they can fix it before starting runs.
+    let kind = applied.runner.agent.kind;
+    let agent_binary = match kind {
+        AgentKind::Codex => applied.runner.codex.binary.as_str(),
+        AgentKind::ClaudeCode => applied.runner.claude_code.binary.as_str(),
+    };
+    guide_agent_install_if_missing(kind, agent_binary).await;
+
     Ok(applied.runner)
+}
+
+/// Best-effort post-add nudge: when the agent CLI the new runner will
+/// drive isn't installed, print a notice and open its official install
+/// page in the operator's browser. Always a no-op on success and never
+/// returns an error — the runner is already added by the time this runs,
+/// so installation guidance must not block or fail the `add`.
+async fn guide_agent_install_if_missing(kind: AgentKind, binary: &str) {
+    if agent_binary_installed(binary).await {
+        return;
+    }
+    let url = kind.install_url();
+    println!(
+        "\nThe `{binary}` CLI for the selected agent ({}) isn't installed on this host.\n\
+         Opening its installation page in your browser: {url}\n\
+         (The runner was still added — install `{binary}`, then `pidash doctor` re-checks it.)",
+        kind.label(),
+    );
+    if let Err(err) = crate::util::browser::open(url) {
+        println!("(Couldn't open a browser automatically: {err:#}. Visit {url} to install.)");
+    }
+}
+
+/// True when `<binary> --version` succeeds through the same login-shell
+/// wrapper the daemon uses to spawn agents, so the probe reflects what
+/// the daemon will actually see at spawn time rather than the caller's
+/// interactive `PATH`. Mirrors `doctor::check_version`'s probe; any
+/// spawn/exit failure is treated as "not installed".
+async fn agent_binary_installed(binary: &str) -> bool {
+    let mut cmd = login_shell_command(binary, &["--version"], None);
+    cmd.stdout(Stdio::null()).stderr(Stdio::null());
+    matches!(cmd.output().await, Ok(out) if out.status.success())
 }
 
 async fn ensure_cli_token(
@@ -576,5 +622,26 @@ async fn try_ipc_remove_local(paths: &Paths, runner_name: &str) -> Result<()> {
             );
             Ok(())
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A binary that cannot possibly exist resolves to "not installed"
+    /// rather than panicking or hanging — the guidance path that opens
+    /// the install page depends on this returning `false`.
+    #[tokio::test]
+    async fn agent_binary_installed_false_for_missing_binary() {
+        assert!(!agent_binary_installed("pidash-nonexistent-agent-xyz").await);
+    }
+
+    /// A binary that is always present on the host (`true`, a POSIX
+    /// builtin/exe that exits 0 and ignores `--version`) resolves to
+    /// "installed", proving the probe recognises a working binary.
+    #[tokio::test]
+    async fn agent_binary_installed_true_for_present_binary() {
+        assert!(agent_binary_installed("true").await);
     }
 }

@@ -222,6 +222,26 @@ impl AgentKind {
             AgentKind::ClaudeCode => Duration::from_secs(15 * 60),
         }
     }
+
+    /// Human-facing name for this agent, used in operator-facing CLI
+    /// messages (`"Codex"`, `"Claude Code"`).
+    pub fn label(self) -> &'static str {
+        match self {
+            AgentKind::Codex => "Codex",
+            AgentKind::ClaudeCode => "Claude Code",
+        }
+    }
+
+    /// Official installation page for this agent's CLI. `pidash runner
+    /// add` opens this in the operator's browser when the selected
+    /// agent's binary isn't installed on the host. URLs mirror the
+    /// prerequisite links in the runner README.
+    pub fn install_url(self) -> &'static str {
+        match self {
+            AgentKind::Codex => "https://github.com/openai/codex",
+            AgentKind::ClaudeCode => "https://docs.anthropic.com/en/docs/claude-code",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -537,6 +557,25 @@ mod tests {
     fn validate_accepts_single_runner() {
         let cfg = config_with(vec![runner("main", "/work/main")]);
         cfg.validate().unwrap();
+    }
+
+    #[test]
+    fn agent_kind_install_url_and_label_per_agent() {
+        assert_eq!(AgentKind::Codex.label(), "Codex");
+        assert_eq!(
+            AgentKind::Codex.install_url(),
+            "https://github.com/openai/codex"
+        );
+        assert_eq!(AgentKind::ClaudeCode.label(), "Claude Code");
+        assert_eq!(
+            AgentKind::ClaudeCode.install_url(),
+            "https://docs.anthropic.com/en/docs/claude-code"
+        );
+        // The two agents must not collapse onto the same install page.
+        assert_ne!(
+            AgentKind::Codex.install_url(),
+            AgentKind::ClaudeCode.install_url()
+        );
     }
 
     #[test]
