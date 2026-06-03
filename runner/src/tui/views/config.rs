@@ -143,6 +143,18 @@ pub const FIELDS: &[FieldSpec] = &[
         kind: FieldKind::Text,
     },
     FieldSpec {
+        id: FieldId::CursorBinary,
+        label: "binary",
+        section: "Cursor Agent",
+        kind: FieldKind::Text,
+    },
+    FieldSpec {
+        id: FieldId::CursorModelDefault,
+        label: "model_default",
+        section: "Cursor Agent",
+        kind: FieldKind::Text,
+    },
+    FieldSpec {
         id: FieldId::ApprovalAutoReadonly,
         label: "auto_approve_readonly_shell",
         section: "Approval policy",
