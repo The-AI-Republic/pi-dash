@@ -301,6 +301,7 @@ export const coreRoutes: RouteConfigEntry[] = [
         route(":workspaceSlug/runners/runs/:runId?", "./(all)/[workspaceSlug]/runners/runs/page.tsx"),
         route(":workspaceSlug/runners/approvals", "./(all)/[workspaceSlug]/runners/approvals/page.tsx"),
         route(":workspaceSlug/runners/chat/:runnerId", "./(all)/[workspaceSlug]/runners/chat/[runnerId]/page.tsx"),
+        route(":workspaceSlug/runners/detail/:runnerId", "./(all)/[workspaceSlug]/runners/detail/[runnerId]/page.tsx"),
       ]),
 
       // ====================================================================

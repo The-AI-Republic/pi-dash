@@ -7,6 +7,7 @@
 import { useState } from "react";
 import { observer } from "mobx-react";
 import { HelpCircle, Plus } from "lucide-react";
+import { Link } from "react-router";
 import useSWR from "swr";
 import { useTranslation } from "@pi-dash/i18n";
 import { TOAST_TYPE, setToast } from "@pi-dash/propel/toast";
@@ -128,7 +129,11 @@ const RunnersListPage = observer(function RunnersListPage() {
                 tooltipContent={
                   <div className="flex max-w-xs flex-col gap-1 p-1 text-12 whitespace-normal">
                     <div className="font-medium">{t("How to add a runner")}</div>
-                    <div className="whitespace-pre-line text-secondary">{t("1. Click \"Add runner\", pick a project + pod and generate the CLI command.\n2. On the machine that will host the runner, run the displayed `pidash runner add` command. If the host is not logged in yet, the CLI starts `pidash auth login` first.\n3. The daemon registers the runner and it shows online here.\n\nPrerequisite: the agent CLI (codex / claude) must already be installed on the host.")}</div>
+                    <div className="whitespace-pre-line text-secondary">
+                      {t(
+                        '1. Click "Add runner", pick a project + pod and generate the CLI command.\n2. On the machine that will host the runner, run the displayed `pidash runner add` command. If the host is not logged in yet, the CLI starts `pidash auth login` first.\n3. The daemon registers the runner and it shows online here.\n\nPrerequisite: the agent CLI (codex / claude) must already be installed on the host.'
+                      )}
+                    </div>
                   </div>
                 }
               >
@@ -141,7 +146,11 @@ const RunnersListPage = observer(function RunnersListPage() {
                 </button>
               </Tooltip>
             </div>
-            <div className="text-13 text-secondary">{t("`pidash runner add` starts `pidash auth login` first when the host is not logged in yet. Run it again for each project or pod this machine should serve.")}</div>
+            <div className="text-13 text-secondary">
+              {t(
+                "`pidash runner add` starts `pidash auth login` first when the host is not logged in yet. Run it again for each project or pod this machine should serve."
+              )}
+            </div>
           </div>
           <Button onClick={() => setAddOpen(true)} disabled={!workspaceId}>
             {t("Add runner")}
@@ -152,7 +161,11 @@ const RunnersListPage = observer(function RunnersListPage() {
       {/* Pods (read-only summary) */}
       <section>
         <div className="mb-2 text-13 font-medium text-primary">{t("Pods")}</div>
-        <div className="mb-2 text-12 text-secondary">{t("Pods group your runners. Issues delegate to a pod, and any free runner inside picks up the work. Click a tile to filter runners.")}</div>
+        <div className="mb-2 text-12 text-secondary">
+          {t(
+            "Pods group your runners. Issues delegate to a pod, and any free runner inside picks up the work. Click a tile to filter runners."
+          )}
+        </div>
         {podsError ? (
           <div className="text-destructive text-12">{t("Failed to load pods")}</div>
         ) : (
@@ -244,6 +257,13 @@ const RunnersListPage = observer(function RunnersListPage() {
                   </td>
                   <td className="px-3 py-2 text-right">
                     <div className="flex justify-end gap-2">
+                      {workspaceSlug && (
+                        <Link to={`/${workspaceSlug}/runners/detail/${r.id}`}>
+                          <Button variant="neutral-primary" size="sm">
+                            {t("Details")}
+                          </Button>
+                        </Link>
+                      )}
                       {isRevocable(r) && (
                         <Button variant="outline-danger" size="sm" onClick={() => setRevokeRunner(r)}>
                           {t("Revoke")}
@@ -259,7 +279,7 @@ const RunnersListPage = observer(function RunnersListPage() {
               {(filteredRunners ?? []).length === 0 && (
                 <tr>
                   <td colSpan={7} className="px-3 py-8 text-center text-secondary">
-                    {t("No runners yet. Click \"Add runner\" to generate your first runner command.")}
+                    {t('No runners yet. Click "Add runner" to generate your first runner command.')}
                   </td>
                 </tr>
               )}
@@ -290,7 +310,9 @@ const RunnersListPage = observer(function RunnersListPage() {
         handleSubmit={confirmDeleteRunner}
         isSubmitting={deleting}
         title={t("Delete runner?")}
-        content={t("The runner row is removed and the daemon is forced offline. Historic runs are preserved with a null runner reference.")}
+        content={t(
+          "The runner row is removed and the daemon is forced offline. Historic runs are preserved with a null runner reference."
+        )}
         primaryButtonText={{ default: t("Delete"), loading: t("Delete") }}
       />
       <AlertModalCore
@@ -299,7 +321,9 @@ const RunnersListPage = observer(function RunnersListPage() {
         handleSubmit={confirmRevokeRunner}
         isSubmitting={revoking}
         title={t("Revoke runner?")}
-        content={t("The runner's credentials are invalidated and any in-flight runs are cancelled, but the row stays in the list. To attach it again, delete it and add a new runner from the target machine.")}
+        content={t(
+          "The runner's credentials are invalidated and any in-flight runs are cancelled, but the row stays in the list. To attach it again, delete it and add a new runner from the target machine."
+        )}
         primaryButtonText={{ default: t("Revoke"), loading: t("Revoke") }}
       />
     </div>
