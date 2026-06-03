@@ -2247,7 +2247,7 @@ impl AssignWorker {
     fn crash_reason(&self) -> FailureReason {
         match self.runner_config.agent.kind {
             AgentKind::Codex => FailureReason::CodexCrash,
-            AgentKind::ClaudeCode => FailureReason::AgentCrash,
+            AgentKind::ClaudeCode | AgentKind::CursorAgent => FailureReason::AgentCrash,
         }
     }
 
@@ -2953,7 +2953,7 @@ mod tests {
     use super::*;
     use crate::cloud::protocol::Envelope;
     use crate::config::schema::{
-        AgentSection, ApprovalPolicySection, ClaudeCodeSection, CodexSection, RunnerConfig,
+        AgentSection, ApprovalPolicySection, ClaudeCodeSection, CursorAgentSection, CodexSection, RunnerConfig,
         WorkspaceSection,
     };
     use crate::daemon::state::ExecCommandSnapshot;
@@ -2980,6 +2980,7 @@ mod tests {
             agent: AgentSection::default(),
             codex: CodexSection::default(),
             claude_code: ClaudeCodeSection::default(),
+            cursor_agent: CursorAgentSection::default(),
             approval_policy: ApprovalPolicySection::default(),
         }
     }

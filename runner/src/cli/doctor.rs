@@ -105,6 +105,7 @@ pub async fn execute(paths: &Paths, runner_filter: Option<&str>) -> Result<Repor
             crate::config::schema::AgentKind::Codex,
             "codex",
             "claude",
+            "cursor-agent",
         )
         .await;
     } else {
@@ -116,6 +117,7 @@ pub async fn execute(paths: &Paths, runner_filter: Option<&str>) -> Result<Repor
                 r.agent.kind,
                 &r.codex.binary,
                 &r.claude_code.binary,
+                &r.cursor_agent.binary,
             )
             .await;
         }
@@ -168,6 +170,7 @@ async fn run_agent_checks(
     agent_kind: crate::config::schema::AgentKind,
     codex_binary: &str,
     claude_binary: &str,
+    cursor_binary: &str,
 ) {
     let tag = |base: &str| match prefix {
         Some(p) => format!("{base}@{p}"),
@@ -225,6 +228,35 @@ async fn run_agent_checks(
                 detail: format!(
                     "assumed ok (run `{} /login` if runs fail with auth errors)",
                     claude_binary
+                ),
+                blocker: false,
+            });
+        }
+        crate::config::schema::AgentKind::CursorAgent => {
+            match check_version(cursor_binary).await {
+                Ok(detail) => checks.push(Check {
+                    name: tag("cursor-agent"),
+                    ok: true,
+                    detail,
+                    blocker: true,
+                }),
+                Err(e) => checks.push(Check {
+                    name: tag("cursor-agent"),
+                    ok: false,
+                    detail: e.to_string(),
+                    blocker: true,
+                }),
+            }
+            // cursor-agent auth is interactive (`cursor-agent login`) or via the
+            // CURSOR_API_KEY env var; there's no cheap non-interactive probe, so
+            // surface a hint rather than block.
+            checks.push(Check {
+                name: tag("cursor-auth"),
+                ok: true,
+                detail: format!(
+                    "assumed ok (run `{} login` or set CURSOR_API_KEY if runs fail \
+                     with auth errors)",
+                    cursor_binary
                 ),
                 blocker: false,
             });
@@ -300,7 +332,7 @@ mod tests {
     //! per-runner tags are correct.
     use super::*;
     use crate::config::schema::{
-        AgentKind, ClaudeCodeSection, CodexSection, Config, DaemonConfig, RunnerConfig,
+        AgentKind, ClaudeCodeSection, CursorAgentSection, CodexSection, Config, DaemonConfig, RunnerConfig,
         WorkspaceSection,
     };
     use std::path::PathBuf;
@@ -333,6 +365,7 @@ mod tests {
                 ..Default::default()
             },
             claude_code: ClaudeCodeSection::default(),
+            cursor_agent: CursorAgentSection::default(),
             approval_policy: Default::default(),
         }
     }
@@ -447,12 +480,14 @@ mod tests {
         // don't have to spawn binaries to see the difference.
         let mut codex_checks: Vec<Check> = Vec::new();
         let mut claude_checks: Vec<Check> = Vec::new();
+        let mut cursor_checks: Vec<Check> = Vec::new();
         run_agent_checks(
             &mut codex_checks,
             None,
             AgentKind::Codex,
             "codex-missing",
             "claude-missing",
+            "cursor-missing",
         )
         .await;
         run_agent_checks(
@@ -461,11 +496,23 @@ mod tests {
             AgentKind::ClaudeCode,
             "codex-missing",
             "claude-missing",
+            "cursor-missing",
+        )
+        .await;
+        run_agent_checks(
+            &mut cursor_checks,
+            None,
+            AgentKind::CursorAgent,
+            "codex-missing",
+            "claude-missing",
+            "cursor-missing",
         )
         .await;
         assert!(codex_checks.iter().any(|c| c.name == "codex"));
         assert!(codex_checks.iter().any(|c| c.name == "codex-auth"));
         assert!(claude_checks.iter().any(|c| c.name == "claude"));
         assert!(claude_checks.iter().any(|c| c.name == "claude-auth"));
+        assert!(cursor_checks.iter().any(|c| c.name == "cursor-agent"));
+        assert!(cursor_checks.iter().any(|c| c.name == "cursor-auth"));
     }
 }

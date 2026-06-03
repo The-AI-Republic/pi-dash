@@ -190,6 +190,7 @@ pub async fn run(args: Args, paths: &Paths) -> Result<()> {
         },
         codex: Default::default(),
         claude_code: Default::default(),
+        cursor_agent: Default::default(),
         approval_policy: Default::default(),
     };
 
@@ -503,6 +504,7 @@ pub async fn enroll_additional_runner(
         agent: Default::default(),
         codex: Default::default(),
         claude_code: Default::default(),
+        cursor_agent: Default::default(),
         approval_policy: Default::default(),
     };
     cfg.runners.push(new_runner.clone());
@@ -611,7 +613,7 @@ fn read_line() -> Option<String> {
 mod tests {
     use super::*;
     use crate::config::schema::{
-        AgentSection, ApprovalPolicySection, ClaudeCodeSection, CodexSection, RunnerConfig,
+        AgentSection, ApprovalPolicySection, ClaudeCodeSection, CursorAgentSection, CodexSection, RunnerConfig,
         WorkspaceSection,
     };
     use std::path::PathBuf;
@@ -642,6 +644,7 @@ mod tests {
             agent: AgentSection::default(),
             codex: CodexSection::default(),
             claude_code: ClaudeCodeSection::default(),
+            cursor_agent: CursorAgentSection::default(),
             approval_policy: ApprovalPolicySection::default(),
         }
     }

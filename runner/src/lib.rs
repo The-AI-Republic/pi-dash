@@ -9,6 +9,7 @@ pub mod cli;
 pub mod cloud;
 pub mod codex;
 pub mod config;
+pub mod cursor_agent;
 pub mod daemon;
 pub mod history;
 pub mod ipc;

@@ -21,7 +21,7 @@ use crate::service::reload::ReloadOutcome;
 
 use super::super::app::AppData;
 
-pub const AGENT_KINDS: &[&str] = &["codex", "claude-code"];
+pub const AGENT_KINDS: &[&str] = &["codex", "claude-code", "cursor-agent"];
 pub const LOG_LEVELS: &[&str] = &["trace", "debug", "info", "warn", "error"];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -33,6 +33,8 @@ pub enum FieldId {
     CodexModelDefault,
     ClaudeBinary,
     ClaudeModelDefault,
+    CursorBinary,
+    CursorModelDefault,
     ApprovalAutoReadonly,
     ApprovalAutoWrites,
     ApprovalAutoNetwork,
@@ -51,6 +53,8 @@ impl FieldId {
             FieldId::CodexModelDefault => "field:codex_model_default",
             FieldId::ClaudeBinary => "field:claude_binary",
             FieldId::ClaudeModelDefault => "field:claude_model_default",
+            FieldId::CursorBinary => "field:cursor_binary",
+            FieldId::CursorModelDefault => "field:cursor_model_default",
             FieldId::ApprovalAutoReadonly => "field:approval_auto_readonly",
             FieldId::ApprovalAutoWrites => "field:approval_auto_writes",
             FieldId::ApprovalAutoNetwork => "field:approval_auto_network",
@@ -68,6 +72,8 @@ impl FieldId {
             "field:codex_model_default" => FieldId::CodexModelDefault,
             "field:claude_binary" => FieldId::ClaudeBinary,
             "field:claude_model_default" => FieldId::ClaudeModelDefault,
+            "field:cursor_binary" => FieldId::CursorBinary,
+            "field:cursor_model_default" => FieldId::CursorModelDefault,
             "field:approval_auto_readonly" => FieldId::ApprovalAutoReadonly,
             "field:approval_auto_writes" => FieldId::ApprovalAutoWrites,
             "field:approval_auto_network" => FieldId::ApprovalAutoNetwork,
@@ -196,12 +202,19 @@ pub fn display_value(cfg: &Config, id: FieldId, runner_idx: usize) -> String {
         FieldId::AgentKind => match runner.agent.kind {
             AgentKind::Codex => "codex".into(),
             AgentKind::ClaudeCode => "claude-code".into(),
+            AgentKind::CursorAgent => "cursor-agent".into(),
         },
         FieldId::CodexBinary => runner.codex.binary.clone(),
         FieldId::CodexModelDefault => runner.codex.model_default.clone().unwrap_or_default(),
         FieldId::ClaudeBinary => runner.claude_code.binary.clone(),
         FieldId::ClaudeModelDefault => runner
             .claude_code
+            .model_default
+            .clone()
+            .unwrap_or_default(),
+        FieldId::CursorBinary => runner.cursor_agent.binary.clone(),
+        FieldId::CursorModelDefault => runner
+            .cursor_agent
             .model_default
             .clone()
             .unwrap_or_default(),
@@ -271,6 +284,19 @@ pub fn set_text_value(
                 Some(s.to_string())
             };
         }
+        FieldId::CursorBinary => {
+            if s.trim().is_empty() {
+                return Err("binary cannot be empty".into());
+            }
+            runner.cursor_agent.binary = s.to_string();
+        }
+        FieldId::CursorModelDefault => {
+            runner.cursor_agent.model_default = if s.is_empty() {
+                None
+            } else {
+                Some(s.to_string())
+            };
+        }
         FieldId::AgentKind
         | FieldId::ApprovalAutoReadonly
         | FieldId::ApprovalAutoWrites
@@ -312,7 +338,8 @@ pub fn cycle_enum(cfg: &mut Config, id: FieldId, runner_idx: usize) {
             };
             runner.agent.kind = match runner.agent.kind {
                 AgentKind::Codex => AgentKind::ClaudeCode,
-                AgentKind::ClaudeCode => AgentKind::Codex,
+                AgentKind::ClaudeCode => AgentKind::CursorAgent,
+                AgentKind::CursorAgent => AgentKind::Codex,
             };
         }
         FieldId::LogLevel => {

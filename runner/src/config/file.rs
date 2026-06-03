@@ -240,6 +240,7 @@ mod tests {
             agent: Default::default(),
             codex: Default::default(),
             claude_code: Default::default(),
+            cursor_agent: Default::default(),
             approval_policy: Default::default(),
         }
     }

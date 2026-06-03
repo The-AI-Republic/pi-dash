@@ -168,6 +168,9 @@ runner/
 │   ├── daemon/               # supervisor + state machine
 │   ├── cloud/                # WS client, message schemas, registration HTTP
 │   ├── codex/                # app-server subprocess + JSON-RPC bridge
+│   ├── claude_code/          # `claude --print` stream-json subprocess + bridge
+│   ├── cursor_agent/         # `cursor-agent --print` stream-json subprocess + bridge
+│   ├── agent/                # agent-agnostic bridge abstraction over the above
 │   ├── workspace/            # working_dir resolution + `git clone` on first task
 │   ├── approval/             # policy engine + first-writer-wins router
 │   ├── ipc/                  # local IPC between daemon and TUI/CLI
