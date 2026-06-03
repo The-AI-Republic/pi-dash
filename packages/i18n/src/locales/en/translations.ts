@@ -307,6 +307,7 @@ export default {
   Color: "Color",
   "Coming soon": "Coming soon",
   "Command Prompt": "Command Prompt",
+  Comment: "Comment",
   "Comment & Run": "Comment & Run",
   "Comment created successfully": "Comment created successfully",
   "Comment creation failed. Please try again later.": "Comment creation failed. Please try again later.",

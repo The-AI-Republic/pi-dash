@@ -87,7 +87,7 @@ export const LiteTextEditor = React.forwardRef(function LiteTextEditor(
     disabledExtensions: additionalDisabledExtensions = [],
     editorClassName = "",
     showPlaceholderOnEmpty = true,
-    submitButtonText = "common.comment",
+    submitButtonText = "Comment",
     extraToolbarActions,
     ...rest
   } = props;
