@@ -479,6 +479,38 @@ pub fn editable_lines(
     ));
     lines.push(Line::raw(""));
 
+    // Per-agent binary / model_default. Every agent's pair is registered in
+    // `FIELDS` (and therefore in the focus tree), so each must be rendered or
+    // navigation would land on an invisible, un-highlighted field. Rendered in
+    // `FIELDS` order so the index-based selection highlight lines up.
+    for (section, ids) in [
+        (
+            "Codex",
+            [FieldId::CodexBinary, FieldId::CodexModelDefault],
+        ),
+        (
+            "Claude Code",
+            [FieldId::ClaudeBinary, FieldId::ClaudeModelDefault],
+        ),
+        (
+            "Cursor Agent",
+            [FieldId::CursorBinary, FieldId::CursorModelDefault],
+        ),
+    ] {
+        lines.push(section_header(section));
+        for id in ids {
+            lines.extend(render_editable_row(
+                working,
+                loaded,
+                selected_idx,
+                index_of(id),
+                runner_idx,
+                edit_buffer,
+            ));
+        }
+        lines.push(Line::raw(""));
+    }
+
     lines.push(section_header("Approval policy"));
     for id in [
         FieldId::ApprovalAutoReadonly,
