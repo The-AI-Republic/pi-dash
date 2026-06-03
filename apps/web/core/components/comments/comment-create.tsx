@@ -4,7 +4,7 @@
  * See the LICENSE file for details.
  */
 
-import { useRef, useState } from "react";
+import { useCallback, useRef, useState } from "react";
 import { observer } from "mobx-react";
 import { useForm, Controller } from "react-hook-form";
 // pi dash imports
@@ -27,8 +27,21 @@ type TCommentCreate = {
   projectId?: string;
   onSubmitCallback?: (elementId: string) => void;
   /** Optional content rendered to the LEFT of the toolbar's submit button.
-   * Forwarded to ``LiteTextEditor`` via ``extraToolbarActions``. */
-  extraToolbarActions?: React.ReactNode;
+   * Forwarded to ``LiteTextEditor`` via ``extraToolbarActions``.
+   *
+   * May be a plain node, or a render function that receives live composer
+   * state — ``isEmpty`` / ``isSubmitting`` and a ``submitComment`` callback
+   * that posts whatever is currently typed (returning the created comment, or
+   * ``undefined`` if empty / on failure). This lets a toolbar action (e.g.
+   * "Comment & Run") reuse the comment the user already typed instead of
+   * popping a second input. */
+  extraToolbarActions?:
+    | React.ReactNode
+    | ((ctx: {
+        isEmpty: boolean;
+        isSubmitting: boolean;
+        submitComment: () => Promise<Partial<TIssueComment> | undefined>;
+      }) => React.ReactNode);
 };
 
 // services
@@ -57,6 +70,7 @@ export const CommentCreate = observer(function CommentCreate(props: TCommentCrea
     handleSubmit,
     control,
     watch,
+    getValues,
     formState: { isSubmitting },
     reset,
   } = useForm<Partial<TIssueComment>>({
@@ -65,7 +79,11 @@ export const CommentCreate = observer(function CommentCreate(props: TCommentCrea
     },
   });
 
-  const onSubmit = async (formData: Partial<TIssueComment>) => {
+  // Posts ``formData`` as a comment, syncs any uploaded assets, then resets the
+  // editor. Returns the created comment so callers (e.g. Comment & Run) can act
+  // on it. Returns ``undefined`` on failure; the editor is reset either way to
+  // match the historical submit behavior.
+  const postComment = async (formData: Partial<TIssueComment>): Promise<Partial<TIssueComment> | undefined> => {
     try {
       const comment = await activityOperations.createComment(formData);
       if (comment?.id) onSubmitCallback?.(comment.id);
@@ -81,8 +99,10 @@ export const CommentCreate = observer(function CommentCreate(props: TCommentCrea
         }
         setUploadedAssetIds([]);
       }
+      return comment;
     } catch (error) {
       console.error(error);
+      return undefined;
     } finally {
       reset({
         comment_html: "<p></p>",
@@ -91,8 +111,27 @@ export const CommentCreate = observer(function CommentCreate(props: TCommentCrea
     }
   };
 
+  const onSubmit = async (formData: Partial<TIssueComment>) => {
+    await postComment(formData);
+  };
+
+  // Imperative submit for toolbar actions: posts whatever is currently typed
+  // (no second input), guarding against empty content so an accidental click on
+  // an empty composer is a no-op.
+  const submitComment = useCallback(async (): Promise<Partial<TIssueComment> | undefined> => {
+    const formData = getValues();
+    if (isCommentEmpty(formData.comment_html ?? undefined)) return undefined;
+    return postComment(formData);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [getValues, uploadedAssetIds, projectId, workspaceSlug, entityId]);
+
   const commentHTML = watch("comment_html");
   const isEmpty = isCommentEmpty(commentHTML ?? undefined);
+
+  const resolvedExtraToolbarActions =
+    typeof extraToolbarActions === "function"
+      ? extraToolbarActions({ isEmpty, isSubmitting, submitComment })
+      : extraToolbarActions;
 
   return (
     <div
@@ -154,7 +193,7 @@ export const CommentCreate = observer(function CommentCreate(props: TCommentCrea
                 displayConfig={{
                   fontSize: "small-font",
                 }}
-                extraToolbarActions={extraToolbarActions}
+                extraToolbarActions={resolvedExtraToolbarActions}
               />
             )}
           />
