@@ -278,10 +278,13 @@ pub async fn add(args: AddArgs, paths: &Paths) -> Result<RunnerConfig> {
 }
 
 /// Best-effort post-add nudge: when the agent CLI the new runner will
-/// drive isn't installed, print a notice and open its official install
-/// page in the operator's browser. Always a no-op on success and never
-/// returns an error — the runner is already added by the time this runs,
-/// so installation guidance must not block or fail the `add`.
+/// drive isn't installed, print a notice and (only when interactive) open
+/// its official install page in the operator's browser. Always a no-op on
+/// success and never returns an error — the runner is already added by the
+/// time this runs, so installation guidance must not block or fail the
+/// `add`. The browser is gated on a TTY because `runner add` is fully
+/// scriptable, and a CI/scripted caller has no operator to see the page;
+/// the notice (with the URL) is still printed so it lands in logs.
 async fn guide_agent_install_if_missing(kind: AgentKind, binary: &str) {
     if agent_binary_installed(binary).await {
         return;
@@ -289,12 +292,16 @@ async fn guide_agent_install_if_missing(kind: AgentKind, binary: &str) {
     let url = kind.install_url();
     println!(
         "\nThe `{binary}` CLI for the selected agent ({}) isn't installed on this host.\n\
-         Opening its installation page in your browser: {url}\n\
          (The runner was still added — install `{binary}`, then `pidash doctor` re-checks it.)",
         kind.label(),
     );
-    if let Err(err) = crate::util::browser::open(url) {
-        println!("(Couldn't open a browser automatically: {err:#}. Visit {url} to install.)");
+    if std::io::stdout().is_terminal() && std::io::stdin().is_terminal() {
+        println!("Opening its installation page in your browser: {url}");
+        if let Err(err) = crate::util::browser::open(url) {
+            println!("(Couldn't open a browser automatically: {err:#}. Visit {url} to install.)");
+        }
+    } else {
+        println!("Install page: {url}");
     }
 }
 
