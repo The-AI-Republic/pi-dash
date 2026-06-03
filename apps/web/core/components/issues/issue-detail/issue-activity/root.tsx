@@ -103,12 +103,12 @@ export const IssueActivity = observer(function IssueActivity(props: TIssueActivi
         activityOperations={activityOperations}
         showToolbarInitially
         projectId={projectId}
-        extraToolbarActions={({ isEmpty, submitComment }) => (
+        extraToolbarActions={({ isEmpty, isSubmitting, submitComment }) => (
           <CommentAndRunActionButton
             workspaceSlug={workspaceSlug}
             issueId={issueId}
             submitComment={submitComment}
-            disabled={disabled || isEmpty}
+            disabled={disabled || isEmpty || isSubmitting}
             size="base"
             className="px-2.5 py-1.5 text-11"
           />
