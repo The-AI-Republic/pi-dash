@@ -129,6 +129,13 @@ pub async fn add(args: AddArgs, paths: &Paths) -> Result<RunnerConfig> {
         );
     }
 
+    // Nudge the operator to install the agent CLI before we register a
+    // runner that drives it. Done up front (before any auth/network work)
+    // so the install page is open in their browser while enrollment runs.
+    // Non-fatal: the binary only has to be present by the time the daemon
+    // picks up a run, and `pidash doctor` re-checks it.
+    remind_if_agent_missing(args.agent).await;
+
     let api_token = ensure_cli_token(paths, args.url.as_deref(), args.workspace.as_deref()).await?;
 
     let cloud_url = if paths.config_path().exists() {
@@ -302,6 +309,45 @@ fn hostname_or_unknown() -> String {
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| "unknown-host".to_string())
+}
+
+/// When the selected agent's CLI isn't installed on this dev machine,
+/// remind the operator how to install it and open the agent's official
+/// install page in their browser.
+///
+/// Non-fatal by design: `pidash runner add` still registers the runner.
+/// The agent binary only has to exist by the time the daemon spawns a run,
+/// and `pidash doctor` re-checks it — so we nudge rather than block. The
+/// presence probe goes through the daemon's login-shell `PATH` (see
+/// [`crate::util::shell::binary_runs_version`]) so a binary that's only on
+/// the user's interactive `PATH` is still seen as installed.
+///
+/// The browser is only opened when attached to a terminal; in CI / piped
+/// invocations we just print the URL (spawning a browser there is noise and
+/// usually fails silently anyway). Both `add` call sites are CLI flows
+/// (`pidash runner add` and `pidash auth login`'s onboarding prompt); the
+/// TUI add-runner modal uses a different path, so printing here is safe.
+async fn remind_if_agent_missing(agent: AgentKind) {
+    let binary = agent.default_binary();
+    if crate::util::shell::binary_runs_version(binary).await {
+        return;
+    }
+
+    let name = agent.display_name();
+    let url = agent.install_page_url();
+    println!();
+    println!("⚠ The {name} CLI (`{binary}`) was not found on this machine.");
+    println!(
+        "  This runner drives {name}, so its runs will fail until `{binary}` is installed and on PATH."
+    );
+    println!("  Install it from: {url}");
+
+    if std::io::stdout().is_terminal() && std::io::stdin().is_terminal() {
+        match crate::util::browser::open_url(url) {
+            Ok(()) => println!("  (Opened the install page in your default browser.)"),
+            Err(_) => println!("  (Open the link above to install, then re-run if needed.)"),
+        }
+    }
 }
 
 pub fn list(paths: &Paths) -> Result<()> {

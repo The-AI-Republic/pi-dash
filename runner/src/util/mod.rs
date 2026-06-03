@@ -1,4 +1,5 @@
 pub mod backoff;
+pub mod browser;
 pub mod confirm;
 pub mod hostname;
 pub mod logging;

@@ -76,6 +76,23 @@ pub fn login_shell_command(program: &str, args: &[&str], cwd: Option<&Path>) -> 
     cmd
 }
 
+/// Probe whether `binary --version` runs successfully through the same
+/// login+interactive bash wrapper the daemon uses to spawn agents. Returns
+/// `true` only when the handler launches and the binary exits `0`.
+///
+/// `pidash runner add` uses this to decide whether to remind the operator
+/// to install the chosen agent CLI. Probing through [`login_shell_command`]
+/// (rather than a bare `Command::new`) is what makes the answer match
+/// reality: the daemon spawns agents under a stripped `systemd`/`launchd`
+/// `PATH`, so a binary that's only on the user's interactive `PATH` is the
+/// case we most need to get right — and the login shell is where it shows up.
+pub async fn binary_runs_version(binary: &str) -> bool {
+    let mut cmd = login_shell_command(binary, &["--version"], None);
+    cmd.stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    matches!(cmd.output().await, Ok(out) if out.status.success())
+}
+
 /// True for the two stderr lines bash always emits when started with `-i`
 /// under a daemon with no controlling TTY. Drain loops consuming a child's
 /// stderr should drop these so logs aren't polluted with a warning on every
@@ -188,6 +205,20 @@ mod tests {
             "claude: unexpected internal error"
         ));
         assert!(!is_benign_login_shell_warning(""));
+    }
+
+    #[tokio::test]
+    async fn binary_runs_version_true_for_present_binary() {
+        // `true` is on PATH everywhere we run and exits 0 regardless of
+        // args, so it stands in for an installed agent CLI.
+        assert!(binary_runs_version("true").await);
+    }
+
+    #[tokio::test]
+    async fn binary_runs_version_false_for_missing_binary() {
+        // The case `pidash runner add` cares about: an agent CLI the user
+        // hasn't installed. bash's `exec` fails (127) → non-success.
+        assert!(!binary_runs_version("pidash-no-such-agent-binary-xyz").await);
     }
 
     #[tokio::test]
