@@ -858,6 +858,8 @@ export default {
   "Manage your AI Agent connectivities": "管理您的 AI 代理连接",
   Manifest: "清单",
   Manual: "手动",
+  "Manually trigger an extra AI agent run. (Issues in the In Progress state already tick an agent run every few hours.)":
+    "Manually trigger an extra AI agent run. (Issues in the In Progress state already tick an agent run every few hours.)",
   "Manually or through automation, you can archive work items that are completed or cancelled. Find them here once archived.":
     "您可以通过手动或自动方式归档已完成或已取消的工作项。归档后，可在此处找到它们。",
   "Map your project goals to Modules and track easily.": "将您的项目目标映射到模块，并轻松跟踪。",
