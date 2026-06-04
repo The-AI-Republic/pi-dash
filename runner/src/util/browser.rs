@@ -15,20 +15,19 @@ use std::process::{Command, Stdio};
 /// (e.g. no `xdg-open` on a minimal Linux host); callers treat that as
 /// "tell the user to open the link themselves".
 pub fn open_url(url: &str) -> Result<()> {
-    let (program, arg_prefix): (&str, Option<&str>) = if cfg!(target_os = "macos") {
-        ("open", None)
+    let mut cmd = if cfg!(target_os = "macos") {
+        let mut cmd = Command::new("open");
+        cmd.arg(url);
+        cmd
     } else if cfg!(target_os = "windows") {
-        ("cmd", Some("/C start"))
+        let mut cmd = Command::new("rundll32");
+        cmd.arg("url.dll,FileProtocolHandler").arg(url);
+        cmd
     } else {
-        ("xdg-open", None)
+        let mut cmd = Command::new("xdg-open");
+        cmd.arg(url);
+        cmd
     };
-    let mut cmd = Command::new(program);
-    if let Some(prefix) = arg_prefix {
-        for arg in prefix.split_whitespace() {
-            cmd.arg(arg);
-        }
-    }
-    cmd.arg(url);
     cmd.stdout(Stdio::null()).stderr(Stdio::null());
     cmd.spawn().context("opening browser")?;
     Ok(())
