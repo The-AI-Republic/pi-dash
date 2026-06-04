@@ -427,6 +427,7 @@ export default {
   "Current password": "Current password",
   "Current timezone setting.": "Current timezone setting.",
   "Current version": "Current version",
+  Cursor: "Cursor",
   Custom: "Custom",
   "Custom theme": "Custom theme",
   "Customize for this workspace": "Customize for this workspace",
