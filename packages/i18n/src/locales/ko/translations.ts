@@ -872,6 +872,8 @@ export default {
   "Manage your AI Agent connectivities": "AI 에이전트 연결 관리",
   Manifest: "매니페스트",
   Manual: "수동",
+  "Manually trigger an extra AI agent run. (Issues in the In Progress state already tick an agent run every few hours.)":
+    "Manually trigger an extra AI agent run. (Issues in the In Progress state already tick an agent run every few hours.)",
   "Manually or through automation, you can archive work items that are completed or cancelled. Find them here once archived.":
     "수동 또는 자동화를 통해 완료되거나 취소된 작업 항목을 보관할 수 있습니다. 보관된 후에는 여기에서 찾을 수 있습니다.",
   "Map your project goals to Modules and track easily.": "프로젝트 목표를 모듈에 매핑하고 쉽게 추적하세요.",

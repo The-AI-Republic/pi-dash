@@ -123,7 +123,7 @@ async fn login_and_bind_workspace(args: &Args, paths: &Paths) -> Result<LoginOut
 
     if !args.no_browser {
         let with_code = format!("{}?code={}", start.verification_uri, start.user_code);
-        let _ = try_open_browser(&with_code);
+        let _ = crate::util::browser::open_url(&with_code);
     }
 
     let token = poll_for_token(&client, &cloud_url, &start).await?;
@@ -249,27 +249,6 @@ fn print_user_code_block(start: &StartResponse) {
     println!();
     print!("Waiting for browser approval...");
     let _ = std::io::stdout().flush();
-}
-
-fn try_open_browser(url: &str) -> Result<()> {
-    let (program, arg_prefix): (&str, Option<&str>) = if cfg!(target_os = "macos") {
-        ("open", None)
-    } else if cfg!(target_os = "windows") {
-        ("cmd", Some("/C start"))
-    } else {
-        ("xdg-open", None)
-    };
-    let mut cmd = std::process::Command::new(program);
-    if let Some(prefix) = arg_prefix {
-        for arg in prefix.split_whitespace() {
-            cmd.arg(arg);
-        }
-    }
-    cmd.arg(url);
-    cmd.stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null());
-    cmd.spawn().context("opening browser")?;
-    Ok(())
 }
 
 async fn poll_for_token(

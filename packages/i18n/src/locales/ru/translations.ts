@@ -893,6 +893,8 @@ export default {
   "Manage your AI Agent connectivities": "Управление подключениями вашего AI Agent",
   Manifest: "Манифест",
   Manual: "Руководство",
+  "Manually trigger an extra AI agent run. (Issues in the In Progress state already tick an agent run every few hours.)":
+    "Manually trigger an extra AI agent run. (Issues in the In Progress state already tick an agent run every few hours.)",
   "Manually or through automation, you can archive work items that are completed or cancelled. Find them here once archived.":
     "Вручную или с помощью автоматизации вы можете архивировать завершенные или отмененные рабочие элементы. Найдите их здесь после архивации.",
   "Map your project goals to Modules and track easily.":

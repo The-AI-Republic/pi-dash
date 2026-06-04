@@ -4,7 +4,7 @@
 
 import pytest
 
-from pi_dash.db.models import Issue, Project, State
+from pi_dash.db.models import Issue, IssueComment, Project, State
 from pi_dash.prompting.composer import (
     PromptTemplateNotFound,
     build_first_turn,
@@ -94,6 +94,29 @@ def test_build_first_turn_uses_default_template(seeded_default, issue, run):
     assert "Pi Dash issue" in rendered
     assert issue.name in rendered
     assert "TP-" in rendered  # project identifier-based issue identifier
+
+
+@pytest.mark.unit
+def test_build_first_turn_serializes_comment_speaker_metadata(
+    seeded_default, issue, run, create_user
+):
+    IssueComment.objects.create(
+        workspace=issue.workspace,
+        project=issue.project,
+        issue=issue,
+        actor=create_user,
+        created_by=create_user,
+        comment_html="<p>I will post the PR link next.</p>",
+        speaker_type=IssueComment.SpeakerType.AGENT,
+        speaker_label="Codex",
+        speaker_agent_run_id=run.id,
+    )
+
+    rendered = build_first_turn(issue, run)
+
+    assert f"AI agent: Codex (submitted by {create_user.display_name})" in rendered
+    assert f"Agent run: {run.id}" in rendered
+    assert "I will post the PR link next." in rendered
 
 
 # ---------------------------------------------------------------------------

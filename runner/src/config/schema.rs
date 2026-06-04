@@ -234,6 +234,39 @@ impl AgentKind {
             AgentKind::ClaudeCode | AgentKind::CursorAgent => Duration::from_secs(15 * 60),
         }
     }
+
+    /// Human-facing name for prompts and operator-facing messages, e.g.
+    /// the missing-agent reminder `pidash runner add` prints.
+    pub fn display_name(self) -> &'static str {
+        match self {
+            AgentKind::Codex => "Codex",
+            AgentKind::ClaudeCode => "Claude Code",
+            AgentKind::CursorAgent => "Cursor",
+        }
+    }
+
+    /// Default CLI binary name for this agent — the executable name a
+    /// fresh runner is configured with (see `CodexSection::default` /
+    /// `ClaudeCodeSection::default`) and the one `pidash runner add`
+    /// probes for presence on the dev machine.
+    pub fn default_binary(self) -> &'static str {
+        match self {
+            AgentKind::Codex => "codex",
+            AgentKind::ClaudeCode => "claude",
+            AgentKind::CursorAgent => "cursor-agent",
+        }
+    }
+
+    /// Official install / setup page for this agent's CLI. `pidash runner
+    /// add` prints this and opens it in the operator's browser when the
+    /// agent binary is missing, so they can install it before runs start.
+    pub fn install_page_url(self) -> &'static str {
+        match self {
+            AgentKind::Codex => "https://github.com/openai/codex",
+            AgentKind::ClaudeCode => "https://docs.claude.com/en/docs/claude-code/setup",
+            AgentKind::CursorAgent => "https://docs.cursor.com/en/cli/overview",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -665,5 +698,31 @@ mod tests {
         let cfg = config_with(vec![r]);
         let err = cfg.validate().unwrap_err();
         assert!(matches!(err, ConfigError::MissingProjectSlug { .. }));
+    }
+
+    #[test]
+    fn agent_kind_default_binary_matches_section_defaults() {
+        // `pidash runner add` probes `default_binary()` for the agent it's
+        // about to configure; it must equal the binary the fresh runner is
+        // actually written with, or the probe checks the wrong executable.
+        assert_eq!(
+            AgentKind::Codex.default_binary(),
+            CodexSection::default().binary
+        );
+        assert_eq!(
+            AgentKind::ClaudeCode.default_binary(),
+            ClaudeCodeSection::default().binary
+        );
+    }
+
+    #[test]
+    fn agent_kind_install_page_urls_are_https() {
+        // These are opened in the operator's browser and printed verbatim;
+        // a typo'd or non-https URL is a user-facing defect.
+        for kind in [AgentKind::Codex, AgentKind::ClaudeCode] {
+            let url = kind.install_page_url();
+            assert!(url.starts_with("https://"), "{kind:?} url not https: {url}");
+            assert!(!kind.display_name().is_empty());
+        }
     }
 }

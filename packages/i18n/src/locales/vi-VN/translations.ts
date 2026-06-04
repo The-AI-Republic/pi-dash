@@ -880,6 +880,8 @@ export default {
   "Manage your AI Agent connectivities": "Quản lý kết nối của AI Agent của bạn",
   Manifest: "Tệp kê khai",
   Manual: "Hướng dẫn",
+  "Manually trigger an extra AI agent run. (Issues in the In Progress state already tick an agent run every few hours.)":
+    "Manually trigger an extra AI agent run. (Issues in the In Progress state already tick an agent run every few hours.)",
   "Manually or through automation, you can archive work items that are completed or cancelled. Find them here once archived.":
     "Bạn có thể lưu trữ các mục công việc đã hoàn thành hoặc bị hủy theo cách thủ công hoặc thông qua tự động hóa. Tìm chúng ở đây sau khi đã lưu trữ.",
   "Map your project goals to Modules and track easily.":

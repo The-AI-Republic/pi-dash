@@ -44,6 +44,9 @@ export type TIssueComment = {
   comment_json: JSONContent;
   external_id: string | undefined;
   external_source: string | undefined;
+  speaker_type?: "human" | "agent" | "system" | "integration";
+  speaker_label?: string;
+  speaker_agent_run_id?: string;
   access: EIssueCommentAccessSpecifier;
 };
 
@@ -138,6 +141,9 @@ export type TIssuePublicComment = {
     reaction: string;
   }[];
   comment_stripped: string;
+  speaker_type?: "human" | "agent" | "system" | "integration";
+  speaker_label?: string;
+  speaker_agent_run_id?: string;
   created_at: Date;
   created_by: string;
   id: string;
