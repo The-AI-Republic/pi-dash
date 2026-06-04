@@ -311,16 +311,16 @@ fn hostname_or_unknown() -> String {
         .unwrap_or_else(|| "unknown-host".to_string())
 }
 
-/// When the selected agent's CLI isn't installed on this dev machine,
+/// When Pi Dash can't run the selected agent's CLI on this dev machine,
 /// remind the operator how to install it and open the agent's official
 /// install page in their browser.
 ///
 /// Non-fatal by design: `pidash runner add` still registers the runner.
 /// The agent binary only has to exist by the time the daemon spawns a run,
 /// and `pidash doctor` re-checks it — so we nudge rather than block. The
-/// presence probe goes through the daemon's login-shell `PATH` (see
-/// [`crate::util::shell::binary_runs_version`]) so a binary that's only on
-/// the user's interactive `PATH` is still seen as installed.
+/// presence probe goes through the same platform spawn helper the daemon uses
+/// (see [`crate::util::shell::binary_runs_version`]) so this reminder matches
+/// whether a real run can launch the agent.
 ///
 /// The browser is only opened when attached to a terminal; in CI / piped
 /// invocations we just print the URL (spawning a browser there is noise and
@@ -336,9 +336,9 @@ async fn remind_if_agent_missing(agent: AgentKind) {
     let name = agent.display_name();
     let url = agent.install_page_url();
     println!();
-    println!("⚠ The {name} CLI (`{binary}`) was not found on this machine.");
+    println!("⚠ Pi Dash could not run the {name} CLI (`{binary}`) on this machine.");
     println!(
-        "  This runner drives {name}, so its runs will fail until `{binary}` is installed and on PATH."
+        "  This runner drives {name}, so its runs will fail until `{binary}` is installed and runnable on PATH."
     );
     println!("  Install it from: {url}");
 

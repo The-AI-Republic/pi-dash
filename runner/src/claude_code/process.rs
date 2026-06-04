@@ -55,8 +55,8 @@ pub struct SpawnArgs<'a> {
 
 impl ClaudeProcess {
     pub async fn spawn(args: SpawnArgs<'_>) -> Result<Self> {
-        // Route through a login bash so the agent binary is found via the
-        // user's interactive PATH (nvm/pyenv/asdf/brew). See
+        // Route through the platform spawn helper so the probe and real
+        // launch behavior stay aligned. See
         // `util::shell::login_shell_command` for why.
         let mut argv: Vec<&str> = vec![
             "--print",

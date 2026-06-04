@@ -1,12 +1,13 @@
 //! Agent-spawn helper.
 //!
-//! The runner lives inside a daemon started by `systemd --user` on Linux
-//! and `launchd` on macOS. Both managers expose a stripped `PATH` that does
-//! not include anything the user's shell rc adds (nvm, pyenv, asdf, brew
-//! on Linux, …). A plain `Command::new("claude")` therefore fails with
-//! `ENOENT` on machines where `claude` works interactively.
+//! On Unix-like hosts the runner lives inside a daemon started by
+//! `systemd --user` on Linux and `launchd` on macOS. Both managers expose a
+//! stripped `PATH` that does not include anything the user's shell rc adds
+//! (nvm, pyenv, asdf, brew on Linux, …). A plain `Command::new("claude")`
+//! therefore fails with `ENOENT` on machines where `claude` works
+//! interactively.
 //!
-//! We sidestep this by wrapping every agent spawn in a login+interactive
+//! We sidestep this by wrapping Unix agent spawns in a login+interactive
 //! `bash`. The `-i` flag is load-bearing: Debian/Ubuntu's stock `.bashrc`
 //! (and nvm's default installer, which appends to `.bashrc`) short-circuits
 //! for non-interactive shells via `case $- in *i*) ;; *) return;; esac`. A
@@ -31,6 +32,10 @@
 //!     preserves our structured argv without shell re-parsing of agent
 //!     flags.
 //!
+//! On Windows, where the daemon is started as a per-user scheduled task, we
+//! run the agent binary directly. That keeps native Windows installs working
+//! without requiring a separate `bash.exe` installation.
+//!
 //! Running an interactive bash without a controlling TTY makes bash emit
 //! two diagnostic lines to stderr during startup:
 //!   `bash: cannot set terminal process group (-1): Inappropriate ioctl for device`
@@ -46,11 +51,32 @@
 use std::path::Path;
 use tokio::process::Command;
 
+#[cfg(not(target_os = "windows"))]
 const SHELL_SCRIPT: &str =
     r#"[ -n "${PIDASH_AGENT_CWD-}" ] && cd -- "$PIDASH_AGENT_CWD"; exec "$@""#;
 
-/// Build a [`Command`] that runs `program args…` through a login+interactive
-/// bash. See the module docs for why `-i` is required alongside `-l`.
+/// Build a [`Command`] that runs `program args…` directly on Windows.
+///
+/// The Windows daemon is a per-user scheduled task, so native CLI installs
+/// should be runnable from the task environment without requiring `bash.exe`.
+/// `cwd`, when `Some`, is applied directly to the child process.
+///
+/// The returned command still needs the caller's usual stdio and
+/// `kill_on_drop` wiring before being spawned.
+#[cfg(target_os = "windows")]
+pub fn login_shell_command(program: &str, args: &[&str], cwd: Option<&Path>) -> Command {
+    let mut cmd = Command::new(program);
+    if let Some(cwd) = cwd {
+        cmd.current_dir(cwd);
+    }
+    cmd.args(args);
+    cmd
+}
+
+/// Build a [`Command`] that runs `program args…` the same way the daemon
+/// launches agents on Unix-like hosts.
+///
+/// See the module docs for why `-i` is required alongside `-l`.
 ///
 /// `cwd`, when `Some`, is both applied to the outer bash (via `current_dir`)
 /// and re-asserted inside the script after rc files run, so `.bashrc`'s
@@ -58,6 +84,7 @@ const SHELL_SCRIPT: &str =
 ///
 /// The returned command still needs the caller's usual stdio and
 /// `kill_on_drop` wiring before being spawned.
+#[cfg(not(target_os = "windows"))]
 pub fn login_shell_command(program: &str, args: &[&str], cwd: Option<&Path>) -> Command {
     let mut cmd = Command::new("bash");
     // `LC_ALL` overrides every more-specific locale category, so drop it
@@ -77,15 +104,13 @@ pub fn login_shell_command(program: &str, args: &[&str], cwd: Option<&Path>) -> 
 }
 
 /// Probe whether `binary --version` runs successfully through the same
-/// login+interactive bash wrapper the daemon uses to spawn agents. Returns
-/// `true` only when the handler launches and the binary exits `0`.
+/// platform-specific wrapper the daemon uses to spawn agents. Returns `true`
+/// only when the handler launches and the binary exits `0`.
 ///
 /// `pidash runner add` uses this to decide whether to remind the operator
-/// to install the chosen agent CLI. Probing through [`login_shell_command`]
-/// (rather than a bare `Command::new`) is what makes the answer match
-/// reality: the daemon spawns agents under a stripped `systemd`/`launchd`
-/// `PATH`, so a binary that's only on the user's interactive `PATH` is the
-/// case we most need to get right — and the login shell is where it shows up.
+/// to install the chosen agent CLI. Probing through [`login_shell_command`] is
+/// what makes the answer match reality: the probe uses the same Unix login
+/// shell or native Windows direct spawn that a real run will use.
 pub async fn binary_runs_version(binary: &str) -> bool {
     let mut cmd = login_shell_command(binary, &["--version"], None);
     cmd.stdout(std::process::Stdio::null())
@@ -122,6 +147,7 @@ mod tests {
             .and_then(|(_, v)| v.map(|v| v.to_os_string()))
     }
 
+    #[cfg(not(target_os = "windows"))]
     #[test]
     fn wraps_program_and_args_in_login_bash() {
         let cmd = login_shell_command("claude", &["--print", "--model", "sonnet-4"], None);
@@ -140,6 +166,7 @@ mod tests {
         );
     }
 
+    #[cfg(not(target_os = "windows"))]
     #[test]
     fn no_args_produces_bare_invocation() {
         let cmd = login_shell_command("codex", &[], None);
@@ -154,6 +181,7 @@ mod tests {
         );
     }
 
+    #[cfg(not(target_os = "windows"))]
     #[test]
     fn pins_lc_messages_to_c_for_stable_warning_strings() {
         // The stderr filter is exact-match English; pinning LC_MESSAGES=C
@@ -162,6 +190,7 @@ mod tests {
         assert_eq!(env_value(&cmd, "LC_MESSAGES"), Some(OsString::from("C")));
     }
 
+    #[cfg(not(target_os = "windows"))]
     #[test]
     fn removes_lc_all_so_lc_messages_takes_effect() {
         let cmd = login_shell_command("claude", &[], None);
@@ -173,12 +202,14 @@ mod tests {
         assert_eq!(lc_all, Some(None));
     }
 
+    #[cfg(not(target_os = "windows"))]
     #[test]
     fn cwd_none_does_not_set_pidash_agent_cwd() {
         let cmd = login_shell_command("claude", &["--version"], None);
         assert_eq!(env_value(&cmd, "PIDASH_AGENT_CWD"), None);
     }
 
+    #[cfg(not(target_os = "windows"))]
     #[test]
     fn cwd_some_sets_both_current_dir_and_pidash_agent_cwd() {
         let cwd = PathBuf::from("/tmp/pidash-workspace");
@@ -188,6 +219,33 @@ mod tests {
             Some(OsString::from("/tmp/pidash-workspace"))
         );
         assert_eq!(cmd.as_std().get_current_dir(), Some(Path::new(&cwd)));
+    }
+
+    #[test]
+    #[cfg(target_os = "windows")]
+    fn windows_runs_program_directly() {
+        let cmd = login_shell_command("claude", &["--print", "--model", "sonnet-4"], None);
+        assert_eq!(cmd.as_std().get_program(), "claude");
+        assert_eq!(
+            argv(&cmd),
+            vec![
+                OsString::from("--print"),
+                OsString::from("--model"),
+                OsString::from("sonnet-4"),
+            ]
+        );
+        assert_eq!(env_value(&cmd, "PIDASH_AGENT_CWD"), None);
+    }
+
+    #[test]
+    #[cfg(target_os = "windows")]
+    fn windows_applies_current_dir_without_shell_env() {
+        let cwd = PathBuf::from(r"C:\pidash-workspace");
+        let cmd = login_shell_command("codex", &["app-server"], Some(&cwd));
+        assert_eq!(cmd.as_std().get_program(), "codex");
+        assert_eq!(argv(&cmd), vec![OsString::from("app-server")]);
+        assert_eq!(cmd.as_std().get_current_dir(), Some(Path::new(&cwd)));
+        assert_eq!(env_value(&cmd, "PIDASH_AGENT_CWD"), None);
     }
 
     #[test]
@@ -209,9 +267,16 @@ mod tests {
 
     #[tokio::test]
     async fn binary_runs_version_true_for_present_binary() {
-        // `true` is on PATH everywhere we run and exits 0 regardless of
-        // args, so it stands in for an installed agent CLI.
-        assert!(binary_runs_version("true").await);
+        let binary = if cfg!(target_os = "windows") {
+            // `cargo` is guaranteed to be on PATH during `cargo test` and
+            // supports `--version` on every platform.
+            "cargo"
+        } else {
+            // `true` is on PATH everywhere we run Unix tests and exits 0
+            // regardless of args, so it stands in for an installed agent CLI.
+            "true"
+        };
+        assert!(binary_runs_version(binary).await);
     }
 
     #[tokio::test]
@@ -221,6 +286,7 @@ mod tests {
         assert!(!binary_runs_version("pidash-no-such-agent-binary-xyz").await);
     }
 
+    #[cfg(not(target_os = "windows"))]
     #[tokio::test]
     async fn round_trips_argv_through_bash() {
         // Prove bash's `exec "$@"` preserves our argv exactly and the child
@@ -248,6 +314,7 @@ mod tests {
         );
     }
 
+    #[cfg(not(target_os = "windows"))]
     #[tokio::test]
     async fn agent_cwd_survives_bashrc_cd() {
         // Regression: a `cd` in the operator's `.bashrc` used to silently
