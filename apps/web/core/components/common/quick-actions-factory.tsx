@@ -19,7 +19,7 @@ export const useQuickActionsFactory = () => {
     // Common menu items
     createEditMenuItem: (handler: () => void, shouldRender: boolean = true): TContextMenuItem => ({
       key: "edit",
-      title: t("edit"),
+      title: t("Edit"),
       icon: Pencil,
       action: handler,
       shouldRender,
@@ -27,14 +27,14 @@ export const useQuickActionsFactory = () => {
 
     createOpenInNewTabMenuItem: (handler: () => void): TContextMenuItem => ({
       key: "open-new-tab",
-      title: t("open_in_new_tab"),
+      title: t("Open in new tab"),
       icon: ExternalLink,
       action: handler,
     }),
 
     createCopyLinkMenuItem: (handler: () => void): TContextMenuItem => ({
       key: "copy-link",
-      title: t("copy_link"),
+      title: t("Copy link"),
       icon: Link,
       action: handler,
     }),
@@ -44,7 +44,7 @@ export const useQuickActionsFactory = () => {
       opts: { shouldRender?: boolean; disabled?: boolean; description?: string }
     ): TContextMenuItem => ({
       key: "archive",
-      title: t("archive"),
+      title: t("Archive"),
       icon: ArchiveIcon,
       action: handler,
       className: "items-start",
@@ -56,7 +56,7 @@ export const useQuickActionsFactory = () => {
 
     createRestoreMenuItem: (handler: () => void, shouldRender: boolean = true): TContextMenuItem => ({
       key: "restore",
-      title: t("restore"),
+      title: t("Restore"),
       icon: ArchiveRestoreIcon,
       action: handler,
       shouldRender,
@@ -64,7 +64,7 @@ export const useQuickActionsFactory = () => {
 
     createDeleteMenuItem: (handler: () => void, shouldRender: boolean = true): TContextMenuItem => ({
       key: "delete",
-      title: t("delete"),
+      title: t("Delete"),
       icon: Trash2,
       action: handler,
       shouldRender,

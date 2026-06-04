@@ -48,9 +48,9 @@ export function BindingScheduleFields<T extends FieldValues>({
   const { t } = useTranslation();
 
   const humanRule = useMemo(() => {
-    if (!watchRrule) return t("scheduler_bindings.install_modal.rrule_empty_help");
+    if (!watchRrule) return t("Fires once at the start time.");
     const anchor = watchDtstart ? new Date(watchDtstart) : new Date();
-    return humanizeRrule(watchRrule, anchor) ?? t("scheduler_bindings.install_modal.rrule_invalid_help");
+    return humanizeRrule(watchRrule, anchor) ?? t("Invalid RRULE — fix it before submitting.");
   }, [watchRrule, watchDtstart, t]);
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -63,12 +63,12 @@ export function BindingScheduleFields<T extends FieldValues>({
       <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
         <div className="flex flex-col gap-1">
           <label htmlFor={`field-${String(dtstartName)}`} className="text-13 font-medium text-primary">
-            {t("scheduler_bindings.install_modal.dtstart_label")}
+            {t("Starts at")}
           </label>
           <Controller
             control={control}
             name={dtstartName}
-            rules={{ required: t("scheduler_bindings.install_modal.errors.dtstart_required") }}
+            rules={{ required: t("Start time is required.") }}
             render={({ field }) => (
               <input
                 {...field}
@@ -78,25 +78,25 @@ export function BindingScheduleFields<T extends FieldValues>({
               />
             )}
           />
-          <p className="text-12 text-secondary">{t("scheduler_bindings.install_modal.dtstart_help")}</p>
+          <p className="text-12 text-secondary">{t("First firing of this binding. The recurrence rule expands from here.")}</p>
           {dtstartErr && <span className="text-red-500 text-12">{String(dtstartErr.message ?? "")}</span>}
         </div>
         <div className="flex flex-col gap-1">
           <label htmlFor={`field-${String(tzidName)}`} className="text-13 font-medium text-primary">
-            {t("scheduler_bindings.install_modal.tzid_label")}
+            {t("Time zone")}
           </label>
           <Controller
             control={control}
             name={tzidName}
             render={({ field }) => <TzidSelect id={`field-${String(tzidName)}`} {...field} />}
           />
-          <p className="text-12 text-secondary">{t("scheduler_bindings.install_modal.tzid_help")}</p>
+          <p className="text-12 text-secondary">{t("Stored with the binding. Future PRs honour it for wall-clock-aware DST semantics.")}</p>
         </div>
       </div>
 
       <div className="flex flex-col gap-1">
         <label htmlFor={`field-${String(rruleName)}`} className="text-13 font-medium text-primary">
-          {t("scheduler_bindings.install_modal.rrule_label")}
+          {t("Recurrence (RRULE)")}
         </label>
         <Controller
           control={control}
@@ -112,14 +112,14 @@ export function BindingScheduleFields<T extends FieldValues>({
           )}
         />
         <p className="text-12 text-secondary">
-          {t("scheduler_bindings.install_modal.rrule_help")} — <span className="text-primary">{humanRule}</span>
+          {t("RFC 5545 RRULE — e.g. ``FREQ=WEEKLY;BYDAY=MO,TU,WE,TH,FR``. Leave blank to fire only once at the start.")} — <span className="text-primary">{humanRule}</span>
         </p>
         {rruleErr && <span className="text-red-500 text-12">{String(rruleErr.message ?? "")}</span>}
       </div>
 
       <div className="flex flex-col gap-1">
         <label htmlFor={`field-${String(extraContextName)}`} className="text-13 font-medium text-primary">
-          {t("scheduler_bindings.install_modal.extra_context_label")}
+          {t("Project context (optional)")}
         </label>
         <Controller
           control={control}
@@ -129,11 +129,11 @@ export function BindingScheduleFields<T extends FieldValues>({
               {...field}
               id={`field-${String(extraContextName)}`}
               rows={4}
-              placeholder={t("scheduler_bindings.install_modal.extra_context_placeholder")}
+              placeholder={t("Notes specific to this project…")}
             />
           )}
         />
-        <p className="text-12 text-secondary">{t("scheduler_bindings.install_modal.extra_context_help")}</p>
+        <p className="text-12 text-secondary">{t("Appended to the scheduler's base prompt at run time. Use it to give project-specific framing the workspace prompt shouldn't carry.")}</p>
       </div>
 
       <Controller
@@ -143,9 +143,9 @@ export function BindingScheduleFields<T extends FieldValues>({
           <div className="flex items-center justify-between gap-4">
             <div className="flex flex-col">
               <span className="text-13 font-medium text-primary">
-                {t("scheduler_bindings.install_modal.enabled_label")}
+                {t("Enabled")}
               </span>
-              <span className="text-12 text-secondary">{t("scheduler_bindings.install_modal.enabled_help")}</span>
+              <span className="text-12 text-secondary">{t("Disabled installs do not fire until re-enabled.")}</span>
             </div>
             <ToggleSwitch value={field.value} onChange={field.onChange} />
           </div>

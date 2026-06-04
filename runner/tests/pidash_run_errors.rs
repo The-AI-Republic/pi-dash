@@ -38,8 +38,8 @@ async fn run_errors_when_config_missing() {
         "error should mention config.toml: {msg}",
     );
     assert!(
-        msg.contains("pidash connect") || msg.contains("pidash install"),
-        "error should point at `pidash connect` or `pidash install`: {msg}",
+        msg.contains("pidash auth login") && msg.contains("pidash runner add"),
+        "error should point at the auth login + runner add flow: {msg}",
     );
 }
 
@@ -75,7 +75,7 @@ working_dir = "/tmp/wd"
         ),
     )
     .unwrap();
-    let args = RunArgs { offline: true };
+    let args = RunArgs { offline: false };
     let err = pidash::cli::run_for_tests(args, &paths)
         .await
         .expect_err("__run with config but no per-runner creds should fail");

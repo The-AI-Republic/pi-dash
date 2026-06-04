@@ -41,7 +41,7 @@ export function IssueDetailWidgetActionButtons(props: Props) {
           issueId={issueId}
           customButton={
             <IssueDetailWidgetButton
-              title={t("issue.add.sub_issue")}
+              title={t("Add sub-work item")}
               icon={<ViewsIcon className="h-3.5 w-3.5 flex-shrink-0" strokeWidth={2} />}
               disabled={disabled}
             />
@@ -55,7 +55,7 @@ export function IssueDetailWidgetActionButtons(props: Props) {
           issueId={issueId}
           customButton={
             <IssueDetailWidgetButton
-              title={t("issue.add.relation")}
+              title={t("Add relation")}
               icon={<RelationPropertyIcon className="h-3.5 w-3.5 flex-shrink-0" />}
               disabled={disabled}
             />
@@ -68,7 +68,7 @@ export function IssueDetailWidgetActionButtons(props: Props) {
         <IssueLinksActionButton
           customButton={
             <IssueDetailWidgetButton
-              title={t("issue.add.link")}
+              title={t("Add link")}
               icon={<LinkIcon className="h-3.5 w-3.5 flex-shrink-0" strokeWidth={2} />}
               disabled={disabled}
             />
@@ -84,7 +84,7 @@ export function IssueDetailWidgetActionButtons(props: Props) {
           issueId={issueId}
           customButton={
             <IssueDetailWidgetButton
-              title={t("common.attach")}
+              title={t("Attach")}
               icon={<Paperclip className="h-3.5 w-3.5 flex-shrink-0" strokeWidth={2} />}
               disabled={disabled}
             />

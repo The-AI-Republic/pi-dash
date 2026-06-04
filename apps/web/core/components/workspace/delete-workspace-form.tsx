@@ -68,14 +68,14 @@ export const DeleteWorkspaceForm = observer(function DeleteWorkspaceForm(props: 
       router.push(getWorkspaceRedirectionUrl());
       setToast({
         type: TOAST_TYPE.SUCCESS,
-        title: t("workspace_settings.settings.general.delete_modal.success_title"),
-        message: t("workspace_settings.settings.general.delete_modal.success_message"),
+        title: t("Workspace deleted."),
+        message: t("You will soon go to your profile page."),
       });
     } catch (_error) {
       setToast({
         type: TOAST_TYPE.ERROR,
-        title: t("workspace_settings.settings.general.delete_modal.error_title"),
-        message: t("workspace_settings.settings.general.delete_modal.error_message"),
+        title: t("That didn't work."),
+        message: t("Try again, please."),
       });
     }
   };
@@ -92,7 +92,7 @@ export const DeleteWorkspaceForm = observer(function DeleteWorkspaceForm(props: 
         </span>
         <div>
           <div className="text-center sm:text-left">
-            <h3 className="text-h5-medium">{t("workspace_settings.settings.general.delete_modal.title")}</h3>
+            <h3 className="text-h5-medium">{t("Are you sure you want to delete this workspace?")}</h3>
             <p className="mt-1 text-body-xs-regular text-secondary">
               You are about to delete the workspace{" "}
               <span className="text-body-xs-semibold break-words">{data?.name}</span>. If you confirm, you will lose
@@ -152,10 +152,10 @@ export const DeleteWorkspaceForm = observer(function DeleteWorkspaceForm(props: 
 
       <div className="flex justify-end gap-2">
         <Button variant="secondary" size="lg" onClick={handleClose}>
-          {t("cancel")}
+          {t("Cancel")}
         </Button>
         <Button variant="error-fill" size="lg" type="submit" disabled={!canDelete} loading={isSubmitting}>
-          {isSubmitting ? t("deleting") : t("confirm")}
+          {isSubmitting ? t("Deleting") : t("Confirm")}
         </Button>
       </div>
     </form>

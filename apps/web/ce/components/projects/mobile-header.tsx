@@ -72,12 +72,12 @@ export const ProjectsListMobileHeader = observer(function ProjectsListMobileHead
       <div className="flex w-full justify-around border-l border-subtle">
         <FiltersDropdown
           icon={<ListFilter className="h-3 w-3" />}
-          title={t("common.filters")}
+          title={t("Filters")}
           placement="bottom-end"
           menuButton={
             <div className="flex items-center gap-2 text-13 text-secondary">
               <ListFilter className="h-3 w-3" />
-              {t("common.filters")}
+              {t("Filters")}
               <ChevronDownIcon className="h-3 w-3" strokeWidth={2} />
             </div>
           }

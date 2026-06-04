@@ -71,7 +71,7 @@ export const ProfileIssuesFilter = observer(function ProfileIssuesFilter() {
         selectedLayout={activeLayout}
       />
       {userId && <WorkItemFiltersToggle entityType={EIssuesStoreType.PROFILE} entityId={userId} />}
-      <FiltersDropdown title={t("common.display")} placement="bottom-end">
+      <FiltersDropdown title={t("Display")} placement="bottom-end">
         <DisplayFiltersSelection
           layoutDisplayFiltersOptions={
             activeLayout ? ISSUE_DISPLAY_FILTERS_BY_PAGE.profile_issues.layoutOptions[activeLayout] : undefined

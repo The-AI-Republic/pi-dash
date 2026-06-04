@@ -124,11 +124,11 @@ export const EstimateDropdown = observer(function EstimateDropdown(props: Props)
     .filter((estimatePointDropdownOption) => estimatePointDropdownOption != undefined) as DropdownOptions;
   options?.unshift({
     value: null,
-    query: t("project_settings.estimates.no_estimate"),
+    query: t("No estimate"),
     content: (
       <div className="flex items-center gap-2">
         <EstimatePropertyIcon className="h-3 w-3 flex-shrink-0" />
-        <span className="flex-grow truncate">{t("project_settings.estimates.no_estimate")}</span>
+        <span className="flex-grow truncate">{t("No estimate")}</span>
       </div>
     ),
   });
@@ -189,7 +189,7 @@ export const EstimateDropdown = observer(function EstimateDropdown(props: Props)
           <DropdownButton
             className={buttonClassName}
             isActive={isOpen}
-            tooltipHeading={t("project_settings.estimates.label")}
+            tooltipHeading={t("Estimates")}
             tooltipContent={selectedEstimate ? selectedEstimate?.value : placeholder}
             showTooltip={showTooltip}
             variant={buttonVariant}
@@ -247,7 +247,7 @@ export const EstimateDropdown = observer(function EstimateDropdown(props: Props)
                 className="w-full bg-transparent py-1 text-11 text-secondary placeholder:text-placeholder focus:outline-none"
                 value={query}
                 onChange={(e) => setQuery(e.target.value)}
-                placeholder={t("common.search.placeholder")}
+                placeholder={t("Type to search")}
                 displayValue={(assigned: any) => assigned?.name}
                 onKeyDown={searchInputKeyDown}
               />
@@ -260,7 +260,7 @@ export const EstimateDropdown = observer(function EstimateDropdown(props: Props)
                   {/* NOTE: This condition renders when estimates are not enabled for the project */}
                   <div className="flex flex-grow items-center gap-2">
                     <EstimatePropertyIcon className="h-3 w-3 flex-shrink-0" />
-                    <span className="flex-grow truncate">{t("project_settings.estimates.no_estimate")}</span>
+                    <span className="flex-grow truncate">{t("No estimate")}</span>
                   </div>
                 </div>
               ) : (
@@ -287,10 +287,10 @@ export const EstimateDropdown = observer(function EstimateDropdown(props: Props)
                         </Combobox.Option>
                       ))
                     ) : (
-                      <p className="px-1.5 py-1 text-placeholder italic">{t("common.search.no_matching_results")}</p>
+                      <p className="px-1.5 py-1 text-placeholder italic">{t("No matching results")}</p>
                     )
                   ) : (
-                    <p className="px-1.5 py-1 text-placeholder italic">{t("common.loading")}</p>
+                    <p className="px-1.5 py-1 text-placeholder italic">{t("Loading")}</p>
                   )}
                 </>
               )}

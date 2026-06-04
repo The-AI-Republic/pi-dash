@@ -18,7 +18,7 @@ import { WorkItemFiltersRow } from "@/components/work-item-filters/filters-row";
 import { useIssues } from "@/hooks/store/use-issues";
 import { IssuesStoreContext } from "@/hooks/use-issue-layout-store";
 // local imports
-import { IssuePeekOverview } from "../../peek-overview";
+import { IssuePeekOverview, IssuePeekUrlSync } from "../../peek-overview";
 import { ArchivedIssueListLayout } from "../list/roots/archived-issue-root";
 
 export const ArchivedIssueLayoutRoot = observer(function ArchivedIssueLayoutRoot() {
@@ -59,6 +59,7 @@ export const ArchivedIssueLayoutRoot = observer(function ArchivedIssueLayoutRoot
             <div className="relative h-full w-full overflow-auto">
               <ArchivedIssueListLayout />
             </div>
+            <IssuePeekUrlSync />
             <IssuePeekOverview />
           </>
         )}

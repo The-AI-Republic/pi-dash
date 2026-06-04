@@ -154,7 +154,7 @@ export const ContentOverflowWrapper = observer(function ContentOverflowWrapper(p
               onClick={handleToggle}
               disabled={isTransitioning}
             >
-              {showAll ? t("show_less") : t("show_all")}
+              {showAll ? t("Show less") : t("Show all")}
             </button>
           )}
         </div>

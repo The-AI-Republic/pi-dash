@@ -35,17 +35,17 @@ const PEEK_OPTIONS: { key: TPeekModes; icon: any; i18n_title: string }[] = [
   {
     key: "side-peek",
     icon: SidePanelIcon,
-    i18n_title: "common.side_peek",
+    i18n_title: "Side Peek",
   },
   {
     key: "modal",
     icon: CenterPanelIcon,
-    i18n_title: "common.modal",
+    i18n_title: "Modal",
   },
   {
     key: "full-screen",
     icon: FullScreenPanelIcon,
-    i18n_title: "common.full_screen",
+    i18n_title: "Full Screen",
   },
 ];
 
@@ -122,8 +122,8 @@ export const IssuePeekOverviewHeader = observer(function IssuePeekOverviewHeader
     copyUrlToClipboard(workItemLink).then(() => {
       setToast({
         type: TOAST_TYPE.SUCCESS,
-        title: t("common.link_copied"),
-        message: t("common.link_copied_to_clipboard"),
+        title: t("Link copied!"),
+        message: t("Link copied to clipboard"),
       });
     });
   };
@@ -137,9 +137,9 @@ export const IssuePeekOverviewHeader = observer(function IssuePeekOverviewHeader
       });
     } catch (_error) {
       setToast({
-        title: t("toast.error"),
+        title: t("Error!"),
         type: TOAST_TYPE.ERROR,
-        message: t("entity.delete.failed", { entity: t("issue.label", { count: 1 }) }),
+        message: t("{entity} delete failed", { entity: t("{count, plural, one {Work item} other {Work items}}", { count: 1 }) }),
       });
     }
   };
@@ -159,13 +159,13 @@ export const IssuePeekOverviewHeader = observer(function IssuePeekOverviewHeader
       }`}
     >
       <div className="flex items-center gap-4">
-        <Tooltip tooltipContent={t("common.close_peek_view")} isMobile={isMobile}>
+        <Tooltip tooltipContent={t("Close the peek view")} isMobile={isMobile}>
           <button onClick={removeRoutePeekId}>
             <MoveRight className="h-4 w-4 text-tertiary hover:text-secondary" />
           </button>
         </Tooltip>
 
-        <Tooltip tooltipContent={t("issue.open_in_full_screen")} isMobile={isMobile}>
+        <Tooltip tooltipContent={t("Open work item in full screen")} isMobile={isMobile}>
           <Link href={workItemLink} onClick={() => removeRoutePeekId()}>
             <MoveDiagonal className="h-4 w-4 text-tertiary hover:text-secondary" />
           </Link>
@@ -176,7 +176,7 @@ export const IssuePeekOverviewHeader = observer(function IssuePeekOverviewHeader
               value={currentMode}
               onChange={(val: any) => setPeekMode(val)}
               customButton={
-                <Tooltip tooltipContent={t("common.toggle_peek_view_layout")} isMobile={isMobile}>
+                <Tooltip tooltipContent={t("Toggle peek view layout")} isMobile={isMobile}>
                   <button type="button" className="">
                     <currentMode.icon className="h-4 w-4 text-tertiary hover:text-secondary" />
                   </button>
@@ -205,7 +205,7 @@ export const IssuePeekOverviewHeader = observer(function IssuePeekOverviewHeader
           {currentUser && !isArchived && (
             <IssueSubscription workspaceSlug={workspaceSlug} projectId={projectId} issueId={issueId} />
           )}
-          <Tooltip tooltipContent={t("common.actions.copy_link")} isMobile={isMobile}>
+          <Tooltip tooltipContent={t("Copy link")} isMobile={isMobile}>
             <IconButton variant="secondary" size="lg" onClick={handleCopyText} icon={CopyLinkIcon} />
           </Tooltip>
           {issueDetails && (

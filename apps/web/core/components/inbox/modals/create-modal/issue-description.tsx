@@ -77,7 +77,7 @@ export const InboxIssueDescription = observer(function InboxIssueDescription(pro
       projectId={projectId}
       dragDropEnabled={false}
       onChange={(_description: object, description_html: string) => handleData("description_html", description_html)}
-      placeholder={(isFocused, description) => t(`${getDescriptionPlaceholderI18n(isFocused, description)}`)}
+      placeholder={(isFocused, description) => t(getDescriptionPlaceholderI18n(isFocused, description))}
       searchMentionCallback={async (payload) =>
         await workspaceService.searchEntity(workspaceSlug?.toString() ?? "", {
           ...payload,

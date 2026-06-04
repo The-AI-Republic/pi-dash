@@ -97,7 +97,7 @@ export function CycleForm(props: Props) {
             />
           )}
           <h3 className="text-18 font-medium text-secondary">
-            {status ? t("project_cycles.update_cycle") : t("project_cycles.create_cycle")}
+            {status ? t("Update cycle") : t("Create cycle")}
           </h3>
         </div>
         <div className="space-y-3">
@@ -106,17 +106,17 @@ export function CycleForm(props: Props) {
               name="name"
               control={control}
               rules={{
-                required: t("title_is_required"),
+                required: t("Title is required"),
                 maxLength: {
                   value: 255,
-                  message: t("title_should_be_less_than_255_characters"),
+                  message: t("Title should be less than 255 characters"),
                 },
               }}
               render={({ field: { value, onChange } }) => (
                 <Input
                   name="name"
                   type="text"
-                  placeholder={t("title")}
+                  placeholder={t("Title")}
                   className="w-full text-14"
                   value={value}
                   inputSize="md"
@@ -136,7 +136,7 @@ export function CycleForm(props: Props) {
               render={({ field: { value, onChange } }) => (
                 <TextArea
                   name="description"
-                  placeholder={t("description")}
+                  placeholder={t("Description")}
                   className="min-h-24 w-full resize-none text-14"
                   hasError={Boolean(errors?.description)}
                   value={value}
@@ -185,16 +185,16 @@ export function CycleForm(props: Props) {
       </div>
       <div className="flex items-center justify-end gap-2 border-t-[0.5px] border-subtle px-5 py-4">
         <Button variant="secondary" size="lg" onClick={handleClose} tabIndex={getIndex("cancel")}>
-          {t("common.cancel")}
+          {t("Cancel")}
         </Button>
         <Button variant="primary" size="lg" type="submit" loading={isSubmitting} tabIndex={getIndex("submit")}>
           {data
             ? isSubmitting
-              ? t("common.updating")
-              : t("project_cycles.update_cycle")
+              ? t("Updating")
+              : t("Update cycle")
             : isSubmitting
-              ? t("common.creating")
-              : t("project_cycles.create_cycle")}
+              ? t("Creating")
+              : t("Create cycle")}
         </Button>
       </div>
     </form>

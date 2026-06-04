@@ -70,9 +70,9 @@ export const IssuePeekOverview = observer(function IssuePeekOverview(props: IWor
         try {
           setError(false);
           await fetchIssue(workspaceSlug, projectId, issueId);
-        } catch (error) {
+        } catch (err) {
           setError(true);
-          console.error("Error fetching the parent issue", error);
+          console.error("Error fetching the parent issue", err);
         }
       },
       update: async (workspaceSlug: string, projectId: string, issueId: string, data: Partial<TIssue>) => {
@@ -85,9 +85,9 @@ export const IssuePeekOverview = observer(function IssuePeekOverview(props: IWor
             })
             .catch((_error) => {
               setToast({
-                title: t("toast.error"),
+                title: t("Error!"),
                 type: TOAST_TYPE.ERROR,
-                message: t("entity.update.failed", { entity: t("issue.label", { count: 1 }) }),
+                message: t("{entity} update failed", { entity: t("{count, plural, one {Work item} other {Work items}}", { count: 1 }) }),
               });
             });
         }
@@ -100,9 +100,9 @@ export const IssuePeekOverview = observer(function IssuePeekOverview(props: IWor
           });
         } catch (_error) {
           setToast({
-            title: t("toast.error"),
+            title: t("Error!"),
             type: TOAST_TYPE.ERROR,
-            message: t("entity.delete.failed", { entity: t("issue.label", { count: 1 }) }),
+            message: t("{entity} delete failed", { entity: t("{count, plural, one {Work item} other {Work items}}", { count: 1 }) }),
           });
         }
       },
@@ -110,8 +110,8 @@ export const IssuePeekOverview = observer(function IssuePeekOverview(props: IWor
         try {
           if (!issues?.archiveIssue) return;
           await issues.archiveIssue(workspaceSlug, projectId, issueId);
-        } catch (error) {
-          console.error("Error archiving the issue", error);
+        } catch (err) {
+          console.error("Error archiving the issue", err);
         }
       },
       restore: async (workspaceSlug: string, projectId: string, issueId: string) => {
@@ -119,14 +119,14 @@ export const IssuePeekOverview = observer(function IssuePeekOverview(props: IWor
           await restoreIssue(workspaceSlug, projectId, issueId);
           setToast({
             type: TOAST_TYPE.SUCCESS,
-            title: t("issue.restore.success.title"),
-            message: t("issue.restore.success.message"),
+            title: t("Restore success"),
+            message: t("Your work item can be found in project work items."),
           });
         } catch (_error) {
           setToast({
             type: TOAST_TYPE.ERROR,
-            title: t("toast.error"),
-            message: t("issue.restore.failed.message"),
+            title: t("Error!"),
+            message: t("Work item could not be restored. Please try again."),
           });
         }
       },
@@ -137,8 +137,8 @@ export const IssuePeekOverview = observer(function IssuePeekOverview(props: IWor
         } catch (_error) {
           setToast({
             type: TOAST_TYPE.ERROR,
-            title: t("toast.error"),
-            message: t("issue.add.cycle.failed"),
+            title: t("Error!"),
+            message: t("Work item could not be added to the cycle. Please try again."),
           });
         }
       },
@@ -148,8 +148,8 @@ export const IssuePeekOverview = observer(function IssuePeekOverview(props: IWor
         } catch (_error) {
           setToast({
             type: TOAST_TYPE.ERROR,
-            title: t("toast.error"),
-            message: t("issue.add.cycle.failed"),
+            title: t("Error!"),
+            message: t("Work item could not be added to the cycle. Please try again."),
           });
         }
       },
@@ -157,20 +157,20 @@ export const IssuePeekOverview = observer(function IssuePeekOverview(props: IWor
         try {
           const removeFromCyclePromise = issues.removeIssueFromCycle(workspaceSlug, projectId, cycleId, issueId);
           setPromiseToast(removeFromCyclePromise, {
-            loading: t("issue.remove.cycle.loading"),
+            loading: t("Removing work item from the cycle"),
             success: {
-              title: t("toast.success"),
-              message: () => t("issue.remove.cycle.success"),
+              title: t("Success!"),
+              message: () => t("Work item removed from the cycle successfully."),
             },
             error: {
-              title: t("toast.error"),
-              message: () => t("issue.remove.cycle.failed"),
+              title: t("Error!"),
+              message: () => t("Work item could not be removed from the cycle. Please try again."),
             },
           });
           await removeFromCyclePromise;
           fetchActivities(workspaceSlug, projectId, issueId);
-        } catch (error) {
-          console.error("Error removing issue from cycle", error);
+        } catch (err) {
+          console.error("Error removing issue from cycle", err);
         }
       },
       changeModulesInIssue: async (
@@ -194,20 +194,20 @@ export const IssuePeekOverview = observer(function IssuePeekOverview(props: IWor
         try {
           const removeFromModulePromise = issues.removeIssuesFromModule(workspaceSlug, projectId, moduleId, [issueId]);
           setPromiseToast(removeFromModulePromise, {
-            loading: t("issue.remove.module.loading"),
+            loading: t("Removing work item from the module"),
             success: {
-              title: t("toast.success"),
-              message: () => t("issue.remove.module.success"),
+              title: t("Success!"),
+              message: () => t("Work item removed from the module successfully."),
             },
             error: {
-              title: t("toast.error"),
-              message: () => t("issue.remove.module.failed"),
+              title: t("Error!"),
+              message: () => t("Work item could not be removed from the module. Please try again."),
             },
           });
           await removeFromModulePromise;
           fetchActivities(workspaceSlug, projectId, issueId);
-        } catch (error) {
-          console.error("Error removing issue from module", error);
+        } catch (err) {
+          console.error("Error removing issue from module", err);
         }
       },
     }),

@@ -94,7 +94,7 @@ export const IssueAttachmentsListItem = observer(function IssueAttachmentsListIt
               >
                 <div className="flex items-center gap-2">
                   <TrashIcon className="h-3.5 w-3.5" strokeWidth={2} />
-                  <span>{t("common.actions.delete")}</span>
+                  <span>{t("Delete")}</span>
                 </div>
               </CustomMenu.MenuItem>
             </CustomMenu>

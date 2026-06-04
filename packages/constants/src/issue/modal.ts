@@ -20,6 +20,7 @@ export const DEFAULT_WORK_ITEM_FORM_VALUES: Partial<TIssue> = {
   label_ids: [],
   cycle_id: null,
   module_ids: null,
+  assigned_pod_id: null,
   start_date: null,
   target_date: null,
   git_work_branch: "",

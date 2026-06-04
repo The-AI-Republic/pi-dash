@@ -85,65 +85,65 @@ export const ROLE = {
 
 export const ROLE_DETAILS = {
   [EUserWorkspaceRoles.GUEST]: {
-    i18n_title: "role_details.guest.title",
-    i18n_description: "role_details.guest.description",
+    i18n_title: "Guest",
+    i18n_description: "External members of organizations can be invited as guests.",
   },
   [EUserWorkspaceRoles.MEMBER]: {
-    i18n_title: "role_details.member.title",
-    i18n_description: "role_details.member.description",
+    i18n_title: "Member",
+    i18n_description: "Ability to read, write, edit, and delete entities inside projects, cycles, and modules",
   },
   [EUserWorkspaceRoles.ADMIN]: {
-    i18n_title: "role_details.admin.title",
-    i18n_description: "role_details.admin.description",
+    i18n_title: "Admin",
+    i18n_description: "All permissions set to true within the workspace.",
   },
 };
 
 export const USER_ROLES = [
   {
     value: "Product / Project Manager",
-    i18n_label: "user_roles.product_or_project_manager",
+    i18n_label: "Product / Project Manager",
   },
   {
     value: "Development / Engineering",
-    i18n_label: "user_roles.development_or_engineering",
+    i18n_label: "Development / Engineering",
   },
   {
     value: "Founder / Executive",
-    i18n_label: "user_roles.founder_or_executive",
+    i18n_label: "Founder / Executive",
   },
   {
     value: "Freelancer / Consultant",
-    i18n_label: "user_roles.freelancer_or_consultant",
+    i18n_label: "Freelancer / Consultant",
   },
-  { value: "Marketing / Growth", i18n_label: "user_roles.marketing_or_growth" },
+  { value: "Marketing / Growth", i18n_label: "Marketing / Growth" },
   {
     value: "Sales / Business Development",
-    i18n_label: "user_roles.sales_or_business_development",
+    i18n_label: "Sales / Business Development",
   },
   {
     value: "Support / Operations",
-    i18n_label: "user_roles.support_or_operations",
+    i18n_label: "Support / Operations",
   },
   {
     value: "Student / Professor",
-    i18n_label: "user_roles.student_or_professor",
+    i18n_label: "Student / Professor",
   },
-  { value: "Human Resources", i18n_label: "user_roles.human_resources" },
-  { value: "Other", i18n_label: "user_roles.other" },
+  { value: "Human Resources", i18n_label: "Human / Resources" },
+  { value: "Other", i18n_label: "Other" },
 ];
 
 export const IMPORTERS_LIST = [
   {
     provider: "github",
     type: "import",
-    i18n_title: "importer.github.title",
-    i18n_description: "importer.github.description",
+    i18n_title: "Github",
+    i18n_description: "Import work items from GitHub repositories and sync them.",
   },
   {
     provider: "jira",
     type: "import",
-    i18n_title: "importer.jira.title",
-    i18n_description: "importer.jira.description",
+    i18n_title: "Jira",
+    i18n_description: "Import work items and epics from Jira projects and epics.",
   },
 ];
 
@@ -151,20 +151,20 @@ export const EXPORTERS_LIST = [
   {
     provider: "csv",
     type: "export",
-    i18n_title: "exporter.csv.title",
-    i18n_description: "exporter.csv.description",
+    i18n_title: "CSV",
+    i18n_description: "Export work items to a CSV file.",
   },
   {
     provider: "xlsx",
     type: "export",
-    i18n_title: "exporter.excel.title",
-    i18n_description: "exporter.csv.description",
+    i18n_title: "Excel",
+    i18n_description: "Export work items to a CSV file.",
   },
   {
     provider: "json",
     type: "export",
-    i18n_title: "exporter.json.title",
-    i18n_description: "exporter.csv.description",
+    i18n_title: "JSON",
+    i18n_description: "Export work items to a CSV file.",
   },
 ];
 
@@ -174,19 +174,19 @@ export const DEFAULT_GLOBAL_VIEWS_LIST: {
 }[] = [
   {
     key: "all-issues",
-    i18n_label: "default_global_view.all_issues",
+    i18n_label: "All work items",
   },
   {
     key: "assigned",
-    i18n_label: "default_global_view.assigned",
+    i18n_label: "Assigned",
   },
   {
     key: "created",
-    i18n_label: "default_global_view.created",
+    i18n_label: "Created",
   },
   {
     key: "subscribed",
-    i18n_label: "default_global_view.subscribed",
+    i18n_label: "Subscribed",
   },
 ];
 
@@ -202,21 +202,21 @@ export interface IWorkspaceSidebarNavigationItem {
 export const WORKSPACE_SIDEBAR_DYNAMIC_NAVIGATION_ITEMS: Record<string, IWorkspaceSidebarNavigationItem> = {
   views: {
     key: "views",
-    labelTranslationKey: "views",
+    labelTranslationKey: "Views",
     href: `/workspace-views/all-issues/`,
     access: [EUserWorkspaceRoles.ADMIN, EUserWorkspaceRoles.MEMBER, EUserWorkspaceRoles.GUEST],
     highlight: (pathname: string, url: string) => pathname.includes(url),
   },
   analytics: {
     key: "analytics",
-    labelTranslationKey: "analytics",
+    labelTranslationKey: "Analytics",
     href: `/analytics/`,
     access: [EUserWorkspaceRoles.ADMIN, EUserWorkspaceRoles.MEMBER],
     highlight: (pathname: string, url: string) => pathname.includes(url),
   },
   archives: {
     key: "archives",
-    labelTranslationKey: "archives",
+    labelTranslationKey: "Archives",
     href: `/projects/archives/`,
     access: [EUserWorkspaceRoles.ADMIN, EUserWorkspaceRoles.MEMBER],
     highlight: (pathname: string, url: string) => pathname.includes(url),
@@ -232,81 +232,81 @@ export const WORKSPACE_SIDEBAR_DYNAMIC_NAVIGATION_ITEMS_LINKS: IWorkspaceSidebar
 export const WORKSPACE_SIDEBAR_STATIC_NAVIGATION_ITEMS: Record<string, IWorkspaceSidebarNavigationItem> = {
   home: {
     key: "home",
-    labelTranslationKey: "home.title",
+    labelTranslationKey: "Home",
     href: `/`,
     access: [EUserWorkspaceRoles.ADMIN, EUserWorkspaceRoles.MEMBER, EUserWorkspaceRoles.GUEST],
     highlight: (pathname: string, url: string) => pathname === url,
   },
   inbox: {
     key: "inbox",
-    labelTranslationKey: "notification.label",
+    labelTranslationKey: "Inbox",
     href: `/notifications/`,
     access: [EUserWorkspaceRoles.ADMIN, EUserWorkspaceRoles.MEMBER, EUserWorkspaceRoles.GUEST],
     highlight: (pathname: string, url: string) => pathname.includes(url),
   },
   "your-work": {
     key: "your_work",
-    labelTranslationKey: "your_work",
+    labelTranslationKey: "Your work",
     href: `/profile/`,
     access: [EUserWorkspaceRoles.ADMIN, EUserWorkspaceRoles.MEMBER],
     highlight: (pathname: string, url: string) => pathname.includes(url),
   },
   stickies: {
     key: "stickies",
-    labelTranslationKey: "sidebar.stickies",
+    labelTranslationKey: "Stickies",
     href: `/stickies/`,
     access: [EUserWorkspaceRoles.ADMIN, EUserWorkspaceRoles.MEMBER, EUserWorkspaceRoles.GUEST],
     highlight: (pathname: string, url: string) => pathname.includes(url),
   },
   drafts: {
     key: "drafts",
-    labelTranslationKey: "drafts",
+    labelTranslationKey: "Drafts",
     href: `/drafts/`,
     access: [EUserWorkspaceRoles.ADMIN, EUserWorkspaceRoles.MEMBER],
     highlight: (pathname: string, url: string) => pathname.includes(url),
   },
   projects: {
     key: "projects",
-    labelTranslationKey: "projects",
+    labelTranslationKey: "Projects",
     href: `/projects/`,
     access: [EUserWorkspaceRoles.ADMIN, EUserWorkspaceRoles.MEMBER, EUserWorkspaceRoles.GUEST],
     highlight: (pathname: string, url: string) => pathname === url,
-    tooltipTranslationKey: "sidebar.tooltips.projects",
+    tooltipTranslationKey: "Browse projects",
   },
   runners: {
     key: "runners",
-    labelTranslationKey: "sidebar.runners",
+    labelTranslationKey: "AI Agents",
     href: `/runners/`,
     access: [EUserWorkspaceRoles.ADMIN, EUserWorkspaceRoles.MEMBER],
     highlight: (pathname: string, url: string) => pathname.includes(url),
-    tooltipTranslationKey: "sidebar.tooltips.runners",
+    tooltipTranslationKey: "Manage your AI Agent connectivities",
   },
   prompts: {
     key: "prompts",
-    labelTranslationKey: "sidebar.prompts",
+    labelTranslationKey: "Prompts",
     href: `/prompts/`,
     access: [EUserWorkspaceRoles.ADMIN, EUserWorkspaceRoles.MEMBER, EUserWorkspaceRoles.GUEST],
     highlight: (pathname: string, url: string) => pathname.includes(url),
-    tooltipTranslationKey: "sidebar.tooltips.prompts",
+    tooltipTranslationKey: "AI Prompt Templates",
   },
   // Project Scheduler — sibling of Prompts (not nested). Visible to all
   // workspace members; the underlying API gates mutation per role.
   // See .ai_design/project_scheduler/design.md §8.A.
   schedulers: {
     key: "schedulers",
-    labelTranslationKey: "sidebar.schedulers",
+    labelTranslationKey: "Schedulers",
     href: `/schedulers/`,
     access: [EUserWorkspaceRoles.ADMIN, EUserWorkspaceRoles.MEMBER, EUserWorkspaceRoles.GUEST],
     highlight: (pathname: string, url: string) => pathname.includes(url),
-    tooltipTranslationKey: "sidebar.tooltips.schedulers",
+    tooltipTranslationKey: "Recurring AI Agent jobs scoped to projects",
   },
   "ai-dev-machines": {
     key: "ai_dev_machines",
-    labelTranslationKey: "sidebar.ai_dev_machines",
+    labelTranslationKey: "AI Dev Machines",
     href: `/ai-dev-machines/`,
     access: [EUserWorkspaceRoles.ADMIN, EUserWorkspaceRoles.MEMBER],
     highlight: (pathname: string, url: string) => pathname.includes(url),
-    tooltipTranslationKey: "sidebar.tooltips.ai_dev_machines",
+    tooltipTranslationKey: "Install the pidash CLI and register dev machines as AI agent runners",
   },
 };
 

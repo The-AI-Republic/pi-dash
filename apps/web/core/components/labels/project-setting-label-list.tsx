@@ -81,12 +81,12 @@ export const ProjectSettingsLabelList = observer(function ProjectSettingsLabelLi
         onClose={() => setSelectDeleteLabel(null)}
       />
       <SettingsHeading
-        title={t("project_settings.labels.heading")}
-        description={t("project_settings.labels.description")}
+        title={t("Labels")}
+        description={t("Create custom labels to categorize and organize your work items")}
         control={
           isEditable && (
             <Button variant="primary" size="lg" onClick={newLabel}>
-              {t("common.add_label")}
+              {t("Add label")}
             </Button>
           )
         }
@@ -112,11 +112,11 @@ export const ProjectSettingsLabelList = observer(function ProjectSettingsLabelLi
             <EmptyStateCompact
               assetKey="label"
               assetClassName="size-20"
-              title={t("settings_empty_state.labels.title")}
-              description={t("settings_empty_state.labels.description")}
+              title={t("No labels yet")}
+              description={t("Create personalized labels to effectively categorize and manage your work items.")}
               actions={[
                 {
-                  label: t("settings_empty_state.labels.cta_primary"),
+                  label: t("Create your first label"),
                   onClick: () => {
                     newLabel();
                   },

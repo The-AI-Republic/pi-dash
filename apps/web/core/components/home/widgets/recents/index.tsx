@@ -26,10 +26,10 @@ import { RecentProject } from "./project";
 const WIDGET_KEY = EWidgetKeys.RECENT_ACTIVITY;
 const workspaceService = new WorkspaceService();
 const filters: { name: TRecentActivityFilterKeys; icon?: React.ReactNode; i18n_key: string }[] = [
-  { name: "all item", i18n_key: "home.recents.filters.all" },
-  { name: "issue", icon: <WorkItemsIcon className="h-4 w-4" />, i18n_key: "home.recents.filters.issues" },
-  { name: "page", icon: <PageIcon height={16} width={16} />, i18n_key: "home.recents.filters.pages" },
-  { name: "project", icon: <ProjectIcon height={16} width={16} />, i18n_key: "home.recents.filters.projects" },
+  { name: "all item", i18n_key: "All" },
+  { name: "issue", icon: <WorkItemsIcon className="h-4 w-4" />, i18n_key: "Work items" },
+  { name: "page", icon: <PageIcon height={16} width={16} />, i18n_key: "Pages" },
+  { name: "project", icon: <ProjectIcon height={16} width={16} />, i18n_key: "Projects" },
 ];
 
 type TRecentWidgetProps = THomeWidgetProps & {
@@ -79,7 +79,7 @@ export const RecentActivityWidget = observer(function RecentActivityWidget(props
     return (
       <div ref={ref} className="max-h-[500px] overflow-y-scroll">
         <div className="mb-4 flex items-center justify-between">
-          <div className="text-14 font-semibold text-tertiary">{t("home.recents.title")}</div>
+          <div className="text-14 font-semibold text-tertiary">{t("Recents")}</div>
           {showFilterSelect && <FiltersDropdown filters={filters} activeFilter={filter} setActiveFilter={setFilter} />}
         </div>
         <div className="flex flex-col items-center justify-center">
@@ -96,7 +96,7 @@ export const RecentActivityWidget = observer(function RecentActivityWidget(props
       buttonClassName="bg-surface-2/20"
     >
       <div className="mb-2 flex items-center justify-between">
-        <div className="text-14 font-semibold text-tertiary">{t("home.recents.title")}</div>
+        <div className="text-14 font-semibold text-tertiary">{t("Recents")}</div>
         {showFilterSelect && <FiltersDropdown filters={filters} activeFilter={filter} setActiveFilter={setFilter} />}
       </div>
       <div className="flex min-h-[250px] flex-col">

@@ -13,22 +13,22 @@ const getDisplayContent = (type: string): { assetKey: CompactAssetType; text: st
     case "project":
       return {
         assetKey: "project",
-        text: "home.recents.empty.project",
+        text: "Your recent projects will appear here once you visit one.",
       };
     case "page":
       return {
         assetKey: "note",
-        text: "home.recents.empty.page",
+        text: "Your recent pages will appear here once you visit one.",
       };
     case "issue":
       return {
         assetKey: "work-item",
-        text: "home.recents.empty.issue",
+        text: "Your recent work items will appear here once you visit one.",
       };
     default:
       return {
         assetKey: "work-item",
-        text: "home.recents.empty.default",
+        text: "You don't have any recents yet.",
       };
   }
 };

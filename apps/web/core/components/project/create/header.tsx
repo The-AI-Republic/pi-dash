@@ -51,7 +51,7 @@ function ProjectCreateHeader(props: Props) {
     <div className="group relative h-44 w-full rounded-lg">
       <CoverImage
         src={coverImage}
-        alt={t("project_cover_image_alt")}
+        alt={t("Project cover image")}
         className="absolute top-0 left-0 h-full w-full rounded-lg"
       />
       {showActionButtons && (
@@ -72,7 +72,7 @@ function ProjectCreateHeader(props: Props) {
           control={control}
           render={({ field: { value, onChange } }) => (
             <ImagePickerPopover
-              label={t("change_cover")}
+              label={t("Change cover")}
               onChange={(data) => {
                 onChange(data);
                 handleFormOnChange?.();

@@ -60,8 +60,8 @@ export const CycleQuickActions = observer(function CycleQuickActions(props: Prop
     copyUrlToClipboard(cycleLink).then(() => {
       setToast({
         type: TOAST_TYPE.SUCCESS,
-        title: t("common.link_copied"),
-        message: t("common.link_copied_to_clipboard"),
+        title: t("Link copied!"),
+        message: t("Link copied to clipboard"),
       });
     });
   const handleOpenInNewTab = () => window.open(`/${cycleLink}`, "_blank");
@@ -71,16 +71,16 @@ export const CycleQuickActions = observer(function CycleQuickActions(props: Prop
       .then(() => {
         setToast({
           type: TOAST_TYPE.SUCCESS,
-          title: t("project_cycles.action.restore.success.title"),
-          message: t("project_cycles.action.restore.success.description"),
+          title: t("Cycle restored"),
+          message: t("The cycle has been restored."),
         });
         router.push(`/${workspaceSlug}/projects/${projectId}/archives/cycles`);
       })
       .catch(() => {
         setToast({
           type: TOAST_TYPE.ERROR,
-          title: t("project_cycles.action.restore.failed.title"),
-          message: t("project_cycles.action.restore.failed.description"),
+          title: t("Cycle restore failed"),
+          message: t("The cycle could not be restored. Please try again."),
         });
       });
 

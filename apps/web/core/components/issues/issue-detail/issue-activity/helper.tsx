@@ -57,17 +57,17 @@ export const useWorkItemCommentOperations = (
           const commentLink = `${workItemLink}#comment-${id}`;
           copyUrlToClipboard(commentLink).then(() => {
             setToast({
-              title: t("common.success"),
+              title: t("Success!"),
               type: TOAST_TYPE.SUCCESS,
-              message: t("issue.comments.copy_link.success"),
+              message: t("Comment link copied to clipboard"),
             });
           });
         } catch (error) {
           console.error("Error in copying comment link:", error);
           setToast({
-            title: t("common.error.label"),
+            title: t("Error!"),
             type: TOAST_TYPE.ERROR,
-            message: t("issue.comments.copy_link.error"),
+            message: t("Error copying comment link. Please try again later."),
           });
         }
       },
@@ -76,16 +76,16 @@ export const useWorkItemCommentOperations = (
           if (!workspaceSlug || !projectId || !issueId) throw new Error("Missing fields");
           const comment = await createComment(workspaceSlug, projectId, issueId, data);
           setToast({
-            title: t("common.success"),
+            title: t("Success!"),
             type: TOAST_TYPE.SUCCESS,
-            message: t("issue.comments.create.success"),
+            message: t("Comment created successfully"),
           });
           return comment;
         } catch {
           setToast({
-            title: t("common.error.label"),
+            title: t("Error!"),
             type: TOAST_TYPE.ERROR,
-            message: t("issue.comments.create.error"),
+            message: t("Comment creation failed. Please try again later."),
           });
         }
       },
@@ -94,15 +94,15 @@ export const useWorkItemCommentOperations = (
           if (!workspaceSlug || !projectId || !issueId) throw new Error("Missing fields");
           await updateComment(workspaceSlug, projectId, issueId, commentId, data);
           setToast({
-            title: t("common.success"),
+            title: t("Success!"),
             type: TOAST_TYPE.SUCCESS,
-            message: t("issue.comments.update.success"),
+            message: t("Comment updated successfully"),
           });
         } catch {
           setToast({
-            title: t("common.error.label"),
+            title: t("Error!"),
             type: TOAST_TYPE.ERROR,
-            message: t("issue.comments.update.error"),
+            message: t("Comment update failed. Please try again later."),
           });
         }
       },
@@ -111,15 +111,15 @@ export const useWorkItemCommentOperations = (
           if (!workspaceSlug || !projectId || !issueId) throw new Error("Missing fields");
           await removeComment(workspaceSlug, projectId, issueId, commentId);
           setToast({
-            title: t("common.success"),
+            title: t("Success!"),
             type: TOAST_TYPE.SUCCESS,
-            message: t("issue.comments.remove.success"),
+            message: t("Comment removed successfully"),
           });
         } catch {
           setToast({
-            title: t("common.error.label"),
+            title: t("Error!"),
             type: TOAST_TYPE.ERROR,
-            message: t("issue.comments.remove.error"),
+            message: t("Comment remove failed. Please try again later."),
           });
         }
       },
@@ -139,7 +139,7 @@ export const useWorkItemCommentOperations = (
           return res;
         } catch (error) {
           console.log("Error in uploading comment asset:", error);
-          throw new Error(t("issue.comments.upload.error"));
+          throw new Error(t("Asset upload failed. Please try again later."));
         }
       },
       duplicateCommentAsset: async (assetId, commentId) => {

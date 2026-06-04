@@ -64,13 +64,13 @@ export const usePowerKPageContextBasedActions = (): TPowerKCommandConfig[] => {
       .then(() => {
         setToast({
           type: TOAST_TYPE.SUCCESS,
-          title: t("power_k.contextual_actions.page.copy_url_toast_success"),
+          title: t("Page URL copied to clipboard."),
         });
       })
       .catch(() => {
         setToast({
           type: TOAST_TYPE.ERROR,
-          title: t("power_k.contextual_actions.page.copy_url_toast_error"),
+          title: t("Some error occurred while copying the page URL to clipboard."),
         });
       });
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -79,7 +79,7 @@ export const usePowerKPageContextBasedActions = (): TPowerKCommandConfig[] => {
   return [
     {
       id: "toggle_page_lock",
-      i18n_title: isLocked ? "power_k.contextual_actions.page.unlock" : "power_k.contextual_actions.page.lock",
+      i18n_title: isLocked ? "Unlock" : "Lock",
       icon: isLocked ? LockKeyholeOpen : LockKeyhole,
       group: "contextual",
       contextType: "page",
@@ -105,8 +105,8 @@ export const usePowerKPageContextBasedActions = (): TPowerKCommandConfig[] => {
       id: "toggle_page_access",
       i18n_title:
         access === EPageAccess.PUBLIC
-          ? "power_k.contextual_actions.page.make_private"
-          : "power_k.contextual_actions.page.make_public",
+          ? "Make private"
+          : "Make public",
       icon: access === EPageAccess.PUBLIC ? LockIcon : GlobeIcon,
       group: "contextual",
       contextType: "page",
@@ -128,7 +128,7 @@ export const usePowerKPageContextBasedActions = (): TPowerKCommandConfig[] => {
     },
     {
       id: "toggle_page_archive",
-      i18n_title: archived_at ? "power_k.contextual_actions.page.restore" : "power_k.contextual_actions.page.archive",
+      i18n_title: archived_at ? "Restore" : "Archive",
       icon: archived_at ? ArchiveRestoreIcon : ArchiveIcon,
       group: "contextual",
       contextType: "page",
@@ -151,8 +151,8 @@ export const usePowerKPageContextBasedActions = (): TPowerKCommandConfig[] => {
     {
       id: "toggle_page_favorite",
       i18n_title: isFavorite
-        ? "power_k.contextual_actions.page.remove_from_favorites"
-        : "power_k.contextual_actions.page.add_to_favorites",
+        ? "Remove from favorites"
+        : "Add to favorites",
       icon: isFavorite ? StarOff : Star,
       group: "contextual",
       contextType: "page",
@@ -165,7 +165,7 @@ export const usePowerKPageContextBasedActions = (): TPowerKCommandConfig[] => {
     },
     {
       id: "copy_page_url",
-      i18n_title: "power_k.contextual_actions.page.copy_url",
+      i18n_title: "Copy URL",
       icon: LinkIcon,
       group: "contextual",
       contextType: "page",

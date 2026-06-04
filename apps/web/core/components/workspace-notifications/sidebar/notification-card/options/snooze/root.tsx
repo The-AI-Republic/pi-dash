@@ -46,8 +46,8 @@ export const NotificationItemSnoozeOption = observer(function NotificationItemSn
       try {
         await snoozeNotification(workspaceSlug, snoozeTill);
         setToast({
-          title: `${t("common.success")}!`,
-          message: t("notification.toasts.snoozed"),
+          title: `${t("Success!")}!`,
+          message: t("Notification snoozed"),
           type: TOAST_TYPE.SUCCESS,
         });
       } catch (e) {
@@ -57,8 +57,8 @@ export const NotificationItemSnoozeOption = observer(function NotificationItemSn
       try {
         await unSnoozeNotification(workspaceSlug);
         setToast({
-          title: `${t("common.success")}!`,
-          message: t("notification.toasts.un_snoozed"),
+          title: `${t("Success!")}!`,
+          message: t("Notification unsnoozed"),
           type: TOAST_TYPE.SUCCESS,
         });
       } catch (e) {
@@ -98,7 +98,7 @@ export const NotificationItemSnoozeOption = observer(function NotificationItemSn
             <>
               <Tooltip
                 tooltipContent={
-                  data.snoozed_till ? t("notification.options.mark_unsnooze") : t("notification.options.mark_snooze")
+                  data.snoozed_till ? t("Un snooze") : t("Snooze")
                 }
                 isMobile={isMobile}
               >
@@ -132,7 +132,7 @@ export const NotificationItemSnoozeOption = observer(function NotificationItemSn
                           handleDropdownSelect("un-snooze");
                         }}
                       >
-                        <div>{t("notification.options.mark_unsnooze")}</div>
+                        <div>{t("Un snooze")}</div>
                       </button>
                     )}
 

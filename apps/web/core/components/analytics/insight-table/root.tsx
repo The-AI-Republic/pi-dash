@@ -42,7 +42,7 @@ export function InsightTable<T extends Exclude<TAnalyticsTabsBase, "overview">>(
             prependIcon={<Download className="h-3.5 w-3.5" />}
             onClick={() => onExport?.(table.getFilteredRowModel().rows)}
           >
-            <div>{t("exporter.csv.short_description")}</div>
+            <div>{t("Export as csv")}</div>
           </Button>
         )}
       />

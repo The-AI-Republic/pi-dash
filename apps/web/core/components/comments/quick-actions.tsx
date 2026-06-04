@@ -44,14 +44,14 @@ export const CommentQuickActions = observer(function CommentQuickActions(props: 
         {
           key: "edit",
           action: setEditMode,
-          title: t("common.actions.edit"),
+          title: t("Edit"),
           icon: EditIcon,
           shouldRender: canEdit,
         },
         {
           key: "copy_link",
           action: () => activityOperations.copyCommentLink(comment.id),
-          title: t("common.actions.copy_link"),
+          title: t("Copy link"),
           icon: LinkIcon,
           shouldRender: showCopyLinkOption,
         },
@@ -66,15 +66,15 @@ export const CommentQuickActions = observer(function CommentQuickActions(props: 
             }),
           title:
             comment.access === EIssueCommentAccessSpecifier.INTERNAL
-              ? t("issue.comments.switch.public")
-              : t("issue.comments.switch.private"),
+              ? t("Switch to public comment")
+              : t("Switch to private comment"),
           icon: comment.access === EIssueCommentAccessSpecifier.INTERNAL ? GlobeIcon : LockIcon,
           shouldRender: showAccessSpecifier,
         },
         {
           key: "delete",
           action: () => activityOperations.removeComment(comment.id),
-          title: t("common.actions.delete"),
+          title: t("Delete"),
           icon: TrashIcon,
           shouldRender: canDelete,
         },

@@ -18,20 +18,20 @@ export type TContextEntityMap = {
 
 export const CONTEXT_ENTITY_MAP: Record<TPowerKContextType, TContextEntityMap> = {
   "work-item": {
-    i18n_title: "power_k.contextual_actions.work_item.title",
-    i18n_indicator: "power_k.contextual_actions.work_item.indicator",
+    i18n_title: "Work item actions",
+    i18n_indicator: "Work item",
   },
   page: {
-    i18n_title: "power_k.contextual_actions.page.title",
-    i18n_indicator: "power_k.contextual_actions.page.indicator",
+    i18n_title: "Page actions",
+    i18n_indicator: "Page",
   },
   cycle: {
-    i18n_title: "power_k.contextual_actions.cycle.title",
-    i18n_indicator: "power_k.contextual_actions.cycle.indicator",
+    i18n_title: "Cycle actions",
+    i18n_indicator: "Cycle",
   },
   module: {
-    i18n_title: "power_k.contextual_actions.module.title",
-    i18n_indicator: "power_k.contextual_actions.module.indicator",
+    i18n_title: "Module actions",
+    i18n_indicator: "Module",
   },
   ...CONTEXT_ENTITY_MAP_EXTENDED,
 };

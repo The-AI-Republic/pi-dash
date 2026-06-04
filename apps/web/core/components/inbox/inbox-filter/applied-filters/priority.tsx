@@ -30,7 +30,7 @@ export const InboxIssueAppliedFiltersPriority = observer(function InboxIssueAppl
   if (filteredValues.length === 0) return <></>;
   return (
     <Tag>
-      <div className="text-11 text-secondary">{t("common.priority")}</div>
+      <div className="text-11 text-secondary">{t("Priority")}</div>
       {filteredValues.map((value) => {
         const optionDetail = currentOptionDetail(value);
         if (!optionDetail) return <></>;

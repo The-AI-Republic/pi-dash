@@ -143,7 +143,7 @@ export const ModuleDropdownBase = observer(function ModuleDropdownBase(props: TM
           <DropdownButton
             className={buttonClassName}
             isActive={isOpen}
-            tooltipHeading={t("common.module")}
+            tooltipHeading={t("Module")}
             tooltipContent={
               Array.isArray(value)
                 ? `${value

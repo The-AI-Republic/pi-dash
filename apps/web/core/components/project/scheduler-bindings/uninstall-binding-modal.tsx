@@ -36,8 +36,8 @@ export const UninstallSchedulerBindingModal = observer(function UninstallSchedul
       await schedulerService.destroyBinding(workspaceSlug, projectId, binding.id);
       setToast({
         type: TOAST_TYPE.SUCCESS,
-        title: t("scheduler_bindings.toast.uninstalled_title"),
-        message: t("scheduler_bindings.toast.uninstalled_message"),
+        title: t("Scheduler uninstalled"),
+        message: t("It will not fire on this project until reinstalled."),
       });
       onUninstalled(binding.id);
       onClose();
@@ -45,8 +45,8 @@ export const UninstallSchedulerBindingModal = observer(function UninstallSchedul
       const err = e as { error?: string } | null;
       setToast({
         type: TOAST_TYPE.ERROR,
-        title: t("scheduler_bindings.toast.error_title"),
-        message: err?.error ?? t("scheduler_bindings.toast.uninstall_failed"),
+        title: t("Something went wrong"),
+        message: err?.error ?? t("Could not uninstall the scheduler."),
       });
     } finally {
       setSubmitting(false);
@@ -59,16 +59,16 @@ export const UninstallSchedulerBindingModal = observer(function UninstallSchedul
       handleClose={() => (submitting ? null : onClose())}
       handleSubmit={handleUninstall}
       isSubmitting={submitting}
-      title={t("scheduler_bindings.uninstall_modal.title")}
+      title={t("Uninstall scheduler?")}
       content={
         <>
-          <p>{t("scheduler_bindings.uninstall_modal.body")}</p>
+          <p>{t("The scheduler stops firing on this project. The workspace definition is unaffected and can be re-installed later.")}</p>
           {binding && <p className="mt-2 font-medium text-primary">{binding.scheduler_name}</p>}
         </>
       }
       primaryButtonText={{
-        default: t("scheduler_bindings.uninstall_modal.confirm"),
-        loading: t("scheduler_bindings.uninstall_modal.confirm"),
+        default: t("Uninstall"),
+        loading: t("Uninstall"),
       }}
     />
   );

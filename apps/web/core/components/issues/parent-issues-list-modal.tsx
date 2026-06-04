@@ -107,7 +107,7 @@ export function ParentIssuesListModal({
           />
           <Combobox.Input
             className="h-12 w-full border-0 bg-transparent pr-4 pl-11 text-primary outline-none placeholder:text-placeholder focus:ring-0 sm:text-13"
-            placeholder={t("common.search.placeholder")}
+            placeholder={t("Type to search")}
             value={searchTerm}
             onChange={(e) => setSearchTerm(e.target.value)}
             displayValue={() => ""}

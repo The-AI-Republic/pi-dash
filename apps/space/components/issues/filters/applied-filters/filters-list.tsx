@@ -70,7 +70,7 @@ export const AppliedFiltersList = observer(function AppliedFiltersList(props: Pr
         onClick={handleRemoveAllFilters}
         className="flex items-center gap-2 rounded-md border border-subtle px-2 py-1 text-11 text-tertiary hover:text-secondary"
       >
-        {t("common.clear_all")}
+        {t("Clear all")}
         <CloseIcon height={12} width={12} strokeWidth={2} />
       </button>
     </div>

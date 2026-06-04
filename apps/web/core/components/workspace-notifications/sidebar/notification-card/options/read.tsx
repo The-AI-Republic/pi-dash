@@ -32,7 +32,7 @@ export const NotificationItemReadOption = observer(function NotificationItemRead
       const request = data.read_at ? markNotificationAsUnRead : markNotificationAsRead;
       await request(workspaceSlug);
       setToast({
-        title: data.read_at ? t("notification.toasts.unread") : t("notification.toasts.read"),
+        title: data.read_at ? t("Notification marked as unread") : t("Notification marked as read"),
         type: TOAST_TYPE.SUCCESS,
       });
     } catch (e) {
@@ -42,7 +42,7 @@ export const NotificationItemReadOption = observer(function NotificationItemRead
 
   return (
     <NotificationItemOptionButton
-      tooltipContent={data.read_at ? t("notification.options.mark_unread") : t("notification.options.mark_read")}
+      tooltipContent={data.read_at ? t("Mark as unread") : t("Mark as read")}
       callBack={handleNotificationUpdate}
     >
       <MessageSquare className="h-3 w-3 text-tertiary" />

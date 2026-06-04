@@ -10,7 +10,11 @@ import { Activity, Bell, CircleUser, KeyRound, LockIcon, Settings2 } from "lucid
 import { observer } from "mobx-react";
 import { useParams } from "react-router";
 // pi dash imports
-import { GROUPED_PROFILE_SETTINGS, PROFILE_SETTINGS_CATEGORIES } from "@pi-dash/constants";
+import {
+  GROUPED_PROFILE_SETTINGS,
+  PROFILE_SETTINGS_CATEGORIES,
+  PROFILE_SETTINGS_CATEGORY_I18N_LABELS,
+} from "@pi-dash/constants";
 import { useTranslation } from "@pi-dash/i18n";
 import type { ISvgIcons } from "@pi-dash/propel/icons";
 import type { TProfileSettingsTabs } from "@pi-dash/types";
@@ -50,7 +54,9 @@ export const ProfileSettingsSidebarItemCategories = observer(function ProfileSet
 
         return (
           <div key={category} className="shrink-0">
-            <div className="p-2 text-caption-md-medium text-tertiary capitalize">{t(category)}</div>
+            <div className="p-2 text-caption-md-medium text-tertiary capitalize">
+              {t(PROFILE_SETTINGS_CATEGORY_I18N_LABELS[category])}
+            </div>
             <div className="flex flex-col">
               {categoryItems.map((item) => (
                 <SettingsSidebarItem

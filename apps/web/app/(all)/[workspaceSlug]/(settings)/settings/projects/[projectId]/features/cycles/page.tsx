@@ -30,7 +30,7 @@ function FeaturesCyclesSettingsPage({ params }: Route.ComponentProps) {
   const { t } = useTranslation();
   // derived values
   const pageTitle = currentProjectDetails?.name
-    ? `${currentProjectDetails?.name} settings - ${t("project_settings.features.cycles.short_title")}`
+    ? `${currentProjectDetails?.name} settings - ${t("Cycles")}`
     : undefined;
   const canPerformProjectAdminActions = allowPermissions([EUserPermissions.ADMIN], EUserPermissionsLevel.PROJECT);
 
@@ -43,13 +43,13 @@ function FeaturesCyclesSettingsPage({ params }: Route.ComponentProps) {
       <PageHead title={pageTitle} />
       <section className="w-full">
         <SettingsHeading
-          title={t("project_settings.features.cycles.title")}
-          description={t("project_settings.features.cycles.description")}
+          title={t("Cycles")}
+          description={t("Schedule work in flexible periods that adapt to this project's unique rhythm and pace.")}
         />
         <div className="mt-7">
           <ProjectSettingsFeatureControlItem
-            title={t("project_settings.features.cycles.toggle_title")}
-            description={t("project_settings.features.cycles.toggle_description")}
+            title={t("Enable cycles")}
+            description={t("Plan work in focused timeframes.")}
             featureProperty="cycle_view"
             projectId={projectId}
             value={!!currentProjectDetails?.cycle_view}

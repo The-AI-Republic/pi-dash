@@ -41,7 +41,7 @@ export default function ProfileOverviewPage({ params }: Route.ComponentProps) {
 
   return (
     <>
-      <PageHead title={t("profile.page_label")} />
+      <PageHead title={t("Your work")} />
       <ContentWrapper className="space-y-7">
         <ProfileStats userProfile={userProfile} />
         <ProfileWorkload stateDistribution={stateDistribution} />

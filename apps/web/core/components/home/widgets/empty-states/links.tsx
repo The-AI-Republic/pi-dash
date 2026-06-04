@@ -14,7 +14,7 @@ export function LinksEmptyState() {
       <EmptyStateCompact
         assetKey="link"
         assetClassName="w-20 h-20"
-        title={t("workspace_empty_state.home_widget_quick_links.title")}
+        title={t("Keep important references, resources, or docs handy for your work")}
       />
     </div>
   );

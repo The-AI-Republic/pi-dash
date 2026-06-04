@@ -60,11 +60,11 @@ export const ProfileSidebar = observer(function ProfileSidebar(props: TProfileSi
 
   const userDetails = [
     {
-      i18n_label: "profile.details.joined_on",
+      i18n_label: "Joined on",
       value: renderFormattedDate(userData?.date_joined ?? ""),
     },
     {
-      i18n_label: "profile.details.time_zone",
+      i18n_label: "Timezone",
       value: <ProfileSidebarTime timeZone={userData?.user_timezone} />,
     },
   ];
@@ -237,7 +237,7 @@ export const ProfileSidebar = observer(function ProfileSidebar(props: TProfileSi
                                   Created
                                 </div>
                                 <div className="font-medium">
-                                  {project.created_issues} {t("issues")}
+                                  {project.created_issues} {t("Work items")}
                                 </div>
                               </div>
                               <div className="flex items-center justify-between gap-2">
@@ -246,7 +246,7 @@ export const ProfileSidebar = observer(function ProfileSidebar(props: TProfileSi
                                   Assigned
                                 </div>
                                 <div className="font-medium">
-                                  {project.assigned_issues} {t("issues")}
+                                  {project.assigned_issues} {t("Work items")}
                                 </div>
                               </div>
                               <div className="flex items-center justify-between gap-2">
@@ -255,7 +255,7 @@ export const ProfileSidebar = observer(function ProfileSidebar(props: TProfileSi
                                   Due
                                 </div>
                                 <div className="font-medium">
-                                  {project.pending_issues} {t("issues")}
+                                  {project.pending_issues} {t("Work items")}
                                 </div>
                               </div>
                               <div className="flex items-center justify-between gap-2">
@@ -264,7 +264,7 @@ export const ProfileSidebar = observer(function ProfileSidebar(props: TProfileSi
                                   Completed
                                 </div>
                                 <div className="font-medium">
-                                  {project.completed_issues} {t("issues")}
+                                  {project.completed_issues} {t("Work items")}
                                 </div>
                               </div>
                             </div>

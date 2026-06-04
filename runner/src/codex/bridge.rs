@@ -87,6 +87,7 @@ impl Bridge {
             seq: 0,
             pending_command: None,
             pending_command_approval_id: None,
+            unpaired_waiting_on_approval: false,
         })
     }
 
@@ -122,8 +123,9 @@ impl Bridge {
             &ThreadStartParams {
                 cwd: cwd.to_string_lossy().to_string(),
                 model: self.model_default.clone(),
-                sandbox_policy: "workspace-write".into(),
-                approval_policy: "on-request".into(),
+                // Match Claude Code's MVP `bypassPermissions` posture.
+                sandbox_policy: "danger-full-access".into(),
+                approval_policy: "never".into(),
             },
         )?;
         self.server.send_raw(&line).await?;
@@ -227,6 +229,12 @@ pub struct BridgeCursor {
     /// sent more than once for the same item) doesn't open duplicate
     /// approval rows.
     pending_command_approval_id: Option<String>,
+    /// A `waitingOnApproval` status frame that arrived before its command.
+    ///
+    /// Codex can emit `waitingOnApproval` before the matching
+    /// `item/started` command frame. Keep this unpaired signal so the command
+    /// frame can still synthesize the approval request instead of deadlocking.
+    unpaired_waiting_on_approval: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -238,6 +246,34 @@ struct PendingCommand {
 }
 
 impl BridgeCursor {
+    fn synthesize_pending_command_approval(&mut self) -> Option<BridgeEvent> {
+        let pending = self.pending_command.clone()?;
+        if self.pending_command_approval_id.is_some() {
+            return None;
+        }
+
+        let approval_id = Uuid::new_v4().to_string();
+        self.pending_command_approval_id = Some(approval_id.clone());
+        let reason = Some(format!(
+            "codex requesting approval to run: {}",
+            pending.command
+        ));
+        let payload = serde_json::json!({
+            "command": pending.command,
+            "cwd": pending.cwd,
+            "item_id": pending.item_id,
+            "synthesized": true,
+            "raw": pending.raw,
+        });
+        Some(BridgeEvent::ApprovalRequest {
+            run_id: self.run_id,
+            approval_id,
+            kind: ApprovalKind::CommandExecution,
+            payload,
+            reason,
+        })
+    }
+
     /// Translate one inbound Codex frame into daemon-level events.
     pub fn translate(&mut self, frame: Incoming) -> Vec<BridgeEvent> {
         self.seq = self.seq.saturating_add(1);
@@ -370,7 +406,9 @@ impl BridgeCursor {
                         .and_then(|f| f.as_array())
                         .map(|arr| arr.iter().any(|v| v.as_str() == Some("waitingOnApproval")))
                         .unwrap_or(false);
-                    if waiting && let Some(pending) = self.pending_command.clone() {
+                    if !waiting {
+                        self.unpaired_waiting_on_approval = false;
+                    } else if self.pending_command.is_some() {
                         // We've already emitted an ApprovalRequest for this
                         // pending command. Re-emitting here would re-send a
                         // ClientMsg::ApprovalRequest to the cloud and append
@@ -385,30 +423,11 @@ impl BridgeCursor {
                                 params,
                             }];
                         }
-                        let approval_id = Uuid::new_v4().to_string();
-                        self.pending_command_approval_id = Some(approval_id.clone());
-                        let reason = Some(format!(
-                            "codex requesting approval to run: {}",
-                            pending.command
-                        ));
-                        // Synthesise a payload that downstream consumers
-                        // (cloud-side ApprovalRequest serializer, TUI
-                        // approval card) can render the same way as a real
-                        // codex-fired approval.
-                        let payload = serde_json::json!({
-                            "command": pending.command,
-                            "cwd": pending.cwd,
-                            "item_id": pending.item_id,
-                            "synthesized": true,
-                            "raw": pending.raw,
-                        });
-                        return vec![BridgeEvent::ApprovalRequest {
-                            run_id: self.run_id,
-                            approval_id,
-                            kind: ApprovalKind::CommandExecution,
-                            payload,
-                            reason,
-                        }];
+                        if let Some(ev) = self.synthesize_pending_command_approval() {
+                            return vec![ev];
+                        }
+                    } else {
+                        self.unpaired_waiting_on_approval = true;
                     }
                     vec![BridgeEvent::Raw {
                         run_id: self.run_id,
@@ -418,6 +437,7 @@ impl BridgeCursor {
                 } else if method == "item/started" {
                     // Cache the most recent in-progress commandExecution so
                     // a later `waitingOnApproval` flag can refer to it.
+                    let mut synthesize_now = false;
                     if let Some(item) = params.get("item")
                         && item.get("type").and_then(|v| v.as_str()) == Some("commandExecution")
                         && item.get("status").and_then(|v| v.as_str()) == Some("inProgress")
@@ -446,12 +466,18 @@ impl BridgeCursor {
                         // is no longer relevant; allow a fresh approval id next
                         // time codex reports waiting.
                         self.pending_command_approval_id = None;
+                        synthesize_now = self.unpaired_waiting_on_approval;
+                        self.unpaired_waiting_on_approval = false;
                     }
-                    vec![BridgeEvent::Raw {
+                    let mut events = vec![BridgeEvent::Raw {
                         run_id: self.run_id,
                         method,
                         params,
-                    }]
+                    }];
+                    if synthesize_now && let Some(ev) = self.synthesize_pending_command_approval() {
+                        events.push(ev);
+                    }
+                    events
                 } else if method == "item/completed" {
                     // The cached command finished; drop the tracking so a
                     // late waitingOnApproval doesn't re-open it.
@@ -470,6 +496,7 @@ impl BridgeCursor {
                         if same {
                             self.pending_command = None;
                             self.pending_command_approval_id = None;
+                            self.unpaired_waiting_on_approval = false;
                         }
                     }
                     vec![BridgeEvent::Raw {
@@ -503,6 +530,7 @@ mod translate_tests {
             seq: 0,
             pending_command: None,
             pending_command_approval_id: None,
+            unpaired_waiting_on_approval: false,
         }
     }
 
@@ -698,6 +726,70 @@ mod translate_tests {
             json!({"status": {"activeFlags": ["waitingOnApproval"]}}),
         ));
         assert!(matches!(evs.as_slice(), [BridgeEvent::Raw { .. }]));
+        assert!(c.unpaired_waiting_on_approval);
+    }
+
+    #[test]
+    fn waiting_on_approval_before_item_started_synthesizes_when_command_arrives() {
+        let mut c = cursor();
+        let first = c.translate(notif(
+            "thread/status/changed",
+            json!({"status": {"activeFlags": ["waitingOnApproval"]}}),
+        ));
+        assert!(matches!(first.as_slice(), [BridgeEvent::Raw { .. }]));
+
+        let evs = c.translate(notif(
+            "item/started",
+            json!({
+                "item": {
+                    "id": "it_1",
+                    "type": "commandExecution",
+                    "status": "inProgress",
+                    "command": "pidash workspace me",
+                    "cwd": "/work",
+                    "processId": null,
+                    "source": "agent"
+                }
+            }),
+        ));
+        match evs.as_slice() {
+            [
+                BridgeEvent::Raw { .. },
+                BridgeEvent::ApprovalRequest {
+                    kind,
+                    payload,
+                    reason,
+                    ..
+                },
+            ] => {
+                assert!(matches!(kind, ApprovalKind::CommandExecution));
+                assert_eq!(
+                    payload.get("command").and_then(|v| v.as_str()),
+                    Some("pidash workspace me")
+                );
+                assert_eq!(
+                    payload.get("synthesized").and_then(|v| v.as_bool()),
+                    Some(true)
+                );
+                assert!(
+                    reason
+                        .as_deref()
+                        .unwrap_or("")
+                        .contains("pidash workspace me")
+                );
+            }
+            other => panic!("expected Raw + ApprovalRequest, got {other:?}"),
+        }
+        assert!(c.pending_command_approval_id.is_some());
+
+        let duplicate = c.translate(notif(
+            "thread/status/changed",
+            json!({"status": {"activeFlags": ["waitingOnApproval"]}}),
+        ));
+        assert!(
+            matches!(duplicate.as_slice(), [BridgeEvent::Raw { .. }]),
+            "duplicate waitingOnApproval must not re-emit ApprovalRequest, got {duplicate:?}"
+        );
     }
 
     #[test]

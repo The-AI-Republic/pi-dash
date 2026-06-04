@@ -36,13 +36,13 @@ export const InboxIssueTitle = observer(function InboxIssueTitle(props: TInboxIs
         type="text"
         value={data?.name}
         onChange={(e) => handleData("name", e.target.value)}
-        placeholder={t("title")}
+        placeholder={t("Title")}
         className="w-full text-14"
         tabIndex={getIndex("name")}
         required
       />
       {isTitleLengthMoreThan255Character && (
-        <span className="text-11 text-danger-primary">{t("title_should_be_less_than_255_characters")}</span>
+        <span className="text-11 text-danger-primary">{t("Title should be less than 255 characters")}</span>
       )}
     </div>
   );

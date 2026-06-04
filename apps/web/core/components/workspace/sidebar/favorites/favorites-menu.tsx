@@ -62,8 +62,8 @@ export const SidebarFavoritesMenu = observer(function SidebarFavoritesMenu() {
     }).catch(() => {
       setToast({
         type: TOAST_TYPE.ERROR,
-        title: t("error"),
-        message: t("failed_to_move_favorite"),
+        title: t("Error"),
+        message: t("Failed to move favorite"),
       });
     });
   };
@@ -113,16 +113,16 @@ export const SidebarFavoritesMenu = observer(function SidebarFavoritesMenu() {
       .then(() => {
         setToast({
           type: TOAST_TYPE.SUCCESS,
-          title: t("success"),
-          message: t("favorite_removed_successfully"),
+          title: t("Success"),
+          message: t("Favorite removed successfully"),
         });
         return;
       })
       .catch(() => {
         setToast({
           type: TOAST_TYPE.ERROR,
-          title: t("error"),
-          message: t("something_went_wrong"),
+          title: t("Error"),
+          message: t("Something went wrong"),
         });
       });
   };
@@ -131,8 +131,8 @@ export const SidebarFavoritesMenu = observer(function SidebarFavoritesMenu() {
     removeFromFavoriteFolder(workspaceSlug.toString(), favoriteId).catch(() => {
       setToast({
         type: TOAST_TYPE.ERROR,
-        title: t("error"),
-        message: t("failed_to_move_favorite"),
+        title: t("Error"),
+        message: t("Failed to move favorite"),
       });
     });
   };
@@ -142,8 +142,8 @@ export const SidebarFavoritesMenu = observer(function SidebarFavoritesMenu() {
       reOrderFavorite(workspaceSlug.toString(), favoriteId, droppedFavId, edge).catch(() => {
         setToast({
           type: TOAST_TYPE.ERROR,
-          title: t("error"),
-          message: t("failed_to_reorder_favorite"),
+          title: t("Error"),
+          message: t("Failed to reorder favorite"),
         });
       });
     },
@@ -199,14 +199,14 @@ export const SidebarFavoritesMenu = observer(function SidebarFavoritesMenu() {
             onClick={() => toggleFavoriteMenu(!isFavoriteMenuOpen)}
             aria-label={t(
               isFavoriteMenuOpen
-                ? "aria_labels.projects_sidebar.close_favorites_menu"
-                : "aria_labels.projects_sidebar.open_favorites_menu"
+                ? "Close favorites menu"
+                : "Open favorites menu"
             )}
           >
-            <span className="text-13 font-semibold">{t("favorites")}</span>
+            <span className="text-13 font-semibold">{t("Favorites")}</span>
           </Disclosure.Button>
           <div className="pointer-events-none flex items-center opacity-0 group-hover/favorites-button:pointer-events-auto group-hover/favorites-button:opacity-100">
-            <Tooltip tooltipHeading={t("create_folder")} tooltipContent="">
+            <Tooltip tooltipHeading={t("Create folder")} tooltipContent="">
               <IconButton
                 variant="ghost"
                 size="sm"
@@ -214,7 +214,7 @@ export const SidebarFavoritesMenu = observer(function SidebarFavoritesMenu() {
                   setCreateNewFolder(true);
                   if (!isFavoriteMenuOpen) toggleFavoriteMenu(!isFavoriteMenuOpen);
                 }}
-                aria-label={t("aria_labels.projects_sidebar.create_favorites_folder")}
+                aria-label={t("Create favorites folder")}
                 icon={FolderPlus}
               />
             </Tooltip>
@@ -225,8 +225,8 @@ export const SidebarFavoritesMenu = observer(function SidebarFavoritesMenu() {
               onClick={() => toggleFavoriteMenu(!isFavoriteMenuOpen)}
               aria-label={t(
                 isFavoriteMenuOpen
-                  ? "aria_labels.projects_sidebar.close_favorites_menu"
-                  : "aria_labels.projects_sidebar.open_favorites_menu"
+                  ? "Close favorites menu"
+                  : "Open favorites menu"
               )}
             >
               <ChevronRightIcon
@@ -251,7 +251,7 @@ export const SidebarFavoritesMenu = observer(function SidebarFavoritesMenu() {
               {createNewFolder && <NewFavoriteFolder setCreateNewFolder={setCreateNewFolder} actionType="create" />}
               {Object.keys(groupedFavorites).length === 0 ? (
                 <>
-                  <span className="px-8 py-1.5 text-11 font-medium text-placeholder">{t("no_favorites_yet")}</span>
+                  <span className="px-8 py-1.5 text-11 font-medium text-placeholder">{t("No favorites yet")}</span>
                 </>
               ) : (
                 orderBy(Object.values(groupedFavorites), "sequence", "desc")

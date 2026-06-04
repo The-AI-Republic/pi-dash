@@ -162,7 +162,7 @@ export function DataTable<TData, TValue>({ columns, data, searchPlaceholder, act
                     assetKey="unknown"
                     assetClassName="size-20"
                     rootClassName="border border-subtle px-5 py-10 md:py-20 md:px-20"
-                    title={t("workspace_empty_state.analytics_work_items.title")}
+                    title={t("Create projects with work items and assignees to start tracking performance, progress, and team impact here.")}
                   />
                 </TableCell>
               </TableRow>

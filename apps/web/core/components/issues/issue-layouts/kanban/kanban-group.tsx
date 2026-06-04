@@ -165,7 +165,7 @@ export const KanbanGroup = observer(function KanbanGroup(props: IKanbanGroup) {
           if ((isWorkflowDropDisabled || isDropDisabled) && dropErrorMessage) {
             setToast({
               type: TOAST_TYPE.WARNING,
-              title: t("common.warning"),
+              title: t("Warning"),
               message: dropErrorMessage,
             });
             return;
@@ -264,7 +264,7 @@ export const KanbanGroup = observer(function KanbanGroup(props: IKanbanGroup) {
       className="sticky bottom-0 w-full cursor-pointer p-3 text-13 font-medium text-accent-primary hover:text-accent-secondary hover:underline"
       onClick={loadMoreIssuesInThisGroup}
     >
-      {t("common.load_more")} &darr;
+      {t("Load more")} &darr;
     </div>
   );
 

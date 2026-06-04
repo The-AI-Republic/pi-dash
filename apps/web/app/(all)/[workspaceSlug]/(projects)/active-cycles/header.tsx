@@ -23,7 +23,7 @@ export const WorkspaceActiveCycleHeader = observer(function WorkspaceActiveCycle
           <Breadcrumbs.Item
             component={
               <BreadcrumbLink
-                label={t("active_cycles")}
+                label={t("Active cycles")}
                 icon={<CycleIcon className="h-4 w-4 rotate-180 text-tertiary" />}
               />
             }

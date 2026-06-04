@@ -226,7 +226,7 @@ export function FavoriteFolder(props: Props) {
                   )}
                   customButtonClassName="grid place-items-center"
                   placement="bottom-start"
-                  ariaLabel={t("aria_labels.projects_sidebar.toggle_quick_actions_menu")}
+                  ariaLabel={t("Toggle quick actions menu")}
                 >
                   <CustomMenu.MenuItem onClick={() => handleRemoveFromFavorites(favorite)}>
                     <span className="flex items-center justify-start gap-2">
@@ -248,7 +248,7 @@ export function FavoriteFolder(props: Props) {
                     "inline-block": isMenuActive,
                   })}
                   aria-label={t(
-                    open ? "aria_labels.projects_sidebar.close_folder" : "aria_labels.projects_sidebar.open_folder"
+                    open ? "Close folder" : "Open folder"
                   )}
                 >
                   <ChevronRightIcon

@@ -38,11 +38,11 @@ export const APITokensProfileSettings = observer(function APITokensProfileSettin
     <div className="size-full">
       <CreateApiTokenModal isOpen={isCreateTokenModalOpen} onClose={() => setIsCreateTokenModalOpen(false)} />
       <ProfileSettingsHeading
-        title={t("account_settings.api_tokens.heading")}
-        description={t("account_settings.api_tokens.description")}
+        title={t("Personal Access Tokens")}
+        description={t("Generate secure API tokens to integrate your data with external systems and applications.")}
         control={
           <Button variant="primary" size="lg" onClick={() => setIsCreateTokenModalOpen(true)}>
-            {t("workspace_settings.settings.api_tokens.add_token")}
+            {t("Add personal access token")}
           </Button>
         }
       />
@@ -59,11 +59,11 @@ export const APITokensProfileSettings = observer(function APITokensProfileSettin
           <EmptyStateCompact
             assetKey="token"
             assetClassName="size-20"
-            title={t("settings_empty_state.tokens.title")}
-            description={t("settings_empty_state.tokens.description")}
+            title={t("No Personal token yet")}
+            description={t("Generate secure API tokens to connect your workspace with external systems and applications.")}
             actions={[
               {
-                label: t("settings_empty_state.tokens.cta_primary"),
+                label: t("Add API token"),
                 onClick: () => {
                   setIsCreateTokenModalOpen(true);
                 },

@@ -11,10 +11,8 @@ import type {
   IAgentChatMessage,
   IAgentChatSession,
   IApprovalRequest,
-  IConnection,
-  IConnectionWithToken,
+  IDevMachine,
   IRunner,
-  IRunnerInvite,
   TApprovalDecision,
 } from "@pi-dash/types";
 import { APIService } from "../api.service";
@@ -31,6 +29,30 @@ export class RunnerService extends APIService {
   async list(workspaceId?: string): Promise<IRunner[]> {
     const params = workspaceId ? { params: { workspace: workspaceId } } : {};
     return this.get("/api/runners/", params)
+      .then((r) => r?.data)
+      .catch((e) => {
+        throw e?.response?.data;
+      });
+  }
+
+  async listDevMachines(workspaceId: string): Promise<IDevMachine[]> {
+    return this.get("/api/runners/dev-machines/", { params: { workspace: workspaceId } })
+      .then((r) => r?.data)
+      .catch((e) => {
+        throw e?.response?.data;
+      });
+  }
+
+  async revokeDevMachine(machineId: string, workspaceId: string): Promise<IDevMachine> {
+    return this.post(`/api/runners/dev-machines/${machineId}/revoke/`, { workspace: workspaceId })
+      .then((r) => r?.data)
+      .catch((e) => {
+        throw e?.response?.data;
+      });
+  }
+
+  async rotateDevMachine(machineId: string, workspaceId: string): Promise<IDevMachine> {
+    return this.post(`/api/runners/dev-machines/${machineId}/rotate/`, { workspace: workspaceId })
       .then((r) => r?.data)
       .catch((e) => {
         throw e?.response?.data;
@@ -67,19 +89,6 @@ export class RunnerService extends APIService {
       });
   }
 
-  /** ``POST /api/runners/<id>/revive/`` — mint a fresh enrollment token
-   * on an existing PENDING-or-REVOKED runner row. The response payload
-   * is identical to ``createRunnerInvite`` so the same install-command
-   * panel can render it. 409 if the runner is currently active — revoke
-   * it first. */
-  async reviveRunner(runnerId: string): Promise<IRunnerInvite> {
-    return this.post(`/api/runners/${runnerId}/revive/`, {})
-      .then((r) => r?.data)
-      .catch((e) => {
-        throw e?.response?.data;
-      });
-  }
-
   /** Move a runner to a different pod (same workspace). Owner or admin only. */
   async move(runnerId: string, podId: string, name?: string): Promise<IRunner> {
     const body: Record<string, unknown> = { pod: podId };
@@ -94,77 +103,6 @@ export class RunnerService extends APIService {
   async getDetail(runnerId: string): Promise<IRunner> {
     return this.get(`/api/runners/${runnerId}/`)
       .then((r) => r?.data)
-      .catch((e) => {
-        throw e?.response?.data;
-      });
-  }
-
-  /** ``POST /api/runners/invites/`` — create a per-runner enrollment
-   * invite. Each runner has its own enrollment token; the daemon
-   * exchanges it for a long-lived refresh token via ``pidash connect``.
-   * Replaces the legacy connection-level ``POST /api/runners/connections/``
-   * — see ``.ai_design/move_to_https/design.md`` §5.1.
-   */
-  async createRunnerInvite(input: {
-    workspaceId: string;
-    projectIdentifier: string;
-    podName?: string;
-    name?: string;
-  }): Promise<IRunnerInvite> {
-    return this.post("/api/runners/invites/", {
-      workspace: input.workspaceId,
-      project: input.projectIdentifier,
-      pod: input.podName ?? "",
-      name: input.name ?? "",
-    })
-      .then((r) => r?.data)
-      .catch((e) => {
-        throw e?.response?.data;
-      });
-  }
-
-  /** ``GET /api/runners/connections/`` — list this user's connections. */
-  async listConnections(): Promise<IConnection[]> {
-    return this.get("/api/runners/connections/")
-      .then((r) => r?.data)
-      .catch((e) => {
-        throw e?.response?.data;
-      });
-  }
-
-  /** ``POST /api/runners/connections/`` — create a connection in PENDING state.
-   * Response carries the one-time enrollment token; the daemon's
-   * ``pidash connect`` consumes it. */
-  async createConnection(workspaceId: string, name?: string): Promise<IConnectionWithToken> {
-    return this.post("/api/runners/connections/", { workspace: workspaceId, name: name ?? "" })
-      .then((r) => r?.data)
-      .catch((e) => {
-        throw e?.response?.data;
-      });
-  }
-
-  /** ``PATCH /api/runners/connections/<id>/`` — rename. */
-  async renameConnection(connectionId: string, name: string): Promise<IConnection> {
-    return this.patch(`/api/runners/connections/${connectionId}/`, { name })
-      .then((r) => r?.data)
-      .catch((e) => {
-        throw e?.response?.data;
-      });
-  }
-
-  /** ``DELETE /api/runners/connections/<id>/`` — hard-delete the
-   * connection and cascade to every runner under it.
-   *
-   * ``onlyIfPending`` adds a server-side guard that refuses the delete
-   * when the connection has already enrolled. Used by the dismiss-token
-   * flow so a daemon that enrolls between the UI's last refresh and the
-   * delete call doesn't get its active connection silently nuked. */
-  async deleteConnection(connectionId: string, onlyIfPending = false): Promise<void> {
-    const url = onlyIfPending
-      ? `/api/runners/connections/${connectionId}/?only_if_pending=true`
-      : `/api/runners/connections/${connectionId}/`;
-    return this.delete(url)
-      .then(() => undefined)
       .catch((e) => {
         throw e?.response?.data;
       });

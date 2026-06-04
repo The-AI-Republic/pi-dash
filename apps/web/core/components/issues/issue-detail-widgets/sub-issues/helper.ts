@@ -33,12 +33,12 @@ export const useSubIssueOperations = (issueServiceType: TIssueServiceType): TSub
         await copyUrlToClipboard(path);
         setToast({
           type: TOAST_TYPE.SUCCESS,
-          title: t("common.link_copied"),
-          message: t("entity.link_copied_to_clipboard", {
+          title: t("Link copied!"),
+          message: t("{entity} link copied to clipboard", {
             entity:
               issueServiceType === EIssueServiceType.ISSUES
-                ? t("common.sub_work_items", { count: 1 })
-                : t("issue.label", { count: 1 }),
+                ? t("Sub-work items", { count: 1 })
+                : t("{count, plural, one {Work item} other {Work items}}", { count: 1 }),
           }),
         });
       },
@@ -48,12 +48,12 @@ export const useSubIssueOperations = (issueServiceType: TIssueServiceType): TSub
         } catch {
           setToast({
             type: TOAST_TYPE.ERROR,
-            title: t("toast.error"),
-            message: t("entity.fetch.failed", {
+            title: t("Error!"),
+            message: t("Error fetching {entity}", {
               entity:
                 issueServiceType === EIssueServiceType.ISSUES
-                  ? t("common.sub_work_items", { count: 2 })
-                  : t("issue.label", { count: 2 }),
+                  ? t("Sub-work items", { count: 2 })
+                  : t("{count, plural, one {Work item} other {Work items}}", { count: 2 }),
             }),
           });
         }
@@ -63,23 +63,23 @@ export const useSubIssueOperations = (issueServiceType: TIssueServiceType): TSub
           await createSubIssues(workspaceSlug, projectId, parentIssueId, issueIds);
           setToast({
             type: TOAST_TYPE.SUCCESS,
-            title: t("toast.success"),
-            message: t("entity.add.success", {
+            title: t("Success!"),
+            message: t("{entity} added successfully", {
               entity:
                 issueServiceType === EIssueServiceType.ISSUES
-                  ? t("common.sub_work_items")
-                  : t("issue.label", { count: issueIds.length }),
+                  ? t("Sub-work items")
+                  : t("{count, plural, one {Work item} other {Work items}}", { count: issueIds.length }),
             }),
           });
         } catch {
           setToast({
             type: TOAST_TYPE.ERROR,
-            title: t("toast.error"),
-            message: t("entity.add.failed", {
+            title: t("Error!"),
+            message: t("Error adding {entity}", {
               entity:
                 issueServiceType === EIssueServiceType.ISSUES
-                  ? t("common.sub_work_items")
-                  : t("issue.label", { count: issueIds.length }),
+                  ? t("Sub-work items")
+                  : t("{count, plural, one {Work item} other {Work items}}", { count: issueIds.length }),
             }),
           });
         }
@@ -98,15 +98,15 @@ export const useSubIssueOperations = (issueServiceType: TIssueServiceType): TSub
           await updateSubIssue(workspaceSlug, projectId, parentIssueId, issueId, issueData, oldIssue, fromModal);
           setToast({
             type: TOAST_TYPE.SUCCESS,
-            title: t("toast.success"),
-            message: t("sub_work_item.update.success"),
+            title: t("Success!"),
+            message: t("Sub-work item updated successfully"),
           });
           setSubIssueHelpers(parentIssueId, "issue_loader", issueId);
         } catch (_error) {
           setToast({
             type: TOAST_TYPE.ERROR,
-            title: t("toast.error"),
-            message: t("sub_work_item.update.error"),
+            title: t("Error!"),
+            message: t("Error updating sub-work item"),
           });
         }
       },
@@ -116,24 +116,24 @@ export const useSubIssueOperations = (issueServiceType: TIssueServiceType): TSub
           await removeSubIssue(workspaceSlug, projectId, parentIssueId, issueId);
           setToast({
             type: TOAST_TYPE.SUCCESS,
-            title: t("toast.success"),
-            message: t("entity.remove.success", {
+            title: t("Success!"),
+            message: t("{entity} removed successfully", {
               entity:
                 issueServiceType === EIssueServiceType.ISSUES
-                  ? t("common.sub_work_items")
-                  : t("issue.label", { count: 1 }),
+                  ? t("Sub-work items")
+                  : t("{count, plural, one {Work item} other {Work items}}", { count: 1 }),
             }),
           });
           setSubIssueHelpers(parentIssueId, "issue_loader", issueId);
         } catch (_error) {
           setToast({
             type: TOAST_TYPE.ERROR,
-            title: t("toast.error"),
-            message: t("entity.remove.failed", {
+            title: t("Error!"),
+            message: t("Error removing {entity}", {
               entity:
                 issueServiceType === EIssueServiceType.ISSUES
-                  ? t("common.sub_work_items")
-                  : t("issue.label", { count: 1 }),
+                  ? t("Sub-work items")
+                  : t("{count, plural, one {Work item} other {Work items}}", { count: 1 }),
             }),
           });
         }
@@ -146,12 +146,12 @@ export const useSubIssueOperations = (issueServiceType: TIssueServiceType): TSub
         } catch (_error) {
           setToast({
             type: TOAST_TYPE.ERROR,
-            title: t("toast.error"),
-            message: t("entity.delete.failed", {
+            title: t("Error!"),
+            message: t("{entity} delete failed", {
               entity:
                 issueServiceType === EIssueServiceType.ISSUES
-                  ? t("common.sub_work_items")
-                  : t("issue.label", { count: 1 }),
+                  ? t("Sub-work items")
+                  : t("{count, plural, one {Work item} other {Work items}}", { count: 1 }),
             }),
           });
         }

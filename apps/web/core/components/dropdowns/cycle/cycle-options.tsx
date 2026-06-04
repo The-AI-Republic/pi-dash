@@ -110,11 +110,11 @@ export const CycleOptions = observer(function CycleOptions(props: CycleOptionsPr
   if (canRemoveCycle) {
     options?.unshift({
       value: null,
-      query: t("cycle.no_cycle"),
+      query: t("No cycle"),
       content: (
         <div className="flex items-center gap-2">
           <CycleIcon className="h-3 w-3 flex-shrink-0" />
-          <span className="flex-grow truncate">{t("cycle.no_cycle")}</span>
+          <span className="flex-grow truncate">{t("No cycle")}</span>
         </div>
       ),
     });
@@ -139,7 +139,7 @@ export const CycleOptions = observer(function CycleOptions(props: CycleOptionsPr
             className="w-full bg-transparent py-1 text-11 text-secondary placeholder:text-placeholder focus:outline-none"
             value={query}
             onChange={(e) => setQuery(e.target.value)}
-            placeholder={t("common.search.label")}
+            placeholder={t("Search")}
             displayValue={(assigned: any) => assigned?.name}
             onKeyDown={searchInputKeyDown}
           />
@@ -166,10 +166,10 @@ export const CycleOptions = observer(function CycleOptions(props: CycleOptionsPr
                 </Combobox.Option>
               ))
             ) : (
-              <p className="px-1.5 py-1 text-placeholder italic">{t("common.search.no_matches_found")}</p>
+              <p className="px-1.5 py-1 text-placeholder italic">{t("No matches found")}</p>
             )
           ) : (
-            <p className="px-1.5 py-1 text-placeholder italic">{t("common.loading")}</p>
+            <p className="px-1.5 py-1 text-placeholder italic">{t("Loading")}</p>
           )}
         </div>
       </div>

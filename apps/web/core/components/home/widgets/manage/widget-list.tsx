@@ -40,15 +40,15 @@ export const WidgetList = observer(function WidgetList({ workspaceSlug }: { work
         .then(() => {
           setToast({
             type: TOAST_TYPE.SUCCESS,
-            title: t("toast.success"),
-            message: t("home.widget.reordered_successfully"),
+            title: t("Success!"),
+            message: t("Widget reordered successfully."),
           });
         })
         .catch(() => {
           setToast({
             type: TOAST_TYPE.ERROR,
-            title: t("toast.error"),
-            message: t("home.widget.reordering_failed"),
+            title: t("Error!"),
+            message: t("Error occurred while reordering widget."),
           });
         });
     }

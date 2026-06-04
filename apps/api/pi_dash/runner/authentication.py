@@ -4,20 +4,23 @@
 
 """DRF authentication for runner-daemon REST traffic.
 
-Per ``.ai_design/move_to_https/design.md`` §5, the runner transport uses
-a per-runner refresh-token + access-token pair (no Connection layer).
-Two auth classes:
+The current runner transport uses a dev-machine MachineToken as the shared
+bearer credential. The runner identity still matters, but it is carried by
+the URL ``runner_id`` or the ``X-Runner-Id`` header, not by a different
+secret per runner. The legacy per-runner refresh/access-token path remains
+accepted for older installs.
 
-- :class:`RunnerAccessTokenAuthentication` — bearer JWT minted at refresh
-  time. Used for every runner-scoped endpoint
-  (``/runners/<rid>/sessions/...``, ``/runs/<run_id>/...``).
+Auth classes:
+
+- :class:`RunnerAccessTokenAuthentication` — accepts the shared
+  MachineToken plus runner id, and still accepts legacy bearer JWTs.
 - :class:`RunnerRefreshTokenAuthentication` — bearer refresh token used
   only on ``POST /runners/<rid>/refresh/``. Verified inside the view
   (because the algorithm depends on row-locked DB state); this class
   parses the bearer header into ``request.auth_refresh_token`` and is
   otherwise a no-op.
-- :class:`MachineTokenAuthentication` — separate machine-scoped CLI
-  credential; used for ``/api/v1/`` user-action endpoints.
+- :class:`MachineTokenAuthentication` — machine-scoped credential helper for
+  explicit MachineToken-only endpoints.
 """
 
 from __future__ import annotations
@@ -51,7 +54,12 @@ def _bearer(request) -> Optional[str]:
 
 
 class RunnerAccessTokenAuthentication(authentication.BaseAuthentication):
-    """Per-runner JWT bearer authentication.
+    """Runner runtime authentication.
+
+    Preferred path: a shared MachineToken (``mt_...``) plus explicit runner
+    identity via URL ``runner_id`` or ``X-Runner-Id``.
+
+    Legacy path: per-runner JWT bearer authentication.
 
     Verification order (``design.md`` §5.4):
 
@@ -72,6 +80,8 @@ class RunnerAccessTokenAuthentication(authentication.BaseAuthentication):
         raw = _bearer(request)
         if not raw:
             return None
+        if raw.startswith("mt_"):
+            return self._authenticate_machine_token(request, raw)
         try:
             payload = decode_access_token(raw)
         except AccessTokenError as exc:
@@ -79,9 +89,7 @@ class RunnerAccessTokenAuthentication(authentication.BaseAuthentication):
 
         runner_id = payload.get("sub")
         try:
-            runner = Runner.objects.select_related("workspace", "pod").get(
-                id=runner_id
-            )
+            runner = Runner.objects.select_related("workspace", "pod", "dev_machine").get(id=runner_id)
         except Runner.DoesNotExist:
             raise exceptions.AuthenticationFailed("runner_not_found")
 
@@ -90,6 +98,8 @@ class RunnerAccessTokenAuthentication(authentication.BaseAuthentication):
         # token issued before revocation survives until expiry.
         if runner.revoked_at is not None:
             raise exceptions.AuthenticationFailed("runner_revoked")
+        if runner.dev_machine_id is not None and runner.dev_machine.revoked_at is not None:
+            raise exceptions.AuthenticationFailed("dev_machine_revoked")
 
         rtg = int(payload.get("rtg") or 0)
         if rtg < (runner.refresh_token_generation - 1):
@@ -107,6 +117,50 @@ class RunnerAccessTokenAuthentication(authentication.BaseAuthentication):
         request.auth_token_payload = payload
         return (runner.owner, None)
 
+    def _authenticate_machine_token(self, request, raw: str) -> Tuple[object, None]:
+        token_hash = hash_token(raw)
+        try:
+            token = MachineToken.objects.select_related("user", "workspace", "dev_machine").get(token_hash=token_hash)
+        except MachineToken.DoesNotExist:
+            raise exceptions.AuthenticationFailed("machine_token_invalid")
+        if token.revoked_at is not None:
+            raise exceptions.AuthenticationFailed("machine_token_revoked")
+        if token.dev_machine_id is not None and token.dev_machine.revoked_at is not None:
+            raise exceptions.AuthenticationFailed("dev_machine_revoked")
+        if not is_workspace_member(token.user, token.workspace_id):
+            token.revoke()
+            raise exceptions.AuthenticationFailed("membership_revoked")
+
+        runner_id = self._request_runner_id(request)
+        if runner_id is None:
+            raise exceptions.AuthenticationFailed("runner_id_required")
+        try:
+            runner = Runner.objects.select_related("workspace", "pod", "dev_machine").get(id=runner_id)
+        except Runner.DoesNotExist:
+            raise exceptions.AuthenticationFailed("runner_not_found")
+        if runner.revoked_at is not None:
+            raise exceptions.AuthenticationFailed("runner_revoked")
+        if runner.dev_machine_id is not None and runner.dev_machine.revoked_at is not None:
+            raise exceptions.AuthenticationFailed("dev_machine_revoked")
+        if runner.owner_id != token.user_id or runner.workspace_id != token.workspace_id:
+            raise exceptions.AuthenticationFailed("runner_not_bound_to_machine_token")
+        if token.dev_machine_id is not None:
+            if runner.dev_machine_id != token.dev_machine_id:
+                raise exceptions.AuthenticationFailed("runner_not_bound_to_machine_token")
+        elif runner.dev_machine_id is not None or runner.host_label != token.host_label:
+            raise exceptions.AuthenticationFailed("runner_not_bound_to_machine_token")
+
+        MachineToken.objects.filter(pk=token.pk).update(last_used_at=timezone.now())
+        request.auth_runner = runner
+        request.auth_machine_token = token
+        request.auth_token_payload = {
+            "sub": str(runner.id),
+            "uid": str(token.user_id),
+            "wid": str(token.workspace_id),
+            "machine_token": str(token.id),
+        }
+        return (token.user, None)
+
     def authenticate_header(self, request) -> str:
         return self.keyword
 
@@ -116,6 +170,14 @@ class RunnerAccessTokenAuthentication(authentication.BaseAuthentication):
         if match is None:
             return None
         return match.kwargs.get("runner_id")
+
+    @classmethod
+    def _request_runner_id(cls, request) -> Optional[str]:
+        url_runner_id = cls._url_runner_id(request)
+        if url_runner_id is not None:
+            return str(url_runner_id)
+        header = (request.headers.get("X-Runner-Id") or "").strip()
+        return header or None
 
 
 class RunnerRefreshTokenAuthentication(authentication.BaseAuthentication):
@@ -141,7 +203,7 @@ class RunnerRefreshTokenAuthentication(authentication.BaseAuthentication):
 
 
 class MachineTokenAuthentication(authentication.BaseAuthentication):
-    """Bearer machine-scoped token (``pidash`` CLI).
+    """Bearer machine-scoped token.
 
     Per-request workspace-membership check (no refresh chokepoint),
     best-effort ``last_used_at`` update.
@@ -155,22 +217,20 @@ class MachineTokenAuthentication(authentication.BaseAuthentication):
             return None
         token_hash = hash_token(raw)
         try:
-            token = MachineToken.objects.select_related("user", "workspace").get(
-                token_hash=token_hash
-            )
+            token = MachineToken.objects.select_related("user", "workspace", "dev_machine").get(token_hash=token_hash)
         except MachineToken.DoesNotExist:
             raise exceptions.AuthenticationFailed("machine_token_invalid")
         if token.revoked_at is not None:
             raise exceptions.AuthenticationFailed("machine_token_revoked")
+        if token.dev_machine_id is not None and token.dev_machine.revoked_at is not None:
+            raise exceptions.AuthenticationFailed("dev_machine_revoked")
         if not is_workspace_member(token.user, token.workspace_id):
             token.revoke()
             raise exceptions.AuthenticationFailed("membership_revoked")
         # Best-effort last_used_at; ignore failures so per-request DB
         # contention doesn't break the request.
         try:
-            MachineToken.objects.filter(pk=token.pk).update(
-                last_used_at=timezone.now()
-            )
+            MachineToken.objects.filter(pk=token.pk).update(last_used_at=timezone.now())
         except Exception:  # pragma: no cover - best-effort
             logger.debug("failed to bump last_used_at", exc_info=True)
         request.auth_machine_token = token

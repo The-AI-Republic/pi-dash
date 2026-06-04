@@ -65,7 +65,7 @@ export const SidebarMoreSection = observer(function SidebarMoreSection() {
           className="flex w-full items-center gap-1 text-left text-13 font-semibold whitespace-nowrap text-placeholder"
           onClick={() => toggleListDisclosure(!isMoreMenuOpen)}
         >
-          <span className="text-13 font-semibold">{t("sidebar.more")}</span>
+          <span className="text-13 font-semibold">{t("More")}</span>
         </Disclosure.Button>
         <div className="pointer-events-none flex items-center opacity-0 group-hover:pointer-events-auto group-hover:opacity-100">
           <Disclosure.Button

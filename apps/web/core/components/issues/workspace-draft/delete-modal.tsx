@@ -72,8 +72,8 @@ export function WorkspaceDraftIssueDeleteIssueModal(props: Props) {
         .then(() => {
           setToast({
             type: TOAST_TYPE.SUCCESS,
-            title: `${t("success")}!`,
-            message: t("workspace_draft_issues.toasts.deleted.success"),
+            title: `${t("Success")}!`,
+            message: t("Draft deleted"),
           });
           onClose();
         })
@@ -97,13 +97,13 @@ export function WorkspaceDraftIssueDeleteIssueModal(props: Props) {
       handleSubmit={handleIssueDelete}
       isSubmitting={isDeleting}
       isOpen={isOpen}
-      title={t("workspace_draft_issues.delete_modal.title")}
-      content={<>{t("workspace_draft_issues.delete_modal.description")}</>}
+      title={t("Delete draft")}
+      content={<>{t("Are you sure you want to delete this draft? This can't be undone.")}</>}
       primaryButtonText={{
-        loading: t("deleting"),
-        default: t("delete"),
+        loading: t("Deleting"),
+        default: t("Delete"),
       }}
-      secondaryButtonText={t("cancel")}
+      secondaryButtonText={t("Cancel")}
     />
   );
 }

@@ -26,7 +26,7 @@ export const ProjectSchedulersHeader = observer(function ProjectSchedulersHeader
           <Breadcrumbs.Item
             component={
               <BreadcrumbLink
-                label={t("sidebar.schedulers")}
+                label={t("Schedulers")}
                 href={`/${workspaceSlug}/projects/${projectId}/schedulers`}
                 icon={<CalendarClock className="size-4 text-tertiary" />}
                 isLast

@@ -112,7 +112,7 @@ export const ResetPasswordForm = observer(function ResetPasswordForm() {
         <input type="hidden" name="csrfmiddlewaretoken" value={csrfToken} />
         <div className="space-y-1">
           <label className="text-13 font-medium text-tertiary" htmlFor="email">
-            {t("auth.common.email.label")}
+            {t("Email")}
           </label>
           <div className="relative flex items-center rounded-md bg-surface-1">
             <Input
@@ -121,7 +121,7 @@ export const ResetPasswordForm = observer(function ResetPasswordForm() {
               type="email"
               value={resetFormData.email}
               //hasError={Boolean(errors.email)}
-              placeholder={t("auth.common.email.placeholder")}
+              placeholder={t("name@company.com")}
               className="h-10 w-full cursor-not-allowed border border-strong !bg-surface-1 pr-12 text-placeholder"
               autoComplete="off"
               disabled
@@ -130,7 +130,7 @@ export const ResetPasswordForm = observer(function ResetPasswordForm() {
         </div>
         <div className="space-y-1">
           <label className="text-13 font-medium text-tertiary" htmlFor="password">
-            {t("auth.common.password.label")}
+            {t("Password")}
           </label>
           <div className="relative flex items-center rounded-md bg-surface-1">
             <Input
@@ -139,7 +139,7 @@ export const ResetPasswordForm = observer(function ResetPasswordForm() {
               value={resetFormData.password}
               onChange={(e) => handleFormChange("password", e.target.value)}
               //hasError={Boolean(errors.password)}
-              placeholder={t("auth.common.password.placeholder")}
+              placeholder={t("Enter password")}
               className="h-10 w-full border border-strong !bg-surface-1 pr-12 placeholder:text-placeholder"
               minLength={8}
               onFocus={() => setIsPasswordInputFocused(true)}
@@ -163,7 +163,7 @@ export const ResetPasswordForm = observer(function ResetPasswordForm() {
         </div>
         <div className="space-y-1">
           <label className="text-13 font-medium text-tertiary" htmlFor="confirm_password">
-            {t("auth.common.password.confirm_password.label")}
+            {t("Confirm password")}
           </label>
           <div className="relative flex items-center rounded-md bg-surface-1">
             <Input
@@ -171,7 +171,7 @@ export const ResetPasswordForm = observer(function ResetPasswordForm() {
               name="confirm_password"
               value={resetFormData.confirm_password}
               onChange={(e) => handleFormChange("confirm_password", e.target.value)}
-              placeholder={t("auth.common.password.confirm_password.placeholder")}
+              placeholder={t("Confirm password")}
               className="h-10 w-full border border-strong !bg-surface-1 pr-12 placeholder:text-placeholder"
               onFocus={() => setIsRetryPasswordInputFocused(true)}
               onBlur={() => setIsRetryPasswordInputFocused(false)}
@@ -192,11 +192,11 @@ export const ResetPasswordForm = observer(function ResetPasswordForm() {
           {!!resetFormData.confirm_password &&
             resetFormData.password !== resetFormData.confirm_password &&
             renderPasswordMatchError && (
-              <span className="text-13 text-danger-primary">{t("auth.common.password.errors.match")}</span>
+              <span className="text-13 text-danger-primary">{t("Passwords don't match")}</span>
             )}
         </div>
         <Button type="submit" variant="primary" className="w-full" size="xl" disabled={isButtonDisabled}>
-          {t("auth.common.password.submit")}
+          {t("Set password")}
         </Button>
       </form>
     </FormContainer>

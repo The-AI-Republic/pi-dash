@@ -20,7 +20,7 @@ export const ListQuickAddIssueButton = observer(function ListQuickAddIssueButton
       onClick={onClick}
     >
       <PlusIcon className="h-3.5 w-3.5 stroke-2" />
-      <span className="text-13 font-medium">{isEpic ? t("epic.new") : t("issue.new")}</span>
+      <span className="text-13 font-medium">{isEpic ? t("New Epic") : t("New work item")}</span>
     </Row>
   );
 });

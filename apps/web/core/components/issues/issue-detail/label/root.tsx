@@ -64,9 +64,9 @@ export const IssueLabel = observer(function IssueLabel(props: TIssueLabel) {
           else await updateIssue(workspaceSlug, projectId, issueId, data);
         } catch (_error) {
           setToast({
-            title: t("toast.error"),
+            title: t("Error!"),
             type: TOAST_TYPE.ERROR,
-            message: t("entity.update.failed", { entity: t("issue.label", { count: 1 }) }),
+            message: t("{entity} update failed", { entity: t("{count, plural, one {Work item} other {Work items}}", { count: 1 }) }),
           });
         }
       },
@@ -75,18 +75,18 @@ export const IssueLabel = observer(function IssueLabel(props: TIssueLabel) {
           const labelResponse = await createLabel(workspaceSlug, projectId, data);
           if (!isInboxIssue)
             setToast({
-              title: t("toast.success"),
+              title: t("Success!"),
               type: TOAST_TYPE.SUCCESS,
-              message: t("label.create.success"),
+              message: t("Label created successfully"),
             });
           return labelResponse;
         } catch (error) {
-          let errMessage = t("label.create.failed");
+          let errMessage = t("Label creation failed");
           if (error && (error as any).error === "Label with the same name already exists in the project")
-            errMessage = t("label.create.already_exists");
+            errMessage = t("Label already exists");
 
           setToast({
-            title: t("toast.error"),
+            title: t("Error!"),
             type: TOAST_TYPE.ERROR,
             message: errMessage,
           });

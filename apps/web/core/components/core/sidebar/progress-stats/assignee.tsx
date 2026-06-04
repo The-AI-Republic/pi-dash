@@ -64,7 +64,7 @@ export const AssigneeStatComponent = observer(function AssigneeStatComponent(pro
                     <div className="h-4 w-4 rounded-full border-2 border-subtle bg-layer-1">
                       <img src={userImage} className="h-full w-full rounded-full object-cover" alt="User" />
                     </div>
-                    <span>{t("no_assignee")}</span>
+                    <span>{t("No assignee")}</span>
                   </div>
                 }
                 completed={assignee?.completed ?? 0}
@@ -77,7 +77,7 @@ export const AssigneeStatComponent = observer(function AssigneeStatComponent(pro
           <div className="flex h-20 w-20 items-center justify-center rounded-full bg-layer-1">
             <img src={emptyMembers} className="h-12 w-12 object-contain" alt="empty members" />
           </div>
-          <h6 className="text-14 text-tertiary">{t("no_assignee")}</h6>
+          <h6 className="text-14 text-tertiary">{t("No assignee")}</h6>
         </div>
       )}
     </div>

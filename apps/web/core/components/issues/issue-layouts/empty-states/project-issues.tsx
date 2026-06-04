@@ -38,11 +38,11 @@ export const ProjectEmptyState = observer(function ProjectEmptyState() {
       {projectWorkItemFilter?.hasActiveFilters ? (
         <EmptyStateDetailed
           assetKey="search"
-          title={t("common_empty_state.search.title")}
-          description={t("common_empty_state.search.description")}
+          title={t("No matching results.")}
+          description={t("No results found. Try adjusting your search terms.")}
           actions={[
             {
-              label: t("project_issues.empty_state.issues_empty_filter.secondary_button.text"),
+              label: t("Clear all filters"),
               onClick: projectWorkItemFilter?.clearFilters,
               disabled: !canPerformEmptyStateActions || !projectWorkItemFilter,
               variant: "secondary",
@@ -52,11 +52,11 @@ export const ProjectEmptyState = observer(function ProjectEmptyState() {
       ) : (
         <EmptyStateDetailed
           assetKey="work-item"
-          title={t("project_empty_state.work_items.title")}
-          description={t("project_empty_state.work_items.description")}
+          title={t("Start with your first work item.")}
+          description={t("Work items are the building blocks of your project — assign owners, set priorities, and track progress easily.")}
           actions={[
             {
-              label: t("project_empty_state.work_items.cta_primary"),
+              label: t("Create your first work item"),
               onClick: () => {
                 toggleCreateIssueModal(true, EIssuesStoreType.PROJECT);
               },

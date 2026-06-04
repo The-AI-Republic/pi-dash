@@ -35,7 +35,7 @@ export function AuthBanner(props: TAuthBanner) {
         type="button"
         className="relative ml-auto grid size-6 place-items-center rounded-xs text-accent-primary/80 transition-all hover:bg-accent-primary/20"
         onClick={() => handleBannerData?.(undefined)}
-        aria-label={t("aria_labels.auth_forms.close_alert")}
+        aria-label={t("Close alert")}
       >
         <CloseIcon className="size-4" />
       </button>

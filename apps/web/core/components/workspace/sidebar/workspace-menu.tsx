@@ -28,28 +28,28 @@ export const SidebarWorkspaceMenu = observer(function SidebarWorkspaceMenu() {
   const SIDEBAR_WORKSPACE_MENU_ITEMS = [
     {
       key: "projects",
-      labelTranslationKey: "sidebar.projects",
+      labelTranslationKey: "Projects",
       href: `/${workspaceSlug}/projects/`,
       access: [EUserWorkspaceRoles.ADMIN, EUserWorkspaceRoles.MEMBER, EUserWorkspaceRoles.GUEST],
       Icon: ProjectIcon,
     },
     {
       key: "views",
-      labelTranslationKey: "sidebar.views",
+      labelTranslationKey: "Views",
       href: `/${workspaceSlug}/workspace-views/all-issues/`,
       access: [EUserWorkspaceRoles.ADMIN, EUserWorkspaceRoles.MEMBER, EUserWorkspaceRoles.GUEST],
       Icon: ViewsIcon,
     },
     {
       key: "active-cycles",
-      labelTranslationKey: "sidebar.cycles",
+      labelTranslationKey: "Cycles",
       href: `/${workspaceSlug}/active-cycles/`,
       access: [EUserWorkspaceRoles.ADMIN, EUserWorkspaceRoles.MEMBER],
       Icon: CycleIcon,
     },
     {
       key: "analytics",
-      labelTranslationKey: "sidebar.analytics",
+      labelTranslationKey: "Analytics",
       href: `/${workspaceSlug}/analytics/`,
       access: [EUserWorkspaceRoles.ADMIN, EUserWorkspaceRoles.MEMBER],
       Icon: AnalyticsIcon,

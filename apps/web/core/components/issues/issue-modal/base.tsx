@@ -235,8 +235,8 @@ export const CreateUpdateIssueModalBase = observer(function CreateUpdateIssueMod
 
       setToast({
         type: TOAST_TYPE.SUCCESS,
-        title: t("success"),
-        message: `${is_draft_issue ? t("draft_created") : t("issue_created_successfully")} `,
+        title: t("Success"),
+        message: `${is_draft_issue ? t("Draft created") : t("Work item created successfully")} `,
         actionItems: !is_draft_issue && response?.project_id && (
           <CreateIssueToastActionItems
             workspaceSlug={workspaceSlug.toString()}
@@ -253,8 +253,8 @@ export const CreateUpdateIssueModalBase = observer(function CreateUpdateIssueMod
     } catch (error: any) {
       setToast({
         type: TOAST_TYPE.ERROR,
-        title: t("error"),
-        message: error?.error ?? t(is_draft_issue ? "draft_creation_failed" : "issue_creation_failed"),
+        title: t("Error"),
+        message: error?.error ?? t(is_draft_issue ? "Draft creation failed" : "Work item creation failed"),
       });
       throw error;
     }
@@ -342,8 +342,8 @@ export const CreateUpdateIssueModalBase = observer(function CreateUpdateIssueMod
 
       setToast({
         type: TOAST_TYPE.SUCCESS,
-        title: t("success"),
-        message: t("issue_updated_successfully"),
+        title: t("Success"),
+        message: t("Work item updated successfully"),
         actionItems:
           showActionItemsOnUpdate && payload.project_id ? (
             <CreateIssueToastActionItems
@@ -358,8 +358,8 @@ export const CreateUpdateIssueModalBase = observer(function CreateUpdateIssueMod
       console.error(error);
       setToast({
         type: TOAST_TYPE.ERROR,
-        title: t("error"),
-        message: error?.error ?? t("issue_could_not_be_updated"),
+        title: t("Error"),
+        message: error?.error ?? t("Work item could not be updated"),
       });
     }
   };

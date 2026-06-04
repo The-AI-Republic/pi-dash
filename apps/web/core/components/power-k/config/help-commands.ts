@@ -22,7 +22,7 @@ export const usePowerKHelpCommands = (): TPowerKCommandConfig[] => {
       id: "open_keyboard_shortcuts",
       type: "action",
       group: "help",
-      i18n_title: "power_k.help_actions.open_keyboard_shortcuts",
+      i18n_title: "Open keyboard shortcuts",
       icon: Rocket,
       modifierShortcut: "cmd+/",
       action: () => toggleShortcutsListModal(true),
@@ -34,7 +34,7 @@ export const usePowerKHelpCommands = (): TPowerKCommandConfig[] => {
       id: "open_pi_dash_documentation",
       type: "action",
       group: "help",
-      i18n_title: "power_k.help_actions.open_pi_dash_documentation",
+      i18n_title: "Open Pi Dash documentation",
       icon: FileText,
       action: () => {
         window.open("https://github.com/The-AI-Republic/pi-dash#readme", "_blank", "noopener,noreferrer");
@@ -47,7 +47,7 @@ export const usePowerKHelpCommands = (): TPowerKCommandConfig[] => {
       id: "join_forum",
       type: "action",
       group: "help",
-      i18n_title: "power_k.help_actions.join_forum",
+      i18n_title: "Join our Forum",
       icon: MessageSquare,
       action: () => {
         window.open("https://github.com/The-AI-Republic/pi-dash/discussions", "_blank", "noopener,noreferrer");
@@ -60,7 +60,7 @@ export const usePowerKHelpCommands = (): TPowerKCommandConfig[] => {
       id: "report_bug",
       type: "action",
       group: "help",
-      i18n_title: "power_k.help_actions.report_bug",
+      i18n_title: "Report a bug",
       icon: GithubIcon,
       action: () => {
         window.open("https://github.com/The-AI-Republic/pi-dash/issues/new/choose", "_blank", "noopener,noreferrer");

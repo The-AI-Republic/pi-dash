@@ -10,15 +10,15 @@ import type { TFilterConditionNodeForDisplay, TFilterValue, TWorkItemFilterPrope
 export const PROGRESS_STATS = [
   {
     key: "stat-states",
-    i18n_title: "common.states",
+    i18n_title: "States",
   },
   {
     key: "stat-assignees",
-    i18n_title: "common.assignees",
+    i18n_title: "Assignees",
   },
   {
     key: "stat-labels",
-    i18n_title: "common.labels",
+    i18n_title: "Labels",
   },
 ];
 

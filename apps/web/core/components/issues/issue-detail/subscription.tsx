@@ -56,18 +56,18 @@ export const IssueSubscription = observer(function IssueSubscription(props: TIss
       else await createSubscription(workspaceSlug, projectId, issueId);
       setToast({
         type: TOAST_TYPE.SUCCESS,
-        title: t("toast.success"),
+        title: t("Success!"),
         message: isSubscribed
-          ? t("issue.subscription.actions.unsubscribed")
-          : t("issue.subscription.actions.subscribed"),
+          ? t("Work item unsubscribed successfully")
+          : t("Work item subscribed successfully"),
       });
       setLoading(false);
     } catch {
       setLoading(false);
       setToast({
         type: TOAST_TYPE.ERROR,
-        title: t("toast.error"),
-        message: t("common.error.message"),
+        title: t("Error!"),
+        message: t("Some error occurred. Please try again."),
       });
     }
   };
@@ -91,12 +91,12 @@ export const IssueSubscription = observer(function IssueSubscription(props: TIss
       >
         {loading ? (
           <span>
-            <span className="hidden sm:block">{t("common.loading")}</span>
+            <span className="hidden sm:block">{t("Loading")}</span>
           </span>
         ) : isSubscribed ? (
-          <div className="hidden sm:block">{t("common.actions.unsubscribe")}</div>
+          <div className="hidden sm:block">{t("Unsubscribe")}</div>
         ) : (
-          <div className="hidden sm:block">{t("common.actions.subscribe")}</div>
+          <div className="hidden sm:block">{t("Subscribe")}</div>
         )}
       </Button>
     </div>

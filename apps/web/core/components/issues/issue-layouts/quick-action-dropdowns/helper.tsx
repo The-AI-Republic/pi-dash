@@ -160,7 +160,7 @@ export const useMenuItemFactory = (props: MenuItemFactoryProps) => {
 
   const createEditMenuItem = (customEditAction?: () => void): TContextMenuItem => ({
     key: "edit",
-    title: t("common.actions.edit"),
+    title: t("Edit"),
     icon: EditIcon,
     action:
       customEditAction ||
@@ -174,7 +174,7 @@ export const useMenuItemFactory = (props: MenuItemFactoryProps) => {
   const createCopyMenuItem = (workspaceSlug?: string): TContextMenuItem => {
     const baseItem = {
       key: "make-a-copy",
-      title: t("common.actions.make_a_copy"),
+      title: t("Make a copy"),
       icon: CopyIcon,
       action: () => {
         setCreateUpdateIssueModal(true);
@@ -193,14 +193,14 @@ export const useMenuItemFactory = (props: MenuItemFactoryProps) => {
 
   const createOpenInNewTabMenuItem = (): TContextMenuItem => ({
     key: "open-in-new-tab",
-    title: t("common.actions.open_in_new_tab"),
+    title: t("Open in new tab"),
     icon: NewTabIcon,
     action: actionHandlers.handleOpenInNewTab,
   });
 
   const createCopyLinkMenuItem = (): TContextMenuItem => ({
     key: "copy-link",
-    title: t("common.actions.copy_link"),
+    title: t("Copy link"),
     icon: LinkIcon,
     action: actionHandlers.handleCopyIssueLink,
   });
@@ -223,8 +223,8 @@ export const useMenuItemFactory = (props: MenuItemFactoryProps) => {
 
   const createArchiveMenuItem = (): TContextMenuItem => ({
     key: "archive",
-    title: t("common.actions.archive"),
-    description: isInArchivableGroup ? undefined : t("issue.archive.description"),
+    title: t("Archive"),
+    description: isInArchivableGroup ? undefined : t("Only completed or canceled\nwork items can be archived"),
     icon: ArchiveIcon,
     className: "items-start",
     iconClassName: "mt-1",
@@ -243,7 +243,7 @@ export const useMenuItemFactory = (props: MenuItemFactoryProps) => {
 
   const createDeleteMenuItem = (): TContextMenuItem => ({
     key: "delete",
-    title: t("common.actions.delete"),
+    title: t("Delete"),
     icon: TrashIcon,
     action: () => {
       setDeleteIssueModal(true);

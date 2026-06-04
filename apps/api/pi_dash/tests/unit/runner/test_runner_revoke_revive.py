@@ -2,20 +2,13 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 # See the LICENSE file for details.
 
-"""Tests for the runner revoke + revive web endpoints.
-
-These two endpoints close the gap left by ``RunnerInviteEndpoint``,
-which only ever creates a brand-new Runner row. ``revoke`` keeps the
-row visible while killing its credentials; ``revive`` mints a fresh
-enrollment token on the same row so the operator can re-enroll the
-daemon without losing pod / name / id continuity.
-"""
+"""Tests for runner revoke and disabled legacy revive endpoints."""
 
 from __future__ import annotations
 
 import pytest
 
-from pi_dash.runner.models import Pod, Runner, RunnerForceRefresh, RunnerStatus
+from pi_dash.runner.models import Pod, Runner, RunnerStatus
 from pi_dash.runner.services import tokens
 
 
@@ -54,9 +47,7 @@ def enrolled_runner(db, api_client, pending_runner):
 
 
 @pytest.mark.unit
-def test_revoke_keeps_row_and_marks_revoked(
-    db, session_client, enrolled_runner
-):
+def test_revoke_keeps_row_and_marks_revoked(db, session_client, enrolled_runner):
     resp = session_client.post(f"/api/runners/{enrolled_runner.id}/revoke/")
     assert resp.status_code == 200, resp.data
     assert resp.data["status"] == RunnerStatus.REVOKED
@@ -83,86 +74,42 @@ def test_revoke_404_for_unknown_runner(db, session_client):
 
 
 @pytest.mark.unit
-def test_revive_404_for_unknown_runner(db, session_client):
-    import uuid
-
-    resp = session_client.post(f"/api/runners/{uuid.uuid4()}/revive/")
-    assert resp.status_code == 404
+def test_invite_endpoint_is_disabled(db, session_client, workspace, project):
+    resp = session_client.post(
+        "/api/runners/invites/",
+        {"workspace": str(workspace.id), "project": project.identifier},
+        format="json",
+    )
+    assert resp.status_code == 410, resp.data
+    assert resp.data["error"] == "legacy_enrollment_disabled"
 
 
 @pytest.mark.unit
-def test_revive_pending_mints_new_enrollment_token(
-    db, session_client, pending_runner
-):
+def test_revive_endpoint_is_disabled_for_pending_runner(db, session_client, pending_runner):
     runner, original = pending_runner
-    original_hash = runner.enrollment_token_hash
     resp = session_client.post(f"/api/runners/{runner.id}/revive/")
-    assert resp.status_code == 201, resp.data
-    new_token = resp.data["enrollment_token"]
-    assert new_token and new_token != original.raw
+    assert resp.status_code == 410, resp.data
+    assert resp.data["error"] == "legacy_enrollment_disabled"
     runner.refresh_from_db()
-    assert runner.enrollment_token_hash != original_hash
-    assert runner.enrollment_token_hash == tokens.hash_token(new_token)
-    # Same row, same name — that's the whole point.
-    assert resp.data["runner_id"] == str(runner.id)
-    assert resp.data["name"] == runner.name
+    assert runner.enrollment_token_hash == original.hashed
 
 
 @pytest.mark.unit
-def test_revive_revoked_runner_resets_state(
-    db, api_client, session_client, enrolled_runner
-):
-    # Revoke first, then revive.
+def test_revive_endpoint_is_disabled_for_revoked_runner(db, session_client, enrolled_runner):
     revoke = session_client.post(f"/api/runners/{enrolled_runner.id}/revoke/")
     assert revoke.status_code == 200
     enrolled_runner.refresh_from_db()
-    assert enrolled_runner.refresh_token_hash != ""
     assert enrolled_runner.revoked_at is not None
 
     resp = session_client.post(f"/api/runners/{enrolled_runner.id}/revive/")
-    assert resp.status_code == 201, resp.data
+    assert resp.status_code == 410, resp.data
+    assert resp.data["error"] == "legacy_enrollment_disabled"
     enrolled_runner.refresh_from_db()
-    assert enrolled_runner.revoked_at is None
-    assert enrolled_runner.revoked_reason == ""
-    assert enrolled_runner.enrolled_at is None
-    assert enrolled_runner.refresh_token_hash == ""
-    assert enrolled_runner.refresh_token_generation == 0
-    assert enrolled_runner.status == RunnerStatus.OFFLINE
-
-    # And the freshly minted enrollment token actually works against the
-    # public enroll endpoint — meaning the same row gets re-enrolled
-    # rather than a new Runner being created.
-    new_token = resp.data["enrollment_token"]
-    enroll = api_client.post(
-        "/api/v1/runner/runners/enroll/",
-        {"enrollment_token": new_token, "host_label": "host-2"},
-        format="json",
-    )
-    assert enroll.status_code == 201, enroll.data
-    assert enroll.data["runner_id"] == str(enrolled_runner.id)
+    assert enrolled_runner.revoked_at is not None
 
 
 @pytest.mark.unit
-def test_revive_rejects_active_runner(db, session_client, enrolled_runner):
-    resp = session_client.post(f"/api/runners/{enrolled_runner.id}/revive/")
-    assert resp.status_code == 409, resp.data
-
-
-@pytest.mark.unit
-def test_revive_clears_force_refresh_directive(
-    db, session_client, enrolled_runner
-):
-    RunnerForceRefresh.objects.create(runner=enrolled_runner, min_rtg=99)
-    session_client.post(f"/api/runners/{enrolled_runner.id}/revoke/")
-    resp = session_client.post(f"/api/runners/{enrolled_runner.id}/revive/")
-    assert resp.status_code == 201
-    assert not RunnerForceRefresh.objects.filter(runner=enrolled_runner).exists()
-
-
-@pytest.mark.unit
-def test_revoke_forbidden_for_non_owner_non_admin(
-    db, api_client, create_user, enrolled_runner
-):
+def test_revoke_404_for_non_owner_private_runner(db, api_client, create_user, enrolled_runner):
     from pi_dash.db.models import User
 
     # ``username`` is unique; ``create_user`` already produced a user
@@ -174,22 +121,13 @@ def test_revoke_forbidden_for_non_owner_non_admin(
     )
     api_client.force_authenticate(user=other)
     resp = api_client.post(f"/api/runners/{enrolled_runner.id}/revoke/")
-    assert resp.status_code == 403
+    assert resp.status_code == 404
 
 
 @pytest.mark.unit
-def test_revive_forbidden_for_non_owner_non_admin(
-    db, api_client, pending_runner
-):
-    from pi_dash.db.models import User
+def test_revive_endpoint_is_disabled_for_unknown_runner(db, session_client):
+    import uuid
 
-    runner, _ = pending_runner
-    # Explicit username; the ``pending_runner`` fixture's ``create_user``
-    # already took the default empty-username slot on the unique key.
-    other = User.objects.create_user(
-        email="other-revive-forbidden@example.com",
-        username="other-revive-forbidden",
-    )
-    api_client.force_authenticate(user=other)
-    resp = api_client.post(f"/api/runners/{runner.id}/revive/")
-    assert resp.status_code == 403
+    resp = session_client.post(f"/api/runners/{uuid.uuid4()}/revive/")
+    assert resp.status_code == 410, resp.data
+    assert resp.data["error"] == "legacy_enrollment_disabled"

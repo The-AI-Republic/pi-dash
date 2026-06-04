@@ -96,7 +96,7 @@ export function AuthUniqueCodeForm(props: TAuthUniqueCodeForm) {
       {nextPath && <input type="hidden" value={nextPath} name="next_path" />}
       <div className="space-y-1">
         <label htmlFor="email" className="text-13 font-medium text-tertiary">
-          {t("auth.common.email.label")}
+          {t("Email")}
         </label>
         <div className={`relative flex items-center rounded-md border border-strong bg-surface-1`}>
           <Input
@@ -105,7 +105,7 @@ export function AuthUniqueCodeForm(props: TAuthUniqueCodeForm) {
             type="email"
             value={uniqueCodeFormData.email}
             onChange={(e) => handleFormChange("email", e.target.value)}
-            placeholder={t("auth.common.email.placeholder")}
+            placeholder={t("name@company.com")}
             className="h-10 w-full border-0 disable-autofill-style placeholder:text-placeholder"
             autoComplete="off"
             disabled
@@ -114,7 +114,7 @@ export function AuthUniqueCodeForm(props: TAuthUniqueCodeForm) {
             <button
               type="button"
               className="absolute right-3 grid size-5 place-items-center"
-              aria-label={t("aria_labels.auth_forms.clear_email")}
+              aria-label={t("Clear email")}
               onClick={handleEmailClear}
             >
               <XCircle className="size-5 stroke-placeholder" />
@@ -125,14 +125,14 @@ export function AuthUniqueCodeForm(props: TAuthUniqueCodeForm) {
 
       <div className="space-y-1">
         <label htmlFor="unique-code" className="text-13 font-medium text-tertiary">
-          {t("auth.common.unique_code.label")}
+          {t("Unique code")}
         </label>
         <Input
           name="code"
           id="unique-code"
           value={uniqueCodeFormData.code}
           onChange={(e) => handleFormChange("code", e.target.value)}
-          placeholder={t("auth.common.unique_code.placeholder")}
+          placeholder={t("123456")}
           className="h-10 w-full border border-strong !bg-surface-1 pr-12 disable-autofill-style placeholder:text-placeholder"
           autoComplete="off"
           autoFocus
@@ -140,7 +140,7 @@ export function AuthUniqueCodeForm(props: TAuthUniqueCodeForm) {
         <div className="flex w-full items-center justify-between px-1 pt-1 text-11">
           <p className="flex items-center gap-1 font-medium text-success-primary">
             <CircleCheck height={12} width={12} />
-            {t("auth.common.unique_code.paste_code")}
+            {t("Paste the code sent to your email")}
           </p>
           <button
             type="button"
@@ -153,10 +153,10 @@ export function AuthUniqueCodeForm(props: TAuthUniqueCodeForm) {
             disabled={isRequestNewCodeDisabled}
           >
             {resendTimerCode > 0
-              ? t("auth.common.resend_in", { seconds: resendTimerCode })
+              ? t("Resend in {seconds} seconds", { seconds: resendTimerCode })
               : isRequestingNewCode
-                ? t("auth.common.unique_code.requesting_new_code")
-                : t("common.resend")}
+                ? t("Requesting new code")
+                : t("Resend")}
           </button>
         </div>
       </div>
@@ -164,11 +164,11 @@ export function AuthUniqueCodeForm(props: TAuthUniqueCodeForm) {
       <div className="space-y-2.5">
         <Button type="submit" variant="primary" className="w-full" size="xl" disabled={isButtonDisabled}>
           {isRequestingNewCode ? (
-            t("auth.common.unique_code.sending_code")
+            t("Sending code")
           ) : isSubmitting ? (
             <Spinner height="20px" width="20px" />
           ) : (
-            t("common.continue")
+            t("Continue")
           )}
         </Button>
       </div>

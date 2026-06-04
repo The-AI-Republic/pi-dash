@@ -55,22 +55,22 @@ export const PageNavigationPaneInfoTabDocumentInfo = observer(function PageNavig
     () => [
       {
         key: "words-count",
-        title: t("page_navigation_pane.tabs.info.document_info.words"),
+        title: t("Words"),
         info: documentInfo.words,
       },
       {
         key: "characters-count",
-        title: t("page_navigation_pane.tabs.info.document_info.characters"),
+        title: t("Characters"),
         info: documentInfo.characters,
       },
       {
         key: "paragraphs-count",
-        title: t("page_navigation_pane.tabs.info.document_info.paragraphs"),
+        title: t("Paragraphs"),
         info: documentInfo.paragraphs,
       },
       {
         key: "read-time",
-        title: t("page_navigation_pane.tabs.info.document_info.read_time"),
+        title: t("Read time"),
         info: secondsToReadableTime(),
       },
     ],

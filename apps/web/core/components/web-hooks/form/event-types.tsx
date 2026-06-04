@@ -16,11 +16,11 @@ type Props = {
 const WEBHOOK_EVENT_TYPES: { key: TWebhookEventTypes; i18n_label: string }[] = [
   {
     key: "all",
-    i18n_label: "workspace_settings.settings.webhooks.options.all",
+    i18n_label: "Send me everything",
   },
   {
     key: "individual",
-    i18n_label: "workspace_settings.settings.webhooks.options.individual",
+    i18n_label: "Select individual events",
   },
 ];
 
@@ -30,7 +30,7 @@ export function WebhookOptions(props: Props) {
 
   return (
     <>
-      <h6 className="text-13 font-medium">{t("workspace_settings.settings.webhooks.modal.question")}</h6>
+      <h6 className="text-13 font-medium">{t("Which events would you like to trigger this webhook?")}</h6>
       <div className="space-y-3">
         {WEBHOOK_EVENT_TYPES.map((option) => (
           <div key={option.key} className="flex items-center gap-2">

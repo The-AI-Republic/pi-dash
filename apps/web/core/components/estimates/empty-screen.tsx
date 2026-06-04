@@ -29,7 +29,7 @@ export function EstimateEmptyScreen(props: TEstimateEmptyScreen) {
       assetPath={resolvedPath}
       className="w-full p-0!"
       primaryButton={{
-        text: t("project_settings.empty_state.estimates.primary_button"),
+        text: t("Add estimate system"),
         onClick: () => {
           onButtonClick();
         },

@@ -141,14 +141,6 @@ pidash runner add --project <project-id>
 
 `pidash auth login` prompts to add a runner inline when no runner exists yet, so a fresh dev laptop can be onboarded with a single command. Add more runners later with `pidash runner add --project <other-project-id>`.
 
-For headless / scripted hosts where the browser flow is awkward, the legacy enrollment-token paste still works:
-
-```bash
-pidash connect --url https://your-pidash-instance.com --token <ONE_TIME_TOKEN>
-```
-
-Generate `<ONE_TIME_TOKEN>` from the "Add connection" button in the web UI.
-
 The runner daemon runs in the background, polls for assigned tasks, dispatches them to your AI agent, and reports results back to the platform.
 
 Useful commands:

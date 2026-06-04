@@ -42,8 +42,8 @@ export const TopNavigationRoot = observer(function TopNavigationRoot() {
     !pathname?.startsWith(`/${workspaceSlugString}/settings`) &&
     !pathname?.startsWith(`/${workspaceSlugString}/notifications`);
   const sidebarToggleTooltip = sidebarCollapsed
-    ? t("aria_labels.projects_sidebar.expand_sidebar")
-    : t("aria_labels.projects_sidebar.collapse_sidebar");
+    ? t("Expand sidebar")
+    : t("Collapse sidebar");
 
   // Fetch notification count
   useSWR(

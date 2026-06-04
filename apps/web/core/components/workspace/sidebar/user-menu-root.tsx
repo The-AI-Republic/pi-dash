@@ -48,8 +48,8 @@ export const UserMenuRoot = observer(function UserMenuRoot({ variant = "compact"
     signOut().catch(() =>
       setToast({
         type: TOAST_TYPE.ERROR,
-        title: t("auth.sign_out.toast.error.title"),
-        message: t("auth.sign_out.toast.error.message"),
+        title: t("Error!"),
+        message: t("Failed to sign out. Please try again."),
       })
     );
   };
@@ -168,7 +168,7 @@ export const UserMenuRoot = observer(function UserMenuRoot({ variant = "compact"
             className="flex items-center gap-2"
           >
             <Settings className="size-3.5 shrink-0" />
-            {t("settings")}
+            {t("Settings")}
           </CustomMenu.MenuItem>
           <CustomMenu.MenuItem
             onClick={() =>
@@ -180,23 +180,23 @@ export const UserMenuRoot = observer(function UserMenuRoot({ variant = "compact"
             className="flex items-center gap-2"
           >
             <Settings2 className="size-3.5 shrink-0" />
-            {t("preferences")}
+            {t("Preferences")}
           </CustomMenu.MenuItem>
         </div>
         <CustomMenu.MenuItem onClick={() => setIsCommunityModalOpen(true)} className="flex items-center gap-2">
           <Globe className="size-3.5 shrink-0" />
-          {t("sidebar.community")}
+          {t("Community")}
         </CustomMenu.MenuItem>
         <CustomMenu.MenuItem onClick={handleSignOut} className="flex items-center gap-2">
           <LogOut className="size-3.5 shrink-0" />
-          {t("sign_out")}
+          {t("Sign out")}
         </CustomMenu.MenuItem>
         {isUserInstanceAdmin && (
           <CustomMenu.MenuItem
             onClick={() => router.push(GOD_MODE_URL)}
             className="bg-accent-primary/20 text-accent-primary hover:bg-accent-primary/30 hover:text-accent-secondary"
           >
-            {t("enter_god_mode")}
+            {t("Enter god mode")}
           </CustomMenu.MenuItem>
         )}
       </CustomMenu>

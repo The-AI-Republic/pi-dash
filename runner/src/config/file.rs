@@ -253,13 +253,14 @@ mod tests {
             version: 2,
             daemon: DaemonConfig {
                 cloud_url: "https://x".into(),
+                dev_machine_id: None,
                 log_level: "info".into(),
                 log_retention_days: 14,
                 agent_observability_v1: false,
                 auto_update: true,
             },
             runners: vec![sample_runner("t", tmp.path().join("wd"))],
-            cli: None,
+        cli: None,
         };
         write_config(&paths, &cfg).unwrap();
         let loaded = load_config(&paths).unwrap();
@@ -480,6 +481,7 @@ model_default = "o4-mini"
             version: 2,
             daemon: DaemonConfig {
                 cloud_url: "https://x".into(),
+                dev_machine_id: None,
                 log_level: "info".into(),
                 log_retention_days: 14,
                 agent_observability_v1: false,
@@ -527,6 +529,7 @@ model_default = "o4-mini"
             version: 2,
             daemon: DaemonConfig {
                 cloud_url: "https://x".into(),
+                dev_machine_id: None,
                 log_level: "info".into(),
                 log_retention_days: 14,
                 agent_observability_v1: false,
@@ -562,6 +565,7 @@ model_default = "o4-mini"
             version: 2,
             daemon: DaemonConfig {
                 cloud_url: "https://x".into(),
+                dev_machine_id: None,
                 log_level: "info".into(),
                 log_retention_days: 14,
                 agent_observability_v1: false,
@@ -600,6 +604,7 @@ model_default = "o4-mini"
             version: 2,
             daemon: DaemonConfig {
                 cloud_url: "https://x".into(),
+                dev_machine_id: None,
                 log_level: "info".into(),
                 log_retention_days: 14,
                 agent_observability_v1: false,
@@ -609,7 +614,7 @@ model_default = "o4-mini"
                 sample_runner("a", tmp.path().join("wd-a")),
                 sample_runner("b", tmp.path().join("wd-b")),
             ],
-        cli: None,
+            cli: None,
         };
         write_config(&paths, &cfg).unwrap();
 

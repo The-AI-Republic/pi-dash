@@ -79,18 +79,18 @@ export const SchedulerFormModal = observer(function SchedulerFormModal(props: Pr
     <ModalCore isOpen={isOpen} handleClose={onClose} position={EModalPosition.CENTER} width={EModalWidth.XXL}>
       <form onSubmit={handleSubmit(handleFormSubmit)} className="flex flex-col gap-5 p-5">
         <div className="text-18 font-medium text-primary">
-          {isEdit ? t("schedulers.form.edit_title") : t("schedulers.form.create_title")}
+          {isEdit ? t("Edit scheduler") : t("New scheduler")}
         </div>
 
         <div className="flex flex-col gap-1">
           <label htmlFor="scheduler-slug" className="text-13 font-medium text-primary">
-            {t("schedulers.form.slug_label")}
+            {t("Slug")}
           </label>
           <Controller
             control={control}
             name="slug"
             rules={{
-              required: t("schedulers.form.errors.slug_required"),
+              required: t("Slug is required."),
               pattern: {
                 value: SLUG_PATTERN,
                 message: "Use lowercase letters, numbers, and dashes only.",
@@ -106,23 +106,23 @@ export const SchedulerFormModal = observer(function SchedulerFormModal(props: Pr
                 ref={ref}
                 disabled={isEdit}
                 hasError={Boolean(errors.slug)}
-                placeholder={t("schedulers.form.slug_placeholder")}
+                placeholder={t("security-audit")}
                 className="w-full"
               />
             )}
           />
-          <p className="text-12 text-secondary">{t("schedulers.form.slug_help")}</p>
+          <p className="text-12 text-secondary">{t("Lowercase identifier used in URLs. Cannot be changed after creation.")}</p>
           {errors.slug?.message && <p className="text-12 text-danger-primary">{errors.slug.message}</p>}
         </div>
 
         <div className="flex flex-col gap-1">
           <label htmlFor="scheduler-name" className="text-13 font-medium text-primary">
-            {t("schedulers.form.name_label")}
+            {t("Name")}
           </label>
           <Controller
             control={control}
             name="name"
-            rules={{ required: t("schedulers.form.errors.name_required") }}
+            rules={{ required: t("Name is required.") }}
             render={({ field: { value, onChange, ref } }) => (
               <Input
                 id="scheduler-name"
@@ -132,7 +132,7 @@ export const SchedulerFormModal = observer(function SchedulerFormModal(props: Pr
                 onChange={onChange}
                 ref={ref}
                 hasError={Boolean(errors.name)}
-                placeholder={t("schedulers.form.name_placeholder")}
+                placeholder={t("Security audit")}
                 className="w-full"
               />
             )}
@@ -142,7 +142,7 @@ export const SchedulerFormModal = observer(function SchedulerFormModal(props: Pr
 
         <div className="flex flex-col gap-1">
           <label htmlFor="scheduler-description" className="text-13 font-medium text-primary">
-            {t("schedulers.form.description_label")}
+            {t("Description")}
           </label>
           <Controller
             control={control}
@@ -154,7 +154,7 @@ export const SchedulerFormModal = observer(function SchedulerFormModal(props: Pr
                 value={value}
                 onChange={onChange}
                 ref={ref}
-                placeholder={t("schedulers.form.description_placeholder")}
+                placeholder={t("Short summary shown in the install picker.")}
                 className="min-h-[60px] w-full"
               />
             )}
@@ -163,12 +163,12 @@ export const SchedulerFormModal = observer(function SchedulerFormModal(props: Pr
 
         <div className="flex flex-col gap-1">
           <label htmlFor="scheduler-prompt" className="text-13 font-medium text-primary">
-            {t("schedulers.form.prompt_label")}
+            {t("Prompt")}
           </label>
           <Controller
             control={control}
             name="prompt"
-            rules={{ required: t("schedulers.form.errors.prompt_required") }}
+            rules={{ required: t("Prompt is required.") }}
             render={({ field: { value, onChange, ref } }) => (
               <TextArea
                 id="scheduler-prompt"
@@ -177,17 +177,17 @@ export const SchedulerFormModal = observer(function SchedulerFormModal(props: Pr
                 onChange={onChange}
                 ref={ref}
                 hasError={Boolean(errors.prompt)}
-                placeholder={t("schedulers.form.prompt_placeholder")}
+                placeholder={t("Look for outstanding security issues in this project…")}
                 className="font-mono min-h-[180px] w-full text-13"
               />
             )}
           />
-          <p className="text-12 text-secondary">{t("schedulers.form.prompt_help")}</p>
+          <p className="text-12 text-secondary">{t("The base prompt the agent runs each tick. Per-project context is appended at install time, so keep this prompt project-agnostic.")}</p>
           {errors.prompt?.message && <p className="text-12 text-danger-primary">{errors.prompt.message}</p>}
         </div>
 
         <div className="flex flex-col gap-2">
-          <span className="text-13 font-medium text-primary">{t("schedulers.form.color_label")}</span>
+          <span className="text-13 font-medium text-primary">{t("Color")}</span>
           <Controller
             control={control}
             name="color"
@@ -210,13 +210,13 @@ export const SchedulerFormModal = observer(function SchedulerFormModal(props: Pr
               </div>
             )}
           />
-          <p className="text-12 text-secondary">{t("schedulers.form.color_help")}</p>
+          <p className="text-12 text-secondary">{t("Used to color this scheduler's blocks on the project calendar.")}</p>
         </div>
 
         <div className="flex items-start justify-between gap-4">
           <div className="flex flex-col">
-            <span className="text-13 font-medium text-primary">{t("schedulers.form.enabled_label")}</span>
-            <span className="text-12 text-secondary">{t("schedulers.form.enabled_help")}</span>
+            <span className="text-13 font-medium text-primary">{t("Enabled")}</span>
+            <span className="text-12 text-secondary">{t("Disabled schedulers cannot be installed on new projects, and existing bindings will not fire.")}</span>
           </div>
           <Controller
             control={control}
@@ -227,16 +227,16 @@ export const SchedulerFormModal = observer(function SchedulerFormModal(props: Pr
 
         <div className="flex items-center justify-end gap-3 border-t border-subtle pt-4">
           <Button variant="secondary" onClick={onClose} disabled={isSubmitting} type="button">
-            {t("schedulers.form.cancel")}
+            {t("Cancel")}
           </Button>
           <Button variant="primary" type="submit" loading={isSubmitting} disabled={isSubmitting}>
             {isEdit
               ? isSubmitting
-                ? t("schedulers.form.saving")
-                : t("schedulers.form.save")
+                ? t("Saving…")
+                : t("Save")
               : isSubmitting
-                ? t("schedulers.form.creating")
-                : t("schedulers.form.create")}
+                ? t("Creating…")
+                : t("Create scheduler")}
           </Button>
         </div>
       </form>

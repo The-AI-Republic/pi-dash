@@ -102,16 +102,16 @@ export const CreateEstimateModal = observer(function CreateEstimateModal(props: 
         setButtonLoader(false);
         setToast({
           type: TOAST_TYPE.SUCCESS,
-          title: t("project_settings.estimates.toasts.created.success.title"),
-          message: t("project_settings.estimates.toasts.created.success.message"),
+          title: t("Estimate created"),
+          message: t("The estimate has been created successfully"),
         });
         handleClose();
       } catch {
         setButtonLoader(false);
         setToast({
           type: TOAST_TYPE.ERROR,
-          title: t("project_settings.estimates.toasts.created.error.title"),
-          message: t("project_settings.estimates.toasts.created.error.message"),
+          title: t("Estimate creation failed"),
+          message: t("We were unable to create the new estimate, please try again."),
         });
       }
     } else {
@@ -126,7 +126,7 @@ export const CreateEstimateModal = observer(function CreateEstimateModal(props: 
             delete newError[currentKey];
           } else {
             newError[currentKey].message =
-              newError[currentKey].message || t("project_settings.estimates.validation.remove_empty");
+              newError[currentKey].message || t("Estimate can't be empty. Enter a value in each field or remove those you don't have values for.");
           }
         });
         return newError;
@@ -158,10 +158,10 @@ export const CreateEstimateModal = observer(function CreateEstimateModal(props: 
                 <ChevronLeftIcon className="h-4 w-4" />
               </div>
             )}
-            <div className="text-18 font-medium text-primary">{t("project_settings.estimates.new")}</div>
+            <div className="text-18 font-medium text-primary">{t("New estimate system")}</div>
           </div>
           <div className="text-gray-400 text-11">
-            {t("project_settings.estimates.create.step", {
+            {t("Step {step} of {total}", {
               step: renderEstimateStepsCount,
               total: 2,
             })}
@@ -201,11 +201,11 @@ export const CreateEstimateModal = observer(function CreateEstimateModal(props: 
 
         <div className="relative flex items-center justify-end gap-3 border-t border-subtle px-5 pt-5">
           <Button variant="secondary" size="lg" onClick={handleClose} disabled={buttonLoader}>
-            {t("common.cancel")}
+            {t("Cancel")}
           </Button>
           {estimatePoints && (
             <Button variant="primary" size="lg" onClick={handleCreateEstimate} disabled={buttonLoader}>
-              {buttonLoader ? t("common.creating") : t("project_settings.estimates.create.label")}
+              {buttonLoader ? t("Creating") : t("Create estimate")}
             </Button>
           )}
         </div>

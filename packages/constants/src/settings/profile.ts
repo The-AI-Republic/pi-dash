@@ -17,6 +17,11 @@ export const PROFILE_SETTINGS_CATEGORIES: PROFILE_SETTINGS_CATEGORY[] = [
   PROFILE_SETTINGS_CATEGORY.DEVELOPER,
 ];
 
+export const PROFILE_SETTINGS_CATEGORY_I18N_LABELS: Record<PROFILE_SETTINGS_CATEGORY, string> = {
+  [PROFILE_SETTINGS_CATEGORY.YOUR_PROFILE]: "Your profile",
+  [PROFILE_SETTINGS_CATEGORY.DEVELOPER]: "Developer",
+};
+
 export const PROFILE_SETTINGS: Record<
   TProfileSettingsTabs,
   {
@@ -26,27 +31,27 @@ export const PROFILE_SETTINGS: Record<
 > = {
   general: {
     key: "general",
-    i18n_label: "profile.actions.profile",
+    i18n_label: "Profile",
   },
   security: {
     key: "security",
-    i18n_label: "profile.actions.security",
+    i18n_label: "Security",
   },
   activity: {
     key: "activity",
-    i18n_label: "profile.actions.activity",
+    i18n_label: "Activity",
   },
   preferences: {
     key: "preferences",
-    i18n_label: "profile.actions.preferences",
+    i18n_label: "Preferences",
   },
   notifications: {
     key: "notifications",
-    i18n_label: "profile.actions.notifications",
+    i18n_label: "Notifications",
   },
   "api-tokens": {
     key: "api-tokens",
-    i18n_label: "profile.actions.api-tokens",
+    i18n_label: "Personal Access Tokens",
   },
 };
 
