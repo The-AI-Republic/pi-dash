@@ -64,6 +64,7 @@ export const CommentCard = observer(function CommentCard(props: Props) {
     editorRef.current?.setEditorValue(formData.comment_html);
     showEditorRef.current?.setEditorValue(formData.comment_html);
   };
+  const agentSpeakerLabel = comment.speaker_type === "agent" ? comment.speaker_label?.trim() || "AI Agent" : undefined;
 
   return (
     <div className="relative flex items-start space-x-3">
@@ -152,6 +153,11 @@ export const CommentCard = observer(function CommentCard(props: Props) {
             </div>
           </form>
           <div className={`${isEditing ? "hidden" : ""}`}>
+            {agentSpeakerLabel ? (
+              <div className="px-3 pt-1 text-12 text-primary">
+                <span className="font-medium">{agentSpeakerLabel}:</span>
+              </div>
+            ) : null}
             <LiteTextEditor
               editable={false}
               anchor={anchor}

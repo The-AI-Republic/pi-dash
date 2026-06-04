@@ -40,24 +40,44 @@ def _absolute_issue_url(issue: Issue) -> str:
     return f"/{ws}/projects/{issue.project_id}/issues/{issue.id}" if ws else ""
 
 
-def _comment_author_label(actor) -> str:
-    """Render an audience-friendly author label for a comment.
-
-    Bot comments are flattened to a single ``Pi Dash Agent`` label so the
-    agent reading its own prior posts immediately recognizes them as
-    self-authored. Humans get display name → email → username, falling
-    back to "Unknown user" rather than leaking ``None``.
-    """
+def _actor_label(actor) -> str:
     if actor is None:
         return "Unknown"
-    if getattr(actor, "is_bot", False):
-        return "Pi Dash Agent"
     return (
         getattr(actor, "display_name", None)
         or getattr(actor, "email", None)
         or getattr(actor, "username", None)
         or "Unknown user"
     )
+
+
+def _comment_author_label(comment) -> str:
+    """Render an audience-friendly speaker label for a comment.
+
+    Bot comments are flattened to a single ``Pi Dash Agent`` label so the
+    agent reading its own prior posts immediately recognizes them as
+    self-authored. Explicit speaker metadata wins over the authenticated
+    actor because agent CLI comments may be submitted with a human token.
+    """
+    actor = comment.actor
+    speaker_type = getattr(comment, "speaker_type", None) or "human"
+    speaker_label = (getattr(comment, "speaker_label", None) or "").strip()
+    actor_label = _actor_label(actor)
+
+    if speaker_type == "agent":
+        label = speaker_label or "AI Agent"
+        if actor is not None and not getattr(actor, "is_bot", False):
+            return f"AI agent: {label} (submitted by {actor_label})"
+        return f"AI agent: {label}"
+    if speaker_type == "system":
+        return f"System: {speaker_label or 'Pi Dash'}"
+    if speaker_type == "integration":
+        return f"Integration: {speaker_label or actor_label}"
+    if actor is None:
+        return "Unknown"
+    if getattr(actor, "is_bot", False):
+        return "AI agent: Pi Dash Agent"
+    return f"Human: {actor_label}"
 
 
 def _comments_section(issue: Issue) -> str:
@@ -83,11 +103,15 @@ def _comments_section(issue: Issue) -> str:
         if not body:
             continue
         index += 1
-        author = _comment_author_label(comment.actor)
+        author = _comment_author_label(comment)
         timestamp = (
             comment.created_at.isoformat() if comment.created_at else "unknown time"
         )
-        parts.append(f"### Comment {index} — {author} at {timestamp}\n\n{body}")
+        run_id = getattr(comment, "speaker_agent_run_id", None)
+        run_line = f"\nAgent run: {run_id}" if run_id else ""
+        parts.append(
+            f"### Comment {index} — {author} at {timestamp}{run_line}\n\n{body}"
+        )
     if not parts:
         return "(no comments on this issue yet)"
     return "\n\n".join(parts)

@@ -340,13 +340,15 @@ pidash comment list ENG-42
 Post a new comment.
 
 ```
-pidash comment add ENG-42 (--body <BODY> | --body-file <PATH>)
+pidash comment add ENG-42 (--body <BODY> | --body-file <PATH>) [--as-agent <NAME>] [--agent-run-id <UUID>]
 ```
 
-| Flag                 | Purpose                                |
-| -------------------- | -------------------------------------- |
-| `--body <B>`         | Comment body (plain text or markdown). |
-| `--body-file <PATH>` | Read body from file.                   |
+| Flag                    | Purpose                                                                 |
+| ----------------------- | ----------------------------------------------------------------------- |
+| `--body <B>`            | Comment body (plain text or markdown).                                  |
+| `--body-file <PATH>`    | Read body from file.                                                    |
+| `--as-agent <NAME>`     | Mark the comment as spoken by an AI agent with this display name.       |
+| `--agent-run-id <UUID>` | Record the Pi Dash agent run UUID that produced the agent-spoken reply. |
 
 ### `pidash comment update <IDENTIFIER> <COMMENT_UUID>`
 

@@ -517,6 +517,12 @@ class IssueActivity(ProjectBaseModel):
 
 
 class IssueComment(ChangeTrackerMixin, ProjectBaseModel):
+    class SpeakerType(models.TextChoices):
+        HUMAN = "human", "Human"
+        AGENT = "agent", "Agent"
+        SYSTEM = "system", "System"
+        INTEGRATION = "integration", "Integration"
+
     comment_stripped = models.TextField(verbose_name="Comment", blank=True)
     comment_json = models.JSONField(blank=True, default=dict)
     comment_html = models.TextField(blank=True, default="<p></p>")
@@ -539,6 +545,15 @@ class IssueComment(ChangeTrackerMixin, ProjectBaseModel):
     )
     external_source = models.CharField(max_length=255, null=True, blank=True)
     external_id = models.CharField(max_length=255, blank=True, null=True)
+    # Conversation attribution. ``actor`` remains the authenticated principal
+    # for audit; these fields say whose message this is in the issue thread.
+    speaker_type = models.CharField(
+        max_length=32,
+        choices=SpeakerType.choices,
+        default=SpeakerType.HUMAN,
+    )
+    speaker_label = models.CharField(max_length=128, blank=True, default="")
+    speaker_agent_run_id = models.UUIDField(null=True, blank=True)
     edited_at = models.DateTimeField(null=True, blank=True)
     parent = models.ForeignKey(
         "self", on_delete=models.CASCADE, null=True, blank=True, related_name="parent_issue_comment"

@@ -67,6 +67,7 @@ export const CommentCardDisplay = observer(function CommentCardDisplay(props: TC
     ? comment?.actor_detail?.first_name + `Bot`
     : (userDetails?.display_name ?? comment?.actor_detail?.display_name);
   const avatarUrl = userDetails?.avatar_url ?? comment?.actor_detail?.avatar_url;
+  const agentSpeakerLabel = comment.speaker_type === "agent" ? comment.speaker_label?.trim() || "AI Agent" : undefined;
 
   const userReactions = activityOperations.userReactions(comment.id);
 
@@ -160,6 +161,11 @@ export const CommentCardDisplay = observer(function CommentCardDisplay(props: TC
         />
       ) : (
         <>
+          {agentSpeakerLabel ? (
+            <div className="px-3 pt-1 text-body-sm-regular text-primary">
+              <span className="font-medium">{agentSpeakerLabel}:</span>
+            </div>
+          ) : null}
           <LiteTextEditor
             editable={false}
             ref={readOnlyEditorRef}
