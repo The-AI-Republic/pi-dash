@@ -21,7 +21,6 @@ import { useProject } from "@/hooks/store/use-project";
 // pi dash web components
 import { HomePageHeader } from "@/pi-dash-web/components/home/header";
 // local imports
-import { StickiesWidget } from "../stickies/widget";
 import { HomeLoader, NoProjectsEmptyState, RecentActivityWidget } from "./widgets";
 import { DashboardQuickLinks } from "./widgets/links";
 import { ManageWidgetsModal } from "./widgets/manage";
@@ -44,7 +43,7 @@ export const HOME_WIDGETS_LIST: {
     title: "Recents",
   },
   my_stickies: {
-    component: StickiesWidget,
+    component: null,
     fullWidth: false,
     title: "Your stickies",
   },

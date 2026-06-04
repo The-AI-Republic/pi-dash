@@ -25,7 +25,6 @@ type TCustomizeNavigationDialogProps = {
 };
 
 const PERSONAL_ITEMS: Array<{ key: TPersonalNavigationItemKey; labelTranslationKey: string }> = [
-  { key: "stickies", labelTranslationKey: "Stickies" },
   { key: "your_work", labelTranslationKey: "Your work" },
   { key: "drafts", labelTranslationKey: "Drafts" },
 ];
