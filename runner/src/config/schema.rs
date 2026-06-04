@@ -264,7 +264,7 @@ impl AgentKind {
         match self {
             AgentKind::Codex => "https://github.com/openai/codex",
             AgentKind::ClaudeCode => "https://docs.claude.com/en/docs/claude-code/setup",
-            AgentKind::CursorAgent => "https://docs.cursor.com/en/cli/overview",
+            AgentKind::CursorAgent => "https://cursor.com/download",
         }
     }
 }
