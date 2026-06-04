@@ -6,22 +6,15 @@
 
 import { observer } from "mobx-react";
 import { ArrowLeft, MessageSquare } from "lucide-react";
-import { Link, useParams } from "react-router";
+import { Link, useNavigate, useParams } from "react-router";
 import useSWR from "swr";
 import { useTranslation } from "@pi-dash/i18n";
 import { getRunnerDetail } from "@pi-dash/services";
-import type { IRunner, TRunnerStatus } from "@pi-dash/types";
-import type { TBadgeVariant } from "@pi-dash/ui";
+import type { IRunner } from "@pi-dash/types";
 import { Badge, Button } from "@pi-dash/ui";
 import { PageHead } from "@/components/core/page-title";
 import { RunnerAgentStatusPanel } from "@/components/runners/runner-agent-status-panel";
-
-const STATUS_BADGE_VARIANT: Record<TRunnerStatus, TBadgeVariant> = {
-  online: "accent-success",
-  busy: "accent-primary",
-  offline: "accent-neutral",
-  revoked: "accent-warning",
-};
+import { RUNNER_STATUS_I18N_LABELS, STATUS_BADGE_VARIANT } from "@/components/runners/runner-status";
 
 function formatDateTime(ts: string | null): string {
   if (!ts) return "—";
@@ -41,6 +34,7 @@ function MetaRow({ label, children }: { label: string; children: React.ReactNode
 const RunnerDetailPage = observer(function RunnerDetailPage() {
   const { workspaceSlug, runnerId } = useParams<{ workspaceSlug: string; runnerId: string }>();
   const { t } = useTranslation();
+  const navigate = useNavigate();
   const base = `/${workspaceSlug}/runners`;
 
   const {
@@ -61,16 +55,14 @@ const RunnerDetailPage = observer(function RunnerDetailPage() {
           <span>{t("Back to runners")}</span>
         </Link>
         {runner && (
-          <Link to={`${base}/chat/${runner.id}`}>
-            <Button variant="neutral-primary" size="sm">
-              <MessageSquare className="mr-1.5 size-4" />
-              {t("Open chat")}
-            </Button>
-          </Link>
+          <Button variant="neutral-primary" size="sm" onClick={() => navigate(`${base}/chat/${runner.id}`)}>
+            <MessageSquare className="mr-1.5 size-4" />
+            {t("Open chat")}
+          </Button>
         )}
       </div>
 
-      {error ? (
+      {error && !runner ? (
         <div className="text-destructive rounded-md border border-subtle p-4 text-13">{t("Failed to load runner")}</div>
       ) : isLoading || !runner ? (
         <div className="rounded-md border border-subtle p-4 text-13 text-secondary">{t("Loading…")}</div>
@@ -80,7 +72,7 @@ const RunnerDetailPage = observer(function RunnerDetailPage() {
             <div className="flex items-center gap-3">
               <h1 className="font-mono text-15 font-semibold break-all text-primary">{runner.name}</h1>
               <Badge variant={STATUS_BADGE_VARIANT[runner.status]} size="sm">
-                {t(runner.status)}
+                {t(RUNNER_STATUS_I18N_LABELS[runner.status])}
               </Badge>
             </div>
           </section>

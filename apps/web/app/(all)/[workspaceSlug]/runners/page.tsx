@@ -7,37 +7,23 @@
 import { useState } from "react";
 import { observer } from "mobx-react";
 import { HelpCircle, Plus } from "lucide-react";
-import { Link } from "react-router";
+import { useNavigate } from "react-router";
 import useSWR from "swr";
 import { useTranslation } from "@pi-dash/i18n";
 import { TOAST_TYPE, setToast } from "@pi-dash/propel/toast";
 import { PodService, RunnerService } from "@pi-dash/services";
-import type { IPod, IRunner, TRunnerStatus } from "@pi-dash/types";
-import type { TBadgeVariant } from "@pi-dash/ui";
+import type { IPod, IRunner } from "@pi-dash/types";
 import { AlertModalCore, Badge, Button, Tooltip } from "@pi-dash/ui";
 import { PageHead } from "@/components/core/page-title";
 import { AddRunnerModal } from "@/components/runners/add-runner-modal";
 import { CreatePodModal } from "@/components/runners/create-pod-modal";
+import { RUNNER_STATUS_I18N_LABELS, STATUS_BADGE_VARIANT } from "@/components/runners/runner-status";
 import { RunnersTabs } from "@/components/runners/runners-tabs";
 import { useSelectedPodFilter } from "@/hooks/use-selected-pod-filter";
 import { useWorkspace } from "@/hooks/store/use-workspace";
 
 const service = new RunnerService();
 const podService = new PodService();
-
-const STATUS_BADGE_VARIANT: Record<TRunnerStatus, TBadgeVariant> = {
-  online: "accent-success",
-  busy: "accent-primary",
-  offline: "accent-neutral",
-  revoked: "accent-warning",
-};
-
-const RUNNER_STATUS_I18N_LABELS: Record<TRunnerStatus, string> = {
-  online: "online",
-  busy: "busy",
-  offline: "offline",
-  revoked: "revoked",
-};
 
 function isRevocable(r: IRunner): boolean {
   return r.status !== "revoked" && r.enrolled_at !== null;
@@ -46,6 +32,7 @@ function isRevocable(r: IRunner): boolean {
 const RunnersListPage = observer(function RunnersListPage() {
   const { currentWorkspace } = useWorkspace();
   const { t } = useTranslation();
+  const navigate = useNavigate();
   const workspaceId = currentWorkspace?.id;
   const workspaceSlug = currentWorkspace?.slug;
   const pageTitle = currentWorkspace?.name
@@ -258,11 +245,13 @@ const RunnersListPage = observer(function RunnersListPage() {
                   <td className="px-3 py-2 text-right">
                     <div className="flex justify-end gap-2">
                       {workspaceSlug && (
-                        <Link to={`/${workspaceSlug}/runners/detail/${r.id}`}>
-                          <Button variant="neutral-primary" size="sm">
-                            {t("Details")}
-                          </Button>
-                        </Link>
+                        <Button
+                          variant="neutral-primary"
+                          size="sm"
+                          onClick={() => navigate(`/${workspaceSlug}/runners/detail/${r.id}`)}
+                        >
+                          {t("Details")}
+                        </Button>
                       )}
                       {isRevocable(r) && (
                         <Button variant="outline-danger" size="sm" onClick={() => setRevokeRunner(r)}>

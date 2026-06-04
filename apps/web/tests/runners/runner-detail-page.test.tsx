@@ -19,6 +19,7 @@ vi.mock("swr", () => ({
 
 vi.mock("react-router", () => ({
   useParams: () => ({ workspaceSlug: "acme", runnerId: "runner-1" }),
+  useNavigate: () => vi.fn(),
   Link: ({ to, children }: { to: string; children: React.ReactNode }) => <a href={to}>{children}</a>,
 }));
 
