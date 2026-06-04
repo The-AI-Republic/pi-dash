@@ -235,9 +235,8 @@ async fn run_agent_checks(
 /// Shared `<binary> --version` check. Works for both `codex` and `claude`
 /// since both print a short version line on stdout and exit 0 on success.
 ///
-/// Runs through the same login-shell wrapper the daemon uses so this check
-/// reflects what the daemon will actually see at spawn time — not just
-/// whether the binary is on the caller's interactive `PATH`.
+/// Runs through the same platform spawn helper the daemon uses so this check
+/// reflects what the daemon will actually see at spawn time.
 async fn check_version(binary: &str) -> Result<String> {
     let mut cmd = login_shell_command(binary, &["--version"], None);
     cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
