@@ -15,15 +15,15 @@ export const PAGE_NAVIGATION_PANE_TABS_LIST: Record<
 > = {
   outline: {
     key: "outline",
-    i18n_label: "page_navigation_pane.tabs.outline.label",
+    i18n_label: "Outline",
   },
   info: {
     key: "info",
-    i18n_label: "page_navigation_pane.tabs.info.label",
+    i18n_label: "Info",
   },
   assets: {
     key: "assets",
-    i18n_label: "page_navigation_pane.tabs.assets.label",
+    i18n_label: "Assets",
   },
 };
 

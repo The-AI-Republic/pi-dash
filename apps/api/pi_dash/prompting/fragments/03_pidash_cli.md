@@ -30,8 +30,8 @@ On success every command prints a single JSON document to stdout and exits `0`. 
 
 Comments are the human ↔ agent conversation channel. Use them to ask clarifying questions, post blocker notices, share PR links, and announce completion. **Comments are not for tracking your own progress — that's what the workpad is for.**
 
-- `pidash comment list <identifier>` — list comments on the issue. Each entry has `id` (UUID), `comment_html`, `comment_stripped`, `actor_detail`, and timestamps. Read these in chronological order to pick up any human replies since your last run.
-- `pidash comment add <identifier> --body-file <path>` — post a new comment from a file. `--body <markdown>` works for one-liners. Prefer `--body-file` for anything multi-line — shell quoting of markdown is error-prone.
+- `pidash comment list <identifier>` — list comments on the issue. Each entry has `id` (UUID), `comment_html`, `comment_stripped`, `actor_detail`, `speaker_type`, `speaker_label`, `speaker_agent_run_id`, and timestamps. Read these in chronological order to pick up any human replies since your last run.
+- `pidash comment add <identifier> --body-file <path> --as-agent "<agent name>" --agent-run-id "{{ run.id }}"` — post a new comment from a file and mark it as spoken by this AI agent run. `--body <markdown>` works for one-liners. Prefer `--body-file` for anything multi-line — shell quoting of markdown is error-prone. When you post any issue comment during this run, always include `--as-agent` and `--agent-run-id`; use your actual runtime name if you know it (`Codex`, `Claude Code`, etc.), otherwise use `AI Agent`.
 - `pidash comment update <identifier> <comment-id> --body-file <path>` — edit a comment you own. Both the issue identifier and the comment UUID are required. Rarely needed — prefer posting a fresh comment for new information.
 
 #### Workpad
@@ -66,7 +66,7 @@ pidash workpad update --body-file ./.pidash-workpad.md
 Post a blocker and move the issue to "Blocked":
 
 ```sh
-pidash comment add {{ issue.identifier }} --body-file ./.pidash-blocked.md
+pidash comment add {{ issue.identifier }} --body-file ./.pidash-blocked.md --as-agent "AI Agent" --agent-run-id "{{ run.id }}"
 pidash issue patch {{ issue.identifier }} --state "Blocked"
 ```
 

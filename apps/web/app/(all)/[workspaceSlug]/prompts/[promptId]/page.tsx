@@ -75,7 +75,7 @@ const PromptDetailPage = observer(function PromptDetailPage() {
   if (!record) {
     return (
       <div className="p-6 text-13 text-secondary">
-        {templates === undefined ? t("prompts.detail.loading") : t("prompts.detail.not_found")}
+        {templates === undefined ? t("Loading…") : t("Template not found.")}
       </div>
     );
   }
@@ -88,15 +88,15 @@ const PromptDetailPage = observer(function PromptDetailPage() {
       setDirty(false);
       setToast({
         type: TOAST_TYPE.SUCCESS,
-        title: t("prompts.toast.saved_title"),
-        message: t("prompts.toast.saved_message"),
+        title: t("Prompt saved"),
+        message: t("Subsequent agent runs will use the updated prompt."),
       });
     } catch (e: unknown) {
       const err = e as { error?: string; body?: string[] } | null;
-      const message = err?.body?.[0] ?? err?.error ?? t("prompts.toast.save_failed");
+      const message = err?.body?.[0] ?? err?.error ?? t("Could not save the prompt.");
       setToast({
         type: TOAST_TYPE.ERROR,
-        title: t("prompts.toast.error_title"),
+        title: t("Something went wrong"),
         message,
       });
     } finally {
@@ -107,7 +107,7 @@ const PromptDetailPage = observer(function PromptDetailPage() {
   async function handlePreview() {
     if (previewing) return;
     if (!issueId) {
-      setPreviewError(t("prompts.preview.missing_issue_id"));
+      setPreviewError(t("Enter an issue id first."));
       return;
     }
     setPreviewing(true);
@@ -117,14 +117,14 @@ const PromptDetailPage = observer(function PromptDetailPage() {
       setPreview(resp.prompt);
     } catch (e: unknown) {
       const err = e as { error?: string; detail?: string } | null;
-      setPreviewError(err?.detail ?? err?.error ?? t("prompts.preview.failed"));
+      setPreviewError(err?.detail ?? err?.error ?? t("Render failed."));
       setPreview("");
     } finally {
       setPreviewing(false);
     }
   }
 
-  const pageTitle = record.is_global_default ? t("prompts.detail.default_title") : t("prompts.detail.workspace_title");
+  const pageTitle = record.is_global_default ? t("Prompt template (Pi Dash default)") : t("Prompt template (workspace override)");
 
   return (
     <div className="flex flex-col gap-4 p-6">
@@ -135,30 +135,30 @@ const PromptDetailPage = observer(function PromptDetailPage() {
           <div className="flex items-center gap-2">
             <h1 className="text-16 font-semibold text-primary">{record.name}</h1>
             <Badge variant={record.is_global_default ? "accent-neutral" : "accent-primary"} size="sm">
-              {record.is_global_default ? t("prompts.scope.default") : t("prompts.scope.workspace")}
+              {record.is_global_default ? t("Pi Dash default") : t("Workspace override")}
             </Badge>
             <span className="text-13 text-secondary">v{record.version}</span>
           </div>
           <p className="mt-1 text-13 text-secondary">
             {record.is_global_default
-              ? t("prompts.detail.default_description")
-              : t("prompts.detail.workspace_description")}
+              ? t("This is the built-in Pi Dash default. Workspace admins cannot edit it here — customize for your workspace to override.")
+              : t("Your workspace's override of the Pi Dash default. Edits bump the version and apply to the next agent run for this workspace.")}
           </p>
         </div>
         <Link to={`/${slug}/prompts`} className="text-13 text-secondary hover:text-primary">
-          {t("prompts.detail.back")}
+          {t("Back to list")}
         </Link>
       </header>
 
       <div className="grid gap-4 lg:grid-cols-2">
         <section className="flex flex-col gap-2">
           <div className="flex items-center justify-between">
-            <h2 className="text-13 font-medium text-primary">{t("prompts.detail.body")}</h2>
+            <h2 className="text-13 font-medium text-primary">{t("Template body (Jinja + Markdown)")}</h2>
             {canEdit && (
               <div className="flex items-center gap-2">
-                {dirty && <span className="text-11 text-secondary">{t("prompts.detail.unsaved")}</span>}
+                {dirty && <span className="text-11 text-secondary">{t("Unsaved changes")}</span>}
                 <Button onClick={handleSave} loading={saving} disabled={!dirty || saving} size="sm">
-                  {t("prompts.detail.save")}
+                  {t("Save")}
                 </Button>
               </div>
             )}
@@ -177,12 +177,12 @@ const PromptDetailPage = observer(function PromptDetailPage() {
 
         {canEdit ? (
           <section className="flex flex-col gap-2">
-            <h2 className="text-13 font-medium text-primary">{t("prompts.preview.title")}</h2>
+            <h2 className="text-13 font-medium text-primary">{t("Preview")}</h2>
             <div className="flex items-center gap-2">
               <Input
                 value={issueId}
                 onChange={(e) => setIssueId(e.target.value)}
-                placeholder={t("prompts.preview.issue_id_placeholder")}
+                placeholder={t("Issue id (UUID)")}
                 className="font-mono flex-1 text-11"
               />
               <Button
@@ -192,7 +192,7 @@ const PromptDetailPage = observer(function PromptDetailPage() {
                 size="sm"
                 variant="outline-primary"
               >
-                {t("prompts.preview.run")}
+                {t("Preview")}
               </Button>
             </div>
             {previewError && (
@@ -201,7 +201,7 @@ const PromptDetailPage = observer(function PromptDetailPage() {
               </div>
             )}
             <pre className="font-mono min-h-[60vh] w-full overflow-auto rounded-md border border-subtle bg-layer-1 p-3 text-11 leading-5 whitespace-pre-wrap text-primary">
-              {preview || t("prompts.preview.empty")}
+              {preview || t("Paste an issue id and click Preview to render the template against a real issue.")}
             </pre>
           </section>
         ) : (
@@ -210,8 +210,8 @@ const PromptDetailPage = observer(function PromptDetailPage() {
           // controls. Keep the column reservation so the layout doesn't jump
           // when role changes mid-session.
           <section className="flex flex-col gap-2">
-            <h2 className="text-13 font-medium text-primary">{t("prompts.detail.body")}</h2>
-            <p className="text-13 text-secondary">{t("prompts.preview.admin_only")}</p>
+            <h2 className="text-13 font-medium text-primary">{t("Template body (Jinja + Markdown)")}</h2>
+            <p className="text-13 text-secondary">{t("Previewing the rendered prompt is a workspace-admin action. Ask your workspace admin if you need to see it rendered against a specific issue.")}</p>
           </section>
         )}
       </div>

@@ -50,8 +50,8 @@ export const ProjectLinkDetail = observer(function ProjectLinkDetail(props: TPro
     copyTextToClipboard(linkUrl).then(() => {
       setToast({
         type: TOAST_TYPE.SUCCESS,
-        title: t("link_copied"),
-        message: t("view_link_copied_to_clipboard"),
+        title: t("Link copied"),
+        message: t("View link copied to clipboard."),
       });
     });
   }, [linkUrl, t]);
@@ -70,25 +70,25 @@ export const ProjectLinkDetail = observer(function ProjectLinkDetail(props: TPro
       {
         key: "edit",
         action: () => handleEdit(true),
-        title: t("edit"),
+        title: t("Edit"),
         icon: EditIcon,
       },
       {
         key: "open-new-tab",
         action: handleOpenInNewTab,
-        title: t("open_in_new_tab"),
+        title: t("Open in new tab"),
         icon: NewTabIcon,
       },
       {
         key: "copy-link",
         action: handleCopyText,
-        title: t("copy_link"),
+        title: t("Copy link"),
         icon: LinkIcon,
       },
       {
         key: "delete",
         action: handleDelete,
-        title: t("delete"),
+        title: t("Delete"),
         icon: TrashIcon,
       },
     ],

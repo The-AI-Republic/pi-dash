@@ -371,7 +371,7 @@ export const ProfileSetup = observer(function ProfileSetup(props: Props) {
                 <>
                   <div className="space-y-1">
                     <label className="text-13 font-medium text-tertiary" htmlFor="password">
-                      Set a password ({t("common.optional")})
+                      Set a password ({t("Optional")})
                     </label>
                     <Controller
                       control={control}
@@ -412,7 +412,7 @@ export const ProfileSetup = observer(function ProfileSetup(props: Props) {
                   </div>
                   <div className="space-y-1">
                     <label className="text-13 font-medium text-tertiary" htmlFor="confirm_password">
-                      {t("auth.common.password.confirm_password.label")} ({t("common.optional")})
+                      {t("Confirm password")} ({t("Optional")})
                     </label>
                     <Controller
                       control={control}
@@ -431,7 +431,7 @@ export const ProfileSetup = observer(function ProfileSetup(props: Props) {
                             onChange={onChange}
                             ref={ref}
                             hasError={Boolean(errors.confirm_password)}
-                            placeholder={t("auth.common.password.confirm_password.placeholder")}
+                            placeholder={t("Confirm password")}
                             className="w-full border-subtle pr-12 placeholder:text-placeholder"
                             autoComplete="new-password"
                           />

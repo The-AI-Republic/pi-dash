@@ -266,14 +266,14 @@ export function LabelDropdown(props: ILabelDropdownProps) {
                   className="w-full bg-transparent px-2 py-1 text-caption-sm-regular text-secondary placeholder:text-placeholder focus:outline-none"
                   value={query}
                   onChange={(e) => setQuery(e.target.value)}
-                  placeholder={t("common.search.label")}
+                  placeholder={t("Search")}
                   displayValue={(assigned: any) => assigned?.name || ""}
                   onKeyDown={searchInputKeyDown}
                 />
               </div>
               <div className={`mt-2 max-h-48 space-y-1 overflow-y-scroll`}>
                 {isLoading ? (
-                  <p className="text-center text-secondary">{t("common.loading")}</p>
+                  <p className="text-center text-secondary">{t("Loading")}</p>
                 ) : filteredOptions && filteredOptions.length > 0 ? (
                   filteredOptions.map((option) => (
                     <Combobox.Option
@@ -319,11 +319,11 @@ export function LabelDropdown(props: ILabelDropdownProps) {
                         + Add <span className="text-primary">&quot;{query}&quot;</span> to labels
                       </>
                     ) : (
-                      t("label.create.type")
+                      t("Type to add a new label")
                     )}
                   </p>
                 ) : (
-                  <p className="text-left text-secondary">{t("common.search.no_matching_results")}</p>
+                  <p className="text-left text-secondary">{t("No matching results")}</p>
                 )}
               </div>
             </div>

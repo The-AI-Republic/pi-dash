@@ -41,7 +41,7 @@ const CustomizedInsights = observer(function CustomizedInsights({
 
   return (
     <AnalyticsSectionWrapper
-      title={t("workspace_analytics.customized_insights")}
+      title={t("Customized Insights")}
       className="col-span-1"
       headerClassName={cn(peekView ? "flex-col items-start" : "")}
       actions={

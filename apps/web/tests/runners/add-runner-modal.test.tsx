@@ -4,27 +4,26 @@
  * See the LICENSE file for details.
  */
 
-import { render, screen, waitFor } from "@testing-library/react";
+import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-const { createRunnerInvite, listPods, listProjects, setToast } = vi.hoisted(() => ({
-  createRunnerInvite: vi.fn(),
+const { apiBaseUrl, listPods, listProjects, setToast } = vi.hoisted(() => ({
+  apiBaseUrl: { value: "http://localhost:8000" },
   listPods: vi.fn(),
   listProjects: vi.fn(),
   setToast: vi.fn(),
 }));
 
 vi.mock("@pi-dash/constants", () => ({
-  API_BASE_URL: "http://localhost:8000",
+  get API_BASE_URL() {
+    return apiBaseUrl.value;
+  },
 }));
 
 vi.mock("@pi-dash/services", () => ({
   PodService: class {
     list = listPods;
-  },
-  RunnerService: class {
-    createRunnerInvite = createRunnerInvite;
   },
 }));
 
@@ -95,6 +94,8 @@ vi.mock("@pi-dash/ui", async () => {
 import { AddRunnerModal } from "@/components/runners/add-runner-modal";
 
 const PROJECTS = [{ id: "project-1", identifier: "BROWSERX", name: "BrowserX" }];
+const RUNNER_NAME_ERROR =
+  "Runner name cannot contain spaces. It must start with a letter, digit, or underscore and contain only letters, digits, underscore, dot, or dash.";
 
 const PODS = [
   {
@@ -112,19 +113,9 @@ const PODS = [
   },
 ];
 
-const INVITE = {
-  runner_id: "runner-1",
-  name: "runner-1",
-  workspace_slug: "acme",
-  project_identifier: "BROWSERX",
-  pod_id: "pod-1",
-  enrollment_token: "apd_test_token",
-  enrollment_expires_at: "2026-05-23T00:30:00Z",
-};
-
 describe("AddRunnerModal", () => {
   beforeEach(() => {
-    createRunnerInvite.mockReset().mockResolvedValue(INVITE);
+    apiBaseUrl.value = "http://localhost:8000";
     listPods.mockReset().mockResolvedValue(PODS);
     listProjects.mockReset().mockResolvedValue(PROJECTS);
     setToast.mockReset();
@@ -136,40 +127,116 @@ describe("AddRunnerModal", () => {
 
   function renderModal() {
     const onClose = vi.fn();
-    const onCreated = vi.fn();
-    const utils = render(
-      <AddRunnerModal isOpen onClose={onClose} workspaceId="workspace-1" workspaceSlug="acme" onCreated={onCreated} />
-    );
-    return { ...utils, onClose, onCreated };
+    const utils = render(<AddRunnerModal isOpen onClose={onClose} workspaceId="workspace-1" workspaceSlug="acme" />);
+    return { ...utils, onClose };
   }
 
-  it("includes working-dir when the submitted agent is codex", async () => {
+  it("generates the runner-add command for the selected project", async () => {
     const user = userEvent.setup();
     const workingDir = "/home/rich/dev/airepublic/open_source/s6/browserx";
-    const { onCreated } = renderModal();
+    const runnerName = "browserx-local";
+    renderModal();
 
     await screen.findByRole("option", { name: "BrowserX" });
 
     const selects = screen.getAllByTestId("select");
     await user.selectOptions(selects[0], "BROWSERX");
-    await user.type(screen.getByPlaceholderText("runners.add_modal.working_dir_placeholder"), workingDir);
+    await user.selectOptions(selects[1], "pod-a");
+    await user.type(screen.getByPlaceholderText("my-laptop-runner"), runnerName);
+    await user.type(screen.getByPlaceholderText("local dev machine project working dir"), workingDir);
     await user.selectOptions(selects[2], "codex");
-    await user.click(screen.getByRole("button", { name: "runners.add_modal.submit" }));
-
-    await waitFor(() => {
-      expect(createRunnerInvite).toHaveBeenCalledWith({
-        workspaceId: "workspace-1",
-        projectIdentifier: "BROWSERX",
-        podName: undefined,
-        name: undefined,
-      });
-    });
-    expect(onCreated).toHaveBeenCalled();
+    await user.click(screen.getByRole("button", { name: "Generate command" }));
 
     const command = await screen.findByText(
       (_content: string, node: Element | null) => node?.tagName.toLowerCase() === "pre"
     );
+    expect(command.textContent).not.toContain("pidash auth login");
+    expect(command.textContent).toContain("pidash runner add");
+    expect(command.textContent).toContain("--url http://localhost:8000");
+    expect(command.textContent).toContain("--workspace acme");
+    expect(command.textContent).toContain("--project BROWSERX");
+    expect(command.textContent).toContain("--pod pod-a");
+    expect(command.textContent).toContain(`--name ${runnerName}`);
     expect(command.textContent).toContain(`--working-dir ${workingDir}`);
     expect(command.textContent).toContain("--agent codex");
+    expect(command.textContent).not.toContain("pidash connect");
+    expect(command.textContent).not.toContain("--token");
+  });
+
+  it("lets the user go back and edit the form after generating a command", async () => {
+    const user = userEvent.setup();
+    const runnerName = "browserx-local";
+    renderModal();
+
+    await screen.findByRole("option", { name: "BrowserX" });
+
+    await user.selectOptions(screen.getAllByTestId("select")[0], "BROWSERX");
+    await user.type(screen.getByPlaceholderText("my-laptop-runner"), runnerName);
+    await user.click(screen.getByRole("button", { name: "Generate command" }));
+
+    await screen.findByText((_content: string, node: Element | null) => node?.tagName.toLowerCase() === "pre");
+    await user.click(screen.getByRole("button", { name: "Back" }));
+
+    expect(screen.getByPlaceholderText("my-laptop-runner")).toHaveValue(runnerName);
+  });
+
+  it("blocks invalid runner names before generating a command", async () => {
+    const user = userEvent.setup();
+    renderModal();
+
+    await screen.findByRole("option", { name: "BrowserX" });
+
+    await user.selectOptions(screen.getAllByTestId("select")[0], "BROWSERX");
+    await user.type(screen.getByPlaceholderText("my-laptop-runner"), "test runner");
+    await user.click(screen.getByRole("button", { name: "Generate command" }));
+
+    const error = await screen.findByText(RUNNER_NAME_ERROR);
+    expect(error).toBeInTheDocument();
+    expect(error).toHaveClass("text-danger-primary");
+    expect(
+      screen.queryByText((_content: string, node: Element | null) => node?.tagName.toLowerCase() === "pre")
+    ).not.toBeInTheDocument();
+  });
+
+  it("renders PowerShell-safe quoting for Windows users", async () => {
+    const user = userEvent.setup();
+    renderModal();
+
+    await screen.findByRole("option", { name: "BrowserX" });
+
+    const selects = screen.getAllByTestId("select");
+    await user.selectOptions(selects[0], "BROWSERX");
+    await user.type(screen.getByPlaceholderText("my-laptop-runner"), "rich.runner");
+    await user.type(
+      screen.getByPlaceholderText("local dev machine project working dir"),
+      String.raw`C:\\Users\\rich\\My Project`
+    );
+    await user.click(screen.getByRole("button", { name: "Generate command" }));
+    await user.click(screen.getByRole("button", { name: "PowerShell" }));
+
+    const command = await screen.findByText(
+      (_content: string, node: Element | null) => node?.tagName.toLowerCase() === "pre"
+    );
+    expect(command.textContent).toContain("--name rich.runner");
+    expect(command.textContent).toContain(String.raw`--working-dir 'C:\\Users\\rich\\My Project'`);
+    expect(command.textContent).not.toContain("'\\''");
+  });
+
+  it("warns when the command URL falls back to the browser origin", async () => {
+    apiBaseUrl.value = "";
+    const user = userEvent.setup();
+    renderModal();
+
+    await screen.findByRole("option", { name: "BrowserX" });
+    await user.selectOptions(screen.getAllByTestId("select")[0], "BROWSERX");
+    await user.click(screen.getByRole("button", { name: "Generate command" }));
+
+    const command = await screen.findByText(
+      (_content: string, node: Element | null) => node?.tagName.toLowerCase() === "pre"
+    );
+    expect(command.textContent).toContain(`--url ${window.location.origin}`);
+    expect(
+      screen.getByText("Using the current browser origin as the cloud URL because VITE_API_BASE_URL is not configured.")
+    ).toBeInTheDocument();
   });
 });

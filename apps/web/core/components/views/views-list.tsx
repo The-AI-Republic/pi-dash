@@ -43,8 +43,8 @@ export const ProjectViewsList = observer(function ProjectViewsList() {
     return (
       <EmptyStateDetailed
         assetKey="search"
-        title={t("common_empty_state.search.title")}
-        description={t("common_empty_state.search.description")}
+        title={t("No matching results.")}
+        description={t("No results found. Try adjusting your search terms.")}
       />
     );
   }
@@ -64,11 +64,11 @@ export const ProjectViewsList = observer(function ProjectViewsList() {
       ) : (
         <EmptyStateDetailed
           assetKey="view"
-          title={t("project_empty_state.views.title")}
-          description={t("project_empty_state.views.description")}
+          title={t("Save custom views for your project")}
+          description={t("Views are saved filters that help you quickly access the information you use most. Collaborate effortlessly as teammates share and tailor views to their specific needs.")}
           actions={[
             {
-              label: t("project_empty_state.views.cta_primary"),
+              label: t("Create view"),
               onClick: () => toggleCreateViewModal(true),
               disabled: !canPerformEmptyStateActions,
               variant: "primary",

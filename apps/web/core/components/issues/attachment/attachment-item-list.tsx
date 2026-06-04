@@ -79,8 +79,8 @@ export const IssueAttachmentItemList = observer(function IssueAttachmentItemList
           .catch(() => {
             setToast({
               type: TOAST_TYPE.ERROR,
-              title: t("toast.error"),
-              message: t("attachment.error"),
+              title: t("Error!"),
+              message: t("File could not be attached. Try uploading again."),
             });
           })
           .finally(() => {
@@ -92,11 +92,11 @@ export const IssueAttachmentItemList = observer(function IssueAttachmentItemList
 
       setToast({
         type: TOAST_TYPE.ERROR,
-        title: t("toast.error"),
+        title: t("Error!"),
         message:
           totalAttachedFiles > 1
-            ? t("attachment.only_one_file_allowed")
-            : t("attachment.file_size_limit", { size: maxFileSize / 1024 / 1024 }),
+            ? t("Only one file can be uploaded at a time.")
+            : t("File must be of {size}MB or less in size.", { size: maxFileSize / 1024 / 1024 }),
       });
       return;
     },
@@ -136,7 +136,7 @@ export const IssueAttachmentItemList = observer(function IssueAttachmentItemList
                 <div className="flex items-center justify-center rounded-md bg-surface-1 p-1">
                   <div className="flex flex-col items-center justify-center rounded-md border border-dashed border-strong px-5 py-6">
                     <UploadCloud className="size-7" />
-                    <span className="text-13 text-tertiary">{t("attachment.drag_and_drop")}</span>
+                    <span className="text-13 text-tertiary">{t("Drag and drop anywhere to upload")}</span>
                   </div>
                 </div>
               </div>

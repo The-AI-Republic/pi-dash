@@ -86,8 +86,8 @@ export const Exporter = observer(function Exporter(props: Props) {
           setExportLoading(false);
           setToast({
             type: TOAST_TYPE.SUCCESS,
-            title: t("workspace_settings.settings.exports.modal.toasts.success.title"),
-            message: t("workspace_settings.settings.exports.modal.toasts.success.message", {
+            title: t("Export successful"),
+            message: t("You will be able to download the exported {entity} from the previous export.", {
               entity: provider === "csv" ? "CSV" : provider === "xlsx" ? "Excel" : provider === "json" ? "JSON" : "",
             }),
           });
@@ -96,8 +96,8 @@ export const Exporter = observer(function Exporter(props: Props) {
           setExportLoading(false);
           setToast({
             type: TOAST_TYPE.ERROR,
-            title: t("error"),
-            message: t("workspace_settings.settings.exports.modal.toasts.error.message"),
+            title: t("Error"),
+            message: t("Export was unsuccessful. Please try again."),
           });
         });
     }
@@ -116,7 +116,7 @@ export const Exporter = observer(function Exporter(props: Props) {
         <div className="flex w-full items-center justify-start gap-6">
           <span className="flex items-center justify-start">
             <h3 className="text-18 font-medium 2xl:text-20">
-              {t("workspace_settings.settings.exports.modal.title")}{" "}
+              {t("Export to")}{" "}
               {provider === "csv" ? "CSV" : provider === "xlsx" ? "Excel" : provider === "json" ? "JSON" : ""}
             </h3>
           </span>
@@ -148,17 +148,17 @@ export const Exporter = observer(function Exporter(props: Props) {
         <div className="flex max-w-min cursor-pointer items-center gap-2">
           <Checkbox checked={multiple} onChange={() => setMultiple(!multiple)} />
           <div className="text-13 whitespace-nowrap">
-            {t("workspace_settings.settings.exports.export_separate_files")}
+            {t("Export the data into separate files")}
           </div>
         </div>
         <div className="flex justify-end gap-2">
           <Button variant="secondary" onClick={handleClose}>
-            {t("cancel")}
+            {t("Cancel")}
           </Button>
           <Button variant="primary" onClick={ExportCSVToMail} disabled={exportLoading} loading={exportLoading}>
             {exportLoading
-              ? `${t("workspace_settings.settings.exports.exporting")}...`
-              : t("workspace_settings.settings.exports.title")}
+              ? `${t("Exporting")}...`
+              : t("Exports")}
           </Button>
         </div>
       </div>

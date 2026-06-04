@@ -57,7 +57,7 @@ export function InboxIssueSnoozeModal(props: InboxIssueSnoozeModalProps) {
             onConfirm(date);
           }}
         >
-          {t("inbox_issue.actions.snooze")}
+          {t("Snooze")}
         </Button>
       </div>
     </ModalCore>

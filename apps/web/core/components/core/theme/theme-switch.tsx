@@ -48,10 +48,10 @@ export function ThemeSwitch(props: Props) {
                 }}
               />
             </div>
-            {t(value.key)}
+            {t(value.i18n_label)}
           </div>
         ) : (
-          t("select_your_theme")
+          t("Select your theme")
         )
       }
       onChange={onChange}
@@ -82,7 +82,7 @@ export function ThemeSwitch(props: Props) {
                 }}
               />
             </div>
-            {t(themeOption.key)}
+            {t(themeOption.i18n_label)}
           </div>
         </CustomSelect.Option>
       ))}

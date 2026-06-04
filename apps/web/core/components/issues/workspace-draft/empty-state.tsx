@@ -37,12 +37,12 @@ export const WorkspaceDraftEmptyState = observer(function WorkspaceDraftEmptySta
       />
       <div className="relative h-full w-full overflow-y-auto">
         <EmptyStateDetailed
-          title={t("workspace_empty_state.drafts.title")}
-          description={t("workspace_empty_state.drafts.description")}
+          title={t("Half-written work items")}
+          description={t("To try this out, start adding a work item and leave it mid-way or create your first draft below. 😉")}
           assetKey="draft"
           actions={[
             {
-              label: t("workspace_empty_state.drafts.cta_primary"),
+              label: t("Create draft work item"),
               onClick: () => {
                 setIsDraftIssueModalOpen(true);
               },

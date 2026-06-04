@@ -172,7 +172,7 @@ export const ExtendedSidebarItem = observer(function ExtendedSidebarItem(props: 
         {!disableDrag && (
           <Tooltip
             // isMobile={isMobile}
-            tooltipContent={t("drag_to_rearrange")}
+            tooltipContent={t("Drag to rearrange")}
             position="top-start"
             disabled={isDragging}
           >

@@ -30,8 +30,8 @@ export const usePowerKAccountCommands = (): TPowerKCommandConfig[] => {
     signOut().catch(() =>
       setToast({
         type: TOAST_TYPE.ERROR,
-        title: t("auth.sign_out.toast.error.title"),
-        message: t("auth.sign_out.toast.error.message"),
+        title: t("Error!"),
+        message: t("Failed to sign out. Please try again."),
       })
     );
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -42,7 +42,7 @@ export const usePowerKAccountCommands = (): TPowerKCommandConfig[] => {
       id: "workspace_invites",
       type: "action",
       group: "account",
-      i18n_title: "power_k.account_actions.workspace_invites",
+      i18n_title: "Workspace invites",
       icon: Mails,
       action: () => router.push("/invitations"),
       isEnabled: () => true,
@@ -53,7 +53,7 @@ export const usePowerKAccountCommands = (): TPowerKCommandConfig[] => {
       id: "sign_out",
       type: "action",
       group: "account",
-      i18n_title: "power_k.account_actions.sign_out",
+      i18n_title: "Sign out",
       icon: LogOut,
       action: handleSignOut,
       isEnabled: () => true,

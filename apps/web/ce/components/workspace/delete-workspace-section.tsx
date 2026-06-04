@@ -35,15 +35,15 @@ export const DeleteWorkspaceSection = observer(function DeleteWorkspaceSection(p
         onClose={() => setDeleteWorkspaceModal(false)}
       />
       <SettingsBoxedControlItem
-        title={t("workspace_settings.settings.general.delete_workspace")}
-        description={t("workspace_settings.settings.general.delete_workspace_description")}
+        title={t("Delete this workspace")}
+        description={t("When deleting a workspace, all of the data and resources within that workspace will be permanently removed and cannot be recovered.")}
         control={
           <Button
             variant="error-outline"
             onClick={() => setDeleteWorkspaceModal(true)}
             data-ph-element={WORKSPACE_TRACKER_ELEMENTS.DELETE_WORKSPACE_BUTTON}
           >
-            {t("delete")}
+            {t("Delete")}
           </Button>
         }
       />

@@ -34,7 +34,7 @@ export const useNavigationItems = ({
   const baseNavigation = useCallback(
     (): TNavigationItem[] => [
       {
-        i18n_key: "sidebar.work_items",
+        i18n_key: "Work Items",
         key: "work_items",
         name: "Work items",
         href: `/${workspaceSlug}/projects/${projectId}/issues`,
@@ -44,7 +44,7 @@ export const useNavigationItems = ({
         sortOrder: 1,
       },
       {
-        i18n_key: "sidebar.cycles",
+        i18n_key: "Cycles",
         key: "cycles",
         name: "Cycles",
         href: `/${workspaceSlug}/projects/${projectId}/cycles`,
@@ -54,7 +54,7 @@ export const useNavigationItems = ({
         sortOrder: 2,
       },
       {
-        i18n_key: "sidebar.modules",
+        i18n_key: "Modules",
         key: "modules",
         name: "Modules",
         href: `/${workspaceSlug}/projects/${projectId}/modules`,
@@ -64,7 +64,7 @@ export const useNavigationItems = ({
         sortOrder: 3,
       },
       {
-        i18n_key: "sidebar.views",
+        i18n_key: "Views",
         key: "views",
         name: "Views",
         href: `/${workspaceSlug}/projects/${projectId}/views`,
@@ -74,7 +74,7 @@ export const useNavigationItems = ({
         sortOrder: 4,
       },
       {
-        i18n_key: "sidebar.pages",
+        i18n_key: "Pages",
         key: "pages",
         name: "Pages",
         href: `/${workspaceSlug}/projects/${projectId}/pages`,
@@ -84,7 +84,7 @@ export const useNavigationItems = ({
         sortOrder: 5,
       },
       {
-        i18n_key: "sidebar.intake",
+        i18n_key: "Intake",
         key: "intake",
         name: "Intake",
         href: `/${workspaceSlug}/projects/${projectId}/intake`,
@@ -94,7 +94,7 @@ export const useNavigationItems = ({
         sortOrder: 6,
       },
       {
-        i18n_key: "sidebar.schedulers",
+        i18n_key: "Schedulers",
         key: "schedulers",
         name: "Schedulers",
         // /schedulers redirects to /schedulers/calendar — see the page

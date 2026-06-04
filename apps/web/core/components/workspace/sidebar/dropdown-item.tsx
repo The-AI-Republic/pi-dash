@@ -61,7 +61,7 @@ const SidebarDropdownItem = observer(function SidebarDropdownItem(props: TProps)
                 <img
                   src={getFileURL(workspace.logo_url)}
                   className="absolute top-0 left-0 h-full w-full rounded-sm object-cover"
-                  alt={t("workspace_logo")}
+                  alt={t("Workspace logo")}
                 />
               ) : (
                 (workspace?.name?.[0] ?? "...")
@@ -76,7 +76,7 @@ const SidebarDropdownItem = observer(function SidebarDropdownItem(props: TProps)
               <div className="flex w-fit gap-2 text-13 text-tertiary capitalize">
                 <span>{getUserRole(workspace.role)?.toLowerCase() || "guest"}</span>
                 <div className="m-auto h-1 w-1 rounded-full bg-layer-1/50" />
-                <span className="capitalize">{t("member", { count: workspace.total_members || 0 })}</span>
+                <span className="capitalize">{t("{count, plural, one{# member} other{# members}}", { count: workspace.total_members || 0 })}</span>
               </div>
             </div>
           </div>
@@ -101,7 +101,7 @@ const SidebarDropdownItem = observer(function SidebarDropdownItem(props: TProps)
                   className="flex gap-1.5 rounded-md border border-strong bg-layer-2 px-2.5 py-1.5 text-secondary transition-colors hover:border-strong hover:text-secondary hover:shadow-raised-100"
                 >
                   <Settings className="my-auto h-4 w-4 flex-shrink-0" />
-                  <span className="my-auto text-13 font-medium whitespace-nowrap">{t("settings")}</span>
+                  <span className="my-auto text-13 font-medium whitespace-nowrap">{t("Settings")}</span>
                 </Link>
               )}
               {[EUserPermissions.ADMIN].includes(workspace?.role) && (
@@ -115,7 +115,7 @@ const SidebarDropdownItem = observer(function SidebarDropdownItem(props: TProps)
                 >
                   <UserPlus className="my-auto h-4 w-4 flex-shrink-0" />
                   <span className="my-auto text-13 font-medium whitespace-nowrap">
-                    {t("project_settings.members.invite_members.title")}
+                    {t("Invite members")}
                   </span>
                 </Link>
               )}

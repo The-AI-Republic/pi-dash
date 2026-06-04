@@ -31,7 +31,7 @@ export const StickiesWidget = observer(function StickiesWidget() {
   return (
     <div>
       <div className="mb-4 flex items-center justify-between">
-        <div className="text-14 font-semibold text-tertiary">{t("stickies.title")}</div>
+        <div className="text-14 font-semibold text-tertiary">{t("Your stickies")}</div>
         {/* actions */}
         <div className="flex gap-2">
           <StickySearch />
@@ -44,7 +44,7 @@ export const StickiesWidget = observer(function StickiesWidget() {
             disabled={creatingSticky}
           >
             <PlusIcon className="my-auto size-4" />
-            <span>{t("stickies.add")}</span>
+            <span>{t("Add sticky")}</span>
             {creatingSticky && (
               <div
                 className="size-4 animate-spin rounded-full border-2 border-accent-strong border-t-transparent"

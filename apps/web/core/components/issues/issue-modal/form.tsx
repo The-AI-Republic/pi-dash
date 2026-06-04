@@ -90,10 +90,10 @@ export const IssueFormRoot = observer(function IssueFormRoot(props: IssueFormPro
     onCreateMoreToggleChange,
     isDraft,
     moveToIssue = false,
-    modalTitle = `${data?.id ? t("update") : isDraft ? t("create_a_draft") : t("create_new_issue")}`,
+    modalTitle = `${data?.id ? t("Update") : isDraft ? t("Create a draft") : t("Create new work item")}`,
     primaryButtonText = {
-      default: `${data?.id ? t("update") : isDraft ? t("save_to_drafts") : t("save")}`,
-      loading: `${data?.id ? t("updating") : t("saving")}`,
+      default: `${data?.id ? t("Update") : isDraft ? t("Save to Drafts") : t("Save")}`,
+      loading: `${data?.id ? t("Updating") : t("Saving")}`,
     },
     isDuplicateModalOpen,
     handleDuplicateIssueModal,
@@ -223,8 +223,8 @@ export const IssueFormRoot = observer(function IssueFormRoot(props: IssueFormPro
     if (!editorRef.current?.isEditorReadyToDiscard()) {
       setToast({
         type: TOAST_TYPE.ERROR,
-        title: t("error"),
-        message: t("editor_is_not_ready_to_discard_changes"),
+        title: t("Error"),
+        message: t("Editor is not ready to discard changes"),
       });
       return;
     }
@@ -427,8 +427,8 @@ export const IssueFormRoot = observer(function IssueFormRoot(props: IssueFormPro
                     isDuplicateModalOpen={isDuplicateModalOpen}
                     label={
                       duplicateIssues.length === 1
-                        ? `${duplicateIssues.length} ${t("duplicate_issue_found")}`
-                        : `${duplicateIssues.length} ${t("duplicate_issues_found")}`
+                        ? `${duplicateIssues.length} ${t("Duplicate work item found")}`
+                        : `${duplicateIssues.length} ${t("Duplicate work items found")}`
                     }
                     handleOnClick={() => handleDuplicateIssueModal(!isDuplicateModalOpen)}
                   />
@@ -523,7 +523,7 @@ export const IssueFormRoot = observer(function IssueFormRoot(props: IssueFormPro
                       onClick={() => onCreateMoreToggleChange(!isCreateMoreToggleEnabled)}
                     >
                       <ToggleSwitch value={isCreateMoreToggleEnabled} onChange={() => {}} size="sm" />
-                      <span className="text-caption-sm-regular">{t("create_more")}</span>
+                      <span className="text-caption-sm-regular">{t("Create more")}</span>
                     </button>
                   )}
                   <div className="flex items-center gap-2">
@@ -543,7 +543,7 @@ export const IssueFormRoot = observer(function IssueFormRoot(props: IssueFormPro
                           }
                         }}
                       >
-                        {t("discard")}
+                        {t("Discard")}
                       </Button>
                     </div>
                     <div tabIndex={isDraft ? getIndex("submit_button") : getIndex("draft_button")}>
@@ -568,7 +568,7 @@ export const IssueFormRoot = observer(function IssueFormRoot(props: IssueFormPro
                         disabled={isMoving}
                         size="lg"
                       >
-                        {t("add_to_project")}
+                        {t("Add to project")}
                       </Button>
                     )}
                   </div>

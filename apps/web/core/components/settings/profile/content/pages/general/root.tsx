@@ -22,7 +22,7 @@ export const GeneralProfileSettings = observer(function GeneralProfileSettings()
 
   return (
     <>
-      <PageHead title={`${t("profile.label")} - ${t("general_settings")}`} />
+      <PageHead title={`${t("Profile")} - ${t("General settings")}`} />
       <GeneralProfileSettingsForm user={currentUser} profile={userProfile.data} />
     </>
   );

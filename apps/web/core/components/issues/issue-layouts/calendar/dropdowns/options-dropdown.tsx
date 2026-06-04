@@ -108,7 +108,7 @@ export const CalendarOptionsDropdown = observer(function CalendarOptionsDropdown
                   open ? "text-primary" : "text-secondary"
                 }`}
               >
-                <div className="font-medium">{t("common.options")}</div>
+                <div className="font-medium">{t("Options")}</div>
                 <div
                   className={`flex h-3.5 w-3.5 items-center justify-center transition-all ${open ? "" : "rotate-180"}`}
                 >
@@ -153,7 +153,7 @@ export const CalendarOptionsDropdown = observer(function CalendarOptionsDropdown
                     className="flex w-full items-center justify-between gap-2 rounded-sm px-1 py-1.5 text-left text-11 hover:bg-layer-1"
                     onClick={handleToggleWeekends}
                   >
-                    {t("common.actions.show_weekends")}
+                    {t("Show weekends")}
                     <ToggleSwitch
                       value={showWeekends}
                       onChange={() => {

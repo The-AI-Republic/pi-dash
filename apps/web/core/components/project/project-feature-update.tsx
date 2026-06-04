@@ -40,13 +40,13 @@ export const ProjectFeatureUpdate = observer(function ProjectFeatureUpdate(props
       </Row>
       <div className="mt-4 flex items-center justify-between gap-2 border-t border-subtle px-6 py-4">
         <div className="flex gap-1 text-13 font-medium text-tertiary">
-          {t("congrats")}
+          {t("Congrats!")}
           <Logo logo={currentProjectDetails.logo_props} /> <p className="break-all">{currentProjectDetails.name}</p>{" "}
-          {t("created").toLowerCase()}.
+          {t("Created").toLowerCase()}.
         </div>
         <div className="flex gap-2">
           <Button variant="secondary" size="lg" onClick={onClose} tabIndex={1}>
-            {t("close")}
+            {t("Close")}
           </Button>
           <Link
             href={`/${workspaceSlug}/projects/${projectId}/issues`}
@@ -54,7 +54,7 @@ export const ProjectFeatureUpdate = observer(function ProjectFeatureUpdate(props
             className={getButtonStyling("primary", "lg")}
             tabIndex={2}
           >
-            {t("open_project")}
+            {t("Open project")}
           </Link>
         </div>
       </div>

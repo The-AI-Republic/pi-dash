@@ -90,7 +90,7 @@ export const AuthPasswordForm = observer(function AuthPasswordForm(props: Props)
             href={`/accounts/forgot-password?email=${encodeURIComponent(email)}`}
             className="text-11 font-medium text-accent-primary"
           >
-            {t("auth.common.forgot_password")}
+            {t("Forgot your password?")}
           </Link>
         ) : (
           <ForgotPasswordPopover />
@@ -133,7 +133,7 @@ export const AuthPasswordForm = observer(function AuthPasswordForm(props: Props)
             <Info size={16} className="text-danger-primary" />
           </div>
           <div className="w-full text-13 font-medium text-danger-primary">
-            {t("auth.sign_up.errors.password.strength")}
+            {t("Try setting-up a strong password to proceed")}
           </div>
           <button
             type="button"
@@ -172,7 +172,7 @@ export const AuthPasswordForm = observer(function AuthPasswordForm(props: Props)
         {nextPath && <input type="hidden" value={nextPath} name="next_path" />}
         <div className="space-y-1">
           <label htmlFor="email" className="text-13 font-medium text-tertiary">
-            {t("auth.common.email.label")}
+            {t("Email")}
           </label>
           <div className={`relative flex items-center rounded-md border border-strong bg-surface-1`}>
             <Input
@@ -181,7 +181,7 @@ export const AuthPasswordForm = observer(function AuthPasswordForm(props: Props)
               type="email"
               value={passwordFormData.email}
               onChange={(e) => handleFormChange("email", e.target.value)}
-              placeholder={t("auth.common.email.placeholder")}
+              placeholder={t("name@company.com")}
               className={`h-10 w-full border-0 disable-autofill-style placeholder:text-placeholder`}
               disabled
             />
@@ -190,7 +190,7 @@ export const AuthPasswordForm = observer(function AuthPasswordForm(props: Props)
                 type="button"
                 className="absolute right-3 size-5"
                 onClick={handleEmailClear}
-                aria-label={t("aria_labels.auth_forms.clear_email")}
+                aria-label={t("Clear email")}
               >
                 <XCircle className="size-5 stroke-placeholder" />
               </button>
@@ -200,7 +200,7 @@ export const AuthPasswordForm = observer(function AuthPasswordForm(props: Props)
 
         <div className="space-y-1">
           <label htmlFor="password" className="text-13 font-medium text-tertiary">
-            {mode === EAuthModes.SIGN_IN ? t("auth.common.password.label") : t("auth.common.password.set_password")}
+            {mode === EAuthModes.SIGN_IN ? t("Password") : t("Set a password")}
           </label>
           <div className="relative flex items-center rounded-md bg-surface-1">
             <Input
@@ -209,7 +209,7 @@ export const AuthPasswordForm = observer(function AuthPasswordForm(props: Props)
               name="password"
               value={passwordFormData.password}
               onChange={(e) => handleFormChange("password", e.target.value)}
-              placeholder={t("auth.common.password.placeholder")}
+              placeholder={t("Enter password")}
               className="h-10 w-full border border-strong !bg-surface-1 pr-12 disable-autofill-style placeholder:text-placeholder"
               onFocus={() => setIsPasswordInputFocused(true)}
               onBlur={() => setIsPasswordInputFocused(false)}
@@ -221,7 +221,7 @@ export const AuthPasswordForm = observer(function AuthPasswordForm(props: Props)
               onClick={() => handleShowPassword("password")}
               className="absolute right-3 grid size-5 place-items-center"
               aria-label={t(
-                showPassword?.password ? "aria_labels.auth_forms.hide_password" : "aria_labels.auth_forms.show_password"
+                showPassword?.password ? "Hide password" : "Show password"
               )}
             >
               {showPassword?.password ? (
@@ -237,7 +237,7 @@ export const AuthPasswordForm = observer(function AuthPasswordForm(props: Props)
         {mode === EAuthModes.SIGN_UP && (
           <div className="space-y-1">
             <label htmlFor="confirm-password" className="text-13 font-medium text-tertiary">
-              {t("auth.common.password.confirm_password.label")}
+              {t("Confirm password")}
             </label>
             <div className="relative flex items-center rounded-md bg-surface-1">
               <Input
@@ -246,7 +246,7 @@ export const AuthPasswordForm = observer(function AuthPasswordForm(props: Props)
                 name="confirm_password"
                 value={passwordFormData.confirm_password}
                 onChange={(e) => handleFormChange("confirm_password", e.target.value)}
-                placeholder={t("auth.common.password.confirm_password.placeholder")}
+                placeholder={t("Confirm password")}
                 className="h-10 w-full border border-strong !bg-surface-1 pr-12 disable-autofill-style placeholder:text-placeholder"
                 onFocus={() => setIsRetryPasswordInputFocused(true)}
                 onBlur={() => setIsRetryPasswordInputFocused(false)}
@@ -257,8 +257,8 @@ export const AuthPasswordForm = observer(function AuthPasswordForm(props: Props)
                 className="absolute right-3 grid size-5 place-items-center"
                 aria-label={t(
                   showPassword?.retypePassword
-                    ? "aria_labels.auth_forms.hide_password"
-                    : "aria_labels.auth_forms.show_password"
+                    ? "Hide password"
+                    : "Show password"
                 )}
                 onClick={() => handleShowPassword("retypePassword")}
               >
@@ -272,7 +272,7 @@ export const AuthPasswordForm = observer(function AuthPasswordForm(props: Props)
             {!!passwordFormData.confirm_password &&
               passwordFormData.password !== passwordFormData.confirm_password &&
               renderPasswordMatchError && (
-                <span className="text-13 text-danger-primary">{t("auth.common.password.errors.match")}</span>
+                <span className="text-13 text-danger-primary">{t("Passwords don't match")}</span>
               )}
           </div>
         )}
@@ -284,9 +284,9 @@ export const AuthPasswordForm = observer(function AuthPasswordForm(props: Props)
                 {isSubmitting ? (
                   <Spinner height="20px" width="20px" />
                 ) : isSMTPConfigured ? (
-                  t("common.continue")
+                  t("Continue")
                 ) : (
-                  t("common.go_to_workspace")
+                  t("Go to workspace")
                 )}
               </Button>
               {isSMTPConfigured && (
@@ -298,7 +298,7 @@ export const AuthPasswordForm = observer(function AuthPasswordForm(props: Props)
                   className="w-full"
                   size="xl"
                 >
-                  {t("auth.common.sign_in_with_unique_code")}
+                  {t("Sign in with unique code")}
                 </Button>
               )}
             </>

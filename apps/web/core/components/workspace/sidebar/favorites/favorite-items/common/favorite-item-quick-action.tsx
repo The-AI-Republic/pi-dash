@@ -43,7 +43,7 @@ export const FavoriteItemQuickAction = observer(function FavoriteItemQuickAction
       )}
       customButtonClassName="grid place-items-center"
       placement="bottom-start"
-      ariaLabel={t("aria_labels.projects_sidebar.toggle_quick_actions_menu")}
+      ariaLabel={t("Toggle quick actions menu")}
     >
       <CustomMenu.MenuItem onClick={() => handleRemoveFromFavorites(favorite)}>
         <span className="flex items-center justify-start gap-2">

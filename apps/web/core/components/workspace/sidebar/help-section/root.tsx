@@ -51,13 +51,13 @@ export const HelpMenuRoot = observer(function HelpMenuRoot() {
         <CustomMenu.MenuItem onClick={() => window.open("https://github.com/The-AI-Republic/pi-dash#readme", "_blank")}>
           <div className="flex items-center gap-x-2 rounded-sm text-11">
             <PageIcon className="h-3.5 w-3.5 text-secondary" height={14} width={14} />
-            <span className="text-11">{t("documentation")}</span>
+            <span className="text-11">{t("Documentation")}</span>
           </div>
         </CustomMenu.MenuItem>
         <CustomMenu.MenuItem onClick={() => window.open("mailto:sales@example.com", "_blank")}>
           <div className="flex items-center gap-x-2 rounded-sm text-11">
             <User className="h-3.5 w-3.5 text-secondary" size={14} />
-            <span className="text-11">{t("contact_sales")}</span>
+            <span className="text-11">{t("Contact sales")}</span>
           </div>
         </CustomMenu.MenuItem>
         <div className="my-1 border-t border-subtle" />
@@ -67,7 +67,7 @@ export const HelpMenuRoot = observer(function HelpMenuRoot() {
             onClick={() => toggleShortcutsListModal(true)}
             className="justify-sbg-layer-211 flex w-full items-center hover:bg-layer-1"
           >
-            <span className="text-11">{t("keyboard_shortcuts")}</span>
+            <span className="text-11">{t("Keyboard shortcuts")}</span>
           </button>
         </CustomMenu.MenuItem>
         <CustomMenu.MenuItem>
@@ -76,7 +76,7 @@ export const HelpMenuRoot = observer(function HelpMenuRoot() {
             onClick={() => setProductUpdatesModalOpen(true)}
             className="justify-sbg-layer-211 flex w-full items-center hover:bg-layer-1"
           >
-            <span className="text-11">{t("whats_new")}</span>
+            <span className="text-11">{t("What's new?")}</span>
           </button>
         </CustomMenu.MenuItem>
         <CustomMenu.MenuItem

@@ -56,13 +56,13 @@ export const usePowerKCycleContextBasedActions = (): TPowerKCommandConfig[] => {
       .then(() => {
         setToast({
           type: TOAST_TYPE.SUCCESS,
-          title: t("power_k.contextual_actions.cycle.copy_url_toast_success"),
+          title: t("Cycle URL copied to clipboard."),
         });
       })
       .catch(() => {
         setToast({
           type: TOAST_TYPE.ERROR,
-          title: t("power_k.contextual_actions.cycle.copy_url_toast_error"),
+          title: t("Some error occurred while copying the cycle URL to clipboard."),
         });
       });
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -72,8 +72,8 @@ export const usePowerKCycleContextBasedActions = (): TPowerKCommandConfig[] => {
     {
       id: "toggle_cycle_favorite",
       i18n_title: isFavorite
-        ? "power_k.contextual_actions.cycle.remove_from_favorites"
-        : "power_k.contextual_actions.cycle.add_to_favorites",
+        ? "Remove from favorites"
+        : "Add to favorites",
       icon: isFavorite ? StarOff : Star,
       group: "contextual",
       contextType: "cycle",
@@ -86,7 +86,7 @@ export const usePowerKCycleContextBasedActions = (): TPowerKCommandConfig[] => {
     },
     {
       id: "copy_cycle_url",
-      i18n_title: "power_k.contextual_actions.cycle.copy_url",
+      i18n_title: "Copy URL",
       icon: LinkIcon,
       group: "contextual",
       contextType: "cycle",

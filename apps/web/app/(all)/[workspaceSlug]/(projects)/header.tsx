@@ -30,7 +30,7 @@ export const WorkspaceDashboardHeader = observer(function WorkspaceDashboardHead
             <Breadcrumbs>
               <Breadcrumbs.Item
                 component={
-                  <BreadcrumbLink label={t("home.title")} icon={<HomeIcon className="h-4 w-4 text-tertiary" />} />
+                  <BreadcrumbLink label={t("Home")} icon={<HomeIcon className="h-4 w-4 text-tertiary" />} />
                 }
               />
             </Breadcrumbs>
@@ -44,7 +44,7 @@ export const WorkspaceDashboardHeader = observer(function WorkspaceDashboardHead
             className="my-auto mb-0"
             prependIcon={<Shapes />}
           >
-            <div className="hidden sm:hidden md:block">{t("home.manage_widgets")}</div>
+            <div className="hidden sm:hidden md:block">{t("Manage widgets")}</div>
           </Button>
         </Header.RightItem>
       </Header>

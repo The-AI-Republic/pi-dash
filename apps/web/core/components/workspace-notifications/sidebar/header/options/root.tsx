@@ -54,7 +54,7 @@ export const NotificationSidebarHeaderOptions = observer(function NotificationSi
   return (
     <div className="relative flex items-center justify-center gap-2 text-body-xs-medium">
       {/* mark all notifications as read*/}
-      <Tooltip tooltipContent={t("notification.options.mark_all_as_read")} isMobile={isMobile} position="bottom">
+      <Tooltip tooltipContent={t("Mark all as read")} isMobile={isMobile} position="bottom">
         <IconButton
           size="base"
           variant="ghost"
@@ -66,7 +66,7 @@ export const NotificationSidebarHeaderOptions = observer(function NotificationSi
       </Tooltip>
 
       {/* refetch current notifications */}
-      <Tooltip tooltipContent={t("notification.options.refresh")} isMobile={isMobile} position="bottom">
+      <Tooltip tooltipContent={t("Refresh")} isMobile={isMobile} position="bottom">
         <IconButton
           size="base"
           variant="ghost"

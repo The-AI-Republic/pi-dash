@@ -50,15 +50,15 @@ export const WebhookSecretKey = observer(function WebhookSecretKey(props: Props)
       .then(() =>
         setToast({
           type: TOAST_TYPE.SUCCESS,
-          title: `${t("success")}`,
-          message: t("workspace_settings.settings.webhooks.toasts.secret_key_copied.message"),
+          title: `${t("Success")}`,
+          message: t("Secret key copied to clipboard."),
         })
       )
       .catch(() =>
         setToast({
           type: TOAST_TYPE.ERROR,
-          title: `${t("error")}!`,
-          message: t("workspace_settings.settings.webhooks.toasts.secret_key_not_copied.message"),
+          title: `${t("Error")}!`,
+          message: t("Error occurred while copying secret key."),
         })
       );
   };
@@ -72,7 +72,7 @@ export const WebhookSecretKey = observer(function WebhookSecretKey(props: Props)
       .then(() => {
         setToast({
           type: TOAST_TYPE.SUCCESS,
-          title: `${t("success")}`,
+          title: `${t("Success")}`,
           message: "New key regenerated successfully.",
         });
 
@@ -84,8 +84,8 @@ export const WebhookSecretKey = observer(function WebhookSecretKey(props: Props)
       .catch((err) =>
         setToast({
           type: TOAST_TYPE.ERROR,
-          title: `${t("error")}!`,
-          message: err?.error ?? t("something_went_wrong_please_try_again"),
+          title: `${t("Error")}!`,
+          message: err?.error ?? t("Something went wrong. Please try again."),
         })
       )
       .finally(() => setIsRegenerating(false));
@@ -103,9 +103,9 @@ export const WebhookSecretKey = observer(function WebhookSecretKey(props: Props)
       {(data || webhookSecretKey) && (
         <div className="space-y-2">
           {webhookId && (
-            <div className="text-13 font-medium">{t("workspace_settings.settings.webhooks.secret_key.title")}</div>
+            <div className="text-13 font-medium">{t("Secret key")}</div>
           )}
-          <div className="text-11 text-placeholder">{t("workspace_settings.settings.webhooks.secret_key.message")}</div>
+          <div className="text-11 text-placeholder">{t("Generate a token to sign-in to the webhook payload")}</div>
           <div className="flex flex-col gap-4 md:flex-row md:items-center">
             <div className="flex h-8 max-w-lg flex-grow items-center justify-between self-stretch rounded-sm border border-subtle px-2">
               <div className="overflow-hidden font-medium select-none">
@@ -140,7 +140,7 @@ export const WebhookSecretKey = observer(function WebhookSecretKey(props: Props)
                   loading={isRegenerating}
                   prependIcon={<RefreshCw />}
                 >
-                  {isRegenerating ? `${t("re_generating")}...` : t("re_generate_key")}
+                  {isRegenerating ? `${t("Re-generating")}...` : t("Re-generate key")}
                 </Button>
               </div>
             )}

@@ -35,8 +35,8 @@ export const DeleteSchedulerModal = observer(function DeleteSchedulerModal(props
       await deleteScheduler(workspaceSlug, scheduler.id);
       setToast({
         type: TOAST_TYPE.SUCCESS,
-        title: t("schedulers.toast.deleted_title"),
-        message: t("schedulers.toast.deleted_message"),
+        title: t("Scheduler deleted"),
+        message: t("Active bindings have stopped firing."),
       });
       onDeleted?.();
       onClose();
@@ -44,8 +44,8 @@ export const DeleteSchedulerModal = observer(function DeleteSchedulerModal(props
       const err = e as { error?: string } | null;
       setToast({
         type: TOAST_TYPE.ERROR,
-        title: t("schedulers.toast.error_title"),
-        message: err?.error ?? t("schedulers.toast.delete_failed"),
+        title: t("Something went wrong"),
+        message: err?.error ?? t("Could not delete the scheduler."),
       });
     } finally {
       setSubmitting(false);
@@ -58,16 +58,16 @@ export const DeleteSchedulerModal = observer(function DeleteSchedulerModal(props
       handleClose={() => (submitting ? null : onClose())}
       handleSubmit={handleDelete}
       isSubmitting={submitting}
-      title={t("schedulers.delete.confirm_title")}
+      title={t("Delete scheduler?")}
       content={
         <>
-          <p>{t("schedulers.delete.confirm_body")}</p>
+          <p>{t("This soft-deletes the scheduler. Any active project bindings will stop firing. The slug becomes available for re-creation.")}</p>
           {scheduler && <p className="mt-2 font-medium text-primary">{scheduler.name}</p>}
         </>
       }
       primaryButtonText={{
-        default: t("schedulers.delete.confirm"),
-        loading: t("schedulers.delete.confirm"),
+        default: t("Delete"),
+        loading: t("Delete"),
       }}
     />
   );

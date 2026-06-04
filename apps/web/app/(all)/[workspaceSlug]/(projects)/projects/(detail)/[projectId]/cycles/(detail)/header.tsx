@@ -213,7 +213,7 @@ export const CycleIssuesHeader = observer(function CycleIssuesHeader() {
             </div>
             <WorkItemFiltersToggle entityType={EIssuesStoreType.CYCLE} entityId={cycleId} />
             <FiltersDropdown
-              title={t("common.display")}
+              title={t("Display")}
               placement="bottom-end"
               miniIcon={<SlidersHorizontal className="size-3.5" />}
             >
@@ -248,7 +248,7 @@ export const CycleIssuesHeader = observer(function CycleIssuesHeader() {
                     }}
                     data-ph-element={WORK_ITEM_TRACKER_ELEMENTS.HEADER_ADD_BUTTON.CYCLE}
                   >
-                    {t("issue.add.label")}
+                    {t("Add work item")}
                   </Button>
                 )}
               </>

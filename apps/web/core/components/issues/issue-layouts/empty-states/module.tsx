@@ -79,8 +79,8 @@ export const ModuleEmptyState = observer(function ModuleEmptyState() {
         {moduleWorkItemFilter?.hasActiveFilters ? (
           <EmptyStateDetailed
             assetKey="search"
-            title={t("common_empty_state.search.title")}
-            description={t("common_empty_state.search.description")}
+            title={t("No matching results.")}
+            description={t("No results found. Try adjusting your search terms.")}
             actions={[
               {
                 label: "Clear filters",
@@ -93,11 +93,11 @@ export const ModuleEmptyState = observer(function ModuleEmptyState() {
         ) : (
           <EmptyStateDetailed
             assetKey="work-item"
-            title={t("project_empty_state.module_work_items.title")}
-            description={t("project_empty_state.module_work_items.description")}
+            title={t("No work items to show in this Module")}
+            description={t("Create work items to begin monitoring this module.")}
             actions={[
               {
-                label: t("project_empty_state.module_work_items.cta_primary"),
+                label: t("Create work item"),
                 onClick: () => {
                   toggleCreateIssueModal(true, EIssuesStoreType.MODULE);
                 },
@@ -105,7 +105,7 @@ export const ModuleEmptyState = observer(function ModuleEmptyState() {
                 variant: "primary",
               },
               {
-                label: t("project_empty_state.module_work_items.cta_secondary"),
+                label: t("Add existing work item"),
                 onClick: () => setModuleIssuesListModal(true),
                 disabled: !canPerformEmptyStateActions,
                 variant: "secondary",

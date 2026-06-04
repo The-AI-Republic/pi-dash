@@ -30,7 +30,7 @@ function FeaturesViewsSettingsPage({ params }: Route.ComponentProps) {
   const { t } = useTranslation();
   // derived values
   const pageTitle = currentProjectDetails?.name
-    ? `${currentProjectDetails?.name} settings - ${t("project_settings.features.views.short_title")}`
+    ? `${currentProjectDetails?.name} settings - ${t("Views")}`
     : undefined;
   const canPerformProjectAdminActions = allowPermissions([EUserPermissions.ADMIN], EUserPermissionsLevel.PROJECT);
 
@@ -43,13 +43,13 @@ function FeaturesViewsSettingsPage({ params }: Route.ComponentProps) {
       <PageHead title={pageTitle} />
       <section className="w-full">
         <SettingsHeading
-          title={t("project_settings.features.views.title")}
-          description={t("project_settings.features.views.description")}
+          title={t("Views")}
+          description={t("Save custom sorts, filters, and display options or share them with your team.")}
         />
         <div className="mt-7">
           <ProjectSettingsFeatureControlItem
-            title={t("project_settings.features.views.toggle_title")}
-            description={t("project_settings.features.views.toggle_description")}
+            title={t("Enable views")}
+            description={t("Project members will be able to create and edit views.")}
             featureProperty="issue_views_view"
             projectId={projectId}
             value={!!currentProjectDetails?.issue_views_view}

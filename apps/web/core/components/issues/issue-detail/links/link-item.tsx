@@ -87,8 +87,8 @@ export const IssueLinkItem = observer(function IssueLinkItem(props: TIssueLinkIt
               copyTextToClipboard(linkDetail.url);
               setToast({
                 type: TOAST_TYPE.SUCCESS,
-                title: t("common.link_copied"),
-                message: t("common.link_copied_to_clipboard"),
+                title: t("Link copied!"),
+                message: t("Link copied to clipboard"),
               });
             }}
             className="relative grid cursor-pointer place-items-center rounded-sm p-1 text-placeholder outline-none group-hover:text-secondary hover:bg-layer-1"
@@ -109,7 +109,7 @@ export const IssueLinkItem = observer(function IssueLinkItem(props: TIssueLinkIt
               }}
             >
               <EditIcon className="h-3 w-3 stroke-[1.5] text-secondary" />
-              {t("common.actions.edit")}
+              {t("Edit")}
             </CustomMenu.MenuItem>
             <CustomMenu.MenuItem
               className="flex items-center gap-2"
@@ -118,7 +118,7 @@ export const IssueLinkItem = observer(function IssueLinkItem(props: TIssueLinkIt
               }}
             >
               <TrashIcon className="h-3 w-3" />
-              {t("common.actions.delete")}
+              {t("Delete")}
             </CustomMenu.MenuItem>
           </CustomMenu>
         </div>

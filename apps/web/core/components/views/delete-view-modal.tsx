@@ -65,8 +65,8 @@ export const DeleteProjectViewModal = observer(function DeleteProjectViewModal(p
       handleSubmit={handleDeleteView}
       isSubmitting={isDeleteLoading}
       isOpen={isOpen}
-      title={t("project_views.delete_view.title")}
-      content={<>{t("project_views.delete_view.content")}</>}
+      title={t("Are you sure you want to delete this view?")}
+      content={<>{t("If you confirm, all the sort, filter, and display options + the layout you have chosen for this view will be permanently deleted without any way to restore them.")}</>}
     />
   );
 });

@@ -25,8 +25,8 @@ type TCustomizeNavigationDialogProps = {
 };
 
 const PERSONAL_ITEMS: Array<{ key: TPersonalNavigationItemKey; labelTranslationKey: string }> = [
-  { key: "your_work", labelTranslationKey: "sidebar.your_work" },
-  { key: "drafts", labelTranslationKey: "drafts" },
+  { key: "your_work", labelTranslationKey: "Your work" },
+  { key: "drafts", labelTranslationKey: "Drafts" },
 ];
 
 // Block: e, E, +, -, . — extracted to module scope so the handler isn't recreated on every render.
@@ -112,7 +112,7 @@ export const CustomizeNavigationDialog = observer(function CustomizeNavigationDi
         {/* Header */}
         <div className="flex justify-between px-6 pt-4">
           <div>
-            <h2 className="text-18 font-semibold text-primary">{t("customize_navigation")}</h2>
+            <h2 className="text-18 font-semibold text-primary">{t("Customize navigation")}</h2>
             <p className="mt-1 text-13 text-tertiary">
               Toggle which personal items appear in the sidebar and configure how projects are listed. These changes are
               personal to you and won&apos;t affect anyone else on your workspace.
@@ -121,7 +121,7 @@ export const CustomizeNavigationDialog = observer(function CustomizeNavigationDi
           <button
             onClick={onClose}
             className="flex size-5 flex-shrink-0 items-center justify-center rounded-sm text-placeholder hover:bg-layer-1"
-            aria-label={t("close")}
+            aria-label={t("Close")}
           >
             <X className="size-4" />
           </button>
@@ -131,7 +131,7 @@ export const CustomizeNavigationDialog = observer(function CustomizeNavigationDi
         <div className="flex-1 space-y-4 overflow-y-auto px-6 py-4">
           {/* Personal Section */}
           <div className="flex flex-col gap-2">
-            <h3 className="text-13 font-semibold text-placeholder">{t("personal")}</h3>
+            <h3 className="text-13 font-semibold text-placeholder">{t("Personal")}</h3>
             <div className="rounded-md border border-subtle bg-surface-2 py-2">
               <Sortable
                 data={personalItems}
@@ -159,14 +159,14 @@ export const CustomizeNavigationDialog = observer(function CustomizeNavigationDi
 
           {/* Projects Section */}
           <div className="flex flex-col gap-2">
-            <h3 className="text-13 font-semibold text-placeholder">{t("projects")}</h3>
+            <h3 className="text-13 font-semibold text-placeholder">{t("Projects")}</h3>
 
             <div className="rounded-md border border-subtle bg-surface-2 px-2 py-2">
               <div className="space-y-3">
                 {/* Navigation Mode Radio Buttons */}
                 <div className="space-y-2">
                   <label
-                    aria-label={t("accordion_navigation_control")}
+                    aria-label={t("Accordion sidebar navigation")}
                     className="flex cursor-pointer gap-2 rounded-md px-2 py-1.5 hover:bg-surface-2"
                   >
                     <input
@@ -178,7 +178,7 @@ export const CustomizeNavigationDialog = observer(function CustomizeNavigationDi
                       className="mt-1 size-4 text-accent-primary focus:ring-accent-strong"
                     />
                     <div className="flex-1">
-                      <div className="text-13 text-primary">{t("accordion_navigation_control")}</div>
+                      <div className="text-13 text-primary">{t("Accordion sidebar navigation")}</div>
                       <div className="text-11 text-secondary">
                         Feature tabs will appear as nested items under project and acts as accordion.
                       </div>
@@ -186,7 +186,7 @@ export const CustomizeNavigationDialog = observer(function CustomizeNavigationDi
                   </label>
 
                   <label
-                    aria-label={t("horizontal_navigation_bar")}
+                    aria-label={t("Tabbed Navigation")}
                     className="flex cursor-pointer gap-2 rounded-md px-2 py-1.5 hover:bg-surface-2"
                   >
                     <input
@@ -198,7 +198,7 @@ export const CustomizeNavigationDialog = observer(function CustomizeNavigationDi
                       className="mt-1 size-4 text-accent-primary focus:ring-accent-strong"
                     />
                     <div className="flex-1">
-                      <div className="text-13 text-primary">{t("horizontal_navigation_bar")}</div>
+                      <div className="text-13 text-primary">{t("Tabbed Navigation")}</div>
                       <div className="text-11 text-secondary">
                         Feature tabs will appear as horizontal tabs inside a project.
                       </div>
@@ -213,14 +213,14 @@ export const CustomizeNavigationDialog = observer(function CustomizeNavigationDi
                       checked={projectPreferences.showLimitedProjects}
                       onChange={(e) => updateShowLimitedProjects(e.target.checked)}
                     />
-                    <span className="text-13 text-primary">{t("show_limited_projects_on_sidebar")}</span>
+                    <span className="text-13 text-primary">{t("Show limited projects on sidebar")}</span>
                   </label>
 
                   {projectPreferences.showLimitedProjects && (
                     <div className="pl-8">
                       <div className="flex w-full flex-col gap-1">
                         <div className="flex w-full flex-col gap-2 pb-1.5">
-                          <label className="w-full text-11 text-secondary">{t("enter_number_of_projects")}</label>
+                          <label className="w-full text-11 text-secondary">{t("Enter number of projects")}</label>
                           <input
                             type="number"
                             min="1"

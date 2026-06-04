@@ -115,7 +115,7 @@ export const CycleDropdown = observer(function CycleDropdown(props: Props) {
           <DropdownButton
             className={buttonClassName}
             isActive={isOpen}
-            tooltipHeading={t("common.cycle")}
+            tooltipHeading={t("Cycle")}
             tooltipContent={selectedName ?? placeholder}
             showTooltip={showTooltip}
             variant={buttonVariant}

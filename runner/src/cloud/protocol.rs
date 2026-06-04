@@ -5,13 +5,14 @@ use uuid::Uuid;
 
 /// Wire version — bump on incompatible shape changes.
 ///
-/// v4 (current): per-runner HTTPS long-poll transport. Each runner has
-/// its own refresh-token + access-token pair; the daemon opens one
-/// session per runner via ``POST /runners/<rid>/sessions/`` and polls
-/// ``POST /runners/<rid>/sessions/<sid>/poll`` for control-plane
-/// messages. ``Hello``/``Heartbeat``/``Bye``/``Ping`` are folded into
-/// HTTP request/response bodies; ``ForceRefresh`` is a new
-/// cloud→runner control message.
+/// v4 (current): per-runner HTTPS long-poll transport. The daemon presents
+/// the shared dev-machine token and identifies the speaking runner by URL
+/// or ``X-Runner-Id``. It opens one session per runner via
+/// ``POST /runners/<rid>/sessions/`` and polls
+/// ``POST /runners/<rid>/sessions/<sid>/poll`` for control-plane messages.
+/// ``Hello``/``Heartbeat``/``Bye``/``Ping`` are folded into HTTP
+/// request/response bodies; ``ForceRefresh`` is retained for legacy
+/// refresh-token clients.
 ///
 /// v3 (retired): always-on WebSocket per Connection.
 ///

@@ -47,7 +47,7 @@ function WebhooksListPage({ params }: Route.ComponentProps) {
   );
 
   const pageTitle = currentWorkspace?.name
-    ? `${currentWorkspace.name} - ${t("workspace_settings.settings.webhooks.title")}`
+    ? `${currentWorkspace.name} - ${t("Webhooks")}`
     : undefined;
 
   // clear secret key when modal is closed.
@@ -75,11 +75,11 @@ function WebhooksListPage({ params }: Route.ComponentProps) {
           }}
         />
         <SettingsHeading
-          title={t("workspace_settings.settings.webhooks.title")}
-          description={t("workspace_settings.settings.webhooks.description")}
+          title={t("Webhooks")}
+          description={t("Automate notifications to external services when project events occur.")}
           control={
             <Button variant="primary" size="lg" onClick={() => setShowCreateWebhookModal(true)}>
-              {t("workspace_settings.settings.webhooks.add_webhook")}
+              {t("Add webhook")}
             </Button>
           }
         />
@@ -92,11 +92,11 @@ function WebhooksListPage({ params }: Route.ComponentProps) {
             <div className="flex h-full w-full items-center justify-center">
               <EmptyStateCompact
                 assetKey="webhook"
-                title={t("settings_empty_state.webhooks.title")}
-                description={t("settings_empty_state.webhooks.description")}
+                title={t("No Webhook added yet")}
+                description={t("Automate notifications to external services when project events occur.")}
                 actions={[
                   {
-                    label: t("settings_empty_state.webhooks.cta_primary"),
+                    label: t("Add webhook"),
                     onClick: () => {
                       setShowCreateWebhookModal(true);
                     },

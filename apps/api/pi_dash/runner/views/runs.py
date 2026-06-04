@@ -18,6 +18,7 @@ from pi_dash.runner.serializers import (
 )
 from pi_dash.runner.services import matcher
 from pi_dash.runner.services.permissions import (
+    can_view_runner,
     is_workspace_admin,
     is_workspace_member,
 )
@@ -41,6 +42,8 @@ def _can_view_run(user, run: AgentRun) -> bool:
         return True
     if run.runner_id is not None and run.runner.owner_id == user.id:
         return True
+    if run.runner_id is not None and not can_view_runner(user, run.runner):
+        return False
     return is_workspace_admin(user, run.workspace_id)
 
 
@@ -76,9 +79,7 @@ class AgentRunListEndpoint(APIView):
         # the live (non-soft-deleted) WorkspaceMember default manager.
         from pi_dash.db.models import WorkspaceMember
 
-        member_workspaces = WorkspaceMember.objects.filter(
-            member=request.user
-        ).values("workspace_id")
+        member_workspaces = WorkspaceMember.objects.filter(member=request.user).values("workspace_id")
         qs = (
             AgentRun.objects.filter(workspace_id__in=member_workspaces)
             .filter(
@@ -173,13 +174,9 @@ class AgentRunListEndpoint(APIView):
             )
         issue = Issue.all_objects.filter(pk=work_item_id).first()
         if issue is None:
-            return Response(
-                {"error": "issue not found"}, status=status.HTTP_404_NOT_FOUND
-            )
+            return Response({"error": "issue not found"}, status=status.HTTP_404_NOT_FOUND)
         if not is_workspace_member(request.user, issue.workspace_id):
-            return Response(
-                {"error": "issue not found"}, status=status.HTTP_404_NOT_FOUND
-            )
+            return Response({"error": "issue not found"}, status=status.HTTP_404_NOT_FOUND)
 
         with transaction.atomic():
             run = scheduling.dispatch_run_ai_run(issue, actor=request.user)
@@ -191,12 +188,7 @@ class AgentRunListEndpoint(APIView):
                 scheduling.reset_ticker_after_comment_and_run(issue)
         if run is None:
             return Response(
-                {
-                    "error": (
-                        "could not dispatch — issue may already have an "
-                        "active run, or no pod is available"
-                    )
-                },
+                {"error": ("could not dispatch — issue may already have an active run, or no pod is available")},
                 status=status.HTTP_409_CONFLICT,
             )
         return Response(
@@ -223,13 +215,9 @@ class AgentRunListEndpoint(APIView):
             )
         issue = Issue.all_objects.filter(pk=work_item_id).first()
         if issue is None:
-            return Response(
-                {"error": "issue not found"}, status=status.HTTP_404_NOT_FOUND
-            )
+            return Response({"error": "issue not found"}, status=status.HTTP_404_NOT_FOUND)
         if not is_workspace_member(request.user, issue.workspace_id):
-            return Response(
-                {"error": "issue not found"}, status=status.HTTP_404_NOT_FOUND
-            )
+            return Response({"error": "issue not found"}, status=status.HTTP_404_NOT_FOUND)
 
         with transaction.atomic():
             run = scheduling.dispatch_continuation_run(
@@ -249,8 +237,7 @@ class AgentRunListEndpoint(APIView):
             return Response(
                 {
                     "error": (
-                        "could not dispatch — issue may already have an "
-                        "active run, or no prior run / pod is available"
+                        "could not dispatch — issue may already have an active run, or no prior run / pod is available"
                     )
                 },
                 status=status.HTTP_409_CONFLICT,
@@ -266,9 +253,7 @@ class AgentRunDetailEndpoint(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request, run_id):
-        run = (
-            AgentRun.objects.select_related("runner").filter(id=run_id).first()
-        )
+        run = AgentRun.objects.select_related("runner").filter(id=run_id).first()
         if run is None:
             return Response({"error": "not found"}, status=status.HTTP_404_NOT_FOUND)
         if not _can_view_run(request.user, run):
@@ -290,9 +275,7 @@ class AgentRunCancelEndpoint(APIView):
         # Authorization check happens on a non-locked read; re-check terminal
         # state after acquiring the row lock to avoid racing with
         # Runner.revoke() (which holds select_for_update on in-flight runs).
-        run = (
-            AgentRun.objects.select_related("runner").filter(id=run_id).first()
-        )
+        run = AgentRun.objects.select_related("runner").filter(id=run_id).first()
         if run is None:
             return Response({"error": "not found"}, status=status.HTTP_404_NOT_FOUND)
         if not _can_cancel_run(request.user, run):
@@ -300,15 +283,9 @@ class AgentRunCancelEndpoint(APIView):
 
         runner_id = run.runner_id
         with transaction.atomic():
-            locked = (
-                AgentRun.objects.select_for_update()
-                .filter(id=run_id)
-                .first()
-            )
+            locked = AgentRun.objects.select_for_update().filter(id=run_id).first()
             if locked is None:
-                return Response(
-                    {"error": "not found"}, status=status.HTTP_404_NOT_FOUND
-                )
+                return Response({"error": "not found"}, status=status.HTTP_404_NOT_FOUND)
             if locked.is_terminal:
                 return Response(
                     {"error": "run already terminal"},
@@ -351,24 +328,16 @@ class AgentRunReleasePinEndpoint(APIView):
     permission_classes = [IsAuthenticated]
 
     def post(self, request, run_id):
-        run = (
-            AgentRun.objects.select_related("runner", "pinned_runner")
-            .filter(id=run_id)
-            .first()
-        )
+        run = AgentRun.objects.select_related("runner", "pinned_runner").filter(id=run_id).first()
         if run is None:
             return Response({"error": "not found"}, status=status.HTTP_404_NOT_FOUND)
         if not _can_cancel_run(request.user, run):
             return Response({"error": "not found"}, status=status.HTTP_404_NOT_FOUND)
 
         with transaction.atomic():
-            locked = (
-                AgentRun.objects.select_for_update().filter(id=run_id).first()
-            )
+            locked = AgentRun.objects.select_for_update().filter(id=run_id).first()
             if locked is None:
-                return Response(
-                    {"error": "not found"}, status=status.HTTP_404_NOT_FOUND
-                )
+                return Response({"error": "not found"}, status=status.HTTP_404_NOT_FOUND)
             if locked.status != AgentRunStatus.QUEUED:
                 return Response(
                     {"error": "run not queued"},
@@ -384,17 +353,12 @@ class AgentRunReleasePinEndpoint(APIView):
             # builds an Assign without a resume hint — the new runner has
             # no session to resume against. The handoff comment carries
             # the human-readable state.
-            if (
-                locked.parent_run is not None
-                and locked.parent_run.thread_id
-            ):
+            if locked.parent_run is not None and locked.parent_run.thread_id:
                 locked.parent_run.thread_id = ""
                 locked.parent_run.save(update_fields=["thread_id"])
             locked.save(update_fields=["pinned_runner"])
             run = locked
 
         if run.pod_id is not None:
-            transaction.on_commit(
-                lambda pid=run.pod_id: matcher.drain_pod_by_id(pid)
-            )
+            transaction.on_commit(lambda pid=run.pod_id: matcher.drain_pod_by_id(pid))
         return Response(AgentRunSerializer(run).data)

@@ -127,7 +127,7 @@ export function CreateApiTokenForm(props: Props) {
     <form onSubmit={handleSubmit(handleFormSubmit)}>
       <div className="space-y-5 p-5">
         <h3 className="text-18 font-medium text-secondary">
-          {t("workspace_settings.settings.api_tokens.create_token")}
+          {t("Create token")}
         </h3>
         <div className="space-y-3">
           <div className="space-y-1">
@@ -135,12 +135,12 @@ export function CreateApiTokenForm(props: Props) {
               control={control}
               name="label"
               rules={{
-                required: t("title_is_required"),
+                required: t("Title is required"),
                 maxLength: {
                   value: 255,
-                  message: t("title_should_be_less_than_255_characters"),
+                  message: t("Title should be less than 255 characters"),
                 },
-                validate: (val) => val.trim() !== "" || t("title_is_required"),
+                validate: (val) => val.trim() !== "" || t("Title is required"),
               }}
               render={({ field: { value, onChange } }) => (
                 <Input
@@ -148,7 +148,7 @@ export function CreateApiTokenForm(props: Props) {
                   value={value}
                   onChange={onChange}
                   hasError={Boolean(errors.label)}
-                  placeholder={t("title")}
+                  placeholder={t("Title")}
                   className="w-full text-14"
                 />
               )}
@@ -163,7 +163,7 @@ export function CreateApiTokenForm(props: Props) {
                 value={value}
                 onChange={onChange}
                 hasError={Boolean(errors.description)}
-                placeholder={t("description")}
+                placeholder={t("Description")}
                 className="min-h-24 w-full resize-none text-14"
               />
             )}
@@ -242,16 +242,16 @@ export function CreateApiTokenForm(props: Props) {
           <div className="flex cursor-pointer items-center justify-center">
             <ToggleSwitch value={neverExpires} onChange={() => {}} size="sm" />
           </div>
-          <span className="text-11">{t("workspace_settings.settings.api_tokens.never_expires")}</span>
+          <span className="text-11">{t("Never expires")}</span>
         </div>
         <div className="flex items-center gap-2">
           <Button variant="secondary" onClick={handleClose}>
-            {t("cancel")}
+            {t("Cancel")}
           </Button>
           <Button variant="primary" type="submit" loading={isSubmitting}>
             {isSubmitting
-              ? t("workspace_settings.settings.api_tokens.generating")
-              : t("workspace_settings.settings.api_tokens.generate_token")}
+              ? t("Generating")
+              : t("Generate token")}
           </Button>
         </div>
       </div>

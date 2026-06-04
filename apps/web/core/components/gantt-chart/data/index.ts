@@ -75,7 +75,7 @@ export const datePreview = (date: Date, includeTime: boolean = false) => {
 export const VIEWS_LIST: ChartDataType[] = [
   {
     key: "week",
-    i18n_title: "common.week",
+    i18n_title: "Week",
     data: {
       startDate: new Date(),
       currentDate: new Date(),
@@ -86,7 +86,7 @@ export const VIEWS_LIST: ChartDataType[] = [
   },
   {
     key: "month",
-    i18n_title: "common.month",
+    i18n_title: "Month",
     data: {
       startDate: new Date(),
       currentDate: new Date(),
@@ -97,7 +97,7 @@ export const VIEWS_LIST: ChartDataType[] = [
   },
   {
     key: "quarter",
-    i18n_title: "common.quarter",
+    i18n_title: "Quarter",
     data: {
       startDate: new Date(),
       currentDate: new Date(),

@@ -53,8 +53,8 @@ export const NewFavoriteFolder = observer(function NewFavoriteFolder(props: TPro
     if (existingFolders.includes(formData.name))
       return setToast({
         type: TOAST_TYPE.ERROR,
-        title: t("error"),
-        message: t("folder_already_exists"),
+        title: t("Error"),
+        message: t("Folder already exists"),
       });
     formData = {
       entity_type: "folder",
@@ -67,24 +67,24 @@ export const NewFavoriteFolder = observer(function NewFavoriteFolder(props: TPro
     if (formData.name === "")
       return setToast({
         type: TOAST_TYPE.ERROR,
-        title: t("error"),
-        message: t("folder_name_cannot_be_empty"),
+        title: t("Error"),
+        message: t("Folder name cannot be empty"),
       });
 
     addFavorite(workspaceSlug.toString(), formData)
       .then(() => {
         setToast({
           type: TOAST_TYPE.SUCCESS,
-          title: t("success"),
-          message: t("favorite_created_successfully"),
+          title: t("Success"),
+          message: t("Favorite created successfully"),
         });
         return;
       })
       .catch(() => {
         setToast({
           type: TOAST_TYPE.ERROR,
-          title: t("error"),
-          message: t("something_went_wrong"),
+          title: t("Error"),
+          message: t("Something went wrong"),
         });
       });
     setCreateNewFolder(false);
@@ -96,8 +96,8 @@ export const NewFavoriteFolder = observer(function NewFavoriteFolder(props: TPro
     if (existingFolders.includes(formData.name))
       return setToast({
         type: TOAST_TYPE.ERROR,
-        title: t("error"),
-        message: t("folder_already_exists"),
+        title: t("Error"),
+        message: t("Folder already exists"),
       });
     const payload = {
       name: formData.name.trim(),
@@ -106,24 +106,24 @@ export const NewFavoriteFolder = observer(function NewFavoriteFolder(props: TPro
     if (formData.name.trim() === "")
       return setToast({
         type: TOAST_TYPE.ERROR,
-        title: t("error"),
-        message: t("folder_name_cannot_be_empty"),
+        title: t("Error"),
+        message: t("Folder name cannot be empty"),
       });
 
     updateFavorite(workspaceSlug.toString(), favoriteId, payload)
       .then(() => {
         setToast({
           type: TOAST_TYPE.SUCCESS,
-          title: t("success"),
-          message: t("favorite_updated_successfully"),
+          title: t("Success"),
+          message: t("Favorite updated successfully"),
         });
         return;
       })
       .catch(() => {
         setToast({
           type: TOAST_TYPE.ERROR,
-          title: t("error"),
-          message: t("something_went_wrong"),
+          title: t("Error"),
+          message: t("Something went wrong"),
         });
       });
     setCreateNewFolder(false);
@@ -148,8 +148,8 @@ export const NewFavoriteFolder = observer(function NewFavoriteFolder(props: TPro
           render={({ field }) => (
             <Input
               className="w-full"
-              placeholder={t("new_folder")}
-              aria-label={t("aria_labels.projects_sidebar.enter_folder_name")}
+              placeholder={t("New folder")}
+              aria-label={t("Enter folder name")}
               {...field}
             />
           )}

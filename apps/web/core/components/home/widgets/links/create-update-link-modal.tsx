@@ -72,19 +72,19 @@ export const LinkCreateUpdateModal = observer(function LinkCreateUpdateModal(pro
       <form onSubmit={handleSubmit(handleFormSubmit)}>
         <div className="space-y-5 p-5">
           <h3 className="text-18 font-medium text-secondary">
-            {preloadedData?.id ? t("update") : t("add")} {t("home.quick_links.title")}
+            {preloadedData?.id ? t("Update") : t("Add")} {t("Quicklink")}
           </h3>
           <div className="mt-2 space-y-3">
             <div>
               <label htmlFor="url" className="mb-2 text-14 font-medium text-secondary">
-                {t("link.modal.url.text")}
-                <span className="block text-10">{t("required")}</span>
+                {t("URL")}
+                <span className="block text-10">{t("Required")}</span>
               </label>
               <Controller
                 control={control}
                 name="url"
                 rules={{
-                  required: t("link.modal.url.required"),
+                  required: t("URL is invalid"),
                 }}
                 render={({ field: { value, onChange, ref } }) => (
                   <Input
@@ -94,17 +94,17 @@ export const LinkCreateUpdateModal = observer(function LinkCreateUpdateModal(pro
                     onChange={onChange}
                     ref={ref}
                     hasError={Boolean(errors.url)}
-                    placeholder={t("link.modal.url.placeholder")}
+                    placeholder={t("Type or paste a URL")}
                     className="w-full"
                   />
                 )}
               />
-              {errors.url && <span className="text-11 text-danger-primary">{t("link.modal.url.required")}</span>}
+              {errors.url && <span className="text-11 text-danger-primary">{t("URL is invalid")}</span>}
             </div>
             <div>
               <label htmlFor="title" className="mb-2 text-14 font-medium text-secondary">
-                {t("link.modal.title.text")}
-                <span className="block text-10">{t("optional")}</span>
+                {t("Display title")}
+                <span className="block text-10">{t("Optional")}</span>
               </label>
               <Controller
                 control={control}
@@ -117,7 +117,7 @@ export const LinkCreateUpdateModal = observer(function LinkCreateUpdateModal(pro
                     onChange={onChange}
                     ref={ref}
                     hasError={Boolean(errors.title)}
-                    placeholder={t("link.modal.title.placeholder")}
+                    placeholder={t("What you'd like to see this link as")}
                     className="w-full"
                   />
                 )}
@@ -130,8 +130,8 @@ export const LinkCreateUpdateModal = observer(function LinkCreateUpdateModal(pro
             {t("Cancel")}
           </Button>
           <Button variant="primary" size="lg" type="submit" loading={isSubmitting}>
-            {preloadedData?.id ? (isSubmitting ? t("updating") : t("update")) : isSubmitting ? t("adding") : t("add")}{" "}
-            {t("home.quick_links.title")}
+            {preloadedData?.id ? (isSubmitting ? t("Updating") : t("Update")) : isSubmitting ? t("Adding") : t("Add")}{" "}
+            {t("Quicklink")}
           </Button>
         </div>
       </form>

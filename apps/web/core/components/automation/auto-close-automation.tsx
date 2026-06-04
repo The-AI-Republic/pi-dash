@@ -91,8 +91,8 @@ export const AutoCloseAutomation = observer(function AutoCloseAutomation(props: 
             <ArchiveX className="size-4 shrink-0 text-danger-primary" />
           </div>
           <SettingsControlItem
-            title={t("project_settings.automations.auto-close.title")}
-            description={t("project_settings.automations.auto-close.description")}
+            title={t("Auto-close work items")}
+            description={t("Pi Dash will automatically close work items that haven't been completed or canceled.")}
             control={
               <ToggleSwitch
                 value={autoCloseStatus}
@@ -116,7 +116,7 @@ export const AutoCloseAutomation = observer(function AutoCloseAutomation(props: 
               <div className="flex flex-col rounded-sm border border-subtle bg-surface-2">
                 <div className="flex w-full items-center justify-between gap-2 px-5 py-4">
                   <div className="w-1/2 text-13 font-medium">
-                    {t("project_settings.automations.auto-close.duration")}
+                    {t("Auto-close work items that are inactive for")}
                   </div>
                   <div className="w-1/2">
                     <CustomSelect
@@ -139,7 +139,7 @@ export const AutoCloseAutomation = observer(function AutoCloseAutomation(props: 
                           className="flex w-full items-center rounded-sm px-1 py-1.5 text-secondary select-none hover:bg-layer-1"
                           onClick={() => setmonthModal(true)}
                         >
-                          {t("common.customize_time_range")}
+                          {t("Customize time range")}
                         </button>
                       </>
                     </CustomSelect>
@@ -148,7 +148,7 @@ export const AutoCloseAutomation = observer(function AutoCloseAutomation(props: 
 
                 <div className="ppy flex w-full items-center justify-between gap-2 px-5 py-4 sm:py-10">
                   <div className="w-1/2 text-13 font-medium">
-                    {t("project_settings.automations.auto-close.auto_close_status")}
+                    {t("Auto-close status")}
                   </div>
                   <div className="w-1/2">
                     <CustomSearchSelect
@@ -172,7 +172,7 @@ export const AutoCloseAutomation = observer(function AutoCloseAutomation(props: 
                           )}
                           {selectedOption?.name
                             ? selectedOption.name
-                            : (currentDefaultState?.name ?? <span className="text-secondary">{t("state")}</span>)}
+                            : (currentDefaultState?.name ?? <span className="text-secondary">{t("State")}</span>)}
                         </div>
                       }
                       onChange={(val: string) => void handleChange({ default_state: val })}

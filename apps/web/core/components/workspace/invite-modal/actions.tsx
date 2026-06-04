@@ -54,16 +54,16 @@ export const InvitationModalActions = observer(function InvitationModalActions(p
         disabled={isInviteDisabled}
       >
         <PlusIcon className="h-3.5 w-3.5" />
-        {addMoreButtonText || t("common.add_more")}
+        {addMoreButtonText || t("Add more")}
       </button>
       <div className="flex items-center gap-2">
         <Button variant="secondary" size="lg" onClick={handleClose}>
-          {cancelButtonText || t("cancel")}
+          {cancelButtonText || t("Cancel")}
         </Button>
         <Button variant="primary" size="lg" type="submit" loading={isSubmitting} disabled={isInviteDisabled}>
           {isSubmitting
-            ? submitButtonText?.loading || t("workspace_settings.settings.members.modal.button_loading")
-            : submitButtonText?.default || t("workspace_settings.settings.members.modal.button")}
+            ? submitButtonText?.loading || t("Sending invitations")
+            : submitButtonText?.default || t("Send invitations")}
         </Button>
       </div>
     </div>

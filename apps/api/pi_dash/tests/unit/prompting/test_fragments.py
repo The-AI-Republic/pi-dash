@@ -113,7 +113,14 @@ def test_fragments_directory_exists_on_disk():
     assert FRAGMENTS_DIR.is_dir(), f"fragments dir missing: {FRAGMENTS_DIR}"
 
 
-def _ctx_from_db(*, parent_branch=None, work_branch=None, base_branch="trunk", has_parent=False):
+def _ctx_from_db(
+    *,
+    parent_branch=None,
+    work_branch=None,
+    base_branch="trunk",
+    has_parent=False,
+    project_description="",
+):
     """Build the Jinja context for these fragment tests via the production
     ``prompting.context.build_context``.
 
@@ -166,6 +173,7 @@ def _ctx_from_db(*, parent_branch=None, work_branch=None, base_branch="trunk", h
         workspace=workspace,
         created_by=owner,
         base_branch=base_branch,
+        description=project_description,
     )
     State.objects.create(
         name="Todo", project=project, workspace=workspace, group="unstarted", default=True
@@ -239,3 +247,36 @@ def test_assemble_renders_existing_work_branch_skips_base_resolution():
     # repo.work_branch path → checkout existing branch directly, no BASE= resolution.
     assert "git checkout feat/pinned" in body
     assert "BASE=" not in body
+
+
+@pytest.mark.unit
+@pytest.mark.django_db
+def test_assemble_renders_project_header_and_description_when_set():
+    body = render(
+        assemble(),
+        _ctx_from_db(project_description="Core backend services."),
+    )
+    # The project header always renders.
+    assert "Project: Test Project (TP)" in body
+    # When description is set, it renders verbatim on its own line,
+    # framed by blank lines between the Project header and Issue Description.
+    assert "\nCore backend services.\n" in body
+    assert (
+        "Project: Test Project (TP)\n\nCore backend services.\n\nIssue Description:"
+        in body
+    )
+
+
+@pytest.mark.unit
+@pytest.mark.django_db
+def test_assemble_renders_project_header_without_description_has_no_extra_blank_line():
+    # Whitespace regression guard: with description empty, the conditional
+    # block must not leave a double-blank-line gap between the Project header
+    # and the Issue Description heading. renderer.py uses trim_blocks=False,
+    # so the structure of fragments/01_intro.md around the {% if %} block is
+    # what enforces single-blank-line spacing here.
+    body = render(assemble(), _ctx_from_db(project_description=""))
+    assert "Project: Test Project (TP)" in body
+    assert "Project: Test Project (TP)\n\nIssue Description:" in body
+    # Triple-newline would mean a double blank line — that's the regression.
+    assert "Project: Test Project (TP)\n\n\nIssue Description:" not in body

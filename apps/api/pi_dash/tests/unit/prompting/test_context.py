@@ -151,6 +151,46 @@ def test_context_parent_work_branch_empty_surfaces_as_none(
 
 
 @pytest.mark.unit
+def test_context_includes_project_description_when_set(
+    workspace, create_user
+):
+    project = Project.objects.create(
+        name="Documented Project",
+        identifier="DP",
+        workspace=workspace,
+        created_by=create_user,
+        description="Core backend services. Prefer additive migrations.",
+    )
+    project_state = State.objects.create(
+        name="Todo", project=project, group="unstarted"
+    )
+    issue = Issue.objects.create(
+        name="Fix a thing",
+        workspace=workspace,
+        project=project,
+        state=project_state,
+        created_by=create_user,
+    )
+    run = AgentRun.objects.create(
+        owner=create_user, workspace=workspace, prompt="", work_item=issue
+    )
+    ctx = build_context(issue, run)
+    assert (
+        ctx["project"]["description"]
+        == "Core backend services. Prefer additive migrations."
+    )
+
+
+@pytest.mark.unit
+def test_context_project_description_defaults_to_empty_string(issue, run):
+    # The `project` fixture above doesn't set `description`, so the model's
+    # TextField(blank=True) default applies — must surface as "" (never None)
+    # so the template's `{% if project.description %}` guard behaves.
+    ctx = build_context(issue, run)
+    assert ctx["project"]["description"] == ""
+
+
+@pytest.mark.unit
 def test_context_empty_base_branch_surfaces_as_none(workspace, create_user):
     # A project with no base_branch set — empty strings must flow through as
     # ``None`` so the prompt template takes the "auto-detect remote default"

@@ -38,7 +38,7 @@ export const ModuleStatusDropdown = observer(function ModuleStatusDropdown(props
             backgroundColor: moduleStatus ? `${moduleStatus.color}20` : "#a3a3a220",
           }}
         >
-          {(moduleStatus && t(moduleStatus?.i18n_label)) ?? t("project_modules.status.backlog")}
+          {(moduleStatus && t(moduleStatus?.i18n_label)) ?? t("Backlog")}
         </span>
       }
       value={moduleStatus?.value}

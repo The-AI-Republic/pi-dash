@@ -78,8 +78,8 @@ export const ArchivedModuleLayoutRoot = observer(function ArchivedModuleLayoutRo
         <div className="h-full place-items-center">
           <EmptyStateDetailed
             assetKey="archived-module"
-            title={t("workspace_empty_state.archive_modules.title")}
-            description={t("workspace_empty_state.archive_modules.description")}
+            title={t("No archived Modules yet")}
+            description={t("To tidy up your project, archive completed or cancelled modules. Find them here once archived.")}
           />
         </div>
       ) : (

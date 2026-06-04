@@ -89,8 +89,8 @@ export const SecurityProfileSettings = observer(function SecurityProfileSettings
       setShowPassword(defaultShowPassword);
       setToast({
         type: TOAST_TYPE.SUCCESS,
-        title: t("auth.common.password.toast.change_password.success.title"),
-        message: t("auth.common.password.toast.change_password.success.message"),
+        title: t("Success!"),
+        message: t("Password changed successfully."),
       });
     } catch (error: unknown) {
       const err = error as Error & { error_code?: string };
@@ -99,15 +99,15 @@ export const SecurityProfileSettings = observer(function SecurityProfileSettings
 
       setToast({
         type: TOAST_TYPE.ERROR,
-        title: errorInfo?.title ?? t("auth.common.password.toast.error.title"),
+        title: errorInfo?.title ?? t("Authentication error"),
         message:
-          typeof errorInfo?.message === "string" ? errorInfo.message : t("auth.common.password.toast.error.message"),
+          typeof errorInfo?.message === "string" ? errorInfo.message : t("Something went wrong. Please try again."),
       });
 
       if (code && passwordErrors.includes(code as EAuthenticationErrorCodes)) {
         setError("new_password", {
           type: "manual",
-          message: errorInfo?.message?.toString() || t("auth.common.password.toast.error.message"),
+          message: errorInfo?.message?.toString() || t("Something went wrong. Please try again."),
         });
       }
     }
@@ -130,18 +130,18 @@ export const SecurityProfileSettings = observer(function SecurityProfileSettings
 
   return (
     <div className="size-full">
-      <ProfileSettingsHeading title={t("auth.common.password.change_password.label.default")} />
+      <ProfileSettingsHeading title={t("Change password")} />
       <form onSubmit={handleSubmit(handleChangePassword)} className="mt-7 flex flex-col gap-8">
         <div className="flex flex-col gap-y-7">
           {oldPasswordRequired && (
             <div className="flex flex-col gap-y-2">
-              <h4 className="text-13">{t("auth.common.password.current_password.label")}</h4>
+              <h4 className="text-13">{t("Current password")}</h4>
               <div className="relative flex items-center rounded-md">
                 <Controller
                   control={control}
                   name="old_password"
                   rules={{
-                    required: t("common.errors.required"),
+                    required: t("This field is required"),
                   }}
                   render={({ field: { value, onChange } }) => (
                     <Input
@@ -149,7 +149,7 @@ export const SecurityProfileSettings = observer(function SecurityProfileSettings
                       type={showPassword?.oldPassword ? "text" : "password"}
                       value={value}
                       onChange={onChange}
-                      placeholder={t("old_password")}
+                      placeholder={t("Old password")}
                       className="w-full"
                       hasError={Boolean(errors.old_password)}
                       autoComplete="current-password"
@@ -175,20 +175,20 @@ export const SecurityProfileSettings = observer(function SecurityProfileSettings
           )}
           <div className="grid gap-x-4 gap-y-7 sm:grid-cols-2">
             <div className="flex flex-col gap-y-2">
-              <h4 className="text-13">{t("auth.common.password.new_password.label")}</h4>
+              <h4 className="text-13">{t("New password")}</h4>
               <div className="relative flex items-center rounded-md">
                 <Controller
                   control={control}
                   name="new_password"
                   rules={{
-                    required: t("common.errors.required"),
+                    required: t("This field is required"),
                   }}
                   render={({ field: { value, onChange } }) => (
                     <Input
                       id="new_password"
                       type={showPassword?.password ? "text" : "password"}
                       value={value}
-                      placeholder={t("auth.common.password.new_password.placeholder")}
+                      placeholder={t("Enter new password")}
                       onChange={onChange}
                       className="w-full"
                       hasError={Boolean(errors.new_password)}
@@ -216,24 +216,24 @@ export const SecurityProfileSettings = observer(function SecurityProfileSettings
               )}
               {isNewPasswordSameAsOldPassword && !isPasswordInputFocused && (
                 <span className="text-11 text-danger-primary">
-                  {t("new_password_must_be_different_from_old_password")}
+                  {t("New password must be different from old password")}
                 </span>
               )}
             </div>
             <div className="flex flex-col gap-y-2">
-              <h4 className="text-13">{t("auth.common.password.confirm_password.label")}</h4>
+              <h4 className="text-13">{t("Confirm password")}</h4>
               <div className="relative flex items-center rounded-md">
                 <Controller
                   control={control}
                   name="confirm_password"
                   rules={{
-                    required: t("common.errors.required"),
+                    required: t("This field is required"),
                   }}
                   render={({ field: { value, onChange } }) => (
                     <Input
                       id="confirm_password"
                       type={showPassword?.confirmPassword ? "text" : "password"}
-                      placeholder={t("auth.common.password.confirm_password.placeholder")}
+                      placeholder={t("Confirm password")}
                       value={value}
                       onChange={onChange}
                       className="w-full"
@@ -257,15 +257,15 @@ export const SecurityProfileSettings = observer(function SecurityProfileSettings
                 )}
               </div>
               {!!confirmPassword && password !== confirmPassword && renderPasswordMatchError && (
-                <span className="text-13 text-danger-primary">{t("auth.common.password.errors.match")}</span>
+                <span className="text-13 text-danger-primary">{t("Passwords don't match")}</span>
               )}
             </div>
           </div>
           <div>
             <Button variant="primary" size="xl" type="submit" loading={isSubmitting} disabled={isButtonDisabled}>
               {isSubmitting
-                ? `${t("auth.common.password.change_password.label.submitting")}`
-                : t("auth.common.password.change_password.label.default")}
+                ? `${t("Changing password")}`
+                : t("Change password")}
             </Button>
           </div>
         </div>

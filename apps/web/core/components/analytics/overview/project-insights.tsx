@@ -53,7 +53,7 @@ const ProjectInsights = observer(function ProjectInsights() {
 
   return (
     <AnalyticsSectionWrapper
-      title={`${t("workspace_analytics.project_insights")}`}
+      title={`${t("Project Insights")}`}
       subtitle={selectedDurationLabel}
       className="md:col-span-3"
     >
@@ -64,7 +64,7 @@ const ProjectInsights = observer(function ProjectInsights() {
           assetKey="unknown"
           assetClassName="size-20"
           rootClassName="border border-subtle px-5 py-10 md:py-20 md:px-20"
-          title={t("workspace_empty_state.analytics_work_items.title")}
+          title={t("Create projects with work items and assignees to start tracking performance, progress, and team impact here.")}
         />
       ) : (
         <div className="gap-8 lg:flex">
@@ -96,12 +96,12 @@ const ProjectInsights = observer(function ProjectInsights() {
             </Suspense>
           )}
           <div className="w-full lg:w-2/5">
-            <div className="text-13 text-tertiary">{t("workspace_analytics.summary_of_projects")}</div>
-            <div className="mb-3 border-b border-subtle py-2">{t("workspace_analytics.all_projects")}</div>
+            <div className="text-13 text-tertiary">{t("Summary of Projects")}</div>
+            <div className="mb-3 border-b border-subtle py-2">{t("All Projects")}</div>
             <div className="flex flex-col gap-4">
               <div className="flex items-center justify-between text-13 text-tertiary">
-                <div>{t("workspace_analytics.trend_on_charts")}</div>
-                <div>{t("common.work_items")}</div>
+                <div>{t("Trend on charts")}</div>
+                <div>{t("Work items")}</div>
               </div>
               {projectInsightsData?.map((item) => (
                 <div key={item.key} className="flex items-center justify-between text-13 text-primary">

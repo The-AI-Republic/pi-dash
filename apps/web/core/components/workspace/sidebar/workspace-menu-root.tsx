@@ -55,8 +55,8 @@ export const WorkspaceMenuRoot = observer(function WorkspaceMenuRoot(props: Work
     await signOut().catch(() =>
       setToast({
         type: TOAST_TYPE.ERROR,
-        title: t("auth.sign_out.toast.error.title"),
-        message: t("auth.sign_out.toast.error.message"),
+        title: t("Error!"),
+        message: t("Failed to sign out. Please try again."),
       })
     );
   };
@@ -118,7 +118,7 @@ export const WorkspaceMenuRoot = observer(function WorkspaceMenuRoot(props: Work
                     "bg-layer-1": open,
                   }
                 )}
-                aria-label={t("aria_labels.projects_sidebar.open_workspace_switcher")}
+                aria-label={t("Open workspace switcher")}
               >
                 <div className="flex flex-grow items-center gap-2 truncate">
                   <WorkspaceLogo
@@ -126,7 +126,7 @@ export const WorkspaceMenuRoot = observer(function WorkspaceMenuRoot(props: Work
                     name={activeWorkspace?.name}
                     classNames="border border-subtle rounded-md size-7"
                   />
-                  <h4 className="truncate text-14 font-medium text-primary">{activeWorkspace?.name ?? t("loading")}</h4>
+                  <h4 className="truncate text-14 font-medium text-primary">{activeWorkspace?.name ?? t("Loading")}</h4>
                 </div>
                 <ChevronDownIcon
                   className={cn("size-4 flex-shrink-0 text-placeholder duration-300", {
@@ -194,7 +194,7 @@ export const WorkspaceMenuRoot = observer(function WorkspaceMenuRoot(props: Work
                           className="flex items-center gap-2 rounded-sm px-2 py-1 text-13 font-medium text-secondary hover:bg-layer-transparent-hover"
                         >
                           <CirclePlus className="size-4 flex-shrink-0" />
-                          {t("create_workspace")}
+                          {t("Create workspace")}
                         </Menu.Item>
                       </Link>
                     )}
@@ -205,7 +205,7 @@ export const WorkspaceMenuRoot = observer(function WorkspaceMenuRoot(props: Work
                         className="flex items-center gap-2 rounded-sm px-2 py-1 text-13 font-medium text-secondary hover:bg-layer-transparent-hover"
                       >
                         <Mails className="h-4 w-4 flex-shrink-0" />
-                        {t("workspace_invites")}
+                        {t("Workspace invites")}
                       </Menu.Item>
                     </Link>
 
@@ -217,7 +217,7 @@ export const WorkspaceMenuRoot = observer(function WorkspaceMenuRoot(props: Work
                         onClick={handleSignOut}
                       >
                         <LogOut className="size-4 flex-shrink-0" />
-                        {t("sign_out")}
+                        {t("Sign out")}
                       </Menu.Item>
                     </div>
                   </div>

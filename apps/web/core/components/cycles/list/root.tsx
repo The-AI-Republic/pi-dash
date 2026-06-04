@@ -47,7 +47,7 @@ export const CyclesList = observer(function CyclesList(props: ICyclesList) {
                   <>
                     <Disclosure.Button className="sticky top-0 z-[2] w-full flex-shrink-0 cursor-pointer border-b border-subtle bg-layer-1">
                       <CycleListGroupHeader
-                        title={t("project_cycles.upcoming_cycle.label")}
+                        title={t("Upcoming cycle")}
                         type="upcoming"
                         count={upcomingCycleIds.length}
                         showCount
@@ -66,7 +66,7 @@ export const CyclesList = observer(function CyclesList(props: ICyclesList) {
                 <>
                   <Disclosure.Button className="sticky top-0 z-2 w-full flex-shrink-0 cursor-pointer border-b border-subtle bg-layer-1">
                     <CycleListGroupHeader
-                      title={t("project_cycles.completed_cycle.label")}
+                      title={t("Completed cycle")}
                       type="completed"
                       count={completedCycleIds.length}
                       showCount

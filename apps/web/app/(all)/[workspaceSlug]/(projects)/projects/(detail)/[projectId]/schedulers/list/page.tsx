@@ -17,8 +17,8 @@ function ProjectSchedulersListPage({ params }: Route.ComponentProps) {
   const { getProjectById } = useProject();
   const project = getProjectById(projectId);
   const pageTitle = project?.name
-    ? `${project.name} - ${t("scheduler_bindings.title")}`
-    : t("scheduler_bindings.title");
+    ? `${project.name} - ${t("Schedulers")}`
+    : t("Schedulers");
 
   return (
     <>

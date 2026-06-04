@@ -79,12 +79,12 @@ export const IssueLinkCreateUpdateModal = observer(function IssueLinkCreateUpdat
       <form onSubmit={handleSubmit(handleFormSubmit)}>
         <div className="space-y-5 p-5">
           <h3 className="text-h4-medium text-secondary">
-            {preloadedData?.id ? t("common.update_link") : t("common.add_link")}
+            {preloadedData?.id ? t("Update link") : t("Add link")}
           </h3>
           <div className="mt-2 space-y-3">
             <div>
               <label htmlFor="url" className="mb-2 text-secondary">
-                {t("common.url")}
+                {t("URL")}
               </label>
               <Controller
                 control={control}
@@ -100,19 +100,19 @@ export const IssueLinkCreateUpdateModal = observer(function IssueLinkCreateUpdat
                     onChange={onChange}
                     ref={ref}
                     hasError={Boolean(errors.url)}
-                    placeholder={t("common.type_or_paste_a_url")}
+                    placeholder={t("Type or paste a URL")}
                     className="w-full"
                   />
                 )}
               />
               {errors.url && (
-                <span className="text-caption-sm-regular text-danger-primary">{t("common.url_is_invalid")}</span>
+                <span className="text-caption-sm-regular text-danger-primary">{t("URL is invalid")}</span>
               )}
             </div>
             <div>
               <label htmlFor="title" className="mb-2 text-secondary">
-                {t("common.display_title")}
-                <span className="block text-caption-xs-regular">{t("common.optional")}</span>
+                {t("Display title")}
+                <span className="block text-caption-xs-regular">{t("Optional")}</span>
               </label>
               <Controller
                 control={control}
@@ -125,7 +125,7 @@ export const IssueLinkCreateUpdateModal = observer(function IssueLinkCreateUpdat
                     onChange={onChange}
                     ref={ref}
                     hasError={Boolean(errors.title)}
-                    placeholder={t("common.link_title_placeholder")}
+                    placeholder={t("What you'd like to see this link as")}
                     className="w-full"
                   />
                 )}
@@ -135,18 +135,18 @@ export const IssueLinkCreateUpdateModal = observer(function IssueLinkCreateUpdat
         </div>
         <div className="flex items-center justify-end gap-2 border-t-[0.5px] border-subtle px-5 py-4">
           <Button variant="secondary" size="lg" onClick={onClose}>
-            {t("common.cancel")}
+            {t("Cancel")}
           </Button>
           <Button variant="primary" size="lg" type="submit" loading={isSubmitting}>
             {`${
               preloadedData?.id
                 ? isSubmitting
-                  ? t("common.updating")
-                  : t("common.update")
+                  ? t("Updating")
+                  : t("Update")
                 : isSubmitting
-                  ? t("common.adding")
-                  : t("common.add")
-            } ${t("common.link")}`}
+                  ? t("Adding")
+                  : t("Add")
+            } ${t("Link")}`}
           </Button>
         </div>
       </form>

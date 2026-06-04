@@ -92,7 +92,7 @@ export const IssueLabelSelect = observer(function IssueLabelSelect(props: IIssue
 
   const issueLabels = values ?? [];
 
-  const label = <span className="text-body-xs-medium text-placeholder">{t("label.select")}</span>;
+  const label = <span className="text-body-xs-medium text-placeholder">{t("Add labels")}</span>;
 
   const searchInputKeyDown = async (e: React.KeyboardEvent<HTMLInputElement>) => {
     if (query !== "" && e.key === "Escape") {
@@ -153,7 +153,7 @@ export const IssueLabelSelect = observer(function IssueLabelSelect(props: IIssue
                   className="w-full bg-transparent px-2 py-1 text-11 text-secondary placeholder:text-placeholder focus:outline-none"
                   value={query}
                   onChange={(e) => setQuery(e.target.value)}
-                  placeholder={t("common.search.label")}
+                  placeholder={t("Search")}
                   displayValue={(assigned: any) => assigned?.name}
                   onKeyDown={searchInputKeyDown}
                   tabIndex={baseTabIndex}
@@ -162,7 +162,7 @@ export const IssueLabelSelect = observer(function IssueLabelSelect(props: IIssue
             </div>
             <div className={`vertical-scrollbar mt-2 scrollbar-sm max-h-48 space-y-1 overflow-y-scroll px-2 pr-0`}>
               {isLoading ? (
-                <p className="text-center text-secondary">{t("common.loading")}</p>
+                <p className="text-center text-secondary">{t("Loading")}</p>
               ) : filteredOptions.length > 0 ? (
                 filteredOptions.map((option) => (
                   <Combobox.Option
@@ -205,11 +205,11 @@ export const IssueLabelSelect = observer(function IssueLabelSelect(props: IIssue
                       labels
                     </>
                   ) : (
-                    t("label.create.type")
+                    t("Type to add a new label")
                   )}
                 </Combobox.Option>
               ) : (
-                <p className="text-left text-secondary">{t("common.search.no_matching_results")}</p>
+                <p className="text-left text-secondary">{t("No matching results")}</p>
               )}
             </div>
           </div>

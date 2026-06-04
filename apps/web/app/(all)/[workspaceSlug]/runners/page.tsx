@@ -11,14 +11,12 @@ import useSWR from "swr";
 import { useTranslation } from "@pi-dash/i18n";
 import { TOAST_TYPE, setToast } from "@pi-dash/propel/toast";
 import { PodService, RunnerService } from "@pi-dash/services";
-import { EModalPosition, EModalWidth, ModalCore } from "@pi-dash/ui";
-import type { IPod, IRunner, IRunnerInvite, TRunnerStatus } from "@pi-dash/types";
+import type { IPod, IRunner, TRunnerStatus } from "@pi-dash/types";
 import type { TBadgeVariant } from "@pi-dash/ui";
 import { AlertModalCore, Badge, Button, Tooltip } from "@pi-dash/ui";
 import { PageHead } from "@/components/core/page-title";
 import { AddRunnerModal } from "@/components/runners/add-runner-modal";
 import { CreatePodModal } from "@/components/runners/create-pod-modal";
-import { RunnerEnrollmentCommand } from "@/components/runners/runner-enrollment-command";
 import { RunnersTabs } from "@/components/runners/runners-tabs";
 import { useSelectedPodFilter } from "@/hooks/use-selected-pod-filter";
 import { useWorkspace } from "@/hooks/store/use-workspace";
@@ -33,13 +31,13 @@ const STATUS_BADGE_VARIANT: Record<TRunnerStatus, TBadgeVariant> = {
   revoked: "accent-warning",
 };
 
-// A runner is "revivable" when it has never enrolled or has been
-// revoked — i.e., it's not currently holding live credentials.
-// ``revoke`` is the inverse: only meaningful when the runner is
-// active (enrolled and not yet revoked).
-function isRevivable(r: IRunner): boolean {
-  return r.status === "revoked" || r.enrolled_at === null;
-}
+const RUNNER_STATUS_I18N_LABELS: Record<TRunnerStatus, string> = {
+  online: "online",
+  busy: "busy",
+  offline: "offline",
+  revoked: "revoked",
+};
+
 function isRevocable(r: IRunner): boolean {
   return r.status !== "revoked" && r.enrolled_at !== null;
 }
@@ -50,8 +48,8 @@ const RunnersListPage = observer(function RunnersListPage() {
   const workspaceId = currentWorkspace?.id;
   const workspaceSlug = currentWorkspace?.slug;
   const pageTitle = currentWorkspace?.name
-    ? t("runners.page_title", { workspace: currentWorkspace.name })
-    : t("runners.title");
+    ? t("{workspace} - AI Agents", { workspace: currentWorkspace.name })
+    : t("AI Agents");
 
   const { data: runners, mutate: mutateRunners } = useSWR<IRunner[]>(
     workspaceId ? ["runners", workspaceId] : null,
@@ -74,8 +72,6 @@ const RunnersListPage = observer(function RunnersListPage() {
   const [deleting, setDeleting] = useState(false);
   const [revokeRunner, setRevokeRunner] = useState<IRunner | null>(null);
   const [revoking, setRevoking] = useState(false);
-  const [reviving, setReviving] = useState<string | null>(null);
-  const [reviveInvite, setReviveInvite] = useState<IRunnerInvite | null>(null);
 
   async function confirmDeleteRunner() {
     if (!deleteRunner) return;
@@ -88,8 +84,8 @@ const RunnersListPage = observer(function RunnersListPage() {
       const err = e as { error?: string } | null;
       setToast({
         type: TOAST_TYPE.ERROR,
-        title: t("runners.toast.error_title"),
-        message: err?.error ?? t("runners.list.delete_failed"),
+        title: t("Error!"),
+        message: err?.error ?? t("Failed to delete runner"),
       });
     } finally {
       setDeleting(false);
@@ -107,29 +103,11 @@ const RunnersListPage = observer(function RunnersListPage() {
       const err = e as { error?: string } | null;
       setToast({
         type: TOAST_TYPE.ERROR,
-        title: t("runners.toast.error_title"),
-        message: err?.error ?? t("runners.list.revoke_failed"),
+        title: t("Error!"),
+        message: err?.error ?? t("Failed to revoke runner"),
       });
     } finally {
       setRevoking(false);
-    }
-  }
-
-  async function reviveRunner(runner: IRunner) {
-    setReviving(runner.id);
-    try {
-      const invite = await service.reviveRunner(runner.id);
-      setReviveInvite(invite);
-      mutateRunners();
-    } catch (e: unknown) {
-      const err = e as { error?: string } | null;
-      setToast({
-        type: TOAST_TYPE.ERROR,
-        title: t("runners.toast.error_title"),
-        message: err?.error ?? t("runners.list.revive_failed"),
-      });
-    } finally {
-      setReviving(null);
     }
   }
 
@@ -144,39 +122,39 @@ const RunnersListPage = observer(function RunnersListPage() {
         <div className="flex items-start justify-between gap-3">
           <div>
             <div className="flex items-center gap-1.5">
-              <div className="text-13 font-medium text-primary">{t("runners.list.add_runner")}</div>
+              <div className="text-13 font-medium text-primary">{t("Add runner")}</div>
               <Tooltip
                 position="bottom"
                 tooltipContent={
                   <div className="flex max-w-xs flex-col gap-1 p-1 text-12 whitespace-normal">
-                    <div className="font-medium">{t("runners.list.how_it_works_title")}</div>
-                    <div className="whitespace-pre-line text-secondary">{t("runners.list.how_it_works_body")}</div>
+                    <div className="font-medium">{t("How to add a runner")}</div>
+                    <div className="whitespace-pre-line text-secondary">{t("1. Click \"Add runner\", pick a project + pod and generate the CLI command.\n2. On the machine that will host the runner, run the displayed `pidash runner add` command. If the host is not logged in yet, the CLI starts `pidash auth login` first.\n3. The daemon registers the runner and it shows online here.\n\nPrerequisite: the agent CLI (codex / claude) must already be installed on the host.")}</div>
                   </div>
                 }
               >
                 <button
                   type="button"
-                  aria-label={t("runners.list.how_it_works_title")}
+                  aria-label={t("How to add a runner")}
                   className="text-tertiary hover:text-primary"
                 >
                   <HelpCircle className="size-4" />
                 </button>
               </Tooltip>
             </div>
-            <div className="text-13 text-secondary">{t("runners.machine_token_note.body")}</div>
+            <div className="text-13 text-secondary">{t("`pidash runner add` starts `pidash auth login` first when the host is not logged in yet. Run it again for each project or pod this machine should serve.")}</div>
           </div>
           <Button onClick={() => setAddOpen(true)} disabled={!workspaceId}>
-            {t("runners.list.add_runner")}
+            {t("Add runner")}
           </Button>
         </div>
       </section>
 
       {/* Pods (read-only summary) */}
       <section>
-        <div className="mb-2 text-13 font-medium text-primary">{t("runners.pods.title")}</div>
-        <div className="mb-2 text-12 text-secondary">{t("runners.pods.help")}</div>
+        <div className="mb-2 text-13 font-medium text-primary">{t("Pods")}</div>
+        <div className="mb-2 text-12 text-secondary">{t("Pods group your runners. Issues delegate to a pod, and any free runner inside picks up the work. Click a tile to filter runners.")}</div>
         {podsError ? (
-          <div className="text-destructive text-12">{t("runners.pods.load_failed")}</div>
+          <div className="text-destructive text-12">{t("Failed to load pods")}</div>
         ) : (
           <div className="flex flex-wrap gap-2">
             {(pods ?? []).map((p) => {
@@ -186,7 +164,7 @@ const RunnersListPage = observer(function RunnersListPage() {
                   key={p.id}
                   type="button"
                   aria-pressed={isSelected}
-                  aria-label={t("runners.pods.tile_aria", { name: p.name })}
+                  aria-label={t("Filter runners by pod {name}", { name: p.name })}
                   onClick={() => setSelectedPodId(isSelected ? null : p.id)}
                   className={`rounded-md border px-3 py-2 text-left text-12 transition-colors ${
                     isSelected
@@ -198,11 +176,11 @@ const RunnersListPage = observer(function RunnersListPage() {
                     <span className="font-medium text-primary">{p.name}</span>
                     {p.is_default && (
                       <Badge variant="accent-neutral" size="sm">
-                        {t("runners.pods.default_badge")}
+                        {t("default")}
                       </Badge>
                     )}
                   </div>
-                  <div className="text-secondary">{t("runners.pods.runner_count", { count: p.runner_count })}</div>
+                  <div className="text-secondary">{t("{count} runner(s)", { count: p.runner_count })}</div>
                 </button>
               );
             })}
@@ -213,7 +191,7 @@ const RunnersListPage = observer(function RunnersListPage() {
               className="hover:border-primary flex items-center gap-1.5 rounded-md border border-dashed border-subtle bg-transparent px-3 py-2 text-12 text-secondary hover:text-primary disabled:cursor-not-allowed disabled:opacity-50"
             >
               <Plus className="size-3.5" />
-              <span className="font-medium">{t("runners.pods.create_tile")}</span>
+              <span className="font-medium">{t("Create new pod")}</span>
             </button>
           </div>
         )}
@@ -222,16 +200,16 @@ const RunnersListPage = observer(function RunnersListPage() {
       {/* Runners list — pending rows show as offline until the daemon enrolls */}
       <section>
         <div className="mb-2 flex items-center gap-3">
-          <div className="text-13 font-medium text-primary">{t("runners.list.connected_runners")}</div>
+          <div className="text-13 font-medium text-primary">{t("Runners")}</div>
           {selectedPod && (
             <div className="flex items-center gap-2 text-12 text-secondary">
-              <span>{t("runners.pods.filter_active", { name: selectedPod.name })}</span>
+              <span>{t("Filtering runners by pod {name}", { name: selectedPod.name })}</span>
               <button
                 type="button"
                 onClick={() => setSelectedPodId(null)}
                 className="text-custom-primary-100 underline-offset-2 hover:underline"
               >
-                {t("runners.pods.filter_clear")}
+                {t("Clear filter")}
               </button>
             </div>
           )}
@@ -240,12 +218,12 @@ const RunnersListPage = observer(function RunnersListPage() {
           <table className="w-full text-13">
             <thead className="bg-layer-1 text-left text-secondary">
               <tr>
-                <th className="px-3 py-2">{t("runners.list.columns.name")}</th>
-                <th className="px-3 py-2">{t("runners.list.columns_pod")}</th>
-                <th className="px-3 py-2">{t("runners.list.columns.status")}</th>
-                <th className="px-3 py-2">{t("runners.list.columns.os_arch")}</th>
-                <th className="px-3 py-2">{t("runners.list.columns.version")}</th>
-                <th className="px-3 py-2">{t("runners.list.columns.last_heartbeat")}</th>
+                <th className="px-3 py-2">{t("Name")}</th>
+                <th className="px-3 py-2">{t("Pod")}</th>
+                <th className="px-3 py-2">{t("Status")}</th>
+                <th className="px-3 py-2">{t("OS / Arch")}</th>
+                <th className="px-3 py-2">{t("Version")}</th>
+                <th className="px-3 py-2">{t("Last heartbeat")}</th>
                 <th className="px-3 py-2"></th>
               </tr>
             </thead>
@@ -256,7 +234,7 @@ const RunnersListPage = observer(function RunnersListPage() {
                   <td className="px-3 py-2">{r.pod_detail ? r.pod_detail.name : "—"}</td>
                   <td className="px-3 py-2">
                     <Badge variant={STATUS_BADGE_VARIANT[r.status]} size="sm">
-                      {t(`runners.list.status.${r.status}`)}
+                      {t(RUNNER_STATUS_I18N_LABELS[r.status])}
                     </Badge>
                   </td>
                   <td className="px-3 py-2">{r.os ? `${r.os} / ${r.arch}` : "—"}</td>
@@ -266,24 +244,13 @@ const RunnersListPage = observer(function RunnersListPage() {
                   </td>
                   <td className="px-3 py-2 text-right">
                     <div className="flex justify-end gap-2">
-                      {isRevivable(r) && (
-                        <Button
-                          variant="neutral-primary"
-                          size="sm"
-                          onClick={() => reviveRunner(r)}
-                          disabled={reviving === r.id}
-                          loading={reviving === r.id}
-                        >
-                          {t("runners.list.revive")}
-                        </Button>
-                      )}
                       {isRevocable(r) && (
                         <Button variant="outline-danger" size="sm" onClick={() => setRevokeRunner(r)}>
-                          {t("runners.list.revoke")}
+                          {t("Revoke")}
                         </Button>
                       )}
                       <Button variant="tertiary-danger" size="sm" onClick={() => setDeleteRunner(r)}>
-                        {t("runners.list.delete")}
+                        {t("Delete")}
                       </Button>
                     </div>
                   </td>
@@ -292,7 +259,7 @@ const RunnersListPage = observer(function RunnersListPage() {
               {(filteredRunners ?? []).length === 0 && (
                 <tr>
                   <td colSpan={7} className="px-3 py-8 text-center text-secondary">
-                    {t("runners.list.empty")}
+                    {t("No runners yet. Click \"Add runner\" to generate your first runner command.")}
                   </td>
                 </tr>
               )}
@@ -307,7 +274,6 @@ const RunnersListPage = observer(function RunnersListPage() {
           onClose={() => setAddOpen(false)}
           workspaceId={workspaceId}
           workspaceSlug={workspaceSlug}
-          onCreated={() => mutateRunners()}
         />
       )}
       {workspaceSlug && (
@@ -323,43 +289,19 @@ const RunnersListPage = observer(function RunnersListPage() {
         handleClose={() => (deleting ? null : setDeleteRunner(null))}
         handleSubmit={confirmDeleteRunner}
         isSubmitting={deleting}
-        title={t("runners.list.delete_confirm_title")}
-        content={t("runners.list.delete_confirm_body")}
-        primaryButtonText={{ default: t("runners.list.delete"), loading: t("runners.list.delete") }}
+        title={t("Delete runner?")}
+        content={t("The runner row is removed and the daemon is forced offline. Historic runs are preserved with a null runner reference.")}
+        primaryButtonText={{ default: t("Delete"), loading: t("Delete") }}
       />
       <AlertModalCore
         isOpen={!!revokeRunner}
         handleClose={() => (revoking ? null : setRevokeRunner(null))}
         handleSubmit={confirmRevokeRunner}
         isSubmitting={revoking}
-        title={t("runners.list.revoke_confirm_title")}
-        content={t("runners.list.revoke_confirm_body")}
-        primaryButtonText={{ default: t("runners.list.revoke"), loading: t("runners.list.revoke") }}
+        title={t("Revoke runner?")}
+        content={t("The runner's credentials are invalidated and any in-flight runs are cancelled, but the row stays in the list. To attach it again, delete it and add a new runner from the target machine.")}
+        primaryButtonText={{ default: t("Revoke"), loading: t("Revoke") }}
       />
-      <ModalCore
-        isOpen={!!reviveInvite}
-        handleClose={() => setReviveInvite(null)}
-        position={EModalPosition.CENTER}
-        width={EModalWidth.XXL}
-      >
-        {reviveInvite && (
-          <div className="flex flex-col gap-4 p-5">
-            <div>
-              <div className="text-18 font-medium text-primary">{t("runners.list.revive_modal_title")}</div>
-              <p className="mt-1 text-13 text-secondary">
-                {t("runners.add_modal.runner_id_label")}: <code className="text-12">{reviveInvite.runner_id}</code>
-                <br />
-                {reviveInvite.name}
-              </p>
-              <p className="mt-2 text-13 text-secondary">{t("runners.list.revive_modal_body")}</p>
-            </div>
-            <RunnerEnrollmentCommand invite={reviveInvite} />
-            <div className="flex justify-end">
-              <Button onClick={() => setReviveInvite(null)}>{t("runners.add_modal.done")}</Button>
-            </div>
-          </div>
-        )}
-      </ModalCore>
     </div>
   );
 });

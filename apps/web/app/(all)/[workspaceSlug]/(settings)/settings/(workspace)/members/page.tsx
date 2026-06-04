@@ -62,7 +62,7 @@ const WorkspaceMembersSettingsPage = observer(function WorkspaceMembersSettingsP
       setToast({
         type: TOAST_TYPE.SUCCESS,
         title: "Success!",
-        message: t("workspace_settings.settings.members.invitations_sent_successfully"),
+        message: t("Invitations sent successfully"),
       });
     } catch (error: unknown) {
       let message = undefined;
@@ -73,7 +73,7 @@ const WorkspaceMembersSettingsPage = observer(function WorkspaceMembersSettingsP
       setToast({
         type: TOAST_TYPE.ERROR,
         title: "Error!",
-        message: `${message ?? t("something_went_wrong_please_try_again")}`,
+        message: `${message ?? t("Something went wrong. Please try again.")}`,
       });
 
       throw error;
@@ -115,7 +115,7 @@ const WorkspaceMembersSettingsPage = observer(function WorkspaceMembersSettingsP
       >
         <div className="flex items-center justify-between gap-4 pb-3.5">
           <h4 className="flex items-center gap-2.5 text-h3-medium">
-            {t("workspace_settings.settings.members.title")}
+            {t("Members")}
             {workspaceMemberIds && workspaceMemberIds.length > 0 && (
               <CountChip count={workspaceMemberIds.length} className="m-auto h-5" />
             )}
@@ -125,7 +125,7 @@ const WorkspaceMembersSettingsPage = observer(function WorkspaceMembersSettingsP
               <SearchIcon className="h-3.5 w-3.5 text-placeholder" />
               <input
                 className="w-full max-w-[234px] border-none bg-transparent text-body-xs-regular outline-none placeholder:text-placeholder"
-                placeholder={`${t("search")}...`}
+                placeholder={`${t("Search")}...`}
                 value={searchQuery}
                 // eslint-disable-next-line jsx-a11y/no-autofocus
                 autoFocus
@@ -140,7 +140,7 @@ const WorkspaceMembersSettingsPage = observer(function WorkspaceMembersSettingsP
             <MembersActivityButton workspaceSlug={workspaceSlug} />
             {canPerformWorkspaceAdminActions && (
               <Button variant="primary" size="lg" onClick={() => setInviteModal(true)}>
-                {t("workspace_settings.settings.members.add_member")}
+                {t("Add member")}
               </Button>
             )}
             <BillingActionsButton canPerformWorkspaceAdminActions={canPerformWorkspaceAdminActions} />

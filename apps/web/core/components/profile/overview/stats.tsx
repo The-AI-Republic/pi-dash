@@ -27,26 +27,26 @@ export function ProfileStats({ userProfile }: Props) {
     {
       icon: CreateIcon,
       route: "created",
-      i18n_title: "profile.stats.created",
+      i18n_title: "Work items created",
       value: userProfile?.created_issues ?? "...",
     },
     {
       icon: UserCirclePropertyIcon,
       route: "assigned",
-      i18n_title: "profile.stats.assigned",
+      i18n_title: "Work items assigned",
       value: userProfile?.assigned_issues ?? "...",
     },
     {
       icon: LayerStackIcon,
       route: "subscribed",
-      i18n_title: "profile.stats.subscribed",
+      i18n_title: "Work items subscribed",
       value: userProfile?.subscribed_issues ?? "...",
     },
   ];
 
   return (
     <div className="space-y-2">
-      <h3 className="text-16 font-medium">{t("profile.stats.overview")}</h3>
+      <h3 className="text-16 font-medium">{t("Overview")}</h3>
       {userProfile ? (
         <div className="grid grid-cols-1 gap-4 md:grid-cols-2 lg:grid-cols-3">
           {overviewCards.map((card) => (

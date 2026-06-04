@@ -36,7 +36,7 @@ You are reviewing the work product of a previous implementation pass.
 "Review" can mean different things depending on what was produced.
 
 Issue: {{ issue.title }}
-Description: {{ issue.description }}
+Issue Description: {{ issue.description }}
 Recent activity:
 {{ comments_section }}
 Latest implementation run output (read this carefully —

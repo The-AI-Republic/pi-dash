@@ -5,7 +5,7 @@
  */
 
 import { IntlMessageFormat } from "intl-messageformat";
-import { get, merge } from "lodash-es";
+import { merge } from "lodash-es";
 import { makeAutoObservable, runInAction } from "mobx";
 // constants
 import { FALLBACK_LANGUAGE, SUPPORTED_LANGUAGES, LANGUAGE_STORAGE_KEY, ETranslationFiles } from "../constants";
@@ -191,8 +191,10 @@ export class TranslationStore {
       return this.messageCache.get(cacheKey) || null;
     }
 
-    // Get the message from the translations
-    const message = get(this.translations[locale], key);
+    // Message ids are the source English text. Look up the exact key first so
+    // strings with dots or punctuation are treated literally.
+    const exactMessage = this.translations[locale]?.[key];
+    const message = typeof exactMessage === "string" ? exactMessage : null;
     if (typeof message !== "string" || message.length === 0) return null;
 
     try {

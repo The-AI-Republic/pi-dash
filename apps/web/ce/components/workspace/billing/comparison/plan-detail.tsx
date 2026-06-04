@@ -101,7 +101,7 @@ export const PlanDetail = observer(function PlanDetail(props: TPlanDetailProps) 
       {/* Subscription button */}
       <div className="flex flex-col items-start gap-1 py-3">
         <Button variant="primary" size="lg" onClick={handleRedirection} className="w-full">
-          {isSubscriptionActive ? `Upgrade to ${subscriptionName}` : t("common.upgrade_cta.talk_to_sales")}
+          {isSubscriptionActive ? `Upgrade to ${subscriptionName}` : t("Talk to Sales")}
         </Button>
       </div>
     </div>

@@ -46,7 +46,7 @@ export function EstimateCreateStageOne(props: TEstimateCreateStageOne) {
                 label: !ESTIMATE_SYSTEMS[currentSystem]?.is_available ? (
                   <div className="relative flex cursor-no-drop items-center gap-2 text-tertiary">
                     {t(ESTIMATE_SYSTEMS[currentSystem]?.i18n_name)}
-                    <Tooltip tooltipContent={t("common.coming_soon")}>
+                    <Tooltip tooltipContent={t("Coming soon")}>
                       <Info size={12} />
                     </Tooltip>
                   </div>
@@ -64,7 +64,7 @@ export function EstimateCreateStageOne(props: TEstimateCreateStageOne) {
             })
             .filter((option) => option !== null)}
           name="estimate-radio-input"
-          label={t("project_settings.estimates.create.choose_estimate_system")}
+          label={t("Choose an estimate system")}
           labelClassName="text-13 font-medium text-secondary mb-1.5"
           wrapperClassName="relative flex flex-wrap gap-14"
           fieldClassName="relative flex items-center gap-1.5"
@@ -77,13 +77,13 @@ export function EstimateCreateStageOne(props: TEstimateCreateStageOne) {
         <>
           <div className="space-y-1.5">
             <div className="text-13 font-medium text-secondary">
-              {t("project_settings.estimates.create.start_from_scratch")}
+              {t("Start from scratch")}
             </div>
             <button
               className="block w-full space-y-1 rounded-md border border-subtle p-3 py-2.5 text-left hover:bg-layer-transparent-hover"
               onClick={() => handleEstimatePoints("custom")}
             >
-              <p className="text-14 font-medium">{t("project_settings.estimates.create.custom")}</p>
+              <p className="text-14 font-medium">{t("Custom")}</p>
               <p className="text-11 text-tertiary">
                 {/* TODO: Translate here */}
                 Add your own <span className="lowercase">{currentEstimateSystem.name}</span> from scratch.
@@ -93,7 +93,7 @@ export function EstimateCreateStageOne(props: TEstimateCreateStageOne) {
 
           <div className="space-y-1.5">
             <div className="text-13 font-medium text-secondary">
-              {t("project_settings.estimates.create.choose_template")}
+              {t("Choose a template")}
             </div>
             <div className="grid grid-cols-1 gap-3 lg:grid-cols-2">
               {Object.keys(currentEstimateSystem.templates).map((name) =>

@@ -12,7 +12,7 @@ export function PiDashVersionNumber() {
   const { t } = useTranslation();
   return (
     <span>
-      {t("version")}: v{packageJson.version}
+      {t("Version")}: v{packageJson.version}
     </span>
   );
 }

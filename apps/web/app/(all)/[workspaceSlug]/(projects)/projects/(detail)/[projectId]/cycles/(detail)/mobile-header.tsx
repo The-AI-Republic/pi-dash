@@ -24,9 +24,9 @@ import { useIssues } from "@/hooks/store/use-issues";
 import { useProject } from "@/hooks/store/use-project";
 
 const SUPPORTED_LAYOUTS = [
-  { key: "list", titleTranslationKey: "issue.layouts.list", icon: ListLayoutIcon },
-  { key: "kanban", titleTranslationKey: "issue.layouts.kanban", icon: BoardLayoutIcon },
-  { key: "calendar", titleTranslationKey: "issue.layouts.calendar", icon: CalendarLayoutIcon },
+  { key: "list", titleTranslationKey: "List", icon: ListLayoutIcon },
+  { key: "kanban", titleTranslationKey: "Board", icon: BoardLayoutIcon },
+  { key: "calendar", titleTranslationKey: "Calendar", icon: CalendarLayoutIcon },
 ];
 
 export const CycleIssuesMobileHeader = observer(function CycleIssuesMobileHeader() {
@@ -102,7 +102,7 @@ export const CycleIssuesMobileHeader = observer(function CycleIssuesMobileHeader
           className="flex flex-grow justify-center text-13 text-secondary"
           placement="bottom-start"
           customButton={
-            <span className="flex flex-grow justify-center text-13 text-secondary">{t("common.layout")}</span>
+            <span className="flex flex-grow justify-center text-13 text-secondary">{t("Layout")}</span>
           }
           customButtonClassName="flex flex-grow justify-center text-secondary text-13"
           closeOnSelect
@@ -122,11 +122,11 @@ export const CycleIssuesMobileHeader = observer(function CycleIssuesMobileHeader
         </CustomMenu>
         <div className="flex flex-grow items-center justify-center border-l border-subtle text-13 text-secondary">
           <FiltersDropdown
-            title={t("common.display")}
+            title={t("Display")}
             placement="bottom-end"
             menuButton={
               <span className="flex items-center text-13 text-secondary">
-                {t("common.display")}
+                {t("Display")}
                 <ChevronDownIcon className="ml-2 h-4 w-4 text-secondary" />
               </span>
             }
@@ -150,7 +150,7 @@ export const CycleIssuesMobileHeader = observer(function CycleIssuesMobileHeader
           onClick={() => setAnalyticsModal(true)}
           className="flex flex-grow justify-center border-l border-subtle text-13 text-secondary"
         >
-          {t("common.analytics")}
+          {t("Analytics")}
         </span>
       </div>
     </>

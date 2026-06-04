@@ -59,21 +59,21 @@ export function OccurrenceDrawer({ occurrence, binding, canManage, onClose, onEd
       <div className="flex-1 overflow-y-auto p-4">
         <div className="mb-4 text-12 tracking-wide text-tertiary uppercase">
           {isPast
-            ? t("scheduler_bindings.calendar.drawer.past_title")
-            : t("scheduler_bindings.calendar.drawer.future_title")}
+            ? t("Past run")
+            : t("Scheduled")}
         </div>
 
-        <Row label={t("scheduler_bindings.calendar.drawer.when")} value={dt.toLocaleString()} />
-        <Row label={t("scheduler_bindings.calendar.drawer.tz")} value={occurrence.tzid} />
+        <Row label={t("When")} value={dt.toLocaleString()} />
+        <Row label={t("Time zone")} value={occurrence.tzid} />
         {isPast && occurrence.status && (
-          <Row label={t("scheduler_bindings.calendar.drawer.status")} value={occurrence.status} />
+          <Row label={t("Status")} value={occurrence.status} />
         )}
 
         {!isPast && binding && (
           <>
-            {friendlyRule && <Row label={t("scheduler_bindings.calendar.drawer.recurrence")} value={friendlyRule} />}
+            {friendlyRule && <Row label={t("Recurrence")} value={friendlyRule} />}
             {binding.extra_context && (
-              <Row label={t("scheduler_bindings.calendar.drawer.context")} value={binding.extra_context} multiline />
+              <Row label={t("Project context")} value={binding.extra_context} multiline />
             )}
           </>
         )}
@@ -81,7 +81,7 @@ export function OccurrenceDrawer({ occurrence, binding, canManage, onClose, onEd
         {isPast && occurrence.agent_run_id && (
           <div className="mt-6">
             <Button variant="link" size="sm" onClick={onClose}>
-              {t("scheduler_bindings.calendar.drawer.view_run")} →
+              {t("View full run")} →
             </Button>
           </div>
         )}
@@ -90,10 +90,10 @@ export function OccurrenceDrawer({ occurrence, binding, canManage, onClose, onEd
       {!isPast && binding && canManage && (
         <footer className="flex justify-end gap-2 border-t border-subtle px-4 py-3">
           <Button variant="secondary" size="sm" onClick={onClose}>
-            {t("scheduler_bindings.calendar.drawer.cancel")}
+            {t("Close")}
           </Button>
           <Button variant="primary" size="sm" onClick={() => onEditBinding(binding)}>
-            {t("scheduler_bindings.calendar.drawer.edit")}
+            {t("Edit binding")}
           </Button>
         </footer>
       )}

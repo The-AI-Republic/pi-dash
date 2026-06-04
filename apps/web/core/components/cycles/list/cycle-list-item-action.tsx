@@ -115,14 +115,14 @@ export const CycleListItemAction = observer(function CycleListItemAction(props: 
     );
 
     setPromiseToast(addToFavoritePromise, {
-      loading: t("project_cycles.action.favorite.loading"),
+      loading: t("Adding cycle to favorites"),
       success: {
-        title: t("project_cycles.action.favorite.success.title"),
-        message: () => t("project_cycles.action.favorite.success.description"),
+        title: t("Success!"),
+        message: () => t("Cycle added to favorites."),
       },
       error: {
-        title: t("project_cycles.action.favorite.failed.title"),
-        message: () => t("project_cycles.action.favorite.failed.description"),
+        title: t("Error!"),
+        message: () => t("Couldn't add the cycle to favorites. Please try again."),
       },
     });
   };
@@ -138,14 +138,14 @@ export const CycleListItemAction = observer(function CycleListItemAction(props: 
     );
 
     setPromiseToast(removeFromFavoritePromise, {
-      loading: t("project_cycles.action.unfavorite.loading"),
+      loading: t("Removing cycle from favorites"),
       success: {
-        title: t("project_cycles.action.unfavorite.success.title"),
-        message: () => t("project_cycles.action.unfavorite.success.description"),
+        title: t("Success!"),
+        message: () => t("Cycle removed from favorites."),
       },
       error: {
-        title: t("project_cycles.action.unfavorite.failed.title"),
-        message: () => t("project_cycles.action.unfavorite.failed.description"),
+        title: t("Error!"),
+        message: () => t("Couldn't remove the cycle from favorites. Please try again."),
       },
     });
   };
@@ -184,7 +184,7 @@ export const CycleListItemAction = observer(function CycleListItemAction(props: 
         className={`z-[1] flex flex-shrink-0 gap-1 text-11 text-accent-secondary ${isMobile || (isActive && !searchParams.has("peekCycle")) ? "flex" : "hidden group-hover:flex"}`}
       >
         <Eye className="my-auto h-4 w-4 text-accent-secondary" />
-        <span>{t("project_cycles.more_details")}</span>
+        <span>{t("More details")}</span>
       </button>
       {showIssueCount && (
         <div className="flex items-center gap-1">
@@ -201,7 +201,7 @@ export const CycleListItemAction = observer(function CycleListItemAction(props: 
           }}
         >
           <TransferIcon className="w-4 fill-accent-primary" />
-          <span>{t("project_cycles.transfer_work_items", { count: transferableIssuesCount })}</span>
+          <span>{t("Transfer {count} work items", { count: transferableIssuesCount })}</span>
         </div>
       )}
       {isActive ? (
@@ -217,7 +217,7 @@ export const CycleListItemAction = observer(function CycleListItemAction(props: 
                 </span>
               }
               disabled={!isProjectTimeZoneDifferent()}
-              tooltipHeading={t("project_cycles.in_your_timezone")}
+              tooltipHeading={t("In your timezone")}
             >
               <div className="flex items-center gap-1 text-11 font-medium text-tertiary">
                 <CalendarDays className="my-auto h-3 w-3 flex-shrink-0" />
@@ -246,11 +246,11 @@ export const CycleListItemAction = observer(function CycleListItemAction(props: 
                 to: getDate(cycleDetails.end_date),
               }}
               placeholder={{
-                from: t("project_cycles.start_date"),
-                to: t("project_cycles.end_date"),
+                from: t("Start date"),
+                to: t("End date"),
               }}
               showTooltip={isProjectTimeZoneDifferent()}
-              customTooltipHeading={t("project_cycles.in_your_timezone")}
+              customTooltipHeading={t("In your timezone")}
               customTooltipContent={
                 <span className="flex gap-1">
                   {renderFormattedDateInUserTimezone(cycleDetails.start_date ?? "")}

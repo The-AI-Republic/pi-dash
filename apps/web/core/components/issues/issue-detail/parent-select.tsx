@@ -107,7 +107,7 @@ export const IssueParentSelect = observer(function IssueParentSelect(props: TIss
             </Tooltip>
 
             {!disabled && (
-              <Tooltip tooltipContent={t("common.remove")} position="bottom" isMobile={isMobile}>
+              <Tooltip tooltipContent={t("Remove")} position="bottom" isMobile={isMobile}>
                 <span
                   onClick={(e) => {
                     e.preventDefault();
@@ -121,7 +121,7 @@ export const IssueParentSelect = observer(function IssueParentSelect(props: TIss
             )}
           </div>
         ) : (
-          <span className="text-body-xs-medium text-placeholder">{t("issue.add.parent")}</span>
+          <span className="text-body-xs-medium text-placeholder">{t("Add parent work item")}</span>
         )}
         {!disabled && (
           <span

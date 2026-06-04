@@ -74,8 +74,8 @@ export function CreateWebhookModal(props: ICreateWebhookModal) {
       .then(({ webHook, secretKey }) => {
         setToast({
           type: TOAST_TYPE.SUCCESS,
-          title: t("workspace_settings.settings.webhooks.toasts.created.title"),
-          message: t("workspace_settings.settings.webhooks.toasts.created.message"),
+          title: t("Webhook created"),
+          message: t("The webhook has been successfully created"),
         });
 
         setGeneratedKey(webHook);
@@ -86,8 +86,8 @@ export function CreateWebhookModal(props: ICreateWebhookModal) {
       .catch((error) => {
         setToast({
           type: TOAST_TYPE.ERROR,
-          title: t("workspace_settings.settings.webhooks.toasts.not_created.title"),
-          message: error?.error ?? t("workspace_settings.settings.webhooks.toasts.not_created.message"),
+          title: t("Webhook not created"),
+          message: error?.error ?? t("The webhook could not be created"),
         });
       });
   };

@@ -98,11 +98,11 @@ export const ModuleOptions = observer(function ModuleOptions(props: Props) {
   if (!multiple)
     options?.unshift({
       value: null,
-      query: t("module.no_module"),
+      query: t("No module"),
       content: (
         <div className="flex items-center gap-2">
           <ModuleIcon className="h-3 w-3 flex-shrink-0" />
-          <span className="flex-grow truncate">{t("module.no_module")}</span>
+          <span className="flex-grow truncate">{t("No module")}</span>
         </div>
       ),
     });
@@ -128,7 +128,7 @@ export const ModuleOptions = observer(function ModuleOptions(props: Props) {
             className="w-full bg-transparent py-1 text-11 text-secondary placeholder:text-placeholder focus:outline-none"
             value={query}
             onChange={(e) => setQuery(e.target.value)}
-            placeholder={t("common.search.label")}
+            placeholder={t("Search")}
             displayValue={(assigned: any) => assigned?.name}
             onKeyDown={searchInputKeyDown}
           />
@@ -160,10 +160,10 @@ export const ModuleOptions = observer(function ModuleOptions(props: Props) {
                 </Combobox.Option>
               ))
             ) : (
-              <p className="px-1.5 py-1 text-placeholder italic">{t("common.search.no_matching_results")}</p>
+              <p className="px-1.5 py-1 text-placeholder italic">{t("No matching results")}</p>
             )
           ) : (
-            <p className="px-1.5 py-1 text-placeholder italic">{t("common.loading")}</p>
+            <p className="px-1.5 py-1 text-placeholder italic">{t("Loading")}</p>
           )}
         </div>
       </div>

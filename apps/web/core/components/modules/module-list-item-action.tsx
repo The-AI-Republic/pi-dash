@@ -146,8 +146,8 @@ export const ModuleListItemAction = observer(function ModuleListItemAction(props
         }}
         mergeDates
         placeholder={{
-          from: t("start_date"),
-          to: t("end_date"),
+          from: t("Start date"),
+          to: t("End date"),
         }}
         disabled={isDisabled}
         hideIcon={{ from: renderIcon ?? true, to: renderIcon }}

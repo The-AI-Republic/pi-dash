@@ -98,7 +98,7 @@ export function ProjectAppliedFiltersList(props: Props) {
         {/* Applied display filters */}
         {appliedDisplayFilters.length > 0 && (
           <Tag key="project_display_filters">
-            <span className="text-11 text-tertiary">{t("workspace_projects.label", { count: 2 })}</span>
+            <span className="text-11 text-tertiary">{t("{count, plural, one {Project} other {Projects}}", { count: 2 })}</span>
             <AppliedProjectDisplayFilters
               editable={isEditingAllowed}
               values={appliedDisplayFilters}
@@ -109,7 +109,7 @@ export function ProjectAppliedFiltersList(props: Props) {
         {isEditingAllowed && (
           <button type="button" onClick={handleClearAllFilters}>
             <Tag>
-              {t("common.clear_all")}
+              {t("Clear all")}
               <CloseIcon height={12} width={12} strokeWidth={2} />
             </Tag>
           </button>

@@ -51,8 +51,8 @@ export function ArchiveIssueModal(props: Props) {
       .then(() => {
         setToast({
           type: TOAST_TYPE.SUCCESS,
-          title: t("issue.archive.success.label"),
-          message: t("issue.archive.success.message"),
+          title: t("Archive success"),
+          message: t("Your archives can be found in project archives."),
         });
         onClose();
         return;
@@ -60,8 +60,8 @@ export function ArchiveIssueModal(props: Props) {
       .catch(() =>
         setToast({
           type: TOAST_TYPE.ERROR,
-          title: t("common.error.label"),
-          message: t("issue.archive.failed.message"),
+          title: t("Error!"),
+          message: t("Work item could not be archived. Please try again."),
         })
       )
       .finally(() => setIsArchiving(false));
@@ -71,15 +71,15 @@ export function ArchiveIssueModal(props: Props) {
     <ModalCore isOpen={isOpen} handleClose={onClose} position={EModalPosition.CENTER} width={EModalWidth.LG}>
       <div className="px-5 py-4">
         <h3 className="text-18 font-medium 2xl:text-20">
-          {t("issue.archive.label")} {projectDetails?.identifier} {issue.sequence_id}
+          {t("Archive Work item")} {projectDetails?.identifier} {issue.sequence_id}
         </h3>
-        <p className="mt-3 text-13 text-secondary">{t("issue.archive.confirm_message")}</p>
+        <p className="mt-3 text-13 text-secondary">{t("Are you sure you want to archive the work item? All your archived work items can be restored later.")}</p>
         <div className="mt-3 flex justify-end gap-2">
           <Button variant="secondary" size="lg" onClick={onClose}>
-            {t("common.cancel")}
+            {t("Cancel")}
           </Button>
           <Button variant="primary" size="lg" tabIndex={1} onClick={handleArchiveIssue} loading={isArchiving}>
-            {isArchiving ? t("common.archiving") : t("common.archive")}
+            {isArchiving ? t("Archiving") : t("Archive")}
           </Button>
         </div>
       </div>

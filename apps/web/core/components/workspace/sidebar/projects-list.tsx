@@ -82,14 +82,14 @@ export const SidebarProjectsList = observer(function SidebarProjectsList() {
       await copyUrlToClipboard(`${workspaceSlug}/projects/${projectId}/issues`);
       setToast({
         type: TOAST_TYPE.SUCCESS,
-        title: t("link_copied"),
-        message: t("project_link_copied_to_clipboard"),
+        title: t("Link copied"),
+        message: t("Project link copied to clipboard"),
       });
     } catch {
       setToast({
         type: TOAST_TYPE.ERROR,
-        title: t("error"),
-        message: t("something_went_wrong"),
+        title: t("Error"),
+        message: t("Something went wrong"),
       });
     }
   };
@@ -118,8 +118,8 @@ export const SidebarProjectsList = observer(function SidebarProjectsList() {
       updateProjectView(workspaceSlug.toString(), sourceId, { sort_order: updatedSortOrder }).catch(() => {
         setToast({
           type: TOAST_TYPE.ERROR,
-          title: t("error"),
-          message: t("something_went_wrong"),
+          title: t("Error"),
+          message: t("Something went wrong"),
         });
       });
   };
@@ -198,15 +198,15 @@ export const SidebarProjectsList = observer(function SidebarProjectsList() {
                 onClick={() => toggleListDisclosure(!isAllProjectsListOpen)}
                 aria-label={t(
                   isAllProjectsListOpen
-                    ? "aria_labels.projects_sidebar.close_projects_menu"
-                    : "aria_labels.projects_sidebar.open_projects_menu"
+                    ? "Close projects menu"
+                    : "Open projects menu"
                 )}
               >
-                <span className="text-13 font-semibold">{t("projects")}</span>
+                <span className="text-13 font-semibold">{t("Projects")}</span>
               </Disclosure.Button>
               <div className="flex items-center gap-1">
                 {isAuthorizedUser && (
-                  <Tooltip tooltipHeading={t("create_project")} tooltipContent="">
+                  <Tooltip tooltipHeading={t("Create project")} tooltipContent="">
                     <IconButton
                       variant="ghost"
                       size="sm"
@@ -216,7 +216,7 @@ export const SidebarProjectsList = observer(function SidebarProjectsList() {
                       }}
                       data-ph-element={PROJECT_TRACKER_ELEMENTS.SIDEBAR_CREATE_PROJECT_TOOLTIP}
                       className="hidden text-placeholder group-hover:inline-flex"
-                      aria-label={t("aria_labels.projects_sidebar.create_new_project")}
+                      aria-label={t("Create new project")}
                     />
                   </Tooltip>
                 )}
@@ -231,8 +231,8 @@ export const SidebarProjectsList = observer(function SidebarProjectsList() {
                   })}
                   aria-label={t(
                     isAllProjectsListOpen
-                      ? "aria_labels.projects_sidebar.close_projects_menu"
-                      : "aria_labels.projects_sidebar.open_projects_menu"
+                      ? "Close projects menu"
+                      : "Open projects menu"
                   )}
                 />
               </div>
@@ -263,7 +263,7 @@ export const SidebarProjectsList = observer(function SidebarProjectsList() {
                       <SidebarItem
                         item={{
                           ...WORKSPACE_SIDEBAR_DYNAMIC_NAVIGATION_ITEMS["views"],
-                          labelTranslationKey: "sidebar.work_items",
+                          labelTranslationKey: "Work Items",
                           // The base highlight only matches /workspace-views/all-issues/.
                           // Since this row is now labelled "Work Items" (the section,
                           // not a single page) it should stay active on every
@@ -294,8 +294,8 @@ export const SidebarProjectsList = observer(function SidebarProjectsList() {
                           id="extended-project-sidebar-toggle"
                           aria-label={t(
                             isExtendedProjectSidebarOpened
-                              ? "aria_labels.app_sidebar.close_extended_sidebar"
-                              : "aria_labels.app_sidebar.open_extended_sidebar"
+                              ? "Close extended sidebar"
+                              : "Open extended sidebar"
                           )}
                         >
                           <Ellipsis className="size-4 flex-shrink-0" />
@@ -319,7 +319,7 @@ export const SidebarProjectsList = observer(function SidebarProjectsList() {
               toggleCreateProjectModal(true);
             }}
           >
-            {t("add_project")}
+            {t("Add project")}
           </button>
         )}
       </div>

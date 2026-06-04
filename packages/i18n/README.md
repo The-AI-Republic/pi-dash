@@ -10,28 +10,30 @@ Each locale is a TypeScript object, not JSON:
 
 ```ts
 export default {
-  common: {
-    save: "Save",
-  },
+  "Save changes": "Enregistrer les modifications",
 } as const;
 ```
 
-UI code reads translations with dot-path keys:
+UI code uses the source English text as the message id:
 
 ```tsx
 const { t } = useTranslation();
 
-return <button>{t("common.save")}</button>;
+return <button>{t("Save changes")}</button>;
 ```
 
-`t("...")` does not create keys at runtime. Missing keys fall back to English, then to the key string itself. Empty string values are treated as missing, so untranslated placeholders do not render blank UI.
+Missing or empty target translations fall back to English by returning the source message id. ICU MessageFormat parameters are supported:
 
-## Adding Keys
+```tsx
+t("Delete {count, plural, one {# work item} other {# work items}}", { count });
+```
+
+## Adding Copy
 
 Add new UI copy by wrapping it with `t("...")`:
 
 ```tsx
-t("new_feature.title");
+t("Create project");
 ```
 
 Then run the manual sync command from the repo root:
@@ -40,11 +42,18 @@ Then run the manual sync command from the repo root:
 pnpm i18n:sync
 ```
 
-This scans literal `t("...")` calls and adds missing keys as empty-string placeholders to each locale's `translations.ts`.
+This scans literal `t("...")` calls, string literals inside conditional `t(...)` calls, `i18n_*` object fields, `*TranslationKey` fields, and `I18N`-named local maps. It rewrites each locale's `translations.ts` as a flat object:
 
-If a new key conflicts with an existing object or string path, the sync command prints the conflicting key and call sites, then exits with an error. Rename the key to avoid the conflict. Use `I18N_SYNC_ALLOW_CONFLICTS=1` only when you intentionally want to skip those keys.
+```ts
+export default {
+  "Create project": "",
+} as const;
+```
+
+For English, the value is the same as the key. For non-English locales, new values are empty placeholders until translated.
 
 The sync command is manual. It does not run during `pnpm build`.
+It formats generated locale files before exiting.
 
 ## Translating Missing Values
 
@@ -77,13 +86,19 @@ Supported options:
 --base-url <openai-compatible-chat-completions-url>
 --languages fr,es,ja
 --limit 100
---batch-size 30
+--batch-size 10
 --request-timeout-ms 180000
 --retry-count 2
---retry-delay-ms 2000
+--retry-delay-ms 5000
+--continue-on-error
 --dry-run
 --skip-readme
 ```
+
+The script logs progress for each batch and writes successful batches to disk immediately. If a provider times out,
+rerun the same command to continue from the remaining empty placeholders. Use `--continue-on-error` to skip failed
+batches during a large run and leave those placeholders empty for a later retry.
+Generated locale files and translated README files are formatted before the command exits.
 
 Environment variables:
 
@@ -98,12 +113,13 @@ I18N_TRANSLATION_BATCH_SIZE
 I18N_TRANSLATION_REQUEST_TIMEOUT_MS
 I18N_TRANSLATION_RETRY_COUNT
 I18N_TRANSLATION_RETRY_DELAY_MS
+I18N_TRANSLATION_CONTINUE_ON_ERROR
 I18N_TRANSLATION_SKIP_README
 OPENAI_API_KEY
 FIREWORKS_API_KEY
 ```
 
-The translator only fills empty strings in target locale `translations.ts` files. It uses the merged English locale as source text and rejects model output that changes ICU MessageFormat argument names or argument types.
+The translator only fills empty strings in target locale `translations.ts` files. It uses the source English message id as the source text and rejects model output that changes ICU MessageFormat argument names or argument types.
 
 The same command also updates translated README files from `README.md` as the English source. README translation is currently maintained for:
 
@@ -114,7 +130,7 @@ Use `--skip-readme` or `I18N_TRANSLATION_SKIP_README=1` to translate locale plac
 
 ## Recommended Workflow
 
-1. Add or update UI code with `t("some.key")`.
+1. Add or update UI code with `t("Source English copy")`.
 2. Run `pnpm i18n:sync`.
 3. Review new empty placeholders in `packages/i18n/src/locales/*/translations.ts`.
 4. Run `pnpm i18n:translate -- --provider openai --model "$MODEL"` or translate manually.

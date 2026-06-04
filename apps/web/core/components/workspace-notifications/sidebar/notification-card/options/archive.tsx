@@ -33,7 +33,7 @@ export const NotificationItemArchiveOption = observer(function NotificationItemA
       const request = data.archived_at ? unArchiveNotification : archiveNotification;
       await request(workspaceSlug);
       setToast({
-        title: data.archived_at ? t("notification.toasts.unarchived") : t("notification.toasts.archived"),
+        title: data.archived_at ? t("Notification marked as un archived") : t("Notification marked as archived"),
         type: TOAST_TYPE.SUCCESS,
       });
     } catch (e) {
@@ -44,7 +44,7 @@ export const NotificationItemArchiveOption = observer(function NotificationItemA
   return (
     <NotificationItemOptionButton
       tooltipContent={
-        data.archived_at ? t("notification.options.mark_unarchive") : t("notification.options.mark_archive")
+        data.archived_at ? t("Un archive") : t("Archive")
       }
       callBack={handleNotificationUpdate}
     >

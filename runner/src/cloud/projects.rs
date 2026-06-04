@@ -37,8 +37,9 @@ pub struct PodInfo {
 /// Read the local credentials and call the project-list endpoint over
 /// the connection-bearer auth path.
 pub async fn list_projects(paths: &Paths) -> Result<Vec<ProjectInfo>> {
-    let creds = file::load_credentials(paths)
-        .context("no credentials.toml — run `pidash connect` first")?;
+    let creds = file::load_credentials(paths).context(
+        "no legacy credentials.toml; use `pidash runner add --project <PROJECT>` for runner setup",
+    )?;
     let cfg = file::load_config(paths)?;
     let url = format!(
         "{}/api/runners/projects/",

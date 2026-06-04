@@ -31,15 +31,15 @@ export const useLinkOperations = (
           if (!workspaceSlug || !projectId || !issueId) throw new Error("Missing required fields");
           await createLink(workspaceSlug, projectId, issueId, data);
           setToast({
-            message: t("links.toasts.created.message"),
+            message: t("The link has been successfully created"),
             type: TOAST_TYPE.SUCCESS,
-            title: t("links.toasts.created.title"),
+            title: t("Link created"),
           });
         } catch (error: any) {
           setToast({
-            message: error?.data?.error ?? t("links.toasts.not_created.message"),
+            message: error?.data?.error ?? t("The link could not be created"),
             type: TOAST_TYPE.ERROR,
-            title: t("links.toasts.not_created.title"),
+            title: t("Link not created"),
           });
           throw error;
         }
@@ -49,15 +49,15 @@ export const useLinkOperations = (
           if (!workspaceSlug || !projectId || !issueId) throw new Error("Missing required fields");
           await updateLink(workspaceSlug, projectId, issueId, linkId, data);
           setToast({
-            message: t("links.toasts.updated.message"),
+            message: t("The link has been successfully updated"),
             type: TOAST_TYPE.SUCCESS,
-            title: t("links.toasts.updated.title"),
+            title: t("Link updated"),
           });
         } catch (error: any) {
           setToast({
-            message: error?.data?.error ?? t("links.toasts.not_updated.message"),
+            message: error?.data?.error ?? t("The link could not be updated"),
             type: TOAST_TYPE.ERROR,
-            title: t("links.toasts.not_updated.title"),
+            title: t("Link not updated"),
           });
           throw error;
         }
@@ -67,15 +67,15 @@ export const useLinkOperations = (
           if (!workspaceSlug || !projectId || !issueId) throw new Error("Missing required fields");
           await removeLink(workspaceSlug, projectId, issueId, linkId);
           setToast({
-            message: t("links.toasts.removed.message"),
+            message: t("The link has been successfully removed"),
             type: TOAST_TYPE.SUCCESS,
-            title: t("links.toasts.removed.title"),
+            title: t("Link removed"),
           });
         } catch {
           setToast({
-            message: t("links.toasts.not_removed.message"),
+            message: t("The link could not be removed"),
             type: TOAST_TYPE.ERROR,
-            title: t("links.toasts.not_removed.title"),
+            title: t("Link not removed"),
           });
         }
       },

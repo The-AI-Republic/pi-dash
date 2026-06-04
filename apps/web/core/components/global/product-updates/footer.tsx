@@ -23,7 +23,7 @@ export function ProductUpdatesFooter() {
           className="text-13 text-secondary underline-offset-1 outline-none hover:text-primary hover:underline"
           rel="noreferrer"
         >
-          {t("docs")}
+          {t("Docs")}
         </a>
         <svg viewBox="0 0 2 2" className="h-0.5 w-0.5 fill-current">
           <circle cx={1} cy={1} r={1} />
@@ -35,7 +35,7 @@ export function ProductUpdatesFooter() {
           className="text-13 text-secondary underline-offset-1 outline-none hover:text-primary hover:underline"
           rel="noreferrer"
         >
-          {t("full_changelog")}
+          {t("Full changelog")}
         </a>
         <svg viewBox="0 0 2 2" className="h-0.5 w-0.5 fill-current">
           <circle cx={1} cy={1} r={1} />
@@ -46,7 +46,7 @@ export function ProductUpdatesFooter() {
           className="text-13 text-secondary underline-offset-1 outline-none hover:text-primary hover:underline"
           rel="noreferrer"
         >
-          {t("support")}
+          {t("Support")}
         </a>
         <svg viewBox="0 0 2 2" className="h-0.5 w-0.5 fill-current">
           <circle cx={1} cy={1} r={1} />
@@ -70,7 +70,7 @@ export function ProductUpdatesFooter() {
         rel="noreferrer"
       >
         <PiDashLogo className="h-4 w-auto text-primary" />
-        {t("powered_by_pi_dash_pages")}
+        {t("Powered by Pi Dash Pages")}
       </a>
     </div>
   );

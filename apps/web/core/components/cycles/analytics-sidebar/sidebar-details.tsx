@@ -41,10 +41,10 @@ export const CycleSidebarDetails = observer(function CycleSidebarDetails(props: 
   const issueCount =
     isCompleted && !isEmpty(cycleDetails?.progress_snapshot)
       ? cycleDetails?.progress_snapshot?.total_issues === 0
-        ? `0 ${t("common.work_item")}`
+        ? `0 ${t("Work item")}`
         : `${cycleDetails?.progress_snapshot?.completed_issues}/${cycleDetails?.progress_snapshot?.total_issues}`
       : cycleDetails?.total_issues === 0
-        ? `0 ${t("common.work_item")}`
+        ? `0 ${t("Work item")}`
         : `${cycleDetails?.completed_issues}/${cycleDetails?.total_issues}`;
   const estimateType = areEstimateEnabled && currentActiveEstimateId && estimateById(currentActiveEstimateId);
   const cycleOwnerDetails = cycleDetails ? getUserDetails(cycleDetails.owned_by_id) : undefined;
@@ -60,10 +60,10 @@ export const CycleSidebarDetails = observer(function CycleSidebarDetails(props: 
   const issueEstimatePointCount =
     isCompleted && !isEmpty(cycleDetails?.progress_snapshot)
       ? cycleDetails?.progress_snapshot.total_issues === 0
-        ? `0 ${t("common.work_item")}`
+        ? `0 ${t("Work item")}`
         : `${cycleDetails?.progress_snapshot.completed_estimate_points}/${cycleDetails?.progress_snapshot.total_estimate_points}`
       : cycleDetails?.total_issues === 0
-        ? `0 ${t("common.work_item")}`
+        ? `0 ${t("Work item")}`
         : `${cycleDetails?.completed_estimate_points}/${cycleDetails?.total_estimate_points}`;
   return (
     <div className="flex w-full flex-col gap-5">
@@ -79,7 +79,7 @@ export const CycleSidebarDetails = observer(function CycleSidebarDetails(props: 
         <div className="flex items-center justify-start gap-1">
           <div className="flex w-2/5 items-center justify-start gap-2 text-tertiary">
             <SquareUser className="h-4 w-4" />
-            <span className="text-14">{t("lead")}</span>
+            <span className="text-14">{t("Lead")}</span>
           </div>
           <div className="flex w-3/5 items-center rounded-xs">
             <div className="flex items-center gap-2.5">
@@ -92,7 +92,7 @@ export const CycleSidebarDetails = observer(function CycleSidebarDetails(props: 
         <div className="flex items-center justify-start gap-1">
           <div className="flex w-2/5 items-center justify-start gap-2 text-tertiary">
             <MembersPropertyIcon className="h-4 w-4" />
-            <span className="text-14">{t("members")}</span>
+            <span className="text-14">{t("Members")}</span>
           </div>
           <div className="flex w-3/5 items-center rounded-xs">
             <div className="flex items-center gap-2.5">
@@ -113,7 +113,7 @@ export const CycleSidebarDetails = observer(function CycleSidebarDetails(props: 
                   </AvatarGroup>
                 </>
               ) : (
-                <span className="px-1.5 text-13 text-tertiary">{t("no_assignee")}</span>
+                <span className="px-1.5 text-13 text-tertiary">{t("No assignee")}</span>
               )}
             </div>
           </div>
@@ -122,7 +122,7 @@ export const CycleSidebarDetails = observer(function CycleSidebarDetails(props: 
         <div className="flex items-center justify-start gap-1">
           <div className="flex w-2/5 items-center justify-start gap-2 text-tertiary">
             <WorkItemsIcon className="h-4 w-4" />
-            <span className="text-14">{t("work_items")}</span>
+            <span className="text-14">{t("Work items")}</span>
           </div>
           <div className="flex w-3/5 items-center">
             <span className="px-1.5 text-13 text-tertiary">{issueCount}</span>
@@ -136,7 +136,7 @@ export const CycleSidebarDetails = observer(function CycleSidebarDetails(props: 
           <div className="flex items-center justify-start gap-1">
             <div className="flex w-2/5 items-center justify-start gap-2 text-tertiary">
               <WorkItemsIcon className="h-4 w-4" />
-              <span className="text-14">{t("points")}</span>
+              <span className="text-14">{t("Points")}</span>
             </div>
             <div className="flex w-3/5 items-center">
               <span className="px-1.5 text-13 text-tertiary">{issueEstimatePointCount}</span>

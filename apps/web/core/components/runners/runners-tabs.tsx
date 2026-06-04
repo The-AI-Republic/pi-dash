@@ -13,9 +13,9 @@ export function RunnersTabs() {
   const base = `/${workspaceSlug}/runners`;
 
   const tabs: { to: string; label: string; end: boolean }[] = [
-    { to: base, label: t("runners.tabs.overview"), end: true },
-    { to: `${base}/runs`, label: t("runners.tabs.runs"), end: false },
-    { to: `${base}/approvals`, label: t("runners.tabs.approvals"), end: false },
+    { to: base, label: t("Overview"), end: true },
+    { to: `${base}/runs`, label: t("Runs"), end: false },
+    { to: `${base}/approvals`, label: t("Approvals"), end: false },
   ];
 
   return (

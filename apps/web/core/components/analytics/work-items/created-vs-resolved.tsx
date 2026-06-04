@@ -91,7 +91,7 @@ const CreatedVsResolved = observer(function CreatedVsResolved() {
 
   return (
     <AnalyticsSectionWrapper
-      title={t("workspace_analytics.created_vs_resolved")}
+      title={t("Created vs Resolved")}
       subtitle={selectedDurationLabel}
       className="col-span-1"
     >
@@ -108,7 +108,7 @@ const CreatedVsResolved = observer(function CreatedVsResolved() {
           }}
           yAxis={{
             key: "count",
-            label: t("common.no_of", { entity: isEpic ? t("epics") : t("work_items") }),
+            label: t("No. of {entity}", { entity: isEpic ? t("epics") : t("Work items") }),
             offset: -60,
             dx: -24,
           }}
@@ -129,7 +129,7 @@ const CreatedVsResolved = observer(function CreatedVsResolved() {
           assetKey="unknown"
           assetClassName="size-20"
           rootClassName="border border-subtle px-5 py-10 md:py-20 md:px-20"
-          title={t("workspace_empty_state.analytics_work_items.title")}
+          title={t("Create projects with work items and assignees to start tracking performance, progress, and team impact here.")}
         />
       )}
     </AnalyticsSectionWrapper>

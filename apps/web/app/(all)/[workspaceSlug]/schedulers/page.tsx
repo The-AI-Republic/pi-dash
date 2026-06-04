@@ -55,16 +55,16 @@ const SchedulersListPage = observer(function SchedulersListPage() {
       mutate();
       setToast({
         type: TOAST_TYPE.SUCCESS,
-        title: t("schedulers.toast.created_title"),
-        message: t("schedulers.toast.created_message"),
+        title: t("Scheduler created"),
+        message: t("Project admins can now install it on their projects."),
       });
     } catch (e: unknown) {
       const err = e as { error?: string; slug?: string[]; name?: string[]; prompt?: string[] } | null;
       const detail =
-        err?.error ?? err?.slug?.[0] ?? err?.name?.[0] ?? err?.prompt?.[0] ?? t("schedulers.toast.create_failed");
+        err?.error ?? err?.slug?.[0] ?? err?.name?.[0] ?? err?.prompt?.[0] ?? t("Could not create the scheduler.");
       setToast({
         type: TOAST_TYPE.ERROR,
-        title: t("schedulers.toast.error_title"),
+        title: t("Something went wrong"),
         message: detail,
       });
     }
@@ -92,23 +92,23 @@ const SchedulersListPage = observer(function SchedulersListPage() {
       mutate();
       setToast({
         type: TOAST_TYPE.SUCCESS,
-        title: t("schedulers.toast.updated_title"),
-        message: t("schedulers.toast.updated_message"),
+        title: t("Scheduler updated"),
+        message: t("Subsequent runs will use the updated definition."),
       });
     } catch (e: unknown) {
       const err = e as { error?: string; name?: string[]; prompt?: string[] } | null;
-      const detail = err?.error ?? err?.name?.[0] ?? err?.prompt?.[0] ?? t("schedulers.toast.update_failed");
+      const detail = err?.error ?? err?.name?.[0] ?? err?.prompt?.[0] ?? t("Could not update the scheduler.");
       setToast({
         type: TOAST_TYPE.ERROR,
-        title: t("schedulers.toast.error_title"),
+        title: t("Something went wrong"),
         message: detail,
       });
     }
   };
 
   const pageTitle = currentWorkspace?.name
-    ? `${currentWorkspace.name} · ${t("schedulers.title")}`
-    : t("schedulers.title");
+    ? `${currentWorkspace.name} · ${t("Schedulers")}`
+    : t("Schedulers");
 
   return (
     <div className="flex flex-col gap-6 p-6">
@@ -116,22 +116,22 @@ const SchedulersListPage = observer(function SchedulersListPage() {
 
       <header className="flex items-start justify-between gap-4">
         <div>
-          <h1 className="text-16 font-semibold text-primary">{t("schedulers.title")}</h1>
-          <p className="mt-1 text-13 text-secondary">{t("schedulers.subtitle")}</p>
+          <h1 className="text-16 font-semibold text-primary">{t("Schedulers")}</h1>
+          <p className="mt-1 text-13 text-secondary">{t("Reusable scheduler definitions for this workspace. Install one on a project to run its prompt against the project on a cron.")}</p>
         </div>
-        {canEdit && <Button onClick={() => setCreateOpen(true)}>{t("schedulers.new")}</Button>}
+        {canEdit && <Button onClick={() => setCreateOpen(true)}>{t("New scheduler")}</Button>}
       </header>
 
       <section className="rounded-md border border-subtle">
         <table className="w-full text-13">
           <thead className="bg-layer-1 text-left text-secondary">
             <tr>
-              <th className="px-3 py-2">{t("schedulers.columns.name")}</th>
-              <th className="px-3 py-2">{t("schedulers.columns.slug")}</th>
-              <th className="px-3 py-2">{t("schedulers.columns.source")}</th>
-              <th className="px-3 py-2">{t("schedulers.columns.installs")}</th>
-              <th className="px-3 py-2">{t("schedulers.columns.status")}</th>
-              <th className="px-3 py-2">{t("schedulers.columns.updated")}</th>
+              <th className="px-3 py-2">{t("Name")}</th>
+              <th className="px-3 py-2">{t("Slug")}</th>
+              <th className="px-3 py-2">{t("Source")}</th>
+              <th className="px-3 py-2">{t("Installs")}</th>
+              <th className="px-3 py-2">{t("Status")}</th>
+              <th className="px-3 py-2">{t("Updated")}</th>
               <th className="px-3 py-2"></th>
             </tr>
           </thead>
@@ -148,7 +148,7 @@ const SchedulersListPage = observer(function SchedulersListPage() {
             {rows.length === 0 && (
               <tr>
                 <td colSpan={7} className="px-3 py-8 text-center text-secondary">
-                  {t("schedulers.list.empty")}
+                  {t("No schedulers in this workspace yet. Click “New scheduler” to create one.")}
                 </td>
               </tr>
             )}
@@ -191,15 +191,15 @@ function SchedulerRow({ scheduler, canEdit, onEdit, onDelete }: RowProps) {
       </td>
       <td className="px-3 py-2">
         <Badge variant="accent-neutral" size="sm">
-          {scheduler.source === "manifest" ? t("schedulers.source.manifest") : t("schedulers.source.builtin")}
+          {scheduler.source === "manifest" ? t("Manifest") : t("Built-in")}
         </Badge>
       </td>
       <td className="px-3 py-2 text-secondary">
-        {t("schedulers.list.installs_count", { count: scheduler.active_binding_count })}
+        {t("{count, plural, one {# install} other {# installs}}", { count: scheduler.active_binding_count })}
       </td>
       <td className="px-3 py-2">
         <Badge variant={scheduler.is_enabled ? "accent-primary" : "accent-neutral"} size="sm">
-          {scheduler.is_enabled ? t("schedulers.status.enabled") : t("schedulers.status.disabled")}
+          {scheduler.is_enabled ? t("Enabled") : t("Disabled")}
         </Badge>
       </td>
       <td className="px-3 py-2 text-secondary">{new Date(scheduler.updated_at).toLocaleString()}</td>
@@ -207,10 +207,10 @@ function SchedulerRow({ scheduler, canEdit, onEdit, onDelete }: RowProps) {
         {canEdit && (
           <div className="flex items-center justify-end gap-2">
             <Button variant="link-neutral" size="sm" onClick={onEdit}>
-              {t("schedulers.actions.edit")}
+              {t("Edit")}
             </Button>
             <Button variant="tertiary-danger" size="sm" onClick={onDelete}>
-              {t("schedulers.actions.delete")}
+              {t("Delete")}
             </Button>
           </div>
         )}

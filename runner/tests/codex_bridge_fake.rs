@@ -42,7 +42,11 @@ fn fake_codex_script() -> &'static str {
         # initialized notification (no response expected)
         read _
         # thread/start
-        read _
+        read thread
+        case "$thread" in
+          *'"sandboxPolicy":"danger-full-access"'*'"approvalPolicy":"never"'*) ;;
+          *) printf '%s\n' '{"jsonrpc":"2.0","id":2,"error":{"code":-32600,"message":"expected bypassed codex thread/start policy"}}'; exit 0;;
+        esac
         printf '%s\n' '{"jsonrpc":"2.0","id":2,"result":{"threadId":"th_fake_001"}}'
         # turn/start
         read _
@@ -66,6 +70,7 @@ async fn warm_bridge_reuses_initialized_thread_across_turns() {
         case "$initialized" in *'"method":"initialized"'*) ;; *) exit 1;; esac
         read thread
         case "$thread" in *'"method":"thread/start"'*) ;; *) printf '%s\n' '{"jsonrpc":"2.0","id":2,"error":{"code":-32600,"message":"expected thread/start"}}'; exit 0;; esac
+        case "$thread" in *'"sandboxPolicy":"danger-full-access"'*'"approvalPolicy":"never"'*) ;; *) printf '%s\n' '{"jsonrpc":"2.0","id":2,"error":{"code":-32600,"message":"expected bypassed codex thread/start policy"}}'; exit 0;; esac
         printf '%s\n' '{"jsonrpc":"2.0","id":2,"result":{"threadId":"th_chat"}}'
         read turn1
         case "$turn1" in *'"method":"turn/start"'*) ;; *) printf '%s\n' '{"jsonrpc":"2.0","id":3,"error":{"code":-32600,"message":"expected first turn/start"}}'; exit 0;; esac

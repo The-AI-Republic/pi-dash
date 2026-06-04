@@ -18,8 +18,17 @@ export class PodService extends APIService {
     super(BASE_URL || API_BASE_URL);
   }
 
-  async list(workspaceId: string): Promise<IPod[]> {
-    return this.get("/api/runners/pods/", { params: { workspace: workspaceId } })
+  /**
+   * List pods. Pods are project-scoped, so pass ``projectId`` to fetch the
+   * pods for a single project (the server's ``project`` filter wins over
+   * ``workspace``). The ``workspaceId``-only form is kept for the workspace
+   * runners views.
+   */
+  async list(workspaceId?: string, projectId?: string): Promise<IPod[]> {
+    const params: Record<string, string> = {};
+    if (projectId) params.project = projectId;
+    if (workspaceId) params.workspace = workspaceId;
+    return this.get("/api/runners/pods/", { params })
       .then((r) => r?.data)
       .catch((e) => {
         throw e?.response?.data;

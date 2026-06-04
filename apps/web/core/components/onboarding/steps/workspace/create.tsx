@@ -79,8 +79,8 @@ export const WorkspaceCreateStep = observer(function WorkspaceCreateStep({
           const workspaceResponse = await createWorkspace(formData);
           setToast({
             type: TOAST_TYPE.SUCCESS,
-            title: t("workspace_creation.toast.success.title"),
-            message: t("workspace_creation.toast.success.message"),
+            title: t("Success"),
+            message: t("Workspace created successfully"),
           });
           await fetchWorkspaces();
           await completeStep(workspaceResponse.id);
@@ -88,8 +88,8 @@ export const WorkspaceCreateStep = observer(function WorkspaceCreateStep({
         } catch {
           setToast({
             type: TOAST_TYPE.ERROR,
-            title: t("workspace_creation.toast.error.title"),
-            message: t("workspace_creation.toast.error.message"),
+            title: t("Error"),
+            message: t("Workspace could not be created. Please try again."),
           });
         }
       } else {
@@ -98,8 +98,8 @@ export const WorkspaceCreateStep = observer(function WorkspaceCreateStep({
     } catch {
       setToast({
         type: TOAST_TYPE.ERROR,
-        title: t("workspace_creation.toast.error.title"),
-        message: t("workspace_creation.toast.error.message"),
+        title: t("Error"),
+        message: t("Workspace could not be created. Please try again."),
       });
     }
   };
@@ -139,17 +139,17 @@ export const WorkspaceCreateStep = observer(function WorkspaceCreateStep({
             className="text-13 font-medium text-tertiary after:ml-0.5 after:text-danger-primary after:content-['*']"
             htmlFor="name"
           >
-            {t("workspace_creation.form.name.label")}
+            {t("Name your workspace")}
           </label>
           <Controller
             control={control}
             name="name"
             rules={{
-              required: t("common.errors.required"),
+              required: t("This field is required"),
               validate: (value) => validateWorkspaceName(value, true),
               maxLength: {
                 value: 80,
-                message: t("workspace_creation.errors.validation.name_length"),
+                message: t("Limit your name to 80 characters."),
               },
             }}
             render={({ field: { value, ref, onChange } }) => (
@@ -188,16 +188,16 @@ export const WorkspaceCreateStep = observer(function WorkspaceCreateStep({
             className="text-13 font-medium text-tertiary after:ml-0.5 after:text-danger-primary after:content-['*']"
             htmlFor="slug"
           >
-            {t("workspace_creation.form.url.label")}
+            {t("Set your workspace's URL")}
           </label>
           <Controller
             control={control}
             name="slug"
             rules={{
-              required: t("common.errors.required"),
+              required: t("This field is required"),
               maxLength: {
                 value: 48,
-                message: t("workspace_creation.errors.validation.url_length"),
+                message: t("Limit your URL to 48 characters."),
               },
             }}
             render={({ field: { value, ref, onChange } }) => (
@@ -225,7 +225,7 @@ export const WorkspaceCreateStep = observer(function WorkspaceCreateStep({
                     onChange(e.target.value.toLowerCase());
                   }}
                   ref={ref}
-                  placeholder={t("workspace_creation.form.url.placeholder")}
+                  placeholder={t("Type or paste a URL")}
                   className={cn(
                     "ring-none w-full rounded-md border-none bg-surface-1 px-3 py-0 pl-0 text-secondary outline-none placeholder:text-placeholder"
                   )}
@@ -233,14 +233,14 @@ export const WorkspaceCreateStep = observer(function WorkspaceCreateStep({
               </div>
             )}
           />
-          <p className="text-13 text-tertiary">{t("workspace_creation.form.url.edit_slug")}</p>
+          <p className="text-13 text-tertiary">{t("You can only edit the slug of the URL")}</p>
           {slugError && (
             <p className="-mt-3 text-13 text-danger-primary">
-              {t("workspace_creation.errors.validation.url_already_taken")}
+              {t("Workspace URL is already taken!")}
             </p>
           )}
           {invalidSlug && (
-            <p className="text-13 text-danger-primary">{t("workspace_creation.errors.validation.url_alphanumeric")}</p>
+            <p className="text-13 text-danger-primary">{t("URLs can contain only ('-') and alphanumeric characters.")}</p>
           )}
           {errors.slug && <span className="text-13 text-danger-primary">{errors.slug.message}</span>}
         </div>
@@ -249,13 +249,13 @@ export const WorkspaceCreateStep = observer(function WorkspaceCreateStep({
             className="text-13 font-medium text-tertiary after:ml-0.5 after:text-danger-primary after:content-['*']"
             htmlFor="organization_size"
           >
-            {t("workspace_creation.form.organization_size.label")}
+            {t("How many people will use this workspace?")}
           </label>
           <div className="w-full">
             <Controller
               name="organization_size"
               control={control}
-              rules={{ required: t("common.errors.required") }}
+              rules={{ required: t("This field is required") }}
               render={({ field: { value, onChange } }) => (
                 <div className="flex flex-wrap gap-3">
                   {ORGANIZATION_SIZE.map((size) => {
@@ -291,7 +291,7 @@ export const WorkspaceCreateStep = observer(function WorkspaceCreateStep({
       </div>
       <div className="flex flex-col gap-4">
         <Button variant="primary" type="submit" size="xl" className="w-full" disabled={isButtonDisabled}>
-          {isSubmitting ? <Spinner height="20px" width="20px" /> : t("workspace_creation.button.default")}
+          {isSubmitting ? <Spinner height="20px" width="20px" /> : t("Create workspace")}
         </Button>
         {hasInvitations && (
           <Button variant="ghost" size="xl" className="w-full" onClick={handleCurrentViewChange}>

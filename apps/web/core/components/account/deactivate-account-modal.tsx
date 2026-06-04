@@ -72,9 +72,9 @@ export function DeactivateAccountModal(props: Props) {
               />
             </div>
             <div>
-              <h3 className="my-4 text-20 leading-6 font-medium text-primary">{t("deactivate_your_account")}</h3>
+              <h3 className="my-4 text-20 leading-6 font-medium text-primary">{t("Deactivate your account")}</h3>
               <p className="mt-6 list-disc pr-4 text-14 font-regular text-secondary">
-                {t("deactivate_your_account_description")}
+                {t("Once deactivated, you can't be assigned work items and be billed for your workspace. To reactivate your account, you will need an invite to a workspace at this email address.")}
               </p>
             </div>
           </div>
@@ -82,10 +82,10 @@ export function DeactivateAccountModal(props: Props) {
       </div>
       <div className="mb-2 flex items-center justify-end gap-2 p-4 sm:px-6">
         <Button variant="secondary" size="lg" onClick={handleClose}>
-          {t("cancel")}
+          {t("Cancel")}
         </Button>
         <Button variant="error-fill" size="lg" onClick={handleDeleteAccount}>
-          {isDeactivating ? t("deactivating") : t("confirm")}
+          {isDeactivating ? t("Deactivating") : t("Confirm")}
         </Button>
       </div>
     </ModalCore>

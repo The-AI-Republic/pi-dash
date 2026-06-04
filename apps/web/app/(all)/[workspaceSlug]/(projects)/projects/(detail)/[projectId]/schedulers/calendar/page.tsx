@@ -17,8 +17,8 @@ function ProjectSchedulersCalendarPage({ params }: Route.ComponentProps) {
   const { getProjectById } = useProject();
   const project = getProjectById(projectId);
   const pageTitle = project?.name
-    ? `${project.name} - ${t("scheduler_bindings.tab_label")} (${t("scheduler_bindings.calendar.title")})`
-    : t("scheduler_bindings.calendar.title");
+    ? `${project.name} - ${t("Schedulers")} (${t("Calendar")})`
+    : t("Calendar");
 
   return (
     <>

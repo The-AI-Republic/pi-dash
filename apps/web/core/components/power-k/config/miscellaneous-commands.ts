@@ -30,13 +30,13 @@ export const usePowerKMiscellaneousCommands = (): TPowerKCommandConfig[] => {
       .then(() => {
         setToast({
           type: TOAST_TYPE.SUCCESS,
-          title: t("power_k.miscellaneous_actions.copy_current_page_url_toast_success"),
+          title: t("Current page URL copied to clipboard."),
         });
       })
       .catch(() => {
         setToast({
           type: TOAST_TYPE.ERROR,
-          title: t("power_k.miscellaneous_actions.copy_current_page_url_toast_error"),
+          title: t("Some error occurred while copying the current page URL to clipboard."),
         });
       });
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -56,7 +56,7 @@ export const usePowerKMiscellaneousCommands = (): TPowerKCommandConfig[] => {
       id: "toggle_app_sidebar",
       group: "miscellaneous",
       type: "action",
-      i18n_title: "power_k.miscellaneous_actions.toggle_app_sidebar",
+      i18n_title: "Toggle app sidebar",
       icon: PanelLeft,
       action: () => toggleSidebar(),
       modifierShortcut: "cmd+b",
@@ -68,7 +68,7 @@ export const usePowerKMiscellaneousCommands = (): TPowerKCommandConfig[] => {
       id: "copy_current_page_url",
       group: "miscellaneous",
       type: "action",
-      i18n_title: "power_k.miscellaneous_actions.copy_current_page_url",
+      i18n_title: "Copy current page URL",
       icon: LinkIcon,
       action: copyCurrentPageUrlToClipboard,
       modifierShortcut: "cmd+shift+c",
@@ -80,7 +80,7 @@ export const usePowerKMiscellaneousCommands = (): TPowerKCommandConfig[] => {
       id: "focus_top_nav_search",
       group: "miscellaneous",
       type: "action",
-      i18n_title: "power_k.miscellaneous_actions.focus_top_nav_search",
+      i18n_title: "Focus search input",
       icon: SearchIcon,
       action: focusTopNavSearch,
       modifierShortcut: "cmd+f",

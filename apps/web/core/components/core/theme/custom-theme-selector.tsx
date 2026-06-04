@@ -79,7 +79,7 @@ export const CustomThemeSelector = observer(function CustomThemeSelector() {
 
       setToast({
         type: TOAST_TYPE.SUCCESS,
-        title: t("success"),
+        title: t("Success"),
         message: "Reloading to apply changes...",
       });
       // reload the page after showing the toast
@@ -90,8 +90,8 @@ export const CustomThemeSelector = observer(function CustomThemeSelector() {
       console.error("Failed to apply theme:", error);
       setToast({
         type: TOAST_TYPE.ERROR,
-        title: t("error"),
-        message: t("failed_to_update_the_theme"),
+        title: t("Error"),
+        message: t("Failed to update the theme"),
       });
     } finally {
       setIsLoadingPalette(false);
@@ -107,7 +107,7 @@ export const CustomThemeSelector = observer(function CustomThemeSelector() {
     >
       <div className="space-y-5">
         <ProfileSettingsHeading
-          title={t("customize_your_theme")}
+          title={t("Customize your theme")}
           control={<CustomThemeImportConfigButton handleUpdateTheme={handleUpdateTheme} setValue={setValue} />}
         />
         <CustomThemeModeSelector control={control} />
@@ -117,7 +117,7 @@ export const CustomThemeSelector = observer(function CustomThemeSelector() {
       <div className="mt-5 flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
         {/* Save Theme Button */}
         <Button variant="primary" size="lg" type="submit" loading={isSubmitting || isLoadingPalette}>
-          {isSubmitting ? t("creating_theme") : isLoadingPalette ? "Generating" : t("set_theme")}
+          {isSubmitting ? t("Creating theme") : isLoadingPalette ? "Generating" : t("Set theme")}
         </Button>
         {/* Import/Export Section */}
         <CustomThemeDownloadConfigButton getValues={getValues} />

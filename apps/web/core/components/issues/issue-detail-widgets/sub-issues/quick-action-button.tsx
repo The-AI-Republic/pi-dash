@@ -68,12 +68,12 @@ export const SubIssuesActionButton = observer(function SubIssuesActionButton(pro
   // options
   const optionItems = [
     {
-      i18n_label: "common.create_new",
+      i18n_label: "Create new",
       icon: <PlusIcon className="h-3 w-3" />,
       onClick: handleCreateNew,
     },
     {
-      i18n_label: "common.add_existing",
+      i18n_label: "Add existing",
       icon: <WorkItemsIcon className="h-3 w-3" />,
       onClick: handleAddExisting,
     },

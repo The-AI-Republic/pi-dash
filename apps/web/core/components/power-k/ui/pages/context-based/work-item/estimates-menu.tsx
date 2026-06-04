@@ -42,7 +42,7 @@ export const PowerKWorkItemEstimatesMenu = observer(function PowerKWorkItemEstim
     <Command.Group>
       <PowerKModalCommandItem
         icon={Triangle}
-        label={t("project_settings.estimates.no_estimate")}
+        label={t("No estimate")}
         isSelected={workItemDetails.estimate_point === null}
         onSelect={() => handleSelect(null)}
       />

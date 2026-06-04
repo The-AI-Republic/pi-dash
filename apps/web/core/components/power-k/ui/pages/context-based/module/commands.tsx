@@ -87,13 +87,13 @@ export const usePowerKModuleContextBasedActions = (): TPowerKCommandConfig[] => 
       .then(() => {
         setToast({
           type: TOAST_TYPE.SUCCESS,
-          title: t("power_k.contextual_actions.module.copy_url_toast_success"),
+          title: t("Module URL copied to clipboard."),
         });
       })
       .catch(() => {
         setToast({
           type: TOAST_TYPE.ERROR,
-          title: t("power_k.contextual_actions.module.copy_url_toast_error"),
+          title: t("Some error occurred while copying the module URL to clipboard."),
         });
       });
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -102,7 +102,7 @@ export const usePowerKModuleContextBasedActions = (): TPowerKCommandConfig[] => 
   return [
     {
       id: "add_remove_module_members",
-      i18n_title: "power_k.contextual_actions.module.add_remove_members",
+      i18n_title: "Add/remove members",
       icon: Users,
       group: "contextual",
       contextType: "module",
@@ -119,7 +119,7 @@ export const usePowerKModuleContextBasedActions = (): TPowerKCommandConfig[] => 
     },
     {
       id: "change_module_status",
-      i18n_title: "power_k.contextual_actions.module.change_status",
+      i18n_title: "Change status",
       iconNode: <ModuleStatusIcon status="backlog" className="size-3.5 shrink-0" />,
       group: "contextual",
       contextType: "module",
@@ -137,8 +137,8 @@ export const usePowerKModuleContextBasedActions = (): TPowerKCommandConfig[] => 
     {
       id: "toggle_module_favorite",
       i18n_title: isFavorite
-        ? "power_k.contextual_actions.module.remove_from_favorites"
-        : "power_k.contextual_actions.module.add_to_favorites",
+        ? "Remove from favorites"
+        : "Add to favorites",
       icon: isFavorite ? StarOff : Star,
       group: "contextual",
       contextType: "module",
@@ -151,7 +151,7 @@ export const usePowerKModuleContextBasedActions = (): TPowerKCommandConfig[] => 
     },
     {
       id: "copy_module_url",
-      i18n_title: "power_k.contextual_actions.module.copy_url",
+      i18n_title: "Copy URL",
       icon: LinkIcon,
       group: "contextual",
       contextType: "module",

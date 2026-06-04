@@ -22,7 +22,7 @@ export const GanttQuickAddIssueButton = observer(function GanttQuickAddIssueButt
     >
       <Row className="flex gap-2 py-2">
         <PlusIcon className="my-auto h-3.5 w-3.5 stroke-2" />
-        <span className="text-13 font-medium">{t(`${isEpic ? "epic.new" : "issue.new"}`)}</span>
+        <span className="text-13 font-medium">{t(isEpic ? "New Epic" : "New work item")}</span>
       </Row>
     </button>
   );

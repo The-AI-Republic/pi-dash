@@ -120,7 +120,7 @@ export const SchedulerCalendar = observer(function SchedulerCalendar({ workspace
 
             {hasMore && (
               <div className="shadow-md absolute bottom-2 left-1/2 -translate-x-1/2 rounded-md border border-subtle bg-surface-1 px-3 py-1 text-12 text-secondary">
-                {t("scheduler_bindings.calendar.too_many")}
+                {t("Too many occurrences in this window — narrow the date range to see all.")}
               </div>
             )}
           </div>
@@ -169,8 +169,8 @@ function EmptyState() {
   const { t } = useTranslation();
   return (
     <div className="flex h-full w-full flex-col items-center justify-center gap-2 p-12 text-center">
-      <h3 className="text-16 font-semibold text-primary">{t("scheduler_bindings.calendar.empty_title")}</h3>
-      <p className="max-w-md text-13 text-secondary">{t("scheduler_bindings.calendar.empty_body")}</p>
+      <h3 className="text-16 font-semibold text-primary">{t("No schedulers installed")}</h3>
+      <p className="max-w-md text-13 text-secondary">{t("Install a scheduler from the List tab to see its occurrences on the calendar.")}</p>
     </div>
   );
 }

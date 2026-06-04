@@ -59,11 +59,11 @@ function ProjectPagesPage({ params }: Route.ComponentProps) {
     return (
       <div className="flex h-full w-full items-center justify-center">
         <DetailedEmptyState
-          title={t("disabled_project.empty_state.page.title")}
-          description={t("disabled_project.empty_state.page.description")}
+          title={t("Pages are not enabled for the project.")}
+          description={t("Pages are the building blocks of your project. Enable pages from project settings to start using them.")}
           assetPath={resolvedPath}
           primaryButton={{
-            text: t("disabled_project.empty_state.page.primary_button.text"),
+            text: t("Manage features"),
             onClick: () => {
               router.push(`/${workspaceSlug}/settings/projects/${projectId}/features`);
             },

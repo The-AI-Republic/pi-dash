@@ -18,7 +18,7 @@ import { useIssues } from "@/hooks/store/use-issues";
 import { useProjectView } from "@/hooks/store/use-project-view";
 import { IssuesStoreContext } from "@/hooks/use-issue-layout-store";
 // local imports
-import { IssuePeekOverview } from "../../peek-overview";
+import { IssuePeekOverview, IssuePeekUrlSync } from "../../peek-overview";
 import { ProjectViewCalendarLayout } from "../calendar/roots/project-view-root";
 import { BaseGanttRoot } from "../gantt";
 import { ProjectViewKanBanLayout } from "../kanban/roots/project-view-root";
@@ -113,6 +113,7 @@ export const ProjectViewLayoutRoot = observer(function ProjectViewLayoutRoot() {
               <ProjectViewIssueLayout activeLayout={activeLayout} viewId={viewId.toString()} />
             </div>
             {/* peek overview */}
+            <IssuePeekUrlSync />
             <IssuePeekOverview />
           </div>
         )}

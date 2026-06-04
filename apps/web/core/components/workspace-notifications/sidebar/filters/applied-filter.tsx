@@ -61,7 +61,7 @@ export const AppliedFilters = observer(function AppliedFilters(props: TAppliedFi
         })}
         <button type="button" onClick={handleClearFilters}>
           <Tag>
-            {t("common.clear_all")}
+            {t("Clear all")}
             <CloseIcon height={12} width={12} strokeWidth={2} />
           </Tag>
         </button>

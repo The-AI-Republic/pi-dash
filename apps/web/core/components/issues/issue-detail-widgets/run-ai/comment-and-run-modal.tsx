@@ -72,10 +72,10 @@ export const CommentAndRunModal = observer(function CommentAndRunModal(props: Pr
         });
         commentPostedRef.current = true;
       } catch (error: unknown) {
-        const message = (error as { error?: string })?.error ?? t("run_ai.comment_failed_message");
+        const message = (error as { error?: string })?.error ?? t("Failed to post the comment.");
         setToast({
           type: TOAST_TYPE.ERROR,
-          title: t("run_ai.comment_failed_title"),
+          title: t("Could not post comment"),
           message,
         });
         setIsPosting(false);
@@ -92,23 +92,23 @@ export const CommentAndRunModal = observer(function CommentAndRunModal(props: Pr
     <ModalCore isOpen={isOpen} handleClose={isBusy ? () => {} : onClose}>
       <form onSubmit={handleSubmit}>
         <div className="space-y-4 p-5">
-          <h3 className="text-h4-medium text-secondary">{t("run_ai.modal_title")}</h3>
-          <p className="text-body-sm-regular text-tertiary">{t("run_ai.modal_description")}</p>
+          <h3 className="text-h4-medium text-secondary">{t("Comment & Run")}</h3>
+          <p className="text-body-sm-regular text-tertiary">{t("Post a comment on this work item and start an AI agent run with the comment as the prompt.")}</p>
           <TextArea
             ref={textareaRef}
             value={comment}
             onChange={(e) => setComment(e.target.value)}
-            placeholder={t("run_ai.placeholder")}
+            placeholder={t("Tell the agent what you want it to do...")}
             textAreaSize="md"
             rows={5}
           />
         </div>
         <div className="flex items-center justify-end gap-2 border-t-[0.5px] border-subtle px-5 py-4">
           <Button variant="secondary" size="lg" onClick={onClose} disabled={isBusy} type="button">
-            {t("common.cancel")}
+            {t("Cancel")}
           </Button>
           <Button variant="primary" size="lg" type="submit" loading={isBusy} disabled={!canSubmit}>
-            {isPosting ? t("run_ai.posting") : isRunning ? t("run_ai.starting") : t("run_ai.comment_button")}
+            {isPosting ? t("Posting...") : isRunning ? t("Starting run...") : t("Comment & Run")}
           </Button>
         </div>
       </form>

@@ -36,7 +36,7 @@ export const ReadonlyMember = observer(function ReadonlyMember(props: TReadonlyM
     return (
       <div className={cn("flex items-center gap-1 text-body-xs-regular", className)}>
         {<ButtonAvatars showTooltip={false} userIds={value} icon={Icon} />}
-        <span className="flex-grow truncate">{placeholder ?? t("common.none")}</span>
+        <span className="flex-grow truncate">{placeholder ?? t("None")}</span>
       </div>
     );
   }

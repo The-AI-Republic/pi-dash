@@ -43,7 +43,7 @@ export const GanttChartHeader = observer(function GanttChartHeader(props: Props)
     >
       <div className="ml-auto">
         <div className="ml-auto text-11 font-medium text-tertiary">
-          {blockIds ? `${blockIds.length} ${loaderTitle}` : t("common.loading")}
+          {blockIds ? `${blockIds.length} ${loaderTitle}` : t("Loading")}
         </div>
       </div>
 
@@ -70,7 +70,7 @@ export const GanttChartHeader = observer(function GanttChartHeader(props: Props)
           className="rounded-md bg-layer-transparent p-1 px-2 text-11 hover:bg-layer-transparent-hover"
           onClick={handleToday}
         >
-          {t("common.today")}
+          {t("Today")}
         </button>
       )}
 

@@ -55,7 +55,7 @@ export const WorkspaceMembersListItem = observer(function WorkspaceMembersListIt
       setToast({
         type: TOAST_TYPE.ERROR,
         title: "Error!",
-        message: error?.error || t("something_went_wrong_please_try_again"),
+        message: error?.error || t("Something went wrong. Please try again."),
       });
     }
   };
@@ -70,7 +70,7 @@ export const WorkspaceMembersListItem = observer(function WorkspaceMembersListIt
       setToast({
         type: TOAST_TYPE.ERROR,
         title: "Error!",
-        message: error?.error || t("something_went_wrong_please_try_again"),
+        message: error?.error || t("Something went wrong. Please try again."),
       });
     }
   };

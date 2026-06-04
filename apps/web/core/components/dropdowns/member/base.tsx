@@ -53,7 +53,7 @@ export const MemberDropdownBase = observer(function MemberDropdownBase(props: TM
     onClose,
     onDropdownOpen,
     optionsClassName = "",
-    placeholder = t("members"),
+    placeholder = t("Members"),
     placement,
     renderByDefault = true,
     showTooltip = false,
@@ -94,7 +94,7 @@ export const MemberDropdownBase = observer(function MemberDropdownBase(props: TM
         if (value.length === 1) {
           return getUserDetails(value[0])?.display_name || placeholder;
         } else {
-          return showUserDetails ? `${value.length} ${t("members").toLocaleLowerCase()}` : "";
+          return showUserDetails ? `${value.length} ${t("Members").toLocaleLowerCase()}` : "";
         }
       } else {
         return placeholder;
@@ -142,7 +142,7 @@ export const MemberDropdownBase = observer(function MemberDropdownBase(props: TM
             isActive={isOpen}
             tooltipHeading={placeholder}
             tooltipContent={
-              tooltipContent ?? `${value?.length ?? 0} ${value?.length !== 1 ? t("assignees") : t("assignee")}`
+              tooltipContent ?? `${value?.length ?? 0} ${value?.length !== 1 ? t("Assignees") : t("Assignee")}`
             }
             showTooltip={showTooltip}
             variant={buttonVariant}

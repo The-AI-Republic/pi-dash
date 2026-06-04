@@ -32,8 +32,8 @@ export const NotificationsProfileSettings = observer(function NotificationsProfi
   return (
     <div className="size-full">
       <ProfileSettingsHeading
-        title={t("account_settings.notifications.heading")}
-        description={t("account_settings.notifications.description")}
+        title={t("Email notifications")}
+        description={t("Stay in the loop on Work items you are subscribed to. Enable this to get notified.")}
       />
       <div className="mt-7">
         <NotificationsProfileSettingsForm data={data} />

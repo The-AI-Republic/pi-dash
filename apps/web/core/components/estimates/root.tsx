@@ -57,8 +57,8 @@ export const EstimateRoot = observer(function EstimateRoot(props: TEstimateRoot)
       <div>
         {/* header */}
         <SettingsHeading
-          title={t("project_settings.estimates.heading")}
-          description={t("project_settings.estimates.description")}
+          title={t("Estimates")}
+          description={t("Set up estimation systems to track and communicate the effort required for each work item.")}
         />
         <div className="mt-6">
           {/* current active estimate section */}
@@ -66,8 +66,8 @@ export const EstimateRoot = observer(function EstimateRoot(props: TEstimateRoot)
             <>
               {/* estimates activated deactivated section */}
               <SettingsBoxedControlItem
-                title={t("project_settings.estimates.title")}
-                description={t("project_settings.estimates.enable_description")}
+                title={t("Enable estimates for my project")}
+                description={t("They help you in communicating complexity and workload of the team.")}
                 control={
                   <EstimateDisableSwitch workspaceSlug={workspaceSlug} projectId={projectId} isAdmin={isAdmin} />
                 }
@@ -89,11 +89,11 @@ export const EstimateRoot = observer(function EstimateRoot(props: TEstimateRoot)
             <EmptyStateCompact
               assetKey="estimate"
               assetClassName="size-20"
-              title={t("settings_empty_state.estimates.title")}
-              description={t("settings_empty_state.estimates.description")}
+              title={t("No estimates yet")}
+              description={t("Define how your team measures effort and track it consistently across all work items.")}
               actions={[
                 {
-                  label: t("settings_empty_state.estimates.cta_primary"),
+                  label: t("Add estimate system"),
                   onClick: () => setIsEstimateCreateModalOpen(true),
                 },
               ]}

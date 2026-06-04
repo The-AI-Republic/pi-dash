@@ -10,14 +10,14 @@ import type { SubmitHandler } from "react-hook-form";
 import { Controller, useForm } from "react-hook-form";
 import useSWR from "swr";
 // pi dash imports
+import { API_BASE_URL } from "@pi-dash/constants";
 import { useTranslation } from "@pi-dash/i18n";
 import { Button } from "@pi-dash/propel/button";
-import { TOAST_TYPE, setToast } from "@pi-dash/propel/toast";
-import { PodService, RunnerService } from "@pi-dash/services";
-import type { IPod, IRunnerInvite, TPartialProject } from "@pi-dash/types";
+import { PodService } from "@pi-dash/services";
+import type { IPod, TPartialProject } from "@pi-dash/types";
 import { CustomSelect, EModalPosition, EModalWidth, Input, ModalCore } from "@pi-dash/ui";
 // app
-import { RunnerEnrollmentCommand } from "@/components/runners/runner-enrollment-command";
+import { RunnerCliCommand } from "@/components/runners/runner-cli-command";
 import { ProjectService } from "@/services/project";
 
 type Props = {
@@ -25,8 +25,6 @@ type Props = {
   onClose: () => void;
   workspaceId: string;
   workspaceSlug: string;
-  /** Refetch the runners list so the new pending row shows up. */
-  onCreated: () => void;
 };
 
 // Mirrors the runner CLI's ``--agent`` value-enum (kebab-case). Keep in
@@ -34,40 +32,41 @@ type Props = {
 const AGENT_OPTIONS = ["claude-code", "codex"] as const;
 type TAgent = (typeof AGENT_OPTIONS)[number];
 const DEFAULT_AGENT: TAgent = "claude-code";
+const RUNNER_NAME_WHITESPACE_RE = /\s/;
+const RUNNER_NAME_RE = /^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$/;
 
 interface FormValues {
   projectIdentifier: string;
   podName: string;
   name: string;
-  hostLabel: string;
   workingDir: string;
   agent: TAgent;
 }
 
-type CommandOptions = Pick<FormValues, "hostLabel" | "workingDir" | "agent">;
+type RunnerCommandValues = Pick<FormValues, "projectIdentifier" | "podName" | "name" | "workingDir" | "agent">;
 
 const DEFAULT_VALUES: FormValues = {
   projectIdentifier: "",
   podName: "",
   name: "",
-  hostLabel: "",
   workingDir: "",
   agent: DEFAULT_AGENT,
 };
 
-const DEFAULT_COMMAND_OPTIONS: CommandOptions = {
-  hostLabel: "",
-  workingDir: "",
-  agent: DEFAULT_AGENT,
-};
-
-const runnerService = new RunnerService();
 const podService = new PodService();
 const projectService = new ProjectService();
 
 export const AddRunnerModal = observer(function AddRunnerModal(props: Props) {
-  const { isOpen, onClose, workspaceId, workspaceSlug, onCreated } = props;
+  const { isOpen, onClose, workspaceId, workspaceSlug } = props;
   const { t } = useTranslation();
+  const [origin, setOrigin] = useState(() => (typeof window !== "undefined" ? window.location.origin : ""));
+
+  useEffect(() => {
+    if (typeof window !== "undefined") setOrigin(window.location.origin);
+  }, []);
+
+  const cloudUrl = API_BASE_URL || origin;
+  const isUsingBrowserOrigin = !API_BASE_URL;
 
   const {
     control,
@@ -75,19 +74,17 @@ export const AddRunnerModal = observer(function AddRunnerModal(props: Props) {
     reset,
     watch,
     setValue,
-    formState: { errors, isSubmitting },
+    formState: { errors },
   } = useForm<FormValues>({ defaultValues: DEFAULT_VALUES });
 
-  const [invite, setInvite] = useState<IRunnerInvite | null>(null);
-  const [commandOptions, setCommandOptions] = useState<CommandOptions>(DEFAULT_COMMAND_OPTIONS);
+  const [runnerCommand, setRunnerCommand] = useState<RunnerCommandValues | null>(null);
 
   // Reset everything on close→open. State persists between consecutive
-  // opens otherwise (RHF + local invite state would carry the stale
+  // opens otherwise (RHF + local command state would carry the stale
   // last-submission and confuse the next user).
   useEffect(() => {
     if (!isOpen) return;
-    setInvite(null);
-    setCommandOptions(DEFAULT_COMMAND_OPTIONS);
+    setRunnerCommand(null);
     reset(DEFAULT_VALUES);
   }, [isOpen, reset]);
 
@@ -142,32 +139,17 @@ export const AddRunnerModal = observer(function AddRunnerModal(props: Props) {
 
   const agentOptionLabel = (value: TAgent): string =>
     value === "claude-code"
-      ? t("runners.add_modal.agent_options.claude_code")
-      : t("runners.add_modal.agent_options.codex");
+      ? t("Claude Code")
+      : t("Codex");
 
-  const onSubmit: SubmitHandler<FormValues> = async (values) => {
-    try {
-      const result = await runnerService.createRunnerInvite({
-        workspaceId,
-        projectIdentifier: values.projectIdentifier,
-        podName: values.podName || undefined,
-        name: values.name.trim() || undefined,
-      });
-      setCommandOptions({
-        hostLabel: values.hostLabel,
-        workingDir: values.workingDir,
-        agent: values.agent,
-      });
-      setInvite(result);
-      onCreated();
-    } catch (e: unknown) {
-      const err = e as { error?: string } | null;
-      setToast({
-        type: TOAST_TYPE.ERROR,
-        title: t("runners.toast.error_title"),
-        message: err?.error ?? t("runners.add_modal.errors.create_failed"),
-      });
-    }
+  const onSubmit: SubmitHandler<FormValues> = (values) => {
+    setRunnerCommand({
+      projectIdentifier: values.projectIdentifier,
+      podName: values.podName,
+      name: values.name.trim(),
+      workingDir: values.workingDir,
+      agent: values.agent,
+    });
   };
 
   // Two layouts: form (before submit) and command panel (after).
@@ -175,26 +157,26 @@ export const AddRunnerModal = observer(function AddRunnerModal(props: Props) {
   // need RHF/Controller wiring.
   return (
     <ModalCore isOpen={isOpen} handleClose={onClose} position={EModalPosition.CENTER} width={EModalWidth.XXL}>
-      {invite === null ? (
+      {runnerCommand === null ? (
         <form onSubmit={handleSubmit(onSubmit)} className="flex flex-col gap-5 p-5">
           <div>
-            <div className="text-18 font-medium text-primary">{t("runners.add_modal.title")}</div>
-            <p className="mt-1 text-13 text-secondary">{t("runners.add_modal.subtitle")}</p>
+            <div className="text-18 font-medium text-primary">{t("Add runner")}</div>
+            <p className="mt-1 text-13 text-secondary">{t("Generate a `pidash runner add` command for the machine that will host this runner.")}</p>
           </div>
 
           <div className="flex flex-col gap-1">
             <label htmlFor="add-runner-project" className="text-13 font-medium text-primary">
-              {t("runners.add_modal.project_label")}
+              {t("Project")}
             </label>
             <Controller
               control={control}
               name="projectIdentifier"
-              rules={{ required: t("runners.add_modal.errors.project_required") }}
+              rules={{ required: t("Pick a project.") }}
               render={({ field }) => (
                 <CustomSelect
                   value={field.value}
                   label={
-                    projects?.find((p) => p.identifier === field.value)?.name ?? t("runners.list.project_placeholder")
+                    projects?.find((p) => p.identifier === field.value)?.name ?? t("Select a project")
                   }
                   onChange={field.onChange}
                   buttonClassName="border border-subtle"
@@ -213,18 +195,18 @@ export const AddRunnerModal = observer(function AddRunnerModal(props: Props) {
                 </CustomSelect>
               )}
             />
-            <p className="text-12 text-secondary">{t("runners.add_modal.project_help")}</p>
+            <p className="text-12 text-secondary">{t("The project this runner will work on.")}</p>
             {errors.projectIdentifier && (
-              <span className="text-red-500 text-12">{errors.projectIdentifier.message}</span>
+              <span className="text-12 text-danger-primary">{errors.projectIdentifier.message}</span>
             )}
             {projectsError && (
-              <span className="text-red-500 text-12">{t("runners.add_modal.errors.load_projects_failed")}</span>
+              <span className="text-12 text-danger-primary">{t("Could not load projects.")}</span>
             )}
           </div>
 
           <div className="flex flex-col gap-1">
             <label htmlFor="add-runner-pod" className="text-13 font-medium text-primary">
-              {t("runners.add_modal.pod_label")}
+              {t("Pod (optional)")}
             </label>
             <Controller
               control={control}
@@ -232,7 +214,7 @@ export const AddRunnerModal = observer(function AddRunnerModal(props: Props) {
               render={({ field }) => (
                 <CustomSelect
                   value={field.value}
-                  label={field.value || t("runners.add_modal.pod_default_option")}
+                  label={field.value || t("(default pod)")}
                   onChange={field.onChange}
                   buttonClassName="border border-subtle"
                   input
@@ -240,7 +222,7 @@ export const AddRunnerModal = observer(function AddRunnerModal(props: Props) {
                   placement="bottom-start"
                 >
                   <>
-                    <CustomSelect.Option value="">{t("runners.add_modal.pod_default_option")}</CustomSelect.Option>
+                    <CustomSelect.Option value="">{t("(default pod)")}</CustomSelect.Option>
                     {podsForPicker.map((pod) => (
                       <CustomSelect.Option key={pod.id} value={pod.name}>
                         {pod.name}
@@ -251,47 +233,38 @@ export const AddRunnerModal = observer(function AddRunnerModal(props: Props) {
                 </CustomSelect>
               )}
             />
-            <p className="text-12 text-secondary">{t("runners.add_modal.pod_help")}</p>
+            <p className="text-12 text-secondary">{t("Defaults to the project's default pod.")}</p>
             {podsError && (
-              <span className="text-red-500 text-12">{t("runners.add_modal.errors.load_pods_failed")}</span>
+              <span className="text-12 text-danger-primary">{t("Could not load pods.")}</span>
             )}
           </div>
 
           <div className="flex flex-col gap-1">
             <label htmlFor="add-runner-name" className="text-13 font-medium text-primary">
-              {t("runners.add_modal.name_label")}
+              {t("Name (optional)")}
             </label>
             <Controller
               control={control}
               name="name"
+              rules={{
+                validate: (value) => {
+                  const trimmed = value.trim();
+                  if (!trimmed) return true;
+                  if (RUNNER_NAME_WHITESPACE_RE.test(trimmed)) return t("Runner name cannot contain spaces. It must start with a letter, digit, or underscore and contain only letters, digits, underscore, dot, or dash.");
+                  return RUNNER_NAME_RE.test(trimmed) || t("Runner name cannot contain spaces. It must start with a letter, digit, or underscore and contain only letters, digits, underscore, dot, or dash.");
+                },
+              }}
               render={({ field }) => (
-                <Input {...field} id="add-runner-name" placeholder={t("runners.add_modal.name_placeholder")} />
+                <Input {...field} id="add-runner-name" placeholder={t("my-laptop-runner")} />
               )}
             />
-            <p className="text-12 text-secondary">{t("runners.add_modal.name_help")}</p>
-          </div>
-
-          <div className="flex flex-col gap-1">
-            <label htmlFor="add-runner-host-label" className="text-13 font-medium text-primary">
-              {t("runners.add_modal.host_label_label")}
-            </label>
-            <Controller
-              control={control}
-              name="hostLabel"
-              render={({ field }) => (
-                <Input
-                  {...field}
-                  id="add-runner-host-label"
-                  placeholder={t("runners.add_modal.host_label_placeholder")}
-                />
-              )}
-            />
-            <p className="text-12 text-secondary">{t("runners.add_modal.host_label_help")}</p>
+            <p className="text-12 text-secondary">{t("Auto-assigned if blank. No spaces. If provided, use letters, digits, underscore, dot, or dash; start with a letter, digit, or underscore.")}</p>
+            {errors.name && <span className="text-12 text-danger-primary">{errors.name.message}</span>}
           </div>
 
           <div className="flex flex-col gap-1">
             <label htmlFor="add-runner-working-dir" className="text-13 font-medium text-primary">
-              {t("runners.add_modal.working_dir_label")}
+              {t("Working directory (optional)")}
             </label>
             <Controller
               control={control}
@@ -300,16 +273,16 @@ export const AddRunnerModal = observer(function AddRunnerModal(props: Props) {
                 <Input
                   {...field}
                   id="add-runner-working-dir"
-                  placeholder={t("runners.add_modal.working_dir_placeholder")}
+                  placeholder={t("local dev machine project working dir")}
                 />
               )}
             />
-            <p className="text-12 text-secondary">{t("runners.add_modal.working_dir_help")}</p>
+            <p className="text-12 text-secondary">{t("Local path the daemon runs the agent CLI in — usually the project repo on disk. Defaults to a sandbox under the runner's data dir, which is rarely what you want.")}</p>
           </div>
 
           <div className="flex flex-col gap-1">
             <label htmlFor="add-runner-agent" className="text-13 font-medium text-primary">
-              {t("runners.add_modal.agent_label")}
+              {t("Agent")}
             </label>
             <Controller
               control={control}
@@ -334,38 +307,41 @@ export const AddRunnerModal = observer(function AddRunnerModal(props: Props) {
                 </CustomSelect>
               )}
             />
-            <p className="text-12 text-secondary">{t("runners.add_modal.agent_help")}</p>
+            <p className="text-12 text-secondary">{t("Which AI agent CLI this runner will drive. Baked into the displayed ``pidash runner add`` command.")}</p>
           </div>
 
           <div className="flex justify-end gap-2">
-            <Button variant="secondary" onClick={onClose} disabled={isSubmitting}>
-              {t("runners.add_modal.cancel")}
+            <Button variant="secondary" onClick={onClose}>
+              {t("Cancel")}
             </Button>
-            <Button type="submit" loading={isSubmitting} disabled={isSubmitting}>
-              {isSubmitting ? t("runners.add_modal.submitting") : t("runners.add_modal.submit")}
-            </Button>
+            <Button type="submit">{t("Generate command")}</Button>
           </div>
         </form>
       ) : (
         <div className="flex flex-col gap-4 p-5">
           <div>
-            <div className="text-18 font-medium text-primary">{t("runners.add_modal.title")}</div>
+            <div className="text-18 font-medium text-primary">{t("Add runner")}</div>
             <p className="mt-1 text-13 text-secondary">
-              {t("runners.add_modal.runner_id_label")}: <code className="text-12">{invite.runner_id}</code>
-              <br />
-              {invite.name}
+              {t("Project")}: <code className="text-12">{runnerCommand.projectIdentifier}</code>
             </p>
           </div>
 
-          <RunnerEnrollmentCommand
-            invite={invite}
-            hostLabel={commandOptions.hostLabel}
-            workingDir={commandOptions.workingDir}
-            agent={commandOptions.agent}
+          <RunnerCliCommand
+            cloudUrl={cloudUrl}
+            workspaceSlug={workspaceSlug}
+            projectIdentifier={runnerCommand.projectIdentifier}
+            podName={runnerCommand.podName}
+            name={runnerCommand.name}
+            workingDir={runnerCommand.workingDir}
+            agent={runnerCommand.agent}
+            isUsingBrowserOrigin={isUsingBrowserOrigin}
           />
 
-          <div className="flex justify-end">
-            <Button onClick={onClose}>{t("runners.add_modal.done")}</Button>
+          <div className="flex justify-end gap-2">
+            <Button variant="secondary" onClick={() => setRunnerCommand(null)}>
+              {t("Back")}
+            </Button>
+            <Button onClick={onClose}>{t("Done")}</Button>
           </div>
         </div>
       )}

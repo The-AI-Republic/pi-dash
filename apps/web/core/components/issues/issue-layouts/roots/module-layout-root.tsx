@@ -18,7 +18,7 @@ import { WorkItemFiltersRow } from "@/components/work-item-filters/filters-row";
 import { useIssues } from "@/hooks/store/use-issues";
 import { IssuesStoreContext } from "@/hooks/use-issue-layout-store";
 // local imports
-import { IssuePeekOverview } from "../../peek-overview";
+import { IssuePeekOverview, IssuePeekUrlSync } from "../../peek-overview";
 import { ModuleCalendarLayout } from "../calendar/roots/module-root";
 import { BaseGanttRoot } from "../gantt";
 import { ModuleKanBanLayout } from "../kanban/roots/module-root";
@@ -93,6 +93,7 @@ export const ModuleLayoutRoot = observer(function ModuleLayoutRoot() {
               <ModuleIssueLayout activeLayout={activeLayout} moduleId={moduleId} />
             </Row>
             {/* peek overview */}
+            <IssuePeekUrlSync />
             <IssuePeekOverview />
           </div>
         )}

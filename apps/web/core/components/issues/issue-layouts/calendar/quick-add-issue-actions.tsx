@@ -59,14 +59,14 @@ export const CalendarQuickAddIssueActions = observer(function CalendarQuickAddIs
     ).then(() => addIssuesToView?.(issueIds));
 
     setPromiseToast(addExistingIssuesPromise, {
-      loading: t("issue.adding", { count: issueIds.length }),
+      loading: t("Adding work item", { count: issueIds.length }),
       success: {
-        title: t("toast.success"),
-        message: () => t("entity.add.success", { entity: t("issue.label", { count: 2 }) }),
+        title: t("Success!"),
+        message: () => t("{entity} added successfully", { entity: t("{count, plural, one {Work item} other {Work items}}", { count: 2 }) }),
       },
       error: {
-        title: t("toast.error"),
-        message: (err) => err?.message || t("common.errors.default.message"),
+        title: t("Error!"),
+        message: (err) => err?.message || t("Something went wrong. Please try again."),
       },
     });
   };
@@ -127,16 +127,16 @@ export const CalendarQuickAddIssueActions = observer(function CalendarQuickAddIs
                 <div className="flex w-full items-center gap-x-[6px] rounded-md px-2 py-1.5 text-tertiary hover:text-tertiary">
                   <PlusIcon className="h-3.5 w-3.5 flex-shrink-0 stroke-2" />
                   <span className="flex-shrink-0 text-13 font-medium">
-                    {isEpic ? t("epic.add.label") : t("issue.add.label")}
+                    {isEpic ? t("Add Epic") : t("Add work item")}
                   </span>
                 </div>
               }
             >
               <CustomMenu.MenuItem onClick={handleNewIssue}>
-                {isEpic ? t("epic.add.label") : t("issue.add.label")}
+                {isEpic ? t("Add Epic") : t("Add work item")}
               </CustomMenu.MenuItem>
               {!isEpic && (
-                <CustomMenu.MenuItem onClick={handleExistingIssue}>{t("issue.add.existing")}</CustomMenu.MenuItem>
+                <CustomMenu.MenuItem onClick={handleExistingIssue}>{t("Add existing work item")}</CustomMenu.MenuItem>
               )}
             </CustomMenu>
           </div>

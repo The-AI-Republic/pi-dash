@@ -41,8 +41,8 @@ export const SendWorkspaceInvitationModal = observer(function SendWorkspaceInvit
   return (
     <ModalCore isOpen={isOpen} position={EModalPosition.TOP} width={EModalWidth.XXL}>
       <InvitationForm
-        title={t("workspace_settings.settings.members.modal.title")}
-        description={t("workspace_settings.settings.members.modal.description")}
+        title={t("Invite people to collaborate")}
+        description={t("Invite people to collaborate on your workspace.")}
         onSubmit={onFormSubmit}
         actions={
           <InvitationModalActions

@@ -38,7 +38,7 @@ export const MEMBER_PROPERTY_DETAILS: {
   };
 } = {
   full_name: {
-    i18n_title: "project_members.full_name",
+    i18n_title: "Full name",
     ascendingOrderKey: "full_name",
     ascendingOrderTitle: "A",
     descendingOrderKey: "-full_name",
@@ -47,7 +47,7 @@ export const MEMBER_PROPERTY_DETAILS: {
     isSortingAllowed: true,
   },
   display_name: {
-    i18n_title: "project_members.display_name",
+    i18n_title: "Display name",
     ascendingOrderKey: "display_name",
     ascendingOrderTitle: "A",
     descendingOrderKey: "-display_name",
@@ -56,7 +56,7 @@ export const MEMBER_PROPERTY_DETAILS: {
     isSortingAllowed: true,
   },
   email: {
-    i18n_title: "project_members.email",
+    i18n_title: "Email",
     ascendingOrderKey: "email",
     ascendingOrderTitle: "A",
     descendingOrderKey: "-email",
@@ -65,7 +65,7 @@ export const MEMBER_PROPERTY_DETAILS: {
     isSortingAllowed: true,
   },
   joining_date: {
-    i18n_title: "project_members.joining_date",
+    i18n_title: "Joining date",
     ascendingOrderKey: "joining_date",
     ascendingOrderTitle: "Old",
     descendingOrderKey: "-joining_date",
@@ -74,7 +74,7 @@ export const MEMBER_PROPERTY_DETAILS: {
     isSortingAllowed: true,
   },
   role: {
-    i18n_title: "project_members.role",
+    i18n_title: "Role",
     ascendingOrderKey: "role",
     ascendingOrderTitle: "Guest",
     descendingOrderKey: "-role",

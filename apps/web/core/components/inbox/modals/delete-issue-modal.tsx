@@ -49,8 +49,8 @@ export const DeleteInboxIssueModal = observer(function DeleteInboxIssueModal({
       .then(() => {
         setToast({
           type: TOAST_TYPE.SUCCESS,
-          title: `${t("success")}`,
-          message: `${t("inbox_issue.modals.delete.success")}`,
+          title: `${t("Success")}`,
+          message: `${t("Work item deleted successfully")}`,
         });
       })
       .catch((errors) => {
@@ -73,7 +73,7 @@ export const DeleteInboxIssueModal = observer(function DeleteInboxIssueModal({
       handleSubmit={handleDelete}
       isSubmitting={isDeleting}
       isOpen={isOpen}
-      title={t("inbox_issue.modals.delete.title")}
+      title={t("Delete work item")}
       // TODO: Need to translate the confirmation message
       content={
         <>
