@@ -179,6 +179,46 @@ async fn bridge_translates_result_error_to_failed() {
 }
 
 #[tokio::test]
+async fn result_before_init_is_surfaced_as_failed() {
+    // cursor-agent can fail (auth/quota) before ever emitting `system/init`,
+    // going straight to a terminal `result`. The bridge must still complete run
+    // setup and surface that result as a Failed event carrying the real detail,
+    // not bail with a generic "stdout closed before init" crash that drops it.
+    let script = r#"
+        set -e
+        printf '%s\n' '{"type":"result","subtype":"error","is_error":true,"result":"unauthorized: run cursor-agent login"}'
+        sleep 0.2
+    "#;
+    let cwd = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let mut bridge = Bridge::spawn("cursor-agent", &cwd, None)
+        .await
+        .expect("bridge setup");
+    // Run setup must succeed even though no init frame arrives; the thread id is
+    // synthesized from the run id.
+    let mut cursor = bridge
+        .run_with_command(fake_cmd(script), Uuid::new_v4())
+        .await
+        .expect("run setup should not bail when result precedes init");
+
+    let events = tokio::time::timeout(Duration::from_secs(2), bridge.next_events(&mut cursor))
+        .await
+        .expect("pump should not time out")
+        .expect("expected a Failed event, got None");
+
+    let mut saw_failed = false;
+    for ev in events {
+        if let BridgeEvent::Failed { detail, .. } = ev {
+            saw_failed = true;
+            assert!(
+                detail.as_deref().unwrap_or("").contains("unauthorized"),
+                "expected detail to include the pre-init error, got {detail:?}"
+            );
+        }
+    }
+    assert!(saw_failed, "expected a Failed event from a result-before-init");
+}
+
+#[tokio::test]
 async fn warm_returns_resume_session_id_without_spawning() {
     // warm must not spawn a process; it only echoes a known resume id so the
     // cloud can keep its session pointer stable until the first turn.

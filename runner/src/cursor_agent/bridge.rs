@@ -117,6 +117,12 @@ impl Bridge {
         if let Some(session_id) = self.session_id.as_deref().filter(|s| !s.is_empty()) {
             argv.extend(["--resume", session_id]);
         }
+        // `--` terminates option parsing so a prompt that legitimately starts
+        // with a dash (a markdown rule `---`, a leading bullet `- ...`, or
+        // pasted CLI/diff text) is taken as the positional prompt instead of
+        // being misread as flags. Unlike Claude (stdin) / Codex (JSON-RPC),
+        // cursor-agent takes the prompt in argv, so this guard is load-bearing.
+        argv.push("--");
         argv.push(prompt);
         login_shell_command(&self.binary, &argv, Some(cwd))
     }
@@ -126,7 +132,22 @@ impl Bridge {
     pub async fn run_with_command(&mut self, cmd: Command, run_id: Uuid) -> Result<BridgeCursor> {
         // Reset the exit signal before the new process can publish into it, so a
         // prior turn's exit snapshot doesn't make this turn look already-dead.
-        let _ = self.exit_tx.send(None);
+        //
+        // Use `send_if_modified` so a no-op reset (a fresh bridge whose value is
+        // already `None`) does NOT fire a watch notification. The supervisor
+        // captures `process_handle()` and subscribes its exit watcher *before*
+        // calling `run`; an unconditional `send(None)` here would wake that
+        // watcher with a `None` value, making it conclude the run already ended
+        // and give up before the real subprocess exit is ever observed. Only a
+        // genuine `Some -> None` clear (a reused bridge) publishes a change.
+        self.exit_tx.send_if_modified(|v| {
+            if v.is_some() {
+                *v = None;
+                true
+            } else {
+                false
+            }
+        });
         self.pending.clear();
         let proc =
             CursorProcess::spawn_command(cmd, self.exit_tx.clone(), self.stderr_ring.clone())
@@ -183,6 +204,18 @@ impl Bridge {
                         .map(ToOwned::to_owned)
                         .or_else(|| self.model.clone());
                     self.session_id = Some(thread_id.clone());
+                    return Ok(thread_id);
+                }
+                Some(ev @ StreamEvent::Result(_)) => {
+                    // cursor-agent can fail before emitting `init` (e.g. an auth
+                    // or quota error): it skips straight to a terminal `result`.
+                    // Buffer that result, synthesize a thread id, and return so
+                    // the normal pump translates it into a `Failed` event — that
+                    // keeps the real error subtype/detail instead of dropping it
+                    // and reporting a generic "stdout closed before init" crash.
+                    let thread_id = format!("cursor-{run_id}");
+                    self.session_id = Some(thread_id.clone());
+                    self.pending.push_back(ev);
                     return Ok(thread_id);
                 }
                 Some(other) => self.pending.push_back(other),
@@ -349,4 +382,33 @@ impl BridgeCursor {
 /// `CodexCrash` so cursor failures don't pollute Codex telemetry).
 fn classify_failure(_subtype: &str) -> FailureReason {
     FailureReason::AgentCrash
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn argv_of(cmd: &Command) -> Vec<String> {
+        cmd.as_std()
+            .get_args()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn build_command_terminates_options_before_prompt() {
+        let bridge = Bridge::spawn("cursor-agent", Path::new("/tmp"), None)
+            .await
+            .expect("bridge setup");
+        // A prompt that begins with a dash must not be parsed as a flag.
+        let cmd = bridge.build_command("--help me refactor", Path::new("/tmp"));
+        let argv = argv_of(&cmd);
+        let sep = argv
+            .iter()
+            .position(|a| a == "--")
+            .expect("expected a `--` option terminator in argv");
+        // The prompt is the final argv element and sits after `--`.
+        assert_eq!(argv.last().map(String::as_str), Some("--help me refactor"));
+        assert_eq!(sep, argv.len() - 2, "`--` must directly precede the prompt");
+    }
 }
