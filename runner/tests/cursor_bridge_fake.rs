@@ -231,3 +231,86 @@ async fn warm_returns_resume_session_id_without_spawning() {
     // No process spawned yet, so the observability handle reports no PID.
     assert!(bridge.process_handle().pid.is_none());
 }
+
+/// Liveness check via `kill -0` (portable across Linux/macOS). Returns false
+/// once the process is gone (reaped) — `wait_task` reaps right after killing, so
+/// the brief zombie window closes immediately.
+fn proc_alive(pid: u32) -> bool {
+    std::process::Command::new("kill")
+        .args(["-0", &pid.to_string()])
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+
+async fn wait_until(mut cond: impl FnMut() -> bool, timeout: Duration) -> bool {
+    let deadline = tokio::time::Instant::now() + timeout;
+    while tokio::time::Instant::now() < deadline {
+        if cond() {
+            return true;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    cond()
+}
+
+#[tokio::test]
+async fn dropping_bridge_kills_a_running_cursor() {
+    // A fake that emits init then blocks on a long sleep, so the subprocess
+    // stays alive after run setup. Dropping the bridge (without a graceful
+    // shutdown) must kill it rather than leave it orphaned to completion.
+    let script = r#"
+        printf '%s\n' '{"type":"system","subtype":"init","session_id":"cur_long_001"}'
+        sleep 30
+    "#;
+    let cwd = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let mut bridge = Bridge::spawn("cursor-agent", &cwd, None)
+        .await
+        .expect("bridge setup");
+    let _cursor = bridge
+        .run_with_command(fake_cmd(script), Uuid::new_v4())
+        .await
+        .expect("run setup");
+    let pid = bridge
+        .process_handle()
+        .pid
+        .expect("a spawned process should report a pid");
+    assert!(proc_alive(pid), "child should be alive right after run setup");
+
+    // Drop the bridge — its kill channel closes; the wait task should kill +
+    // reap the still-running child.
+    drop(bridge);
+
+    let gone = wait_until(|| !proc_alive(pid), Duration::from_secs(5)).await;
+    assert!(
+        gone,
+        "dropping the bridge should kill the running cursor-agent (pid {pid})"
+    );
+}
+
+#[tokio::test]
+async fn shutdown_returns_promptly_after_the_process_exits() {
+    // Drive a fake to completion (process exits), then `shutdown` must not block
+    // on a `changed()` that will never fire — it should observe the prior exit
+    // and return well under the (deliberately large) grace.
+    let cwd = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let mut bridge = Bridge::spawn("cursor-agent", &cwd, None)
+        .await
+        .expect("bridge setup");
+    let mut cursor = bridge
+        .run_with_command(fake_cmd(fake_cursor_script()), Uuid::new_v4())
+        .await
+        .expect("run setup");
+    let _ = drain_until_completed(&mut bridge, &mut cursor).await;
+
+    let started = tokio::time::Instant::now();
+    bridge
+        .shutdown(Duration::from_secs(30))
+        .await
+        .expect("shutdown");
+    assert!(
+        started.elapsed() < Duration::from_secs(5),
+        "shutdown should return promptly after the process already exited"
+    );
+}
