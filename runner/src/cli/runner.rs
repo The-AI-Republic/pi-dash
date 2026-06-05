@@ -343,6 +343,19 @@ async fn remind_if_agent_missing(agent: AgentKind) {
     println!("  Install it from: {url}");
 
     if std::io::stdout().is_terminal() && std::io::stdin().is_terminal() {
+        use std::io::Write;
+        // Give the operator a few seconds to read the warning before the
+        // browser grabs window focus. Counts down in place; Ctrl-C during the
+        // wait still aborts `runner add`.
+        const COUNTDOWN_SECS: u32 = 5;
+        print!("  Opening the install page in your browser in ");
+        let _ = std::io::stdout().flush();
+        for n in (1..=COUNTDOWN_SECS).rev() {
+            print!("{n}… ");
+            let _ = std::io::stdout().flush();
+            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+        }
+        println!();
         match crate::util::browser::open_url(url) {
             Ok(()) => println!("  (Opened the install page in your default browser.)"),
             Err(_) => println!("  (Open the link above to install, then re-run if needed.)"),
