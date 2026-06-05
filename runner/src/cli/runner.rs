@@ -129,13 +129,6 @@ pub async fn add(args: AddArgs, paths: &Paths) -> Result<RunnerConfig> {
         );
     }
 
-    // Nudge the operator to install the agent CLI before we register a
-    // runner that drives it. Done up front (before any auth/network work)
-    // so the install page is open in their browser while enrollment runs.
-    // Non-fatal: the binary only has to be present by the time the daemon
-    // picks up a run, and `pidash doctor` re-checks it.
-    remind_if_agent_missing(args.agent).await;
-
     let api_token = ensure_cli_token(paths, args.url.as_deref(), args.workspace.as_deref()).await?;
 
     let cloud_url = if paths.config_path().exists() {
@@ -267,6 +260,16 @@ pub async fn add(args: AddArgs, paths: &Paths) -> Result<RunnerConfig> {
             }
         }
     }
+
+    // Nudge the operator to install the agent CLI — done LAST, after login +
+    // enrollment + service setup have all succeeded. Opening the install page
+    // up front fought the device-login browser tab (and made the operator wait
+    // out the countdown before auth even started); deferring it means the page
+    // opens cleanly once the runner is actually registered. Non-fatal: the
+    // binary only has to exist by the time the daemon picks up a run, and
+    // `pidash doctor` re-checks it.
+    remind_if_agent_missing(args.agent).await;
+
     Ok(applied.runner)
 }
 
