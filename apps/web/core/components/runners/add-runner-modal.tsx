@@ -29,7 +29,7 @@ type Props = {
 
 // Mirrors the runner CLI's ``--agent`` value-enum (kebab-case). Keep in
 // sync with runner/src/config/schema.rs:AgentKind.
-const AGENT_OPTIONS = ["claude-code", "codex"] as const;
+const AGENT_OPTIONS = ["claude-code", "codex", "cursor-agent"] as const;
 type TAgent = (typeof AGENT_OPTIONS)[number];
 const DEFAULT_AGENT: TAgent = "claude-code";
 const RUNNER_NAME_WHITESPACE_RE = /\s/;
@@ -137,10 +137,11 @@ export const AddRunnerModal = observer(function AddRunnerModal(props: Props) {
     if (!stillFits) setValue("podName", "");
   }, [selectedProject, selectedPodName, podsForPicker, setValue]);
 
-  const agentOptionLabel = (value: TAgent): string =>
-    value === "claude-code"
-      ? t("Claude Code")
-      : t("Codex");
+  const agentOptionLabel = (value: TAgent): string => {
+    if (value === "claude-code") return t("Claude Code");
+    if (value === "cursor-agent") return t("Cursor");
+    return t("Codex");
+  };
 
   const onSubmit: SubmitHandler<FormValues> = (values) => {
     setRunnerCommand({
@@ -161,7 +162,9 @@ export const AddRunnerModal = observer(function AddRunnerModal(props: Props) {
         <form onSubmit={handleSubmit(onSubmit)} className="flex flex-col gap-5 p-5">
           <div>
             <div className="text-18 font-medium text-primary">{t("Add runner")}</div>
-            <p className="mt-1 text-13 text-secondary">{t("Generate a `pidash runner add` command for the machine that will host this runner.")}</p>
+            <p className="mt-1 text-13 text-secondary">
+              {t("Generate a `pidash runner add` command for the machine that will host this runner.")}
+            </p>
           </div>
 
           <div className="flex flex-col gap-1">
@@ -175,9 +178,7 @@ export const AddRunnerModal = observer(function AddRunnerModal(props: Props) {
               render={({ field }) => (
                 <CustomSelect
                   value={field.value}
-                  label={
-                    projects?.find((p) => p.identifier === field.value)?.name ?? t("Select a project")
-                  }
+                  label={projects?.find((p) => p.identifier === field.value)?.name ?? t("Select a project")}
                   onChange={field.onChange}
                   buttonClassName="border border-subtle"
                   input
@@ -199,9 +200,7 @@ export const AddRunnerModal = observer(function AddRunnerModal(props: Props) {
             {errors.projectIdentifier && (
               <span className="text-12 text-danger-primary">{errors.projectIdentifier.message}</span>
             )}
-            {projectsError && (
-              <span className="text-12 text-danger-primary">{t("Could not load projects.")}</span>
-            )}
+            {projectsError && <span className="text-12 text-danger-primary">{t("Could not load projects.")}</span>}
           </div>
 
           <div className="flex flex-col gap-1">
@@ -234,9 +233,7 @@ export const AddRunnerModal = observer(function AddRunnerModal(props: Props) {
               )}
             />
             <p className="text-12 text-secondary">{t("Defaults to the project's default pod.")}</p>
-            {podsError && (
-              <span className="text-12 text-danger-primary">{t("Could not load pods.")}</span>
-            )}
+            {podsError && <span className="text-12 text-danger-primary">{t("Could not load pods.")}</span>}
           </div>
 
           <div className="flex flex-col gap-1">
@@ -250,15 +247,25 @@ export const AddRunnerModal = observer(function AddRunnerModal(props: Props) {
                 validate: (value) => {
                   const trimmed = value.trim();
                   if (!trimmed) return true;
-                  if (RUNNER_NAME_WHITESPACE_RE.test(trimmed)) return t("Runner name cannot contain spaces. It must start with a letter, digit, or underscore and contain only letters, digits, underscore, dot, or dash.");
-                  return RUNNER_NAME_RE.test(trimmed) || t("Runner name cannot contain spaces. It must start with a letter, digit, or underscore and contain only letters, digits, underscore, dot, or dash.");
+                  if (RUNNER_NAME_WHITESPACE_RE.test(trimmed))
+                    return t(
+                      "Runner name cannot contain spaces. It must start with a letter, digit, or underscore and contain only letters, digits, underscore, dot, or dash."
+                    );
+                  return (
+                    RUNNER_NAME_RE.test(trimmed) ||
+                    t(
+                      "Runner name cannot contain spaces. It must start with a letter, digit, or underscore and contain only letters, digits, underscore, dot, or dash."
+                    )
+                  );
                 },
               }}
-              render={({ field }) => (
-                <Input {...field} id="add-runner-name" placeholder={t("my-laptop-runner")} />
-              )}
+              render={({ field }) => <Input {...field} id="add-runner-name" placeholder={t("my-laptop-runner")} />}
             />
-            <p className="text-12 text-secondary">{t("Auto-assigned if blank. No spaces. If provided, use letters, digits, underscore, dot, or dash; start with a letter, digit, or underscore.")}</p>
+            <p className="text-12 text-secondary">
+              {t(
+                "Auto-assigned if blank. No spaces. If provided, use letters, digits, underscore, dot, or dash; start with a letter, digit, or underscore."
+              )}
+            </p>
             {errors.name && <span className="text-12 text-danger-primary">{errors.name.message}</span>}
           </div>
 
@@ -277,7 +284,11 @@ export const AddRunnerModal = observer(function AddRunnerModal(props: Props) {
                 />
               )}
             />
-            <p className="text-12 text-secondary">{t("Local path the daemon runs the agent CLI in — usually the project repo on disk. Defaults to a sandbox under the runner's data dir, which is rarely what you want.")}</p>
+            <p className="text-12 text-secondary">
+              {t(
+                "Local path the daemon runs the agent CLI in — usually the project repo on disk. Defaults to a sandbox under the runner's data dir, which is rarely what you want."
+              )}
+            </p>
           </div>
 
           <div className="flex flex-col gap-1">
@@ -307,7 +318,9 @@ export const AddRunnerModal = observer(function AddRunnerModal(props: Props) {
                 </CustomSelect>
               )}
             />
-            <p className="text-12 text-secondary">{t("Which AI agent CLI this runner will drive. Baked into the displayed ``pidash runner add`` command.")}</p>
+            <p className="text-12 text-secondary">
+              {t("Which AI agent CLI this runner will drive. Baked into the displayed ``pidash runner add`` command.")}
+            </p>
           </div>
 
           <div className="flex justify-end gap-2">

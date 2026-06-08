@@ -129,13 +129,6 @@ pub async fn add(args: AddArgs, paths: &Paths) -> Result<RunnerConfig> {
         );
     }
 
-    // Nudge the operator to install the agent CLI before we register a
-    // runner that drives it. Done up front (before any auth/network work)
-    // so the install page is open in their browser while enrollment runs.
-    // Non-fatal: the binary only has to be present by the time the daemon
-    // picks up a run, and `pidash doctor` re-checks it.
-    remind_if_agent_missing(args.agent).await;
-
     let api_token = ensure_cli_token(paths, args.url.as_deref(), args.workspace.as_deref()).await?;
 
     let cloud_url = if paths.config_path().exists() {
@@ -267,6 +260,16 @@ pub async fn add(args: AddArgs, paths: &Paths) -> Result<RunnerConfig> {
             }
         }
     }
+
+    // Nudge the operator to install the agent CLI — done LAST, after login +
+    // enrollment + service setup have all succeeded. Opening the install page
+    // up front fought the device-login browser tab (and made the operator wait
+    // out the countdown before auth even started); deferring it means the page
+    // opens cleanly once the runner is actually registered. Non-fatal: the
+    // binary only has to exist by the time the daemon picks up a run, and
+    // `pidash doctor` re-checks it.
+    remind_if_agent_missing(args.agent).await;
+
     Ok(applied.runner)
 }
 
@@ -343,6 +346,19 @@ async fn remind_if_agent_missing(agent: AgentKind) {
     println!("  Install it from: {url}");
 
     if std::io::stdout().is_terminal() && std::io::stdin().is_terminal() {
+        use std::io::Write;
+        // Give the operator a few seconds to read the warning before the
+        // browser grabs window focus. Counts down in place; Ctrl-C during the
+        // wait still aborts `runner add`.
+        const COUNTDOWN_SECS: u32 = 5;
+        print!("  Opening the install page in your browser in ");
+        let _ = std::io::stdout().flush();
+        for n in (1..=COUNTDOWN_SECS).rev() {
+            print!("{n}… ");
+            let _ = std::io::stdout().flush();
+            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+        }
+        println!();
         match crate::util::browser::open_url(url) {
             Ok(()) => println!("  (Opened the install page in your default browser.)"),
             Err(_) => println!("  (Open the link above to install, then re-run if needed.)"),

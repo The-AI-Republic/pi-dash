@@ -144,6 +144,12 @@ pub struct RunnerConfig {
     /// when `agent.kind == claude_code`.
     #[serde(default)]
     pub claude_code: ClaudeCodeSection,
+    /// Cursor Agent settings. Missing section falls back to
+    /// `CursorAgentSection::default()` so existing `config.toml` files (written
+    /// before Cursor support) still parse. Only consulted when
+    /// `agent.kind == cursor_agent`.
+    #[serde(default)]
+    pub cursor_agent: CursorAgentSection,
     /// Missing section falls back to `ApprovalPolicySection::default()` so
     /// a minimal `config.toml` doesn't have to spell out every knob.
     #[serde(default)]
@@ -198,6 +204,8 @@ pub enum AgentKind {
     Codex,
     /// Anthropic Claude Code via `claude --print --output-format stream-json`.
     ClaudeCode,
+    /// Cursor Agent via `cursor-agent --print --output-format stream-json`.
+    CursorAgent,
 }
 
 impl AgentKind {
@@ -219,7 +227,11 @@ impl AgentKind {
     pub fn stall_timeout(self) -> Duration {
         match self {
             AgentKind::Codex => Duration::from_secs(5 * 60),
-            AgentKind::ClaudeCode => Duration::from_secs(15 * 60),
+            // Cursor Agent, like Claude Code, can be silent for the full
+            // duration of a single tool call (a long build or test run) with no
+            // intra-tool progress on the stream-json transport. Use the same
+            // 15-minute envelope so a live-but-quiet tool call isn't killed.
+            AgentKind::ClaudeCode | AgentKind::CursorAgent => Duration::from_secs(15 * 60),
         }
     }
 
@@ -229,6 +241,7 @@ impl AgentKind {
         match self {
             AgentKind::Codex => "Codex",
             AgentKind::ClaudeCode => "Claude Code",
+            AgentKind::CursorAgent => "Cursor",
         }
     }
 
@@ -240,6 +253,7 @@ impl AgentKind {
         match self {
             AgentKind::Codex => "codex",
             AgentKind::ClaudeCode => "claude",
+            AgentKind::CursorAgent => "cursor-agent",
         }
     }
 
@@ -250,6 +264,7 @@ impl AgentKind {
         match self {
             AgentKind::Codex => "https://github.com/openai/codex",
             AgentKind::ClaudeCode => "https://docs.claude.com/en/docs/claude-code/setup",
+            AgentKind::CursorAgent => "https://cursor.com/download",
         }
     }
 }
@@ -273,6 +288,30 @@ impl Default for ClaudeCodeSection {
     fn default() -> Self {
         Self {
             binary: default_claude_binary(),
+            model_default: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CursorAgentSection {
+    /// Per-field default so a partial `[cursor_agent]` block (e.g. only
+    /// `model_default = "..."`) still parses. Without this, declaring the
+    /// section at all would require spelling out `binary = "cursor-agent"`.
+    #[serde(default = "default_cursor_binary")]
+    pub binary: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_default: Option<String>,
+}
+
+fn default_cursor_binary() -> String {
+    "cursor-agent".to_string()
+}
+
+impl Default for CursorAgentSection {
+    fn default() -> Self {
+        Self {
+            binary: default_cursor_binary(),
             model_default: None,
         }
     }
@@ -543,6 +582,7 @@ mod tests {
             agent: Default::default(),
             codex: Default::default(),
             claude_code: Default::default(),
+            cursor_agent: Default::default(),
             approval_policy: Default::default(),
         }
     }

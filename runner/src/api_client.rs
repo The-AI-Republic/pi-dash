@@ -290,7 +290,7 @@ mod resolve_tests {
     use super::*;
     use crate::config::file::write_config;
     use crate::config::schema::{
-        AgentSection, ApprovalPolicySection, ClaudeCodeSection, CliSection, CodexSection, Config,
+        AgentSection, ApprovalPolicySection, ClaudeCodeSection, CursorAgentSection, CliSection, CodexSection, Config,
         DaemonConfig, RunnerConfig, WorkspaceSection,
     };
     use crate::util::paths::Paths;
@@ -327,6 +327,7 @@ mod resolve_tests {
                 agent: AgentSection::default(),
                 codex: CodexSection::default(),
                 claude_code: ClaudeCodeSection::default(),
+                cursor_agent: CursorAgentSection::default(),
                 approval_policy: ApprovalPolicySection::default(),
             }],
             cli: Some(CliSection {

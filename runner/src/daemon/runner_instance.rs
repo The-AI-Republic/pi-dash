@@ -145,7 +145,7 @@ impl RunnerInstance {
 mod tests {
     use super::*;
     use crate::config::schema::{
-        AgentSection, ApprovalPolicySection, ClaudeCodeSection, CodexSection, WorkspaceSection,
+        AgentSection, ApprovalPolicySection, ClaudeCodeSection, CursorAgentSection, CodexSection, WorkspaceSection,
     };
 
     fn runner_config() -> RunnerConfig {
@@ -161,6 +161,7 @@ mod tests {
             agent: AgentSection::default(),
             codex: CodexSection::default(),
             claude_code: ClaudeCodeSection::default(),
+            cursor_agent: CursorAgentSection::default(),
             approval_policy: ApprovalPolicySection::default(),
         }
     }
