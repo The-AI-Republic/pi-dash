@@ -6,4 +6,3 @@
 
 export * from "./run-ai-button";
 export * from "./comment-and-run-button";
-export * from "./comment-and-run-modal";

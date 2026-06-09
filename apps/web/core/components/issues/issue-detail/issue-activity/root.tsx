@@ -15,7 +15,6 @@ import { useLocalStorage } from "@pi-dash/hooks";
 import { useTranslation } from "@pi-dash/i18n";
 //types
 import type { TFileSignedURLResponse, TIssueComment, TIssueServiceType } from "@pi-dash/types";
-import { EIssueServiceType } from "@pi-dash/types";
 // components
 import { CommentCreate } from "@/components/comments/comment-create";
 import { CommentAndRunActionButton } from "@/components/issues/issue-detail-widgets/run-ai";
@@ -50,14 +49,7 @@ export type TActivityOperations = {
 };
 
 export const IssueActivity = observer(function IssueActivity(props: TIssueActivity) {
-  const {
-    workspaceSlug,
-    projectId,
-    issueId,
-    disabled = false,
-    isIntakeIssue = false,
-    issueServiceType = EIssueServiceType.ISSUES,
-  } = props;
+  const { workspaceSlug, projectId, issueId, disabled = false, isIntakeIssue = false } = props;
   // i18n
   const { t } = useTranslation();
   // hooks
@@ -111,20 +103,19 @@ export const IssueActivity = observer(function IssueActivity(props: TIssueActivi
         activityOperations={activityOperations}
         showToolbarInitially
         projectId={projectId}
-        extraToolbarActions={
+        extraToolbarActions={({ isEmpty, isSubmitting, submitComment }) => (
           <CommentAndRunActionButton
             workspaceSlug={workspaceSlug}
-            projectId={projectId}
             issueId={issueId}
-            issueServiceType={issueServiceType}
-            disabled={disabled}
+            submitComment={submitComment}
+            disabled={disabled || isEmpty || isSubmitting}
             size="base"
             className="px-2.5 py-1.5 text-11"
           />
-        }
+        )}
       />
     ),
-    [workspaceSlug, issueId, activityOperations, projectId, issueServiceType, disabled]
+    [workspaceSlug, issueId, activityOperations, projectId, disabled]
   );
   if (!project) return <></>;
 
