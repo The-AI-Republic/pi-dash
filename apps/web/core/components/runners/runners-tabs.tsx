@@ -27,9 +27,7 @@ export function RunnersTabs() {
           end={tab.end}
           className={({ isActive }) =>
             `flex h-9 items-center border-b-2 px-3 text-13 font-medium transition-colors ${
-              isActive
-                ? "border-custom-primary-100 text-primary"
-                : "border-transparent text-secondary hover:text-primary"
+              isActive ? "border-accent-strong text-primary" : "border-transparent text-secondary hover:text-primary"
             }`
           }
         >

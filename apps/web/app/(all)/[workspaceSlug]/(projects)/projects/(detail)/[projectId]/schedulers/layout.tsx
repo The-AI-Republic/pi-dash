@@ -65,7 +65,7 @@ function SchedulerTabLink({ to, active, icon, children }: SchedulerTabLinkProps)
       className={cn(
         "inline-flex items-center gap-1.5 border-b-2 px-3 py-2 text-13 font-medium transition-colors",
         active
-          ? "border-primary text-primary"
+          ? "border-accent-strong text-primary"
           : "border-transparent text-secondary hover:border-subtle hover:text-primary"
       )}
     >

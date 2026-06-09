@@ -115,7 +115,7 @@ export function RunnerAgentStatusPanel({ runner, liveState }: RunnerAgentStatusP
   const modelLabel = liveState?.llm_model?.trim() || "—";
 
   return (
-    <div className="border-custom-border-200 space-y-3 rounded border p-4">
+    <div className="space-y-3 rounded border border-subtle p-4">
       <div className="flex items-center justify-between">
         <div className="flex items-center gap-2">
           <h3 className="text-sm font-medium">Agent</h3>
@@ -123,36 +123,36 @@ export function RunnerAgentStatusPanel({ runner, liveState }: RunnerAgentStatusP
             {BADGE_LABEL[activityBadge]}
           </Badge>
         </div>
-        <span className="text-xs text-custom-text-300">{runner.name}</span>
+        <span className="text-xs text-tertiary">{runner.name}</span>
       </div>
 
       <dl className="text-xs grid grid-cols-2 gap-x-4 gap-y-2">
-        <dt className="text-custom-text-300">Last activity</dt>
+        <dt className="text-tertiary">Last activity</dt>
         <dd className="font-mono" title={liveState?.last_event_summary ?? undefined}>
           {lastEventLabel}
         </dd>
 
-        <dt className="text-custom-text-300">Last event</dt>
+        <dt className="text-tertiary">Last event</dt>
         <dd className="font-mono truncate">{liveState?.last_event_kind ?? "—"}</dd>
 
-        <dt className="text-custom-text-300">Agent PID</dt>
+        <dt className="text-tertiary">Agent PID</dt>
         <dd className="font-mono">{liveState?.agent_pid ?? "—"}</dd>
 
-        <dt className="text-custom-text-300">Subprocess alive</dt>
+        <dt className="text-tertiary">Subprocess alive</dt>
         <dd>{formatBoolish(liveState?.agent_subprocess_alive ?? null)}</dd>
 
-        <dt className="text-custom-text-300">Approvals</dt>
+        <dt className="text-tertiary">Approvals</dt>
         <dd>{liveState?.approvals_pending ?? 0}</dd>
 
-        <dt className="text-custom-text-300">Tokens</dt>
+        <dt className="text-tertiary">Tokens</dt>
         <dd className="font-mono">{tokensLabel}</dd>
 
-        <dt className="text-custom-text-300">Model</dt>
+        <dt className="text-tertiary">Model</dt>
         <dd className="font-mono truncate" title={modelLabel === "—" ? undefined : modelLabel}>
           {modelLabel}
         </dd>
 
-        <dt className="text-custom-text-300">Turn</dt>
+        <dt className="text-tertiary">Turn</dt>
         <dd className="font-mono">{liveState?.turn_count != null ? liveState.turn_count : "—"}</dd>
       </dl>
     </div>
