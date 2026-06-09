@@ -14,6 +14,7 @@ import { TOAST_TYPE, setToast } from "@pi-dash/propel/toast";
 import type { ISchedulerBinding } from "@pi-dash/services";
 import { SchedulerService } from "@pi-dash/services";
 import { EModalPosition, EModalWidth, ModalCore } from "@pi-dash/ui";
+import { BindingPodField } from "./binding-pod-field";
 import { BindingScheduleFields } from "./binding-schedule-fields";
 import { DEFAULT_TZID } from "./constants";
 import { isoUTCToLocalInput, localToIsoUTC } from "./datetime-input";
@@ -24,6 +25,8 @@ interface EditFormValues {
   rrule: string;
   extra_context: string;
   enabled: boolean;
+  /** Pod id, or "" for the project default. */
+  pod: string;
 }
 
 type Props = {
@@ -47,7 +50,7 @@ export const EditSchedulerBindingModal = observer(function EditSchedulerBindingM
     reset,
     formState: { errors, isSubmitting },
   } = useForm<EditFormValues>({
-    defaultValues: { dtstart: "", tzid: DEFAULT_TZID, rrule: "", extra_context: "", enabled: true },
+    defaultValues: { dtstart: "", tzid: DEFAULT_TZID, rrule: "", extra_context: "", enabled: true, pod: "" },
   });
 
   useEffect(() => {
@@ -58,6 +61,7 @@ export const EditSchedulerBindingModal = observer(function EditSchedulerBindingM
       rrule: binding.rrule || "",
       extra_context: binding.extra_context ?? "",
       enabled: binding.enabled,
+      pod: binding.pod ?? "",
     });
   }, [isOpen, binding, reset]);
 
@@ -73,6 +77,7 @@ export const EditSchedulerBindingModal = observer(function EditSchedulerBindingM
         rrule: values.rrule.trim(),
         extra_context: values.extra_context.trim(),
         enabled: values.enabled,
+        pod: values.pod || null,
       });
       setToast({
         type: TOAST_TYPE.SUCCESS,
@@ -82,12 +87,19 @@ export const EditSchedulerBindingModal = observer(function EditSchedulerBindingM
       onUpdated(updated);
       onClose();
     } catch (e: unknown) {
-      const err = e as { error?: string; rrule?: string[]; dtstart?: string[]; tzid?: string[] } | null;
+      const err = e as {
+        error?: string;
+        rrule?: string[];
+        dtstart?: string[];
+        tzid?: string[];
+        pod?: string[];
+      } | null;
       const detail =
         err?.error ??
         err?.rrule?.[0] ??
         err?.dtstart?.[0] ??
         err?.tzid?.[0] ??
+        err?.pod?.[0] ??
         t("Could not update the install.");
       setToast({
         type: TOAST_TYPE.ERROR,
@@ -116,6 +128,8 @@ export const EditSchedulerBindingModal = observer(function EditSchedulerBindingM
           watchDtstart={watchedDtstart}
           watchRrule={watchedRrule}
         />
+
+        <BindingPodField control={control} name="pod" projectId={projectId} />
 
         <div className="flex justify-end gap-2">
           <Button variant="secondary" onClick={onClose} disabled={isSubmitting}>

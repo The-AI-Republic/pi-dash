@@ -197,7 +197,12 @@ class ProjectSchedulerBindingListEndpoint(BaseAPIView):
             workspace=project.workspace,
             is_enabled=True,
         )
-        serializer = SchedulerBindingSerializer(data=request.data)
+        # Pass `project` in context so the serializer can validate that a
+        # chosen `pod` belongs to this project (project is injected at save(),
+        # so it isn't in validated_data at validation time).
+        serializer = SchedulerBindingSerializer(
+            data=request.data, context={"project": project}
+        )
         serializer.is_valid(raise_exception=True)
         binding = serializer.save(
             scheduler=scheduler,

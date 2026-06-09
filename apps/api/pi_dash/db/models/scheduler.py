@@ -125,6 +125,21 @@ class SchedulerBinding(WorkspaceBaseModel):
         related_name="scheduler_bindings_authored",
     )
 
+    # Optional pod override for runs fired by this binding. NULL means "use
+    # the project's default pod" (resolved at fire time). The pod is *late
+    # bound* — the dispatcher reads this on each fire rather than pinning a
+    # run, so changing it takes effect on the next tick. SET_NULL so a hard
+    # pod delete degrades to the project default rather than orphaning the
+    # binding; the dispatcher additionally falls back when the pod is
+    # soft-deleted or no longer in this project.
+    pod = models.ForeignKey(
+        "runner.Pod",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="scheduler_bindings",
+    )
+
     class Meta:
         db_table = "scheduler_bindings"
         verbose_name = "Scheduler Binding"

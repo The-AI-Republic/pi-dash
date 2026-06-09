@@ -21,6 +21,7 @@ from rest_framework import serializers
 from pi_dash.app.serializers.base import BaseSerializer
 from pi_dash.bgtasks._rrule import RRuleValidationError, validate_rrule_string
 from pi_dash.db.models.scheduler import Scheduler, SchedulerBinding
+from pi_dash.runner.models import Pod
 
 
 EXTRA_CONTEXT_MAX_LENGTH = 16 * 1024
@@ -116,6 +117,17 @@ class SchedulerBindingSerializer(BaseSerializer):
     scheduler_color = serializers.CharField(source="scheduler.color", read_only=True)
     last_run_status = serializers.SerializerMethodField()
     last_run_ended_at = serializers.SerializerMethodField()
+    # Optional pod override. Scoped to active pods; the cross-project check
+    # lives in `validate()` (the project is known there via instance/context).
+    # NULL = use the project's default pod at fire time.
+    pod = serializers.PrimaryKeyRelatedField(
+        queryset=Pod.objects.filter(deleted_at__isnull=True),
+        required=False,
+        allow_null=True,
+    )
+    # Joined pod name so the calendar / list can render the chosen pod without
+    # a second fetch. Null when the binding uses the project default.
+    pod_name = serializers.CharField(source="pod.name", read_only=True, default=None)
 
     class Meta:
         model = SchedulerBinding
@@ -134,6 +146,8 @@ class SchedulerBindingSerializer(BaseSerializer):
             "exdates",
             "extra_context",
             "enabled",
+            "pod",
+            "pod_name",
             "next_run_at",
             "last_run",
             "last_run_status",
@@ -146,6 +160,7 @@ class SchedulerBindingSerializer(BaseSerializer):
         read_only_fields = [
             "id",
             "workspace",
+            "pod_name",
             "next_run_at",
             "last_run",
             "last_run_status",
@@ -231,4 +246,20 @@ class SchedulerBindingSerializer(BaseSerializer):
                 validate_rrule_string(rrule_str, dtstart=dtstart)
             except RRuleValidationError as e:
                 raise serializers.ValidationError({"rrule": str(e)})
+        # A chosen pod must belong to the binding's project. Resolve the
+        # project from the incoming data (create sends `project`), the existing
+        # instance (update), or the view-supplied context (belt-and-suspenders
+        # for the create path, where the view also injects project at save()).
+        pod = attrs.get("pod")
+        if pod is not None:
+            incoming_project = attrs.get("project")
+            project_id = (
+                getattr(incoming_project, "id", None)
+                or (self.instance.project_id if self.instance is not None else None)
+                or getattr(self.context.get("project"), "id", None)
+            )
+            if project_id is not None and pod.project_id != project_id:
+                raise serializers.ValidationError(
+                    {"pod": "pod must belong to the same project as this scheduler install"}
+                )
         return super().validate(attrs)

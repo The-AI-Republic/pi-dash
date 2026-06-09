@@ -189,6 +189,52 @@ def test_fire_resolves_prompt_with_extra_context(scheduler, binding):
     assert "Focus on authn paths." in run.prompt
 
 
+# ---------------------------------------------------------------------------
+# fire_scheduler_binding — pod resolution (binding.pod override)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+def test_fire_uses_default_pod_when_binding_pod_unset(binding, project):
+    """No override → run lands on the project's default pod (prior behavior)."""
+    default_pod = Pod.default_for_project(project)
+    fire_scheduler_binding(str(binding.pk))
+    binding.refresh_from_db()
+    assert binding.last_run.pod_id == default_pod.id
+
+
+@pytest.mark.unit
+def test_fire_uses_binding_pod_override(binding, project, create_user):
+    """An explicit, active, same-project pod override is honored."""
+    with impersonate(create_user):
+        custom = Pod.objects.create(
+            project=project, name=f"{project.identifier}_custom", created_by=create_user
+        )
+    binding.pod = custom
+    binding.save(update_fields=["pod"])
+    fire_scheduler_binding(str(binding.pk))
+    binding.refresh_from_db()
+    assert binding.last_run.pod_id == custom.id
+
+
+@pytest.mark.unit
+def test_fire_falls_back_to_default_when_override_pod_soft_deleted(binding, project, create_user):
+    """A soft-deleted override pod degrades to the project default rather
+    than dispatching into a dead pod."""
+    default_pod = Pod.default_for_project(project)
+    with impersonate(create_user):
+        custom = Pod.objects.create(
+            project=project, name=f"{project.identifier}_dead", created_by=create_user
+        )
+    binding.pod = custom
+    binding.save(update_fields=["pod"])
+    custom.deleted_at = timezone.now()
+    custom.save(update_fields=["deleted_at"])
+    fire_scheduler_binding(str(binding.pk))
+    binding.refresh_from_db()
+    assert binding.last_run.pod_id == default_pod.id
+
+
 @pytest.mark.unit
 def test_fire_phase3a_save_advances_updated_at(binding):
     """Codex review #6: Phase 3a must use save() so auto_now fires."""

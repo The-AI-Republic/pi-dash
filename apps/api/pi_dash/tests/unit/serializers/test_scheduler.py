@@ -21,6 +21,7 @@ from pi_dash.app.serializers.scheduler import (
     SchedulerSerializer,
 )
 from pi_dash.db.models import Project, Scheduler, SchedulerBinding
+from pi_dash.runner.models import Pod
 
 
 # Fixture-shared anchor — Mon 2026-01-05 09:00 UTC.
@@ -288,3 +289,98 @@ def test_active_binding_count_excludes_soft_deleted_bindings(scheduler, binding)
     fresh = Scheduler.objects.get(pk=scheduler.pk)
     data = SchedulerSerializer(fresh).data
     assert data["active_binding_count"] == 0
+
+
+# ---------------------------------------------------------------------------
+# Pod override validation (SchedulerBinding.pod)
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def project_pod(project, create_user):
+    with impersonate(create_user):
+        return Pod.objects.create(
+            project=project, name=f"{project.identifier}_extra", created_by=create_user
+        )
+
+
+@pytest.fixture
+def other_project(workspace, create_user):
+    with impersonate(create_user):
+        return Project.objects.create(
+            name="Api", identifier="API", workspace=workspace, created_by=create_user
+        )
+
+
+@pytest.mark.unit
+def test_pod_in_same_project_accepted(scheduler, project, project_pod):
+    s = SchedulerBindingSerializer(
+        data={
+            "scheduler": scheduler.id,
+            "project": project.id,
+            "dtstart": _ANCHOR.isoformat(),
+            "rrule": "FREQ=DAILY",
+            "tzid": "UTC",
+            "pod": project_pod.id,
+        }
+    )
+    assert s.is_valid(), s.errors
+    assert s.validated_data["pod"] == project_pod
+
+
+@pytest.mark.unit
+def test_pod_in_other_project_rejected(scheduler, project, other_project, create_user):
+    with impersonate(create_user):
+        foreign_pod = Pod.objects.create(
+            project=other_project, name="API_x", created_by=create_user
+        )
+    s = SchedulerBindingSerializer(
+        data={
+            "scheduler": scheduler.id,
+            "project": project.id,
+            "dtstart": _ANCHOR.isoformat(),
+            "rrule": "FREQ=DAILY",
+            "tzid": "UTC",
+            "pod": foreign_pod.id,
+        }
+    )
+    assert not s.is_valid()
+    assert "pod" in s.errors
+
+
+@pytest.mark.unit
+def test_soft_deleted_pod_rejected(scheduler, project, project_pod):
+    project_pod.deleted_at = _ANCHOR
+    project_pod.save(update_fields=["deleted_at"])
+    s = SchedulerBindingSerializer(
+        data={
+            "scheduler": scheduler.id,
+            "project": project.id,
+            "dtstart": _ANCHOR.isoformat(),
+            "rrule": "FREQ=DAILY",
+            "tzid": "UTC",
+            "pod": project_pod.id,
+        }
+    )
+    # Excluded from the field queryset → resolves as a non-existent PK.
+    assert not s.is_valid()
+    assert "pod" in s.errors
+
+
+@pytest.mark.unit
+def test_patch_can_change_pod(binding, project_pod):
+    s = SchedulerBindingSerializer(binding, data={"pod": project_pod.id}, partial=True)
+    assert s.is_valid(), s.errors
+    updated = s.save()
+    assert updated.pod_id == project_pod.id
+
+
+@pytest.mark.unit
+def test_patch_pod_from_other_project_rejected(binding, other_project, create_user):
+    with impersonate(create_user):
+        foreign_pod = Pod.objects.create(
+            project=other_project, name="API_y", created_by=create_user
+        )
+    s = SchedulerBindingSerializer(binding, data={"pod": foreign_pod.id}, partial=True)
+    assert not s.is_valid()
+    assert "pod" in s.errors
