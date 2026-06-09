@@ -11,9 +11,10 @@ import { Controller, useForm, useWatch } from "react-hook-form";
 import { useTranslation } from "@pi-dash/i18n";
 import { Button } from "@pi-dash/propel/button";
 import { TOAST_TYPE, setToast } from "@pi-dash/propel/toast";
-import type { IScheduler, ISchedulerBinding } from "@pi-dash/services";
+import type { IScheduler, ISchedulerBinding, SchedulerOutcomeMode } from "@pi-dash/services";
 import { SchedulerService } from "@pi-dash/services";
 import { EModalPosition, EModalWidth, ModalCore } from "@pi-dash/ui";
+import { BindingOutcomeModeField, DEFAULT_OUTCOME_MODE } from "./binding-outcome-mode-field";
 import { BindingPodField } from "./binding-pod-field";
 import { BindingScheduleFields } from "./binding-schedule-fields";
 import { DEFAULT_TZID } from "./constants";
@@ -26,6 +27,7 @@ interface InstallFormValues {
   rrule: string;
   extra_context: string;
   enabled: boolean;
+  outcome_mode: SchedulerOutcomeMode;
   /** Pod id, or "" for the project default. */
   pod: string;
 }
@@ -47,6 +49,7 @@ const DEFAULT_VALUES = (): InstallFormValues => ({
   rrule: "FREQ=DAILY",
   extra_context: "",
   enabled: true,
+  outcome_mode: DEFAULT_OUTCOME_MODE,
   pod: "",
 });
 
@@ -95,6 +98,7 @@ export const InstallSchedulerBindingModal = observer(function InstallSchedulerBi
         rrule: values.rrule.trim(),
         extra_context: values.extra_context.trim(),
         enabled: values.enabled,
+        outcome_mode: values.outcome_mode,
         pod: values.pod || null,
       });
       setToast({
@@ -193,6 +197,8 @@ export const InstallSchedulerBindingModal = observer(function InstallSchedulerBi
           watchDtstart={watchedDtstart}
           watchRrule={watchedRrule}
         />
+
+        <BindingOutcomeModeField control={control} name="outcome_mode" />
 
         <BindingPodField control={control} name="pod" projectId={projectId} />
 

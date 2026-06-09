@@ -37,7 +37,11 @@ from django.db.models import Q
 from django.utils import timezone
 
 from pi_dash.bgtasks._rrule import next_fire_from_rrule
-from pi_dash.db.models.scheduler import LAST_ERROR_MAX_LEN, SchedulerBinding
+from pi_dash.db.models.scheduler import (
+    LAST_ERROR_MAX_LEN,
+    SchedulerBinding,
+    outcome_mode_directive,
+)
 from pi_dash.runner.models import AgentRunStatus
 from pi_dash.utils.iso_datetime import coerce_iso_datetimes
 
@@ -202,12 +206,20 @@ def fire_scheduler_binding(self, binding_id: str) -> bool:
             binding.last_error = ""
         binding.save(update_fields=["next_run_at", "last_error", "updated_at"])
 
-        # Resolve prompt while we still have the row in scope.
+        # Resolve prompt while we still have the row in scope. Order:
+        # scheduler task prompt, optional per-install extra context, then the
+        # work-mode directive (what to do with findings — file issues / open
+        # fix PRs / fix + review). outcome_mode is per-binding, so the same
+        # scheduler can behave differently across projects. The directive is
+        # appended here rather than composed in a template because the scheduler
+        # prompt path does not yet go through the prompt composer (deferred; see
+        # OutcomeMode docstring).
         base_prompt = binding.scheduler.prompt or ""
+        parts = [base_prompt.strip()]
         if binding.extra_context:
-            prompt = f"{base_prompt}\n\n{binding.extra_context}".strip()
-        else:
-            prompt = base_prompt.strip()
+            parts.append(binding.extra_context.strip())
+        parts.append(outcome_mode_directive(binding.outcome_mode))
+        prompt = "\n\n".join(p for p in parts if p)
 
     # ----- Phase 2: Dispatch outside the transaction -----
     from pi_dash.orchestration.service import dispatch_scheduler_run
