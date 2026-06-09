@@ -120,6 +120,9 @@ def _ctx_from_db(
     base_branch="trunk",
     has_parent=False,
     project_description="",
+    parent_description="",
+    parent_comment_count=0,
+    has_grandparent=False,
 ):
     """Build the Jinja context for these fragment tests via the production
     ``prompting.context.build_context``.
@@ -148,6 +151,7 @@ def _ctx_from_db(
     """
     from pi_dash.db.models import (
         Issue,
+        IssueComment,
         Project,
         State,
         Workspace,
@@ -181,13 +185,31 @@ def _ctx_from_db(
 
     parent = None
     if has_parent:
+        grandparent = None
+        if has_grandparent:
+            grandparent = Issue.objects.create(
+                name="Root epic",
+                workspace=workspace,
+                project=project,
+                created_by=owner,
+            )
         parent = Issue.objects.create(
             name="Umbrella",
             workspace=workspace,
             project=project,
             created_by=owner,
             git_work_branch=parent_branch or "",
+            parent=grandparent,
+            description_html=(f"<p>{parent_description}</p>" if parent_description else ""),
         )
+        for n in range(parent_comment_count):
+            IssueComment.objects.create(
+                issue=parent,
+                workspace=workspace,
+                project=project,
+                created_by=owner,
+                comment_html=f"<p>comment {n}</p>",
+            )
     issue = Issue.objects.create(
         name="Make button blue",
         workspace=workspace,
@@ -247,6 +269,53 @@ def test_assemble_renders_existing_work_branch_skips_base_resolution():
     # repo.work_branch path → checkout existing branch directly, no BASE= resolution.
     assert "git checkout feat/pinned" in body
     assert "BASE=" not in body
+
+
+@pytest.mark.unit
+@pytest.mark.django_db
+def test_assemble_renders_no_parent_context_for_independent_issue():
+    body = render(assemble(), _ctx_from_db())
+    # Independent issue → no parent-context block at all.
+    assert "Parent issue context" not in body
+
+
+@pytest.mark.unit
+@pytest.mark.django_db
+def test_assemble_renders_parent_context_block_with_content_and_comment_count():
+    body = render(
+        assemble(),
+        _ctx_from_db(
+            has_parent=True,
+            parent_description="Parent acceptance criteria here.",
+            parent_comment_count=3,
+        ),
+    )
+    assert "Parent issue context (this issue is a sub-issue of TP-" in body
+    # Parent content is inlined...
+    assert "Parent acceptance criteria here." in body
+    # ...but the parent's comment bodies are not — only the count + the exact
+    # ready-to-run command to read them.
+    assert "has 3 comment(s)" in body
+    assert "pidash comment list TP-" in body
+    # Single parent (no grandparent) → no lineage tree.
+    assert "multi-level parent lineage" not in body
+
+
+@pytest.mark.unit
+@pytest.mark.django_db
+def test_assemble_renders_lineage_tree_when_grandparent_exists():
+    body = render(
+        assemble(),
+        _ctx_from_db(has_parent=True, has_grandparent=True),
+    )
+    # Lineage tree is emitted with the current issue marked and arrows between
+    # ancestors, ending at the root.
+    assert "multi-level parent lineage" in body
+    assert "(current)" in body
+    assert "→" in body
+    assert "Root epic" in body
+    # And the agent is pointed at the CLI to fetch any ancestor's details.
+    assert "pidash issue get <ANCESTOR-ID>" in body
 
 
 @pytest.mark.unit
