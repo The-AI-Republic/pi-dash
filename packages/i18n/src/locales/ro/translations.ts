@@ -495,8 +495,7 @@ export default {
   "Delete this workspace": "Șterge acest spațiu de lucru",
   "Delete work item": "Șterge elementul de lucru",
   Deleting: "Se șterge",
-  "Deleting a runner does not uninstall the AI agent (such as Codex or Claude) on your dev machine — remove it there separately if you no longer need it.":
-    "",
+  "Deleting a runner does not uninstall the AI agent (such as Codex or Claude) on your dev machine.": "",
   Descending: "Descrescător",
   Description: "Descriere",
   "Description (optional)": "Descriere (opțional)",

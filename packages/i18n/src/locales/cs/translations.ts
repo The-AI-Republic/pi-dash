@@ -489,8 +489,7 @@ export default {
   "Delete this workspace": "Smazat tento pracovní prostor",
   "Delete work item": "Smazat pracovní položku",
   Deleting: "Mazání",
-  "Deleting a runner does not uninstall the AI agent (such as Codex or Claude) on your dev machine — remove it there separately if you no longer need it.":
-    "",
+  "Deleting a runner does not uninstall the AI agent (such as Codex or Claude) on your dev machine.": "",
   Descending: "Sestupně",
   Description: "Popis",
   "Description (optional)": "Popis (volitelný)",

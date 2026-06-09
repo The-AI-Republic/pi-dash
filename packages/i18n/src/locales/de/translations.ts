@@ -494,8 +494,7 @@ export default {
   "Delete this workspace": "Diesen Arbeitsbereich löschen",
   "Delete work item": "Arbeitselement löschen",
   Deleting: "Löschen",
-  "Deleting a runner does not uninstall the AI agent (such as Codex or Claude) on your dev machine — remove it there separately if you no longer need it.":
-    "",
+  "Deleting a runner does not uninstall the AI agent (such as Codex or Claude) on your dev machine.": "",
   Descending: "Absteigend",
   Description: "Beschreibung",
   "Description (optional)": "Beschreibung (optional)",

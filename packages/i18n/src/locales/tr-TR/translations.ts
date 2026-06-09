@@ -486,8 +486,7 @@ export default {
   "Delete this workspace": "Bu çalışma alanını sil",
   "Delete work item": "İş öğesini sil",
   Deleting: "Siliniyor",
-  "Deleting a runner does not uninstall the AI agent (such as Codex or Claude) on your dev machine — remove it there separately if you no longer need it.":
-    "",
+  "Deleting a runner does not uninstall the AI agent (such as Codex or Claude) on your dev machine.": "",
   Descending: "Azalan",
   Description: "Açıklama",
   "Description (optional)": "Açıklama (isteğe bağlı)",

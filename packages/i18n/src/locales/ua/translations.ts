@@ -489,8 +489,7 @@ export default {
   "Delete this workspace": "Видалити цю робочу область",
   "Delete work item": "Видалити робочий елемент",
   Deleting: "Видалення",
-  "Deleting a runner does not uninstall the AI agent (such as Codex or Claude) on your dev machine — remove it there separately if you no longer need it.":
-    "",
+  "Deleting a runner does not uninstall the AI agent (such as Codex or Claude) on your dev machine.": "",
   Descending: "За спаданням",
   Description: "Опис",
   "Description (optional)": "Опис (необов'язково)",

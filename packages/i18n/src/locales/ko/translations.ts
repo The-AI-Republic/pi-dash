@@ -482,8 +482,7 @@ export default {
   "Delete this workspace": "이 워크스페이스 삭제",
   "Delete work item": "작업 항목 삭제",
   Deleting: "삭제 중",
-  "Deleting a runner does not uninstall the AI agent (such as Codex or Claude) on your dev machine — remove it there separately if you no longer need it.":
-    "",
+  "Deleting a runner does not uninstall the AI agent (such as Codex or Claude) on your dev machine.": "",
   Descending: "내림차순",
   Description: "설명",
   "Description (optional)": "설명 (선택 사항)",

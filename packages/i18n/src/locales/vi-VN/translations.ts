@@ -484,8 +484,7 @@ export default {
   "Delete this workspace": "Xóa không gian làm việc này",
   "Delete work item": "Xóa mục công việc",
   Deleting: "Đang xóa",
-  "Deleting a runner does not uninstall the AI agent (such as Codex or Claude) on your dev machine — remove it there separately if you no longer need it.":
-    "",
+  "Deleting a runner does not uninstall the AI agent (such as Codex or Claude) on your dev machine.": "",
   Descending: "Giảm dần",
   Description: "Mô tả",
   "Description (optional)": "Mô tả (không bắt buộc)",

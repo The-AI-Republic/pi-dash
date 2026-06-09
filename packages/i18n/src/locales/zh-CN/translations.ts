@@ -473,8 +473,7 @@ export default {
   "Delete this workspace": "删除此工作区",
   "Delete work item": "删除工作项",
   Deleting: "正在删除",
-  "Deleting a runner does not uninstall the AI agent (such as Codex or Claude) on your dev machine — remove it there separately if you no longer need it.":
-    "",
+  "Deleting a runner does not uninstall the AI agent (such as Codex or Claude) on your dev machine.": "",
   Descending: "降序",
   Description: "描述",
   "Description (optional)": "描述（可选）",

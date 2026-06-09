@@ -483,8 +483,7 @@ export default {
   "Delete this workspace": "Hapus ruang kerja ini",
   "Delete work item": "Hapus item pekerjaan",
   Deleting: "Menghapus",
-  "Deleting a runner does not uninstall the AI agent (such as Codex or Claude) on your dev machine — remove it there separately if you no longer need it.":
-    "",
+  "Deleting a runner does not uninstall the AI agent (such as Codex or Claude) on your dev machine.": "",
   Descending: "Menurun",
   Description: "Deskripsi",
   "Description (optional)": "Deskripsi (opsional)",
