@@ -150,6 +150,12 @@ pub struct RunnerConfig {
     /// `agent.kind == cursor_agent`.
     #[serde(default)]
     pub cursor_agent: CursorAgentSection,
+    /// OpenClaw settings. Missing section falls back to
+    /// `OpenClawSection::default()` so existing `config.toml` files (written
+    /// before OpenClaw support) still parse. Only consulted when
+    /// `agent.kind == open_claw`.
+    #[serde(default)]
+    pub openclaw: OpenClawSection,
     /// Missing section falls back to `ApprovalPolicySection::default()` so
     /// a minimal `config.toml` doesn't have to spell out every knob.
     #[serde(default)]
@@ -206,6 +212,10 @@ pub enum AgentKind {
     ClaudeCode,
     /// Cursor Agent via `cursor-agent --print --output-format stream-json`.
     CursorAgent,
+    /// OpenClaw via the headless ACP client `acpx`
+    /// (`acpx --format json openclaw exec`), which drives OpenClaw over the
+    /// Agent Client Protocol.
+    OpenClaw,
 }
 
 impl AgentKind {
@@ -231,7 +241,12 @@ impl AgentKind {
             // duration of a single tool call (a long build or test run) with no
             // intra-tool progress on the stream-json transport. Use the same
             // 15-minute envelope so a live-but-quiet tool call isn't killed.
-            AgentKind::ClaudeCode | AgentKind::CursorAgent => Duration::from_secs(15 * 60),
+            // OpenClaw (driven via acpx), like Cursor and Claude, can be silent
+            // for the full duration of a single tool call with no intra-tool
+            // progress on the ACP stream. Use the same 15-minute envelope.
+            AgentKind::ClaudeCode | AgentKind::CursorAgent | AgentKind::OpenClaw => {
+                Duration::from_secs(15 * 60)
+            }
         }
     }
 
@@ -242,6 +257,7 @@ impl AgentKind {
             AgentKind::Codex => "Codex",
             AgentKind::ClaudeCode => "Claude Code",
             AgentKind::CursorAgent => "Cursor",
+            AgentKind::OpenClaw => "OpenClaw",
         }
     }
 
@@ -254,6 +270,9 @@ impl AgentKind {
             AgentKind::Codex => "codex",
             AgentKind::ClaudeCode => "claude",
             AgentKind::CursorAgent => "cursor-agent",
+            // OpenClaw is driven through the `acpx` ACP client, so that's the
+            // binary the runner invokes and `pidash runner add` probes for.
+            AgentKind::OpenClaw => "acpx",
         }
     }
 
@@ -265,6 +284,7 @@ impl AgentKind {
             AgentKind::Codex => "https://github.com/openai/codex",
             AgentKind::ClaudeCode => "https://docs.claude.com/en/docs/claude-code/setup",
             AgentKind::CursorAgent => "https://cursor.com/download",
+            AgentKind::OpenClaw => "https://github.com/openclaw/acpx",
         }
     }
 }
@@ -312,6 +332,30 @@ impl Default for CursorAgentSection {
     fn default() -> Self {
         Self {
             binary: default_cursor_binary(),
+            model_default: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OpenClawSection {
+    /// The `acpx` ACP client binary the runner shells out to. Per-field
+    /// default so a partial `[openclaw]` block (e.g. only `model_default`)
+    /// still parses without spelling out `binary = "acpx"`.
+    #[serde(default = "default_openclaw_binary")]
+    pub binary: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_default: Option<String>,
+}
+
+fn default_openclaw_binary() -> String {
+    "acpx".to_string()
+}
+
+impl Default for OpenClawSection {
+    fn default() -> Self {
+        Self {
+            binary: default_openclaw_binary(),
             model_default: None,
         }
     }
@@ -583,6 +627,7 @@ mod tests {
             codex: Default::default(),
             claude_code: Default::default(),
             cursor_agent: Default::default(),
+            openclaw: Default::default(),
             approval_policy: Default::default(),
         }
     }
@@ -713,13 +758,26 @@ mod tests {
             AgentKind::ClaudeCode.default_binary(),
             ClaudeCodeSection::default().binary
         );
+        assert_eq!(
+            AgentKind::CursorAgent.default_binary(),
+            CursorAgentSection::default().binary
+        );
+        assert_eq!(
+            AgentKind::OpenClaw.default_binary(),
+            OpenClawSection::default().binary
+        );
     }
 
     #[test]
     fn agent_kind_install_page_urls_are_https() {
         // These are opened in the operator's browser and printed verbatim;
         // a typo'd or non-https URL is a user-facing defect.
-        for kind in [AgentKind::Codex, AgentKind::ClaudeCode] {
+        for kind in [
+            AgentKind::Codex,
+            AgentKind::ClaudeCode,
+            AgentKind::CursorAgent,
+            AgentKind::OpenClaw,
+        ] {
             let url = kind.install_page_url();
             assert!(url.starts_with("https://"), "{kind:?} url not https: {url}");
             assert!(!kind.display_name().is_empty());

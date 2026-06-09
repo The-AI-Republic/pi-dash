@@ -170,6 +170,7 @@ runner/
 │   ├── codex/                # app-server subprocess + JSON-RPC bridge
 │   ├── claude_code/          # `claude --print` stream-json subprocess + bridge
 │   ├── cursor_agent/         # `cursor-agent --print` stream-json subprocess + bridge
+│   ├── openclaw/             # `acpx ... openclaw exec` ACP (JSON-RPC) subprocess + bridge
 │   ├── agent/                # agent-agnostic bridge abstraction over the above
 │   ├── workspace/            # working_dir resolution + `git clone` on first task
 │   ├── approval/             # policy engine + first-writer-wins router

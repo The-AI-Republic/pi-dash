@@ -13,8 +13,8 @@ use std::path::PathBuf;
 use crate::cloud::http::{EnrollResponse, RunnerCredentials, write_runner_credentials};
 use crate::config::file;
 use crate::config::schema::{
-    AgentKind, AgentSection, ApprovalPolicySection, ClaudeCodeSection, CursorAgentSection, CliSection, CodexSection,
-    Config, DaemonConfig, RunnerConfig, WorkspaceSection,
+    AgentKind, AgentSection, ApprovalPolicySection, ClaudeCodeSection, CursorAgentSection,
+    CliSection, CodexSection, Config, DaemonConfig, OpenClawSection, RunnerConfig, WorkspaceSection,
 };
 use crate::util::paths::Paths;
 use uuid::Uuid;
@@ -208,6 +208,7 @@ pub async fn apply_enroll_response(
         codex: CodexSection::default(),
         claude_code: ClaudeCodeSection::default(),
         cursor_agent: CursorAgentSection::default(),
+        openclaw: OpenClawSection::default(),
         approval_policy: ApprovalPolicySection::default(),
     };
 
@@ -515,6 +516,7 @@ mod tests {
             codex: CodexSection::default(),
             claude_code: ClaudeCodeSection::default(),
             cursor_agent: CursorAgentSection::default(),
+            openclaw: OpenClawSection::default(),
             approval_policy: ApprovalPolicySection::default(),
         });
         file::write_config(&paths, &cfg).unwrap();

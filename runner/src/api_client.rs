@@ -328,6 +328,7 @@ mod resolve_tests {
                 codex: CodexSection::default(),
                 claude_code: ClaudeCodeSection::default(),
                 cursor_agent: CursorAgentSection::default(),
+                openclaw: Default::default(),
                 approval_policy: ApprovalPolicySection::default(),
             }],
             cli: Some(CliSection {

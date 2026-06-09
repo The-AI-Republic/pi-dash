@@ -191,6 +191,7 @@ pub async fn run(args: Args, paths: &Paths) -> Result<()> {
         codex: Default::default(),
         claude_code: Default::default(),
         cursor_agent: Default::default(),
+        openclaw: Default::default(),
         approval_policy: Default::default(),
     };
 
@@ -505,6 +506,7 @@ pub async fn enroll_additional_runner(
         codex: Default::default(),
         claude_code: Default::default(),
         cursor_agent: Default::default(),
+        openclaw: Default::default(),
         approval_policy: Default::default(),
     };
     cfg.runners.push(new_runner.clone());
@@ -645,6 +647,7 @@ mod tests {
             codex: CodexSection::default(),
             claude_code: ClaudeCodeSection::default(),
             cursor_agent: CursorAgentSection::default(),
+            openclaw: crate::config::schema::OpenClawSection::default(),
             approval_policy: ApprovalPolicySection::default(),
         }
     }

@@ -106,6 +106,7 @@ pub async fn execute(paths: &Paths, runner_filter: Option<&str>) -> Result<Repor
             "codex",
             "claude",
             "cursor-agent",
+            "acpx",
         )
         .await;
     } else {
@@ -118,6 +119,7 @@ pub async fn execute(paths: &Paths, runner_filter: Option<&str>) -> Result<Repor
                 &r.codex.binary,
                 &r.claude_code.binary,
                 &r.cursor_agent.binary,
+                &r.openclaw.binary,
             )
             .await;
         }
@@ -171,6 +173,7 @@ async fn run_agent_checks(
     codex_binary: &str,
     claude_binary: &str,
     cursor_binary: &str,
+    openclaw_binary: &str,
 ) {
     let tag = |base: &str| match prefix {
         Some(p) => format!("{base}@{p}"),
@@ -261,6 +264,35 @@ async fn run_agent_checks(
                 blocker: false,
             });
         }
+        crate::config::schema::AgentKind::OpenClaw => {
+            match check_version(openclaw_binary).await {
+                Ok(detail) => checks.push(Check {
+                    name: tag("acpx"),
+                    ok: true,
+                    detail,
+                    blocker: true,
+                }),
+                Err(e) => checks.push(Check {
+                    name: tag("acpx"),
+                    ok: false,
+                    detail: e.to_string(),
+                    blocker: true,
+                }),
+            }
+            // OpenClaw is reached through acpx; both `acpx`/`openclaw` auth and a
+            // running OpenClaw Gateway are configured out-of-band (no cheap
+            // non-interactive probe), so surface a hint rather than block.
+            checks.push(Check {
+                name: tag("openclaw-auth"),
+                ok: true,
+                detail: format!(
+                    "assumed ok (ensure `{} openclaw` is authenticated and an \
+                     OpenClaw Gateway is reachable if runs fail)",
+                    openclaw_binary
+                ),
+                blocker: false,
+            });
+        }
     }
 }
 
@@ -331,8 +363,8 @@ mod tests {
     //! per-runner tags are correct.
     use super::*;
     use crate::config::schema::{
-        AgentKind, ClaudeCodeSection, CursorAgentSection, CodexSection, Config, DaemonConfig, RunnerConfig,
-        WorkspaceSection,
+        AgentKind, ClaudeCodeSection, CursorAgentSection, CodexSection, Config, DaemonConfig,
+        OpenClawSection, RunnerConfig, WorkspaceSection,
     };
     use std::path::PathBuf;
     use uuid::Uuid;
@@ -365,6 +397,7 @@ mod tests {
             },
             claude_code: ClaudeCodeSection::default(),
             cursor_agent: CursorAgentSection::default(),
+            openclaw: OpenClawSection::default(),
             approval_policy: Default::default(),
         }
     }
@@ -480,6 +513,7 @@ mod tests {
         let mut codex_checks: Vec<Check> = Vec::new();
         let mut claude_checks: Vec<Check> = Vec::new();
         let mut cursor_checks: Vec<Check> = Vec::new();
+        let mut openclaw_checks: Vec<Check> = Vec::new();
         run_agent_checks(
             &mut codex_checks,
             None,
@@ -487,6 +521,7 @@ mod tests {
             "codex-missing",
             "claude-missing",
             "cursor-missing",
+            "acpx-missing",
         )
         .await;
         run_agent_checks(
@@ -496,6 +531,7 @@ mod tests {
             "codex-missing",
             "claude-missing",
             "cursor-missing",
+            "acpx-missing",
         )
         .await;
         run_agent_checks(
@@ -505,6 +541,17 @@ mod tests {
             "codex-missing",
             "claude-missing",
             "cursor-missing",
+            "acpx-missing",
+        )
+        .await;
+        run_agent_checks(
+            &mut openclaw_checks,
+            None,
+            AgentKind::OpenClaw,
+            "codex-missing",
+            "claude-missing",
+            "cursor-missing",
+            "acpx-missing",
         )
         .await;
         assert!(codex_checks.iter().any(|c| c.name == "codex"));
@@ -513,5 +560,7 @@ mod tests {
         assert!(claude_checks.iter().any(|c| c.name == "claude-auth"));
         assert!(cursor_checks.iter().any(|c| c.name == "cursor-agent"));
         assert!(cursor_checks.iter().any(|c| c.name == "cursor-auth"));
+        assert!(openclaw_checks.iter().any(|c| c.name == "acpx"));
+        assert!(openclaw_checks.iter().any(|c| c.name == "openclaw-auth"));
     }
 }

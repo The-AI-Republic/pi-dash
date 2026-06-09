@@ -241,6 +241,7 @@ mod tests {
             codex: Default::default(),
             claude_code: Default::default(),
             cursor_agent: Default::default(),
+            openclaw: Default::default(),
             approval_policy: Default::default(),
         }
     }
