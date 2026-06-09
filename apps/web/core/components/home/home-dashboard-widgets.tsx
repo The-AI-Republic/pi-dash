@@ -59,6 +59,12 @@ export const HOME_WIDGETS_LIST: {
   },
 };
 
+// Widgets hidden from users. `my_stickies` is part of the inherited Stickies
+// feature, which Pi Dash does not surface (PDASHOSS01-7). Its dashboard
+// component is already `null`, but the Manage Widgets modal still enumerates
+// every server-provided widget key — so it must be filtered there too.
+export const HIDDEN_HOME_WIDGET_KEYS: ReadonlySet<THomeWidgetKeys> = new Set(["my_stickies"]);
+
 export const DashboardWidgets = observer(function DashboardWidgets() {
   // router
   const { workspaceSlug } = useParams();
@@ -67,13 +73,18 @@ export const DashboardWidgets = observer(function DashboardWidgets() {
   // theme hook
   const { resolvedTheme } = useTheme();
   // store hooks
-  const { toggleWidgetSettings, widgetsMap, showWidgetSettings, orderedWidgets, isAnyWidgetEnabled, loading } =
-    useHome();
+  const { toggleWidgetSettings, widgetsMap, showWidgetSettings, orderedWidgets, loading } = useHome();
   const { loader } = useProject();
   // pi dash hooks
   const { t } = useTranslation();
   // derived values
   const noWidgetsResolvedPath = resolvedTheme === "light" ? lightWidgetsAsset : darkWidgetsAsset;
+  // Only consider widgets that are actually surfaced to users when deciding
+  // between the dashboard and the empty state. `my_stickies` is hidden
+  // (PDASHOSS01-7) and renders nothing, so an enabled-but-hidden stickies
+  // widget must not suppress the "all widgets off" empty state.
+  const visibleWidgets = orderedWidgets.filter((key) => !HIDDEN_HOME_WIDGET_KEYS.has(key));
+  const isAnyVisibleWidgetEnabled = visibleWidgets.some((key) => widgetsMap[key]?.is_enabled);
 
   // derived values
   const isWikiApp = pathname.includes(`/${workspaceSlug.toString()}/pages`);
@@ -90,9 +101,9 @@ export const DashboardWidgets = observer(function DashboardWidgets() {
       />
       {!isWikiApp && <NoProjectsEmptyState />}
 
-      {isAnyWidgetEnabled ? (
+      {isAnyVisibleWidgetEnabled ? (
         <div className="flex flex-col">
-          {orderedWidgets.map((key) => {
+          {visibleWidgets.map((key) => {
             const WidgetComponent = HOME_WIDGETS_LIST[key]?.component;
             const isEnabled = widgetsMap[key]?.is_enabled;
             if (!WidgetComponent || !isEnabled) return null;
@@ -107,7 +118,9 @@ export const DashboardWidgets = observer(function DashboardWidgets() {
         <div className="grid h-full w-full place-items-center">
           <SimpleEmptyState
             title={t("It's Quiet Without Widgets, Turn Them On")}
-            description={t("It looks like all your widgets are turned off. Enable them\nnow to enhance your experience!")}
+            description={t(
+              "It looks like all your widgets are turned off. Enable them\nnow to enhance your experience!"
+            )}
             assetPath={noWidgetsResolvedPath}
           />
         </div>
