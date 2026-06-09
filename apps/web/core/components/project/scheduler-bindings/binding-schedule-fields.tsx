@@ -74,12 +74,14 @@ export function BindingScheduleFields<T extends FieldValues>({
                 {...field}
                 type="datetime-local"
                 id={`field-${String(dtstartName)}`}
-                className="bg-layer-0 focus:ring-accent-primary rounded-md border border-subtle px-3 py-2 text-13 text-primary focus:ring-1 focus:outline-none"
+                className="rounded-md border border-subtle bg-surface-1 px-3 py-2 text-13 text-primary focus:ring-1 focus:ring-accent-strong focus:outline-none"
               />
             )}
           />
-          <p className="text-12 text-secondary">{t("First firing of this binding. The recurrence rule expands from here.")}</p>
-          {dtstartErr && <span className="text-red-500 text-12">{String(dtstartErr.message ?? "")}</span>}
+          <p className="text-12 text-secondary">
+            {t("First firing of this binding. The recurrence rule expands from here.")}
+          </p>
+          {dtstartErr && <span className="text-12 text-danger-primary">{String(dtstartErr.message ?? "")}</span>}
         </div>
         <div className="flex flex-col gap-1">
           <label htmlFor={`field-${String(tzidName)}`} className="text-13 font-medium text-primary">
@@ -90,7 +92,9 @@ export function BindingScheduleFields<T extends FieldValues>({
             name={tzidName}
             render={({ field }) => <TzidSelect id={`field-${String(tzidName)}`} {...field} />}
           />
-          <p className="text-12 text-secondary">{t("Stored with the binding. Future PRs honour it for wall-clock-aware DST semantics.")}</p>
+          <p className="text-12 text-secondary">
+            {t("Stored with the binding. Future PRs honour it for wall-clock-aware DST semantics.")}
+          </p>
         </div>
       </div>
 
@@ -112,9 +116,10 @@ export function BindingScheduleFields<T extends FieldValues>({
           )}
         />
         <p className="text-12 text-secondary">
-          {t("RFC 5545 RRULE — e.g. ``FREQ=WEEKLY;BYDAY=MO,TU,WE,TH,FR``. Leave blank to fire only once at the start.")} — <span className="text-primary">{humanRule}</span>
+          {t("RFC 5545 RRULE — e.g. ``FREQ=WEEKLY;BYDAY=MO,TU,WE,TH,FR``. Leave blank to fire only once at the start.")}{" "}
+          — <span className="text-primary">{humanRule}</span>
         </p>
-        {rruleErr && <span className="text-red-500 text-12">{String(rruleErr.message ?? "")}</span>}
+        {rruleErr && <span className="text-12 text-danger-primary">{String(rruleErr.message ?? "")}</span>}
       </div>
 
       <div className="flex flex-col gap-1">
@@ -133,7 +138,11 @@ export function BindingScheduleFields<T extends FieldValues>({
             />
           )}
         />
-        <p className="text-12 text-secondary">{t("Appended to the scheduler's base prompt at run time. Use it to give project-specific framing the workspace prompt shouldn't carry.")}</p>
+        <p className="text-12 text-secondary">
+          {t(
+            "Appended to the scheduler's base prompt at run time. Use it to give project-specific framing the workspace prompt shouldn't carry."
+          )}
+        </p>
       </div>
 
       <Controller
@@ -142,9 +151,7 @@ export function BindingScheduleFields<T extends FieldValues>({
         render={({ field }) => (
           <div className="flex items-center justify-between gap-4">
             <div className="flex flex-col">
-              <span className="text-13 font-medium text-primary">
-                {t("Enabled")}
-              </span>
+              <span className="text-13 font-medium text-primary">{t("Enabled")}</span>
               <span className="text-12 text-secondary">{t("Disabled installs do not fire until re-enabled.")}</span>
             </div>
             <ToggleSwitch value={field.value} onChange={field.onChange} />
@@ -188,7 +195,7 @@ function TzidSelect({ id, value, onChange, onBlur, name }: TzidSelectProps) {
       value={value}
       onChange={(e) => onChange(e.target.value)}
       onBlur={onBlur}
-      className="bg-layer-0 focus:ring-accent-primary rounded-md border border-subtle px-3 py-2 text-13 text-primary focus:ring-1 focus:outline-none"
+      className="rounded-md border border-subtle bg-surface-1 px-3 py-2 text-13 text-primary focus:ring-1 focus:ring-accent-strong focus:outline-none"
     >
       {zones.map((z) => (
         <option key={z} value={z}>

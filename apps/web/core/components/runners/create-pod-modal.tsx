@@ -84,7 +84,9 @@ export const CreatePodModal = observer(function CreatePodModal(props: Props) {
       <form onSubmit={handleSubmit(onSubmit)} className="flex flex-col gap-5 p-5">
         <div>
           <div className="text-18 font-medium text-primary">{t("Create new pod")}</div>
-          <p className="mt-1 text-13 text-secondary">{t("Pods group runners under a project. Pick a project, then give the pod a name.")}</p>
+          <p className="mt-1 text-13 text-secondary">
+            {t("Pods group runners under a project. Pick a project, then give the pod a name.")}
+          </p>
         </div>
 
         <div className="flex flex-col gap-1">
@@ -98,9 +100,7 @@ export const CreatePodModal = observer(function CreatePodModal(props: Props) {
             render={({ field }) => (
               <CustomSelect
                 value={field.value}
-                label={
-                  projects?.find((p) => p.id === field.value)?.name ?? t("Select a project")
-                }
+                label={projects?.find((p) => p.id === field.value)?.name ?? t("Select a project")}
                 onChange={field.onChange}
                 buttonClassName="border border-subtle"
                 input
@@ -118,11 +118,11 @@ export const CreatePodModal = observer(function CreatePodModal(props: Props) {
               </CustomSelect>
             )}
           />
-          <p className="text-12 text-secondary">{t("The project this pod belongs to. The name will be prefixed with the project identifier.")}</p>
-          {errors.projectId && <span className="text-red-500 text-12">{errors.projectId.message}</span>}
-          {projectsError && (
-            <span className="text-red-500 text-12">{t("Could not load projects.")}</span>
-          )}
+          <p className="text-12 text-secondary">
+            {t("The project this pod belongs to. The name will be prefixed with the project identifier.")}
+          </p>
+          {errors.projectId && <span className="text-12 text-danger-primary">{errors.projectId.message}</span>}
+          {projectsError && <span className="text-12 text-danger-primary">{t("Could not load projects.")}</span>}
         </div>
 
         <div className="flex flex-col gap-1">
@@ -135,12 +135,12 @@ export const CreatePodModal = observer(function CreatePodModal(props: Props) {
             rules={{
               validate: (v) => v.trim().length > 0 || t("Name is required."),
             }}
-            render={({ field }) => (
-              <Input {...field} id="create-pod-name" placeholder={t("beefy")} />
-            )}
+            render={({ field }) => <Input {...field} id="create-pod-name" placeholder={t("beefy")} />}
           />
-          <p className="text-12 text-secondary">{t("Letters, digits, dashes, and underscores. The project prefix is added automatically.")}</p>
-          {errors.name && <span className="text-red-500 text-12">{errors.name.message}</span>}
+          <p className="text-12 text-secondary">
+            {t("Letters, digits, dashes, and underscores. The project prefix is added automatically.")}
+          </p>
+          {errors.name && <span className="text-12 text-danger-primary">{errors.name.message}</span>}
         </div>
 
         <div className="flex flex-col gap-1">

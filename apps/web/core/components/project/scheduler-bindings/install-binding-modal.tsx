@@ -126,10 +126,12 @@ export const InstallSchedulerBindingModal = observer(function InstallSchedulerBi
     return (
       <ModalCore isOpen={isOpen} handleClose={onClose} position={EModalPosition.CENTER} width={EModalWidth.XL}>
         <div className="flex flex-col gap-4 p-5">
-          <div className="text-18 font-medium text-primary">
-            {t("No schedulers available")}
-          </div>
-          <p className="text-13 text-secondary">{t("Either every workspace scheduler is already installed on this project, or your workspace admin hasn't enabled any. Visit Workspace → Schedulers to manage the catalog.")}</p>
+          <div className="text-18 font-medium text-primary">{t("No schedulers available")}</div>
+          <p className="text-13 text-secondary">
+            {t(
+              "Either every workspace scheduler is already installed on this project, or your workspace admin hasn't enabled any. Visit Workspace → Schedulers to manage the catalog."
+            )}
+          </p>
           <div className="flex justify-end">
             <Button variant="secondary" onClick={onClose}>
               {t("Cancel")}
@@ -157,7 +159,7 @@ export const InstallSchedulerBindingModal = observer(function InstallSchedulerBi
               <select
                 {...field}
                 id="binding-scheduler"
-                className="bg-layer-0 focus:ring-accent-primary rounded-md border border-subtle px-3 py-2 text-13 text-primary focus:ring-1 focus:outline-none"
+                className="rounded-md border border-subtle bg-surface-1 px-3 py-2 text-13 text-primary focus:ring-1 focus:ring-accent-strong focus:outline-none"
               >
                 {installable.map((s) => (
                   <option key={s.id} value={s.id}>
@@ -167,8 +169,10 @@ export const InstallSchedulerBindingModal = observer(function InstallSchedulerBi
               </select>
             )}
           />
-          <p className="text-12 text-secondary">{t("Pick from your workspace's enabled schedulers. Already-installed ones aren't listed.")}</p>
-          {errors.scheduler && <span className="text-red-500 text-12">{errors.scheduler.message}</span>}
+          <p className="text-12 text-secondary">
+            {t("Pick from your workspace's enabled schedulers. Already-installed ones aren't listed.")}
+          </p>
+          {errors.scheduler && <span className="text-12 text-danger-primary">{errors.scheduler.message}</span>}
         </div>
 
         <BindingScheduleFields
@@ -188,9 +192,7 @@ export const InstallSchedulerBindingModal = observer(function InstallSchedulerBi
             {t("Cancel")}
           </Button>
           <Button type="submit" loading={isSubmitting} disabled={isSubmitting}>
-            {isSubmitting
-              ? t("Installing…")
-              : t("Install")}
+            {isSubmitting ? t("Installing…") : t("Install")}
           </Button>
         </div>
       </form>

@@ -172,8 +172,8 @@ function CurrentTimeLine() {
   }, []);
   const top = ((now.getHours() * 60 + now.getMinutes()) / 60) * HOUR_HEIGHT;
   return (
-    <div className="border-red-500 pointer-events-none absolute right-0 left-0 z-10 border-t-2" style={{ top }}>
-      <div className="bg-red-500 absolute -top-1.5 -left-1 size-3 rounded-full" />
+    <div className="pointer-events-none absolute right-0 left-0 z-10 border-t-2 border-danger-strong" style={{ top }}>
+      <div className="absolute -top-1.5 -left-1 size-3 rounded-full bg-danger-primary" />
     </div>
   );
 }

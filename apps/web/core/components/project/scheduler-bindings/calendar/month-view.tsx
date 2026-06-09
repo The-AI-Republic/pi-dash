@@ -83,7 +83,7 @@ function DayCell({ date, isInMonth, isCurrentDay, blocks, now, onSelectOccurrenc
     <div
       className={cn(
         "flex min-h-[6rem] flex-col gap-0.5 border-r border-b border-subtle p-1.5",
-        !isInMonth && "bg-layer-0/50"
+        !isInMonth && "bg-layer-1/50"
       )}
     >
       <div className="flex items-center justify-between">
