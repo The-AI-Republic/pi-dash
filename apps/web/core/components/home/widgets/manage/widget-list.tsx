@@ -13,6 +13,7 @@ import { observer } from "mobx-react";
 import { useTranslation } from "@pi-dash/i18n";
 import { TOAST_TYPE, setToast } from "@pi-dash/propel/toast";
 import { useHome } from "@/hooks/store/use-home";
+import { HIDDEN_HOME_WIDGET_KEYS } from "../../home-dashboard-widgets";
 import { WidgetItem } from "./widget-item";
 import type { TargetData } from "./widget.helpers";
 import { getInstructionFromPayload } from "./widget.helpers";
@@ -20,6 +21,9 @@ import { getInstructionFromPayload } from "./widget.helpers";
 export const WidgetList = observer(function WidgetList({ workspaceSlug }: { workspaceSlug: string }) {
   const { orderedWidgets, reorderWidget, toggleWidget } = useHome();
   const { t } = useTranslation();
+  // Exclude widgets that are hidden from users (e.g. Stickies — PDASHOSS01-7)
+  // so they don't appear as toggleable rows in the Manage Widgets modal.
+  const visibleWidgets = orderedWidgets.filter((widget) => !HIDDEN_HOME_WIDGET_KEYS.has(widget));
 
   const handleDrop = (self: DropTargetRecord, source: ElementDragPayload, location: DragLocationHistory) => {
     const dropTargets = location?.current?.dropTargets ?? [];
@@ -37,13 +41,13 @@ export const WidgetList = observer(function WidgetList({ workspaceSlug }: { work
     if (!sourceData.id) return;
     if (droppedId) {
       reorderWidget(workspaceSlug, sourceData.id, droppedId, instruction)
-        .then(() => {
+        .then(() =>
           setToast({
             type: TOAST_TYPE.SUCCESS,
             title: t("Success!"),
             message: t("Widget reordered successfully."),
-          });
-        })
+          })
+        )
         .catch(() => {
           setToast({
             type: TOAST_TYPE.ERROR,
@@ -56,11 +60,11 @@ export const WidgetList = observer(function WidgetList({ workspaceSlug }: { work
 
   return (
     <div className="my-4">
-      {orderedWidgets.map((widget, index) => (
+      {visibleWidgets.map((widget, index) => (
         <WidgetItem
           key={widget}
           widgetId={widget}
-          isLastChild={index === orderedWidgets.length - 1}
+          isLastChild={index === visibleWidgets.length - 1}
           handleDrop={handleDrop}
           handleToggle={toggleWidget}
         />

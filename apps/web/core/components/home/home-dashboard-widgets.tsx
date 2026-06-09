@@ -59,6 +59,12 @@ export const HOME_WIDGETS_LIST: {
   },
 };
 
+// Widgets hidden from users. `my_stickies` is part of the inherited Stickies
+// feature, which Pi Dash does not surface (PDASHOSS01-7). Its dashboard
+// component is already `null`, but the Manage Widgets modal still enumerates
+// every server-provided widget key — so it must be filtered there too.
+export const HIDDEN_HOME_WIDGET_KEYS: ReadonlySet<THomeWidgetKeys> = new Set(["my_stickies"]);
+
 export const DashboardWidgets = observer(function DashboardWidgets() {
   // router
   const { workspaceSlug } = useParams();
@@ -107,7 +113,9 @@ export const DashboardWidgets = observer(function DashboardWidgets() {
         <div className="grid h-full w-full place-items-center">
           <SimpleEmptyState
             title={t("It's Quiet Without Widgets, Turn Them On")}
-            description={t("It looks like all your widgets are turned off. Enable them\nnow to enhance your experience!")}
+            description={t(
+              "It looks like all your widgets are turned off. Enable them\nnow to enhance your experience!"
+            )}
             assetPath={noWidgetsResolvedPath}
           />
         </div>

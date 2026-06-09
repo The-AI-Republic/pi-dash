@@ -103,10 +103,9 @@ export const coreRoutes: RouteConfigEntry[] = [
           ),
         ]),
 
-        // Stickies
-        layout("./(all)/[workspaceSlug]/(projects)/stickies/layout.tsx", [
-          route(":workspaceSlug/stickies", "./(all)/[workspaceSlug]/(projects)/stickies/page.tsx"),
-        ]),
+        // Stickies — hidden from users (PDASHOSS01-7). The page/layout/header
+        // components are kept in place so the feature can be restored by
+        // re-registering this route; it is intentionally not reachable by URL.
 
         // Prompts (prompt templates: view for members, create/edit for workspace admins)
         layout("./(all)/[workspaceSlug]/prompts/layout.tsx", [
