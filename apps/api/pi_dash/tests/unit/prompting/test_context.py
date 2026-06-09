@@ -151,6 +151,89 @@ def test_context_parent_work_branch_empty_surfaces_as_none(
 
 
 @pytest.mark.unit
+def test_context_parent_includes_description_and_comment_count(
+    workspace, project, state, create_user, run, issue
+):
+    from pi_dash.db.models import IssueComment
+
+    parent = Issue.objects.create(
+        name="Umbrella epic",
+        workspace=workspace,
+        project=project,
+        state=state,
+        created_by=create_user,
+        description_html="<p>Parent framing and acceptance criteria.</p>",
+    )
+    for body in ("<p>first</p>", "<p>second</p>"):
+        IssueComment.objects.create(
+            issue=parent,
+            workspace=workspace,
+            project=project,
+            created_by=create_user,
+            comment_html=body,
+        )
+    issue.parent = parent
+    issue.save(update_fields=["parent"])
+
+    ctx = build_context(issue, run)
+    assert ctx["parent"]["description"] == "Parent framing and acceptance criteria."
+    # Comment count surfaces the discussion volume without inlining bodies.
+    assert ctx["parent"]["comments_count"] == 2
+
+
+@pytest.mark.unit
+def test_context_lineage_is_none_for_single_parent(
+    workspace, project, state, create_user, run, issue
+):
+    # A direct parent with no ancestors → the `parent` block carries
+    # everything, so no separate lineage tree is emitted.
+    parent = Issue.objects.create(
+        name="Lone parent",
+        workspace=workspace,
+        project=project,
+        state=state,
+        created_by=create_user,
+    )
+    issue.parent = parent
+    issue.save(update_fields=["parent"])
+
+    ctx = build_context(issue, run)
+    assert ctx["parent"] is not None
+    assert ctx["lineage"] is None
+
+
+@pytest.mark.unit
+def test_context_lineage_populated_for_grandparent(
+    workspace, project, state, create_user, run, issue
+):
+    grandparent = Issue.objects.create(
+        name="Root epic",
+        workspace=workspace,
+        project=project,
+        state=state,
+        created_by=create_user,
+    )
+    parent = Issue.objects.create(
+        name="Mid epic",
+        workspace=workspace,
+        project=project,
+        state=state,
+        created_by=create_user,
+        parent=grandparent,
+    )
+    issue.parent = parent
+    issue.save(update_fields=["parent"])
+
+    ctx = build_context(issue, run)
+    lineage = ctx["lineage"]
+    assert lineage is not None
+    # Ordered current -> parent -> grandparent (root).
+    assert [n["title"] for n in lineage] == ["Make button blue", "Mid epic", "Root epic"]
+    assert lineage[0]["identifier"] == ctx["issue"]["identifier"]
+    assert lineage[-1]["title"] == "Root epic"
+
+
+@pytest.mark.unit
 def test_context_includes_project_description_when_set(
     workspace, create_user
 ):
