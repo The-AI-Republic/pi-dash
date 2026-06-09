@@ -439,6 +439,7 @@ export default {
   "Current password": "Aktuálne heslo",
   "Current timezone setting.": "Nastavenie aktuálneho časového pásma.",
   "Current version": "Aktuálna verzia",
+  Cursor: "",
   Custom: "Vlastné",
   "Custom theme": "Vlastná téma",
   "Customize for this workspace": "Prispôsobiť pre tento pracovný priestor",
@@ -489,6 +490,8 @@ export default {
   "Delete this workspace": "Odstrániť tento pracovný priestor",
   "Delete work item": "Odstrániť pracovnú položku",
   Deleting: "Odstraňuje sa",
+  "Deleting a runner does not uninstall the AI agent (such as Codex or Claude) on your dev machine — remove it there separately if you no longer need it.":
+    "",
   Descending: "Zostupne",
   Description: "Popis",
   "Description (optional)": "Popis (voliteľný)",
@@ -894,10 +897,10 @@ export default {
   "Manage your AI Agent connectivities": "Spravovať pripojenia vášho AI agenta",
   Manifest: "Manifest",
   Manual: "Manuálny",
-  "Manually trigger an extra AI agent run. (Issues in the In Progress state already tick an agent run every few hours.)":
-    "Manually trigger an extra AI agent run. (Issues in the In Progress state already tick an agent run every few hours.)",
   "Manually or through automation, you can archive work items that are completed or cancelled. Find them here once archived.":
     "Manuálne alebo prostredníctvom automatizácie môžete archivovať pracovné položky, ktoré sú dokončené alebo zrušené. Po archivácii ich nájdete tu.",
+  "Manually trigger an extra AI agent run. (Issues in the In Progress state already tick an agent run every few hours.)":
+    "Manually trigger an extra AI agent run. (Issues in the In Progress state already tick an agent run every few hours.)",
   "Map your project goals to Modules and track easily.":
     "Mapujte ciele svojho projektu na moduly a jednoducho ich sledujte.",
   "Mark all as read": "Označiť všetky ako prečítané",

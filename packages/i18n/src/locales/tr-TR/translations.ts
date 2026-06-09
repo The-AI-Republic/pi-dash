@@ -435,6 +435,7 @@ export default {
   "Current password": "Mevcut şifre",
   "Current timezone setting.": "Mevcut saat dilimi ayarı.",
   "Current version": "Mevcut sürüm",
+  Cursor: "",
   Custom: "Özel",
   "Custom theme": "Özel tema",
   "Customize for this workspace": "Bu çalışma alanı için özelleştir",
@@ -485,6 +486,8 @@ export default {
   "Delete this workspace": "Bu çalışma alanını sil",
   "Delete work item": "İş öğesini sil",
   Deleting: "Siliniyor",
+  "Deleting a runner does not uninstall the AI agent (such as Codex or Claude) on your dev machine — remove it there separately if you no longer need it.":
+    "",
   Descending: "Azalan",
   Description: "Açıklama",
   "Description (optional)": "Açıklama (isteğe bağlı)",
@@ -890,10 +893,10 @@ export default {
   "Manage your AI Agent connectivities": "AI Ajan bağlantılarınızı yönetin",
   Manifest: "Manifest",
   Manual: "Manuel",
-  "Manually trigger an extra AI agent run. (Issues in the In Progress state already tick an agent run every few hours.)":
-    "Manually trigger an extra AI agent run. (Issues in the In Progress state already tick an agent run every few hours.)",
   "Manually or through automation, you can archive work items that are completed or cancelled. Find them here once archived.":
     "Manuel olarak veya otomasyon yoluyla, tamamlanmış veya iptal edilmiş iş öğelerini arşivleyebilirsiniz. Arşivlendikten sonra onları burada bulun.",
+  "Manually trigger an extra AI agent run. (Issues in the In Progress state already tick an agent run every few hours.)":
+    "Manually trigger an extra AI agent run. (Issues in the In Progress state already tick an agent run every few hours.)",
   "Map your project goals to Modules and track easily.":
     "Proje hedeflerinizi Modüllerle eşleyin ve kolayca takip edin.",
   "Mark all as read": "Tümünü okundu olarak işaretle",

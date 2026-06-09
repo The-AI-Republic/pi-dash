@@ -443,6 +443,7 @@ export default {
   "Current password": "Parola curentă",
   "Current timezone setting.": "Setarea fusului orar curent.",
   "Current version": "Versiunea curentă",
+  Cursor: "",
   Custom: "Personalizat",
   "Custom theme": "Temă personalizată",
   "Customize for this workspace": "Personalizează pentru acest spațiu de lucru",
@@ -494,6 +495,8 @@ export default {
   "Delete this workspace": "Șterge acest spațiu de lucru",
   "Delete work item": "Șterge elementul de lucru",
   Deleting: "Se șterge",
+  "Deleting a runner does not uninstall the AI agent (such as Codex or Claude) on your dev machine — remove it there separately if you no longer need it.":
+    "",
   Descending: "Descrescător",
   Description: "Descriere",
   "Description (optional)": "Descriere (opțional)",
@@ -907,10 +910,10 @@ export default {
   "Manage your AI Agent connectivities": "Gestionează conexiunile agentului tău AI",
   Manifest: "Manifest",
   Manual: "Manual",
-  "Manually trigger an extra AI agent run. (Issues in the In Progress state already tick an agent run every few hours.)":
-    "Manually trigger an extra AI agent run. (Issues in the In Progress state already tick an agent run every few hours.)",
   "Manually or through automation, you can archive work items that are completed or cancelled. Find them here once archived.":
     "Manual sau prin automatizare, puteți arhiva elemente de lucru care sunt finalizate sau anulate. Găsiți-le aici odată arhivate.",
+  "Manually trigger an extra AI agent run. (Issues in the In Progress state already tick an agent run every few hours.)":
+    "Manually trigger an extra AI agent run. (Issues in the In Progress state already tick an agent run every few hours.)",
   "Map your project goals to Modules and track easily.":
     "Asociați obiectivele proiectului dvs. cu Module și urmăriți-le ușor.",
   "Mark all as read": "Marchează totul ca citit",

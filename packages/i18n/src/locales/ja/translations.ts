@@ -436,6 +436,7 @@ export default {
   "Current password": "現在のパスワード",
   "Current timezone setting.": "現在のタイムゾーン設定。",
   "Current version": "現在のバージョン",
+  Cursor: "",
   Custom: "カスタム",
   "Custom theme": "カスタムテーマ",
   "Customize for this workspace": "このワークスペース用にカスタマイズ",
@@ -486,6 +487,8 @@ export default {
   "Delete this workspace": "このワークスペースを削除",
   "Delete work item": "作業項目を削除",
   Deleting: "削除中",
+  "Deleting a runner does not uninstall the AI agent (such as Codex or Claude) on your dev machine — remove it there separately if you no longer need it.":
+    "",
   Descending: "降順",
   Description: "説明",
   "Description (optional)": "説明（任意）",
@@ -893,10 +896,10 @@ export default {
   "Manage your AI Agent connectivities": "AIエージェントの接続を管理",
   Manifest: "マニフェスト",
   Manual: "手動",
-  "Manually trigger an extra AI agent run. (Issues in the In Progress state already tick an agent run every few hours.)":
-    "Manually trigger an extra AI agent run. (Issues in the In Progress state already tick an agent run every few hours.)",
   "Manually or through automation, you can archive work items that are completed or cancelled. Find them here once archived.":
     "手動または自動化により、完了またはキャンセルされた作業項目をアーカイブできます。アーカイブ後はこちらで確認できます。",
+  "Manually trigger an extra AI agent run. (Issues in the In Progress state already tick an agent run every few hours.)":
+    "Manually trigger an extra AI agent run. (Issues in the In Progress state already tick an agent run every few hours.)",
   "Map your project goals to Modules and track easily.":
     "プロジェクトの目標をモジュールにマッピングして、簡単に追跡できます。",
   "Mark all as read": "すべて既読にする",

@@ -443,6 +443,7 @@ export default {
   "Current password": "Aktuelles Passwort",
   "Current timezone setting.": "Aktuelle Zeitzoneneinstellung.",
   "Current version": "Aktuelle Version",
+  Cursor: "",
   Custom: "Benutzerdefiniert",
   "Custom theme": "Benutzerdefiniertes Design",
   "Customize for this workspace": "Für diesen Arbeitsbereich anpassen",
@@ -493,6 +494,8 @@ export default {
   "Delete this workspace": "Diesen Arbeitsbereich löschen",
   "Delete work item": "Arbeitselement löschen",
   Deleting: "Löschen",
+  "Deleting a runner does not uninstall the AI agent (such as Codex or Claude) on your dev machine — remove it there separately if you no longer need it.":
+    "",
   Descending: "Absteigend",
   Description: "Beschreibung",
   "Description (optional)": "Beschreibung (optional)",
@@ -907,10 +910,10 @@ export default {
   "Manage your AI Agent connectivities": "AI Agent-Verbindungen verwalten",
   Manifest: "Manifest",
   Manual: "Handbuch",
-  "Manually trigger an extra AI agent run. (Issues in the In Progress state already tick an agent run every few hours.)":
-    "Manually trigger an extra AI agent run. (Issues in the In Progress state already tick an agent run every few hours.)",
   "Manually or through automation, you can archive work items that are completed or cancelled. Find them here once archived.":
     "Manuell oder per Automatisierung können Sie abgeschlossene oder stornierte Arbeitselemente archivieren. Finden Sie sie hier, sobald sie archiviert sind.",
+  "Manually trigger an extra AI agent run. (Issues in the In Progress state already tick an agent run every few hours.)":
+    "Manually trigger an extra AI agent run. (Issues in the In Progress state already tick an agent run every few hours.)",
   "Map your project goals to Modules and track easily.":
     "Ordnen Sie Ihre Projektziele Modulen zu und verfolgen Sie sie einfach.",
   "Mark all as read": "Alle als gelesen markieren",
