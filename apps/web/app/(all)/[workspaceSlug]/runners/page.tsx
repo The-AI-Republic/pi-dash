@@ -299,9 +299,9 @@ const RunnersListPage = observer(function RunnersListPage() {
         handleSubmit={confirmDeleteRunner}
         isSubmitting={deleting}
         title={t("Delete runner?")}
-        content={t(
+        content={`${t(
           "The runner row is removed and the daemon is forced offline. Historic runs are preserved with a null runner reference."
-        )}
+        )} ${t("Deleting a runner does not uninstall the AI agent (such as Codex or Claude) on your dev machine.")}`}
         primaryButtonText={{ default: t("Delete"), loading: t("Delete") }}
       />
       <AlertModalCore

@@ -431,6 +431,7 @@ export default {
   "Current password": "현재 비밀번호",
   "Current timezone setting.": "현재 시간대 설정.",
   "Current version": "현재 버전",
+  Cursor: "",
   Custom: "사용자 정의",
   "Custom theme": "사용자 정의 테마",
   "Customize for this workspace": "이 워크스페이스에 맞게 사용자 지정",
@@ -481,6 +482,7 @@ export default {
   "Delete this workspace": "이 워크스페이스 삭제",
   "Delete work item": "작업 항목 삭제",
   Deleting: "삭제 중",
+  "Deleting a runner does not uninstall the AI agent (such as Codex or Claude) on your dev machine.": "",
   Descending: "내림차순",
   Description: "설명",
   "Description (optional)": "설명 (선택 사항)",
@@ -879,10 +881,10 @@ export default {
   "Manage your AI Agent connectivities": "AI 에이전트 연결 관리",
   Manifest: "매니페스트",
   Manual: "수동",
-  "Manually trigger an extra AI agent run. (Issues in the In Progress state already tick an agent run every few hours.)":
-    "Manually trigger an extra AI agent run. (Issues in the In Progress state already tick an agent run every few hours.)",
   "Manually or through automation, you can archive work items that are completed or cancelled. Find them here once archived.":
     "수동 또는 자동화를 통해 완료되거나 취소된 작업 항목을 보관할 수 있습니다. 보관된 후에는 여기에서 찾을 수 있습니다.",
+  "Manually trigger an extra AI agent run. (Issues in the In Progress state already tick an agent run every few hours.)":
+    "Manually trigger an extra AI agent run. (Issues in the In Progress state already tick an agent run every few hours.)",
   "Map your project goals to Modules and track easily.": "프로젝트 목표를 모듈에 매핑하고 쉽게 추적하세요.",
   "Mark all as read": "모두 읽음으로 표시",
   "Mark as duplicate": "중복으로 표시",

@@ -433,6 +433,7 @@ export default {
   "Current password": "Mật khẩu hiện tại",
   "Current timezone setting.": "Cài đặt múi giờ hiện tại.",
   "Current version": "Phiên bản hiện tại",
+  Cursor: "",
   Custom: "Tùy chỉnh",
   "Custom theme": "Chủ đề tùy chỉnh",
   "Customize for this workspace": "Tùy chỉnh cho không gian làm việc này",
@@ -483,6 +484,7 @@ export default {
   "Delete this workspace": "Xóa không gian làm việc này",
   "Delete work item": "Xóa mục công việc",
   Deleting: "Đang xóa",
+  "Deleting a runner does not uninstall the AI agent (such as Codex or Claude) on your dev machine.": "",
   Descending: "Giảm dần",
   Description: "Mô tả",
   "Description (optional)": "Mô tả (không bắt buộc)",
@@ -887,10 +889,10 @@ export default {
   "Manage your AI Agent connectivities": "Quản lý kết nối của AI Agent của bạn",
   Manifest: "Tệp kê khai",
   Manual: "Hướng dẫn",
-  "Manually trigger an extra AI agent run. (Issues in the In Progress state already tick an agent run every few hours.)":
-    "Manually trigger an extra AI agent run. (Issues in the In Progress state already tick an agent run every few hours.)",
   "Manually or through automation, you can archive work items that are completed or cancelled. Find them here once archived.":
     "Bạn có thể lưu trữ các mục công việc đã hoàn thành hoặc bị hủy theo cách thủ công hoặc thông qua tự động hóa. Tìm chúng ở đây sau khi đã lưu trữ.",
+  "Manually trigger an extra AI agent run. (Issues in the In Progress state already tick an agent run every few hours.)":
+    "Manually trigger an extra AI agent run. (Issues in the In Progress state already tick an agent run every few hours.)",
   "Map your project goals to Modules and track easily.":
     "Ánh xạ mục tiêu dự án của bạn vào Modules và theo dõi dễ dàng.",
   "Mark all as read": "Đánh dấu tất cả là đã đọc",

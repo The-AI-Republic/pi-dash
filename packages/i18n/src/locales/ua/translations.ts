@@ -438,6 +438,7 @@ export default {
   "Current password": "Поточний пароль",
   "Current timezone setting.": "Поточне налаштування часового поясу.",
   "Current version": "Поточна версія",
+  Cursor: "",
   Custom: "Користувацький",
   "Custom theme": "Користувацька тема",
   "Customize for this workspace": "Налаштувати для цього робочого простору",
@@ -488,6 +489,7 @@ export default {
   "Delete this workspace": "Видалити цю робочу область",
   "Delete work item": "Видалити робочий елемент",
   Deleting: "Видалення",
+  "Deleting a runner does not uninstall the AI agent (such as Codex or Claude) on your dev machine.": "",
   Descending: "За спаданням",
   Description: "Опис",
   "Description (optional)": "Опис (необов'язково)",
@@ -894,10 +896,10 @@ export default {
   "Manage your AI Agent connectivities": "Керуйте підключеннями вашого AI Agent",
   Manifest: "Маніфест",
   Manual: "Посібник",
-  "Manually trigger an extra AI agent run. (Issues in the In Progress state already tick an agent run every few hours.)":
-    "Manually trigger an extra AI agent run. (Issues in the In Progress state already tick an agent run every few hours.)",
   "Manually or through automation, you can archive work items that are completed or cancelled. Find them here once archived.":
     "Вручну або за допомогою автоматизації ви можете архівувати робочі елементи, які завершені або скасовані. Знайдіть їх тут після архівування.",
+  "Manually trigger an extra AI agent run. (Issues in the In Progress state already tick an agent run every few hours.)":
+    "Manually trigger an extra AI agent run. (Issues in the In Progress state already tick an agent run every few hours.)",
   "Map your project goals to Modules and track easily.":
     "Зіставте цілі вашого проекту з модулями та легко відстежуйте.",
   "Mark all as read": "Позначити всі як прочитані",

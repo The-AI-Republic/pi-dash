@@ -420,6 +420,7 @@ export default {
   "Current password": "目前密碼",
   "Current timezone setting.": "目前的時區設定。",
   "Current version": "目前版本",
+  Cursor: "",
   Custom: "自訂",
   "Custom theme": "自訂主題",
   "Customize for this workspace": "為此工作區自訂",
@@ -470,6 +471,7 @@ export default {
   "Delete this workspace": "刪除此工作區",
   "Delete work item": "刪除工作項目",
   Deleting: "正在刪除",
+  "Deleting a runner does not uninstall the AI agent (such as Codex or Claude) on your dev machine.": "",
   Descending: "降序",
   Description: "描述",
   "Description (optional)": "描述（選填）",
@@ -864,10 +866,10 @@ export default {
   "Manage your AI Agent connectivities": "管理您的 AI 代理連線",
   Manifest: "資訊清單",
   Manual: "手動",
-  "Manually trigger an extra AI agent run. (Issues in the In Progress state already tick an agent run every few hours.)":
-    "Manually trigger an extra AI agent run. (Issues in the In Progress state already tick an agent run every few hours.)",
   "Manually or through automation, you can archive work items that are completed or cancelled. Find them here once archived.":
     "您可以手動或透過自動化方式，將已完成或已取消的工作項目封存。封存後，請在此處尋找。",
+  "Manually trigger an extra AI agent run. (Issues in the In Progress state already tick an agent run every few hours.)":
+    "Manually trigger an extra AI agent run. (Issues in the In Progress state already tick an agent run every few hours.)",
   "Map your project goals to Modules and track easily.": "將您的專案目標對應到模組，輕鬆追蹤。",
   "Mark all as read": "全部標為已讀",
   "Mark as duplicate": "標記為重複",
