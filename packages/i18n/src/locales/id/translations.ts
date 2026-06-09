@@ -432,6 +432,7 @@ export default {
   "Current password": "Kata sandi saat ini",
   "Current timezone setting.": "Pengaturan zona waktu saat ini.",
   "Current version": "Versi saat ini",
+  Cursor: "",
   Custom: "Kustom",
   "Custom theme": "Tema kustom",
   "Customize for this workspace": "Sesuaikan untuk ruang kerja ini",
@@ -887,10 +888,10 @@ export default {
   "Manage your AI Agent connectivities": "Kelola konektivitas AI Agent Anda",
   Manifest: "Manifest",
   Manual: "Manual",
-  "Manually trigger an extra AI agent run. (Issues in the In Progress state already tick an agent run every few hours.)":
-    "Manually trigger an extra AI agent run. (Issues in the In Progress state already tick an agent run every few hours.)",
   "Manually or through automation, you can archive work items that are completed or cancelled. Find them here once archived.":
     "Secara manual atau melalui otomatisasi, Anda dapat mengarsipkan item pekerjaan yang telah selesai atau dibatalkan. Temukan di sini setelah diarsipkan.",
+  "Manually trigger an extra AI agent run. (Issues in the In Progress state already tick an agent run every few hours.)":
+    "Manually trigger an extra AI agent run. (Issues in the In Progress state already tick an agent run every few hours.)",
   "Map your project goals to Modules and track easily.": "Petakan tujuan proyek Anda ke Modul dan lacak dengan mudah.",
   "Mark all as read": "Tandai semua sudah dibaca",
   "Mark as duplicate": "Tandai sebagai duplikat",
@@ -1085,6 +1086,7 @@ export default {
   "Open work item": "Buka item pekerjaan",
   "Open work item in full screen": "Buka item pekerjaan dalam layar penuh",
   "Open workspace switcher": "Buka pengalih ruang kerja",
+  OpenClaw: "",
   Optional: "Opsional",
   Options: "Opsi",
   "Order by": "Urutkan berdasarkan",

@@ -444,6 +444,7 @@ export default {
   "Current password": "Mot de passe actuel",
   "Current timezone setting.": "Paramètre de fuseau horaire actuel.",
   "Current version": "Version actuelle",
+  Cursor: "",
   Custom: "Personnalisé",
   "Custom theme": "Thème personnalisé",
   "Customize for this workspace": "Personnaliser pour cet espace de travail",
@@ -905,10 +906,10 @@ export default {
   "Manage your AI Agent connectivities": "Gérer les connectivités de votre agent IA",
   Manifest: "Manifeste",
   Manual: "Manuel",
-  "Manually trigger an extra AI agent run. (Issues in the In Progress state already tick an agent run every few hours.)":
-    "Manually trigger an extra AI agent run. (Issues in the In Progress state already tick an agent run every few hours.)",
   "Manually or through automation, you can archive work items that are completed or cancelled. Find them here once archived.":
     "Manuellement ou via l'automatisation, vous pouvez archiver les éléments de travail terminés ou annulés. Retrouvez-les ici une fois archivés.",
+  "Manually trigger an extra AI agent run. (Issues in the In Progress state already tick an agent run every few hours.)":
+    "Manually trigger an extra AI agent run. (Issues in the In Progress state already tick an agent run every few hours.)",
   "Map your project goals to Modules and track easily.":
     "Associez les objectifs de votre projet aux Modules et suivez-les facilement.",
   "Mark all as read": "Tout marquer comme lu",
@@ -1109,6 +1110,7 @@ export default {
   "Open work item": "Ouvrir l'élément de travail",
   "Open work item in full screen": "Ouvrir l'élément de travail en plein écran",
   "Open workspace switcher": "Ouvrir le sélecteur d'espace de travail",
+  OpenClaw: "",
   Optional: "Optionnel",
   Options: "Options",
   "Order by": "Trier par",

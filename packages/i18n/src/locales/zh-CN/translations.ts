@@ -422,6 +422,7 @@ export default {
   "Current password": "当前密码",
   "Current timezone setting.": "当前时区设置。",
   "Current version": "当前版本",
+  Cursor: "",
   Custom: "自定义",
   "Custom theme": "自定义主题",
   "Customize for this workspace": "为此工作区自定义",
@@ -865,10 +866,10 @@ export default {
   "Manage your AI Agent connectivities": "管理您的 AI 代理连接",
   Manifest: "清单",
   Manual: "手动",
-  "Manually trigger an extra AI agent run. (Issues in the In Progress state already tick an agent run every few hours.)":
-    "Manually trigger an extra AI agent run. (Issues in the In Progress state already tick an agent run every few hours.)",
   "Manually or through automation, you can archive work items that are completed or cancelled. Find them here once archived.":
     "您可以通过手动或自动方式归档已完成或已取消的工作项。归档后，可在此处找到它们。",
+  "Manually trigger an extra AI agent run. (Issues in the In Progress state already tick an agent run every few hours.)":
+    "Manually trigger an extra AI agent run. (Issues in the In Progress state already tick an agent run every few hours.)",
   "Map your project goals to Modules and track easily.": "将您的项目目标映射到模块，并轻松跟踪。",
   "Mark all as read": "全部标记为已读",
   "Mark as duplicate": "标记为重复",
@@ -1055,6 +1056,7 @@ export default {
   "Open work item": "打开工作项",
   "Open work item in full screen": "全屏打开工作项",
   "Open workspace switcher": "打开工作区切换器",
+  OpenClaw: "",
   Optional: "可选",
   Options: "选项",
   "Order by": "排序依据",

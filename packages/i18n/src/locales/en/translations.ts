@@ -883,10 +883,10 @@ export default {
   "Manage your AI Agent connectivities": "Manage your AI Agent connectivities",
   Manifest: "Manifest",
   Manual: "Manual",
-  "Manually trigger an extra AI agent run. (Issues in the In Progress state already tick an agent run every few hours.)":
-    "Manually trigger an extra AI agent run. (Issues in the In Progress state already tick an agent run every few hours.)",
   "Manually or through automation, you can archive work items that are completed or cancelled. Find them here once archived.":
     "Manually or through automation, you can archive work items that are completed or cancelled. Find them here once archived.",
+  "Manually trigger an extra AI agent run. (Issues in the In Progress state already tick an agent run every few hours.)":
+    "Manually trigger an extra AI agent run. (Issues in the In Progress state already tick an agent run every few hours.)",
   "Map your project goals to Modules and track easily.": "Map your project goals to Modules and track easily.",
   "Mark all as read": "Mark all as read",
   "Mark as duplicate": "Mark as duplicate",
@@ -1077,6 +1077,7 @@ export default {
   "Open work item": "Open work item",
   "Open work item in full screen": "Open work item in full screen",
   "Open workspace switcher": "Open workspace switcher",
+  OpenClaw: "OpenClaw",
   Optional: "Optional",
   Options: "Options",
   "Order by": "Order by",

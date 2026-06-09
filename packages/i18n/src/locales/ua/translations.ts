@@ -438,6 +438,7 @@ export default {
   "Current password": "Поточний пароль",
   "Current timezone setting.": "Поточне налаштування часового поясу.",
   "Current version": "Поточна версія",
+  Cursor: "",
   Custom: "Користувацький",
   "Custom theme": "Користувацька тема",
   "Customize for this workspace": "Налаштувати для цього робочого простору",
@@ -894,10 +895,10 @@ export default {
   "Manage your AI Agent connectivities": "Керуйте підключеннями вашого AI Agent",
   Manifest: "Маніфест",
   Manual: "Посібник",
-  "Manually trigger an extra AI agent run. (Issues in the In Progress state already tick an agent run every few hours.)":
-    "Manually trigger an extra AI agent run. (Issues in the In Progress state already tick an agent run every few hours.)",
   "Manually or through automation, you can archive work items that are completed or cancelled. Find them here once archived.":
     "Вручну або за допомогою автоматизації ви можете архівувати робочі елементи, які завершені або скасовані. Знайдіть їх тут після архівування.",
+  "Manually trigger an extra AI agent run. (Issues in the In Progress state already tick an agent run every few hours.)":
+    "Manually trigger an extra AI agent run. (Issues in the In Progress state already tick an agent run every few hours.)",
   "Map your project goals to Modules and track easily.":
     "Зіставте цілі вашого проекту з модулями та легко відстежуйте.",
   "Mark all as read": "Позначити всі як прочитані",
@@ -1093,6 +1094,7 @@ export default {
   "Open work item": "Відкрити робочий елемент",
   "Open work item in full screen": "Відкрити робочий елемент на весь екран",
   "Open workspace switcher": "Відкрити перемикач робочих просторів",
+  OpenClaw: "",
   Optional: "Необов'язково",
   Options: "Параметри",
   "Order by": "Сортувати за",

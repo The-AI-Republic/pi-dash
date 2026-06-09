@@ -438,6 +438,7 @@ export default {
   "Current password": "Aktuální heslo",
   "Current timezone setting.": "Aktuální nastavení časového pásma.",
   "Current version": "Aktuální verze",
+  Cursor: "",
   Custom: "Vlastní",
   "Custom theme": "Vlastní motiv",
   "Customize for this workspace": "Přizpůsobit pro tento pracovní prostor",
@@ -893,10 +894,10 @@ export default {
   "Manage your AI Agent connectivities": "Spravovat připojení vašeho AI Agenta",
   Manifest: "Manifest",
   Manual: "Manuální",
-  "Manually trigger an extra AI agent run. (Issues in the In Progress state already tick an agent run every few hours.)":
-    "Manually trigger an extra AI agent run. (Issues in the In Progress state already tick an agent run every few hours.)",
   "Manually or through automation, you can archive work items that are completed or cancelled. Find them here once archived.":
     "Ručně nebo pomocí automatizace můžete archivovat dokončené nebo zrušené pracovní položky. Po archivaci je najdete zde.",
+  "Manually trigger an extra AI agent run. (Issues in the In Progress state already tick an agent run every few hours.)":
+    "Manually trigger an extra AI agent run. (Issues in the In Progress state already tick an agent run every few hours.)",
   "Map your project goals to Modules and track easily.": "Mapujte cíle svého projektu na moduly a snadno je sledujte.",
   "Mark all as read": "Označit vše jako přečtené",
   "Mark as duplicate": "Označit jako duplicitní",
@@ -1091,6 +1092,7 @@ export default {
   "Open work item": "Otevřít pracovní položku",
   "Open work item in full screen": "Otevřít pracovní položku na celou obrazovku",
   "Open workspace switcher": "Otevřít přepínač pracovních prostorů",
+  OpenClaw: "",
   Optional: "Volitelné",
   Options: "Možnosti",
   "Order by": "Seřadit podle",

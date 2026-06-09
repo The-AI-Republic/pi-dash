@@ -443,6 +443,7 @@ export default {
   "Current password": "Текущий пароль",
   "Current timezone setting.": "Текущая настройка часового пояса.",
   "Current version": "Текущая версия",
+  Cursor: "",
   Custom: "Пользовательский",
   "Custom theme": "Пользовательская тема",
   "Customize for this workspace": "Настроить для этой рабочей области",
@@ -900,10 +901,10 @@ export default {
   "Manage your AI Agent connectivities": "Управление подключениями вашего AI Agent",
   Manifest: "Манифест",
   Manual: "Руководство",
-  "Manually trigger an extra AI agent run. (Issues in the In Progress state already tick an agent run every few hours.)":
-    "Manually trigger an extra AI agent run. (Issues in the In Progress state already tick an agent run every few hours.)",
   "Manually or through automation, you can archive work items that are completed or cancelled. Find them here once archived.":
     "Вручную или с помощью автоматизации вы можете архивировать завершенные или отмененные рабочие элементы. Найдите их здесь после архивации.",
+  "Manually trigger an extra AI agent run. (Issues in the In Progress state already tick an agent run every few hours.)":
+    "Manually trigger an extra AI agent run. (Issues in the In Progress state already tick an agent run every few hours.)",
   "Map your project goals to Modules and track easily.":
     "Сопоставьте цели вашего проекта с модулями и легко отслеживайте их.",
   "Mark all as read": "Отметить все как прочитанное",
@@ -1099,6 +1100,7 @@ export default {
   "Open work item": "Открыть элемент работы",
   "Open work item in full screen": "Открыть элемент работы в полноэкранном режиме",
   "Open workspace switcher": "Открыть переключатель рабочей области",
+  OpenClaw: "",
   Optional: "Необязательно",
   Options: "Параметры",
   "Order by": "Сортировать по",
