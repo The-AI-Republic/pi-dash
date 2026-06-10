@@ -1188,6 +1188,7 @@ export default {
   "Project context (optional)": "Ngữ cảnh dự án (tùy chọn)",
   "Project cover image": "Ảnh bìa dự án",
   "Project created successfully": "Dự án đã được tạo thành công",
+  "Project default pod": "Project default pod",
   "Project ID": "ID dự án",
   "Project ID is required": "ID dự án là bắt buộc",
   "Project ID must at least be of 1 character": "ID dự án phải có ít nhất 1 ký tự",
@@ -1685,6 +1686,8 @@ export default {
   "Which AI agent CLI this runner will drive. Baked into the displayed ``pidash runner add`` command.":
     "CLI tác nhân AI nào mà runner này sẽ điều khiển. Được tích hợp vào lệnh ``pidash runner add`` được hiển thị.",
   "Which events would you like to trigger this webhook?": "Bạn muốn sự kiện nào kích hoạt webhook này?",
+  "Which pod's runners serve this scheduler's runs. Leave on the project default unless you need a specific machine fleet.":
+    "Which pod's runners serve this scheduler's runs. Leave on the project default unless you need a specific machine fleet.",
   "Widget reordered successfully.": "Widget đã được sắp xếp lại thành công.",
   "Windows (MSI)": "Windows (MSI)",
   "Windows (PowerShell)": "Windows (PowerShell)",

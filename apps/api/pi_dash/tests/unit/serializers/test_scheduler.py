@@ -384,3 +384,32 @@ def test_patch_pod_from_other_project_rejected(binding, other_project, create_us
     s = SchedulerBindingSerializer(binding, data={"pod": foreign_pod.id}, partial=True)
     assert not s.is_valid()
     assert "pod" in s.errors
+
+
+@pytest.mark.unit
+def test_create_pod_validated_against_context_project_not_request_body(
+    scheduler, project, other_project, create_user
+):
+    """A client must not bypass the cross-project pod check by claiming a
+    different `project` in the body. The view pins the binding to the URL's
+    project via context/save(), so validation must trust that — not the
+    request-supplied project."""
+    with impersonate(create_user):
+        foreign_pod = Pod.objects.create(
+            project=other_project, name="API_z", created_by=create_user
+        )
+    s = SchedulerBindingSerializer(
+        data={
+            "scheduler": scheduler.id,
+            # Body lies: claims the pod's (other) project to slip the check.
+            "project": other_project.id,
+            "dtstart": _ANCHOR.isoformat(),
+            "rrule": "FREQ=DAILY",
+            "tzid": "UTC",
+            "pod": foreign_pod.id,
+        },
+        # View injects the authoritative project here; it must win.
+        context={"project": project},
+    )
+    assert not s.is_valid()
+    assert "pod" in s.errors

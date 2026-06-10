@@ -177,7 +177,7 @@ class ProjectSchedulerBindingListEndpoint(BaseAPIView):
                 project_id=project_id,
                 workspace__slug=slug,
             )
-            .select_related("scheduler", "last_run")
+            .select_related("scheduler", "last_run", "pod")
             .order_by("-created_at")
         )
         return Response(

@@ -1207,6 +1207,7 @@ export default {
   "Project context (optional)": "Contextul proiectului (opțional)",
   "Project cover image": "Imaginea de copertă a proiectului",
   "Project created successfully": "Proiect creat cu succes",
+  "Project default pod": "Project default pod",
   "Project ID": "ID-ul proiectului",
   "Project ID is required": "ID-ul proiectului este obligatoriu",
   "Project ID must at least be of 1 character": "ID-ul proiectului trebuie să aibă cel puțin 1 caracter",
@@ -1705,6 +1706,8 @@ export default {
   "Which AI agent CLI this runner will drive. Baked into the displayed ``pidash runner add`` command.":
     "Pe care agent AI CLI îl va conduce acest runner. Încorporat în comanda afișată ``pidash runner add``.",
   "Which events would you like to trigger this webhook?": "Ce evenimente doriți să declanșeze acest webhook?",
+  "Which pod's runners serve this scheduler's runs. Leave on the project default unless you need a specific machine fleet.":
+    "Which pod's runners serve this scheduler's runs. Leave on the project default unless you need a specific machine fleet.",
   "Widget reordered successfully.": "Widget reordonat cu succes.",
   "Windows (MSI)": "Windows (MSI)",
   "Windows (PowerShell)": "Windows (PowerShell)",

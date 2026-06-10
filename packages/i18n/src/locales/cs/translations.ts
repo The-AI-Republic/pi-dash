@@ -1192,6 +1192,7 @@ export default {
   "Project context (optional)": "Kontext projektu (volitelný)",
   "Project cover image": "Titulní obrázek projektu",
   "Project created successfully": "Projekt byl úspěšně vytvořen",
+  "Project default pod": "Project default pod",
   "Project ID": "ID projektu",
   "Project ID is required": "ID projektu je povinné",
   "Project ID must at least be of 1 character": "ID projektu musí mít alespoň 1 znak",
@@ -1689,6 +1690,8 @@ export default {
   "Which AI agent CLI this runner will drive. Baked into the displayed ``pidash runner add`` command.":
     "Který CLI agenta AI bude tento runner řídit. Zakomponováno do zobrazeného příkazu ``pidash runner add``.",
   "Which events would you like to trigger this webhook?": "Které události chcete použít k aktivaci tohoto webhooku?",
+  "Which pod's runners serve this scheduler's runs. Leave on the project default unless you need a specific machine fleet.":
+    "Which pod's runners serve this scheduler's runs. Leave on the project default unless you need a specific machine fleet.",
   "Widget reordered successfully.": "Widget byl úspěšně přeuspořádán.",
   "Windows (MSI)": "Windows (MSI)",
   "Windows (PowerShell)": "Windows (PowerShell)",

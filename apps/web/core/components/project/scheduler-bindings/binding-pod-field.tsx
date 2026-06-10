@@ -4,7 +4,8 @@
  * See the LICENSE file for details.
  */
 
-import { Controller } from "react-hook-form";
+import { useEffect } from "react";
+import { useController } from "react-hook-form";
 import type { Control, FieldValues, Path } from "react-hook-form";
 import useSWR from "swr";
 import { useTranslation } from "@pi-dash/i18n";
@@ -34,31 +35,38 @@ export function BindingPodField<T extends FieldValues>({ control, name, projectI
     projectId ? () => podService.list(undefined, projectId) : null
   );
 
+  // If the selected pod is no longer among the project's active pods (e.g. it
+  // was deleted after this binding was created), the <select> silently renders
+  // the "Project default pod" option while the form still holds the stale id —
+  // a no-op save would then 400. Normalize to the default, which also matches
+  // what the dispatcher does at fire time (it falls back for dead pods).
+  const { field } = useController({ control, name });
+  const currentPodId = field.value as string;
+  const { onChange } = field;
+  useEffect(() => {
+    if (!pods || !currentPodId) return;
+    if (!pods.some((pod) => pod.id === currentPodId)) onChange("");
+  }, [pods, currentPodId, onChange]);
+
   return (
     <div className="flex flex-col gap-1">
       <label htmlFor="binding-pod" className="text-13 font-medium text-primary">
         {t("Pod")}
       </label>
-      <Controller
-        control={control}
-        name={name}
-        render={({ field }) => (
-          <select
-            {...field}
-            id="binding-pod"
-            disabled={isLoading}
-            className="rounded-md border border-subtle bg-surface-1 px-3 py-2 text-13 text-primary focus:ring-1 focus:ring-accent-strong focus:outline-none"
-          >
-            <option value="">{t("Project default pod")}</option>
-            {(pods ?? []).map((pod) => (
-              <option key={pod.id} value={pod.id}>
-                {pod.name}
-                {pod.is_default ? ` (${t("default")})` : ""}
-              </option>
-            ))}
-          </select>
-        )}
-      />
+      <select
+        {...field}
+        id="binding-pod"
+        disabled={isLoading}
+        className="rounded-md border border-subtle bg-surface-1 px-3 py-2 text-13 text-primary focus:ring-1 focus:ring-accent-strong focus:outline-none"
+      >
+        <option value="">{t("Project default pod")}</option>
+        {(pods ?? []).map((pod) => (
+          <option key={pod.id} value={pod.id}>
+            {pod.name}
+            {pod.is_default ? ` (${t("default")})` : ""}
+          </option>
+        ))}
+      </select>
       <p className="text-12 text-secondary">
         {t(
           "Which pod's runners serve this scheduler's runs. Leave on the project default unless you need a specific machine fleet."

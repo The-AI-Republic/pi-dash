@@ -247,16 +247,18 @@ class SchedulerBindingSerializer(BaseSerializer):
             except RRuleValidationError as e:
                 raise serializers.ValidationError({"rrule": str(e)})
         # A chosen pod must belong to the binding's project. Resolve the
-        # project from the incoming data (create sends `project`), the existing
-        # instance (update), or the view-supplied context (belt-and-suspenders
-        # for the create path, where the view also injects project at save()).
+        # project from the *authoritative* source first: the existing instance
+        # (update) or the view-supplied context (create — the view injects this
+        # project at save()). Only fall back to the client-sent `project` when
+        # neither is available. Trusting the request body here would let a
+        # crafted payload pass a foreign-project pod (claim project=B, send a
+        # B-pod) while save() still pins the binding to the URL's project.
         pod = attrs.get("pod")
         if pod is not None:
-            incoming_project = attrs.get("project")
             project_id = (
-                getattr(incoming_project, "id", None)
-                or (self.instance.project_id if self.instance is not None else None)
+                (self.instance.project_id if self.instance is not None else None)
                 or getattr(self.context.get("project"), "id", None)
+                or getattr(attrs.get("project"), "id", None)
             )
             if project_id is not None and pod.project_id != project_id:
                 raise serializers.ValidationError(
