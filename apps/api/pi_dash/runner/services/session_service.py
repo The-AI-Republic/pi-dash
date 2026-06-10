@@ -32,7 +32,7 @@ OFFLINE_GRACE_SECS = 60
 
 # Grace window protecting freshly-assigned runs from the reaper.
 #
-# The reaper runs on every long-poll request (`RunnerSessionPollEndpoint`)
+# The reaper runs on every long-poll request (`runner_session_poll`)
 # *before* the outbox is drained for that same response. So the very poll
 # that's about to deliver an Assign to the runner is the poll where the
 # runner still legitimately reports `in_flight_run=null` (it hasn't seen

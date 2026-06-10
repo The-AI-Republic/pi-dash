@@ -16,15 +16,19 @@ See ``.ai_design/move_to_https/design.md`` §7.1 / §7.3. Three verbs:
 
 from __future__ import annotations
 
+import json
 import logging
 import time
 import uuid as _uuid
 from typing import Any, Dict, List
 
+from asgiref.sync import sync_to_async
 from django.conf import settings
 from django.db import transaction
+from django.http import JsonResponse
 from django.utils import timezone
 from redis.exceptions import RedisError
+from rest_framework import exceptions as drf_exceptions
 from rest_framework import status
 from rest_framework.response import Response
 from rest_framework.views import APIView
@@ -266,219 +270,277 @@ class RunnerSessionDeleteEndpoint(APIView):
         return Response(status=status.HTTP_204_NO_CONTENT)
 
 
-class RunnerSessionPollEndpoint(APIView):
-    """``POST /runners/<rid>/sessions/<sid>/poll`` — long-poll."""
+def _authenticate_poll_runner(request):
+    """Run :class:`RunnerAccessTokenAuthentication` outside DRF.
 
-    authentication_classes = [RunnerAccessTokenAuthentication]
-    permission_classes: list = []
-    throttle_classes: list = []
+    The long-poll view is a plain Django async view (DRF's ``APIView``
+    cannot await), so the auth class is invoked directly. Raises
+    ``rest_framework.exceptions.AuthenticationFailed`` exactly like the
+    DRF dispatch path; returns the authenticated runner or ``None``
+    when no bearer credential was presented.
+    """
+    result = RunnerAccessTokenAuthentication().authenticate(request)
+    if result is None:
+        return None
+    return getattr(request, "auth_runner", None)
 
-    def post(self, request, runner_id, sid):
-        runner = getattr(request, "auth_runner", None)
-        if runner is None or str(runner.id) != str(runner_id):
-            return Response(
-                {"error": "runner_id_mismatch"},
-                status=status.HTTP_403_FORBIDDEN,
-            )
 
-        try:
-            session = RunnerSession.objects.get(id=sid, runner=runner)
-        except RunnerSession.DoesNotExist:
-            return Response(
-                {"error": "session_evicted"},
-                status=status.HTTP_409_CONFLICT,
-            )
-        if session.revoked_at is not None:
-            return Response(
-                {"error": "session_evicted", "reason": session.revoked_reason},
-                status=status.HTTP_409_CONFLICT,
-            )
+def _poll_bookkeeping(runner, body: Dict[str, Any], sid):
+    """Sync pre-wait phase of the long poll: session checks, heartbeat,
+    stale-run reaping, acks, and drain scheduling.
 
-        body = request.data or {}
-        ack_ids: List[str] = list(body.get("ack") or [])
-        raw_status = body.get("status") or {}
-        status_entry: Dict[str, Any] = raw_status if isinstance(raw_status, dict) else {}
-
-        # 2. Update session.last_seen_at.
-        session.last_seen_at = timezone.now()
-        session.save(update_fields=["last_seen_at"])
-
-        # 3. Update runner.last_heartbeat_at + reap stale busy runs.
-        from pi_dash.runner.models import Runner
-        from pi_dash.runner.services.matcher import (
-            HEARTBEAT_GRACE,
-            drain_for_runner_by_id,
+    Returns ``(error, plan)`` — exactly one is non-None. ``error`` is
+    ``{"payload": ..., "status": ...}`` for an early rejection; ``plan``
+    carries ``block_ms`` / ``use_zero`` for the async wait phase.
+    """
+    try:
+        session = RunnerSession.objects.get(id=sid, runner=runner)
+    except RunnerSession.DoesNotExist:
+        return (
+            {"payload": {"error": "session_evicted"}, "status": status.HTTP_409_CONFLICT},
+            None,
+        )
+    if session.revoked_at is not None:
+        return (
+            {
+                "payload": {"error": "session_evicted", "reason": session.revoked_reason},
+                "status": status.HTTP_409_CONFLICT,
+            },
+            None,
         )
 
-        # Capture prior heartbeat/status from the DB so we can detect when this
-        # poll makes the runner eligible for queued work again.
-        now_ts = timezone.now()
-        with transaction.atomic():
-            runner_snapshot = (
-                Runner.objects.select_for_update().filter(pk=runner.id).values("last_heartbeat_at", "status").get()
-            )
-            prior_hb = runner_snapshot["last_heartbeat_at"]
-            prior_status = runner_snapshot["status"]
-            was_stale = prior_hb is None or (now_ts - prior_hb) > HEARTBEAT_GRACE
-            reported_status = status_entry.get("status")
-            reports_busy = reported_status == "busy"
-            reports_available = reported_status in {"idle", "online"}
-            became_available = prior_status == RunnerStatus.BUSY and reports_available
-            status_allows_drain = reports_available or (not status_entry and prior_status != RunnerStatus.BUSY)
+    ack_ids: List[str] = list(body.get("ack") or [])
+    raw_status = body.get("status") or {}
+    status_entry: Dict[str, Any] = raw_status if isinstance(raw_status, dict) else {}
 
-            runner_updates: Dict[str, Any] = {
-                "last_heartbeat_at": now_ts,
-                "status": RunnerStatus.BUSY if reports_busy else RunnerStatus.ONLINE,
-            }
-            # Capacity hint (design §6.4): persist the free-desk count the
-            # runner reports for its work-dir pool so the matcher can prefer
-            # runners with spare worktrees. Additive + optional — old runners
-            # omit the field and we leave the column untouched.
-            free_worktrees = session_service.parse_free_worktrees(
-                status_entry.get("free_worktrees")
-            )
-            if free_worktrees is not None:
-                runner_updates["free_worktrees"] = free_worktrees
-            Runner.objects.filter(pk=runner.id).update(**runner_updates)
-            if status_entry:
-                session_service.reap_stale_busy_runs(runner, status_entry)
+    # 2. Update session.last_seen_at.
+    session.last_seen_at = timezone.now()
+    session.save(update_fields=["last_seen_at"])
+
+    # 3. Update runner.last_heartbeat_at + reap stale busy runs.
+    from pi_dash.runner.models import Runner
+    from pi_dash.runner.services.matcher import (
+        HEARTBEAT_GRACE,
+        drain_for_runner_by_id,
+    )
+
+    # Capture prior heartbeat/status from the DB so we can detect when this
+    # poll makes the runner eligible for queued work again.
+    now_ts = timezone.now()
+    with transaction.atomic():
+        runner_snapshot = (
+            Runner.objects.select_for_update().filter(pk=runner.id).values("last_heartbeat_at", "status").get()
+        )
+        prior_hb = runner_snapshot["last_heartbeat_at"]
+        prior_status = runner_snapshot["status"]
+        was_stale = prior_hb is None or (now_ts - prior_hb) > HEARTBEAT_GRACE
+        reported_status = status_entry.get("status")
+        reports_busy = reported_status == "busy"
+        reports_available = reported_status in {"idle", "online"}
+        became_available = prior_status == RunnerStatus.BUSY and reports_available
+        status_allows_drain = reports_available or (not status_entry and prior_status != RunnerStatus.BUSY)
+
+        runner_updates: Dict[str, Any] = {
+            "last_heartbeat_at": now_ts,
+            "status": RunnerStatus.BUSY if reports_busy else RunnerStatus.ONLINE,
+        }
+        # Capacity hint (design §6.4): persist the free-desk count the
+        # runner reports for its work-dir pool so the matcher can prefer
+        # runners with spare worktrees. Additive + optional — old runners
+        # omit the field and we leave the column untouched.
+        free_worktrees = session_service.parse_free_worktrees(status_entry.get("free_worktrees"))
+        if free_worktrees is not None:
+            runner_updates["free_worktrees"] = free_worktrees
+        Runner.objects.filter(pk=runner.id).update(**runner_updates)
         if status_entry:
-            # Volatile observability snapshot — see
-            # `.ai_design/runner_agent_bridge/design.md` §4.5.2.
-            # Pre-observability runners send no snapshot fields and the
-            # helper short-circuits. Failures here must never break the
-            # poll path: a malformed snapshot or a transient DB error
-            # would otherwise return 500 and spin the runner's retry loop.
+            session_service.reap_stale_busy_runs(runner, status_entry)
+    if status_entry:
+        # Volatile observability snapshot — see
+        # `.ai_design/runner_agent_bridge/design.md` §4.5.2.
+        # Pre-observability runners send no snapshot fields and the
+        # helper short-circuits. Failures here must never break the
+        # poll path: a malformed snapshot or a transient DB error
+        # would otherwise return 500 and spin the runner's retry loop.
+        try:
+            session_service.upsert_runner_live_state(runner, status_entry)
+        except Exception:
+            logger.exception(
+                "upsert_runner_live_state failed for runner %s",
+                runner.id,
+            )
+
+    # 5. XACK explicit ids.
+    if ack_ids:
+        outbox.ack_for_session(runner.id, ack_ids)
+
+    # 6. XREADGROUP — first poll uses 0 (replay PEL), subsequent
+    # polls use >.
+    use_zero = not outbox.is_pel_drained(sid)
+
+    # A session-open alone is not proof that the daemon is actually
+    # polling. Drain on either stale-heartbeat recovery or the first
+    # real poll for this session, after the heartbeat/status update
+    # makes the runner assignable. Keep this as one trigger so a first
+    # poll with no prior heartbeat does not double-dispatch.
+    if (
+        (was_stale or became_available or use_zero)
+        and status_allows_drain
+        and not status_entry.get("in_flight_run")
+    ):
+
+        def _drain_poll_ready_runner(rid=runner.id):
             try:
-                session_service.upsert_runner_live_state(runner, status_entry)
+                drain_for_runner_by_id(rid)
             except Exception:
                 logger.exception(
-                    "upsert_runner_live_state failed for runner %s",
-                    runner.id,
+                    "drain_for_runner_by_id failed for poll-ready runner %s",
+                    rid,
                 )
 
-        # 5. XACK explicit ids.
-        if ack_ids:
-            outbox.ack_for_session(runner.id, ack_ids)
+        transaction.on_commit(_drain_poll_ready_runner)
 
-        # 6. XREADGROUP — first poll uses 0 (replay PEL), subsequent
-        # polls use >.
-        use_zero = not outbox.is_pel_drained(sid)
+    block_ms = max(1, settings.LONG_POLL_INTERVAL_SECS * 1000) if not use_zero else 0
+    return None, {"block_ms": block_ms, "use_zero": use_zero}
 
-        # A session-open alone is not proof that the daemon is actually
-        # polling. Drain on either stale-heartbeat recovery or the first
-        # real poll for this session, after the heartbeat/status update
-        # makes the runner assignable. Keep this as one trigger so a first
-        # poll with no prior heartbeat does not double-dispatch.
-        if (
-            (was_stale or became_available or use_zero)
-            and status_allows_drain
-            and not status_entry.get("in_flight_run")
-        ):
 
-            def _drain_poll_ready_runner(rid=runner.id):
-                try:
-                    drain_for_runner_by_id(rid)
-                except Exception:
-                    logger.exception(
-                        "drain_for_runner_by_id failed for poll-ready runner %s",
-                        rid,
-                    )
+async def _aread_with_eviction_awareness(
+    *,
+    runner_id,
+    session_id,
+    block_ms: int,
+    use_zero: bool,
+) -> list[dict]:
+    """Await messages for the session, breaking early on eviction.
 
-            transaction.on_commit(_drain_poll_ready_runner)
-
-        block_ms = max(1, settings.LONG_POLL_INTERVAL_SECS * 1000) if not use_zero else 0
-        try:
-            messages = self._read_with_eviction_awareness(
-                runner_id=runner.id,
-                session_id=sid,
-                sid=sid,
-                block_ms=block_ms,
-                use_zero=use_zero,
-            )
-        except _SessionEvictedDuringPoll:
-            return Response(
-                {"error": "session_evicted"},
-                status=status.HTTP_409_CONFLICT,
-            )
-        if use_zero:
-            outbox.mark_pel_drained(sid)
-
-        return Response(
-            {
-                "messages": messages,
-                "server_time": timezone.now().isoformat(),
-                "long_poll_interval_secs": settings.LONG_POLL_INTERVAL_SECS,
-            }
+    Runs on the event loop (async Redis), so the long block window holds
+    no worker thread — the whole point of the async poll view. A sync
+    DRF view would pin the per-process ``thread_sensitive`` thread for
+    the full block window, serializing every other sync request behind
+    it (observed in production as 5s+ page loads with a handful of
+    connected runners).
+    """
+    if block_ms <= 0:
+        if not use_zero:
+            return []
+        # The initial PEL replay uses STREAMS ... 0 and must remain
+        # nonblocking. The dangerous Redis case is BLOCK 0 with ">".
+        return await outbox.aread_for_session(
+            runner_id=runner_id,
+            session_id=session_id,
+            block_ms=0,
+            count=100,
+            use_zero=use_zero,
         )
 
-    def _read_with_eviction_awareness(
-        self,
-        *,
-        runner_id,
-        session_id,
-        sid,
-        block_ms: int,
-        use_zero: bool,
-    ) -> list[dict]:
-        if block_ms <= 0:
-            if not use_zero:
+    from pi_dash.settings.redis import async_redis_instance
+
+    client = async_redis_instance()
+    if client is None:
+        return await outbox.aread_for_session(
+            runner_id=runner_id,
+            session_id=session_id,
+            block_ms=block_ms,
+            count=100,
+            use_zero=use_zero,
+        )
+
+    pubsub = client.pubsub(ignore_subscribe_messages=True)
+    try:
+        await pubsub.subscribe(outbox.session_eviction_channel(runner_id))
+        deadline = time.monotonic() + (block_ms / 1000.0)
+        while True:
+            remaining_ms = max(0, int((deadline - time.monotonic()) * 1000))
+            # CRITICAL: bail BEFORE calling Redis when the deadline
+            # has expired. `XREADGROUP BLOCK 0 STREAMS … >` means
+            # "block forever" in Redis (BLOCK 0 is documented as
+            # "block indefinitely"), not "do not block." If we let
+            # `slice_ms` reach 0 and call aread_for_session, the
+            # underlying XREADGROUP parks the request indefinitely —
+            # well beyond the runner's HTTP timeout — and any assign
+            # message that lands later gets claimed by this dead
+            # consumer's PEL where the live session can never see it.
+            # Observed in production: poll handlers stuck for 4+
+            # hours on evicted sessions, blocking gunicorn workers
+            # and reaping unrelated runs whose assigns couldn't
+            # reach the live runner.
+            if remaining_ms <= 0:
                 return []
-            # The initial PEL replay uses STREAMS ... 0 and must remain
-            # nonblocking. The dangerous Redis case is BLOCK 0 with ">".
-            return outbox.read_for_session(
+            slice_ms = min(_POLL_SLICE_MS, remaining_ms)
+            messages = await outbox.aread_for_session(
                 runner_id=runner_id,
                 session_id=session_id,
-                block_ms=0,
+                block_ms=slice_ms,
                 count=100,
                 use_zero=use_zero,
             )
+            if messages:
+                return messages
+            use_zero = False
+            if await pubsub.get_message(timeout=0) is not None:
+                raise _SessionEvictedDuringPoll
+    finally:
+        await pubsub.close()
 
-        from pi_dash.settings.redis import redis_instance
 
-        client = redis_instance()
-        if client is None:
-            return outbox.read_for_session(
-                runner_id=runner_id,
-                session_id=session_id,
-                block_ms=block_ms,
-                count=100,
-                use_zero=use_zero,
-            )
+async def runner_session_poll(request, runner_id, sid):
+    """``POST /runners/<rid>/sessions/<sid>/poll`` — long-poll.
 
-        pubsub = client.pubsub(ignore_subscribe_messages=True)
+    A plain Django **async** view rather than a DRF ``APIView``: the
+    request spends up to ``LONG_POLL_INTERVAL_SECS`` (~25s) parked
+    waiting for control-plane messages, and under ASGI every sync view
+    in a worker shares one ``thread_sensitive`` thread — a sync long
+    poll therefore blocks every other request on that worker for the
+    whole window. Auth and DB bookkeeping stay sync (briefly, via
+    ``sync_to_async``); only the wait is async.
+    """
+    if request.method != "POST":
+        return JsonResponse({"detail": f'Method "{request.method}" not allowed.'}, status=405)
+
+    try:
+        runner = await sync_to_async(_authenticate_poll_runner)(request)
+    except drf_exceptions.AuthenticationFailed as exc:
+        return JsonResponse({"detail": str(exc.detail)}, status=status.HTTP_401_UNAUTHORIZED)
+    if runner is None or str(runner.id) != str(runner_id):
+        return JsonResponse({"error": "runner_id_mismatch"}, status=status.HTTP_403_FORBIDDEN)
+
+    body: Dict[str, Any] = {}
+    if request.body:
         try:
-            pubsub.subscribe(outbox.session_eviction_channel(runner_id))
-            deadline = time.monotonic() + (block_ms / 1000.0)
-            while True:
-                remaining_ms = max(0, int((deadline - time.monotonic()) * 1000))
-                # CRITICAL: bail BEFORE calling Redis when the deadline
-                # has expired. `XREADGROUP BLOCK 0 STREAMS … >` means
-                # "block forever" in Redis (BLOCK 0 is documented as
-                # "block indefinitely"), not "do not block." If we let
-                # `slice_ms` reach 0 and call read_for_session, the
-                # underlying XREADGROUP parks the worker indefinitely —
-                # well beyond the runner's HTTP timeout — and any assign
-                # message that lands later gets claimed by this dead
-                # consumer's PEL where the live session can never see it.
-                # Observed in production: poll handlers stuck for 4+
-                # hours on evicted sessions, blocking gunicorn workers
-                # and reaping unrelated runs whose assigns couldn't
-                # reach the live runner.
-                if remaining_ms <= 0:
-                    return []
-                slice_ms = min(_POLL_SLICE_MS, remaining_ms)
-                messages = outbox.read_for_session(
-                    runner_id=runner_id,
-                    session_id=session_id,
-                    block_ms=slice_ms,
-                    count=100,
-                    use_zero=use_zero,
-                )
-                if messages:
-                    return messages
-                use_zero = False
-                if pubsub.get_message(timeout=0) is not None:
-                    raise _SessionEvictedDuringPoll
-        finally:
-            pubsub.close()
+            parsed = json.loads(request.body)
+        except ValueError:
+            return JsonResponse({"detail": "JSON parse error"}, status=status.HTTP_400_BAD_REQUEST)
+        if isinstance(parsed, dict):
+            body = parsed
+
+    error, plan = await sync_to_async(_poll_bookkeeping)(runner, body, sid)
+    if error is not None:
+        return JsonResponse(error["payload"], status=error["status"])
+
+    try:
+        messages = await _aread_with_eviction_awareness(
+            runner_id=runner.id,
+            session_id=sid,
+            block_ms=plan["block_ms"],
+            use_zero=plan["use_zero"],
+        )
+    except _SessionEvictedDuringPoll:
+        return JsonResponse({"error": "session_evicted"}, status=status.HTTP_409_CONFLICT)
+    if plan["use_zero"]:
+        await sync_to_async(outbox.mark_pel_drained)(sid)
+
+    return JsonResponse(
+        {
+            "messages": messages,
+            "server_time": timezone.now().isoformat(),
+            "long_poll_interval_secs": settings.LONG_POLL_INTERVAL_SECS,
+        }
+    )
+
+
+# Django 4.2's ``@csrf_exempt`` wraps the view in a *sync* function, which
+# hides the coroutine from the handler's async detection (the request then
+# returns an un-awaited coroutine). Async decorator support only landed in
+# Django 5.0, so mark the attribute directly. The runner daemon authenticates
+# with a bearer token, never cookies, so CSRF does not apply — this mirrors
+# DRF's csrf-exempt dispatch the endpoint had as an ``APIView``.
+runner_session_poll.csrf_exempt = True
