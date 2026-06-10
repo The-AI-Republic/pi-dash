@@ -65,7 +65,7 @@ from .runs import (
 from .sessions import (
     RunnerSessionDeleteEndpoint,
     RunnerSessionOpenEndpoint,
-    RunnerSessionPollEndpoint,
+    runner_session_poll,
 )
 
 __all__ = [
@@ -123,5 +123,5 @@ __all__ = [
     "RunStreamUpgradeEndpoint",
     "RunnerSessionDeleteEndpoint",
     "RunnerSessionOpenEndpoint",
-    "RunnerSessionPollEndpoint",
+    "runner_session_poll",
 ]

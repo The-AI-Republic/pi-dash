@@ -106,11 +106,11 @@ def _patched_poll_dependencies(*, drain_side_effect=None, is_pel_drained=True):
         ),
         patch("pi_dash.runner.views.sessions.outbox.mark_pel_drained"),
         patch(
-            "pi_dash.runner.views.sessions.outbox.read_for_session",
+            "pi_dash.runner.views.sessions.outbox.aread_for_session",
             return_value=[],
         ),
         # Eviction-aware reader's pubsub fallback — short-circuit it.
-        patch("pi_dash.settings.redis.redis_instance", return_value=None),
+        patch("pi_dash.settings.redis.async_redis_instance", return_value=None),
         # Fire on_commit callbacks inline so the drain assertion is synchronous.
         patch(
             "django.db.transaction.on_commit",
@@ -282,3 +282,32 @@ def test_drain_failure_does_not_fail_poll_response(db, api_client, enrolled_runn
 
     assert resp.status_code == 200, resp.data
     mock_drain.assert_called_once_with(enrolled_runner.id)
+
+
+@pytest.mark.unit
+def test_poll_endpoint_is_csrf_exempt(db, enrolled_runner, runner_token, runner_session):
+    """Regression: the poll view must stay CSRF-exempt.
+
+    It replaced a DRF ``APIView`` (csrf-exempt by default) with a plain
+    Django async view, which CsrfViewMiddleware *does* enforce unless the
+    view carries ``csrf_exempt``. The runner posts bearer-only with no CSRF
+    token, so dropping the exemption would 403 every poll in production.
+
+    DRF's ``APIClient`` (used by the other tests here) bypasses CSRF, so it
+    can't catch that regression — this uses Django's test ``Client`` with
+    ``enforce_csrf_checks=True`` to actually run CsrfViewMiddleware.
+    """
+    from django.test import Client
+
+    client = Client(enforce_csrf_checks=True)
+    with _patched_poll_dependencies():
+        resp = client.post(
+            f"/api/v1/runner/runners/{enrolled_runner.id}/sessions/{runner_session.id}/poll",
+            data="{}",
+            content_type="application/json",
+            HTTP_AUTHORIZATION=f"Bearer {runner_token}",
+        )
+
+    # 200 = passed CSRF + auth + bookkeeping. A CSRF rejection would be 403
+    # with a CSRF failure reason, which is exactly the regression we guard.
+    assert resp.status_code == 200, resp.content

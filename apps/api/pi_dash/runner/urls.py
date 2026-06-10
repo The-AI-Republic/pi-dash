@@ -41,7 +41,7 @@ from pi_dash.runner.views import (
     RunnerSelfRevokeEndpoint,
     RunnerSessionDeleteEndpoint,
     RunnerSessionOpenEndpoint,
-    RunnerSessionPollEndpoint,
+    runner_session_poll,
 )
 
 app_name = "runner"
@@ -97,7 +97,7 @@ urlpatterns = [
     ),
     path(
         "runners/<uuid:runner_id>/sessions/<uuid:sid>/poll",
-        RunnerSessionPollEndpoint.as_view(),
+        runner_session_poll,
         name="runner-session-poll",
     ),
     # Run-lifecycle + event upstream.
