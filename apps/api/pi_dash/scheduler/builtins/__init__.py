@@ -79,15 +79,19 @@ path and line range, category (security|correctness) and a specific subtype,
 severity (high|medium|low), confidence (high|medium|low), a 1-3 sentence
 explanation of the exploit path or failure mode, and a concrete fix.
 
-For each NEW finding, create a Pi Dash issue with the `pi-dash` CLI:
+For each NEW finding, create a Pi Dash issue with the `pi-dash` CLI. Use the
+title prefix "[fable-security]" for security findings and "[fable-bug]" for
+correctness findings (a dedicated namespace so this audit does not collide with
+the basic "[security]" Security Audit scheduler):
     pi-dash issue create \\
-      --title "[security] <short summary>"   # use [bug] for correctness findings
+      --title "[fable-security] <short summary>" \\
       --description "<file path + line range, category/subtype, severity,
                      confidence, explanation, and suggested fix>"
 
-Before creating an issue, list existing open issues with the "[security]" or
-"[bug]" title prefix and skip any finding that already has a corresponding open
-issue (de-dupe by file + subtype, not by exact title). Never refile duplicates.
+Before creating an issue, list existing open issues with the "[fable-security]"
+or "[fable-bug]" title prefix and skip any finding that already has a
+corresponding open issue (de-dupe by file + subtype, not by exact title). Never
+refile duplicates.
 
 End with a one-line summary: issues filed, duplicates skipped, breakdown by
 severity. If there are no new findings, file nothing and report "No new findings".

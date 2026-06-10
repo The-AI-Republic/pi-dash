@@ -20,7 +20,7 @@ than failing the ``(workspace, slug)`` unique constraint.
 See ``.ai_design/project_scheduler/design.md`` §6.6.
 """
 
-from django.db import migrations
+from django.db import IntegrityError, migrations, transaction
 
 TARGET_SLUG = "fable-security-audit"
 
@@ -39,6 +39,15 @@ def _seed_fable_audit(apps, schema_editor):
         # nothing to seed.
         return
 
+    def _apply_defaults(row):
+        row.name = builtin.name
+        row.description = builtin.description
+        row.prompt = builtin.prompt
+        row.source = "builtin"
+        row.save(
+            update_fields=["name", "description", "prompt", "source", "updated_at"]
+        )
+
     for workspace in Workspace.objects.filter(deleted_at__isnull=True).iterator():
         existing = Scheduler.objects.filter(
             workspace=workspace,
@@ -46,22 +55,30 @@ def _seed_fable_audit(apps, schema_editor):
             deleted_at__isnull=True,
         ).first()
         if existing is not None:
-            existing.name = builtin.name
-            existing.description = builtin.description
-            existing.prompt = builtin.prompt
-            existing.source = "builtin"
-            existing.save(
-                update_fields=["name", "description", "prompt", "source", "updated_at"]
-            )
-        else:
-            Scheduler.objects.create(
+            _apply_defaults(existing)
+            continue
+        # The Workspace post_save signal can insert this same row between our
+        # SELECT and INSERT (e.g. a signup during a rolling deploy). Wrap the
+        # create in a savepoint so the conflicting INSERT doesn't abort the
+        # whole migration transaction, then converge by updating the winner.
+        try:
+            with transaction.atomic():
+                Scheduler.objects.create(
+                    workspace=workspace,
+                    slug=builtin.slug,
+                    name=builtin.name,
+                    description=builtin.description,
+                    prompt=builtin.prompt,
+                    source="builtin",
+                )
+        except IntegrityError:
+            winner = Scheduler.objects.filter(
                 workspace=workspace,
                 slug=builtin.slug,
-                name=builtin.name,
-                description=builtin.description,
-                prompt=builtin.prompt,
-                source="builtin",
-            )
+                deleted_at__isnull=True,
+            ).first()
+            if winner is not None:
+                _apply_defaults(winner)
 
 
 def _noop_reverse(apps, schema_editor):
