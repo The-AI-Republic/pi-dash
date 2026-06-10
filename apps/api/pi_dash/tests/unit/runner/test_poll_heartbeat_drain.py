@@ -106,11 +106,11 @@ def _patched_poll_dependencies(*, drain_side_effect=None, is_pel_drained=True):
         ),
         patch("pi_dash.runner.views.sessions.outbox.mark_pel_drained"),
         patch(
-            "pi_dash.runner.views.sessions.outbox.read_for_session",
+            "pi_dash.runner.views.sessions.outbox.aread_for_session",
             return_value=[],
         ),
         # Eviction-aware reader's pubsub fallback — short-circuit it.
-        patch("pi_dash.settings.redis.redis_instance", return_value=None),
+        patch("pi_dash.settings.redis.async_redis_instance", return_value=None),
         # Fire on_commit callbacks inline so the drain assertion is synchronous.
         patch(
             "django.db.transaction.on_commit",

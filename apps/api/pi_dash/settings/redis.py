@@ -6,12 +6,17 @@ import threading
 from urllib.parse import unquote, urlparse
 
 import redis
+import redis.asyncio as aioredis
 from django.conf import settings
 
 
 _redis_client = None
 _redis_client_key = None
 _redis_lock = threading.Lock()
+
+_async_redis_client = None
+_async_redis_client_key = None
+_async_redis_lock = threading.Lock()
 
 
 def _float_setting(name: str, default: float) -> float:
@@ -109,3 +114,74 @@ def redis_instance():
             _redis_client = redis.Redis.from_url(settings.REDIS_URL, db=0, **kwargs)
         _redis_client_key = key
         return _redis_client
+
+
+async def close_async_redis_instance():
+    """Close the cached asyncio Redis client for this process."""
+
+    global _async_redis_client, _async_redis_client_key
+    client = None
+    with _async_redis_lock:
+        client = _async_redis_client
+        _async_redis_client = None
+        _async_redis_client_key = None
+    if client is not None:
+        await client.aclose()
+
+
+def async_redis_instance():
+    """Asyncio twin of :func:`redis_instance`.
+
+    Same URL, timeouts, and ``db=0`` pinning as the sync client so the
+    two clients always observe the same keyspace. Used by async views
+    (runner long-poll, chat SSE) that must block on Redis without
+    holding a worker thread.
+    """
+
+    if not settings.REDIS_URL:
+        raise RuntimeError("REDIS_URL is required to create a Redis client")
+
+    connect_timeout = _float_setting("REDIS_SOCKET_CONNECT_TIMEOUT", 2.0)
+    socket_timeout = _float_setting("REDIS_SOCKET_TIMEOUT", 5.0)
+    health_check_interval = _int_setting("REDIS_HEALTH_CHECK_INTERVAL", 30)
+    max_connections = _optional_int_setting("REDIS_MAX_CONNECTIONS")
+    key = (
+        settings.REDIS_URL,
+        bool(settings.REDIS_SSL),
+        connect_timeout,
+        socket_timeout,
+        health_check_interval,
+        max_connections,
+    )
+
+    global _async_redis_client, _async_redis_client_key
+    if _async_redis_client is not None and _async_redis_client_key == key:
+        return _async_redis_client
+
+    with _async_redis_lock:
+        if _async_redis_client is not None and _async_redis_client_key == key:
+            return _async_redis_client
+
+        kwargs = {
+            "socket_connect_timeout": connect_timeout,
+            "socket_timeout": socket_timeout,
+            "health_check_interval": health_check_interval,
+        }
+        if max_connections is not None:
+            kwargs["max_connections"] = max_connections
+        if settings.REDIS_SSL:
+            url = urlparse(settings.REDIS_URL)
+            password = unquote(url.password) if url.password is not None else None
+            _async_redis_client = aioredis.Redis(
+                host=url.hostname,
+                port=url.port,
+                password=password,
+                db=0,
+                ssl=True,
+                ssl_cert_reqs=None,
+                **kwargs,
+            )
+        else:
+            _async_redis_client = aioredis.Redis.from_url(settings.REDIS_URL, db=0, **kwargs)
+        _async_redis_client_key = key
+        return _async_redis_client
