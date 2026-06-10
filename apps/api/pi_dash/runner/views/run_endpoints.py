@@ -126,6 +126,68 @@ class RunAcceptEndpoint(_RunEndpointBase):
         return Response({"ok": True})
 
 
+class RunQueuedEndpoint(_RunEndpointBase):
+    """``POST /runs/<run_id>/queued`` — runner reports the run is waiting.
+
+    The runner accepted the run but cannot acquire a worktree lease yet, so it
+    sits in the daemon's local queue. Body carries ``queue_position`` (the
+    run's position in that queue). See
+    ``.ai_design/worktree_pooling/design.md`` §6.1.
+
+    Transition rules:
+
+    - ``ASSIGNED`` → ``WAITING_FOR_WORKTREE`` (and store the position).
+    - ``WAITING_FOR_WORKTREE`` → ``WAITING_FOR_WORKTREE`` (position refresh as
+      the queue drains; positions only decrease).
+    - ``RUNNING`` or any terminal status → acknowledged and dropped without a
+      state change. A late or duplicate ``queued`` post must never regress a
+      run that already started (or finished); the runner posts ``accept`` at
+      lease grant, which is what actually drives ``RUNNING``.
+    """
+
+    def post(self, request, run_id):
+        run, err = self._resolve(request, run_id)
+        if err:
+            return err
+        with transaction.atomic():
+            if not _record_dedupe(run, _idempotency_key(request)):
+                return Response({"ok": True, "duplicate": True})
+            locked, closed = self._lock_non_terminal(run)
+            if closed:
+                # Terminal: acknowledge so the runner stops retrying; the
+                # ``_lock_non_terminal`` helper already returns ``terminal``.
+                return closed
+            if locked.status not in (
+                AgentRunStatus.ASSIGNED,
+                AgentRunStatus.WAITING_FOR_WORKTREE,
+            ):
+                # RUNNING (or any other non-terminal state): acknowledge and
+                # drop. A run that has already started must not regress to
+                # WAITING_FOR_WORKTREE on a late/duplicate queued post.
+                return Response({"ok": True, "ignored": True})
+            position = _parse_queue_position(request.data.get("queue_position"))
+            AgentRun.objects.filter(pk=locked.pk).update(
+                status=AgentRunStatus.WAITING_FOR_WORKTREE,
+                queue_position=position,
+            )
+        return Response({"ok": True})
+
+
+def _parse_queue_position(raw) -> Optional[int]:
+    """Coerce a reported queue position to a non-negative int, else ``None``.
+
+    A missing or malformed value clears the stored position rather than
+    erroring — the field is display-only and never load-bearing.
+    """
+    if raw is None:
+        return None
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        return None
+    return value if value >= 0 else None
+
+
 class RunStartedEndpoint(_RunEndpointBase):
     def post(self, request, run_id):
         run, err = self._resolve(request, run_id)

@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use tokio::process::Command;
 
@@ -78,6 +78,179 @@ pub async fn checkout_work_branch(path: &Path, branch: &str) -> Result<()> {
         .await
         .with_context(|| format!("git checkout {branch}"))?;
     Ok(())
+}
+
+/// Add a detached-HEAD worktree of `repo` at `worktree_path`. Detached so the
+/// fresh desk holds no branch lock until a run checks one out. Worktree
+/// pooling (`.ai_design/worktree_pooling/design.md` §4.2).
+pub async fn worktree_add(repo: &Path, worktree_path: &Path) -> Result<()> {
+    if let Some(parent) = worktree_path.parent() {
+        tokio::fs::create_dir_all(parent)
+            .await
+            .with_context(|| format!("creating worktree parent {parent:?}"))?;
+    }
+    // `--` before the path keeps a hostile/odd path from being read as a flag.
+    git_output(
+        repo,
+        &[
+            "worktree",
+            "add",
+            "--detach",
+            "--",
+            &worktree_path.to_string_lossy(),
+        ],
+    )
+    .await
+    .with_context(|| format!("git worktree add {worktree_path:?}"))?;
+    Ok(())
+}
+
+/// Remove a worktree. `force` drops it even if dirty (used when a worktree is
+/// corrupt or being reclaimed). Always followed by `worktree_prune` by callers
+/// that delete the directory out from under git.
+pub async fn worktree_remove(repo: &Path, worktree_path: &Path, force: bool) -> Result<()> {
+    let path = worktree_path.to_string_lossy().to_string();
+    let mut args = vec!["worktree", "remove"];
+    if force {
+        args.push("--force");
+    }
+    args.push("--");
+    args.push(&path);
+    git_output(repo, &args)
+        .await
+        .with_context(|| format!("git worktree remove {worktree_path:?}"))?;
+    Ok(())
+}
+
+/// `git worktree prune` — clears bookkeeping for worktrees whose directories
+/// vanished (e.g. a crash, or a forced `rm -rf`). Cheap and idempotent.
+pub async fn worktree_prune(repo: &Path) -> Result<()> {
+    git_output(repo, &["worktree", "prune"])
+        .await
+        .context("git worktree prune")?;
+    Ok(())
+}
+
+/// Map of branch name -> worktree path for every branch currently checked out
+/// across `repo` and all its worktrees (including the canonical clone itself).
+/// This is the branch-lock source of truth: git refuses to check out a branch
+/// that's already checked out elsewhere, so the pool consults this before
+/// granting a lease (design §4.3).
+pub async fn checked_out_branches(repo: &Path) -> Result<std::collections::HashMap<String, PathBuf>> {
+    let out = git_output(repo, &["worktree", "list", "--porcelain"]).await?;
+    let mut map = std::collections::HashMap::new();
+    let mut current_path: Option<PathBuf> = None;
+    for line in out.lines() {
+        if let Some(rest) = line.strip_prefix("worktree ") {
+            current_path = Some(PathBuf::from(rest.trim()));
+        } else if let Some(rest) = line.strip_prefix("branch ") {
+            // Porcelain emits the full ref, e.g. `refs/heads/feature`.
+            let branch = rest
+                .trim()
+                .strip_prefix("refs/heads/")
+                .unwrap_or(rest.trim())
+                .to_string();
+            if let Some(p) = &current_path {
+                map.insert(branch, p.clone());
+            }
+        }
+        // A `detached` line (no `branch`) means that worktree holds no lock.
+    }
+    Ok(map)
+}
+
+/// Disable auto-gc on a repo so a background `git gc` can't race concurrent
+/// worktree checkouts/fetches against the shared object database (pool init).
+pub async fn set_gc_auto_off(repo: &Path) -> Result<()> {
+    git_output(repo, &["config", "gc.auto", "0"])
+        .await
+        .context("git config gc.auto 0")?;
+    Ok(())
+}
+
+/// Park a worktree on a detached HEAD so it holds no branch lock while idle in
+/// the pool (design §4.4). No-op-safe to call on an already-detached worktree.
+pub async fn detach_head(worktree: &Path) -> Result<()> {
+    git_output(worktree, &["checkout", "--detach"])
+        .await
+        .context("git checkout --detach")?;
+    Ok(())
+}
+
+/// Scrub a leased worktree before it returns to the pool, per `mode`
+/// (design §4.4):
+/// - `KeepIgnored`: `reset --hard` + `clean -fd` (keep gitignored files).
+/// - `Allowlist`: like `Full` but `--exclude`s each `keep_paths` glob.
+/// - `Full`: `reset --hard` + `clean -fdx` (pristine).
+pub async fn reset_clean(
+    worktree: &Path,
+    mode: crate::config::schema::CleanMode,
+    keep_paths: &[String],
+) -> Result<()> {
+    use crate::config::schema::CleanMode;
+    git_output(worktree, &["reset", "--hard"])
+        .await
+        .context("git reset --hard")?;
+    match mode {
+        CleanMode::KeepIgnored => {
+            git_output(worktree, &["clean", "-fd"])
+                .await
+                .context("git clean -fd")?;
+        }
+        CleanMode::Full => {
+            git_output(worktree, &["clean", "-fdx"])
+                .await
+                .context("git clean -fdx")?;
+        }
+        CleanMode::Allowlist => {
+            // Build `clean -fdx -e <glob> -e <glob> …`. Reject globs that look
+            // like flags so a malicious config can't smuggle one past `git`.
+            let mut args: Vec<String> =
+                vec!["clean".into(), "-fdx".into()];
+            for g in keep_paths {
+                if g.starts_with('-') || g.contains(['\n', '\0']) {
+                    anyhow::bail!("invalid keep_paths glob: {g:?}");
+                }
+                args.push("-e".into());
+                args.push(g.clone());
+            }
+            let argref: Vec<&str> = args.iter().map(String::as_str).collect();
+            git_output(worktree, &argref)
+                .await
+                .context("git clean -fdx (allowlist)")?;
+        }
+    }
+    Ok(())
+}
+
+/// Best-effort salvage of a dirty worktree before it's cleaned and recycled
+/// (design §4.4 step 1). Commits everything to `branch` as a WIP commit and
+/// tries to push it, so a failed/cancelled run's working state survives. The
+/// commit is left on the local branch ref even if the push fails — `git log`
+/// in the canonical clone can still find it. Returns `Ok(Some(sha))` if a WIP
+/// commit was made, `Ok(None)` if the tree was clean (nothing to salvage).
+pub async fn salvage_wip(worktree: &Path, branch: &str, label: &str) -> Result<Option<String>> {
+    validate_branch_name(branch)?;
+    // Nothing to do if the tree is clean.
+    let status = git_output(worktree, &["status", "--porcelain"]).await?;
+    if status.trim().is_empty() {
+        return Ok(None);
+    }
+    git_output(worktree, &["add", "-A"])
+        .await
+        .context("git add -A (salvage)")?;
+    let msg = format!("wip(pidash): salvaged working state from {label}");
+    // `--no-verify` so a repo's commit hooks can't block salvage; `-q` quiets.
+    git_output(worktree, &["commit", "-q", "--no-verify", "-m", &msg])
+        .await
+        .context("git commit (salvage)")?;
+    let sha = git_output(worktree, &["rev-parse", "HEAD"]).await.ok();
+    // Push is best-effort: salvage's value is the local commit; the push is a
+    // convenience. A push failure (auth/network) must not block desk recycle.
+    if let Err(e) = git_output(worktree, &["push", "origin", branch]).await {
+        tracing::warn!(%branch, error = %e, "salvage push failed; WIP commit kept locally");
+    }
+    Ok(sha)
 }
 
 /// Injection-level validation: reject names that could be mistaken for a git

@@ -140,6 +140,7 @@ export default {
   "AI agent is blocked on this issue": "AIエージェントはこの課題でブロックされています",
   "AI agent is queued": "AIエージェントはキューに入っています",
   "AI agent is starting on this issue": "AIエージェントはこの課題で起動中です",
+  "AI agent is waiting for a worktree": "",
   "AI agent is waiting for approval": "AIエージェントは承認待ちです",
   "AI agent is waiting for input": "AIエージェントは入力を待っています",
   "AI agent is working on this issue": "AIエージェントはこの課題に取り組んでいます",
@@ -361,7 +362,6 @@ export default {
   "Could not load dev machines.": "開発マシンを読み込めませんでした。",
   "Could not load pods.": "ポッドを読み込めませんでした。",
   "Could not load projects.": "プロジェクトを読み込めませんでした。",
-  "Could not post comment": "コメントを投稿できませんでした。",
   "Could not revert the prompt.": "プロンプトを元に戻せませんでした。",
   "Could not revoke the dev machine.": "開発マシンを取り消せませんでした。",
   "Could not rotate the dev machine token.": "開発マシンのトークンをローテーションできませんでした。",
@@ -471,6 +471,8 @@ export default {
   Declining: "辞退中",
   default: "デフォルト",
   Default: "デフォルト",
+  "Default model this runner's agent uses. ``Default`` lets the agent pick its own; the choice is baked into the displayed ``pidash runner add`` command.":
+    "",
   "Defaults to the project's default pod.": "プロジェクトのデフォルトポッドにデフォルト設定されます。",
   "Define and customize workflow states to track the progress of your work items.":
     "ワークフローの状態を定義およびカスタマイズして、作業項目の進捗を追跡します。",
@@ -641,7 +643,6 @@ export default {
   "Failed to load pods": "ポッドの読み込みに失敗しました",
   "Failed to load runner": "",
   "Failed to move favorite": "お気に入りの移動に失敗しました",
-  "Failed to post the comment.": "コメントの投稿に失敗しました。",
   "Failed to record decision": "決定の記録に失敗しました",
   "Failed to reorder favorite": "お気に入りの並べ替えに失敗しました",
   "Failed to revoke runner": "ランナーの取り消しに失敗しました",
@@ -916,6 +917,7 @@ export default {
   "Missing headings": "見出しの欠落",
   "Missing images": "画像の欠落",
   Modal: "モーダル",
+  "Model (optional)": "",
   Modern: "モダン",
   Module: "モジュール",
   "Module actions": "モジュールアクション",
@@ -1130,10 +1132,12 @@ export default {
   "Pi Dash default": "Pi Dash デフォルト",
   "Pi Dash hands AI agents (Claude Code, Codex, …) the keys to a real dev machine so they can pick up work items, write code, and open changes. Three pieces work together to make that possible:":
     "Pi Dashは、AIエージェント（Claude Code、Codexなど）に実際の開発マシンの鍵を渡し、作業項目を取得してコードを書き、変更を開くことができるようにします。これを可能にするために、3つの要素が連携します:",
+  "Pi Dash helps you utilize best out of Claude Fable 5": "",
   "Pi Dash will auto archive work items that have been completed or canceled.":
     "Pi Dashは、完了またはキャンセルされた作業項目を自動的にアーカイブします。",
   "Pi Dash will automatically close work items that haven't been completed or canceled.":
     "Pi Dashは、完了またはキャンセルされていない作業項目を自動的にクローズします。",
+  "Pi Dash: Your AI Employee Management Platform": "",
   "Pick a project.": "プロジェクトを選択してください。",
   "Pick a scheduler.": "スケジューラーを選択してください。",
   "Pick from your workspace's enabled schedulers. Already-installed ones aren't listed.":
@@ -1154,9 +1158,6 @@ export default {
   "Pods group your runners. Issues delegate to a pod, and any free runner inside picks up the work. Click a tile to filter runners.":
     "ポッドはランナーをグループ化します。課題はポッドに委任され、内部の空いているランナーが作業を引き受けます。タイルをクリックしてランナーをフィルタリングします。",
   Points: "ポイント",
-  "Post a comment on this work item and start an AI agent run with the comment as the prompt.":
-    "この作業項目にコメントを投稿し、そのコメントをプロンプトとしてAIエージェントの実行を開始します。",
-  "Posting...": "投稿中...",
   "Powered by Pi Dash Pages": "Powered by Pi Dash Pages",
   PowerShell: "PowerShell",
   Preferences: "設定",
@@ -1221,6 +1222,9 @@ export default {
   Quarter: "四半期",
   queued: "キュー済み",
   Queued: "キュー済み",
+  "Queued (position {count})": "",
+  "Queued on runner": "",
+  "Queued on the runner's machine for a free worktree.": "",
   Quicklink: "クイックリンク",
   Quicklinks: "クイックリンク",
   "Quickly see make-or-break work items. ": "重要な作業項目をすぐに確認できます。",
@@ -1413,7 +1417,6 @@ export default {
   "Start your first project": "最初のプロジェクトを開始する",
   Started: "開始済み",
   "Started {entity}": "{entity} を開始しました",
-  "Starting run...": "実行を開始しています...",
   "Starts at": "開始時刻",
   State: "状態",
   "State change": "状態変更",
@@ -1468,7 +1471,6 @@ export default {
   "Table Layout": "テーブルレイアウト",
   "Talk to Sales": "営業に問い合わせ",
   "Team project": "チームプロジェクト",
-  "Tell the agent what you want it to do...": "エージェントに実行してほしいことを伝えてください...",
   "Template body (Jinja + Markdown)": "テンプレート本文 (Jinja + Markdown)",
   "Template not found.": "テンプレートが見つかりません。",
   "That didn't work.": "うまくいきませんでした。",
@@ -1650,6 +1652,7 @@ export default {
     "ビューはプロジェクトの構成要素です。プロジェクト設定からビューを有効にして使い始めましょう。",
   "Waiting for an available runner.": "利用可能なランナーを待機中。",
   "Waiting for the next scheduled tick.": "次のスケジュールされたティックを待機中。",
+  "waiting for worktree": "",
   Warning: "警告",
   "We are unable to process your request, please try again.":
     "リクエストを処理できませんでした。もう一度お試しください。",
@@ -1669,6 +1672,7 @@ export default {
   Webhooks: "Webhook",
   Week: "週",
   "What is the pidash CLI, daemon, and runner?": "pidash CLI、デーモン、ランナーとは何ですか？",
+  "What to do with findings": "",
   "What you'd like to see this link as": "このリンクをどのように表示したいですか？",
   "What's new?": "新着情報",
   When: "日時",

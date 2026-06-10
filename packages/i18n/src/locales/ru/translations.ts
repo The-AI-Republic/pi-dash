@@ -144,6 +144,7 @@ export default {
   "AI agent is blocked on this issue": "ИИ-агент заблокирован по этой задаче",
   "AI agent is queued": "ИИ-агент в очереди",
   "AI agent is starting on this issue": "ИИ-агент начинает работу над этой задачей",
+  "AI agent is waiting for a worktree": "",
   "AI agent is waiting for approval": "ИИ-агент ожидает утверждения",
   "AI agent is waiting for input": "ИИ-агент ожидает ввода",
   "AI agent is working on this issue": "ИИ-агент работает над этой задачей",
@@ -368,7 +369,6 @@ export default {
   "Could not load dev machines.": "Не удалось загрузить машины разработки.",
   "Could not load pods.": "Не удалось загрузить поды.",
   "Could not load projects.": "Не удалось загрузить проекты.",
-  "Could not post comment": "Не удалось опубликовать комментарий",
   "Could not revert the prompt.": "Не удалось отменить подсказку.",
   "Could not revoke the dev machine.": "Не удалось отозвать dev-машину.",
   "Could not rotate the dev machine token.": "Не удалось обновить токен dev-машины.",
@@ -478,6 +478,8 @@ export default {
   Declining: "Отклонение",
   default: "по умолчанию",
   Default: "По умолчанию",
+  "Default model this runner's agent uses. ``Default`` lets the agent pick its own; the choice is baked into the displayed ``pidash runner add`` command.":
+    "",
   "Defaults to the project's default pod.": "По умолчанию используется стандартный pod проекта.",
   "Define and customize workflow states to track the progress of your work items.":
     "Определите и настройте состояния рабочего процесса для отслеживания прогресса ваших рабочих элементов.",
@@ -648,7 +650,6 @@ export default {
   "Failed to load pods": "Не удалось загрузить поды",
   "Failed to load runner": "",
   "Failed to move favorite": "Не удалось переместить избранное",
-  "Failed to post the comment.": "Не удалось опубликовать комментарий.",
   "Failed to record decision": "Не удалось записать решение",
   "Failed to reorder favorite": "Не удалось изменить порядок избранного",
   "Failed to revoke runner": "Не удалось отозвать раннер",
@@ -923,6 +924,7 @@ export default {
   "Missing headings": "Отсутствующие заголовки",
   "Missing images": "Отсутствующие изображения",
   Modal: "Модальное окно",
+  "Model (optional)": "",
   Modern: "Современный",
   Module: "Модуль",
   "Module actions": "Действия модуля",
@@ -1141,10 +1143,12 @@ export default {
   "Pi Dash default": "Pi Dash по умолчанию",
   "Pi Dash hands AI agents (Claude Code, Codex, …) the keys to a real dev machine so they can pick up work items, write code, and open changes. Three pieces work together to make that possible:":
     "Pi Dash предоставляет AI-агентам (Claude Code, Codex, …) ключи к реальной машине разработчика, чтобы они могли брать задачи, писать код и открывать изменения. Три компонента работают вместе, чтобы сделать это возможным:",
+  "Pi Dash helps you utilize best out of Claude Fable 5": "",
   "Pi Dash will auto archive work items that have been completed or canceled.":
     "Pi Dash автоматически архивирует задачи, которые были завершены или отменены.",
   "Pi Dash will automatically close work items that haven't been completed or canceled.":
     "Pi Dash автоматически закроет задачи, которые не были завершены или отменены.",
+  "Pi Dash: Your AI Employee Management Platform": "",
   "Pick a project.": "Выберите проект.",
   "Pick a scheduler.": "Выберите планировщик.",
   "Pick from your workspace's enabled schedulers. Already-installed ones aren't listed.":
@@ -1165,9 +1169,6 @@ export default {
   "Pods group your runners. Issues delegate to a pod, and any free runner inside picks up the work. Click a tile to filter runners.":
     "Поды группируют ваши раннеры. Задачи делегируются поду, и любой свободный раннер внутри берет работу. Нажмите на плитку, чтобы отфильтровать раннеры.",
   Points: "Очки",
-  "Post a comment on this work item and start an AI agent run with the comment as the prompt.":
-    "Оставьте комментарий к этому элементу работы и запустите выполнение AI-агента, используя комментарий в качестве подсказки.",
-  "Posting...": "Отправка...",
   "Powered by Pi Dash Pages": "Работает на Pi Dash Pages",
   PowerShell: "PowerShell",
   Preferences: "Настройки",
@@ -1234,6 +1235,9 @@ export default {
   Quarter: "Квартал",
   queued: "в очереди",
   Queued: "В очереди",
+  "Queued (position {count})": "",
+  "Queued on runner": "",
+  "Queued on the runner's machine for a free worktree.": "",
   Quicklink: "Быстрая ссылка",
   Quicklinks: "Быстрые ссылки",
   "Quickly see make-or-break work items. ": "Быстро просматривайте решающие рабочие элементы.",
@@ -1426,7 +1430,6 @@ export default {
   "Start your first project": "Начните ваш первый проект",
   Started: "Запущено",
   "Started {entity}": "Запущено {entity}",
-  "Starting run...": "Запуск выполнения...",
   "Starts at": "Начинается в",
   State: "Состояние",
   "State change": "Изменение состояния",
@@ -1482,7 +1485,6 @@ export default {
   "Table Layout": "Макет таблицы",
   "Talk to Sales": "Связаться с отделом продаж",
   "Team project": "Командный проект",
-  "Tell the agent what you want it to do...": "Скажите агенту, что вы хотите, чтобы он сделал...",
   "Template body (Jinja + Markdown)": "Тело шаблона (Jinja + Markdown)",
   "Template not found.": "Шаблон не найден.",
   "That didn't work.": "Это не сработало.",
@@ -1666,6 +1668,7 @@ export default {
     "Представления — это строительные блоки вашего проекта. Включите представления в настройках проекта, чтобы начать их использовать.",
   "Waiting for an available runner.": "Ожидание доступного раннера.",
   "Waiting for the next scheduled tick.": "Ожидание следующего запланированного тика.",
+  "waiting for worktree": "",
   Warning: "Предупреждение",
   "We are unable to process your request, please try again.":
     "Мы не можем обработать ваш запрос, пожалуйста, попробуйте снова.",
@@ -1686,6 +1689,7 @@ export default {
   Webhooks: "Вебхуки",
   Week: "Неделя",
   "What is the pidash CLI, daemon, and runner?": "Что такое pidash CLI, демон и раннер?",
+  "What to do with findings": "",
   "What you'd like to see this link as": "Как вы хотите видеть эту ссылку",
   "What's new?": "Что нового?",
   When: "Когда",

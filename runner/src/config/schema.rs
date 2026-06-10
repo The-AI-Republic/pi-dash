@@ -12,6 +12,15 @@ pub struct Config {
     /// daemon; will grow once the cap is lifted (design.md §16).
     #[serde(default, rename = "runner")]
     pub runners: Vec<RunnerConfig>,
+    /// Work directories shared by runners. Each entry owns one canonical git
+    /// clone on this machine plus a pool of git worktrees (the "desks" runs
+    /// execute in). N runners may reference the same work dir by name; the
+    /// pool bounds how many of them execute concurrently. See
+    /// `.ai_design/worktree_pooling/design.md`. Empty by default so configs
+    /// written before worktree pooling still parse — a runner with no
+    /// `workdir` reference falls back to its legacy `workspace.working_dir`.
+    #[serde(default, rename = "workdir")]
+    pub workdirs: Vec<WorkdirConfig>,
     /// CLI-side configuration consumed by the `pidash issue/comment/
     /// state/workspace` subcommands when invoked by the agent (or by the
     /// operator out-of-band). Optional so older configs still parse;
@@ -132,6 +141,15 @@ pub struct RunnerConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pod_id: Option<Uuid>,
     pub workspace: WorkspaceSection,
+    /// Name of the `[[workdir]]` this runner executes in. When set, the
+    /// daemon leases a git worktree from that work dir's pool for each run
+    /// instead of running the agent directly in `workspace.working_dir`;
+    /// this is what lets N runners (e.g. a codex runner and a claude_code
+    /// runner) share one repo checkout. `None` preserves the legacy
+    /// single-dir behavior (`workspace.working_dir` used directly). See
+    /// `.ai_design/worktree_pooling/design.md` §7.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workdir: Option<String>,
     /// Which agent CLI the daemon drives for assigned runs. Defaults to
     /// `codex` so existing deployments are unaffected.
     #[serde(default)]
@@ -159,6 +177,78 @@ pub struct RunnerConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WorkspaceSection {
     pub working_dir: PathBuf,
+}
+
+/// Default pool size for a freshly-added work dir. Two desks lets a single
+/// repo serve two concurrent runs (e.g. two agents) out of the box without
+/// the operator having to think about capacity. See design §4.2.
+pub const DEFAULT_POOL_SIZE: usize = 2;
+
+/// Soft ceiling on `pool_size`. Values above this are accepted but warned
+/// about — a desk cap, not an abuse cap (the `MAX_RUNNERS_PER_DAEMON` cap
+/// still governs how many runners exist). See design §7.
+pub const POOL_SIZE_WARN_ABOVE: usize = 16;
+
+/// One shared work directory: a single canonical git clone on this machine
+/// plus a pool of git worktrees that runs execute in. See
+/// `.ai_design/worktree_pooling/design.md` §3–§4.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WorkdirConfig {
+    /// Stable name runners reference via `runner.workdir`. Unique per config.
+    pub name: String,
+    /// The canonical clone. Holds the shared object database; agents never
+    /// execute here (worktrees are leased from the pool instead). Typically
+    /// the directory the operator already had a runner pointed at.
+    pub path: PathBuf,
+    /// Maximum concurrent leases (worktrees). Defaults to `DEFAULT_POOL_SIZE`.
+    #[serde(default = "default_pool_size")]
+    pub pool_size: usize,
+    /// How a worktree is cleaned when returned to the pool. See `CleanMode`.
+    #[serde(default)]
+    pub clean_mode: CleanMode,
+    /// Globs preserved across cleans in `allowlist` mode (e.g.
+    /// `["node_modules/**", ".env"]`). Ignored for other modes.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub keep_paths: Vec<String>,
+    /// Optional command run once when a worktree is first created (and again
+    /// after every `full` clean) — e.g. `pnpm install`. Provisions
+    /// gitignored setup like `.env` and dependency installs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub setup_command: Option<String>,
+    /// Where worktrees are materialized. `None` => `data_dir/worktrees/<name>`.
+    /// Override to keep worktrees on the same filesystem as a huge repo.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worktrees_dir: Option<PathBuf>,
+}
+
+fn default_pool_size() -> usize {
+    DEFAULT_POOL_SIZE
+}
+
+impl WorkdirConfig {
+    /// `true` when `pool_size` exceeds the soft ceiling (operator-facing warn,
+    /// not a hard error).
+    pub fn pool_size_is_large(&self) -> bool {
+        self.pool_size > POOL_SIZE_WARN_ABOVE
+    }
+}
+
+/// How a leased worktree is scrubbed when a run finishes and the desk returns
+/// to the pool. See design §4.4.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, Default, PartialEq, Eq, clap::ValueEnum)]
+#[serde(rename_all = "kebab-case")]
+pub enum CleanMode {
+    /// `git reset --hard` + `git clean -fd`: drop tracked changes and stray
+    /// untracked files, but KEEP gitignored files (`node_modules`, caches,
+    /// `.env`). Warm pools — cheap reuse even on huge repos. Default.
+    #[default]
+    KeepIgnored,
+    /// Like `full`, but preserve `keep_paths` globs. Warm where it matters,
+    /// pristine everywhere else.
+    Allowlist,
+    /// `git reset --hard` + `git clean -fdx`: pristine but cold. The next
+    /// lease re-runs `setup_command`.
+    Full,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -449,12 +539,25 @@ impl Config {
             }
         }
 
-        // Workspace collisions: exact-match and nested-path. Two runners
-        // sharing a working directory will trample each other's git state;
-        // refusing to start at config load is dramatically cheaper than
-        // diagnosing the corrupted runs after the fact.
+        // Validate work-dir entities and every runner's reference to one.
+        self.validate_workdirs()?;
+
+        // Workspace collisions: exact-match and nested-path. Two LEGACY
+        // runners (no `workdir` reference) sharing a working directory will
+        // trample each other's git state; refusing to start at config load is
+        // dramatically cheaper than diagnosing the corrupted runs after the
+        // fact. Pooled runners (those that reference a `[[workdir]]`) are
+        // EXEMPT — sharing a checkout is the whole point of pooling, and the
+        // worktree pool isolates them. Their canonical-clone collisions are
+        // checked at the work-dir level by `validate_workdirs`.
         for (i, a) in self.runners.iter().enumerate() {
+            if a.workdir.is_some() {
+                continue;
+            }
             for b in self.runners.iter().skip(i + 1) {
+                if b.workdir.is_some() {
+                    continue;
+                }
                 let ap = &a.workspace.working_dir;
                 let bp = &b.workspace.working_dir;
                 if ap == bp {
@@ -476,6 +579,74 @@ impl Config {
         }
 
         Ok(())
+    }
+
+    /// Validate `[[workdir]]` entities and the runner references to them
+    /// (design §7). Hard errors only — the daemon refuses to start.
+    fn validate_workdirs(&self) -> Result<(), ConfigError> {
+        // Unique names; pool_size floor.
+        for (i, a) in self.workdirs.iter().enumerate() {
+            if a.pool_size < 1 {
+                return Err(ConfigError::PoolSizeTooSmall {
+                    workdir: a.name.clone(),
+                });
+            }
+            for b in self.workdirs.iter().skip(i + 1) {
+                if a.name == b.name {
+                    return Err(ConfigError::DuplicateWorkdirName {
+                        name: a.name.clone(),
+                    });
+                }
+            }
+        }
+
+        // Equal / nested canonical-clone paths across work dirs, and the same
+        // for any explicit worktrees_dir overrides. Two work dirs whose trees
+        // overlap would corrupt each other exactly as two legacy runners would.
+        let collide = |x: &PathBuf, y: &PathBuf| x == y || x.starts_with(y) || y.starts_with(x);
+        for (i, a) in self.workdirs.iter().enumerate() {
+            for b in self.workdirs.iter().skip(i + 1) {
+                if collide(&a.path, &b.path) {
+                    return Err(ConfigError::WorkdirPathCollision {
+                        workdir_a: a.name.clone(),
+                        path_a: a.path.display().to_string(),
+                        workdir_b: b.name.clone(),
+                        path_b: b.path.display().to_string(),
+                    });
+                }
+                if let (Some(wa), Some(wb)) = (&a.worktrees_dir, &b.worktrees_dir)
+                    && collide(wa, wb)
+                {
+                    return Err(ConfigError::WorkdirPathCollision {
+                        workdir_a: a.name.clone(),
+                        path_a: wa.display().to_string(),
+                        workdir_b: b.name.clone(),
+                        path_b: wb.display().to_string(),
+                    });
+                }
+            }
+        }
+
+        // Every runner.workdir reference must name an existing work dir.
+        for r in &self.runners {
+            if let Some(name) = r.workdir.as_deref()
+                && !self.workdirs.iter().any(|w| w.name == name)
+            {
+                return Err(ConfigError::UnknownWorkdir {
+                    runner: r.name.clone(),
+                    workdir: name.to_string(),
+                });
+            }
+        }
+
+        Ok(())
+    }
+
+    /// The work dir a runner executes in, by reference. `None` for legacy
+    /// runners (no pool — they run directly in `workspace.working_dir`).
+    pub fn workdir_for(&self, runner: &RunnerConfig) -> Option<&WorkdirConfig> {
+        let name = runner.workdir.as_deref()?;
+        self.workdirs.iter().find(|w| w.name == name)
     }
 }
 
@@ -507,6 +678,22 @@ pub enum ConfigError {
         path_a: String,
         runner_b: String,
         path_b: String,
+    },
+    DuplicateWorkdirName {
+        name: String,
+    },
+    PoolSizeTooSmall {
+        workdir: String,
+    },
+    WorkdirPathCollision {
+        workdir_a: String,
+        path_a: String,
+        workdir_b: String,
+        path_b: String,
+    },
+    UnknownWorkdir {
+        runner: String,
+        workdir: String,
     },
 }
 
@@ -565,6 +752,34 @@ impl std::fmt::Display for ConfigError {
                  path is a prefix of the other; their git trees will collide. \
                  Use disjoint working directories."
             ),
+            ConfigError::DuplicateWorkdirName { name } => write!(
+                f,
+                "configuration error: two [[workdir]] blocks share the name {name:?}. \
+                 Each work dir must have a unique name."
+            ),
+            ConfigError::PoolSizeTooSmall { workdir } => write!(
+                f,
+                "configuration error: work dir {workdir:?} has pool_size < 1. \
+                 A work dir needs at least one worktree to run anything."
+            ),
+            ConfigError::WorkdirPathCollision {
+                workdir_a,
+                path_a,
+                workdir_b,
+                path_b,
+            } => write!(
+                f,
+                "configuration error: work dirs {workdir_a:?} ({path_a:?}) and \
+                 {workdir_b:?} ({path_b:?}) have equal or nested paths. Their git \
+                 trees would collide; use disjoint paths."
+            ),
+            ConfigError::UnknownWorkdir { runner, workdir } => write!(
+                f,
+                "configuration error: runner {runner:?} references workdir \
+                 {workdir:?}, but no [[workdir]] block with that name exists. \
+                 Add the work dir or fix the reference (see \
+                 `pidash workdir add`)."
+            ),
         }
     }
 }
@@ -586,6 +801,7 @@ mod tests {
             workspace: WorkspaceSection {
                 working_dir: PathBuf::from(working_dir),
             },
+            workdir: None,
             agent: Default::default(),
             codex: Default::default(),
             claude_code: Default::default(),
@@ -595,6 +811,10 @@ mod tests {
     }
 
     fn config_with(runners: Vec<RunnerConfig>) -> Config {
+        config_with_workdirs(runners, vec![])
+    }
+
+    fn config_with_workdirs(runners: Vec<RunnerConfig>, workdirs: Vec<WorkdirConfig>) -> Config {
         Config {
             version: 2,
             daemon: DaemonConfig {
@@ -606,8 +826,29 @@ mod tests {
                 auto_update: true,
             },
             runners,
+            workdirs,
             cli: None,
         }
+    }
+
+    fn workdir(name: &str, path: &str) -> WorkdirConfig {
+        WorkdirConfig {
+            name: name.into(),
+            path: PathBuf::from(path),
+            pool_size: DEFAULT_POOL_SIZE,
+            clean_mode: CleanMode::default(),
+            keep_paths: vec![],
+            setup_command: None,
+            worktrees_dir: None,
+        }
+    }
+
+    /// A runner bound to a named work dir (pooled). Its `workspace.working_dir`
+    /// is a vestige; the pool path is what actually gets used.
+    fn pooled_runner(name: &str, workdir_name: &str) -> RunnerConfig {
+        let mut r = runner(name, "/vestige");
+        r.workdir = Some(workdir_name.into());
+        r
     }
 
     #[test]
@@ -731,5 +972,150 @@ mod tests {
             assert!(url.starts_with("https://"), "{kind:?} url not https: {url}");
             assert!(!kind.display_name().is_empty());
         }
+    }
+
+    // ---- Worktree pooling: work-dir config validation (design §7) ----
+
+    #[test]
+    fn validate_accepts_two_pooled_runners_sharing_one_workdir() {
+        // The motivating case: a codex runner and a claude_code runner on one
+        // repo. Both reference the same work dir; sharing is allowed.
+        let cfg = config_with_workdirs(
+            vec![
+                pooled_runner("codex", "main"),
+                pooled_runner("fable", "main"),
+            ],
+            vec![workdir("main", "/work/main")],
+        );
+        cfg.validate().unwrap();
+    }
+
+    #[test]
+    fn validate_rejects_runner_referencing_unknown_workdir() {
+        let cfg = config_with_workdirs(
+            vec![pooled_runner("codex", "ghost")],
+            vec![workdir("main", "/work/main")],
+        );
+        let err = cfg.validate().unwrap_err();
+        match err {
+            ConfigError::UnknownWorkdir { runner, workdir } => {
+                assert_eq!(runner, "codex");
+                assert_eq!(workdir, "ghost");
+            }
+            other => panic!("expected UnknownWorkdir, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn validate_rejects_duplicate_workdir_name() {
+        let cfg = config_with_workdirs(
+            vec![],
+            vec![workdir("main", "/work/a"), workdir("main", "/work/b")],
+        );
+        assert!(matches!(
+            cfg.validate().unwrap_err(),
+            ConfigError::DuplicateWorkdirName { .. }
+        ));
+    }
+
+    #[test]
+    fn validate_rejects_nested_workdir_paths() {
+        let cfg = config_with_workdirs(
+            vec![],
+            vec![workdir("outer", "/work"), workdir("inner", "/work/sub")],
+        );
+        let err = cfg.validate().unwrap_err();
+        let msg = err.to_string();
+        assert!(matches!(err, ConfigError::WorkdirPathCollision { .. }));
+        assert!(msg.contains("outer"), "message: {msg}");
+        assert!(msg.contains("inner"), "message: {msg}");
+    }
+
+    #[test]
+    fn validate_rejects_pool_size_zero() {
+        let mut w = workdir("main", "/work/main");
+        w.pool_size = 0;
+        let cfg = config_with_workdirs(vec![], vec![w]);
+        assert!(matches!(
+            cfg.validate().unwrap_err(),
+            ConfigError::PoolSizeTooSmall { .. }
+        ));
+    }
+
+    #[test]
+    fn pooled_runners_exempt_from_legacy_working_dir_collision() {
+        // Two pooled runners share the SAME vestigial workspace.working_dir
+        // (`/vestige`), which would trip the legacy DuplicateWorkingDir check.
+        // Because they reference a work dir, that check must be skipped.
+        let cfg = config_with_workdirs(
+            vec![
+                pooled_runner("codex", "main"),
+                pooled_runner("fable", "main"),
+            ],
+            vec![workdir("main", "/work/main")],
+        );
+        // Must not error on the vestigial working_dir collision.
+        cfg.validate().unwrap();
+    }
+
+    #[test]
+    fn legacy_runners_still_collide_on_shared_working_dir() {
+        // A legacy (non-pooled) runner pair sharing a dir must still be
+        // rejected — pooling doesn't loosen the guarantee for them.
+        let cfg = config_with(vec![
+            runner("a", "/work/shared"),
+            runner("b", "/work/shared"),
+        ]);
+        assert!(matches!(
+            cfg.validate().unwrap_err(),
+            ConfigError::DuplicateWorkingDir { .. }
+        ));
+    }
+
+    #[test]
+    fn workdir_defaults_pool_size_and_clean_mode() {
+        let w = workdir("main", "/work/main");
+        assert_eq!(w.pool_size, DEFAULT_POOL_SIZE);
+        assert_eq!(w.clean_mode, CleanMode::KeepIgnored);
+        assert!(!w.pool_size_is_large());
+    }
+
+    #[test]
+    fn workdir_for_resolves_reference() {
+        let cfg = config_with_workdirs(
+            vec![pooled_runner("codex", "main")],
+            vec![workdir("main", "/work/main")],
+        );
+        let r = &cfg.runners[0];
+        let w = cfg.workdir_for(r).expect("workdir resolves");
+        assert_eq!(w.name, "main");
+        assert_eq!(w.path, PathBuf::from("/work/main"));
+        // A legacy runner resolves to None.
+        let legacy = runner("legacy", "/work/legacy");
+        assert!(cfg.workdir_for(&legacy).is_none());
+    }
+
+    #[test]
+    fn workdir_toml_roundtrip_with_defaults_omitted() {
+        // A minimal [[workdir]] (name + path only) parses, and serializing a
+        // default config omits empty keep_paths / None options.
+        let toml_in = r#"
+            version = 2
+            [daemon]
+            cloud_url = "https://x"
+            [[workdir]]
+            name = "main"
+            path = "/work/main"
+        "#;
+        let cfg: Config = toml::from_str(toml_in).expect("parse");
+        assert_eq!(cfg.workdirs.len(), 1);
+        assert_eq!(cfg.workdirs[0].pool_size, DEFAULT_POOL_SIZE);
+        assert_eq!(cfg.workdirs[0].clean_mode, CleanMode::KeepIgnored);
+
+        let out = toml::to_string(&cfg).expect("serialize");
+        assert!(out.contains("[[workdir]]"), "out: {out}");
+        // keep_paths is empty → omitted; setup_command None → omitted.
+        assert!(!out.contains("keep_paths"), "out: {out}");
+        assert!(!out.contains("setup_command"), "out: {out}");
     }
 }

@@ -140,6 +140,7 @@ export default {
   "AI agent is blocked on this issue": "Tác nhân AI bị chặn trên vấn đề này",
   "AI agent is queued": "Tác nhân AI đang xếp hàng",
   "AI agent is starting on this issue": "Tác nhân AI đang bắt đầu xử lý vấn đề này",
+  "AI agent is waiting for a worktree": "",
   "AI agent is waiting for approval": "Tác nhân AI đang chờ phê duyệt",
   "AI agent is waiting for input": "Tác nhân AI đang chờ đầu vào",
   "AI agent is working on this issue": "Tác nhân AI đang làm việc trên vấn đề này",
@@ -361,7 +362,6 @@ export default {
   "Could not load dev machines.": "Không thể tải máy phát triển.",
   "Could not load pods.": "Không thể tải các pod.",
   "Could not load projects.": "Không thể tải các dự án.",
-  "Could not post comment": "Không thể đăng bình luận",
   "Could not revert the prompt.": "Không thể hoàn nguyên lời nhắc.",
   "Could not revoke the dev machine.": "Không thể thu hồi máy phát triển.",
   "Could not rotate the dev machine token.": "Không thể xoay vòng token máy phát triển.",
@@ -468,6 +468,8 @@ export default {
   Declining: "Đang từ chối",
   default: "mặc định",
   Default: "Mặc định",
+  "Default model this runner's agent uses. ``Default`` lets the agent pick its own; the choice is baked into the displayed ``pidash runner add`` command.":
+    "",
   "Defaults to the project's default pod.": "Mặc định là pod mặc định của dự án.",
   "Define and customize workflow states to track the progress of your work items.":
     "Xác định và tùy chỉnh các trạng thái quy trình làm việc để theo dõi tiến độ của các mục công việc của bạn.",
@@ -637,7 +639,6 @@ export default {
   "Failed to load pods": "Không thể tải các pod",
   "Failed to load runner": "",
   "Failed to move favorite": "Không thể di chuyển mục yêu thích",
-  "Failed to post the comment.": "Không thể đăng bình luận.",
   "Failed to record decision": "Không thể ghi lại quyết định",
   "Failed to reorder favorite": "Không thể sắp xếp lại mục yêu thích",
   "Failed to revoke runner": "Không thể thu hồi runner",
@@ -910,6 +911,7 @@ export default {
   "Missing headings": "Thiếu tiêu đề",
   "Missing images": "Thiếu hình ảnh",
   Modal: "Cửa sổ modal",
+  "Model (optional)": "",
   Modern: "Hiện đại",
   Module: "Mô-đun",
   "Module actions": "Hành động mô-đun",
@@ -1129,10 +1131,12 @@ export default {
   "Pi Dash default": "Pi Dash mặc định",
   "Pi Dash hands AI agents (Claude Code, Codex, …) the keys to a real dev machine so they can pick up work items, write code, and open changes. Three pieces work together to make that possible:":
     "Pi Dash trao cho các tác nhân AI (Claude Code, Codex, …) chìa khóa để truy cập vào một máy phát triển thực tế, giúp họ có thể nhận các mục công việc, viết mã và mở các thay đổi. Ba phần phối hợp với nhau để thực hiện điều đó:",
+  "Pi Dash helps you utilize best out of Claude Fable 5": "",
   "Pi Dash will auto archive work items that have been completed or canceled.":
     "Pi Dash sẽ tự động lưu trữ các mục công việc đã hoàn thành hoặc bị hủy.",
   "Pi Dash will automatically close work items that haven't been completed or canceled.":
     "Pi Dash sẽ tự động đóng các mục công việc chưa hoàn thành hoặc chưa bị hủy.",
+  "Pi Dash: Your AI Employee Management Platform": "",
   "Pick a project.": "Chọn một dự án.",
   "Pick a scheduler.": "Chọn một bộ lập lịch.",
   "Pick from your workspace's enabled schedulers. Already-installed ones aren't listed.":
@@ -1153,9 +1157,6 @@ export default {
   "Pods group your runners. Issues delegate to a pod, and any free runner inside picks up the work. Click a tile to filter runners.":
     "Pod nhóm các runner của bạn. Các issue ủy thác cho một pod, và bất kỳ runner rảnh nào bên trong sẽ nhận công việc. Nhấp vào một ô để lọc runner.",
   Points: "Điểm",
-  "Post a comment on this work item and start an AI agent run with the comment as the prompt.":
-    "Đăng bình luận về mục công việc này và bắt đầu chạy tác nhân AI với bình luận làm lời nhắc.",
-  "Posting...": "Đang đăng...",
   "Powered by Pi Dash Pages": "Được cung cấp bởi Pi Dash Pages",
   PowerShell: "PowerShell",
   Preferences: "Tùy chọn",
@@ -1222,6 +1223,9 @@ export default {
   Quarter: "Quý",
   queued: "đã xếp hàng",
   Queued: "Đã xếp hàng",
+  "Queued (position {count})": "",
+  "Queued on runner": "",
+  "Queued on the runner's machine for a free worktree.": "",
   Quicklink: "Liên kết nhanh",
   Quicklinks: "Các liên kết nhanh",
   "Quickly see make-or-break work items. ": "Nhanh chóng xem các hạng mục công việc quyết định thành bại.",
@@ -1414,7 +1418,6 @@ export default {
   "Start your first project": "Bắt đầu dự án đầu tiên của bạn",
   Started: "Đã bắt đầu",
   "Started {entity}": "Đã bắt đầu {entity}",
-  "Starting run...": "Đang bắt đầu chạy...",
   "Starts at": "Bắt đầu lúc",
   State: "Trạng thái",
   "State change": "Thay đổi trạng thái",
@@ -1469,7 +1472,6 @@ export default {
   "Table Layout": "Bố cục bảng",
   "Talk to Sales": "Nói chuyện với bộ phận bán hàng",
   "Team project": "Dự án nhóm",
-  "Tell the agent what you want it to do...": "Hãy cho tác nhân biết bạn muốn nó làm gì...",
   "Template body (Jinja + Markdown)": "Nội dung mẫu (Jinja + Markdown)",
   "Template not found.": "Không tìm thấy mẫu.",
   "That didn't work.": "Điều đó không hoạt động.",
@@ -1653,6 +1655,7 @@ export default {
     "Chế độ xem là các khối xây dựng của dự án của bạn. Bật chế độ xem từ cài đặt dự án để bắt đầu sử dụng chúng.",
   "Waiting for an available runner.": "Đang chờ một runner khả dụng.",
   "Waiting for the next scheduled tick.": "Đang chờ lần đánh dấu theo lịch trình tiếp theo.",
+  "waiting for worktree": "",
   Warning: "Cảnh báo",
   "We are unable to process your request, please try again.":
     "Chúng tôi không thể xử lý yêu cầu của bạn, vui lòng thử lại.",
@@ -1673,6 +1676,7 @@ export default {
   Webhooks: "Webhooks",
   Week: "Tuần",
   "What is the pidash CLI, daemon, and runner?": "pidash CLI, daemon và runner là gì?",
+  "What to do with findings": "",
   "What you'd like to see this link as": "Bạn muốn xem liên kết này dưới dạng gì?",
   "What's new?": "Có gì mới?",
   When: "Khi nào",

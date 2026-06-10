@@ -33,6 +33,7 @@ from pi_dash.runner.views import (
     RunEventEndpoint,
     RunFailedEndpoint,
     RunPausedEndpoint,
+    RunQueuedEndpoint,
     RunResumedEndpoint,
     RunStartedEndpoint,
     RunStreamUpgradeEndpoint,
@@ -105,6 +106,11 @@ urlpatterns = [
         "runs/<uuid:run_id>/accept/",
         RunAcceptEndpoint.as_view(),
         name="run-accept",
+    ),
+    path(
+        "runs/<uuid:run_id>/queued/",
+        RunQueuedEndpoint.as_view(),
+        name="run-queued",
     ),
     path(
         "runs/<uuid:run_id>/started/",

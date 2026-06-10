@@ -142,6 +142,7 @@ export default {
   "AI agent is blocked on this issue": "Agentul AI este blocat pe această problemă",
   "AI agent is queued": "Agentul AI este în coadă",
   "AI agent is starting on this issue": "Agentul AI pornește pe această problemă",
+  "AI agent is waiting for a worktree": "",
   "AI agent is waiting for approval": "Agentul AI așteaptă aprobarea",
   "AI agent is waiting for input": "Agentul AI așteaptă input",
   "AI agent is working on this issue": "Agentul AI lucrează la această problemă",
@@ -368,7 +369,6 @@ export default {
   "Could not load dev machines.": "Nu s-au putut încărca mașinile de dezvoltare.",
   "Could not load pods.": "Nu s-au putut încărca pods.",
   "Could not load projects.": "Nu s-au putut încărca proiecte.",
-  "Could not post comment": "Nu s-a putut posta comentariul",
   "Could not revert the prompt.": "Nu s-a putut reveni la prompt.",
   "Could not revoke the dev machine.": "Nu s-a putut revoca mașina de dezvoltare.",
   "Could not rotate the dev machine token.": "Nu s-a putut roti token-ul mașinii de dezvoltare.",
@@ -479,6 +479,8 @@ export default {
   Declining: "Refuzare",
   default: "implicit",
   Default: "Implicit",
+  "Default model this runner's agent uses. ``Default`` lets the agent pick its own; the choice is baked into the displayed ``pidash runner add`` command.":
+    "",
   "Defaults to the project's default pod.": "Implicit, se utilizează pod-ul implicit al proiectului.",
   "Define and customize workflow states to track the progress of your work items.":
     "Definiți și personalizați stările fluxului de lucru pentru a urmări progresul elementelor de lucru.",
@@ -652,7 +654,6 @@ export default {
   "Failed to load pods": "Eroare la încărcarea podurilor",
   "Failed to load runner": "",
   "Failed to move favorite": "Eroare la mutarea favoritului",
-  "Failed to post the comment.": "Eroare la postarea comentariului.",
   "Failed to record decision": "Eroare la înregistrarea deciziei",
   "Failed to reorder favorite": "Eroare la reordonarea favoritului",
   "Failed to revoke runner": "Eroare la revocarea runner-ului",
@@ -930,6 +931,7 @@ export default {
   "Missing headings": "Titluri lipsă",
   "Missing images": "Imagini lipsă",
   Modal: "Modal",
+  "Model (optional)": "",
   Modern: "Modern",
   Module: "Modul",
   "Module actions": "Acțiuni modul",
@@ -1148,10 +1150,12 @@ export default {
   "Pi Dash default": "Pi Dash implicit",
   "Pi Dash hands AI agents (Claude Code, Codex, …) the keys to a real dev machine so they can pick up work items, write code, and open changes. Three pieces work together to make that possible:":
     "Pi Dash pune la dispoziția agenților AI (Claude Code, Codex, …) cheile unei mașini de dezvoltare reale, astfel încât aceștia să poată prelua elemente de lucru, scrie cod și deschide modificări. Trei componente lucrează împreună pentru a face acest lucru posibil:",
+  "Pi Dash helps you utilize best out of Claude Fable 5": "",
   "Pi Dash will auto archive work items that have been completed or canceled.":
     "Pi Dash va arhiva automat elementele de lucru care au fost finalizate sau anulate.",
   "Pi Dash will automatically close work items that haven't been completed or canceled.":
     "Pi Dash va închide automat elementele de lucru care nu au fost finalizate sau anulate.",
+  "Pi Dash: Your AI Employee Management Platform": "",
   "Pick a project.": "Alegeți un proiect.",
   "Pick a scheduler.": "Alege un planificator.",
   "Pick from your workspace's enabled schedulers. Already-installed ones aren't listed.":
@@ -1172,9 +1176,6 @@ export default {
   "Pods group your runners. Issues delegate to a pod, and any free runner inside picks up the work. Click a tile to filter runners.":
     "Pods grupează runnerii tăi. Issues delegă către un pod, iar orice runner liber din interior preia munca. Fă clic pe un tile pentru a filtra runnerii.",
   Points: "Puncte",
-  "Post a comment on this work item and start an AI agent run with the comment as the prompt.":
-    "Postează un comentariu pe acest element de lucru și pornește o rulare a agentului AI cu comentariul ca prompt.",
-  "Posting...": "Se postează...",
   "Powered by Pi Dash Pages": "Propulsat de Pi Dash Pages",
   PowerShell: "PowerShell",
   Preferences: "Preferințe",
@@ -1238,6 +1239,9 @@ export default {
   Quarter: "Trimestru",
   queued: "în coadă",
   Queued: "În coadă",
+  "Queued (position {count})": "",
+  "Queued on runner": "",
+  "Queued on the runner's machine for a free worktree.": "",
   Quicklink: "Link rapid",
   Quicklinks: "Linkuri rapide",
   "Quickly see make-or-break work items. ": "Vedeți rapid elementele de lucru critice.",
@@ -1431,7 +1435,6 @@ export default {
   "Start your first project": "Începeți primul dvs. proiect.",
   Started: "Început",
   "Started {entity}": "Început {entity}",
-  "Starting run...": "Pornire rulare...",
   "Starts at": "Începe la",
   State: "Stare",
   "State change": "Schimbare stare",
@@ -1487,7 +1490,6 @@ export default {
   "Table Layout": "Aspect tabel",
   "Talk to Sales": "Vorbește cu Vânzările",
   "Team project": "Proiect de echipă",
-  "Tell the agent what you want it to do...": "Spune agentului ce vrei să facă...",
   "Template body (Jinja + Markdown)": "Corpul șablonului (Jinja + Markdown)",
   "Template not found.": "Șablonul nu a fost găsit.",
   "That didn't work.": "Asta nu a funcționat.",
@@ -1672,6 +1674,7 @@ export default {
     "Vizualizările sunt elementele de bază ale proiectului dvs. Activați vizualizările din setările proiectului pentru a începe să le utilizați.",
   "Waiting for an available runner.": "Se așteaptă un runner disponibil.",
   "Waiting for the next scheduled tick.": "Se așteaptă următorul tick programat.",
+  "waiting for worktree": "",
   Warning: "Avertisment",
   "We are unable to process your request, please try again.":
     "Nu putem procesa cererea dvs., vă rugăm să încercați din nou.",
@@ -1693,6 +1696,7 @@ export default {
   Webhooks: "Webhookuri",
   Week: "Săptămână",
   "What is the pidash CLI, daemon, and runner?": "Ce sunt CLI-ul pidash, daemonul și runnerul?",
+  "What to do with findings": "",
   "What you'd like to see this link as": "Cum doriți să vedeți acest link",
   "What's new?": "Ce este nou?",
   When: "Când",

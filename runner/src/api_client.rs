@@ -324,12 +324,14 @@ mod resolve_tests {
                 workspace: WorkspaceSection {
                     working_dir: std::path::PathBuf::from("/tmp/wd"),
                 },
+                workdir: None,
                 agent: AgentSection::default(),
                 codex: CodexSection::default(),
                 claude_code: ClaudeCodeSection::default(),
                 cursor_agent: CursorAgentSection::default(),
                 approval_policy: ApprovalPolicySection::default(),
             }],
+            workdirs: vec![],
             cli: Some(CliSection {
                 token: Some(token.into()),
                 workspace_slug: None,

@@ -142,6 +142,7 @@ export default {
   "AI agent is blocked on this issue": "AI agent je zablokovaný na tomto probléme",
   "AI agent is queued": "AI agent je vo fronte",
   "AI agent is starting on this issue": "AI agent sa spúšťa na tomto probléme",
+  "AI agent is waiting for a worktree": "",
   "AI agent is waiting for approval": "AI agent čaká na schválenie",
   "AI agent is waiting for input": "AI agent čaká na vstup",
   "AI agent is working on this issue": "AI agent pracuje na tomto probléme",
@@ -365,7 +366,6 @@ export default {
   "Could not load dev machines.": "Nepodarilo sa načítať vývojové stroje.",
   "Could not load pods.": "Nepodarilo sa načítať pody.",
   "Could not load projects.": "Nepodarilo sa načítať projekty.",
-  "Could not post comment": "Nepodarilo sa pridať komentár.",
   "Could not revert the prompt.": "Nepodarilo sa vrátiť prompt.",
   "Could not revoke the dev machine.": "Nepodarilo sa zrušiť vývojový stroj.",
   "Could not rotate the dev machine token.": "Nepodarilo sa obnoviť token vývojového stroja.",
@@ -474,6 +474,8 @@ export default {
   Declining: "Odmietanie",
   default: "predvolené",
   Default: "Predvolené",
+  "Default model this runner's agent uses. ``Default`` lets the agent pick its own; the choice is baked into the displayed ``pidash runner add`` command.":
+    "",
   "Defaults to the project's default pod.": "Predvolene sa používa predvolený pod projektu.",
   "Define and customize workflow states to track the progress of your work items.":
     "Definujte a prispôsobte stavy pracovného toku na sledovanie pokroku vašich pracovných položiek.",
@@ -643,7 +645,6 @@ export default {
   "Failed to load pods": "Nepodarilo sa načítať pods.",
   "Failed to load runner": "",
   "Failed to move favorite": "Nepodarilo sa presunúť obľúbenú položku.",
-  "Failed to post the comment.": "Nepodarilo sa pridať komentár.",
   "Failed to record decision": "Nepodarilo sa zaznamenať rozhodnutie.",
   "Failed to reorder favorite": "Nepodarilo sa zmeniť poradie obľúbenej položky.",
   "Failed to revoke runner": "Nepodarilo sa odvolať runnera",
@@ -917,6 +918,7 @@ export default {
   "Missing headings": "Chýbajúce nadpisy",
   "Missing images": "Chýbajúce obrázky",
   Modal: "Modálne okno",
+  "Model (optional)": "",
   Modern: "Moderné",
   Module: "Modul",
   "Module actions": "Akcie modulu",
@@ -1135,10 +1137,12 @@ export default {
   "Pi Dash default": "Pi Dash predvolené",
   "Pi Dash hands AI agents (Claude Code, Codex, …) the keys to a real dev machine so they can pick up work items, write code, and open changes. Three pieces work together to make that possible:":
     "Pi Dash odovzdáva AI agentom (Claude Code, Codex, …) kľúče k skutočnému vývojovému stroju, aby mohli preberať pracovné položky, písať kód a otvárať zmeny. Tri časti spolupracujú, aby to bolo možné:",
+  "Pi Dash helps you utilize best out of Claude Fable 5": "",
   "Pi Dash will auto archive work items that have been completed or canceled.":
     "Pi Dash automaticky archivuje pracovné položky, ktoré boli dokončené alebo zrušené.",
   "Pi Dash will automatically close work items that haven't been completed or canceled.":
     "Pi Dash automaticky uzavrie pracovné položky, ktoré neboli dokončené alebo zrušené.",
+  "Pi Dash: Your AI Employee Management Platform": "",
   "Pick a project.": "Vyberte projekt.",
   "Pick a scheduler.": "Vyberte plánovač.",
   "Pick from your workspace's enabled schedulers. Already-installed ones aren't listed.":
@@ -1159,9 +1163,6 @@ export default {
   "Pods group your runners. Issues delegate to a pod, and any free runner inside picks up the work. Click a tile to filter runners.":
     "Pods zoskupujú vašich bežcov. Úlohy delegujú na pod a každý voľný bežec v ňom preberie prácu. Kliknutím na dlaždicu filtrujte bežcov.",
   Points: "Body",
-  "Post a comment on this work item and start an AI agent run with the comment as the prompt.":
-    "Uverejnite komentár k tejto pracovnej položke a spustite beh AI agenta s komentárom ako výzvou.",
-  "Posting...": "Odosielanie...",
   "Powered by Pi Dash Pages": "Poháňané službou Pi Dash Pages",
   PowerShell: "PowerShell",
   Preferences: "Nastavenia",
@@ -1227,6 +1228,9 @@ export default {
   Quarter: "Štvrťrok",
   queued: "v poradí",
   Queued: "V poradí",
+  "Queued (position {count})": "",
+  "Queued on runner": "",
+  "Queued on the runner's machine for a free worktree.": "",
   Quicklink: "Rýchly odkaz",
   Quicklinks: "Rýchle odkazy",
   "Quickly see make-or-break work items. ": "Rýchlo uvidíte rozhodujúce pracovné položky.",
@@ -1419,7 +1423,6 @@ export default {
   "Start your first project": "Spustite svoj prvý projekt",
   Started: "Spustené",
   "Started {entity}": "Spustené {entity}",
-  "Starting run...": "Spúšťa sa beh...",
   "Starts at": "Začína o",
   State: "Stav",
   "State change": "Zmena stavu",
@@ -1474,7 +1477,6 @@ export default {
   "Table Layout": "Rozloženie tabuľky",
   "Talk to Sales": "Kontaktovať predaj",
   "Team project": "Tímový projekt",
-  "Tell the agent what you want it to do...": "Povedzte agentovi, čo má urobiť...",
   "Template body (Jinja + Markdown)": "Telo šablóny (Jinja + Markdown)",
   "Template not found.": "Šablóna sa nenašla.",
   "That didn't work.": "To nefungovalo.",
@@ -1658,6 +1660,7 @@ export default {
     "Pohľady sú stavebnými kameňmi vášho projektu. Povoľte pohľady v nastaveniach projektu, aby ste ich mohli začať používať.",
   "Waiting for an available runner.": "Čaká sa na dostupného bežca.",
   "Waiting for the next scheduled tick.": "Čaká sa na ďalší naplánovaný tik.",
+  "waiting for worktree": "",
   Warning: "Varovanie",
   "We are unable to process your request, please try again.":
     "Nie sme schopní spracovať vašu požiadavku, skúste to znova.",
@@ -1677,6 +1680,7 @@ export default {
   Webhooks: "Webhooky",
   Week: "Týždeň",
   "What is the pidash CLI, daemon, and runner?": "Čo je pidash CLI, démon a spúšťač?",
+  "What to do with findings": "",
   "What you'd like to see this link as": "Ako by ste chceli, aby tento odkaz vyzeral",
   "What's new?": "Čo je nové?",
   When: "Kedy",

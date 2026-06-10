@@ -142,6 +142,7 @@ export default {
   "AI agent is blocked on this issue": "KI-Agent ist bei diesem Problem blockiert",
   "AI agent is queued": "KI-Agent ist in der Warteschlange",
   "AI agent is starting on this issue": "KI-Agent startet mit diesem Problem",
+  "AI agent is waiting for a worktree": "",
   "AI agent is waiting for approval": "KI-Agent wartet auf Genehmigung",
   "AI agent is waiting for input": "KI-Agent wartet auf Eingabe",
   "AI agent is working on this issue": "KI-Agent arbeitet an diesem Problem",
@@ -368,7 +369,6 @@ export default {
   "Could not load dev machines.": "Die Entwicklungsmaschinen konnten nicht geladen werden.",
   "Could not load pods.": "Pods konnten nicht geladen werden.",
   "Could not load projects.": "Projekte konnten nicht geladen werden.",
-  "Could not post comment": "Kommentar konnte nicht gepostet werden.",
   "Could not revert the prompt.": "Der Prompt konnte nicht zurückgesetzt werden.",
   "Could not revoke the dev machine.": "Die Entwicklungsmaschine konnte nicht widerrufen werden.",
   "Could not rotate the dev machine token.": "Das Token der Entwicklungsmaschine konnte nicht rotiert werden.",
@@ -478,6 +478,8 @@ export default {
   Declining: "Wird abgelehnt",
   default: "standard",
   Default: "Standard",
+  "Default model this runner's agent uses. ``Default`` lets the agent pick its own; the choice is baked into the displayed ``pidash runner add`` command.":
+    "",
   "Defaults to the project's default pod.": "Standardmäßig wird der Standard-Pod des Projekts verwendet.",
   "Define and customize workflow states to track the progress of your work items.":
     "Definieren und passen Sie Workflow-Status an, um den Fortschritt Ihrer Arbeitselemente zu verfolgen.",
@@ -651,7 +653,6 @@ export default {
   "Failed to load pods": "Fehler beim Laden der Pods",
   "Failed to load runner": "",
   "Failed to move favorite": "Fehler beim Verschieben des Favoriten",
-  "Failed to post the comment.": "Fehler beim Veröffentlichen des Kommentars.",
   "Failed to record decision": "Fehler beim Aufzeichnen der Entscheidung",
   "Failed to reorder favorite": "Fehler beim Neuanordnen des Favoriten",
   "Failed to revoke runner": "Fehler beim Widerrufen des Runners",
@@ -930,6 +931,7 @@ export default {
   "Missing headings": "Fehlende Überschriften",
   "Missing images": "Fehlende Bilder",
   Modal: "Modal",
+  "Model (optional)": "",
   Modern: "Modern",
   Module: "Modul",
   "Module actions": "Modulaktionen",
@@ -1149,10 +1151,12 @@ export default {
   "Pi Dash default": "Pi Dash Standard",
   "Pi Dash hands AI agents (Claude Code, Codex, …) the keys to a real dev machine so they can pick up work items, write code, and open changes. Three pieces work together to make that possible:":
     "Pi Dash gibt KI-Agenten (Claude Code, Codex, …) die Schlüssel zu einer echten Entwicklungsmaschine, damit sie Arbeitsaufgaben übernehmen, Code schreiben und Änderungen öffnen können. Drei Komponenten arbeiten zusammen, um dies zu ermöglichen:",
+  "Pi Dash helps you utilize best out of Claude Fable 5": "",
   "Pi Dash will auto archive work items that have been completed or canceled.":
     "Pi Dash wird Arbeitsaufgaben, die abgeschlossen oder storniert wurden, automatisch archivieren.",
   "Pi Dash will automatically close work items that haven't been completed or canceled.":
     "Pi Dash wird Arbeitsaufgaben, die nicht abgeschlossen oder storniert wurden, automatisch schließen.",
+  "Pi Dash: Your AI Employee Management Platform": "",
   "Pick a project.": "Wählen Sie ein Projekt aus.",
   "Pick a scheduler.": "Wählen Sie einen Scheduler.",
   "Pick from your workspace's enabled schedulers. Already-installed ones aren't listed.":
@@ -1173,9 +1177,6 @@ export default {
   "Pods group your runners. Issues delegate to a pod, and any free runner inside picks up the work. Click a tile to filter runners.":
     "Pods gruppieren Ihre Runner. Issues delegieren an einen Pod, und jeder freie Runner darin übernimmt die Arbeit. Klicken Sie auf eine Kachel, um Runner zu filtern.",
   Points: "Punkte",
-  "Post a comment on this work item and start an AI agent run with the comment as the prompt.":
-    "Posten Sie einen Kommentar zu diesem Arbeitselement und starten Sie einen AI-Agenten-Lauf mit dem Kommentar als Prompt.",
-  "Posting...": "Wird gepostet...",
   "Powered by Pi Dash Pages": "Unterstützt von Pi Dash Pages",
   PowerShell: "PowerShell",
   Preferences: "Einstellungen",
@@ -1241,6 +1242,9 @@ export default {
   Quarter: "Quartal",
   queued: "in der Warteschlange",
   Queued: "In der Warteschlange",
+  "Queued (position {count})": "",
+  "Queued on runner": "",
+  "Queued on the runner's machine for a free worktree.": "",
   Quicklink: "Schnelllink",
   Quicklinks: "Schnelllinks",
   "Quickly see make-or-break work items. ": "Sehen Sie schnell, welche Arbeitsaufgaben entscheidend sind.",
@@ -1437,7 +1441,6 @@ export default {
   "Start your first project": "Starten Sie Ihr erstes Projekt",
   Started: "Gestartet",
   "Started {entity}": "{entity} gestartet",
-  "Starting run...": "Starte Ausführung...",
   "Starts at": "Beginnt um",
   State: "Zustand",
   "State change": "Zustandsänderung",
@@ -1494,7 +1497,6 @@ export default {
   "Table Layout": "Tabellenlayout",
   "Talk to Sales": "Mit Vertrieb sprechen",
   "Team project": "Teamprojekt",
-  "Tell the agent what you want it to do...": "Sagen Sie dem Agenten, was er tun soll...",
   "Template body (Jinja + Markdown)": "Vorlagenkörper (Jinja + Markdown)",
   "Template not found.": "Vorlage nicht gefunden.",
   "That didn't work.": "Das hat nicht funktioniert.",
@@ -1679,6 +1681,7 @@ export default {
     "Ansichten sind die Bausteine Ihres Projekts. Aktivieren Sie Ansichten in den Projekteinstellungen, um sie zu nutzen.",
   "Waiting for an available runner.": "Warten auf einen verfügbaren Runner.",
   "Waiting for the next scheduled tick.": "Warten auf den nächsten geplanten Tick.",
+  "waiting for worktree": "",
   Warning: "Warnung",
   "We are unable to process your request, please try again.":
     "Wir können Ihre Anfrage nicht bearbeiten. Bitte versuchen Sie es erneut.",
@@ -1701,6 +1704,7 @@ export default {
   Webhooks: "Webhooks",
   Week: "Woche",
   "What is the pidash CLI, daemon, and runner?": "Was ist die pidash CLI, der Daemon und der Runner?",
+  "What to do with findings": "",
   "What you'd like to see this link as": "Wie Sie diesen Link sehen möchten",
   "What's new?": "Was gibt es Neues?",
   When: "Wann",

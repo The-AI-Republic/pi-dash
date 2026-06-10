@@ -26,6 +26,7 @@ use crate::history::jsonl::{HistoryEntry, HistoryWriter};
 use crate::ipc::protocol::{CurrentRunSummary, version_lt};
 use crate::ipc::server::IpcServer;
 use crate::util::paths::{Paths, RunnerPaths};
+use crate::workspace::pool::{LeaseKind, LeaseRequest, PoolHandle};
 
 pub struct Supervisor {
     pub config: Config,
@@ -111,6 +112,29 @@ impl Supervisor {
             inst.paths.ensure()?;
             instances.push(inst);
         }
+
+        // Worktree pools — one per `[[workdir]]`. Built once at startup; each
+        // runner that references a work dir leases desks from the matching
+        // pool instead of running the agent directly in its `working_dir`.
+        // Runners with no `workdir` reference (legacy) get no pool and keep
+        // the single-dir behavior. See `.ai_design/worktree_pooling/`.
+        let worktrees_base = paths.data_dir.join("worktrees");
+        let mut pools: HashMap<String, PoolHandle> = HashMap::new();
+        for wd in &config.workdirs {
+            match crate::workspace::pool::spawn(wd.clone(), &worktrees_base).await {
+                Ok(handle) => {
+                    pools.insert(wd.name.clone(), handle);
+                }
+                Err(e) => {
+                    // A pool that can't even be constructed is a hard config
+                    // problem; surface it but keep the daemon up (the pool
+                    // reports unhealthy and runs targeting it fail fast).
+                    tracing::error!(workdir = %wd.name, error = %e, "failed to start worktree pool");
+                }
+            }
+        }
+        let pools = Arc::new(pools);
+
         let mailboxes = Arc::new(RwLock::new(
             instances
                 .iter()
@@ -192,11 +216,18 @@ impl Supervisor {
             let live_mailboxes = mailboxes.clone();
             let live_hello_runners = hello_runners.clone();
             let daemon_paths = paths.clone();
+            // Resolve this runner's pool (if it references a work dir). Cloned
+            // handle is cheap (wraps an mpsc sender).
+            let inst_pool = runner_config
+                .workdir
+                .as_deref()
+                .and_then(|name| pools.get(name).cloned());
             let h = tokio::spawn(async move {
                 let run = RunnerLoop {
                     runner_paths,
                     paths: daemon_paths,
                     runner_config,
+                    pool: inst_pool,
                     out: inst_out,
                     state: inst_state,
                     approvals: inst_approvals,
@@ -551,6 +582,9 @@ struct RunnerLoop {
     /// the host-wide config lock.
     paths: Paths,
     runner_config: crate::config::schema::RunnerConfig,
+    /// Worktree pool for this runner's work dir, if it references one.
+    /// `None` for legacy runners (no pool — run directly in `working_dir`).
+    pool: Option<PoolHandle>,
     out: RunnerOut,
     state: StateHandle,
     approvals: ApprovalRouter,
@@ -815,6 +849,7 @@ impl RunnerLoop {
                     let runner_paths = self.runner_paths.clone();
                     let daemon_paths = self.paths.clone();
                     let runner_config = self.runner_config.clone();
+                    let pool = self.pool.clone();
                     let state = self.state.clone();
                     let approvals = self.approvals.clone();
                     let out = self.out.clone();
@@ -823,6 +858,7 @@ impl RunnerLoop {
                             runner_paths,
                             daemon_paths,
                             runner_config,
+                            pool,
                             state,
                             approvals,
                             out,
@@ -2215,6 +2251,8 @@ struct AssignWorker {
     runner_paths: RunnerPaths,
     daemon_paths: Paths,
     runner_config: crate::config::schema::RunnerConfig,
+    /// Worktree pool for this runner's work dir, if any (see `RunnerLoop`).
+    pool: Option<PoolHandle>,
     state: StateHandle,
     approvals: ApprovalRouter,
     out: RunnerOut,
@@ -2277,39 +2315,94 @@ impl AssignWorker {
         git_work_branch: Option<String>,
         expected_codex_model: Option<String>,
     ) -> Result<()> {
-        // Resolve workspace.
-        let wd = self.runner_config.workspace.working_dir.clone();
-        let resolution = crate::workspace::resolve(&wd, repo_url.as_deref()).await;
-        let workspace_path = match resolution {
-            Ok(r) => match r {
-                crate::workspace::Resolution::ExistingRepo(p)
-                | crate::workspace::Resolution::Cloned(p) => p,
-            },
-            Err(e) => {
-                let reason = match &e {
-                    crate::workspace::ResolveError::Clone(_) => FailureReason::GitAuth,
-                    crate::workspace::ResolveError::MissingRepoUrl
-                    | crate::workspace::ResolveError::NonEmptyNonRepo(_)
-                    | crate::workspace::ResolveError::UnsupportedScheme(_) => {
-                        FailureReason::WorkspaceSetup
-                    }
-                    crate::workspace::ResolveError::Io(_) => FailureReason::WorkspaceSetup,
-                };
-                self.send(ClientMsg::RunFailed {
-                    run_id,
-                    reason,
-                    detail: Some(e.to_string()),
-                    ended_at: Utc::now(),
-                    tokens: None,
-                    model: None,
-                })
-                .await;
-                // The supervisor stamped ``rx_in_flight = Some(run_id)``
-                // synchronously when the Assign arrived; clear it now so
-                // a session reconnect after the failure doesn't claim a
-                // run that no longer exists.
-                self.state.set_current_run(None).await;
-                return Ok(());
+        // Resolve the directory the agent runs in. Pooled runners lease a git
+        // worktree from their work dir's pool (which may park/wait when all
+        // desks are busy); legacy runners resolve `workspace.working_dir`
+        // directly. The lease (if any) lives for the whole function and
+        // releases on drop — salvage→clean→park→return — on every exit path,
+        // success or failure. See `.ai_design/worktree_pooling/`.
+        //
+        // `_lease` is read only via Drop, so the underscore prefix silences
+        // the unused-variable lint while keeping it bound to function scope.
+        let mut _lease: Option<crate::workspace::pool::Lease> = None;
+        let pinned_branch = git_work_branch.as_deref().filter(|s| !s.is_empty());
+        let workspace_path = if let Some(pool) = self.pool.clone() {
+            let req = LeaseRequest {
+                kind: LeaseKind::Run,
+                holder_id: run_id,
+                branch: pinned_branch.map(str::to_string),
+            };
+            // Race the lease against this run's cancel signal: a cancel that
+            // arrives while the run is parked in the queue must dequeue it and
+            // report `RunCancelled` immediately, with no desk ever leased
+            // (design §5 / §6.2).
+            let acquired = tokio::select! {
+                biased;
+                _ = self.cancel.notified() => {
+                    pool.cancel(run_id);
+                    self.send(ClientMsg::RunCancelled {
+                        run_id,
+                        cancelled_at: Utc::now(),
+                        tokens: None,
+                        model: None,
+                    })
+                    .await;
+                    self.state.set_current_run(None).await;
+                    return Ok(());
+                }
+                res = pool.acquire(req) => res,
+            };
+            match acquired {
+                Ok(lease) => {
+                    let p = lease.path().to_path_buf();
+                    _lease = Some(lease);
+                    p
+                }
+                Err(e) => {
+                    self.send(ClientMsg::RunFailed {
+                        run_id,
+                        reason: FailureReason::WorkspaceSetup,
+                        detail: Some(format!("worktree lease failed: {e}")),
+                        ended_at: Utc::now(),
+                        tokens: None,
+                        model: None,
+                    })
+                    .await;
+                    self.state.set_current_run(None).await;
+                    return Ok(());
+                }
+            }
+        } else {
+            let wd = self.runner_config.workspace.working_dir.clone();
+            match crate::workspace::resolve(&wd, repo_url.as_deref()).await {
+                Ok(crate::workspace::Resolution::ExistingRepo(p))
+                | Ok(crate::workspace::Resolution::Cloned(p)) => p,
+                Err(e) => {
+                    let reason = match &e {
+                        crate::workspace::ResolveError::Clone(_) => FailureReason::GitAuth,
+                        crate::workspace::ResolveError::MissingRepoUrl
+                        | crate::workspace::ResolveError::NonEmptyNonRepo(_)
+                        | crate::workspace::ResolveError::UnsupportedScheme(_) => {
+                            FailureReason::WorkspaceSetup
+                        }
+                        crate::workspace::ResolveError::Io(_) => FailureReason::WorkspaceSetup,
+                    };
+                    self.send(ClientMsg::RunFailed {
+                        run_id,
+                        reason,
+                        detail: Some(e.to_string()),
+                        ended_at: Utc::now(),
+                        tokens: None,
+                        model: None,
+                    })
+                    .await;
+                    // The supervisor stamped ``rx_in_flight = Some(run_id)``
+                    // synchronously when the Assign arrived; clear it now so
+                    // a session reconnect after the failure doesn't claim a
+                    // run that no longer exists.
+                    self.state.set_current_run(None).await;
+                    return Ok(());
+                }
             }
         };
         if let Some(project_ref) = self.runner_config.project_slug.as_deref()
@@ -2329,7 +2422,10 @@ impl AssignWorker {
         // Pre-flight checkout: if the issue pins an existing branch, land on
         // it before the agent runs so it commits onto that branch directly.
         // When not set, the agent handles branch creation per the prompt.
-        if let Some(branch) = git_work_branch.as_deref().filter(|s| !s.is_empty())
+        // Pooled runs SKIP this — the pool already checked the branch out in
+        // the leased worktree (and holds the branch lock for it).
+        if self.pool.is_none()
+            && let Some(branch) = git_work_branch.as_deref().filter(|s| !s.is_empty())
             && let Err(e) =
                 crate::workspace::git::checkout_work_branch(&workspace_path, branch).await
         {
@@ -2491,6 +2587,16 @@ impl AssignWorker {
         let mut idx = RunsIndex::load(&self.runner_paths).unwrap_or_default();
         idx.upsert(summary);
         idx.save(&self.runner_paths).ok();
+
+        // A clean completion returns its worktree without salvaging; any other
+        // terminal outcome (failed/cancelled, reached here normally) leaves the
+        // lease's default `Aborted` outcome so the dirty tree is salvaged to the
+        // run's branch before the desk recycles (design §4.4).
+        if outcome.status_label == "completed"
+            && let Some(lease) = _lease.as_mut()
+        {
+            lease.mark_success();
+        }
 
         self.state.set_current_run(None).await;
         Ok(())
@@ -2977,6 +3083,7 @@ mod tests {
             project_slug: Some(project_slug.into()),
             pod_id: None,
             workspace: WorkspaceSection { working_dir },
+            workdir: None,
             agent: AgentSection::default(),
             codex: CodexSection::default(),
             claude_code: ClaudeCodeSection::default(),
@@ -3210,6 +3317,7 @@ mod tests {
             version: 2,
             daemon: Default::default(),
             runners: vec![],
+            workdirs: vec![],
             cli: None,
         });
         let task = tokio::spawn(async move {

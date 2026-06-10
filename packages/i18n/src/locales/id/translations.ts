@@ -139,6 +139,7 @@ export default {
   "AI agent is blocked on this issue": "Agen AI diblokir pada masalah ini",
   "AI agent is queued": "Agen AI dalam antrean",
   "AI agent is starting on this issue": "Agen AI mulai mengerjakan masalah ini",
+  "AI agent is waiting for a worktree": "",
   "AI agent is waiting for approval": "Agen AI menunggu persetujuan",
   "AI agent is waiting for input": "Agen AI menunggu masukan",
   "AI agent is working on this issue": "Agen AI sedang mengerjakan masalah ini",
@@ -360,7 +361,6 @@ export default {
   "Could not load dev machines.": "Tidak dapat memuat mesin dev.",
   "Could not load pods.": "Tidak dapat memuat pod.",
   "Could not load projects.": "Tidak dapat memuat proyek.",
-  "Could not post comment": "Tidak dapat memposting komentar",
   "Could not revert the prompt.": "Tidak dapat mengembalikan prompt.",
   "Could not revoke the dev machine.": "Tidak dapat mencabut mesin dev.",
   "Could not rotate the dev machine token.": "Tidak dapat memutar token mesin dev.",
@@ -467,6 +467,8 @@ export default {
   Declining: "Menolak",
   default: "bawaan",
   Default: "Bawaan",
+  "Default model this runner's agent uses. ``Default`` lets the agent pick its own; the choice is baked into the displayed ``pidash runner add`` command.":
+    "",
   "Defaults to the project's default pod.": "Defaultnya adalah pod default proyek.",
   "Define and customize workflow states to track the progress of your work items.":
     "Tentukan dan sesuaikan status alur kerja untuk melacak kemajuan item kerja Anda.",
@@ -638,7 +640,6 @@ export default {
   "Failed to load pods": "Gagal memuat pods",
   "Failed to load runner": "",
   "Failed to move favorite": "Gagal memindahkan favorit",
-  "Failed to post the comment.": "Gagal memposting komentar.",
   "Failed to record decision": "Gagal merekam keputusan",
   "Failed to reorder favorite": "Gagal mengurutkan ulang favorit",
   "Failed to revoke runner": "Gagal mencabut runner",
@@ -909,6 +910,7 @@ export default {
   "Missing headings": "Heading yang hilang",
   "Missing images": "Gambar yang hilang",
   Modal: "Modal",
+  "Model (optional)": "",
   Modern: "Modern",
   Module: "Modul",
   "Module actions": "Aksi modul",
@@ -1127,10 +1129,12 @@ export default {
   "Pi Dash default": "Default Pi Dash",
   "Pi Dash hands AI agents (Claude Code, Codex, …) the keys to a real dev machine so they can pick up work items, write code, and open changes. Three pieces work together to make that possible:":
     "Pi Dash memberikan kunci mesin dev nyata kepada agen AI (Claude Code, Codex, …) sehingga mereka dapat mengambil item pekerjaan, menulis kode, dan membuka perubahan. Tiga bagian bekerja bersama untuk memungkinkan hal tersebut:",
+  "Pi Dash helps you utilize best out of Claude Fable 5": "",
   "Pi Dash will auto archive work items that have been completed or canceled.":
     "Pi Dash akan secara otomatis mengarsipkan item pekerjaan yang telah selesai atau dibatalkan.",
   "Pi Dash will automatically close work items that haven't been completed or canceled.":
     "Pi Dash akan secara otomatis menutup item pekerjaan yang belum selesai atau dibatalkan.",
+  "Pi Dash: Your AI Employee Management Platform": "",
   "Pick a project.": "Pilih proyek.",
   "Pick a scheduler.": "Pilih penjadwal.",
   "Pick from your workspace's enabled schedulers. Already-installed ones aren't listed.":
@@ -1151,9 +1155,6 @@ export default {
   "Pods group your runners. Issues delegate to a pod, and any free runner inside picks up the work. Click a tile to filter runners.":
     "Pod mengelompokkan runner Anda. Isu mendelegasikan ke pod, dan runner gratis di dalamnya akan mengambil pekerjaan. Klik ubin untuk memfilter runner.",
   Points: "Poin",
-  "Post a comment on this work item and start an AI agent run with the comment as the prompt.":
-    "Posting komentar pada item kerja ini dan mulai menjalankan agen AI dengan komentar sebagai prompt.",
-  "Posting...": "Memposting...",
   "Powered by Pi Dash Pages": "Didukung oleh Pi Dash Pages",
   PowerShell: "PowerShell",
   Preferences: "Preferensi",
@@ -1216,6 +1217,9 @@ export default {
   Quarter: "Kuartal",
   queued: "antre",
   Queued: "Antre",
+  "Queued (position {count})": "",
+  "Queued on runner": "",
+  "Queued on the runner's machine for a free worktree.": "",
   Quicklink: "Tautan Cepat",
   Quicklinks: "Tautan Cepat",
   "Quickly see make-or-break work items. ": "Lihat dengan cepat item pekerjaan yang menentukan.",
@@ -1408,7 +1412,6 @@ export default {
   "Start your first project": "Mulai proyek pertama Anda",
   Started: "Dimulai",
   "Started {entity}": "Dimulai {entity}",
-  "Starting run...": "Memulai proses...",
   "Starts at": "Mulai pada",
   State: "Keadaan",
   "State change": "Perubahan keadaan",
@@ -1464,7 +1467,6 @@ export default {
   "Table Layout": "Tata Letak Tabel",
   "Talk to Sales": "Hubungi Penjualan",
   "Team project": "Proyek tim",
-  "Tell the agent what you want it to do...": "Beri tahu agen apa yang Anda ingin lakukan...",
   "Template body (Jinja + Markdown)": "Isi template (Jinja + Markdown)",
   "Template not found.": "Template tidak ditemukan.",
   "That didn't work.": "Itu tidak berhasil.",
@@ -1647,6 +1649,7 @@ export default {
     "Tampilan adalah blok bangunan proyek Anda. Aktifkan tampilan dari pengaturan proyek untuk mulai menggunakannya.",
   "Waiting for an available runner.": "Menunggu runner yang tersedia.",
   "Waiting for the next scheduled tick.": "Menunggu tick terjadwal berikutnya.",
+  "waiting for worktree": "",
   Warning: "Peringatan",
   "We are unable to process your request, please try again.":
     "Kami tidak dapat memproses permintaan Anda, silakan coba lagi.",
@@ -1667,6 +1670,7 @@ export default {
   Webhooks: "Webhook",
   Week: "Minggu",
   "What is the pidash CLI, daemon, and runner?": "Apa itu pidash CLI, daemon, dan runner?",
+  "What to do with findings": "",
   "What you'd like to see this link as": "Teks yang Anda inginkan untuk tautan ini",
   "What's new?": "Apa yang baru?",
   When: "Kapan",

@@ -143,6 +143,7 @@ export default {
   "AI agent is blocked on this issue": "AI-агент заблокований на цьому завданні",
   "AI agent is queued": "AI-агент у черзі",
   "AI agent is starting on this issue": "AI-агент починає роботу над цим завданням",
+  "AI agent is waiting for a worktree": "",
   "AI agent is waiting for approval": "AI-агент очікує на схвалення",
   "AI agent is waiting for input": "AI-агент очікує на введення",
   "AI agent is working on this issue": "AI-агент працює над цим завданням",
@@ -365,7 +366,6 @@ export default {
   "Could not load dev machines.": "Не вдалося завантажити машини розробки.",
   "Could not load pods.": "Не вдалося завантажити поди.",
   "Could not load projects.": "Не вдалося завантажити проекти.",
-  "Could not post comment": "Не вдалося опублікувати коментар",
   "Could not revert the prompt.": "Не вдалося відкотити підказку.",
   "Could not revoke the dev machine.": "Не вдалося відкликати машину розробника.",
   "Could not rotate the dev machine token.": "Не вдалося обернути токен машини розробника.",
@@ -473,6 +473,8 @@ export default {
   Declining: "Відхилення",
   default: "за замовчуванням",
   Default: "За замовчуванням",
+  "Default model this runner's agent uses. ``Default`` lets the agent pick its own; the choice is baked into the displayed ``pidash runner add`` command.":
+    "",
   "Defaults to the project's default pod.": "За замовчуванням використовується под проекту за замовчуванням.",
   "Define and customize workflow states to track the progress of your work items.":
     "Визначайте та налаштовуйте стани робочого процесу, щоб відстежувати прогрес ваших робочих елементів.",
@@ -644,7 +646,6 @@ export default {
   "Failed to load pods": "Не вдалося завантажити поди",
   "Failed to load runner": "",
   "Failed to move favorite": "Не вдалося перемістити обране",
-  "Failed to post the comment.": "Не вдалося опублікувати коментар.",
   "Failed to record decision": "Не вдалося записати рішення",
   "Failed to reorder favorite": "Не вдалося змінити порядок обраного",
   "Failed to revoke runner": "Не вдалося відкликати виконавця",
@@ -917,6 +918,7 @@ export default {
   "Missing headings": "Відсутні заголовки",
   "Missing images": "Відсутні зображення",
   Modal: "Модальне вікно",
+  "Model (optional)": "",
   Modern: "Сучасний",
   Module: "Модуль",
   "Module actions": "Дії модуля",
@@ -1135,10 +1137,12 @@ export default {
   "Pi Dash default": "Pi Dash за замовчуванням",
   "Pi Dash hands AI agents (Claude Code, Codex, …) the keys to a real dev machine so they can pick up work items, write code, and open changes. Three pieces work together to make that possible:":
     "Pi Dash надає AI-агентам (Claude Code, Codex, …) ключі до реальної машини розробника, щоб вони могли брати робочі завдання, писати код і відкривати зміни. Три компоненти працюють разом, щоб зробити це можливим:",
+  "Pi Dash helps you utilize best out of Claude Fable 5": "",
   "Pi Dash will auto archive work items that have been completed or canceled.":
     "Pi Dash автоматично архівуватиме робочі завдання, які були завершені або скасовані.",
   "Pi Dash will automatically close work items that haven't been completed or canceled.":
     "Pi Dash автоматично закриватиме робочі завдання, які не були завершені або скасовані.",
+  "Pi Dash: Your AI Employee Management Platform": "",
   "Pick a project.": "Виберіть проект.",
   "Pick a scheduler.": "Виберіть планувальник.",
   "Pick from your workspace's enabled schedulers. Already-installed ones aren't listed.":
@@ -1159,9 +1163,6 @@ export default {
   "Pods group your runners. Issues delegate to a pod, and any free runner inside picks up the work. Click a tile to filter runners.":
     "Поди групують ваших виконавців. Завдання делегуються поду, і будь-який вільний виконавець всередині береться за роботу. Натисніть плитку, щоб відфільтрувати виконавців.",
   Points: "Бали",
-  "Post a comment on this work item and start an AI agent run with the comment as the prompt.":
-    "Залиште коментар до цього робочого елемента та запустіть виконання AI-агента з коментарем як підказкою.",
-  "Posting...": "Надсилання...",
   "Powered by Pi Dash Pages": "Працює на Pi Dash Pages",
   PowerShell: "PowerShell",
   Preferences: "Налаштування",
@@ -1227,6 +1228,9 @@ export default {
   Quarter: "Квартал",
   queued: "у черзі",
   Queued: "У черзі",
+  "Queued (position {count})": "",
+  "Queued on runner": "",
+  "Queued on the runner's machine for a free worktree.": "",
   Quicklink: "Швидке посилання",
   Quicklinks: "Швидкі посилання",
   "Quickly see make-or-break work items. ": "Швидко переглядайте критичні робочі елементи.",
@@ -1419,7 +1423,6 @@ export default {
   "Start your first project": "Почніть ваш перший проєкт",
   Started: "Розпочато",
   "Started {entity}": "Розпочато {entity}",
-  "Starting run...": "Запуск виконання...",
   "Starts at": "Починається о",
   State: "Стан",
   "State change": "Зміна стану",
@@ -1474,7 +1477,6 @@ export default {
   "Table Layout": "Макет таблиці",
   "Talk to Sales": "Зв'язатися з відділом продажів",
   "Team project": "Командний проєкт",
-  "Tell the agent what you want it to do...": "Скажіть агенту, що ви хочете, щоб він зробив...",
   "Template body (Jinja + Markdown)": "Тіло шаблону (Jinja + Markdown)",
   "Template not found.": "Шаблон не знайдено.",
   "That didn't work.": "Це не спрацювало.",
@@ -1658,6 +1660,7 @@ export default {
     "Перегляди — це будівельні блоки вашого проєкту. Увімкніть перегляди в налаштуваннях проєкту, щоб почати їх використовувати.",
   "Waiting for an available runner.": "Очікування доступного виконавця.",
   "Waiting for the next scheduled tick.": "Очікування наступного запланованого такту.",
+  "waiting for worktree": "",
   Warning: "Попередження",
   "We are unable to process your request, please try again.": "Ми не можемо обробити ваш запит, спробуйте ще раз.",
   "We copied the current Pi Dash default. Edit and save to customize it.":
@@ -1676,6 +1679,7 @@ export default {
   Webhooks: "Вебхуки",
   Week: "Тиждень",
   "What is the pidash CLI, daemon, and runner?": "Що таке pidash CLI, демон і виконавець?",
+  "What to do with findings": "",
   "What you'd like to see this link as": "Як ви хотіли б бачити це посилання",
   "What's new?": "Що нового?",
   When: "Коли",
