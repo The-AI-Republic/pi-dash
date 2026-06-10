@@ -449,6 +449,15 @@ def test_poll_still_reaps_old_unreported_waiting_run(
         patch("pi_dash.runner.views.sessions.outbox.read_for_session", return_value=[]),
         patch("pi_dash.runner.views.sessions.outbox.mark_pel_drained"),
         patch("pi_dash.runner.views.sessions.outbox.ack_for_session"),
+        # The long poll is an async view; stub its async readers so the test
+        # never touches the module-cached async redis client, which stays
+        # bound to whichever event loop used it first (same pattern as
+        # test_poll_heartbeat_drain's _patched_poll_dependencies).
+        patch(
+            "pi_dash.runner.views.sessions.outbox.aread_for_session",
+            return_value=[],
+        ),
+        patch("pi_dash.settings.redis.async_redis_instance", return_value=None),
         patch("django.db.transaction.on_commit", side_effect=lambda fn, **kw: fn()),
     ):
         poll_resp = api_client.post(
@@ -486,6 +495,15 @@ def test_poll_persists_free_worktrees(db, api_client, runner_token, enrolled_run
         patch("pi_dash.runner.views.sessions.outbox.read_for_session", return_value=[]),
         patch("pi_dash.runner.views.sessions.outbox.mark_pel_drained"),
         patch("pi_dash.runner.views.sessions.outbox.ack_for_session"),
+        # The long poll is an async view; stub its async readers so the test
+        # never touches the module-cached async redis client, which stays
+        # bound to whichever event loop used it first (same pattern as
+        # test_poll_heartbeat_drain's _patched_poll_dependencies).
+        patch(
+            "pi_dash.runner.views.sessions.outbox.aread_for_session",
+            return_value=[],
+        ),
+        patch("pi_dash.settings.redis.async_redis_instance", return_value=None),
         patch("django.db.transaction.on_commit", side_effect=lambda fn, **kw: fn()),
     ):
         poll_resp = api_client.post(
