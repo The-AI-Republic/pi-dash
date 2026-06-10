@@ -124,7 +124,7 @@ impl Bridge {
                 cwd: cwd.to_string_lossy().to_string(),
                 model: self.model_default.clone(),
                 // Match Claude Code's MVP `bypassPermissions` posture.
-                sandbox_policy: "danger-full-access".into(),
+                sandbox: "danger-full-access".into(),
                 approval_policy: "never".into(),
             },
         )?;
