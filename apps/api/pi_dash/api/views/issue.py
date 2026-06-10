@@ -2881,9 +2881,19 @@ class IssueWorkpadAPIEndpoint(BaseAPIView):
         # The agent ticker can coalesce continuation runs but in-process
         # rapid updates from a single agent (phase + notes in quick
         # succession) still race without this.
+        #
+        # ``of=["self"]`` is required, not cosmetic: ``Issue.issue_objects``
+        # excludes triage states via ``.exclude(state__group=...)`` and
+        # ``state`` is a nullable FK, so the queryset carries a LEFT OUTER
+        # JOIN to ``states``. A bare ``SELECT ... FOR UPDATE`` then tries to
+        # lock every joined table, and Postgres rejects locking the nullable
+        # side of an outer join ("FOR UPDATE cannot be applied to the nullable
+        # side of an outer join") — surfacing as an unhandled 500 on every
+        # workpad write. Scoping the lock to the base ``issues`` row avoids the
+        # join entirely while still serializing concurrent writers.
         with transaction.atomic():
             issue = (
-                Issue.issue_objects.select_for_update()
+                Issue.issue_objects.select_for_update(of=("self",))
                 .get(workspace__slug=slug, project_id=project_id, pk=issue_id)
             )
             serializer = IssueWorkpadSerializer(issue, data=request.data, partial=True)
