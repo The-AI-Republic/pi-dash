@@ -98,10 +98,12 @@ export const AllIssueLayoutRoot = observer(function AllIssueLayoutRoot(props: Pr
   // always fetched (the list layout reads display filters from the same store).
   const isListLayout = activeLayout === EIssueLayoutTypes.LIST;
 
-  // Fetch issues
+  // Fetch issues. The key keys on isListLayout (not the raw layout) so the
+  // spreadsheet/default case stays a single key as activeLayout resolves from
+  // undefined to its loaded value — otherwise the key would change and refetch.
   const { isLoading: issuesLoading } = useSWR(
     workspaceSlug && globalViewId
-      ? `WORKSPACE_GLOBAL_VIEW_ISSUES_${workspaceSlug}_${globalViewId}_${activeLayout ?? "default"}`
+      ? `WORKSPACE_GLOBAL_VIEW_ISSUES_${workspaceSlug}_${globalViewId}_${isListLayout ? "list" : "default"}`
       : null,
     async () => {
       if (workspaceSlug && globalViewId) {
