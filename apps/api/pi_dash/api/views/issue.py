@@ -909,7 +909,18 @@ class IssueMoveAPIEndpoint(BaseAPIView):
             )
 
         with transaction.atomic():
-            issue = Issue.issue_objects.select_for_update().get(workspace__slug=slug, project_id=project_id, pk=pk)
+            # ``of=("self",)`` scopes the row lock to the base ``issues`` row.
+            # ``Issue.issue_objects`` excludes triage states via
+            # ``.exclude(state__group=...)`` and ``state`` is a nullable FK, so
+            # the queryset carries a LEFT OUTER JOIN to ``states``. A bare
+            # ``SELECT ... FOR UPDATE`` then asks Postgres to lock the nullable
+            # side of that outer join, which it refuses ("FOR UPDATE cannot be
+            # applied to the nullable side of an outer join") — a 500 on every
+            # move. Same fix as ``IssueWorkpadAPIEndpoint.patch``.
+            issue = (
+                Issue.issue_objects.select_for_update(of=("self",))
+                .get(workspace__slug=slug, project_id=project_id, pk=pk)
+            )
             lock_key = convert_uuid_to_integer(target_project.id)
             with connection.cursor() as cursor:
                 cursor.execute("SELECT pg_advisory_xact_lock(%s)", [lock_key])
