@@ -19,7 +19,7 @@ import { CustomSelect, EModalPosition, EModalWidth, Input, ModalCore } from "@pi
 // app
 import { RunnerCliCommand } from "@/components/runners/runner-cli-command";
 import {
-  DEFAULT_MODEL_ID,
+  DEFAULT_MODEL_BY_AGENT,
   RUNNER_MODEL_OPTIONS,
   resolveRunnerModel,
   runnerModelLabel,
@@ -64,7 +64,7 @@ const DEFAULT_VALUES: FormValues = {
   name: "",
   workingDir: "",
   agent: DEFAULT_AGENT,
-  model: DEFAULT_MODEL_ID,
+  model: DEFAULT_MODEL_BY_AGENT[DEFAULT_AGENT],
 };
 
 const podService = new PodService();
@@ -162,7 +162,7 @@ export const AddRunnerModal = observer(function AddRunnerModal(props: Props) {
   // sentinel whenever the agent changes.
   const selectedAgent = watch("agent");
   useEffect(() => {
-    setValue("model", DEFAULT_MODEL_ID);
+    setValue("model", DEFAULT_MODEL_BY_AGENT[selectedAgent]);
   }, [selectedAgent, setValue]);
 
   const onSubmit: SubmitHandler<FormValues> = (values) => {

@@ -102,6 +102,18 @@ export const RUNNER_MODEL_OPTIONS: Record<TRunnerAgent, IRunnerModelOption[]> = 
   "cursor-agent": [DEFAULT_OPTION, ...CURSOR_OPTIONS],
 };
 
+/**
+ * Pre-selected model option id per agent in the "Add runner" form. Claude
+ * runners default to Fable 5; the others fall back to the agent's own
+ * built-in model (the ``"default"`` sentinel). The id must exist in that
+ * agent's `RUNNER_MODEL_OPTIONS` list.
+ */
+export const DEFAULT_MODEL_BY_AGENT: Record<TRunnerAgent, string> = {
+  "claude-code": "claude-fable-5",
+  codex: DEFAULT_MODEL_ID,
+  "cursor-agent": DEFAULT_MODEL_ID,
+};
+
 /** Look up a selected option's label; falls back to the default label. */
 export function runnerModelLabel(agent: TRunnerAgent, id: string): string {
   const opt = RUNNER_MODEL_OPTIONS[agent].find((o) => o.id === id);
