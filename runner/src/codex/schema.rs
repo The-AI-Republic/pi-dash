@@ -71,7 +71,7 @@ pub struct ThreadStartParams {
     // (`gpt-5-codex`), which is unavailable on ChatGPT-account auth.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
-    pub sandbox_policy: String,
+    pub sandbox: String,
     pub approval_policy: String,
 }
 
