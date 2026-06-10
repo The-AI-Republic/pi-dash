@@ -50,13 +50,19 @@ fn warn_model_fallback(msg: &str) {
 ///   `gpt-*`, `gemini-*`, `grok-*`, `composer-*`, `auto`, `kimi-*`, …),
 ///   so we accept any non-empty value and let `cursor-agent` reject
 ///   unknown slugs itself rather than wrongly dropping a valid one.
+///
+/// A bare dash-terminated prefix (`"claude-"`, `"gpt-"`) is rejected — it
+/// is an incomplete slug, not a model — so it can't be written as a bogus
+/// `model_default`.
 fn model_applies_to_agent(kind: AgentKind, model: &str) -> bool {
     let m = model.trim().to_ascii_lowercase();
+    // `prefix` followed by at least one more character.
+    let has = |prefix: &str| m.strip_prefix(prefix).is_some_and(|rest| !rest.is_empty());
     match kind {
-        AgentKind::ClaudeCode => m.starts_with("claude-"),
-        AgentKind::Codex => {
-            m.starts_with("gpt-") || m.starts_with("o3") || m.starts_with("o4") || m.starts_with("codex")
-        }
+        AgentKind::ClaudeCode => has("claude-"),
+        // `o3` / `o4` are valid bare model names; the dash-terminated
+        // families (`gpt-`, `codex`) require a suffix.
+        AgentKind::Codex => has("gpt-") || m == "o3" || m == "o4" || has("o3-") || has("o4-") || has("codex"),
         AgentKind::CursorAgent => !m.is_empty(),
     }
 }
@@ -75,30 +81,9 @@ pub fn agent_sections_for(
     let model = model.map(str::trim).filter(|s| !s.is_empty());
     let effort = reasoning_effort.map(str::trim).filter(|s| !s.is_empty());
 
-    // Reasoning effort only applies to Codex; validate the tier name.
-    let effort = match (agent_kind, effort) {
-        (_, None) => None,
-        (AgentKind::Codex, Some(e)) if CODEX_EFFORTS.contains(&e.to_ascii_lowercase().as_str()) => {
-            Some(e.to_ascii_lowercase())
-        }
-        (AgentKind::Codex, Some(e)) => {
-            warn_model_fallback(&format!(
-                "reasoning effort {e:?} is not a recognized Codex tier \
-                 (expected one of {}); using the model's default effort.",
-                CODEX_EFFORTS.join(", ")
-            ));
-            None
-        }
-        (_, Some(_)) => {
-            warn_model_fallback(&format!(
-                "--reasoning-effort only applies to the codex agent, not {}; ignoring it.",
-                agent_kind.display_name()
-            ));
-            None
-        }
-    };
-
-    // Model: drop it (with a warning) when it's not applicable to the agent.
+    // Resolve the model first: drop it (with a warning) when it isn't
+    // applicable to the chosen agent. `effort` below is keyed off the
+    // resolved model, so this has to run first.
     let model = match model {
         None => None,
         Some(m) if model_applies_to_agent(agent_kind, m) => Some(m.to_string()),
@@ -106,6 +91,38 @@ pub fn agent_sections_for(
             warn_model_fallback(&format!(
                 "model {m:?} is not applicable to the {} agent; \
                  using the agent's default model instead.",
+                agent_kind.display_name()
+            ));
+            None
+        }
+    };
+
+    // Reasoning effort only applies to Codex, and only alongside an explicit
+    // model — it is meaningless on its own (see `CodexSection::effort_default`),
+    // so it is dropped when the model was absent or rejected above.
+    let effort = match (agent_kind, effort) {
+        (_, None) => None,
+        (AgentKind::Codex, Some(e))
+            if !CODEX_EFFORTS.contains(&e.to_ascii_lowercase().as_str()) =>
+        {
+            warn_model_fallback(&format!(
+                "reasoning effort {e:?} is not a recognized Codex tier \
+                 (expected one of {}); using the model's default effort.",
+                CODEX_EFFORTS.join(", ")
+            ));
+            None
+        }
+        (AgentKind::Codex, Some(e)) if model.is_some() => Some(e.to_ascii_lowercase()),
+        (AgentKind::Codex, Some(_)) => {
+            // Valid tier, but no applicable model to attach it to.
+            warn_model_fallback(
+                "--reasoning-effort needs an applicable --model for the codex agent; ignoring it.",
+            );
+            None
+        }
+        (_, Some(_)) => {
+            warn_model_fallback(&format!(
+                "--reasoning-effort only applies to the codex agent, not {}; ignoring it.",
                 agent_kind.display_name()
             ));
             None
@@ -482,6 +499,43 @@ mod tests {
     fn blank_model_is_treated_as_unset() {
         let (codex, _, _) = agent_sections_for(AgentKind::Codex, Some("   "), None);
         assert_eq!(codex.model_default, None);
+    }
+
+    #[test]
+    fn codex_effort_dropped_when_model_inapplicable() {
+        // A Claude model handed to codex: the model is dropped, and the
+        // effort meant for it must not survive onto codex's default model.
+        let (codex, _, _) =
+            agent_sections_for(AgentKind::Codex, Some("claude-opus-4-8"), Some("high"));
+        assert_eq!(codex.model_default, None);
+        assert_eq!(codex.effort_default, None);
+    }
+
+    #[test]
+    fn codex_effort_dropped_without_a_model() {
+        // Effort is meaningless without an explicit model (see the
+        // CodexSection::effort_default contract).
+        let (codex, _, _) = agent_sections_for(AgentKind::Codex, None, Some("high"));
+        assert_eq!(codex.model_default, None);
+        assert_eq!(codex.effort_default, None);
+    }
+
+    #[test]
+    fn bare_prefix_models_are_rejected() {
+        // A dash-terminated prefix with nothing after it is an incomplete
+        // slug, not a model — it must not become a bogus model_default.
+        let (_, claude, _) = agent_sections_for(AgentKind::ClaudeCode, Some("claude-"), None);
+        assert_eq!(claude.model_default, None);
+        let (codex, _, _) = agent_sections_for(AgentKind::Codex, Some("gpt-"), None);
+        assert_eq!(codex.model_default, None);
+    }
+
+    #[test]
+    fn bare_openai_reasoning_models_are_accepted() {
+        // `o3` / `o4` are valid bare model names; the bare-prefix guard
+        // must not reject them.
+        let (codex, _, _) = agent_sections_for(AgentKind::Codex, Some("o3"), None);
+        assert_eq!(codex.model_default.as_deref(), Some("o3"));
     }
 
     fn paths_for(root: &std::path::Path) -> Paths {
