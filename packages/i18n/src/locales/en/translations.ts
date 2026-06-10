@@ -906,6 +906,9 @@ export default {
   "Missing headings": "Missing headings",
   "Missing images": "Missing images",
   Modal: "Modal",
+  "Model (optional)": "Model (optional)",
+  "Default model this runner's agent uses. ``Default`` lets the agent pick its own; the choice is baked into the displayed ``pidash runner add`` command.":
+    "Default model this runner's agent uses. ``Default`` lets the agent pick its own; the choice is baked into the displayed ``pidash runner add`` command.",
   Modern: "Modern",
   Module: "Module",
   "Module actions": "Module actions",

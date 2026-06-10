@@ -166,6 +166,12 @@ pub struct CodexSection {
     pub binary: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model_default: Option<String>,
+    /// Reasoning-effort tier passed to codex `turn/start` (`low` / `medium`
+    /// / `high` / `xhigh`). `None` omits the field so codex applies the
+    /// model's own default effort. Only meaningful alongside `model_default`
+    /// — `pidash runner add --reasoning-effort` writes this.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effort_default: Option<String>,
 }
 
 impl Default for CodexSection {
@@ -178,6 +184,7 @@ impl Default for CodexSection {
         Self {
             binary: "codex".to_string(),
             model_default: None,
+            effort_default: None,
         }
     }
 }

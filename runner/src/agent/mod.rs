@@ -329,6 +329,7 @@ impl AgentBridge {
                     &runner.codex.binary,
                     cwd,
                     selected_model(model_override, runner.codex.model_default.clone()),
+                    runner.codex.effort_default.clone(),
                 )
                 .await?;
                 Ok(AgentBridge::Codex(b))

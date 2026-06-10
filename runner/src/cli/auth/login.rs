@@ -520,6 +520,8 @@ async fn maybe_offer_runner_add(
             pod: None,
             working_dir: None,
             agent: crate::config::schema::AgentKind::default(),
+            model: None,
+            reasoning_effort: None,
         },
         paths,
     )

@@ -69,6 +69,18 @@ pub struct AddArgs {
     /// Which agent CLI this runner drives.
     #[arg(long, value_enum, default_value_t = AgentKind::Codex)]
     pub agent: AgentKind,
+
+    /// Default LLM model for this runner's agent (e.g. `claude-opus-4-8`
+    /// for claude-code, `gpt-5.5` for codex, a `cursor-agent` slug for
+    /// cursor-agent). Omit to use the agent's own default. A model that
+    /// doesn't apply to `--agent` is ignored with a warning.
+    #[arg(long)]
+    pub model: Option<String>,
+
+    /// Codex reasoning-effort tier (`low` / `medium` / `high` / `xhigh`).
+    /// Only applies when `--agent codex`; ignored for other agents.
+    #[arg(long)]
+    pub reasoning_effort: Option<String>,
 }
 
 #[derive(Debug, ClapArgs)]
@@ -189,6 +201,8 @@ pub async fn add(args: AddArgs, paths: &Paths) -> Result<RunnerConfig> {
         &cloud_url,
         args.working_dir.clone(),
         args.agent,
+        args.model.as_deref(),
+        args.reasoning_effort.as_deref(),
     )
     .await
     {

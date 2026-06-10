@@ -17,7 +17,131 @@ use crate::config::schema::{
     Config, DaemonConfig, RunnerConfig, WorkspaceSection,
 };
 use crate::util::paths::Paths;
+use std::io::IsTerminal;
 use uuid::Uuid;
+
+/// Codex reasoning-effort tiers accepted by `--reasoning-effort` / the
+/// cloud dropdown. Passed verbatim to codex `turn/start`; the exact set a
+/// given codex build honours can vary, so an unrecognized value here is a
+/// soft warning, not a hard error.
+const CODEX_EFFORTS: &[&str] = &["low", "medium", "high", "xhigh"];
+
+/// Print an orange (256-color 208) warning to stderr. Used when a
+/// `--model` / `--reasoning-effort` value can't be applied to the chosen
+/// agent: we never fail the enrollment over it, just tell the operator we
+/// fell back to the agent's default. Color is suppressed when stderr is
+/// not a TTY (logs / CI) and when `NO_COLOR` is set.
+fn warn_model_fallback(msg: &str) {
+    let color = std::io::stderr().is_terminal() && std::env::var_os("NO_COLOR").is_none();
+    if color {
+        eprintln!("\x1b[38;5;208m⚠ {msg}\x1b[0m");
+    } else {
+        eprintln!("⚠ {msg}");
+    }
+}
+
+/// Whether a model id is meaningful for the given agent. The cloud "add
+/// runner" dropdown only offers each agent's own models, so this guards
+/// the hand-typed-CLI case (`--agent claude-code --model gpt-5.5`).
+///
+/// - **Claude Code** drives Anthropic models only (`claude-…`).
+/// - **Codex** drives OpenAI models (`gpt-…`, `o3`/`o4`, `codex…`).
+/// - **Cursor** has a broad, account-specific slug space (`claude-*`,
+///   `gpt-*`, `gemini-*`, `grok-*`, `composer-*`, `auto`, `kimi-*`, …),
+///   so we accept any non-empty value and let `cursor-agent` reject
+///   unknown slugs itself rather than wrongly dropping a valid one.
+///
+/// A bare dash-terminated prefix (`"claude-"`, `"gpt-"`) is rejected — it
+/// is an incomplete slug, not a model — so it can't be written as a bogus
+/// `model_default`.
+fn model_applies_to_agent(kind: AgentKind, model: &str) -> bool {
+    let m = model.trim().to_ascii_lowercase();
+    // `prefix` followed by at least one more character.
+    let has = |prefix: &str| m.strip_prefix(prefix).is_some_and(|rest| !rest.is_empty());
+    match kind {
+        AgentKind::ClaudeCode => has("claude-"),
+        // `o3` / `o4` are valid bare model names; the dash-terminated
+        // families (`gpt-`, `codex`) require a suffix.
+        AgentKind::Codex => has("gpt-") || m == "o3" || m == "o4" || has("o3-") || has("o4-") || has("codex"),
+        AgentKind::CursorAgent => !m.is_empty(),
+    }
+}
+
+/// Build the three per-agent config sections for a fresh `[[runner]]`,
+/// applying the operator's `--model` / `--reasoning-effort` to whichever
+/// agent was selected. Inapplicable combinations are non-fatal: an orange
+/// warning is printed and that knob falls back to the agent default (left
+/// unset in the config). Shared by `pidash runner add` and the deprecated
+/// `pidash connect`.
+pub fn agent_sections_for(
+    agent_kind: AgentKind,
+    model: Option<&str>,
+    reasoning_effort: Option<&str>,
+) -> (CodexSection, ClaudeCodeSection, CursorAgentSection) {
+    let model = model.map(str::trim).filter(|s| !s.is_empty());
+    let effort = reasoning_effort.map(str::trim).filter(|s| !s.is_empty());
+
+    // Resolve the model first: drop it (with a warning) when it isn't
+    // applicable to the chosen agent. `effort` below is keyed off the
+    // resolved model, so this has to run first.
+    let model = match model {
+        None => None,
+        Some(m) if model_applies_to_agent(agent_kind, m) => Some(m.to_string()),
+        Some(m) => {
+            warn_model_fallback(&format!(
+                "model {m:?} is not applicable to the {} agent; \
+                 using the agent's default model instead.",
+                agent_kind.display_name()
+            ));
+            None
+        }
+    };
+
+    // Reasoning effort only applies to Codex, and only alongside an explicit
+    // model — it is meaningless on its own (see `CodexSection::effort_default`),
+    // so it is dropped when the model was absent or rejected above.
+    let effort = match (agent_kind, effort) {
+        (_, None) => None,
+        (AgentKind::Codex, Some(e))
+            if !CODEX_EFFORTS.contains(&e.to_ascii_lowercase().as_str()) =>
+        {
+            warn_model_fallback(&format!(
+                "reasoning effort {e:?} is not a recognized Codex tier \
+                 (expected one of {}); using the model's default effort.",
+                CODEX_EFFORTS.join(", ")
+            ));
+            None
+        }
+        (AgentKind::Codex, Some(e)) if model.is_some() => Some(e.to_ascii_lowercase()),
+        (AgentKind::Codex, Some(_)) => {
+            // Valid tier, but no applicable model to attach it to.
+            warn_model_fallback(
+                "--reasoning-effort needs an applicable --model for the codex agent; ignoring it.",
+            );
+            None
+        }
+        (_, Some(_)) => {
+            warn_model_fallback(&format!(
+                "--reasoning-effort only applies to the codex agent, not {}; ignoring it.",
+                agent_kind.display_name()
+            ));
+            None
+        }
+    };
+
+    let mut codex = CodexSection::default();
+    let mut claude_code = ClaudeCodeSection::default();
+    let mut cursor_agent = CursorAgentSection::default();
+    match agent_kind {
+        AgentKind::Codex => {
+            codex.model_default = model;
+            codex.effort_default = effort;
+        }
+        AgentKind::ClaudeCode => claude_code.model_default = model,
+        AgentKind::CursorAgent => cursor_agent.model_default = model,
+    }
+    (codex, claude_code, cursor_agent)
+}
 
 /// Read the user's CLI token from `[cli].token` in `config.toml`.
 /// Returns `Ok(None)` when no config exists yet or the section is
@@ -193,10 +317,14 @@ pub async fn apply_enroll_response(
     cloud_url: &str,
     working_dir: Option<PathBuf>,
     agent_kind: AgentKind,
+    model: Option<&str>,
+    reasoning_effort: Option<&str>,
 ) -> Result<AppliedRunner> {
     let working_dir =
         working_dir.unwrap_or_else(|| paths.runner_dir(resp.runner_id).join("workspace"));
 
+    let (codex, claude_code, cursor_agent) =
+        agent_sections_for(agent_kind, model, reasoning_effort);
     let new_runner = RunnerConfig {
         name: resp.runner_name.clone(),
         runner_id: resp.runner_id,
@@ -205,9 +333,9 @@ pub async fn apply_enroll_response(
         pod_id: None,
         workspace: WorkspaceSection { working_dir },
         agent: AgentSection { kind: agent_kind },
-        codex: CodexSection::default(),
-        claude_code: ClaudeCodeSection::default(),
-        cursor_agent: CursorAgentSection::default(),
+        codex,
+        claude_code,
+        cursor_agent,
         approval_policy: ApprovalPolicySection::default(),
     };
 
@@ -315,6 +443,101 @@ mod tests {
     use tempfile::tempdir;
     use uuid::Uuid;
 
+    #[test]
+    fn model_routes_to_selected_agent_section() {
+        let (codex, claude, cursor) =
+            agent_sections_for(AgentKind::ClaudeCode, Some("claude-opus-4-8"), None);
+        assert_eq!(claude.model_default.as_deref(), Some("claude-opus-4-8"));
+        assert_eq!(codex.model_default, None);
+        assert_eq!(cursor.model_default, None);
+    }
+
+    #[test]
+    fn codex_model_and_effort_are_applied_together() {
+        let (codex, _, _) = agent_sections_for(AgentKind::Codex, Some("gpt-5.5"), Some("High"));
+        assert_eq!(codex.model_default.as_deref(), Some("gpt-5.5"));
+        // Effort is normalized to lowercase.
+        assert_eq!(codex.effort_default.as_deref(), Some("high"));
+    }
+
+    #[test]
+    fn mismatched_model_falls_back_to_agent_default() {
+        // The user's example: a Codex model handed to the Claude agent.
+        // Non-fatal — the model is dropped (warning printed) and the
+        // section is left at its default (None).
+        let (_, claude, _) = agent_sections_for(AgentKind::ClaudeCode, Some("gpt-5.5"), None);
+        assert_eq!(claude.model_default, None);
+    }
+
+    #[test]
+    fn effort_ignored_for_non_codex_agents() {
+        let (_, claude, _) =
+            agent_sections_for(AgentKind::ClaudeCode, Some("claude-opus-4-8"), Some("high"));
+        // Model still applies; effort has no home on the claude section.
+        assert_eq!(claude.model_default.as_deref(), Some("claude-opus-4-8"));
+    }
+
+    #[test]
+    fn unknown_codex_effort_is_dropped() {
+        let (codex, _, _) =
+            agent_sections_for(AgentKind::Codex, Some("gpt-5.5"), Some("turbo"));
+        assert_eq!(codex.model_default.as_deref(), Some("gpt-5.5"));
+        assert_eq!(codex.effort_default, None);
+    }
+
+    #[test]
+    fn cursor_accepts_any_nonempty_slug() {
+        let (_, _, cursor) =
+            agent_sections_for(AgentKind::CursorAgent, Some("claude-opus-4-8-thinking-high"), None);
+        assert_eq!(
+            cursor.model_default.as_deref(),
+            Some("claude-opus-4-8-thinking-high")
+        );
+    }
+
+    #[test]
+    fn blank_model_is_treated_as_unset() {
+        let (codex, _, _) = agent_sections_for(AgentKind::Codex, Some("   "), None);
+        assert_eq!(codex.model_default, None);
+    }
+
+    #[test]
+    fn codex_effort_dropped_when_model_inapplicable() {
+        // A Claude model handed to codex: the model is dropped, and the
+        // effort meant for it must not survive onto codex's default model.
+        let (codex, _, _) =
+            agent_sections_for(AgentKind::Codex, Some("claude-opus-4-8"), Some("high"));
+        assert_eq!(codex.model_default, None);
+        assert_eq!(codex.effort_default, None);
+    }
+
+    #[test]
+    fn codex_effort_dropped_without_a_model() {
+        // Effort is meaningless without an explicit model (see the
+        // CodexSection::effort_default contract).
+        let (codex, _, _) = agent_sections_for(AgentKind::Codex, None, Some("high"));
+        assert_eq!(codex.model_default, None);
+        assert_eq!(codex.effort_default, None);
+    }
+
+    #[test]
+    fn bare_prefix_models_are_rejected() {
+        // A dash-terminated prefix with nothing after it is an incomplete
+        // slug, not a model — it must not become a bogus model_default.
+        let (_, claude, _) = agent_sections_for(AgentKind::ClaudeCode, Some("claude-"), None);
+        assert_eq!(claude.model_default, None);
+        let (codex, _, _) = agent_sections_for(AgentKind::Codex, Some("gpt-"), None);
+        assert_eq!(codex.model_default, None);
+    }
+
+    #[test]
+    fn bare_openai_reasoning_models_are_accepted() {
+        // `o3` / `o4` are valid bare model names; the bare-prefix guard
+        // must not reject them.
+        let (codex, _, _) = agent_sections_for(AgentKind::Codex, Some("o3"), None);
+        assert_eq!(codex.model_default.as_deref(), Some("o3"));
+    }
+
     fn paths_for(root: &std::path::Path) -> Paths {
         Paths {
             config_dir: root.join("config"),
@@ -352,6 +575,8 @@ mod tests {
             "https://example.com",
             Some(tmp.path().join("wd")),
             AgentKind::Codex,
+            None,
+            None,
         )
         .await
         .unwrap();
@@ -373,6 +598,8 @@ mod tests {
             "https://example.com",
             Some(tmp.path().join("wd1")),
             AgentKind::Codex,
+            None,
+            None,
         )
         .await
         .unwrap();
@@ -384,6 +611,8 @@ mod tests {
             "https://example.com",
             Some(tmp.path().join("wd2")),
             AgentKind::Codex,
+            None,
+            None,
         )
         .await
         .unwrap();
@@ -407,6 +636,8 @@ mod tests {
             "https://cloud-a.example.com",
             Some(tmp.path().join("wd1")),
             AgentKind::Codex,
+            None,
+            None,
         )
         .await
         .unwrap();
@@ -418,6 +649,8 @@ mod tests {
             "https://cloud-b.example.com",
             Some(tmp.path().join("wd2")),
             AgentKind::Codex,
+            None,
+            None,
         )
         .await
         .unwrap_err();
