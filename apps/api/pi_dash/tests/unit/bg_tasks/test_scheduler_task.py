@@ -22,6 +22,7 @@ from pi_dash.bgtasks.scheduler import (
     scan_due_bindings,
 )
 from pi_dash.db.models import Project, Scheduler, SchedulerBinding
+from pi_dash.db.models.scheduler import OutcomeMode, outcome_mode_directive
 from pi_dash.runner.models import AgentRun, AgentRunStatus, Pod, Runner, RunnerStatus
 
 
@@ -233,6 +234,62 @@ def test_fire_falls_back_to_default_when_override_pod_soft_deleted(binding, proj
     fire_scheduler_binding(str(binding.pk))
     binding.refresh_from_db()
     assert binding.last_run.pod_id == default_pod.id
+
+
+# ---------------------------------------------------------------------------
+# fire_scheduler_binding — outcome_mode work-mode directive
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+def test_fire_appends_create_issue_directive_by_default(binding):
+    """A scheduler with the default outcome_mode (create_issue) appends the
+    create-issue directive after the task prompt."""
+    fire_scheduler_binding(str(binding.pk))
+    binding.refresh_from_db()
+    prompt = binding.last_run.prompt
+    assert "Work mode: create issues" in prompt
+    assert "pidash issue create" in prompt
+    # Task prompt comes first; directive is appended after it.
+    assert prompt.index("Scan the project.") < prompt.index("Work mode: create issues")
+
+
+@pytest.mark.unit
+def test_fire_appends_apply_fix_directive(binding):
+    binding.outcome_mode = OutcomeMode.APPLY_FIX
+    binding.save(update_fields=["outcome_mode"])
+    fire_scheduler_binding(str(binding.pk))
+    binding.refresh_from_db()
+    prompt = binding.last_run.prompt
+    assert "Work mode: apply fix" in prompt
+    assert "open a pull request" in prompt
+    assert "do NOT merge" in prompt
+    # The other modes' directives must not leak in.
+    assert "Work mode: create issues" not in prompt
+    assert "Work mode: fix and open for review" not in prompt
+
+
+@pytest.mark.unit
+def test_fire_appends_fix_and_review_directive(binding):
+    """fix_and_review files an issue, applies the fix, and moves the issue
+    straight to In Review — the directive must instruct all three steps."""
+    binding.outcome_mode = OutcomeMode.FIX_AND_REVIEW
+    binding.save(update_fields=["outcome_mode"])
+    fire_scheduler_binding(str(binding.pk))
+    binding.refresh_from_db()
+    prompt = binding.last_run.prompt
+    assert "Work mode: fix and open for review" in prompt
+    assert "pidash issue create" in prompt
+    assert "open a pull request" in prompt
+    assert 'pidash issue patch <IDENT> --state "In Review"' in prompt
+
+
+@pytest.mark.unit
+def test_outcome_mode_directive_falls_back_for_unknown_value():
+    """A stale / unrecognized mode never yields an empty directive — it falls
+    back to the create-issue guidance so a run is never dispatched without a
+    work-mode instruction."""
+    assert "Work mode: create issues" in outcome_mode_directive("nonexistent_mode")
 
 
 @pytest.mark.unit

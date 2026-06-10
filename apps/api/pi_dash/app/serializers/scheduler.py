@@ -146,6 +146,7 @@ class SchedulerBindingSerializer(BaseSerializer):
             "exdates",
             "extra_context",
             "enabled",
+            "outcome_mode",
             "pod",
             "pod_name",
             "next_run_at",

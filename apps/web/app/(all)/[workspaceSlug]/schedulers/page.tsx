@@ -106,9 +106,7 @@ const SchedulersListPage = observer(function SchedulersListPage() {
     }
   };
 
-  const pageTitle = currentWorkspace?.name
-    ? `${currentWorkspace.name} · ${t("Schedulers")}`
-    : t("Schedulers");
+  const pageTitle = currentWorkspace?.name ? `${currentWorkspace.name} · ${t("Schedulers")}` : t("Schedulers");
 
   return (
     <div className="flex flex-col gap-6 p-6">
@@ -117,7 +115,11 @@ const SchedulersListPage = observer(function SchedulersListPage() {
       <header className="flex items-start justify-between gap-4">
         <div>
           <h1 className="text-16 font-semibold text-primary">{t("Schedulers")}</h1>
-          <p className="mt-1 text-13 text-secondary">{t("Reusable scheduler definitions for this workspace. Install one on a project to run its prompt against the project on a cron.")}</p>
+          <p className="mt-1 text-13 text-secondary">
+            {t(
+              "Reusable scheduler definitions for this workspace. Install one on a project to run its prompt against the project on a cron."
+            )}
+          </p>
         </div>
         {canEdit && <Button onClick={() => setCreateOpen(true)}>{t("New scheduler")}</Button>}
       </header>

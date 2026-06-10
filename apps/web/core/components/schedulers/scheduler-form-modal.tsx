@@ -78,9 +78,7 @@ export const SchedulerFormModal = observer(function SchedulerFormModal(props: Pr
   return (
     <ModalCore isOpen={isOpen} handleClose={onClose} position={EModalPosition.CENTER} width={EModalWidth.XXL}>
       <form onSubmit={handleSubmit(handleFormSubmit)} className="flex flex-col gap-5 p-5">
-        <div className="text-18 font-medium text-primary">
-          {isEdit ? t("Edit scheduler") : t("New scheduler")}
-        </div>
+        <div className="text-18 font-medium text-primary">{isEdit ? t("Edit scheduler") : t("New scheduler")}</div>
 
         <div className="flex flex-col gap-1">
           <label htmlFor="scheduler-slug" className="text-13 font-medium text-primary">
@@ -111,7 +109,9 @@ export const SchedulerFormModal = observer(function SchedulerFormModal(props: Pr
               />
             )}
           />
-          <p className="text-12 text-secondary">{t("Lowercase identifier used in URLs. Cannot be changed after creation.")}</p>
+          <p className="text-12 text-secondary">
+            {t("Lowercase identifier used in URLs. Cannot be changed after creation.")}
+          </p>
           {errors.slug?.message && <p className="text-12 text-danger-primary">{errors.slug.message}</p>}
         </div>
 
@@ -182,7 +182,11 @@ export const SchedulerFormModal = observer(function SchedulerFormModal(props: Pr
               />
             )}
           />
-          <p className="text-12 text-secondary">{t("The base prompt the agent runs each tick. Per-project context is appended at install time, so keep this prompt project-agnostic.")}</p>
+          <p className="text-12 text-secondary">
+            {t(
+              "The base prompt the agent runs each tick. Per-project context is appended at install time, so keep this prompt project-agnostic."
+            )}
+          </p>
           {errors.prompt?.message && <p className="text-12 text-danger-primary">{errors.prompt.message}</p>}
         </div>
 
@@ -210,13 +214,17 @@ export const SchedulerFormModal = observer(function SchedulerFormModal(props: Pr
               </div>
             )}
           />
-          <p className="text-12 text-secondary">{t("Used to color this scheduler's blocks on the project calendar.")}</p>
+          <p className="text-12 text-secondary">
+            {t("Used to color this scheduler's blocks on the project calendar.")}
+          </p>
         </div>
 
         <div className="flex items-start justify-between gap-4">
           <div className="flex flex-col">
             <span className="text-13 font-medium text-primary">{t("Enabled")}</span>
-            <span className="text-12 text-secondary">{t("Disabled schedulers cannot be installed on new projects, and existing bindings will not fire.")}</span>
+            <span className="text-12 text-secondary">
+              {t("Disabled schedulers cannot be installed on new projects, and existing bindings will not fire.")}
+            </span>
           </div>
           <Controller
             control={control}
@@ -230,13 +238,7 @@ export const SchedulerFormModal = observer(function SchedulerFormModal(props: Pr
             {t("Cancel")}
           </Button>
           <Button variant="primary" type="submit" loading={isSubmitting} disabled={isSubmitting}>
-            {isEdit
-              ? isSubmitting
-                ? t("Saving…")
-                : t("Save")
-              : isSubmitting
-                ? t("Creating…")
-                : t("Create scheduler")}
+            {isEdit ? (isSubmitting ? t("Saving…") : t("Save")) : isSubmitting ? t("Creating…") : t("Create scheduler")}
           </Button>
         </div>
       </form>
