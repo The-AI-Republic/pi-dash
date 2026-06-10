@@ -536,7 +536,20 @@ def dispatch_scheduler_run(
     """
     from pi_dash.runner.services import matcher
 
-    pod = Pod.default_for_project_id(binding.project_id)
+    # Pod resolution (late bound): prefer the binding's explicit pod override,
+    # but only when it is still active and belongs to this project — a pod can
+    # be soft-deleted (deleted_at set, FK intact) or, defensively, drift out of
+    # the project. In any of those cases fall back to the project default so a
+    # stale override never silently dispatches into the wrong/dead pod.
+    pod = None
+    if binding.pod_id is not None:
+        pod = Pod.objects.filter(
+            pk=binding.pod_id,
+            deleted_at__isnull=True,
+            project_id=binding.project_id,
+        ).first()
+    if pod is None:
+        pod = Pod.default_for_project_id(binding.project_id)
     if pod is None:
         logger.warning(
             "scheduler.dispatch: skip binding=%s reason=no-default-pod project=%s",

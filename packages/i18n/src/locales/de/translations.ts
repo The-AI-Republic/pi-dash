@@ -1208,6 +1208,7 @@ export default {
   "Project context (optional)": "Projektkontext (optional)",
   "Project cover image": "Projekt-Titelbild",
   "Project created successfully": "Projekt erfolgreich erstellt",
+  "Project default pod": "Project default pod",
   "Project ID": "Projekt-ID",
   "Project ID is required": "Projekt-ID ist erforderlich",
   "Project ID must at least be of 1 character": "Projekt-ID muss mindestens 1 Zeichen lang sein",
@@ -1713,6 +1714,8 @@ export default {
   "Which AI agent CLI this runner will drive. Baked into the displayed ``pidash runner add`` command.":
     "Welchen KI-Agenten-CLI dieser Runner antreiben wird. In den angezeigten Befehl ``pidash runner add`` eingebettet.",
   "Which events would you like to trigger this webhook?": "Welche Ereignisse sollen diesen Webhook auslösen?",
+  "Which pod's runners serve this scheduler's runs. Leave on the project default unless you need a specific machine fleet.":
+    "Which pod's runners serve this scheduler's runs. Leave on the project default unless you need a specific machine fleet.",
   "Widget reordered successfully.": "Widget erfolgreich neu angeordnet.",
   "Windows (MSI)": "Windows (MSI)",
   "Windows (PowerShell)": "Windows (PowerShell)",

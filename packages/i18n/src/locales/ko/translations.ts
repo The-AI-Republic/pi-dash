@@ -1172,6 +1172,7 @@ export default {
   "Project context (optional)": "프로젝트 컨텍스트(선택 사항)",
   "Project cover image": "프로젝트 커버 이미지",
   "Project created successfully": "프로젝트가 성공적으로 생성되었습니다",
+  "Project default pod": "Project default pod",
   "Project ID": "프로젝트 ID",
   "Project ID is required": "프로젝트 ID가 필요합니다",
   "Project ID must at least be of 1 character": "프로젝트 ID는 최소 1자 이상이어야 합니다",
@@ -1657,6 +1658,8 @@ export default {
   "Which AI agent CLI this runner will drive. Baked into the displayed ``pidash runner add`` command.":
     "이 러너가 구동할 AI 에이전트 CLI입니다. 표시된 ``pidash runner add`` 명령에 포함됩니다.",
   "Which events would you like to trigger this webhook?": "이 웹훅을 트리거할 이벤트를 선택하세요.",
+  "Which pod's runners serve this scheduler's runs. Leave on the project default unless you need a specific machine fleet.":
+    "Which pod's runners serve this scheduler's runs. Leave on the project default unless you need a specific machine fleet.",
   "Widget reordered successfully.": "위젯이 성공적으로 재정렬되었습니다.",
   "Windows (MSI)": "Windows (MSI)",
   "Windows (PowerShell)": "Windows (PowerShell)",

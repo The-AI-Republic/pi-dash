@@ -74,6 +74,10 @@ export interface ISchedulerBinding {
   exdates: string[];
   extra_context: string;
   enabled: boolean;
+  /** Pod override for runs fired by this binding. Null = use the project's default pod (resolved at fire time). */
+  pod: string | null;
+  /** Joined name of the override pod, or null when using the project default. Read-only. */
+  pod_name: string | null;
   next_run_at: string | null;
   last_run: string | null;
   last_run_status: string | null;
@@ -101,10 +105,12 @@ export interface ISchedulerBindingCreatePayload {
   exdates?: string[];
   extra_context?: string;
   enabled?: boolean;
+  /** Optional pod override; omit or null to use the project's default pod. */
+  pod?: string | null;
 }
 
 export type ISchedulerBindingUpdatePayload = Partial<
-  Pick<ISchedulerBinding, "dtstart" | "tzid" | "rrule" | "rdates" | "exdates" | "extra_context" | "enabled">
+  Pick<ISchedulerBinding, "dtstart" | "tzid" | "rrule" | "rdates" | "exdates" | "extra_context" | "enabled" | "pod">
 >;
 
 export class SchedulerService extends APIService {

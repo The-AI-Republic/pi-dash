@@ -1185,6 +1185,7 @@ export default {
   "Project context (optional)": "Konteks proyek (opsional)",
   "Project cover image": "Gambar sampul proyek",
   "Project created successfully": "Proyek berhasil dibuat",
+  "Project default pod": "Project default pod",
   "Project ID": "ID Proyek",
   "Project ID is required": "ID Proyek diperlukan",
   "Project ID must at least be of 1 character": "ID Proyek harus minimal 1 karakter",
@@ -1679,6 +1680,8 @@ export default {
   "Which AI agent CLI this runner will drive. Baked into the displayed ``pidash runner add`` command.":
     "CLI agen AI mana yang akan dijalankan oleh runner ini. Tertanam dalam perintah ``pidash runner add`` yang ditampilkan.",
   "Which events would you like to trigger this webhook?": "Acara mana yang ingin Anda picu webhook ini?",
+  "Which pod's runners serve this scheduler's runs. Leave on the project default unless you need a specific machine fleet.":
+    "Which pod's runners serve this scheduler's runs. Leave on the project default unless you need a specific machine fleet.",
   "Widget reordered successfully.": "Widget berhasil diurutkan ulang.",
   "Windows (MSI)": "Windows (MSI)",
   "Windows (PowerShell)": "Windows (PowerShell)",

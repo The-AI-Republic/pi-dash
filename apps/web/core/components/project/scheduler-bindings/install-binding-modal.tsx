@@ -14,6 +14,7 @@ import { TOAST_TYPE, setToast } from "@pi-dash/propel/toast";
 import type { IScheduler, ISchedulerBinding } from "@pi-dash/services";
 import { SchedulerService } from "@pi-dash/services";
 import { EModalPosition, EModalWidth, ModalCore } from "@pi-dash/ui";
+import { BindingPodField } from "./binding-pod-field";
 import { BindingScheduleFields } from "./binding-schedule-fields";
 import { DEFAULT_TZID } from "./constants";
 import { defaultDtstartLocal, localToIsoUTC } from "./datetime-input";
@@ -25,6 +26,8 @@ interface InstallFormValues {
   rrule: string;
   extra_context: string;
   enabled: boolean;
+  /** Pod id, or "" for the project default. */
+  pod: string;
 }
 
 type Props = {
@@ -44,6 +47,7 @@ const DEFAULT_VALUES = (): InstallFormValues => ({
   rrule: "FREQ=DAILY",
   extra_context: "",
   enabled: true,
+  pod: "",
 });
 
 const schedulerService = new SchedulerService();
@@ -91,6 +95,7 @@ export const InstallSchedulerBindingModal = observer(function InstallSchedulerBi
         rrule: values.rrule.trim(),
         extra_context: values.extra_context.trim(),
         enabled: values.enabled,
+        pod: values.pod || null,
       });
       setToast({
         type: TOAST_TYPE.SUCCESS,
@@ -106,6 +111,7 @@ export const InstallSchedulerBindingModal = observer(function InstallSchedulerBi
         dtstart?: string[];
         tzid?: string[];
         scheduler?: string[];
+        pod?: string[];
       } | null;
       const detail =
         err?.error ??
@@ -113,6 +119,7 @@ export const InstallSchedulerBindingModal = observer(function InstallSchedulerBi
         err?.dtstart?.[0] ??
         err?.tzid?.[0] ??
         err?.scheduler?.[0] ??
+        err?.pod?.[0] ??
         t("Could not install the scheduler.");
       setToast({
         type: TOAST_TYPE.ERROR,
@@ -186,6 +193,8 @@ export const InstallSchedulerBindingModal = observer(function InstallSchedulerBi
           watchDtstart={watchedDtstart}
           watchRrule={watchedRrule}
         />
+
+        <BindingPodField control={control} name="pod" projectId={projectId} />
 
         <div className="flex justify-end gap-2">
           <Button variant="secondary" onClick={onClose} disabled={isSubmitting}>

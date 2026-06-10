@@ -1155,6 +1155,7 @@ export default {
   "Project context (optional)": "项目上下文（可选）",
   "Project cover image": "项目封面图片",
   "Project created successfully": "项目创建成功",
+  "Project default pod": "Project default pod",
   "Project ID": "项目ID",
   "Project ID is required": "项目ID是必需的",
   "Project ID must at least be of 1 character": "项目ID至少需要1个字符",
@@ -1625,6 +1626,8 @@ export default {
   "Which AI agent CLI this runner will drive. Baked into the displayed ``pidash runner add`` command.":
     "此运行器将驱动哪个 AI agent CLI。已嵌入到显示的 ``pidash runner add`` 命令中。",
   "Which events would you like to trigger this webhook?": "您希望哪些事件触发此 webhook？",
+  "Which pod's runners serve this scheduler's runs. Leave on the project default unless you need a specific machine fleet.":
+    "Which pod's runners serve this scheduler's runs. Leave on the project default unless you need a specific machine fleet.",
   "Widget reordered successfully.": "小组件已成功重新排序。",
   "Windows (MSI)": "Windows (MSI)",
   "Windows (PowerShell)": "Windows (PowerShell)",

@@ -1189,6 +1189,7 @@ export default {
   "Project context (optional)": "プロジェクトコンテキスト（オプション）",
   "Project cover image": "プロジェクトカバー画像",
   "Project created successfully": "プロジェクトが正常に作成されました",
+  "Project default pod": "Project default pod",
   "Project ID": "プロジェクトID",
   "Project ID is required": "プロジェクトIDが必要です",
   "Project ID must at least be of 1 character": "プロジェクトIDは1文字以上である必要があります",
@@ -1681,6 +1682,8 @@ export default {
   "Which AI agent CLI this runner will drive. Baked into the displayed ``pidash runner add`` command.":
     "このランナーが駆動するAIエージェントCLI。表示される ``pidash runner add`` コマンドに組み込まれています。",
   "Which events would you like to trigger this webhook?": "このウェブフックをトリガーするイベントを選択してください。",
+  "Which pod's runners serve this scheduler's runs. Leave on the project default unless you need a specific machine fleet.":
+    "Which pod's runners serve this scheduler's runs. Leave on the project default unless you need a specific machine fleet.",
   "Widget reordered successfully.": "ウィジェットの並べ替えが成功しました。",
   "Windows (MSI)": "Windows (MSI)",
   "Windows (PowerShell)": "Windows (PowerShell)",
