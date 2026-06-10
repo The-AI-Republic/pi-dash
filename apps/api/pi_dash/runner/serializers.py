@@ -221,6 +221,7 @@ class AgentRunSerializer(serializers.ModelSerializer):
             "ended_at",
             "done_payload",
             "error",
+            "refusal_category",
             "llm_model",
             "input_tokens",
             "output_tokens",

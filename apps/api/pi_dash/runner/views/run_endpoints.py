@@ -320,6 +320,21 @@ class RunFailedEndpoint(_RunEndpointBase):
                     locked_run=locked,
                 )
                 return Response({"ok": True, "rescheduled": True})
+            # A safety-classifier decline (e.g. Claude Fable 5 cyber/bio) is a
+            # terminal REFUSED, not a generic crash. The runner reports
+            # `reason: "refusal"` with a `category`; record both so a policy
+            # decline stays queryable apart from a FAILED.
+            if (request.data.get("reason") or "") == "refusal":
+                run_lifecycle.finalize_run_terminal(
+                    runner,
+                    run.id,
+                    AgentRunStatus.REFUSED,
+                    error_detail=request.data.get("detail") or "",
+                    refusal_category=request.data.get("category"),
+                    tokens=request.data.get("tokens") or request.data.get("usage"),
+                    model=request.data.get("model"),
+                )
+                return Response({"ok": True, "refused": True})
             run_lifecycle.finalize_run_terminal(
                 runner,
                 run.id,

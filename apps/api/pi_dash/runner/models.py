@@ -193,6 +193,25 @@ class AgentRunStatus(models.TextChoices):
     COMPLETED = "completed", "Completed"
     FAILED = "failed", "Failed"
     CANCELLED = "cancelled", "Cancelled"
+    # Terminal: the model declined the task under a safety classifier
+    # (e.g. Claude Fable 5 cyber/bio). Kept distinct from FAILED so a policy
+    # decline is queryable separately from a crash; the category is recorded
+    # in ``AgentRun.refusal_category``.
+    REFUSED = "refused", "Refused"
+
+
+class RefusalCategory(models.TextChoices):
+    """Safety-classifier decline category, mirrored from the Messages API
+    ``stop_details.category`` (Anthropic refusals-and-fallback docs).
+
+    ``UNKNOWN`` covers a refusal that carried no named category (the API
+    returns ``null`` there).
+    """
+
+    CYBER = "cyber", "Cyber"
+    BIO = "bio", "Bio"
+    REASONING_EXTRACTION = "reasoning_extraction", "Reasoning Extraction"
+    UNKNOWN = "unknown", "Unknown"
 
 
 class ApprovalStatus(models.TextChoices):
@@ -760,6 +779,15 @@ class AgentRun(models.Model):
     lease_expires_at = models.DateTimeField(null=True, blank=True)
     done_payload = models.JSONField(null=True, blank=True)
     error = models.TextField(blank=True, default="")
+    # Set only when ``status == REFUSED``: the safety-classifier category the
+    # runner reported (mirrors Messages API ``stop_details.category``). Empty
+    # for every non-refusal terminal state.
+    refusal_category = models.CharField(
+        max_length=32,
+        choices=RefusalCategory.choices,
+        blank=True,
+        default="",
+    )
     llm_model = models.CharField(max_length=128, blank=True, default="")
     input_tokens = models.BigIntegerField(null=True, blank=True)
     output_tokens = models.BigIntegerField(null=True, blank=True)
@@ -820,6 +848,7 @@ class AgentRun(models.Model):
             AgentRunStatus.FAILED,
             AgentRunStatus.CANCELLED,
             AgentRunStatus.BLOCKED,
+            AgentRunStatus.REFUSED,
         }
 
     @property
