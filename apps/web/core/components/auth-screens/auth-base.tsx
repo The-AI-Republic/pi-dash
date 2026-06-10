@@ -16,8 +16,10 @@ type AuthBaseProps = {
 export function AuthBase({ authType }: AuthBaseProps) {
   return (
     <div className="relative z-10 flex h-screen w-screen flex-col items-center overflow-hidden overflow-y-auto px-8 pt-6 pb-10">
-      <AuthHeader type={authType} />
-      <AuthRoot authMode={authType} />
+      <div className="mx-auto flex w-full max-w-[30rem] flex-grow flex-col items-center">
+        <AuthHeader type={authType} />
+        <AuthRoot authMode={authType} />
+      </div>
     </div>
   );
 }
