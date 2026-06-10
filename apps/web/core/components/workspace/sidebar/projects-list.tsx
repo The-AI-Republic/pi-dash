@@ -167,7 +167,12 @@ export const SidebarProjectsList = observer(function SidebarProjectsList() {
   // whenever the user lands on any of those routes so the active row is not
   // hidden behind a collapsed disclosure.
   useEffect(() => {
-    if (pathname.includes("projects") || pathname.includes("/drafts") || pathname.includes("/workspace-views")) {
+    if (
+      pathname.includes("projects") ||
+      pathname.includes("/drafts") ||
+      pathname.includes("/all-issues") ||
+      pathname.includes("/workspace-views")
+    ) {
       setIsAllProjectsListOpen(true);
       localStorage.setItem("isAllProjectsListOpen", "true");
     }
@@ -196,11 +201,7 @@ export const SidebarProjectsList = observer(function SidebarProjectsList() {
                 type="button"
                 className="flex w-full items-center gap-1 text-left text-13 font-semibold whitespace-nowrap text-placeholder"
                 onClick={() => toggleListDisclosure(!isAllProjectsListOpen)}
-                aria-label={t(
-                  isAllProjectsListOpen
-                    ? "Close projects menu"
-                    : "Open projects menu"
-                )}
+                aria-label={t(isAllProjectsListOpen ? "Close projects menu" : "Open projects menu")}
               >
                 <span className="text-13 font-semibold">{t("Projects")}</span>
               </Disclosure.Button>
@@ -229,11 +230,7 @@ export const SidebarProjectsList = observer(function SidebarProjectsList() {
                   iconClassName={cn("transition-transform", {
                     "rotate-90": isAllProjectsListOpen,
                   })}
-                  aria-label={t(
-                    isAllProjectsListOpen
-                      ? "Close projects menu"
-                      : "Open projects menu"
-                  )}
+                  aria-label={t(isAllProjectsListOpen ? "Close projects menu" : "Open projects menu")}
                 />
               </div>
             </div>
@@ -264,11 +261,11 @@ export const SidebarProjectsList = observer(function SidebarProjectsList() {
                         item={{
                           ...WORKSPACE_SIDEBAR_DYNAMIC_NAVIGATION_ITEMS["views"],
                           labelTranslationKey: "Work Items",
-                          // The base highlight only matches /workspace-views/all-issues/.
-                          // Since this row is now labelled "Work Items" (the section,
-                          // not a single page) it should stay active on every
-                          // /workspace-views/* route.
-                          highlight: (path: string) => path.includes("/workspace-views"),
+                          // "Work Items" points at the new /all-issues route but
+                          // represents the whole workspace work-items section, so it
+                          // stays active on the legacy /workspace-views/* routes too.
+                          highlight: (path: string) =>
+                            path.includes("/all-issues") || path.includes("/workspace-views"),
                         }}
                         additionalStaticItems={["views"]}
                       />
@@ -293,9 +290,7 @@ export const SidebarProjectsList = observer(function SidebarProjectsList() {
                           className="flex flex-grow items-center gap-1.5 text-13 font-medium text-tertiary"
                           id="extended-project-sidebar-toggle"
                           aria-label={t(
-                            isExtendedProjectSidebarOpened
-                              ? "Close extended sidebar"
-                              : "Open extended sidebar"
+                            isExtendedProjectSidebarOpened ? "Close extended sidebar" : "Open extended sidebar"
                           )}
                         >
                           <Ellipsis className="size-4 flex-shrink-0" />
