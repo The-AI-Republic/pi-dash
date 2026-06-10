@@ -121,7 +121,10 @@ class RunAcceptEndpoint(_RunEndpointBase):
             if closed:
                 return closed
             AgentRun.objects.filter(pk=locked.pk).update(
-                status=AgentRunStatus.RUNNING
+                status=AgentRunStatus.RUNNING,
+                # The run left the daemon's local worktree queue — a stale
+                # position must not linger on a now-running row.
+                queue_position=None,
             )
         return Response({"ok": True})
 
@@ -173,11 +176,18 @@ class RunQueuedEndpoint(_RunEndpointBase):
         return Response({"ok": True})
 
 
+# ``AgentRun.queue_position`` is a PositiveSmallIntegerField; Postgres
+# rejects anything above the signed-int16 ceiling, so out-of-range reports
+# are clamped rather than allowed to 500 the endpoint.
+QUEUE_POSITION_MAX = 32767
+
+
 def _parse_queue_position(raw) -> Optional[int]:
     """Coerce a reported queue position to a non-negative int, else ``None``.
 
     A missing or malformed value clears the stored position rather than
-    erroring — the field is display-only and never load-bearing.
+    erroring — the field is display-only and never load-bearing. Values
+    beyond the column's int16 range are clamped for the same reason.
     """
     if raw is None:
         return None
@@ -185,7 +195,9 @@ def _parse_queue_position(raw) -> Optional[int]:
         value = int(raw)
     except (TypeError, ValueError):
         return None
-    return value if value >= 0 else None
+    if value < 0:
+        return None
+    return min(value, QUEUE_POSITION_MAX)
 
 
 class RunStartedEndpoint(_RunEndpointBase):

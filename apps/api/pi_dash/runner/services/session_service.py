@@ -66,10 +66,17 @@ def apply_hello(runner: Runner, body: Dict[str, Any]) -> None:
     runner.save(
         update_fields=["os", "arch", "runner_version", "last_heartbeat_at"]
     )
-    reap_stale_busy_runs(runner, body)
+    # Session open redelivers ASSIGNED / WAITING_FOR_WORKTREE runs the
+    # restarted daemon no longer reports (design §6.3) — reaping them here
+    # would fail the very runs ``build_session_open_redeliver`` is about to
+    # push back, so they are excluded on this path only. The poll path keeps
+    # the default: an alive daemon that lost such a run is still reaped.
+    reap_stale_busy_runs(runner, body, exclude_redeliverable=True)
 
 
-def reap_stale_busy_runs(runner: Runner, body: Dict[str, Any]) -> None:
+def reap_stale_busy_runs(
+    runner: Runner, body: Dict[str, Any], *, exclude_redeliverable: bool = False
+) -> None:
     """Cancel BUSY runs the daemon no longer claims.
 
     WAITING_FOR_WORKTREE runs are covered automatically via
@@ -78,6 +85,10 @@ def reap_stale_busy_runs(runner: Runner, body: Dict[str, Any]) -> None:
     ``in_flight_run`` while it waits, so it is excluded below; a daemon that
     truly lost the run stops reporting it and is correctly reaped, exactly as
     for RUNNING.
+
+    ``exclude_redeliverable=True`` (session-open only) spares ASSIGNED /
+    WAITING_FOR_WORKTREE runs so ``build_session_open_redeliver`` can push
+    them back to the freshly-restarted daemon instead of failing them.
     """
     from django.db import transaction
 
@@ -116,9 +127,19 @@ def reap_stale_busy_runs(runner: Runner, body: Dict[str, Any]) -> None:
     assignment_cutoff = now - timedelta(seconds=ASSIGN_DELIVERY_GRACE_SECS)
     effective_cutoff = min(heartbeat_ts, assignment_cutoff)
 
+    reapable_statuses = tuple(BUSY_STATUSES)
+    if exclude_redeliverable:
+        redeliverable = (
+            AgentRunStatus.ASSIGNED,
+            AgentRunStatus.WAITING_FOR_WORKTREE,
+        )
+        reapable_statuses = tuple(
+            s for s in reapable_statuses if s not in redeliverable
+        )
+
     stale = AgentRun.objects.filter(
         runner=runner,
-        status__in=BUSY_STATUSES,
+        status__in=reapable_statuses,
         assigned_at__lt=effective_cutoff,
     )
     if in_flight_id:
@@ -264,12 +285,19 @@ def upsert_runner_live_state(
         )
 
 
+# ``Runner.free_worktrees`` is an IntegerField; Postgres rejects anything
+# above the signed-int32 ceiling, so out-of-range reports are clamped
+# rather than allowed to 500 the poll handler.
+FREE_WORKTREES_MAX = 2**31 - 1
+
+
 def parse_free_worktrees(raw: Any) -> Optional[int]:
     """Coerce a reported ``free_worktrees`` hint to a non-negative int.
 
     Returns ``None`` for a missing or malformed value so the poll handler
     leaves the stored hint untouched (a pre-feature runner omits the field;
-    a malformed one should never wipe a known-good value). See
+    a malformed one should never wipe a known-good value). Values beyond the
+    column's int32 range are clamped rather than 500ing the poll. See
     ``.ai_design/worktree_pooling/design.md`` §6.4.
     """
     if raw is None:
@@ -278,7 +306,9 @@ def parse_free_worktrees(raw: Any) -> Optional[int]:
         value = int(raw)
     except (TypeError, ValueError):
         return None
-    return value if value >= 0 else None
+    if value < 0:
+        return None
+    return min(value, FREE_WORKTREES_MAX)
 
 
 def build_session_open_redeliver(

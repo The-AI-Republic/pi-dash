@@ -311,10 +311,10 @@ The status object gains an optional field:
 The poll handler stores it on the runner row.
 `select_runner_in_pod` (`apps/api/pi_dash/runner/services/matcher.py:96`)
 uses it as a **preference, not a gate**: among eligible idle runners, prefer
-one whose office reports a free desk; fall back to today's oldest-heartbeat
-choice. The matcher never refuses to assign because capacity looks full — the
-local queue absorbs the overflow, and stale hints therefore cost at most some
-queue time, never a stuck run. With agent-targeted routing there is often
+one whose office reports a free desk; fall back to today's freshest-heartbeat
+choice (`-last_heartbeat_at`, newest first). The matcher never refuses to
+assign because capacity looks full — the local queue absorbs the overflow,
+and stale hints therefore cost at most some queue time, never a stuck run. With agent-targeted routing there is often
 exactly one eligible runner anyway; this hint only improves the multi-eligible
 case.
 

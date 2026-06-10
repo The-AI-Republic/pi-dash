@@ -23,12 +23,26 @@ use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use tokio::sync::{mpsc, oneshot};
 use uuid::Uuid;
 
 use crate::config::schema::{CleanMode, WorkdirConfig};
 use crate::workspace::git;
+
+/// How many times a waiter's branch checkout may fail before the lease fails
+/// hard (a typo'd or unfetchable branch must not present as an eternal queue,
+/// design §9).
+const MAX_CHECKOUT_ATTEMPTS: u32 = 3;
+/// Delay before re-draining the queue after a checkout failure. Without this,
+/// a transient fetch error on an otherwise idle pool would strand the waiter
+/// forever (the queue is otherwise only re-evaluated on lease release).
+const RETRY_DRAIN_DELAY: std::time::Duration = std::time::Duration::from_secs(3);
+/// Hard ceiling on `setup_command` runtime. The owner task runs setup inline,
+/// so a hung command would otherwise freeze every acquire/cancel/snapshot for
+/// the work dir indefinitely.
+const SETUP_COMMAND_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15 * 60);
 
 /// What a lease is being held for. Recorded in the on-disk lock file so a
 /// crash-reap can describe what it salvaged.
@@ -59,6 +73,10 @@ struct LockFile {
     kind: LeaseKind,
     holder_id: Uuid,
     branch: Option<String>,
+    /// When the lease was granted — ops-debugging context for `pidash status`
+    /// and crash-reap logs (design §8).
+    #[serde(default)]
+    acquired_at: Option<DateTime<Utc>>,
 }
 
 /// Why an acquire failed. `PoolUnhealthy` is terminal for the work dir until
@@ -69,6 +87,8 @@ pub enum AcquireError {
     PoolUnhealthy { workdir: String, reason: String },
     #[error("lease request was cancelled before a worktree was granted")]
     Cancelled,
+    #[error("worktree checkout failed after {MAX_CHECKOUT_ATTEMPTS} attempts: {detail}")]
+    Checkout { detail: String },
     #[error("pool owner task is gone")]
     PoolGone,
 }
@@ -83,6 +103,14 @@ pub struct LeaseRequest {
     /// run will create/choose its own branch (no branch lock to contend on at
     /// lease time).
     pub branch: Option<String>,
+    /// When set, the owner task reports this waiter's queue position here:
+    /// once when it parks and again whenever the position changes (positions
+    /// only decrease). This is the authoritative "the run is actually waiting"
+    /// signal feeding `RunQueued` / `WAITING_FOR_WORKTREE` (design §6.1) —
+    /// unlike a pre-acquire snapshot, it cannot race the enqueue and it also
+    /// covers branch-lock waits with free desks. The sender is dropped when
+    /// the waiter is granted, cancelled, or failed.
+    pub queued_tx: Option<mpsc::UnboundedSender<u32>>,
 }
 
 /// A granted desk. Holds the worktree path; releasing happens on drop.
@@ -92,7 +120,6 @@ pub struct Lease {
     /// an abnormal exit and should salvage. Defaults to `Aborted`; the happy
     /// path calls [`Lease::mark_success`].
     outcome: LeaseOutcome,
-    branch: Option<String>,
     holder_id: Uuid,
     worktree_id: usize,
     release_tx: Option<mpsc::UnboundedSender<OwnerMsg>>,
@@ -119,7 +146,6 @@ impl Drop for Lease {
             let _ = tx.send(OwnerMsg::Release {
                 worktree_id: self.worktree_id,
                 outcome: self.outcome,
-                branch: self.branch.take(),
                 holder_id: self.holder_id,
             });
         }
@@ -155,8 +181,13 @@ pub struct PoolSnapshot {
 impl PoolSnapshot {
     /// Free desks the matcher can use as a capacity hint (design §6.4). Counts
     /// desks that could be granted right now: unmaterialized capacity plus
-    /// idle materialized worktrees.
+    /// idle materialized worktrees. An unhealthy pool advertises zero — every
+    /// lease against it fails fast, so steering the matcher toward it would
+    /// invert the hint exactly when it matters.
     pub fn free_worktrees(&self) -> u32 {
+        if !self.healthy {
+            return 0;
+        }
         (self.pool_size.saturating_sub(self.busy)) as u32
     }
 }
@@ -173,7 +204,6 @@ enum OwnerMsg {
     Release {
         worktree_id: usize,
         outcome: LeaseOutcome,
-        branch: Option<String>,
         holder_id: Uuid,
     },
     /// Remove a queued waiter (cancel-while-parked, design §5).
@@ -183,6 +213,10 @@ enum OwnerMsg {
     Snapshot {
         reply: oneshot::Sender<PoolSnapshot>,
     },
+    /// Re-evaluate the queue. Scheduled (delayed) after a checkout failure so
+    /// a waiter parked by a transient git error is retried even when no lease
+    /// release is coming (an idle pool would otherwise strand it forever).
+    Drain,
     /// Clear an `Unhealthy` state and allow leases again (operator retry).
     ClearUnhealthy,
 }
@@ -241,6 +275,12 @@ struct Desk {
 struct Waiter {
     req: LeaseRequest,
     reply: oneshot::Sender<Result<Lease, AcquireError>>,
+    /// Consecutive checkout failures for this waiter. Capacity and branch-lock
+    /// waits don't count — only real git errors, bounded by
+    /// [`MAX_CHECKOUT_ATTEMPTS`].
+    checkout_attempts: u32,
+    /// Last queue position reported through `req.queued_tx` (dedupe).
+    last_reported_pos: Option<u32>,
 }
 
 struct PoolState {
@@ -268,8 +308,9 @@ impl PoolState {
     }
 
     /// Try to grant a desk to `req` right now. Returns the lease on success, or
-    /// gives the request back (still ungranted) so the caller can queue it.
-    /// `Err` carries a hard failure (unhealthy) to report to the waiter.
+    /// gives the request back (still ungranted, with the wait cause) so the
+    /// caller can queue it. `Err` carries a hard failure (unhealthy) to report
+    /// to the waiter.
     async fn try_grant(&mut self, req: LeaseRequest) -> TryGrant {
         if let PoolHealth::Unhealthy(reason) = &self.health {
             return TryGrant::Fail(AcquireError::PoolUnhealthy {
@@ -280,10 +321,17 @@ impl PoolState {
 
         // Branch-lock check: if this run pins a branch already checked out
         // elsewhere, it can't start regardless of free desks (design §4.3).
-        if let Some(branch) = req.branch.as_deref()
-            && self.branch_locked_for_grant(branch).await
-        {
-            return TryGrant::Wait(req);
+        // Fail-closed: an error listing worktrees is treated like a checkout
+        // failure (bounded retry), never as "unlocked" — `checkout -B` does
+        // not reliably refuse a doubly-held branch, so this check is the lock.
+        if let Some(branch) = req.branch.as_deref() {
+            match self.branch_locked_for_grant(branch).await {
+                Ok(true) => return TryGrant::Wait(req, WaitCause::BranchLocked),
+                Ok(false) => {}
+                Err(e) => {
+                    return TryGrant::Wait(req, WaitCause::CheckoutFailed(format!("{e:#}")));
+                }
+            }
         }
 
         // Find a free materialized desk, else lazily create one under the cap.
@@ -303,7 +351,7 @@ impl PoolState {
             }
         } else {
             // All desks busy — queue it.
-            return TryGrant::Wait(req);
+            return TryGrant::Wait(req, WaitCause::Capacity);
         };
 
         match self.check_out_for(desk_id, &req).await {
@@ -313,7 +361,6 @@ impl PoolState {
                 let lease = Lease {
                     worktree: desk.path.clone(),
                     outcome: LeaseOutcome::Aborted,
-                    branch: req.branch.clone(),
                     holder_id: req.holder_id,
                     worktree_id: desk_id,
                     release_tx: Some(self.self_tx.clone()),
@@ -322,29 +369,25 @@ impl PoolState {
             }
             Err(e) => {
                 tracing::warn!(workdir = %self.cfg.name, desk_id, error = %e, "checkout failed; queueing");
-                TryGrant::Wait(req)
+                // The desk stays idle and unleased — remove the lock file
+                // written before the failed checkout so a later crash-reap
+                // doesn't "salvage" an idle desk under this request's name.
+                let _ = tokio::fs::remove_file(self.lock_path(desk_id)).await;
+                TryGrant::Wait(req, WaitCause::CheckoutFailed(format!("{e:#}")))
             }
         }
     }
 
     /// Branch-lock check used when deciding whether to grant. Separate method so
-    /// the borrow on `self` is released before mutation.
-    async fn branch_locked_for_grant(&self, branch: &str) -> bool {
-        match git::checked_out_branches(&self.canonical).await {
-            Ok(map) => {
-                if let Some(holder_path) = map.get(branch) {
-                    // If the holder is an idle desk of ours we could reuse it,
-                    // but to keep the logic simple we treat any other holder as
-                    // a lock. (An idle desk parks on detached HEAD, so it never
-                    // holds a branch — only busy desks / the canonical clone do.)
-                    let _ = holder_path;
-                    true
-                } else {
-                    false
-                }
-            }
-            Err(_) => false,
-        }
+    /// the borrow on `self` is released before mutation. Errors propagate so
+    /// the caller can fail closed.
+    async fn branch_locked_for_grant(&self, branch: &str) -> anyhow::Result<bool> {
+        let map = git::checked_out_branches(&self.canonical).await?;
+        // If the holder is an idle desk of ours we could reuse it, but to keep
+        // the logic simple we treat any holder as a lock. (An idle desk parks
+        // on detached HEAD, so it never holds a branch — only busy desks / the
+        // canonical clone do.)
+        Ok(map.contains_key(branch))
     }
 
     /// Write the lock file and check out the run's branch in the desk.
@@ -353,6 +396,7 @@ impl PoolState {
             kind: req.kind,
             holder_id: req.holder_id,
             branch: req.branch.clone(),
+            acquired_at: Some(Utc::now()),
         };
         let lock_path = self.lock_path(desk_id);
         if let Some(parent) = lock_path.parent() {
@@ -368,12 +412,24 @@ impl PoolState {
     }
 
     /// Create a new worktree desk and run `setup_command` (once). One retry
-    /// with a short backoff before giving up (design §9).
+    /// with a short backoff before giving up (design §9) — for both the
+    /// `worktree add` (a transient disk/lock blip must not condemn the whole
+    /// pool) and the setup command.
     async fn materialize_desk(&mut self) -> anyhow::Result<usize> {
         let id = self.next_id;
         self.next_id += 1;
         let path = self.desk_path(id);
-        git::worktree_add(&self.canonical, &path).await?;
+        if let Err(first) = git::worktree_add(&self.canonical, &path).await {
+            // Clear any half-created state (stale dir, dangling bookkeeping)
+            // and retry once before declaring the pool broken.
+            tracing::warn!(workdir = %self.cfg.name, desk_id = id, error = %first, "worktree add failed; retrying once");
+            self.remove_desk_dir(&path).await;
+            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+            if let Err(e) = git::worktree_add(&self.canonical, &path).await {
+                self.next_id = self.next_id.saturating_sub(1);
+                return Err(e);
+            }
+        }
 
         if let Some(cmd) = self.cfg.setup_command.clone().filter(|c| !c.trim().is_empty()) {
             let mut last_err = None;
@@ -388,15 +444,17 @@ impl PoolState {
                         last_err = Some(e);
                         // Short backoff before the single retry. Bounded so a
                         // broken work dir is declared unhealthy promptly rather
-                        // than queueing forever.
-                        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                        // than queueing forever. No sleep after the last
+                        // attempt — there is nothing left to wait for.
+                        if attempt == 0 {
+                            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                        }
                     }
                 }
             }
             if let Some(e) = last_err {
                 // Tear the half-set-up desk back down so it isn't reused dirty.
-                let _ = git::worktree_remove(&self.canonical, &path, true).await;
-                let _ = git::worktree_prune(&self.canonical).await;
+                self.remove_desk_dir(&path).await;
                 self.next_id = self.next_id.saturating_sub(1);
                 return Err(e);
             }
@@ -408,6 +466,17 @@ impl PoolState {
             leased_to: None,
         });
         Ok(id)
+    }
+
+    /// Remove a desk directory and its git bookkeeping, tolerating any state:
+    /// a registered worktree, an unregistered leftover dir, or nothing at all.
+    /// Leaving a `wt-<n>` directory behind would make the next
+    /// `git worktree add` of that path fail.
+    async fn remove_desk_dir(&self, path: &Path) {
+        if git::worktree_remove(&self.canonical, path, true).await.is_err() && path.exists() {
+            let _ = tokio::fs::remove_dir_all(path).await;
+        }
+        let _ = git::worktree_prune(&self.canonical).await;
     }
 
     fn mark_unhealthy(&mut self, reason: String) {
@@ -425,30 +494,26 @@ impl PoolState {
 
     /// Release a desk: salvage (if aborted + dirty) → clean → park → unlock,
     /// then wake the next grantable waiter (design §4.4, §5).
-    async fn release(
-        &mut self,
-        worktree_id: usize,
-        outcome: LeaseOutcome,
-        branch: Option<String>,
-        holder_id: Uuid,
-    ) {
+    async fn release(&mut self, worktree_id: usize, outcome: LeaseOutcome, holder_id: Uuid) {
         let Some(desk) = self.desks.iter().find(|d| d.id == worktree_id) else {
             return;
         };
         let path = desk.path.clone();
 
-        // 1. Salvage on abnormal exit, if a branch is known and tree is dirty.
-        if outcome == LeaseOutcome::Aborted
-            && let Some(branch) = branch.as_deref().filter(|s| !s.is_empty())
-        {
+        // 1. Salvage on abnormal exit. Unconditional — recycling must never
+        // destroy a failed run's working state (design §4.4), whether or not
+        // the run pinned a branch. `salvage_wip` no-ops on a clean tree and
+        // picks the branch HEAD actually sits on (or a salvage branch when
+        // detached).
+        if outcome == LeaseOutcome::Aborted {
             let label = format!("aborted run {holder_id}");
-            match git::salvage_wip(&path, branch, &label).await {
+            match git::salvage_wip(&path, holder_id, &label).await {
                 Ok(Some(sha)) => {
-                    tracing::info!(workdir = %self.cfg.name, %branch, sha, "salvaged WIP before recycle")
+                    tracing::info!(workdir = %self.cfg.name, sha, "salvaged WIP before recycle")
                 }
                 Ok(None) => {}
                 Err(e) => {
-                    tracing::warn!(workdir = %self.cfg.name, %branch, error = %e, "salvage failed; continuing recycle")
+                    tracing::warn!(workdir = %self.cfg.name, error = %e, "salvage failed; continuing recycle")
                 }
             }
         }
@@ -460,8 +525,7 @@ impl PoolState {
             .and(git::detach_head(&path).await);
         if let Err(e) = clean_ok {
             tracing::warn!(workdir = %self.cfg.name, desk_id = worktree_id, error = %e, "clean/park failed; reclaiming desk");
-            let _ = git::worktree_remove(&self.canonical, &path, true).await;
-            let _ = git::worktree_prune(&self.canonical).await;
+            self.remove_desk_dir(&path).await;
             self.desks.retain(|d| d.id != worktree_id);
         } else {
             // Re-run setup after a `full` clean so the next lease is warm.
@@ -493,8 +557,7 @@ impl PoolState {
         {
             if let Some(pos) = self.desks.iter().position(|d| d.leased_to.is_none()) {
                 let desk = self.desks.remove(pos);
-                let _ = git::worktree_remove(&self.canonical, &desk.path, true).await;
-                let _ = git::worktree_prune(&self.canonical).await;
+                self.remove_desk_dir(&desk.path).await;
                 let _ = tokio::fs::remove_file(self.lock_path(desk.id)).await;
             } else {
                 break;
@@ -504,10 +567,18 @@ impl PoolState {
 
     /// FIFO with head-of-line bypass for branch locks only (design §5): a
     /// waiter blocked solely by a branch lock is skipped; the next grantable
-    /// waiter starts. Capacity contention never reorders.
+    /// waiter starts. Capacity contention never reorders. A checkout failure
+    /// counts against the waiter's bounded attempts (a broken branch must not
+    /// queue forever); a retry drain is scheduled since no release may come.
     async fn drain_queue(&mut self) {
         let mut skipped: VecDeque<Waiter> = VecDeque::new();
-        while let Some(waiter) = self.queue.pop_front() {
+        while let Some(mut waiter) = self.queue.pop_front() {
+            // A waiter whose acquire future was dropped (without a cancel) has
+            // nobody listening — discard it instead of wasting a checkout and
+            // inflating reported queue positions.
+            if waiter.reply.is_closed() {
+                continue;
+            }
             // Stop if no desk could possibly be granted (all busy and at cap).
             let any_free = self.desks.iter().any(|d| d.leased_to.is_none())
                 || self.desks.len() < self.cfg.pool_size;
@@ -519,22 +590,74 @@ impl PoolState {
                 TryGrant::Granted(lease) => {
                     let _ = waiter.reply.send(Ok(lease));
                 }
-                TryGrant::Wait(req) => {
-                    // Branch-locked: keep it queued (bypass), try the next one.
-                    skipped.push_back(Waiter {
-                        req,
-                        reply: waiter.reply,
-                    });
+                TryGrant::Wait(req, cause) => {
+                    waiter.req = req;
+                    match cause {
+                        WaitCause::Capacity | WaitCause::BranchLocked => {
+                            // Keep it queued (bypass), try the next one.
+                            skipped.push_back(waiter);
+                        }
+                        WaitCause::CheckoutFailed(detail) => {
+                            waiter.checkout_attempts += 1;
+                            if waiter.checkout_attempts >= MAX_CHECKOUT_ATTEMPTS {
+                                let _ = waiter.reply.send(Err(AcquireError::Checkout { detail }));
+                            } else {
+                                skipped.push_back(waiter);
+                                self.schedule_retry_drain();
+                            }
+                        }
+                    }
                 }
                 TryGrant::Fail(e) => {
                     let _ = waiter.reply.send(Err(e));
                 }
             }
         }
+        // If the pool went unhealthy mid-drain (`mark_unhealthy` failed the
+        // main queue but cannot see this local deque), fail the skipped
+        // waiters too — nothing will ever drain them (design §9 fail-fast).
+        if let PoolHealth::Unhealthy(reason) = &self.health {
+            for w in skipped.drain(..) {
+                let _ = w.reply.send(Err(AcquireError::PoolUnhealthy {
+                    workdir: self.cfg.name.clone(),
+                    reason: reason.clone(),
+                }));
+            }
+            return;
+        }
         // Re-queue skipped (branch-locked) waiters at the front, preserving order.
         while let Some(w) = skipped.pop_back() {
             self.queue.push_front(w);
         }
+        self.notify_positions();
+    }
+
+    /// Report queue positions to waiters that asked for them (design §6.1).
+    /// Sends once on park and again whenever the position changes; deduped per
+    /// waiter so a no-op drain stays silent.
+    fn notify_positions(&mut self) {
+        for (idx, waiter) in self.queue.iter_mut().enumerate() {
+            let pos = idx as u32 + 1;
+            if waiter.last_reported_pos == Some(pos) {
+                continue;
+            }
+            if let Some(tx) = &waiter.req.queued_tx
+                && tx.send(pos).is_ok()
+            {
+                waiter.last_reported_pos = Some(pos);
+            }
+        }
+    }
+
+    /// Schedule a delayed queue re-evaluation. Used after checkout failures:
+    /// the queue is otherwise only drained on lease release, so a transient
+    /// git error on an idle pool would strand the waiter forever.
+    fn schedule_retry_drain(&self) {
+        let tx = self.self_tx.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(RETRY_DRAIN_DELAY).await;
+            let _ = tx.send(OwnerMsg::Drain);
+        });
     }
 
     fn snapshot(&self) -> PoolSnapshot {
@@ -559,20 +682,42 @@ impl PoolState {
 
 enum TryGrant {
     Granted(Lease),
-    Wait(LeaseRequest),
+    Wait(LeaseRequest, WaitCause),
     Fail(AcquireError),
 }
 
-/// Run a work dir's `setup_command` in `cwd` via the system shell.
+/// Why a request could not be granted right now. Capacity and branch-lock
+/// waits are normal queueing; a checkout failure is a git error that counts
+/// against the waiter's bounded retries.
+enum WaitCause {
+    Capacity,
+    BranchLocked,
+    CheckoutFailed(String),
+}
+
+/// Run a work dir's `setup_command` in `cwd` via the system shell. Bounded by
+/// [`SETUP_COMMAND_TIMEOUT`] — the pool owner runs this inline, so a hung
+/// command would otherwise block every acquire/cancel/snapshot for the work
+/// dir indefinitely.
 async fn run_setup_command(cwd: &Path, cmd: &str) -> anyhow::Result<()> {
     use anyhow::Context;
-    let out = tokio::process::Command::new("sh")
-        .arg("-c")
-        .arg(cmd)
-        .current_dir(cwd)
-        .output()
-        .await
-        .context("spawning setup_command")?;
+    let out = tokio::time::timeout(
+        SETUP_COMMAND_TIMEOUT,
+        tokio::process::Command::new("sh")
+            .arg("-c")
+            .arg(cmd)
+            .current_dir(cwd)
+            .kill_on_drop(true)
+            .output(),
+    )
+    .await
+    .map_err(|_| {
+        anyhow::anyhow!(
+            "setup_command `{cmd}` timed out after {}s",
+            SETUP_COMMAND_TIMEOUT.as_secs()
+        )
+    })?
+    .context("spawning setup_command")?;
     if !out.status.success() {
         anyhow::bail!(
             "setup_command `{cmd}` exited {}: {}",
@@ -641,57 +786,108 @@ async fn init_pool(state: &mut PoolState) -> anyhow::Result<()> {
     let _ = git::set_gc_auto_off(&state.canonical).await;
 
     git::worktree_prune(&state.canonical).await.ok();
-    reap_stale_locks(state).await;
+    adopt_existing_desks(state).await;
+
+    // Heads-up (design §4.3): the canonical clone's checked-out branch holds a
+    // permanent branch lock — runs pinning it will queue until it's parked.
+    if let Ok(Some(branch)) = git::current_branch(&state.canonical).await {
+        tracing::info!(
+            workdir = %state.cfg.name,
+            %branch,
+            "canonical clone has this branch checked out; runs pinning it will \
+             wait — `git checkout --detach` there to release it"
+        );
+    }
     Ok(())
 }
 
-/// On start, every lock file is stale (no lease survives the process). Each
-/// locked worktree is reaped through salvage → clean → park → unlock so a
-/// crash can't strand a desk or lose a dirty tree (design §8).
-async fn reap_stale_locks(state: &mut PoolState) {
+/// On start, adopt every `wt-<id>` directory left under the pool dir — desks
+/// from a clean shutdown (no lock file) as well as crashed leases (stale lock
+/// file; no lease survives the process, so every lock is stale by definition).
+///
+/// Both kinds MUST be adopted or removed: a leftover directory that the pool
+/// forgets about makes the next `git worktree add wt-<id>` fail, bricking the
+/// pool on its first lease after a restart. Crashed leases are reaped through
+/// the full release path (salvage → clean → park) so a crash can't lose a
+/// dirty tree (design §8); a desk that fails cleaning is removed, never
+/// repaired in place or registered broken.
+async fn adopt_existing_desks(state: &mut PoolState) {
+    // Collect stale locks first: desk id → lock contents.
     let locks_dir = state.pool_dir.join("locks");
-    let mut entries = match tokio::fs::read_dir(&locks_dir).await {
-        Ok(e) => e,
-        Err(_) => return,
-    };
-    while let Ok(Some(entry)) = entries.next_entry().await {
-        let path = entry.path();
-        if path.extension().and_then(|e| e.to_str()) != Some("json") {
-            continue;
-        }
-        // Parse `wt-<id>.lock.json` for the desk id.
-        let id = path
-            .file_name()
-            .and_then(|n| n.to_str())
-            .and_then(|n| n.strip_prefix("wt-"))
-            .and_then(|n| n.strip_suffix(".lock.json"))
-            .and_then(|n| n.parse::<usize>().ok());
-        let Some(id) = id else { continue };
-        let lock: Option<LockFile> = tokio::fs::read(&path)
-            .await
-            .ok()
-            .and_then(|b| serde_json::from_slice(&b).ok());
-
-        let desk_path = state.desk_path(id);
-        if desk_path.exists() {
-            // Salvage the pre-crash tree to its branch, then clean and park.
-            if let Some(lock) = &lock
-                && let Some(branch) = lock.branch.as_deref().filter(|s| !s.is_empty())
+    let mut locks: std::collections::HashMap<usize, LockFile> = std::collections::HashMap::new();
+    if let Ok(mut entries) = tokio::fs::read_dir(&locks_dir).await {
+        while let Ok(Some(entry)) = entries.next_entry().await {
+            let path = entry.path();
+            let id = path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .and_then(|n| n.strip_prefix("wt-"))
+                .and_then(|n| n.strip_suffix(".lock.json"))
+                .and_then(|n| n.parse::<usize>().ok());
+            let Some(id) = id else { continue };
+            if let Some(lock) = tokio::fs::read(&path)
+                .await
+                .ok()
+                .and_then(|b| serde_json::from_slice::<LockFile>(&b).ok())
             {
-                let label = format!("crash-reaped run {}", lock.holder_id);
-                let _ = git::salvage_wip(&desk_path, branch, &label).await;
+                locks.insert(id, lock);
             }
-            let _ = git::reset_clean(&desk_path, state.cfg.clean_mode, &state.cfg.keep_paths).await;
-            let _ = git::detach_head(&desk_path).await;
-            // Re-register the reaped desk as an idle pool member so it's reused.
-            state.desks.push(Desk {
-                id,
-                path: desk_path,
-                leased_to: None,
-            });
-            state.next_id = state.next_id.max(id + 1);
+            let _ = tokio::fs::remove_file(&path).await;
         }
-        let _ = tokio::fs::remove_file(&path).await;
+    }
+
+    // Scan for desk directories. The set of dirs (not the set of locks) is
+    // the ground truth for what must be adopted or removed.
+    let mut desk_ids: Vec<usize> = Vec::new();
+    if let Ok(mut entries) = tokio::fs::read_dir(&state.pool_dir).await {
+        while let Ok(Some(entry)) = entries.next_entry().await {
+            let id = entry
+                .file_name()
+                .to_str()
+                .and_then(|n| n.strip_prefix("wt-"))
+                .and_then(|n| n.parse::<usize>().ok());
+            if let Some(id) = id
+                && entry.path().is_dir()
+            {
+                desk_ids.push(id);
+            }
+        }
+    }
+    desk_ids.sort_unstable();
+
+    for id in desk_ids {
+        let desk_path = state.desk_path(id);
+        // Salvage any dirty tree before cleaning — from the lock's holder if
+        // we know it, otherwise anonymously. `salvage_wip` no-ops when clean
+        // (the normal case for clean-shutdown desks).
+        let (holder, label) = match locks.get(&id) {
+            Some(lock) => (
+                lock.holder_id,
+                format!("crash-reaped run {}", lock.holder_id),
+            ),
+            None => (Uuid::nil(), "desk adopted at startup".to_string()),
+        };
+        let _ = git::salvage_wip(&desk_path, holder, &label).await;
+
+        let clean_ok = git::reset_clean(&desk_path, state.cfg.clean_mode, &state.cfg.keep_paths)
+            .await
+            .and(git::detach_head(&desk_path).await);
+        match clean_ok {
+            Ok(()) => {
+                state.desks.push(Desk {
+                    id,
+                    path: desk_path,
+                    leased_to: None,
+                });
+            }
+            Err(e) => {
+                // Never register a desk that failed cleaning (design §8) —
+                // remove it; the pool recreates capacity lazily.
+                tracing::warn!(workdir = %state.cfg.name, desk_id = id, error = %e, "adopted desk failed clean/park; removing");
+                state.remove_desk_dir(&desk_path).await;
+            }
+        }
+        state.next_id = state.next_id.max(id + 1);
     }
 }
 
@@ -702,8 +898,23 @@ async fn pool_owner(mut state: PoolState, mut rx: mpsc::UnboundedReceiver<OwnerM
                 TryGrant::Granted(lease) => {
                     let _ = reply.send(Ok(lease));
                 }
-                TryGrant::Wait(req) => {
-                    state.queue.push_back(Waiter { req, reply });
+                TryGrant::Wait(req, cause) => {
+                    let checkout_attempts = match &cause {
+                        WaitCause::CheckoutFailed(_) => 1,
+                        _ => 0,
+                    };
+                    if let WaitCause::CheckoutFailed(_) = &cause {
+                        state.schedule_retry_drain();
+                    }
+                    state.queue.push_back(Waiter {
+                        req,
+                        reply,
+                        checkout_attempts,
+                        last_reported_pos: None,
+                    });
+                    // Authoritative park signal: the waiter is now actually
+                    // queued, so report its position (design §6.1).
+                    state.notify_positions();
                 }
                 TryGrant::Fail(e) => {
                     let _ = reply.send(Err(e));
@@ -712,24 +923,32 @@ async fn pool_owner(mut state: PoolState, mut rx: mpsc::UnboundedReceiver<OwnerM
             OwnerMsg::Release {
                 worktree_id,
                 outcome,
-                branch,
                 holder_id,
             } => {
-                state.release(worktree_id, outcome, branch, holder_id).await;
+                state.release(worktree_id, outcome, holder_id).await;
             }
             OwnerMsg::Cancel { holder_id } => {
                 if let Some(pos) = state.queue.iter().position(|w| w.req.holder_id == holder_id) {
                     let waiter = state.queue.remove(pos).unwrap();
                     let _ = waiter.reply.send(Err(AcquireError::Cancelled));
+                    // Everyone behind the cancelled waiter moved up one.
+                    state.notify_positions();
                 }
             }
             OwnerMsg::Snapshot { reply } => {
                 let _ = reply.send(state.snapshot());
             }
+            OwnerMsg::Drain => {
+                state.drain_queue().await;
+            }
             OwnerMsg::ClearUnhealthy => {
                 if matches!(state.health, PoolHealth::Unhealthy(_)) {
                     tracing::info!(workdir = %state.cfg.name, "clearing unhealthy state");
                     state.health = PoolHealth::Healthy;
+                    // Waiters may have queued between the failure and the
+                    // clear; without a drain they'd sit until an unrelated
+                    // release.
+                    state.drain_queue().await;
                 }
             }
         }

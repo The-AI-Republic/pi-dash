@@ -165,6 +165,26 @@ def test_queued_dedupes_duplicate(db, api_client, runner_token, assigned_run):
 
 
 @pytest.mark.unit
+def test_accept_clears_queue_position(db, api_client, runner_token, assigned_run):
+    """A lease grant moves the run out of the daemon's local queue — accept
+    must not leave a stale position on the now-running row."""
+    assigned_run.status = AgentRunStatus.WAITING_FOR_WORKTREE
+    assigned_run.queue_position = 2
+    assigned_run.save(update_fields=["status", "queue_position"])
+
+    resp = api_client.post(
+        f"/api/v1/runner/runs/{assigned_run.id}/accept/",
+        {},
+        format="json",
+        HTTP_AUTHORIZATION=f"Bearer {runner_token}",
+    )
+    assert resp.status_code == 200, resp.data
+    assigned_run.refresh_from_db()
+    assert assigned_run.status == AgentRunStatus.RUNNING
+    assert assigned_run.queue_position is None
+
+
+@pytest.mark.unit
 def test_queued_rejects_other_runner(
     db, api_client, runner_token, assigned_run, create_user, workspace, pod
 ):
@@ -332,13 +352,17 @@ def _open_session(api_client, runner, token, *, in_flight=None):
 def test_session_open_redelivers_unreported_waiting_run(
     db, api_client, runner_token, enrolled_runner, assigned_run
 ):
+    """Regression: the run is well outside ASSIGN_DELIVERY_GRACE_SECS, so the
+    session-open reaper used to fail it before ``build_session_open_redeliver``
+    could push it back. Session open must redeliver, never reap."""
     assigned_run.status = AgentRunStatus.WAITING_FOR_WORKTREE
+    assigned_run.assigned_at = timezone.now() - timezone.timedelta(minutes=10)
     assigned_run.run_config = {
         "repo_url": "git@example.com:x/y.git",
         "repo_ref": "main",
         "git_work_branch": "pidash/run",
     }
-    assigned_run.save(update_fields=["status", "run_config"])
+    assigned_run.save(update_fields=["status", "assigned_at", "run_config"])
 
     resp = _open_session(api_client, enrolled_runner, runner_token, in_flight=None)
     assert resp.status_code == 201, resp.data
@@ -348,6 +372,29 @@ def test_session_open_redelivers_unreported_waiting_run(
     assert redeliver["run_id"] == str(assigned_run.id)
     assert redeliver["repo_url"] == "git@example.com:x/y.git"
     assert redeliver["git_work_branch"] == "pidash/run"
+    assigned_run.refresh_from_db()
+    assert assigned_run.status == AgentRunStatus.WAITING_FOR_WORKTREE
+    assert assigned_run.ended_at is None
+
+
+@pytest.mark.unit
+def test_session_open_redelivers_unreported_assigned_run_past_grace(
+    db, api_client, runner_token, enrolled_runner, assigned_run
+):
+    """Same regression for plain ASSIGNED: redelivered at session open even
+    past the delivery grace, not failed by the reaper."""
+    assigned_run.assigned_at = timezone.now() - timezone.timedelta(minutes=10)
+    assigned_run.save(update_fields=["assigned_at"])
+
+    resp = _open_session(api_client, enrolled_runner, runner_token, in_flight=None)
+    assert resp.status_code == 201, resp.data
+    redeliver = resp.data.get("redeliver")
+    assert redeliver is not None
+    assert redeliver["type"] == "assign"
+    assert redeliver["run_id"] == str(assigned_run.id)
+    assigned_run.refresh_from_db()
+    assert assigned_run.status == AgentRunStatus.ASSIGNED
+    assert assigned_run.ended_at is None
 
 
 @pytest.mark.unit
@@ -378,6 +425,49 @@ def test_session_open_no_redeliver_for_running_run(
     resp = _open_session(api_client, enrolled_runner, runner_token, in_flight=None)
     assert resp.status_code == 201, resp.data
     assert resp.data.get("redeliver") is None
+
+
+@pytest.mark.unit
+def test_poll_still_reaps_old_unreported_waiting_run(
+    db, api_client, runner_token, enrolled_runner, assigned_run
+):
+    """Only session OPEN redelivers. A daemon that is alive and polling but no
+    longer reports an old ASSIGNED/WAITING run truly lost it — the poll path
+    keeps the default reap."""
+    assigned_run.status = AgentRunStatus.WAITING_FOR_WORKTREE
+    assigned_run.assigned_at = timezone.now() - timezone.timedelta(minutes=10)
+    assigned_run.save(update_fields=["status", "assigned_at"])
+
+    open_resp = _open_session(
+        api_client, enrolled_runner, runner_token, in_flight=str(assigned_run.id)
+    )
+    assert open_resp.status_code == 201, open_resp.data
+    sid = open_resp.data["session_id"]
+
+    with (
+        patch("pi_dash.runner.views.sessions.outbox.is_pel_drained", return_value=True),
+        patch("pi_dash.runner.views.sessions.outbox.read_for_session", return_value=[]),
+        patch("pi_dash.runner.views.sessions.outbox.mark_pel_drained"),
+        patch("pi_dash.runner.views.sessions.outbox.ack_for_session"),
+        patch("django.db.transaction.on_commit", side_effect=lambda fn, **kw: fn()),
+    ):
+        poll_resp = api_client.post(
+            f"/api/v1/runner/runners/{enrolled_runner.id}/sessions/{sid}/poll",
+            {
+                "ack": [],
+                "status": {
+                    "status": "online",
+                    "in_flight_run": None,
+                    "ts": timezone.now().isoformat(),
+                },
+            },
+            format="json",
+            HTTP_AUTHORIZATION=f"Bearer {runner_token}",
+        )
+    assert poll_resp.status_code == 200, poll_resp.data
+    assigned_run.refresh_from_db()
+    assert assigned_run.status == AgentRunStatus.FAILED
+    assert assigned_run.ended_at is not None
 
 
 # ---------------------------------------------------------------------------
@@ -423,3 +513,27 @@ def test_parse_free_worktrees_coercion():
     assert session_service.parse_free_worktrees(-1) is None
     assert session_service.parse_free_worktrees(0) == 0
     assert session_service.parse_free_worktrees("3") == 3
+    # Out-of-range reports are clamped to the column's int32 ceiling rather
+    # than raising (which would 500 the poll handler).
+    assert session_service.parse_free_worktrees(2**31 - 1) == 2**31 - 1
+    assert session_service.parse_free_worktrees(2**31) == session_service.FREE_WORKTREES_MAX
+    assert session_service.parse_free_worktrees(2**63) == session_service.FREE_WORKTREES_MAX
+
+
+@pytest.mark.unit
+def test_parse_queue_position_coercion():
+    from pi_dash.runner.views.run_endpoints import (
+        QUEUE_POSITION_MAX,
+        _parse_queue_position,
+    )
+
+    assert _parse_queue_position(None) is None
+    assert _parse_queue_position("bad") is None
+    assert _parse_queue_position(-1) is None
+    assert _parse_queue_position(0) == 0
+    assert _parse_queue_position("3") == 3
+    # Out-of-range reports are clamped to the PositiveSmallIntegerField
+    # ceiling rather than raising (which would 500 the endpoint).
+    assert _parse_queue_position(QUEUE_POSITION_MAX) == QUEUE_POSITION_MAX
+    assert _parse_queue_position(QUEUE_POSITION_MAX + 1) == QUEUE_POSITION_MAX
+    assert _parse_queue_position(2**31) == QUEUE_POSITION_MAX

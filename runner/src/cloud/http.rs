@@ -551,6 +551,13 @@ impl RunnerCloudClient {
             session_id: parsed.session_id,
             server_time: parsed.welcome.server_time.unwrap_or_else(Utc::now),
         });
+        drop(state);
+        // Re-probe `queued` support each session: the latch may have been set
+        // by a transient proxy 404 (e.g. mid-deploy), and a cloud upgrade
+        // behind the same URL should be picked up without a daemon restart.
+        self.inner
+            .queued_unsupported
+            .store(false, std::sync::atomic::Ordering::Relaxed);
         Ok(parsed)
     }
 
@@ -808,12 +815,17 @@ impl RunnerCloudClient {
     }
 
     /// Post a `RunQueued` to `.../runs/<id>/queued/`, feature-detecting a
-    /// cloud that predates worktree pooling (design §6.1, §15). A 404 latches
-    /// `queued_unsupported` (logged once) and is swallowed — the run keeps
-    /// running, just without `WAITING_FOR_WORKTREE` visibility. `queued` is a
-    /// best-effort visibility signal, so unlike `accept` it does NOT go through
-    /// the full lifecycle retry machinery; a transient failure is fine because
-    /// the next position change re-posts.
+    /// cloud that predates worktree pooling (design §6.1, §15).
+    ///
+    /// A *route* 404 latches `queued_unsupported` (logged once, reset at the
+    /// next session open) and falls back to legacy accept-on-enqueue, so an
+    /// old cloud shows the parked run as `RUNNING` instead of an idle-looking
+    /// `ASSIGNED` (design §15: degraded visibility, no stuck states). The
+    /// endpoint's own run-level 404 (`run_not_found` body — the run row is
+    /// gone) must NOT latch: that says nothing about the route existing.
+    /// Transient failures retry via the normal lifecycle machinery; anything
+    /// that survives the retries is swallowed — `queued` is a visibility
+    /// signal and must never fail the run.
     async fn post_run_queued(
         &self,
         run_id: Uuid,
@@ -822,40 +834,62 @@ impl RunnerCloudClient {
     ) -> Result<(), TransportError> {
         use std::sync::atomic::Ordering;
         if self.inner.queued_unsupported.load(Ordering::Relaxed) {
-            return Ok(());
+            return self.post_accept_on_enqueue(run_id, idempotency_key).await;
         }
-        let token = self.ensure_access_token().await?;
         let url = format!(
             "{}/api/v1/runner/runs/{}/queued/",
             self.inner.transport.cloud_url(),
             run_id,
         );
-        let resp = self
-            .inner
-            .transport
-            .http()
-            .post(&url)
-            .header(AUTHORIZATION, format!("Bearer {}", token.raw))
-            .header("X-Runner-Id", self.inner.runner_id.to_string())
-            .header("Idempotency-Key", idempotency_key)
-            .json(&body)
-            .send()
+        match self
+            .post_authed_with_retry(&url, body, idempotency_key, |_| true)
             .await
-            .map_err(|e| TransportError::Network(e.to_string()))?;
-        if resp.status() == StatusCode::NOT_FOUND {
-            if !self.inner.queued_unsupported.swap(true, Ordering::Relaxed) {
-                tracing::info!(
-                    "cloud has no runs/<id>/queued/ endpoint; disabling worktree-queue \
-                     reporting for this session (falling back to accept-on-enqueue)"
-                );
+        {
+            Ok(_) => Ok(()),
+            Err(TransportError::Server { status: 404, body }) => {
+                if body.contains("run_not_found") {
+                    // The endpoint exists; this specific run is gone cloud-side
+                    // (cleaned up / deleted). Nothing to report.
+                    tracing::debug!(%run_id, "queued post: run not found cloud-side; ignoring");
+                    return Ok(());
+                }
+                if !self.inner.queued_unsupported.swap(true, Ordering::Relaxed) {
+                    tracing::info!(
+                        "cloud has no runs/<id>/queued/ endpoint; disabling worktree-queue \
+                         reporting for this session (falling back to accept-on-enqueue)"
+                    );
+                }
+                self.post_accept_on_enqueue(run_id, idempotency_key).await
             }
-            return Ok(());
+            Err(err) => {
+                // Retries exhausted (or fatal auth error). Non-fatal for a
+                // visibility signal; the next position change re-posts.
+                tracing::warn!(%run_id, error = %err, "queued post failed; ignoring");
+                Ok(())
+            }
         }
-        // Any other non-success is non-fatal for a visibility signal; log and
-        // move on so a queued run never fails just because its position update
-        // didn't land.
-        if !resp.status().is_success() {
-            tracing::debug!(status = %resp.status(), "queued post returned non-success; ignoring");
+    }
+
+    /// Legacy fallback for clouds without the `queued` endpoint (design §15):
+    /// post `accept` at enqueue time so the parked run is at least visibly
+    /// claimed (`RUNNING`) instead of sitting in `ASSIGNED` for its whole
+    /// queue wait. The real lease-time `Accept` that follows is an idempotent
+    /// repeat from the old cloud's perspective. Best-effort.
+    async fn post_accept_on_enqueue(
+        &self,
+        run_id: Uuid,
+        idempotency_key: &str,
+    ) -> Result<(), TransportError> {
+        let body = serde_json::json!({
+            "type": "accept",
+            "run_id": run_id,
+            "workspace_state": { "branch": null, "head": null, "dirty": false },
+        });
+        // A distinct idempotency key: the lease-time Accept must not be
+        // deduped away against this early one.
+        let key = format!("{idempotency_key}-accept-on-enqueue");
+        if let Err(err) = self.post_run_lifecycle(run_id, "accept", body, &key).await {
+            tracing::warn!(%run_id, error = %err, "accept-on-enqueue fallback failed; ignoring");
         }
         Ok(())
     }
@@ -1050,6 +1084,13 @@ pub struct OpenSessionResponse {
     pub welcome: WelcomePayload,
     #[serde(default)]
     pub resume_ack: Option<Json>,
+    /// An `Assign`-shaped payload for an outstanding ASSIGNED /
+    /// WAITING_FOR_WORKTREE run this runner did not report as in-flight
+    /// (design §6.3). After a daemon restart the local worktree queue is
+    /// gone; the cloud's assignment record is the durable truth and this is
+    /// how it flows back. Treated exactly like a fresh `Assign`.
+    #[serde(default)]
+    pub redeliver: Option<Json>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -1549,6 +1590,35 @@ impl HttpLoop {
                 .await
                 .map_err(|e| self.mailbox_closed_error(e))?;
         }
+        // Redelivery (design §6.3): an outstanding run the cloud still holds in
+        // ASSIGNED/WAITING_FOR_WORKTREE that we did not report as in-flight —
+        // i.e. the daemon restarted and lost its local queue. Inject it into
+        // the mailbox as if it were a fresh `Assign`; the instance will lease
+        // or enqueue it like any other assignment.
+        if let Some(redeliver_body) = session.redeliver {
+            match serde_json::from_value::<ServerMsg>(redeliver_body) {
+                Ok(parsed) => {
+                    tracing::info!(
+                        runner = %self.client.runner_id(),
+                        "session open redelivered an outstanding run"
+                    );
+                    self.mailbox
+                        .send(InboundEnvelope {
+                            stream_id: None,
+                            env: Envelope::for_runner(self.client.runner_id(), parsed),
+                        })
+                        .await
+                        .map_err(|e| self.mailbox_closed_error(e))?;
+                }
+                Err(err) => {
+                    tracing::warn!(
+                        runner = %self.client.runner_id(),
+                        error = %err,
+                        "ignoring unparseable redeliver payload from session open"
+                    );
+                }
+            }
+        }
 
         let mut backoff_secs = 1u64;
         let mut consecutive_evictions = 0u32;
@@ -1961,6 +2031,59 @@ mod tests {
         };
         assert!(!token.is_expired(60));
         assert!(token.is_expired(121));
+    }
+
+    /// The session-open response's `redeliver` payload (design §6.3) must
+    /// parse and decode as a `ServerMsg::Assign` — this is the exact shape the
+    /// cloud's `_build_assign_msg` emits.
+    #[test]
+    fn open_session_response_redeliver_decodes_as_assign() {
+        let run_id = Uuid::new_v4();
+        let raw = serde_json::json!({
+            "session_id": Uuid::new_v4(),
+            "welcome": { "server_time": Utc::now() },
+            "resume_ack": null,
+            "redeliver": {
+                "v": 1,
+                "type": "assign",
+                "run_id": run_id,
+                "work_item_id": null,
+                "prompt": "do the thing",
+                "repo_url": null,
+                "repo_ref": null,
+                "git_work_branch": "feat/x",
+                "expected_codex_model": null,
+                "approval_policy_overrides": null,
+                "deadline": null,
+            },
+        });
+        let parsed: OpenSessionResponse = serde_json::from_value(raw).expect("parse response");
+        let redeliver = parsed.redeliver.expect("redeliver present");
+        let msg: ServerMsg = serde_json::from_value(redeliver).expect("decode as ServerMsg");
+        match msg {
+            ServerMsg::Assign {
+                run_id: rid,
+                git_work_branch,
+                ..
+            } => {
+                assert_eq!(rid, run_id);
+                assert_eq!(git_work_branch.as_deref(), Some("feat/x"));
+            }
+            other => panic!("expected Assign, got {other:?}"),
+        }
+    }
+
+    /// Old runners must keep decoding session-open responses that lack the
+    /// `redeliver` key (and vice versa — the field is additive).
+    #[test]
+    fn open_session_response_without_redeliver_still_decodes() {
+        let raw = serde_json::json!({
+            "session_id": Uuid::new_v4(),
+            "welcome": { "server_time": Utc::now() },
+        });
+        let parsed: OpenSessionResponse = serde_json::from_value(raw).expect("parse response");
+        assert!(parsed.redeliver.is_none());
+        assert!(parsed.resume_ack.is_none());
     }
 
     #[test]

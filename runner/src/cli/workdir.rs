@@ -75,7 +75,18 @@ pub async fn run(args: WorkdirArgs, paths: &Paths) -> Result<()> {
     }
 }
 
-fn add(args: AddArgs, paths: &Paths) -> Result<()> {
+fn add(mut args: AddArgs, paths: &Paths) -> Result<()> {
+    // Absolutize before storing: a relative path (e.g. `--path .`) would
+    // resolve against the *daemon's* cwd at runtime and dodge the lexical
+    // collision checks in `Config::validate`.
+    args.path = std::path::absolute(&args.path)
+        .map_err(|e| anyhow::anyhow!("resolving path {:?}: {e}", args.path))?;
+    if let Some(wt) = args.worktrees_dir.take() {
+        args.worktrees_dir = Some(
+            std::path::absolute(&wt)
+                .map_err(|e| anyhow::anyhow!("resolving worktrees_dir {wt:?}: {e}"))?,
+        );
+    }
     // The canonical clone must already be a git repo: the pool shares its
     // object database and never clones from a URL itself.
     if !crate::workspace::git::is_git_repo(&args.path) {

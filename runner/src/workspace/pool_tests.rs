@@ -88,6 +88,7 @@ async fn acquire_grants_a_worktree_and_release_returns_it() {
             kind: LeaseKind::Run,
             holder_id: Uuid::new_v4(),
             branch: None,
+            queued_tx: None,
         })
         .await
         .expect("acquire");
@@ -119,6 +120,7 @@ async fn lazy_growth_stops_at_pool_size_and_excess_queues() {
             kind: LeaseKind::Run,
             holder_id: Uuid::new_v4(),
             branch: None,
+            queued_tx: None,
         })
         .await
         .expect("first acquire");
@@ -133,6 +135,7 @@ async fn lazy_growth_stops_at_pool_size_and_excess_queues() {
                 kind: LeaseKind::Run,
                 holder_id: h2,
                 branch: None,
+                queued_tx: None,
             })
             .await
     });
@@ -164,6 +167,7 @@ async fn cancel_removes_a_queued_waiter() {
             kind: LeaseKind::Run,
             holder_id: Uuid::new_v4(),
             branch: None,
+            queued_tx: None,
         })
         .await
         .expect("first acquire");
@@ -176,6 +180,7 @@ async fn cancel_removes_a_queued_waiter() {
                 kind: LeaseKind::Run,
                 holder_id: h2,
                 branch: None,
+                queued_tx: None,
             })
             .await
     });
@@ -205,6 +210,7 @@ async fn branch_lock_serializes_two_runs_on_the_same_branch() {
             kind: LeaseKind::Run,
             holder_id: Uuid::new_v4(),
             branch: Some("feat/x".into()),
+            queued_tx: None,
         })
         .await
         .expect("A acquires feat/x");
@@ -223,6 +229,7 @@ async fn branch_lock_serializes_two_runs_on_the_same_branch() {
                 kind: LeaseKind::Run,
                 holder_id: Uuid::new_v4(),
                 branch: Some("feat/x".into()),
+                queued_tx: None,
             })
             .await
     });
@@ -261,6 +268,7 @@ async fn branch_lock_bypass_lets_a_different_branch_run_first() {
             kind: LeaseKind::Run,
             holder_id: Uuid::new_v4(),
             branch: Some("feat/x".into()),
+            queued_tx: None,
         })
         .await
         .expect("A");
@@ -275,6 +283,7 @@ async fn branch_lock_bypass_lets_a_different_branch_run_first() {
                 kind: LeaseKind::Run,
                 holder_id: hb,
                 branch: Some("feat/x".into()),
+                queued_tx: None,
             })
             .await
     });
@@ -287,6 +296,7 @@ async fn branch_lock_bypass_lets_a_different_branch_run_first() {
                 kind: LeaseKind::Run,
                 holder_id: hc,
                 branch: Some("feat/y".into()),
+                queued_tx: None,
             })
             .await
     });
@@ -321,6 +331,7 @@ async fn aborted_lease_salvages_dirty_tree_to_branch() {
             kind: LeaseKind::Run,
             holder_id: Uuid::new_v4(),
             branch: Some("feat/x".into()),
+            queued_tx: None,
         })
         .await
         .expect("acquire feat/x");
@@ -356,6 +367,7 @@ async fn success_lease_does_not_salvage() {
             kind: LeaseKind::Run,
             holder_id: Uuid::new_v4(),
             branch: Some("feat/x".into()),
+            queued_tx: None,
         })
         .await
         .expect("acquire");
@@ -387,6 +399,7 @@ async fn keep_ignored_preserves_gitignored_files_across_leases() {
             kind: LeaseKind::Run,
             holder_id: Uuid::new_v4(),
             branch: None,
+            queued_tx: None,
         })
         .await
         .expect("acquire");
@@ -406,6 +419,7 @@ async fn keep_ignored_preserves_gitignored_files_across_leases() {
             kind: LeaseKind::Run,
             holder_id: Uuid::new_v4(),
             branch: None,
+            queued_tx: None,
         })
         .await
         .expect("reacquire");
@@ -431,6 +445,7 @@ async fn full_clean_removes_gitignored_files() {
             kind: LeaseKind::Run,
             holder_id: Uuid::new_v4(),
             branch: None,
+            queued_tx: None,
         })
         .await
         .expect("acquire");
@@ -446,6 +461,7 @@ async fn full_clean_removes_gitignored_files() {
             kind: LeaseKind::Run,
             holder_id: Uuid::new_v4(),
             branch: None,
+            queued_tx: None,
         })
         .await
         .expect("reacquire");
@@ -467,6 +483,7 @@ async fn setup_command_failure_marks_pool_unhealthy_and_fails_fast() {
             kind: LeaseKind::Run,
             holder_id: Uuid::new_v4(),
             branch: None,
+            queued_tx: None,
         })
         .await;
     assert!(
@@ -483,6 +500,7 @@ async fn setup_command_failure_marks_pool_unhealthy_and_fails_fast() {
             kind: LeaseKind::Run,
             holder_id: Uuid::new_v4(),
             branch: None,
+            queued_tx: None,
         })
         .await;
     assert!(matches!(res2, Err(AcquireError::PoolUnhealthy { .. })));
@@ -575,6 +593,7 @@ async fn two_runners_share_one_workdir_concurrently() {
             kind: LeaseKind::Run,
             holder_id: Uuid::new_v4(),
             branch: None,
+            queued_tx: None,
         })
         .await
         .expect("l1");
@@ -583,6 +602,7 @@ async fn two_runners_share_one_workdir_concurrently() {
             kind: LeaseKind::Run,
             holder_id: Uuid::new_v4(),
             branch: None,
+            queued_tx: None,
         })
         .await
         .expect("l2 — second desk granted concurrently");
@@ -600,4 +620,257 @@ fn current_branch(path: &Path) -> String {
         .output()
         .unwrap();
     String::from_utf8_lossy(&out.stdout).trim().to_string()
+}
+
+/// Regression (restart bricking): a daemon restart after a CLEAN release left
+/// `wt-N` directories on disk with no lock files; the rebuilt pool knew
+/// nothing about them, and its first `git worktree add wt-1` collided and
+/// marked the whole work dir unhealthy. Adoption at init must re-register
+/// leftover desks.
+#[tokio::test]
+async fn restart_adopts_clean_shutdown_desks_instead_of_colliding() {
+    let (_tmp, canonical, worktrees) = fixture();
+    {
+        let pool = spawn_pool(workdir_cfg("main", &canonical, 2), &worktrees).await;
+        let mut lease = pool
+            .acquire(LeaseRequest {
+                kind: LeaseKind::Run,
+                holder_id: Uuid::new_v4(),
+                branch: None,
+                queued_tx: None,
+            })
+            .await
+            .expect("first-life acquire");
+        lease.mark_success();
+        drop(lease);
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        // wt-1 now exists on disk, idle, with no lock file.
+        assert!(worktrees.join("main/wt-1").exists());
+    }
+
+    // "Restart": build a fresh pool over the same directories.
+    let pool = spawn_pool(workdir_cfg("main", &canonical, 2), &worktrees).await;
+    let res = pool
+        .acquire(LeaseRequest {
+            kind: LeaseKind::Run,
+            holder_id: Uuid::new_v4(),
+            branch: None,
+            queued_tx: None,
+        })
+        .await;
+    assert!(
+        res.is_ok(),
+        "restarted pool must adopt the leftover desk, not collide: {:?}",
+        res.err().map(|e| e.to_string()),
+    );
+    let snap = pool.snapshot().await.unwrap();
+    assert!(snap.healthy, "restart must not mark the pool unhealthy");
+    assert_eq!(snap.live, 1, "the leftover desk was adopted, not duplicated");
+}
+
+/// Regression (eternal queue on broken branch): a branch that cannot be
+/// fetched used to park the waiter forever (the queue was only re-evaluated
+/// on release). Checkout failures are now bounded.
+#[tokio::test]
+async fn unfetchable_branch_fails_after_bounded_retries() {
+    let (_tmp, canonical, worktrees) = fixture();
+    let pool = spawn_pool(workdir_cfg("main", &canonical, 2), &worktrees).await;
+
+    let res = tokio::time::timeout(
+        std::time::Duration::from_secs(30),
+        pool.acquire(LeaseRequest {
+            kind: LeaseKind::Run,
+            holder_id: Uuid::new_v4(),
+            branch: Some("feat/does-not-exist".into()),
+            queued_tx: None,
+        }),
+    )
+    .await
+    .expect("must resolve (no eternal queue), even with idle desks");
+    assert!(
+        matches!(res, Err(AcquireError::Checkout { .. })),
+        "expected bounded checkout failure, got: {:?}",
+        res.as_ref().err().map(|e| e.to_string()),
+    );
+}
+
+/// Queue positions are reported authoritatively by the owner (on park and on
+/// every change), not guessed from a pre-acquire snapshot.
+#[tokio::test]
+async fn parked_waiters_receive_position_updates() {
+    let (_tmp, canonical, worktrees) = fixture();
+    let pool = spawn_pool(workdir_cfg("main", &canonical, 1), &worktrees).await;
+
+    let lease1 = pool
+        .acquire(LeaseRequest {
+            kind: LeaseKind::Run,
+            holder_id: Uuid::new_v4(),
+            branch: None,
+            queued_tx: None,
+        })
+        .await
+        .expect("first lease");
+
+    let (tx2, mut rx2) = mpsc::unbounded_channel();
+    let pool2 = pool.clone();
+    let w2 = tokio::spawn(async move {
+        pool2
+            .acquire(LeaseRequest {
+                kind: LeaseKind::Run,
+                holder_id: Uuid::new_v4(),
+                branch: None,
+                queued_tx: Some(tx2),
+            })
+            .await
+    });
+    let (tx3, mut rx3) = mpsc::unbounded_channel();
+    let pool3 = pool.clone();
+    let _w3 = tokio::spawn(async move {
+        pool3
+            .acquire(LeaseRequest {
+                kind: LeaseKind::Run,
+                holder_id: Uuid::new_v4(),
+                branch: None,
+                queued_tx: Some(tx3),
+            })
+            .await
+    });
+
+    let pos2 = tokio::time::timeout(std::time::Duration::from_secs(5), rx2.recv())
+        .await
+        .expect("waiter 2 parked")
+        .expect("position");
+    assert_eq!(pos2, 1, "first parked waiter is position 1");
+    let pos3 = tokio::time::timeout(std::time::Duration::from_secs(5), rx3.recv())
+        .await
+        .expect("waiter 3 parked")
+        .expect("position");
+    assert_eq!(pos3, 2, "second parked waiter is position 2");
+
+    // Release the desk: waiter 2 is granted (its channel closes without
+    // another send) and waiter 3 moves up to position 1.
+    drop(lease1);
+    let granted = tokio::time::timeout(std::time::Duration::from_secs(5), w2)
+        .await
+        .expect("waiter 2 granted")
+        .expect("join");
+    assert!(granted.is_ok());
+    let pos3b = tokio::time::timeout(std::time::Duration::from_secs(5), rx3.recv())
+        .await
+        .expect("waiter 3 position update")
+        .expect("position");
+    assert_eq!(pos3b, 1, "waiter 3 moved up after the grant");
+}
+
+/// Regression (salvage gap): an aborted lease with NO pinned branch used to
+/// skip salvage entirely, destroying the run's working state. Salvage now
+/// follows whatever branch the agent actually worked on.
+#[tokio::test]
+async fn branchless_aborted_lease_salvages_to_agents_branch() {
+    let (_tmp, canonical, worktrees) = fixture();
+    let pool = spawn_pool(workdir_cfg("main", &canonical, 1), &worktrees).await;
+
+    let lease = pool
+        .acquire(LeaseRequest {
+            kind: LeaseKind::Run,
+            holder_id: Uuid::new_v4(),
+            branch: None,
+            queued_tx: None,
+        })
+        .await
+        .expect("acquire");
+    let wt = lease.path().to_path_buf();
+    // The agent picks its own branch and leaves uncommitted work behind.
+    git(&wt, &["checkout", "-q", "-b", "agent/own-branch"]);
+    git(&wt, &["config", "user.email", "t@t.io"]);
+    git(&wt, &["config", "user.name", "t"]);
+    std::fs::write(wt.join("scratch.txt"), "uncommitted agent work\n").unwrap();
+    drop(lease); // aborted
+
+    tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+    let out = Command::new("git")
+        .current_dir(&canonical)
+        .args(["log", "-1", "--format=%s", "agent/own-branch"])
+        .output()
+        .unwrap();
+    let subject = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        subject.contains("wip(pidash): salvaged"),
+        "branch-less abort must salvage onto the agent's branch, got: {subject}"
+    );
+}
+
+/// Regression (salvage destroyed by next lease): `checkout -B <branch>
+/// origin/<branch>` used to force-reset a local branch that was strictly ahead
+/// of origin — exactly the state a salvage whose push failed leaves behind.
+#[tokio::test]
+async fn next_lease_preserves_unpushed_commits_on_branch() {
+    let (_tmp, canonical, worktrees) = fixture();
+    // Make local feat/x strictly ahead of origin/feat/x (an unpushed commit),
+    // via a throwaway worktree so the canonical clone stays parked on main.
+    let ahead_wt = canonical.parent().unwrap().join("ahead");
+    git(&canonical, &["worktree", "add", ahead_wt.to_str().unwrap(), "feat/x"]);
+    git(&ahead_wt, &["config", "user.email", "t@t.io"]);
+    git(&ahead_wt, &["config", "user.name", "t"]);
+    std::fs::write(ahead_wt.join("salvaged.txt"), "unpushed\n").unwrap();
+    git(&ahead_wt, &["add", "-A"]);
+    git(&ahead_wt, &["commit", "-q", "-m", "wip(pidash): salvaged working state from test"]);
+    let unpushed_tip = {
+        let out = Command::new("git")
+            .current_dir(&ahead_wt)
+            .args(["rev-parse", "HEAD"])
+            .output()
+            .unwrap();
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    };
+    // Release the branch lock so the pool can lease feat/x.
+    git(&canonical, &["worktree", "remove", "--force", ahead_wt.to_str().unwrap()]);
+
+    let pool = spawn_pool(workdir_cfg("main", &canonical, 1), &worktrees).await;
+    let lease = pool
+        .acquire(LeaseRequest {
+            kind: LeaseKind::Run,
+            holder_id: Uuid::new_v4(),
+            branch: Some("feat/x".into()),
+            queued_tx: None,
+        })
+        .await
+        .expect("acquire feat/x");
+    let tip = {
+        let out = Command::new("git")
+            .current_dir(lease.path())
+            .args(["rev-parse", "HEAD"])
+            .output()
+            .unwrap();
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    };
+    assert_eq!(
+        tip, unpushed_tip,
+        "leasing feat/x must not reset away the unpushed (salvaged) commit"
+    );
+}
+
+/// An unhealthy pool must advertise zero free desks so the cloud matcher is
+/// never steered toward a work dir whose leases all fail fast.
+#[tokio::test]
+async fn unhealthy_pool_reports_zero_free_worktrees() {
+    let (_tmp, canonical, worktrees) = fixture();
+    let mut cfg = workdir_cfg("main", &canonical, 3);
+    cfg.setup_command = Some("exit 3".into());
+    let pool = spawn_pool(cfg, &worktrees).await;
+    let _ = pool
+        .acquire(LeaseRequest {
+            kind: LeaseKind::Run,
+            holder_id: Uuid::new_v4(),
+            branch: None,
+            queued_tx: None,
+        })
+        .await;
+    let snap = pool.snapshot().await.unwrap();
+    assert!(!snap.healthy);
+    assert_eq!(
+        snap.free_worktrees(),
+        0,
+        "unhealthy pool must not advertise capacity"
+    );
 }

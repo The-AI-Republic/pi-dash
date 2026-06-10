@@ -600,29 +600,67 @@ impl Config {
             }
         }
 
-        // Equal / nested canonical-clone paths across work dirs, and the same
-        // for any explicit worktrees_dir overrides. Two work dirs whose trees
-        // overlap would corrupt each other exactly as two legacy runners would.
+        // Equal / nested path collisions across (and within) work dirs. Each
+        // work dir "claims" its canonical clone path plus any explicit
+        // worktrees_dir; any overlap between claimed trees — including a
+        // worktrees_dir nested inside a canonical clone (design §4.1) — would
+        // corrupt git state exactly as two legacy runners sharing a dir would.
+        // (Default worktrees_dirs live under `data_dir/worktrees/<name>` and
+        // cannot collide: names are unique.)
         let collide = |x: &PathBuf, y: &PathBuf| x == y || x.starts_with(y) || y.starts_with(x);
+        let claimed = |w: &WorkdirConfig| -> Vec<PathBuf> {
+            let mut v = vec![w.path.clone()];
+            if let Some(wt) = &w.worktrees_dir {
+                v.push(wt.clone());
+            }
+            v
+        };
         for (i, a) in self.workdirs.iter().enumerate() {
+            // Own worktrees_dir inside (or containing) the own canonical clone.
+            if let Some(wa) = &a.worktrees_dir
+                && collide(&a.path, wa)
+            {
+                return Err(ConfigError::WorkdirPathCollision {
+                    workdir_a: a.name.clone(),
+                    path_a: a.path.display().to_string(),
+                    workdir_b: a.name.clone(),
+                    path_b: wa.display().to_string(),
+                });
+            }
             for b in self.workdirs.iter().skip(i + 1) {
-                if collide(&a.path, &b.path) {
-                    return Err(ConfigError::WorkdirPathCollision {
-                        workdir_a: a.name.clone(),
-                        path_a: a.path.display().to_string(),
-                        workdir_b: b.name.clone(),
-                        path_b: b.path.display().to_string(),
-                    });
+                for pa in claimed(a) {
+                    for pb in claimed(b) {
+                        if collide(&pa, &pb) {
+                            return Err(ConfigError::WorkdirPathCollision {
+                                workdir_a: a.name.clone(),
+                                path_a: pa.display().to_string(),
+                                workdir_b: b.name.clone(),
+                                path_b: pb.display().to_string(),
+                            });
+                        }
+                    }
                 }
-                if let (Some(wa), Some(wb)) = (&a.worktrees_dir, &b.worktrees_dir)
-                    && collide(wa, wb)
-                {
-                    return Err(ConfigError::WorkdirPathCollision {
-                        workdir_a: a.name.clone(),
-                        path_a: wa.display().to_string(),
-                        workdir_b: b.name.clone(),
-                        path_b: wb.display().to_string(),
-                    });
+            }
+        }
+
+        // Legacy runners (no `workdir` reference) must not run inside any work
+        // dir's claimed tree: an agent executing directly in a canonical clone
+        // holds its branch lock permanently and tramples pool state.
+        for r in &self.runners {
+            if r.workdir.is_some() {
+                continue;
+            }
+            let rp = &r.workspace.working_dir;
+            for w in &self.workdirs {
+                for wp in claimed(w) {
+                    if collide(rp, &wp) {
+                        return Err(ConfigError::RunnerWorkdirCollision {
+                            runner: r.name.clone(),
+                            path: rp.display().to_string(),
+                            workdir: w.name.clone(),
+                            workdir_path: wp.display().to_string(),
+                        });
+                    }
                 }
             }
         }
@@ -694,6 +732,12 @@ pub enum ConfigError {
     UnknownWorkdir {
         runner: String,
         workdir: String,
+    },
+    RunnerWorkdirCollision {
+        runner: String,
+        path: String,
+        workdir: String,
+        workdir_path: String,
     },
 }
 
@@ -779,6 +823,19 @@ impl std::fmt::Display for ConfigError {
                  {workdir:?}, but no [[workdir]] block with that name exists. \
                  Add the work dir or fix the reference (see \
                  `pidash workdir add`)."
+            ),
+            ConfigError::RunnerWorkdirCollision {
+                runner,
+                path,
+                workdir,
+                workdir_path,
+            } => write!(
+                f,
+                "configuration error: runner {runner:?} works directly in \
+                 {path:?}, which overlaps work dir {workdir:?} ({workdir_path:?}). \
+                 An agent executing inside a pooled work dir's tree would trample \
+                 its git state; bind the runner to the work dir instead \
+                 (`pidash runner add --workdir {workdir}`) or move one of the paths."
             ),
         }
     }
@@ -1039,6 +1096,45 @@ mod tests {
         assert!(matches!(
             cfg.validate().unwrap_err(),
             ConfigError::PoolSizeTooSmall { .. }
+        ));
+    }
+
+    #[test]
+    fn validate_rejects_legacy_runner_inside_workdir_tree() {
+        // A legacy runner executing directly in (or under) a pooled work dir's
+        // canonical clone would trample the pool's git state.
+        let cfg = config_with_workdirs(
+            vec![runner("legacy", "/work/main/sub")],
+            vec![workdir("main", "/work/main")],
+        );
+        let err = cfg.validate().unwrap_err();
+        assert!(
+            matches!(err, ConfigError::RunnerWorkdirCollision { .. }),
+            "expected RunnerWorkdirCollision, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn validate_rejects_worktrees_dir_inside_canonical_clone() {
+        // worktrees nested inside the canonical clone (design §4.1 hazard).
+        let mut w = workdir("main", "/work/main");
+        w.worktrees_dir = Some(PathBuf::from("/work/main/.worktrees"));
+        let cfg = config_with_workdirs(vec![], vec![w]);
+        assert!(matches!(
+            cfg.validate().unwrap_err(),
+            ConfigError::WorkdirPathCollision { .. }
+        ));
+    }
+
+    #[test]
+    fn validate_rejects_worktrees_dir_colliding_with_other_workdir_path() {
+        let mut a = workdir("a", "/work/a");
+        a.worktrees_dir = Some(PathBuf::from("/work/b/wt"));
+        let b = workdir("b", "/work/b");
+        let cfg = config_with_workdirs(vec![], vec![a, b]);
+        assert!(matches!(
+            cfg.validate().unwrap_err(),
+            ConfigError::WorkdirPathCollision { .. }
         ));
     }
 

@@ -124,7 +124,8 @@ def select_runner_in_pod(pod: Pod) -> Optional[Runner]:
         # prefer one whose work-dir pool reports a free desk. This is a
         # PREFERENCE, never a gate — runners with ``free_worktrees`` of 0 or
         # ``None`` (a runner that predates the hint) stay eligible and sort
-        # after free-desk runners, then fall back to oldest-heartbeat. A
+        # after free-desk runners, then fall back to freshest-heartbeat
+        # (``-last_heartbeat_at``, newest first). A
         # stale hint costs at most some local queue time, never a stuck run.
         .annotate(_has_free_desk=_free_desk_rank())
         .order_by("_has_free_desk", "-last_heartbeat_at")

@@ -149,6 +149,23 @@ pub async fn add(args: AddArgs, paths: &Paths) -> Result<RunnerConfig> {
         );
     }
 
+    // `--workdir` must name an existing [[workdir]] BEFORE we enroll: failing
+    // after enrollment would leave a cloud-registered runner bound to nothing,
+    // and re-running the command would then create a second runner.
+    if let Some(workdir_name) = args.workdir.as_deref() {
+        let exists = paths.config_path().exists()
+            && file::load_config(paths)?
+                .workdirs
+                .iter()
+                .any(|w| w.name == workdir_name);
+        if !exists {
+            anyhow::bail!(
+                "no work dir named {workdir_name:?}; add it first with \
+                 `pidash workdir add --name {workdir_name} --path <repo>`"
+            );
+        }
+    }
+
     let api_token = ensure_cli_token(paths, args.url.as_deref(), args.workspace.as_deref()).await?;
 
     let cloud_url = if paths.config_path().exists() {

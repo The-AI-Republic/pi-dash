@@ -66,6 +66,10 @@ def _active_run_for(issue: Issue) -> Optional[AgentRun]:
             status__in=[
                 AgentRunStatus.QUEUED,
                 AgentRunStatus.ASSIGNED,
+                # Waiting in the runner's local worktree queue still counts as
+                # active — without it the ticker / state-transition dispatch
+                # would create a second concurrent run for the same issue.
+                AgentRunStatus.WAITING_FOR_WORKTREE,
                 AgentRunStatus.RUNNING,
                 AgentRunStatus.AWAITING_APPROVAL,
                 AgentRunStatus.AWAITING_REAUTH,

@@ -162,10 +162,17 @@ export const RunnerRunsPage = observer(function RunnerRunsPage() {
               <div className="flex items-center justify-between">
                 <div>
                   <div className="font-mono text-11">{detail.id}</div>
-                  <div className="mt-1">
+                  <div className="mt-1 flex items-center gap-2">
                     <Badge variant={STATUS_BADGE_VARIANT[detail.status]} size="sm">
                       {t(RUN_STATUS_I18N_LABELS[detail.status])}
                     </Badge>
+                    {detail.status === "waiting_for_worktree" &&
+                      typeof detail.queue_position === "number" &&
+                      detail.queue_position > 0 && (
+                        <span className="text-11 text-secondary">
+                          {t("Queued (position {count})", { count: detail.queue_position })}
+                        </span>
+                      )}
                   </div>
                 </div>
                 {!isTerminal(detail.status) && (

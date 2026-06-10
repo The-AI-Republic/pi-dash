@@ -2,6 +2,7 @@ use anyhow::{Context, Result};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use tokio::process::Command;
+use uuid::Uuid;
 
 use crate::cloud::protocol::WorkspaceState;
 
@@ -60,24 +61,73 @@ pub async fn workspace_state(path: &Path) -> Result<WorkspaceState> {
 
 /// Fetch from origin and check out the given branch so the agent can commit
 /// directly onto an existing feature branch. Called before the Codex process
-/// spawns when an issue specifies `git_work_branch`.
+/// spawns when an issue specifies `git_work_branch`, and by the worktree pool
+/// at lease-grant time.
 ///
-/// Assumes the workspace is ephemeral / server-owned: `git checkout -B`
-/// force-resets the local branch pointer to match `origin/<branch>`, which
-/// would discard any unpushed local commits on that branch.
+/// Refuses when the branch is already checked out in a *different* worktree:
+/// `git checkout -B` does not reliably enforce the one-branch-one-checkout
+/// invariant (it succeeds when the ref value would not move), so the pool's
+/// branch lock (design §4.3) must be enforced here, fail-closed.
+///
+/// Resets the local branch to `origin/<branch>` unless the local ref is
+/// strictly ahead of origin (e.g. a salvaged WIP commit whose push failed) —
+/// resetting then would silently destroy the only copy of salvaged work.
 pub async fn checkout_work_branch(path: &Path, branch: &str) -> Result<()> {
     validate_branch_name(branch)?;
+
+    // Branch-lock guard (fail-closed): if we cannot list worktrees, or the
+    // branch is held by another worktree, refuse rather than risk two
+    // checkouts of one branch fighting via reset/salvage.
+    let held = checked_out_branches(path)
+        .await
+        .context("git worktree list (branch-lock check)")?;
+    if let Some(holder) = held.get(branch) {
+        let same = match (holder.canonicalize(), path.canonicalize()) {
+            (Ok(a), Ok(b)) => a == b,
+            _ => holder == path,
+        };
+        if !same {
+            anyhow::bail!("branch {branch:?} is already checked out at {holder:?}");
+        }
+    }
 
     git_output(path, &["fetch", "origin", branch])
         .await
         .with_context(|| format!("git fetch origin {branch}"))?;
+    let remote_ref = format!("origin/{branch}");
+    // Preserve a local branch that is strictly ahead of origin (salvage
+    // commits whose push failed live there). `merge-base --is-ancestor`
+    // exits 0 when origin/<branch> is an ancestor of the local ref.
+    let local_exists = git_output(path, &["rev-parse", "--verify", "--quiet", &format!("refs/heads/{branch}")])
+        .await
+        .is_ok();
+    if local_exists
+        && git_output(path, &["merge-base", "--is-ancestor", remote_ref.as_str(), branch]).await.is_ok()
+    {
+        git_output(path, &["checkout", branch])
+            .await
+            .with_context(|| format!("git checkout {branch}"))?;
+        return Ok(());
+    }
+    if local_exists {
+        // Diverged local ref: about to be reset to origin. The old tip stays
+        // reachable via the reflog; record it so operators can recover.
+        if let Ok(old) = git_output(path, &["rev-parse", branch]).await {
+            tracing::warn!(%branch, old_tip = %old, "local branch diverged from origin; resetting (old tip kept in reflog)");
+        }
+    }
     // `git checkout -B <branch> <start_point>` always lands us on a local
     // branch that points at `origin/<branch>`, creating it if necessary.
-    let remote_ref = format!("origin/{branch}");
     git_output(path, &["checkout", "-B", branch, remote_ref.as_str()])
         .await
         .with_context(|| format!("git checkout {branch}"))?;
     Ok(())
+}
+
+/// The branch HEAD is on, or `None` when detached.
+pub async fn current_branch(worktree: &Path) -> Result<Option<String>> {
+    let name = git_output(worktree, &["rev-parse", "--abbrev-ref", "HEAD"]).await?;
+    if name == "HEAD" { Ok(None) } else { Ok(Some(name)) }
 }
 
 /// Add a detached-HEAD worktree of `repo` at `worktree_path`. Detached so the
@@ -224,18 +274,35 @@ pub async fn reset_clean(
 }
 
 /// Best-effort salvage of a dirty worktree before it's cleaned and recycled
-/// (design §4.4 step 1). Commits everything to `branch` as a WIP commit and
-/// tries to push it, so a failed/cancelled run's working state survives. The
-/// commit is left on the local branch ref even if the push fails — `git log`
-/// in the canonical clone can still find it. Returns `Ok(Some(sha))` if a WIP
-/// commit was made, `Ok(None)` if the tree was clean (nothing to salvage).
-pub async fn salvage_wip(worktree: &Path, branch: &str, label: &str) -> Result<Option<String>> {
-    validate_branch_name(branch)?;
+/// (design §4.4 step 1). Commits everything as a WIP commit on a branch that
+/// will survive the desk's reset/park, and tries to push it.
+///
+/// The commit lands on whatever branch HEAD is actually on — the truthful
+/// location of the work, even if the agent switched branches mid-run. When
+/// HEAD is detached (so a plain commit would be orphaned by the park step),
+/// the WIP is parked on a dedicated `pidash/salvage/<holder>` branch instead;
+/// no existing branch ref is ever moved. The commit is left on the local
+/// branch even if the push fails. Returns `Ok(Some(sha))` if a WIP commit was
+/// made, `Ok(None)` if the tree was clean (nothing to salvage).
+pub async fn salvage_wip(worktree: &Path, holder: Uuid, label: &str) -> Result<Option<String>> {
     // Nothing to do if the tree is clean.
     let status = git_output(worktree, &["status", "--porcelain"]).await?;
     if status.trim().is_empty() {
         return Ok(None);
     }
+    let target = match current_branch(worktree).await? {
+        Some(b) => b,
+        None => {
+            // Detached HEAD: park the WIP on a fresh salvage branch. Never
+            // `checkout -B` an existing branch here — that would move a ref
+            // that may point at someone else's work.
+            let name = format!("pidash/salvage/{holder}");
+            git_output(worktree, &["checkout", "-b", &name])
+                .await
+                .with_context(|| format!("git checkout -b {name} (salvage)"))?;
+            name
+        }
+    };
     git_output(worktree, &["add", "-A"])
         .await
         .context("git add -A (salvage)")?;
@@ -247,8 +314,11 @@ pub async fn salvage_wip(worktree: &Path, branch: &str, label: &str) -> Result<O
     let sha = git_output(worktree, &["rev-parse", "HEAD"]).await.ok();
     // Push is best-effort: salvage's value is the local commit; the push is a
     // convenience. A push failure (auth/network) must not block desk recycle.
-    if let Err(e) = git_output(worktree, &["push", "origin", branch]).await {
-        tracing::warn!(%branch, error = %e, "salvage push failed; WIP commit kept locally");
+    // Push `HEAD:` explicitly so the remote ref updated is the branch the
+    // commit actually sits on, not a stale local ref of the same name.
+    let refspec = format!("HEAD:refs/heads/{target}");
+    if let Err(e) = git_output(worktree, &["push", "origin", &refspec]).await {
+        tracing::warn!(branch = %target, error = %e, "salvage push failed; WIP commit kept locally");
     }
     Ok(sha)
 }
