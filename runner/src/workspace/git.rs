@@ -285,7 +285,7 @@ async fn git_output(path: &Path, args: &[&str]) -> Result<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::validate_branch_name;
+    use super::*;
 
     #[test]
     fn rejects_empty() {
@@ -314,5 +314,54 @@ mod tests {
         assert!(validate_branch_name("feat/pinned-branch").is_ok());
         assert!(validate_branch_name("release/1.2.3").is_ok());
         assert!(validate_branch_name("user/jdoe/fix_42").is_ok());
+    }
+
+    // ---- Worktree primitives (the pool's branch-lock source of truth) ----
+
+    use std::process::Command;
+
+    fn run_git(dir: &std::path::Path, args: &[&str]) {
+        let out = Command::new("git")
+            .current_dir(dir)
+            .args(args)
+            .output()
+            .expect("git");
+        assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
+    }
+
+    #[tokio::test]
+    async fn checked_out_branches_reports_worktree_branches_and_detach_releases() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        run_git(&repo, &["init", "-q", "-b", "main"]);
+        run_git(&repo, &["config", "user.email", "t@t.io"]);
+        run_git(&repo, &["config", "user.name", "t"]);
+        std::fs::write(repo.join("f"), "x").unwrap();
+        run_git(&repo, &["add", "-A"]);
+        run_git(&repo, &["commit", "-q", "-m", "init"]);
+        run_git(&repo, &["branch", "feat/x"]);
+
+        // Add a worktree checked out on feat/x.
+        let wt = tmp.path().join("wt-feat");
+        worktree_add(&repo, &wt).await.unwrap();
+        run_git(&wt, &["checkout", "feat/x"]);
+
+        let map = checked_out_branches(&repo).await.unwrap();
+        // main is held by the canonical clone; feat/x by the worktree.
+        assert!(map.contains_key("main"), "map: {map:?}");
+        assert_eq!(map.get("feat/x").map(|p| p.as_path()), Some(wt.as_path()));
+
+        // Park the worktree on detached HEAD → it releases feat/x.
+        detach_head(&wt).await.unwrap();
+        let map2 = checked_out_branches(&repo).await.unwrap();
+        assert!(
+            !map2.contains_key("feat/x"),
+            "detached worktree should hold no branch lock: {map2:?}"
+        );
+
+        // Clean up bookkeeping.
+        worktree_remove(&repo, &wt, true).await.unwrap();
+        worktree_prune(&repo).await.unwrap();
     }
 }

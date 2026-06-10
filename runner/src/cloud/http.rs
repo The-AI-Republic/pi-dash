@@ -314,6 +314,11 @@ struct RunnerCloudClientInner {
     creds: CredentialsHandle,
     transport: SharedHttpTransport,
     state: Mutex<RunnerCloudClientState>,
+    /// Set once a `queued` lifecycle POST 404s — the cloud predates worktree
+    /// pooling (design §15). When set, `RunQueued` frames are dropped silently
+    /// and the runner falls back to legacy accept-on-enqueue. Avoids hammering
+    /// an old cloud with a route it doesn't have.
+    queued_unsupported: std::sync::atomic::AtomicBool,
 }
 
 #[derive(Default)]
@@ -363,6 +368,7 @@ impl RunnerCloudClient {
                 creds,
                 transport,
                 state: Mutex::new(RunnerCloudClientState::default()),
+                queued_unsupported: std::sync::atomic::AtomicBool::new(false),
             }),
         }
     }
@@ -663,6 +669,10 @@ impl RunnerCloudClient {
                 self.post_run_lifecycle(run_id, "accept", body, &idempotency_key)
                     .await
             }
+            msg @ ClientMsg::RunQueued { run_id, .. } => {
+                let body = to_value(&msg)?;
+                self.post_run_queued(run_id, body, &idempotency_key).await
+            }
             msg @ ClientMsg::RunStarted { run_id, .. } => {
                 let body = to_value(&msg)?;
                 self.post_run_lifecycle(run_id, "started", body, &idempotency_key)
@@ -794,6 +804,59 @@ impl RunnerCloudClient {
         );
         self.post_authed_with_retry(&url, body, idempotency_key, |_| true)
             .await?;
+        Ok(())
+    }
+
+    /// Post a `RunQueued` to `.../runs/<id>/queued/`, feature-detecting a
+    /// cloud that predates worktree pooling (design §6.1, §15). A 404 latches
+    /// `queued_unsupported` (logged once) and is swallowed — the run keeps
+    /// running, just without `WAITING_FOR_WORKTREE` visibility. `queued` is a
+    /// best-effort visibility signal, so unlike `accept` it does NOT go through
+    /// the full lifecycle retry machinery; a transient failure is fine because
+    /// the next position change re-posts.
+    async fn post_run_queued(
+        &self,
+        run_id: Uuid,
+        body: Json,
+        idempotency_key: &str,
+    ) -> Result<(), TransportError> {
+        use std::sync::atomic::Ordering;
+        if self.inner.queued_unsupported.load(Ordering::Relaxed) {
+            return Ok(());
+        }
+        let token = self.ensure_access_token().await?;
+        let url = format!(
+            "{}/api/v1/runner/runs/{}/queued/",
+            self.inner.transport.cloud_url(),
+            run_id,
+        );
+        let resp = self
+            .inner
+            .transport
+            .http()
+            .post(&url)
+            .header(AUTHORIZATION, format!("Bearer {}", token.raw))
+            .header("X-Runner-Id", self.inner.runner_id.to_string())
+            .header("Idempotency-Key", idempotency_key)
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| TransportError::Network(e.to_string()))?;
+        if resp.status() == StatusCode::NOT_FOUND {
+            if !self.inner.queued_unsupported.swap(true, Ordering::Relaxed) {
+                tracing::info!(
+                    "cloud has no runs/<id>/queued/ endpoint; disabling worktree-queue \
+                     reporting for this session (falling back to accept-on-enqueue)"
+                );
+            }
+            return Ok(());
+        }
+        // Any other non-success is non-fatal for a visibility signal; log and
+        // move on so a queued run never fails just because its position update
+        // didn't land.
+        if !resp.status().is_success() {
+            tracing::debug!(status = %resp.status(), "queued post returned non-success; ignoring");
+        }
         Ok(())
     }
 
@@ -1042,6 +1105,12 @@ pub struct PollStatus {
     pub model: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub turn_count: Option<u32>,
+    /// Free worktree desks in this runner's work dir pool, when it has one.
+    /// The cloud stores it and uses it as a soft capacity hint when choosing
+    /// between equally-eligible runners (design §6.4). Optional / additive —
+    /// an old cloud ignores it; a runner with no pool omits it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub free_worktrees: Option<u32>,
 }
 
 /// Wire-side wrapper used to express the three states of `observed_run_id`:
@@ -1119,6 +1188,7 @@ impl PollStatus {
             tokens: None,
             model: None,
             turn_count: None,
+            free_worktrees: None,
         }
     }
 
@@ -1143,6 +1213,7 @@ impl PollStatus {
             tokens: None,
             model: None,
             turn_count: None,
+            free_worktrees: None,
         }
     }
 
@@ -1214,6 +1285,10 @@ pub struct HttpLoop {
     /// which is identical to the v3 wire shape — used by tests and any
     /// caller that doesn't want to thread state through.
     pub state: Option<crate::daemon::state::StateHandle>,
+    /// This runner's worktree pool, when it references a work dir. When set,
+    /// `poll_once` reports `free_worktrees` so the cloud can prefer a runner
+    /// with a free desk (design §6.4). `None` for legacy runners.
+    pub pool: Option<crate::workspace::pool::PoolHandle>,
     teardown_rx: Option<watch::Receiver<bool>>,
     inline_acks: VecDeque<String>,
     /// Bounded mid-dedupe (design.md §8 / Decision 21). At-least-once
@@ -1333,6 +1408,7 @@ impl HttpLoop {
             shutdown,
             attach_body,
             state: None,
+            pool: None,
             teardown_rx: None,
             inline_acks: VecDeque::new(),
             mid_dedupe: MidDedupe::with_capacity(MID_DEDUPE_CAPACITY),
@@ -1345,6 +1421,13 @@ impl HttpLoop {
     /// `agent_observability_v1` flag is enabled.
     pub fn with_state(mut self, state: crate::daemon::state::StateHandle) -> Self {
         self.state = Some(state);
+        self
+    }
+
+    /// Attach this runner's worktree pool so `poll_once` reports the free-desk
+    /// capacity hint (design §6.4).
+    pub fn with_pool(mut self, pool: Option<crate::workspace::pool::PoolHandle>) -> Self {
+        self.pool = pool;
         self
     }
 
@@ -1537,7 +1620,7 @@ impl HttpLoop {
         }
         let wire_status = *self.status_rx.borrow();
         let in_flight = *self.in_flight_rx.borrow();
-        let status = match self.state.as_ref() {
+        let mut status = match self.state.as_ref() {
             Some(state) if state.agent_observability_v1() => {
                 let snapshot = state.observability_snapshot().await;
                 let approvals = state.approvals_pending_value().await;
@@ -1545,6 +1628,12 @@ impl HttpLoop {
             }
             _ => PollStatus::from_wire(wire_status, in_flight),
         };
+        // Capacity hint: free desks in this runner's pool (design §6.4).
+        if let Some(pool) = self.pool.as_ref()
+            && let Some(snap) = pool.snapshot().await
+        {
+            status.free_worktrees = Some(snap.free_worktrees());
+        }
         let resp = self
             .client
             .poll(acks, status, self.long_poll_interval_secs)

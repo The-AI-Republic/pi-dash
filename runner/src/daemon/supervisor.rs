@@ -180,6 +180,7 @@ impl Supervisor {
                 .unwrap_or_else(|| state.clone()),
             paths: paths.clone(),
             instances: Arc::new(ipc_instances),
+            pools: pools.clone(),
         };
         let ipc_handle = tokio::spawn(async move {
             if let Err(e) = ipc.run().await {
@@ -266,6 +267,12 @@ impl Supervisor {
                     attach_body_for_instance(inst),
                 )
                 .with_state(inst.state.clone())
+                .with_pool(
+                    inst.config
+                        .workdir
+                        .as_deref()
+                        .and_then(|name| pools.get(name).cloned()),
+                )
                 .with_teardown_rx(inst.remove_tx.subscribe());
                 let close_client = client.clone();
                 let local_state = inst.state.clone();
@@ -2332,6 +2339,22 @@ impl AssignWorker {
                 holder_id: run_id,
                 branch: pinned_branch.map(str::to_string),
             };
+            // If no desk is free right now, the lease will park — report the
+            // run as queued so the cloud shows `WAITING_FOR_WORKTREE` with a
+            // position instead of an idle-looking ASSIGNED run (design §6.1).
+            // Best-effort and the position is approximate (the snapshot races
+            // the actual enqueue); a cloud that predates the `queued` endpoint
+            // 404s and the runner silently stops reporting (feature-detect).
+            if let Some(snap) = pool.snapshot().await
+                && snap.free_worktrees() == 0
+            {
+                let queue_position = snap.queue.len() as u32 + 1;
+                self.send(ClientMsg::RunQueued {
+                    run_id,
+                    queue_position,
+                })
+                .await;
+            }
             // Race the lease against this run's cancel signal: a cancel that
             // arrives while the run is parked in the queue must dequeue it and
             // report `RunCancelled` immediately, with no desk ever leased

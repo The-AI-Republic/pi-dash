@@ -62,9 +62,17 @@ pub struct AddArgs {
     pub pod: Option<String>,
 
     /// Working directory the runner clones into. Defaults to a path
-    /// derived from the runner's data dir.
+    /// derived from the runner's data dir. Ignored when `--workdir` is given
+    /// (pooled runners execute in leased worktrees, not this path).
     #[arg(long)]
     pub working_dir: Option<PathBuf>,
+
+    /// Name of a shared `[[workdir]]` (see `pidash workdir add`) this runner
+    /// executes in. When set, the runner leases a git worktree from that work
+    /// dir's pool for each run instead of using its own `working_dir` — this
+    /// is what lets several runners share one repo checkout.
+    #[arg(long)]
+    pub workdir: Option<String>,
 
     /// Which agent CLI this runner drives.
     #[arg(long, value_enum, default_value_t = AgentKind::Codex)]
@@ -232,6 +240,29 @@ pub async fn add(args: AddArgs, paths: &Paths) -> Result<RunnerConfig> {
             return Err(persist_err.context("persisting new runner to config.toml"));
         }
     };
+
+    // Bind the runner to a shared work dir if requested: it then leases
+    // worktrees from that pool instead of using its own working_dir. Done as a
+    // follow-up mutate so the existing enroll path stays untouched; validates
+    // the reference and re-runs config validation before writing.
+    if let Some(workdir_name) = args.workdir.as_deref() {
+        let runner_id = applied.runner.runner_id;
+        let name = workdir_name.to_string();
+        file::mutate_config(paths, move |cfg| {
+            if !cfg.workdirs.iter().any(|w| w.name == name) {
+                anyhow::bail!(
+                    "no work dir named {name:?}; add it first with `pidash workdir add --name {name} --path <repo>`"
+                );
+            }
+            if let Some(r) = cfg.runners.iter_mut().find(|r| r.runner_id == runner_id) {
+                r.workdir = Some(name.clone());
+            }
+            cfg.validate()
+                .map_err(|e| anyhow::anyhow!("invalid config after binding workdir: {e}"))?;
+            Ok(())
+        })?;
+        println!("Runner bound to work dir {workdir_name:?} (leases worktrees from its pool).");
+    }
 
     println!(
         "Added runner {} ({}) under project {}.",

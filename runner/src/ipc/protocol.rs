@@ -206,6 +206,11 @@ pub struct RunnerStatusSnapshot {
 pub struct StatusSnapshot {
     pub daemon: DaemonInfo,
     pub runners: Vec<RunnerStatusSnapshot>,
+    /// Worktree pools, one per configured `[[workdir]]`. Empty for daemons
+    /// with no work dirs (legacy single-dir runners). `#[serde(default)]` so
+    /// an older client/daemon pairing still decodes the snapshot.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pools: Vec<crate::workspace::pool::PoolSnapshot>,
 }
 
 impl StatusSnapshot {
@@ -229,6 +234,24 @@ impl StatusSnapshot {
         }
         for r in &self.runners {
             r.print_compact();
+        }
+        for p in &self.pools {
+            let health = if p.healthy {
+                String::new()
+            } else {
+                format!(
+                    " UNHEALTHY: {}",
+                    p.unhealthy_reason.as_deref().unwrap_or("(unknown)")
+                )
+            };
+            println!(
+                "  workdir {} — {}/{} desks busy, {} queued{}",
+                p.workdir_name,
+                p.busy,
+                p.pool_size,
+                p.queue.len(),
+                health
+            );
         }
     }
 
@@ -405,6 +428,7 @@ mod tests {
                 last_heartbeat: Some(Utc::now()),
                 observability: None,
             }],
+            pools: vec![],
         };
         let s = serde_json::to_string(&snap).unwrap();
         let back: StatusSnapshot = serde_json::from_str(&s).unwrap();
@@ -450,6 +474,7 @@ mod tests {
                     last_exec_command: None,
                 }),
             }],
+            pools: vec![],
         };
         let s = serde_json::to_string(&snap).unwrap();
         let back: StatusSnapshot = serde_json::from_str(&s).unwrap();
@@ -525,6 +550,7 @@ mod tests {
                     observability: None,
                 },
             ],
+            pools: vec![],
         };
         assert!(snap.runner_by_name("a").is_some());
         assert!(snap.runner_by_name("b").is_some());
