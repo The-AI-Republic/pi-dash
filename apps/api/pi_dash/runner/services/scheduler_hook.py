@@ -27,8 +27,16 @@ def update_scheduler_binding_on_terminate(run: AgentRun) -> None:
         if binding.last_error:
             binding.last_error = ""
             binding.save(update_fields=["last_error", "updated_at"])
-    elif run.status in (AgentRunStatus.FAILED, AgentRunStatus.CANCELLED):
-        msg = (run.error or run.status)[:LAST_ERROR_MAX_LEN]
+    elif run.status in (AgentRunStatus.FAILED, AgentRunStatus.CANCELLED, AgentRunStatus.REFUSED):
+        if run.status == AgentRunStatus.REFUSED:
+            # Surface the decline category so the scheduler tab shows *why* the
+            # tick produced nothing (e.g. "refused (cyber)"), not a bare error.
+            raw = f"refused ({run.refusal_category or 'unknown'})"
+            if run.error:
+                raw = f"{raw}: {run.error}"
+        else:
+            raw = run.error or run.status
+        msg = raw[:LAST_ERROR_MAX_LEN]
         if binding.last_error != msg:
             binding.last_error = msg
             binding.save(update_fields=["last_error", "updated_at"])
