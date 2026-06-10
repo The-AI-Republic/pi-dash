@@ -140,6 +140,7 @@ export default {
   "AI agent is blocked on this issue": "Agent AI jest zablokowany w tym zgłoszeniu",
   "AI agent is queued": "Agent AI jest w kolejce",
   "AI agent is starting on this issue": "Agent AI rozpoczyna pracę nad tym zgłoszeniem",
+  "AI agent is waiting for a worktree": "",
   "AI agent is waiting for approval": "Agent AI oczekuje na zatwierdzenie",
   "AI agent is waiting for input": "Agent AI oczekuje na dane wejściowe",
   "AI agent is working on this issue": "Agent AI pracuje nad tym zgłoszeniem",
@@ -363,7 +364,6 @@ export default {
   "Could not load dev machines.": "Nie można załadować maszyn deweloperskich.",
   "Could not load pods.": "Nie można załadować pods.",
   "Could not load projects.": "Nie można załadować projektów.",
-  "Could not post comment": "Nie można opublikować komentarza",
   "Could not revert the prompt.": "Nie można cofnąć prompt.",
   "Could not revoke the dev machine.": "Nie można odwołać maszyny deweloperskiej.",
   "Could not rotate the dev machine token.": "Nie można obrócić tokena maszyny deweloperskiej.",
@@ -472,6 +472,8 @@ export default {
   Declining: "Odrzucanie",
   default: "domyślny",
   Default: "Domyślny",
+  "Default model this runner's agent uses. ``Default`` lets the agent pick its own; the choice is baked into the displayed ``pidash runner add`` command.":
+    "",
   "Defaults to the project's default pod.": "Domyślnie używany jest domyślny pod projektu.",
   "Define and customize workflow states to track the progress of your work items.":
     "Zdefiniuj i dostosuj stany przepływu pracy, aby śledzić postęp swoich elementów roboczych.",
@@ -644,7 +646,6 @@ export default {
   "Failed to load pods": "Nie udało się załadować podów",
   "Failed to load runner": "",
   "Failed to move favorite": "Nie udało się przenieść ulubionego",
-  "Failed to post the comment.": "Nie udało się opublikować komentarza.",
   "Failed to record decision": "Nie udało się zapisać decyzji",
   "Failed to reorder favorite": "Nie udało się zmienić kolejności ulubionego",
   "Failed to revoke runner": "Nie udało się cofnąć uprawnień runnera",
@@ -918,6 +919,7 @@ export default {
   "Missing headings": "Brakujące nagłówki",
   "Missing images": "Brakujące obrazy",
   Modal: "Modal",
+  "Model (optional)": "",
   Modern: "Nowoczesny",
   Module: "Moduł",
   "Module actions": "Akcje modułu",
@@ -1137,10 +1139,12 @@ export default {
   "Pi Dash default": "Domyślne Pi Dash",
   "Pi Dash hands AI agents (Claude Code, Codex, …) the keys to a real dev machine so they can pick up work items, write code, and open changes. Three pieces work together to make that possible:":
     "Pi Dash przekazuje agentom AI (Claude Code, Codex, …) klucze do prawdziwej maszyny deweloperskiej, aby mogli podejmować zadania, pisać kod i otwierać zmiany. Trzy elementy współpracują ze sobą, aby to umożliwić:",
+  "Pi Dash helps you utilize best out of Claude Fable 5": "",
   "Pi Dash will auto archive work items that have been completed or canceled.":
     "Pi Dash automatycznie zarchiwizuje zadania, które zostały ukończone lub anulowane.",
   "Pi Dash will automatically close work items that haven't been completed or canceled.":
     "Pi Dash automatycznie zamknie zadania, które nie zostały ukończone ani anulowane.",
+  "Pi Dash: Your AI Employee Management Platform": "",
   "Pick a project.": "Wybierz projekt.",
   "Pick a scheduler.": "Wybierz harmonogram.",
   "Pick from your workspace's enabled schedulers. Already-installed ones aren't listed.":
@@ -1161,9 +1165,6 @@ export default {
   "Pods group your runners. Issues delegate to a pod, and any free runner inside picks up the work. Click a tile to filter runners.":
     "Pods grupują twoich runnerów. Issues delegują do poda, a każdy wolny runner wewnątrz podejmuje pracę. Kliknij kafelek, aby filtrować runnerów.",
   Points: "Punkty",
-  "Post a comment on this work item and start an AI agent run with the comment as the prompt.":
-    "Opublikuj komentarz na tym elemencie pracy i rozpocznij działanie agenta AI z komentarzem jako promptem.",
-  "Posting...": "Publikowanie...",
   "Powered by Pi Dash Pages": "Obsługiwane przez Pi Dash Pages",
   PowerShell: "PowerShell",
   Preferences: "Preferencje",
@@ -1228,6 +1229,9 @@ export default {
   Quarter: "Kwartał",
   queued: "w kolejce",
   Queued: "W kolejce",
+  "Queued (position {count})": "",
+  "Queued on runner": "",
+  "Queued on the runner's machine for a free worktree.": "",
   Quicklink: "Szybki link",
   Quicklinks: "Szybkie linki",
   "Quickly see make-or-break work items. ": "Szybko zobacz kluczowe elementy pracy.",
@@ -1420,7 +1424,6 @@ export default {
   "Start your first project": "Rozpocznij swój pierwszy projekt",
   Started: "Rozpoczęto",
   "Started {entity}": "Rozpoczęto {entity}",
-  "Starting run...": "Rozpoczynanie uruchomienia...",
   "Starts at": "Rozpoczyna się o",
   State: "Stan",
   "State change": "Zmiana stanu",
@@ -1476,7 +1479,6 @@ export default {
   "Table Layout": "Układ tabeli",
   "Talk to Sales": "Porozmawiaj z działem sprzedaży",
   "Team project": "Projekt zespołowy",
-  "Tell the agent what you want it to do...": "Powiedz agentowi, co ma zrobić...",
   "Template body (Jinja + Markdown)": "Treść szablonu (Jinja + Markdown)",
   "Template not found.": "Nie znaleziono szablonu.",
   "That didn't work.": "To nie zadziałało.",
@@ -1660,6 +1662,7 @@ export default {
     "Widoki są podstawowymi elementami Twojego projektu. Włącz widoki w ustawieniach projektu, aby zacząć z nich korzystać.",
   "Waiting for an available runner.": "Oczekiwanie na dostępnego runnera.",
   "Waiting for the next scheduled tick.": "Oczekiwanie na następny zaplanowany cykl.",
+  "waiting for worktree": "",
   Warning: "Ostrzeżenie",
   "We are unable to process your request, please try again.":
     "Nie możemy przetworzyć Twojego żądania, spróbuj ponownie.",
@@ -1680,6 +1683,7 @@ export default {
   Webhooks: "Webhooki",
   Week: "Tydzień",
   "What is the pidash CLI, daemon, and runner?": "Czym jest pidash CLI, demon i runner?",
+  "What to do with findings": "",
   "What you'd like to see this link as": "Jak chcesz, aby ten link był wyświetlany",
   "What's new?": "Co nowego?",
   When: "Kiedy",

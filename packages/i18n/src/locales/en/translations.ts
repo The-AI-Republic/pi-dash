@@ -139,6 +139,7 @@ export default {
   "AI agent is blocked on this issue": "AI agent is blocked on this issue",
   "AI agent is queued": "AI agent is queued",
   "AI agent is starting on this issue": "AI agent is starting on this issue",
+  "AI agent is waiting for a worktree": "AI agent is waiting for a worktree",
   "AI agent is waiting for approval": "AI agent is waiting for approval",
   "AI agent is waiting for input": "AI agent is waiting for input",
   "AI agent is working on this issue": "AI agent is working on this issue",
@@ -310,7 +311,6 @@ export default {
   Color: "Color",
   "Coming soon": "Coming soon",
   "Command Prompt": "Command Prompt",
-  Comment: "Comment",
   "Comment & Run": "Comment & Run",
   "Comment created successfully": "Comment created successfully",
   "Comment creation failed. Please try again later.": "Comment creation failed. Please try again later.",
@@ -361,7 +361,6 @@ export default {
   "Could not load dev machines.": "Could not load dev machines.",
   "Could not load pods.": "Could not load pods.",
   "Could not load projects.": "Could not load projects.",
-  "Could not post comment": "Could not post comment",
   "Could not revert the prompt.": "Could not revert the prompt.",
   "Could not revoke the dev machine.": "Could not revoke the dev machine.",
   "Could not rotate the dev machine token.": "Could not rotate the dev machine token.",
@@ -467,6 +466,8 @@ export default {
   Declining: "Declining",
   default: "default",
   Default: "Default",
+  "Default model this runner's agent uses. ``Default`` lets the agent pick its own; the choice is baked into the displayed ``pidash runner add`` command.":
+    "Default model this runner's agent uses. ``Default`` lets the agent pick its own; the choice is baked into the displayed ``pidash runner add`` command.",
   "Defaults to the project's default pod.": "Defaults to the project's default pod.",
   "Define and customize workflow states to track the progress of your work items.":
     "Define and customize workflow states to track the progress of your work items.",
@@ -637,7 +638,6 @@ export default {
   "Failed to load pods": "Failed to load pods",
   "Failed to load runner": "Failed to load runner",
   "Failed to move favorite": "Failed to move favorite",
-  "Failed to post the comment.": "Failed to post the comment.",
   "Failed to record decision": "Failed to record decision",
   "Failed to reorder favorite": "Failed to reorder favorite",
   "Failed to revoke runner": "Failed to revoke runner",
@@ -907,8 +907,6 @@ export default {
   "Missing images": "Missing images",
   Modal: "Modal",
   "Model (optional)": "Model (optional)",
-  "Default model this runner's agent uses. ``Default`` lets the agent pick its own; the choice is baked into the displayed ``pidash runner add`` command.":
-    "Default model this runner's agent uses. ``Default`` lets the agent pick its own; the choice is baked into the displayed ``pidash runner add`` command.",
   Modern: "Modern",
   Module: "Module",
   "Module actions": "Module actions",
@@ -1123,10 +1121,12 @@ export default {
   "Pi Dash default": "Pi Dash default",
   "Pi Dash hands AI agents (Claude Code, Codex, …) the keys to a real dev machine so they can pick up work items, write code, and open changes. Three pieces work together to make that possible:":
     "Pi Dash hands AI agents (Claude Code, Codex, …) the keys to a real dev machine so they can pick up work items, write code, and open changes. Three pieces work together to make that possible:",
+  "Pi Dash helps you utilize best out of Claude Fable 5": "Pi Dash helps you utilize best out of Claude Fable 5",
   "Pi Dash will auto archive work items that have been completed or canceled.":
     "Pi Dash will auto archive work items that have been completed or canceled.",
   "Pi Dash will automatically close work items that haven't been completed or canceled.":
     "Pi Dash will automatically close work items that haven't been completed or canceled.",
+  "Pi Dash: Your AI Employee Management Platform": "Pi Dash: Your AI Employee Management Platform",
   "Pick a project.": "Pick a project.",
   "Pick a scheduler.": "Pick a scheduler.",
   "Pick from your workspace's enabled schedulers. Already-installed ones aren't listed.":
@@ -1147,9 +1147,6 @@ export default {
   "Pods group your runners. Issues delegate to a pod, and any free runner inside picks up the work. Click a tile to filter runners.":
     "Pods group your runners. Issues delegate to a pod, and any free runner inside picks up the work. Click a tile to filter runners.",
   Points: "Points",
-  "Post a comment on this work item and start an AI agent run with the comment as the prompt.":
-    "Post a comment on this work item and start an AI agent run with the comment as the prompt.",
-  "Posting...": "Posting...",
   "Powered by Pi Dash Pages": "Powered by Pi Dash Pages",
   PowerShell: "PowerShell",
   Preferences: "Preferences",
@@ -1213,6 +1210,9 @@ export default {
   Quarter: "Quarter",
   queued: "queued",
   Queued: "Queued",
+  "Queued (position {count})": "Queued (position {count})",
+  "Queued on runner": "Queued on runner",
+  "Queued on the runner's machine for a free worktree.": "Queued on the runner's machine for a free worktree.",
   Quicklink: "Quicklink",
   Quicklinks: "Quicklinks",
   "Quickly see make-or-break work items. ": "Quickly see make-or-break work items. ",
@@ -1404,7 +1404,6 @@ export default {
   "Start your first project": "Start your first project",
   Started: "Started",
   "Started {entity}": "Started {entity}",
-  "Starting run...": "Starting run...",
   "Starts at": "Starts at",
   State: "State",
   "State change": "State change",
@@ -1459,7 +1458,6 @@ export default {
   "Table Layout": "Table Layout",
   "Talk to Sales": "Talk to Sales",
   "Team project": "Team project",
-  "Tell the agent what you want it to do...": "Tell the agent what you want it to do...",
   "Template body (Jinja + Markdown)": "Template body (Jinja + Markdown)",
   "Template not found.": "Template not found.",
   "That didn't work.": "That didn't work.",
@@ -1639,6 +1637,7 @@ export default {
     "Views are the building blocks of your project. Enable views from project settings to start using them.",
   "Waiting for an available runner.": "Waiting for an available runner.",
   "Waiting for the next scheduled tick.": "Waiting for the next scheduled tick.",
+  "waiting for worktree": "waiting for worktree",
   Warning: "Warning",
   "We are unable to process your request, please try again.":
     "We are unable to process your request, please try again.",
@@ -1658,6 +1657,7 @@ export default {
   Webhooks: "Webhooks",
   Week: "Week",
   "What is the pidash CLI, daemon, and runner?": "What is the pidash CLI, daemon, and runner?",
+  "What to do with findings": "What to do with findings",
   "What you'd like to see this link as": "What you'd like to see this link as",
   "What's new?": "What's new?",
   When: "When",

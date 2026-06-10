@@ -24,6 +24,7 @@ const service = new RunnerService();
 const STATUS_BADGE_VARIANT: Record<TAgentRunStatus, TBadgeVariant> = {
   queued: "accent-neutral",
   assigned: "accent-primary",
+  waiting_for_worktree: "accent-primary",
   running: "primary",
   awaiting_approval: "accent-warning",
   awaiting_reauth: "accent-warning",
@@ -37,6 +38,7 @@ const STATUS_BADGE_VARIANT: Record<TAgentRunStatus, TBadgeVariant> = {
 const RUN_STATUS_I18N_LABELS: Record<TAgentRunStatus, string> = {
   queued: "queued",
   assigned: "assigned",
+  waiting_for_worktree: "waiting for worktree",
   running: "running",
   awaiting_approval: "awaiting approval",
   awaiting_reauth: "awaiting reauth",
@@ -150,7 +152,9 @@ export const RunnerRunsPage = observer(function RunnerRunsPage() {
 
         <div className="rounded-md border border-subtle p-4">
           {selected && detailError ? (
-            <div className="text-13 text-danger-primary">{t("This run is not available. It may have been deleted or belong to a different workspace.")}</div>
+            <div className="text-13 text-danger-primary">
+              {t("This run is not available. It may have been deleted or belong to a different workspace.")}
+            </div>
           ) : !detail ? (
             <div className="text-13 text-secondary">{t("Select a run on the left.")}</div>
           ) : (
@@ -158,10 +162,17 @@ export const RunnerRunsPage = observer(function RunnerRunsPage() {
               <div className="flex items-center justify-between">
                 <div>
                   <div className="font-mono text-11">{detail.id}</div>
-                  <div className="mt-1">
+                  <div className="mt-1 flex items-center gap-2">
                     <Badge variant={STATUS_BADGE_VARIANT[detail.status]} size="sm">
                       {t(RUN_STATUS_I18N_LABELS[detail.status])}
                     </Badge>
+                    {detail.status === "waiting_for_worktree" &&
+                      typeof detail.queue_position === "number" &&
+                      detail.queue_position > 0 && (
+                        <span className="text-11 text-secondary">
+                          {t("Queued (position {count})", { count: detail.queue_position })}
+                        </span>
+                      )}
                   </div>
                 </div>
                 {!isTerminal(detail.status) && (
@@ -189,9 +200,7 @@ export const RunnerRunsPage = observer(function RunnerRunsPage() {
                 </div>
               )}
               <div className="text-13">
-                <div className="text-secondary">
-                  {t("Events ({count})", { count: detail.events?.length ?? 0 })}
-                </div>
+                <div className="text-secondary">{t("Events ({count})", { count: detail.events?.length ?? 0 })}</div>
                 <div className="mt-1 max-h-[420px] overflow-auto rounded border border-subtle">
                   <table className="w-full text-11">
                     <thead className="bg-layer-1 text-left text-secondary">

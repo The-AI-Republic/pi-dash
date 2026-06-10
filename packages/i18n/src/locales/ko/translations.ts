@@ -138,6 +138,7 @@ export default {
   "AI agent is blocked on this issue": "AI 에이전트가 이 이슈에서 차단됨",
   "AI agent is queued": "AI 에이전트가 대기 중",
   "AI agent is starting on this issue": "AI 에이전트가 이 이슈에서 시작 중",
+  "AI agent is waiting for a worktree": "",
   "AI agent is waiting for approval": "AI 에이전트가 승인 대기 중",
   "AI agent is waiting for input": "AI 에이전트가 입력 대기 중",
   "AI agent is working on this issue": "AI 에이전트가 이 이슈에서 작업 중",
@@ -359,7 +360,6 @@ export default {
   "Could not load dev machines.": "개발 머신을 로드할 수 없습니다.",
   "Could not load pods.": "포드를 불러올 수 없습니다.",
   "Could not load projects.": "프로젝트를 불러올 수 없습니다.",
-  "Could not post comment": "댓글을 게시할 수 없습니다",
   "Could not revert the prompt.": "프롬프트를 되돌릴 수 없습니다.",
   "Could not revoke the dev machine.": "개발 머신을 취소할 수 없습니다.",
   "Could not rotate the dev machine token.": "개발 머신 토큰을 교체할 수 없습니다.",
@@ -466,6 +466,8 @@ export default {
   Declining: "거절 중",
   default: "기본값",
   Default: "기본",
+  "Default model this runner's agent uses. ``Default`` lets the agent pick its own; the choice is baked into the displayed ``pidash runner add`` command.":
+    "",
   "Defaults to the project's default pod.": "프로젝트의 기본 포드로 기본 설정됩니다.",
   "Define and customize workflow states to track the progress of your work items.":
     "작업 항목의 진행 상황을 추적하기 위해 워크플로 상태를 정의하고 사용자 지정합니다.",
@@ -633,7 +635,6 @@ export default {
   "Failed to load pods": "팟 로드 실패",
   "Failed to load runner": "",
   "Failed to move favorite": "즐겨찾기 이동 실패",
-  "Failed to post the comment.": "댓글 게시 실패",
   "Failed to record decision": "결정 기록 실패",
   "Failed to reorder favorite": "즐겨찾기 재정렬 실패",
   "Failed to revoke runner": "러너 취소 실패",
@@ -901,6 +902,7 @@ export default {
   "Missing headings": "누락된 제목",
   "Missing images": "누락된 이미지",
   Modal: "모달",
+  "Model (optional)": "",
   Modern: "모던",
   Module: "모듈",
   "Module actions": "모듈 작업",
@@ -1113,10 +1115,12 @@ export default {
   "Pi Dash default": "Pi Dash 기본값",
   "Pi Dash hands AI agents (Claude Code, Codex, …) the keys to a real dev machine so they can pick up work items, write code, and open changes. Three pieces work together to make that possible:":
     "Pi Dash는 AI 에이전트(Claude Code, Codex 등)에게 실제 개발 머신의 키를 제공하여 작업 항목을 선택하고, 코드를 작성하고, 변경 사항을 열 수 있도록 합니다. 이를 가능하게 하는 세 가지 요소가 함께 작동합니다:",
+  "Pi Dash helps you utilize best out of Claude Fable 5": "",
   "Pi Dash will auto archive work items that have been completed or canceled.":
     "Pi Dash는 완료되거나 취소된 작업 항목을 자동으로 보관합니다.",
   "Pi Dash will automatically close work items that haven't been completed or canceled.":
     "Pi Dash는 완료되거나 취소되지 않은 작업 항목을 자동으로 종료합니다.",
+  "Pi Dash: Your AI Employee Management Platform": "",
   "Pick a project.": "프로젝트를 선택하세요.",
   "Pick a scheduler.": "스케줄러를 선택하세요.",
   "Pick from your workspace's enabled schedulers. Already-installed ones aren't listed.":
@@ -1137,9 +1141,6 @@ export default {
   "Pods group your runners. Issues delegate to a pod, and any free runner inside picks up the work. Click a tile to filter runners.":
     "Pods는 러너를 그룹화합니다. 이슈는 Pod에 위임되고, Pod 내의 사용 가능한 러너가 작업을 처리합니다. 타일을 클릭하여 러너를 필터링하세요.",
   Points: "포인트",
-  "Post a comment on this work item and start an AI agent run with the comment as the prompt.":
-    "이 작업 항목에 댓글을 게시하고 댓글을 프롬프트로 사용하여 AI 에이전트를 실행합니다.",
-  "Posting...": "게시 중...",
   "Powered by Pi Dash Pages": "Pi Dash Pages 제공",
   PowerShell: "PowerShell",
   Preferences: "환경 설정",
@@ -1203,6 +1204,9 @@ export default {
   Quarter: "분기",
   queued: "대기 중",
   Queued: "대기 중",
+  "Queued (position {count})": "",
+  "Queued on runner": "",
+  "Queued on the runner's machine for a free worktree.": "",
   Quicklink: "퀵링크",
   Quicklinks: "퀵링크",
   "Quickly see make-or-break work items. ": "성패를 좌우하는 작업 항목을 빠르게 확인하세요.",
@@ -1394,7 +1398,6 @@ export default {
   "Start your first project": "첫 번째 프로젝트 시작",
   Started: "시작됨",
   "Started {entity}": "{entity} 시작됨",
-  "Starting run...": "실행 시작 중...",
   "Starts at": "시작 시간",
   State: "상태",
   "State change": "상태 변경",
@@ -1449,7 +1452,6 @@ export default {
   "Table Layout": "표 레이아웃",
   "Talk to Sales": "영업팀 문의",
   "Team project": "팀 프로젝트",
-  "Tell the agent what you want it to do...": "에이전트에게 수행할 작업을 알려주세요...",
   "Template body (Jinja + Markdown)": "템플릿 본문 (Jinja + Markdown)",
   "Template not found.": "템플릿을 찾을 수 없습니다.",
   "That didn't work.": "작동하지 않았습니다.",
@@ -1628,6 +1630,7 @@ export default {
     "보기는 프로젝트의 구성 요소입니다. 프로젝트 설정에서 보기를 활성화하여 사용을 시작하세요.",
   "Waiting for an available runner.": "사용 가능한 러너를 기다리는 중입니다.",
   "Waiting for the next scheduled tick.": "다음 예정된 틱을 기다리는 중입니다.",
+  "waiting for worktree": "",
   Warning: "경고",
   "We are unable to process your request, please try again.": "요청을 처리할 수 없습니다. 다시 시도해 주세요.",
   "We copied the current Pi Dash default. Edit and save to customize it.":
@@ -1645,6 +1648,7 @@ export default {
   Webhooks: "웹훅",
   Week: "주",
   "What is the pidash CLI, daemon, and runner?": "pidash CLI, 데몬 및 러너란 무엇인가요?",
+  "What to do with findings": "",
   "What you'd like to see this link as": "이 링크를 어떻게 표시할까요?",
   "What's new?": "새로운 기능",
   When: "언제",

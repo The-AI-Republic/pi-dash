@@ -52,6 +52,7 @@ NON_TERMINAL_STATUSES = frozenset(
     {
         AgentRunStatus.QUEUED,
         AgentRunStatus.ASSIGNED,
+        AgentRunStatus.WAITING_FOR_WORKTREE,
         AgentRunStatus.RUNNING,
         AgentRunStatus.AWAITING_APPROVAL,
         AgentRunStatus.AWAITING_REAUTH,

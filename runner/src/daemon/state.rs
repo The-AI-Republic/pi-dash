@@ -481,6 +481,7 @@ mod tests {
             version: 2,
             daemon: Default::default(),
             runners: vec![],
+            workdirs: vec![],
             cli: None,
         })
     }

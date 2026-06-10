@@ -140,6 +140,7 @@ export default {
   "AI agent is blocked on this issue": "Yapay zeka ajanı bu konuda engellendi",
   "AI agent is queued": "Yapay zeka ajanı sıraya alındı",
   "AI agent is starting on this issue": "Yapay zeka ajanı bu konuda başlatılıyor",
+  "AI agent is waiting for a worktree": "",
   "AI agent is waiting for approval": "Yapay zeka ajanı onay bekliyor",
   "AI agent is waiting for input": "Yapay zeka ajanı girdi bekliyor",
   "AI agent is working on this issue": "Yapay zeka ajanı bu konu üzerinde çalışıyor",
@@ -363,7 +364,6 @@ export default {
   "Could not load dev machines.": "Geliştirme makineleri yüklenemedi.",
   "Could not load pods.": "Pod'lar yüklenemedi.",
   "Could not load projects.": "Projeler yüklenemedi.",
-  "Could not post comment": "Yorum gönderilemedi",
   "Could not revert the prompt.": "İstem geri alınamadı.",
   "Could not revoke the dev machine.": "Geliştirici makinesi iptal edilemedi.",
   "Could not rotate the dev machine token.": "Geliştirici makinesi token'ı döndürülemedi.",
@@ -470,6 +470,8 @@ export default {
   Declining: "Reddediliyor",
   default: "varsayılan",
   Default: "Varsayılan",
+  "Default model this runner's agent uses. ``Default`` lets the agent pick its own; the choice is baked into the displayed ``pidash runner add`` command.":
+    "",
   "Defaults to the project's default pod.": "Varsayılan olarak projenin varsayılan pod'una ayarlanır.",
   "Define and customize workflow states to track the progress of your work items.":
     "İş öğelerinizin ilerlemesini takip etmek için iş akışı durumlarını tanımlayın ve özelleştirin.",
@@ -641,7 +643,6 @@ export default {
   "Failed to load pods": "Pod'lar yüklenemedi",
   "Failed to load runner": "",
   "Failed to move favorite": "Favori taşınamadı",
-  "Failed to post the comment.": "Yorum gönderilemedi.",
   "Failed to record decision": "Karar kaydedilemedi",
   "Failed to reorder favorite": "Favori yeniden sıralanamadı",
   "Failed to revoke runner": "Koşucu iptal edilemedi",
@@ -913,6 +914,7 @@ export default {
   "Missing headings": "Eksik başlıklar",
   "Missing images": "Eksik resimler",
   Modal: "Modal",
+  "Model (optional)": "",
   Modern: "Modern",
   Module: "Modül",
   "Module actions": "Modül eylemleri",
@@ -1129,10 +1131,12 @@ export default {
   "Pi Dash default": "Pi Dash varsayılan",
   "Pi Dash hands AI agents (Claude Code, Codex, …) the keys to a real dev machine so they can pick up work items, write code, and open changes. Three pieces work together to make that possible:":
     "Pi Dash, AI ajanlarına (Claude Code, Codex, …) gerçek bir geliştirme makinesinin anahtarlarını verir, böylece iş öğelerini alabilir, kod yazabilir ve değişiklikler açabilirler. Bunu mümkün kılmak için üç parça birlikte çalışır:",
+  "Pi Dash helps you utilize best out of Claude Fable 5": "",
   "Pi Dash will auto archive work items that have been completed or canceled.":
     "Pi Dash, tamamlanmış veya iptal edilmiş iş öğelerini otomatik olarak arşivleyecektir.",
   "Pi Dash will automatically close work items that haven't been completed or canceled.":
     "Pi Dash, tamamlanmamış veya iptal edilmemiş iş öğelerini otomatik olarak kapatacaktır.",
+  "Pi Dash: Your AI Employee Management Platform": "",
   "Pick a project.": "Bir proje seçin.",
   "Pick a scheduler.": "Bir zamanlayıcı seçin.",
   "Pick from your workspace's enabled schedulers. Already-installed ones aren't listed.":
@@ -1153,9 +1157,6 @@ export default {
   "Pods group your runners. Issues delegate to a pod, and any free runner inside picks up the work. Click a tile to filter runners.":
     "Podlar, runner'larınızı gruplar. Issues, bir poda yetki verir ve içindeki herhangi bir boş runner işi alır. Runner'ları filtrelemek için bir kutucuğa tıklayın.",
   Points: "Puanlar",
-  "Post a comment on this work item and start an AI agent run with the comment as the prompt.":
-    "Bu iş öğesine bir yorum gönderin ve yorumu prompt olarak kullanarak bir AI agent çalıştırması başlatın.",
-  "Posting...": "Gönderiliyor...",
   "Powered by Pi Dash Pages": "Pi Dash Pages tarafından desteklenmektedir",
   PowerShell: "PowerShell",
   Preferences: "Tercihler",
@@ -1221,6 +1222,9 @@ export default {
   Quarter: "Çeyrek",
   queued: "sıraya alındı",
   Queued: "Sıraya Alındı",
+  "Queued (position {count})": "",
+  "Queued on runner": "",
+  "Queued on the runner's machine for a free worktree.": "",
   Quicklink: "Hızlı Bağlantı",
   Quicklinks: "Hızlı Bağlantılar",
   "Quickly see make-or-break work items. ": "Kritik iş öğelerini hızlıca görün. ",
@@ -1411,7 +1415,6 @@ export default {
   "Start your first project": "İlk projenizi başlatın",
   Started: "Başlatıldı",
   "Started {entity}": "{entity} başlatıldı",
-  "Starting run...": "Çalıştırma başlatılıyor...",
   "Starts at": "Başlangıç",
   State: "Durum",
   "State change": "Durum değişikliği",
@@ -1466,7 +1469,6 @@ export default {
   "Table Layout": "Tablo Düzeni",
   "Talk to Sales": "Satışla Görüşün",
   "Team project": "Takım projesi",
-  "Tell the agent what you want it to do...": "Aracıya ne yapmasını istediğinizi söyleyin...",
   "Template body (Jinja + Markdown)": "Şablon gövdesi (Jinja + Markdown)",
   "Template not found.": "Şablon bulunamadı.",
   "That didn't work.": "Bu işe yaramadı.",
@@ -1650,6 +1652,7 @@ export default {
     "Görünümler, projenizin yapı taşlarıdır. Bunları kullanmaya başlamak için proje ayarlarından görünümleri etkinleştirin.",
   "Waiting for an available runner.": "Kullanılabilir bir çalıştırıcı bekleniyor.",
   "Waiting for the next scheduled tick.": "Bir sonraki zamanlanmış tik bekleniyor.",
+  "waiting for worktree": "",
   Warning: "Uyarı",
   "We are unable to process your request, please try again.": "İsteğinizi işleyemiyoruz, lütfen tekrar deneyin.",
   "We copied the current Pi Dash default. Edit and save to customize it.":
@@ -1668,6 +1671,7 @@ export default {
   Webhooks: "Webhook'lar",
   Week: "Hafta",
   "What is the pidash CLI, daemon, and runner?": "pidash CLI, daemon ve runner nedir?",
+  "What to do with findings": "",
   "What you'd like to see this link as": "Bu bağlantının nasıl görünmesini istersiniz?",
   "What's new?": "Yenilikler neler?",
   When: "Ne zaman",

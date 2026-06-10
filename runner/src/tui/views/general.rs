@@ -897,6 +897,7 @@ pub async fn submit_register(
         project_slug: Some(resp.project_identifier.clone()),
         pod_id: None,
         workspace: crate::config::schema::WorkspaceSection { working_dir },
+        workdir: None,
         agent: Default::default(),
         codex: Default::default(),
         claude_code: Default::default(),
@@ -914,6 +915,7 @@ pub async fn submit_register(
             auto_update: true,
         },
         runners: vec![new_runner_block],
+        workdirs: vec![],
         cli: None,
     };
     crate::config::file::write_config(paths, &cfg).map_err(|e| format!("writing config.toml: {e:#}"))?;

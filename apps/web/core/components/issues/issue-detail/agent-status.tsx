@@ -38,6 +38,7 @@ type Props = {
 const ACTIVE_RUN_STATUSES = new Set<TAgentRunStatus>([
   "queued",
   "assigned",
+  "waiting_for_worktree",
   "running",
   "awaiting_approval",
   "awaiting_reauth",
@@ -77,9 +78,7 @@ function formatUntil(timestamp: string | null | undefined, now: number, t: Trans
       : t("{count}h", { count: hours });
   const days = Math.floor(hours / 24);
   const remainingHours = hours % 24;
-  return remainingHours > 0
-    ? t("{days}d {hours}h", { days, hours: remainingHours })
-    : t("{count}d", { count: days });
+  return remainingHours > 0 ? t("{days}d {hours}h", { days, hours: remainingHours }) : t("{count}d", { count: days });
 }
 
 function formatRunDone(count: number, t: TranslationFn): string {
@@ -176,6 +175,19 @@ function getRunView(
         icon: LoaderCircle,
         iconClassName: "animate-spin text-accent-primary",
       };
+    case "waiting_for_worktree": {
+      const position = run.queue_position;
+      const queueDetail =
+        typeof position === "number" && position > 0 ? t("Queued (position {count})", { count: position }) : null;
+      return {
+        title: t("AI agent is waiting for a worktree"),
+        detail: queueDetail ?? runnerDetail ?? t("Queued on the runner's machine for a free worktree."),
+        badge: t("Queued on runner"),
+        badgeVariant: "brand",
+        icon: Clock3,
+        iconClassName: "text-accent-primary",
+      };
+    }
     case "running":
       return {
         title: t("AI agent is working on this issue"),
@@ -257,9 +269,7 @@ function getTickerOnlyView(ticker: TIssueAgentTicker, now: number, t: Translatio
   if (ticker.enabled) {
     return {
       title: t("AI agent ticking is scheduled"),
-      detail: nextTick
-        ? t("Next ticking in {nextTick}", { nextTick })
-        : t("Waiting for the next scheduled tick."),
+      detail: nextTick ? t("Next ticking in {nextTick}", { nextTick }) : t("Waiting for the next scheduled tick."),
       badge: t("Scheduled"),
       badgeVariant: "brand",
       icon: Clock3,

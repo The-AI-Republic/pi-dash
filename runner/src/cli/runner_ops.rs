@@ -181,6 +181,7 @@ pub fn write_cli_token(paths: &Paths, cloud_url: &str, token: &str) -> Result<()
                 auto_update: true,
             },
             runners: vec![],
+            workdirs: vec![],
             cli: None,
         }
     };
@@ -332,6 +333,7 @@ pub async fn apply_enroll_response(
         project_slug: Some(resp.project_identifier.clone()),
         pod_id: None,
         workspace: WorkspaceSection { working_dir },
+        workdir: None,
         agent: AgentSection { kind: agent_kind },
         codex,
         claude_code,
@@ -355,6 +357,7 @@ pub async fn apply_enroll_response(
                 auto_update: true,
             },
             runners: vec![],
+            workdirs: vec![],
             cli: None,
         })
     };
@@ -744,6 +747,7 @@ mod tests {
             workspace: WorkspaceSection {
                 working_dir: tmp.path().join("wd"),
             },
+            workdir: None,
             agent: AgentSection::default(),
             codex: CodexSection::default(),
             claude_code: ClaudeCodeSection::default(),

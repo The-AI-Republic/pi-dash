@@ -130,6 +130,9 @@ export type TIssueAgentRunSummary = {
   input_tokens: number | null;
   output_tokens: number | null;
   total_tokens: number | null;
+  /** Place in the runner's local worktree queue while
+   * ``waiting_for_worktree``; ``null`` otherwise (display only). */
+  queue_position?: number | null;
   live_state?: IRunnerLiveState | null;
 };
 

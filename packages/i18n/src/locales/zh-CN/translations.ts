@@ -137,6 +137,7 @@ export default {
   "AI agent is blocked on this issue": "AI 代理在此问题上被阻塞",
   "AI agent is queued": "AI 代理已排队",
   "AI agent is starting on this issue": "AI 代理正在此问题上启动",
+  "AI agent is waiting for a worktree": "",
   "AI agent is waiting for approval": "AI 代理正在等待批准",
   "AI agent is waiting for input": "AI 代理正在等待输入",
   "AI agent is working on this issue": "AI 代理正在处理此问题",
@@ -355,7 +356,6 @@ export default {
   "Could not load dev machines.": "无法加载开发机器。",
   "Could not load pods.": "无法加载 Pods。",
   "Could not load projects.": "无法加载项目。",
-  "Could not post comment": "无法发布评论",
   "Could not revert the prompt.": "无法还原提示。",
   "Could not revoke the dev machine.": "无法撤销开发机。",
   "Could not rotate the dev machine token.": "无法轮换开发机令牌。",
@@ -457,6 +457,8 @@ export default {
   Declining: "正在拒绝",
   default: "默认",
   Default: "默认",
+  "Default model this runner's agent uses. ``Default`` lets the agent pick its own; the choice is baked into the displayed ``pidash runner add`` command.":
+    "",
   "Defaults to the project's default pod.": "默认使用项目的默认 pod。",
   "Define and customize workflow states to track the progress of your work items.":
     "定义并自定义工作流状态，以跟踪工作项的进度。",
@@ -624,7 +626,6 @@ export default {
   "Failed to load pods": "加载 Pods 失败",
   "Failed to load runner": "",
   "Failed to move favorite": "移动收藏失败",
-  "Failed to post the comment.": "发表评论失败。",
   "Failed to record decision": "记录决策失败",
   "Failed to reorder favorite": "重新排序收藏失败",
   "Failed to revoke runner": "撤销运行器失败",
@@ -887,6 +888,7 @@ export default {
   "Missing headings": "缺少标题",
   "Missing images": "缺少图片",
   Modal: "模态框",
+  "Model (optional)": "",
   Modern: "现代",
   Module: "模块",
   "Module actions": "模块操作",
@@ -1097,10 +1099,12 @@ export default {
   "Pi Dash default": "Pi Dash 默认",
   "Pi Dash hands AI agents (Claude Code, Codex, …) the keys to a real dev machine so they can pick up work items, write code, and open changes. Three pieces work together to make that possible:":
     "Pi Dash 将 AI 代理（Claude Code、Codex 等）的钥匙交给真实的开发机器，以便它们可以领取工作项、编写代码并打开更改。三个部分协同工作以实现这一点：",
+  "Pi Dash helps you utilize best out of Claude Fable 5": "",
   "Pi Dash will auto archive work items that have been completed or canceled.":
     "Pi Dash 将自动归档已完成或已取消的工作项。",
   "Pi Dash will automatically close work items that haven't been completed or canceled.":
     "Pi Dash 将自动关闭未完成或未取消的工作项。",
+  "Pi Dash: Your AI Employee Management Platform": "",
   "Pick a project.": "选择一个项目。",
   "Pick a scheduler.": "选择一个调度器。",
   "Pick from your workspace's enabled schedulers. Already-installed ones aren't listed.":
@@ -1121,9 +1125,6 @@ export default {
   "Pods group your runners. Issues delegate to a pod, and any free runner inside picks up the work. Click a tile to filter runners.":
     "Pods 对您的运行器进行分组。问题委托给一个 Pod，其中的任何空闲运行器都会接手工作。点击一个磁贴以筛选运行器。",
   Points: "积分",
-  "Post a comment on this work item and start an AI agent run with the comment as the prompt.":
-    "在此工作项上发布评论，并以该评论作为提示启动 AI 代理运行。",
-  "Posting...": "正在发布...",
   "Powered by Pi Dash Pages": "由 Pi Dash Pages 提供支持",
   PowerShell: "PowerShell",
   Preferences: "偏好设置",
@@ -1186,6 +1187,9 @@ export default {
   Quarter: "季度",
   queued: "已排队",
   Queued: "已排队",
+  "Queued (position {count})": "",
+  "Queued on runner": "",
+  "Queued on the runner's machine for a free worktree.": "",
   Quicklink: "快速链接",
   Quicklinks: "快速链接",
   "Quickly see make-or-break work items. ": "快速查看关键工作项。",
@@ -1367,7 +1371,6 @@ export default {
   "Start your first project": "开始你的第一个项目",
   Started: "已开始",
   "Started {entity}": "已开始 {entity}",
-  "Starting run...": "正在启动运行...",
   "Starts at": "开始于",
   State: "状态",
   "State change": "状态变更",
@@ -1421,7 +1424,6 @@ export default {
   "Table Layout": "表格布局",
   "Talk to Sales": "联系销售",
   "Team project": "团队项目",
-  "Tell the agent what you want it to do...": "告诉代理您希望它做什么...",
   "Template body (Jinja + Markdown)": "模板正文（Jinja + Markdown）",
   "Template not found.": "未找到模板。",
   "That didn't work.": "那没有成功。",
@@ -1596,6 +1598,7 @@ export default {
     "视图是项目的构建块。从项目设置中启用视图即可开始使用。",
   "Waiting for an available runner.": "等待可用的运行器。",
   "Waiting for the next scheduled tick.": "等待下一个计划周期。",
+  "waiting for worktree": "",
   Warning: "警告",
   "We are unable to process your request, please try again.": "我们无法处理您的请求，请重试。",
   "We copied the current Pi Dash default. Edit and save to customize it.":
@@ -1613,6 +1616,7 @@ export default {
   Webhooks: "Webhooks",
   Week: "周",
   "What is the pidash CLI, daemon, and runner?": "什么是 pidash CLI、守护进程和运行器？",
+  "What to do with findings": "",
   "What you'd like to see this link as": "您希望将此链接显示为",
   "What's new?": "有什么新功能？",
   When: "时间",

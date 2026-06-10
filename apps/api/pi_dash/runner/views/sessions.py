@@ -211,6 +211,16 @@ class RunnerSessionOpenEndpoint(APIView):
         if in_flight:
             resume_ack = session_service.build_resume_ack(runner, str(in_flight))
 
+        # 9b. Redeliver an outstanding assigned/waiting run the runner did not
+        # report as in-flight (design §6.3). After a daemon restart the local
+        # worktree queue is lost, so a run the cloud still has ASSIGNED /
+        # WAITING_FOR_WORKTREE is invisible to the daemon until we push it
+        # back. The runner treats this exactly like a fresh Assign. Old
+        # runners ignore the unknown response key, so this is additive.
+        redeliver = session_service.build_session_open_redeliver(
+            runner, str(in_flight) if in_flight else None
+        )
+
         welcome = {
             "type": "welcome",
             "rid": str(runner.id),
@@ -227,6 +237,7 @@ class RunnerSessionOpenEndpoint(APIView):
                 "session_id": str(new_sid),
                 "welcome": welcome,
                 "resume_ack": resume_ack,
+                "redeliver": redeliver,
             },
             status=status.HTTP_201_CREATED,
         )
@@ -329,10 +340,18 @@ def _poll_bookkeeping(runner, body: Dict[str, Any], sid):
         became_available = prior_status == RunnerStatus.BUSY and reports_available
         status_allows_drain = reports_available or (not status_entry and prior_status != RunnerStatus.BUSY)
 
-        Runner.objects.filter(pk=runner.id).update(
-            last_heartbeat_at=now_ts,
-            status=RunnerStatus.BUSY if reports_busy else RunnerStatus.ONLINE,
-        )
+        runner_updates: Dict[str, Any] = {
+            "last_heartbeat_at": now_ts,
+            "status": RunnerStatus.BUSY if reports_busy else RunnerStatus.ONLINE,
+        }
+        # Capacity hint (design §6.4): persist the free-desk count the
+        # runner reports for its work-dir pool so the matcher can prefer
+        # runners with spare worktrees. Additive + optional — old runners
+        # omit the field and we leave the column untouched.
+        free_worktrees = session_service.parse_free_worktrees(status_entry.get("free_worktrees"))
+        if free_worktrees is not None:
+            runner_updates["free_worktrees"] = free_worktrees
+        Runner.objects.filter(pk=runner.id).update(**runner_updates)
         if status_entry:
             session_service.reap_stale_busy_runs(runner, status_entry)
     if status_entry:
