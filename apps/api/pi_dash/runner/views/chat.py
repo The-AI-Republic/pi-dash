@@ -4,7 +4,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import json
 import logging
 import time
@@ -12,8 +11,9 @@ from types import SimpleNamespace
 from typing import Optional
 
 import redis.asyncio as aioredis
+from channels.db import database_sync_to_async
 from django.conf import settings
-from django.db import transaction
+from django.db import close_old_connections, transaction
 from django.db.models import Q
 from django.http import JsonResponse, StreamingHttpResponse
 from django.utils import timezone
@@ -767,13 +767,22 @@ class ChatClosedEndpoint(_ChatRunnerEndpointBase):
 
 
 async def chat_event_stream(request, session_id):
-    if not await asyncio.to_thread(_session_authenticates, request):
+    # ``database_sync_to_async`` (not ``asyncio.to_thread``): these helpers
+    # run ORM queries. ``asyncio.to_thread`` dispatches to Python's default
+    # ThreadPoolExecutor (~cpu+4 threads), and a Django connection opened in
+    # one of those pool threads is never closed — ``close_old_connections``
+    # only fires on the HTTP request cycle, not in arbitrary pool threads —
+    # so the connections accumulate (observed in prod 2026-06-10: ~94 idle
+    # connections exhausting the shared Postgres host). ``database_sync_to_async``
+    # routes the call onto Django's shared thread-sensitive executor and
+    # closes stale connections around it.
+    if not await database_sync_to_async(_session_authenticates)(request):
         return JsonResponse(
             {"error": "authentication required"},
             status=status.HTTP_403_FORBIDDEN,
         )
     session = await AgentChatSession.objects.filter(pk=session_id).afirst()
-    if session is None or not await asyncio.to_thread(chat_service.can_read_chat, request.user, session):
+    if session is None or not await database_sync_to_async(chat_service.can_read_chat)(request.user, session):
         return JsonResponse({"error": "not found"}, status=status.HTTP_404_NOT_FOUND)
 
     after_raw = request.GET.get("after") or request.headers.get("Last-Event-ID") or "0"
@@ -824,5 +833,13 @@ async def chat_event_stream(request, session_id):
                 await pubsub.close()
             except Exception:
                 logger.exception("failed to close chat SSE pubsub for session %s", session_id)
+            # The initial event replay above uses the async ORM, which runs on
+            # the shared thread-sensitive executor. Close that connection on the
+            # same thread when the (potentially long-lived) stream ends so it
+            # doesn't sit idle for the life of the connection.
+            try:
+                await database_sync_to_async(close_old_connections)()
+            except Exception:
+                logger.exception("failed to close DB connection after chat SSE for session %s", session_id)
 
     return StreamingHttpResponse(_events(), content_type="text/event-stream")
