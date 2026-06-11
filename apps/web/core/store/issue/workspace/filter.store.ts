@@ -255,10 +255,14 @@ export class WorkspaceIssuesFilter extends IssueFilterHelperStore implements IWo
             _filters.displayFilters.sub_group_by = null;
             updatedDisplayFilters.sub_group_by = null;
           }
-          // set group_by to state if layout is switched to kanban and group_by is null
+          // Set a default group_by when switching to the board with none set.
+          // This is the workspace ("all issues") store, which spans projects, so
+          // group by state GROUP (Backlog/Started/Completed/…) rather than raw
+          // per-project states — the latter would produce a column per state of
+          // every project.
           if (_filters.displayFilters.layout === "kanban" && _filters.displayFilters.group_by === null) {
-            _filters.displayFilters.group_by = "state";
-            updatedDisplayFilters.group_by = "state";
+            _filters.displayFilters.group_by = "state_detail.group";
+            updatedDisplayFilters.group_by = "state_detail.group";
           }
 
           runInAction(() => {
