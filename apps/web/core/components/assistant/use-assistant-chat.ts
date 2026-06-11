@@ -20,9 +20,14 @@ function deltaText(payload: Record<string, unknown>): string {
   return "";
 }
 
+const bySeq = (a: IAssistantMessage, b: IAssistantMessage): number => a.seq - b.seq;
+
 function upsert(list: IAssistantMessage[], msg: IAssistantMessage): IAssistantMessage[] {
   const idx = list.findIndex((m) => m.id === msg.id);
-  if (idx === -1) return [...list, msg].toSorted((a, b) => a.seq - b.seq);
+  if (idx === -1) {
+    // eslint-disable-next-line unicorn/no-array-sort -- fresh copy; toSorted not in tsconfig lib target
+    return [...list, msg].sort(bySeq);
+  }
   const next = [...list];
   next[idx] = { ...next[idx], ...msg };
   return next;
@@ -136,7 +141,8 @@ export function useAssistantChat(slug: string | undefined, threadId: string | un
     }
   }, [slug, threadId]);
 
-  const messages = useMemo(() => live.toSorted((a, b) => a.seq - b.seq), [live]);
+  // eslint-disable-next-line unicorn/no-array-sort -- fresh copy; toSorted not in tsconfig lib target
+  const messages = useMemo(() => [...live].sort(bySeq), [live]);
 
   return { messages, busy, sending, send, stop, error };
 }
