@@ -858,6 +858,7 @@ export default {
   "Load more": "더 불러오기",
   Loading: "로딩 중",
   "Loading dev machines...": "개발 머신 로딩 중...",
+  "Loading run details…": "",
   "Loading…": "로딩 중…",
   "local dev machine project working dir": "로컬 개발 머신 프로젝트 작업 디렉터리",
   "Local path the daemon runs the agent CLI in — usually the project repo on disk. Defaults to a sandbox under the runner's data dir, which is rarely what you want.":

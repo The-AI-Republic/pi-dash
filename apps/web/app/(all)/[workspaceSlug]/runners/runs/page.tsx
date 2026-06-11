@@ -14,7 +14,7 @@ import { RunnerService } from "@pi-dash/services";
 import type { IAgentRun, TAgentRunStatus } from "@pi-dash/types";
 import { AGENT_RUN_TERMINAL_STATUSES } from "@pi-dash/types";
 import type { TBadgeVariant } from "@pi-dash/ui";
-import { AlertModalCore, Badge, Button } from "@pi-dash/ui";
+import { AlertModalCore, Badge, Button, Spinner } from "@pi-dash/ui";
 import { PageHead } from "@/components/core/page-title";
 import { RunnersTabs } from "@/components/runners/runners-tabs";
 import { useWorkspace } from "@/hooks/store/use-workspace";
@@ -108,13 +108,13 @@ export const RunnerRunsPage = observer(function RunnerRunsPage() {
     : t("AI Agents");
 
   return (
-    <div className="flex flex-col gap-6">
+    <div className="flex h-full min-h-0 flex-col gap-6">
       <PageHead title={pageTitle} />
       <RunnersTabs />
-      <div className="grid grid-cols-[400px_1fr] gap-4">
-        <div className="rounded-md border border-subtle">
+      <div className="grid min-h-0 flex-1 grid-cols-[400px_1fr] gap-4 overflow-hidden">
+        <div className="overflow-auto rounded-md border border-subtle">
           <table className="w-full text-13">
-            <thead className="bg-layer-1 text-left text-secondary">
+            <thead className="sticky top-0 z-10 bg-layer-1 text-left text-secondary">
               <tr>
                 <th className="px-3 py-2">{t("Started")}</th>
                 <th className="px-3 py-2">{t("Status")}</th>
@@ -150,13 +150,18 @@ export const RunnerRunsPage = observer(function RunnerRunsPage() {
           </table>
         </div>
 
-        <div className="rounded-md border border-subtle p-4">
+        <div className="overflow-auto rounded-md border border-subtle p-4">
           {selected && detailError ? (
             <div className="text-13 text-danger-primary">
               {t("This run is not available. It may have been deleted or belong to a different workspace.")}
             </div>
-          ) : !detail ? (
+          ) : !selected ? (
             <div className="text-13 text-secondary">{t("Select a run on the left.")}</div>
+          ) : !detail ? (
+            <div className="flex items-center gap-2 text-13 text-secondary">
+              <Spinner height="16px" width="16px" />
+              {t("Loading run details…")}
+            </div>
           ) : (
             <div className="flex flex-col gap-3">
               <div className="flex items-center justify-between">

@@ -866,6 +866,7 @@ export default {
   "Load more": "Tải thêm",
   Loading: "Đang tải",
   "Loading dev machines...": "Đang tải máy phát triển...",
+  "Loading run details…": "",
   "Loading…": "Đang tải…",
   "local dev machine project working dir": "thư mục làm việc của dự án trên máy dev cục bộ",
   "Local path the daemon runs the agent CLI in — usually the project repo on disk. Defaults to a sandbox under the runner's data dir, which is rarely what you want.":
