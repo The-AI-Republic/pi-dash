@@ -1,0 +1,107 @@
+---
+key: pidash-cli
+title: Pi Dash CLI usage
+customizable: locked
+---
+## Pi Dash CLI (`pidash`)
+
+`pidash` is your only channel to Pi Dash during this run. Use it to read the issue, read and write comments, read and write your workpad, and move the issue between workflow states. Do not use `curl`, raw HTTP, or any other tool to reach the Pi Dash API — only the `pidash` binary is authenticated for this session.
+
+### Environment
+
+The CLI reads the following from the process environment — never pass them as flags, and never print, log, or commit their values:
+
+- `PIDASH_API_URL` — base URL of this Pi Dash instance.
+- `PIDASH_WORKSPACE_SLUG` — the workspace the issue lives in.
+- `PIDASH_TOKEN` — session-scoped credential. Treat it like any other secret.
+{% if run.kind != "scheduler" %}- `PIDASH_ISSUE_IDENTIFIER` — the current issue identifier (`{{ issue.identifier }}`). When set, `pidash state list` defaults to this issue's project so you can call it with no args.
+{% else %}- `PIDASH_PROJECT` — the project (`{{ project.identifier }}`) this scheduled run is scoped to. There is no single current issue — you operate across the project. Pass `--project {{ project.identifier }}` explicitly to commands that need it.
+{% endif %}
+### Output contract
+
+On success every command prints a single JSON document to stdout and exits `0`. On failure, a JSON object with an `error` field is printed to stderr and the exit code is non-zero. Parse the stderr JSON rather than pattern-matching the human message. Retry only transient failures; never retry the same command more than twice.
+
+### Commands
+
+#### Issues
+
+- `pidash issue get <identifier>` — fetch a work item. Returns the full payload including `id`, `name` (title), `description`, `state` (UUID — pair with `pidash state list` to map back to a name), `priority`, `labels`, `assignees`, and timestamps.
+- `pidash issue list --project <PROJ-or-UUID> [--cursor <c>] [--per-page <N>] [--order-by <field>]` — list work items in a project. `--project` accepts either the workspace-scoped slug (e.g. `ENG`) or a project UUID. Returns the server's paginated envelope `{count, next_cursor, prev_cursor, results: [...]}`; pass `--cursor` from a prior page to walk pages. Use this to find related/duplicate issues in the same project before creating new ones.
+- `pidash issue create --project <PROJ-or-UUID> --title "<title>" [--description <s>] [--priority <none|low|medium|high|urgent>] [--state "<state-name-or-UUID>"]` — file a new work item under the named project. Use this only for capturing **discovered scope that does not belong on the current issue** (a follow-up bug, a separated task, a missing prerequisite). Do **not** create an issue to track sub-steps of the current run — use the workpad comment for that. Record the new issue's identifier in the workpad so the operator can find it.
+- `pidash issue patch <identifier> --state "<state-name>"` — move the issue to a different state. The name is case-insensitive; the CLI resolves it to a UUID for you. You can also pass a state UUID directly.
+- `pidash issue patch <identifier> [--title <s>] [--description <s>] [--priority <none|low|medium|high|urgent>]` — update other fields. At least one flag is required. Do **not** edit title or description for planning or progress tracking — use the workpad comment instead.
+- `pidash issue search "<query>" [--project <PROJ-or-UUID>] [--status open|closed|all] [--since <iso8601>] [--limit <N>] [--sort rank|-created|-updated]` — full-text search across work item titles, descriptions, **and** comments. Use this to recover historical context: check whether a similar issue has been filed before, look up the *resolution* of a past task (the answer usually lives in a comment, not the title), or find anything that touched a given component. **This is search, not grep**: `<query>` is parsed as websearch syntax (quoted phrases, `OR`, `-exclude`) and is stem-aware (`color` finds `colors`/`colored`); regex / glob will not work. `--since` accepts ISO 8601 — either a full datetime (`2025-01-01T00:00:00Z`) or a bare date (`2025-01-01`, treated as midnight that day); malformed strings produce a 400. `--sort` accepts only `rank` (default), `-created`, `-updated`; other values 400. Returns `{query, count, results: [{id, identifier (e.g. PROJ-42), name, snippet, state, project, created_at, updated_at, completed_at, rank, url}]}`. `snippet` is empty when the match was in the title or in a comment (the snippet excerpt only covers the description body). Default `--limit` is 10, server max is 50 — tuned for your context window, not bulk export. Cast a broad net first, then read promising hits with `pidash issue get`. **Backwards-compatibility note:** if the local `pidash` is older than the version that shipped this subcommand, stderr will be a clap parser error (`error: unrecognized subcommand 'search'`) instead of the usual `{"error": ...}` JSON envelope, with exit code 2. Treat that case as "historical-context search is unavailable on this operator's runner" — silently skip the lookup and continue with the rest of the run; do **not** retry the command and do **not** treat it as a blocker.
+
+#### Comments
+
+Comments are the human ↔ agent conversation channel. Use them to ask clarifying questions, post blocker notices, share PR links, and announce completion. **Comments are not for tracking your own progress — that's what the workpad is for.**
+
+- `pidash comment list <identifier>` — list comments on the issue. Each entry has `id` (UUID), `comment_html`, `comment_stripped`, `actor_detail`, `speaker_type`, `speaker_label`, `speaker_agent_run_id`, and timestamps. Read these in chronological order to pick up any human replies since your last run.
+- `pidash comment add <identifier> --body-file <path> --as-agent "<agent name>" --agent-run-id "{{ run.id }}"` — post a new comment from a file and mark it as spoken by this AI agent run. `--body <markdown>` works for one-liners. Prefer `--body-file` for anything multi-line — shell quoting of markdown is error-prone. When you post any issue comment during this run, always include `--as-agent` and `--agent-run-id`; use your actual runtime name if you know it (`Codex`, `Claude Code`, etc.), otherwise use `AI Agent`.
+- `pidash comment update <identifier> <comment-id> --body-file <path>` — edit a comment you own. Both the issue identifier and the comment UUID are required. Rarely needed — prefer posting a fresh comment for new information.
+
+{% if run.kind != "scheduler" %}#### Workpad
+
+The workpad is your durable per-issue scratchpad — a single markdown document the agent owns. It is the only carrier of state between runs. It is **not** visible to humans in the comment thread; treat it as your own working memory, not a message to the operator.
+
+- `pidash workpad get [<identifier>]` — fetch the current workpad body. Returns `{body, updated_at}`. Defaults `<identifier>` to `PIDASH_ISSUE_IDENTIFIER` so you can call it bare.
+- `pidash workpad update [<identifier>] --body-file <path>` — overwrite the workpad body from a file. Defaults `<identifier>` to `PIDASH_ISSUE_IDENTIFIER`. An empty file clears it. There is no "append" — always write the full body.
+
+{% endif %}#### States
+
+- `pidash state list{% if run.kind == "scheduler" %} --project {{ project.identifier }}{% endif %}` — list the states available in {% if run.kind == "scheduler" %}this project{% else %}this issue's project{% endif %} with `name`, `group` (`backlog | unstarted | started | completed | cancelled`), and `description`.{% if run.kind != "scheduler" %} Uses `PIDASH_ISSUE_IDENTIFIER` by default; pass `pidash state list <issue-identifier>` or `pidash state list <project-uuid>` to override. Already rendered below under "Available states"; only call again if something looks stale.{% endif %}
+
+#### Debugging
+
+- `pidash workspace me` — print the authenticated user. For sanity-checking credentials only; you should not need this in normal flow.
+
+### Not for you
+
+The remaining `pidash` subcommands (`configure`, `install`, `uninstall`, `start`, `stop`, `restart`, `status`, `tui`, `doctor`, `remove`, `rotate`) manage the runner daemon itself — they are run by the human operator before your session starts. Do not invoke them. If any of them appears necessary, your run is blocked: follow "Blocking the run".
+
+### Typical recipes
+
+Read your workpad, edit it, write it back:
+
+```sh
+pidash workpad get | jq -r .body > ./.pidash-workpad.md
+# …edit the file in place…
+pidash workpad update --body-file ./.pidash-workpad.md
+```
+
+{% if run.kind != "scheduler" %}Post a blocker and move the issue to "Blocked":
+
+```sh
+pidash comment add {{ issue.identifier }} --body-file ./.pidash-blocked.md --as-agent "AI Agent" --agent-run-id "{{ run.id }}"
+pidash issue patch {{ issue.identifier }} --state "Blocked"
+```
+
+End a successful run (workpad already written via `pidash workpad update`):
+
+```sh
+pidash issue patch {{ issue.identifier }} --state "Done"
+```
+{% else %}File a finding as a new issue under this project:
+
+```sh
+pidash issue create --project {{ project.identifier }} --title "<short summary>" --description "<evidence, file path, severity, suggested fix>"
+```
+{% endif %}
+### Available states
+
+{% if run.kind != "scheduler" and issue.project_states %}
+{% for s in issue.project_states %}
+- **{{ s.name }}** (group: `{{ s.group }}`) — {{ s.description or "(no description)" }}
+{% endfor %}
+{% else %}
+_(state list unavailable — call `pidash state list` to retrieve it before moving state)_
+{% endif %}
+
+Use the list above to pick the correct `--state` value. Match your intent to the state's `group` first (e.g. `completed` for "this work is done", `cancelled` for "this will not be done"), then to the name and description.
+
+### Conventions
+
+- All writes are real and immediate. There is no undo. Confirm intent against your workpad plan before mutating.
+- Never retry the same `pidash` command more than twice. On non-zero exit, read the JSON on stderr, decide whether the failure is retryable, back off, and record the outcome in the workpad.
+- Never print, log, commit, or comment on the value of `PIDASH_TOKEN` or anything else whose name begins with `PIDASH_`. If you see the token echoed anywhere, stop and record it in the workpad.
+- When pasting `pidash` JSON back into the workpad for audit, enclose it in a fenced ` ``` ` block.

@@ -2,32 +2,31 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 # See the LICENSE file for details.
 
-"""Prompt-template REST surface.
+"""Prompt-section REST surface (design §7.2).
 
-- ``GET    /api/workspaces/<slug>/prompt-templates`` — list templates visible
-  to this workspace (the global default plus any workspace-scoped override).
-  Readable by any workspace member.
-- ``POST   /api/workspaces/<slug>/prompt-templates`` — create a workspace
-  override. Workspace admins only. Pre-fills the body from the global default
-  when the request omits ``body``.
-- ``GET    /api/workspaces/<slug>/prompt-templates/<id>`` — detail. Any
-  workspace member.
-- ``PATCH  /api/workspaces/<slug>/prompt-templates/<id>`` — edit in place.
-  Bumps ``version``. Workspace admins only. Refuses edits on the global
-  default.
-- ``POST   /api/workspaces/<slug>/prompt-templates/<id>/archive`` — flip
-  ``is_active=False`` so the workspace falls back to the global default.
-  Workspace admins only.
-- ``POST   /api/workspaces/<slug>/prompt-templates/<id>/preview`` — render
-  against a real issue without creating an ``AgentRun``. Workspace admins
-  only.
+- ``GET    /api/workspaces/<slug>/prompt-sections?kind=&scope=`` — the ordered
+  section list for a kind, each resolved (default / workspace / user) with its
+  customizable flag, source, and override metadata. Member-readable.
+- ``PUT    /api/workspaces/<slug>/prompt-sections/<key>?scope=`` — upsert an
+  override body. ``scope=workspace`` is admin-only; ``scope=user`` is any
+  member editing their own row. Runs save-time validation.
+- ``DELETE /api/workspaces/<slug>/prompt-sections/<key>?scope=`` — deactivate
+  an override (revert to the next rung in the chain).
+- ``GET    /api/workspaces/<slug>/prompts/<kind>/compiled?scope=`` — the
+  assembled final template (Jinja markers intact) plus the per-section
+  breakdown. When ``scope=user`` and the caller has overrides, also returns the
+  workspace-only ("automatic runs") compilation for comparison.
+- ``POST   /api/workspaces/<slug>/prompts/<kind>/preview`` — render the
+  compiled template against a real issue (coding-task / review) or scheduler
+  binding (scheduler), without creating a run. Admin-gated.
 """
 
 from __future__ import annotations
 
 import uuid
 
-from django.db.models import F, Q
+from django.core.exceptions import ValidationError as DjangoValidationError
+from django.db import IntegrityError, transaction
 from rest_framework import status
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
@@ -36,20 +35,32 @@ from rest_framework.views import APIView
 
 from pi_dash.db.models.issue import Issue
 from pi_dash.db.models.workspace import Workspace, WorkspaceMember
-from pi_dash.prompting.context import build_context
-from pi_dash.prompting.models import PromptTemplate
-from pi_dash.prompting.renderer import PromptRenderError, render
-from pi_dash.prompting.serializers import PromptTemplateSerializer
+from pi_dash.prompting import recipes, registry
+from pi_dash.prompting.composer import (
+    compile_template,
+    compose,
+    resolve_section,
+)
+from pi_dash.prompting.context import build_context, build_scheduler_context
+from pi_dash.prompting.models import PromptSectionOverride
+from pi_dash.prompting.renderer import PromptRenderError
+from pi_dash.prompting.serializers import (
+    PromptSectionOverrideSerializer,
+    ResolvedSectionSerializer,
+)
+from pi_dash.prompting.validation import OverrideValidationError, validate_override
 
 #: Numeric value of ``WorkspaceMember.role`` for the "Admin" role. Mirrors
-#: ``db.models.workspace.ROLE_CHOICES`` — kept as a named constant here so
-#: access checks don't rely on an unlabelled literal.
+#: ``db.models.workspace.ROLE_CHOICES``.
 WORKSPACE_ADMIN_ROLE = 20
+
+SCOPE_USER = "user"
+SCOPE_WORKSPACE = "workspace"
 
 
 class _FakeRun:
-    """Stand-in for :class:`AgentRun` that carries the fields the renderer
-    consumes, so a preview never has to mutate the DB."""
+    """Stand-in for :class:`AgentRun` that carries the fields the context
+    builders consume, so a preview never has to mutate the DB."""
 
     def __init__(self, run_id: uuid.UUID):
         self.id = run_id
@@ -57,34 +68,19 @@ class _FakeRun:
 
 
 def _is_workspace_admin(user, workspace: Workspace) -> bool:
-    """Write access: workspace-scoped admins (role 20) plus Django superusers.
-    ``is_staff`` alone is not sufficient — a staff flag doesn't imply
-    membership in this workspace."""
     if user.is_superuser:
         return True
     return WorkspaceMember.objects.filter(
-        workspace=workspace,
-        member=user,
-        role=WORKSPACE_ADMIN_ROLE,
-        is_active=True,
+        workspace=workspace, member=user, role=WORKSPACE_ADMIN_ROLE, is_active=True
     ).exists()
 
 
 def _is_workspace_member(user, workspace: Workspace) -> bool:
-    """Read access: any active member of the workspace, at any role."""
     if user.is_superuser:
         return True
     return WorkspaceMember.objects.filter(
-        workspace=workspace,
-        member=user,
-        is_active=True,
+        workspace=workspace, member=user, is_active=True
     ).exists()
-
-
-def _visible_to(workspace):
-    """Templates visible to a workspace: the workspace's own rows plus the
-    global default."""
-    return Q(workspace=workspace) | Q(workspace__isnull=True)
 
 
 def _get_workspace_or_404(slug: str):
@@ -94,23 +90,44 @@ def _get_workspace_or_404(slug: str):
         return None
 
 
-def _get_global_default_body() -> str:
-    """Current body of the global default template, or empty string if the
-    seed row is missing."""
-    row = (
-        PromptTemplate.objects.filter(
-            workspace__isnull=True,
-            name=PromptTemplate.DEFAULT_NAME,
-            is_active=True,
+def _resolve_scope(request) -> str:
+    """Return the requested resolution scope (``user`` default, or
+    ``workspace``)."""
+    scope = request.query_params.get("scope", SCOPE_USER)
+    return SCOPE_WORKSPACE if scope == SCOPE_WORKSPACE else SCOPE_USER
+
+
+def _overrides_by_key(workspace, user) -> dict:
+    """Map ``section_key -> PromptSectionOverride`` for one scope's active
+    rows. ``user is None`` selects the workspace-level rows."""
+    qs = PromptSectionOverride.objects.filter(workspace=workspace, is_active=True)
+    qs = qs.filter(user__isnull=True) if user is None else qs.filter(user=user)
+    return {row.section_key: row for row in qs}
+
+
+def _section_breakdown(kind: str, *, workspace, user, overrides: dict) -> list:
+    """Resolve every section in ``kind``'s recipe and attach ``needs_attention``
+    from the matching active override row."""
+    out = []
+    for key in recipes.recipe_for(kind):
+        resolved = resolve_section(key, workspace=workspace, project=None, user=user)
+        row = overrides.get(key)
+        out.append(
+            {
+                "key": resolved.key,
+                "title": resolved.title,
+                "customizable": resolved.customizable,
+                "body": resolved.body,
+                "source": resolved.source,
+                "version": resolved.version,
+                "needs_attention": bool(row.needs_attention) if row is not None else False,
+            }
         )
-        .order_by("-updated_at")
-        .first()
-    )
-    return row.body if row is not None else ""
+    return out
 
 
-class PromptTemplateListCreateEndpoint(APIView):
-    """``GET|POST /api/workspaces/<slug>/prompt-templates``."""
+class PromptSectionListEndpoint(APIView):
+    """``GET /api/workspaces/<slug>/prompt-sections?kind=&scope=``."""
 
     permission_classes = [IsAuthenticated]
     throttle_classes = [UserRateThrottle]
@@ -122,200 +139,268 @@ class PromptTemplateListCreateEndpoint(APIView):
         if not _is_workspace_member(request.user, workspace):
             return Response({"error": "forbidden"}, status=status.HTTP_403_FORBIDDEN)
 
-        # nulls_last=True so the workspace override (non-null workspace_id)
-        # lands before the global default — the UI doesn't depend on this
-        # order today but making it explicit avoids future bugs if consumers
-        # start trusting the response order.
-        qs = (
-            PromptTemplate.objects.filter(is_active=True)
-            .filter(_visible_to(workspace))
-            .order_by(F("workspace_id").asc(nulls_last=True), "name")
-        )
-        serializer = PromptTemplateSerializer(qs, many=True)
-        return Response(serializer.data)
-
-    def post(self, request, slug: str):
-        workspace = _get_workspace_or_404(slug)
-        if workspace is None:
-            return Response({"error": "workspace not found"}, status=status.HTTP_404_NOT_FOUND)
-        if not _is_workspace_admin(request.user, workspace):
-            return Response({"error": "forbidden"}, status=status.HTTP_403_FORBIDDEN)
-
-        # MVP scope (Option 1): one template kind per workspace — the built-in
-        # "coding-task" slot that the composer actually reads. Client-supplied
-        # names are ignored on purpose; accepting them would let callers
-        # create rows that orchestration never loads.
-        name = PromptTemplate.DEFAULT_NAME
-        existing = PromptTemplate.objects.filter(
-            workspace=workspace, name=name, is_active=True
-        ).first()
-        if existing is not None:
+        kind = request.query_params.get("kind", recipes.KIND_CODING_TASK)
+        if kind not in recipes.RECIPES:
             return Response(
-                {
-                    "error": "workspace already has an active template with this name",
-                    "existing_id": str(existing.id),
-                },
-                status=status.HTTP_409_CONFLICT,
-            )
-
-        body = request.data.get("body")
-        if not body:
-            body = _get_global_default_body()
-        if not body:
-            return Response(
-                {"error": "no body provided and no global default available to copy from"},
+                {"error": f"unknown kind {kind!r}", "kinds": list(recipes.all_kinds())},
                 status=status.HTTP_400_BAD_REQUEST,
             )
-
-        serializer = PromptTemplateSerializer(data={"name": name, "body": body})
-        serializer.is_valid(raise_exception=True)
-        template = PromptTemplate.objects.create(
-            workspace=workspace,
-            name=serializer.validated_data["name"],
-            body=serializer.validated_data["body"],
-            is_active=True,
-            version=1,
-            updated_by=request.user,
-        )
+        scope = _resolve_scope(request)
+        user = request.user if scope == SCOPE_USER else None
+        overrides = _overrides_by_key(workspace, user)
+        breakdown = _section_breakdown(kind, workspace=workspace, user=user, overrides=overrides)
         return Response(
-            PromptTemplateSerializer(template).data, status=status.HTTP_201_CREATED
+            {
+                "kind": kind,
+                "scope": scope,
+                "sections": ResolvedSectionSerializer(breakdown, many=True).data,
+            }
         )
 
 
-class PromptTemplateDetailEndpoint(APIView):
-    """``GET|PATCH /api/workspaces/<slug>/prompt-templates/<id>``."""
+class PromptSectionDetailEndpoint(APIView):
+    """``PUT|DELETE /api/workspaces/<slug>/prompt-sections/<key>?scope=``."""
 
     permission_classes = [IsAuthenticated]
     throttle_classes = [UserRateThrottle]
 
-    def _lookup(self, workspace, template_id):
-        return (
-            PromptTemplate.objects.filter(id=template_id)
-            .filter(_visible_to(workspace))
-            .first()
+    def _check_write_permission(self, request, workspace, scope) -> bool:
+        if scope == SCOPE_WORKSPACE:
+            return _is_workspace_admin(request.user, workspace)
+        # User-scope writes: any member, own row only (enforced by user=self).
+        return _is_workspace_member(request.user, workspace)
+
+    def put(self, request, slug: str, section_key: str):
+        workspace = _get_workspace_or_404(slug)
+        if workspace is None:
+            return Response({"error": "workspace not found"}, status=status.HTTP_404_NOT_FOUND)
+
+        scope = request.data.get("scope") or request.query_params.get("scope", SCOPE_USER)
+        scope = SCOPE_WORKSPACE if scope == SCOPE_WORKSPACE else SCOPE_USER
+        if not self._check_write_permission(request, workspace, scope):
+            return Response({"error": "forbidden"}, status=status.HTTP_403_FORBIDDEN)
+
+        if section_key not in registry.REGISTRY:
+            return Response(
+                {"error": f"unknown section {section_key!r}"},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+        section = registry.get_section(section_key)
+        if section.is_locked:
+            return Response(
+                {"error": f"section {section_key!r} is locked and cannot be overridden"},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+
+        body = request.data.get("body")
+        if body is None:
+            return Response({"error": "body is required"}, status=status.HTTP_400_BAD_REQUEST)
+
+        target_user = request.user if scope == SCOPE_USER else None
+        try:
+            validate_override(section_key, body, workspace=workspace, user=target_user)
+        except OverrideValidationError as exc:
+            return Response(
+                {"error": "override validation failed", "detail": str(exc)},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        row = self._upsert(workspace, target_user, section_key, body, request.user)
+        return Response(
+            PromptSectionOverrideSerializer(row).data, status=status.HTTP_200_OK
         )
 
-    def get(self, request, slug: str, template_id: uuid.UUID):
+    def _upsert(self, workspace, target_user, section_key, body, editor):
+        """Update the active override in place (bump version) or create one.
+
+        The partial-unique constraints make a concurrent create race possible;
+        retry-as-update on IntegrityError.
+        """
+        qs = PromptSectionOverride.objects.filter(
+            workspace=workspace, section_key=section_key, is_active=True
+        )
+        qs = qs.filter(user__isnull=True) if target_user is None else qs.filter(user=target_user)
+        existing = qs.first()
+        if existing is not None:
+            existing.body = body
+            existing.version = (existing.version or 0) + 1
+            existing.needs_attention = False
+            existing.updated_by = editor
+            existing.save(
+                update_fields=["body", "version", "needs_attention", "updated_by", "updated_at"]
+            )
+            return existing
+        try:
+            with transaction.atomic():
+                return PromptSectionOverride.objects.create(
+                    workspace=workspace,
+                    user=target_user,
+                    section_key=section_key,
+                    body=body,
+                    is_active=True,
+                    version=1,
+                    updated_by=editor,
+                )
+        except IntegrityError:
+            # Lost a race — an active row now exists; update it.
+            existing = qs.first()
+            if existing is None:
+                raise
+            existing.body = body
+            existing.version = (existing.version or 0) + 1
+            existing.needs_attention = False
+            existing.updated_by = editor
+            existing.save(
+                update_fields=["body", "version", "needs_attention", "updated_by", "updated_at"]
+            )
+            return existing
+
+    def delete(self, request, slug: str, section_key: str):
+        workspace = _get_workspace_or_404(slug)
+        if workspace is None:
+            return Response({"error": "workspace not found"}, status=status.HTTP_404_NOT_FOUND)
+
+        scope = request.query_params.get("scope", SCOPE_USER)
+        scope = SCOPE_WORKSPACE if scope == SCOPE_WORKSPACE else SCOPE_USER
+        if not self._check_write_permission(request, workspace, scope):
+            return Response({"error": "forbidden"}, status=status.HTTP_403_FORBIDDEN)
+
+        target_user = request.user if scope == SCOPE_USER else None
+        qs = PromptSectionOverride.objects.filter(
+            workspace=workspace, section_key=section_key, is_active=True
+        )
+        qs = qs.filter(user__isnull=True) if target_user is None else qs.filter(user=target_user)
+        row = qs.first()
+        if row is None:
+            return Response(
+                {"error": "no active override at this scope"},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+        row.is_active = False
+        row.updated_by = request.user
+        row.save(update_fields=["is_active", "updated_by", "updated_at"])
+        return Response(status=status.HTTP_204_NO_CONTENT)
+
+
+class PromptCompiledEndpoint(APIView):
+    """``GET /api/workspaces/<slug>/prompts/<kind>/compiled?scope=``."""
+
+    permission_classes = [IsAuthenticated]
+    throttle_classes = [UserRateThrottle]
+
+    def get(self, request, slug: str, kind: str):
         workspace = _get_workspace_or_404(slug)
         if workspace is None:
             return Response({"error": "workspace not found"}, status=status.HTTP_404_NOT_FOUND)
         if not _is_workspace_member(request.user, workspace):
             return Response({"error": "forbidden"}, status=status.HTTP_403_FORBIDDEN)
-
-        template = self._lookup(workspace, template_id)
-        if template is None:
-            return Response({"error": "template not found"}, status=status.HTTP_404_NOT_FOUND)
-        return Response(PromptTemplateSerializer(template).data)
-
-    def patch(self, request, slug: str, template_id: uuid.UUID):
-        workspace = _get_workspace_or_404(slug)
-        if workspace is None:
-            return Response({"error": "workspace not found"}, status=status.HTTP_404_NOT_FOUND)
-        if not _is_workspace_admin(request.user, workspace):
-            return Response({"error": "forbidden"}, status=status.HTTP_403_FORBIDDEN)
-
-        template = self._lookup(workspace, template_id)
-        if template is None:
-            return Response({"error": "template not found"}, status=status.HTTP_404_NOT_FOUND)
-        if template.is_global_default:
+        if kind not in recipes.RECIPES:
             return Response(
-                {"error": "the global default template is read-only on this surface"},
-                status=status.HTTP_403_FORBIDDEN,
+                {"error": f"unknown kind {kind!r}", "kinds": list(recipes.all_kinds())},
+                status=status.HTTP_400_BAD_REQUEST,
             )
 
-        serializer = PromptTemplateSerializer(template, data=request.data, partial=True)
-        serializer.is_valid(raise_exception=True)
-        # Edit-in-place: bump version counter, persist new body, stamp the
-        # editor. History is not retained on the row itself.
-        new_body = serializer.validated_data.get("body", template.body)
-        template.body = new_body
-        template.version = (template.version or 0) + 1
-        template.updated_by = request.user
-        template.save(update_fields=["body", "version", "updated_by", "updated_at"])
-        return Response(PromptTemplateSerializer(template).data)
+        scope = _resolve_scope(request)
+        user = request.user if scope == SCOPE_USER else None
+        compiled = compile_template(kind, workspace=workspace, project=None, user=user)
+        overrides = _overrides_by_key(workspace, user)
+        payload = {
+            "kind": kind,
+            "scope": scope,
+            "template_body": compiled.template_body,
+            "sections": ResolvedSectionSerializer(
+                _section_breakdown(kind, workspace=workspace, user=user, overrides=overrides),
+                many=True,
+            ).data,
+        }
+        # Dual compilation (§9.1): when resolving for a user who has overrides,
+        # also surface the workspace-only template that automatic runs (ticks,
+        # scheduler beats) would use, so the seam is visible.
+        if user is not None and any(
+            r.source.startswith("user:") for r in compiled.resolved
+        ):
+            automatic = compile_template(kind, workspace=workspace, project=None, user=None)
+            payload["automatic_template_body"] = automatic.template_body
+        return Response(payload)
 
 
-class PromptTemplateArchiveEndpoint(APIView):
-    """``POST /api/workspaces/<slug>/prompt-templates/<id>/archive``.
-
-    Flips ``is_active=False`` on a workspace-scoped row so lookup falls back
-    to the global default. Refuses to archive the global default itself.
-    """
+class PromptPreviewEndpoint(APIView):
+    """``POST /api/workspaces/<slug>/prompts/<kind>/preview``."""
 
     permission_classes = [IsAuthenticated]
     throttle_classes = [UserRateThrottle]
 
-    def post(self, request, slug: str, template_id: uuid.UUID):
+    def post(self, request, slug: str, kind: str):
         workspace = _get_workspace_or_404(slug)
         if workspace is None:
             return Response({"error": "workspace not found"}, status=status.HTTP_404_NOT_FOUND)
         if not _is_workspace_admin(request.user, workspace):
             return Response({"error": "forbidden"}, status=status.HTTP_403_FORBIDDEN)
-
-        template = (
-            PromptTemplate.objects.filter(
-                id=template_id, workspace=workspace, is_active=True
-            ).first()
-        )
-        if template is None:
+        if kind not in recipes.RECIPES:
             return Response(
-                {"error": "active workspace-scoped template not found"},
-                status=status.HTTP_404_NOT_FOUND,
+                {"error": f"unknown kind {kind!r}", "kinds": list(recipes.all_kinds())},
+                status=status.HTTP_400_BAD_REQUEST,
             )
 
-        template.is_active = False
-        template.updated_by = request.user
-        template.save(update_fields=["is_active", "updated_by", "updated_at"])
-        return Response(PromptTemplateSerializer(template).data)
+        scope = request.data.get("scope", SCOPE_WORKSPACE)
+        user = request.user if scope == SCOPE_USER else None
 
+        if kind == recipes.KIND_SCHEDULER:
+            context, project, err = self._scheduler_context(request, workspace)
+        else:
+            context, project, err = self._issue_context(request, workspace, kind)
+        if err is not None:
+            return err
 
-class PromptTemplatePreviewEndpoint(APIView):
-    """``POST /api/workspaces/<slug>/prompt-templates/<uuid>/preview``.
-
-    Workspace-admin-gated. Renders the template against a real issue without
-    creating an ``AgentRun``. Accepts an optional ``body`` override so the
-    editor can preview unsaved drafts.
-    """
-
-    permission_classes = [IsAuthenticated]
-    throttle_classes = [UserRateThrottle]
-
-    def post(self, request, slug: str, template_id: uuid.UUID):
-        workspace = _get_workspace_or_404(slug)
-        if workspace is None:
-            return Response({"error": "workspace not found"}, status=status.HTTP_404_NOT_FOUND)
-
-        if not _is_workspace_admin(request.user, workspace):
-            return Response({"error": "forbidden"}, status=status.HTTP_403_FORBIDDEN)
-
-        template = (
-            PromptTemplate.objects.filter(id=template_id)
-            .filter(_visible_to(workspace))
-            .first()
-        )
-        if template is None:
-            return Response({"error": "template not found"}, status=status.HTTP_404_NOT_FOUND)
-
-        issue_id = request.data.get("issue_id")
-        if not issue_id:
-            return Response(
-                {"error": "issue_id is required"}, status=status.HTTP_400_BAD_REQUEST
-            )
         try:
-            issue = (
-                Issue.objects.select_related("project", "workspace", "state")
-                .get(id=issue_id, workspace=workspace)
+            composed = compose(
+                kind, workspace=workspace, project=project, user=user, context=context
             )
-        except Issue.DoesNotExist:
-            return Response({"error": "issue not found"}, status=status.HTTP_404_NOT_FOUND)
-
-        context = build_context(issue, _FakeRun(run_id=uuid.uuid4()))
-        body = request.data.get("body") or template.body
-        try:
-            rendered = render(body, context)
         except PromptRenderError as exc:
             return Response(
                 {"error": "render failed", "detail": str(exc)},
                 status=status.HTTP_422_UNPROCESSABLE_ENTITY,
             )
-        return Response({"prompt": rendered})
+        return Response({"kind": kind, "prompt": composed.text})
+
+    def _issue_context(self, request, workspace, kind):
+        issue_id = request.data.get("issue_id")
+        if not issue_id:
+            return None, None, Response(
+                {"error": "issue_id is required for this kind"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        try:
+            issue = Issue.objects.select_related("project", "workspace", "state").get(
+                id=issue_id, workspace=workspace
+            )
+        except (Issue.DoesNotExist, ValueError, DjangoValidationError):
+            return None, None, Response(
+                {"error": "issue not found"}, status=status.HTTP_404_NOT_FOUND
+            )
+        context = build_context(issue, _FakeRun(run_id=uuid.uuid4()))
+        # Honor the requested kind even if it differs from the issue's state-
+        # derived kind, so a preview of the review prompt against an In Progress
+        # issue still reads as a review prompt.
+        context["run"]["kind"] = kind
+        return context, issue.project, None
+
+    def _scheduler_context(self, request, workspace):
+        from pi_dash.db.models.scheduler import SchedulerBinding
+
+        binding_id = request.data.get("binding_id")
+        if not binding_id:
+            return None, None, Response(
+                {"error": "binding_id is required for the scheduler kind"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        try:
+            binding = SchedulerBinding.objects.select_related(
+                "scheduler", "project", "workspace"
+            ).get(id=binding_id, workspace=workspace)
+        except (SchedulerBinding.DoesNotExist, ValueError, DjangoValidationError):
+            return None, None, Response(
+                {"error": "scheduler binding not found"}, status=status.HTTP_404_NOT_FOUND
+            )
+        context = build_scheduler_context(binding, _FakeRun(run_id=uuid.uuid4()))
+        return context, binding.project, None

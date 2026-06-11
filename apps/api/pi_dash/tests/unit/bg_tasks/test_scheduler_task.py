@@ -355,7 +355,7 @@ def test_fire_rolls_back_next_run_at_on_dispatch_failure(monkeypatch, binding):
 
     monkeypatch.setattr(
         "pi_dash.orchestration.service.dispatch_scheduler_run",
-        lambda b, p: (None, "no default pod for workspace test"),
+        lambda b: (None, "no default pod for workspace test"),
     )
     fired = fire_scheduler_binding(str(binding.pk))
     assert fired is False
