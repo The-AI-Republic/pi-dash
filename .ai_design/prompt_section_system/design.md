@@ -17,6 +17,27 @@
 > a `kind_for(phase, work_kind)` seam with `work_kind` hardcoded to
 > `"coding"` in v1 (§9.5).
 >
+> **Implementation-readiness gaps closed** (review round 2, verified
+> against the code): scheduler task content is injected as a context
+> variable, not parsed as Jinja — eliminating the escape-delimiters
+> data migration and matching how all other user content flows through
+> the renderer (§5.1/§5.4); the scheduler dispatch becomes
+> create-run-then-compose because the context carries `run.id`, and
+> render failures fail the run rather than writing `binding.last_error`
+> (§5.3); every context guarantees `run.kind` and shared sections must
+> branch on it, never probe object presence — today's `pidash-cli`
+> fragment references `issue.*` throughout and gets a guard pass in
+> PR 2 (§5.2); the override uniqueness constraint is split into two
+> partial constraints because Postgres NULL-distinctness +
+> Django 4.2 (no `nulls_distinct`) would allow duplicate active
+> workspace rows (§6.1); `AgentRun` gains an explicit `trigger` field
+> because human-vs-automatic is not derivable from `created_by`
+> (ticks resolve a human creator) (§7.1); manifest storage pinned to a
+> dedicated `prompt_manifest` JSON field (§7.1); preview request
+> shapes pinned per kind (§7.2); the PR 1 → PR 3 transition window
+> keeps legacy workspace rows rendering and the seed machinery
+> functional (§8.1).
+>
 > **Scope:** replace seed-time fragment flattening and the whole-body
 > `PromptTemplate` override with compose-time assembly from a
 > code-owned **section registry**, per-kind **recipes**, and a
@@ -223,19 +244,41 @@ work_kind)` with `work_kind` hardcoded to `"coding"` in v1 — the
 
 ### 5.1 The `scheduler-task` section
 
-The scheduler kind has one **dynamic-body section**: `scheduler-task`.
-Its body comes from data, not the registry:
+The scheduler kind has one **dynamic-content section**:
+`scheduler-task`. Its registry body is a thin frame that injects the
+operator-authored prompt **as a context variable**, not as template
+text:
 
+```markdown
+## Your task
+
+{{ scheduler_task_body }}
 ```
-{Scheduler.prompt}
 
-{SchedulerBinding.extra_context}   # when non-empty
-```
+where `scheduler_task_body` = `Scheduler.prompt` + (when non-empty)
+`"\n\n"` + `binding.extra_context`, built by the context builder.
 
-Structurally, a `Scheduler` row _is_ a per-scheduler section override
-— `Scheduler.prompt` and `binding.extra_context` keep their existing
-storage and editing surfaces; they simply slot into the recipe instead
-of being the whole prompt.
+Variable injection (rather than concatenating the operator prompt into
+the template before rendering) is deliberate and matches how every
+other piece of user-authored content already flows through the
+renderer — issue descriptions, comment bodies, and workpad text are
+all injected via context variables and never parsed as Jinja. Benefits:
+
+- **No data migration.** Existing `Scheduler.prompt` rows containing
+  literal `{{` / `{%` render byte-identical to today; nothing is
+  escaped or mutated.
+- **No new parse surface.** `binding.extra_context` is not
+  admin-validated content; parsing it as a template would widen the
+  sandbox's exposure for zero requested functionality.
+- Jinja support _inside_ scheduler prompts (e.g. `{{ project.name }}`
+  in an operator's prompt) is **deferred** — if wanted later it lands
+  as an explicit opt-in (validate-on-save + render the task body in a
+  nested pass), without changing this section's frame.
+
+Structurally, a `Scheduler` row still _is_ the per-scheduler task
+content — `Scheduler.prompt` and `binding.extra_context` keep their
+existing storage and editing surfaces; they fill the `scheduler-task`
+slot instead of being the whole prompt.
 
 ### 5.2 Scheduler context builder
 
@@ -247,33 +290,66 @@ alongside `build_context`):
     "workspace": {"slug": ..., "name": ...},
     "project":   {"id": ..., "identifier": ..., "name": ..., "description": ...},
     "scheduler": {"slug": ..., "name": ..., "description": ...},
-    "run":       {"id": ..., "kind": "scheduler"},
+    "run":       {"id": ..., "kind": "scheduler", "attempt": 1, "turn_number": 1},
+    "scheduler_task_body": "...",   # §5.1
 }
 ```
 
 Issue-centric keys (`issue`, `comments_section`, `parent_done_payload`,
-`workpad_body`, …) do not exist in this context. Shared sections used
-by the scheduler recipe must only reference keys present in _all_ their
-kinds' contexts — enforced by save-time and CI validation (§6.3, §3.2).
+`workpad_body`, …) do not exist in this context.
+
+**Base-context contract.** Every kind's context guarantees
+`workspace`, `project`, and `run` (with `run.kind` set to the kind
+name — `build_context` adds `run.kind` in PR 1). Because the renderer
+uses `StrictUndefined`, shared sections must branch on **`run.kind`**
+(always defined) and must never probe for the _presence_ of
+kind-specific objects (`{% if issue %}` raises on an undefined name).
+This matters immediately: today's `pidash-cli` fragment references
+`{{ issue.identifier }}` and `{{ issue.project_states }}` throughout,
+so PR 2 includes a content pass over every section shared into the
+scheduler recipe (`session-framing`, `pidash-cli`, `guardrails`),
+guarding issue-specific lines with `{% if run.kind != "scheduler" %}`
+(or scheduler-appropriate alternatives — e.g. the CLI section's
+environment block describes `PIDASH_ISSUE_IDENTIFIER` only for issue
+kinds). The §6.3 dual-sample validation and the §3.2 CI check both
+render every kind's full default prompt, so an unguarded reference
+fails CI, not production.
 
 ### 5.3 Call-site change
 
-`bgtasks/scheduler.py` stops concatenating; the fire path calls
-`compose("scheduler", workspace, project, user=None, context=...)`
-and `orchestration/service.py::dispatch_scheduler_run` receives the
-composed prompt (or composes internally — keep the existing
-`(run, fail_reason)` contract and `binding.last_error` reporting; a
-`PromptRenderError` becomes a recorded fail reason exactly like
-`no default pod`).
+`bgtasks/scheduler.py` stops building the prompt; composition moves
+inside `orchestration/service.py::dispatch_scheduler_run(binding)`
+(the prompt parameter is dropped), which **mirrors the issue-run
+shape** in `_create_continuation_run`: create the `AgentRun` with
+`prompt=""`, then compose, then save — because the scheduler context
+includes `run.id` (§5.2), the run must exist before composition,
+exactly as it does on the issue path today
+(`service.py` creates the run, then assigns
+`run.prompt = build_first_turn(...)`).
 
-### 5.4 Jinja migration of existing `Scheduler.prompt` rows
+Failure semantics, aligned with the issue path:
 
-Scheduler prompts become Jinja-rendered (sandboxed). Existing rows may
-contain literal `{{` / `{%`. Migration: run `validate_syntax()` over
-every `Scheduler.prompt` and `binding.extra_context`; rows that fail
-get their delimiters escaped (`{{` → `{{ '{{' }}`) so behavior is
-byte-identical to today. Save paths for scheduler prompts add the same
-syntax validation going forward.
+- `PromptRenderError` during composition → the created run is marked
+  `FAILED` with the §6.3-attributed error, `binding.last_run` points
+  at it, and the Beat fire loop proceeds (next occurrence scheduled).
+  This is visible exactly like any other failed scheduler run via
+  `last_run.status`.
+- `binding.last_error` keeps its documented semantic — _"short-circuit
+  errors that never produced a run"_ (no pod, no creator). Render
+  failures now produce a run, so they do **not** write `last_error`.
+- The existing `(run, fail_reason)` return contract is preserved for
+  the short-circuit cases.
+
+### 5.4 No data migration required
+
+A consequence of §5.1's variable injection: existing
+`Scheduler.prompt` / `binding.extra_context` rows need **no
+migration** — their text is never parsed as Jinja, so literal
+`{{` / `{%` in operator prompts renders verbatim, byte-identical to
+today. No save-path validation is added for scheduler prompt text
+either (it is plain text by design). The earlier draft's
+escape-delimiters migration is dropped; revisit only if/when
+Jinja-in-scheduler-prompts ships as an opt-in (§5.1).
 
 ## 6. Overrides (goal 3)
 
@@ -293,15 +369,30 @@ class PromptSectionOverride(models.Model):
     created_at / updated_at
 
     class Meta:
-        constraints = [UniqueConstraint(
-            fields=["workspace", "user", "section_key"],
-            condition=Q(is_active=True),
-            name="prompt_section_override_one_active",
-        )]
+        constraints = [
+            # Postgres treats NULLs as distinct in unique indexes, and
+            # `nulls_distinct=False` requires Django 5.0+ / PG 15+ (repo is
+            # Django 4.2). A single constraint over (workspace, user,
+            # section_key) would therefore allow unlimited duplicate ACTIVE
+            # workspace-level rows (user IS NULL). Split into two partial
+            # constraints instead:
+            UniqueConstraint(
+                fields=["workspace", "section_key"],
+                condition=Q(is_active=True, user__isnull=True),
+                name="prompt_section_override_one_active_ws",
+            ),
+            UniqueConstraint(
+                fields=["workspace", "user", "section_key"],
+                condition=Q(is_active=True, user__isnull=False),
+                name="prompt_section_override_one_active_user",
+            ),
+        ]
         indexes = [Index(fields=["workspace", "user", "section_key", "is_active"])]
 ```
 
-Replaces `PromptTemplate` (retirement: §8).
+Replaces `PromptTemplate` (retirement: §8). Upsert paths must still
+handle the race (`IntegrityError` → retry-as-update), same as any
+partial-unique upsert.
 
 ### 6.2 Resolution
 
@@ -398,15 +489,29 @@ def build_first_turn(issue, run) -> str:   # signature unchanged for callers
 
 - `AgentRun.prompt` keeps storing the final rendered text (audit
   record, unchanged).
-- The **composition manifest** is persisted per run (new JSON field on
-  `AgentRun` or inside `run_config`) so "why did this run behave
+- The **composition manifest** is persisted as a dedicated
+  `AgentRun.prompt_manifest = JSONField(null=True, blank=True)` (PR 3
+  migration; preferred over stuffing `run_config`, which is the
+  runner-facing dispatch payload) so "why did this run behave
   differently" is answerable by diffing manifests: which sections,
   whose overrides, which versions.
-- Trigger classification (`run_is_human_triggered`) derives from the
-  existing trigger plumbing in `orchestration/scheduling.py`
-  (`TRIGGER_RUN_AI`, comment-continuation, state-transition actor vs.
-  tick/system creator resolution) — it must be explicit at run
-  creation, not inferred after the fact.
+- **Trigger persistence (required, not derivable).** `AgentRun` today
+  has no trigger field, and `created_by` cannot distinguish
+  human-vs-automatic: ticks resolve a _human_ creator via
+  `_resolve_creator_for_trigger` (`orchestration/scheduling.py`), so a
+  tick-created run's `created_by` looks identical to a Run AI click.
+  PR 3 adds `AgentRun.trigger = CharField(choices=...)` with values
+  `state_transition | run_ai | comment_and_run | tick | scheduler |
+direct` (superset of the existing `TRIGGER_*` constants in
+  `scheduling.py`, which become the shared enum), threaded through
+  `_create_and_dispatch_run` / `_create_continuation_run` /
+  `dispatch_scheduler_run` as a required kwarg. Then
+  `run_is_human_triggered(run)` =
+  `run.trigger in {state_transition, run_ai, comment_and_run, direct}`
+  — and since the helpers set `trigger` before calling
+  `build_first_turn`, the composer reads it off the run it already
+  receives. The field doubles as audit metadata the manifest and run
+  detail UI can surface.
 
 ### 7.2 Endpoints
 
@@ -437,10 +542,14 @@ GET    /workspaces/<slug>/prompts/<kind>/compiled?scope=user|workspace
          compilations, per §9.1.
 
 POST   /workspaces/<slug>/prompts/<kind>/preview
-       → render the compiled template against a real issue
-         (coding-task/review: body of today's preview endpoint,
-         generalized) or a scheduler binding (scheduler kind), without
-         creating a run. Admin-gated like today's preview.
+       → render the compiled template against real data, without
+         creating a run. Admin-gated like today's preview. Request
+         body: `{"issue_id": ...}` for coding-task/review kinds,
+         `{"binding_id": ...}` for the scheduler kind (400 on a
+         kind/parameter mismatch); optional `{"scope": "user"}` to
+         preview with the caller's user overrides applied. Reuses
+         today's `_FakeRun` stand-in (generalized to carry `kind`)
+         so no `AgentRun` row is created.
 ```
 
 The section breakdown with `source` per section is the v1
@@ -448,6 +557,29 @@ admin-governance surface (§9.2): admins can _see_ every user override
 in effect even though they cannot yet lock sections.
 
 ## 8. Retirement of `PromptTemplate`
+
+### 8.1 Transition window (PR 1 → PR 3)
+
+`PromptTemplate` retires in PR 3, but PR 1 already reroutes
+composition. Two hazards in the window must be handled **in PR 1**:
+
+1. **Existing workspace overrides must not silently stop applying.**
+   PR 1's `build_first_turn` checks for an active _workspace-scoped_
+   `PromptTemplate` row for the kind first: if one exists, render it
+   whole-body (today's behavior, legacy path); otherwise compose from
+   sections. The global-default row is never consulted (defaults are
+   code now). The legacy branch and the four `PromptTemplate`
+   endpoints are deleted together in PR 3.
+2. **The seed machinery must not break when `fragments/` becomes
+   `sections/`.** `seed.py::read_default_body()` imports
+   `fragments.assemble()`; PR 1 re-points it at the registry
+   (assemble = the `coding-task` recipe's default bodies in order) so
+   `post_migrate` seeding and `reseed_default_template` keep working
+   until PR 3 deletes them. `views.py::_get_global_default_body()`
+   (used by the legacy create-from-default flow) likewise reads from
+   the registry in PR 1.
+
+### 8.2 Retirement (PR 3)
 
 - `composer.load_template()` and the seed machinery
   (`seed_default_template*`, `reseed_default_template` command, the
@@ -577,20 +709,27 @@ Four PRs, each shippable:
   `prompting/sections/` with front-matter, `recipes.py`, new
   `compose()`; port `coding-task` and `review` onto it; split the
   review monolith into sections (review gains `pidash-cli` /
-  `session-framing` — the one intended behavior change); golden-file
-  snapshot tests of assembled output per kind; CI registry checks
-  (§3.2); kind lookup written as `kind_for(phase, work_kind)` with
-  `work_kind="coding"` hardcoded (§9.5 seam). `PromptTemplate` lookup
-  bypassed but model untouched.
+  `session-framing` — the one intended behavior change); `run.kind`
+  added to `build_context` (§5.2 base-context contract); transition
+  guards per §8.1 (legacy workspace-row fallback; seed machinery
+  re-pointed at the registry); golden-file snapshot tests of assembled
+  output per kind; CI registry checks (§3.2); kind lookup written as
+  `kind_for(phase, work_kind)` with `work_kind="coding"` hardcoded
+  (§9.5 seam). `PromptTemplate` model untouched.
 - **PR 2 — Scheduler onto the composer.** `scheduler` recipe +
-  sections, `build_scheduler_context`, `scheduler-task` dynamic body,
-  call-site change in `bgtasks/scheduler.py` /
-  `dispatch_scheduler_run`, Jinja-escape migration for existing
-  scheduler prompt rows (§5.4), render-failure → `binding.last_error`.
-- **PR 3 — Overrides.** `PromptSectionOverride` model, `resolve_section`
-  with the §9.1 user rule, save-time validation, section CRUD
-  endpoints (workspace scope, then user scope), composition manifest
-  on `AgentRun`, `PromptTemplate` retirement migration (§8).
+  sections, `build_scheduler_context` with `scheduler_task_body`
+  variable injection (§5.1 — no data migration, §5.4); content pass
+  guarding issue-specific lines in shared sections with `run.kind`
+  branches (§5.2); `dispatch_scheduler_run` switches to
+  create-run-then-compose mirroring the issue path, render failure
+  fails the run (not `last_error`) (§5.3).
+- **PR 3 — Overrides.** `PromptSectionOverride` model with the dual
+  partial-unique constraints (§6.1), `resolve_section` with the §9.1
+  user rule, `AgentRun.trigger` field threaded through all three
+  run-creation helpers + `run_is_human_triggered` (§7.1),
+  `AgentRun.prompt_manifest` field, save-time validation, section CRUD
+  endpoints (workspace scope, then user scope), `PromptTemplate`
+  retirement (§8.2) including deletion of the §8.1 legacy fallback.
 - **PR 4 — Visibility.** `compiled` endpoint (dual compilation per
   §9.1), generalized `preview`, the section-management UI (section
   list, lock badges, source/modified indicators, `needs_attention`,
@@ -613,6 +752,17 @@ Four PRs, each shippable:
 - **Manifest**: every created run carries a manifest consistent with
   the resolution inputs; tick-created runs never carry `user:*`
   sources.
+- **Constraints**: duplicate-active-override attempts at both scopes
+  (workspace-level NULL-user duplicates included — the §6.1 Postgres
+  NULL-distinctness case) raise `IntegrityError`; the upsert path
+  converts the race to an update.
+- **Trigger**: each of the run-creation helpers stamps the expected
+  `trigger` value; `run_is_human_triggered` classification matrix;
+  trigger is set before `build_first_turn` is invoked.
+- **Transition window (PR 1)**: a workspace with an active legacy
+  `PromptTemplate` row still renders it whole-body; without one,
+  composition is section-based; seed/`reseed` keep functioning against
+  the registry.
 - Existing contract tests for the retired endpoints are replaced, not
   deleted, by section-CRUD contract tests with the same
   permission-matrix rigor (`tests/contract/prompting/`).
