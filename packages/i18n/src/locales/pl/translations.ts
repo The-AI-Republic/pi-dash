@@ -49,8 +49,6 @@ export default {
   "1 day": "1 dzień",
   "1 month ago": "1 miesiąc temu",
   "1 week": "1 tydzień",
-  '1. Click "Add runner", pick a project + pod and generate the CLI command.\n2. On the machine that will host the runner, run the displayed `pidash runner add` command. If the host is not logged in yet, the CLI starts `pidash auth login` first.\n3. The daemon registers the runner and it shows online here.\n\nPrerequisite: the agent CLI (codex / claude) must already be installed on the host.':
-    '1. Kliknij "Add runner", wybierz projekt + pod i wygeneruj polecenie CLI.\n2. Na maszynie, która będzie hostować runnera, uruchom wyświetlone polecenie `pidash runner add`. Jeśli host nie jest jeszcze zalogowany, CLI najpierw uruchamia `pidash auth login`.\n3. Demon rejestruje runnera i pojawia się on tutaj jako online.\n\nWymaganie wstępne: agent CLI (codex / claude) musi być już zainstalowany na hoście.',
   "10,000-feet view of all active cycles.": "Widok z lotu ptaka wszystkich aktywnych cykli.",
   "2 weeks": "2 tygodnie",
   "3 days": "3 dni",
@@ -59,6 +57,8 @@ export default {
     "Wiersz po stronie chmury reprezentujący jedną instancję agenta powiązaną z projektem (i opcjonalnie podem). Uruchomienie `pidash runner add` na zalogowanej maszynie tworzy wiersz i wiąże tę maszynę jako hosta. Jedna maszyna może hostować wielu runnerów.",
   "A long-running background process that maintains the WebSocket session with Pi Dash cloud, dispatches work to the configured agent, and streams approvals + heartbeats back. One daemon per machine.":
     "Długotrwały proces w tle, który utrzymuje sesję WebSocket z chmurą Pi Dash, wysyła pracę do skonfigurowanego agenta i strumieniuje zatwierdzenia + sygnały aktywności z powrotem. Jeden demon na maszynę.",
+  'A runner is an AI agent instance working on a given project.\n\n1. Click "Add runner", pick a project + pod and generate the CLI command.\n2. On the machine that will host the runner, run the displayed `pidash runner add` command. If the host is not logged in yet, the CLI starts `pidash auth login` first.\n3. The daemon registers the runner and it shows online here.\n\nPrerequisite: the agent CLI (codex / claude) must already be installed on the host.':
+    "",
   "Ability to read, write, edit, and delete entities inside projects, cycles, and modules":
     "Możliwość odczytu, zapisu, edycji i usuwania encji w projektach, cyklach i modułach",
   Accept: "Akceptuj",

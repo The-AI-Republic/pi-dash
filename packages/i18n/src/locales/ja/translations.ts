@@ -49,8 +49,6 @@ export default {
   "1 day": "1日",
   "1 month ago": "1ヶ月前",
   "1 week": "1週間",
-  '1. Click "Add runner", pick a project + pod and generate the CLI command.\n2. On the machine that will host the runner, run the displayed `pidash runner add` command. If the host is not logged in yet, the CLI starts `pidash auth login` first.\n3. The daemon registers the runner and it shows online here.\n\nPrerequisite: the agent CLI (codex / claude) must already be installed on the host.':
-    "1. 「ランナーを追加」をクリックし、プロジェクトとポッドを選択してCLIコマンドを生成します。\n2. ランナーをホストするマシンで、表示された `pidash runner add` コマンドを実行します。ホストがまだログインしていない場合、CLIは最初に `pidash auth login` を開始します。\n3. デーモンがランナーを登録し、ここでオンラインとして表示されます。\n\n前提条件: エージェントCLI（codex / claude）がホストに既にインストールされている必要があります。",
   "10,000-feet view of all active cycles.": "すべてのアクティブなサイクルの俯瞰図。",
   "2 weeks": "2週間",
   "3 days": "3日",
@@ -59,6 +57,8 @@ export default {
     "プロジェクト（およびオプションでポッド）にバインドされた1つのエージェントインスタンスを表すクラウド側の行。ログインしたマシンで `pidash runner add` を実行すると、行が作成され、そのマシンがホストとしてバインドされます。1台のマシンで複数のランナーをホストできます。",
   "A long-running background process that maintains the WebSocket session with Pi Dash cloud, dispatches work to the configured agent, and streams approvals + heartbeats back. One daemon per machine.":
     "Pi Dash クラウドとのWebSocketセッションを維持し、設定されたエージェントに作業をディスパッチし、承認とハートビートをストリーミングする長時間実行のバックグラウンドプロセス。マシンごとに1つのデーモン。",
+  'A runner is an AI agent instance working on a given project.\n\n1. Click "Add runner", pick a project + pod and generate the CLI command.\n2. On the machine that will host the runner, run the displayed `pidash runner add` command. If the host is not logged in yet, the CLI starts `pidash auth login` first.\n3. The daemon registers the runner and it shows online here.\n\nPrerequisite: the agent CLI (codex / claude) must already be installed on the host.':
+    "",
   "Ability to read, write, edit, and delete entities inside projects, cycles, and modules":
     "プロジェクト、サイクル、モジュール内のエンティティの読み取り、書き込み、編集、削除の機能",
   Accept: "承認",

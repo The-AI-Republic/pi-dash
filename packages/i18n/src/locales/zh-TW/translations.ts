@@ -48,8 +48,6 @@ export default {
   "1 day": "1 天",
   "1 month ago": "1 個月前",
   "1 week": "1 週",
-  '1. Click "Add runner", pick a project + pod and generate the CLI command.\n2. On the machine that will host the runner, run the displayed `pidash runner add` command. If the host is not logged in yet, the CLI starts `pidash auth login` first.\n3. The daemon registers the runner and it shows online here.\n\nPrerequisite: the agent CLI (codex / claude) must already be installed on the host.':
-    "1. 點擊「新增執行器」，選擇專案 + Pod 並產生 CLI 指令。\n2. 在將託管執行器的機器上，執行顯示的 `pidash runner add` 指令。如果主機尚未登入，CLI 會先啟動 `pidash auth login`。\n3. 守護程序會註冊執行器，並在此處顯示為上線狀態。\n\n先決條件：代理 CLI（codex / claude）必須已安裝在主機上。",
   "10,000-feet view of all active cycles.": "所有進行中週期的鳥瞰圖。",
   "2 weeks": "2 週",
   "3 days": "3 天",
@@ -58,6 +56,8 @@ export default {
     "一個雲端端的列，代表一個繫結到專案（以及可選的 Pod）的代理執行個體。在已登入的機器上執行 `pidash runner add` 會建立該列，並將該機器繫結為主機。一台機器可以託管多個執行器。",
   "A long-running background process that maintains the WebSocket session with Pi Dash cloud, dispatches work to the configured agent, and streams approvals + heartbeats back. One daemon per machine.":
     "一個長時間執行的背景程序，負責維護與 Pi Dash 雲端的 WebSocket 連線，將工作分派給已設定的代理，並串流回核准與心跳訊號。每台機器一個守護程序。",
+  'A runner is an AI agent instance working on a given project.\n\n1. Click "Add runner", pick a project + pod and generate the CLI command.\n2. On the machine that will host the runner, run the displayed `pidash runner add` command. If the host is not logged in yet, the CLI starts `pidash auth login` first.\n3. The daemon registers the runner and it shows online here.\n\nPrerequisite: the agent CLI (codex / claude) must already be installed on the host.':
+    "",
   "Ability to read, write, edit, and delete entities inside projects, cycles, and modules":
     "能夠讀取、寫入、編輯和刪除專案、週期和模組內的實體",
   Accept: "接受",
