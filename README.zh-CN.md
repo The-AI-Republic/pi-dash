@@ -18,7 +18,11 @@
 
 <p align="center">
     <a href="./README.md"><b>English</b></a> •
-    <b>简体中文</b>
+    <b>简体中文</b> •
+    <a href="./README.ja.md"><b>日本語</b></a> •
+    <a href="./README.pt-BR.md"><b>Português (BR)</b></a> •
+    <a href="./README.es.md"><b>Español</b></a> •
+    <a href="./README.ko.md"><b>한국어</b></a>
 </p>
 
 Pi Dash 是一个开源的 AI 智能体编排平台，专为 **As Coding（异步氛围编程）** 打造——在这种工作流中，你只需定义需要构建的内容，编码智能体便会在后台完成具体实现。无需再盯着智能体运行、看着终端不断滚动，Pi Dash 让你专注于真正重要的工作：规划任务、审阅结果、交付产品。

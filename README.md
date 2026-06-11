@@ -18,7 +18,11 @@
 
 <p align="center">
     <b>English</b> •
-    <a href="./README.zh-CN.md"><b>简体中文</b></a>
+    <a href="./README.zh-CN.md"><b>简体中文</b></a> •
+    <a href="./README.ja.md"><b>日本語</b></a> •
+    <a href="./README.pt-BR.md"><b>Português (BR)</b></a> •
+    <a href="./README.es.md"><b>Español</b></a> •
+    <a href="./README.ko.md"><b>한국어</b></a>
 </p>
 
 Pi Dash is an open-source AI agent orchestration platform built for **As Coding (asynchronous vibe coding)** — a workflow where you define what needs to be built, and coding agents handle the implementation in the background. Instead of babysitting agent runs and watching terminals scroll, Pi Dash lets you focus on the work that matters: scoping tasks, reviewing results, and shipping products.
