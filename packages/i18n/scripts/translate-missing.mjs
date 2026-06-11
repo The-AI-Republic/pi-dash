@@ -16,10 +16,9 @@ const defaultBatchSize = 10;
 const defaultRequestTimeoutMs = 180000;
 const defaultRetryCount = 2;
 const defaultRetryDelayMs = 5000;
-const readmeTranslationTargets = new Map([
-  ["es", path.join(repoRoot, "packages/i18n/README.es.md")],
-  ["zh-CN", path.join(repoRoot, "packages/i18n/README.zh-CN.md")],
-]);
+// The i18n package README is developer-facing and intentionally English-only;
+// no per-locale translations are generated for it.
+const readmeTranslationTargets = new Map();
 const readmeSourcePath = path.join(repoRoot, "packages/i18n/README.md");
 
 const languages = [
