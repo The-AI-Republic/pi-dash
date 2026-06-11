@@ -99,6 +99,7 @@ export interface IRunner {
 export type TAgentRunStatus =
   | "queued"
   | "assigned"
+  | "waiting_for_worktree"
   | "running"
   | "awaiting_approval"
   | "awaiting_reauth"
@@ -146,6 +147,9 @@ export interface IAgentRun {
   input_tokens: number | null;
   output_tokens: number | null;
   total_tokens: number | null;
+  /** Place in the runner's local worktree queue while
+   * ``waiting_for_worktree``; ``null`` otherwise (display only). */
+  queue_position?: number | null;
   events?: IAgentRunEvent[];
 }
 

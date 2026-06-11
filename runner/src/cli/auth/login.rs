@@ -519,7 +519,10 @@ async fn maybe_offer_runner_add(
             workspace: Some(workspace_slug.to_string()),
             pod: None,
             working_dir: None,
+            workdir: None,
             agent: crate::config::schema::AgentKind::default(),
+            model: None,
+            reasoning_effort: None,
         },
         paths,
     )

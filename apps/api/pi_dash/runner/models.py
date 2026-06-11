@@ -185,6 +185,12 @@ class Visibility(models.IntegerChoices):
 class AgentRunStatus(models.TextChoices):
     QUEUED = "queued", "Queued"
     ASSIGNED = "assigned", "Assigned"
+    # Non-terminal: the run is assigned to a single-tenant runner that has
+    # accepted it but cannot acquire a worktree lease yet, so it waits in the
+    # daemon's local queue. Sits between ASSIGNED and RUNNING; the runner
+    # reports ``queue_position`` for display. See
+    # ``.ai_design/worktree_pooling/design.md`` §6.1.
+    WAITING_FOR_WORKTREE = "waiting_for_worktree", "Waiting for Worktree"
     RUNNING = "running", "Running"
     AWAITING_APPROVAL = "awaiting_approval", "Awaiting Approval"
     AWAITING_REAUTH = "awaiting_reauth", "Awaiting Reauth"
@@ -193,6 +199,25 @@ class AgentRunStatus(models.TextChoices):
     COMPLETED = "completed", "Completed"
     FAILED = "failed", "Failed"
     CANCELLED = "cancelled", "Cancelled"
+    # Terminal: the model declined the task under a safety classifier
+    # (e.g. Claude Fable 5 cyber/bio). Kept distinct from FAILED so a policy
+    # decline is queryable separately from a crash; the category is recorded
+    # in ``AgentRun.refusal_category``.
+    REFUSED = "refused", "Refused"
+
+
+class RefusalCategory(models.TextChoices):
+    """Safety-classifier decline category, mirrored from the Messages API
+    ``stop_details.category`` (Anthropic refusals-and-fallback docs).
+
+    ``UNKNOWN`` covers a refusal that carried no named category (the API
+    returns ``null`` there).
+    """
+
+    CYBER = "cyber", "Cyber"
+    BIO = "bio", "Bio"
+    REASONING_EXTRACTION = "reasoning_extraction", "Reasoning Extraction"
+    UNKNOWN = "unknown", "Unknown"
 
 
 class ApprovalStatus(models.TextChoices):
@@ -347,6 +372,12 @@ class Runner(models.Model):
     runner_version = models.CharField(max_length=32, blank=True, default="")
     protocol_version = models.PositiveIntegerField(default=1)
     last_heartbeat_at = models.DateTimeField(null=True, blank=True)
+    # Free worktree count in this runner's work-dir pool, reported in the
+    # long-poll status body. A capacity *hint* the matcher prefers (never
+    # gates) when choosing between equally-eligible idle runners. ``None``
+    # means the runner predates the feature (no hint). See
+    # ``.ai_design/worktree_pooling/design.md`` §6.4.
+    free_worktrees = models.IntegerField(null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
     revoked_at = models.DateTimeField(null=True, blank=True)
@@ -760,12 +791,26 @@ class AgentRun(models.Model):
     lease_expires_at = models.DateTimeField(null=True, blank=True)
     done_payload = models.JSONField(null=True, blank=True)
     error = models.TextField(blank=True, default="")
+    # Set only when ``status == REFUSED``: the safety-classifier category the
+    # runner reported (mirrors Messages API ``stop_details.category``). Empty
+    # for every non-refusal terminal state.
+    refusal_category = models.CharField(
+        max_length=32,
+        choices=RefusalCategory.choices,
+        blank=True,
+        default="",
+    )
     llm_model = models.CharField(max_length=128, blank=True, default="")
     input_tokens = models.BigIntegerField(null=True, blank=True)
     output_tokens = models.BigIntegerField(null=True, blank=True)
     total_tokens = models.BigIntegerField(null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
     assigned_at = models.DateTimeField(null=True, blank=True)
+    # Display-only position in the runner's local worktree queue while the
+    # run is WAITING_FOR_WORKTREE. The runner is the source of truth and
+    # reports it via the ``queued`` lifecycle verb; the cloud never computes
+    # it. See ``.ai_design/worktree_pooling/design.md`` §6.1.
+    queue_position = models.PositiveSmallIntegerField(null=True, blank=True)
     started_at = models.DateTimeField(null=True, blank=True)
     ended_at = models.DateTimeField(null=True, blank=True)
 
@@ -820,6 +865,7 @@ class AgentRun(models.Model):
             AgentRunStatus.FAILED,
             AgentRunStatus.CANCELLED,
             AgentRunStatus.BLOCKED,
+            AgentRunStatus.REFUSED,
         }
 
     @property
@@ -828,6 +874,9 @@ class AgentRun(models.Model):
         return self.status in {
             AgentRunStatus.QUEUED,
             AgentRunStatus.ASSIGNED,
+            # Committed to a single-tenant runner, queued locally for a
+            # worktree — still occupies the issue's active slot like ASSIGNED.
+            AgentRunStatus.WAITING_FOR_WORKTREE,
             AgentRunStatus.RUNNING,
             AgentRunStatus.AWAITING_APPROVAL,
             AgentRunStatus.AWAITING_REAUTH,

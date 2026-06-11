@@ -17,6 +17,8 @@ type Props = {
   name?: string;
   workingDir?: string;
   agent?: string;
+  model?: string;
+  reasoningEffort?: string;
   isUsingBrowserOrigin?: boolean;
 };
 
@@ -79,7 +81,18 @@ function oneLineCommand(command: string, shell: TShell, args: Array<[string, str
 }
 
 export function RunnerCliCommand(props: Props) {
-  const { cloudUrl, workspaceSlug, projectIdentifier, podName, name, workingDir, agent, isUsingBrowserOrigin } = props;
+  const {
+    cloudUrl,
+    workspaceSlug,
+    projectIdentifier,
+    podName,
+    name,
+    workingDir,
+    agent,
+    model,
+    reasoningEffort,
+    isUsingBrowserOrigin,
+  } = props;
   const { t } = useTranslation();
   const [justCopied, setJustCopied] = useState(false);
   const [shell, setShell] = useState<TShell>("posix");
@@ -93,10 +106,12 @@ export function RunnerCliCommand(props: Props) {
       ["--name", name],
       ["--working-dir", workingDir],
       ["--agent", agent],
+      ["--model", model],
+      ["--reasoning-effort", reasoningEffort],
     ];
     if (shell === "posix") return posixCommandLines("pidash runner add", args).join("\n");
     return oneLineCommand("pidash runner add", shell, args);
-  }, [agent, cloudUrl, name, podName, projectIdentifier, shell, workspaceSlug, workingDir]);
+  }, [agent, cloudUrl, model, name, podName, projectIdentifier, reasoningEffort, shell, workspaceSlug, workingDir]);
 
   const shellLabel = (value: TShell): string => {
     if (value === "powershell") return t("PowerShell");
@@ -119,7 +134,7 @@ export function RunnerCliCommand(props: Props) {
   };
 
   return (
-    <div className="border-custom-primary-100/40 bg-custom-primary-100/10 rounded border p-3 text-13 text-primary">
+    <div className="rounded border border-accent-strong/40 bg-accent-primary/10 p-3 text-13 text-primary">
       <p className="text-secondary">{t("Run this on the machine that will host the runner:")}</p>
       <div className="mt-3 flex flex-wrap items-center gap-2">
         <span className="text-12 text-secondary">{t("Shell")}</span>
@@ -131,7 +146,7 @@ export function RunnerCliCommand(props: Props) {
               aria-pressed={shell === option}
               onClick={() => setShell(option)}
               className={`border-r border-subtle px-2 py-1 text-12 last:border-r-0 ${
-                shell === option ? "bg-custom-primary-100 text-white" : "text-secondary hover:text-primary"
+                shell === option ? "bg-accent-primary text-on-color" : "text-secondary hover:text-primary"
               }`}
             >
               {shellLabel(option)}
@@ -143,7 +158,9 @@ export function RunnerCliCommand(props: Props) {
         {command}
       </pre>
       {isUsingBrowserOrigin && (
-        <p className="mt-2 text-12 text-secondary">{t("Using the current browser origin as the cloud URL because VITE_API_BASE_URL is not configured.")}</p>
+        <p className="mt-2 text-12 text-secondary">
+          {t("Using the current browser origin as the cloud URL because VITE_API_BASE_URL is not configured.")}
+        </p>
       )}
       <div className="mt-2">
         <Button size="sm" onClick={copy}>

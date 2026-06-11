@@ -32,6 +32,10 @@ pub struct IpcServer {
     /// so the supervisor can hand it to the IPC task without giving up
     /// ownership.
     pub instances: Arc<HashMap<Uuid, RunnerInstance>>,
+    /// Worktree pools keyed by work-dir name. Snapshotted into `pidash status`
+    /// so operators can see desk occupancy and queue depth. Empty for daemons
+    /// with no `[[workdir]]` blocks.
+    pub pools: Arc<HashMap<String, crate::workspace::pool::PoolHandle>>,
 }
 
 impl IpcServer {
@@ -348,7 +352,18 @@ impl IpcServer {
         }
         // Stable order so successive snapshots don't churn rendering.
         runners.sort_by(|a, b| a.name.cmp(&b.name));
-        StatusSnapshot { daemon, runners }
+        let mut pools = Vec::with_capacity(self.pools.len());
+        for handle in self.pools.values() {
+            if let Some(snap) = handle.snapshot().await {
+                pools.push(snap);
+            }
+        }
+        pools.sort_by(|a, b| a.workdir_name.cmp(&b.workdir_name));
+        StatusSnapshot {
+            daemon,
+            runners,
+            pools,
+        }
     }
 }
 

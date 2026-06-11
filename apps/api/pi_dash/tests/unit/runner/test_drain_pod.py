@@ -128,6 +128,61 @@ def test_select_runner_in_pod_skips_stale_heartbeat(db, create_user, workspace, 
         assert matcher.select_runner_in_pod(pod) is None
 
 
+# ---------------- free_worktrees capacity hint (design §6.4) ----------------
+
+
+@pytest.mark.unit
+def test_select_runner_in_pod_prefers_free_worktrees(db, create_user, workspace, pod):
+    """Among equally-eligible idle runners, the one whose pool reports a free
+    desk wins — even if its heartbeat is older."""
+    from django.db import transaction
+
+    # ``fresh_full`` has the newest heartbeat but no free desk; ``older_free``
+    # is older but reports a free worktree. The free-desk preference must
+    # override the heartbeat tiebreak.
+    fresh_full = _make_runner(create_user, workspace, pod, "fresh-full", heartbeat_ago_s=1)
+    fresh_full.free_worktrees = 0
+    fresh_full.save(update_fields=["free_worktrees"])
+
+    older_free = _make_runner(create_user, workspace, pod, "older-free", heartbeat_ago_s=20)
+    older_free.free_worktrees = 2
+    older_free.save(update_fields=["free_worktrees"])
+
+    with transaction.atomic():
+        picked = matcher.select_runner_in_pod(pod)
+    assert picked.pk == older_free.pk
+
+
+@pytest.mark.unit
+def test_select_runner_in_pod_none_hint_keeps_heartbeat_order(
+    db, create_user, workspace, pod
+):
+    """Two eligible runners both reporting no hint (``None``, e.g. old
+    runners) fall back to today's oldest-heartbeat-wins ordering."""
+    from django.db import transaction
+
+    _make_runner(create_user, workspace, pod, "old", heartbeat_ago_s=20)
+    fresh = _make_runner(create_user, workspace, pod, "fresh", heartbeat_ago_s=1)
+    assert fresh.free_worktrees is None
+    with transaction.atomic():
+        picked = matcher.select_runner_in_pod(pod)
+    assert picked.pk == fresh.pk
+
+
+@pytest.mark.unit
+def test_select_runner_in_pod_zero_free_not_excluded(db, create_user, workspace, pod):
+    """``free_worktrees == 0`` is a preference miss, never a gate — a runner
+    reporting a full pool is still selected when it's the only candidate."""
+    from django.db import transaction
+
+    full = _make_runner(create_user, workspace, pod, "full")
+    full.free_worktrees = 0
+    full.save(update_fields=["free_worktrees"])
+    with transaction.atomic():
+        picked = matcher.select_runner_in_pod(pod)
+    assert picked.pk == full.pk
+
+
 # ---------------- next_queued_run_for_pod ----------------
 
 

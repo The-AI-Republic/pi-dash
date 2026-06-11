@@ -106,6 +106,7 @@ impl RunnerInstance {
             version: 2,
             daemon,
             runners: vec![config.clone()],
+            workdirs: vec![],
             cli: None,
         });
         let approvals = ApprovalRouter::new();
@@ -158,6 +159,7 @@ mod tests {
             workspace: WorkspaceSection {
                 working_dir: std::env::temp_dir().join("pidash-runner-instance-test"),
             },
+            workdir: None,
             agent: AgentSection::default(),
             codex: CodexSection::default(),
             claude_code: ClaudeCodeSection::default(),

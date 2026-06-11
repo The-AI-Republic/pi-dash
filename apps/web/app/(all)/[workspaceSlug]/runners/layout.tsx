@@ -57,7 +57,7 @@ const RunnersLayout = observer(function RunnersLayout() {
   return (
     <WorkspaceShell>
       <div className="flex h-full w-full overflow-hidden">
-        <aside className="bg-layer-0 w-[280px] shrink-0 border-r border-subtle">
+        <aside className="w-[280px] shrink-0 border-r border-subtle bg-surface-1">
           <div className="flex h-12 items-center border-b border-subtle px-4 text-14 font-semibold text-primary">
             {t("AI Agents")}
           </div>

@@ -121,9 +121,83 @@ class RunAcceptEndpoint(_RunEndpointBase):
             if closed:
                 return closed
             AgentRun.objects.filter(pk=locked.pk).update(
-                status=AgentRunStatus.RUNNING
+                status=AgentRunStatus.RUNNING,
+                # The run left the daemon's local worktree queue — a stale
+                # position must not linger on a now-running row.
+                queue_position=None,
             )
         return Response({"ok": True})
+
+
+class RunQueuedEndpoint(_RunEndpointBase):
+    """``POST /runs/<run_id>/queued`` — runner reports the run is waiting.
+
+    The runner accepted the run but cannot acquire a worktree lease yet, so it
+    sits in the daemon's local queue. Body carries ``queue_position`` (the
+    run's position in that queue). See
+    ``.ai_design/worktree_pooling/design.md`` §6.1.
+
+    Transition rules:
+
+    - ``ASSIGNED`` → ``WAITING_FOR_WORKTREE`` (and store the position).
+    - ``WAITING_FOR_WORKTREE`` → ``WAITING_FOR_WORKTREE`` (position refresh as
+      the queue drains; positions only decrease).
+    - ``RUNNING`` or any terminal status → acknowledged and dropped without a
+      state change. A late or duplicate ``queued`` post must never regress a
+      run that already started (or finished); the runner posts ``accept`` at
+      lease grant, which is what actually drives ``RUNNING``.
+    """
+
+    def post(self, request, run_id):
+        run, err = self._resolve(request, run_id)
+        if err:
+            return err
+        with transaction.atomic():
+            if not _record_dedupe(run, _idempotency_key(request)):
+                return Response({"ok": True, "duplicate": True})
+            locked, closed = self._lock_non_terminal(run)
+            if closed:
+                # Terminal: acknowledge so the runner stops retrying; the
+                # ``_lock_non_terminal`` helper already returns ``terminal``.
+                return closed
+            if locked.status not in (
+                AgentRunStatus.ASSIGNED,
+                AgentRunStatus.WAITING_FOR_WORKTREE,
+            ):
+                # RUNNING (or any other non-terminal state): acknowledge and
+                # drop. A run that has already started must not regress to
+                # WAITING_FOR_WORKTREE on a late/duplicate queued post.
+                return Response({"ok": True, "ignored": True})
+            position = _parse_queue_position(request.data.get("queue_position"))
+            AgentRun.objects.filter(pk=locked.pk).update(
+                status=AgentRunStatus.WAITING_FOR_WORKTREE,
+                queue_position=position,
+            )
+        return Response({"ok": True})
+
+
+# ``AgentRun.queue_position`` is a PositiveSmallIntegerField; Postgres
+# rejects anything above the signed-int16 ceiling, so out-of-range reports
+# are clamped rather than allowed to 500 the endpoint.
+QUEUE_POSITION_MAX = 32767
+
+
+def _parse_queue_position(raw) -> Optional[int]:
+    """Coerce a reported queue position to a non-negative int, else ``None``.
+
+    A missing or malformed value clears the stored position rather than
+    erroring — the field is display-only and never load-bearing. Values
+    beyond the column's int16 range are clamped for the same reason.
+    """
+    if raw is None:
+        return None
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        return None
+    if value < 0:
+        return None
+    return min(value, QUEUE_POSITION_MAX)
 
 
 class RunStartedEndpoint(_RunEndpointBase):
@@ -320,6 +394,21 @@ class RunFailedEndpoint(_RunEndpointBase):
                     locked_run=locked,
                 )
                 return Response({"ok": True, "rescheduled": True})
+            # A safety-classifier decline (e.g. Claude Fable 5 cyber/bio) is a
+            # terminal REFUSED, not a generic crash. The runner reports
+            # `reason: "refusal"` with a `category`; record both so a policy
+            # decline stays queryable apart from a FAILED.
+            if (request.data.get("reason") or "") == "refusal":
+                run_lifecycle.finalize_run_terminal(
+                    runner,
+                    run.id,
+                    AgentRunStatus.REFUSED,
+                    error_detail=request.data.get("detail") or "",
+                    refusal_category=request.data.get("category"),
+                    tokens=request.data.get("tokens") or request.data.get("usage"),
+                    model=request.data.get("model"),
+                )
+                return Response({"ok": True, "refused": True})
             run_lifecycle.finalize_run_terminal(
                 runner,
                 run.id,

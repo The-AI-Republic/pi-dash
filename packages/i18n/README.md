@@ -121,12 +121,7 @@ FIREWORKS_API_KEY
 
 The translator only fills empty strings in target locale `translations.ts` files. It uses the source English message id as the source text and rejects model output that changes ICU MessageFormat argument names or argument types.
 
-The same command also updates translated README files from `README.md` as the English source. README translation is currently maintained for:
-
-- `README.es.md`
-- `README.zh-CN.md`
-
-Use `--skip-readme` or `I18N_TRANSLATION_SKIP_README=1` to translate locale placeholders only.
+This package README is developer-facing and kept English-only — the translator does not generate per-locale copies of it.
 
 ## Recommended Workflow
 

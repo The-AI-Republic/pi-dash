@@ -402,6 +402,7 @@ mod tests {
             workspace: WorkspaceSection {
                 working_dir: PathBuf::from("/tmp/pi-dash-doctor-test"),
             },
+            workdir: None,
             agent: Default::default(),
             codex: CodexSection {
                 binary: codex_binary.to_string(),
@@ -426,6 +427,7 @@ mod tests {
                 auto_update: true,
             },
             runners,
+            workdirs: Vec::new(),
             cli: None,
         }
     }

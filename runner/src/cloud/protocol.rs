@@ -115,6 +115,17 @@ pub enum ClientMsg {
         run_id: Uuid,
         workspace_state: WorkspaceState,
     },
+    /// The run was accepted by a runner but is waiting in the local worktree
+    /// queue for a free desk. Reported so the cloud can show
+    /// `WAITING_FOR_WORKTREE` with a queue position instead of a run that
+    /// looks idle. Posted on enqueue and on each position change; positions
+    /// only decrease. A cloud that predates worktree pooling returns 404 for
+    /// this lifecycle verb, which the runner feature-detects (design §6.1,
+    /// §15). `Envelope.runner_id` routes it like every other run frame.
+    RunQueued {
+        run_id: Uuid,
+        queue_position: u32,
+    },
     RunStarted {
         run_id: Uuid,
         thread_id: String,
@@ -456,6 +467,33 @@ mod tests {
         let s = serde_json::to_string(&env).unwrap();
         let back: Envelope<ClientMsg> = serde_json::from_str(&s).unwrap();
         assert_eq!(back.version, WIRE_VERSION);
+    }
+
+    #[test]
+    fn run_queued_serialises_with_run_id_and_position() {
+        // The cloud's `queued` endpoint reads `run_id` + `queue_position` from
+        // the lifecycle body; assert the wire shape the Django side expects.
+        let run_id = Uuid::new_v4();
+        let msg = ClientMsg::RunQueued {
+            run_id,
+            queue_position: 3,
+        };
+        let v = serde_json::to_value(&msg).unwrap();
+        assert_eq!(v.get("type").and_then(|t| t.as_str()), Some("run_queued"));
+        assert_eq!(
+            v.get("run_id").and_then(|r| r.as_str()),
+            Some(run_id.to_string().as_str())
+        );
+        assert_eq!(v.get("queue_position").and_then(|q| q.as_u64()), Some(3));
+        // And it round-trips back to the same variant.
+        let back: ClientMsg = serde_json::from_value(v).unwrap();
+        assert!(matches!(
+            back,
+            ClientMsg::RunQueued {
+                queue_position: 3,
+                ..
+            }
+        ));
     }
 
     #[test]

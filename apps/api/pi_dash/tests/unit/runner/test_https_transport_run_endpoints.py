@@ -108,7 +108,7 @@ def test_session_open_waits_for_first_poll_before_dispatch(
     sid = open_resp.data["session_id"]
     with (
         patch("pi_dash.runner.views.sessions.outbox.is_pel_drained", return_value=False),
-        patch("pi_dash.runner.views.sessions.outbox.read_for_session", return_value=[]),
+        patch("pi_dash.runner.views.sessions.outbox.aread_for_session", return_value=[]),
         patch("pi_dash.runner.views.sessions.outbox.mark_pel_drained"),
         patch("django.db.transaction.on_commit", side_effect=lambda fn, **kw: fn()),
     ):
@@ -343,6 +343,55 @@ def test_fail_endpoint_resume_unavailable_requeues_instead_of_terminating(
     assert assigned_run.status == AgentRunStatus.QUEUED
     assert assigned_run.runner_id is None
     assert assigned_run.pinned_runner_id is None
+
+
+@pytest.mark.unit
+def test_fail_endpoint_refusal_records_refused_and_category(
+    db, api_client, runner_token, assigned_run
+):
+    """A RunFailed{reason: refusal} is recorded as terminal REFUSED with the
+    safety-classifier category, not a generic FAILED. This is how a Claude
+    Fable 5 cyber/bio decline stays queryable apart from a crash.
+    """
+    resp = api_client.post(
+        f"/api/v1/runner/runs/{assigned_run.id}/fail/",
+        {
+            "reason": "refusal",
+            "category": "cyber",
+            "detail": "declined under cyber policy",
+            "model": "claude-fable-5",
+        },
+        format="json",
+        HTTP_AUTHORIZATION=f"Bearer {runner_token}",
+    )
+    assert resp.status_code == 200, resp.data
+    assert resp.data.get("refused") is True
+    assigned_run.refresh_from_db()
+    assert assigned_run.status == AgentRunStatus.REFUSED
+    assert assigned_run.refusal_category == "cyber"
+    assert assigned_run.error == "declined under cyber policy"
+    assert assigned_run.llm_model == "claude-fable-5"
+    assert assigned_run.ended_at is not None
+
+
+@pytest.mark.unit
+def test_fail_endpoint_refusal_unknown_category_normalizes(
+    db, api_client, runner_token, assigned_run
+):
+    """A refusal with a missing/unrecognized category is still recorded as
+    REFUSED, with the category normalized to ``unknown`` so the column is
+    always populated for a decline."""
+    resp = api_client.post(
+        f"/api/v1/runner/runs/{assigned_run.id}/fail/",
+        {"reason": "refusal", "category": "not_a_real_category"},
+        format="json",
+        HTTP_AUTHORIZATION=f"Bearer {runner_token}",
+    )
+    assert resp.status_code == 200, resp.data
+    assert resp.data.get("refused") is True
+    assigned_run.refresh_from_db()
+    assert assigned_run.status == AgentRunStatus.REFUSED
+    assert assigned_run.refusal_category == "unknown"
 
 
 @pytest.mark.unit

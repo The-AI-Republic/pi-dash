@@ -149,6 +149,46 @@ def _ensure_group(client, runner_id: UUID | str) -> None:
         raise
 
 
+async def _aensure_group(client, runner_id: UUID | str) -> None:
+    """Async twin of :func:`_ensure_group`."""
+    sk = stream_key(runner_id)
+    gn = group_name(runner_id)
+    try:
+        await client.xgroup_create(name=sk, groupname=gn, id="$", mkstream=True)
+    except Exception as exc:
+        if "BUSYGROUP" in str(exc):
+            return
+        raise
+
+
+def _decode_read_result(result) -> List[Dict[str, Any]]:
+    """Decode an XREADGROUP reply into the entry dicts the poll returns."""
+    out: List[Dict[str, Any]] = []
+    if not result:
+        return out
+    for _, entries in result:
+        for stream_id, fields in entries:
+            sid = stream_id.decode() if isinstance(stream_id, bytes) else str(stream_id)
+            decoded = {}
+            for k, v in fields.items():
+                key = k.decode() if isinstance(k, bytes) else k
+                val = v.decode() if isinstance(v, bytes) else v
+                decoded[key] = val
+            try:
+                body = json.loads(decoded.get("payload") or "{}")
+            except (TypeError, ValueError):
+                body = {}
+            out.append(
+                {
+                    "stream_id": sid,
+                    "mid": decoded.get("mid") or body.get("mid") or "",
+                    "type": decoded.get("type") or body.get("type") or "",
+                    "body": body,
+                }
+            )
+    return out
+
+
 def ensure_stream_group(runner_id: UUID | str) -> None:
     """Idempotent ``XGROUP CREATE ... MKSTREAM`` for the runner stream."""
     client = redis_instance()
@@ -433,30 +473,45 @@ def read_for_session(
     except Exception:
         logger.exception("xreadgroup failed for runner %s", runner_id)
         return []
-    out: List[Dict[str, Any]] = []
-    if not result:
-        return out
-    for _, entries in result:
-        for stream_id, fields in entries:
-            sid = stream_id.decode() if isinstance(stream_id, bytes) else str(stream_id)
-            decoded = {}
-            for k, v in fields.items():
-                key = k.decode() if isinstance(k, bytes) else k
-                val = v.decode() if isinstance(v, bytes) else v
-                decoded[key] = val
-            try:
-                body = json.loads(decoded.get("payload") or "{}")
-            except (TypeError, ValueError):
-                body = {}
-            out.append(
-                {
-                    "stream_id": sid,
-                    "mid": decoded.get("mid") or body.get("mid") or "",
-                    "type": decoded.get("type") or body.get("type") or "",
-                    "body": body,
-                }
-            )
-    return out
+    return _decode_read_result(result)
+
+
+async def aread_for_session(
+    runner_id: UUID | str,
+    session_id: UUID | str,
+    *,
+    block_ms: int,
+    count: int = 100,
+    use_zero: bool = False,
+) -> List[Dict[str, Any]]:
+    """Async twin of :func:`read_for_session`.
+
+    Used by the async long-poll view so a blocking ``XREADGROUP`` awaits
+    on the event loop instead of pinning a worker thread for the block
+    window.
+    """
+    from pi_dash.settings.redis import async_redis_instance
+
+    client = async_redis_instance()
+    if client is None:
+        return []
+    await _aensure_group(client, runner_id)
+    sk = stream_key(runner_id)
+    gn = group_name(runner_id)
+    cn = consumer_name(session_id)
+    last_id = "0" if use_zero else ">"
+    try:
+        result = await client.xreadgroup(
+            groupname=gn,
+            consumername=cn,
+            streams={sk: last_id},
+            count=count,
+            block=block_ms,
+        )
+    except Exception:
+        logger.exception("xreadgroup failed for runner %s", runner_id)
+        return []
+    return _decode_read_result(result)
 
 
 def ack_for_session(

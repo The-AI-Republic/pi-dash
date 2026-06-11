@@ -124,7 +124,9 @@ const PromptDetailPage = observer(function PromptDetailPage() {
     }
   }
 
-  const pageTitle = record.is_global_default ? t("Prompt template (Pi Dash default)") : t("Prompt template (workspace override)");
+  const pageTitle = record.is_global_default
+    ? t("Prompt template (Pi Dash default)")
+    : t("Prompt template (workspace override)");
 
   return (
     <div className="flex flex-col gap-4 p-6">
@@ -141,8 +143,12 @@ const PromptDetailPage = observer(function PromptDetailPage() {
           </div>
           <p className="mt-1 text-13 text-secondary">
             {record.is_global_default
-              ? t("This is the built-in Pi Dash default. Workspace admins cannot edit it here — customize for your workspace to override.")
-              : t("Your workspace's override of the Pi Dash default. Edits bump the version and apply to the next agent run for this workspace.")}
+              ? t(
+                  "This is the built-in Pi Dash default. Workspace admins cannot edit it here — customize for your workspace to override."
+                )
+              : t(
+                  "Your workspace's override of the Pi Dash default. Edits bump the version and apply to the next agent run for this workspace."
+                )}
           </p>
         </div>
         <Link to={`/${slug}/prompts`} className="text-13 text-secondary hover:text-primary">
@@ -171,7 +177,7 @@ const PromptDetailPage = observer(function PromptDetailPage() {
             }}
             readOnly={!canEdit}
             spellCheck={false}
-            className="bg-layer-base font-mono focus:border-primary min-h-[60vh] w-full resize-y rounded-md border border-subtle p-3 text-11 leading-5 text-primary focus:outline-none"
+            className="font-mono min-h-[60vh] w-full resize-y rounded-md border border-subtle bg-layer-1 p-3 text-11 leading-5 text-primary focus:border-accent-strong focus:outline-none"
           />
         </section>
 
@@ -196,7 +202,7 @@ const PromptDetailPage = observer(function PromptDetailPage() {
               </Button>
             </div>
             {previewError && (
-              <div className="border-destructive text-destructive rounded border bg-layer-1 p-2 text-11">
+              <div className="rounded border border-danger-subtle bg-layer-1 p-2 text-11 text-danger-primary">
                 {previewError}
               </div>
             )}
@@ -211,7 +217,11 @@ const PromptDetailPage = observer(function PromptDetailPage() {
           // when role changes mid-session.
           <section className="flex flex-col gap-2">
             <h2 className="text-13 font-medium text-primary">{t("Template body (Jinja + Markdown)")}</h2>
-            <p className="text-13 text-secondary">{t("Previewing the rendered prompt is a workspace-admin action. Ask your workspace admin if you need to see it rendered against a specific issue.")}</p>
+            <p className="text-13 text-secondary">
+              {t(
+                "Previewing the rendered prompt is a workspace-admin action. Ask your workspace admin if you need to see it rendered against a specific issue."
+              )}
+            </p>
           </section>
         )}
       </div>

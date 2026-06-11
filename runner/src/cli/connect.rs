@@ -49,6 +49,17 @@ pub struct Args {
     #[arg(long, value_enum)]
     pub agent: Option<AgentKind>,
 
+    /// Default LLM model for this runner's agent. Omit to use the agent's
+    /// own default. A model that doesn't apply to ``--agent`` is ignored
+    /// with a warning.
+    #[arg(long)]
+    pub model: Option<String>,
+
+    /// Codex reasoning-effort tier (``low`` / ``medium`` / ``high`` /
+    /// ``xhigh``). Only applies when ``--agent codex``.
+    #[arg(long)]
+    pub reasoning_effort: Option<String>,
+
     /// Skip the post-enroll doctor + service install. Useful in CI.
     #[arg(long)]
     pub skip_service: bool,
@@ -178,6 +189,12 @@ pub async fn run(args: Args, paths: &Paths) -> Result<()> {
         .clone()
         .unwrap_or_else(|| paths.runner_dir(resp.runner_id).join("workspace"));
 
+    let agent_kind = args.agent.unwrap_or_default();
+    let (codex, claude_code, cursor_agent, openclaw) = crate::cli::runner_ops::agent_sections_for(
+        agent_kind,
+        args.model.as_deref(),
+        args.reasoning_effort.as_deref(),
+    );
     let new_runner_block = RunnerConfig {
         name: resp.runner_name.clone(),
         runner_id: resp.runner_id,
@@ -185,13 +202,12 @@ pub async fn run(args: Args, paths: &Paths) -> Result<()> {
         project_slug: Some(resp.project_identifier.clone()),
         pod_id: None,
         workspace: WorkspaceSection { working_dir },
-        agent: AgentSection {
-            kind: args.agent.unwrap_or_default(),
-        },
-        codex: Default::default(),
-        claude_code: Default::default(),
-        cursor_agent: Default::default(),
-        openclaw: Default::default(),
+        workdir: None,
+        agent: AgentSection { kind: agent_kind },
+        codex,
+        claude_code,
+        cursor_agent,
+        openclaw,
         approval_policy: Default::default(),
     };
 
@@ -214,6 +230,7 @@ pub async fn run(args: Args, paths: &Paths) -> Result<()> {
                 auto_update: true,
             },
             runners: vec![new_runner_block],
+            workdirs: vec![],
             cli: None,
         },
     };
@@ -502,6 +519,7 @@ pub async fn enroll_additional_runner(
         project_slug: Some(resp.project_identifier.clone()),
         pod_id: None,
         workspace: WorkspaceSection { working_dir },
+        workdir: None,
         agent: Default::default(),
         codex: Default::default(),
         claude_code: Default::default(),
@@ -643,6 +661,7 @@ mod tests {
             project_slug: Some("p".into()),
             pod_id: None,
             workspace: WorkspaceSection { working_dir: wd },
+            workdir: None,
             agent: AgentSection::default(),
             codex: CodexSection::default(),
             claude_code: ClaudeCodeSection::default(),

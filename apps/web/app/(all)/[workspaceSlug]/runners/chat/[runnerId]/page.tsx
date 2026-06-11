@@ -273,7 +273,7 @@ const RunnerChatPage = observer(function RunnerChatPage() {
               <div key={message.id} className={`flex ${message.role === "user" ? "justify-end" : "justify-start"}`}>
                 <div
                   className={`max-w-[72%] rounded-md px-3 py-2 text-13 ${
-                    message.role === "user" ? "bg-brand-accent text-white" : "bg-layer-1 text-primary"
+                    message.role === "user" ? "bg-accent-primary text-on-color" : "bg-layer-1 text-primary"
                   }`}
                 >
                   <div className="whitespace-pre-wrap">{message.content || message.status}</div>
@@ -291,7 +291,7 @@ const RunnerChatPage = observer(function RunnerChatPage() {
               .map((event) => (
                 <div
                   key={event.seq}
-                  className="bg-layer-0 rounded border border-subtle px-3 py-2 text-11 text-secondary"
+                  className="rounded border border-subtle bg-surface-1 px-3 py-2 text-11 text-secondary"
                 >
                   <span className="font-mono">{event.kind}</span>
                 </div>
@@ -313,7 +313,7 @@ const RunnerChatPage = observer(function RunnerChatPage() {
               }
             }}
             disabled={!!reason || sending}
-            className="bg-layer-0 focus:border-brand-accent min-h-20 flex-1 resize-none rounded-md border border-subtle px-3 py-2 text-13 outline-none"
+            className="min-h-20 flex-1 resize-none rounded-md border border-subtle bg-surface-1 px-3 py-2 text-13 outline-none focus:border-accent-strong"
           />
           {session?.active_message_id || session?.active_turn_id ? (
             <Button onClick={stop} variant="tertiary-danger">

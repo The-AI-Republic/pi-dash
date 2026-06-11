@@ -73,7 +73,7 @@ export function IssueCommentToolbar(props: Props) {
     showAccessSpecifier,
     showSubmitButton,
     editorRef,
-    submitButtonText = "common.comment",
+    submitButtonText = "Comment",
     extraToolbarActions,
   } = props;
   // State to manage active states of toolbar items

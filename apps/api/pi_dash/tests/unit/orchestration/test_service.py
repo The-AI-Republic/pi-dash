@@ -118,6 +118,28 @@ def test_no_op_when_active_run_exists(seeded, issue, states, workspace, create_u
 
 
 @pytest.mark.unit
+def test_no_op_when_waiting_for_worktree_run_exists(
+    seeded, issue, states, workspace, create_user
+):
+    """A run waiting in the daemon's local worktree queue still counts as
+    active — dispatch must not create a second concurrent run for the issue."""
+    AgentRun.objects.create(
+        owner=create_user,
+        workspace=workspace,
+        prompt="x",
+        work_item=issue,
+        status=AgentRunStatus.WAITING_FOR_WORKTREE,
+    )
+    outcome = service.handle_issue_state_transition(
+        issue=issue,
+        from_state=states["todo"],
+        to_state=states["in_progress"],
+    )
+    assert outcome.reason == "active-run-exists"
+    assert outcome.created_run is None
+
+
+@pytest.mark.unit
 def test_follow_up_run_links_parent(
     seeded, issue, states, workspace, create_user
 ):

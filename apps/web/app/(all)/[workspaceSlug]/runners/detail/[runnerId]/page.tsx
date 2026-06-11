@@ -63,7 +63,9 @@ const RunnerDetailPage = observer(function RunnerDetailPage() {
       </div>
 
       {error && !runner ? (
-        <div className="text-destructive rounded-md border border-subtle p-4 text-13">{t("Failed to load runner")}</div>
+        <div className="rounded-md border border-subtle p-4 text-13 text-danger-primary">
+          {t("Failed to load runner")}
+        </div>
       ) : isLoading || !runner ? (
         <div className="rounded-md border border-subtle p-4 text-13 text-secondary">{t("Loading…")}</div>
       ) : (

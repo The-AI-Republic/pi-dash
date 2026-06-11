@@ -154,7 +154,7 @@ const RunnersListPage = observer(function RunnersListPage() {
           )}
         </div>
         {podsError ? (
-          <div className="text-destructive text-12">{t("Failed to load pods")}</div>
+          <div className="text-12 text-danger-primary">{t("Failed to load pods")}</div>
         ) : (
           <div className="flex flex-wrap gap-2">
             {(pods ?? []).map((p) => {
@@ -168,8 +168,8 @@ const RunnersListPage = observer(function RunnersListPage() {
                   onClick={() => setSelectedPodId(isSelected ? null : p.id)}
                   className={`rounded-md border px-3 py-2 text-left text-12 transition-colors ${
                     isSelected
-                      ? "border-custom-primary-100 bg-custom-primary-100/10 ring-custom-primary-100 ring-1"
-                      : "hover:border-primary border-subtle bg-layer-1"
+                      ? "border-accent-strong bg-accent-primary/10 ring-1 ring-accent-strong"
+                      : "border-subtle bg-layer-1 hover:border-strong"
                   }`}
                 >
                   <div className="flex items-center gap-2">
@@ -188,7 +188,7 @@ const RunnersListPage = observer(function RunnersListPage() {
               type="button"
               onClick={() => setCreatePodOpen(true)}
               disabled={!workspaceSlug}
-              className="hover:border-primary flex items-center gap-1.5 rounded-md border border-dashed border-subtle bg-transparent px-3 py-2 text-12 text-secondary hover:text-primary disabled:cursor-not-allowed disabled:opacity-50"
+              className="flex items-center gap-1.5 rounded-md border border-dashed border-subtle bg-transparent px-3 py-2 text-12 text-secondary hover:border-strong hover:text-primary disabled:cursor-not-allowed disabled:opacity-50"
             >
               <Plus className="size-3.5" />
               <span className="font-medium">{t("Create new pod")}</span>
@@ -207,7 +207,7 @@ const RunnersListPage = observer(function RunnersListPage() {
               <button
                 type="button"
                 onClick={() => setSelectedPodId(null)}
-                className="text-custom-primary-100 underline-offset-2 hover:underline"
+                className="text-accent-primary underline-offset-2 hover:underline"
               >
                 {t("Clear filter")}
               </button>
@@ -299,9 +299,9 @@ const RunnersListPage = observer(function RunnersListPage() {
         handleSubmit={confirmDeleteRunner}
         isSubmitting={deleting}
         title={t("Delete runner?")}
-        content={t(
+        content={`${t(
           "The runner row is removed and the daemon is forced offline. Historic runs are preserved with a null runner reference."
-        )}
+        )} ${t("Deleting a runner does not uninstall the AI agent (such as Codex or Claude) on your dev machine.")}`}
         primaryButtonText={{ default: t("Delete"), loading: t("Delete") }}
       />
       <AlertModalCore

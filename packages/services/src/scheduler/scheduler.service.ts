@@ -24,6 +24,16 @@ import { APIService } from "../api.service";
 
 export type SchedulerSource = "builtin" | "manifest";
 
+/**
+ * What a scheduler run does with its findings. The scheduler layer never
+ * creates issues or edits code itself; this steers the dispatched agent run.
+ * - `create_issue`   — file a Pi Dash issue per finding (default).
+ * - `apply_fix`      — implement the fix and open a PR for review (no merge).
+ * - `fix_and_review` — file an issue, fix it, open a PR, and move the issue
+ *                      straight to In Review for a human.
+ */
+export type SchedulerOutcomeMode = "create_issue" | "apply_fix" | "fix_and_review";
+
 export interface IScheduler {
   id: string;
   workspace: string;
@@ -74,6 +84,12 @@ export interface ISchedulerBinding {
   exdates: string[];
   extra_context: string;
   enabled: boolean;
+  /** What a run of this install does with its findings. Per-project; steers the dispatched prompt. */
+  outcome_mode: SchedulerOutcomeMode;
+  /** Pod override for runs fired by this binding. Null = use the project's default pod (resolved at fire time). */
+  pod: string | null;
+  /** Joined name of the override pod, or null when using the project default. Read-only. */
+  pod_name: string | null;
   next_run_at: string | null;
   last_run: string | null;
   last_run_status: string | null;
@@ -101,10 +117,17 @@ export interface ISchedulerBindingCreatePayload {
   exdates?: string[];
   extra_context?: string;
   enabled?: boolean;
+  /** What to do with findings; omit to default to create_issue. */
+  outcome_mode?: SchedulerOutcomeMode;
+  /** Optional pod override; omit or null to use the project's default pod. */
+  pod?: string | null;
 }
 
 export type ISchedulerBindingUpdatePayload = Partial<
-  Pick<ISchedulerBinding, "dtstart" | "tzid" | "rrule" | "rdates" | "exdates" | "extra_context" | "enabled">
+  Pick<
+    ISchedulerBinding,
+    "dtstart" | "tzid" | "rrule" | "rdates" | "exdates" | "extra_context" | "enabled" | "outcome_mode" | "pod"
+  >
 >;
 
 export class SchedulerService extends APIService {

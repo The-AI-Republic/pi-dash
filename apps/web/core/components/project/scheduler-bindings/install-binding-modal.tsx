@@ -11,9 +11,11 @@ import { Controller, useForm, useWatch } from "react-hook-form";
 import { useTranslation } from "@pi-dash/i18n";
 import { Button } from "@pi-dash/propel/button";
 import { TOAST_TYPE, setToast } from "@pi-dash/propel/toast";
-import type { IScheduler, ISchedulerBinding } from "@pi-dash/services";
+import type { IScheduler, ISchedulerBinding, SchedulerOutcomeMode } from "@pi-dash/services";
 import { SchedulerService } from "@pi-dash/services";
 import { EModalPosition, EModalWidth, ModalCore } from "@pi-dash/ui";
+import { BindingOutcomeModeField, DEFAULT_OUTCOME_MODE } from "./binding-outcome-mode-field";
+import { BindingPodField } from "./binding-pod-field";
 import { BindingScheduleFields } from "./binding-schedule-fields";
 import { DEFAULT_TZID } from "./constants";
 import { defaultDtstartLocal, localToIsoUTC } from "./datetime-input";
@@ -25,6 +27,9 @@ interface InstallFormValues {
   rrule: string;
   extra_context: string;
   enabled: boolean;
+  outcome_mode: SchedulerOutcomeMode;
+  /** Pod id, or "" for the project default. */
+  pod: string;
 }
 
 type Props = {
@@ -44,6 +49,8 @@ const DEFAULT_VALUES = (): InstallFormValues => ({
   rrule: "FREQ=DAILY",
   extra_context: "",
   enabled: true,
+  outcome_mode: DEFAULT_OUTCOME_MODE,
+  pod: "",
 });
 
 const schedulerService = new SchedulerService();
@@ -91,6 +98,8 @@ export const InstallSchedulerBindingModal = observer(function InstallSchedulerBi
         rrule: values.rrule.trim(),
         extra_context: values.extra_context.trim(),
         enabled: values.enabled,
+        outcome_mode: values.outcome_mode,
+        pod: values.pod || null,
       });
       setToast({
         type: TOAST_TYPE.SUCCESS,
@@ -106,6 +115,7 @@ export const InstallSchedulerBindingModal = observer(function InstallSchedulerBi
         dtstart?: string[];
         tzid?: string[];
         scheduler?: string[];
+        pod?: string[];
       } | null;
       const detail =
         err?.error ??
@@ -113,6 +123,7 @@ export const InstallSchedulerBindingModal = observer(function InstallSchedulerBi
         err?.dtstart?.[0] ??
         err?.tzid?.[0] ??
         err?.scheduler?.[0] ??
+        err?.pod?.[0] ??
         t("Could not install the scheduler.");
       setToast({
         type: TOAST_TYPE.ERROR,
@@ -126,10 +137,12 @@ export const InstallSchedulerBindingModal = observer(function InstallSchedulerBi
     return (
       <ModalCore isOpen={isOpen} handleClose={onClose} position={EModalPosition.CENTER} width={EModalWidth.XL}>
         <div className="flex flex-col gap-4 p-5">
-          <div className="text-18 font-medium text-primary">
-            {t("No schedulers available")}
-          </div>
-          <p className="text-13 text-secondary">{t("Either every workspace scheduler is already installed on this project, or your workspace admin hasn't enabled any. Visit Workspace → Schedulers to manage the catalog.")}</p>
+          <div className="text-18 font-medium text-primary">{t("No schedulers available")}</div>
+          <p className="text-13 text-secondary">
+            {t(
+              "Either every workspace scheduler is already installed on this project, or your workspace admin hasn't enabled any. Visit Workspace → Schedulers to manage the catalog."
+            )}
+          </p>
           <div className="flex justify-end">
             <Button variant="secondary" onClick={onClose}>
               {t("Cancel")}
@@ -157,7 +170,7 @@ export const InstallSchedulerBindingModal = observer(function InstallSchedulerBi
               <select
                 {...field}
                 id="binding-scheduler"
-                className="bg-layer-0 focus:ring-accent-primary rounded-md border border-subtle px-3 py-2 text-13 text-primary focus:ring-1 focus:outline-none"
+                className="rounded-md border border-subtle bg-surface-1 px-3 py-2 text-13 text-primary focus:ring-1 focus:ring-accent-strong focus:outline-none"
               >
                 {installable.map((s) => (
                   <option key={s.id} value={s.id}>
@@ -167,8 +180,10 @@ export const InstallSchedulerBindingModal = observer(function InstallSchedulerBi
               </select>
             )}
           />
-          <p className="text-12 text-secondary">{t("Pick from your workspace's enabled schedulers. Already-installed ones aren't listed.")}</p>
-          {errors.scheduler && <span className="text-red-500 text-12">{errors.scheduler.message}</span>}
+          <p className="text-12 text-secondary">
+            {t("Pick from your workspace's enabled schedulers. Already-installed ones aren't listed.")}
+          </p>
+          {errors.scheduler && <span className="text-12 text-danger-primary">{errors.scheduler.message}</span>}
         </div>
 
         <BindingScheduleFields
@@ -183,14 +198,16 @@ export const InstallSchedulerBindingModal = observer(function InstallSchedulerBi
           watchRrule={watchedRrule}
         />
 
+        <BindingOutcomeModeField control={control} name="outcome_mode" />
+
+        <BindingPodField control={control} name="pod" projectId={projectId} />
+
         <div className="flex justify-end gap-2">
           <Button variant="secondary" onClick={onClose} disabled={isSubmitting}>
             {t("Cancel")}
           </Button>
           <Button type="submit" loading={isSubmitting} disabled={isSubmitting}>
-            {isSubmitting
-              ? t("Installing…")
-              : t("Install")}
+            {isSubmitting ? t("Installing…") : t("Install")}
           </Button>
         </div>
       </form>

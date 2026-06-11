@@ -20,6 +20,10 @@ use crate::codex::schema::{
 pub struct Bridge {
     pub server: AppServer,
     pub model_default: Option<String>,
+    /// Reasoning-effort tier sent on every `turn/start` (`low`/`medium`/
+    /// `high`/`xhigh`). `None` omits the field so codex uses the model's
+    /// default effort. Sourced from `[runner.codex].effort_default`.
+    pub effort_default: Option<String>,
     initialized: bool,
     thread_id: Option<String>,
     /// Notifications that arrived while we were waiting for an RPC response
@@ -30,11 +34,17 @@ pub struct Bridge {
 }
 
 impl Bridge {
-    pub async fn spawn(binary: &str, cwd: &Path, model_default: Option<String>) -> Result<Self> {
+    pub async fn spawn(
+        binary: &str,
+        cwd: &Path,
+        model_default: Option<String>,
+        effort_default: Option<String>,
+    ) -> Result<Self> {
         let server = AppServer::spawn(binary, cwd).await?;
         Ok(Self {
             server,
             model_default,
+            effort_default,
             initialized: false,
             thread_id: None,
             pending: std::collections::VecDeque::new(),
@@ -47,6 +57,7 @@ impl Bridge {
         Self {
             server,
             model_default,
+            effort_default: None,
             initialized: false,
             thread_id: None,
             pending: std::collections::VecDeque::new(),
@@ -124,7 +135,7 @@ impl Bridge {
                 cwd: cwd.to_string_lossy().to_string(),
                 model: self.model_default.clone(),
                 // Match Claude Code's MVP `bypassPermissions` posture.
-                sandbox_policy: "danger-full-access".into(),
+                sandbox: "danger-full-access".into(),
                 approval_policy: "never".into(),
             },
         )?;
@@ -150,7 +161,7 @@ impl Bridge {
                     text: payload.prompt.clone(),
                 }],
                 model: payload.model.clone().or_else(|| self.model_default.clone()),
-                effort: None,
+                effort: self.effort_default.clone(),
             },
         )?;
         self.server.send_raw(&line).await

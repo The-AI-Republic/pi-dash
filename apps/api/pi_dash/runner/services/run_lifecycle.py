@@ -26,6 +26,7 @@ from django.utils import timezone
 from pi_dash.runner.models import (
     AgentRun,
     AgentRunStatus,
+    RefusalCategory,
     Runner,
     RunnerLiveState,
 )
@@ -37,12 +38,22 @@ TERMINAL_RUN_STATUSES = (
     AgentRunStatus.FAILED,
     AgentRunStatus.CANCELLED,
     AgentRunStatus.BLOCKED,
+    AgentRunStatus.REFUSED,
 )
 BIGINT_MAX = 2**63 - 1
+
+_VALID_REFUSAL_CATEGORIES = frozenset(c.value for c in RefusalCategory)
 
 
 def _normalize_model(raw: Any) -> str:
     return str(raw or "").strip()[:128]
+
+
+def _normalize_refusal_category(raw: Any) -> str:
+    """Map a runner-reported category to a known value, defaulting to
+    ``UNKNOWN`` for anything unrecognized or empty."""
+    value = str(raw or "").strip().lower()
+    return value if value in _VALID_REFUSAL_CATEGORIES else RefusalCategory.UNKNOWN.value
 
 
 def _coerce_token(raw: Any) -> Optional[int]:
@@ -253,11 +264,20 @@ def apply_run_resume_unavailable(
     run.runner = None
     run.pinned_runner = None
     run.assigned_at = None
+    # The run is no longer in any daemon's local worktree queue — drop a
+    # stale WAITING_FOR_WORKTREE position along with the assignment.
+    run.queue_position = None
     if run.parent_run is not None and run.parent_run.thread_id:
         run.parent_run.thread_id = ""
         run.parent_run.save(update_fields=["thread_id"])
     run.save(
-        update_fields=["status", "runner", "pinned_runner", "assigned_at"]
+        update_fields=[
+            "status",
+            "runner",
+            "pinned_runner",
+            "assigned_at",
+            "queue_position",
+        ]
     )
 
     from pi_dash.runner.services.matcher import drain_pod_by_id
@@ -347,6 +367,7 @@ def finalize_run_terminal(
     *,
     done_payload: Any = None,
     error_detail: str = "",
+    refusal_category: Any = None,
     tokens: Any = None,
     model: Any = None,
 ) -> None:
@@ -366,12 +387,21 @@ def finalize_run_terminal(
     updates: Dict[str, Any] = {
         "status": new_status,
         "ended_at": timezone.now(),
+        # Belt-and-braces: a terminal run is out of every queue, so a stale
+        # WAITING_FOR_WORKTREE position must not survive on the closed row.
+        "queue_position": None,
     }
     if new_status == AgentRunStatus.COMPLETED:
         updates["done_payload"] = done_payload
         updates["error"] = ""
     if new_status == AgentRunStatus.FAILED and error_detail:
         updates["error"] = error_detail[:16000]
+    if new_status == AgentRunStatus.REFUSED:
+        # A safety-classifier decline. Record the category (always set, so the
+        # column is queryable) and surface the explanation, if any, in `error`.
+        updates["refusal_category"] = _normalize_refusal_category(refusal_category)
+        if error_detail:
+            updates["error"] = error_detail[:16000]
     live_state = _matching_live_state(runner, run_id)
     updates.update(_usage_updates_from_live_state(live_state))
     updates.update(_token_updates(_payload_usage(done_payload)))

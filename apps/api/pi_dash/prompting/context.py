@@ -32,6 +32,43 @@ def _issue_description_markdown(issue: Issue) -> str:
     return ""
 
 
+def _issue_identifier(issue: Issue) -> str:
+    """Workspace-scoped identifier, e.g. ``TP-12``.
+
+    Always uses the issue's *own* project identifier — a parent may live in a
+    different project than its child, so this must not assume the child's
+    project.
+    """
+    return f"{issue.project.identifier}-{issue.sequence_id}"
+
+
+def _issue_comment_count(issue: Issue) -> int:
+    """Count of comments on ``issue`` — matches what ``pidash comment list``
+    returns. Surfaced for a parent so the agent learns the discussion volume
+    without inlining the parent's comment bodies into this prompt.
+    """
+    from pi_dash.db.models.issue import IssueComment
+
+    return IssueComment.objects.filter(issue=issue).count()
+
+
+def _ancestor_chain(issue: Issue) -> list[Issue]:
+    """Return ``[issue, parent, grandparent, ... root]``.
+
+    Walks the ``parent`` self-FK upward. The FK has no DB-level acyclicity
+    guarantee, so defend against accidental cycles with a visited-id set and a
+    hard depth cap — a malformed graph must never spin the renderer.
+    """
+    chain: list[Issue] = []
+    seen: set[Any] = set()
+    current: Issue | None = issue
+    while current is not None and current.id not in seen and len(chain) < 50:
+        chain.append(current)
+        seen.add(current.id)
+        current = current.parent
+    return chain
+
+
 def _absolute_issue_url(issue: Issue) -> str:
     """Return a best-effort deep link. Full URL construction lives in the
     web layer; we return a relative path so templates still have something
@@ -165,6 +202,9 @@ def build_context(issue: Issue, run: AgentRun) -> Dict[str, Any]:
 
     attempt = _compute_attempt(issue, run)
 
+    # Walk the parent chain once: [issue, parent, grandparent, ... root].
+    ancestors = _ancestor_chain(issue)
+
     return {
         "issue": {
             "id": str(issue.id),
@@ -197,11 +237,27 @@ def build_context(issue: Issue, run: AgentRun) -> Dict[str, Any]:
         },
         "parent": (
             {
-                "identifier": f"{parent.project.identifier}-{parent.sequence_id}",
+                "identifier": _issue_identifier(parent),
                 "title": parent.name or "",
                 "work_branch": (getattr(parent, "git_work_branch", "") or None),
+                "description": _issue_description_markdown(parent),
+                "comments_count": _issue_comment_count(parent),
             }
             if parent is not None
+            else None
+        ),
+        # Multi-level lineage (current -> parent -> ... -> root). Only set when
+        # there's a grandparent or higher: for a single parent the `parent`
+        # block already carries everything, so the template renders the lineage
+        # tree only when ``lineage`` is truthy. We do NOT inline ancestor
+        # content beyond the direct parent — the agent is told to fetch it via
+        # the CLI on demand.
+        "lineage": (
+            [
+                {"identifier": _issue_identifier(node), "title": node.name or ""}
+                for node in ancestors
+            ]
+            if len(ancestors) > 2
             else None
         ),
         "run": {

@@ -1154,6 +1154,7 @@ class IssueDetailSerializer(IssueSerializer):
         return {
             "id": str(run.id),
             "status": run.status,
+            "queue_position": run.queue_position,
             "runner": str(run.runner_id) if run.runner_id else None,
             "runner_name": run.runner.name if run.runner_id and run.runner else None,
             "created_at": self._serialize_datetime(run.created_at),
@@ -1188,6 +1189,7 @@ class IssueDetailSerializer(IssueSerializer):
                 status__in=[
                     AgentRunStatus.QUEUED,
                     AgentRunStatus.ASSIGNED,
+                    AgentRunStatus.WAITING_FOR_WORKTREE,
                     AgentRunStatus.RUNNING,
                     AgentRunStatus.AWAITING_APPROVAL,
                     AgentRunStatus.AWAITING_REAUTH,

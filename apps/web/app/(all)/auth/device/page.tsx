@@ -81,36 +81,36 @@ function DeviceAuthPage() {
   }
 
   return (
-    <div className="bg-custom-background-100 flex min-h-[80vh] items-center justify-center p-8">
-      <div className="border-custom-border-200 bg-custom-background-90 shadow-sm w-full max-w-md rounded-lg border p-8">
-        <h1 className="text-xl text-custom-text-100 mb-2 font-semibold">Authorize Pi Dash CLI</h1>
-        <p className="text-sm text-custom-text-300 mb-6">
+    <div className="flex min-h-[80vh] items-center justify-center bg-canvas p-8">
+      <div className="w-full max-w-md rounded-lg border border-subtle bg-surface-1 p-8 shadow-raised-200">
+        <h1 className="text-xl mb-2 font-semibold text-primary">Authorize Pi Dash CLI</h1>
+        <p className="text-sm mb-6 text-tertiary">
           Enter the code shown on your terminal to grant this device access to your account.
         </p>
 
         {status === "approved" && approvedFor ? (
           <div className="space-y-3">
-            <div className="border-green-500/30 bg-green-500/10 text-sm text-green-700 dark:text-green-300 rounded-md border p-3">
+            <div className="text-sm rounded-md border border-success-subtle bg-success-subtle p-3 text-success-primary">
               <strong>Approved.</strong> Your CLI should pick up the token within a few seconds.
             </div>
-            <dl className="text-sm text-custom-text-200 space-y-1">
+            <dl className="text-sm space-y-1 text-secondary">
               <div className="flex justify-between">
-                <dt className="text-custom-text-400">Account</dt>
+                <dt className="text-placeholder">Account</dt>
                 <dd>{approvedFor.email}</dd>
               </div>
               {approvedFor.workspace && (
                 <div className="flex justify-between">
-                  <dt className="text-custom-text-400">Workspace</dt>
+                  <dt className="text-placeholder">Workspace</dt>
                   <dd>{approvedFor.workspace}</dd>
                 </div>
               )}
             </dl>
-            <p className="text-xs text-custom-text-400 pt-2">You can close this tab.</p>
+            <p className="text-xs pt-2 text-placeholder">You can close this tab.</p>
           </div>
         ) : (
           <form onSubmit={onSubmit} className="space-y-4">
             <label className="block">
-              <span className="text-xs text-custom-text-400 mb-1 block font-medium tracking-wide uppercase">
+              <span className="text-xs mb-1 block font-medium tracking-wide text-placeholder uppercase">
                 Device code
               </span>
               <input
@@ -126,13 +126,13 @@ function DeviceAuthPage() {
                 value={code}
                 onChange={(e) => setCode(formatUserCode(e.target.value))}
                 placeholder="XXXX-YYYY"
-                className="border-custom-border-200 bg-custom-background-100 font-mono text-lg tracking-widest text-custom-text-100 focus:border-custom-primary-100 w-full rounded-md border px-3 py-2 uppercase focus:outline-none"
+                className="font-mono text-lg tracking-widest w-full rounded-md border border-subtle bg-canvas px-3 py-2 text-primary uppercase focus:border-accent-strong focus:outline-none"
                 maxLength={9}
               />
             </label>
 
             {status === "error" && errorMessage && (
-              <div className="border-red-500/30 bg-red-500/10 text-sm text-red-600 dark:text-red-300 rounded-md border p-3">
+              <div className="text-sm rounded-md border border-danger-subtle bg-danger-subtle p-3 text-danger-primary">
                 {errorMessage}
               </div>
             )}
@@ -140,14 +140,14 @@ function DeviceAuthPage() {
             <button
               type="submit"
               disabled={!submittable}
-              className="bg-custom-primary-100 text-sm hover:bg-custom-primary-200 w-full rounded-md px-4 py-2 font-medium text-white transition disabled:cursor-not-allowed disabled:opacity-50"
+              className="text-sm w-full rounded-md bg-accent-primary px-4 py-2 font-medium text-on-color transition hover:bg-accent-primary-hover disabled:cursor-not-allowed disabled:opacity-50"
             >
               {status === "submitting" ? "Approving…" : "Approve"}
             </button>
           </form>
         )}
 
-        <p className="text-xs text-custom-text-400 mt-6">
+        <p className="text-xs mt-6 text-placeholder">
           Only approve a code that you started by running <code className="font-mono">pidash auth login</code> on a
           device you control.
         </p>

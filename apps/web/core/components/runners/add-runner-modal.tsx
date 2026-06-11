@@ -18,6 +18,12 @@ import type { IPod, TPartialProject } from "@pi-dash/types";
 import { CustomSelect, EModalPosition, EModalWidth, Input, ModalCore } from "@pi-dash/ui";
 // app
 import { RunnerCliCommand } from "@/components/runners/runner-cli-command";
+import {
+  DEFAULT_MODEL_BY_AGENT,
+  RUNNER_MODEL_OPTIONS,
+  resolveRunnerModel,
+  runnerModelLabel,
+} from "@/components/runners/runner-models";
 import { ProjectService } from "@/services/project";
 
 type Props = {
@@ -41,9 +47,16 @@ interface FormValues {
   name: string;
   workingDir: string;
   agent: TAgent;
+  /** Selected model-catalog option id (``"default"`` = agent's own default). */
+  model: string;
 }
 
-type RunnerCommandValues = Pick<FormValues, "projectIdentifier" | "podName" | "name" | "workingDir" | "agent">;
+type RunnerCommandValues = Pick<FormValues, "projectIdentifier" | "podName" | "name" | "workingDir" | "agent"> & {
+  /** Resolved ``--model`` value; undefined for the default sentinel. */
+  model?: string;
+  /** Resolved ``--reasoning-effort`` value; codex only. */
+  reasoningEffort?: string;
+};
 
 const DEFAULT_VALUES: FormValues = {
   projectIdentifier: "",
@@ -51,6 +64,7 @@ const DEFAULT_VALUES: FormValues = {
   name: "",
   workingDir: "",
   agent: DEFAULT_AGENT,
+  model: DEFAULT_MODEL_BY_AGENT[DEFAULT_AGENT],
 };
 
 const podService = new PodService();
@@ -144,13 +158,24 @@ export const AddRunnerModal = observer(function AddRunnerModal(props: Props) {
     return t("Codex");
   };
 
+  // Model options are agent-specific, so a stale selection from a previous
+  // agent would generate an inapplicable ``--model``. Reset to the default
+  // sentinel whenever the agent changes.
+  const selectedAgent = watch("agent");
+  useEffect(() => {
+    setValue("model", DEFAULT_MODEL_BY_AGENT[selectedAgent]);
+  }, [selectedAgent, setValue]);
+
   const onSubmit: SubmitHandler<FormValues> = (values) => {
+    const { model, reasoningEffort } = resolveRunnerModel(values.agent, values.model);
     setRunnerCommand({
       projectIdentifier: values.projectIdentifier,
       podName: values.podName,
       name: values.name.trim(),
       workingDir: values.workingDir,
       agent: values.agent,
+      model,
+      reasoningEffort,
     });
   };
 
@@ -324,6 +349,40 @@ export const AddRunnerModal = observer(function AddRunnerModal(props: Props) {
             </p>
           </div>
 
+          <div className="flex flex-col gap-1">
+            <label htmlFor="add-runner-model" className="text-13 font-medium text-primary">
+              {t("Model (optional)")}
+            </label>
+            <Controller
+              control={control}
+              name="model"
+              render={({ field }) => (
+                <CustomSelect
+                  value={field.value}
+                  label={runnerModelLabel(selectedAgent, field.value)}
+                  onChange={field.onChange}
+                  buttonClassName="border border-subtle"
+                  input
+                  maxHeight="lg"
+                  placement="bottom-start"
+                >
+                  <>
+                    {RUNNER_MODEL_OPTIONS[selectedAgent].map((opt) => (
+                      <CustomSelect.Option key={opt.id} value={opt.id}>
+                        {opt.label}
+                      </CustomSelect.Option>
+                    ))}
+                  </>
+                </CustomSelect>
+              )}
+            />
+            <p className="text-12 text-secondary">
+              {t(
+                "Default model this runner's agent uses. ``Default`` lets the agent pick its own; the choice is baked into the displayed ``pidash runner add`` command."
+              )}
+            </p>
+          </div>
+
           <div className="flex justify-end gap-2">
             <Button variant="secondary" onClick={onClose}>
               {t("Cancel")}
@@ -348,6 +407,8 @@ export const AddRunnerModal = observer(function AddRunnerModal(props: Props) {
             name={runnerCommand.name}
             workingDir={runnerCommand.workingDir}
             agent={runnerCommand.agent}
+            model={runnerCommand.model}
+            reasoningEffort={runnerCommand.reasoningEffort}
             isUsingBrowserOrigin={isUsingBrowserOrigin}
           />
 
