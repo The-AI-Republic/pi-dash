@@ -52,7 +52,7 @@ export default {
 
 对于英文 locale，值与键相同。对于非英文 locale，新值在翻译前为空占位符。
 
-同步命令是手动命令。它不会在 `pnpm build` 期间运行。
+同步命令是手动命令。它不会在 `pnpm build` 期间运行。它会在退出前格式化生成的 locale 文件。
 
 ## 翻译缺失值
 
@@ -114,6 +114,8 @@ I18N_TRANSLATION_SKIP_README
 OPENAI_API_KEY
 FIREWORKS_API_KEY
 ```
+
+生成的 locale 文件和翻译后的 README 文件会在命令退出前进行格式化。
 
 翻译器只会填充目标 locale `translations.ts` 文件中的空字符串。它使用源英文消息 ID 作为源文本，并拒绝会改变 ICU MessageFormat 参数名称或参数类型的模型输出。
 

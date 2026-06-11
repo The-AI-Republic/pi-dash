@@ -53,6 +53,7 @@ export default {
 Para inglés, el valor es igual a la clave. Para locales que no son inglés, los valores nuevos son marcadores de posición vacíos hasta que se traduzcan.
 
 El comando de sincronización es manual. No se ejecuta durante `pnpm build`.
+Formatea los archivos de locale generados antes de salir.
 
 ## Traducir valores faltantes
 
@@ -95,6 +96,7 @@ Opciones compatibles:
 ```
 
 El script registra el progreso de cada lote y escribe los lotes exitosos en disco inmediatamente. Si un proveedor agota el tiempo de espera, vuelve a ejecutar el mismo comando para continuar desde los marcadores de posición vacíos restantes. Usa `--continue-on-error` para omitir lotes fallidos durante una ejecución grande y dejar esos marcadores de posición vacíos para un reintento posterior.
+Los archivos de locale generados y los archivos README traducidos se formatean antes de que el comando termine.
 
 Variables de entorno:
 
