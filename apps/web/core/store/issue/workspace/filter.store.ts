@@ -100,7 +100,13 @@ export class WorkspaceIssuesFilter extends IssueFilterHelperStore implements IWo
     const userFilters = this.getIssueFilters(viewId);
     if (!userFilters) return undefined;
 
-    const filteredParams = handleIssueQueryParamsByLayout(EIssueLayoutTypes.SPREADSHEET, "my_issues");
+    // Use the view's active layout (not a hardcoded spreadsheet) so layout-specific
+    // params like group_by/sub_group_by are sent to the server — otherwise the
+    // list/board layouts would never receive grouped issues.
+    const filteredParams = handleIssueQueryParamsByLayout(
+      userFilters?.displayFilters?.layout ?? EIssueLayoutTypes.SPREADSHEET,
+      "my_issues"
+    );
     if (!filteredParams) return undefined;
 
     const filteredRouteParams: Partial<Record<TIssueParams, string | boolean>> = this.computedFilteredParams(
