@@ -29,6 +29,7 @@ import { WorkspaceService } from "@/services/workspace.service";
 import type { IBaseIssueFilterStore, IIssueFilterHelperStore } from "../helpers/issue-filter-helper.store";
 import { IssueFilterHelperStore } from "../helpers/issue-filter-helper.store";
 import type { IIssueRootStore } from "../root.store";
+import { getWorkspaceDefaultDisplayFilters, normalizeWorkspaceDisplayFilters } from "./display-filter-defaults";
 
 type TWorkspaceFilters = TStaticViewTypes;
 
@@ -164,44 +165,30 @@ export class WorkspaceIssuesFilter extends IssueFilterHelperStore implements IWo
       sub_group_by: [],
     };
 
-    const _filters = this.handleIssuesLocalFilters.get(EIssuesStoreType.GLOBAL, workspaceSlug, undefined, viewId);
-    // The workspace "all work items" view defaults to a Board (Kanban) grouped by
-    // state group; other global views keep the spreadsheet default. Applies only
-    // when the user has no saved preference for the view.
-    const defaultDisplayFilters: IIssueDisplayFilterOptions =
-      viewId === "all-issues"
-        ? { layout: EIssueLayoutTypes.KANBAN, group_by: "state", order_by: "-created_at" }
-        : { layout: EIssueLayoutTypes.SPREADSHEET, order_by: "-created_at" };
-    displayFilters = this.computedDisplayFilters(_filters?.display_filters, defaultDisplayFilters);
-    // computedDisplayFilters only honors the defaults when NO local filters exist
-    // for the view. Ensure the work-items Board (grouped by state) is the default
-    // whenever the user hasn't explicitly chosen a layout, even if other local
-    // filters were saved.
-    if (viewId === "all-issues" && !_filters?.display_filters?.layout) {
-      displayFilters.layout = EIssueLayoutTypes.KANBAN;
-      if (!_filters?.display_filters?.group_by) {
-        displayFilters.group_by = "state";
-      }
-    }
-    displayProperties = this.computedDisplayProperties(_filters?.display_properties);
+    const localFilters = this.handleIssuesLocalFilters.get(EIssuesStoreType.GLOBAL, workspaceSlug, undefined, viewId);
+    const defaultDisplayFilters = getWorkspaceDefaultDisplayFilters(viewId);
+    displayFilters = this.computedDisplayFilters(localFilters?.display_filters, defaultDisplayFilters);
+    displayFilters = normalizeWorkspaceDisplayFilters(viewId, displayFilters, localFilters?.display_filters);
+    displayProperties = this.computedDisplayProperties(localFilters?.display_properties);
     kanbanFilters = {
-      group_by: _filters?.kanban_filters?.group_by || [],
-      sub_group_by: _filters?.kanban_filters?.sub_group_by || [],
+      group_by: localFilters?.kanban_filters?.group_by || [],
+      sub_group_by: localFilters?.kanban_filters?.sub_group_by || [],
     };
 
     // Get the view details if the view is not a static view
     if (STATIC_VIEW_TYPES.includes(viewId) === false) {
-      const _filters = await this.issueFilterService.getViewDetails(workspaceSlug, viewId);
-      richFilters = _filters?.rich_filters;
-      displayFilters = this.computedDisplayFilters(_filters?.display_filters, {
+      const viewFilters = await this.issueFilterService.getViewDetails(workspaceSlug, viewId);
+      richFilters = viewFilters?.rich_filters;
+      displayFilters = this.computedDisplayFilters(viewFilters?.display_filters, {
         layout: EIssueLayoutTypes.SPREADSHEET,
         order_by: "-created_at",
       });
-      displayProperties = this.computedDisplayProperties(_filters?.display_properties);
+      displayProperties = this.computedDisplayProperties(viewFilters?.display_properties);
     }
 
-    // override existing order by if ordered by manual sort_order
-    if (displayFilters.order_by === "sort_order") {
+    // Workspace custom views do not support manual project ordering as a default.
+    // The static Work Items view is the exception because it mirrors project issues.
+    if (viewId !== "all-issues" && displayFilters.order_by === "sort_order") {
       displayFilters.order_by = "-created_at";
     }
 
