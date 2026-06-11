@@ -159,10 +159,23 @@ export class WorkspaceIssuesFilter extends IssueFilterHelperStore implements IWo
     };
 
     const _filters = this.handleIssuesLocalFilters.get(EIssuesStoreType.GLOBAL, workspaceSlug, undefined, viewId);
-    displayFilters = this.computedDisplayFilters(_filters?.display_filters, {
-      layout: EIssueLayoutTypes.SPREADSHEET,
-      order_by: "-created_at",
-    });
+    // The workspace "all work items" view defaults to a Board (Kanban) grouped by
+    // state group; other global views keep the spreadsheet default. Applies only
+    // when the user has no saved preference for the view.
+    const defaultDisplayFilters: IIssueDisplayFilterOptions =
+      viewId === "all-issues"
+        ? { layout: EIssueLayoutTypes.KANBAN, group_by: "state_detail.group", order_by: "-created_at" }
+        : { layout: EIssueLayoutTypes.SPREADSHEET, order_by: "-created_at" };
+    displayFilters = this.computedDisplayFilters(_filters?.display_filters, defaultDisplayFilters);
+    // computedDisplayFilters only honors the defaults when NO local filters exist
+    // for the view. Ensure the work-items Board is the default whenever the user
+    // hasn't explicitly chosen a layout, even if other local filters were saved.
+    if (viewId === "all-issues" && !_filters?.display_filters?.layout) {
+      displayFilters.layout = EIssueLayoutTypes.KANBAN;
+      if (!_filters?.display_filters?.group_by) {
+        displayFilters.group_by = "state_detail.group";
+      }
+    }
     displayProperties = this.computedDisplayProperties(_filters?.display_properties);
     kanbanFilters = {
       group_by: _filters?.kanban_filters?.group_by || [],

@@ -93,22 +93,22 @@ export const AllIssueLayoutRoot = observer(function AllIssueLayoutRoot(props: Pr
     { revalidateIfStale: false, revalidateOnFocus: false }
   );
 
-  // The list layout fetches its own grouped issues via BaseListRoot, so the
-  // root only fetches the flat list that the spreadsheet consumes. Filters are
-  // always fetched (the list layout reads display filters from the same store).
-  const isListLayout = activeLayout === EIssueLayoutTypes.LIST;
+  // The list and board (kanban) layouts fetch their own grouped issues via their
+  // roots, so the root here only fetches the flat list the spreadsheet consumes.
+  // Filters are always fetched (the other layouts read display filters too).
+  const selfFetchingLayout = activeLayout === EIssueLayoutTypes.LIST || activeLayout === EIssueLayoutTypes.KANBAN;
 
-  // Fetch issues. The key keys on isListLayout (not the raw layout) so the
+  // Fetch issues. The key keys on selfFetchingLayout (not the raw layout) so the
   // spreadsheet/default case stays a single key as activeLayout resolves from
   // undefined to its loaded value — otherwise the key would change and refetch.
   const { isLoading: issuesLoading } = useSWR(
     workspaceSlug && globalViewId
-      ? `WORKSPACE_GLOBAL_VIEW_ISSUES_${workspaceSlug}_${globalViewId}_${isListLayout ? "list" : "default"}`
+      ? `WORKSPACE_GLOBAL_VIEW_ISSUES_${workspaceSlug}_${globalViewId}_${selfFetchingLayout ? "self" : "default"}`
       : null,
     async () => {
       if (workspaceSlug && globalViewId) {
         await fetchFilters(workspaceSlug, globalViewId);
-        if (!isListLayout) {
+        if (!selfFetchingLayout) {
           clear();
           toggleLoading(true);
           await fetchIssues(workspaceSlug, globalViewId, groupedIssueIds ? "mutation" : "init-loader", {
