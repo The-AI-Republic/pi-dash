@@ -1111,6 +1111,7 @@ export default {
   "Open work item": "Deschide elementul de lucru",
   "Open work item in full screen": "Deschide elementul de lucru pe ecran complet",
   "Open workspace switcher": "Deschide comutatorul de spațiu de lucru",
+  OpenClaw: "",
   Optional: "Opțional",
   Options: "Opțiuni",
   "Order by": "Ordonează după",

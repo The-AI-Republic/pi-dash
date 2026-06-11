@@ -13,6 +13,7 @@ pub mod cursor_agent;
 pub mod daemon;
 pub mod history;
 pub mod ipc;
+pub mod openclaw;
 pub mod service;
 pub mod tui;
 pub mod util;

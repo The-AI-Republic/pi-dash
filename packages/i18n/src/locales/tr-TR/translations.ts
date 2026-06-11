@@ -1092,6 +1092,7 @@ export default {
   "Open work item": "İş öğesini aç",
   "Open work item in full screen": "İş öğesini tam ekranda aç",
   "Open workspace switcher": "Çalışma alanı değiştiriciyi aç",
+  OpenClaw: "",
   Optional: "İsteğe bağlı",
   Options: "Seçenekler",
   "Order by": "Sıralama ölçütü",

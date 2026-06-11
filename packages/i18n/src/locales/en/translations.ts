@@ -1081,6 +1081,7 @@ export default {
   "Open work item": "Open work item",
   "Open work item in full screen": "Open work item in full screen",
   "Open workspace switcher": "Open workspace switcher",
+  OpenClaw: "OpenClaw",
   Optional: "Optional",
   Options: "Options",
   "Order by": "Order by",

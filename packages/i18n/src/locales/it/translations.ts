@@ -1101,6 +1101,7 @@ export default {
   "Open work item": "Apri elemento di lavoro",
   "Open work item in full screen": "Apri elemento di lavoro a schermo intero",
   "Open workspace switcher": "Apri il selettore dell'area di lavoro",
+  OpenClaw: "",
   Optional: "Opzionale",
   Options: "Opzioni",
   "Order by": "Ordina per",

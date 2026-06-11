@@ -106,6 +106,7 @@ pub async fn execute(paths: &Paths, runner_filter: Option<&str>) -> Result<Repor
             "codex",
             "claude",
             "cursor-agent",
+            "acpx",
         )
         .await;
     } else {
@@ -118,6 +119,7 @@ pub async fn execute(paths: &Paths, runner_filter: Option<&str>) -> Result<Repor
                 &r.codex.binary,
                 &r.claude_code.binary,
                 &r.cursor_agent.binary,
+                &r.openclaw.binary,
             )
             .await;
         }
@@ -171,6 +173,7 @@ async fn run_agent_checks(
     codex_binary: &str,
     claude_binary: &str,
     cursor_binary: &str,
+    openclaw_binary: &str,
 ) {
     let tag = |base: &str| match prefix {
         Some(p) => format!("{base}@{p}"),
@@ -261,11 +264,52 @@ async fn run_agent_checks(
                 blocker: false,
             });
         }
+        crate::config::schema::AgentKind::OpenClaw => {
+            match check_version(openclaw_binary).await {
+                Ok(detail) => checks.push(Check {
+                    name: tag("acpx"),
+                    ok: true,
+                    detail,
+                    blocker: true,
+                }),
+                Err(e) => checks.push(Check {
+                    name: tag("acpx"),
+                    ok: false,
+                    detail: e.to_string(),
+                    blocker: true,
+                }),
+            }
+            // OpenClaw needs two binaries: `acpx` (probed above, the ACP client
+            // the runner spawns) and `openclaw` itself, which acpx launches for
+            // `openclaw exec`. Presence of `openclaw` is cheaply probeable, so
+            // check it directly — a machine with acpx but no openclaw would
+            // otherwise pass doctor yet fail every run. Keep it non-blocking:
+            // an older openclaw that doesn't print a `--version` line shouldn't
+            // hard-fail doctor, and auth + a reachable OpenClaw Gateway still
+            // have no cheap non-interactive probe (so they stay a hint).
+            let openclaw_runnable = crate::util::shell::binary_runs_version("openclaw").await;
+            checks.push(Check {
+                name: tag("openclaw"),
+                ok: openclaw_runnable,
+                detail: if openclaw_runnable {
+                    "openclaw CLI runnable (ensure it's authenticated and an \
+                     OpenClaw Gateway is reachable if runs fail)"
+                        .to_string()
+                } else {
+                    "openclaw CLI not runnable on PATH — acpx launches it for \
+                     `openclaw exec`, so install OpenClaw on this machine and \
+                     ensure a Gateway is reachable"
+                        .to_string()
+                },
+                blocker: false,
+            });
+        }
     }
 }
 
-/// Shared `<binary> --version` check. Works for both `codex` and `claude`
-/// since both print a short version line on stdout and exit 0 on success.
+/// Shared `<binary> --version` check used for every supported agent binary
+/// (`codex`, `claude`, `cursor-agent`, and `acpx`), each of which prints a
+/// short version line on stdout and exits 0 on success.
 ///
 /// Runs through the same platform spawn helper the daemon uses so this check
 /// reflects what the daemon will actually see at spawn time.
@@ -331,8 +375,8 @@ mod tests {
     //! per-runner tags are correct.
     use super::*;
     use crate::config::schema::{
-        AgentKind, ClaudeCodeSection, CursorAgentSection, CodexSection, Config, DaemonConfig, RunnerConfig,
-        WorkspaceSection,
+        AgentKind, ClaudeCodeSection, CursorAgentSection, CodexSection, Config, DaemonConfig,
+        OpenClawSection, RunnerConfig, WorkspaceSection,
     };
     use std::path::PathBuf;
     use uuid::Uuid;
@@ -366,6 +410,7 @@ mod tests {
             },
             claude_code: ClaudeCodeSection::default(),
             cursor_agent: CursorAgentSection::default(),
+            openclaw: OpenClawSection::default(),
             approval_policy: Default::default(),
         }
     }
@@ -482,6 +527,7 @@ mod tests {
         let mut codex_checks: Vec<Check> = Vec::new();
         let mut claude_checks: Vec<Check> = Vec::new();
         let mut cursor_checks: Vec<Check> = Vec::new();
+        let mut openclaw_checks: Vec<Check> = Vec::new();
         run_agent_checks(
             &mut codex_checks,
             None,
@@ -489,6 +535,7 @@ mod tests {
             "codex-missing",
             "claude-missing",
             "cursor-missing",
+            "acpx-missing",
         )
         .await;
         run_agent_checks(
@@ -498,6 +545,7 @@ mod tests {
             "codex-missing",
             "claude-missing",
             "cursor-missing",
+            "acpx-missing",
         )
         .await;
         run_agent_checks(
@@ -507,6 +555,17 @@ mod tests {
             "codex-missing",
             "claude-missing",
             "cursor-missing",
+            "acpx-missing",
+        )
+        .await;
+        run_agent_checks(
+            &mut openclaw_checks,
+            None,
+            AgentKind::OpenClaw,
+            "codex-missing",
+            "claude-missing",
+            "cursor-missing",
+            "acpx-missing",
         )
         .await;
         assert!(codex_checks.iter().any(|c| c.name == "codex"));
@@ -515,5 +574,7 @@ mod tests {
         assert!(claude_checks.iter().any(|c| c.name == "claude-auth"));
         assert!(cursor_checks.iter().any(|c| c.name == "cursor-agent"));
         assert!(cursor_checks.iter().any(|c| c.name == "cursor-auth"));
+        assert!(openclaw_checks.iter().any(|c| c.name == "acpx"));
+        assert!(openclaw_checks.iter().any(|c| c.name == "openclaw"));
     }
 }

@@ -33,8 +33,10 @@ const OUTCOME_MODE_OPTIONS: ReadonlyArray<{ value: SchedulerOutcomeMode; label: 
 export const DEFAULT_OUTCOME_MODE: SchedulerOutcomeMode = "create_issue";
 
 const outcomeModeHelp = (value: SchedulerOutcomeMode): string =>
-  (OUTCOME_MODE_OPTIONS.find((o) => o.value === value) ??
-    OUTCOME_MODE_OPTIONS.find((o) => o.value === DEFAULT_OUTCOME_MODE)!).help;
+  (
+    OUTCOME_MODE_OPTIONS.find((o) => o.value === value) ??
+    OUTCOME_MODE_OPTIONS.find((o) => o.value === DEFAULT_OUTCOME_MODE)!
+  ).help;
 
 type Props<T extends FieldValues> = {
   control: Control<T>;

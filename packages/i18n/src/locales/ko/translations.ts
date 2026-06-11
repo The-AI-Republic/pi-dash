@@ -1076,6 +1076,7 @@ export default {
   "Open work item": "작업 항목 열기",
   "Open work item in full screen": "작업 항목을 전체 화면으로 열기",
   "Open workspace switcher": "작업 공간 전환기 열기",
+  OpenClaw: "",
   Optional: "선택 사항",
   Options: "옵션",
   "Order by": "정렬 기준",

@@ -1059,6 +1059,7 @@ export default {
   "Open work item": "開啟工作項目",
   "Open work item in full screen": "以全螢幕開啟工作項目",
   "Open workspace switcher": "開啟工作區切換器",
+  OpenClaw: "",
   Optional: "選填",
   Options: "選項",
   "Order by": "排序依據",

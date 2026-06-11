@@ -1098,6 +1098,7 @@ export default {
   "Open work item": "Otvoriť pracovnú položku",
   "Open work item in full screen": "Otvoriť pracovnú položku na celú obrazovku",
   "Open workspace switcher": "Otvoriť prepínač pracovných priestorov",
+  OpenClaw: "",
   Optional: "Voliteľné",
   Options: "Možnosti",
   "Order by": "Zoradiť podľa",

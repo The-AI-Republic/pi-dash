@@ -1092,6 +1092,7 @@ export default {
   "Open work item": "Mở mục công việc",
   "Open work item in full screen": "Mở mục công việc ở chế độ toàn màn hình",
   "Open workspace switcher": "Mở trình chuyển đổi không gian làm việc",
+  OpenClaw: "",
   Optional: "Không bắt buộc",
   Options: "Tùy chọn",
   "Order by": "Sắp xếp theo",

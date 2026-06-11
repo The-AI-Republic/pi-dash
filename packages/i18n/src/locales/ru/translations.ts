@@ -1104,6 +1104,7 @@ export default {
   "Open work item": "Открыть элемент работы",
   "Open work item in full screen": "Открыть элемент работы в полноэкранном режиме",
   "Open workspace switcher": "Открыть переключатель рабочей области",
+  OpenClaw: "",
   Optional: "Необязательно",
   Options: "Параметры",
   "Order by": "Сортировать по",

@@ -1090,6 +1090,7 @@ export default {
   "Open work item": "Buka item pekerjaan",
   "Open work item in full screen": "Buka item pekerjaan dalam layar penuh",
   "Open workspace switcher": "Buka pengalih ruang kerja",
+  OpenClaw: "",
   Optional: "Opsional",
   Options: "Opsi",
   "Order by": "Urutkan berdasarkan",

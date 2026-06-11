@@ -1060,6 +1060,7 @@ export default {
   "Open work item": "打开工作项",
   "Open work item in full screen": "全屏打开工作项",
   "Open workspace switcher": "打开工作区切换器",
+  OpenClaw: "",
   Optional: "可选",
   Options: "选项",
   "Order by": "排序依据",

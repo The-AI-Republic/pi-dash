@@ -1093,6 +1093,7 @@ export default {
   "Open work item": "作業項目を開く",
   "Open work item in full screen": "作業項目を全画面で開く",
   "Open workspace switcher": "ワークスペース切り替えを開く",
+  OpenClaw: "",
   Optional: "オプション",
   Options: "オプション",
   "Order by": "並び替え",

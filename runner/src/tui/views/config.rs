@@ -21,7 +21,7 @@ use crate::service::reload::ReloadOutcome;
 
 use super::super::app::AppData;
 
-pub const AGENT_KINDS: &[&str] = &["codex", "claude-code", "cursor-agent"];
+pub const AGENT_KINDS: &[&str] = &["codex", "claude-code", "cursor-agent", "open-claw"];
 pub const LOG_LEVELS: &[&str] = &["trace", "debug", "info", "warn", "error"];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -35,6 +35,8 @@ pub enum FieldId {
     ClaudeModelDefault,
     CursorBinary,
     CursorModelDefault,
+    OpenClawBinary,
+    OpenClawModelDefault,
     ApprovalAutoReadonly,
     ApprovalAutoWrites,
     ApprovalAutoNetwork,
@@ -55,6 +57,8 @@ impl FieldId {
             FieldId::ClaudeModelDefault => "field:claude_model_default",
             FieldId::CursorBinary => "field:cursor_binary",
             FieldId::CursorModelDefault => "field:cursor_model_default",
+            FieldId::OpenClawBinary => "field:openclaw_binary",
+            FieldId::OpenClawModelDefault => "field:openclaw_model_default",
             FieldId::ApprovalAutoReadonly => "field:approval_auto_readonly",
             FieldId::ApprovalAutoWrites => "field:approval_auto_writes",
             FieldId::ApprovalAutoNetwork => "field:approval_auto_network",
@@ -74,6 +78,8 @@ impl FieldId {
             "field:claude_model_default" => FieldId::ClaudeModelDefault,
             "field:cursor_binary" => FieldId::CursorBinary,
             "field:cursor_model_default" => FieldId::CursorModelDefault,
+            "field:openclaw_binary" => FieldId::OpenClawBinary,
+            "field:openclaw_model_default" => FieldId::OpenClawModelDefault,
             "field:approval_auto_readonly" => FieldId::ApprovalAutoReadonly,
             "field:approval_auto_writes" => FieldId::ApprovalAutoWrites,
             "field:approval_auto_network" => FieldId::ApprovalAutoNetwork,
@@ -155,6 +161,18 @@ pub const FIELDS: &[FieldSpec] = &[
         kind: FieldKind::Text,
     },
     FieldSpec {
+        id: FieldId::OpenClawBinary,
+        label: "binary",
+        section: "OpenClaw",
+        kind: FieldKind::Text,
+    },
+    FieldSpec {
+        id: FieldId::OpenClawModelDefault,
+        label: "model_default",
+        section: "OpenClaw",
+        kind: FieldKind::Text,
+    },
+    FieldSpec {
         id: FieldId::ApprovalAutoReadonly,
         label: "auto_approve_readonly_shell",
         section: "Approval policy",
@@ -215,6 +233,7 @@ pub fn display_value(cfg: &Config, id: FieldId, runner_idx: usize) -> String {
             AgentKind::Codex => "codex".into(),
             AgentKind::ClaudeCode => "claude-code".into(),
             AgentKind::CursorAgent => "cursor-agent".into(),
+            AgentKind::OpenClaw => "open-claw".into(),
         },
         FieldId::CodexBinary => runner.codex.binary.clone(),
         FieldId::CodexModelDefault => runner.codex.model_default.clone().unwrap_or_default(),
@@ -230,6 +249,10 @@ pub fn display_value(cfg: &Config, id: FieldId, runner_idx: usize) -> String {
             .model_default
             .clone()
             .unwrap_or_default(),
+        FieldId::OpenClawBinary => runner.openclaw.binary.clone(),
+        FieldId::OpenClawModelDefault => {
+            runner.openclaw.model_default.clone().unwrap_or_default()
+        }
         FieldId::ApprovalAutoReadonly => runner
             .approval_policy
             .auto_approve_readonly_shell
@@ -309,6 +332,19 @@ pub fn set_text_value(
                 Some(s.to_string())
             };
         }
+        FieldId::OpenClawBinary => {
+            if s.trim().is_empty() {
+                return Err("binary cannot be empty".into());
+            }
+            runner.openclaw.binary = s.to_string();
+        }
+        FieldId::OpenClawModelDefault => {
+            runner.openclaw.model_default = if s.is_empty() {
+                None
+            } else {
+                Some(s.to_string())
+            };
+        }
         FieldId::AgentKind
         | FieldId::ApprovalAutoReadonly
         | FieldId::ApprovalAutoWrites
@@ -351,7 +387,8 @@ pub fn cycle_enum(cfg: &mut Config, id: FieldId, runner_idx: usize) {
             runner.agent.kind = match runner.agent.kind {
                 AgentKind::Codex => AgentKind::ClaudeCode,
                 AgentKind::ClaudeCode => AgentKind::CursorAgent,
-                AgentKind::CursorAgent => AgentKind::Codex,
+                AgentKind::CursorAgent => AgentKind::OpenClaw,
+                AgentKind::OpenClaw => AgentKind::Codex,
             };
         }
         FieldId::LogLevel => {
@@ -495,6 +532,10 @@ pub fn editable_lines(
         (
             "Cursor Agent",
             [FieldId::CursorBinary, FieldId::CursorModelDefault],
+        ),
+        (
+            "OpenClaw",
+            [FieldId::OpenClawBinary, FieldId::OpenClawModelDefault],
         ),
     ] {
         lines.push(section_header(section));

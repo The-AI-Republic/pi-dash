@@ -1098,6 +1098,7 @@ export default {
   "Open work item": "Відкрити робочий елемент",
   "Open work item in full screen": "Відкрити робочий елемент на весь екран",
   "Open workspace switcher": "Відкрити перемикач робочих просторів",
+  OpenClaw: "",
   Optional: "Необов'язково",
   Options: "Параметри",
   "Order by": "Сортувати за",
