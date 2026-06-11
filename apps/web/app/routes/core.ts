@@ -303,6 +303,10 @@ export const coreRoutes: RouteConfigEntry[] = [
         route(":workspaceSlug/runners/detail/:runnerId", "./(all)/[workspaceSlug]/runners/detail/[runnerId]/page.tsx"),
       ]),
 
+      // AI Assistant
+      route(":workspaceSlug/assistant", "./(all)/[workspaceSlug]/assistant/page.tsx"),
+      route(":workspaceSlug/assistant/:threadId", "./(all)/[workspaceSlug]/assistant/[threadId]/page.tsx"),
+
       // ====================================================================
       // SETTINGS SECTION
       // ====================================================================
