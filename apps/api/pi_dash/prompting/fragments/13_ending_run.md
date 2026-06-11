@@ -19,10 +19,14 @@ If any item fails this check, fix the workpad before exiting — `pidash workpad
 1. **If the work completed successfully:**
    - Pushed your branch (if any code changed).
    - Wrote the final workpad via `pidash workpad update` so its checkpoints and validation notes are accurate.
-   - Optionally posted a short completion comment (e.g. "Done — PR <url> merged-ready") if the human will benefit from the ping; otherwise the issue state change is signal enough.
-   - Moved the issue to a state in the `completed` group (usually "Done"):
-     `pidash issue patch {{ issue.identifier }} --state "Done"`
-     Pick the state from "Available states" whose `group` is `completed` and whose name best matches the workflow.
+   - Optionally posted a short completion comment (e.g. "Done — PR <url> ready for review") if the human will benefit from the ping; otherwise the issue state change is signal enough.
+   - Moved the issue to the correct next state. **Choosing this state is the single most common place runs get the ending wrong — read it carefully:**
+     - **If you opened a PR (a `code_change` task): move from `In Progress` to the `review` group — usually "In Review".** Opening the PR hands the work to a human reviewer; it is _not_ merged yet, so the issue is *not* done. Marking it `completed`/"Done" here falsely claims the change already landed.
+       `pidash issue patch {{ issue.identifier }} --state "In Review"`
+       Pick the state from "Available states" whose `group` is `review`. **Only** if this project exposes no `review`-group state at all, fall back to a `completed`-group state.
+     - **If the task produced no PR to review** (a `noncode` task — investigation, status check, CLI-only action, comment-only response — that is genuinely finished): move to the `completed` group, usually "Done".
+       `pidash issue patch {{ issue.identifier }} --state "Done"`
+     - In both cases, resolve the exact state name from "Available states" by matching the target `group` first, then the name.
 
 2. **If the run is blocked** (missing auth, missing access, or a decision only a human can make):
    - Wrote the final workpad noting the blocker and setting `Awaiting human reply` to point at the comment.

@@ -92,6 +92,35 @@ def test_assemble_contains_expanded_pidash_cli_subsections():
 
 
 @pytest.mark.unit
+def test_pr_work_routes_to_review_group_not_done():
+    """A `code_change` that opens a PR must land in the `review` group
+    ("In Review"), not `completed`/"Done".
+
+    Regression for runs that marked PR-producing issues "Done": the prompt
+    used to give ``--state "Done"`` as the *only* canonical success example,
+    so a literal-minded agent (Codex) copied it and skipped In Review, while
+    a judgement-driven agent (Claude) overrode it. The routing is now stated
+    explicitly so neither has to infer it.
+    """
+    body = assemble()
+
+    # The PR/success path must offer the review-group move...
+    assert '--state "In Review"' in body, "no In Review routing in assembled prompt"
+    # ...and it must appear before the Done example (In Review is the primary
+    # ending for a run that opened a PR; Done is the noncode fallback).
+    review_idx = body.find('--state "In Review"')
+    done_idx = body.find('--state "Done"')
+    assert review_idx != -1 and done_idx != -1
+    assert review_idx < done_idx, (
+        "Done is presented before In Review — In Review must be the primary "
+        "ending for PR-producing work"
+    )
+    # The default posture and ending-run guidance both name the review group
+    # as the destination for code-change/PR work.
+    assert "`review` group" in body
+
+
+@pytest.mark.unit
 def test_assemble_preserves_unindented_jinja_block_tags():
     # Renderer runs with lstrip_blocks=False, so leading whitespace on
     # {% if %} / {% endif %} / {% else %} / {% endfor %} lines bleeds into
