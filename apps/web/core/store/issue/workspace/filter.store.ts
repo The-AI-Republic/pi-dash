@@ -164,16 +164,17 @@ export class WorkspaceIssuesFilter extends IssueFilterHelperStore implements IWo
     // when the user has no saved preference for the view.
     const defaultDisplayFilters: IIssueDisplayFilterOptions =
       viewId === "all-issues"
-        ? { layout: EIssueLayoutTypes.KANBAN, group_by: "state_detail.group", order_by: "-created_at" }
+        ? { layout: EIssueLayoutTypes.KANBAN, group_by: "state", order_by: "-created_at" }
         : { layout: EIssueLayoutTypes.SPREADSHEET, order_by: "-created_at" };
     displayFilters = this.computedDisplayFilters(_filters?.display_filters, defaultDisplayFilters);
     // computedDisplayFilters only honors the defaults when NO local filters exist
-    // for the view. Ensure the work-items Board is the default whenever the user
-    // hasn't explicitly chosen a layout, even if other local filters were saved.
+    // for the view. Ensure the work-items Board (grouped by state) is the default
+    // whenever the user hasn't explicitly chosen a layout, even if other local
+    // filters were saved.
     if (viewId === "all-issues" && !_filters?.display_filters?.layout) {
       displayFilters.layout = EIssueLayoutTypes.KANBAN;
       if (!_filters?.display_filters?.group_by) {
-        displayFilters.group_by = "state_detail.group";
+        displayFilters.group_by = "state";
       }
     }
     displayProperties = this.computedDisplayProperties(_filters?.display_properties);
@@ -255,14 +256,12 @@ export class WorkspaceIssuesFilter extends IssueFilterHelperStore implements IWo
             _filters.displayFilters.sub_group_by = null;
             updatedDisplayFilters.sub_group_by = null;
           }
-          // Set a default group_by when switching to the board with none set.
-          // This is the workspace ("all issues") store, which spans projects, so
-          // group by state GROUP (Backlog/Started/Completed/…) rather than raw
-          // per-project states — the latter would produce a column per state of
-          // every project.
+          // Default the board to group by state when none is set (matches the
+          // project board). Users can switch to "State groups" for a single
+          // column per state group across projects via the Display dropdown.
           if (_filters.displayFilters.layout === "kanban" && _filters.displayFilters.group_by === null) {
-            _filters.displayFilters.group_by = "state_detail.group";
-            updatedDisplayFilters.group_by = "state_detail.group";
+            _filters.displayFilters.group_by = "state";
+            updatedDisplayFilters.group_by = "state";
           }
 
           runInAction(() => {

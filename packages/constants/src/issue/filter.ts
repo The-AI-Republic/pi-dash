@@ -194,9 +194,9 @@ export const ISSUE_DISPLAY_FILTERS_BY_PAGE: TIssueFiltersToDisplayByPageType = {
       list: {
         display_properties: ISSUE_DISPLAY_PROPERTIES_KEYS,
         display_filters: {
-          // "state_detail.group" (state groups) rather than per-project "state"
-          // since the workspace view spans projects.
-          group_by: ["state_detail.group", "priority", "project", "labels", "assignees", "created_by", null],
+          // "state" groups by the projects' actual states; "state_detail.group"
+          // rolls them up into the shared state groups (cleaner across projects).
+          group_by: ["state", "state_detail.group", "priority", "project", "labels", "assignees", "created_by", null],
           order_by: ["sort_order", "-created_at", "-updated_at", "start_date", "-priority"],
           type: ["active", "backlog"],
         },
@@ -208,7 +208,7 @@ export const ISSUE_DISPLAY_FILTERS_BY_PAGE: TIssueFiltersToDisplayByPageType = {
       kanban: {
         display_properties: ISSUE_DISPLAY_PROPERTIES_KEYS,
         display_filters: {
-          group_by: ["state_detail.group", "priority", "project", "labels", "assignees"],
+          group_by: ["state", "state_detail.group", "priority", "project", "labels", "assignees"],
           order_by: ["sort_order", "-created_at", "-updated_at", "start_date", "-priority"],
           type: ["active", "backlog"],
         },
