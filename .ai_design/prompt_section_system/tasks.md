@@ -42,7 +42,9 @@ Scope:
   front-matter, `validate_syntax()` on every default body, no
   orphan files in `sections/`
 - create `apps/api/pi_dash/prompting/recipes.py` (`RECIPES`,
-  kind names = `PhaseConfig.template_name` values)
+  kind names = `PhaseConfig.template_name` values); kind lookup
+  written as `kind_for(phase, work_kind)` with `work_kind` hardcoded
+  to `"coding"` (design §9.5 seam)
 - rewrite `composer.py`: `compose(kind, *, workspace, project, user,
 context) -> ComposedPrompt(text, manifest)`; `build_first_turn`
   keeps its signature, passes `user=None` for now (the §9.1 user rule
@@ -159,5 +161,10 @@ Scope:
   seam (§9.4)
 - Sticky per-engagement user resolution for ticks — manifest data is
   the evidence source (§9.1)
+- Work-kind axis (non-coding prompts): `project.default_work_kind` +
+  nullable `issue.work_kind` (dedicated enum fields, not free-form
+  labels) + `effective_work_kind()` resolver; new kind + recipe per
+  work kind; `(phase × work_kind)` matrix filled deliberately —
+  `kind_for(phase, work_kind)` is the seam (§9.5)
 - User-editable recipes (section order/membership) — explicitly not
   planned; recipes encode cross-section step numbering

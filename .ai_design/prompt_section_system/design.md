@@ -12,7 +12,10 @@
 > fail-loud with section/author attribution, and context-schema changes
 > re-validate all active overrides (§9.3); the project-level override
 > layer is deferred but `resolve_section()` accepts `project` from day
-> one and ignores it (§9.4).
+> one and ignores it (§9.4); the work-kind axis (non-coding prompts via
+> project default + per-issue override) is designed-but-deferred behind
+> a `kind_for(phase, work_kind)` seam with `work_kind` hardcoded to
+> `"coding"` in v1 (§9.5).
 >
 > **Scope:** replace seed-time fragment flattening and the whole-body
 > `PromptTemplate` override with compose-time assembly from a
@@ -203,7 +206,9 @@ RECIPES: dict[str, tuple[str, ...]] = {
 - Kind names align with `PhaseConfig.template_name`
   (`orchestration/agent_phases.py`): the phase registry keeps mapping
   state → kind; only the lookup target changes from a `PromptTemplate`
-  row to a recipe.
+  row to a recipe. The lookup is written as `kind_for(phase,
+work_kind)` with `work_kind` hardcoded to `"coding"` in v1 — the
+  seam for the deferred work-kind axis (§9.5).
 - Recipes are not user-editable in v1. Section _content_ is the
   customization surface; section _order and membership_ stays
   code-owned (it encodes step numbering and cross-references between
@@ -510,6 +515,60 @@ already per-binding by construction (§5.1). Revisit trigger: demand
 evidenced by per-project `{% if %}` branching appearing in real
 workspace overrides.
 
+### 9.5 Work-kind axis (non-coding In Progress prompts)
+
+**Designed, deferred.** Today every In Progress issue renders
+`coding-task`, and non-coding work (investigations, ops, comment-only
+responses) is handled by runtime classification _inside_ the prompt
+(the intro's Step 0.5 fork). To make non-coding work first-class, kind
+selection gains a second axis — **work kind** — resolved
+default-with-override, mirroring the existing project-cadence /
+per-issue-ticker pattern:
+
+```
+issue.work_kind set?  ──yes──►  use it
+        │ no
+        ▼
+project.default_work_kind  ──►  use it
+        │ (unset)
+        ▼
+"coding"                        (today's behavior; rollout is a no-op)
+```
+
+and the registry lookup becomes a matrix:
+
+```
+(phase, effective_work_kind) → kind → recipe
+STARTED × coding → "coding-task"     STARTED × ops → "ops-task"
+REVIEW  × coding → "review"          REVIEW  × ops → "review"  (shared
+                                     initially — the polymorphic review
+                                     prompt's GENERIC branch covers it;
+                                     fork to "ops-review" only when it
+                                     needs to diverge)
+```
+
+Design constraints settled now:
+
+- **Dedicated enum fields, not free-form labels.** UI may present the
+  kind as a label chip, but storage is `project.default_work_kind` +
+  nullable `issue.work_kind` (NULL = inherit) with an
+  `effective_work_kind()` resolver. Prompt selection must never depend
+  on user-renamable/deletable/stackable label rows — a closed value
+  set with a guaranteed single answer.
+- **Every cell of the (phase × kind) matrix is filled deliberately**,
+  even when cells share a recipe.
+- A new work kind = two dict entries + new task section(s) + golden
+  files; composer, overrides, validation, compiled view, and manifest
+  are all keyed on kind and need zero changes. Mid-stream kind changes
+  are safe by construction — runs are fresh invocations; the manifest
+  records what each run actually used.
+
+**v1 seam:** the kind lookup is written as
+`kind_for(phase, work_kind)` from day one with `work_kind` hardcoded
+to `"coding"`, so the axis lands later without touching call sites —
+same zero-cost-seam pattern as §9.2/§9.4. Revisit trigger: a concrete
+non-coding workflow (the ops/investigation use case) is prioritized.
+
 ## 10. Implementation phasing
 
 Four PRs, each shippable:
@@ -520,7 +579,9 @@ Four PRs, each shippable:
   review monolith into sections (review gains `pidash-cli` /
   `session-framing` — the one intended behavior change); golden-file
   snapshot tests of assembled output per kind; CI registry checks
-  (§3.2). `PromptTemplate` lookup bypassed but model untouched.
+  (§3.2); kind lookup written as `kind_for(phase, work_kind)` with
+  `work_kind="coding"` hardcoded (§9.5 seam). `PromptTemplate` lookup
+  bypassed but model untouched.
 - **PR 2 — Scheduler onto the composer.** `scheduler` recipe +
   sections, `build_scheduler_context`, `scheduler-task` dynamic body,
   call-site change in `bgtasks/scheduler.py` /
