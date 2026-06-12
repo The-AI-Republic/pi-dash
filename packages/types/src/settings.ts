@@ -12,6 +12,7 @@ export type TProfileSettingsTabs =
   | "general"
   | "preferences"
   | "ai-assistant"
+  | "auto-project-management"
   | "activity"
   | "notifications"
   | "security"

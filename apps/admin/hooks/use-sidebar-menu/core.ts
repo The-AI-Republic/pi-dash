@@ -4,13 +4,13 @@
  * See the LICENSE file for details.
  */
 
-import { Image, BrainCog, Cog, Mail } from "lucide-react";
+import { Image, BrainCog, Cog, Mail, RefreshCw } from "lucide-react";
 // pi dash imports
 import { LockIcon, WorkspaceIcon } from "@pi-dash/propel/icons";
 // types
 import type { TSidebarMenuItem } from "./types";
 
-export type TCoreSidebarMenuKey = "general" | "email" | "workspace" | "authentication" | "ai" | "image";
+export type TCoreSidebarMenuKey = "general" | "email" | "workspace" | "authentication" | "ai" | "loop" | "image";
 
 export const coreSidebarMenuLinks: Record<TCoreSidebarMenuKey, TSidebarMenuItem> = {
   general: {
@@ -42,6 +42,12 @@ export const coreSidebarMenuLinks: Record<TCoreSidebarMenuKey, TSidebarMenuItem>
     name: "Artificial intelligence",
     description: "Configure your OpenAI creds.",
     href: `/ai/`,
+  },
+  loop: {
+    Icon: RefreshCw,
+    name: "Loop",
+    description: "Scheduled AI project management jobs.",
+    href: `/loop/`,
   },
   image: {
     Icon: Image,

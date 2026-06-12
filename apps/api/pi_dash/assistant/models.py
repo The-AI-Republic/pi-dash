@@ -19,6 +19,11 @@ from django.conf import settings
 from django.db import models
 
 
+class ThreadKind(models.TextChoices):
+    CHAT = "chat", "Chat"
+    LOOP = "loop", "Loop"
+
+
 class AssistantThread(models.Model):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     workspace = models.ForeignKey(
@@ -28,6 +33,9 @@ class AssistantThread(models.Model):
         settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="assistant_threads"
     )
     title = models.CharField(max_length=255, blank=True, default="")
+    # "chat" = user-driven conversation (visible in the assistant UI);
+    # "loop" = Auto Project Management run thread (hidden from the thread list).
+    kind = models.CharField(max_length=16, choices=ThreadKind.choices, default=ThreadKind.CHAT)
     is_archived = models.BooleanField(default=False)
     # The single in-flight turn for this thread (one-active-turn flag). Nullable
     # FK rather than a bool so cancellation/sweep have a handle on the turn.
