@@ -24,9 +24,14 @@ def create_comment(ctx: RunContext[AssistantDeps], issue_id: str, body_md: str) 
     deps = ctx.deps
     issue = _scoping.get_issue(deps, issue_id)
 
-    # Mirror the comment endpoint's guest rule: guests may only comment on
-    # issues they created.
-    if deps.workspace_role <= ROLE_GUEST and issue.created_by_id != deps.user_id:
+    # Mirror the comment endpoint's guest rule exactly (app/views/issue/comment.py):
+    # a guest may comment only when the project enables guest_view_all_features
+    # or they created the issue.
+    if (
+        deps.workspace_role <= ROLE_GUEST
+        and not issue.project.guest_view_all_features
+        and issue.created_by_id != deps.user_id
+    ):
         raise _scoping.ToolPermissionError(
             "Guests can only comment on issues they created."
         )

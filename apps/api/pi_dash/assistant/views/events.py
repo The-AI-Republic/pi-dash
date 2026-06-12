@@ -60,9 +60,7 @@ async def assistant_event_stream(request, slug, thread_id):
         after = 0
 
     async def stream():
-        last = after
         for ev in await sync_to_async(_replay)(thread_id, after):
-            last = ev["seq"]
             yield _sse(ev)
 
         client = async_redis_instance()

@@ -12,9 +12,12 @@ See ``.ai_design/integrate_ai_agent/02-backend.md`` §1.
 
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 from pi_dash.assistant.models import AssistantThread, TurnStatus
+
+logger = logging.getLogger(__name__)
 
 
 def load_history(thread: AssistantThread) -> list:
@@ -24,13 +27,17 @@ def load_history(thread: AssistantThread) -> list:
     messages: list = []
     blobs = (
         thread.turns.filter(status=TurnStatus.COMPLETED, model_messages__isnull=False)
-        .order_by("created_at")
+        .order_by("created_at", "id")  # stable tie-break for same-microsecond turns
         .values_list("model_messages", flat=True)
     )
     for blob in blobs:
         if not blob:
             continue
-        messages.extend(ModelMessagesTypeAdapter.validate_python(blob))
+        try:
+            messages.extend(ModelMessagesTypeAdapter.validate_python(blob))
+        except Exception:  # noqa: BLE001 — a pydantic-ai format change shouldn't crash a turn
+            logger.warning("assistant: could not deserialize a stored turn's history; skipping it")
+            continue
     return messages
 
 

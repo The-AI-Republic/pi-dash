@@ -92,11 +92,15 @@ def _load_context(turn_id):
     return _Ctx(thread=thread, turn=turn, user=user, user_text=user_text, deps=deps)
 
 
-def _mark_running(ctx: _Ctx):
-    ctx.turn.status = TurnStatus.RUNNING
-    ctx.turn.started_at = timezone.now()
-    ctx.turn.save(update_fields=["status", "started_at"])
+def _mark_running(ctx: _Ctx) -> bool:
+    """Atomically move QUEUED→RUNNING. Returns False if already taken/cancelled."""
+    updated = AssistantTurn.objects.filter(pk=ctx.turn.id, status=TurnStatus.QUEUED).update(
+        status=TurnStatus.RUNNING, started_at=timezone.now()
+    )
+    if not updated:
+        return False
     events.append_event(ctx.thread, "turn_started", payload={"turn_id": str(ctx.turn.id)}, turn=ctx.turn)
+    return True
 
 
 def _is_cancelled(turn_id) -> bool:
@@ -162,6 +166,14 @@ def _complete_turn(ctx: _Ctx, model_messages, usage, model_used):
     events.prune_turn_deltas(ctx.turn)
 
 
+def _finalize_open_rows(turn, status: str):
+    """Close any still-streaming assistant rows for a turn (covers the
+    soft-time-limit signal and sweep paths, where the in-loop finalizer can't run)."""
+    AssistantMessage.objects.filter(turn=turn, status=MessageStatus.STREAMING).update(
+        status=status, completed_at=timezone.now()
+    )
+
+
 def _fail_turn(ctx: _Ctx, code: str, detail: str):
     with transaction.atomic():
         turn = AssistantTurn.objects.select_for_update().get(pk=ctx.turn.id)
@@ -170,6 +182,7 @@ def _fail_turn(ctx: _Ctx, code: str, detail: str):
         turn.error_detail = (detail or "")[:2000]
         turn.completed_at = timezone.now()
         turn.save(update_fields=["status", "error_code", "error_detail", "completed_at"])
+        _finalize_open_rows(turn, MessageStatus.FAILED)
         AssistantThread.objects.filter(pk=ctx.thread.id, active_turn_id=ctx.turn.id).update(active_turn=None)
     err = events.create_message(
         ctx.thread, MessageKind.ERROR, turn=ctx.turn, display_content=detail or code, status=MessageStatus.FAILED
@@ -190,6 +203,7 @@ def _cancel_turn(ctx: _Ctx):
         turn.status = TurnStatus.CANCELLED
         turn.completed_at = timezone.now()
         turn.save(update_fields=["status", "completed_at"])
+        _finalize_open_rows(turn, MessageStatus.CANCELLED)
         AssistantThread.objects.filter(pk=ctx.thread.id, active_turn_id=ctx.turn.id).update(active_turn=None)
     events.append_event(ctx.thread, "turn_cancelled", payload={"turn_id": str(ctx.turn.id)}, turn=ctx.turn)
     events.prune_turn_deltas(ctx.turn)
@@ -230,7 +244,7 @@ class _Streamer:
         self.message = await sync_to_async(_start_assistant_row)(self.ctx)
         self.text = ""
         self.pending = ""
-        self.last_flush = asyncio.get_event_loop().time()
+        self.last_flush = asyncio.get_running_loop().time()
         if initial:
             await self._append(initial)
 
@@ -241,7 +255,7 @@ class _Streamer:
             await self._start("")
         self.text += chunk
         self.pending += chunk
-        now = asyncio.get_event_loop().time()
+        now = asyncio.get_running_loop().time()
         if (now - self.last_flush) * 1000 >= DELTA_FLUSH_MS or len(self.pending) >= 200:
             await self._flush()
 
@@ -249,7 +263,7 @@ class _Streamer:
         if self.message is not None and self.pending:
             chunk, self.pending = self.pending, ""
             await sync_to_async(_emit_delta)(self.ctx, self.message, chunk)
-            self.last_flush = asyncio.get_event_loop().time()
+            self.last_flush = asyncio.get_running_loop().time()
 
     async def _finalize(self):
         if self.message is None:
@@ -278,7 +292,8 @@ async def _run_turn(turn_id: str):
     ctx = await sync_to_async(_load_context)(turn_id)
     if ctx is None:
         return
-    await sync_to_async(_mark_running)(ctx)
+    if not await sync_to_async(_mark_running)(ctx):
+        return  # turn was already taken, cancelled, or swept
 
     try:
         model = await sync_to_async(resolve_model_for_user)(ctx.user)

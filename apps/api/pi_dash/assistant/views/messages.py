@@ -67,7 +67,8 @@ class AssistantMessageListCreateEndpoint(AssistantBaseView):
         if len(content) > MAX_MESSAGE_CHARS:
             return Response({"error": "message_too_long"}, status=status.HTTP_400_BAD_REQUEST)
 
-        if get_config(request.user) is None or not get_config(request.user).has_api_key:
+        cfg = get_config(request.user)
+        if cfg is None or not cfg.has_api_key:
             return Response(
                 {"error": "llm_config_missing", "detail": "Configure your AI provider in Settings."},
                 status=status.HTTP_422_UNPROCESSABLE_ENTITY,

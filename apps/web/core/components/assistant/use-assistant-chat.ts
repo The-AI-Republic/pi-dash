@@ -4,7 +4,7 @@
  * See the LICENSE file for details.
  */
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import useSWR from "swr";
 import { AssistantService } from "@pi-dash/services";
 import type { IAssistantEvent, IAssistantMessage } from "@pi-dash/types";
@@ -49,6 +49,9 @@ export function useAssistantChat(slug: string | undefined, threadId: string | un
   const [busy, setBusy] = useState(false);
   const [sending, setSending] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // Track applied delta event seqs so an SSE reconnect (which replays from 0)
+  // doesn't double-append in-flight streamed text.
+  const appliedDeltas = useRef<Set<number>>(new Set());
 
   const { data: base, mutate } = useSWR<IAssistantMessage[]>(
     slug && threadId ? ["assistant-messages", slug, threadId] : null,
@@ -62,6 +65,7 @@ export function useAssistantChat(slug: string | undefined, threadId: string | un
     setById({});
     setBusy(false);
     setError(null);
+    appliedDeltas.current = new Set();
   }, [slug, threadId]);
 
   // Merge the durable transcript (SWR fetch/poll) into local state without
@@ -80,7 +84,10 @@ export function useAssistantChat(slug: string | undefined, threadId: string | un
   }, [base]);
 
   // Fallback turn-completion detection from polled state (covers a missed SSE
-  // turn_completed): no streaming row remains and the latest item is a reply.
+  // turn_completed): no streaming row remains and the latest item is a terminal
+  // reply. We require a terminal role (assistant/error) rather than "not user"
+  // so a tool_result mid-turn doesn't prematurely clear busy and re-enable the
+  // composer between tool calls.
   useEffect(() => {
     if (!busy) return;
     const list = Object.values(byId);
@@ -88,7 +95,9 @@ export function useAssistantChat(slug: string | undefined, threadId: string | un
     if (list.some((m) => m.status === "streaming")) return;
     let last: IAssistantMessage | undefined;
     for (const m of list) if (!last || m.seq > last.seq) last = m;
-    if (last && last.role !== "user") setBusy(false);
+    if (last && (last.role === "assistant" || last.role === "error") && last.status !== "streaming") {
+      setBusy(false);
+    }
   }, [byId, busy]);
 
   // SSE stream — smooth deltas + immediate lifecycle.
@@ -110,7 +119,8 @@ export function useAssistantChat(slug: string | undefined, threadId: string | un
         case "assistant_delta": {
           const id = event.message;
           const chunk = deltaText(payload);
-          if (id && chunk) {
+          if (id && chunk && !appliedDeltas.current.has(event.seq)) {
+            appliedDeltas.current.add(event.seq);
             setById((prev) =>
               prev[id] ? { ...prev, [id]: { ...prev[id], content: (prev[id].content || "") + chunk } } : prev
             );
@@ -166,10 +176,12 @@ export function useAssistantChat(slug: string | undefined, threadId: string | un
     if (!slug || !threadId) return;
     try {
       await service.cancel(slug, threadId);
+      // Leave busy=true; the turn_cancelled event (or the poll fallback when it
+      // observes the finalized row) clears it. Clearing here would re-enable the
+      // composer before the worker stops, yielding a 409 turn_active on resend.
     } catch {
       /* no-op */
     }
-    setBusy(false);
   }, [slug, threadId]);
 
   const messages = useMemo(() => {

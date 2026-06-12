@@ -28,6 +28,13 @@ def resolve_byok_model(user):
         raise LLMConfigMissing("No LLM provider is configured for this user.")
     if not cfg.model_name:
         raise LLMConfigMissing("No model name is configured.")
+    # Re-enforce the SSRF guard at execution time (not just at config save) so a
+    # base_url that was benign at save time but later re-points (DNS rebinding)
+    # at an internal address is still rejected before we connect.
+    from pi_dash.assistant import ssrf
+
+    if cfg.base_url and ssrf.is_blocked(cfg.base_url):
+        raise LLMConfigMissing("The configured provider endpoint is not allowed.")
     return build_model(
         provider_kind=cfg.provider_kind,
         base_url=cfg.base_url,

@@ -206,34 +206,49 @@ def update_issue(
     issue = _scoping.get_issue(deps, issue_id)
     _scoping.require_project_write(deps, str(issue.project_id))
 
-    from_state = issue.state
-    changed = []
-    to_state = None
-    if name is not None and name.strip():
-        issue.name = name.strip()[:255]
-        changed.append("name")
-    if description_md is not None:
-        issue.description_html = to_safe_html(description_md)
-        issue.description_json = {}
-        changed.append("description")
+    # Validate inputs before taking any lock.
+    prio = None
     if priority is not None:
         prio = priority.lower()
         if prio not in _VALID_PRIORITIES:
             raise ModelRetry(f"Priority must be one of {sorted(_VALID_PRIORITIES)}.")
-        issue.priority = prio
-        changed.append("priority")
+    to_state = None
     if state_id is not None:
         to_state = _resolve_state(deps, str(issue.project_id), state_id)
-        issue.state = to_state
-        changed.append("state")
-
-    if not changed:
+    if name is None and description_md is None and prio is None and to_state is None:
         raise ModelRetry("Nothing to update — provide at least one field to change.")
 
     user = _scoping.user_for(deps)
     run_id = None
-    with impersonate(user):
-        issue.save()
+    changed: list[str] = []
+    # Re-fetch under a row lock so concurrent UI edits aren't lost; only the
+    # changed columns are written back via update_fields.
+    with impersonate(user), transaction.atomic():
+        locked = Issue.objects.select_for_update().get(pk=issue.id)
+        from_state = locked.state
+        update_fields: list[str] = []
+        if name is not None and name.strip():
+            locked.name = name.strip()[:255]
+            changed.append("name")
+            update_fields.append("name")
+        if description_md is not None:
+            locked.description_html = to_safe_html(description_md)
+            locked.description_json = {}
+            changed.append("description")
+            update_fields += ["description_html", "description_json"]
+        if prio is not None:
+            locked.priority = prio
+            changed.append("priority")
+            update_fields.append("priority")
+        if to_state is not None:
+            locked.state = to_state
+            changed.append("state")
+            update_fields.append("state")
+        # include audit columns so update_fields doesn't drop them (BaseModel.save
+        # sets updated_by from the impersonated user; updated_at is auto_now).
+        update_fields += ["updated_at", "updated_by"]
+        locked.save(update_fields=update_fields)
+        issue = locked
 
         # Mirror the UI: a state change routes through the orchestration transition
         # handler, which may dispatch a coding run.
@@ -241,7 +256,7 @@ def update_issue(
             from pi_dash.orchestration import service as orchestration
 
             outcome = orchestration.handle_issue_state_transition(
-                issue, from_state, to_state, actor=user, dispatch_immediate=True
+                locked, from_state, to_state, actor=user, dispatch_immediate=True
             )
             if outcome.created_run is not None:
                 run_id = str(outcome.created_run.id)

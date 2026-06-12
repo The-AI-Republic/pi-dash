@@ -97,8 +97,8 @@ class UserLLMConfigTestEndpoint(BaseAPIView):
 
         try:
             ok, code, detail = _run_test(cfg, api_key)
-        except Exception as exc:  # noqa: BLE001
-            return Response({"ok": False, "error_code": "provider_unreachable", "detail": str(exc)[:200]})
+        except Exception:  # noqa: BLE001 — never echo raw errors (may reveal internal hosts)
+            return Response({"ok": False, "error_code": "provider_unreachable"})
 
         if ok:
             cfg.last_verified_at = timezone.now()
@@ -132,4 +132,4 @@ def _run_test(cfg: UserLLMConfig, api_key: str) -> tuple[bool, str, str]:
             return False, "provider_unreachable", "Could not reach the endpoint."
         if any(s in text for s in ("model", "not found", "does not exist")):
             return False, "model_invalid", "Model not accepted by the provider."
-        return False, "internal", str(exc)[:200]
+        return False, "provider_unreachable", "Could not reach the endpoint."

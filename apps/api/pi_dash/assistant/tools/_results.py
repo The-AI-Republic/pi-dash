@@ -23,7 +23,9 @@ def wrap_untrusted(text: Optional[str]) -> str:
     The closing delimiter is neutralized inside the content so it cannot be
     forged by a malicious issue/comment body.
     """
-    safe = (text or "").replace("</untrusted>", "<​/untrusted>")
+    # Neutralize both delimiters so injected content cannot open a nested frame
+    # or close the wrapper early (zero-width space breaks the tag for the model).
+    safe = (text or "").replace("</untrusted>", "<​/untrusted>").replace("<untrusted>", "<​untrusted>")
     return f"<untrusted>{safe}</untrusted>"
 
 

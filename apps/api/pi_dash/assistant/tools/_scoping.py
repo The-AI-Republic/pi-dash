@@ -14,6 +14,7 @@ always taken from ``deps`` (server-set), never from model arguments. See
 from __future__ import annotations
 
 from django.contrib.auth import get_user_model
+from pydantic_ai import ModelRetry
 
 from pi_dash.core import permissions as core_permissions
 from pi_dash.core.querysets import member_project_issues, user_issues_queryset
@@ -23,11 +24,14 @@ from pi_dash.db.models.state import State
 User = get_user_model()
 
 
-class ToolPermissionError(Exception):
+# These subclass ModelRetry so pydantic-ai feeds the message back to the model
+# (which then explains the denial / missing object to the user) instead of the
+# exception propagating out of the run and failing the whole turn as "internal".
+class ToolPermissionError(ModelRetry):
     """Raised when the requesting user lacks permission for a tool action."""
 
 
-class ToolNotFound(Exception):
+class ToolNotFound(ModelRetry):
     """Raised when a referenced object is outside the user's scope / missing."""
 
 
