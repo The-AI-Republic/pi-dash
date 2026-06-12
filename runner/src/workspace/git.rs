@@ -323,6 +323,95 @@ pub async fn salvage_wip(worktree: &Path, holder: Uuid, label: &str) -> Result<O
     Ok(sha)
 }
 
+/// Resolve a repo's default branch — `origin/HEAD`'s target if set, else the
+/// repo's current branch, else `main`. Used to branch fresh chat sessions from
+/// the right place (design `make_chat_issue_parallel_working` Phase 2).
+pub async fn default_branch(repo: &Path) -> Result<String> {
+    if let Ok(s) =
+        git_output(repo, &["symbolic-ref", "--quiet", "--short", "refs/remotes/origin/HEAD"]).await
+        && let Some(b) = s.strip_prefix("origin/")
+        && !b.is_empty()
+    {
+        return Ok(b.to_string());
+    }
+    if let Ok(Some(b)) = current_branch(repo).await {
+        return Ok(b);
+    }
+    Ok("main".to_string())
+}
+
+async fn rev_exists(worktree: &Path, rev: &str) -> bool {
+    git_output(worktree, &["rev-parse", "--verify", "--quiet", rev])
+        .await
+        .is_ok()
+}
+
+/// Start (or resume) a chat session's branch in the dedicated chat worktree
+/// (Phase 2). Any leftover dirty state from a previous session that did not end
+/// cleanly (e.g. a crash) is salvaged first, then the session branch is checked
+/// out: resumed from `origin/<branch>` if it already exists (revive), otherwise
+/// branched fresh from the default branch. Best-effort fetch keeps it offline-
+/// tolerant.
+pub async fn start_chat_session(
+    worktree: &Path,
+    branch: &str,
+    default_branch: &str,
+    holder: Uuid,
+) -> Result<()> {
+    validate_branch_name(branch)?;
+    if let Err(e) = salvage_wip(worktree, holder, "previous chat session (recovered)").await {
+        tracing::warn!(error = %e, "chat session: salvage of leftover state failed");
+    }
+    let _ = git_output(worktree, &["fetch", "origin"]).await;
+
+    let remote_session = format!("origin/{branch}");
+    let remote_default = format!("origin/{default_branch}");
+    let start_point = if rev_exists(worktree, &remote_session).await {
+        remote_session
+    } else if rev_exists(worktree, &remote_default).await {
+        remote_default
+    } else if rev_exists(worktree, default_branch).await {
+        default_branch.to_string()
+    } else {
+        // Brand-new repo with no usable start point: (re)label HEAD.
+        "HEAD".to_string()
+    };
+    git_output(worktree, &["checkout", "-B", branch, &start_point])
+        .await
+        .with_context(|| format!("git checkout -B {branch} {start_point}"))?;
+    Ok(())
+}
+
+/// Commit everything in the worktree and push the current branch, so a chat
+/// session never leaves work local-only (Phase 2). Returns `Ok(false)` when the
+/// tree is clean (nothing to persist). Push failures are logged, not fatal —
+/// the local commit is the durable artifact.
+pub async fn commit_and_push_all(worktree: &Path, message: &str) -> Result<bool> {
+    let status = git_output(worktree, &["status", "--porcelain"]).await?;
+    if status.trim().is_empty() {
+        return Ok(false);
+    }
+    let branch = match current_branch(worktree).await? {
+        Some(b) => b,
+        None => {
+            let name = "pidash/chat-recovered".to_string();
+            git_output(worktree, &["checkout", "-b", &name]).await.ok();
+            name
+        }
+    };
+    git_output(worktree, &["add", "-A"])
+        .await
+        .context("git add -A (chat)")?;
+    git_output(worktree, &["commit", "-q", "--no-verify", "-m", message])
+        .await
+        .context("git commit (chat)")?;
+    let refspec = format!("HEAD:refs/heads/{branch}");
+    if let Err(e) = git_output(worktree, &["push", "origin", &refspec]).await {
+        tracing::warn!(branch = %branch, error = %e, "chat session push failed; commit kept locally");
+    }
+    Ok(true)
+}
+
 /// Injection-level validation: reject names that could be mistaken for a git
 /// flag or contain characters that don't belong in a branch name. Does not
 /// enforce the full `git check-ref-format` rules — git itself catches those

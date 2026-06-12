@@ -71,11 +71,46 @@ pub async fn ensure(canonical: &Path, worktree: &Path) -> Result<PathBuf> {
     Ok(worktree.to_path_buf())
 }
 
+/// The deterministic branch a chat session works on, namespaced per runner so
+/// runners sharing a repo never collide on push (design §3.1.1), and derivable
+/// purely from ids the runner already has — which is what makes "revive" free:
+/// the same session id maps to the same branch, so resuming just checks it out.
+pub fn session_branch(runner_id: uuid::Uuid, chat_session_id: uuid::Uuid) -> String {
+    format!("chat/{runner_id}/{chat_session_id}")
+}
+
+/// Phase 2: start (or resume) the session's branch in the dedicated worktree.
+/// Fresh sessions branch from the repo's default branch; a returning session id
+/// resumes its pushed branch. Returns the branch name.
+pub async fn start_session(
+    canonical: &Path,
+    worktree: &Path,
+    runner_id: uuid::Uuid,
+    chat_session_id: uuid::Uuid,
+) -> Result<String> {
+    let default = git::default_branch(canonical)
+        .await
+        .unwrap_or_else(|_| "main".to_string());
+    let branch = session_branch(runner_id, chat_session_id);
+    git::start_chat_session(worktree, &branch, &default, chat_session_id)
+        .await
+        .with_context(|| format!("starting chat session branch {branch}"))?;
+    Ok(branch)
+}
+
+/// Phase 2: persist the session's work on its branch (commit + push) so nothing
+/// is left only on the dev machine. No-op when the tree is clean. Returns
+/// whether a commit was made.
+pub async fn end_session(worktree: &Path) -> Result<bool> {
+    git::commit_and_push_all(worktree, "chat(pidash): persist chat session changes").await
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::process::Command;
     use tempfile::TempDir;
+    use uuid::Uuid;
 
     fn git(dir: &Path, args: &[&str]) {
         let out = Command::new("git")
@@ -89,6 +124,29 @@ mod tests {
             args,
             String::from_utf8_lossy(&out.stderr)
         );
+    }
+
+    /// A canonical clone with a real bare `origin` to push to and `origin/HEAD`
+    /// set to `main` — what a pooled runner's canonical looks like.
+    fn canonical_with_origin() -> (TempDir, PathBuf) {
+        let tmp = TempDir::new().unwrap();
+        let origin = tmp.path().join("origin.git");
+        std::fs::create_dir_all(&origin).unwrap();
+        git(&origin, &["init", "--bare", "-q", "-b", "main"]);
+        let canonical = tmp.path().join("canonical");
+        git(
+            tmp.path(),
+            &["clone", "-q", origin.to_str().unwrap(), "canonical"],
+        );
+        git(&canonical, &["config", "user.email", "t@t.io"]);
+        git(&canonical, &["config", "user.name", "t"]);
+        git(&canonical, &["config", "commit.gpgsign", "false"]);
+        std::fs::write(canonical.join("README.md"), "hello\n").unwrap();
+        git(&canonical, &["add", "-A"]);
+        git(&canonical, &["commit", "-q", "-m", "init"]);
+        git(&canonical, &["push", "-q", "origin", "main"]);
+        git(&canonical, &["remote", "set-head", "origin", "main"]);
+        (tmp, canonical)
     }
 
     /// A canonical clone with one commit on `main` — what `PoolHandle::canonical`
@@ -168,5 +226,79 @@ mod tests {
         assert_eq!(p, wt);
         assert!(git::is_git_repo(&wt), "recreated as a healthy worktree");
         assert!(wt.join("README.md").exists());
+    }
+
+    // ---- Phase 2: session branch lifecycle ----
+
+    #[tokio::test]
+    async fn session_start_uses_per_runner_namespaced_branch() {
+        let (tmp, canonical) = canonical_with_origin();
+        let wt = tmp.path().join("chat-worktree");
+        ensure(&canonical, &wt).await.unwrap();
+        let rid = Uuid::new_v4();
+        let sid = Uuid::new_v4();
+
+        let branch = start_session(&canonical, &wt, rid, sid).await.unwrap();
+        assert_eq!(branch, format!("chat/{rid}/{sid}"));
+        // The worktree is now on that branch.
+        let cur = git::current_branch(&wt).await.unwrap();
+        assert_eq!(cur.as_deref(), Some(branch.as_str()));
+    }
+
+    #[tokio::test]
+    async fn session_end_commits_and_pushes_then_revive_resumes() {
+        let (tmp, canonical) = canonical_with_origin();
+        let rid = Uuid::new_v4();
+        let sid = Uuid::new_v4();
+
+        // Session 1 in worktree A: do some work, then end (commit + push).
+        let wt_a = tmp.path().join("chat-a");
+        ensure(&canonical, &wt_a).await.unwrap();
+        let branch = start_session(&canonical, &wt_a, rid, sid).await.unwrap();
+        std::fs::write(wt_a.join("note.md"), "work from chat\n").unwrap();
+        assert!(
+            end_session(&wt_a).await.unwrap(),
+            "a dirty session commits + pushes"
+        );
+
+        // The branch is now on origin.
+        let ls = Command::new("git")
+            .current_dir(&wt_a)
+            .args(["ls-remote", "origin", &format!("refs/heads/{branch}")])
+            .output()
+            .unwrap();
+        assert!(
+            !String::from_utf8_lossy(&ls.stdout).trim().is_empty(),
+            "session branch was pushed to origin"
+        );
+
+        // Revive in a FRESH worktree B with the same ids → resumes the pushed
+        // branch with its work intact (the deterministic-branch revive, §3.7).
+        let wt_b = tmp.path().join("chat-b");
+        ensure(&canonical, &wt_b).await.unwrap();
+        let branch_b = start_session(&canonical, &wt_b, rid, sid).await.unwrap();
+        assert_eq!(branch_b, branch);
+        assert!(
+            wt_b.join("note.md").exists(),
+            "revive resumes the pushed session branch with its work"
+        );
+        assert_eq!(
+            std::fs::read_to_string(wt_b.join("note.md")).unwrap(),
+            "work from chat\n"
+        );
+    }
+
+    #[tokio::test]
+    async fn session_end_is_noop_on_clean_tree() {
+        let (tmp, canonical) = canonical_with_origin();
+        let wt = tmp.path().join("chat-worktree");
+        ensure(&canonical, &wt).await.unwrap();
+        start_session(&canonical, &wt, Uuid::new_v4(), Uuid::new_v4())
+            .await
+            .unwrap();
+        assert!(
+            !end_session(&wt).await.unwrap(),
+            "a read-only session persists nothing"
+        );
     }
 }

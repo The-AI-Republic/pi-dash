@@ -1397,7 +1397,10 @@ struct ChatWorker {
 
 impl ChatWorker {
     async fn run(&mut self, chat_session_id: uuid::Uuid) {
-        const CHAT_IDLE_TIMEOUT: Duration = Duration::from_secs(30 * 60);
+        // Phase 2: a session idles out after 5 minutes of silence, then its work
+        // is committed + pushed (below). Reviving (a new message for the same
+        // session id) spawns a fresh worker that resumes the pushed branch.
+        const CHAT_IDLE_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 
         let mut bridge: Option<AgentBridge> = None;
         let mut workspace_path: Option<std::path::PathBuf> = None;
@@ -1522,7 +1525,24 @@ impl ChatWorker {
         }
         let _ = self.active_tx.send(false);
         self.state.set_chat_active(false).await;
-        let _ = &self.runner_paths;
+
+        // Phase 2: persist this session's work on its branch (commit + push) so
+        // nothing is left only on the dev machine and a revive can resume it.
+        // No-op on a clean tree, so read-only sessions push nothing.
+        if self.pool.is_some() {
+            let root = crate::workspace::chat_worktree::path_for(&self.runner_paths);
+            if root.exists() {
+                match crate::workspace::chat_worktree::end_session(&root).await {
+                    Ok(true) => {
+                        tracing::info!(%chat_session_id, "chat session changes committed and pushed")
+                    }
+                    Ok(false) => {}
+                    Err(e) => {
+                        tracing::warn!(%chat_session_id, error = %e, "chat session persist failed")
+                    }
+                }
+            }
+        }
     }
 
     async fn send_timing_event(
@@ -2067,7 +2087,7 @@ impl ChatWorker {
 
     async fn resolve_chat_workspace(
         &mut self,
-        _chat_session_id: uuid::Uuid,
+        chat_session_id: uuid::Uuid,
         cwd: Option<&str>,
     ) -> Result<std::path::PathBuf> {
         // The chat lane runs in a DEDICATED per-runner worktree managed outside
@@ -2077,9 +2097,21 @@ impl ChatWorker {
         // §3.6). `workspace.working_dir` stays vestigial for pooled runners.
         let workspace_path = if let Some(pool) = &self.pool {
             let chat_path = crate::workspace::chat_worktree::path_for(&self.runner_paths);
-            crate::workspace::chat_worktree::ensure(pool.canonical(), &chat_path)
+            let root = crate::workspace::chat_worktree::ensure(pool.canonical(), &chat_path)
                 .await
-                .map_err(|e| anyhow::anyhow!("dedicated chat worktree: {e:#}"))?
+                .map_err(|e| anyhow::anyhow!("dedicated chat worktree: {e:#}"))?;
+            // Phase 2: start (or resume) this session's branch so its work is
+            // committed + pushed on session end and reconstructable on revive.
+            // Runs once per session (the caller only resolves when unset).
+            crate::workspace::chat_worktree::start_session(
+                pool.canonical(),
+                &root,
+                self.runner_paths.runner_id,
+                chat_session_id,
+            )
+            .await
+            .map_err(|e| anyhow::anyhow!("chat session branch: {e:#}"))?;
+            root
         } else if self.runner_config.workdir.is_some() {
             // Work-dir runner whose pool failed to construct — fail rather
             // than silently running in a vestigial directory.
