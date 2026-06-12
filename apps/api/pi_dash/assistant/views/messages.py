@@ -48,8 +48,15 @@ class AssistantMessageListCreateEndpoint(AssistantBaseView):
         thread = self.owned_thread(request, slug, thread_id)
         if thread is None:
             return Response({"error": "not_found"}, status=status.HTTP_404_NOT_FOUND)
-        after = int(request.query_params.get("after", 0) or 0)
-        limit = max(1, min(int(request.query_params.get("limit", 100) or 100), 200))
+        try:
+            after = int(request.query_params.get("after", 0) or 0)
+        except (TypeError, ValueError):
+            after = 0
+        try:
+            limit = int(request.query_params.get("limit", 100) or 100)
+        except (TypeError, ValueError):
+            limit = 100
+        limit = max(1, min(limit, 200))
         qs = AssistantMessage.objects.filter(thread=thread, seq__gt=after).order_by("seq")[:limit]
         return Response([events.message_envelope(m) for m in qs])
 

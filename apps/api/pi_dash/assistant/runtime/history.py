@@ -6,8 +6,10 @@
 
 The ONLY replay source is ``AssistantTurn.model_messages`` — the verbatim
 serialized pydantic-ai message list captured per completed turn. Concatenating
-completed turns yields a valid, correctly-alternating history by construction.
-See ``.ai_design/integrate_ai_agent/02-backend.md`` §1.
+completed turns yields a valid, correctly-alternating history by construction,
+so truncation happens at turn granularity: only the most recent
+``ASSISTANT_HISTORY_MAX_TURNS`` completed turns are replayed, bounding token
+cost on long threads. See ``.ai_design/integrate_ai_agent/02-backend.md`` §1.
 """
 
 from __future__ import annotations
@@ -15,21 +17,25 @@ from __future__ import annotations
 import logging
 from typing import Any
 
+from django.conf import settings
+
 from pi_dash.assistant.models import AssistantThread, TurnStatus
 
 logger = logging.getLogger(__name__)
 
 
 def load_history(thread: AssistantThread) -> list:
-    """Return the prior ``list[ModelMessage]`` for this thread (completed turns)."""
+    """Return the prior ``list[ModelMessage]`` for this thread (most recent completed turns)."""
     from pydantic_ai.messages import ModelMessagesTypeAdapter
 
+    max_turns = max(1, int(getattr(settings, "ASSISTANT_HISTORY_MAX_TURNS", 40)))
     messages: list = []
-    blobs = (
+    blobs = list(
         thread.turns.filter(status=TurnStatus.COMPLETED, model_messages__isnull=False)
-        .order_by("created_at", "id")  # stable tie-break for same-microsecond turns
-        .values_list("model_messages", flat=True)
+        .order_by("-created_at", "-id")  # stable tie-break for same-microsecond turns
+        .values_list("model_messages", flat=True)[:max_turns]
     )
+    blobs.reverse()  # restore chronological order after taking the newest N
     for blob in blobs:
         if not blob:
             continue

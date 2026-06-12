@@ -57,8 +57,8 @@ export class AssistantService extends APIService {
       });
   }
 
-  async listMessages(slug: string, threadId: string, after = 0): Promise<IAssistantMessage[]> {
-    return this.get(`${this.base(slug)}/threads/${threadId}/messages/`, { after })
+  async listMessages(slug: string, threadId: string, after = 0, limit = 100): Promise<IAssistantMessage[]> {
+    return this.get(`${this.base(slug)}/threads/${threadId}/messages/`, { params: { after, limit } })
       .then((res) => res?.data)
       .catch((err) => {
         throw err?.response?.data;

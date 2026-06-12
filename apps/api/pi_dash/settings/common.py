@@ -221,6 +221,10 @@ ASSISTANT_BLOCK_PRIVATE_URLS = os.environ.get("ASSISTANT_BLOCK_PRIVATE_URLS", "f
 )
 ASSISTANT_TURN_SOFT_LIMIT = int(os.environ.get("ASSISTANT_TURN_SOFT_LIMIT", 300))
 ASSISTANT_TURN_HARD_LIMIT = int(os.environ.get("ASSISTANT_TURN_HARD_LIMIT", 330))
+# Max completed turns replayed to the model as history. Bounds per-turn token
+# cost (and context-window use) on long threads; the durable transcript shown
+# in the UI is unaffected — only what the model sees is truncated.
+ASSISTANT_HISTORY_MAX_TURNS = int(os.environ.get("ASSISTANT_HISTORY_MAX_TURNS", 40))
 
 if REDIS_SSL:
     CACHES = {

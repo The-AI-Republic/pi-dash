@@ -91,6 +91,27 @@ def test_message_lists_in_envelope_shape(world, fernet_key, mocker):
     assert "content" in res.data[0]
 
 
+def test_message_list_paginates_and_tolerates_bad_params(world, fernet_key):
+    from pi_dash.assistant.models import MessageKind
+    from pi_dash.assistant.runtime import events
+
+    c = client_for(world.member)
+    thread = AssistantThread.objects.create(workspace=world.ws, user=world.member)
+    for i in range(3):
+        events.create_message(thread, MessageKind.USER, display_content=f"m{i}")
+    url = f"{base(world.ws)}/threads/{thread.id}/messages/"
+
+    # after/limit page through the transcript by seq
+    res = c.get(url, {"after": 1, "limit": 1})
+    assert res.status_code == 200
+    assert [m["seq"] for m in res.data] == [2]
+
+    # non-numeric params fall back to defaults instead of a 500
+    res = c.get(url, {"after": "abc", "limit": "abc"})
+    assert res.status_code == 200
+    assert len(res.data) == 3
+
+
 def test_cannot_access_other_users_thread(world, fernet_key):
     other_thread = AssistantThread.objects.create(workspace=world.ws, user=world.admin)
     c = client_for(world.member)

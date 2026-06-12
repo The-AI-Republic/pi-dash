@@ -13,6 +13,23 @@ const service = new AssistantService();
 
 const bySeq = (a: IAssistantMessage, b: IAssistantMessage): number => a.seq - b.seq;
 
+// Server page size for transcript fetches. Threads are capped server-side
+// (MAX_THREAD_MESSAGES), so the pagination loop below is bounded to a few pages.
+const PAGE_SIZE = 100;
+
+async function fetchTranscript(slug: string, threadId: string): Promise<IAssistantMessage[]> {
+  const out: IAssistantMessage[] = [];
+  let after = 0;
+  for (;;) {
+    // eslint-disable-next-line no-await-in-loop -- pages are sequential; each cursor depends on the previous page
+    const batch = await service.listMessages(slug, threadId, after, PAGE_SIZE);
+    out.push(...batch);
+    if (batch.length < PAGE_SIZE) break;
+    after = batch[batch.length - 1].seq;
+  }
+  return out;
+}
+
 function deltaText(payload: Record<string, unknown>): string {
   const params = payload?.params;
   if (params && typeof params === "object" && !Array.isArray(params)) {
@@ -55,7 +72,7 @@ export function useAssistantChat(slug: string | undefined, threadId: string | un
 
   const { data: base, mutate } = useSWR<IAssistantMessage[]>(
     slug && threadId ? ["assistant-messages", slug, threadId] : null,
-    () => service.listMessages(slug!, threadId!, 0),
+    () => fetchTranscript(slug!, threadId!),
     // Poll while a turn is running so messages render without depending on SSE.
     { refreshInterval: busy ? 1000 : 0 }
   );
