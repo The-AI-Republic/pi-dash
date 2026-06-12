@@ -34,18 +34,27 @@ the state model correct for when the guards come off.
       shutdown send `ChatCommand::Close`/`Shutdown` and emit a terminal
       `ChatClosed`; persistent worktree is left intact.
 
-### 1.B Dedicated chat worktree provider
+### 1.B Dedicated chat worktree provider (design §3.1, §3.6, §3.7)
 
 - [ ] Add a `chat_worktree` provider in `runner/src/workspace/` that lazily
-      creates one worktree per runner under `chat-worktrees/<runner_id>` (or a
-      `chat-` namespace **outside** the pool's `wt-<int>` scan, `pool.rs:814`),
-      via `git::worktree_add` (`git.rs:136`); reused across sessions.
-- [ ] Do **not** route through `PoolHandle::acquire` (avoids clean-on-release
-      wiping persistence and avoids `free_worktrees()` capacity loss — design §3.1).
-- [ ] Startup adopt/prune for orphaned `chat-worktrees/<runner_id>` after a crash
-      (re-implements the cleanup the pool gives leases for free).
-- [ ] Bind `ChatWorker` to this worktree, replacing the `LeaseKind::Session`
-      acquire in `resolve_chat_workspace` (`supervisor.rs:2027–2046`).
+      creates one worktree **per runner** under `chat-worktrees/<runner_id>`
+      (**outside** the pool's `wt-<int>` scan, `pool.rs:814`) via
+      `git::worktree_add` (`git.rs:136`).
+- [ ] `resolve_chat_workspace` (pooled runner, `supervisor.rs:2027–2046`) returns
+      this dedicated path and **no longer** calls `pool.acquire(LeaseKind::Session)`
+      — worktree lifetime is decoupled from `ChatWorker` lifetime, so a
+      re-spawned worker for the same runner reuses the same path/state (§3.7).
+- [ ] Keep the cloud-supplied `cwd` handling as a **sub-path within** the chat
+      worktree (reuse the existing escape-rejection in `resolve_chat_workspace`);
+      cwd binds once per session — no per-turn re-rooting needed (§3.6).
+- [ ] **Bespoke** startup recovery (graft at the instance loop near pool spawn,
+      `supervisor.rs:121`/`:199`, before `RunnerLoop` starts): `git worktree
+    prune` + verify `chat-worktrees/<runner_id>` is healthy (`git -C … rev-parse`)
+      → **reuse as-is if healthy (keep dirty state)**, `worktree remove --force` +
+      recreate-lazily if broken. **No salvage/reset/clean** (that would wipe the
+      persistent state — §3.7).
+- [ ] Confirm legacy `pool.is_none()` runners are unaffected (chat stays in
+      `working_dir`, serialized per §3.5).
 
 ### 1.C Remove the cross-lane guards (pooled runners only)
 
@@ -117,13 +126,14 @@ the state model correct for when the guards come off.
 - [ ] Concurrent lanes for legacy (non-pooled) runners (needs worktree infra or
       read-only-only chat there).
 
-## Open questions (resolve before / during 1.B)
+## Open questions
 
-- [ ] **Codex `app-server` cwd binding** — can a chat conversation be (re)rooted
-      in the dedicated worktree without losing context? (Affects only codex.)
-- [ ] **Persistence vs. crash-reap** — exact startup adopt/prune semantics for a
-      half-created/stale `chat-worktrees/<runner_id>`.
-- [ ] **Disk eviction** — policy if many runners on one machine each hold a
-      persistent chat worktree (idle-evict? cap? — likely Phase 2/3).
+- [x] **Codex `app-server` cwd binding** — RESOLVED (design §3.6): chat binds cwd
+      once per session, which all agents support; no per-turn re-rooting needed.
+- [x] **Persistence vs. crash-reap** — RESOLVED (design §3.7): per-runner keyed,
+      decoupled from `ChatWorker` lifetime, bespoke prune/repair that preserves
+      dirty state.
+- [ ] **Disk eviction (Phase 2/3)** — policy if many runners on one machine each
+      hold a persistent chat worktree (idle-evict? cap?).
 - [ ] **Per-runner vs per-(runner × agent kind)** chat worktree if a runner can
       switch agent kind (default: per runner).

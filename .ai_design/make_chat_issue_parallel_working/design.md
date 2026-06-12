@@ -294,6 +294,72 @@ exclusion** (keep the guards' effect for `pool.is_none()`); concurrent lanes are
 a **pooled-runner-only** feature in this iteration. The guard removal in §3.2
 must therefore be conditional on `pool.is_some()`.
 
+### 3.6 Agent cwd binding — once-per-session is sufficient (codex resolved)
+
+The chat lane already binds cwd **once per session**, which every agent supports,
+so the dedicated worktree needs **no per-turn re-rooting** and codex is **not** a
+blocker (resolves the §9 open risk):
+
+- **Codex** pins cwd at session start on both axes — the `app-server` OS cwd at
+  spawn (`login_shell_command`, `codex/app_server.rs:45`) and `thread/start
+{cwd}` on the first warm/run (`codex/bridge.rs:129`, with a cached
+  `thread_id`); `turn/start` carries no cwd. A live codex bridge cannot be
+  re-rooted — and does not need to be.
+- **Claude** pins OS cwd at spawn (`claude_code/process.rs:57`); `warm`/`run`
+  ignore their cwd arg.
+- **Cursor / OpenClaw** bind cwd **per turn** (fresh one-shot process,
+  `cursor_agent/bridge.rs:166`, `openclaw/bridge.rs:171`) — flexible, but not
+  needed here.
+- **Chat path today** resolves `workspace_path` once on the first warm/turn and
+  caches it for the `ChatWorker`'s life (`supervisor.rs:1528/1651`); the bridge
+  is spawned rooted there. Later `cwd` values from the cloud are ignored.
+
+**Resolution:** the dedicated worktree is simply the path `resolve_chat_workspace`
+returns. Because the chat conversation lives in one cwd for its whole session —
+exactly what codex/claude require and what cursor/openclaw tolerate — all four
+agents work unchanged. Read turns "roam" sibling issue desks by **absolute path**
+(`git -C <desk> …`), not by changing cwd, so the fixed-cwd model does not limit
+reads.
+
+### 3.7 Chat-worktree lifecycle & crash recovery (persistence resolved)
+
+The chat worktree must **outlive any single chat session** (terminal-style) and
+be keyed to the **runner**, not a session. This requires decoupling it from both
+the pool and the `ChatWorker` lifetime, plus a **bespoke** recovery that
+_preserves_ dirty state (resolves the §9 open risk):
+
+- **Keying & lifetime.** Path `<data_dir>/chat-worktrees/<runner_id>` (runner,
+  not `chat_session_id`). Today `resolve_chat_workspace` acquires a pool
+  `LeaseKind::Session` desk keyed by `chat_session_id`, and `ChatWorker` drops it
+  on exit (30-min idle / `Shutdown` / `Close`, `supervisor.rs:1481`),
+  re-acquiring a _different_ desk next session — no persistence. **Change:** for
+  pooled runners, `resolve_chat_workspace` returns the dedicated per-runner
+  worktree and does **not** lease from the pool, so worktree lifetime is
+  independent of `ChatWorker` lifetime. A re-spawned `ChatWorker` for the same
+  runner resolves to the **same** path and reuses its state.
+- **Lazy create.** Created on first chat for the runner (`git::worktree_add`,
+  `git.rs:136`); absent for runners that never chat.
+- **Crash recovery — NOT pool-style.** The pool's `adopt_existing_desks`
+  (`pool.rs:814`) _salvages → resets → cleans_ every desk (`git::salvage_wip` +
+  `reset_clean` + `detach_head`) — i.e. it **wipes** the working tree. That is the
+  **opposite** of what the chat worktree needs. Instead, a per-runner startup
+  pass (grafted at the instance loop near the pool spawn,
+  `supervisor.rs:121`/`:199`, before the `RunnerLoop` starts) does only: `git
+worktree prune` on the main repo (drop stale admin entries), and for an
+  existing `chat-worktrees/<runner_id>` verify it is a healthy git worktree (`git
+-C … rev-parse`) — **reuse as-is if healthy** (keep dirty state),
+  `worktree remove --force` + recreate-lazily if broken. **No salvage, no reset,
+  no clean** in Phase 1; Phase 2's commit+push lifecycle is where
+  salvage-equivalent behavior lands.
+- **Capacity bonus.** Removing the chat `Session` lease means chat no longer
+  consumes a pool desk, so `free_worktrees()` (advertised to the matcher) now
+  reflects issue runs only — the §2.3 starvation interaction is **eliminated**,
+  not just mitigated.
+- **Conversation continuity** is orthogonal: the agent thread/session resumes via
+  `local_session_id`/`local_thread_id` (cloud-tracked), while the worktree
+  persists by `runner_id` — together they give terminal-style "same files, resume
+  the conversation".
+
 ## 4. Lifecycle (MVP)
 
 1. **First chat message** → lazily create the dedicated chat worktree (from the
@@ -415,19 +481,22 @@ and the cloud `BUSY` reconciliation in §3.4 are mandatory; shipping guard remov
 without them yields contradictory runner status, a stall-watchdog mis-fire risk,
 and ungraceful chat teardown.
 
+**Resolved during this review (see §3.6, §3.7):**
+
+- ~~**Codex `app-server` cwd binding.**~~ Chat binds cwd **once per session**,
+  which every agent supports; the dedicated worktree is just the path
+  `resolve_chat_workspace` returns. **Not a blocker** (§3.6).
+- ~~**Persistence vs. crash-reap.**~~ Per-runner keyed, decoupled from the
+  `ChatWorker` lifetime, with a bespoke startup prune/repair that **preserves**
+  dirty state (not the pool's salvage/clean). **Resolved** (§3.7).
+
 **Open risks to resolve during implementation:**
 
-1. **Persistence vs. crash-reap.** Managing the chat worktree outside the pool
-   means re-implementing orphan cleanup. Verify the startup adopt/prune handles a
-   half-created or stale `chat-worktrees/<runner_id>` after a crash.
-2. **Codex `app-server` cwd binding.** A codex _conversation_ may bind cwd at
-   creation; confirm the chat conversation can be (re)rooted in the dedicated
-   worktree without losing context. Affects only the codex agent.
-3. **Status semantics across the fleet.** Confirm no other cloud consumer treats
+1. **Status semantics across the fleet.** Confirm no other cloud consumer treats
    `Runner.status == busy` as "idle for chat" beyond the sites in §3.4 (search for
    `RunnerStatus.BUSY` / `status="busy"` readers).
-4. **Heartbeat consistency.** After B1, verify the poll body never emits
+2. **Heartbeat consistency.** After B1, verify the poll body never emits
    `status:"idle"` with a non-null `in_flight_run` under concurrent lanes.
-5. **Matcher capacity.** Since the chat worktree is outside the pool,
+3. **Matcher capacity.** Since the chat worktree is outside the pool,
    `free_worktrees()` is unaffected — confirm no assumption that "a chatting
    runner has reduced capacity".
