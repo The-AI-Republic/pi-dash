@@ -119,7 +119,9 @@ def select_runner_in_pod(pod: Pod) -> Optional[Runner]:
             last_heartbeat_at__gte=alive_threshold,
         )
         .exclude(agent_runs__status__in=BUSY_STATUSES)
-        .exclude(pk__in=_runners_with_active_chat_ids())
+        # An active chat no longer excludes a runner from issue assignment:
+        # chat and issue runs are concurrent (design §3.4). BUSY_STATUSES still
+        # keeps the assign lane single-tenant (one issue at a time).
         # Capacity hint (design §6.4): among equally-eligible idle runners,
         # prefer one whose work-dir pool reports a free desk. This is a
         # PREFERENCE, never a gate — runners with ``free_worktrees`` of 0 or
@@ -231,7 +233,9 @@ def drain_pod(pod: Pod) -> int:
                 last_heartbeat_at__gte=alive_threshold,
             )
             .exclude(agent_runs__status__in=BUSY_STATUSES)
-            .exclude(pk__in=_runners_with_active_chat_ids())
+            # An active chat no longer excludes a runner from issue assignment:
+            # chat and issue runs are concurrent (design §3.4). BUSY_STATUSES
+            # still keeps the assign lane single-tenant (one issue at a time).
             .order_by("-last_heartbeat_at")
         )
         for runner in idle_runners:
@@ -285,7 +289,9 @@ def drain_for_runner(runner: Runner) -> bool:
                 last_heartbeat_at__gte=alive_threshold,
             )
             .exclude(agent_runs__status__in=BUSY_STATUSES)
-            .exclude(pk__in=_runners_with_active_chat_ids())
+            # An active chat no longer excludes a runner from issue assignment:
+            # chat and issue runs are concurrent (design §3.4). BUSY_STATUSES
+            # still keeps the assign lane single-tenant (one issue at a time).
             .first()
         )
         if locked is None:
@@ -363,7 +369,9 @@ def select_runner_for_run(run: AgentRun) -> Optional[Runner]:
             last_heartbeat_at__gte=alive_threshold,
         )
         .exclude(agent_runs__status__in=BUSY_STATUSES)
-        .exclude(pk__in=_runners_with_active_chat_ids())
+        # An active chat no longer excludes a runner from issue assignment:
+        # chat and issue runs are concurrent (design §3.4). BUSY_STATUSES still
+        # keeps the assign lane single-tenant (one issue at a time).
         .order_by("-last_heartbeat_at")
         .first()
     )

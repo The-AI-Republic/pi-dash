@@ -77,7 +77,10 @@ function disabledReason(runner?: IRunner, session?: IAgentChatSession | null): s
   if (!runner) return "Loading";
   if (runner.status === "offline") return "Runner offline";
   if (runner.status === "revoked") return "Runner revoked";
-  if (runner.status === "busy") return "Runner busy";
+  // "busy" no longer blocks chat: the runner serves chat concurrently with an
+  // issue run in a dedicated worktree, and "busy" is also reported while a chat
+  // turn is in flight. The mid-turn case is covered by the active_message check
+  // below. See design make_chat_issue_parallel_working §3.4.
   if (session?.status === "closed") return "Session closed";
   if (session?.active_message_id || session?.active_turn_id) return "Response in progress";
   return null;
