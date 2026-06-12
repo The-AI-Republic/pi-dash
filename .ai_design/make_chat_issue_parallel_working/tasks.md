@@ -49,7 +49,7 @@ the state model correct for when the guards come off.
       cwd binds once per session — no per-turn re-rooting needed (§3.6).
 - [ ] **Bespoke** startup recovery (graft at the instance loop near pool spawn,
       `supervisor.rs:121`/`:199`, before `RunnerLoop` starts): `git worktree
-    prune` + verify `chat-worktrees/<runner_id>` is healthy (`git -C … rev-parse`)
+  prune` + verify `chat-worktrees/<runner_id>` is healthy (`git -C … rev-parse`)
       → **reuse as-is if healthy (keep dirty state)**, `worktree remove --force` +
       recreate-lazily if broken. **No salvage/reset/clean** (that would wipe the
       persistent state — §3.7).
@@ -106,25 +106,43 @@ the state model correct for when the guards come off.
 - [ ] Reported status is `Busy` whenever either lane is active; never
       `idle + in_flight_run`.
 
-## Phase 2 — Clean-session lifecycle (deferred, design §7)
+## Phase 2 — Clean-session lifecycle (DONE, runner-side)
 
-- [ ] Fresh branch from default on session start (unless user specifies),
-      **per-runner namespaced** (e.g. `chat/<runner_id>/…`) so runners sharing a
-      workdir don't collide on push (design §3.1.1).
-- [ ] Mandatory commit + push to remote on session end; never local-only.
-- [ ] Auto-create a PR only when the operator explicitly asks.
-- [ ] Session lifetime ~5 min idle; reviving by typing restarts the countdown
-      (resume from remote branch + agent session id).
+- [x] Fresh branch from default on session start, **per-runner namespaced**
+      (`chat/<runner_id>/<chat_session_id>`), §3.1.1 — `chat_worktree::start_session`.
+- [x] Mandatory commit + push to remote on session end; never local-only —
+      `chat_worktree::end_session` / `git::commit_and_push_all`.
+- [x] Session lifetime 5 min idle; revive resumes the pushed branch (the branch
+      name is deterministic from the session id, so revive needs no cloud
+      coordination).
+- [ ] Auto-create a PR only when the operator explicitly asks. **Cloud-side, not
+      runner.** The runner now pushes the chat branch; turning it into a PR (and
+      detecting "the operator asked") mirrors the issue-run → GitHub-sync path and
+      belongs in `apps/api` + the web UI. Out of scope for the runner change.
 
-## Phase 3 — Hygiene & ergonomics (deferred)
+## Phase 3 — Hygiene & ergonomics (backlog — see status, NOT a coherent build phase)
 
-- [ ] Per-lane `ObservabilitySnapshot` (full B2 fix) so chat-agent telemetry
-      doesn't collide with the run agent.
-- [ ] TTL cleanup for chat-authored branches that never became PRs.
-- [ ] Read-only concierge mode + first-class cross-worktree reads.
-- [ ] Build-cache sharing / `node_modules` symlink into the chat worktree.
-- [ ] Concurrent lanes for legacy (non-pooled) runners (needs worktree infra or
-      read-only-only chat there).
+- [~] Per-lane `ObservabilitySnapshot`. **Effectively already satisfied / YAGNI.**
+  The snapshot is assign-lane-owned and the chat lane writes none (B2). A full
+  per-lane split is only meaningful once chat-agent telemetry is _collected_,
+  which isn't planned and would also be a wire-protocol change with no consumer.
+- [ ] TTL cleanup for chat branches. **Cloud-side / policy.** Only sessions that
+      _wrote_ push a branch, and those carry real user work — auto-deleting them
+      from the runner is unsafe. The cloud knows PR/merge status and should own a
+      long-TTL sweep. Building destructive remote-branch deletion in the runner
+      would be the wrong call.
+- [ ] Read-only concierge mode + cross-worktree reads. **Large, optional.** Design
+      §3.1 concluded read-only enforcement is _not needed_ (chat owns its tree).
+      This is an opt-in mode requiring per-agent sandbox/permission work
+      (codex sandbox, claude permission mode, approval policy) — a feature in its
+      own right, only if a product reason emerges.
+- [ ] Build-cache sharing / `node_modules` symlink. **Speculative optimization
+      (YAGNI).** Only worth it for large projects with heavy per-worktree build
+      artifacts; build it when a real disk problem is observed, not before.
+- [ ] Concurrent lanes for legacy (non-pooled) runners. **Needs new infra.**
+      Non-pooled runners have no canonical clone / pool, so the dedicated-worktree
+      approach doesn't apply; giving them worktree isolation is an architecture
+      change the design deliberately deferred (§3.5).
 
 ## Open questions
 
