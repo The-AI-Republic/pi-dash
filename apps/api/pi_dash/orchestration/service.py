@@ -29,6 +29,8 @@ from pi_dash.orchestration.agent_phases import (
     phase_config_for,
 )
 from pi_dash.prompting.composer import build_first_turn
+from pi_dash.prompting.recipes import RecipeNotFound
+from pi_dash.prompting.registry import PromptRegistryError
 from pi_dash.prompting.renderer import PromptRenderError
 from pi_dash.runner.models import (
     AgentRun,
@@ -40,6 +42,12 @@ from pi_dash.runner.models import (
 )
 
 logger = logging.getLogger(__name__)
+
+#: Exceptions from the compose pipeline that should fail the run cleanly rather
+#: than crash dispatch: a render failure, or a recipe/registry inconsistency
+#: (defense-in-depth — the startup check in ``prompting.apps`` makes the latter
+#: unlikely, but a mid-deploy skew must not strand dispatch).
+_PROMPT_BUILD_ERRORS = (PromptRenderError, RecipeNotFound, PromptRegistryError)
 
 #: DEPRECATED: retained only for backward compatibility with external
 #: importers (tests, integrations). Internal callers must use
@@ -423,9 +431,9 @@ def _create_continuation_run(
         )
         try:
             run.prompt = build_first_turn(issue, run)
-        except PromptRenderError as exc:
+        except _PROMPT_BUILD_ERRORS as exc:
             run.status = AgentRunStatus.FAILED
-            run.error = f"prompt render failed: {exc}"
+            run.error = f"prompt build failed: {exc}"
             run.ended_at = timezone.now()
             run.save(update_fields=["status", "error", "ended_at"])
             logger.exception(
@@ -505,9 +513,9 @@ def _create_and_dispatch_run(
         )
         try:
             run.prompt = build_first_turn(issue, run)
-        except PromptRenderError as exc:
+        except _PROMPT_BUILD_ERRORS as exc:
             run.status = AgentRunStatus.FAILED
-            run.error = f"prompt render failed: {exc}"
+            run.error = f"prompt build failed: {exc}"
             run.ended_at = timezone.now()
             run.save(update_fields=["status", "error", "ended_at"])
             logger.exception("orchestration: prompt render failed for issue %s", issue.id)
@@ -605,9 +613,9 @@ def dispatch_scheduler_run(
         )
         try:
             run.prompt = build_scheduler_turn(binding, run)
-        except PromptRenderError as exc:
+        except _PROMPT_BUILD_ERRORS as exc:
             run.status = AgentRunStatus.FAILED
-            run.error = f"prompt render failed: {exc}"
+            run.error = f"prompt build failed: {exc}"
             run.ended_at = timezone.now()
             run.save(update_fields=["status", "error", "ended_at"])
             logger.exception(

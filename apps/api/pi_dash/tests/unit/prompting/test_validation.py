@@ -73,6 +73,25 @@ def test_validate_override_minimal_context_trap(db, workspace):
 
 
 @pytest.mark.unit
+def test_no_orphan_sections_every_registry_section_in_a_recipe():
+    from pi_dash.prompting import registry
+
+    for key in registry.REGISTRY:
+        assert kinds_for_section(key), f"section {key!r} is in no recipe (orphan)"
+
+
+@pytest.mark.unit
+def test_validate_override_fails_closed_for_orphan_section(db, workspace, monkeypatch):
+    # Force the "section used by no recipe" condition; validation must refuse
+    # rather than save an unrendered (never-validated) override.
+    monkeypatch.setattr(
+        "pi_dash.prompting.validation.kinds_for_section", lambda key: []
+    )
+    with pytest.raises(OverrideValidationError):
+        validate_override("implementation", "anything valid", workspace=workspace)
+
+
+@pytest.mark.unit
 def test_kinds_for_section_shared_vs_unique():
     # implementation is coding-task only; session-framing is in all three.
     assert kinds_for_section("implementation") == ["coding-task"]
@@ -107,6 +126,46 @@ def _issue_context_keys(db, workspace, create_user):
         workspace=workspace, prompt="", work_item=issue, created_by=create_user
     )
     return set(build_context(issue, run).keys())
+
+
+def _key_paths(obj, prefix=""):
+    """Recursively collect dotted key paths of a context dict, descending into
+    nested dicts and the first element of list-of-dicts. Lets the sync test
+    catch *nested* key drift (e.g. a new ``issue.foo``), not just top-level."""
+    paths = set()
+    if isinstance(obj, dict):
+        for k, v in obj.items():
+            p = f"{prefix}.{k}" if prefix else k
+            paths.add(p)
+            paths |= _key_paths(v, p)
+    elif isinstance(obj, list) and obj and isinstance(obj[0], dict):
+        paths |= _key_paths(obj[0], f"{prefix}[]")
+    return paths
+
+
+@pytest.mark.unit
+def test_issue_sample_context_paths_match_builder(db, workspace, create_user):
+    from pi_dash.db.models import Issue, Project, State
+    from pi_dash.runner.models import AgentRun
+
+    project = Project.objects.create(
+        name="Sync Project", identifier="SYN", workspace=workspace, created_by=create_user,
+        repo_url="git@github.com:a/b.git", base_branch="main",
+    )
+    state = State.objects.create(name="In Progress", project=project, group="started")
+    issue = Issue.objects.create(
+        name="Sync issue", workspace=workspace, project=project, state=state,
+        created_by=create_user, priority="high",
+    )
+    run = AgentRun.objects.create(
+        workspace=workspace, prompt="", work_item=issue, created_by=create_user
+    )
+    builder_paths = _key_paths(build_context(issue, run))
+    # The populated sample is the structural reference; it must cover every
+    # path the builder can emit (nested included).
+    sample_paths = _key_paths(sample_contexts("coding-task")[0])
+    missing = builder_paths - sample_paths
+    assert not missing, f"sample context missing builder paths: {sorted(missing)}"
 
 
 @pytest.mark.unit

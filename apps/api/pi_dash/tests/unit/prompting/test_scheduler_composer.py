@@ -78,6 +78,27 @@ def test_scheduler_turn_renders_and_injects_task_body(binding, fake_run):
 
 
 @pytest.mark.unit
+def test_dispatch_catches_recipe_error_and_fails_run(binding, monkeypatch):
+    """H2: a RecipeNotFound/PromptRegistryError from compose must fail the run
+    cleanly (not crash dispatch). dispatch_scheduler_run should return a FAILED
+    run, not raise."""
+    from pi_dash.orchestration.service import dispatch_scheduler_run
+    from pi_dash.prompting.recipes import RecipeNotFound
+    from pi_dash.runner.models import AgentRunStatus
+
+    def _boom(b, run):
+        raise RecipeNotFound("recipe vanished mid-deploy")
+
+    # dispatch_scheduler_run imports build_scheduler_turn locally → patch the source.
+    monkeypatch.setattr("pi_dash.prompting.composer.build_scheduler_turn", _boom)
+    run, fail_reason = dispatch_scheduler_run(binding)
+    assert run is not None
+    assert run.status == AgentRunStatus.FAILED
+    assert "prompt build failed" in run.error
+    assert fail_reason is None  # a run was produced → not a short-circuit
+
+
+@pytest.mark.unit
 def test_operator_prompt_jinja_is_not_parsed(binding, fake_run):
     # The key §5.1 guarantee: operator-authored prompt text is injected as a
     # context variable, never parsed as Jinja. Literal braces survive verbatim.

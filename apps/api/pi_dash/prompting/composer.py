@@ -89,26 +89,76 @@ def effective_customizability(section: registry.PromptSection, workspace) -> str
     return section.customizable
 
 
-def _active_override(workspace, user, section_key: str):
-    """Fetch the active override row for a scope, or ``None``.
+#: Override-index keys: ("user", section_key) and ("workspace", section_key).
+_SCOPE_USER = "user"
+_SCOPE_WORKSPACE = "workspace"
 
-    ``user is None`` selects the workspace-level row (``user IS NULL``).
+
+def load_override_index(workspace, user) -> Dict[tuple, Any]:
+    """Bulk-load active overrides for a scope into ``{(scope, key): row}``.
+
+    Two scopes at most are loaded (the requesting user's rows + the
+    workspace-level rows), in a single query, so a full recipe resolves with
+    no per-section round-trips. The partial-unique constraints guarantee at
+    most one active row per (scope, key).
     """
+    if workspace is None:
+        return {}
+    from django.db.models import Q
+
     from pi_dash.prompting.models import PromptSectionOverride
 
-    qs = PromptSectionOverride.objects.filter(
-        workspace=workspace, section_key=section_key, is_active=True
-    )
-    qs = qs.filter(user__isnull=True) if user is None else qs.filter(user=user)
-    return qs.order_by("-updated_at").first()
+    scope_filter = Q(user__isnull=True)
+    if user is not None:
+        scope_filter |= Q(user=user)
+    rows = PromptSectionOverride.objects.filter(
+        workspace=workspace, is_active=True
+    ).filter(scope_filter)
+    index: Dict[tuple, Any] = {}
+    for row in rows:
+        scope = _SCOPE_WORKSPACE if row.user_id is None else _SCOPE_USER
+        index[(scope, row.section_key)] = row
+    return index
 
 
-def resolve_section(key: str, *, workspace, project, user) -> ResolvedSection:
+def _lookup_override(workspace, user, key, override_index):
+    """Resolve the (scope, row) for ``key`` from a preloaded index, or fall
+    back to a direct query when no index is provided (single-section callers)."""
+    if override_index is not None:
+        if user is not None:
+            row = override_index.get((_SCOPE_USER, key))
+            if row is not None:
+                return _SCOPE_USER, row
+        return _SCOPE_WORKSPACE, override_index.get((_SCOPE_WORKSPACE, key))
+
+    from pi_dash.prompting.models import PromptSectionOverride
+
+    def _active(qs_user):
+        qs = PromptSectionOverride.objects.filter(
+            workspace=workspace, section_key=key, is_active=True
+        )
+        qs = qs.filter(user__isnull=True) if qs_user is None else qs.filter(user=qs_user)
+        # The partial-unique constraint guarantees at most one active row.
+        return qs.first()
+
+    if user is not None:
+        row = _active(user)
+        if row is not None:
+            return _SCOPE_USER, row
+    return _SCOPE_WORKSPACE, _active(None)
+
+
+def resolve_section(
+    key: str, *, workspace, project, user, override_index: Optional[Dict] = None
+) -> ResolvedSection:
     """Resolve one section's body via the precedence chain.
 
     user override → workspace override → registry default. Locked sections
     skip the chain entirely. ``project`` is accepted (every call site has one)
     and ignored in v1 — the §9.4 seam for a future project-level rung.
+
+    ``override_index`` (from :func:`load_override_index`) avoids per-section
+    queries when resolving a whole recipe; omit it for one-off resolution.
     """
     section = registry.get_section(key)
     default = ResolvedSection(
@@ -125,25 +175,15 @@ def resolve_section(key: str, *, workspace, project, user) -> ResolvedSection:
         # No workspace context (e.g. a global preview): defaults only.
         return default
 
-    if user is not None:
-        row = _active_override(workspace, user, key)
-        if row is not None:
-            return ResolvedSection(
-                key=section.key,
-                title=section.title,
-                customizable=section.customizable,
-                body=row.body,
-                source=f"user:{user.id}",
-                version=row.version,
-            )
-    row = _active_override(workspace, None, key)
+    scope, row = _lookup_override(workspace, user, key, override_index)
     if row is not None:
+        source = f"user:{user.id}" if scope == _SCOPE_USER else SOURCE_WORKSPACE
         return ResolvedSection(
             key=section.key,
             title=section.title,
             customizable=section.customizable,
             body=row.body,
-            source=SOURCE_WORKSPACE,
+            source=source,
             version=row.version,
         )
     return default
@@ -178,19 +218,48 @@ def _assemble(resolved: List[ResolvedSection]) -> tuple[str, List[ManifestEntry]
     return template_body, manifest
 
 
-def _attributed_render_error(
-    exc: PromptRenderError, manifest: List[ManifestEntry]
-) -> PromptRenderError:
-    """Re-wrap a render failure with section/source attribution (§6.3)."""
+def _find_culprit_section(
+    resolved: List[ResolvedSection],
+    manifest: List[ManifestEntry],
+    exc: PromptRenderError,
+    context: Optional[Dict[str, Any]],
+) -> Optional[ManifestEntry]:
+    """Best-effort: identify which section caused a render failure.
+
+    First tries the Jinja error lineno (works for syntax errors). Jinja's
+    runtime ``UndefinedError`` — the common case — carries no lineno, so when
+    that fails and a context is available, re-render each *overridden* section
+    in isolation; the first that raises is the culprit. This pinpoints a bad
+    override without depending on lineno.
+    """
     cause = exc.__cause__
     lineno = getattr(cause, "lineno", None) or getattr(exc, "lineno", None)
-    culprit: Optional[ManifestEntry] = None
     if lineno:
         for entry in manifest:
             if entry.line_start <= lineno <= entry.line_end:
-                culprit = entry
-                break
+                return entry
+    if context is None:
+        return None
+    by_key = {e.section_key: e for e in manifest}
+    for section in resolved:
+        if section.source == SOURCE_DEFAULT:
+            continue  # defaults are validated in CI; suspect overrides first
+        try:
+            render(section.body, context)
+        except PromptRenderError:
+            return by_key.get(section.key)
+    return None
+
+
+def _attributed_render_error(
+    exc: PromptRenderError,
+    manifest: List[ManifestEntry],
+    resolved: Optional[List[ResolvedSection]] = None,
+    context: Optional[Dict[str, Any]] = None,
+) -> PromptRenderError:
+    """Re-wrap a render failure with section/source attribution (§6.3)."""
     detail = str(exc)
+    culprit = _find_culprit_section(resolved or [], manifest, exc, context)
     if culprit is not None:
         return PromptRenderError(
             f"section '{culprit.section_key}' (source={culprit.source}, "
@@ -214,15 +283,18 @@ def compose(
     rendering fails — the caller fails the run cleanly, never a 500.
     """
     recipe = recipes.recipe_for(kind)
+    override_index = load_override_index(workspace, user)
     resolved = [
-        resolve_section(key, workspace=workspace, project=project, user=user)
+        resolve_section(
+            key, workspace=workspace, project=project, user=user, override_index=override_index
+        )
         for key in recipe
     ]
     template_body, manifest = _assemble(resolved)
     try:
         text = render(template_body, context)
     except PromptRenderError as exc:
-        raise _attributed_render_error(exc, manifest) from exc
+        raise _attributed_render_error(exc, manifest, resolved, context) from exc
     return ComposedPrompt(
         text=text, manifest=manifest, template_body=template_body, resolved=resolved
     )
@@ -234,8 +306,11 @@ def compile_template(kind: str, *, workspace, project, user) -> ComposedPrompt:
     :class:`ComposedPrompt` whose ``text`` is the raw assembled body.
     """
     recipe = recipes.recipe_for(kind)
+    override_index = load_override_index(workspace, user)
     resolved = [
-        resolve_section(key, workspace=workspace, project=project, user=user)
+        resolve_section(
+            key, workspace=workspace, project=project, user=user, override_index=override_index
+        )
         for key in recipe
     ]
     template_body, manifest = _assemble(resolved)

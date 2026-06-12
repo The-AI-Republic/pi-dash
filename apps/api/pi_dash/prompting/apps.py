@@ -18,6 +18,7 @@ class PromptingConfig(AppConfig):
         # bad recipe/section edit fails loudly here rather than at first render.
         # (The legacy ``PromptTemplate`` seed machinery in ``seed.py`` is kept
         # only for historical-migration replay; the table drop is deferred.)
+        from pi_dash.orchestration.agent_phases import PHASES
         from pi_dash.prompting import recipes, registry
 
         for kind, section_keys in recipes.RECIPES.items():
@@ -26,3 +27,11 @@ class PromptingConfig(AppConfig):
                     raise registry.PromptRegistryError(
                         f"recipe {kind!r} references unknown section {key!r}"
                     )
+        # Every ticking phase must map to a real recipe, else a run would only
+        # fail at creation time with a confusing RecipeNotFound.
+        for cfg in PHASES.values():
+            if cfg.template_name not in recipes.RECIPES:
+                raise registry.PromptRegistryError(
+                    f"phase {cfg.state_name!r} maps to unknown recipe "
+                    f"{cfg.template_name!r}"
+                )

@@ -233,7 +233,16 @@ def validate_override(
     except PromptSyntaxError as exc:
         raise OverrideValidationError(f"invalid Jinja syntax: {exc}") from exc
 
-    for kind in kinds_for_section(section_key):
+    kinds = kinds_for_section(section_key)
+    if not kinds:
+        # Fail closed: a section present in the registry but in no recipe would
+        # otherwise be saved with zero render validation, and silently become
+        # live if a future recipe adds it. Refuse rather than save unvalidated.
+        raise OverrideValidationError(
+            f"section {section_key!r} is not used by any prompt kind; "
+            "it cannot be overridden until a recipe references it"
+        )
+    for kind in kinds:
         template_body = _compose_with_candidate(
             kind, section_key, candidate_body, workspace=workspace, project=project, user=user
         )

@@ -212,7 +212,9 @@ def fire_scheduler_binding(self, binding_id: str) -> bool:
     # Re-fetch the binding without SFU; the dispatcher only needs the FK
     # values it copies onto the AgentRun.
     binding_for_dispatch = (
-        SchedulerBinding.objects.select_related("scheduler")
+        SchedulerBinding.objects.select_related(
+            "scheduler", "project", "workspace", "actor"
+        )
         .filter(pk=binding_pk)
         .first()
     )
@@ -222,8 +224,14 @@ def fire_scheduler_binding(self, binding_id: str) -> bool:
 
     run, fail_reason = dispatch_scheduler_run(binding_for_dispatch)
 
-    # ----- Phase 3a: Success — record the run pointer -----
+    # ----- Phase 3a: a run was produced — record the run pointer -----
     if run is not None:
+        # A prompt-build failure still produces a run (marked FAILED) so the
+        # tick is recorded and next_run_at stays advanced. But surface the
+        # failure on ``last_error`` too, otherwise a permanently-broken prompt
+        # fails invisibly every tick (operators watch last_error, not
+        # last_run.status). A healthy run clears last_error.
+        run_failed = run.status == AgentRunStatus.FAILED
         with transaction.atomic():
             success = (
                 SchedulerBinding.objects.select_for_update(of=("self",))
@@ -232,15 +240,23 @@ def fire_scheduler_binding(self, binding_id: str) -> bool:
             )
             if success is not None:
                 success.last_run = run
-                success.last_error = ""
+                success.last_error = (
+                    f"prompt build failed: {run.error}"[:LAST_ERROR_MAX_LEN]
+                    if run_failed
+                    else ""
+                )
                 # Use save() so auto_now on updated_at fires; queryset
                 # .update() bypasses it (`auto_now` is set in pre_save).
                 success.save(update_fields=["last_run", "last_error", "updated_at"])
         logger.info(
-            "scheduler.fire: dispatched run=%s binding=%s",
+            "scheduler.fire: dispatched run=%s binding=%s failed=%s",
             run.pk,
             binding_pk,
+            run_failed,
         )
+        # A run was produced and next_run_at stays advanced (no rollback),
+        # so this is a dispatch, not a skip — return True regardless of the
+        # run's terminal status.
         return True
 
     # ----- Phase 3b: Failure — rollback the next_run_at advance -----

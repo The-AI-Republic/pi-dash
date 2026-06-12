@@ -40,7 +40,7 @@ from pi_dash.db.models.issue_agent_ticker import (
     jitter_seconds,
 )
 from pi_dash.orchestration.agent_phases import is_ticking_state
-from pi_dash.runner.models import AgentRun
+from pi_dash.runner.models import AgentRun, AgentRunTrigger
 
 logger = logging.getLogger(__name__)
 
@@ -354,9 +354,12 @@ def reset_ticker_after_comment_and_run(issue: Issue) -> Optional[IssueAgentTicke
 # ---------------------------------------------------------------------------
 
 
-TRIGGER_TICK = "tick"
-TRIGGER_COMMENT_AND_RUN = "comment_and_run"
-TRIGGER_RUN_AI = "run_ai"
+# Sourced from ``AgentRunTrigger`` so a value change propagates here rather
+# than silently diverging — these strings are passed straight to
+# ``AgentRun.trigger`` and feed ``run_is_human_triggered`` (design §9.1).
+TRIGGER_TICK = AgentRunTrigger.TICK.value
+TRIGGER_COMMENT_AND_RUN = AgentRunTrigger.COMMENT_AND_RUN.value
+TRIGGER_RUN_AI = AgentRunTrigger.RUN_AI.value
 
 
 def _resolve_pod_for_issue(issue: Issue):

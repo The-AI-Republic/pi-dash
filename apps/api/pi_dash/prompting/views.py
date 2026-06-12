@@ -37,8 +37,11 @@ from pi_dash.db.models.issue import Issue
 from pi_dash.db.models.workspace import Workspace, WorkspaceMember
 from pi_dash.prompting import recipes, registry
 from pi_dash.prompting.composer import (
+    SOURCE_DEFAULT,
+    SOURCE_WORKSPACE,
     compile_template,
     compose,
+    load_override_index,
     resolve_section,
 )
 from pi_dash.prompting.context import build_context, build_scheduler_context
@@ -97,21 +100,25 @@ def _resolve_scope(request) -> str:
     return SCOPE_WORKSPACE if scope == SCOPE_WORKSPACE else SCOPE_USER
 
 
-def _overrides_by_key(workspace, user) -> dict:
-    """Map ``section_key -> PromptSectionOverride`` for one scope's active
-    rows. ``user is None`` selects the workspace-level rows."""
-    qs = PromptSectionOverride.objects.filter(workspace=workspace, is_active=True)
-    qs = qs.filter(user__isnull=True) if user is None else qs.filter(user=user)
-    return {row.section_key: row for row in qs}
-
-
-def _section_breakdown(kind: str, *, workspace, user, overrides: dict) -> list:
+def _section_breakdown(kind: str, *, workspace, user) -> list:
     """Resolve every section in ``kind``'s recipe and attach ``needs_attention``
-    from the matching active override row."""
+    from the override row that actually resolved.
+
+    Bulk-loads overrides once (no per-section query) via the composer's index.
+    """
+    override_index = load_override_index(workspace, user)
     out = []
     for key in recipes.recipe_for(kind):
-        resolved = resolve_section(key, workspace=workspace, project=None, user=user)
-        row = overrides.get(key)
+        resolved = resolve_section(
+            key, workspace=workspace, project=None, user=user, override_index=override_index
+        )
+        # The row that resolved is the one matching the resolved source.
+        if resolved.source == SOURCE_WORKSPACE:
+            row = override_index.get(("workspace", key))
+        elif resolved.source != SOURCE_DEFAULT:  # "user:<id>"
+            row = override_index.get(("user", key))
+        else:
+            row = None
         out.append(
             {
                 "key": resolved.key,
@@ -147,8 +154,7 @@ class PromptSectionListEndpoint(APIView):
             )
         scope = _resolve_scope(request)
         user = request.user if scope == SCOPE_USER else None
-        overrides = _overrides_by_key(workspace, user)
-        breakdown = _section_breakdown(kind, workspace=workspace, user=user, overrides=overrides)
+        breakdown = _section_breakdown(kind, workspace=workspace, user=user)
         return Response(
             {
                 "kind": kind,
@@ -213,25 +219,23 @@ class PromptSectionDetailEndpoint(APIView):
     def _upsert(self, workspace, target_user, section_key, body, editor):
         """Update the active override in place (bump version) or create one.
 
-        The partial-unique constraints make a concurrent create race possible;
-        retry-as-update on IntegrityError.
+        Runs under ``transaction.atomic()`` with ``select_for_update`` so two
+        concurrent PUTs (or a PUT racing a DELETE) can't lose an update or
+        write a body onto a just-deactivated row. ``version`` is bumped with
+        ``F('version') + 1`` to avoid read-modify-write drift.
         """
-        qs = PromptSectionOverride.objects.filter(
-            workspace=workspace, section_key=section_key, is_active=True
-        )
-        qs = qs.filter(user__isnull=True) if target_user is None else qs.filter(user=target_user)
-        existing = qs.first()
-        if existing is not None:
-            existing.body = body
-            existing.version = (existing.version or 0) + 1
-            existing.needs_attention = False
-            existing.updated_by = editor
-            existing.save(
-                update_fields=["body", "version", "needs_attention", "updated_by", "updated_at"]
+
+        def _base_qs():
+            qs = PromptSectionOverride.objects.filter(
+                workspace=workspace, section_key=section_key, is_active=True
             )
-            return existing
+            return qs.filter(user__isnull=True) if target_user is None else qs.filter(user=target_user)
+
         try:
             with transaction.atomic():
+                existing = _base_qs().select_for_update().first()
+                if existing is not None:
+                    return self._apply_update(existing, body, editor)
                 return PromptSectionOverride.objects.create(
                     workspace=workspace,
                     user=target_user,
@@ -242,18 +246,26 @@ class PromptSectionDetailEndpoint(APIView):
                     updated_by=editor,
                 )
         except IntegrityError:
-            # Lost a race — an active row now exists; update it.
-            existing = qs.first()
-            if existing is None:
-                raise
-            existing.body = body
-            existing.version = (existing.version or 0) + 1
-            existing.needs_attention = False
-            existing.updated_by = editor
-            existing.save(
-                update_fields=["body", "version", "needs_attention", "updated_by", "updated_at"]
-            )
-            return existing
+            # Lost the create race — an active row now exists; lock and update.
+            with transaction.atomic():
+                existing = _base_qs().select_for_update().first()
+                if existing is None:
+                    raise
+                return self._apply_update(existing, body, editor)
+
+    @staticmethod
+    def _apply_update(row, body, editor):
+        from django.db.models import F
+
+        row.body = body
+        row.version = F("version") + 1
+        row.needs_attention = False
+        row.updated_by = editor
+        row.save(
+            update_fields=["body", "version", "needs_attention", "updated_by", "updated_at"]
+        )
+        row.refresh_from_db(fields=["version"])  # resolve F() for the response
+        return row
 
     def delete(self, request, slug: str, section_key: str):
         workspace = _get_workspace_or_404(slug)
@@ -264,6 +276,11 @@ class PromptSectionDetailEndpoint(APIView):
         scope = SCOPE_WORKSPACE if scope == SCOPE_WORKSPACE else SCOPE_USER
         if not self._check_write_permission(request, workspace, scope):
             return Response({"error": "forbidden"}, status=status.HTTP_403_FORBIDDEN)
+        if section_key not in registry.REGISTRY:
+            return Response(
+                {"error": f"unknown section {section_key!r}"},
+                status=status.HTTP_404_NOT_FOUND,
+            )
 
         target_user = request.user if scope == SCOPE_USER else None
         qs = PromptSectionOverride.objects.filter(
@@ -303,13 +320,12 @@ class PromptCompiledEndpoint(APIView):
         scope = _resolve_scope(request)
         user = request.user if scope == SCOPE_USER else None
         compiled = compile_template(kind, workspace=workspace, project=None, user=user)
-        overrides = _overrides_by_key(workspace, user)
         payload = {
             "kind": kind,
             "scope": scope,
             "template_body": compiled.template_body,
             "sections": ResolvedSectionSerializer(
-                _section_breakdown(kind, workspace=workspace, user=user, overrides=overrides),
+                _section_breakdown(kind, workspace=workspace, user=user),
                 many=True,
             ).data,
         }
