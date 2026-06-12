@@ -4,7 +4,7 @@
  * See the LICENSE file for details.
  */
 
-import { CalendarClock, FileText, Laptop, Server } from "lucide-react";
+import { CalendarClock, FileText, Laptop, Server, Sparkles } from "lucide-react";
 import {
   AnalyticsIcon,
   ArchiveIcon,
@@ -49,5 +49,7 @@ export const getSidebarNavigationItemIcon = (key: string, className: string = ""
       return <CalendarClock className={cn("size-4 flex-shrink-0", className)} />;
     case "ai_dev_machines":
       return <Laptop className={cn("size-4 flex-shrink-0", className)} />;
+    case "assistant":
+      return <Sparkles className={cn("size-4 flex-shrink-0", className)} />;
   }
 };

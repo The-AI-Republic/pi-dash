@@ -16,6 +16,7 @@ import { useUserProfile, useUser } from "@/hooks/store/user";
 import { HomePeekOverviewsRoot } from "@/pi-dash-web/components/home";
 import { TourRoot } from "@/pi-dash-web/components/onboarding/tour/root";
 // local imports
+import { AssistantHomeWidget } from "@/components/assistant/home-widget";
 import { DashboardWidgets } from "./home-dashboard-widgets";
 import { UserGreetingsView } from "./user-greetings";
 
@@ -57,6 +58,9 @@ export const WorkspaceHomeView = observer(function WorkspaceHomeView() {
         <ContentWrapper className="mx-auto scrollbar-hide gap-6 bg-surface-1 px-page-x">
           <div className="mx-auto w-full max-w-[800px]">
             {currentUser && <UserGreetingsView user={currentUser} />}
+            <div className="my-4">
+              <AssistantHomeWidget />
+            </div>
             <DashboardWidgets />
           </div>
         </ContentWrapper>

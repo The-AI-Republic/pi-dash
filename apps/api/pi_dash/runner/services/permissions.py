@@ -13,42 +13,22 @@ Role values come from ``pi_dash.db.models.workspace.ROLE_CHOICES``:
 
 from __future__ import annotations
 
-from typing import Optional
-
 from django.db.models import Exists, OuterRef, Q
 
-from pi_dash.db.models.workspace import WorkspaceMember
 from pi_dash.runner.models import Visibility
 
-ROLE_ADMIN = 20
-ROLE_MEMBER = 15
-ROLE_GUEST = 5
-
-
-def is_workspace_member(user, workspace_id) -> bool:
-    """True if ``user`` is a member (any role) of the given workspace."""
-    if user is None or not getattr(user, "is_authenticated", False):
-        return False
-    return WorkspaceMember.objects.filter(workspace_id=workspace_id, member=user).exists()
-
-
-def workspace_role(user, workspace_id) -> Optional[int]:
-    """Return the user's role in the workspace, or ``None`` if not a member."""
-    if user is None or not getattr(user, "is_authenticated", False):
-        return None
-    return WorkspaceMember.objects.filter(workspace_id=workspace_id, member=user).values_list("role", flat=True).first()
-
-
-def is_workspace_admin(user, workspace_id) -> bool:
-    """True if ``user`` is an Admin (role >= 20) of the workspace."""
-    role = workspace_role(user, workspace_id)
-    return role is not None and role >= ROLE_ADMIN
-
-
-def is_at_least_member(user, workspace_id) -> bool:
-    """True if ``user`` is at least Member role (>=15) — not Guest."""
-    role = workspace_role(user, workspace_id)
-    return role is not None and role >= ROLE_MEMBER
+# Workspace membership/role helpers now live in the neutral ``pi_dash.core``
+# package so the assistant app can share them without importing ``runner``.
+# Re-exported here for backwards compatibility with existing runner callers.
+from pi_dash.core.permissions import (  # noqa: F401
+    ROLE_ADMIN,
+    ROLE_GUEST,
+    ROLE_MEMBER,
+    is_at_least_member,
+    is_workspace_admin,
+    is_workspace_member,
+    workspace_role,
+)
 
 
 def _authenticated_user_id(user):

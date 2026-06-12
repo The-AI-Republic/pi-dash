@@ -11,6 +11,7 @@ import type { TProfileSettingsTabs } from "@pi-dash/types";
 export const PROFILE_SETTINGS_PAGES_MAP: Record<TProfileSettingsTabs, React.LazyExoticComponent<React.FC>> = {
   general: lazy(() => import("./general").then((m) => ({ default: m.GeneralProfileSettings }))),
   preferences: lazy(() => import("./preferences").then((m) => ({ default: m.PreferencesProfileSettings }))),
+  "ai-assistant": lazy(() => import("./ai-assistant").then((m) => ({ default: m.AIAssistantProfileSettings }))),
   notifications: lazy(() => import("./notifications").then((m) => ({ default: m.NotificationsProfileSettings }))),
   security: lazy(() => import("./security").then((m) => ({ default: m.SecurityProfileSettings }))),
   activity: lazy(() => import("./activity").then((m) => ({ default: m.ActivityProfileSettings }))),

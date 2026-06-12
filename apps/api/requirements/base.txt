@@ -44,7 +44,13 @@ uvicorn[standard]==0.29.0
 channels==4.1.0
 channels-redis==4.2.0
 # ai
-openai==1.63.2
+# Bumped 1.63.2 -> 2.x for pydantic-ai-slim compatibility. The only SDK call site
+# (app/views/external/base.py) uses the stable OpenAI() + chat.completions.create
+# pattern, unchanged across v1->v2.
+openai==2.29.0
+# AI assistant agent runtime. Must be >= the release containing pydantic-ai
+# PR #4421 (per-instance httpx client) for asyncio.run-per-Celery-task safety.
+pydantic-ai-slim[openai,anthropic]==1.107.0
 # slack
 slack-sdk==3.27.1
 # apm
