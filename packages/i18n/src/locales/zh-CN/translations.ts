@@ -846,6 +846,7 @@ export default {
   "Load more": "加载更多",
   Loading: "加载中",
   "Loading dev machines...": "正在加载开发机器...",
+  "Loading run details…": "",
   "Loading…": "加载中…",
   "local dev machine project working dir": "本地开发机器项目工作目录",
   "Local path the daemon runs the agent CLI in — usually the project repo on disk. Defaults to a sandbox under the runner's data dir, which is rarely what you want.":

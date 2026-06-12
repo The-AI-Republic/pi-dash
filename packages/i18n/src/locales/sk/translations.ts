@@ -873,6 +873,7 @@ export default {
   "Load more": "Načítať viac",
   Loading: "Načítava sa",
   "Loading dev machines...": "Načítavajú sa vývojové stroje...",
+  "Loading run details…": "",
   "Loading…": "Načítava sa…",
   "local dev machine project working dir": "pracovný adresár projektu lokálneho vývojového stroja",
   "Local path the daemon runs the agent CLI in — usually the project repo on disk. Defaults to a sandbox under the runner's data dir, which is rarely what you want.":

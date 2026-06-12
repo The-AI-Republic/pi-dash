@@ -879,6 +879,7 @@ export default {
   "Load more": "Загрузить ещё",
   Loading: "Загрузка",
   "Loading dev machines...": "Загрузка машин разработки...",
+  "Loading run details…": "",
   "Loading…": "Загрузка…",
   "local dev machine project working dir": "рабочий каталог проекта на локальной машине разработчика",
   "Local path the daemon runs the agent CLI in — usually the project repo on disk. Defaults to a sandbox under the runner's data dir, which is rarely what you want.":

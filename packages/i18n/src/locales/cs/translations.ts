@@ -872,6 +872,7 @@ export default {
   "Load more": "Načíst další",
   Loading: "Načítání",
   "Loading dev machines...": "Načítání vývojových strojů...",
+  "Loading run details…": "",
   "Loading…": "Načítání…",
   "local dev machine project working dir": "pracovní adresář projektu na místním vývojovém počítači",
   "Local path the daemon runs the agent CLI in — usually the project repo on disk. Defaults to a sandbox under the runner's data dir, which is rarely what you want.":

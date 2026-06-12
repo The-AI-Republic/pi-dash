@@ -879,6 +879,7 @@ export default {
   "Load more": "Cargar más",
   Loading: "Cargando",
   "Loading dev machines...": "Cargando máquinas de desarrollo...",
+  "Loading run details…": "",
   "Loading…": "Cargando…",
   "local dev machine project working dir": "directorio de trabajo del proyecto de la máquina de desarrollo local",
   "Local path the daemon runs the agent CLI in — usually the project repo on disk. Defaults to a sandbox under the runner's data dir, which is rarely what you want.":

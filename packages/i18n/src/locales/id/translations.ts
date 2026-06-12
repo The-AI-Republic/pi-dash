@@ -866,6 +866,7 @@ export default {
   "Load more": "Muat lebih banyak",
   Loading: "Memuat",
   "Loading dev machines...": "Memuat mesin pengembangan...",
+  "Loading run details…": "",
   "Loading…": "Memuat…",
   "local dev machine project working dir": "direktori kerja proyek mesin dev lokal",
   "Local path the daemon runs the agent CLI in — usually the project repo on disk. Defaults to a sandbox under the runner's data dir, which is rarely what you want.":

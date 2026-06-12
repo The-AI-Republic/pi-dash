@@ -872,6 +872,7 @@ export default {
   "Load more": "さらに読み込む",
   Loading: "読み込み中",
   "Loading dev machines...": "開発用マシンを読み込み中...",
+  "Loading run details…": "",
   "Loading…": "読み込み中…",
   "local dev machine project working dir": "ローカル開発マシンのプロジェクト作業ディレクトリ",
   "Local path the daemon runs the agent CLI in — usually the project repo on disk. Defaults to a sandbox under the runner's data dir, which is rarely what you want.":

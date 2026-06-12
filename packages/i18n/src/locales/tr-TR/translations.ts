@@ -870,6 +870,7 @@ export default {
   "Load more": "Daha fazla yükle",
   Loading: "Yükleniyor",
   "Loading dev machines...": "Geliştirici makineleri yükleniyor...",
+  "Loading run details…": "",
   "Loading…": "Yükleniyor…",
   "local dev machine project working dir": "yerel geliştirme makinesi proje çalışma dizini",
   "Local path the daemon runs the agent CLI in — usually the project repo on disk. Defaults to a sandbox under the runner's data dir, which is rarely what you want.":

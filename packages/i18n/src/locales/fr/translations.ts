@@ -883,6 +883,7 @@ export default {
   "Load more": "Charger plus",
   Loading: "Chargement",
   "Loading dev machines...": "Chargement des machines de développement...",
+  "Loading run details…": "",
   "Loading…": "Chargement…",
   "local dev machine project working dir": "répertoire de travail du projet sur la machine de développement locale",
   "Local path the daemon runs the agent CLI in — usually the project repo on disk. Defaults to a sandbox under the runner's data dir, which is rarely what you want.":
