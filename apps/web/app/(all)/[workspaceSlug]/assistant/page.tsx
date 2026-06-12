@@ -7,53 +7,22 @@
 import { useState } from "react";
 import { observer } from "mobx-react";
 import { Sparkles } from "lucide-react";
-import { useNavigate, useParams } from "react-router";
-import useSWR, { useSWRConfig } from "swr";
-import { setToast, TOAST_TYPE } from "@pi-dash/propel/toast";
-import { AssistantService } from "@pi-dash/services";
-import type { IUserLLMConfig } from "@pi-dash/types";
+import { useParams } from "react-router";
 import { AssistantSetupCard } from "@/components/assistant/setup-card";
+import { useLLMConfig } from "@/components/assistant/use-llm-config";
+import { useStartAssistantChat } from "@/components/assistant/use-start-chat";
 import { ChatComposer } from "@/components/chat/composer";
-
-const service = new AssistantService();
-
-// Thread titles come from the first message; keep them list-friendly.
-const TITLE_MAX_LENGTH = 80;
 
 const AssistantIndexPage = observer(function AssistantIndexPage() {
   const { workspaceSlug } = useParams<{ workspaceSlug: string }>();
-  const navigate = useNavigate();
-  const { mutate } = useSWRConfig();
   const [draft, setDraft] = useState("");
-  const [sending, setSending] = useState(false);
-  const { data: config } = useSWR<IUserLLMConfig>("assistant-llm-config", () => service.getLLMConfig());
-
-  // `config` is undefined while loading — only treat as "needs setup" once known.
-  const needsSetup = config ? !config.has_api_key : false;
-
-  const startChat = async () => {
-    const content = draft.trim();
-    if (!content || !workspaceSlug || sending) return;
-    setSending(true);
-    try {
-      const thread = await service.createThread(workspaceSlug, content.slice(0, TITLE_MAX_LENGTH));
-      await service.sendMessage(workspaceSlug, thread.id, content);
-      mutate(["assistant-threads", workspaceSlug]);
-      navigate(`/${workspaceSlug}/assistant/${thread.id}`);
-    } catch (e: unknown) {
-      const err = e as { error?: string; detail?: string } | null;
-      setToast({
-        type: TOAST_TYPE.ERROR,
-        title: "Unable to start chat",
-        message: err?.detail || err?.error || "Something went wrong. Please try again.",
-      });
-      setSending(false);
-    }
-  };
+  const { needsSetup } = useLLMConfig();
+  const { start, starting } = useStartAssistantChat(workspaceSlug);
 
   return (
-    <div className="flex h-full w-full items-center justify-center overflow-auto px-4">
-      <div className="w-full max-w-2xl">
+    <div className="flex h-full w-full overflow-auto px-4">
+      {/* m-auto (not items/justify-center) so content taller than the panel stays scrollable */}
+      <div className="m-auto w-full max-w-2xl py-8">
         {needsSetup ? (
           <AssistantSetupCard />
         ) : (
@@ -66,9 +35,9 @@ const AssistantIndexPage = observer(function AssistantIndexPage() {
             <ChatComposer
               draft={draft}
               onDraftChange={setDraft}
-              onSend={startChat}
-              sending={sending}
-              className="w-full"
+              onSend={() => void start(draft)}
+              sending={starting}
+              bordered={false}
             />
           </>
         )}

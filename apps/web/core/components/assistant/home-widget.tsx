@@ -7,12 +7,14 @@
 import { useState } from "react";
 import { observer } from "mobx-react";
 import { Sparkles } from "lucide-react";
-import { Link, useNavigate } from "react-router";
+import { Link } from "react-router";
 import useSWR from "swr";
 import { setToast, TOAST_TYPE } from "@pi-dash/propel/toast";
 import { AssistantService } from "@pi-dash/services";
-import { EUserWorkspaceRoles, type IAssistantThread, type IUserLLMConfig } from "@pi-dash/types";
+import { EUserWorkspaceRoles, type IAssistantThread } from "@pi-dash/types";
 import { Button } from "@pi-dash/ui";
+import { useLLMConfig } from "@/components/assistant/use-llm-config";
+import { useStartAssistantChat } from "@/components/assistant/use-start-chat";
 import { useWorkspace } from "@/hooks/store/use-workspace";
 
 const service = new AssistantService();
@@ -22,9 +24,7 @@ const API_KEY_REMINDER = "Please set your API key in Settings first to start usi
 
 export const AssistantHomeWidget = observer(function AssistantHomeWidget() {
   const { currentWorkspace } = useWorkspace();
-  const navigate = useNavigate();
   const [draft, setDraft] = useState("");
-  const [submitting, setSubmitting] = useState(false);
 
   const slug = currentWorkspace?.slug;
   const role = currentWorkspace?.role ?? 0;
@@ -34,29 +34,21 @@ export const AssistantHomeWidget = observer(function AssistantHomeWidget() {
   const { data: threads } = useSWR<IAssistantThread[]>(enabled ? ["assistant-threads", slug] : null, () =>
     service.listThreads(slug!)
   );
-  const { data: config } = useSWR<IUserLLMConfig>(enabled ? "assistant-llm-config" : null, () =>
-    service.getLLMConfig()
-  );
+  const { needsSetup } = useLLMConfig(enabled);
+  const { start: startChat, starting } = useStartAssistantChat(slug);
 
   // Guests do not get the assistant (parity with the backend 403).
   if (!enabled || !slug) return null;
 
   const start = async (text: string) => {
     const content = text.trim();
-    if (!content || submitting) return;
+    if (!content || starting) return;
     // Remind the user to configure a key before starting a conversation.
-    if (config && !config.has_api_key) {
+    if (needsSetup) {
       setToast({ type: TOAST_TYPE.ERROR, title: "API key required", message: API_KEY_REMINDER });
       return;
     }
-    setSubmitting(true);
-    try {
-      const thread = await service.createThread(slug);
-      await service.sendMessage(slug, thread.id, content);
-      navigate(`/${slug}/assistant/${thread.id}`);
-    } finally {
-      setSubmitting(false);
-    }
+    await startChat(content);
   };
 
   return (
@@ -74,7 +66,7 @@ export const AssistantHomeWidget = observer(function AssistantHomeWidget() {
           placeholder="Ask Pi to do something…"
           className="flex-1 rounded-md border border-subtle bg-canvas px-3 py-2 text-13 outline-none focus:border-accent-strong"
         />
-        <Button onClick={() => start(draft)} disabled={!draft.trim()} loading={submitting}>
+        <Button onClick={() => start(draft)} disabled={!draft.trim()} loading={starting}>
           Ask
         </Button>
       </div>

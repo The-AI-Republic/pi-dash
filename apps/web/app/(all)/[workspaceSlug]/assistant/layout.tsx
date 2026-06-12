@@ -10,8 +10,16 @@ import { NavLink, Outlet, useParams } from "react-router";
 import useSWR from "swr";
 import { AssistantService } from "@pi-dash/services";
 import type { IAssistantThread } from "@pi-dash/types";
+import { cn } from "@pi-dash/utils";
 
 const service = new AssistantService();
+
+const navItemClass = (isActive: boolean, extra?: string) =>
+  cn(
+    "flex items-center gap-2 rounded px-2 text-13",
+    extra,
+    isActive ? "bg-layer-1 font-medium text-primary" : "text-secondary hover:bg-layer-1"
+  );
 
 const AssistantLayout = observer(function AssistantLayout() {
   const { workspaceSlug } = useParams<{ workspaceSlug: string }>();
@@ -20,8 +28,8 @@ const AssistantLayout = observer(function AssistantLayout() {
     () => service.listThreads(workspaceSlug!)
   );
 
+  // listThreads already excludes archived threads server-side.
   const base = `/${workspaceSlug}/assistant`;
-  const visibleThreads = (threads ?? []).filter((t) => !t.is_archived);
 
   return (
     <div className="flex h-full w-full overflow-hidden">
@@ -31,36 +39,24 @@ const AssistantLayout = observer(function AssistantLayout() {
           Pi Dash AI
         </div>
         <div className="shrink-0 p-2">
-          <NavLink
-            to={base}
-            end
-            className={({ isActive }) =>
-              `flex h-9 items-center gap-2 rounded px-2 text-13 ${
-                isActive ? "bg-layer-1 font-medium text-primary" : "text-secondary hover:bg-layer-1"
-              }`
-            }
-          >
+          <NavLink to={base} end className={({ isActive }) => navItemClass(isActive, "h-9")}>
             <SquarePen className="size-4" />
             <span>New chat</span>
           </NavLink>
         </div>
         <nav className="flex min-h-0 flex-1 flex-col gap-1 overflow-y-auto p-2 pt-0">
           <div className="px-2 py-1 text-11 font-medium text-tertiary uppercase">Chats</div>
-          {visibleThreads.map((thread) => (
+          {(threads ?? []).map((thread) => (
             <NavLink
               key={thread.id}
               to={`${base}/${thread.id}`}
-              className={({ isActive }) =>
-                `flex min-h-9 items-center gap-2 rounded px-2 py-2 text-13 ${
-                  isActive ? "bg-layer-1 font-medium text-primary" : "text-secondary hover:bg-layer-1"
-                }`
-              }
+              className={({ isActive }) => navItemClass(isActive, "min-h-9 py-2")}
             >
               <MessageSquare className="size-4 shrink-0" />
               <span className="min-w-0 flex-1 truncate">{thread.title || "Untitled conversation"}</span>
             </NavLink>
           ))}
-          {threads && visibleThreads.length === 0 && (
+          {threads && threads.length === 0 && (
             <div className="px-2 py-4 text-12 text-tertiary">No conversations yet.</div>
           )}
         </nav>
