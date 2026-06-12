@@ -70,3 +70,103 @@ pub async fn ensure(canonical: &Path, worktree: &Path) -> Result<PathBuf> {
         .with_context(|| format!("creating chat worktree at {worktree:?}"))?;
     Ok(worktree.to_path_buf())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::process::Command;
+    use tempfile::TempDir;
+
+    fn git(dir: &Path, args: &[&str]) {
+        let out = Command::new("git")
+            .current_dir(dir)
+            .args(args)
+            .output()
+            .expect("spawn git");
+        assert!(
+            out.status.success(),
+            "git {:?} failed: {}",
+            args,
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    /// A canonical clone with one commit on `main` — what `PoolHandle::canonical`
+    /// points at.
+    fn canonical_repo() -> (TempDir, PathBuf) {
+        let tmp = TempDir::new().unwrap();
+        let repo = tmp.path().join("canonical");
+        std::fs::create_dir_all(&repo).unwrap();
+        git(&repo, &["init", "-q", "-b", "main"]);
+        git(&repo, &["config", "user.email", "t@t.io"]);
+        git(&repo, &["config", "user.name", "t"]);
+        git(&repo, &["config", "commit.gpgsign", "false"]);
+        std::fs::write(repo.join("README.md"), "hello\n").unwrap();
+        git(&repo, &["add", "-A"]);
+        git(&repo, &["commit", "-q", "-m", "init"]);
+        (tmp, repo)
+    }
+
+    #[tokio::test]
+    async fn ensure_creates_worktree_lazily_from_canonical() {
+        let (tmp, canonical) = canonical_repo();
+        let wt = tmp.path().join("chat-worktree");
+        assert!(!wt.exists(), "no worktree until first use (lazy)");
+
+        let p = ensure(&canonical, &wt).await.unwrap();
+        assert_eq!(p, wt);
+        assert!(
+            wt.join(".git").exists(),
+            "created as a linked git worktree"
+        );
+        assert!(
+            wt.join("README.md").exists(),
+            "checked out from the canonical HEAD"
+        );
+        // It is a SEPARATE tree from the canonical (so it can't collide with
+        // issue desks or the canonical clone).
+        assert_ne!(wt, canonical);
+    }
+
+    #[tokio::test]
+    async fn ensure_reuses_healthy_worktree_and_preserves_dirty_state() {
+        // Terminal-style persistence: a second chat session resolves the SAME
+        // worktree and must keep the operator's uncommitted work (§3.7).
+        let (tmp, canonical) = canonical_repo();
+        let wt = tmp.path().join("chat-worktree");
+        ensure(&canonical, &wt).await.unwrap();
+
+        std::fs::write(wt.join("scratch.txt"), "wip\n").unwrap(); // untracked
+        std::fs::write(wt.join("README.md"), "edited\n").unwrap(); // tracked edit
+
+        let p = ensure(&canonical, &wt).await.unwrap();
+        assert_eq!(p, wt);
+        assert!(
+            wt.join("scratch.txt").exists(),
+            "dirty untracked file preserved across sessions"
+        );
+        assert_eq!(
+            std::fs::read_to_string(wt.join("README.md")).unwrap(),
+            "edited\n",
+            "dirty tracked edit preserved (no reset/clean)"
+        );
+    }
+
+    #[tokio::test]
+    async fn ensure_recreates_broken_worktree() {
+        // A crash mid-create can leave a dir that isn't a valid worktree. ensure
+        // must remove and recreate it (there is no usable state to preserve).
+        let (tmp, canonical) = canonical_repo();
+        let wt = tmp.path().join("chat-worktree");
+        ensure(&canonical, &wt).await.unwrap();
+
+        // Break it: drop the `.git` link so it is no longer a git work tree.
+        let _ = std::fs::remove_file(wt.join(".git"));
+        assert!(!git::is_git_repo(&wt), "now broken");
+
+        let p = ensure(&canonical, &wt).await.unwrap();
+        assert_eq!(p, wt);
+        assert!(git::is_git_repo(&wt), "recreated as a healthy worktree");
+        assert!(wt.join("README.md").exists());
+    }
+}

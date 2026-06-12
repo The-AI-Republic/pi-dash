@@ -878,4 +878,109 @@ mod tests {
             assert_eq!(v, Some(rid), "rx_in_flight transitioned to None mid-stream");
         }
     }
+
+    // ---- B1: derived RunnerStatus across the two lanes ----
+
+    #[tokio::test]
+    async fn chat_active_alone_reports_busy() {
+        let state = empty_state();
+        assert!(matches!(*state.rx_status.borrow(), RunnerStatus::Idle));
+        state.set_chat_active(true).await;
+        assert!(
+            matches!(*state.rx_status.borrow(), RunnerStatus::Busy),
+            "chat alone makes the runner Busy"
+        );
+        state.set_chat_active(false).await;
+        assert!(matches!(*state.rx_status.borrow(), RunnerStatus::Idle));
+    }
+
+    #[tokio::test]
+    async fn chat_turn_ending_keeps_busy_while_issue_runs() {
+        // The core B1 race: a finishing chat turn must NOT report Idle while an
+        // issue is still in flight.
+        let state = empty_state();
+        let rid = Uuid::new_v4();
+        state.set_current_run(Some(summary(rid, "running"))).await;
+        state.set_chat_active(true).await;
+        assert!(matches!(*state.rx_status.borrow(), RunnerStatus::Busy));
+
+        // Chat turn ends; the issue is still running.
+        state.set_chat_active(false).await;
+        assert!(
+            matches!(*state.rx_status.borrow(), RunnerStatus::Busy),
+            "must stay Busy — the issue run is still in flight"
+        );
+        assert_eq!(*state.rx_in_flight.borrow(), Some(rid));
+
+        // Issue ends → now Idle.
+        state.set_current_run(None).await;
+        assert!(matches!(*state.rx_status.borrow(), RunnerStatus::Idle));
+    }
+
+    #[tokio::test]
+    async fn run_finishing_keeps_busy_while_chat_active() {
+        // The inverse race: set_current_run(None) must NOT clobber Busy down to
+        // Idle while a chat turn is still active.
+        let state = empty_state();
+        state.set_chat_active(true).await;
+        let rid = Uuid::new_v4();
+        state.set_current_run(Some(summary(rid, "running"))).await;
+        assert!(matches!(*state.rx_status.borrow(), RunnerStatus::Busy));
+
+        state.set_current_run(None).await;
+        assert!(
+            matches!(*state.rx_status.borrow(), RunnerStatus::Busy),
+            "must stay Busy — a chat turn is still active"
+        );
+
+        state.set_chat_active(false).await;
+        assert!(matches!(*state.rx_status.borrow(), RunnerStatus::Idle));
+    }
+
+    #[tokio::test]
+    async fn reauth_overrides_chat_active() {
+        let state = empty_state();
+        state.set_chat_active(true).await;
+        state.set_run_status(RunnerStatus::AwaitingReauth).await;
+        assert!(
+            matches!(*state.rx_status.borrow(), RunnerStatus::AwaitingReauth),
+            "AwaitingReauth (run lane) overrides a chat-derived Busy"
+        );
+        // Clearing the run lane (run ends) falls back to chat-derived Busy.
+        state.set_current_run(None).await;
+        assert!(matches!(*state.rx_status.borrow(), RunnerStatus::Busy));
+    }
+
+    // ---- B3: approvals_pending read live from the shared router ----
+
+    #[tokio::test]
+    async fn approvals_pending_reads_live_from_router() {
+        use crate::approval::router::{ApprovalRecord, ApprovalStatus};
+        use crate::cloud::protocol::ApprovalKind;
+
+        let state = empty_state();
+        // No router injected → 0 (e.g. the daemon-aggregate state).
+        assert_eq!(state.approvals_pending_value().await, 0);
+
+        let router = ApprovalRouter::new();
+        state.set_approval_router(router.clone());
+        assert_eq!(state.approvals_pending_value().await, 0);
+
+        // Opening an approval in the shared router is reflected live — no lane
+        // stamps the count.
+        router
+            .open(ApprovalRecord {
+                approval_id: "a1".into(),
+                runner_id: Uuid::nil(),
+                run_id: Uuid::new_v4(),
+                kind: ApprovalKind::CommandExecution,
+                payload: serde_json::Value::Null,
+                reason: None,
+                requested_at: Utc::now(),
+                expires_at: None,
+                status: ApprovalStatus::Pending,
+            })
+            .await;
+        assert_eq!(state.approvals_pending_value().await, 1);
+    }
 }
