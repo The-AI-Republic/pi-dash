@@ -108,12 +108,14 @@ def _reconcile_targets(now) -> int:
     return created
 
 
-def _advance_ineligible_due(now) -> int:
+def _advance_ineligible_due(now, eligible_ids) -> int:
     """Advance the cursor for due-but-ineligible targets so they aren't
     re-examined every minute. One bulk pass, cursor recomputed once per job.
+
+    ``eligible_ids`` is the set already computed by the scanner, so the eligible
+    queryset (4 annotated subqueries) is evaluated once per tick, not twice.
     Returns the number advanced.
     """
-    eligible_ids = set(eligibility.eligible_due_targets(now).values_list("id", flat=True))
     due = (
         eligibility.due_targets(now)
         .select_related("job")
@@ -156,18 +158,19 @@ def scan_due_targets() -> int:
     _reconcile_targets(now)
 
     cap = max(1, int(getattr(settings, "LOOP_MAX_DISPATCH_PER_TICK", 100)))
-    ids = list(
-        eligibility.eligible_due_targets(now)
-        .order_by("next_run_at")
-        .values_list("id", flat=True)[:cap]
+    # Evaluate the eligible set once; cap the dispatch slice in Python and reuse
+    # the full set to exclude eligibles from the ineligible-advance pass.
+    eligible_ids = list(
+        eligibility.eligible_due_targets(now).order_by("next_run_at").values_list("id", flat=True)
     )
+    ids = eligible_ids[:cap]
     for target_id in ids:
         fire_loop_target.delay(str(target_id))
 
     # Targets that are due but ineligible still need their cursor advanced, or
     # they'd be re-scanned every minute forever. (Over-cap *eligible* targets
     # are intentionally left due — backpressure; they drain next tick.)
-    _advance_ineligible_due(now)
+    _advance_ineligible_due(now, set(eligible_ids))
 
     if ids:
         logger.info("loop.scan: dispatched %d fire_loop_target tasks", len(ids))

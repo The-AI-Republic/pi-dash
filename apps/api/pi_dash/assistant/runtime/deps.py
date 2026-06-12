@@ -40,7 +40,10 @@ class AssistantDeps:
     # "chat" = user-driven turn; "loop" = unattended Auto Project Management run.
     # Derived from the thread's kind in _load_context.
     mode: str = "chat"
-    budget: RunBudget = field(default_factory=RunBudget)
+    # Per-run mutable counters. compare=False keeps them out of __eq__/__hash__
+    # so the frozen deps stays hashable and two runs with identical identity
+    # compare equal regardless of how much budget each has spent.
+    budget: RunBudget = field(default_factory=RunBudget, compare=False)
 
     @property
     def created_via(self) -> str:

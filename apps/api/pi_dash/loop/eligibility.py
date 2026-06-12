@@ -24,17 +24,31 @@ from pi_dash.assistant.models import UserLLMConfig
 from pi_dash.db.models import LoopTarget, LoopUserPreference, SkipReason, WorkspaceMember
 
 
-def llm_available_q() -> Exists:
-    """``Exists`` subquery: does ``OuterRef('user_id')`` have usable LLM creds?
+def _usable_llm_filter() -> dict:
+    """Single source of truth for "this user has usable LLM credentials".
 
-    CE: a ``UserLLMConfig`` row with a stored key. Overridden in the cloud
-    overlay to also admit plan-entitled users.
+    CE: a ``UserLLMConfig`` row with a stored key. The cloud overlay widens
+    this (or overrides :func:`llm_available_q` / :func:`user_has_llm` together)
+    to also admit plan-entitled users. Keeping the filter in one place is what
+    guarantees the scanner pre-filter and the fire-time re-check can't diverge.
     """
+    return {"api_key_encrypted__isnull": False}
+
+
+def llm_available_q() -> Exists:
+    """``Exists`` subquery: does ``OuterRef('user_id')`` have usable LLM creds?"""
     return Exists(
-        UserLLMConfig.objects.filter(
-            user_id=OuterRef("user_id"), api_key_encrypted__isnull=False
-        )
+        UserLLMConfig.objects.filter(user_id=OuterRef("user_id"), **_usable_llm_filter())
     )
+
+
+def user_has_llm(user_id) -> bool:
+    """Row-level form of :func:`llm_available_q` for the fire-time re-check.
+
+    Shares ``_usable_llm_filter`` with the queryset form so the scanner and the
+    per-target ``check`` always agree on who has credentials.
+    """
+    return UserLLMConfig.objects.filter(user_id=user_id, **_usable_llm_filter()).exists()
 
 
 def _member_q() -> Exists:
@@ -135,9 +149,7 @@ def check(target: LoopTarget) -> Optional[str]:
     if membership < target.job.min_role:
         return SkipReason.MIN_ROLE
 
-    if not UserLLMConfig.objects.filter(
-        user_id=user_id, api_key_encrypted__isnull=False
-    ).exists():
+    if not user_has_llm(user_id):
         return SkipReason.LLM_CONFIG_MISSING
 
     return None

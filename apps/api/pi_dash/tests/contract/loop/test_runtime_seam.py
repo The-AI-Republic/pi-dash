@@ -33,6 +33,18 @@ def test_created_via_depends_on_mode(world):
     assert loop.created_via == "loop"
 
 
+def test_deps_hashable_and_budget_excluded_from_identity(world):
+    # The frozen deps must stay hashable despite carrying a mutable budget, and
+    # two runs with the same identity must compare/hash equal regardless of how
+    # much budget each has spent (budget is compare=False).
+    a = make_deps(world.member, world.ws, 15, thread_id=world.ws.id, turn_id=world.ws.id)
+    b = make_deps(world.member, world.ws, 15, thread_id=world.ws.id, turn_id=world.ws.id)
+    b.budget.pr_lookups = 9
+    assert hash(a) == hash(b)
+    assert a == b
+    assert len({a, b}) == 1
+
+
 def test_loop_instructions_only_in_loop_mode(world):
     chat = make_deps(world.member, world.ws, 15)
     loop = AssistantDeps(**{**chat.__dict__, "mode": "loop"})
