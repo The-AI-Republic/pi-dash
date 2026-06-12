@@ -21,7 +21,6 @@ from pi_dash.runner.models import (
     AgentChatMessageStatus,
     AgentChatSession,
     AgentChatSessionStatus,
-    AgentRun,
     ChatMessageDedupe,
     Runner,
     RunnerStatus,
@@ -80,20 +79,15 @@ def runner_has_active_chat(runner: Runner) -> bool:
     )
 
 
-def runner_has_active_task(runner: Runner) -> bool:
-    return AgentRun.objects.filter(
-        runner=runner,
-        status__in=matcher.BUSY_STATUSES,
-    ).exists()
-
-
 def drain_tasks_after_chat_release(session: AgentChatSession) -> None:
-    """Wake the task queue after an active chat turn releases a runner.
+    """Wake the task queue after a chat turn finishes (opportunistic).
 
-    Chat and task runs intentionally do not share a queue. The only coupling is
-    runner capacity: an active chat turn makes the matcher skip that runner.
-    When chat clears ``active_message_id`` / ``active_turn_id``, any queued
-    AgentRun rows need the same drain trigger a completed task would get.
+    Chat and task runs intentionally do not share a queue, and (as of the
+    concurrent chat/issue change) an active chat turn no longer makes the
+    matcher skip a runner — the two run concurrently. This drain is therefore an
+    optimisation, not an unblocking mechanism: a finishing chat turn may free a
+    worktree, so it's a cheap moment to re-check whether the runner can pick up
+    queued AgentRun rows sooner.
     """
 
     runner_id = session.runner_id

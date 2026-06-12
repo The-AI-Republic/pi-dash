@@ -1213,6 +1213,23 @@ impl RunnerLoop {
                         .write()
                         .await
                         .remove(&self.runner_paths.runner_id);
+                    // Detach the dedicated chat worktree from the canonical's
+                    // git bookkeeping before we blow the dir away, so we don't
+                    // leave a stale `.git/worktrees/<name>` admin entry behind
+                    // (otherwise pruned only at the next pool init).
+                    if let Some(pool) = &self.pool {
+                        let chat_wt =
+                            crate::workspace::chat_worktree::path_for(&self.runner_paths);
+                        if chat_wt.exists() {
+                            let _ = crate::workspace::git::worktree_remove(
+                                pool.canonical(),
+                                &chat_wt,
+                                true,
+                            )
+                            .await;
+                            let _ = crate::workspace::git::worktree_prune(pool.canonical()).await;
+                        }
+                    }
                     // Best-effort cleanup of this runner's local data
                     // dir. The on-disk state is keyed by runner_id and
                     // is dead weight once the cloud-side row is gone.
@@ -1410,14 +1427,21 @@ impl ChatWorker {
         // B4: the chat lane gets its own graceful-shutdown signal. Before this,
         // only the assign lane observed `shutdown_notified()`, so on daemon
         // shutdown / RemoveRunner the chat loop was aborted with no terminal
-        // `ChatClosed`. We catch the signal while idle in the select below and
-        // emit a clean close. (A turn already in flight finishes first; the
-        // dedicated chat worktree persists either way.)
+        // `ChatClosed`. A turn already in flight finishes first; the dedicated
+        // chat worktree persists either way.
+        //
+        // The `Notified` future is created ONCE and pinned across iterations:
+        // `notify_waiters()` does not store a permit, so a fresh future created
+        // per loop turn would miss a signal that landed while we were inside a
+        // turn (it would then hang until the idle timeout). A pinned future
+        // stays registered as a waiter and catches the signal on the next poll.
         let shutdown = self.state.shutdown_notified();
+        let notified = shutdown.notified();
+        tokio::pin!(notified);
         loop {
             let command = tokio::select! {
                 biased;
-                _ = shutdown.notified() => {
+                _ = &mut notified => {
                     let _ = self
                         .out
                         .send(ClientMsg::ChatClosed {
@@ -1517,7 +1541,18 @@ impl ChatWorker {
                         .await;
                     break;
                 }
-                ChatCommand::Shutdown => break,
+                ChatCommand::Shutdown => {
+                    // RemoveRunner / teardown. Emit a terminal `ChatClosed` so
+                    // the cloud session doesn't linger in "active turn" state.
+                    let _ = self
+                        .out
+                        .send(ClientMsg::ChatClosed {
+                            chat_session_id,
+                            closed_at: Utc::now(),
+                        })
+                        .await;
+                    break;
+                }
             }
         }
         if let Some(bridge) = bridge.take() {

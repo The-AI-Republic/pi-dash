@@ -131,7 +131,13 @@ const RunnerChatPage = observer(function RunnerChatPage() {
   useEffect(() => {
     let cancelled = false;
     async function warmSelectedRunner() {
-      if (!workspaceId || !runnerId || !runner || runner.status !== "online") return;
+      // A "busy" runner (running an issue and/or already chatting) can still be
+      // warmed: chat runs concurrently in a dedicated worktree. Only offline /
+      // revoked runners can't serve chat (the server also rejects those). Not
+      // warming a busy runner would skip the warm step that seeds
+      // local_thread_id/local_session_id and break revive continuity.
+      if (!workspaceId || !runnerId || !runner) return;
+      if (runner.status !== "online" && runner.status !== "busy") return;
       if (session?.status === "open") {
         if (warmSessionRef.current === session.id) return;
         warmSessionRef.current = session.id;

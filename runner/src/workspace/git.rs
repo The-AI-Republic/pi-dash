@@ -402,7 +402,10 @@ pub async fn commit_and_push_all(worktree: &Path, message: &str) -> Result<bool>
     git_output(worktree, &["add", "-A"])
         .await
         .context("git add -A (chat)")?;
-    git_output(worktree, &["commit", "-q", "--no-verify", "-m", message])
+    // Unlike salvage (which must never be blocked), a chat-session persist
+    // commit runs the repo's commit hooks — secret-scanning / lint / policy
+    // gates SHOULD apply to agent-authored code we're about to push to origin.
+    git_output(worktree, &["commit", "-q", "-m", message])
         .await
         .context("git commit (chat)")?;
     let refspec = format!("HEAD:refs/heads/{branch}");
