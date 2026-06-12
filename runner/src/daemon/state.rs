@@ -103,6 +103,15 @@ struct Inner {
     started_at: DateTime<Utc>,
     connected: Mutex<bool>,
     last_heartbeat: Mutex<Option<DateTime<Utc>>>,
+    /// When this runner last opened a cloud session. `None` until the very
+    /// first successful bootstrap — a runner that has never connected shows
+    /// `None`, which is exactly the signal `pidash status` needs to flag it.
+    last_session_open: Mutex<Option<DateTime<Utc>>>,
+    /// Consecutive bootstrap (session-open) failures since the last success.
+    /// Incremented on every retry in `HttpLoop::bootstrap_with_retry`, reset
+    /// to 0 on a successful open. A non-zero value on a disconnected runner
+    /// is the difference between "briefly reconnecting" and "wedged".
+    consecutive_bootstrap_failures: Mutex<u32>,
     current_run: Mutex<Option<CurrentRunSummary>>,
     approvals_pending: Mutex<usize>,
     runner_id: Mutex<Option<Uuid>>,
@@ -155,6 +164,8 @@ impl StateHandle {
                 started_at: Utc::now(),
                 connected: Mutex::new(false),
                 last_heartbeat: Mutex::new(None),
+                last_session_open: Mutex::new(None),
+                consecutive_bootstrap_failures: Mutex::new(0),
                 current_run: Mutex::new(None),
                 approvals_pending: Mutex::new(0),
                 runner_id: Mutex::new(None),
@@ -214,6 +225,27 @@ impl StateHandle {
     pub async fn set_heartbeat(&self, ts: DateTime<Utc>) {
         *self.inner.last_heartbeat.lock().await = Some(ts);
         self.tick();
+    }
+
+    /// Mark a successful cloud session-open: stamp the time and clear the
+    /// consecutive-failure counter. Connection-level `connected` is still
+    /// driven by welcome receipt (`set_connected`); this records the more
+    /// precise "the HTTP session opened" signal one step earlier.
+    pub async fn note_session_open(&self) {
+        *self.inner.last_session_open.lock().await = Some(Utc::now());
+        *self.inner.consecutive_bootstrap_failures.lock().await = 0;
+        self.tick();
+    }
+
+    /// Record one failed bootstrap attempt and return the new running count
+    /// of consecutive failures (for the caller's log line).
+    pub async fn note_bootstrap_failure(&self) -> u32 {
+        let mut guard = self.inner.consecutive_bootstrap_failures.lock().await;
+        *guard = guard.saturating_add(1);
+        let count = *guard;
+        drop(guard);
+        self.tick();
+        count
     }
 
     pub async fn set_current_run(&self, s: Option<CurrentRunSummary>) {
@@ -376,7 +408,11 @@ impl StateHandle {
     pub async fn runner_snapshot(&self) -> RunnerStatusSnapshot {
         let status = { *self.rx_status.borrow() };
         let runner_id = *self.inner.runner_id.lock().await;
+        let connected = *self.inner.connected.lock().await;
         let last_heartbeat = *self.inner.last_heartbeat.lock().await;
+        let last_session_open = *self.inner.last_session_open.lock().await;
+        let consecutive_bootstrap_failures =
+            *self.inner.consecutive_bootstrap_failures.lock().await;
         let current_run = self.inner.current_run.lock().await.clone();
         let approvals_pending = *self.inner.approvals_pending.lock().await;
         let observability = if self.inner.agent_observability_v1 {
@@ -390,9 +426,12 @@ impl StateHandle {
             project_slug: self.inner.project_slug.clone(),
             pod_id: self.inner.pod_id,
             status,
+            connected,
             current_run,
             approvals_pending,
             last_heartbeat,
+            last_session_open,
+            consecutive_bootstrap_failures,
             observability,
         }
     }
@@ -494,6 +533,39 @@ mod tests {
             started_at: Utc::now(),
             events: 0,
         }
+    }
+
+    #[tokio::test]
+    async fn fresh_runner_snapshot_reports_disconnected_with_no_session() {
+        let state = empty_state();
+        let snap = state.runner_snapshot().await;
+        assert!(
+            !snap.connected,
+            "a runner that never connected is not connected"
+        );
+        assert!(snap.last_session_open.is_none(), "no session opened yet");
+        assert_eq!(snap.consecutive_bootstrap_failures, 0);
+    }
+
+    #[tokio::test]
+    async fn bootstrap_failures_accumulate_then_session_open_resets() {
+        let state = empty_state();
+        assert_eq!(state.note_bootstrap_failure().await, 1);
+        assert_eq!(state.note_bootstrap_failure().await, 2);
+        assert_eq!(state.note_bootstrap_failure().await, 3);
+
+        let snap = state.runner_snapshot().await;
+        assert_eq!(snap.consecutive_bootstrap_failures, 3);
+        assert!(snap.last_session_open.is_none());
+
+        // A successful open clears the counter and stamps the time.
+        state.note_session_open().await;
+        let snap = state.runner_snapshot().await;
+        assert_eq!(snap.consecutive_bootstrap_failures, 0);
+        assert!(snap.last_session_open.is_some());
+
+        // Failures after a successful open count from zero again.
+        assert_eq!(state.note_bootstrap_failure().await, 1);
     }
 
     #[tokio::test]

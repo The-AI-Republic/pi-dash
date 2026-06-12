@@ -40,6 +40,18 @@ use crate::cloud::protocol::{
 pub enum TransportError {
     #[error("network: {0}")]
     Network(String),
+    /// The request deadline elapsed before the server responded. Usually a
+    /// server that accepted the request but never replied (e.g. a hung
+    /// handler that the reverse proxy eventually cuts to a 504) — NOT a
+    /// local-network outage. Kept distinct from `Network` so a server-side
+    /// hang doesn't read as "your connection is down" in logs / status.
+    #[error("timeout: {0}")]
+    Timeout(String),
+    /// Failed to establish the TCP/TLS connection at all (DNS failure,
+    /// connection refused, no route). This is the variant that genuinely
+    /// points at local connectivity / the cloud being unreachable.
+    #[error("connect: {0}")]
+    Connect(String),
     #[error("auth: access_token_expired")]
     AccessTokenExpired,
     #[error("auth: refresh_token_replayed")]
@@ -78,6 +90,8 @@ impl TransportError {
         matches!(
             self,
             TransportError::Network(_)
+                | TransportError::Timeout(_)
+                | TransportError::Connect(_)
                 | TransportError::Server { .. }
                 | TransportError::AccessTokenExpired
                 | TransportError::RateLimited
@@ -473,7 +487,7 @@ impl RunnerCloudClient {
             .json(&serde_json::json!({}))
             .send()
             .await
-            .map_err(|e| TransportError::Network(e.to_string()))?;
+            .map_err(classify_send_error)?;
         let status = resp.status();
         if !status.is_success() {
             let body = resp.text().await.unwrap_or_default();
@@ -536,7 +550,7 @@ impl RunnerCloudClient {
             .json(&body)
             .send()
             .await
-            .map_err(|e| TransportError::Network(e.to_string()))?;
+            .map_err(classify_send_error)?;
         let status = resp.status();
         if !status.is_success() {
             let body = resp.text().await.unwrap_or_default();
@@ -634,7 +648,7 @@ impl RunnerCloudClient {
             .timeout(request_timeout)
             .send()
             .await
-            .map_err(|e| TransportError::Network(e.to_string()))?;
+            .map_err(classify_send_error)?;
         let status = resp.status();
         if status == StatusCode::CONFLICT {
             let body = resp.text().await.unwrap_or_default();
@@ -1526,7 +1540,12 @@ impl HttpLoop {
                 }
                 result = attempt => result,
             } {
-                Ok(session) => return Ok(session),
+                Ok(session) => {
+                    if let Some(state) = &self.state {
+                        state.note_session_open().await;
+                    }
+                    return Ok(session);
+                }
                 Err(err) if err.is_fatal_for_runner() => {
                     tracing::warn!(
                         runner = %self.client.runner_id(),
@@ -1535,9 +1554,17 @@ impl HttpLoop {
                     return Err(err);
                 }
                 Err(err) => {
+                    // Record the failure on the runner's state so a wedged
+                    // runner surfaces in `pidash status` / `doctor` as
+                    // DISCONNECTED-with-a-count instead of looking Idle.
+                    let consecutive = match &self.state {
+                        Some(state) => state.note_bootstrap_failure().await,
+                        None => 0,
+                    };
                     tracing::warn!(
                         runner = %self.client.runner_id(),
                         backoff_secs,
+                        consecutive_failures = consecutive,
                         "bootstrap failed; retrying: {err}",
                     );
                     sleep(Duration::from_secs(backoff_secs)).await;
@@ -1786,6 +1813,23 @@ fn parse_uuid(raw: &str) -> Option<Uuid> {
     Uuid::parse_str(raw).ok()
 }
 
+/// Classify a failed reqwest send into the most specific `TransportError`.
+/// `is_timeout()` (request deadline elapsed — a server that never answered)
+/// and `is_connect()` (couldn't open the connection at all) are separated
+/// from the generic `Network` bucket so operators can tell a server-side
+/// hang apart from a local connectivity failure. reqwest reports BOTH as the
+/// same opaque "error sending request for url …" `Display`, which is exactly
+/// what made a 60s server hang look like a dropped network link.
+fn classify_send_error(e: reqwest::Error) -> TransportError {
+    if e.is_timeout() {
+        TransportError::Timeout(e.to_string())
+    } else if e.is_connect() {
+        TransportError::Connect(e.to_string())
+    } else {
+        TransportError::Network(e.to_string())
+    }
+}
+
 fn map_auth_error(status: StatusCode, body: &str) -> TransportError {
     if status == StatusCode::UNAUTHORIZED {
         if body.contains("access_token_expired") {
@@ -1874,7 +1918,7 @@ pub async fn create_runner(
         .json(&body)
         .send()
         .await
-        .map_err(|e| TransportError::Network(e.to_string()))?;
+        .map_err(classify_send_error)?;
     let status = resp.status();
     if !status.is_success() {
         let body = resp.text().await.unwrap_or_default();
@@ -1905,7 +1949,7 @@ pub async fn enroll_runner(
         .json(&body)
         .send()
         .await
-        .map_err(|e| TransportError::Network(e.to_string()))?;
+        .map_err(classify_send_error)?;
     let status = resp.status();
     if !status.is_success() {
         let body = resp.text().await.unwrap_or_default();
@@ -1988,7 +2032,7 @@ pub async fn revoke_runner_self(client: &RunnerCloudClient) -> Result<(), Transp
         .header("X-Runner-Id", client.runner_id().to_string())
         .send()
         .await
-        .map_err(|e| TransportError::Network(e.to_string()))?;
+        .map_err(classify_send_error)?;
     let status = resp.status();
     if status.is_success() || status == StatusCode::NOT_FOUND || status == StatusCode::UNAUTHORIZED
     {
@@ -2084,6 +2128,67 @@ mod tests {
         let parsed: OpenSessionResponse = serde_json::from_value(raw).expect("parse response");
         assert!(parsed.redeliver.is_none());
         assert!(parsed.resume_ack.is_none());
+    }
+
+    #[test]
+    fn timeout_and_connect_are_recoverable_not_fatal() {
+        for err in [
+            TransportError::Timeout("deadline".into()),
+            TransportError::Connect("refused".into()),
+        ] {
+            assert!(err.is_recoverable(), "{err} should be retried, not unwound");
+            assert!(!err.is_fatal_for_runner(), "{err} must not kill the runner");
+        }
+    }
+
+    /// `classify_send_error` is the whole point of the timeout/connect split:
+    /// a server that accepts the request but never answers (→ request timeout)
+    /// must NOT be reported as the same thing as a connection that can't be
+    /// established. Both surface from reqwest as the identical opaque
+    /// "error sending request for url …" string, so we lean on reqwest's
+    /// `is_timeout()` / `is_connect()` predicates instead.
+    #[tokio::test]
+    async fn classify_send_error_separates_timeout_from_connect() {
+        use std::time::Duration;
+
+        // --- Timeout: accept the connection but never respond. ---
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let mut held = Vec::new();
+            loop {
+                if let Ok((stream, _)) = listener.accept().await {
+                    held.push(stream); // keep the socket open, send nothing
+                }
+            }
+        });
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_millis(200))
+            .build()
+            .unwrap();
+        let err = client
+            .get(format!("http://{addr}/"))
+            .send()
+            .await
+            .expect_err("request should time out");
+        assert!(
+            matches!(classify_send_error(err), TransportError::Timeout(_)),
+            "a hung server must classify as Timeout",
+        );
+
+        // --- Connect: bind then free the port so the connection is refused. ---
+        let dead = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let dead_addr = dead.local_addr().unwrap();
+        drop(dead);
+        let err = client
+            .get(format!("http://{dead_addr}/"))
+            .send()
+            .await
+            .expect_err("connection should be refused");
+        assert!(
+            matches!(classify_send_error(err), TransportError::Connect(_)),
+            "a refused connection must classify as Connect",
+        );
     }
 
     #[test]
