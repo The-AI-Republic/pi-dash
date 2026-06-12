@@ -22,6 +22,7 @@ import {
 import { BindingScheduleFields } from "@/components/project/scheduler-bindings/binding-schedule-fields";
 import { DEFAULT_TZID } from "@/components/project/scheduler-bindings/constants";
 import { defaultDtstartLocal, localToIsoUTC } from "@/components/project/scheduler-bindings/datetime-input";
+import { filterProjects, partitionInstallResults } from "@/components/schedulers/install-scheduler-helpers";
 import { useProject } from "@/hooks/store/use-project";
 
 interface InstallFormValues {
@@ -131,11 +132,7 @@ export const InstallSchedulerOnProjectsModal = observer(function InstallSchedule
   const watchedDtstart = useWatch({ control, name: "dtstart" }) ?? "";
   const watchedRrule = useWatch({ control, name: "rrule" }) ?? "";
 
-  const filteredProjects = useMemo(() => {
-    const q = query.trim().toLowerCase();
-    if (!q) return projects;
-    return projects.filter((p) => p.name.toLowerCase().includes(q) || (p.identifier ?? "").toLowerCase().includes(q));
-  }, [projects, query]);
+  const filteredProjects = useMemo(() => filterProjects(projects, query), [projects, query]);
 
   const isInstalled = (id: string) => installedIds?.has(id) ?? false;
 
@@ -193,13 +190,7 @@ export const InstallSchedulerOnProjectsModal = observer(function InstallSchedule
       )
     );
 
-    const succeededIds: string[] = [];
-    const failedIds: string[] = [];
-    results.forEach((res, i) => {
-      const pid = targetIds[i];
-      if (res.status === "fulfilled") succeededIds.push(pid);
-      else failedIds.push(pid);
-    });
+    const { succeededIds, failedIds, firstError } = partitionInstallResults(targetIds, results);
 
     if (succeededIds.length > 0) {
       setToast({
@@ -213,10 +204,11 @@ export const InstallSchedulerOnProjectsModal = observer(function InstallSchedule
     }
 
     if (failedIds.length > 0) {
+      const names = failedIds.map((id) => getProjectById(id)?.name ?? id).join(", ");
       setToast({
         type: TOAST_TYPE.ERROR,
         title: t("{count, plural, one {# project failed} other {# projects failed}}", { count: failedIds.length }),
-        message: failedIds.map((id) => getProjectById(id)?.name ?? id).join(", "),
+        message: firstError ? `${names} — ${firstError}` : names,
       });
       // Keep the modal open with only the failures still selected so the user
       // can retry them; mark the successful ones as installed.
