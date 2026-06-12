@@ -169,6 +169,35 @@ This single decision dissolves the §2.3 hazards:
 | Lazy lock-on-write             | Not needed — the dedicated tree is always available. |
 | `SETUP_COMMAND_TIMEOUT` freeze | Outside the pool owner task → no interaction.        |
 
+### 3.1.1 Per-runner, not per-workdir — and why
+
+Multiple runners can reference the same `[[workdir]]` and share its issue pool
+(§2.2). The chat worktree is nonetheless **per-runner**, not shared per-workdir.
+This is mandatory, not a disk/safety tradeoff:
+
+1. **Cross-runner write safety.** Runners R1 and R2 on the same workdir are
+   independently chat-able at the same time. A chat tree they both wrote to would
+   reintroduce the §2.3 cross-worktree pollution — just _between runners_ instead
+   of between turns. Two concurrent writing chats need two trees, exactly as two
+   issue runs need two desks.
+2. **Per-runner persistence.** The chat worktree is identity-bound: R1 resumes
+   its own branch/dirty state. A shared/anonymous tree cannot hold two runners'
+   separate continuity.
+
+The only way a shared per-workdir chat tree could be safe is to **serialize chat
+across all runners on the workdir** ("can't talk to R2 while R1 is chatting") —
+strictly worse UX and a partial return of the "refuse the boss" problem.
+Rejected.
+
+This is the mirror of the issue pool, which _is_ per-workdir (§2.2) precisely
+because issue desks are **fungible capacity**; chat is bound to a **runner
+identity**, so it is not poolable. Disk: per-runner means up to N trees for N
+runners on a workdir, but it is lazy (only chat-written runners create one) and
+idle-evictable (§9) — steady-state is one tree per _actively-used_ chat, not per
+runner. A consequence for Phase 2: chat branch names must be **per-runner
+namespaced** (e.g. `chat/<runner_id>/…`) so two runners on the same repo do not
+collide on push.
+
 ### 3.2 Parallel Lanes
 
 - Remove the **cross-lane** guards (`:937`/`:1009` chat-reject, `:809`

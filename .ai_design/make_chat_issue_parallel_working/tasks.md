@@ -99,7 +99,9 @@ the state model correct for when the guards come off.
 
 ## Phase 2 — Clean-session lifecycle (deferred, design §7)
 
-- [ ] Fresh branch from default on session start (unless user specifies).
+- [ ] Fresh branch from default on session start (unless user specifies),
+      **per-runner namespaced** (e.g. `chat/<runner_id>/…`) so runners sharing a
+      workdir don't collide on push (design §3.1.1).
 - [ ] Mandatory commit + push to remote on session end; never local-only.
 - [ ] Auto-create a PR only when the operator explicitly asks.
 - [ ] Session lifetime ~5 min idle; reviving by typing restarts the countdown
