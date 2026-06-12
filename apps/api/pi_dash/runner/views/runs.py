@@ -179,13 +179,18 @@ class AgentRunListEndpoint(APIView):
             return Response({"error": "issue not found"}, status=status.HTTP_404_NOT_FOUND)
 
         with transaction.atomic():
-            run = scheduling.dispatch_run_ai_run(issue, actor=request.user)
             # Run AI is explicit human re-engagement — mirror the Comment
             # & Run reset so the next automatic tick budget restarts
-            # cleanly. Only fires when the dispatch actually committed a
-            # run (active-run-exists / no-pod return None).
-            if run is not None:
-                scheduling.reset_ticker_after_comment_and_run(issue)
+            # cleanly. Reset BEFORE dispatch: the prompt renders the tick
+            # budget at dispatch time, so resetting after would bake the
+            # stale pre-reset count ("23 of 24 used") into a prompt whose
+            # budget this same request just refunded. The rollback below
+            # keeps the reset conditional on a run actually committing
+            # (active-run-exists / no-pod return None).
+            scheduling.reset_ticker_after_comment_and_run(issue)
+            run = scheduling.dispatch_run_ai_run(issue, actor=request.user)
+            if run is None:
+                transaction.set_rollback(True)
         if run is None:
             return Response(
                 {"error": ("could not dispatch — issue may already have an active run, or no pod is available")},
@@ -220,19 +225,24 @@ class AgentRunListEndpoint(APIView):
             return Response({"error": "issue not found"}, status=status.HTTP_404_NOT_FOUND)
 
         with transaction.atomic():
+            # Reset BEFORE dispatch: the prompt renders the tick budget at
+            # dispatch time, so resetting after would bake the stale
+            # pre-reset count into the prompt this same request refunds.
+            # The reset must still only stick when the dispatch actually
+            # commits a run — otherwise (active-run-exists / no-prior-run
+            # / no-pod, all of which return None) the user's existing
+            # tick_count and next_run_at must stay intact: they didn't
+            # trigger a new invocation, so the cap budget shouldn't be
+            # refunded and the next-tick clock shouldn't be pushed out.
+            # Hence the rollback instead of a conditional reset.
+            scheduling.reset_ticker_after_comment_and_run(issue)
             run = scheduling.dispatch_continuation_run(
                 issue,
                 triggered_by=scheduling.TRIGGER_COMMENT_AND_RUN,
                 actor=request.user,
             )
-            # Only reset the schedule when the dispatch actually committed
-            # a run. Otherwise (active-run-exists / no-prior-run / no-pod
-            # — all of which return None) the user's existing tick_count
-            # and next_run_at must stay intact: they didn't trigger a new
-            # invocation, so the cap budget shouldn't be refunded and the
-            # next-tick clock shouldn't be pushed out.
-            if run is not None:
-                scheduling.reset_ticker_after_comment_and_run(issue)
+            if run is None:
+                transaction.set_rollback(True)
         if run is None:
             return Response(
                 {

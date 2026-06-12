@@ -900,3 +900,83 @@ def test_no_skip_header_creates_run_on_state_change(db, session_client, workspac
     )
     assert resp.status_code == status.HTTP_204_NO_CONTENT
     assert AgentRun.objects.filter(work_item=issue).count() == 1
+
+
+@pytest.mark.unit
+def test_comment_and_run_prompt_renders_post_reset_budget(
+    db, session_client, workspace, project
+):
+    """The ticker reset must land BEFORE the prompt renders — otherwise the
+    prompt bakes in the stale pre-reset count ("used 7 of 24 ticks") that
+    this very request refunds."""
+    from pi_dash.db.models.issue_agent_ticker import IssueAgentTicker
+    from pi_dash.prompting.seed import seed_default_template
+
+    seed_default_template()
+    issue, _ = _make_in_progress_issue_with_paused_run(workspace)
+    sched = IssueAgentTicker.objects.get(issue=issue)
+    sched.tick_count = 7
+    sched.save(update_fields=["tick_count"])
+
+    resp = session_client.post(
+        "/api/runners/runs/",
+        {
+            "workspace": str(workspace.id),
+            "work_item": str(issue.id),
+            "triggered_by": "comment_and_run",
+        },
+        format="json",
+    )
+    assert resp.status_code == status.HTTP_201_CREATED
+    run = AgentRun.objects.get(pk=resp.data["id"])
+    assert "used 0 of" in run.prompt
+    assert "used 7 of" not in run.prompt
+
+
+@pytest.mark.unit
+def test_comment_and_run_409_leaves_ticker_untouched(
+    db, session_client, workspace, project
+):
+    """When the dispatch bails (no prior run → 409) the pre-dispatch ticker
+    reset must roll back: the user didn't trigger a new invocation, so the
+    cap budget must not be refunded nor the next-tick clock pushed out."""
+    from datetime import timedelta
+
+    from crum import impersonate
+    from django.utils import timezone
+
+    from pi_dash.db.models import Issue, Project, State
+    from pi_dash.db.models.issue_agent_ticker import IssueAgentTicker
+
+    with impersonate(workspace.owner):
+        project2 = Project.objects.create(
+            name="P3", identifier="P3", workspace=workspace,
+            created_by=workspace.owner,
+        )
+        in_progress = State.objects.create(
+            name="In Progress", project=project2, group="started"
+        )
+        issue = Issue.objects.create(
+            name="Task", workspace=workspace, project=project2,
+            state=in_progress, created_by=workspace.owner,
+        )
+    AgentRun.objects.filter(work_item=issue).delete()
+    sched = IssueAgentTicker.objects.get(issue=issue)
+    stale = timezone.now() + timedelta(hours=2)
+    sched.tick_count = 7
+    sched.next_run_at = stale
+    sched.save(update_fields=["tick_count", "next_run_at"])
+
+    resp = session_client.post(
+        "/api/runners/runs/",
+        {
+            "workspace": str(workspace.id),
+            "work_item": str(issue.id),
+            "triggered_by": "comment_and_run",
+        },
+        format="json",
+    )
+    assert resp.status_code == status.HTTP_409_CONFLICT
+    sched.refresh_from_db()
+    assert sched.tick_count == 7
+    assert sched.next_run_at == stale

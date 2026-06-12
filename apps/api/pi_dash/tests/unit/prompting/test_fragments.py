@@ -357,7 +357,6 @@ def test_assemble_renders_tick_trigger_guidance():
     ctx = _ctx_from_db()
     ctx["run"]["trigger"] = "tick"
     ctx["tick"] = {
-        "enabled": True,
         "count": 5,
         "cap": 24,
         "remaining": 19,

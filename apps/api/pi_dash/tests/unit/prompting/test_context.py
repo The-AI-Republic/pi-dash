@@ -333,7 +333,6 @@ def test_context_tick_populated_from_ticker(issue, run):
     )
     ctx = build_context(issue, run)
     assert ctx["tick"] == {
-        "enabled": True,
         "count": 5,
         "cap": 24,
         "remaining": 19,
@@ -353,3 +352,53 @@ def test_context_tick_infinite_cap_surfaces_none(issue, run):
     assert ctx["tick"]["cap"] is None
     assert ctx["tick"]["remaining"] is None
     assert ctx["tick"]["count"] == 3
+
+
+@pytest.mark.unit
+def test_context_tick_none_when_ticker_disarmed(issue, run):
+    # A disarmed ticker (cap hit, user disabled, left the ticking state)
+    # must not render the "automatically re-invokes" schedule block — the
+    # promise would be false and invites the agent to defer work to a
+    # tick that never fires.
+    from pi_dash.db.models.issue_agent_ticker import IssueAgentTicker
+
+    IssueAgentTicker.objects.create(issue=issue, tick_count=5, enabled=False)
+    ctx = build_context(issue, run)
+    assert ctx["tick"] is None
+
+
+@pytest.mark.unit
+def test_context_tick_none_for_nonsense_interval(issue, run, project):
+    # The project-default interval is API-writable with no validation;
+    # "about every 0 hours" must not reach a prompt.
+    from pi_dash.db.models.issue_agent_ticker import IssueAgentTicker
+
+    project.agent_default_interval_seconds = 0
+    project.save(update_fields=["agent_default_interval_seconds"])
+    IssueAgentTicker.objects.create(issue=issue, tick_count=1)
+    ctx = build_context(issue, run)
+    assert ctx["tick"] is None
+
+
+@pytest.mark.unit
+def test_context_tick_none_for_negative_noninfinite_cap(issue, run):
+    # Only -1 means infinite; any other negative cap is misconfiguration
+    # ("used 1 of -2 ticks") and the schedule block must be omitted.
+    from pi_dash.db.models.issue_agent_ticker import IssueAgentTicker
+
+    IssueAgentTicker.objects.create(issue=issue, tick_count=1, max_ticks=-2)
+    ctx = build_context(issue, run)
+    assert ctx["tick"] is None
+
+
+@pytest.mark.unit
+def test_context_survives_run_without_run_config_attribute(issue):
+    # The template-preview endpoint renders with a _FakeRun stub that has
+    # no run_config attribute — build_context must not raise.
+    class _StubRun:
+        def __init__(self):
+            self.id = "00000000-0000-0000-0000-000000000000"
+            self.work_item_id = None
+
+    ctx = build_context(issue, _StubRun())
+    assert ctx["run"]["trigger"] is None

@@ -40,7 +40,10 @@ Why this run started:
 This review run was fired automatically by the issue's ticker — a
 scheduled re-invocation, not a human action. If nothing has changed
 since your last review pass (no new commits, no new comments), emit
-`noop` instead of re-reviewing from scratch.
+`noop` instead of re-reviewing from scratch. Judge "no new comments"
+against the live thread (`pidash comment list`), not the activity
+inlined below — that snapshot was captured when this run was created
+and a human comment may have arrived since.
 {% elif run.trigger in ("comment", "comment_and_run") %}\
 A new human comment triggered this run — read the comment thread first
 and address it.

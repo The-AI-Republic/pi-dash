@@ -8,7 +8,7 @@
 ## Why this run started
 
 {% if run.trigger == "tick" %}
-This run was fired **automatically by the issue's ticker** — a scheduled re-invocation, not a human action. Treat it as a checkpoint on work already in flight: re-read the workpad and the comment thread, work out what (if anything) changed since the prior run, and continue the plan from there. If nothing has changed and no plan item is actionable, do **not** redo or re-validate work that is already recorded as done — confirm the workpad is accurate and exit promptly. Spending a tick on "nothing to do" is fine; repeating finished work is not.
+This run was fired **automatically by the issue's ticker** — a scheduled re-invocation, not a human action. Treat it as a checkpoint on work already in flight: re-read the workpad and the comment thread, work out what (if anything) changed since the prior run, and continue the plan from there. Note that the comment thread inlined in this prompt was captured when this run was created — a human comment may have arrived since, so check `pidash comment list` for anything newer before concluding nothing changed; if a newer human comment exists, treat this run as comment-triggered and address it. If nothing has changed and no plan item is actionable, do **not** redo or re-validate work that is already recorded as done — confirm the workpad is accurate and exit promptly. Spending a tick on "nothing to do" is fine; repeating finished work is not.
 {% elif run.trigger in ("comment", "comment_and_run") %}
 This run was triggered by **a new human comment** on the issue. The latest human comment(s) are the reason you are here — read the comment thread first and address them before resuming the broader plan.
 {% elif run.trigger == "run_ai" %}
