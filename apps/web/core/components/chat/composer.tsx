@@ -16,6 +16,7 @@ interface ChatComposerProps {
   sending?: boolean;
   disabledReason?: string | null;
   placeholder?: string;
+  className?: string;
 }
 
 export function ChatComposer({
@@ -27,10 +28,11 @@ export function ChatComposer({
   sending = false,
   disabledReason = null,
   placeholder = "Ask Pi to do something…",
+  className = "shrink-0 border-t border-subtle pt-3",
 }: ChatComposerProps) {
   const disabled = !!disabledReason;
   return (
-    <div className="shrink-0 border-t border-subtle pt-3">
+    <div className={className}>
       {disabledReason && <div className="mb-2 text-12 text-secondary">{disabledReason}</div>}
       <div className="flex items-end gap-2">
         <textarea
