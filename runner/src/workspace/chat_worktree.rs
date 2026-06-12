@@ -250,20 +250,22 @@ mod tests {
         let (tmp, canonical) = canonical_with_origin();
         let rid = Uuid::new_v4();
         let sid = Uuid::new_v4();
+        let other = Uuid::new_v4();
 
-        // Session 1 in worktree A: do some work, then end (commit + push).
-        let wt_a = tmp.path().join("chat-a");
-        ensure(&canonical, &wt_a).await.unwrap();
-        let branch = start_session(&canonical, &wt_a, rid, sid).await.unwrap();
-        std::fs::write(wt_a.join("note.md"), "work from chat\n").unwrap();
+        // A runner has ONE dedicated chat worktree (deterministic path); every
+        // session reuses it. Session 1 does work, then ends (commit + push).
+        let wt = tmp.path().join("chat-worktree");
+        ensure(&canonical, &wt).await.unwrap();
+        let branch = start_session(&canonical, &wt, rid, sid).await.unwrap();
+        std::fs::write(wt.join("note.md"), "work from chat\n").unwrap();
         assert!(
-            end_session(&wt_a).await.unwrap(),
+            end_session(&wt).await.unwrap(),
             "a dirty session commits + pushes"
         );
 
         // The branch is now on origin.
         let ls = Command::new("git")
-            .current_dir(&wt_a)
+            .current_dir(&wt)
             .args(["ls-remote", "origin", &format!("refs/heads/{branch}")])
             .output()
             .unwrap();
@@ -272,18 +274,24 @@ mod tests {
             "session branch was pushed to origin"
         );
 
-        // Revive in a FRESH worktree B with the same ids → resumes the pushed
-        // branch with its work intact (the deterministic-branch revive, §3.7).
-        let wt_b = tmp.path().join("chat-b");
-        ensure(&canonical, &wt_b).await.unwrap();
-        let branch_b = start_session(&canonical, &wt_b, rid, sid).await.unwrap();
-        assert_eq!(branch_b, branch);
+        // A DIFFERENT session reuses the same worktree → it branches fresh from
+        // default, moving the worktree off `sid`'s branch (so `note.md` is gone).
+        start_session(&canonical, &wt, rid, other).await.unwrap();
         assert!(
-            wt_b.join("note.md").exists(),
+            !wt.join("note.md").exists(),
+            "an intervening session starts fresh from default"
+        );
+
+        // Revive `sid` in the same worktree → resumes its pushed branch with its
+        // work intact (the deterministic-branch revive, §3.7).
+        let revived = start_session(&canonical, &wt, rid, sid).await.unwrap();
+        assert_eq!(revived, branch);
+        assert!(
+            wt.join("note.md").exists(),
             "revive resumes the pushed session branch with its work"
         );
         assert_eq!(
-            std::fs::read_to_string(wt_b.join("note.md")).unwrap(),
+            std::fs::read_to_string(wt.join("note.md")).unwrap(),
             "work from chat\n"
         );
     }
