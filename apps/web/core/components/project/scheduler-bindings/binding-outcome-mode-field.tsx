@@ -25,7 +25,7 @@ const OUTCOME_MODE_OPTIONS: ReadonlyArray<{ value: SchedulerOutcomeMode; label: 
   {
     value: "fix_and_review",
     label: "Fix & open for review",
-    help: "File an issue for each finding, implement the fix, open a pull request (never merged automatically), and move the issue straight to In Review for a human.",
+    help: "File an agent-ready issue for each finding and move it to In Progress — that automatically delegates the fix to the coding agent, which opens a pull request for review (never merged automatically).",
   },
 ];
 
