@@ -349,3 +349,43 @@ def test_assemble_renders_project_header_without_description_has_no_extra_blank_
     assert "Project: Test Project (TP)\n\nIssue Description:" in body
     # Triple-newline would mean a double blank line — that's the regression.
     assert "Project: Test Project (TP)\n\n\nIssue Description:" not in body
+
+
+@pytest.mark.unit
+@pytest.mark.django_db
+def test_assemble_renders_tick_trigger_guidance():
+    ctx = _ctx_from_db()
+    ctx["run"]["trigger"] = "tick"
+    ctx["tick"] = {
+        "enabled": True,
+        "count": 5,
+        "cap": 24,
+        "remaining": 19,
+        "interval_seconds": 10800,
+        "interval_human": "3 hours",
+    }
+    body = render(assemble(), ctx)
+    assert "automatically by the issue's ticker" in body
+    assert "about every 3 hours" in body
+    assert "used 5 of 24 ticks" in body
+    assert "19 remaining before the issue auto-pauses" in body
+
+
+@pytest.mark.unit
+@pytest.mark.django_db
+def test_assemble_renders_comment_trigger_guidance():
+    ctx = _ctx_from_db()
+    ctx["run"]["trigger"] = "comment"
+    body = render(assemble(), ctx)
+    assert "a new human comment" in body
+    assert "automatically by the issue's ticker" not in body
+
+
+@pytest.mark.unit
+@pytest.mark.django_db
+def test_assemble_renders_unrecorded_trigger_fallback():
+    # Default _ctx_from_db run has no triggered_by — the template must take
+    # the fallback branch, and the tick block must not render without a ticker.
+    body = render(assemble(), _ctx_from_db())
+    assert "The trigger for this run was not recorded" in body
+    assert "Ticking schedule" not in body

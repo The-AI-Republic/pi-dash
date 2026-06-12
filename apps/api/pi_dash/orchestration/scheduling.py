@@ -449,6 +449,7 @@ def dispatch_continuation_run(
         parent=parent,
         creator=creator,
         pod=pod,
+        triggered_by=triggered_by,
     )
     return outcome.created_run
 
@@ -510,6 +511,7 @@ def dispatch_run_ai_run(issue: Issue, *, actor) -> Optional[AgentRun]:
             parent=parent,
             creator=creator,
             pod=pod,
+            triggered_by=TRIGGER_RUN_AI,
         )
     else:
         outcome = orchestration_service._create_and_dispatch_run(
@@ -517,6 +519,7 @@ def dispatch_run_ai_run(issue: Issue, *, actor) -> Optional[AgentRun]:
             parent=None,
             creator=creator,
             pod=pod,
+            triggered_by=TRIGGER_RUN_AI,
         )
     return outcome.created_run
 

@@ -41,6 +41,14 @@ logger = logging.getLogger(__name__)
 #: imports of ``DELEGATION_STATE_NAME`` exist.
 DELEGATION_STATE_NAME = "In Progress"
 
+#: Trigger labels persisted on ``AgentRun.run_config["triggered_by"]`` and
+#: surfaced to the agent prompt as ``run.trigger`` (see
+#: ``prompting.context.build_context``). The tick / Comment & Run / Run AI
+#: labels live in ``orchestration.scheduling`` (``TRIGGER_TICK`` et al.);
+#: these two cover the dispatch paths owned by this module.
+TRIGGER_STATE_TRANSITION = "state_transition"
+TRIGGER_COMMENT = "comment"
+
 
 @dataclass
 class TransitionOutcome:
@@ -378,11 +386,12 @@ def handle_issue_comment(comment: IssueComment) -> ContinuationOutcome:
         parent=prior,
         creator=comment.actor,
         pod=pod,
+        triggered_by=TRIGGER_COMMENT,
     )
 
 
 def _create_continuation_run(
-    *, issue: Issue, parent: AgentRun, creator, pod
+    *, issue: Issue, parent: AgentRun, creator, pod, triggered_by: str = ""
 ) -> ContinuationOutcome:
     """Create R_next as a follow-up to ``parent`` with optional pin.
 
@@ -390,6 +399,10 @@ def _create_continuation_run(
     full prompt and starts a fresh agent session — it does not resume the
     parent's session. ``parent`` is retained for lineage / pin selection only.
     See ``.ai_design/ticking_optimization/design.md``.
+
+    ``triggered_by`` is persisted in ``run_config`` **before** the prompt
+    renders, so the template can tell the agent what woke it (tick vs
+    human comment vs manual Run AI).
     """
     from pi_dash.runner.services import matcher
 
@@ -409,6 +422,7 @@ def _create_continuation_run(
                 "repo_url": (issue.project.repo_url or None),
                 "repo_ref": (issue.project.base_branch or None),
                 "git_work_branch": (issue.git_work_branch or None),
+                "triggered_by": (triggered_by or None),
             },
         )
         try:
@@ -456,6 +470,7 @@ def _create_and_dispatch_run(
     creator,
     pod,
     fresh_session: bool = False,
+    triggered_by: str = TRIGGER_STATE_TRANSITION,
 ) -> TransitionOutcome:
     """Create a fresh ``AgentRun`` and dispatch it.
 
@@ -488,6 +503,7 @@ def _create_and_dispatch_run(
                 "repo_url": (issue.project.repo_url or None),
                 "repo_ref": (issue.project.base_branch or None),
                 "git_work_branch": (issue.git_work_branch or None),
+                "triggered_by": (triggered_by or None),
             },
             # owner stays NULL until assignment captures runner.owner.
         )

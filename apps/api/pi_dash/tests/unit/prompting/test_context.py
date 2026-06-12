@@ -300,3 +300,56 @@ def test_context_empty_base_branch_surfaces_as_none(workspace, create_user):
     ctx = build_context(issue, run)
     assert ctx["repo"]["base_branch"] is None
     assert ctx["repo"]["work_branch"] is None
+
+
+@pytest.mark.unit
+def test_context_run_trigger_surfaced_from_run_config(issue, run):
+    run.run_config = {"triggered_by": "tick"}
+    run.save(update_fields=["run_config"])
+    ctx = build_context(issue, run)
+    assert ctx["run"]["trigger"] == "tick"
+
+
+@pytest.mark.unit
+def test_context_run_trigger_none_when_unrecorded(issue, run):
+    # Runs created before the trigger was recorded (or via paths that don't
+    # populate run_config) must surface None so templates take the fallback.
+    ctx = build_context(issue, run)
+    assert ctx["run"]["trigger"] is None
+
+
+@pytest.mark.unit
+def test_context_tick_none_without_ticker(issue, run):
+    ctx = build_context(issue, run)
+    assert ctx["tick"] is None
+
+
+@pytest.mark.unit
+def test_context_tick_populated_from_ticker(issue, run):
+    from pi_dash.db.models.issue_agent_ticker import IssueAgentTicker
+
+    IssueAgentTicker.objects.create(
+        issue=issue, tick_count=5, interval_seconds=7200, max_ticks=24
+    )
+    ctx = build_context(issue, run)
+    assert ctx["tick"] == {
+        "enabled": True,
+        "count": 5,
+        "cap": 24,
+        "remaining": 19,
+        "interval_seconds": 7200,
+        "interval_human": "2 hours",
+    }
+
+
+@pytest.mark.unit
+def test_context_tick_infinite_cap_surfaces_none(issue, run):
+    # -1 means infinite — cap/remaining must surface as None so templates
+    # can branch with `{% if tick.cap is not none %}`.
+    from pi_dash.db.models.issue_agent_ticker import IssueAgentTicker
+
+    IssueAgentTicker.objects.create(issue=issue, tick_count=3, max_ticks=-1)
+    ctx = build_context(issue, run)
+    assert ctx["tick"]["cap"] is None
+    assert ctx["tick"]["remaining"] is None
+    assert ctx["tick"]["count"] == 3
