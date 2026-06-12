@@ -64,7 +64,9 @@ def my_issues(deps, scope: str = "all"):
 
 
 def get_issue(deps, issue_id) -> Issue:
-    issue = scoped_issues(deps).filter(id=issue_id).first()
+    issue = (
+        scoped_issues(deps).select_related("project", "state").filter(id=issue_id).first()
+    )
     if issue is None:
         raise ToolNotFound(f"Issue {issue_id} not found or not accessible.")
     return issue

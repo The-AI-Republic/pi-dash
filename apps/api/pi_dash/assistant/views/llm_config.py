@@ -4,8 +4,7 @@
 
 from __future__ import annotations
 
-import asyncio
-
+from asgiref.sync import async_to_sync
 from django.utils import timezone
 from rest_framework import status
 from rest_framework.response import Response
@@ -122,7 +121,7 @@ def _run_test(cfg: UserLLMConfig, api_key: str) -> tuple[bool, str, str]:
         await agent.run("Reply with the single word: ok", usage_limits=UsageLimits(request_limit=1))
 
     try:
-        asyncio.run(_go())
+        async_to_sync(_go)()
         return True, "", ""
     except Exception as exc:  # noqa: BLE001
         text = str(exc).lower()
