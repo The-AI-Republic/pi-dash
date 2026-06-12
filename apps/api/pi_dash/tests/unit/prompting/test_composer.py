@@ -237,3 +237,24 @@ def test_pr_work_routes_to_review_group_not_done():
     # The default posture and ending-run guidance both name the review group
     # as the destination for code-change/PR work.
     assert "`review` group" in body
+    # And the sample project actually exposes a review-group state, so the
+    # happy path (route to it) is real here, not just the no-review fallback.
+    assert "(group: `review`)" in body
+
+
+@pytest.mark.unit
+def test_review_kind_ending_does_not_forbid_completed():
+    """The shared ``ending-run`` / ``pidash-cli`` sections carry coding-task
+    PR-routing ("In Review, not Done"). That guidance must NOT leak into the
+    ``review`` kind, whose approved outcome correctly moves to ``completed``
+    (see ``review-cycle`` Step 3). Otherwise the review agent gets two
+    contradictory endings and can refuse to close out an approved review.
+    """
+    out = compose("review", workspace=None, project=None, user=None, context=_ctx("review"))
+    body = out.text
+
+    # The coding-task "PR -> In Review, not completed" warning must be absent.
+    assert "falsely claims the change already landed" not in body
+    assert '--state "In Review"' not in body
+    # The review kind defers to its own outcome routing (approved -> completed).
+    assert '--state "Done"' in body
