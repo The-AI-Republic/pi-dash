@@ -93,5 +93,9 @@ async def assistant_event_stream(request, slug, thread_id):
 
     response = StreamingHttpResponse(stream(), content_type="text/event-stream")
     response["Cache-Control"] = "no-cache"
-    response["X-Accel-Buffering"] = "no"
+    response["X-Accel-Buffering"] = "no"  # disable nginx proxy buffering
+    # Setting Content-Encoding makes Django's GZipMiddleware skip this response,
+    # so SSE chunks are not held in a gzip buffer (which would batch/delay
+    # token deltas). "identity" = no transfer encoding.
+    response["Content-Encoding"] = "identity"
     return response

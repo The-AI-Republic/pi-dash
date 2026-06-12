@@ -46,7 +46,7 @@ def create_comment(ctx: RunContext[AssistantDeps], issue_id: str, body_md: str) 
             comment_json={},
             comment_stripped=strip_tags(html),
             speaker_type="agent",
-            speaker_label="Pi Assistant",
+            speaker_label="Pi Dash AI",
         )
 
     _results.record_write(

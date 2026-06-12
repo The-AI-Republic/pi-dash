@@ -65,6 +65,10 @@ export const coreRoutes: RouteConfigEntry[] = [
         // Workspace Home
         route(":workspaceSlug", "./(all)/[workspaceSlug]/(projects)/page.tsx"),
 
+        // AI Assistant (inside the workspace layout so the sidebar stays)
+        route(":workspaceSlug/assistant", "./(all)/[workspaceSlug]/assistant/page.tsx"),
+        route(":workspaceSlug/assistant/:threadId", "./(all)/[workspaceSlug]/assistant/[threadId]/page.tsx"),
+
         // Active Cycles
         layout("./(all)/[workspaceSlug]/(projects)/active-cycles/layout.tsx", [
           route(":workspaceSlug/active-cycles", "./(all)/[workspaceSlug]/(projects)/active-cycles/page.tsx"),
@@ -302,10 +306,6 @@ export const coreRoutes: RouteConfigEntry[] = [
         route(":workspaceSlug/runners/chat/:runnerId", "./(all)/[workspaceSlug]/runners/chat/[runnerId]/page.tsx"),
         route(":workspaceSlug/runners/detail/:runnerId", "./(all)/[workspaceSlug]/runners/detail/[runnerId]/page.tsx"),
       ]),
-
-      // AI Assistant
-      route(":workspaceSlug/assistant", "./(all)/[workspaceSlug]/assistant/page.tsx"),
-      route(":workspaceSlug/assistant/:threadId", "./(all)/[workspaceSlug]/assistant/[threadId]/page.tsx"),
 
       // ====================================================================
       // SETTINGS SECTION

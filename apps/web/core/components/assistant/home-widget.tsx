@@ -9,14 +9,16 @@ import { observer } from "mobx-react";
 import { Sparkles } from "lucide-react";
 import { Link, useNavigate } from "react-router";
 import useSWR from "swr";
+import { setToast, TOAST_TYPE } from "@pi-dash/propel/toast";
 import { AssistantService } from "@pi-dash/services";
-import { EUserWorkspaceRoles, type IAssistantThread } from "@pi-dash/types";
+import { EUserWorkspaceRoles, type IAssistantThread, type IUserLLMConfig } from "@pi-dash/types";
 import { Button } from "@pi-dash/ui";
 import { useWorkspace } from "@/hooks/store/use-workspace";
 
 const service = new AssistantService();
 
 const SUGGESTIONS = ["What's assigned to me?", "Create an issue in…", "Summarize open issues in…"];
+const API_KEY_REMINDER = "Please set your API key in Settings first to start using AI Assistant.";
 
 export const AssistantHomeWidget = observer(function AssistantHomeWidget() {
   const { currentWorkspace } = useWorkspace();
@@ -27,17 +29,26 @@ export const AssistantHomeWidget = observer(function AssistantHomeWidget() {
   const slug = currentWorkspace?.slug;
   const role = currentWorkspace?.role ?? 0;
 
-  const { data: threads } = useSWR<IAssistantThread[]>(
-    slug && role >= EUserWorkspaceRoles.MEMBER ? ["assistant-threads", slug] : null,
-    () => service.listThreads(slug!)
+  const enabled = !!slug && role >= EUserWorkspaceRoles.MEMBER;
+
+  const { data: threads } = useSWR<IAssistantThread[]>(enabled ? ["assistant-threads", slug] : null, () =>
+    service.listThreads(slug!)
+  );
+  const { data: config } = useSWR<IUserLLMConfig>(enabled ? "assistant-llm-config" : null, () =>
+    service.getLLMConfig()
   );
 
   // Guests do not get the assistant (parity with the backend 403).
-  if (!slug || role < EUserWorkspaceRoles.MEMBER) return null;
+  if (!enabled || !slug) return null;
 
   const start = async (text: string) => {
     const content = text.trim();
     if (!content || submitting) return;
+    // Remind the user to configure a key before starting a conversation.
+    if (config && !config.has_api_key) {
+      setToast({ type: TOAST_TYPE.ERROR, title: "API key required", message: API_KEY_REMINDER });
+      return;
+    }
     setSubmitting(true);
     try {
       const thread = await service.createThread(slug);
@@ -51,7 +62,7 @@ export const AssistantHomeWidget = observer(function AssistantHomeWidget() {
   return (
     <div className="rounded-lg border border-subtle bg-surface-1 p-4">
       <div className="mb-2 flex items-center gap-2 text-13 font-semibold text-primary">
-        <Sparkles className="size-4 text-accent-primary" /> Pi Assistant
+        <Sparkles className="size-4 text-accent-primary" /> Pi Dash AI
       </div>
       <div className="flex items-end gap-2">
         <input

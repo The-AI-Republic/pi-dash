@@ -32,7 +32,7 @@ const AssistantIndexPage = observer(function AssistantIndexPage() {
     <div className="mx-auto w-full max-w-3xl px-4 py-8">
       <div className="mb-4 flex items-center justify-between">
         <div className="flex items-center gap-2 text-18 font-semibold text-primary">
-          <Sparkles className="size-5 text-accent-primary" /> Pi Assistant
+          <Sparkles className="size-5 text-accent-primary" /> Pi Dash AI
         </div>
         <Button onClick={newChat}>
           <Plus className="size-4" /> New chat

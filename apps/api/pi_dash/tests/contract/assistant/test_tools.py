@@ -77,7 +77,7 @@ def test_create_comment_attribution(world, member_ctx):
     assert res["created"] is True
     comment = IssueComment.objects.get(id=res["comment_id"])
     assert comment.speaker_type == "agent"
-    assert comment.speaker_label == "Pi Assistant"
+    assert comment.speaker_label == "Pi Dash AI"
     assert comment.actor_id == world.member.id
 
 

@@ -6,6 +6,7 @@
 
 import { useState } from "react";
 import useSWR from "swr";
+import { setToast, TOAST_TYPE } from "@pi-dash/propel/toast";
 import { AssistantService } from "@pi-dash/services";
 import type { IUserLLMConfig } from "@pi-dash/types";
 import { ChatComposer } from "@/components/chat/composer";
@@ -16,22 +17,29 @@ import { useAssistantChat } from "@/components/assistant/use-assistant-chat";
 
 const service = new AssistantService();
 
+const API_KEY_REMINDER = "Please set your API key in Settings first to start using AI Assistant.";
+
 export function AssistantChatRoot({ slug, threadId }: { slug: string; threadId: string }) {
   const [draft, setDraft] = useState("");
   const { data: config } = useSWR<IUserLLMConfig>("assistant-llm-config", () => service.getLLMConfig());
   const { messages, busy, sending, send, stop, error } = useAssistantChat(slug, threadId);
 
-  const needsSetup = config && !config.has_api_key;
+  // `config` is undefined while loading — only treat as "needs setup" once known.
+  const needsSetup = config ? !config.has_api_key : false;
 
   const onSend = async () => {
     const content = draft.trim();
     if (!content) return;
+    if (needsSetup) {
+      setToast({ type: TOAST_TYPE.ERROR, title: "API key required", message: API_KEY_REMINDER });
+      return;
+    }
     setDraft("");
     await send(content);
   };
 
   return (
-    <div className="flex h-full min-h-[640px] flex-col overflow-hidden">
+    <div className="flex h-full min-h-0 flex-col overflow-hidden">
       <ChatMessageList
         messages={messages}
         renderMessage={(m) => <AssistantMessage message={m} />}
@@ -46,24 +54,15 @@ export function AssistantChatRoot({ slug, threadId }: { slug: string; threadId: 
         }
       />
       {error && <div className="text-danger mb-2 text-12">{error}</div>}
-      {needsSetup ? (
-        <div className="border-t border-subtle pt-3 text-center text-12 text-secondary">
-          Configure your AI provider in{" "}
-          <a href="/settings/profile/ai-assistant" className="text-accent-primary hover:underline">
-            Settings → AI Assistant
-          </a>{" "}
-          to start chatting.
-        </div>
-      ) : (
-        <ChatComposer
-          draft={draft}
-          onDraftChange={setDraft}
-          onSend={onSend}
-          onStop={stop}
-          busy={busy}
-          sending={sending}
-        />
-      )}
+      <ChatComposer
+        draft={draft}
+        onDraftChange={setDraft}
+        onSend={onSend}
+        onStop={stop}
+        busy={busy}
+        sending={sending}
+        disabledReason={needsSetup ? API_KEY_REMINDER : null}
+      />
     </div>
   );
 }

@@ -103,7 +103,7 @@ def get_issue(ctx: RunContext[AssistantDeps], issue_id: str) -> dict:
     comments = []
     for c in issue.issue_comments.select_related("actor").order_by("-created_at")[:10]:
         body, body_trunc = _results.truncate(c.comment_stripped or "", _COMMENT_CAP)
-        author = "Pi Assistant" if c.speaker_type == "agent" else (
+        author = "Pi Dash AI" if c.speaker_type == "agent" else (
             (c.actor.display_name or c.actor.email) if c.actor_id else "Unknown"
         )
         comments.append(

@@ -16,7 +16,7 @@ from django.utils import timezone
 from pi_dash.core.permissions import ROLE_MEMBER
 
 BASE_INSTRUCTIONS = """\
-You are Pi Assistant, built into the pi-dash project tracker. You operate \
+You are Pi Dash AI, built into the pi-dash project tracker. You operate \
 pi-dash on behalf of the user via tools, with exactly the user's own \
 permissions — nothing more.
 
