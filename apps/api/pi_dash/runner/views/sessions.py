@@ -24,7 +24,7 @@ from typing import Any, Dict, List
 
 from asgiref.sync import sync_to_async
 from django.conf import settings
-from django.db import transaction
+from django.db import OperationalError, connection, transaction
 from django.http import JsonResponse
 from django.utils import timezone
 from redis.exceptions import RedisError
@@ -45,6 +45,30 @@ _REDIS_SIDE_EFFECT_ERRORS = (RedisError, OSError)
 
 class _SessionEvictedDuringPoll(Exception):
     pass
+
+
+def _bound_txn_waits() -> None:
+    """Cap lock + statement waits for the CURRENT transaction (Postgres only).
+
+    A session-open / poll transaction that blocks on a runner-scoped row
+    lock with no timeout parks the worker until the reverse proxy 504s — and
+    the worker keeps waiting long after the client is gone, while holding
+    row locks of its own (e.g. the just-evicted prior session). Every runner
+    retry then queues behind it: a self-sustaining per-runner convoy,
+    observed in production as session-open hanging exactly 60s → 504 on
+    every attempt for hours while all other runners stayed healthy.
+
+    ``SET LOCAL`` scopes the caps to the enclosing transaction. On timeout
+    Postgres raises ``OperationalError``; callers translate it to a 503 so
+    the runner backs off and retries instead of feeding the convoy.
+    """
+    if connection.vendor != "postgresql":
+        return
+    lock_ms = int(getattr(settings, "RUNNER_TXN_LOCK_TIMEOUT_MS", 5000))
+    stmt_ms = int(getattr(settings, "RUNNER_TXN_STATEMENT_TIMEOUT_MS", 20000))
+    with connection.cursor() as cursor:
+        cursor.execute(f"SET LOCAL lock_timeout = '{lock_ms}ms'")
+        cursor.execute(f"SET LOCAL statement_timeout = '{stmt_ms}ms'")
 
 
 def _session_open_side_effect(log_runner_id, label: str, func, *args, **kwargs):
@@ -143,32 +167,50 @@ class RunnerSessionOpenEndpoint(APIView):
 
         old_session_id = None
         new_sid = _uuid.uuid4()
-        with transaction.atomic():
-            prior = RunnerSession.objects.select_for_update().filter(runner=runner, revoked_at__isnull=True).first()
-            if prior is not None:
-                old_session_id = str(prior.id)
-                prior.revoked_at = timezone.now()
-                prior.revoked_reason = "evicted_by_new_session"
-                prior.save(update_fields=["revoked_at", "revoked_reason"])
-
-            RunnerSession.objects.create(
-                id=new_sid,
-                runner=runner,
-                protocol_version=settings.RUNNER_PROTOCOL_VERSION,
-                last_seen_at=timezone.now(),
-            )
-
-            session_service.apply_hello(runner, body)
-            released_chats = chat_service.release_active_chats_for_runner(
-                runner,
-                "runner opened a new session before the prior chat turn completed",
-            )
-            if released_chats:
-                logger.info(
-                    "released %s stale active chat session(s) for runner %s on session open",
-                    released_chats,
-                    runner.id,
+        try:
+            with transaction.atomic():
+                _bound_txn_waits()
+                prior = (
+                    RunnerSession.objects.select_for_update()
+                    .filter(runner=runner, revoked_at__isnull=True)
+                    .first()
                 )
+                if prior is not None:
+                    old_session_id = str(prior.id)
+                    prior.revoked_at = timezone.now()
+                    prior.revoked_reason = "evicted_by_new_session"
+                    prior.save(update_fields=["revoked_at", "revoked_reason"])
+
+                RunnerSession.objects.create(
+                    id=new_sid,
+                    runner=runner,
+                    protocol_version=settings.RUNNER_PROTOCOL_VERSION,
+                    last_seen_at=timezone.now(),
+                )
+
+                session_service.apply_hello(runner, body)
+                released_chats = chat_service.release_active_chats_for_runner(
+                    runner,
+                    "runner opened a new session before the prior chat turn completed",
+                )
+                if released_chats:
+                    logger.info(
+                        "released %s stale active chat session(s) for runner %s on session open",
+                        released_chats,
+                        runner.id,
+                    )
+        except OperationalError:
+            # Lock or statement timeout: another transaction is sitting on
+            # this runner's rows. Fail fast so the runner retries with
+            # backoff — waiting here is what builds the worker convoy.
+            logger.exception(
+                "runner session-open timed out waiting on runner-scoped locks runner=%s",
+                runner.id,
+            )
+            return Response(
+                {"error": "runner_state_locked"},
+                status=status.HTTP_503_SERVICE_UNAVAILABLE,
+            )
 
         # Post-tx Redis side effects — the new session row is committed and
         # visible, and the row lock is released, so a Redis hang here can no
@@ -327,33 +369,49 @@ def _poll_bookkeeping(runner, body: Dict[str, Any], sid):
     # Capture prior heartbeat/status from the DB so we can detect when this
     # poll makes the runner eligible for queued work again.
     now_ts = timezone.now()
-    with transaction.atomic():
-        runner_snapshot = (
-            Runner.objects.select_for_update().filter(pk=runner.id).values("last_heartbeat_at", "status").get()
-        )
-        prior_hb = runner_snapshot["last_heartbeat_at"]
-        prior_status = runner_snapshot["status"]
-        was_stale = prior_hb is None or (now_ts - prior_hb) > HEARTBEAT_GRACE
-        reported_status = status_entry.get("status")
-        reports_busy = reported_status == "busy"
-        reports_available = reported_status in {"idle", "online"}
-        became_available = prior_status == RunnerStatus.BUSY and reports_available
-        status_allows_drain = reports_available or (not status_entry and prior_status != RunnerStatus.BUSY)
+    try:
+        with transaction.atomic():
+            _bound_txn_waits()
+            runner_snapshot = (
+                Runner.objects.select_for_update().filter(pk=runner.id).values("last_heartbeat_at", "status").get()
+            )
+            prior_hb = runner_snapshot["last_heartbeat_at"]
+            prior_status = runner_snapshot["status"]
+            was_stale = prior_hb is None or (now_ts - prior_hb) > HEARTBEAT_GRACE
+            reported_status = status_entry.get("status")
+            reports_busy = reported_status == "busy"
+            reports_available = reported_status in {"idle", "online"}
+            became_available = prior_status == RunnerStatus.BUSY and reports_available
+            status_allows_drain = reports_available or (not status_entry and prior_status != RunnerStatus.BUSY)
 
-        runner_updates: Dict[str, Any] = {
-            "last_heartbeat_at": now_ts,
-            "status": RunnerStatus.BUSY if reports_busy else RunnerStatus.ONLINE,
-        }
-        # Capacity hint (design §6.4): persist the free-desk count the
-        # runner reports for its work-dir pool so the matcher can prefer
-        # runners with spare worktrees. Additive + optional — old runners
-        # omit the field and we leave the column untouched.
-        free_worktrees = session_service.parse_free_worktrees(status_entry.get("free_worktrees"))
-        if free_worktrees is not None:
-            runner_updates["free_worktrees"] = free_worktrees
-        Runner.objects.filter(pk=runner.id).update(**runner_updates)
-        if status_entry:
-            session_service.reap_stale_busy_runs(runner, status_entry)
+            runner_updates: Dict[str, Any] = {
+                "last_heartbeat_at": now_ts,
+                "status": RunnerStatus.BUSY if reports_busy else RunnerStatus.ONLINE,
+            }
+            # Capacity hint (design §6.4): persist the free-desk count the
+            # runner reports for its work-dir pool so the matcher can prefer
+            # runners with spare worktrees. Additive + optional — old runners
+            # omit the field and we leave the column untouched.
+            free_worktrees = session_service.parse_free_worktrees(status_entry.get("free_worktrees"))
+            if free_worktrees is not None:
+                runner_updates["free_worktrees"] = free_worktrees
+            Runner.objects.filter(pk=runner.id).update(**runner_updates)
+            if status_entry:
+                session_service.reap_stale_busy_runs(runner, status_entry)
+    except OperationalError:
+        # Same convoy guard as session-open: a lock/statement timeout means
+        # this runner's rows are contended — 503 so the daemon retries.
+        logger.exception(
+            "runner poll bookkeeping timed out waiting on runner-scoped locks runner=%s",
+            runner.id,
+        )
+        return (
+            {
+                "payload": {"error": "runner_state_locked"},
+                "status": status.HTTP_503_SERVICE_UNAVAILABLE,
+            },
+            None,
+        )
     if status_entry:
         # Volatile observability snapshot — see
         # `.ai_design/runner_agent_bridge/design.md` §4.5.2.

@@ -55,6 +55,29 @@ def test_claim_pending_deletes_old_consumer_after_full_handoff(monkeypatch):
 
 
 @pytest.mark.unit
+def test_claim_pending_without_prior_consumer_still_claims_orphaned_pel(monkeypatch):
+    """A cleanly-shut-down session leaves its un-acked PEL entries behind and
+    its revoked row is invisible to the session-open eviction path, so the
+    open passes ``old_consumer=None``. The XAUTOCLAIM loop must still run (it
+    scans the whole group's PEL regardless of consumer) — otherwise those
+    messages are orphaned forever. Observed in production as a lost Assign:
+    delivered moments before daemon shutdown, never acked, never seen again
+    while the run sat ASSIGNED.
+    """
+    client = _FakeRedis(autoclaim_results=[(b"0-0", [b"1-0"])])
+    monkeypatch.setattr(outbox, "redis_instance", lambda: client)
+
+    claimed = outbox.claim_pending_for_new_session(
+        "runner-1",
+        old_consumer=None,
+        new_consumer="consumer-new",
+    )
+
+    assert claimed == 1
+    assert client.deleted == []  # no prior consumer entry to clean up
+
+
+@pytest.mark.unit
 def test_claim_pending_keeps_old_consumer_when_handoff_fails(monkeypatch):
     client = _FakeRedis(autoclaim_error=RuntimeError("redis unavailable"))
     monkeypatch.setattr(outbox, "redis_instance", lambda: client)
