@@ -5,7 +5,7 @@
 from django import forms
 from django.contrib import admin
 
-from pi_dash.prompting.models import PromptTemplate
+from pi_dash.prompting.models import PromptSectionOverride, PromptTemplate
 
 
 class PromptTemplateForm(forms.ModelForm):
@@ -40,3 +40,19 @@ class PromptTemplateAdmin(admin.ModelAdmin):
         # a dedicated REST endpoint lands.
         obj.updated_by = request.user
         super().save_model(request, obj, form, change)
+
+
+@admin.register(PromptSectionOverride)
+class PromptSectionOverrideAdmin(admin.ModelAdmin):
+    list_display = (
+        "section_key",
+        "workspace",
+        "user",
+        "is_active",
+        "version",
+        "needs_attention",
+        "updated_at",
+    )
+    list_filter = ("section_key", "is_active", "needs_attention", "workspace")
+    search_fields = ("section_key", "workspace__slug", "user__email")
+    readonly_fields = ("id", "created_at", "updated_at", "version", "updated_by")
