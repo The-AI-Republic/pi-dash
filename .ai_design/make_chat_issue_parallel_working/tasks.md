@@ -1,91 +1,127 @@
 # Tasks: Parallel Chat + Issue Execution
 
-> Companion to [`design.md`](./design.md). Phase 1 is the shippable MVP:
-> dedicated chat worktree + parallel lanes. Phases 2+ are the deferred
-> improvements from design §7.
+> Companion to [`design.md`](./design.md). Phase 1 is the shippable MVP. The
+> ordering matters: land the shared-state fixes (P1.A) **before** removing the
+> guards (P1.C), or concurrent lanes will emit contradictory status and risk a
+> stall-watchdog mis-fire (design §3.3). All `file:line` refs are from the
+> design review — re-confirm at implementation time.
 
-## Phase 1 — Dedicated chat worktree + parallel lanes (MVP)
+## Phase 1 — Concurrent chat + issue on pooled runners (MVP)
 
-### 1.1 Dedicated chat worktree provider
+### 1.A Shared per-runner state fixes (land FIRST, behind the guards)
 
-- [ ] Add a chat-worktree provider in `runner/src/workspace/` that, per runner,
-      **lazily creates** one dedicated worktree (checked out from the default
-      branch) on first chat use and **persists** it across sessions.
-- [ ] Keep it in a **separate path namespace** from the issue pool desks so it
-      can never be handed out as an `AssignWorker` desk.
-- [ ] Reuse the existing worktree add/remove plumbing from `pool.rs`; do **not**
-      route chat through `PoolHandle::acquire`.
-- [ ] One reusable worktree **per runner** (not per session) — re-`checkout` the
-      target branch on session start. (Bounds disk to +1 working tree.)
+These are safe to land while the guards still serialize the lanes; they just make
+the state model correct for when the guards come off.
 
-### 1.2 Bind ChatWorker to the dedicated worktree
+- [ ] **B1 — derive `RunnerStatus`.** In `state.rs`, compute reported status from
+      `run_active || chat_active` (+ `Reconnecting`/`AwaitingReauth` overrides)
+      instead of direct writes. Add a `chat_active` signal to `StateHandle` fed by
+      `CurrentChat.active_rx`. Remove the direct `set_status(Idle/Busy)` calls in
+      `ChatWorker` (`supervisor.rs:1428/1459/1485/1808/1885/1931/1979`).
+- [ ] **B1 test** — heartbeat never reports `status:"idle"` with non-null
+      `in_flight_run`; status is `Busy` if _either_ lane is active.
+- [ ] **B2 — observability ownership.** Make `ObservabilitySnapshot` explicitly
+      assign-lane-owned; assert/guard that the chat lane writes no snapshot
+      fields. (`state.rs:132`, `set_current_run` reset `:228–235`.)
+- [ ] **B3 — single derived `approvals_pending`.** Compute the count once from the
+      shared `ApprovalRouter` after any change; remove the per-lane
+      `set_approvals_pending` stamps (`supervisor.rs:1904/1935`, `:3005/3049`).
+- [ ] **B3 test** — concurrent chat + assign approvals report the _combined_
+      count; the assign stall-watchdog (`pump_events`, `:2745`) does not mis-fire
+      when only a chat approval is pending.
+- [ ] **B4 — chat shutdown signal.** Add `state.shutdown_notified()` arm to the
+      `ChatWorker` loop (`:1389–1479`); `RemoveRunner` (`:1159`) and daemon
+      shutdown send `ChatCommand::Close`/`Shutdown` and emit a terminal
+      `ChatClosed`; persistent worktree is left intact.
 
-- [ ] Change `ChatWorker` (`supervisor.rs`) to use the dedicated chat worktree
-      instead of leasing a `LeaseKind::Session` desk from the pool.
-- [ ] Remove the chat `Session` desk lease (`supervisor.rs:~2040`) from the chat
-      path.
+### 1.B Dedicated chat worktree provider
 
-### 1.3 Remove the mutual-exclusion guards
+- [ ] Add a `chat_worktree` provider in `runner/src/workspace/` that lazily
+      creates one worktree per runner under `chat-worktrees/<runner_id>` (or a
+      `chat-` namespace **outside** the pool's `wt-<int>` scan, `pool.rs:814`),
+      via `git::worktree_add` (`git.rs:136`); reused across sessions.
+- [ ] Do **not** route through `PoolHandle::acquire` (avoids clean-on-release
+      wiping persistence and avoids `free_worktrees()` capacity loss — design §3.1).
+- [ ] Startup adopt/prune for orphaned `chat-worktrees/<runner_id>` after a crash
+      (re-implements the cleanup the pool gives leases for free).
+- [ ] Bind `ChatWorker` to this worktree, replacing the `LeaseKind::Session`
+      acquire in `resolve_chat_workspace` (`supervisor.rs:2027–2046`).
 
-- [ ] `supervisor.rs:937` — stop rejecting `ChatUserMessage` with `runner_busy`
-      when `current_run.is_some()`.
-- [ ] `supervisor.rs:809` — stop ignoring `Assign` when a chat is active.
-- [ ] `supervisor.rs:820/:823` — stop tearing down chat / ignoring `Assign` on an
-      in-flight run; allow `current_run` + `current_chat` to coexist.
-- [ ] Keep the "one run in flight at a time" guard for the **assign** lane only.
+### 1.C Remove the cross-lane guards (pooled runners only)
 
-### 1.4 Intra-chat turn serialization
+- [ ] `supervisor.rs:937`/`:1009` — stop rejecting `ChatUserMessage`/`ChatWarm`
+      with `runner_busy` when `current_run.is_some()` **and `pool.is_some()`**.
+- [ ] `supervisor.rs:809` — stop ignoring `Assign` when a chat is active (pooled).
+- [ ] `supervisor.rs:820` — stop tearing down an idle chat for an `Assign`.
+- [ ] **Keep** `:823` (one issue in flight at a time) and keep all guards for
+      **legacy `pool.is_none()` runners** (design §3.5).
+- [ ] Confirm the `tokio::select!` completion arms (`:701–712`) behave with both
+      lanes live (the existing `biased` ordering is sound — verify with a test).
 
-- [ ] Ensure the chat lane runs **one turn at a time** in its worktree (no two
-      concurrent write turns). Confirm the single-conversation command queue
-      already guarantees this; add a guard/test if not.
+### 1.D Intra-chat turn serialization
 
-### 1.5 Per-lane status
+- [ ] Confirm the `ChatCommand` mpsc queue already serializes chat turns (one
+      write turn at a time in the chat worktree). Add a guard/test if not.
 
-- [ ] Split single `RunnerStatus::Busy` visibility into assign-lane vs chat-lane
-      activity; keep assign BUSY semantics for cloud run accounting.
+### 1.E Cloud-side (apps/api)
 
-### 1.6 Cloud-side
+- [ ] `views/chat.py:299–300`, `:242–243` — drop the run-activity / `BUSY` half of
+      the chat gate so chat is accepted while an issue runs (design §3.4).
+- [ ] `services/matcher.py` (`~:121/:234/:287`) — remove
+      `.exclude(pk__in=_runners_with_active_chat_ids())`; **keep**
+      `agent_runs__status__in=BUSY_STATUSES`.
+- [ ] Re-confirm `reap_stale_busy_runs` (`session_service.py:77–167`) is unaffected
+      (chat is not an `AgentRun`; assign lane stays single-tenant).
+- [ ] Audit other readers of `Runner.status == busy` for "idle-for-chat"
+      assumptions (design §9.3).
 
-- [ ] Chat session acceptance must not depend on the runner being idle.
-- [ ] Surface "chatting + working" in the runner status UI (`apps/web/`).
-- [ ] Confirm `reap_stale_busy_runs` / run accounting tolerate a runner that is
-      simultaneously chatting and running an issue.
+### 1.F Web (apps/web)
 
-### 1.7 Tests
+- [ ] `runners/chat/[runnerId]/page.tsx:76–84` — `disabledReason()` stops treating
+      `runner.status === "busy"` as a chat blocker.
+- [ ] Surface "chatting + working" as a second signal (e.g. via
+      `runner-agent-status-panel.tsx`, which already reads `RunnerLiveState`)
+      rather than overloading the single status badge.
 
-- [ ] Runner: chat turn accepted while an issue run is in flight (no
-      `runner_busy`).
-- [ ] Runner: issue assignment accepted while a chat is active.
-- [ ] Runner: chat write turns land in the dedicated worktree; issue writes land
-      in a pool desk; assert disjoint paths.
-- [ ] Runner: multi-turn chat writes accumulate in the **same** chat worktree
-      (the §2.3 pollution scenario cannot recur).
-- [ ] Runner: a runner that never chats never creates a chat worktree (lazy).
+### 1.G Integration tests (runner)
+
+- [ ] Chat turn accepted while an issue run is in flight (no `runner_busy`),
+      pooled runner.
+- [ ] Issue assignment accepted while a chat is active, pooled runner.
+- [ ] Chat writes land in the dedicated chat worktree; issue writes land in a pool
+      desk — assert disjoint paths.
+- [ ] Multi-turn chat writes accumulate in the **same** chat worktree (the §2.3
+      pollution scenario cannot recur).
+- [ ] A runner that never chats never creates a chat worktree (lazy).
+- [ ] Legacy `pool.is_none()` runner still serializes chat vs issue (guard kept).
+- [ ] Reported status is `Busy` whenever either lane is active; never
+      `idle + in_flight_run`.
 
 ## Phase 2 — Clean-session lifecycle (deferred, design §7)
 
-- [ ] On session start: check out a fresh branch from default (unless the user
-      specifies otherwise).
-- [ ] On session end: **mandatory commit + push** to remote; never leave work
-      local-only.
-- [ ] Auto-create a PR only when the operator explicitly asks in the query.
-- [ ] Session lifetime: end after ~5 min idle; reviving by typing restarts the
-      countdown (resume from remote branch + agent session id).
+- [ ] Fresh branch from default on session start (unless user specifies).
+- [ ] Mandatory commit + push to remote on session end; never local-only.
+- [ ] Auto-create a PR only when the operator explicitly asks.
+- [ ] Session lifetime ~5 min idle; reviving by typing restarts the countdown
+      (resume from remote branch + agent session id).
 
 ## Phase 3 — Hygiene & ergonomics (deferred)
 
+- [ ] Per-lane `ObservabilitySnapshot` (full B2 fix) so chat-agent telemetry
+      doesn't collide with the run agent.
 - [ ] TTL cleanup for chat-authored branches that never became PRs.
-- [ ] Read-only concierge mode + first-class cross-worktree reads ("report each
-      desk's branch").
-- [ ] Build-cache sharing (or `node_modules` symlink) into the chat worktree for
-      large projects.
+- [ ] Read-only concierge mode + first-class cross-worktree reads.
+- [ ] Build-cache sharing / `node_modules` symlink into the chat worktree.
+- [ ] Concurrent lanes for legacy (non-pooled) runners (needs worktree infra or
+      read-only-only chat there).
 
-## Open questions
+## Open questions (resolve before / during 1.B)
 
-- [ ] Per-runner vs per-(runner × agent kind) chat worktree when a runner can
-      switch agent kind? (Default: per runner.)
-- [ ] Disk ceiling / eviction policy if many runners on one machine each create a
-      persistent chat worktree.
-- [ ] Codex `app-server`: does a chat conversation need a fixed cwd at creation
-      (affecting how the dedicated worktree binds)? Verify against the codex API.
+- [ ] **Codex `app-server` cwd binding** — can a chat conversation be (re)rooted
+      in the dedicated worktree without losing context? (Affects only codex.)
+- [ ] **Persistence vs. crash-reap** — exact startup adopt/prune semantics for a
+      half-created/stale `chat-worktrees/<runner_id>`.
+- [ ] **Disk eviction** — policy if many runners on one machine each hold a
+      persistent chat worktree (idle-evict? cap? — likely Phase 2/3).
+- [ ] **Per-runner vs per-(runner × agent kind)** chat worktree if a runner can
+      switch agent kind (default: per runner).
