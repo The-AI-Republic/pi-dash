@@ -76,7 +76,13 @@ pidash comment add {{ issue.identifier }} --body-file ./.pidash-blocked.md --as-
 pidash issue patch {{ issue.identifier }} --state "Blocked"
 ```
 
-End a successful run (workpad already written via `pidash workpad update`):
+End a successful run that opened a PR (workpad already written via `pidash workpad update`) — the change is awaiting human review and merge, so move to the `review` group, **not** `completed`:
+
+```sh
+pidash issue patch {{ issue.identifier }} --state "In Review"
+```
+
+End a successful run with nothing to review — a finished `noncode` task (investigation, status check, comment-only response) that produced no PR — move to the `completed` group:
 
 ```sh
 pidash issue patch {{ issue.identifier }} --state "Done"
@@ -97,7 +103,7 @@ pidash issue create --project {{ project.identifier }} --title "<short summary>"
 _(state list unavailable — call `pidash state list` to retrieve it before moving state)_
 {% endif %}
 
-Use the list above to pick the correct `--state` value. Match your intent to the state's `group` first (e.g. `completed` for "this work is done", `cancelled` for "this will not be done"), then to the name and description.
+Use the list above to pick the correct `--state` value. Match your intent to the state's `group` first, then to the name and description. The mapping that trips runs up most often: a `code_change` that opened a PR is awaiting review → `review` group ("In Review"), **not** `completed`. Use `completed` ("this work is done") only for a finished `noncode` task with no PR, and `cancelled` for "this will not be done".
 
 ### Conventions
 
