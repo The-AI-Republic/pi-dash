@@ -13,8 +13,11 @@ export default {
   "{active} active / {total} total": "{active} attivi / {total} totali",
   "{count, plural, one {# install} other {# installs}}":
     "{count, plural, one {# installazione} other {# installazioni}}",
+  "{count, plural, one {# project failed} other {# projects failed}}": "",
+  "{count, plural, one {# project selected} other {# projects selected}}": "",
   "{count, plural, one {Cycle} other {Cycles}}": "{count, plural, one {Ciclo} other {Cicli}}",
   "{count, plural, one {Epic} other {Epics}}": "{count, plural, one {Epica} other {Epiche}}",
+  "{count, plural, one {Installed on # project} other {Installed on # projects}}": "",
   "{count, plural, one {Project} other {Projects}}": "{count, plural, one {Progetto} other {Progetti}}",
   "{count, plural, one {Work item} other {Work items}}":
     "{count, plural, one {Elemento di lavoro} other {Elementi di lavoro}}",
@@ -297,6 +300,7 @@ export default {
   "Clear filter": "Cancella filtro",
   "Clear filters": "Cancella filtri",
   "Clear search": "Cancella ricerca",
+  "Clear selection": "",
   "Clear sorting": "Cancella ordinamento",
   "Click the button below to join it.": "Fai clic sul pulsante qui sotto per partecipare.",
   "Click to add description": "Clicca per aggiungere descrizione",
@@ -777,6 +781,7 @@ export default {
   "Install the pidash CLI and register dev machines as AI agent runners":
     "Installa la CLI pidash e registra le macchine di sviluppo come esecutori di agenti AI",
   "Install updated": "Installazione aggiornata",
+  Installed: "",
   "Installing…": "Installazione in corso…",
   Installs: "Installazioni",
   Intake: "Intake",
@@ -1006,6 +1011,7 @@ export default {
   "No projects archived": "Nessun progetto archiviato",
   "No projects detected with the matching criteria. \n Create a new project instead.":
     "Nessun progetto rilevato con i criteri di corrispondenza. \n Crea invece un nuovo progetto.",
+  "No projects match your search.": "",
   "No prompt templates available. The Pi Dash default will be seeded on the next migrate.":
     "Nessun modello di prompt disponibile. Il modello predefinito di Pi Dash verrà inserito nella prossima migrazione.",
   "No results found": "Nessun risultato trovato",
@@ -1035,6 +1041,7 @@ export default {
   "No work items yet": "Nessun elemento di lavoro ancora",
   "No. of {entity}": "N. di {entity}",
   None: "Nessuno",
+  "None selected": "",
   "Not right now": "Non adesso",
   "Notes specific to this project…": "Note specifiche per questo progetto…",
   "Notification marked as archived": "Notifica contrassegnata come archiviata",
@@ -1151,8 +1158,10 @@ export default {
     "Pi Dash: La tua piattaforma di gestione dei dipendenti basata sull'IA",
   "Pick a project.": "Scegli un progetto.",
   "Pick a scheduler.": "Scegli un pianificatore.",
+  "Pick at least one project to install this scheduler on.": "",
   "Pick from your workspace's enabled schedulers. Already-installed ones aren't listed.":
     "Scegli tra i pianificatori abilitati del tuo spazio di lavoro. Quelli già installati non sono elencati.",
+  "Pick one or more projects. One schedule applies to all of them.": "",
   "pidash CLI": "pidash CLI",
   "pidash daemon": "pidash daemon",
   "Plan work in focused timeframes.": "Pianifica il lavoro in intervalli di tempo mirati.",
@@ -1342,6 +1351,7 @@ export default {
   Scope: "Ambito",
   Search: "Cerca",
   "Search by title": "Cerca per titolo",
+  "Search projects…": "",
   "Secret key": "Chiave segreta",
   "Secret key copied to clipboard.": "Chiave segreta copiata negli appunti.",
   Security: "Sicurezza",
@@ -1359,6 +1369,7 @@ export default {
   "Select or customize your interface color scheme.":
     "Seleziona o personalizza la combinazione di colori dell'interfaccia.",
   "Select organization size": "Seleziona la dimensione dell'organizzazione",
+  "Select projects": "",
   "Select your theme": "Seleziona il tuo tema",
   "Send invitations": "Invia inviti",
   "Send me everything": "Inviami tutto",
@@ -1779,6 +1790,7 @@ export default {
   You: "Tu",
   "You already have a cycle on the given dates, if you want to create a draft cycle, you can do that by removing both the dates.":
     "Hai già un ciclo nelle date indicate, se vuoi creare un ciclo bozza, puoi farlo rimuovendo entrambe le date.",
+  "You aren't a member of any project in this workspace to install on.": "",
   "You can only edit the slug of the URL": "Puoi modificare solo lo slug dell'URL",
   "You can see here if someone invites you to a workspace": "Puoi vedere qui se qualcuno ti invita a un'area di lavoro",
   "You do not have the permission to access this page.": "Non hai il permesso di accedere a questa pagina.",

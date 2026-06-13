@@ -12,8 +12,11 @@ export default {
     "(tùy chọn — ghim vấn đề này vào một nhánh từ xa hiện có)",
   "{active} active / {total} total": "{active} đang hoạt động / {total} tổng cộng",
   "{count, plural, one {# install} other {# installs}}": "{count, plural, one {# cài đặt} other {# cài đặt}}",
+  "{count, plural, one {# project failed} other {# projects failed}}": "",
+  "{count, plural, one {# project selected} other {# projects selected}}": "",
   "{count, plural, one {Cycle} other {Cycles}}": "{count, plural, one {Chu kỳ} other {Chu kỳ}}",
   "{count, plural, one {Epic} other {Epics}}": "{count, plural, one {Epic} other {Epic}}",
+  "{count, plural, one {Installed on # project} other {Installed on # projects}}": "",
   "{count, plural, one {Project} other {Projects}}": "{count, plural, one {Dự án} other {Dự án}}",
   "{count, plural, one {Work item} other {Work items}}": "{count, plural, one {Mục công việc} other {Mục công việc}}",
   "{count, plural, one{# member} other{# members}}": "{count, plural, one{# thành viên} other{# thành viên}}",
@@ -293,6 +296,7 @@ export default {
   "Clear filter": "Xóa bộ lọc",
   "Clear filters": "Xóa các bộ lọc",
   "Clear search": "Xóa tìm kiếm",
+  "Clear selection": "",
   "Clear sorting": "Xóa sắp xếp",
   "Click the button below to join it.": "Nhấp vào nút bên dưới để tham gia.",
   "Click to add description": "Nhấp để thêm mô tả",
@@ -768,6 +772,7 @@ export default {
   "Install the pidash CLI and register dev machines as AI agent runners":
     "Cài đặt CLI pidash và đăng ký máy phát triển làm trình chạy tác nhân AI",
   "Install updated": "Cài đặt đã cập nhật",
+  Installed: "",
   "Installing…": "Đang cài đặt…",
   Installs: "Cài đặt",
   Intake: "Tiếp nhận",
@@ -997,6 +1002,7 @@ export default {
   "No projects archived": "Không có dự án đã lưu trữ",
   "No projects detected with the matching criteria. \n Create a new project instead.":
     "Không tìm thấy dự án nào phù hợp với tiêu chí. \n Hãy tạo một dự án mới thay thế.",
+  "No projects match your search.": "",
   "No prompt templates available. The Pi Dash default will be seeded on the next migrate.":
     "Không có mẫu lời nhắc nào khả dụng. Mẫu mặc định của Pi Dash sẽ được tạo trong lần di chuyển tiếp theo.",
   "No results found": "Không tìm thấy kết quả",
@@ -1026,6 +1032,7 @@ export default {
   "No work items yet": "Chưa có mục công việc nào",
   "No. of {entity}": "Số lượng {entity}",
   None: "Không có",
+  "None selected": "",
   "Not right now": "Không phải bây giờ",
   "Notes specific to this project…": "Ghi chú cụ thể cho dự án này…",
   "Notification marked as archived": "Thông báo được đánh dấu là đã lưu trữ",
@@ -1141,8 +1148,10 @@ export default {
   "Pi Dash: Your AI Employee Management Platform": "Pi Dash: Nền tảng quản lý nhân viên AI của bạn",
   "Pick a project.": "Chọn một dự án.",
   "Pick a scheduler.": "Chọn một bộ lập lịch.",
+  "Pick at least one project to install this scheduler on.": "",
   "Pick from your workspace's enabled schedulers. Already-installed ones aren't listed.":
     "Chọn từ các bộ lập lịch đã được bật trong không gian làm việc của bạn. Các bộ đã cài đặt sẵn không được liệt kê.",
+  "Pick one or more projects. One schedule applies to all of them.": "",
   "pidash CLI": "pidash CLI",
   "pidash daemon": "pidash daemon",
   "Plan work in focused timeframes.": "Lập kế hoạch công việc trong các khung thời gian tập trung.",
@@ -1333,6 +1342,7 @@ export default {
   Scope: "Phạm vi",
   Search: "Tìm kiếm",
   "Search by title": "Tìm kiếm theo tiêu đề",
+  "Search projects…": "",
   "Secret key": "Khóa bí mật",
   "Secret key copied to clipboard.": "Khóa bí mật đã được sao chép vào bảng nhớ tạm.",
   Security: "Bảo mật",
@@ -1348,6 +1358,7 @@ export default {
   "Select network": "Chọn mạng",
   "Select or customize your interface color scheme.": "Chọn hoặc tùy chỉnh bảng màu giao diện của bạn.",
   "Select organization size": "Chọn quy mô tổ chức",
+  "Select projects": "",
   "Select your theme": "Chọn chủ đề của bạn",
   "Send invitations": "Gửi lời mời",
   "Send me everything": "Gửi cho tôi mọi thứ",
@@ -1764,6 +1775,7 @@ export default {
   You: "Bạn",
   "You already have a cycle on the given dates, if you want to create a draft cycle, you can do that by removing both the dates.":
     "Bạn đã có một chu kỳ vào các ngày đã cho, nếu bạn muốn tạo một chu kỳ nháp, bạn có thể làm điều đó bằng cách xóa cả hai ngày.",
+  "You aren't a member of any project in this workspace to install on.": "",
   "You can only edit the slug of the URL": "Bạn chỉ có thể chỉnh sửa slug của URL",
   "You can see here if someone invites you to a workspace":
     "Bạn có thể xem ở đây nếu ai đó mời bạn vào một không gian làm việc",

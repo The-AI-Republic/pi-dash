@@ -10,11 +10,10 @@ import type { SubmitHandler } from "react-hook-form";
 import { useForm, useWatch } from "react-hook-form";
 import { useTranslation } from "@pi-dash/i18n";
 import { Button } from "@pi-dash/propel/button";
-import { Logo } from "@pi-dash/propel/emoji-icon-picker";
 import { TOAST_TYPE, setToast } from "@pi-dash/propel/toast";
 import type { IScheduler, SchedulerOutcomeMode } from "@pi-dash/services";
 import { SchedulerService } from "@pi-dash/services";
-import { Badge, Checkbox, EModalPosition, EModalWidth, Input, Loader, ModalCore } from "@pi-dash/ui";
+import { EModalPosition, EModalWidth, ModalCore } from "@pi-dash/ui";
 import {
   BindingOutcomeModeField,
   DEFAULT_OUTCOME_MODE,
@@ -22,7 +21,8 @@ import {
 import { BindingScheduleFields } from "@/components/project/scheduler-bindings/binding-schedule-fields";
 import { DEFAULT_TZID } from "@/components/project/scheduler-bindings/constants";
 import { defaultDtstartLocal, localToIsoUTC } from "@/components/project/scheduler-bindings/datetime-input";
-import { filterProjects, partitionInstallResults } from "@/components/schedulers/install-scheduler-helpers";
+import { partitionInstallResults } from "@/components/schedulers/install-scheduler-helpers";
+import { ProjectMultiSelect } from "@/components/schedulers/project-multi-select";
 import { useProject } from "@/hooks/store/use-project";
 
 interface InstallFormValues {
@@ -77,7 +77,6 @@ export const InstallSchedulerOnProjectsModal = observer(function InstallSchedule
   } = useForm<InstallFormValues>({ defaultValues: DEFAULT_VALUES() });
 
   const [selected, setSelected] = useState<Set<string>>(new Set());
-  const [query, setQuery] = useState("");
   // Project ids that already have THIS scheduler installed. Loaded lazily when
   // the modal opens; until then everything is treated as installable.
   const [installedIds, setInstalledIds] = useState<Set<string> | null>(null);
@@ -94,7 +93,6 @@ export const InstallSchedulerOnProjectsModal = observer(function InstallSchedule
     if (isOpen && !wasOpen.current) {
       reset(DEFAULT_VALUES());
       setSelected(new Set());
-      setQuery("");
       setInstalledIds(null);
     }
     wasOpen.current = isOpen;
@@ -132,40 +130,11 @@ export const InstallSchedulerOnProjectsModal = observer(function InstallSchedule
   const watchedDtstart = useWatch({ control, name: "dtstart" }) ?? "";
   const watchedRrule = useWatch({ control, name: "rrule" }) ?? "";
 
-  const filteredProjects = useMemo(() => filterProjects(projects, query), [projects, query]);
-
-  const isInstalled = (id: string) => installedIds?.has(id) ?? false;
-
-  // Eligible = visible (post-filter) and not already installed.
-  const eligibleFilteredIds = useMemo(
-    () => filteredProjects.filter((p) => !isInstalled(p.id)).map((p) => p.id),
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    [filteredProjects, installedIds]
-  );
-  const allEligibleSelected = eligibleFilteredIds.length > 0 && eligibleFilteredIds.every((id) => selected.has(id));
-  const someEligibleSelected = eligibleFilteredIds.some((id) => selected.has(id));
-
-  const toggleProject = (id: string) => {
-    setSelected((prev) => {
-      const next = new Set(prev);
-      if (next.has(id)) next.delete(id);
-      else next.add(id);
-      return next;
-    });
-  };
-
-  const toggleSelectAll = () => {
-    setSelected((prev) => {
-      const next = new Set(prev);
-      if (allEligibleSelected) eligibleFilteredIds.forEach((id) => next.delete(id));
-      else eligibleFilteredIds.forEach((id) => next.add(id));
-      return next;
-    });
-  };
-
   const handleFormSubmit: SubmitHandler<InstallFormValues> = async (values) => {
     if (!scheduler) return;
-    const targetIds = [...selected];
+    // Guard against installed ids sneaking in (the picker never adds them, but
+    // detection may resolve after a selection was made).
+    const targetIds = [...selected].filter((id) => !installedIds?.has(id));
     if (targetIds.length === 0) {
       setToast({
         type: TOAST_TYPE.ERROR,
@@ -247,88 +216,21 @@ export const InstallSchedulerOnProjectsModal = observer(function InstallSchedule
 
         {/* Project picker */}
         <div className="flex flex-col gap-2">
-          <div className="flex items-center justify-between gap-2">
-            <span className="text-13 font-medium text-primary">{t("Projects")}</span>
-            {!noProjects && (
-              <button
-                type="button"
-                onClick={toggleSelectAll}
-                disabled={eligibleFilteredIds.length === 0}
-                className="text-12 text-accent-primary hover:underline disabled:cursor-not-allowed disabled:text-secondary disabled:no-underline"
-              >
-                {allEligibleSelected ? t("Clear selection") : t("Select all")}
-              </button>
-            )}
-          </div>
-
+          <span className="text-13 font-medium text-primary">{t("Projects")}</span>
           {noProjects ? (
             <p className="rounded-md border border-subtle px-3 py-6 text-center text-13 text-secondary">
               {t("You aren't a member of any project in this workspace to install on.")}
             </p>
           ) : (
             <>
-              <Input
-                type="text"
-                value={query}
-                onChange={(e) => setQuery(e.target.value)}
-                placeholder={t("Search projects…")}
-                className="w-full"
+              <ProjectMultiSelect
+                projects={projects}
+                selectedIds={selected}
+                installedIds={installedIds}
+                onChange={setSelected}
               />
-              <div className="max-h-64 overflow-y-auto rounded-md border border-subtle">
-                {installedIds === null ? (
-                  <Loader className="flex flex-col gap-2 p-3">
-                    <Loader.Item height="36px" />
-                    <Loader.Item height="36px" />
-                    <Loader.Item height="36px" />
-                  </Loader>
-                ) : filteredProjects.length === 0 ? (
-                  <p className="px-3 py-6 text-center text-13 text-secondary">{t("No projects match your search.")}</p>
-                ) : (
-                  <ul>
-                    {filteredProjects.map((project) => {
-                      const installed = isInstalled(project.id);
-                      const checked = selected.has(project.id);
-                      return (
-                        <li key={project.id} className="border-b border-subtle last:border-b-0">
-                          <label
-                            className={`flex items-center gap-3 px-3 py-2 ${
-                              installed ? "cursor-not-allowed opacity-60" : "cursor-pointer hover:bg-layer-1"
-                            }`}
-                          >
-                            <Checkbox
-                              checked={installed || checked}
-                              disabled={installed}
-                              onChange={() => toggleProject(project.id)}
-                            />
-                            <span className="flex-shrink-0">
-                              <Logo logo={project.logo_props} size={14} />
-                            </span>
-                            <span className="flex min-w-0 flex-col">
-                              <span className="truncate text-13 font-medium text-primary">{project.name}</span>
-                              {project.identifier && (
-                                <span className="truncate text-12 text-secondary">{project.identifier}</span>
-                              )}
-                            </span>
-                            {installed && (
-                              <span className="ml-auto flex-shrink-0">
-                                <Badge variant="accent-neutral" size="sm">
-                                  {t("Installed")}
-                                </Badge>
-                              </span>
-                            )}
-                          </label>
-                        </li>
-                      );
-                    })}
-                  </ul>
-                )}
-              </div>
               <p className="text-12 text-secondary">
-                {someEligibleSelected
-                  ? t("{count, plural, one {# project selected} other {# projects selected}}", {
-                      count: [...selected].filter((id) => !isInstalled(id)).length,
-                    })
-                  : t("Select the projects to install this scheduler on.")}
+                {t("Pick one or more projects. One schedule applies to all of them.")}
               </p>
             </>
           )}
