@@ -1,0 +1,210 @@
+/**
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
+ * SPDX-License-Identifier: AGPL-3.0-only
+ * See the LICENSE file for details.
+ */
+
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import useSWR from "swr";
+import { AssistantService } from "@pi-dash/services";
+import type { IAssistantEvent, IAssistantMessage } from "@pi-dash/types";
+
+const service = new AssistantService();
+
+const bySeq = (a: IAssistantMessage, b: IAssistantMessage): number => a.seq - b.seq;
+
+// Server page size for transcript fetches. Threads are capped server-side
+// (MAX_THREAD_MESSAGES), so the pagination loop below is bounded to a few pages.
+const PAGE_SIZE = 100;
+
+async function fetchTranscript(slug: string, threadId: string): Promise<IAssistantMessage[]> {
+  const out: IAssistantMessage[] = [];
+  let after = 0;
+  for (;;) {
+    // eslint-disable-next-line no-await-in-loop -- pages are sequential; each cursor depends on the previous page
+    const batch = await service.listMessages(slug, threadId, after, PAGE_SIZE);
+    out.push(...batch);
+    if (batch.length < PAGE_SIZE) break;
+    after = batch[batch.length - 1].seq;
+  }
+  return out;
+}
+
+function deltaText(payload: Record<string, unknown>): string {
+  const params = payload?.params;
+  if (params && typeof params === "object" && !Array.isArray(params)) {
+    const delta = (params as Record<string, unknown>).delta;
+    if (typeof delta === "string") return delta;
+  }
+  return "";
+}
+
+type ById = Record<string, IAssistantMessage>;
+
+export interface UseAssistantChat {
+  messages: IAssistantMessage[];
+  busy: boolean;
+  sending: boolean;
+  send: (content: string) => Promise<void>;
+  stop: () => Promise<void>;
+  error: string | null;
+}
+
+/**
+ * Live transcript for one thread.
+ *
+ * Updates come from two sources that reinforce each other so the UI renders
+ * live like a web chat regardless of SSE reliability:
+ *   1. SSE stream — smooth token-level deltas + tool/lifecycle events.
+ *   2. SWR polling while a turn is active — guarantees the response appears
+ *      within ~1s even if the SSE stream is buffered/blocked.
+ * The merge prefers in-flight streamed content so polling never clobbers a
+ * partially-streamed message.
+ */
+export function useAssistantChat(slug: string | undefined, threadId: string | undefined): UseAssistantChat {
+  const [byId, setById] = useState<ById>({});
+  const [busy, setBusy] = useState(false);
+  const [sending, setSending] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  // Track applied delta event seqs so an SSE reconnect (which replays from 0)
+  // doesn't double-append in-flight streamed text.
+  const appliedDeltas = useRef<Set<number>>(new Set());
+
+  const { data: base, mutate } = useSWR<IAssistantMessage[]>(
+    slug && threadId ? ["assistant-messages", slug, threadId] : null,
+    () => fetchTranscript(slug!, threadId!),
+    // Poll while a turn is running so messages render without depending on SSE.
+    { refreshInterval: busy ? 1000 : 0 }
+  );
+
+  // Reset transcript when the thread changes.
+  useEffect(() => {
+    setById({});
+    setBusy(false);
+    setError(null);
+    appliedDeltas.current = new Set();
+  }, [slug, threadId]);
+
+  // Merge the durable transcript (SWR fetch/poll) into local state without
+  // clobbering content that the SSE stream may be ahead on.
+  useEffect(() => {
+    if (!base) return;
+    setById((prev) => {
+      const next: ById = { ...prev };
+      for (const m of base) {
+        const cur = next[m.id];
+        const take = !cur || m.status === "completed" || (m.content?.length ?? 0) >= (cur.content?.length ?? 0);
+        if (take) next[m.id] = { ...cur, ...m };
+      }
+      return next;
+    });
+  }, [base]);
+
+  // Fallback turn-completion detection from polled state (covers a missed SSE
+  // turn_completed): no streaming row remains and the latest item is a terminal
+  // reply. We require a terminal role (assistant/error) rather than "not user"
+  // so a tool_result mid-turn doesn't prematurely clear busy and re-enable the
+  // composer between tool calls.
+  useEffect(() => {
+    if (!busy) return;
+    const list = Object.values(byId);
+    if (list.length === 0) return;
+    if (list.some((m) => m.status === "streaming")) return;
+    let last: IAssistantMessage | undefined;
+    for (const m of list) if (!last || m.seq > last.seq) last = m;
+    if (last && (last.role === "assistant" || last.role === "error") && last.status !== "streaming") {
+      setBusy(false);
+    }
+  }, [byId, busy]);
+
+  // SSE stream — smooth deltas + immediate lifecycle.
+  useEffect(() => {
+    if (!slug || !threadId) return;
+    const source = new EventSource(service.eventsUrl(slug, threadId, 0), { withCredentials: true });
+    source.addEventListener("chat.event", (raw) => {
+      let event: IAssistantEvent;
+      try {
+        event = JSON.parse((raw as MessageEvent).data) as IAssistantEvent;
+      } catch {
+        return;
+      }
+      const payload = event.payload || {};
+      switch (event.kind) {
+        case "turn_started":
+          setBusy(true);
+          break;
+        case "assistant_delta": {
+          const id = event.message;
+          const chunk = deltaText(payload);
+          if (id && chunk && !appliedDeltas.current.has(event.seq)) {
+            appliedDeltas.current.add(event.seq);
+            setById((prev) =>
+              prev[id] ? { ...prev, [id]: { ...prev[id], content: (prev[id].content || "") + chunk } } : prev
+            );
+          }
+          break;
+        }
+        case "message_created":
+        case "message_completed":
+        case "tool_call":
+        case "tool_result": {
+          const m = payload.message as IAssistantMessage | undefined;
+          if (m) setById((prev) => ({ ...prev, [m.id]: { ...prev[m.id], ...m } }));
+          break;
+        }
+        case "turn_failed":
+          setError((payload.detail as string) || (payload.error_code as string) || "The assistant failed.");
+          setBusy(false);
+          mutate();
+          break;
+        case "turn_cancelled":
+        case "turn_completed":
+          setBusy(false);
+          mutate();
+          break;
+        default:
+          break;
+      }
+    });
+    return () => source.close();
+  }, [slug, threadId, mutate]);
+
+  const send = useCallback(
+    async (content: string) => {
+      if (!slug || !threadId || !content.trim()) return;
+      setSending(true);
+      setError(null);
+      try {
+        const res = await service.sendMessage(slug, threadId, content.trim());
+        setById((prev) => ({ ...prev, [res.message.id]: res.message }));
+        setBusy(true); // starts polling + shows the stop button immediately
+        mutate();
+      } catch (e: unknown) {
+        const err = e as { error?: string; detail?: string } | null;
+        setError(err?.detail || err?.error || "Unable to send message");
+      } finally {
+        setSending(false);
+      }
+    },
+    [slug, threadId, mutate]
+  );
+
+  const stop = useCallback(async () => {
+    if (!slug || !threadId) return;
+    try {
+      await service.cancel(slug, threadId);
+      // Leave busy=true; the turn_cancelled event (or the poll fallback when it
+      // observes the finalized row) clears it. Clearing here would re-enable the
+      // composer before the worker stops, yielding a 409 turn_active on resend.
+    } catch {
+      /* no-op */
+    }
+  }, [slug, threadId]);
+
+  const messages = useMemo(() => {
+    // eslint-disable-next-line unicorn/no-array-sort -- fresh copy; toSorted not in tsconfig lib target
+    return Object.values(byId).sort(bySeq);
+  }, [byId]);
+
+  return { messages, busy, sending, send, stop, error };
+}

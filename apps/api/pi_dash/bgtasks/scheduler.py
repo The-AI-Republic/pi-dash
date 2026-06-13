@@ -27,7 +27,7 @@ but the scan rate is still doubled.
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timedelta, timezone as dt_timezone
+from datetime import datetime
 from typing import Optional
 
 from celery import shared_task
@@ -40,7 +40,6 @@ from pi_dash.bgtasks._rrule import next_fire_from_rrule
 from pi_dash.db.models.scheduler import (
     LAST_ERROR_MAX_LEN,
     SchedulerBinding,
-    outcome_mode_directive,
 )
 from pi_dash.runner.models import AgentRunStatus
 from pi_dash.utils.iso_datetime import coerce_iso_datetimes
@@ -151,8 +150,6 @@ def fire_scheduler_binding(self, binding_id: str) -> bool:
 
     # ----- Phase 1: Claim under SFU and advance next_run_at -----
     prev_next_run_at: Optional[datetime] = None
-    prompt: str = ""
-    binding_workspace_id = None
     binding_pk = None
 
     with transaction.atomic():
@@ -198,7 +195,6 @@ def fire_scheduler_binding(self, binding_id: str) -> bool:
             return False
 
         prev_next_run_at = binding.next_run_at
-        binding_workspace_id = binding.workspace_id
         binding_pk = binding.pk
         binding.next_run_at = nxt
         # Clear previous short-circuit error; a real terminate-hook update
@@ -207,28 +203,18 @@ def fire_scheduler_binding(self, binding_id: str) -> bool:
             binding.last_error = ""
         binding.save(update_fields=["next_run_at", "last_error", "updated_at"])
 
-        # Resolve prompt while we still have the row in scope. Order:
-        # scheduler task prompt, optional per-install extra context, then the
-        # work-mode directive (what to do with findings — file issues / open
-        # fix PRs / fix + review). outcome_mode is per-binding, so the same
-        # scheduler can behave differently across projects. The directive is
-        # appended here rather than composed in a template because the scheduler
-        # prompt path does not yet go through the prompt composer (deferred; see
-        # OutcomeMode docstring).
-        base_prompt = binding.scheduler.prompt or ""
-        parts = [base_prompt.strip()]
-        if binding.extra_context:
-            parts.append(binding.extra_context.strip())
-        parts.append(outcome_mode_directive(binding.outcome_mode))
-        prompt = "\n\n".join(p for p in parts if p)
-
     # ----- Phase 2: Dispatch outside the transaction -----
+    # The prompt is composed inside ``dispatch_scheduler_run`` (it needs the
+    # run id), unified onto the same section-based composer as issue runs.
+    # See .ai_design/prompt_section_system/design.md §5.
     from pi_dash.orchestration.service import dispatch_scheduler_run
 
     # Re-fetch the binding without SFU; the dispatcher only needs the FK
     # values it copies onto the AgentRun.
     binding_for_dispatch = (
-        SchedulerBinding.objects.select_related("scheduler")
+        SchedulerBinding.objects.select_related(
+            "scheduler", "project", "workspace", "actor"
+        )
         .filter(pk=binding_pk)
         .first()
     )
@@ -236,10 +222,16 @@ def fire_scheduler_binding(self, binding_id: str) -> bool:
         # Deleted between phases — nothing to roll back to.
         return False
 
-    run, fail_reason = dispatch_scheduler_run(binding_for_dispatch, prompt)
+    run, fail_reason = dispatch_scheduler_run(binding_for_dispatch)
 
-    # ----- Phase 3a: Success — record the run pointer -----
+    # ----- Phase 3a: a run was produced — record the run pointer -----
     if run is not None:
+        # A prompt-build failure still produces a run (marked FAILED) so the
+        # tick is recorded and next_run_at stays advanced. But surface the
+        # failure on ``last_error`` too, otherwise a permanently-broken prompt
+        # fails invisibly every tick (operators watch last_error, not
+        # last_run.status). A healthy run clears last_error.
+        run_failed = run.status == AgentRunStatus.FAILED
         with transaction.atomic():
             success = (
                 SchedulerBinding.objects.select_for_update(of=("self",))
@@ -248,15 +240,23 @@ def fire_scheduler_binding(self, binding_id: str) -> bool:
             )
             if success is not None:
                 success.last_run = run
-                success.last_error = ""
+                success.last_error = (
+                    f"prompt build failed: {run.error}"[:LAST_ERROR_MAX_LEN]
+                    if run_failed
+                    else ""
+                )
                 # Use save() so auto_now on updated_at fires; queryset
                 # .update() bypasses it (`auto_now` is set in pre_save).
                 success.save(update_fields=["last_run", "last_error", "updated_at"])
         logger.info(
-            "scheduler.fire: dispatched run=%s binding=%s",
+            "scheduler.fire: dispatched run=%s binding=%s failed=%s",
             run.pk,
             binding_pk,
+            run_failed,
         )
+        # A run was produced and next_run_at stays advanced (no rollback),
+        # so this is a dispatch, not a skip — return True regardless of the
+        # run's terminal status.
         return True
 
     # ----- Phase 3b: Failure — rollback the next_run_at advance -----

@@ -95,6 +95,11 @@ app.conf.beat_schedule = {
         "task": "runner.sweep_agent_chat_state",
         "schedule": timedelta(seconds=30),
     },
+    # AI assistant — fail turns whose worker died so threads never wedge.
+    "assistant-sweep-stale-turns": {
+        "task": "assistant.sweep_stale_turns",
+        "schedule": timedelta(seconds=30),
+    },
     "runner-sweep-chat-message-dedupe": {
         "task": "runner.sweep_chat_message_dedupe",
         "schedule": crontab(hour=4, minute=0),

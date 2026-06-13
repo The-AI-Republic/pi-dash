@@ -184,6 +184,10 @@ class Issue(ProjectBaseModel):
     # serializer to avoid bloating list/get responses — read/write via the
     # dedicated workpad endpoint.
     workpad = models.TextField(blank=True, default="")
+    # Provenance marker: set to "assistant" when the AI assistant created the
+    # issue on a user's behalf. NULL for manually-created issues. Surfaced as a
+    # "via assistant" badge. See .ai_design/integrate_ai_agent/.
+    created_via = models.CharField(max_length=32, null=True, blank=True)
     # Pod this issue's agent runs dispatch to. NULL means "use the workspace
     # default pod at run time." See .ai_design/issue_runner/design.md §4.4.
     # PROTECT is safe because pods are soft-deleted, never physically removed.

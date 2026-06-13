@@ -12,8 +12,11 @@ export default {
     "(オプション — このIssueを既存のリモートブランチにピン留めする)",
   "{active} active / {total} total": "{active} アクティブ / {total} 合計",
   "{count, plural, one {# install} other {# installs}}": "{count, plural, one {# インストール} other {# インストール}}",
+  "{count, plural, one {# project failed} other {# projects failed}}": "",
+  "{count, plural, one {# project selected} other {# projects selected}}": "",
   "{count, plural, one {Cycle} other {Cycles}}": "{count, plural, one {# サイクル} other {# サイクル}}",
   "{count, plural, one {Epic} other {Epics}}": "{count, plural, one {# エピック} other {# エピック}}",
+  "{count, plural, one {Installed on # project} other {Installed on # projects}}": "",
   "{count, plural, one {Project} other {Projects}}": "{count, plural, one {# プロジェクト} other {# プロジェクト}}",
   "{count, plural, one {Work item} other {Work items}}": "{count, plural, one {# 作業項目} other {# 作業項目}}",
   "{count, plural, one{# member} other{# members}}": "{count, plural, one{#メンバー} other{#メンバー}}",
@@ -293,6 +296,7 @@ export default {
   "Clear filter": "フィルターをクリア",
   "Clear filters": "すべてのフィルターをクリア",
   "Clear search": "検索をクリア",
+  "Clear selection": "",
   "Clear sorting": "並べ替えをクリア",
   "Click the button below to join it.": "下のボタンをクリックして参加してください。",
   "Click to add description": "クリックして説明を追加",
@@ -774,6 +778,7 @@ export default {
   "Install the pidash CLI and register dev machines as AI agent runners":
     "pidash CLIをインストールし、開発マシンをAIエージェントランナーとして登録してください",
   "Install updated": "インストールが更新されました",
+  Installed: "",
   "Installing…": "インストール中…",
   Installs: "インストール",
   Intake: "Intake",
@@ -872,6 +877,7 @@ export default {
   "Load more": "さらに読み込む",
   Loading: "読み込み中",
   "Loading dev machines...": "開発用マシンを読み込み中...",
+  "Loading run details…": "",
   "Loading…": "読み込み中…",
   "local dev machine project working dir": "ローカル開発マシンのプロジェクト作業ディレクトリ",
   "Local path the daemon runs the agent CLI in — usually the project repo on disk. Defaults to a sandbox under the runner's data dir, which is rarely what you want.":
@@ -1002,6 +1008,7 @@ export default {
   "No projects archived": "アーカイブされたプロジェクトはありません",
   "No projects detected with the matching criteria. \n Create a new project instead.":
     "一致する条件のプロジェクトは見つかりませんでした。\n代わりに新しいプロジェクトを作成してください。",
+  "No projects match your search.": "",
   "No prompt templates available. The Pi Dash default will be seeded on the next migrate.":
     "プロンプトテンプレートが利用できません。Pi Dash のデフォルトは次回のマイグレーションでシードされます。",
   "No results found": "結果が見つかりません",
@@ -1030,6 +1037,7 @@ export default {
   "No work items yet": "まだ作業項目はありません",
   "No. of {entity}": "{entity}の数",
   None: "なし",
+  "None selected": "",
   "Not right now": "今はやめておきます",
   "Notes specific to this project…": "このプロジェクト固有のメモ…",
   "Notification marked as archived": "通知がアーカイブ済みとしてマークされました",
@@ -1142,8 +1150,10 @@ export default {
   "Pi Dash: Your AI Employee Management Platform": "Pi Dash: あなたのAI従業員管理プラットフォーム",
   "Pick a project.": "プロジェクトを選択してください。",
   "Pick a scheduler.": "スケジューラーを選択してください。",
+  "Pick at least one project to install this scheduler on.": "",
   "Pick from your workspace's enabled schedulers. Already-installed ones aren't listed.":
     "ワークスペースで有効なスケジューラーから選択してください。既にインストールされているものは表示されません。",
+  "Pick one or more projects. One schedule applies to all of them.": "",
   "pidash CLI": "pidash CLI",
   "pidash daemon": "pidash デーモン",
   "Plan work in focused timeframes.": "集中した時間枠で作業を計画します。",
@@ -1332,6 +1342,7 @@ export default {
   Scope: "スコープ",
   Search: "検索",
   "Search by title": "タイトルで検索",
+  "Search projects…": "",
   "Secret key": "シークレットキー",
   "Secret key copied to clipboard.": "シークレットキーをクリップボードにコピーしました。",
   Security: "セキュリティ",
@@ -1347,6 +1358,7 @@ export default {
   "Select network": "ネットワークを選択",
   "Select or customize your interface color scheme.": "インターフェースの配色を選択またはカスタマイズしてください。",
   "Select organization size": "組織の規模を選択",
+  "Select projects": "",
   "Select your theme": "テーマを選択",
   "Send invitations": "招待状を送信",
   "Send me everything": "すべてを送信",
@@ -1760,6 +1772,7 @@ export default {
   You: "あなた",
   "You already have a cycle on the given dates, if you want to create a draft cycle, you can do that by removing both the dates.":
     "指定された日付には既にサイクルがあります。下書きサイクルを作成したい場合は、両方の日付を削除することで可能です。",
+  "You aren't a member of any project in this workspace to install on.": "",
   "You can only edit the slug of the URL": "URLのスラッグのみ編集できます",
   "You can see here if someone invites you to a workspace":
     "誰かがあなたをワークスペースに招待した場合、ここで確認できます",

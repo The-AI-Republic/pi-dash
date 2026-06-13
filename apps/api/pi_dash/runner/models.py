@@ -206,6 +206,43 @@ class AgentRunStatus(models.TextChoices):
     REFUSED = "refused", "Refused"
 
 
+class AgentRunTrigger(models.TextChoices):
+    """How a run came to be created.
+
+    Human-vs-automatic is **not** derivable from ``created_by`` — a tick
+    resolves a human creator (issue creator / project lead) via
+    ``_resolve_creator_for_trigger``, so a tick-created run's ``created_by``
+    looks identical to a Run AI click. The prompt composer needs this
+    distinction to decide whether per-user section overrides apply (design
+    §9.1), and it doubles as run-detail audit metadata.
+    """
+
+    STATE_TRANSITION = "state_transition", "State transition"
+    RUN_AI = "run_ai", "Run AI button"
+    COMMENT_AND_RUN = "comment_and_run", "Comment & Run"
+    TICK = "tick", "Automatic tick"
+    SCHEDULER = "scheduler", "Scheduler beat"
+    DIRECT = "direct", "Direct"
+
+
+#: Triggers that count as a human directly initiating the run. Per design
+#: §9.1, only these resolve per-user prompt overrides; ``tick`` / ``scheduler``
+#: (and any system-bot run) use workspace + defaults only.
+HUMAN_TRIGGERS = frozenset(
+    {
+        AgentRunTrigger.STATE_TRANSITION,
+        AgentRunTrigger.RUN_AI,
+        AgentRunTrigger.COMMENT_AND_RUN,
+        AgentRunTrigger.DIRECT,
+    }
+)
+
+
+def run_is_human_triggered(run) -> bool:
+    """True when ``run`` was directly initiated by a human (design §9.1)."""
+    return run.trigger in HUMAN_TRIGGERS
+
+
 class RefusalCategory(models.TextChoices):
     """Safety-classifier decline category, mirrored from the Messages API
     ``stop_details.category`` (Anthropic refusals-and-fallback docs).
@@ -785,6 +822,21 @@ class AgentRun(models.Model):
         db_index=True,
     )
     prompt = models.TextField(blank=True, default="")
+    # How this run was triggered. Drives per-user prompt-override resolution in
+    # the composer (design §9.1) and is surfaced as run-detail audit metadata.
+    # Defaults to ``direct`` so any run-creation path that doesn't set it is
+    # treated as human-initiated (overrides apply) rather than silently
+    # automatic.
+    trigger = models.CharField(
+        max_length=24,
+        choices=AgentRunTrigger.choices,
+        default=AgentRunTrigger.DIRECT,
+        db_index=True,
+    )
+    # Per-section provenance of the composed prompt: a list of
+    # {section_key, source, version, line_start, line_end}. Lets "why did this
+    # run behave differently" be answered by diffing manifests (design §7.1).
+    prompt_manifest = models.JSONField(null=True, blank=True)
     run_config = models.JSONField(default=dict, blank=True)
     required_capabilities = models.JSONField(default=list, blank=True)
     thread_id = models.CharField(max_length=128, blank=True, default="")

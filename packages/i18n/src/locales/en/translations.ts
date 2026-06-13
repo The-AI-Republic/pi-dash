@@ -12,8 +12,14 @@ export default {
     "(optional — pin this issue to an existing remote branch)",
   "{active} active / {total} total": "{active} active / {total} total",
   "{count, plural, one {# install} other {# installs}}": "{count, plural, one {# install} other {# installs}}",
+  "{count, plural, one {# project failed} other {# projects failed}}":
+    "{count, plural, one {# project failed} other {# projects failed}}",
+  "{count, plural, one {# project selected} other {# projects selected}}":
+    "{count, plural, one {# project selected} other {# projects selected}}",
   "{count, plural, one {Cycle} other {Cycles}}": "{count, plural, one {Cycle} other {Cycles}}",
   "{count, plural, one {Epic} other {Epics}}": "{count, plural, one {Epic} other {Epics}}",
+  "{count, plural, one {Installed on # project} other {Installed on # projects}}":
+    "{count, plural, one {Installed on # project} other {Installed on # projects}}",
   "{count, plural, one {Project} other {Projects}}": "{count, plural, one {Project} other {Projects}}",
   "{count, plural, one {Work item} other {Work items}}": "{count, plural, one {Work item} other {Work items}}",
   "{count, plural, one{# member} other{# members}}": "{count, plural, one{# member} other{# members}}",
@@ -292,6 +298,7 @@ export default {
   "Clear filter": "Clear filter",
   "Clear filters": "Clear filters",
   "Clear search": "Clear search",
+  "Clear selection": "Clear selection",
   "Clear sorting": "Clear sorting",
   "Click the button below to join it.": "Click the button below to join it.",
   "Click to add description": "Click to add description",
@@ -766,6 +773,7 @@ export default {
   "Install the pidash CLI and register dev machines as AI agent runners":
     "Install the pidash CLI and register dev machines as AI agent runners",
   "Install updated": "Install updated",
+  Installed: "Installed",
   "Installing…": "Installing…",
   Installs: "Installs",
   Intake: "Intake",
@@ -861,6 +869,7 @@ export default {
   "Load more": "Load more",
   Loading: "Loading",
   "Loading dev machines...": "Loading dev machines...",
+  "Loading run details…": "Loading run details…",
   "Loading…": "Loading…",
   "local dev machine project working dir": "local dev machine project working dir",
   "Local path the daemon runs the agent CLI in — usually the project repo on disk. Defaults to a sandbox under the runner's data dir, which is rarely what you want.":
@@ -990,6 +999,7 @@ export default {
   "No projects archived": "No projects archived",
   "No projects detected with the matching criteria. \n Create a new project instead.":
     "No projects detected with the matching criteria. \n Create a new project instead.",
+  "No projects match your search.": "No projects match your search.",
   "No prompt templates available. The Pi Dash default will be seeded on the next migrate.":
     "No prompt templates available. The Pi Dash default will be seeded on the next migrate.",
   "No results found": "No results found",
@@ -1018,6 +1028,7 @@ export default {
   "No work items yet": "No work items yet",
   "No. of {entity}": "No. of {entity}",
   None: "None",
+  "None selected": "None selected",
   "Not right now": "Not right now",
   "Notes specific to this project…": "Notes specific to this project…",
   "Notification marked as archived": "Notification marked as archived",
@@ -1130,8 +1141,11 @@ export default {
   "Pi Dash: Your AI Employee Management Platform": "Pi Dash: Your AI Employee Management Platform",
   "Pick a project.": "Pick a project.",
   "Pick a scheduler.": "Pick a scheduler.",
+  "Pick at least one project to install this scheduler on.": "Pick at least one project to install this scheduler on.",
   "Pick from your workspace's enabled schedulers. Already-installed ones aren't listed.":
     "Pick from your workspace's enabled schedulers. Already-installed ones aren't listed.",
+  "Pick one or more projects. One schedule applies to all of them.":
+    "Pick one or more projects. One schedule applies to all of them.",
   "pidash CLI": "pidash CLI",
   "pidash daemon": "pidash daemon",
   "Plan work in focused timeframes.": "Plan work in focused timeframes.",
@@ -1318,6 +1332,7 @@ export default {
   Scope: "Scope",
   Search: "Search",
   "Search by title": "Search by title",
+  "Search projects…": "Search projects…",
   "Secret key": "Secret key",
   "Secret key copied to clipboard.": "Secret key copied to clipboard.",
   Security: "Security",
@@ -1333,6 +1348,7 @@ export default {
   "Select network": "Select network",
   "Select or customize your interface color scheme.": "Select or customize your interface color scheme.",
   "Select organization size": "Select organization size",
+  "Select projects": "Select projects",
   "Select your theme": "Select your theme",
   "Send invitations": "Send invitations",
   "Send me everything": "Send me everything",
@@ -1743,6 +1759,8 @@ export default {
   You: "You",
   "You already have a cycle on the given dates, if you want to create a draft cycle, you can do that by removing both the dates.":
     "You already have a cycle on the given dates, if you want to create a draft cycle, you can do that by removing both the dates.",
+  "You aren't a member of any project in this workspace to install on.":
+    "You aren't a member of any project in this workspace to install on.",
   "You can only edit the slug of the URL": "You can only edit the slug of the URL",
   "You can see here if someone invites you to a workspace": "You can see here if someone invites you to a workspace",
   "You do not have the permission to access this page.": "You do not have the permission to access this page.",

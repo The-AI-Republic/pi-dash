@@ -13,8 +13,11 @@ export default {
   "{active} active / {total} total": "{active} actif / {total} total",
   "{count, plural, one {# install} other {# installs}}":
     "{count, plural, one {# installation} other {# installations}}",
+  "{count, plural, one {# project failed} other {# projects failed}}": "",
+  "{count, plural, one {# project selected} other {# projects selected}}": "",
   "{count, plural, one {Cycle} other {Cycles}}": "{count, plural, one {Cycle} other {Cycles}}",
   "{count, plural, one {Epic} other {Epics}}": "{count, plural, one {Epic} other {Epics}}",
+  "{count, plural, one {Installed on # project} other {Installed on # projects}}": "",
   "{count, plural, one {Project} other {Projects}}": "{count, plural, one {Projet} other {Projets}}",
   "{count, plural, one {Work item} other {Work items}}":
     "{count, plural, one {Élément de travail} other {Éléments de travail}}",
@@ -298,6 +301,7 @@ export default {
   "Clear filter": "Effacer le filtre",
   "Clear filters": "Effacer les filtres",
   "Clear search": "Effacer la recherche",
+  "Clear selection": "",
   "Clear sorting": "Effacer le tri",
   "Click the button below to join it.": "Cliquez sur le bouton ci-dessous pour y participer.",
   "Click to add description": "Cliquez pour ajouter une description",
@@ -785,6 +789,7 @@ export default {
   "Install the pidash CLI and register dev machines as AI agent runners":
     "Installez l'interface en ligne de commande pidash et enregistrez les machines de développement en tant qu'exécuteurs d'agents IA",
   "Install updated": "Installation mise à jour",
+  Installed: "",
   "Installing…": "Installation en cours…",
   Installs: "Installations",
   Intake: "Intake",
@@ -883,6 +888,7 @@ export default {
   "Load more": "Charger plus",
   Loading: "Chargement",
   "Loading dev machines...": "Chargement des machines de développement...",
+  "Loading run details…": "",
   "Loading…": "Chargement…",
   "local dev machine project working dir": "répertoire de travail du projet sur la machine de développement locale",
   "Local path the daemon runs the agent CLI in — usually the project repo on disk. Defaults to a sandbox under the runner's data dir, which is rarely what you want.":
@@ -1016,6 +1022,7 @@ export default {
   "No projects archived": "Aucun projet archivé",
   "No projects detected with the matching criteria. \n Create a new project instead.":
     "Aucun projet détecté avec les critères correspondants. \n Créez un nouveau projet à la place.",
+  "No projects match your search.": "",
   "No prompt templates available. The Pi Dash default will be seeded on the next migrate.":
     "Aucun modèle de prompt disponible. Le modèle par défaut de Pi Dash sera initialisé lors de la prochaine migration.",
   "No results found": "Aucun résultat trouvé",
@@ -1045,6 +1052,7 @@ export default {
   "No work items yet": "Aucun élément de travail pour l'instant",
   "No. of {entity}": "Nombre de {entity}",
   None: "Aucun",
+  "None selected": "",
   "Not right now": "Pas maintenant",
   "Notes specific to this project…": "Notes spécifiques à ce projet…",
   "Notification marked as archived": "Notification marquée comme archivée",
@@ -1164,8 +1172,10 @@ export default {
   "Pi Dash: Your AI Employee Management Platform": "Pi Dash : Votre plateforme de gestion des employés IA",
   "Pick a project.": "Choisissez un projet.",
   "Pick a scheduler.": "Choisissez un planificateur.",
+  "Pick at least one project to install this scheduler on.": "",
   "Pick from your workspace's enabled schedulers. Already-installed ones aren't listed.":
     "Choisissez parmi les planificateurs activés de votre espace de travail. Ceux déjà installés ne sont pas listés.",
+  "Pick one or more projects. One schedule applies to all of them.": "",
   "pidash CLI": "pidash CLI",
   "pidash daemon": "pidash daemon",
   "Plan work in focused timeframes.": "Planifiez le travail dans des périodes ciblées.",
@@ -1357,6 +1367,7 @@ export default {
   Scope: "Portée",
   Search: "Rechercher",
   "Search by title": "Rechercher par titre",
+  "Search projects…": "",
   "Secret key": "Clé secrète",
   "Secret key copied to clipboard.": "Clé secrète copiée dans le presse-papiers.",
   Security: "Sécurité",
@@ -1373,6 +1384,7 @@ export default {
   "Select or customize your interface color scheme.":
     "Sélectionnez ou personnalisez votre jeu de couleurs d'interface.",
   "Select organization size": "Sélectionnez la taille de l'organisation",
+  "Select projects": "",
   "Select your theme": "Sélectionnez votre thème",
   "Send invitations": "Envoyer des invitations",
   "Send me everything": "Tout m'envoyer",
@@ -1796,6 +1808,7 @@ export default {
   You: "Vous",
   "You already have a cycle on the given dates, if you want to create a draft cycle, you can do that by removing both the dates.":
     "Vous avez déjà un cycle aux dates indiquées. Si vous souhaitez créer un cycle brouillon, vous pouvez le faire en supprimant les deux dates.",
+  "You aren't a member of any project in this workspace to install on.": "",
   "You can only edit the slug of the URL": "Vous ne pouvez modifier que le slug de l'URL",
   "You can see here if someone invites you to a workspace":
     "Vous pouvez voir ici si quelqu'un vous invite dans un espace de travail",

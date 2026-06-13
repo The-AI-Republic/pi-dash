@@ -56,6 +56,7 @@ INSTALLED_APPS = [
     "pi_dash.runner",
     "pi_dash.prompting",
     "pi_dash.orchestration",
+    "pi_dash.assistant",
     # Third-party things
     "channels",
     "rest_framework",
@@ -93,6 +94,9 @@ REST_FRAMEWORK = {
         # endpoint creates a DB row each call, so a flood would otherwise
         # be a free table-pollution vector.
         "auth_device_start": "20/minute",
+        # AI assistant: the only platform-compute brake in the BYOK-only MVP.
+        "assistant_message": "30/hour",
+        "assistant_llm_test": "6/minute",
     },
     "DEFAULT_PERMISSION_CLASSES": ("rest_framework.permissions.IsAuthenticated",),
     "DEFAULT_RENDERER_CLASSES": ("rest_framework.renderers.JSONRenderer",),
@@ -204,6 +208,23 @@ REDIS_SOCKET_CONNECT_TIMEOUT = os.environ.get("REDIS_SOCKET_CONNECT_TIMEOUT", 2.
 REDIS_SOCKET_TIMEOUT = os.environ.get("REDIS_SOCKET_TIMEOUT", 5.0)
 REDIS_HEALTH_CHECK_INTERVAL = os.environ.get("REDIS_HEALTH_CHECK_INTERVAL", 30)
 REDIS_MAX_CONNECTIONS = os.environ.get("REDIS_MAX_CONNECTIONS")
+
+# AI Assistant — see .ai_design/integrate_ai_agent/
+# Comma-separated MultiFernet key list (urlsafe base64, 32 bytes). When unset,
+# BYOK keys cannot be stored (the config endpoint reports assistant_not_configured).
+ASSISTANT_ENCRYPTION_KEY = os.environ.get("ASSISTANT_ENCRYPTION_KEY", "")
+# SSRF guard for BYOK base_url. Off in OSS (LAN vLLM/Ollama allowed); cloud sets True.
+ASSISTANT_BLOCK_PRIVATE_URLS = os.environ.get("ASSISTANT_BLOCK_PRIVATE_URLS", "false").lower() in (
+    "1",
+    "true",
+    "yes",
+)
+ASSISTANT_TURN_SOFT_LIMIT = int(os.environ.get("ASSISTANT_TURN_SOFT_LIMIT", 300))
+ASSISTANT_TURN_HARD_LIMIT = int(os.environ.get("ASSISTANT_TURN_HARD_LIMIT", 330))
+# Max completed turns replayed to the model as history. Bounds per-turn token
+# cost (and context-window use) on long threads; the durable transcript shown
+# in the UI is unaffected — only what the model sees is truncated.
+ASSISTANT_HISTORY_MAX_TURNS = int(os.environ.get("ASSISTANT_HISTORY_MAX_TURNS", 40))
 
 if REDIS_SSL:
     CACHES = {
