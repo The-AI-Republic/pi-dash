@@ -52,8 +52,6 @@ export default {
   "1 day": "1 gün",
   "1 month ago": "1 ay önce",
   "1 week": "1 hafta",
-  '1. Click "Add runner", pick a project + pod and generate the CLI command.\n2. On the machine that will host the runner, run the displayed `pidash runner add` command. If the host is not logged in yet, the CLI starts `pidash auth login` first.\n3. The daemon registers the runner and it shows online here.\n\nPrerequisite: the agent CLI (codex / claude) must already be installed on the host.':
-    "1. \"Runner Ekle\"ye tıklayın, bir proje + pod seçin ve CLI komutunu oluşturun.\n2. Runner'ı barındıracak makinede, görüntülenen `pidash runner add` komutunu çalıştırın. Ana bilgisayar henüz oturum açmamışsa, CLI önce `pidash auth login` başlatır.\n3. Daemon runner'ı kaydeder ve burada çevrimiçi olarak gösterilir.\n\nÖn koşul: aracı CLI'si (codex / claude) ana bilgisayara zaten yüklenmiş olmalıdır.",
   "10,000-feet view of all active cycles.": "Tüm aktif döngülerin 10.000 fitlik görünümü.",
   "2 weeks": "2 hafta",
   "3 days": "3 gün",
@@ -62,6 +60,8 @@ export default {
     "Bir projeye (ve isteğe bağlı olarak bir pod'a) bağlı bir aracı örneğini temsil eden bulut tarafı satırı. Oturum açmış bir makinede `pidash runner add` çalıştırmak satırı oluşturur ve o makineyi ana bilgisayar olarak bağlar. Bir makine birçok runner'ı barındırabilir.",
   "A long-running background process that maintains the WebSocket session with Pi Dash cloud, dispatches work to the configured agent, and streams approvals + heartbeats back. One daemon per machine.":
     "Pi Dash bulutu ile WebSocket oturumunu sürdüren, yapılandırılmış aracıya iş gönderen ve onaylar + kalp atışlarını geri akıtan uzun süreli bir arka plan işlemi. Makine başına bir daemon.",
+  'A runner is an AI agent instance working on a given project.\n\n1. Click "Add runner", pick a project + pod and generate the CLI command.\n2. On the machine that will host the runner, run the displayed `pidash runner add` command. If the host is not logged in yet, the CLI starts `pidash auth login` first.\n3. The daemon registers the runner and it shows online here.\n\nPrerequisite: the agent CLI (codex / claude) must already be installed on the host.':
+    "Runner, belirli bir proje üzerinde çalışan bir yapay zekâ aracı örneğidir.\n\n1. \"Runner Ekle\"ye tıklayın, bir proje + pod seçin ve CLI komutunu oluşturun.\n2. Runner'ı barındıracak makinede, görüntülenen `pidash runner add` komutunu çalıştırın. Ana bilgisayar henüz oturum açmamışsa, CLI önce `pidash auth login` başlatır.\n3. Daemon runner'ı kaydeder ve burada çevrimiçi olarak gösterilir.\n\nÖn koşul: aracı CLI'si (codex / claude) ana bilgisayara zaten yüklenmiş olmalıdır.",
   "Ability to read, write, edit, and delete entities inside projects, cycles, and modules":
     "Projeler, döngüler ve modüller içindeki varlıkları okuma, yazma, düzenleme ve silme yeteneği",
   Accept: "Kabul Et",

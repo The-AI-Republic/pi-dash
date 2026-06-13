@@ -53,8 +53,6 @@ export default {
   "1 day": "1 dia",
   "1 month ago": "1 mês atrás",
   "1 week": "1 semana",
-  '1. Click "Add runner", pick a project + pod and generate the CLI command.\n2. On the machine that will host the runner, run the displayed `pidash runner add` command. If the host is not logged in yet, the CLI starts `pidash auth login` first.\n3. The daemon registers the runner and it shows online here.\n\nPrerequisite: the agent CLI (codex / claude) must already be installed on the host.':
-    '1. Clique em "Adicionar runner", escolha um projeto + pod e gere o comando CLI.\n2. Na máquina que hospedará o runner, execute o comando `pidash runner add` exibido. Se o host ainda não estiver logado, a CLI inicia `pidash auth login` primeiro.\n3. O daemon registra o runner e ele aparece online aqui.\n\nPré-requisito: a CLI do agente (codex / claude) já deve estar instalada no host.',
   "10,000-feet view of all active cycles.": "Visão geral de todos os ciclos ativos.",
   "2 weeks": "2 semanas",
   "3 days": "3 dias",
@@ -63,6 +61,8 @@ export default {
     "Uma linha do lado da nuvem que representa uma instância de agente vinculada a um projeto (e opcionalmente a um pod). Executar `pidash runner add` em uma máquina logada cria a linha e vincula essa máquina como host. Uma máquina pode hospedar muitos runners.",
   "A long-running background process that maintains the WebSocket session with Pi Dash cloud, dispatches work to the configured agent, and streams approvals + heartbeats back. One daemon per machine.":
     "Um processo de segundo plano de longa duração que mantém a sessão WebSocket com a nuvem Pi Dash, despacha trabalho para o agente configurado e transmite aprovações + heartbeats de volta. Um daemon por máquina.",
+  'A runner is an AI agent instance working on a given project.\n\n1. Click "Add runner", pick a project + pod and generate the CLI command.\n2. On the machine that will host the runner, run the displayed `pidash runner add` command. If the host is not logged in yet, the CLI starts `pidash auth login` first.\n3. The daemon registers the runner and it shows online here.\n\nPrerequisite: the agent CLI (codex / claude) must already be installed on the host.':
+    'Um runner é uma instância de agente de IA que trabalha em um projeto específico.\n\n1. Clique em "Adicionar runner", escolha um projeto + pod e gere o comando CLI.\n2. Na máquina que hospedará o runner, execute o comando `pidash runner add` exibido. Se o host ainda não estiver logado, a CLI inicia `pidash auth login` primeiro.\n3. O daemon registra o runner e ele aparece online aqui.\n\nPré-requisito: a CLI do agente (codex / claude) já deve estar instalada no host.',
   "Ability to read, write, edit, and delete entities inside projects, cycles, and modules":
     "Capacidade de ler, escrever, editar e excluir entidades dentro de projetos, ciclos e módulos",
   Accept: "Aceitar",
