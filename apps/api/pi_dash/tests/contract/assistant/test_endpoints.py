@@ -2,10 +2,13 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 # See the LICENSE file for details.
 
+from datetime import timedelta
+
 import pytest
+from django.utils import timezone
 from rest_framework.test import APIClient
 
-from pi_dash.assistant.models import AssistantThread
+from pi_dash.assistant.models import AssistantThread, AssistantTurn
 from pi_dash.tests.contract.assistant.conftest import configure_llm
 
 pytestmark = pytest.mark.django_db
@@ -41,6 +44,33 @@ def test_guest_blocked_from_assistant(world):
 def test_non_member_cannot_access(world):
     c = client_for(world.other_user)
     assert c.get(f"{base(world.ws)}/threads/").status_code == 403
+
+
+def test_listing_threads_reaps_abandoned_empty_conversations(world):
+    """An untitled chat thread with no turns (no history) is reaped once past
+    the grace window, while fresh empties, titled threads, and threads with
+    history survive."""
+    stale = timezone.now() - timedelta(hours=2)
+
+    def make(title="", *, old=False, with_turn=False):
+        t = AssistantThread.objects.create(workspace=world.ws, user=world.member, title=title)
+        if old:
+            AssistantThread.objects.filter(pk=t.pk).update(created_at=stale)
+        if with_turn:
+            AssistantTurn.objects.create(thread=t)
+        return t
+
+    empty_old = make(old=True)  # reaped
+    empty_fresh = make()  # kept (grace)
+    titled_old = make("Kept", old=True)  # kept (has title)
+    history_old = make(old=True, with_turn=True)  # kept (has history)
+
+    res = client_for(world.member).get(f"{base(world.ws)}/threads/")
+    assert res.status_code == 200
+
+    assert not AssistantThread.objects.filter(pk=empty_old.pk).exists()
+    for kept in (empty_fresh, titled_old, history_old):
+        assert AssistantThread.objects.filter(pk=kept.pk).exists()
 
 
 # --- messages ---
