@@ -11,6 +11,7 @@ model behaviour. See ``.ai_design/integrate_ai_agent/02-backend.md`` §2.1.
 
 from __future__ import annotations
 
+from django.conf import settings
 from django.utils import timezone
 
 from pi_dash.core.permissions import ROLE_MEMBER
@@ -49,6 +50,23 @@ offer dispatch_coding_run instead of attempting it yourself.
 """
 
 
+# Appended (not substituted) when a turn runs unattended on a loop thread. The
+# base rules still apply; this overrides only rule 3 (ask-before-bulk — there is
+# nobody to ask) and adds the unattended contract. See
+# ``.ai_design/loop_project_management/design.md`` §7.7.
+LOOP_INSTRUCTIONS = """\
+## Unattended mode
+You are running as a scheduled maintenance task. No human reads your reply \
+live, and nobody can answer questions — never ask; when a judgement is \
+ambiguous, skip that item instead of guessing. Perform only the actions your \
+task instructions explicitly call for. Never delete anything. The \
+bulk-change confirmation rule does not apply, but act on at most {max_writes} \
+items per run; if more qualify, handle the oldest and note the remainder in \
+your summary. End with a short plain-text summary of every action you took, \
+or "No action needed."
+"""
+
+
 def dynamic_instructions(ctx) -> str:
     """Per-run context appended to the base instructions (derived from deps)."""
     deps = ctx.deps
@@ -62,4 +80,7 @@ def dynamic_instructions(ctx) -> str:
         lines.append(
             "This user's role cannot create or modify issues; offer read-only help."
         )
+    if getattr(deps, "mode", "chat") == "loop":
+        max_writes = int(getattr(settings, "LOOP_MAX_WRITES", 10))
+        lines.append(LOOP_INSTRUCTIONS.format(max_writes=max_writes))
     return "\n".join(lines)

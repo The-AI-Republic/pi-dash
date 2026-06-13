@@ -11,8 +11,11 @@ export default {
   "(optional — pin this issue to an existing remote branch)": "(선택 사항 — 이 이슈를 기존 원격 브랜치에 고정)",
   "{active} active / {total} total": "{active} 활성 / {total} 전체",
   "{count, plural, one {# install} other {# installs}}": "{count, plural, one {#개 설치} other {#개 설치}}",
+  "{count, plural, one {# project failed} other {# projects failed}}": "",
+  "{count, plural, one {# project selected} other {# projects selected}}": "",
   "{count, plural, one {Cycle} other {Cycles}}": "{count, plural, one {사이클} other {사이클}}",
   "{count, plural, one {Epic} other {Epics}}": "{count, plural, one {에픽} other {에픽}}",
+  "{count, plural, one {Installed on # project} other {Installed on # projects}}": "",
   "{count, plural, one {Project} other {Projects}}": "{count, plural, one {프로젝트} other {프로젝트}}",
   "{count, plural, one {Work item} other {Work items}}": "{count, plural, one {작업 항목} other {작업 항목}}",
   "{count, plural, one{# member} other{# members}}": "{count, plural, one{# 멤버} other{# 멤버}}",
@@ -48,8 +51,6 @@ export default {
   "1 day": "1일",
   "1 month ago": "1개월 전",
   "1 week": "1주",
-  '1. Click "Add runner", pick a project + pod and generate the CLI command.\n2. On the machine that will host the runner, run the displayed `pidash runner add` command. If the host is not logged in yet, the CLI starts `pidash auth login` first.\n3. The daemon registers the runner and it shows online here.\n\nPrerequisite: the agent CLI (codex / claude) must already be installed on the host.':
-    '1. "Add runner"를 클릭하고 프로젝트 + 포드를 선택한 후 CLI 명령어를 생성합니다.\n2. 러너를 호스팅할 머신에서 표시된 `pidash runner add` 명령어를 실행합니다. 호스트가 아직 로그인하지 않은 경우 CLI가 먼저 `pidash auth login`을 시작합니다.\n3. 데몬이 러너를 등록하고 여기에 온라인으로 표시됩니다.\n\n전제 조건: 에이전트 CLI(codex / claude)가 호스트에 이미 설치되어 있어야 합니다.',
   "10,000-feet view of all active cycles.": "모든 활성 사이클의 개괄적인 보기.",
   "2 weeks": "2주",
   "3 days": "3일",
@@ -58,6 +59,8 @@ export default {
     "프로젝트(및 선택적으로 포드)에 바인딩된 하나의 에이전트 인스턴스를 나타내는 클라우드 측 행입니다. 로그인된 머신에서 `pidash runner add`를 실행하면 행이 생성되고 해당 머신이 호스트로 바인딩됩니다. 하나의 머신은 여러 러너를 호스팅할 수 있습니다.",
   "A long-running background process that maintains the WebSocket session with Pi Dash cloud, dispatches work to the configured agent, and streams approvals + heartbeats back. One daemon per machine.":
     "Pi Dash 클라우드와의 WebSocket 세션을 유지하고, 구성된 에이전트에 작업을 전달하며, 승인 및 하트비트를 다시 스트리밍하는 장기 실행 백그라운드 프로세스입니다. 머신당 하나의 데몬.",
+  'A runner is an AI agent instance working on a given project.\n\n1. Click "Add runner", pick a project + pod and generate the CLI command.\n2. On the machine that will host the runner, run the displayed `pidash runner add` command. If the host is not logged in yet, the CLI starts `pidash auth login` first.\n3. The daemon registers the runner and it shows online here.\n\nPrerequisite: the agent CLI (codex / claude) must already be installed on the host.':
+    '러너는 특정 프로젝트에서 작업하는 AI 에이전트 인스턴스입니다.\n\n1. "Add runner"를 클릭하고 프로젝트 + 포드를 선택한 후 CLI 명령어를 생성합니다.\n2. 러너를 호스팅할 머신에서 표시된 `pidash runner add` 명령어를 실행합니다. 호스트가 아직 로그인하지 않은 경우 CLI가 먼저 `pidash auth login`을 시작합니다.\n3. 데몬이 러너를 등록하고 여기에 온라인으로 표시됩니다.\n\n전제 조건: 에이전트 CLI(codex / claude)가 호스트에 이미 설치되어 있어야 합니다.',
   "Ability to read, write, edit, and delete entities inside projects, cycles, and modules":
     "프로젝트, 사이클 및 모듈 내의 엔터티를 읽고, 쓰고, 편집하고, 삭제할 수 있는 기능",
   Accept: "수락",
@@ -291,6 +294,7 @@ export default {
   "Clear filter": "필터 지우기",
   "Clear filters": "필터 지우기",
   "Clear search": "검색 지우기",
+  "Clear selection": "",
   "Clear sorting": "정렬 지우기",
   "Click the button below to join it.": "아래 버튼을 클릭하여 참여하세요.",
   "Click to add description": "설명을 추가하려면 클릭하세요",
@@ -763,6 +767,7 @@ export default {
   "Install the pidash CLI and register dev machines as AI agent runners":
     "pidash CLI를 설치하고 개발 머신을 AI 에이전트 러너로 등록하세요",
   "Install updated": "설치 업데이트됨",
+  Installed: "",
   "Installing…": "설치 중…",
   Installs: "설치",
   Intake: "인테이크",
@@ -988,6 +993,7 @@ export default {
   "No projects archived": "보관된 프로젝트가 없습니다",
   "No projects detected with the matching criteria. \n Create a new project instead.":
     "일치하는 기준의 프로젝트가 없습니다. \n 대신 새 프로젝트를 만드세요.",
+  "No projects match your search.": "",
   "No prompt templates available. The Pi Dash default will be seeded on the next migrate.":
     "사용 가능한 프롬프트 템플릿이 없습니다. Pi Dash 기본값은 다음 마이그레이션 시 시드됩니다.",
   "No results found": "결과를 찾을 수 없습니다",
@@ -1016,6 +1022,7 @@ export default {
   "No work items yet": "아직 작업 항목이 없습니다",
   "No. of {entity}": "{entity} 개수",
   None: "없음",
+  "None selected": "",
   "Not right now": "지금은 안 함",
   "Notes specific to this project…": "이 프로젝트에 대한 노트…",
   "Notification marked as archived": "알림이 보관됨으로 표시됨",
@@ -1127,8 +1134,10 @@ export default {
   "Pi Dash: Your AI Employee Management Platform": "Pi Dash: AI 직원 관리 플랫폼",
   "Pick a project.": "프로젝트를 선택하세요.",
   "Pick a scheduler.": "스케줄러를 선택하세요.",
+  "Pick at least one project to install this scheduler on.": "",
   "Pick from your workspace's enabled schedulers. Already-installed ones aren't listed.":
     "워크스페이스에서 활성화된 스케줄러 중에서 선택하세요. 이미 설치된 스케줄러는 목록에 표시되지 않습니다.",
+  "Pick one or more projects. One schedule applies to all of them.": "",
   "pidash CLI": "pidash CLI",
   "pidash daemon": "pidash 데몬",
   "Plan work in focused timeframes.": "집중 시간대에 작업을 계획하세요.",
@@ -1315,6 +1324,7 @@ export default {
   Scope: "범위",
   Search: "검색",
   "Search by title": "제목으로 검색",
+  "Search projects…": "",
   "Secret key": "비밀 키",
   "Secret key copied to clipboard.": "비밀 키가 클립보드에 복사되었습니다.",
   Security: "보안",
@@ -1330,6 +1340,7 @@ export default {
   "Select network": "네트워크 선택",
   "Select or customize your interface color scheme.": "인터페이스 색 구성표를 선택하거나 사용자 지정하세요.",
   "Select organization size": "조직 규모 선택",
+  "Select projects": "",
   "Select your theme": "테마 선택",
   "Send invitations": "초대장 보내기",
   "Send me everything": "모든 알림 받기",
@@ -1737,6 +1748,7 @@ export default {
   You: "당신",
   "You already have a cycle on the given dates, if you want to create a draft cycle, you can do that by removing both the dates.":
     "주어진 날짜에 이미 주기가 있습니다. 초안 주기를 만들려면 두 날짜를 모두 제거하면 됩니다.",
+  "You aren't a member of any project in this workspace to install on.": "",
   "You can only edit the slug of the URL": "URL의 슬러그만 편집할 수 있습니다",
   "You can see here if someone invites you to a workspace":
     "누군가가 당신을 워크스페이스에 초대하면 여기에서 확인할 수 있습니다",

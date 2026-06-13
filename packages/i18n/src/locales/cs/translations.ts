@@ -12,8 +12,11 @@ export default {
     "(volitelné — připnout tento problém k existující vzdálené větvi)",
   "{active} active / {total} total": "{active} aktivní / {total} celkem",
   "{count, plural, one {# install} other {# installs}}": "{count, plural, one {# instalace} other {# instalací}}",
+  "{count, plural, one {# project failed} other {# projects failed}}": "",
+  "{count, plural, one {# project selected} other {# projects selected}}": "",
   "{count, plural, one {Cycle} other {Cycles}}": "{count, plural, one {Cyklus} other {Cyklů}}",
   "{count, plural, one {Epic} other {Epics}}": "{count, plural, one {Epic} other {Epiců}}",
+  "{count, plural, one {Installed on # project} other {Installed on # projects}}": "",
   "{count, plural, one {Project} other {Projects}}": "{count, plural, one {Projekt} other {Projektů}}",
   "{count, plural, one {Work item} other {Work items}}":
     "{count, plural, one {Pracovní položka} other {Pracovních položek}}",
@@ -50,8 +53,6 @@ export default {
   "1 day": "1 den",
   "1 month ago": "před 1 měsícem",
   "1 week": "1 týden",
-  '1. Click "Add runner", pick a project + pod and generate the CLI command.\n2. On the machine that will host the runner, run the displayed `pidash runner add` command. If the host is not logged in yet, the CLI starts `pidash auth login` first.\n3. The daemon registers the runner and it shows online here.\n\nPrerequisite: the agent CLI (codex / claude) must already be installed on the host.':
-    '1. Klikněte na "Přidat runner", vyberte projekt + pod a vygenerujte příkaz CLI.\n2. Na stroji, který bude hostit runner, spusťte zobrazený příkaz `pidash runner add`. Pokud host ještě není přihlášen, CLI nejprve spustí `pidash auth login`.\n3. Démon zaregistruje runner a ten se zde zobrazí jako online.\n\nPředpoklad: agent CLI (codex / claude) musí být již nainstalován na hostitelském stroji.',
   "10,000-feet view of all active cycles.": "Pohled z výšky 10 000 stop na všechny aktivní cykly.",
   "2 weeks": "2 týdny",
   "3 days": "3 dny",
@@ -60,6 +61,8 @@ export default {
     "Řádek na straně cloudu, který představuje jednu instanci agenta vázanou na projekt (a volitelně na pod). Spuštěním `pidash runner add` na přihlášeném stroji se vytvoří řádek a tento stroj se naváže jako hostitel. Jeden stroj může hostit mnoho runnerů.",
   "A long-running background process that maintains the WebSocket session with Pi Dash cloud, dispatches work to the configured agent, and streams approvals + heartbeats back. One daemon per machine.":
     "Dlouho běžící proces na pozadí, který udržuje WebSocket relaci s Pi Dash cloudem, odesílá práci nakonfigurovanému agentovi a streamuje zpět schválení a heartbeaty. Jeden démon na stroj.",
+  'A runner is an AI agent instance working on a given project.\n\n1. Click "Add runner", pick a project + pod and generate the CLI command.\n2. On the machine that will host the runner, run the displayed `pidash runner add` command. If the host is not logged in yet, the CLI starts `pidash auth login` first.\n3. The daemon registers the runner and it shows online here.\n\nPrerequisite: the agent CLI (codex / claude) must already be installed on the host.':
+    'Runner je instance AI agenta, která pracuje na zadaném projektu.\n\n1. Klikněte na "Přidat runner", vyberte projekt + pod a vygenerujte příkaz CLI.\n2. Na stroji, který bude hostit runner, spusťte zobrazený příkaz `pidash runner add`. Pokud host ještě není přihlášen, CLI nejprve spustí `pidash auth login`.\n3. Démon zaregistruje runner a ten se zde zobrazí jako online.\n\nPředpoklad: agent CLI (codex / claude) musí být již nainstalován na hostitelském stroji.',
   "Ability to read, write, edit, and delete entities inside projects, cycles, and modules":
     "Schopnost číst, zapisovat, upravovat a mazat entity v rámci projektů, cyklů a modulů",
   Accept: "Přijmout",
@@ -296,6 +299,7 @@ export default {
   "Clear filter": "Vymazat filtr",
   "Clear filters": "Vymazat filtry",
   "Clear search": "Vymazat vyhledávání",
+  "Clear selection": "",
   "Clear sorting": "Vymazat řazení",
   "Click the button below to join it.": "Kliknutím na tlačítko níže se k němu připojte.",
   "Click to add description": "Kliknutím přidáte popis",
@@ -775,6 +779,7 @@ export default {
   "Install the pidash CLI and register dev machines as AI agent runners":
     "Nainstalujte CLI pidash a zaregistrujte vývojové stroje jako běžce AI agentů",
   "Install updated": "Instalace aktualizována",
+  Installed: "",
   "Installing…": "Instaluje se…",
   Installs: "Instalace",
   Intake: "Příjem",
@@ -1003,6 +1008,7 @@ export default {
   "No projects archived": "Žádné archivované projekty",
   "No projects detected with the matching criteria. \n Create a new project instead.":
     "Nebyly nalezeny žádné projekty odpovídající kritériím. \n Místo toho vytvořte nový projekt.",
+  "No projects match your search.": "",
   "No prompt templates available. The Pi Dash default will be seeded on the next migrate.":
     "Nejsou k dispozici žádné šablony výzev. Výchozí šablona Pi Dash bude nasazena při příští migraci.",
   "No results found": "Nebyly nalezeny žádné výsledky",
@@ -1032,6 +1038,7 @@ export default {
   "No work items yet": "Zatím žádné pracovní položky",
   "No. of {entity}": "Počet {entity}",
   None: "Žádné",
+  "None selected": "",
   "Not right now": "Teď ne",
   "Notes specific to this project…": "Poznámky specifické pro tento projekt…",
   "Notification marked as archived": "Oznámení označeno jako archivované",
@@ -1147,8 +1154,10 @@ export default {
     "Pi Dash: Vaše platforma pro správu zaměstnanců s umělou inteligencí",
   "Pick a project.": "Vyberte projekt.",
   "Pick a scheduler.": "Vyberte plánovač.",
+  "Pick at least one project to install this scheduler on.": "",
   "Pick from your workspace's enabled schedulers. Already-installed ones aren't listed.":
     "Vyberte z povolených plánovačů vašeho pracovního prostoru. Již nainstalované nejsou uvedeny.",
+  "Pick one or more projects. One schedule applies to all of them.": "",
   "pidash CLI": "pidash CLI",
   "pidash daemon": "pidash daemon",
   "Plan work in focused timeframes.": "Plánujte práci v soustředěných časových rámcích.",
@@ -1339,6 +1348,7 @@ export default {
   Scope: "Rozsah",
   Search: "Hledat",
   "Search by title": "Hledat podle názvu",
+  "Search projects…": "",
   "Secret key": "Tajný klíč",
   "Secret key copied to clipboard.": "Tajný klíč zkopírován do schránky.",
   Security: "Zabezpečení",
@@ -1354,6 +1364,7 @@ export default {
   "Select network": "Vyberte síť",
   "Select or customize your interface color scheme.": "Vyberte nebo přizpůsobte barevné schéma rozhraní.",
   "Select organization size": "Vyberte velikost organizace",
+  "Select projects": "",
   "Select your theme": "Vyberte své téma",
   "Send invitations": "Odeslat pozvánky",
   "Send me everything": "Posílat mi vše",
@@ -1771,6 +1782,7 @@ export default {
   You: "Vy",
   "You already have a cycle on the given dates, if you want to create a draft cycle, you can do that by removing both the dates.":
     "Již máte cyklus na daná data. Pokud chcete vytvořit koncept cyklu, můžete to udělat odstraněním obou dat.",
+  "You aren't a member of any project in this workspace to install on.": "",
   "You can only edit the slug of the URL": "Můžete upravovat pouze slug URL.",
   "You can see here if someone invites you to a workspace":
     "Zde můžete vidět, pokud vás někdo pozve do pracovního prostoru.",

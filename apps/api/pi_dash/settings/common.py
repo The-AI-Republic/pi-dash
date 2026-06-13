@@ -226,6 +226,30 @@ ASSISTANT_TURN_HARD_LIMIT = int(os.environ.get("ASSISTANT_TURN_HARD_LIMIT", 330)
 # in the UI is unaffected — only what the model sees is truncated.
 ASSISTANT_HISTORY_MAX_TURNS = int(os.environ.get("ASSISTANT_HISTORY_MAX_TURNS", 40))
 
+# Loop (Auto Project Management) — periodic assistant jobs.
+# See .ai_design/loop_project_management/design.md §11.
+# Instance kill switch: when false, the scanner and fire tasks short-circuit.
+LOOP_ENABLED = os.environ.get("LOOP_ENABLED", "true").lower() in ("1", "true", "yes")
+# Deterministic per-edge fire offset window (minutes) so a daily job doesn't
+# fire every membership edge in the same minute.
+LOOP_STAGGER_WINDOW_MINUTES = int(os.environ.get("LOOP_STAGGER_WINDOW_MINUTES", 60))
+# Backpressure: at most this many targets dispatched per scanner tick; the rest
+# stay due and drain on later ticks.
+LOOP_MAX_DISPATCH_PER_TICK = int(os.environ.get("LOOP_MAX_DISPATCH_PER_TICK", 100))
+# Reconcile (create missing targets for new membership edges) runs only when
+# minute % this == 0 — cheap throttle vs. the per-minute due scan.
+LOOP_RECONCILE_EVERY_MINUTES = int(os.environ.get("LOOP_RECONCILE_EVERY_MINUTES", 15))
+# Rotate to a fresh hidden thread when within this many messages of the cap.
+LOOP_ROTATION_HEADROOM = int(os.environ.get("LOOP_ROTATION_HEADROOM", 30))
+# Per-run blast-radius cap, enforced by instruction (hard backstop is the
+# assistant's tool_calls_limit).
+LOOP_MAX_WRITES = int(os.environ.get("LOOP_MAX_WRITES", 10))
+# Per-run cap on get_pull_request_status calls (protects the unauthenticated
+# GitHub rate limit for the host IP).
+LOOP_PR_LOOKUPS_PER_RUN = int(os.environ.get("LOOP_PR_LOOKUPS_PER_RUN", 15))
+# Completed loop turns replayed as history — tighter than chat (daily cost).
+ASSISTANT_LOOP_HISTORY_MAX_TURNS = int(os.environ.get("ASSISTANT_LOOP_HISTORY_MAX_TURNS", 5))
+
 if REDIS_SSL:
     CACHES = {
         "default": {

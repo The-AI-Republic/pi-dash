@@ -12,8 +12,11 @@ export default {
     "(isteğe bağlı — bu sorunu mevcut bir uzak dala sabitleyin)",
   "{active} active / {total} total": "{active} aktif / {total} toplam",
   "{count, plural, one {# install} other {# installs}}": "{count, plural, one {# yükleme} other {# yükleme}}",
+  "{count, plural, one {# project failed} other {# projects failed}}": "",
+  "{count, plural, one {# project selected} other {# projects selected}}": "",
   "{count, plural, one {Cycle} other {Cycles}}": "{count, plural, one {Döngü} other {Döngüler}}",
   "{count, plural, one {Epic} other {Epics}}": "{count, plural, one {Epik} other {Epikler}}",
+  "{count, plural, one {Installed on # project} other {Installed on # projects}}": "",
   "{count, plural, one {Project} other {Projects}}": "{count, plural, one {Proje} other {Projeler}}",
   "{count, plural, one {Work item} other {Work items}}": "{count, plural, one {İş öğesi} other {İş öğeleri}}",
   "{count, plural, one{# member} other{# members}}": "{count, plural, one{# üye} other{# üye}}",
@@ -49,8 +52,6 @@ export default {
   "1 day": "1 gün",
   "1 month ago": "1 ay önce",
   "1 week": "1 hafta",
-  '1. Click "Add runner", pick a project + pod and generate the CLI command.\n2. On the machine that will host the runner, run the displayed `pidash runner add` command. If the host is not logged in yet, the CLI starts `pidash auth login` first.\n3. The daemon registers the runner and it shows online here.\n\nPrerequisite: the agent CLI (codex / claude) must already be installed on the host.':
-    "1. \"Runner Ekle\"ye tıklayın, bir proje + pod seçin ve CLI komutunu oluşturun.\n2. Runner'ı barındıracak makinede, görüntülenen `pidash runner add` komutunu çalıştırın. Ana bilgisayar henüz oturum açmamışsa, CLI önce `pidash auth login` başlatır.\n3. Daemon runner'ı kaydeder ve burada çevrimiçi olarak gösterilir.\n\nÖn koşul: aracı CLI'si (codex / claude) ana bilgisayara zaten yüklenmiş olmalıdır.",
   "10,000-feet view of all active cycles.": "Tüm aktif döngülerin 10.000 fitlik görünümü.",
   "2 weeks": "2 hafta",
   "3 days": "3 gün",
@@ -59,6 +60,8 @@ export default {
     "Bir projeye (ve isteğe bağlı olarak bir pod'a) bağlı bir aracı örneğini temsil eden bulut tarafı satırı. Oturum açmış bir makinede `pidash runner add` çalıştırmak satırı oluşturur ve o makineyi ana bilgisayar olarak bağlar. Bir makine birçok runner'ı barındırabilir.",
   "A long-running background process that maintains the WebSocket session with Pi Dash cloud, dispatches work to the configured agent, and streams approvals + heartbeats back. One daemon per machine.":
     "Pi Dash bulutu ile WebSocket oturumunu sürdüren, yapılandırılmış aracıya iş gönderen ve onaylar + kalp atışlarını geri akıtan uzun süreli bir arka plan işlemi. Makine başına bir daemon.",
+  'A runner is an AI agent instance working on a given project.\n\n1. Click "Add runner", pick a project + pod and generate the CLI command.\n2. On the machine that will host the runner, run the displayed `pidash runner add` command. If the host is not logged in yet, the CLI starts `pidash auth login` first.\n3. The daemon registers the runner and it shows online here.\n\nPrerequisite: the agent CLI (codex / claude) must already be installed on the host.':
+    "Runner, belirli bir proje üzerinde çalışan bir yapay zekâ aracı örneğidir.\n\n1. \"Runner Ekle\"ye tıklayın, bir proje + pod seçin ve CLI komutunu oluşturun.\n2. Runner'ı barındıracak makinede, görüntülenen `pidash runner add` komutunu çalıştırın. Ana bilgisayar henüz oturum açmamışsa, CLI önce `pidash auth login` başlatır.\n3. Daemon runner'ı kaydeder ve burada çevrimiçi olarak gösterilir.\n\nÖn koşul: aracı CLI'si (codex / claude) ana bilgisayara zaten yüklenmiş olmalıdır.",
   "Ability to read, write, edit, and delete entities inside projects, cycles, and modules":
     "Projeler, döngüler ve modüller içindeki varlıkları okuma, yazma, düzenleme ve silme yeteneği",
   Accept: "Kabul Et",
@@ -293,6 +296,7 @@ export default {
   "Clear filter": "Filtreyi temizle",
   "Clear filters": "Filtreleri temizle",
   "Clear search": "Aramayı temizle",
+  "Clear selection": "",
   "Clear sorting": "Sıralamayı temizle",
   "Click the button below to join it.": "Katılmak için aşağıdaki düğmeye tıklayın.",
   "Click to add description": "Açıklama eklemek için tıklayın",
@@ -773,6 +777,7 @@ export default {
   "Install the pidash CLI and register dev machines as AI agent runners":
     "pidash CLI'sini yükleyin ve geliştirme makinelerini AI ajan çalıştırıcıları olarak kaydedin",
   "Install updated": "Güncelleme yüklendi",
+  Installed: "",
   "Installing…": "Yükleniyor…",
   Installs: "Yüklemeler",
   Intake: "Alım",
@@ -1000,6 +1005,7 @@ export default {
   "No projects archived": "Arşivlenmiş proje yok",
   "No projects detected with the matching criteria. \n Create a new project instead.":
     "Eşleşen kriterlere sahip proje bulunamadı. \n Bunun yerine yeni bir proje oluşturun.",
+  "No projects match your search.": "",
   "No prompt templates available. The Pi Dash default will be seeded on the next migrate.":
     "Kullanılabilir komut şablonu yok. Pi Dash varsayılanı bir sonraki migrate'de tohumlanacak.",
   "No results found": "Sonuç bulunamadı",
@@ -1028,6 +1034,7 @@ export default {
   "No work items yet": "Henüz iş öğesi yok",
   "No. of {entity}": "{entity} sayısı",
   None: "Hiçbiri",
+  "None selected": "",
   "Not right now": "Şu anda değil",
   "Notes specific to this project…": "Bu projeye özel notlar…",
   "Notification marked as archived": "Bildirim arşivlendi olarak işaretlendi",
@@ -1143,8 +1150,10 @@ export default {
   "Pi Dash: Your AI Employee Management Platform": "Pi Dash: Yapay Zeka Çalışan Yönetim Platformunuz",
   "Pick a project.": "Bir proje seçin.",
   "Pick a scheduler.": "Bir zamanlayıcı seçin.",
+  "Pick at least one project to install this scheduler on.": "",
   "Pick from your workspace's enabled schedulers. Already-installed ones aren't listed.":
     "Çalışma alanınızın etkin zamanlayıcılarından seçin. Zaten yüklü olanlar listelenmez.",
+  "Pick one or more projects. One schedule applies to all of them.": "",
   "pidash CLI": "pidash CLI",
   "pidash daemon": "pidash arka plan hizmeti",
   "Plan work in focused timeframes.": "Odaklanmış zaman dilimlerinde çalışmayı planlayın.",
@@ -1335,6 +1344,7 @@ export default {
   Scope: "Kapsam",
   Search: "Ara",
   "Search by title": "Başlığa göre ara",
+  "Search projects…": "",
   "Secret key": "Gizli anahtar",
   "Secret key copied to clipboard.": "Gizli anahtar panoya kopyalandı.",
   Security: "Güvenlik",
@@ -1350,6 +1360,7 @@ export default {
   "Select network": "Ağ seç",
   "Select or customize your interface color scheme.": "Arayüz renk şemanızı seçin veya özelleştirin.",
   "Select organization size": "Kuruluş boyutunu seçin",
+  "Select projects": "",
   "Select your theme": "Temanızı seçin",
   "Send invitations": "Davetiyeleri gönder",
   "Send me everything": "Bana her şeyi gönder",
@@ -1760,6 +1771,7 @@ export default {
   You: "Sen",
   "You already have a cycle on the given dates, if you want to create a draft cycle, you can do that by removing both the dates.":
     "Belirtilen tarihlerde zaten bir döngünüz var, taslak bir döngü oluşturmak istiyorsanız, bunu her iki tarihi de kaldırarak yapabilirsiniz.",
+  "You aren't a member of any project in this workspace to install on.": "",
   "You can only edit the slug of the URL": "URL'nin yalnızca kısa adını (slug) düzenleyebilirsiniz.",
   "You can see here if someone invites you to a workspace":
     "Birisi sizi bir çalışma alanına davet ederse burada görebilirsiniz.",

@@ -119,6 +119,12 @@ app.conf.beat_schedule = {
         "task": "pi_dash.bgtasks.scheduler.scan_due_bindings",
         "schedule": crontab(minute="*"),
     },
+    # Loop (Auto Project Management) scanner — see
+    # .ai_design/loop_project_management/design.md §7.1.
+    "scan-due-loop-targets": {
+        "task": "pi_dash.bgtasks.loop.scan_due_targets",
+        "schedule": crontab(minute="*"),
+    },
 }
 
 
