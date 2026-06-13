@@ -258,3 +258,54 @@ def test_review_kind_ending_does_not_forbid_completed():
     assert '--state "In Review"' not in body
     # The review kind defers to its own outcome routing (approved -> completed).
     assert '--state "Done"' in body
+
+
+# ----------------------------------------------------------------------
+# Run-trigger / ticking guidance in the shared session-framing section
+# ----------------------------------------------------------------------
+
+
+@pytest.mark.unit
+def test_session_framing_renders_tick_guidance_and_schedule():
+    ctx = _ctx("coding-task")  # populated sample: trigger="tick", tick budget set
+    out = compose(
+        "coding-task", workspace=None, project=None, user=None, context=ctx
+    ).text
+    assert "automatically by the issue's ticker" in out
+    assert "about every 3 hours" in out
+    assert "used 5 of 24 ticks" in out
+    assert "19 remaining before the issue auto-pauses" in out
+
+
+@pytest.mark.unit
+def test_session_framing_review_tick_adds_noop_hint():
+    ctx = _ctx("review")
+    out = compose(
+        "review", workspace=None, project=None, user=None, context=ctx
+    ).text
+    assert "automatically by the issue's ticker" in out
+    assert "emit `noop`" in out  # review-specific done-signal nudge
+
+
+@pytest.mark.unit
+def test_session_framing_comment_trigger_guidance():
+    ctx = _ctx("coding-task")
+    ctx["run"]["trigger"] = "comment_and_run"
+    ctx["tick"] = None
+    out = compose(
+        "coding-task", workspace=None, project=None, user=None, context=ctx
+    ).text
+    assert "a new human comment" in out
+    assert "automatically by the issue's ticker" not in out
+    assert "Ticking schedule" not in out
+
+
+@pytest.mark.unit
+def test_session_framing_omits_trigger_block_for_scheduler():
+    # The scheduler context has no run.trigger / tick keys; the shared
+    # section must render (StrictUndefined-safe) and skip the block.
+    out = compose(
+        "scheduler", workspace=None, project=None, user=None, context=_ctx("scheduler")
+    ).text
+    assert "Why this run started" not in out
+    assert "Ticking schedule" not in out
