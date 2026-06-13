@@ -6,6 +6,7 @@
 
 import { Send, Square } from "lucide-react";
 import { Button } from "@pi-dash/ui";
+import { cn } from "@pi-dash/utils";
 
 interface ChatComposerProps {
   draft: string;
@@ -16,6 +17,8 @@ interface ChatComposerProps {
   sending?: boolean;
   disabledReason?: string | null;
   placeholder?: string;
+  /** Docked composers (bottom of a chat) draw a top border; standalone ones don't. */
+  bordered?: boolean;
 }
 
 export function ChatComposer({
@@ -26,11 +29,12 @@ export function ChatComposer({
   busy = false,
   sending = false,
   disabledReason = null,
-  placeholder = "Ask Pi to do something…",
+  placeholder = "Ask Pi Dash to do something…",
+  bordered = true,
 }: ChatComposerProps) {
   const disabled = !!disabledReason;
   return (
-    <div className="shrink-0 border-t border-subtle pt-3">
+    <div className={cn("shrink-0", bordered && "border-t border-subtle pt-3")}>
       {disabledReason && <div className="mb-2 text-12 text-secondary">{disabledReason}</div>}
       <div className="flex items-end gap-2">
         <textarea
