@@ -91,6 +91,8 @@ Supported options:
 --retry-count 2
 --retry-delay-ms 5000
 --continue-on-error
+--validation-report [path]   consume an i18n:validate report (default packages/i18n/i18n-validation-report.json)
+--skip-empty                 skip empty-placeholder filling (apply validation report only)
 --dry-run
 --skip-readme
 ```
@@ -123,14 +125,50 @@ The translator only fills empty strings in target locale `translations.ts` files
 
 This package README is developer-facing and kept English-only — the translator does not generate per-locale copies of it.
 
+## Validating Existing Translations
+
+`i18n:translate` only fills _empty_ placeholders — it never re-checks translations that already have a value, so a wrong
+or stale existing translation is kept silently. `i18n:validate` is a manual, LLM-backed QA pass over those existing
+values. It is deliberately **not** wired into any automation.
+
+```bash
+pnpm i18n:validate -- --provider openai --model "$MODEL" --api-key "$OPENAI_API_KEY"
+```
+
+What it does:
+
+- Reviews every **non-empty** translation (empty placeholders are `i18n:translate`'s job).
+- Flags **only genuinely wrong** translations — wrong meaning, mistranslation, untranslated English, wrong language, or
+  broken/missing ICU placeholders. It is prompted to **skip** translations that are merely "could be phrased better";
+  stylistic preferences are not reported.
+- **Never edits locale files.** It writes a JSON report (default `packages/i18n/i18n-validation-report.json`) where each
+  issue records `{ locale, key, current, reason, suggestion }`.
+
+Then feed the report back to `i18n:translate` to apply fixes. The translator does **not** blindly accept the
+suggestions: for every flagged entry it asks the model to independently judge whether the current value is actually
+wrong, and only writes a placeholder-safe correction when the verdict is "incorrect". Use `--skip-empty` to apply
+corrections only (without also filling empty placeholders):
+
+```bash
+pnpm i18n:translate -- --provider openai --model "$MODEL" --api-key "$OPENAI_API_KEY" \
+  --validation-report packages/i18n/i18n-validation-report.json --skip-empty
+```
+
+A translation edited since the report was generated is skipped (never silently reverted). Options mirror
+`i18n:translate` (`--languages`, `--limit`, `--batch-size`, `--out <path>`, `--dry-run`, …) and the same provider
+environment variables apply (`I18N_TRANSLATION_*`, `OPENAI_API_KEY`, `FIREWORKS_API_KEY`). Validation-only overrides use
+the `I18N_VALIDATION_*` prefix (e.g. `I18N_VALIDATION_OUT`, `I18N_VALIDATION_LIMIT`).
+
 ## Recommended Workflow
 
 1. Add or update UI code with `t("Source English copy")`.
 2. Run `pnpm i18n:sync`.
 3. Review new empty placeholders in `packages/i18n/src/locales/*/translations.ts`.
 4. Run `pnpm i18n:translate -- --provider openai --model "$MODEL"` or translate manually.
-5. Review the diff before committing, especially ICU placeholders such as `{count}`, plural blocks, and translated README command examples.
-6. Run:
+5. _(Optional, manual)_ Run `pnpm i18n:validate -- --provider openai --model "$MODEL"` to QA existing translations, then
+   apply with `pnpm i18n:translate -- --validation-report packages/i18n/i18n-validation-report.json --skip-empty …`.
+6. Review the diff before committing, especially ICU placeholders such as `{count}`, plural blocks, and translated README command examples.
+7. Run:
 
 ```bash
 pnpm --filter @pi-dash/i18n check:format

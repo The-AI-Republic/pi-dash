@@ -4,73 +4,37 @@
 import fs from "node:fs";
 import path from "node:path";
 import process from "node:process";
-import { spawnSync } from "node:child_process";
-import { IntlMessageFormat } from "intl-messageformat";
-import ts from "typescript";
 
-const repoRoot = path.resolve(import.meta.dirname, "../../..");
-const localesRoot = path.join(repoRoot, "packages/i18n/src/locales");
-const targetLocaleFile = "translations.ts";
-const fallbackLanguage = "en";
-const defaultBatchSize = 10;
-const defaultRequestTimeoutMs = 180000;
-const defaultRetryCount = 2;
-const defaultRetryDelayMs = 5000;
+import {
+  chatContent,
+  chunkArray,
+  collectEmptyEntries,
+  defaultBatchSize,
+  defaultRequestTimeoutMs,
+  defaultRetryCount,
+  defaultRetryDelayMs,
+  formatErrorMessage,
+  formatGeneratedFiles,
+  hasMatchingIcuArguments,
+  isValidIcu,
+  localeFileContent,
+  localesRoot,
+  parseArgs,
+  parseJsonContent,
+  readFileIfExists,
+  readObjectLiteral,
+  repoRoot,
+  resolveLanguages,
+  resolveProviderConfig,
+  requestChatCompletion,
+  targetLocaleFile,
+} from "./lib/shared.mjs";
+import { groupIssuesByLocale, normalizeIssues, pendingEvaluations, resolveCorrection } from "./lib/report.mjs";
+
 // The i18n package README is developer-facing and intentionally English-only;
 // no per-locale translations are generated for it.
 const readmeTranslationTargets = new Map();
 const readmeSourcePath = path.join(repoRoot, "packages/i18n/README.md");
-
-const languages = [
-  { value: "en", label: "English" },
-  { value: "fr", label: "French" },
-  { value: "es", label: "Spanish" },
-  { value: "ja", label: "Japanese" },
-  { value: "zh-CN", label: "Simplified Chinese" },
-  { value: "zh-TW", label: "Traditional Chinese" },
-  { value: "ru", label: "Russian" },
-  { value: "it", label: "Italian" },
-  { value: "cs", label: "Czech" },
-  { value: "sk", label: "Slovak" },
-  { value: "de", label: "German" },
-  { value: "ua", label: "Ukrainian" },
-  { value: "pl", label: "Polish" },
-  { value: "ko", label: "Korean" },
-  { value: "pt-BR", label: "Brazilian Portuguese" },
-  { value: "id", label: "Indonesian" },
-  { value: "ro", label: "Romanian" },
-  { value: "vi-VN", label: "Vietnamese" },
-  { value: "tr-TR", label: "Turkish" },
-];
-
-const languageByValue = new Map(languages.map((language) => [language.value, language]));
-
-function parseArgs(argv) {
-  const args = {};
-
-  for (let i = 0; i < argv.length; i += 1) {
-    const arg = argv[i];
-    if (!arg.startsWith("--")) continue;
-
-    const [rawKey, inlineValue] = arg.slice(2).split("=", 2);
-    const key = rawKey.replaceAll("-", "_");
-
-    if (inlineValue !== undefined) {
-      args[key] = inlineValue;
-      continue;
-    }
-
-    const next = argv[i + 1];
-    if (!next || next.startsWith("--")) {
-      args[key] = true;
-    } else {
-      args[key] = next;
-      i += 1;
-    }
-  }
-
-  return args;
-}
 
 function configFromArgs() {
   const args = parseArgs(process.argv.slice(2));
@@ -80,20 +44,13 @@ function configFromArgs() {
     process.exit(0);
   }
 
-  const provider = String(args.provider || process.env.I18N_TRANSLATION_PROVIDER || "openai").toLowerCase();
-  const baseUrl =
-    args.base_url ||
-    process.env.I18N_TRANSLATION_BASE_URL ||
-    (provider === "fireworks"
-      ? "https://api.fireworks.ai/inference/v1/chat/completions"
-      : "https://api.openai.com/v1/chat/completions");
-  const apiKey =
-    args.api_key ||
-    process.env.I18N_TRANSLATION_API_KEY ||
-    (provider === "fireworks" ? process.env.FIREWORKS_API_KEY : process.env.OPENAI_API_KEY);
-  const model = args.model || process.env.I18N_TRANSLATION_MODEL;
-  const requestedLanguages = args.languages || args.language || process.env.I18N_TRANSLATION_LANGUAGES;
   const dryRun = args.dry_run === true || process.env.I18N_TRANSLATION_DRY_RUN === "1";
+  const { provider, baseUrl, apiKey, model } = resolveProviderConfig(args, {
+    requireModel: !dryRun,
+    requireApiKey: !dryRun,
+  });
+
+  const requestedLanguages = args.languages || args.language || process.env.I18N_TRANSLATION_LANGUAGES;
   const limit = Number(args.limit || process.env.I18N_TRANSLATION_LIMIT || 0);
   const batchSize = Number(args.batch_size || process.env.I18N_TRANSLATION_BATCH_SIZE || defaultBatchSize);
   const requestTimeoutMs = Number(
@@ -105,16 +62,14 @@ function configFromArgs() {
   );
   const skipReadme = args.skip_readme === true || process.env.I18N_TRANSLATION_SKIP_README === "1";
   const continueOnError = args.continue_on_error === true || process.env.I18N_TRANSLATION_CONTINUE_ON_ERROR === "1";
-
-  if (!model && !dryRun) {
-    throw new Error("Missing model. Pass --model or set I18N_TRANSLATION_MODEL.");
-  }
-
-  if (!apiKey && !dryRun) {
-    throw new Error(
-      "Missing API key. Pass --api-key, set I18N_TRANSLATION_API_KEY, or set OPENAI_API_KEY/FIREWORKS_API_KEY."
-    );
-  }
+  // Optional: a report produced by `pnpm i18n:validate`. When present, translate
+  // also re-evaluates each flagged existing translation and applies the fix if
+  // the LLM confirms it. `--no-validation-report` / skip-empty opt-outs below.
+  const validationReport =
+    args.validation_report === true
+      ? "packages/i18n/i18n-validation-report.json"
+      : args.validation_report || process.env.I18N_VALIDATION_REPORT || "";
+  const skipEmpty = args.skip_empty === true || process.env.I18N_TRANSLATION_SKIP_EMPTY === "1";
 
   return {
     provider,
@@ -131,6 +86,8 @@ function configFromArgs() {
     retryDelayMs: Number.isFinite(retryDelayMs) && retryDelayMs >= 0 ? retryDelayMs : defaultRetryDelayMs,
     skipReadme,
     continueOnError,
+    validationReport,
+    skipEmpty,
   };
 }
 
@@ -139,6 +96,9 @@ function usage() {
     "Usage:",
     "  pnpm i18n:translate -- --provider openai --model <model> --api-key <key>",
     "  pnpm i18n:translate -- --provider fireworks --model <model> --api-key <key>",
+    "",
+    "Fills empty translation placeholders. With --validation-report it also",
+    "re-evaluates and applies fixes flagged by `pnpm i18n:validate`.",
     "",
     "Options:",
     "  --provider openai|fireworks",
@@ -152,150 +112,11 @@ function usage() {
     "  --retry-count 2",
     "  --retry-delay-ms 5000",
     "  --continue-on-error",
+    "  --validation-report [path]   consume an i18n:validate report (default path if no value)",
+    "  --skip-empty                 skip empty-placeholder filling (apply validation report only)",
     "  --dry-run",
     "  --skip-readme",
   ].join("\n");
-}
-
-function resolveLanguages(value) {
-  if (!value) {
-    return languages.filter((language) => language.value !== fallbackLanguage);
-  }
-
-  const selected = String(value)
-    .split(",")
-    .map((language) => language.trim())
-    .filter(Boolean);
-
-  for (const language of selected) {
-    if (!languageByValue.has(language)) {
-      throw new Error(
-        `Unsupported language "${language}". Supported: ${languages.map((item) => item.value).join(", ")}`
-      );
-    }
-  }
-
-  return selected
-    .map((language) => languageByValue.get(language))
-    .filter((language) => language.value !== fallbackLanguage);
-}
-
-function readFileIfExists(filePath) {
-  return fs.existsSync(filePath) ? fs.readFileSync(filePath, "utf8") : null;
-}
-
-function isStringLike(node) {
-  return ts.isStringLiteral(node) || ts.isNoSubstitutionTemplateLiteral(node);
-}
-
-function unwrapExpression(expression) {
-  let current = expression;
-  while (ts.isAsExpression(current) || ts.isSatisfiesExpression?.(current) || ts.isParenthesizedExpression(current)) {
-    current = current.expression;
-  }
-  return current;
-}
-
-function propertyNameToString(name) {
-  if (ts.isIdentifier(name) || ts.isStringLiteral(name) || ts.isNumericLiteral(name)) {
-    return name.text;
-  }
-  return null;
-}
-
-function readObjectLiteral(filePath) {
-  const sourceText = readFileIfExists(filePath);
-  if (!sourceText) return {};
-
-  const sourceFile = ts.createSourceFile(filePath, sourceText, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
-
-  for (const statement of sourceFile.statements) {
-    if (!ts.isExportAssignment(statement)) continue;
-
-    const expression = unwrapExpression(statement.expression);
-    if (ts.isObjectLiteralExpression(expression)) {
-      return objectLiteralToObject(expression);
-    }
-  }
-
-  return {};
-}
-
-function objectLiteralToObject(objectLiteral) {
-  const result = {};
-
-  for (const property of objectLiteral.properties) {
-    if (!ts.isPropertyAssignment(property)) continue;
-
-    const key = propertyNameToString(property.name);
-    if (!key) continue;
-
-    const value = unwrapExpression(property.initializer);
-    if (ts.isObjectLiteralExpression(value)) {
-      result[key] = objectLiteralToObject(value);
-    } else if (isStringLike(value)) {
-      result[key] = value.text;
-    }
-  }
-
-  return result;
-}
-
-function collectEmptyEntries(object, result = []) {
-  for (const [key, value] of Object.entries(object)) {
-    if (value === "") {
-      result.push(key);
-    }
-  }
-
-  return result;
-}
-
-function formatFlatObject(object) {
-  const entries = Object.entries(object);
-  if (entries.length === 0) return "{}";
-
-  return ["{", ...entries.map(([key, value]) => `  ${JSON.stringify(key)}: ${JSON.stringify(value)},`), "}"].join("\n");
-}
-
-function localeFileContent(object) {
-  return `/**
- * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
- * SPDX-License-Identifier: AGPL-3.0-only
- * See the LICENSE file for details.
- */
-
-export default ${formatFlatObject(object)} as const;
-`;
-}
-
-function formatGeneratedFiles(filePaths) {
-  const uniquePaths = Array.from(new Set(filePaths)).filter((filePath) => fs.existsSync(filePath));
-  if (uniquePaths.length === 0) return;
-
-  const relativePaths = uniquePaths.map((filePath) => path.relative(repoRoot, filePath));
-  const result = spawnSync("pnpm", ["exec", "oxfmt", ...relativePaths], {
-    cwd: repoRoot,
-    stdio: "inherit",
-  });
-
-  if (result.error) {
-    throw result.error;
-  }
-
-  if (result.status !== 0) {
-    throw new Error("Failed to format generated i18n files with oxfmt.");
-  }
-
-  console.log(`i18n: formatted ${uniquePaths.length} generated files`);
-}
-
-function chunkArray(items, size) {
-  const chunks = [];
-  for (let index = 0; index < items.length; index += size) {
-    chunks.push(items.slice(index, index + size));
-  }
-  return chunks;
 }
 
 function buildMessages(language, items) {
@@ -327,93 +148,7 @@ function buildMessages(language, items) {
 
 async function requestTranslations(config, language, items) {
   const data = await requestChatCompletion(config, buildMessages(language, items));
-  const content = data.choices?.[0]?.message?.content;
-  if (typeof content !== "string") {
-    throw new Error(`Translation response for ${language.value} did not include choices[0].message.content`);
-  }
-
-  return parseJsonContent(content);
-}
-
-async function requestChatCompletion(config, messages) {
-  let delayMs = config.retryDelayMs;
-
-  for (let attempt = 0; attempt <= config.retryCount; attempt += 1) {
-    try {
-      return await requestChatCompletionOnce(config, messages);
-    } catch (error) {
-      const hasAttemptsRemaining = attempt < config.retryCount;
-      if (!hasAttemptsRemaining || !isRetryableError(error)) {
-        throw error;
-      }
-
-      console.warn(`i18n: request failed (${formatErrorMessage(error)}), retrying ${attempt + 1}/${config.retryCount}`);
-      await sleep(delayMs);
-      delayMs *= 2;
-    }
-  }
-
-  throw new Error("Translation request failed unexpectedly");
-}
-
-async function requestChatCompletionOnce(config, messages) {
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), config.requestTimeoutMs);
-  timeout.unref?.();
-
-  const response = await fetch(config.baseUrl, {
-    method: "POST",
-    signal: controller.signal,
-    headers: {
-      Authorization: `Bearer ${config.apiKey}`,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({
-      model: config.model,
-      temperature: 0,
-      messages,
-    }),
-  }).finally(() => {
-    clearTimeout(timeout);
-  });
-
-  const body = await response.text();
-  if (!response.ok) {
-    const error = new Error(`Translation request failed: HTTP ${response.status} ${body}`);
-    error.status = response.status;
-    error.retryable = response.status === 429 || response.status >= 500;
-    throw error;
-  }
-
-  return JSON.parse(body);
-}
-
-function isRetryableError(error) {
-  if (error?.retryable === true) return true;
-  if (error?.name === "AbortError" || error?.name === "TimeoutError") return true;
-
-  const code = error?.code || error?.cause?.code;
-  if (typeof code === "string" && code.startsWith("UND_ERR_")) return true;
-
-  return error instanceof TypeError && error.message === "fetch failed";
-}
-
-function formatErrorMessage(error) {
-  const causeCode = error?.cause?.code ? ` ${error.cause.code}` : "";
-  return `${error?.message || String(error)}${causeCode}`.trim();
-}
-
-function sleep(ms) {
-  return new Promise((resolve) => {
-    setTimeout(resolve, ms);
-  });
-}
-
-function parseJsonContent(content) {
-  const trimmed = content.trim();
-  const fencedMatch = trimmed.match(/^```(?:json)?\s*([\s\S]*?)\s*```$/);
-  const jsonText = fencedMatch ? fencedMatch[1] : trimmed;
-  return JSON.parse(jsonText);
+  return parseJsonContent(chatContent(data, language.value));
 }
 
 function validateTranslations(items, translations, language) {
@@ -429,11 +164,8 @@ function validateTranslations(items, translations, language) {
       console.warn(`i18n: ${language.value} returned an empty translation for ${item.key}`);
       continue;
     }
-    try {
-      const messageFormat = new IntlMessageFormat(translation, language.value);
-      void messageFormat;
-    } catch (error) {
-      console.warn(`i18n: ${language.value} returned invalid ICU for ${item.key}: ${error.message}`);
+    if (!isValidIcu(translation, language.value)) {
+      console.warn(`i18n: ${language.value} returned invalid ICU for ${item.key}`);
       continue;
     }
     if (!hasMatchingIcuArguments(item.source, translation, language.value)) {
@@ -444,40 +176,6 @@ function validateTranslations(items, translations, language) {
   }
 
   return valid;
-}
-
-function hasMatchingIcuArguments(source, translation, locale) {
-  const sourceArguments = getIcuArgumentSignature(source, fallbackLanguage);
-  const translationArguments = getIcuArgumentSignature(translation, locale);
-
-  return JSON.stringify(sourceArguments) === JSON.stringify(translationArguments);
-}
-
-function getIcuArgumentSignature(message, locale) {
-  const messageFormat = new IntlMessageFormat(message, locale);
-  const argumentsByName = new Map();
-
-  collectIcuArguments(messageFormat.getAst(), argumentsByName);
-
-  return Array.from(argumentsByName.entries())
-    .map(([name, types]) => [name, Array.from(types).toSorted()])
-    .toSorted(([left], [right]) => left.localeCompare(right));
-}
-
-function collectIcuArguments(ast, result) {
-  for (const node of ast) {
-    if (typeof node.value === "string" && [1, 2, 3, 4, 5, 6].includes(node.type)) {
-      const types = result.get(node.value) || new Set();
-      types.add(node.type);
-      result.set(node.value, types);
-    }
-
-    if (node.options) {
-      for (const option of Object.values(node.options)) {
-        collectIcuArguments(option.value, result);
-      }
-    }
-  }
 }
 
 async function translateLanguage(config, language, writtenFiles) {
@@ -544,6 +242,162 @@ async function translateLanguage(config, language, writtenFiles) {
   console.log(`i18n: ${language.value} translated ${translatedCount}/${items.length} placeholders`);
 }
 
+// ---------------------------------------------------------------------------
+// Validation-report consumption
+//
+// A report from `pnpm i18n:validate` lists existing translations a reviewer LLM
+// flagged as wrong, each with a `suggestion`. We do NOT trust the suggestion
+// blindly: for every flagged entry we ask the LLM to independently judge whether
+// the current value is actually wrong and, if so, return the best correction.
+// Only an explicit "incorrect" verdict with a placeholder-safe replacement is
+// written back. Anything else leaves the existing translation untouched.
+// ---------------------------------------------------------------------------
+
+function loadValidationReport(reportPath) {
+  const absolute = path.isAbsolute(reportPath) ? reportPath : path.join(repoRoot, reportPath);
+  const raw = readFileIfExists(absolute);
+  if (raw === null) {
+    throw new Error(`Validation report not found: ${reportPath}`);
+  }
+
+  let parsed;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (error) {
+    throw new Error(`Validation report is not valid JSON (${reportPath}): ${formatErrorMessage(error)}`, {
+      cause: error,
+    });
+  }
+
+  if (!Array.isArray(parsed) && !Array.isArray(parsed?.issues)) {
+    throw new Error(`Validation report must be an array of issues or { issues: [...] } (${reportPath})`);
+  }
+
+  return groupIssuesByLocale(normalizeIssues(parsed));
+}
+
+function buildEvaluationMessages(language, items) {
+  return [
+    {
+      role: "system",
+      content: [
+        "You are a senior localization reviewer making a final accept/reject decision.",
+        "For each item you are given the English source, the CURRENT target-language translation, and a PROPOSED replacement with a reason.",
+        "Judge independently. Do NOT accept the proposal just because it exists.",
+        "Mark verdict 'incorrect' ONLY when the current translation is genuinely wrong: wrong meaning, mistranslation, untranslated English left in, wrong language, or broken/missing ICU placeholders.",
+        "If the current translation is acceptable and conveys the right meaning, mark verdict 'acceptable' even if the proposal is slightly more elegant — do not chase marginal stylistic improvements.",
+        "When verdict is 'incorrect', return your own best correction in 'final' (you may adopt or improve the proposal). Preserve ICU MessageFormat placeholders and plural/select syntax exactly.",
+        "Return only valid JSON: an object mapping each input id to { verdict: 'incorrect' | 'acceptable', final: string }.",
+      ].join(" "),
+    },
+    {
+      role: "user",
+      content: JSON.stringify(
+        {
+          target_language: language.label,
+          target_locale: language.value,
+          items: items.map((item) => ({
+            id: item.id,
+            source: item.source,
+            current: item.current,
+            proposed: item.suggestion,
+            reason: item.reason,
+          })),
+        },
+        null,
+        2
+      ),
+    },
+  ];
+}
+
+function warnSkippedDriftedIssue(issue) {
+  console.warn(`i18n: ${issue.locale} ${JSON.stringify(issue.key)} changed since validation; skipping`);
+}
+
+async function applyValidationForLanguage(config, language, issues, writtenFiles) {
+  const targetPath = path.join(localesRoot, language.value, targetLocaleFile);
+  const targetTranslations = readObjectLiteral(targetPath);
+  const items = pendingEvaluations(issues, targetTranslations, warnSkippedDriftedIssue).slice(
+    0,
+    config.limit || undefined
+  );
+
+  if (items.length === 0) {
+    console.log(`i18n: ${language.value} has no applicable validation entries`);
+    return 0;
+  }
+
+  if (config.dryRun) {
+    console.log(`i18n: ${language.value} would re-evaluate ${items.length} flagged translations`);
+    return 0;
+  }
+
+  let appliedCount = 0;
+  const batches = chunkArray(items, config.batchSize);
+  console.log(`i18n: ${language.value} evaluating ${items.length} flagged translations in ${batches.length} batches`);
+
+  for (const [batchIndex, batch] of batches.entries()) {
+    const batchNumber = batchIndex + 1;
+
+    let verdicts;
+    try {
+      const data = await requestChatCompletion(config, buildEvaluationMessages(language, batch));
+      verdicts = parseJsonContent(chatContent(data, language.value));
+    } catch (error) {
+      if (!config.continueOnError) {
+        throw error;
+      }
+      console.error(
+        `i18n: ${language.value} evaluation batch ${batchNumber}/${batches.length} failed: ${formatErrorMessage(error)}`
+      );
+      continue;
+    }
+
+    let batchApplied = 0;
+    for (const item of batch) {
+      const final = resolveCorrection(verdicts?.[item.id], item, language.value);
+      if (final === null) continue;
+
+      targetTranslations[item.key] = final;
+      appliedCount += 1;
+      batchApplied += 1;
+    }
+
+    if (batchApplied > 0) {
+      fs.writeFileSync(targetPath, localeFileContent(targetTranslations));
+      writtenFiles.add(targetPath);
+    }
+
+    console.log(
+      `i18n: ${language.value} evaluation batch ${batchNumber}/${batches.length} applied ${batchApplied}/${batch.length}`
+    );
+  }
+
+  console.log(`i18n: ${language.value} applied ${appliedCount}/${items.length} validation corrections`);
+  return appliedCount;
+}
+
+async function applyValidationReport(config, writtenFiles) {
+  const byLocale = loadValidationReport(config.validationReport);
+  const totalIssues = Array.from(byLocale.values()).reduce((sum, issues) => sum + issues.length, 0);
+  if (totalIssues === 0) {
+    console.log(`i18n: validation report ${config.validationReport} has no actionable issues`);
+    return;
+  }
+
+  console.log(`i18n: applying validation report ${config.validationReport} (${totalIssues} flagged across locales)`);
+
+  let appliedTotal = 0;
+  for (const language of config.languages) {
+    const issues = byLocale.get(language.value);
+    if (!issues || issues.length === 0) continue;
+    appliedTotal += await applyValidationForLanguage(config, language, issues, writtenFiles);
+  }
+
+  console.log(`i18n: validation report applied ${appliedTotal} corrections total`);
+}
+
 function buildReadmeMessages(language, sourceMarkdown, existingTranslation) {
   return [
     {
@@ -605,12 +459,18 @@ async function main() {
       .map((language) => language.value)
       .join(",")} batch_size=${config.batchSize}${config.limit ? ` limit=${config.limit}` : ""}${
       config.dryRun ? " dry_run=true" : ""
-    }`
+    }${config.validationReport ? ` validation_report=${config.validationReport}` : ""}`
   );
 
   try {
-    for (const language of config.languages) {
-      await translateLanguage(config, language, writtenFiles);
+    if (!config.skipEmpty) {
+      for (const language of config.languages) {
+        await translateLanguage(config, language, writtenFiles);
+      }
+    }
+
+    if (config.validationReport) {
+      await applyValidationReport(config, writtenFiles);
     }
 
     if (!config.skipReadme) {
