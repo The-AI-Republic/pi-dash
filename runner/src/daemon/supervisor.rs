@@ -652,6 +652,35 @@ enum ChatCommand {
 }
 
 impl RunnerLoop {
+    /// NACK an `Assign` this runner cannot take right now. The cloud frees a
+    /// runner the moment its previous run goes terminal in the database,
+    /// which can precede the local agent actually stopping (most commonly a
+    /// user cancel) — so the matcher may dispatch the next run to a runner
+    /// that is still busy. Silently dropping that Assign leaves the run
+    /// ASSIGNED forever: the runner never starts it and the cloud shows the
+    /// runner busy with nothing running. `RunFailed{AssignRejectedBusy}`
+    /// lets the cloud re-queue it for a fresh dispatch.
+    ///
+    /// Sent from a detached task so a slow cloud cannot stall the message
+    /// loop. Delivery failure is logged only — the session-open redeliver
+    /// path remains the backstop for a lost NACK.
+    fn nack_assign(&self, run_id: uuid::Uuid, detail: String) {
+        let out = self.out.clone();
+        tokio::spawn(async move {
+            let msg = ClientMsg::RunFailed {
+                run_id,
+                reason: FailureReason::AssignRejectedBusy,
+                detail: Some(detail),
+                ended_at: Utc::now(),
+                tokens: None,
+                model: None,
+            };
+            if let Err(e) = out.send(msg).await {
+                tracing::warn!(%run_id, "failed to NACK rejected assign: {e:#}");
+            }
+        });
+    }
+
     async fn stop_idle_chat_runtime(&mut self) {
         let Some(mut chat) = self.current_chat.take() else {
             return;
@@ -819,7 +848,14 @@ impl RunnerLoop {
                         {
                             tracing::warn!(
                                 %run_id,
-                                "assign received while chat is active on a non-pooled runner; ignoring"
+                                "assign received while chat is active on a non-pooled runner; rejecting"
+                            );
+                            // NACK rather than silently dropping, so the cloud
+                            // re-queues the run instead of leaving it stuck
+                            // ASSIGNED forever (#246).
+                            self.nack_assign(
+                                run_id,
+                                "assign rejected: a chat turn is active on this runner".to_string(),
                             );
                             continue;
                         }
@@ -830,10 +866,18 @@ impl RunnerLoop {
                     // Intra-assign-lane guard — one issue in flight at a time —
                     // is kept for ALL runners (the assign lane stays
                     // single-tenant; the cloud reaper assumes it, design §3.4).
-                    if self.current_run.is_some() {
+                    if let Some(current) = &self.current_run {
                         tracing::warn!(
                             %run_id,
-                            "assign received while a run is already in flight; ignoring"
+                            in_flight = %current.run_id,
+                            "assign received while a run is already in flight; rejecting"
+                        );
+                        self.nack_assign(
+                            run_id,
+                            format!(
+                                "assign rejected: run {} is still in flight on this runner",
+                                current.run_id
+                            ),
                         );
                         continue;
                     }

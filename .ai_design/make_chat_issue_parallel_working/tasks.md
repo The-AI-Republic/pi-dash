@@ -49,7 +49,7 @@ the state model correct for when the guards come off.
       cwd binds once per session — no per-turn re-rooting needed (§3.6).
 - [ ] **Bespoke** startup recovery (graft at the instance loop near pool spawn,
       `supervisor.rs:121`/`:199`, before `RunnerLoop` starts): `git worktree
-  prune` + verify `chat-worktrees/<runner_id>` is healthy (`git -C … rev-parse`)
+prune` + verify `chat-worktrees/<runner_id>` is healthy (`git -C … rev-parse`)
       → **reuse as-is if healthy (keep dirty state)**, `worktree remove --force` +
       recreate-lazily if broken. **No salvage/reset/clean** (that would wipe the
       persistent state — §3.7).

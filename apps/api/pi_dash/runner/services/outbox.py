@@ -289,13 +289,21 @@ def claim_pending_for_new_session(
     new_consumer: str,
     min_idle_ms: int = 0,
 ) -> int:
-    """Reassign every PEL entry from ``old_consumer`` to ``new_consumer``.
+    """Reassign every pending PEL entry in the group to ``new_consumer``.
 
     Paginated XAUTOCLAIM loop (``design.md`` §7.6). Returns the number
-    of stream IDs claimed. Ignored when there is no prior consumer.
+    of stream IDs claimed.
+
+    Runs even when ``old_consumer`` is ``None``: XAUTOCLAIM scans the whole
+    group's PEL regardless of which consumer holds each entry, so un-acked
+    messages from a *cleanly shut down* session — whose row is revoked and
+    therefore invisible to the session-open eviction path — are claimed
+    into the new consumer instead of being orphaned forever. Observed in
+    production as a lost Assign: delivered moments before daemon shutdown,
+    never acked, then invisible to every later session while the run sat
+    ASSIGNED. ``old_consumer`` is only needed for the final consumer-entry
+    cleanup.
     """
-    if not old_consumer:
-        return 0
     client = redis_instance()
     if client is None:
         return 0
@@ -326,7 +334,8 @@ def claim_pending_for_new_session(
             next_cursor = next_cursor.decode()
         claimed += len(claimed_ids)
         if next_cursor == "0-0":
-            delete_consumer(runner_id, old_consumer, client=client)
+            if old_consumer:
+                delete_consumer(runner_id, old_consumer, client=client)
             return claimed
         cursor = next_cursor
 

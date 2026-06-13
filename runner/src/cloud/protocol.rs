@@ -445,11 +445,33 @@ pub enum FailureReason {
     /// the run to FAILED via a deliberate signal instead of inferring it
     /// from the heartbeat reaper after the next reconnect.
     DaemonRestart,
+    /// The runner rejected an `Assign` because it already has a run in
+    /// flight (or an active chat turn). The cloud considers a runner free
+    /// the moment its previous run goes terminal in the database — which
+    /// can precede the local agent actually stopping (most commonly after
+    /// a user cancel) — and may dispatch the next run to it immediately.
+    /// Without this NACK the rejected run sits ASSIGNED forever and the
+    /// runner shows "busy" in the UI with nothing running. Current clouds
+    /// re-queue the run for a fresh dispatch; older clouds fail it — either
+    /// way it is not silently stuck.
+    AssignRejectedBusy,
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The cloud's RunFailed endpoint branches on the literal string
+    /// `"assign_rejected_busy"` to re-queue instead of fail-stop — the wire
+    /// name is a cross-language contract, not an implementation detail.
+    #[test]
+    fn assign_rejected_busy_wire_name_is_stable() {
+        let json = serde_json::to_value(FailureReason::AssignRejectedBusy).unwrap();
+        assert_eq!(json, serde_json::json!("assign_rejected_busy"));
+        let back: FailureReason =
+            serde_json::from_value(serde_json::json!("assign_rejected_busy")).unwrap();
+        assert_eq!(back, FailureReason::AssignRejectedBusy);
+    }
 
     #[test]
     fn roundtrips_client_hello() {

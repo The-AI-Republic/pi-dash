@@ -346,6 +346,60 @@ def test_fail_endpoint_resume_unavailable_requeues_instead_of_terminating(
 
 
 @pytest.mark.unit
+def test_fail_endpoint_assign_rejected_busy_requeues_and_marks_runner_busy(
+    db, api_client, runner_token, assigned_run, enrolled_runner
+):
+    """A RunFailed{reason: assign_rejected_busy} is the runner NACKing an
+    Assign that raced its still-winding-down agent (the cloud freed the
+    runner in DB terms — e.g. a user cancel went terminal — before the local
+    agent actually stopped). The run must go back to the queue, not FAILED,
+    and the runner must flip BUSY so the post-commit pod drain can't
+    instantly re-assign the same run to the runner that just rejected it.
+    """
+    resp = api_client.post(
+        f"/api/v1/runner/runs/{assigned_run.id}/fail/",
+        {
+            "reason": "assign_rejected_busy",
+            "detail": "assign rejected: another run is still in flight",
+        },
+        format="json",
+        HTTP_AUTHORIZATION=f"Bearer {runner_token}",
+    )
+    assert resp.status_code == 200, resp.data
+    assert resp.data.get("rescheduled") is True
+    assigned_run.refresh_from_db()
+    assert assigned_run.status == AgentRunStatus.QUEUED
+    assert assigned_run.runner_id is None
+    assert assigned_run.pinned_runner_id is None
+    enrolled_runner.refresh_from_db()
+    assert enrolled_runner.status == RunnerStatus.BUSY
+
+
+@pytest.mark.unit
+def test_late_assign_rejected_busy_does_not_requeue_failed_run(
+    db, api_client, runner_token, assigned_run, enrolled_runner
+):
+    assigned_run.status = AgentRunStatus.FAILED
+    assigned_run.ended_at = timezone.now()
+    assigned_run.error = "reaped by heartbeat"
+    assigned_run.save(update_fields=["status", "ended_at", "error"])
+
+    resp = api_client.post(
+        f"/api/v1/runner/runs/{assigned_run.id}/fail/",
+        {"reason": "assign_rejected_busy", "detail": "late NACK"},
+        format="json",
+        HTTP_AUTHORIZATION=f"Bearer {runner_token}",
+    )
+
+    assert resp.status_code == 200, resp.data
+    assert resp.data.get("terminal") is True
+    assigned_run.refresh_from_db()
+    assert assigned_run.status == AgentRunStatus.FAILED
+    assert assigned_run.runner_id == enrolled_runner.id
+    assert assigned_run.error == "reaped by heartbeat"
+
+
+@pytest.mark.unit
 def test_fail_endpoint_refusal_records_refused_and_category(
     db, api_client, runner_token, assigned_run
 ):

@@ -394,6 +394,21 @@ class RunFailedEndpoint(_RunEndpointBase):
                     locked_run=locked,
                 )
                 return Response({"ok": True, "rescheduled": True})
+            # The runner rejected this Assign because its agent is still
+            # busy (the matcher freed it in DB terms before the local
+            # agent actually stopped — e.g. right after a user cancel).
+            # Re-queue for a fresh dispatch instead of fail-stopping;
+            # without this branch a NACKed run would read as a crash.
+            if (request.data.get("reason") or "") == "assign_rejected_busy":
+                locked, closed = self._lock_non_terminal(run)
+                if closed:
+                    return closed
+                run_lifecycle.apply_assign_rejected_busy(
+                    runner,
+                    locked.id,
+                    locked_run=locked,
+                )
+                return Response({"ok": True, "rescheduled": True})
             # A safety-classifier decline (e.g. Claude Fable 5 cyber/bio) is a
             # terminal REFUSED, not a generic crash. The runner reports
             # `reason: "refusal"` with a `category`; record both so a policy
