@@ -12,8 +12,11 @@ export default {
     "(необязательно — прикрепить эту задачу к существующей удаленной ветке)",
   "{active} active / {total} total": "{active} активных / {total} всего",
   "{count, plural, one {# install} other {# installs}}": "{count, plural, one {# установка} other {# установок}}",
+  "{count, plural, one {# project failed} other {# projects failed}}": "",
+  "{count, plural, one {# project selected} other {# projects selected}}": "",
   "{count, plural, one {Cycle} other {Cycles}}": "{count, plural, one {# Цикл} other {# Циклов}}",
   "{count, plural, one {Epic} other {Epics}}": "{count, plural, one {# Эпик} other {# Эпиков}}",
+  "{count, plural, one {Installed on # project} other {Installed on # projects}}": "",
   "{count, plural, one {Project} other {Projects}}": "{count, plural, one {# Проект} other {# Проектов}}",
   "{count, plural, one {Work item} other {Work items}}":
     "{count, plural, one {# Рабочий элемент} other {# Рабочих элементов}}",
@@ -299,6 +302,7 @@ export default {
   "Clear filter": "Очистить фильтр",
   "Clear filters": "Очистить фильтры",
   "Clear search": "Очистить поиск",
+  "Clear selection": "",
   "Clear sorting": "Очистить сортировку",
   "Click the button below to join it.": "Нажмите кнопку ниже, чтобы присоединиться.",
   "Click to add description": "Нажмите, чтобы добавить описание",
@@ -781,6 +785,7 @@ export default {
   "Install the pidash CLI and register dev machines as AI agent runners":
     "Установите CLI pidash и зарегистрируйте машины разработки как агенты ИИ",
   "Install updated": "Установка обновлена",
+  Installed: "",
   "Installing…": "Установка…",
   Installs: "Установки",
   Intake: "Входящие",
@@ -1011,6 +1016,7 @@ export default {
   "No projects archived": "Нет архивированных проектов",
   "No projects detected with the matching criteria. \n Create a new project instead.":
     "Проекты, соответствующие критериям, не найдены. \n Создайте новый проект.",
+  "No projects match your search.": "",
   "No prompt templates available. The Pi Dash default will be seeded on the next migrate.":
     "Нет доступных шаблонов подсказок. Шаблон по умолчанию Pi Dash будет добавлен при следующей миграции.",
   "No results found": "Результаты не найдены",
@@ -1039,6 +1045,7 @@ export default {
   "No work items yet": "Пока нет рабочих элементов",
   "No. of {entity}": "Кол-во {entity}",
   None: "Нет",
+  "None selected": "",
   "Not right now": "Не сейчас",
   "Notes specific to this project…": "Заметки, относящиеся к этому проекту…",
   "Notification marked as archived": "Уведомление помечено как архивированное",
@@ -1155,8 +1162,10 @@ export default {
   "Pi Dash: Your AI Employee Management Platform": "Pi Dash: Ваша платформа управления сотрудниками на основе ИИ",
   "Pick a project.": "Выберите проект.",
   "Pick a scheduler.": "Выберите планировщик.",
+  "Pick at least one project to install this scheduler on.": "",
   "Pick from your workspace's enabled schedulers. Already-installed ones aren't listed.":
     "Выберите из включенных планировщиков вашего рабочего пространства. Уже установленные не отображаются.",
+  "Pick one or more projects. One schedule applies to all of them.": "",
   "pidash CLI": "pidash CLI",
   "pidash daemon": "pidash daemon",
   "Plan work in focused timeframes.": "Планируйте работу в сфокусированных временных интервалах.",
@@ -1347,6 +1356,7 @@ export default {
   Scope: "Область",
   Search: "Поиск",
   "Search by title": "Поиск по названию",
+  "Search projects…": "",
   "Secret key": "Секретный ключ",
   "Secret key copied to clipboard.": "Секретный ключ скопирован в буфер обмена.",
   Security: "Безопасность",
@@ -1362,6 +1372,7 @@ export default {
   "Select network": "Выберите сеть",
   "Select or customize your interface color scheme.": "Выберите или настройте цветовую схему интерфейса.",
   "Select organization size": "Выберите размер организации",
+  "Select projects": "",
   "Select your theme": "Выберите тему",
   "Send invitations": "Отправить приглашения",
   "Send me everything": "Отправлять мне всё",
@@ -1782,6 +1793,7 @@ export default {
   You: "Вы",
   "You already have a cycle on the given dates, if you want to create a draft cycle, you can do that by removing both the dates.":
     "У вас уже есть цикл на указанные даты. Если вы хотите создать черновик цикла, вы можете сделать это, удалив обе даты.",
+  "You aren't a member of any project in this workspace to install on.": "",
   "You can only edit the slug of the URL": "Вы можете редактировать только слаг URL.",
   "You can see here if someone invites you to a workspace":
     "Здесь вы можете увидеть, если кто-то приглашает вас в рабочее пространство.",

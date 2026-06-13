@@ -12,8 +12,11 @@ export default {
     "(opțional — fixați această problemă la o ramură remote existentă)",
   "{active} active / {total} total": "{active} active / {total} total",
   "{count, plural, one {# install} other {# installs}}": "{count, plural, one {# instalare} other {# instalări}}",
+  "{count, plural, one {# project failed} other {# projects failed}}": "",
+  "{count, plural, one {# project selected} other {# projects selected}}": "",
   "{count, plural, one {Cycle} other {Cycles}}": "{count, plural, one {Ciclu} other {Cicluri}}",
   "{count, plural, one {Epic} other {Epics}}": "{count, plural, one {Epic} other {Epicuri}}",
+  "{count, plural, one {Installed on # project} other {Installed on # projects}}": "",
   "{count, plural, one {Project} other {Projects}}": "{count, plural, one {Proiect} other {Proiecte}}",
   "{count, plural, one {Work item} other {Work items}}":
     "{count, plural, one {Element de lucru} other {Elemente de lucru}}",
@@ -298,6 +301,7 @@ export default {
   "Clear filter": "Ștergeți filtrul",
   "Clear filters": "Ștergeți filtrele",
   "Clear search": "Ștergeți căutarea",
+  "Clear selection": "",
   "Clear sorting": "Ștergeți sortarea",
   "Click the button below to join it.": "Faceți clic pe butonul de mai jos pentru a vă alătura.",
   "Click to add description": "Faceți clic pentru a adăuga descrierea",
@@ -787,6 +791,7 @@ export default {
   "Install the pidash CLI and register dev machines as AI agent runners":
     "Instalați CLI-ul pidash și înregistrați mașinile de dezvoltare ca rulare agenți AI",
   "Install updated": "Instalare actualizată",
+  Installed: "",
   "Installing…": "Se instalează…",
   Installs: "Instalări",
   Intake: "Intake",
@@ -1018,6 +1023,7 @@ export default {
   "No projects archived": "Niciun proiect arhivat",
   "No projects detected with the matching criteria. \n Create a new project instead.":
     "Niciun proiect detectat cu criteriile de potrivire. \n Creați un proiect nou în schimb.",
+  "No projects match your search.": "",
   "No prompt templates available. The Pi Dash default will be seeded on the next migrate.":
     "Niciun șablon de prompt disponibil. Șablonul implicit Pi Dash va fi introdus la următoarea migrare.",
   "No results found": "Niciun rezultat găsit",
@@ -1047,6 +1053,7 @@ export default {
   "No work items yet": "Niciun element de lucru încă",
   "No. of {entity}": "Nr. de {entity}",
   None: "Niciunul",
+  "None selected": "",
   "Not right now": "Nu acum",
   "Notes specific to this project…": "Note specifice acestui proiect…",
   "Notification marked as archived": "Notificare marcată ca arhivată",
@@ -1161,8 +1168,10 @@ export default {
   "Pi Dash: Your AI Employee Management Platform": "Pi Dash: Platforma ta AI de gestionare a angajaților",
   "Pick a project.": "Alegeți un proiect.",
   "Pick a scheduler.": "Alege un planificator.",
+  "Pick at least one project to install this scheduler on.": "",
   "Pick from your workspace's enabled schedulers. Already-installed ones aren't listed.":
     "Alege dintre planificatoarele activate ale spațiului tău de lucru. Cele deja instalate nu sunt listate.",
+  "Pick one or more projects. One schedule applies to all of them.": "",
   "pidash CLI": "pidash CLI",
   "pidash daemon": "pidash daemon",
   "Plan work in focused timeframes.": "Planifică munca în intervale de timp concentrate.",
@@ -1350,6 +1359,7 @@ export default {
   Scope: "Domeniu",
   Search: "Căutare",
   "Search by title": "Căutare după titlu",
+  "Search projects…": "",
   "Secret key": "Cheie secretă",
   "Secret key copied to clipboard.": "Cheia secretă a fost copiată în clipboard.",
   Security: "Securitate",
@@ -1366,6 +1376,7 @@ export default {
   "Select or customize your interface color scheme.":
     "Selectează sau personalizează schema de culori a interfeței tale.",
   "Select organization size": "Selectează dimensiunea organizației",
+  "Select projects": "",
   "Select your theme": "Selectează-ți tema",
   "Send invitations": "Trimite invitații",
   "Send me everything": "Trimite-mi totul",
@@ -1788,6 +1799,7 @@ export default {
   You: "Tu",
   "You already have a cycle on the given dates, if you want to create a draft cycle, you can do that by removing both the dates.":
     "Aveți deja un ciclu la datele date. Dacă doriți să creați un ciclu draft, puteți face acest lucru eliminând ambele date.",
+  "You aren't a member of any project in this workspace to install on.": "",
   "You can only edit the slug of the URL": "Puteți edita doar slug-ul URL-ului.",
   "You can see here if someone invites you to a workspace":
     "Puteți vedea aici dacă cineva vă invită la un spațiu de lucru.",

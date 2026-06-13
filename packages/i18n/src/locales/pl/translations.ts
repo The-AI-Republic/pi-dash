@@ -12,8 +12,11 @@ export default {
     "(opcjonalnie — przypnij to zgłoszenie do istniejącej zdalnej gałęzi)",
   "{active} active / {total} total": "{active} aktywne / {total} ogółem",
   "{count, plural, one {# install} other {# installs}}": "{count, plural, one {# instalacja} other {# instalacji}}",
+  "{count, plural, one {# project failed} other {# projects failed}}": "",
+  "{count, plural, one {# project selected} other {# projects selected}}": "",
   "{count, plural, one {Cycle} other {Cycles}}": "{count, plural, one {Cykl} other {Cykli}}",
   "{count, plural, one {Epic} other {Epics}}": "{count, plural, one {Epik} other {Epików}}",
+  "{count, plural, one {Installed on # project} other {Installed on # projects}}": "",
   "{count, plural, one {Project} other {Projects}}": "{count, plural, one {Projekt} other {Projektów}}",
   "{count, plural, one {Work item} other {Work items}}": "{count, plural, one {Element pracy} other {Elementów pracy}}",
   "{count, plural, one{# member} other{# members}}": "{count, plural, one{# członek} other{# członków}}",
@@ -293,6 +296,7 @@ export default {
   "Clear filter": "Wyczyść filtr",
   "Clear filters": "Wyczyść filtry",
   "Clear search": "Wyczyść wyszukiwanie",
+  "Clear selection": "",
   "Clear sorting": "Wyczyść sortowanie",
   "Click the button below to join it.": "Kliknij przycisk poniżej, aby dołączyć.",
   "Click to add description": "Kliknij, aby dodać opis",
@@ -776,6 +780,7 @@ export default {
   "Install the pidash CLI and register dev machines as AI agent runners":
     "Zainstaluj pidash CLI i zarejestruj maszyny deweloperskie jako runnerów agentów AI",
   "Install updated": "Instalacja zaktualizowana",
+  Installed: "",
   "Installing…": "Instalowanie…",
   Installs: "Instalacje",
   Intake: "Intake",
@@ -1006,6 +1011,7 @@ export default {
   "No projects archived": "Brak zarchiwizowanych projektów",
   "No projects detected with the matching criteria. \n Create a new project instead.":
     "Nie znaleziono projektów spełniających kryteria. \n Zamiast tego utwórz nowy projekt.",
+  "No projects match your search.": "",
   "No prompt templates available. The Pi Dash default will be seeded on the next migrate.":
     "Brak dostępnych szablonów promptów. Domyślny szablon Pi Dash zostanie dodany przy następnej migracji.",
   "No results found": "Nie znaleziono wyników",
@@ -1035,6 +1041,7 @@ export default {
   "No work items yet": "Brak jeszcze elementów pracy",
   "No. of {entity}": "Liczba {entity}",
   None: "Brak",
+  "None selected": "",
   "Not right now": "Nie teraz",
   "Notes specific to this project…": "Notatki specyficzne dla tego projektu…",
   "Notification marked as archived": "Powiadomienie oznaczone jako zarchiwizowane",
@@ -1150,8 +1157,10 @@ export default {
   "Pi Dash: Your AI Employee Management Platform": "Pi Dash: Twoja platforma do zarządzania pracownikami AI",
   "Pick a project.": "Wybierz projekt.",
   "Pick a scheduler.": "Wybierz harmonogram.",
+  "Pick at least one project to install this scheduler on.": "",
   "Pick from your workspace's enabled schedulers. Already-installed ones aren't listed.":
     "Wybierz z włączonych harmonogramów w swoim obszarze roboczym. Już zainstalowane nie są wyświetlane.",
+  "Pick one or more projects. One schedule applies to all of them.": "",
   "pidash CLI": "pidash CLI",
   "pidash daemon": "pidash daemon",
   "Plan work in focused timeframes.": "Planuj pracę w skoncentrowanych ramach czasowych.",
@@ -1341,6 +1350,7 @@ export default {
   Scope: "Zakres",
   Search: "Szukaj",
   "Search by title": "Szukaj po tytule",
+  "Search projects…": "",
   "Secret key": "Tajny klucz",
   "Secret key copied to clipboard.": "Tajny klucz skopiowany do schowka.",
   Security: "Bezpieczeństwo",
@@ -1356,6 +1366,7 @@ export default {
   "Select network": "Wybierz sieć",
   "Select or customize your interface color scheme.": "Wybierz lub dostosuj schemat kolorów interfejsu.",
   "Select organization size": "Wybierz rozmiar organizacji",
+  "Select projects": "",
   "Select your theme": "Wybierz swój motyw",
   "Send invitations": "Wyślij zaproszenia",
   "Send me everything": "Wyślij mi wszystko",
@@ -1772,6 +1783,7 @@ export default {
   You: "Ty",
   "You already have a cycle on the given dates, if you want to create a draft cycle, you can do that by removing both the dates.":
     "Masz już cykl w podanych datach. Jeśli chcesz utworzyć cykl roboczy, możesz to zrobić, usuwając obie daty.",
+  "You aren't a member of any project in this workspace to install on.": "",
   "You can only edit the slug of the URL": "Możesz edytować tylko slug URL-a",
   "You can see here if someone invites you to a workspace":
     "Tutaj możesz zobaczyć, jeśli ktoś zaprosi Cię do obszaru roboczego.",

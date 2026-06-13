@@ -12,8 +12,11 @@ export default {
     "(voliteľné — pripnite tento problém na existujúcu vzdialenú vetvu)",
   "{active} active / {total} total": "{active} aktívnych / {total} celkom",
   "{count, plural, one {# install} other {# installs}}": "{count, plural, one {# inštalácia} other {# inštalácií}}",
+  "{count, plural, one {# project failed} other {# projects failed}}": "",
+  "{count, plural, one {# project selected} other {# projects selected}}": "",
   "{count, plural, one {Cycle} other {Cycles}}": "{count, plural, one {Cyklus} other {Cyklov}}",
   "{count, plural, one {Epic} other {Epics}}": "{count, plural, one {Epika} other {Epík}}",
+  "{count, plural, one {Installed on # project} other {Installed on # projects}}": "",
   "{count, plural, one {Project} other {Projects}}": "{count, plural, one {Projekt} other {Projektov}}",
   "{count, plural, one {Work item} other {Work items}}":
     "{count, plural, one {Pracovná položka} other {Pracovných položiek}}",
@@ -297,6 +300,7 @@ export default {
   "Clear filter": "Vymazať filter",
   "Clear filters": "Vymazať filtre",
   "Clear search": "Vymazať vyhľadávanie",
+  "Clear selection": "",
   "Clear sorting": "Vymazať triedenie",
   "Click the button below to join it.": "Kliknutím na tlačidlo nižšie sa k nemu pripojíte.",
   "Click to add description": "Kliknutím pridajte popis",
@@ -775,6 +779,7 @@ export default {
   "Install the pidash CLI and register dev machines as AI agent runners":
     "Nainštalujte CLI pidash a zaregistrujte vývojové stroje ako bežce AI agentov",
   "Install updated": "Inštalácia aktualizovaná",
+  Installed: "",
   "Installing…": "Inštaluje sa…",
   Installs: "Inštalácie",
   Intake: "Príjem",
@@ -1005,6 +1010,7 @@ export default {
   "No projects archived": "Žiadne archivované projekty",
   "No projects detected with the matching criteria. \n Create a new project instead.":
     "Nenašli sa žiadne projekty zodpovedajúce kritériám. \n Namiesto toho vytvorte nový projekt.",
+  "No projects match your search.": "",
   "No prompt templates available. The Pi Dash default will be seeded on the next migrate.":
     "Nie sú k dispozícii žiadne šablóny promptov. Predvolená šablóna Pi Dash bude nasadená pri najbližšej migrácii.",
   "No results found": "Nenašli sa žiadne výsledky",
@@ -1034,6 +1040,7 @@ export default {
   "No work items yet": "Zatiaľ žiadne pracovné položky",
   "No. of {entity}": "Počet {entity}",
   None: "Žiadne",
+  "None selected": "",
   "Not right now": "Teraz nie",
   "Notes specific to this project…": "Poznámky špecifické pre tento projekt…",
   "Notification marked as archived": "Oznámenie označené ako archivované",
@@ -1148,8 +1155,10 @@ export default {
   "Pi Dash: Your AI Employee Management Platform": "Pi Dash: Vaša platforma pre správu zamestnancov s AI",
   "Pick a project.": "Vyberte projekt.",
   "Pick a scheduler.": "Vyberte plánovač.",
+  "Pick at least one project to install this scheduler on.": "",
   "Pick from your workspace's enabled schedulers. Already-installed ones aren't listed.":
     "Vyberte z povolených plánovačov vášho pracovného priestoru. Už nainštalované nie sú uvedené.",
+  "Pick one or more projects. One schedule applies to all of them.": "",
   "pidash CLI": "pidash CLI",
   "pidash daemon": "pidash daemon",
   "Plan work in focused timeframes.": "Plánujte prácu v sústredených časových rámcoch.",
@@ -1339,6 +1348,7 @@ export default {
   Scope: "Rozsah",
   Search: "Vyhľadávanie",
   "Search by title": "Vyhľadávať podľa názvu",
+  "Search projects…": "",
   "Secret key": "Tajný kľúč",
   "Secret key copied to clipboard.": "Tajný kľúč skopírovaný do schránky.",
   Security: "Bezpečnosť",
@@ -1354,6 +1364,7 @@ export default {
   "Select network": "Vyberte sieť",
   "Select or customize your interface color scheme.": "Vyberte alebo prispôsobte farebnú schému rozhrania.",
   "Select organization size": "Vyberte veľkosť organizácie",
+  "Select projects": "",
   "Select your theme": "Vyberte si tému",
   "Send invitations": "Odoslať pozvánky",
   "Send me everything": "Poslať mi všetko",
@@ -1771,6 +1782,7 @@ export default {
   You: "Vy",
   "You already have a cycle on the given dates, if you want to create a draft cycle, you can do that by removing both the dates.":
     "Už máte cyklus na uvedené dátumy. Ak chcete vytvoriť koncept cyklu, môžete to urobiť odstránením oboch dátumov.",
+  "You aren't a member of any project in this workspace to install on.": "",
   "You can only edit the slug of the URL": "Môžete upraviť iba slug URL.",
   "You can see here if someone invites you to a workspace":
     "Tu môžete vidieť, či vás niekto pozval do pracovného priestoru.",
