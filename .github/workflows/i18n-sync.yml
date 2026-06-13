@@ -1,0 +1,105 @@
+name: i18n key sync
+
+# When source changes land on `main` (i.e. a PR is merged), regenerate the
+# translation KEY SET with `pnpm i18n:sync`. Sync adds new message ids as empty
+# placeholders and removes orphaned ones — it does NOT translate. If the locale
+# files changed, open (or update) a follow-up PR containing just those key
+# changes, so the new strings can then be filled with `pnpm i18n:translate` and
+# reviewed before they ship.
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+    paths:
+      # Source that can contain translatable strings (t("...") calls).
+      - "apps/**"
+      - "packages/**"
+      # Exclude the locale files themselves so the sync PR's own merge (which
+      # only touches locales) doesn't re-trigger this workflow → no loop.
+      - "!packages/i18n/src/locales/**"
+
+concurrency:
+  group: i18n-sync
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  sync:
+    name: sync translation keys
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          # Optional: set an I18N_BOT_TOKEN PAT secret so the opened PR triggers
+          # the normal PR CI checks. With the default GITHUB_TOKEN, GitHub does
+          # not run pull_request workflows on bot-created PRs.
+          token: ${{ secrets.I18N_BOT_TOKEN || secrets.GITHUB_TOKEN }}
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: "22"
+
+      - name: Enable Corepack and pnpm
+        run: corepack enable pnpm
+
+      - name: Get pnpm store directory
+        shell: bash
+        run: echo "STORE_PATH=$(pnpm store path --silent)" >> $GITHUB_ENV
+
+      - name: Cache pnpm store
+        uses: actions/cache@v5
+        with:
+          path: ${{ env.STORE_PATH }}
+          key: pnpm-store-${{ runner.os }}-${{ hashFiles('**/pnpm-lock.yaml') }}
+          restore-keys: |
+            pnpm-store-${{ runner.os }}-
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Sync translation keys
+        run: pnpm i18n:sync
+
+      - name: Open or update the sync PR if keys changed
+        env:
+          GH_TOKEN: ${{ secrets.I18N_BOT_TOKEN || secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          if git diff --quiet -- packages/i18n/src/locales; then
+            echo "No translation-key changes; nothing to do."
+            exit 0
+          fi
+
+          BRANCH="automation/i18n-sync"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout -B "$BRANCH"
+          git add packages/i18n/src/locales
+          git commit -m "chore(i18n): sync translation keys"
+          git push --force origin "$BRANCH"
+
+          # Make sure the label exists (ignore failure if it already does).
+          gh label create i18n --color 5319e7 --description "Translations / i18n" 2>/dev/null || true
+
+          existing="$(gh pr list --head "$BRANCH" --state open --json number --jq '.[0].number // empty')"
+          if [ -n "$existing" ]; then
+            echo "Updated existing i18n-sync PR #$existing."
+            exit 0
+          fi
+
+          gh pr create \
+            --base main \
+            --head "$BRANCH" \
+            --title "chore(i18n): sync translation keys" \
+            --label i18n \
+            --body-file .github/i18n-sync-pr-body.md
