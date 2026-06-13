@@ -7,7 +7,7 @@ from __future__ import annotations
 from rest_framework import status
 from rest_framework.response import Response
 
-from pi_dash.assistant.models import AssistantThread
+from pi_dash.assistant.models import AssistantThread, ThreadKind
 from pi_dash.assistant.serializers import AssistantThreadSerializer
 from pi_dash.assistant.tasks import cancel_key
 from pi_dash.assistant.views._base import AssistantBaseView
@@ -19,8 +19,11 @@ class AssistantThreadListCreateEndpoint(AssistantBaseView):
         denied = self.require_member(request, slug)
         if denied:
             return denied
+        # Only chat threads surface in the assistant UI; loop (Auto Project
+        # Management) threads are hidden — that filter is the entire opacity
+        # mechanism (design §6.4).
         threads = AssistantThread.objects.filter(
-            user=request.user, workspace__slug=slug, is_archived=False
+            user=request.user, workspace__slug=slug, is_archived=False, kind=ThreadKind.CHAT
         ).order_by("-updated_at")[:50]
         return Response(AssistantThreadSerializer(threads, many=True).data)
 
