@@ -57,6 +57,7 @@ def _issue_sample(kind: str, *, populated: bool) -> Dict[str, Any]:
                 "target_date": "2026-01-01",
                 "project_states": [
                     {"name": "In Progress", "group": "started", "description": "Active"},
+                    {"name": "In Review", "group": "review", "description": "Awaiting human review"},
                     {"name": "Done", "group": "completed", "description": "Finished"},
                 ],
             },
