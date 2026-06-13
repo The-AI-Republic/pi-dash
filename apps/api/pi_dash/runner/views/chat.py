@@ -239,8 +239,11 @@ class AgentChatWarmEndpoint(APIView):
                 )
             if session.active_message_id is not None or session.active_turn_id:
                 return Response({"ok": True, "skipped": "chat_turn_active"})
-            if chat_service.runner_has_active_task(runner) or runner.status == RunnerStatus.BUSY:
-                return Response({"error": "runner_busy"}, status=status.HTTP_409_CONFLICT)
+            # Chat is accepted concurrently with an issue run: the runner serves
+            # chat in a dedicated worktree, isolated from the issue pool (design
+            # make_chat_issue_parallel_working §3.4). "Busy" still gates ISSUE
+            # assignment in the matcher, but no longer blocks chat. Offline /
+            # revoked runners are still rejected above via _runner_unavailable().
             chat_service.enqueue_chat_warm_after_commit(
                 runner.id,
                 chat_session_id=session.id,
@@ -296,8 +299,11 @@ class AgentChatMessageListEndpoint(APIView):
                     {"error": "runner_unavailable"},
                     status=status.HTTP_409_CONFLICT,
                 )
-            if chat_service.runner_has_active_task(runner) or runner.status == RunnerStatus.BUSY:
-                return Response({"error": "runner_busy"}, status=status.HTTP_409_CONFLICT)
+            # Chat is accepted concurrently with an issue run: the runner serves
+            # chat in a dedicated worktree, isolated from the issue pool (design
+            # make_chat_issue_parallel_working §3.4). "Busy" still gates ISSUE
+            # assignment in the matcher, but no longer blocks chat. Offline /
+            # revoked runners are still rejected above via _runner_unavailable().
             if session.active_message_id is not None or session.active_turn_id:
                 return Response(
                     {"error": "chat_turn_active"},

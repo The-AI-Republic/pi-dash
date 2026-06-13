@@ -16,7 +16,10 @@ use crate::cli::runner_ops;
 use crate::cloud::http::{CreateRunnerRequest, SharedHttpTransport, create_runner};
 use crate::cloud::runners::{delete_runner, probe_cloud_reachable};
 use crate::config::file;
-use crate::config::schema::{AgentKind, MAX_RUNNERS_PER_DAEMON, RunnerConfig};
+use crate::config::schema::{
+    AgentKind, CleanMode, Config, DEFAULT_POOL_SIZE, MAX_RUNNERS_PER_DAEMON, RunnerConfig,
+    WorkdirConfig,
+};
 use crate::util::confirm::maybe_confirm;
 use crate::util::paths::Paths;
 use crate::util::runner_name;
@@ -73,6 +76,16 @@ pub struct AddArgs {
     /// is what lets several runners share one repo checkout.
     #[arg(long)]
     pub workdir: Option<String>,
+
+    /// Opt out of the default worktree pool and create a legacy runner that
+    /// executes the agent directly in `working_dir`. Without this flag,
+    /// `runner add` auto-provisions (or reuses) a pool from `working_dir` so
+    /// lane-isolation features — notably concurrent chat during an issue run —
+    /// work out of the box. Ignored when `--workdir` is given (that already
+    /// selects a pool). Old configs are unaffected; this only changes what a
+    /// *new* `runner add` writes.
+    #[arg(long)]
+    pub no_pool: bool,
 
     /// Which agent CLI this runner drives.
     #[arg(long, value_enum, default_value_t = AgentKind::Codex)]
@@ -279,6 +292,104 @@ pub async fn add(args: AddArgs, paths: &Paths) -> Result<RunnerConfig> {
             Ok(())
         })?;
         println!("Runner bound to work dir {workdir_name:?} (leases worktrees from its pool).");
+    } else if !args.no_pool {
+        // Default to a pooled runner: auto-provision (or reuse) a worktree pool
+        // from this runner's working_dir so lane-isolation features — notably
+        // concurrent chat during an issue run (#239) — work without a separate
+        // `pidash workdir add`. `--no-pool` keeps the legacy single-dir mode.
+        // Back-compat is preserved at the *parse* layer (a missing `workdir`
+        // still deserializes to `None`), so existing configs are untouched;
+        // this only changes what a *new* `runner add` writes.
+        //
+        // Pooling requires a canonical git clone. The default working_dir is a
+        // data-dir path the daemon clones lazily and isn't a repo yet at
+        // add-time — in that case we leave the runner non-pooled rather than
+        // fail. When the operator pointed --working-dir at an existing repo
+        // (where concurrency actually matters today), we pool it.
+        let working_dir = std::path::absolute(&applied.runner.workspace.working_dir)
+            .unwrap_or_else(|_| applied.runner.workspace.working_dir.clone());
+        if !crate::workspace::git::is_git_repo(&working_dir) {
+            println!(
+                "Runner added non-pooled: working_dir {} is not a git repo yet. \
+                 Once it's cloned, enable concurrent chat by pooling it: \
+                 `pidash workdir add --name <n> --path {0}` then rebind with `--workdir <n>`.",
+                working_dir.display()
+            );
+        } else {
+            let runner_id = applied.runner.runner_id;
+            let seed = applied.runner.name.clone();
+            let wd = working_dir.clone();
+            let pooled = file::mutate_config(paths, move |cfg| {
+                // Reuse a pool already pointed at this path so two runners on the
+                // same repo share one pool (the original pooling use case);
+                // otherwise mint a fresh, uniquely-named pool.
+                let existing = cfg.workdirs.iter().find(|w| w.path == wd).map(|w| w.name.clone());
+                let name = match existing {
+                    Some(n) => n,
+                    None => {
+                        let n = unique_workdir_name(cfg, &seed);
+                        cfg.workdirs.push(WorkdirConfig {
+                            name: n.clone(),
+                            path: wd.clone(),
+                            pool_size: DEFAULT_POOL_SIZE,
+                            clean_mode: CleanMode::default(),
+                            keep_paths: Vec::new(),
+                            setup_command: None,
+                            worktrees_dir: None,
+                        });
+                        n
+                    }
+                };
+                if let Some(r) = cfg.runners.iter_mut().find(|r| r.runner_id == runner_id) {
+                    r.workdir = Some(name);
+                }
+                cfg.validate()
+                    .map_err(|e| anyhow::anyhow!("invalid config after auto-pool: {e}"))?;
+                Ok(())
+            });
+            match pooled {
+                Ok(cfg_after) => {
+                    let chosen = cfg_after
+                        .runners
+                        .iter()
+                        .find(|r| r.runner_id == runner_id)
+                        .and_then(|r| r.workdir.clone())
+                        .unwrap_or_default();
+                    // A pooled canonical clone should sit on a detached HEAD so
+                    // leased worktrees (incl. the chat lane's) can check out any
+                    // branch. Best-effort: a branch left checked out only makes
+                    // runs that pin it wait, so never fail the add over it.
+                    match crate::workspace::git::current_branch(&working_dir).await {
+                        Ok(Some(branch)) => {
+                            match crate::workspace::git::detach_head(&working_dir).await {
+                                Ok(()) => println!(
+                                    "Auto-pooled runner via work dir {chosen:?} (pool_size \
+                                     {DEFAULT_POOL_SIZE}); detached the canonical clone off \
+                                     {branch} so worktrees lease freely. Pass --no-pool for the \
+                                     legacy single-dir mode."
+                                ),
+                                Err(e) => println!(
+                                    "Auto-pooled runner via work dir {chosen:?} (pool_size \
+                                     {DEFAULT_POOL_SIZE}). Note: couldn't detach the canonical \
+                                     clone off {branch} ({e}); runs pinning {branch} will wait \
+                                     until you run `git -C {} checkout --detach`.",
+                                    working_dir.display()
+                                ),
+                            }
+                        }
+                        _ => println!(
+                            "Auto-pooled runner via work dir {chosen:?} (pool_size \
+                             {DEFAULT_POOL_SIZE}). Pass --no-pool for the legacy single-dir mode."
+                        ),
+                    }
+                }
+                Err(e) => println!(
+                    "Runner added, but auto-pooling failed ({e}); left as a non-pooled \
+                     (legacy single-dir) runner. Pool it later with `pidash workdir add` + \
+                     `pidash runner add --workdir <n>`."
+                ),
+            }
+        }
     }
 
     println!(
@@ -364,6 +475,38 @@ async fn ensure_cli_token(
         .ok_or_else(|| {
             anyhow::anyhow!("auth login completed but no CLI token was written to config.toml")
         })
+}
+
+/// Derive a unique `[[workdir]]` name for an auto-provisioned pool, seeded from
+/// the runner's name. Non-identifier chars are folded to `-`; collisions get a
+/// numeric suffix so repeated `runner add`s never clash.
+fn unique_workdir_name(cfg: &Config, seed: &str) -> String {
+    let base: String = seed
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '-'
+            }
+        })
+        .collect();
+    let base = base.trim_matches('-').to_string();
+    let base = if base.is_empty() {
+        "pool".to_string()
+    } else {
+        base
+    };
+    if !cfg.workdirs.iter().any(|w| w.name == base) {
+        return base;
+    }
+    for n in 2.. {
+        let cand = format!("{base}-{n}");
+        if !cfg.workdirs.iter().any(|w| w.name == cand) {
+            return cand;
+        }
+    }
+    unreachable!("an unbounded search always finds a free name")
 }
 
 fn hostname_or_unknown() -> String {
