@@ -61,7 +61,7 @@ export default {
   "A long-running background process that maintains the WebSocket session with Pi Dash cloud, dispatches work to the configured agent, and streams approvals + heartbeats back. One daemon per machine.":
     "Долго работающий фоновый процесс, который поддерживает сессию WebSocket с Pi Dash cloud, отправляет работу настроенному агенту и передаёт обратно подтверждения + сигналы пульса. Один демон на машину.",
   'A runner is an AI agent instance working on a given project.\n\n1. Click "Add runner", pick a project + pod and generate the CLI command.\n2. On the machine that will host the runner, run the displayed `pidash runner add` command. If the host is not logged in yet, the CLI starts `pidash auth login` first.\n3. The daemon registers the runner and it shows online here.\n\nPrerequisite: the agent CLI (codex / claude) must already be installed on the host.':
-    "",
+    "Раннер — это экземпляр ИИ-агента, работающий над заданным проектом.\n\n1. Нажмите «Add runner», выберите проект + под и сгенерируйте команду CLI.\n2. На машине, которая будет хостить раннер, выполните отображаемую команду `pidash runner add`. Если хост ещё не вошёл в систему, CLI сначала запускает `pidash auth login`.\n3. Демон регистрирует раннер, и он отображается как онлайн здесь.\n\nПредварительное условие: агент CLI (codex / claude) уже должен быть установлен на хосте.",
   "Ability to read, write, edit, and delete entities inside projects, cycles, and modules":
     "Возможность читать, записывать, редактировать и удалять сущности внутри проектов, циклов и модулей",
   Accept: "Принять",
