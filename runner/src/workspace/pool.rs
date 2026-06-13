@@ -207,9 +207,7 @@ enum OwnerMsg {
         holder_id: Uuid,
     },
     /// Remove a queued waiter (cancel-while-parked, design §5).
-    Cancel {
-        holder_id: Uuid,
-    },
+    Cancel { holder_id: Uuid },
     Snapshot {
         reply: oneshot::Sender<PoolSnapshot>,
     },
@@ -226,6 +224,10 @@ enum OwnerMsg {
 pub struct PoolHandle {
     tx: mpsc::UnboundedSender<OwnerMsg>,
     workdir_name: Arc<str>,
+    /// The workdir's canonical clone. Exposed so the dedicated chat worktree
+    /// (managed outside the pool, design §3.1/§3.7) can `git worktree add` from
+    /// the same repo the issue desks come from.
+    canonical: Arc<Path>,
 }
 
 impl PoolHandle {
@@ -257,6 +259,11 @@ impl PoolHandle {
 
     pub fn workdir_name(&self) -> &str {
         &self.workdir_name
+    }
+
+    /// The workdir's canonical clone (for the dedicated chat worktree).
+    pub fn canonical(&self) -> &Path {
+        &self.canonical
     }
 }
 
@@ -300,7 +307,9 @@ struct PoolState {
 
 impl PoolState {
     fn lock_path(&self, id: usize) -> PathBuf {
-        self.pool_dir.join("locks").join(format!("wt-{id}.lock.json"))
+        self.pool_dir
+            .join("locks")
+            .join(format!("wt-{id}.lock.json"))
     }
 
     fn desk_path(&self, id: usize) -> PathBuf {
@@ -431,7 +440,12 @@ impl PoolState {
             }
         }
 
-        if let Some(cmd) = self.cfg.setup_command.clone().filter(|c| !c.trim().is_empty()) {
+        if let Some(cmd) = self
+            .cfg
+            .setup_command
+            .clone()
+            .filter(|c| !c.trim().is_empty())
+        {
             let mut last_err = None;
             for attempt in 0..2 {
                 match run_setup_command(&path, &cmd).await {
@@ -473,7 +487,11 @@ impl PoolState {
     /// Leaving a `wt-<n>` directory behind would make the next
     /// `git worktree add` of that path fail.
     async fn remove_desk_dir(&self, path: &Path) {
-        if git::worktree_remove(&self.canonical, path, true).await.is_err() && path.exists() {
+        if git::worktree_remove(&self.canonical, path, true)
+            .await
+            .is_err()
+            && path.exists()
+        {
             let _ = tokio::fs::remove_dir_all(path).await;
         }
         let _ = git::worktree_prune(&self.canonical).await;
@@ -530,7 +548,11 @@ impl PoolState {
         } else {
             // Re-run setup after a `full` clean so the next lease is warm.
             if self.cfg.clean_mode == CleanMode::Full
-                && let Some(cmd) = self.cfg.setup_command.clone().filter(|c| !c.trim().is_empty())
+                && let Some(cmd) = self
+                    .cfg
+                    .setup_command
+                    .clone()
+                    .filter(|c| !c.trim().is_empty())
                 && let Err(e) = run_setup_command(&path, &cmd).await
             {
                 tracing::warn!(workdir = %self.cfg.name, error = %e, "post-full-clean setup failed");
@@ -742,6 +764,7 @@ pub async fn spawn(cfg: WorkdirConfig, data_worktrees: &Path) -> anyhow::Result<
         .clone()
         .unwrap_or_else(|| data_worktrees.join(&cfg.name));
     let canonical = cfg.path.clone();
+    let canonical_handle: Arc<Path> = Arc::from(canonical.as_path());
 
     let (tx, rx) = mpsc::unbounded_channel();
     let workdir_name: Arc<str> = Arc::from(cfg.name.as_str());
@@ -765,7 +788,11 @@ pub async fn spawn(cfg: WorkdirConfig, data_worktrees: &Path) -> anyhow::Result<
 
     tokio::spawn(pool_owner(state, rx));
 
-    Ok(PoolHandle { tx, workdir_name })
+    Ok(PoolHandle {
+        tx,
+        workdir_name,
+        canonical: canonical_handle,
+    })
 }
 
 async fn init_pool(state: &mut PoolState) -> anyhow::Result<()> {
@@ -928,7 +955,11 @@ async fn pool_owner(mut state: PoolState, mut rx: mpsc::UnboundedReceiver<OwnerM
                 state.release(worktree_id, outcome, holder_id).await;
             }
             OwnerMsg::Cancel { holder_id } => {
-                if let Some(pos) = state.queue.iter().position(|w| w.req.holder_id == holder_id) {
+                if let Some(pos) = state
+                    .queue
+                    .iter()
+                    .position(|w| w.req.holder_id == holder_id)
+                {
                     let waiter = state.queue.remove(pos).unwrap();
                     let _ = waiter.reply.send(Err(AcquireError::Cancelled));
                     // Everyone behind the cancelled waiter moved up one.

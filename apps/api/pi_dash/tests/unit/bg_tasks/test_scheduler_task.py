@@ -266,22 +266,26 @@ def test_fire_appends_apply_fix_directive(binding):
     assert "do NOT merge" in prompt
     # The other modes' directives must not leak in.
     assert "Work mode: create issues" not in prompt
-    assert "Work mode: fix and open for review" not in prompt
+    assert "Work mode: file issue and delegate fix" not in prompt
 
 
 @pytest.mark.unit
 def test_fire_appends_fix_and_review_directive(binding):
-    """fix_and_review files an issue, applies the fix, and moves the issue
-    straight to In Review — the directive must instruct all three steps."""
+    """fix_and_review files an agent-ready issue and moves it to In Progress —
+    the In Progress transition auto-delegates the fix to the issue agent, so
+    the scheduler run itself must NOT modify code or open a PR."""
     binding.outcome_mode = OutcomeMode.FIX_AND_REVIEW
     binding.save(update_fields=["outcome_mode"])
     fire_scheduler_binding(str(binding.pk))
     binding.refresh_from_db()
     prompt = binding.last_run.prompt
-    assert "Work mode: fix and open for review" in prompt
+    assert "Work mode: file issue and delegate fix" in prompt
     assert "pidash issue create" in prompt
-    assert "open a pull request" in prompt
-    assert 'pidash issue patch <IDENT> --state "In Review"' in prompt
+    assert "Do NOT modify code or open a pull request in this run" in prompt
+    assert 'pidash issue patch <IDENT> --state "In Progress"' in prompt
+    # The old in-run fix instruction must be gone: the issue agent, not the
+    # scheduler run, moves the issue through review.
+    assert 'pidash issue patch <IDENT> --state "In Review"' not in prompt
 
 
 @pytest.mark.unit
@@ -355,7 +359,7 @@ def test_fire_rolls_back_next_run_at_on_dispatch_failure(monkeypatch, binding):
 
     monkeypatch.setattr(
         "pi_dash.orchestration.service.dispatch_scheduler_run",
-        lambda b, p: (None, "no default pod for workspace test"),
+        lambda b: (None, "no default pod for workspace test"),
     )
     fired = fire_scheduler_binding(str(binding.pk))
     assert fired is False
@@ -365,6 +369,53 @@ def test_fire_rolls_back_next_run_at_on_dispatch_failure(monkeypatch, binding):
     assert "dispatch failed" in binding.last_error
     # Specific reason surfaced through (Codex review: avoid lossy errors)
     assert "no default pod" in binding.last_error
+
+
+@pytest.mark.unit
+def test_fire_surfaces_render_failure_on_last_error(monkeypatch, binding, create_user):
+    """Phase 3a: a prompt-build failure produces a FAILED run (not a None
+    dispatch). next_run_at stays advanced, but last_error must surface the
+    failure so a permanently-broken prompt is not invisible every tick."""
+    failed_run = AgentRun.objects.create(
+        workspace=binding.workspace,
+        created_by=create_user,
+        pod=Pod.default_for_project_id(binding.project_id),
+        scheduler_binding=binding,
+        status=AgentRunStatus.FAILED,
+        error="prompt build failed: 'x' is undefined",
+        prompt="",
+    )
+    monkeypatch.setattr(
+        "pi_dash.orchestration.service.dispatch_scheduler_run",
+        lambda b: (failed_run, None),
+    )
+    fire_scheduler_binding(str(binding.pk))
+    binding.refresh_from_db()
+    assert binding.last_run_id == failed_run.id
+    assert "prompt build failed" in binding.last_error
+    # next_run_at advanced (a run WAS produced — not a Phase 3b rollback)
+    assert binding.next_run_at is not None
+
+
+@pytest.mark.unit
+def test_fire_clears_last_error_on_healthy_run(monkeypatch, binding, create_user):
+    binding.last_error = "stale error from a prior tick"
+    binding.save(update_fields=["last_error"])
+    ok_run = AgentRun.objects.create(
+        workspace=binding.workspace,
+        created_by=create_user,
+        pod=Pod.default_for_project_id(binding.project_id),
+        scheduler_binding=binding,
+        status=AgentRunStatus.QUEUED,
+        prompt="ok",
+    )
+    monkeypatch.setattr(
+        "pi_dash.orchestration.service.dispatch_scheduler_run",
+        lambda b: (ok_run, None),
+    )
+    assert fire_scheduler_binding(str(binding.pk)) is True
+    binding.refresh_from_db()
+    assert binding.last_error == ""
 
 
 @pytest.mark.unit

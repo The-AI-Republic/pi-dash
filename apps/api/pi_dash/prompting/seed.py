@@ -35,35 +35,6 @@ REVIEW_TEMPLATE_BODY = """\
 You are reviewing the work product of a previous implementation pass.
 "Review" can mean different things depending on what was produced.
 
-Why this run started:
-{% if run.trigger == "tick" %}\
-This review run was fired automatically by the issue's ticker — a
-scheduled re-invocation, not a human action. If nothing has changed
-since your last review pass (no new commits, no new comments), emit
-`noop` instead of re-reviewing from scratch. Judge "no new comments"
-against the live thread (`pidash comment list`), not the activity
-inlined below — that snapshot was captured when this run was created
-and a human comment may have arrived since.
-{% elif run.trigger in ("comment", "comment_and_run") %}\
-A new human comment triggered this run — read the comment thread first
-and address it.
-{% elif run.trigger == "run_ai" %}\
-A human manually started this run from the Pi Dash UI and expects a
-visible result from this pass.
-{% elif run.trigger == "state_transition" %}\
-The issue just entered the review state — this is the first review
-pass on the current work product.
-{% else %}\
-The trigger for this run was not recorded.
-{% endif %}\
-{% if tick %}\
-Ticking schedule: while the issue stays in review, this prompt re-fires
-about every {{ tick.interval_human }}; {{ tick.count }}\
-{% if tick.cap is not none %} of {{ tick.cap }}{% endif %} ticks used\
-{% if tick.remaining is not none %}, {{ tick.remaining }} remaining \
-before auto-pause{% endif %}.
-{% endif %}\
-
 Issue: {{ issue.title }}
 Issue Description: {{ issue.description }}
 Recent activity:

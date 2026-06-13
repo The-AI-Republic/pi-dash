@@ -25,7 +25,7 @@ from dataclasses import dataclass
 from typing import Optional
 
 from pi_dash.db.models.state import StateGroup
-from pi_dash.prompting.models import PromptTemplate
+from pi_dash.prompting.recipes import KIND_CODING_TASK
 
 
 @dataclass(frozen=True)
@@ -61,7 +61,7 @@ class PhaseConfig:
 PHASES: dict[str, PhaseConfig] = {
     StateGroup.STARTED.value: PhaseConfig(
         state_name="In Progress",
-        template_name=PromptTemplate.DEFAULT_NAME,  # "coding-task"
+        template_name=KIND_CODING_TASK,  # "coding-task"
         fresh_session_on_entry=False,
     ),
     StateGroup.REVIEW.value: PhaseConfig(
@@ -110,7 +110,7 @@ def template_name_for(state) -> str:
     """
     cfg = phase_config_for(state)
     if cfg is None:
-        return PromptTemplate.DEFAULT_NAME
+        return KIND_CODING_TASK
     return cfg.template_name
 
 

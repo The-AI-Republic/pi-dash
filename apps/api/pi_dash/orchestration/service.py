@@ -29,10 +29,25 @@ from pi_dash.orchestration.agent_phases import (
     phase_config_for,
 )
 from pi_dash.prompting.composer import build_first_turn
+from pi_dash.prompting.recipes import RecipeNotFound
+from pi_dash.prompting.registry import PromptRegistryError
 from pi_dash.prompting.renderer import PromptRenderError
-from pi_dash.runner.models import AgentRun, AgentRunStatus, Pod, Runner, RunnerStatus
+from pi_dash.runner.models import (
+    AgentRun,
+    AgentRunStatus,
+    AgentRunTrigger,
+    Pod,
+    Runner,
+    RunnerStatus,
+)
 
 logger = logging.getLogger(__name__)
+
+#: Exceptions from the compose pipeline that should fail the run cleanly rather
+#: than crash dispatch: a render failure, or a recipe/registry inconsistency
+#: (defense-in-depth — the startup check in ``prompting.apps`` makes the latter
+#: unlikely, but a mid-deploy skew must not strand dispatch).
+_PROMPT_BUILD_ERRORS = (PromptRenderError, RecipeNotFound, PromptRegistryError)
 
 #: DEPRECATED: retained only for backward compatibility with external
 #: importers (tests, integrations). Internal callers must use
@@ -40,14 +55,6 @@ logger = logging.getLogger(__name__)
 #: ``phase_config_for``. Remove this constant once no remaining
 #: imports of ``DELEGATION_STATE_NAME`` exist.
 DELEGATION_STATE_NAME = "In Progress"
-
-#: Trigger labels persisted on ``AgentRun.run_config["triggered_by"]`` and
-#: surfaced to the agent prompt as ``run.trigger`` (see
-#: ``prompting.context.build_context``). The tick / Comment & Run / Run AI
-#: labels live in ``orchestration.scheduling`` (``TRIGGER_TICK`` et al.);
-#: these two cover the dispatch paths owned by this module.
-TRIGGER_STATE_TRANSITION = "state_transition"
-TRIGGER_COMMENT = "comment"
 
 
 @dataclass
@@ -243,6 +250,7 @@ def handle_issue_state_transition(
         creator=creator,
         pod=pod,
         fresh_session=fresh_session,
+        trigger=AgentRunTrigger.STATE_TRANSITION,
     )
 
 
@@ -386,12 +394,12 @@ def handle_issue_comment(comment: IssueComment) -> ContinuationOutcome:
         parent=prior,
         creator=comment.actor,
         pod=pod,
-        triggered_by=TRIGGER_COMMENT,
+        trigger=AgentRunTrigger.COMMENT_AND_RUN,
     )
 
 
 def _create_continuation_run(
-    *, issue: Issue, parent: AgentRun, creator, pod, triggered_by: str = ""
+    *, issue: Issue, parent: AgentRun, creator, pod, trigger: str
 ) -> ContinuationOutcome:
     """Create R_next as a follow-up to ``parent`` with optional pin.
 
@@ -399,10 +407,6 @@ def _create_continuation_run(
     full prompt and starts a fresh agent session — it does not resume the
     parent's session. ``parent`` is retained for lineage / pin selection only.
     See ``.ai_design/ticking_optimization/design.md``.
-
-    ``triggered_by`` is persisted in ``run_config`` **before** the prompt
-    renders, so the template can tell the agent what woke it (tick vs
-    human comment vs manual Run AI).
     """
     from pi_dash.runner.services import matcher
 
@@ -417,19 +421,19 @@ def _create_continuation_run(
             parent_run=parent,
             pinned_runner=pinned_runner,
             status=AgentRunStatus.QUEUED,
+            trigger=trigger,
             prompt="",
             run_config={
                 "repo_url": (issue.project.repo_url or None),
                 "repo_ref": (issue.project.base_branch or None),
                 "git_work_branch": (issue.git_work_branch or None),
-                "triggered_by": (triggered_by or None),
             },
         )
         try:
             run.prompt = build_first_turn(issue, run)
-        except PromptRenderError as exc:
+        except _PROMPT_BUILD_ERRORS as exc:
             run.status = AgentRunStatus.FAILED
-            run.error = f"prompt render failed: {exc}"
+            run.error = f"prompt build failed: {exc}"
             run.ended_at = timezone.now()
             run.save(update_fields=["status", "error", "ended_at"])
             logger.exception(
@@ -437,7 +441,7 @@ def _create_continuation_run(
                 issue.id,
             )
             return ContinuationOutcome(created_run=run, reason="render-failed")
-        run.save(update_fields=["prompt"])
+        run.save(update_fields=["prompt", "prompt_manifest"])
         transaction.on_commit(lambda: matcher.drain_pod_by_id(pod.id))
 
     return ContinuationOutcome(created_run=run, reason="created")
@@ -470,7 +474,7 @@ def _create_and_dispatch_run(
     creator,
     pod,
     fresh_session: bool = False,
-    triggered_by: str = TRIGGER_STATE_TRANSITION,
+    trigger: str = AgentRunTrigger.STATE_TRANSITION,
 ) -> TransitionOutcome:
     """Create a fresh ``AgentRun`` and dispatch it.
 
@@ -498,26 +502,26 @@ def _create_and_dispatch_run(
             parent_run=effective_parent,
             pinned_runner=pinned_runner,
             status=AgentRunStatus.QUEUED,
+            trigger=trigger,
             prompt="",  # populated below before dispatch
             run_config={
                 "repo_url": (issue.project.repo_url or None),
                 "repo_ref": (issue.project.base_branch or None),
                 "git_work_branch": (issue.git_work_branch or None),
-                "triggered_by": (triggered_by or None),
             },
             # owner stays NULL until assignment captures runner.owner.
         )
         try:
             run.prompt = build_first_turn(issue, run)
-        except PromptRenderError as exc:
+        except _PROMPT_BUILD_ERRORS as exc:
             run.status = AgentRunStatus.FAILED
-            run.error = f"prompt render failed: {exc}"
+            run.error = f"prompt build failed: {exc}"
             run.ended_at = timezone.now()
             run.save(update_fields=["status", "error", "ended_at"])
             logger.exception("orchestration: prompt render failed for issue %s", issue.id)
             return TransitionOutcome(created_run=run, reason="render-failed")
 
-        run.save(update_fields=["prompt"])
+        run.save(update_fields=["prompt", "prompt_manifest"])
         # Drain the pod's queue after the run row has landed. drain_pod is
         # idempotent and uses select_for_update(skip_locked=True), so it's
         # safe to run unconditionally.
@@ -540,7 +544,7 @@ def _create_and_dispatch_run(
 
 
 def dispatch_scheduler_run(
-    binding, prompt: str
+    binding,
 ) -> tuple[Optional[AgentRun], Optional[str]]:
     """Create a fresh ``AgentRun`` for one scheduler-binding tick.
 
@@ -549,11 +553,17 @@ def dispatch_scheduler_run(
     runner's problem (the dispatcher does not populate ``run_config``
     with repo URL / ref).
 
-    Returns ``(run, None)`` on success, or ``(None, reason)`` when the
-    dispatch was short-circuited. The reason string is what the Beat
-    fire path stores on ``binding.last_error`` so operators don't need
-    to grep worker logs to find out why a tick was skipped.
+    The prompt is **composed here** (create-run-then-compose, mirroring the
+    issue path) because the scheduler context needs ``run.id`` — the run must
+    exist before composition. A render failure marks the created run FAILED and
+    still returns ``(run, None)``: the binding's ``last_run`` points at the
+    failed run (visible via ``last_run.status``), and ``binding.last_error``
+    keeps its "never produced a run" semantic for the short-circuit cases only
+    (no pod / no creator), which still return ``(None, reason)``.
+
+    See design §5.3.
     """
+    from pi_dash.prompting.composer import build_scheduler_turn
     from pi_dash.runner.services import matcher
 
     # Pod resolution (late bound): prefer the binding's explicit pod override,
@@ -597,9 +607,25 @@ def dispatch_scheduler_run(
             scheduler_binding=binding,
             parent_run=None,
             status=AgentRunStatus.QUEUED,
-            prompt=prompt or "",
+            trigger=AgentRunTrigger.SCHEDULER,
+            prompt="",
             run_config={},
         )
+        try:
+            run.prompt = build_scheduler_turn(binding, run)
+        except _PROMPT_BUILD_ERRORS as exc:
+            run.status = AgentRunStatus.FAILED
+            run.error = f"prompt build failed: {exc}"
+            run.ended_at = timezone.now()
+            run.save(update_fields=["status", "error", "ended_at"])
+            logger.exception(
+                "scheduler.dispatch: prompt render failed for binding %s", binding.pk
+            )
+            # A render failure DID produce a run — return it (not a
+            # short-circuit None) so the Beat loop records it as last_run
+            # and does not write binding.last_error. See design §5.3.
+            return run, None
+        run.save(update_fields=["prompt", "prompt_manifest"])
         transaction.on_commit(lambda: matcher.drain_pod_by_id(pod.id))
 
     logger.info(

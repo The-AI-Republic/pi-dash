@@ -15,6 +15,7 @@ import type { IScheduler } from "@pi-dash/services";
 import { Badge, Button } from "@pi-dash/ui";
 import { PageHead } from "@/components/core/page-title";
 import { DeleteSchedulerModal } from "@/components/schedulers/delete-scheduler-modal";
+import { InstallSchedulerOnProjectsModal } from "@/components/schedulers/install-scheduler-on-projects-modal";
 import { SchedulerFormModal } from "@/components/schedulers/scheduler-form-modal";
 import { useScheduler } from "@/hooks/store/use-scheduler";
 import { useUserPermissions } from "@/hooks/store/user";
@@ -38,6 +39,7 @@ const SchedulersListPage = observer(function SchedulersListPage() {
   const [createOpen, setCreateOpen] = useState(false);
   const [editTarget, setEditTarget] = useState<IScheduler | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<IScheduler | null>(null);
+  const [installTarget, setInstallTarget] = useState<IScheduler | null>(null);
 
   const rows = schedulers ?? [];
 
@@ -143,6 +145,7 @@ const SchedulersListPage = observer(function SchedulersListPage() {
                 key={s.id}
                 scheduler={s}
                 canEdit={canEdit}
+                onInstall={() => setInstallTarget(s)}
                 onEdit={() => setEditTarget(s)}
                 onDelete={() => setDeleteTarget(s)}
               />
@@ -172,6 +175,13 @@ const SchedulersListPage = observer(function SchedulersListPage() {
         scheduler={deleteTarget}
         onDeleted={() => mutate()}
       />
+      <InstallSchedulerOnProjectsModal
+        isOpen={!!installTarget}
+        onClose={() => setInstallTarget(null)}
+        workspaceSlug={slug}
+        scheduler={installTarget}
+        onInstalled={() => mutate()}
+      />
     </div>
   );
 });
@@ -179,11 +189,12 @@ const SchedulersListPage = observer(function SchedulersListPage() {
 type RowProps = {
   scheduler: IScheduler;
   canEdit: boolean;
+  onInstall: () => void;
   onEdit: () => void;
   onDelete: () => void;
 };
 
-function SchedulerRow({ scheduler, canEdit, onEdit, onDelete }: RowProps) {
+function SchedulerRow({ scheduler, canEdit, onInstall, onEdit, onDelete }: RowProps) {
   const { t } = useTranslation();
   return (
     <tr className="border-t border-subtle">
@@ -208,6 +219,11 @@ function SchedulerRow({ scheduler, canEdit, onEdit, onDelete }: RowProps) {
       <td className="px-3 py-2 text-right">
         {canEdit && (
           <div className="flex items-center justify-end gap-2">
+            {scheduler.is_enabled && (
+              <Button variant="link-primary" size="sm" onClick={onInstall}>
+                {t("Install")}
+              </Button>
+            )}
             <Button variant="link-neutral" size="sm" onClick={onEdit}>
               {t("Edit")}
             </Button>

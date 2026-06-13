@@ -221,6 +221,21 @@ def _parent_done_payload(issue: Issue, run: AgentRun) -> str:
     return json.dumps(payload, indent=2, sort_keys=True)
 
 
+def _issue_run_kind(issue: Issue) -> str:
+    """Resolve the prompt *kind* for an issue run, for ``run.kind`` in context.
+
+    Shared sections branch on ``run.kind`` (always defined) — e.g. the CLI
+    section guards issue-specific lines with ``run.kind != "scheduler"``. Both
+    issue kinds (coding-task / review) are non-scheduler, so issue content
+    always renders for issue runs.
+    """
+    from pi_dash.orchestration.agent_phases import template_name_for
+    from pi_dash.prompting import recipes
+
+    state = getattr(issue, "state", None)
+    return recipes.kind_for(template_name_for(state))
+
+
 def build_context(issue: Issue, run: AgentRun) -> Dict[str, Any]:
     """Build the dict passed into Jinja.
 
@@ -311,16 +326,15 @@ def build_context(issue: Issue, run: AgentRun) -> Dict[str, Any]:
         ),
         "run": {
             "id": str(run.id),
+            "kind": _issue_run_kind(issue),
             "attempt": attempt,
             "turn_number": 1,
-            # What dispatched this run: "tick", "comment",
-            # "comment_and_run", "run_ai", "state_transition", or None for
-            # runs created before the trigger was recorded. getattr, not
-            # attribute access: the template-preview endpoint renders with
-            # a _FakeRun stub that has no run_config.
-            "trigger": (getattr(run, "run_config", None) or {}).get(
-                "triggered_by"
-            ),
+            # How this run was dispatched, from the first-class
+            # ``AgentRun.trigger`` field: "tick" / "comment_and_run" /
+            # "run_ai" / "state_transition" / "scheduler" / "direct".
+            # getattr, not attribute access: the template-preview endpoint
+            # renders with a stub run that has no ``trigger``.
+            "trigger": getattr(run, "trigger", None),
         },
         # Ticking schedule (None when the issue has no ticker row). Lets the
         # template explain the re-invocation cadence and remaining budget.
@@ -331,6 +345,62 @@ def build_context(issue: Issue, run: AgentRun) -> Dict[str, Any]:
         # continuation runs see their predecessor's plan/phase/notes without
         # an extra ``pidash workpad get`` round-trip.
         "workpad_body": issue.workpad or "",
+    }
+
+
+def build_scheduler_task_body(binding) -> str:
+    """Assemble the operator-authored task content for a scheduler run.
+
+    Injected into the ``scheduler-task`` section as the ``scheduler_task_body``
+    context variable — it is **never parsed as Jinja**, matching how issue
+    descriptions / comments flow through the renderer. Order preserves the
+    legacy dispatch concatenation: scheduler prompt, per-install extra context,
+    then the per-binding outcome-mode work directive.
+    """
+    from pi_dash.db.models.scheduler import outcome_mode_directive
+
+    scheduler = binding.scheduler
+    parts = [
+        ((getattr(scheduler, "prompt", "") or "").strip()),
+        ((binding.extra_context or "").strip()),
+        outcome_mode_directive(binding.outcome_mode),
+    ]
+    return "\n\n".join(p for p in parts if p)
+
+
+def build_scheduler_context(binding, run: AgentRun) -> Dict[str, Any]:
+    """Build the Jinja context for a project-scoped scheduler run.
+
+    Issue-centric keys do not exist here; the base-context contract guarantees
+    ``workspace``, ``project``, and ``run`` (with ``run.kind == "scheduler"``)
+    so shared sections can branch safely. See design §5.2.
+    """
+    project = binding.project
+    workspace = binding.workspace
+    scheduler = binding.scheduler
+    return {
+        "workspace": {
+            "slug": getattr(workspace, "slug", ""),
+            "name": getattr(workspace, "name", ""),
+        },
+        "project": {
+            "id": str(project.id) if project is not None else "",
+            "identifier": getattr(project, "identifier", ""),
+            "name": getattr(project, "name", ""),
+            "description": (getattr(project, "description", "") or ""),
+        },
+        "scheduler": {
+            "slug": getattr(scheduler, "slug", ""),
+            "name": getattr(scheduler, "name", ""),
+            "description": (getattr(scheduler, "description", "") or ""),
+        },
+        "run": {
+            "id": str(run.id),
+            "kind": "scheduler",
+            "attempt": 1,
+            "turn_number": 1,
+        },
+        "scheduler_task_body": build_scheduler_task_body(binding),
     }
 
 

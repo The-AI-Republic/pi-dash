@@ -56,6 +56,9 @@ def test_context_shape(issue, run):
     assert ctx["issue"]["state"] == "Todo"
     assert ctx["issue"]["state_group"] == "unstarted"
     assert ctx["issue"]["identifier"].startswith("TP-")
+    # run.kind is the base-context contract key shared sections branch on.
+    # A Todo (unstarted) issue falls back to the default coding-task kind.
+    assert ctx["run"]["kind"] == "coding-task"
     assert ctx["project"]["identifier"] == "TP"
     assert ctx["repo"]["url"] == "git@github.com:acme/web.git"
     assert ctx["repo"]["base_branch"] == "trunk"
@@ -303,19 +306,11 @@ def test_context_empty_base_branch_surfaces_as_none(workspace, create_user):
 
 
 @pytest.mark.unit
-def test_context_run_trigger_surfaced_from_run_config(issue, run):
-    run.run_config = {"triggered_by": "tick"}
-    run.save(update_fields=["run_config"])
+def test_context_run_trigger_surfaced_from_field(issue, run):
+    run.trigger = "tick"
+    run.save(update_fields=["trigger"])
     ctx = build_context(issue, run)
     assert ctx["run"]["trigger"] == "tick"
-
-
-@pytest.mark.unit
-def test_context_run_trigger_none_when_unrecorded(issue, run):
-    # Runs created before the trigger was recorded (or via paths that don't
-    # populate run_config) must surface None so templates take the fallback.
-    ctx = build_context(issue, run)
-    assert ctx["run"]["trigger"] is None
 
 
 @pytest.mark.unit
@@ -392,9 +387,10 @@ def test_context_tick_none_for_negative_noninfinite_cap(issue, run):
 
 
 @pytest.mark.unit
-def test_context_survives_run_without_run_config_attribute(issue):
-    # The template-preview endpoint renders with a _FakeRun stub that has
-    # no run_config attribute — build_context must not raise.
+def test_context_survives_run_without_trigger_attribute(issue):
+    # The template-preview endpoint renders with a stub run that has no
+    # ``trigger`` attribute — build_context must not raise, and trigger
+    # surfaces as None so the "Why this run started" block is skipped.
     class _StubRun:
         def __init__(self):
             self.id = "00000000-0000-0000-0000-000000000000"

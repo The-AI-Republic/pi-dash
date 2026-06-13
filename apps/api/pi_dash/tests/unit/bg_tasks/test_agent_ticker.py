@@ -282,7 +282,7 @@ def test_fire_tick_increments_tick_count_and_dispatches(
     # The trigger is persisted on the run and rendered into the prompt so
     # the agent knows a scheduled tick (not a human) woke it.
     run = runs.get()
-    assert run.run_config.get("triggered_by") == "tick"
+    assert run.trigger == "tick"
     assert "automatically by the issue's ticker" in run.prompt
     assert "Ticking schedule" in run.prompt
 

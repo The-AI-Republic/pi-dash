@@ -5,33 +5,33 @@
 from django.urls import path
 
 from pi_dash.prompting.views import (
-    PromptTemplateArchiveEndpoint,
-    PromptTemplateDetailEndpoint,
-    PromptTemplateListCreateEndpoint,
-    PromptTemplatePreviewEndpoint,
+    PromptCompiledEndpoint,
+    PromptPreviewEndpoint,
+    PromptSectionDetailEndpoint,
+    PromptSectionListEndpoint,
 )
 
 app_name = "prompting"
 
 urlpatterns = [
     path(
-        "workspaces/<slug:slug>/prompt-templates",
-        PromptTemplateListCreateEndpoint.as_view(),
-        name="prompt-template-list-create",
+        "workspaces/<slug:slug>/prompt-sections",
+        PromptSectionListEndpoint.as_view(),
+        name="prompt-section-list",
     ),
     path(
-        "workspaces/<slug:slug>/prompt-templates/<uuid:template_id>",
-        PromptTemplateDetailEndpoint.as_view(),
-        name="prompt-template-detail",
+        "workspaces/<slug:slug>/prompt-sections/<str:section_key>",
+        PromptSectionDetailEndpoint.as_view(),
+        name="prompt-section-detail",
     ),
     path(
-        "workspaces/<slug:slug>/prompt-templates/<uuid:template_id>/archive",
-        PromptTemplateArchiveEndpoint.as_view(),
-        name="prompt-template-archive",
+        "workspaces/<slug:slug>/prompts/<str:kind>/compiled",
+        PromptCompiledEndpoint.as_view(),
+        name="prompt-compiled",
     ),
     path(
-        "workspaces/<slug:slug>/prompt-templates/<uuid:template_id>/preview",
-        PromptTemplatePreviewEndpoint.as_view(),
-        name="prompt-template-preview",
+        "workspaces/<slug:slug>/prompts/<str:kind>/preview",
+        PromptPreviewEndpoint.as_view(),
+        name="prompt-preview",
     ),
 ]
