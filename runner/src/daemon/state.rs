@@ -7,6 +7,7 @@ use std::sync::{
 use tokio::sync::{Mutex, watch};
 use uuid::Uuid;
 
+use crate::approval::ApprovalRouter;
 use crate::cloud::protocol::RunnerStatus;
 use crate::config::schema::Config;
 use crate::daemon::observability::TokenUsage;
@@ -23,7 +24,17 @@ impl Drop for AutoSwapGuard {
     }
 }
 
-/// Volatile observability fields that ride on `PollStatus`. Doubles as
+/// Volatile observability fields that ride on `PollStatus`.
+///
+/// **Ownership (B2):** this snapshot is written **only by the assign (issue)
+/// lane** — `set_agent_pid`, `set_tokens`, `set_model`, `incr_turn`,
+/// `note_agent_event`, `note_exec_command*`. The chat lane MUST NOT write any of
+/// these (it has no per-lane slot here); per-lane chat observability is deferred
+/// (design `make_chat_issue_parallel_working` §3.3 B2 / Phase 3). With the two
+/// lanes running concurrently, a single shared snapshot would otherwise
+/// last-write-wins between two agents.
+///
+/// Doubles as
 /// the in-memory storage shape (held under one `Mutex` inside `Inner`)
 /// AND the wire-snapshot returned by `StateHandle::observability_snapshot()`.
 /// Keeping them in one struct means `reset_run_snapshot()` is a single
@@ -113,7 +124,25 @@ struct Inner {
     /// is the difference between "briefly reconnecting" and "wedged".
     consecutive_bootstrap_failures: Mutex<u32>,
     current_run: Mutex<Option<CurrentRunSummary>>,
-    approvals_pending: Mutex<usize>,
+    /// Reported `RunnerStatus` is **derived** from two independent lanes so the
+    /// assign (issue) lane and the chat lane can be active concurrently without
+    /// clobbering each other's status. See design
+    /// `make_chat_issue_parallel_working` §3.3 (B1). `run_status` is the
+    /// assign/connection lane's status (`Idle` / `Busy` / `AwaitingReauth`), set
+    /// by `set_current_run` and `set_run_status`; `chat_active` is whether the
+    /// chat lane is mid-turn, set by `set_chat_active`. `recompute_status()`
+    /// publishes the combined value: an `AwaitingReauth` / `Reconnecting`
+    /// override wins; otherwise `Busy` if the run lane is `Busy` or the chat
+    /// lane is active; otherwise `Idle`.
+    run_status: Mutex<RunnerStatus>,
+    chat_active: Mutex<bool>,
+    /// The shared approval router, injected after construction. The
+    /// approvals-pending count reported on the wire is read **live** from this
+    /// single source rather than a separately-stamped scalar, so the assign and
+    /// chat lanes (which share one router) can't clobber each other's count.
+    /// See design `make_chat_issue_parallel_working` §3.3 (B3). `None` for the
+    /// daemon-aggregate state, which has no per-runner router.
+    approval_router: std::sync::Mutex<Option<ApprovalRouter>>,
     runner_id: Mutex<Option<Uuid>>,
     /// Latest version advisory the cloud has pushed via the welcome
     /// frame. `(latest_announced, min_required)`. Populated on every
@@ -167,7 +196,9 @@ impl StateHandle {
                 last_session_open: Mutex::new(None),
                 consecutive_bootstrap_failures: Mutex::new(0),
                 current_run: Mutex::new(None),
-                approvals_pending: Mutex::new(0),
+                run_status: Mutex::new(RunnerStatus::Idle),
+                chat_active: Mutex::new(false),
+                approval_router: std::sync::Mutex::new(None),
                 runner_id: Mutex::new(None),
                 update_advisory: Mutex::new((None, None)),
                 on_disk_version: Mutex::new(None),
@@ -267,12 +298,52 @@ impl StateHandle {
         }
         *self.inner.current_run.lock().await = s;
         let _ = self.tx_in_flight.send(next);
-        let status = if next.is_some() {
+        // Set the assign-lane status and publish the DERIVED reported status
+        // (which also folds in the chat lane). See B1 in the design.
+        *self.inner.run_status.lock().await = if next.is_some() {
             RunnerStatus::Busy
         } else {
             RunnerStatus::Idle
         };
-        let _ = self.tx_status.send(status);
+        self.recompute_status().await;
+        self.tick();
+    }
+
+    /// Recompute and publish the derived reported status from the two lanes.
+    /// `AwaitingReauth` / `Reconnecting` (run-lane overrides) win; otherwise
+    /// `Busy` if the run lane is `Busy` or the chat lane is active; else `Idle`.
+    async fn recompute_status(&self) {
+        let run_status = *self.inner.run_status.lock().await;
+        let chat_active = *self.inner.chat_active.lock().await;
+        let reported = match run_status {
+            RunnerStatus::AwaitingReauth | RunnerStatus::Reconnecting => run_status,
+            RunnerStatus::Busy => RunnerStatus::Busy,
+            RunnerStatus::Idle => {
+                if chat_active {
+                    RunnerStatus::Busy
+                } else {
+                    RunnerStatus::Idle
+                }
+            }
+        };
+        let _ = self.tx_status.send(reported);
+    }
+
+    /// Set the assign/connection-lane status (`Idle` / `Busy` / `AwaitingReauth`)
+    /// and republish the derived status. The chat lane uses `set_chat_active`
+    /// instead, so a chat turn never clobbers an in-flight run's `Busy`.
+    pub async fn set_run_status(&self, s: RunnerStatus) {
+        *self.inner.run_status.lock().await = s;
+        self.recompute_status().await;
+        self.tick();
+    }
+
+    /// Mark the chat lane active/idle and republish the derived status. Never
+    /// clobbers an in-flight run's `Busy` or an `AwaitingReauth` override — a
+    /// chat turn ending while an issue still runs keeps the runner `Busy`.
+    pub async fn set_chat_active(&self, active: bool) {
+        *self.inner.chat_active.lock().await = active;
+        self.recompute_status().await;
         self.tick();
     }
 
@@ -374,14 +445,37 @@ impl StateHandle {
         self.tick();
     }
 
-    pub async fn set_approvals_pending(&self, n: usize) {
-        *self.inner.approvals_pending.lock().await = n;
+    /// Inject the shared approval router so the pending count can be read live.
+    /// Called once per `RunnerInstance` after both the state and the router
+    /// exist. Idempotent.
+    pub fn set_approval_router(&self, router: ApprovalRouter) {
+        *self
+            .inner
+            .approval_router
+            .lock()
+            .expect("approval_router mutex poisoned") = Some(router);
+    }
+
+    /// Notify reactive consumers (IPC/TUI) that the approval set changed. The
+    /// count itself is read live from the router, so this only ticks — both
+    /// lanes call it instead of stamping a (potentially stale) scalar.
+    pub fn note_approvals_changed(&self) {
         self.tick();
     }
 
-    /// Read the cached approvals-pending count for the wire snapshot.
+    /// Live approvals-pending count from the single shared router (0 when no
+    /// router is injected, e.g. the daemon-aggregate state).
     pub async fn approvals_pending_value(&self) -> usize {
-        *self.inner.approvals_pending.lock().await
+        let router = self
+            .inner
+            .approval_router
+            .lock()
+            .expect("approval_router mutex poisoned")
+            .clone();
+        match router {
+            Some(r) => r.list_pending().await.len(),
+            None => 0,
+        }
     }
 
     pub async fn set_config(&self, cfg: Config) {
@@ -391,11 +485,6 @@ impl StateHandle {
 
     pub async fn set_runner_id(&self, id: Uuid) {
         *self.inner.runner_id.lock().await = Some(id);
-        self.tick();
-    }
-
-    pub async fn set_status(&self, s: RunnerStatus) {
-        let _ = self.tx_status.send(s);
         self.tick();
     }
 
@@ -414,7 +503,7 @@ impl StateHandle {
         let consecutive_bootstrap_failures =
             *self.inner.consecutive_bootstrap_failures.lock().await;
         let current_run = self.inner.current_run.lock().await.clone();
-        let approvals_pending = *self.inner.approvals_pending.lock().await;
+        let approvals_pending = self.approvals_pending_value().await;
         let observability = if self.inner.agent_observability_v1 {
             Some(self.inner.run_snapshot.lock().await.clone())
         } else {
@@ -860,5 +949,110 @@ mod tests {
             let v = *rx.borrow_and_update();
             assert_eq!(v, Some(rid), "rx_in_flight transitioned to None mid-stream");
         }
+    }
+
+    // ---- B1: derived RunnerStatus across the two lanes ----
+
+    #[tokio::test]
+    async fn chat_active_alone_reports_busy() {
+        let state = empty_state();
+        assert!(matches!(*state.rx_status.borrow(), RunnerStatus::Idle));
+        state.set_chat_active(true).await;
+        assert!(
+            matches!(*state.rx_status.borrow(), RunnerStatus::Busy),
+            "chat alone makes the runner Busy"
+        );
+        state.set_chat_active(false).await;
+        assert!(matches!(*state.rx_status.borrow(), RunnerStatus::Idle));
+    }
+
+    #[tokio::test]
+    async fn chat_turn_ending_keeps_busy_while_issue_runs() {
+        // The core B1 race: a finishing chat turn must NOT report Idle while an
+        // issue is still in flight.
+        let state = empty_state();
+        let rid = Uuid::new_v4();
+        state.set_current_run(Some(summary(rid, "running"))).await;
+        state.set_chat_active(true).await;
+        assert!(matches!(*state.rx_status.borrow(), RunnerStatus::Busy));
+
+        // Chat turn ends; the issue is still running.
+        state.set_chat_active(false).await;
+        assert!(
+            matches!(*state.rx_status.borrow(), RunnerStatus::Busy),
+            "must stay Busy — the issue run is still in flight"
+        );
+        assert_eq!(*state.rx_in_flight.borrow(), Some(rid));
+
+        // Issue ends → now Idle.
+        state.set_current_run(None).await;
+        assert!(matches!(*state.rx_status.borrow(), RunnerStatus::Idle));
+    }
+
+    #[tokio::test]
+    async fn run_finishing_keeps_busy_while_chat_active() {
+        // The inverse race: set_current_run(None) must NOT clobber Busy down to
+        // Idle while a chat turn is still active.
+        let state = empty_state();
+        state.set_chat_active(true).await;
+        let rid = Uuid::new_v4();
+        state.set_current_run(Some(summary(rid, "running"))).await;
+        assert!(matches!(*state.rx_status.borrow(), RunnerStatus::Busy));
+
+        state.set_current_run(None).await;
+        assert!(
+            matches!(*state.rx_status.borrow(), RunnerStatus::Busy),
+            "must stay Busy — a chat turn is still active"
+        );
+
+        state.set_chat_active(false).await;
+        assert!(matches!(*state.rx_status.borrow(), RunnerStatus::Idle));
+    }
+
+    #[tokio::test]
+    async fn reauth_overrides_chat_active() {
+        let state = empty_state();
+        state.set_chat_active(true).await;
+        state.set_run_status(RunnerStatus::AwaitingReauth).await;
+        assert!(
+            matches!(*state.rx_status.borrow(), RunnerStatus::AwaitingReauth),
+            "AwaitingReauth (run lane) overrides a chat-derived Busy"
+        );
+        // Clearing the run lane (run ends) falls back to chat-derived Busy.
+        state.set_current_run(None).await;
+        assert!(matches!(*state.rx_status.borrow(), RunnerStatus::Busy));
+    }
+
+    // ---- B3: approvals_pending read live from the shared router ----
+
+    #[tokio::test]
+    async fn approvals_pending_reads_live_from_router() {
+        use crate::approval::router::{ApprovalRecord, ApprovalStatus};
+        use crate::cloud::protocol::ApprovalKind;
+
+        let state = empty_state();
+        // No router injected → 0 (e.g. the daemon-aggregate state).
+        assert_eq!(state.approvals_pending_value().await, 0);
+
+        let router = ApprovalRouter::new();
+        state.set_approval_router(router.clone());
+        assert_eq!(state.approvals_pending_value().await, 0);
+
+        // Opening an approval in the shared router is reflected live — no lane
+        // stamps the count.
+        router
+            .open(ApprovalRecord {
+                approval_id: "a1".into(),
+                runner_id: Uuid::nil(),
+                run_id: Uuid::new_v4(),
+                kind: ApprovalKind::CommandExecution,
+                payload: serde_json::Value::Null,
+                reason: None,
+                requested_at: Utc::now(),
+                expires_at: None,
+                status: ApprovalStatus::Pending,
+            })
+            .await;
+        assert_eq!(state.approvals_pending_value().await, 1);
     }
 }

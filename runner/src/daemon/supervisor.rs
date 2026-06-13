@@ -677,7 +677,6 @@ impl RunnerLoop {
             runner_paths: self.runner_paths.clone(),
             runner_config: self.runner_config.clone(),
             pool: self.pool.clone(),
-            lease: None,
             state: self.state.clone(),
             approvals: self.approvals.clone(),
             out: self.out.clone(),
@@ -806,20 +805,31 @@ impl RunnerLoop {
                     expected_codex_model,
                     ..
                 } => {
-                    if self
-                        .current_chat
-                        .as_ref()
-                        .is_some_and(|chat| *chat.active_rx.borrow())
-                    {
-                        tracing::warn!(
-                            %run_id,
-                            "assign received while chat is active; ignoring"
-                        );
-                        continue;
+                    // Cross-lane exclusion applies ONLY to legacy non-pooled
+                    // runners: they share one `working_dir` between chat and
+                    // issue execution, so the two cannot run concurrently
+                    // (design §3.5). Pooled runners run the chat lane in a
+                    // dedicated worktree, so an issue assign coexists with an
+                    // active chat — no rejection, no teardown.
+                    if self.pool.is_none() {
+                        if self
+                            .current_chat
+                            .as_ref()
+                            .is_some_and(|chat| *chat.active_rx.borrow())
+                        {
+                            tracing::warn!(
+                                %run_id,
+                                "assign received while chat is active on a non-pooled runner; ignoring"
+                            );
+                            continue;
+                        }
+                        if self.current_chat.is_some() {
+                            self.stop_idle_chat_runtime().await;
+                        }
                     }
-                    if self.current_chat.is_some() {
-                        self.stop_idle_chat_runtime().await;
-                    }
+                    // Intra-assign-lane guard — one issue in flight at a time —
+                    // is kept for ALL runners (the assign lane stays
+                    // single-tenant; the cloud reaper assumes it, design §3.4).
                     if self.current_run.is_some() {
                         tracing::warn!(
                             %run_id,
@@ -921,8 +931,7 @@ impl RunnerLoop {
                     self.approvals
                         .decide(&approval_id.to_string(), decision, DecisionSource::Cloud)
                         .await;
-                    let pending = self.approvals.list_pending().await.len();
-                    self.state.set_approvals_pending(pending).await;
+                    self.state.note_approvals_changed();
                 }
                 ServerMsg::ChatUserMessage {
                     chat_session_id,
@@ -934,7 +943,11 @@ impl RunnerLoop {
                     cwd,
                     model,
                 } => {
-                    if self.current_run.is_some() {
+                    // Only legacy non-pooled runners reject chat during an issue
+                    // run (shared `working_dir`, design §3.5). Pooled runners
+                    // accept chat concurrently — its dedicated worktree keeps the
+                    // two lanes isolated.
+                    if self.pool.is_none() && self.current_run.is_some() {
                         let _ = self
                             .out
                             .send(ClientMsg::ChatFailed {
@@ -1006,7 +1019,10 @@ impl RunnerLoop {
                     cwd,
                     model,
                 } => {
-                    if self.current_run.is_some() {
+                    // Legacy non-pooled runners skip warm during an issue run
+                    // (shared `working_dir`, §3.5); pooled runners warm the chat
+                    // lane concurrently in its dedicated worktree.
+                    if self.pool.is_none() && self.current_run.is_some() {
                         let _ = self
                             .out
                             .send(ClientMsg::ChatEvent {
@@ -1116,8 +1132,7 @@ impl RunnerLoop {
                     self.approvals
                         .decide(&local_approval_id, decision, DecisionSource::Cloud)
                         .await;
-                    let pending = self.approvals.list_pending().await.len();
-                    self.state.set_approvals_pending(pending).await;
+                    self.state.note_approvals_changed();
                 }
                 ServerMsg::ConfigPush { .. } => {
                     tracing::info!("config_push received (deferred)");
@@ -1177,6 +1192,13 @@ impl RunnerLoop {
                     if let Some(run) = &self.current_run {
                         run.cancel.cancel();
                     }
+                    // B4: tear down the chat lane too. RemoveRunner previously
+                    // cancelled only the run lane, leaving the chat worker (and
+                    // its bridge) to be aborted when the RunnerLoop exits, with
+                    // no terminal `ChatClosed` for the client.
+                    if let Some(chat) = &self.current_chat {
+                        let _ = chat.tx.send(ChatCommand::Shutdown).await;
+                    }
                     // Tell the heartbeat task to exit before we drop
                     // out of the loop. Without this it would keep
                     // emitting frames carrying this runner's id and
@@ -1191,6 +1213,23 @@ impl RunnerLoop {
                         .write()
                         .await
                         .remove(&self.runner_paths.runner_id);
+                    // Detach the dedicated chat worktree from the canonical's
+                    // git bookkeeping before we blow the dir away, so we don't
+                    // leave a stale `.git/worktrees/<name>` admin entry behind
+                    // (otherwise pruned only at the next pool init).
+                    if let Some(pool) = &self.pool {
+                        let chat_wt =
+                            crate::workspace::chat_worktree::path_for(&self.runner_paths);
+                        if chat_wt.exists() {
+                            let _ = crate::workspace::git::worktree_remove(
+                                pool.canonical(),
+                                &chat_wt,
+                                true,
+                            )
+                            .await;
+                            let _ = crate::workspace::git::worktree_prune(pool.canonical()).await;
+                        }
+                    }
                     // Best-effort cleanup of this runner's local data
                     // dir. The on-disk state is keyed by runner_id and
                     // is dead weight once the cloud-side row is gone.
@@ -1361,15 +1400,11 @@ fn timing_payload(stage: &str, mut payload: serde_json::Value) -> serde_json::Va
 struct ChatWorker {
     runner_paths: RunnerPaths,
     runner_config: crate::config::schema::RunnerConfig,
-    /// Worktree pool for this runner's work dir, if any. Chat sessions lease
-    /// a desk (`LeaseKind::Session`) for their whole lifetime instead of
-    /// executing in `workspace.working_dir`, which is vestigial for pooled
-    /// runners (design §4.5).
+    /// Worktree pool for this runner's work dir, if any. Used only to reach the
+    /// canonical clone (`PoolHandle::canonical`) for the dedicated chat worktree
+    /// — the chat lane does NOT lease pool desks (design §3.1/§3.7); it runs in
+    /// its own per-runner worktree, leaving the pool entirely for issue runs.
     pool: Option<PoolHandle>,
-    /// The chat session's desk lease. Held from the first warm/turn until the
-    /// worker exits; dropping it releases the desk through the normal
-    /// salvage → clean → park path.
-    lease: Option<crate::workspace::pool::Lease>,
     state: StateHandle,
     approvals: ApprovalRouter,
     out: RunnerOut,
@@ -1379,19 +1414,50 @@ struct ChatWorker {
 
 impl ChatWorker {
     async fn run(&mut self, chat_session_id: uuid::Uuid) {
-        const CHAT_IDLE_TIMEOUT: Duration = Duration::from_secs(30 * 60);
+        // Phase 2: a session idles out after 5 minutes of silence, then its work
+        // is committed + pushed (below). Reviving (a new message for the same
+        // session id) spawns a fresh worker that resumes the pushed branch.
+        const CHAT_IDLE_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 
         let mut bridge: Option<AgentBridge> = None;
         let mut workspace_path: Option<std::path::PathBuf> = None;
         let mut bridge_seq = 0u64;
         let mut started_sent = false;
 
+        // B4: the chat lane gets its own graceful-shutdown signal. Before this,
+        // only the assign lane observed `shutdown_notified()`, so on daemon
+        // shutdown / RemoveRunner the chat loop was aborted with no terminal
+        // `ChatClosed`. A turn already in flight finishes first; the dedicated
+        // chat worktree persists either way.
+        //
+        // The `Notified` future is created ONCE and pinned across iterations:
+        // `notify_waiters()` does not store a permit, so a fresh future created
+        // per loop turn would miss a signal that landed while we were inside a
+        // turn (it would then hang until the idle timeout). A pinned future
+        // stays registered as a waiter and catches the signal on the next poll.
+        let shutdown = self.state.shutdown_notified();
+        let notified = shutdown.notified();
+        tokio::pin!(notified);
         loop {
-            let command =
-                match tokio::time::timeout(CHAT_IDLE_TIMEOUT, self.command_rx.recv()).await {
-                    Ok(Some(command)) => command,
-                    Ok(None) | Err(_) => break,
-                };
+            let command = tokio::select! {
+                biased;
+                _ = &mut notified => {
+                    let _ = self
+                        .out
+                        .send(ClientMsg::ChatClosed {
+                            chat_session_id,
+                            closed_at: Utc::now(),
+                        })
+                        .await;
+                    break;
+                }
+                recv = tokio::time::timeout(CHAT_IDLE_TIMEOUT, self.command_rx.recv()) => {
+                    match recv {
+                        Ok(Some(command)) => command,
+                        Ok(None) | Err(_) => break,
+                    }
+                }
+            };
             match command {
                 ChatCommand::Warm(warm) => {
                     if let Err(e) = self
@@ -1425,7 +1491,7 @@ impl ChatWorker {
                 }
                 ChatCommand::Message(turn) => {
                     let _ = self.active_tx.send(true);
-                    self.state.set_status(RunnerStatus::Busy).await;
+                    self.state.set_chat_active(true).await;
                     let close_runtime = match self
                         .handle_turn(
                             chat_session_id,
@@ -1456,7 +1522,7 @@ impl ChatWorker {
                         }
                     };
                     let _ = self.active_tx.send(false);
-                    self.state.set_status(RunnerStatus::Idle).await;
+                    self.state.set_chat_active(false).await;
                     if close_runtime {
                         break;
                     }
@@ -1475,15 +1541,43 @@ impl ChatWorker {
                         .await;
                     break;
                 }
-                ChatCommand::Shutdown => break,
+                ChatCommand::Shutdown => {
+                    // RemoveRunner / teardown. Emit a terminal `ChatClosed` so
+                    // the cloud session doesn't linger in "active turn" state.
+                    let _ = self
+                        .out
+                        .send(ClientMsg::ChatClosed {
+                            chat_session_id,
+                            closed_at: Utc::now(),
+                        })
+                        .await;
+                    break;
+                }
             }
         }
         if let Some(bridge) = bridge.take() {
             bridge.shutdown(Duration::from_secs(5)).await.ok();
         }
         let _ = self.active_tx.send(false);
-        self.state.set_status(RunnerStatus::Idle).await;
-        let _ = &self.runner_paths;
+        self.state.set_chat_active(false).await;
+
+        // Phase 2: persist this session's work on its branch (commit + push) so
+        // nothing is left only on the dev machine and a revive can resume it.
+        // No-op on a clean tree, so read-only sessions push nothing.
+        if self.pool.is_some() {
+            let root = crate::workspace::chat_worktree::path_for(&self.runner_paths);
+            if root.exists() {
+                match crate::workspace::chat_worktree::end_session(&root).await {
+                    Ok(true) => {
+                        tracing::info!(%chat_session_id, "chat session changes committed and pushed")
+                    }
+                    Ok(false) => {}
+                    Err(e) => {
+                        tracing::warn!(%chat_session_id, error = %e, "chat session persist failed")
+                    }
+                }
+            }
+        }
     }
 
     async fn send_timing_event(
@@ -1526,7 +1620,10 @@ impl ChatWorker {
         .await;
 
         if workspace_path.is_none() {
-            *workspace_path = Some(self.resolve_chat_workspace(chat_session_id, warm.cwd.as_deref()).await?);
+            *workspace_path = Some(
+                self.resolve_chat_workspace(chat_session_id, warm.cwd.as_deref())
+                    .await?,
+            );
         }
         let workspace_path = workspace_path
             .as_deref()
@@ -1649,7 +1746,10 @@ impl ChatWorker {
         .await;
 
         if workspace_path.is_none() {
-            *workspace_path = Some(self.resolve_chat_workspace(chat_session_id, turn.cwd.as_deref()).await?);
+            *workspace_path = Some(
+                self.resolve_chat_workspace(chat_session_id, turn.cwd.as_deref())
+                    .await?,
+            );
         }
         let workspace_path = workspace_path
             .as_deref()
@@ -1805,7 +1905,7 @@ impl ChatWorker {
                             detail: Some("agent stdout closed".into()),
                             failed_at: Utc::now(),
                         }).await.ok();
-                        self.state.set_status(RunnerStatus::Idle).await;
+                        self.state.set_chat_active(false).await;
                         return Ok(true);
                     };
                     let mut done = false;
@@ -1882,7 +1982,7 @@ impl ChatWorker {
                                             detail: Some(format!("{e:#}")),
                                             failed_at: Utc::now(),
                                         }).await.ok();
-                                        self.state.set_status(RunnerStatus::Idle).await;
+                                        self.state.set_chat_active(false).await;
                                         return Ok(true);
                                     }
                                     continue;
@@ -1900,9 +2000,7 @@ impl ChatWorker {
                                 };
                                 let mut rx = self.approvals.subscribe();
                                 self.approvals.open(rec.clone()).await;
-                                self.state
-                                    .set_approvals_pending(self.approvals.list_pending().await.len())
-                                    .await;
+                                self.state.note_approvals_changed();
                                 self.out.send(ClientMsg::ChatApprovalRequest {
                                     chat_session_id,
                                     local_approval_id: approval_id.clone(),
@@ -1928,12 +2026,10 @@ impl ChatWorker {
                                                     detail: Some(format!("{e:#}")),
                                                     failed_at: Utc::now(),
                                                 }).await.ok();
-                                                self.state.set_status(RunnerStatus::Idle).await;
+                                                self.state.set_chat_active(false).await;
                                                 return Ok(true);
                                             }
-                                            self.state
-                                                .set_approvals_pending(self.approvals.list_pending().await.len())
-                                                .await;
+                                            self.state.note_approvals_changed();
                                             break;
                                         }
                                         Ok(_) => continue,
@@ -1976,7 +2072,7 @@ impl ChatWorker {
                                     detail,
                                     failed_at: Utc::now(),
                                 }).await.ok();
-                                self.state.set_status(RunnerStatus::Idle).await;
+                                self.state.set_chat_active(false).await;
                                 return Ok(true);
                             }
                             BridgeEvent::RunStarted { .. } | BridgeEvent::AwaitingReauth { .. } => {}
@@ -2029,28 +2125,28 @@ impl ChatWorker {
         chat_session_id: uuid::Uuid,
         cwd: Option<&str>,
     ) -> Result<std::path::PathBuf> {
-        // Pooled runners lease a desk for the chat session (design §4.5) —
-        // never execute in `workspace.working_dir`, which is vestigial for
-        // them and may even be the pool's canonical clone (forbidden: agents
-        // executing there hold its branch lock permanently).
+        // The chat lane runs in a DEDICATED per-runner worktree managed outside
+        // the issue pool (design §3.1/§3.7), NOT a pool `Session` desk. It
+        // persists across chat sessions, can never collide with or starve issue
+        // runs, and binds cwd once per session (which every agent supports —
+        // §3.6). `workspace.working_dir` stays vestigial for pooled runners.
         let workspace_path = if let Some(pool) = &self.pool {
-            if self.lease.is_none() {
-                let lease = pool
-                    .acquire(crate::workspace::pool::LeaseRequest {
-                        kind: crate::workspace::pool::LeaseKind::Session,
-                        holder_id: chat_session_id,
-                        branch: None,
-                        queued_tx: None,
-                    })
-                    .await
-                    .map_err(|e| anyhow::anyhow!("worktree lease for chat session: {e}"))?;
-                self.lease = Some(lease);
-            }
-            self.lease
-                .as_ref()
-                .expect("chat lease just set")
-                .path()
-                .to_path_buf()
+            let chat_path = crate::workspace::chat_worktree::path_for(&self.runner_paths);
+            let root = crate::workspace::chat_worktree::ensure(pool.canonical(), &chat_path)
+                .await
+                .map_err(|e| anyhow::anyhow!("dedicated chat worktree: {e:#}"))?;
+            // Phase 2: start (or resume) this session's branch so its work is
+            // committed + pushed on session end and reconstructable on revive.
+            // Runs once per session (the caller only resolves when unset).
+            crate::workspace::chat_worktree::start_session(
+                pool.canonical(),
+                &root,
+                self.runner_paths.runner_id,
+                chat_session_id,
+            )
+            .await
+            .map_err(|e| anyhow::anyhow!("chat session branch: {e:#}"))?;
+            root
         } else if self.runner_config.workdir.is_some() {
             // Work-dir runner whose pool failed to construct — fail rather
             // than silently running in a vestigial directory.
@@ -3001,9 +3097,7 @@ impl AssignWorker {
                 // an event it'll never see.
                 let mut rx = self.approvals.subscribe();
                 self.approvals.open(rec.clone()).await;
-                self.state
-                    .set_approvals_pending(self.approvals.list_pending().await.len())
-                    .await;
+                self.state.note_approvals_changed();
                 self.send(ClientMsg::ApprovalRequest {
                     run_id,
                     approval_id: uuid_or(&approval_id),
@@ -3045,8 +3139,7 @@ impl AssignWorker {
                             })
                             .await
                             .ok();
-                            let remaining = self.approvals.list_pending().await.len();
-                            self.state.set_approvals_pending(remaining).await;
+                            self.state.note_approvals_changed();
                             return Ok(None);
                         }
                         Ok(_) => continue,
@@ -3057,7 +3150,9 @@ impl AssignWorker {
                 Ok(None)
             }
             BridgeEvent::AwaitingReauth { run_id, detail } => {
-                self.state.set_status(RunnerStatus::AwaitingReauth).await;
+                self.state
+                    .set_run_status(RunnerStatus::AwaitingReauth)
+                    .await;
                 run_events.flush_before_lifecycle(&self.out).await;
                 self.send(ClientMsg::RunAwaitingReauth {
                     run_id,
@@ -3173,7 +3268,7 @@ mod tests {
     use super::*;
     use crate::cloud::protocol::Envelope;
     use crate::config::schema::{
-        AgentSection, ApprovalPolicySection, ClaudeCodeSection, CursorAgentSection, CodexSection,
+        AgentSection, ApprovalPolicySection, ClaudeCodeSection, CodexSection, CursorAgentSection,
         OpenClawSection, RunnerConfig, WorkspaceSection,
     };
     use crate::daemon::state::ExecCommandSnapshot;

@@ -56,6 +56,7 @@ INSTALLED_APPS = [
     "pi_dash.runner",
     "pi_dash.prompting",
     "pi_dash.orchestration",
+    "pi_dash.assistant",
     # Third-party things
     "channels",
     "rest_framework",
@@ -93,6 +94,9 @@ REST_FRAMEWORK = {
         # endpoint creates a DB row each call, so a flood would otherwise
         # be a free table-pollution vector.
         "auth_device_start": "20/minute",
+        # AI assistant: the only platform-compute brake in the BYOK-only MVP.
+        "assistant_message": "30/hour",
+        "assistant_llm_test": "6/minute",
     },
     "DEFAULT_PERMISSION_CLASSES": ("rest_framework.permissions.IsAuthenticated",),
     "DEFAULT_RENDERER_CLASSES": ("rest_framework.renderers.JSONRenderer",),
@@ -204,6 +208,47 @@ REDIS_SOCKET_CONNECT_TIMEOUT = os.environ.get("REDIS_SOCKET_CONNECT_TIMEOUT", 2.
 REDIS_SOCKET_TIMEOUT = os.environ.get("REDIS_SOCKET_TIMEOUT", 5.0)
 REDIS_HEALTH_CHECK_INTERVAL = os.environ.get("REDIS_HEALTH_CHECK_INTERVAL", 30)
 REDIS_MAX_CONNECTIONS = os.environ.get("REDIS_MAX_CONNECTIONS")
+
+# AI Assistant — see .ai_design/integrate_ai_agent/
+# Comma-separated MultiFernet key list (urlsafe base64, 32 bytes). When unset,
+# BYOK keys cannot be stored (the config endpoint reports assistant_not_configured).
+ASSISTANT_ENCRYPTION_KEY = os.environ.get("ASSISTANT_ENCRYPTION_KEY", "")
+# SSRF guard for BYOK base_url. Off in OSS (LAN vLLM/Ollama allowed); cloud sets True.
+ASSISTANT_BLOCK_PRIVATE_URLS = os.environ.get("ASSISTANT_BLOCK_PRIVATE_URLS", "false").lower() in (
+    "1",
+    "true",
+    "yes",
+)
+ASSISTANT_TURN_SOFT_LIMIT = int(os.environ.get("ASSISTANT_TURN_SOFT_LIMIT", 300))
+ASSISTANT_TURN_HARD_LIMIT = int(os.environ.get("ASSISTANT_TURN_HARD_LIMIT", 330))
+# Max completed turns replayed to the model as history. Bounds per-turn token
+# cost (and context-window use) on long threads; the durable transcript shown
+# in the UI is unaffected — only what the model sees is truncated.
+ASSISTANT_HISTORY_MAX_TURNS = int(os.environ.get("ASSISTANT_HISTORY_MAX_TURNS", 40))
+
+# Loop (Auto Project Management) — periodic assistant jobs.
+# See .ai_design/loop_project_management/design.md §11.
+# Instance kill switch: when false, the scanner and fire tasks short-circuit.
+LOOP_ENABLED = os.environ.get("LOOP_ENABLED", "true").lower() in ("1", "true", "yes")
+# Deterministic per-edge fire offset window (minutes) so a daily job doesn't
+# fire every membership edge in the same minute.
+LOOP_STAGGER_WINDOW_MINUTES = int(os.environ.get("LOOP_STAGGER_WINDOW_MINUTES", 60))
+# Backpressure: at most this many targets dispatched per scanner tick; the rest
+# stay due and drain on later ticks.
+LOOP_MAX_DISPATCH_PER_TICK = int(os.environ.get("LOOP_MAX_DISPATCH_PER_TICK", 100))
+# Reconcile (create missing targets for new membership edges) runs only when
+# minute % this == 0 — cheap throttle vs. the per-minute due scan.
+LOOP_RECONCILE_EVERY_MINUTES = int(os.environ.get("LOOP_RECONCILE_EVERY_MINUTES", 15))
+# Rotate to a fresh hidden thread when within this many messages of the cap.
+LOOP_ROTATION_HEADROOM = int(os.environ.get("LOOP_ROTATION_HEADROOM", 30))
+# Per-run blast-radius cap, enforced by instruction (hard backstop is the
+# assistant's tool_calls_limit).
+LOOP_MAX_WRITES = int(os.environ.get("LOOP_MAX_WRITES", 10))
+# Per-run cap on get_pull_request_status calls (protects the unauthenticated
+# GitHub rate limit for the host IP).
+LOOP_PR_LOOKUPS_PER_RUN = int(os.environ.get("LOOP_PR_LOOKUPS_PER_RUN", 15))
+# Completed loop turns replayed as history — tighter than chat (daily cost).
+ASSISTANT_LOOP_HISTORY_MAX_TURNS = int(os.environ.get("ASSISTANT_LOOP_HISTORY_MAX_TURNS", 5))
 
 if REDIS_SSL:
     CACHES = {

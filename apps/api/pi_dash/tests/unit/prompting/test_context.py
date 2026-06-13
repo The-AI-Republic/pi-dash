@@ -56,6 +56,9 @@ def test_context_shape(issue, run):
     assert ctx["issue"]["state"] == "Todo"
     assert ctx["issue"]["state_group"] == "unstarted"
     assert ctx["issue"]["identifier"].startswith("TP-")
+    # run.kind is the base-context contract key shared sections branch on.
+    # A Todo (unstarted) issue falls back to the default coding-task kind.
+    assert ctx["run"]["kind"] == "coding-task"
     assert ctx["project"]["identifier"] == "TP"
     assert ctx["repo"]["url"] == "git@github.com:acme/web.git"
     assert ctx["repo"]["base_branch"] == "trunk"

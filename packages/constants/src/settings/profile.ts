@@ -45,6 +45,14 @@ export const PROFILE_SETTINGS: Record<
     key: "preferences",
     i18n_label: "Preferences",
   },
+  "ai-assistant": {
+    key: "ai-assistant",
+    i18n_label: "AI Assistant",
+  },
+  "auto-project-management": {
+    key: "auto-project-management",
+    i18n_label: "Auto Project Management",
+  },
   notifications: {
     key: "notifications",
     i18n_label: "Notifications",
@@ -64,6 +72,8 @@ export const GROUPED_PROFILE_SETTINGS: Record<
   [PROFILE_SETTINGS_CATEGORY.YOUR_PROFILE]: [
     PROFILE_SETTINGS["general"],
     PROFILE_SETTINGS["preferences"],
+    PROFILE_SETTINGS["ai-assistant"],
+    PROFILE_SETTINGS["auto-project-management"],
     PROFILE_SETTINGS["notifications"],
     PROFILE_SETTINGS["security"],
     PROFILE_SETTINGS["activity"],

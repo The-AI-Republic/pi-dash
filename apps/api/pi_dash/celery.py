@@ -95,6 +95,11 @@ app.conf.beat_schedule = {
         "task": "runner.sweep_agent_chat_state",
         "schedule": timedelta(seconds=30),
     },
+    # AI assistant — fail turns whose worker died so threads never wedge.
+    "assistant-sweep-stale-turns": {
+        "task": "assistant.sweep_stale_turns",
+        "schedule": timedelta(seconds=30),
+    },
     "runner-sweep-chat-message-dedupe": {
         "task": "runner.sweep_chat_message_dedupe",
         "schedule": crontab(hour=4, minute=0),
@@ -112,6 +117,12 @@ app.conf.beat_schedule = {
     # Project Scheduler scanner — see .ai_design/project_scheduler/design.md §6.1.
     "scan-due-scheduler-bindings": {
         "task": "pi_dash.bgtasks.scheduler.scan_due_bindings",
+        "schedule": crontab(minute="*"),
+    },
+    # Loop (Auto Project Management) scanner — see
+    # .ai_design/loop_project_management/design.md §7.1.
+    "scan-due-loop-targets": {
+        "task": "pi_dash.bgtasks.loop.scan_due_targets",
         "schedule": crontab(minute="*"),
     },
 }

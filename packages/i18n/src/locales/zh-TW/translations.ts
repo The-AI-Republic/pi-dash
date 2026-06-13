@@ -11,8 +11,11 @@ export default {
   "(optional — pin this issue to an existing remote branch)": "(可選 — 將此問題釘選到現有的遠端分支)",
   "{active} active / {total} total": "{active} 啟用中 / {total} 總計",
   "{count, plural, one {# install} other {# installs}}": "{count, plural, one {# 安裝} other {# 安裝}}",
+  "{count, plural, one {# project failed} other {# projects failed}}": "",
+  "{count, plural, one {# project selected} other {# projects selected}}": "",
   "{count, plural, one {Cycle} other {Cycles}}": "{count, plural, one {週期} other {週期}}",
   "{count, plural, one {Epic} other {Epics}}": "{count, plural, one {史詩} other {史詩}}",
+  "{count, plural, one {Installed on # project} other {Installed on # projects}}": "",
   "{count, plural, one {Project} other {Projects}}": "{count, plural, one {專案} other {專案}}",
   "{count, plural, one {Work item} other {Work items}}": "{count, plural, one {工作項目} other {工作項目}}",
   "{count, plural, one{# member} other{# members}}": "{count, plural, one{# 位成員} other{# 位成員}}",
@@ -48,8 +51,6 @@ export default {
   "1 day": "1 天",
   "1 month ago": "1 個月前",
   "1 week": "1 週",
-  '1. Click "Add runner", pick a project + pod and generate the CLI command.\n2. On the machine that will host the runner, run the displayed `pidash runner add` command. If the host is not logged in yet, the CLI starts `pidash auth login` first.\n3. The daemon registers the runner and it shows online here.\n\nPrerequisite: the agent CLI (codex / claude) must already be installed on the host.':
-    "1. 點擊「新增執行器」，選擇專案 + Pod 並產生 CLI 指令。\n2. 在將託管執行器的機器上，執行顯示的 `pidash runner add` 指令。如果主機尚未登入，CLI 會先啟動 `pidash auth login`。\n3. 守護程序會註冊執行器，並在此處顯示為上線狀態。\n\n先決條件：代理 CLI（codex / claude）必須已安裝在主機上。",
   "10,000-feet view of all active cycles.": "所有進行中週期的鳥瞰圖。",
   "2 weeks": "2 週",
   "3 days": "3 天",
@@ -58,6 +59,8 @@ export default {
     "一個雲端端的列，代表一個繫結到專案（以及可選的 Pod）的代理執行個體。在已登入的機器上執行 `pidash runner add` 會建立該列，並將該機器繫結為主機。一台機器可以託管多個執行器。",
   "A long-running background process that maintains the WebSocket session with Pi Dash cloud, dispatches work to the configured agent, and streams approvals + heartbeats back. One daemon per machine.":
     "一個長時間執行的背景程序，負責維護與 Pi Dash 雲端的 WebSocket 連線，將工作分派給已設定的代理，並串流回核准與心跳訊號。每台機器一個守護程序。",
+  'A runner is an AI agent instance working on a given project.\n\n1. Click "Add runner", pick a project + pod and generate the CLI command.\n2. On the machine that will host the runner, run the displayed `pidash runner add` command. If the host is not logged in yet, the CLI starts `pidash auth login` first.\n3. The daemon registers the runner and it shows online here.\n\nPrerequisite: the agent CLI (codex / claude) must already be installed on the host.':
+    "執行器是在指定專案上運作的 AI 代理執行個體。\n\n1. 點擊「新增執行器」，選擇專案 + Pod 並產生 CLI 指令。\n2. 在將託管執行器的機器上，執行顯示的 `pidash runner add` 指令。如果主機尚未登入，CLI 會先啟動 `pidash auth login`。\n3. 守護程序會註冊執行器，並在此處顯示為上線狀態。\n\n先決條件：代理 CLI（codex / claude）必須已安裝在主機上。",
   "Ability to read, write, edit, and delete entities inside projects, cycles, and modules":
     "能夠讀取、寫入、編輯和刪除專案、週期和模組內的實體",
   Accept: "接受",
@@ -287,6 +290,7 @@ export default {
   "Clear filter": "清除篩選條件",
   "Clear filters": "清除篩選條件",
   "Clear search": "清除搜尋",
+  "Clear selection": "",
   "Clear sorting": "清除排序",
   "Click the button below to join it.": "點擊下方按鈕加入。",
   "Click to add description": "點擊以新增描述",
@@ -750,6 +754,7 @@ export default {
   "Install the pidash CLI and register dev machines as AI agent runners":
     "安裝 pidash CLI 並將開發機器註冊為 AI 代理執行器",
   "Install updated": "安裝已更新",
+  Installed: "",
   "Installing…": "正在安裝…",
   Installs: "安裝",
   Intake: "Intake",
@@ -845,6 +850,7 @@ export default {
   "Load more": "載入更多",
   Loading: "載入中",
   "Loading dev machines...": "正在載入開發機器...",
+  "Loading run details…": "",
   "Loading…": "載入中…",
   "local dev machine project working dir": "本機開發機器專案工作目錄",
   "Local path the daemon runs the agent CLI in — usually the project repo on disk. Defaults to a sandbox under the runner's data dir, which is rarely what you want.":
@@ -972,6 +978,7 @@ export default {
   "No projects archived": "沒有已封存的專案",
   "No projects detected with the matching criteria. \n Create a new project instead.":
     "未找到符合條件的專案。\n請改為建立新專案。",
+  "No projects match your search.": "",
   "No prompt templates available. The Pi Dash default will be seeded on the next migrate.":
     "沒有可用的提示模板。Pi Dash 預設模板將在下次遷移時植入。",
   "No results found": "找不到結果",
@@ -1000,6 +1007,7 @@ export default {
   "No work items yet": "尚無工作項目",
   "No. of {entity}": "{entity} 的數量",
   None: "無",
+  "None selected": "",
   "Not right now": "現在不要",
   "Notes specific to this project…": "此專案的特定備註…",
   "Notification marked as archived": "通知已標記為封存",
@@ -1108,8 +1116,10 @@ export default {
   "Pi Dash: Your AI Employee Management Platform": "Pi Dash：您的 AI 員工管理平台",
   "Pick a project.": "選擇一個專案。",
   "Pick a scheduler.": "選擇一個排程器。",
+  "Pick at least one project to install this scheduler on.": "",
   "Pick from your workspace's enabled schedulers. Already-installed ones aren't listed.":
     "從您工作區已啟用的排程器中選擇。已安裝的排程器不會列出。",
+  "Pick one or more projects. One schedule applies to all of them.": "",
   "pidash CLI": "pidash CLI",
   "pidash daemon": "pidash 守護程式",
   "Plan work in focused timeframes.": "在專注的時間範圍內規劃工作。",
@@ -1293,6 +1303,7 @@ export default {
   Scope: "範圍",
   Search: "搜尋",
   "Search by title": "依標題搜尋",
+  "Search projects…": "",
   "Secret key": "密鑰",
   "Secret key copied to clipboard.": "密鑰已複製到剪貼簿。",
   Security: "安全性",
@@ -1308,6 +1319,7 @@ export default {
   "Select network": "選擇網路",
   "Select or customize your interface color scheme.": "選擇或自訂您的介面色彩配置。",
   "Select organization size": "選擇組織規模",
+  "Select projects": "",
   "Select your theme": "選擇您的主題",
   "Send invitations": "傳送邀請",
   "Send me everything": "傳送所有內容給我",
@@ -1700,6 +1712,7 @@ export default {
   You: "您",
   "You already have a cycle on the given dates, if you want to create a draft cycle, you can do that by removing both the dates.":
     "您已在指定日期有一個週期，若要建立草稿週期，可以移除這兩個日期。",
+  "You aren't a member of any project in this workspace to install on.": "",
   "You can only edit the slug of the URL": "您只能編輯網址的別名部分",
   "You can see here if someone invites you to a workspace": "您可以在這裡查看是否有人邀請您加入工作區",
   "You do not have the permission to access this page.": "您沒有權限存取此頁面。",

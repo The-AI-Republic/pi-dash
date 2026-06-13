@@ -65,6 +65,12 @@ export const coreRoutes: RouteConfigEntry[] = [
         // Workspace Home
         route(":workspaceSlug", "./(all)/[workspaceSlug]/(projects)/page.tsx"),
 
+        // AI Assistant (inside the workspace layout so the sidebar stays)
+        layout("./(all)/[workspaceSlug]/assistant/layout.tsx", [
+          route(":workspaceSlug/assistant", "./(all)/[workspaceSlug]/assistant/page.tsx"),
+          route(":workspaceSlug/assistant/:threadId", "./(all)/[workspaceSlug]/assistant/[threadId]/page.tsx"),
+        ]),
+
         // Active Cycles
         layout("./(all)/[workspaceSlug]/(projects)/active-cycles/layout.tsx", [
           route(":workspaceSlug/active-cycles", "./(all)/[workspaceSlug]/(projects)/active-cycles/page.tsx"),

@@ -6,9 +6,11 @@
 
 export * from "./activity";
 export * from "./ai";
+export * from "./assistant";
 export * from "./analytics";
 export * from "./api_token";
 export * from "./auth";
+export * from "./auto-pm";
 export * from "./calendar";
 export * from "./charts";
 export * from "./command-palette";

@@ -16,6 +16,8 @@ handler404 = "pi_dash.app.views.error_404.custom_404_view"
 
 urlpatterns = [
     path("api/", include("pi_dash.app.urls")),
+    path("api/", include("pi_dash.assistant.urls")),
+    path("api/", include("pi_dash.loop.urls")),
     path("api/public/", include("pi_dash.space.urls")),
     path("api/instances/", include("pi_dash.license.urls")),
     path("api/runners/", include("pi_dash.runner.web_urls")),

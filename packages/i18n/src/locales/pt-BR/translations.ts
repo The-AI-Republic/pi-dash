@@ -12,8 +12,11 @@ export default {
     "(opcional — fixar este issue a um branch remoto existente)",
   "{active} active / {total} total": "{active} ativo / {total} total",
   "{count, plural, one {# install} other {# installs}}": "{count, plural, one {# instalação} other {# instalações}}",
+  "{count, plural, one {# project failed} other {# projects failed}}": "",
+  "{count, plural, one {# project selected} other {# projects selected}}": "",
   "{count, plural, one {Cycle} other {Cycles}}": "{count, plural, one {Ciclo} other {Ciclos}}",
   "{count, plural, one {Epic} other {Epics}}": "{count, plural, one {Épico} other {Épicos}}",
+  "{count, plural, one {Installed on # project} other {Installed on # projects}}": "",
   "{count, plural, one {Project} other {Projects}}": "{count, plural, one {Projeto} other {Projetos}}",
   "{count, plural, one {Work item} other {Work items}}":
     "{count, plural, one {Item de trabalho} other {Itens de trabalho}}",
@@ -50,8 +53,6 @@ export default {
   "1 day": "1 dia",
   "1 month ago": "1 mês atrás",
   "1 week": "1 semana",
-  '1. Click "Add runner", pick a project + pod and generate the CLI command.\n2. On the machine that will host the runner, run the displayed `pidash runner add` command. If the host is not logged in yet, the CLI starts `pidash auth login` first.\n3. The daemon registers the runner and it shows online here.\n\nPrerequisite: the agent CLI (codex / claude) must already be installed on the host.':
-    '1. Clique em "Adicionar runner", escolha um projeto + pod e gere o comando CLI.\n2. Na máquina que hospedará o runner, execute o comando `pidash runner add` exibido. Se o host ainda não estiver logado, a CLI inicia `pidash auth login` primeiro.\n3. O daemon registra o runner e ele aparece online aqui.\n\nPré-requisito: a CLI do agente (codex / claude) já deve estar instalada no host.',
   "10,000-feet view of all active cycles.": "Visão geral de todos os ciclos ativos.",
   "2 weeks": "2 semanas",
   "3 days": "3 dias",
@@ -60,6 +61,8 @@ export default {
     "Uma linha do lado da nuvem que representa uma instância de agente vinculada a um projeto (e opcionalmente a um pod). Executar `pidash runner add` em uma máquina logada cria a linha e vincula essa máquina como host. Uma máquina pode hospedar muitos runners.",
   "A long-running background process that maintains the WebSocket session with Pi Dash cloud, dispatches work to the configured agent, and streams approvals + heartbeats back. One daemon per machine.":
     "Um processo de segundo plano de longa duração que mantém a sessão WebSocket com a nuvem Pi Dash, despacha trabalho para o agente configurado e transmite aprovações + heartbeats de volta. Um daemon por máquina.",
+  'A runner is an AI agent instance working on a given project.\n\n1. Click "Add runner", pick a project + pod and generate the CLI command.\n2. On the machine that will host the runner, run the displayed `pidash runner add` command. If the host is not logged in yet, the CLI starts `pidash auth login` first.\n3. The daemon registers the runner and it shows online here.\n\nPrerequisite: the agent CLI (codex / claude) must already be installed on the host.':
+    'Um runner é uma instância de agente de IA que trabalha em um projeto específico.\n\n1. Clique em "Adicionar runner", escolha um projeto + pod e gere o comando CLI.\n2. Na máquina que hospedará o runner, execute o comando `pidash runner add` exibido. Se o host ainda não estiver logado, a CLI inicia `pidash auth login` primeiro.\n3. O daemon registra o runner e ele aparece online aqui.\n\nPré-requisito: a CLI do agente (codex / claude) já deve estar instalada no host.',
   "Ability to read, write, edit, and delete entities inside projects, cycles, and modules":
     "Capacidade de ler, escrever, editar e excluir entidades dentro de projetos, ciclos e módulos",
   Accept: "Aceitar",
@@ -295,6 +298,7 @@ export default {
   "Clear filter": "Limpar filtro",
   "Clear filters": "Limpar filtros",
   "Clear search": "Limpar pesquisa",
+  "Clear selection": "",
   "Clear sorting": "Limpar classificação",
   "Click the button below to join it.": "Clique no botão abaixo para participar.",
   "Click to add description": "Clique para adicionar descrição",
@@ -772,6 +776,7 @@ export default {
   "Install the pidash CLI and register dev machines as AI agent runners":
     "Instale a CLI pidash e registre máquinas de desenvolvimento como runners de agente de IA",
   "Install updated": "Instalação atualizada",
+  Installed: "",
   "Installing…": "Instalando…",
   Installs: "Instalações",
   Intake: "Intake",
@@ -869,6 +874,7 @@ export default {
   "Load more": "Carregar mais",
   Loading: "Carregando",
   "Loading dev machines...": "Carregando máquinas de desenvolvimento...",
+  "Loading run details…": "",
   "Loading…": "Carregando…",
   "local dev machine project working dir": "diretório de trabalho do projeto da máquina de desenvolvimento local",
   "Local path the daemon runs the agent CLI in — usually the project repo on disk. Defaults to a sandbox under the runner's data dir, which is rarely what you want.":
@@ -1001,6 +1007,7 @@ export default {
   "No projects archived": "Nenhum projeto arquivado",
   "No projects detected with the matching criteria. \n Create a new project instead.":
     "Nenhum projeto encontrado com os critérios correspondentes. \n Crie um novo projeto.",
+  "No projects match your search.": "",
   "No prompt templates available. The Pi Dash default will be seeded on the next migrate.":
     "Nenhum modelo de prompt disponível. O padrão do Pi Dash será inserido na próxima migração.",
   "No results found": "Nenhum resultado encontrado",
@@ -1030,6 +1037,7 @@ export default {
   "No work items yet": "Nenhum item de trabalho ainda",
   "No. of {entity}": "N.º de {entity}",
   None: "Nenhum",
+  "None selected": "",
   "Not right now": "Agora não",
   "Notes specific to this project…": "Notas específicas para este projeto…",
   "Notification marked as archived": "Notificação marcada como arquivada",
@@ -1146,8 +1154,10 @@ export default {
   "Pi Dash: Your AI Employee Management Platform": "Pi Dash: Sua Plataforma de Gerenciamento de Funcionários com IA",
   "Pick a project.": "Escolha um projeto.",
   "Pick a scheduler.": "Escolha um agendador.",
+  "Pick at least one project to install this scheduler on.": "",
   "Pick from your workspace's enabled schedulers. Already-installed ones aren't listed.":
     "Escolha entre os agendadores habilitados do seu workspace. Os já instalados não são listados.",
+  "Pick one or more projects. One schedule applies to all of them.": "",
   "pidash CLI": "pidash CLI",
   "pidash daemon": "pidash daemon",
   "Plan work in focused timeframes.": "Planeje o trabalho em períodos focados.",
@@ -1336,6 +1346,7 @@ export default {
   Scope: "Escopo",
   Search: "Pesquisar",
   "Search by title": "Pesquisar por título",
+  "Search projects…": "",
   "Secret key": "Chave secreta",
   "Secret key copied to clipboard.": "Chave secreta copiada para a área de transferência.",
   Security: "Segurança",
@@ -1351,6 +1362,7 @@ export default {
   "Select network": "Selecione a rede",
   "Select or customize your interface color scheme.": "Selecione ou personalize seu esquema de cores da interface.",
   "Select organization size": "Selecione o tamanho da organização",
+  "Select projects": "",
   "Select your theme": "Selecione seu tema",
   "Send invitations": "Enviar convites",
   "Send me everything": "Envie-me tudo",
@@ -1768,6 +1780,7 @@ export default {
   You: "Você",
   "You already have a cycle on the given dates, if you want to create a draft cycle, you can do that by removing both the dates.":
     "Você já tem um ciclo nas datas fornecidas. Se quiser criar um ciclo rascunho, pode fazer isso removendo ambas as datas.",
+  "You aren't a member of any project in this workspace to install on.": "",
   "You can only edit the slug of the URL": "Você só pode editar o slug da URL",
   "You can see here if someone invites you to a workspace": "Você pode ver aqui se alguém te convida para um workspace",
   "You do not have the permission to access this page.": "Você não tem permissão para acessar esta página.",

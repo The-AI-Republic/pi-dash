@@ -109,7 +109,7 @@ export function BindingScheduleFields<T extends FieldValues>({
             <TextArea
               {...field}
               id={`field-${String(rruleName)}`}
-              rows={2}
+              className="min-h-[56px] text-13"
               placeholder="FREQ=WEEKLY;BYDAY=MO,TU,WE,TH,FR;BYHOUR=9;BYMINUTE=0"
               hasError={!!rruleErr}
             />
@@ -133,7 +133,7 @@ export function BindingScheduleFields<T extends FieldValues>({
             <TextArea
               {...field}
               id={`field-${String(extraContextName)}`}
-              rows={4}
+              className="min-h-[96px] text-13"
               placeholder={t("Notes specific to this project…")}
             />
           )}
