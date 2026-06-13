@@ -14,17 +14,12 @@
   },
   "scripts": {
     "dev": "tsdown --watch --no-clean",
-    "sync:keys": "node scripts/sync-translation-keys.mjs",
-    "translate:missing": "node scripts/translate-missing.mjs",
-    "validate:translations": "node scripts/validate-translations.mjs",
     "build": "tsdown",
     "check:lint": "oxlint --max-warnings=2 .",
     "check:types": "tsc --noEmit",
     "check:format": "oxfmt --check .",
     "fix:lint": "oxlint --fix .",
     "fix:format": "oxfmt .",
-    "test": "vitest run",
-    "test:watch": "vitest",
     "clean": "rm -rf .turbo && rm -rf .next && rm -rf node_modules && rm -rf dist"
   },
   "dependencies": {
@@ -41,7 +36,6 @@
     "@types/node": "catalog:",
     "@types/react": "catalog:",
     "tsdown": "catalog:",
-    "typescript": "catalog:",
-    "vitest": "^4.0.15"
+    "typescript": "catalog:"
   }
 }

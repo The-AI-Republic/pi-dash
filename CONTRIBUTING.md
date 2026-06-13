@@ -81,126 +81,20 @@ To ensure consistency throughout the source code:
 
 ## Contributing to language support
 
-This guide helps contributors add or update translations in the application.
+The open-source build ships **English only**. UI copy is wrapped in
+`t("Source English text")`, using the English string itself as the message id —
+there is no separate key catalogue to keep in sync, and no per-string entry to
+add when you introduce new copy.
 
-### Understanding translation structure
+Self-hosters who want to run Pi Dash in another language can add their own
+locale files; the package is built for it, with no code changes required. The
+full how-to (locale file shape, registering the language so it appears in the
+picker, ICU MessageFormat) lives next to the code in
+[`packages/i18n/README.md`](packages/i18n/README.md).
 
-#### File organization
-
-Translations are organized by language in the locales directory. Each language has its own folder containing JSON files:
-
-```
-packages/i18n/src/locales/
-    ├── en/
-    │   ├── core.json       # Critical translations
-    │   └── translations.json
-    ├── fr/
-    │   └── translations.json
-    └── [language]/
-        └── translations.json
-```
-
-#### Nested structure
-
-We use nested keys to keep translations organized:
-
-```json
-{
-  "agent": {
-    "status": {
-      "running": "Running",
-      "completed": "Completed",
-      "failed": "Failed"
-    }
-  },
-  "task": {
-    "label": "Task",
-    "title": {
-      "label": "Task title"
-    }
-  }
-}
-```
-
-### Translation formatting guide
-
-We use [IntlMessageFormat](https://formatjs.github.io/docs/intl-messageformat/) for dynamic content such as variables and pluralization:
-
-- **Simple variables**
-
-  ```json
-  {
-    "greeting": "Hello, {name}!"
-  }
-  ```
-
-- **Pluralization**
-  ```json
-  {
-    "items": "{count, plural, one {task} other {tasks}}"
-  }
-  ```
-
-### Contributing guidelines
-
-#### Updating existing translations
-
-1. Locate the key in `locales/<language>/translations.json`.
-2. Update the value while keeping the key structure intact.
-3. Preserve any existing ICU formats (e.g., variables, pluralization).
-
-#### Adding new translation keys
-
-1. When introducing a new key, add it to **all** language files (use English as a placeholder if a translation isn't available yet).
-2. Keep the nesting structure consistent across all languages.
-3. If the new key requires dynamic content, apply ICU format uniformly across all languages.
-
-### Adding new languages
-
-1. **Update type definitions**
-
-```ts
-// packages/i18n/src/types/language.ts
-export type TLanguage = "en" | "fr" | "your-lang";
-```
-
-2. **Add language configuration**
-
-```ts
-// packages/i18n/src/constants/language.ts
-export const SUPPORTED_LANGUAGES: ILanguageOption[] = [
-  { label: "English", value: "en" },
-  { label: "Your Language", value: "your-lang" },
-];
-```
-
-3. **Create translation files**
-   1. Create a new folder under locales (e.g., `locales/your-lang/`).
-   2. Add a `translations.json` file inside it.
-   3. Copy the structure from an existing translation file and translate all keys.
-
-4. **Update import logic**
-
-```ts
-private importLanguageFile(language: TLanguage): Promise<any> {
-  switch (language) {
-    case "your-lang":
-      return import("../locales/your-lang/translations.json");
-    // ...
-  }
-}
-```
-
-### Quality checklist
-
-Before submitting your contribution:
-
-- All translation keys exist in every language file
-- Nested structures match across all language files
-- ICU message formats are correctly implemented
-- All languages load without errors in the application
-- Dynamic values and pluralization work as expected
-- No missing or untranslated keys
+> The upstream multi-language locales and the key-sync / machine-translation
+> tooling that maintains them are part of Pi Dash Cloud, layered on top at build
+> time, and are not maintained in this repository.
 
 ## Need help?
 

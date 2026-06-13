@@ -5,30 +5,48 @@
  */
 
 import type { TLanguage, ILanguageOption } from "../types";
+import { locales } from "../locales";
 
 export const FALLBACK_LANGUAGE: TLanguage = "en";
 
-export const SUPPORTED_LANGUAGES: ILanguageOption[] = [
-  { label: "English", value: "en" },
-  { label: "Français", value: "fr" },
-  { label: "Español", value: "es" },
-  { label: "日本語", value: "ja" },
-  { label: "简体中文", value: "zh-CN" },
-  { label: "繁體中文", value: "zh-TW" },
-  { label: "Русский", value: "ru" },
-  { label: "Italian", value: "it" },
-  { label: "Čeština", value: "cs" },
-  { label: "Slovenčina", value: "sk" },
-  { label: "Deutsch", value: "de" },
-  { label: "Українська", value: "ua" },
-  { label: "Polski", value: "pl" },
-  { label: "한국어", value: "ko" },
-  { label: "Português Brasil", value: "pt-BR" },
-  { label: "Indonesian", value: "id" },
-  { label: "Română", value: "ro" },
-  { label: "Tiếng việt", value: "vi-VN" },
-  { label: "Türkçe", value: "tr-TR" },
-];
+/**
+ * Display names (endonyms) for every language the codebase knows about. These
+ * are metadata, not translated content, so the full table is kept here even
+ * though the open-source build ships English only — it lets locales layered in
+ * on top (see `locales/index.ts`) render with the right label automatically.
+ */
+const LANGUAGE_LABELS: Record<TLanguage, string> = {
+  en: "English",
+  fr: "Français",
+  es: "Español",
+  ja: "日本語",
+  "zh-CN": "简体中文",
+  "zh-TW": "繁體中文",
+  ru: "Русский",
+  it: "Italian",
+  cs: "Čeština",
+  sk: "Slovenčina",
+  de: "Deutsch",
+  ua: "Українська",
+  pl: "Polski",
+  ko: "한국어",
+  "pt-BR": "Português Brasil",
+  id: "Indonesian",
+  ro: "Română",
+  "vi-VN": "Tiếng việt",
+  "tr-TR": "Türkçe",
+};
+
+/**
+ * The languages actually available at runtime — derived from the `locales` map.
+ * The OSS build exposes English only; the cloud overlay swaps in a fuller
+ * `locales` map at build time and these options expand to match, with no change
+ * to consumers (the language picker reads this list).
+ */
+export const SUPPORTED_LANGUAGES: ILanguageOption[] = (Object.keys(locales) as TLanguage[]).map((value) => ({
+  label: LANGUAGE_LABELS[value] ?? value,
+  value,
+}));
 
 /**
  * Enum for translation file names

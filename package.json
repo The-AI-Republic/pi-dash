@@ -6,9 +6,6 @@
   "license": "AGPL-3.0",
   "repository": "https://github.com/The-AI-Republic/pi-dash.git",
   "scripts": {
-    "i18n:sync": "pnpm --filter @pi-dash/i18n sync:keys",
-    "i18n:translate": "pnpm --filter @pi-dash/i18n translate:missing",
-    "i18n:validate": "pnpm --filter @pi-dash/i18n validate:translations",
     "build": "turbo run build",
     "dev": "turbo run dev --concurrency=18",
     "start": "turbo run start",
