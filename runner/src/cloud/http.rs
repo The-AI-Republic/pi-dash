@@ -1073,7 +1073,14 @@ fn should_retry_post_error(err: &TransportError, attempt: u8) -> bool {
         return false;
     }
     match err {
-        TransportError::Network(_) | TransportError::RateLimited => true,
+        // Timeout/Connect are the send-level failures `classify_send_error`
+        // now splits out of `Network`; they're transient and must stay
+        // retryable here, otherwise classifying them lost the POST retry they
+        // had when they were all `Network`.
+        TransportError::Network(_)
+        | TransportError::Timeout(_)
+        | TransportError::Connect(_)
+        | TransportError::RateLimited => true,
         TransportError::Server { status, .. } => *status >= 500,
         _ => false,
     }
@@ -2242,6 +2249,16 @@ mod tests {
             0
         ));
         assert!(should_retry_post_error(&TransportError::RateLimited, 0));
+        // Timeout/Connect are transient send failures (split out of Network by
+        // classify_send_error) and must remain retryable.
+        assert!(should_retry_post_error(
+            &TransportError::Timeout("deadline".into()),
+            0
+        ));
+        assert!(should_retry_post_error(
+            &TransportError::Connect("refused".into()),
+            0
+        ));
         assert!(should_retry_post_error(
             &TransportError::Server {
                 status: 503,
