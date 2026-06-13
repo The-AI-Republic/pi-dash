@@ -159,6 +159,7 @@ export default {
   "AI agent ticking is off": "Tikanie AI agenta je vypnuté",
   "AI agent ticking is scheduled": "Tikanie AI agenta je naplánované",
   "AI Agents": "AI agenti",
+  "AI Assistant": "",
   "AI Dev Machines": "AI vývojové stroje",
   "AI Prompt Templates": "Šablóny promptov AI",
   All: "Všetky",
@@ -212,6 +213,7 @@ export default {
   Attachments: "Prílohy",
   Authentication: "Autentifikácia",
   "Authentication error": "Chyba autentifikácie",
+  "Auto Project Management": "",
   "Auto-archive closed work items": "Automaticky archivovať uzavreté pracovné položky",
   "Auto-archive work items that are closed for": "Automaticky archivovať pracovné položky, ktoré sú uzavreté po dobu",
   "Auto-assigned if blank. No spaces. If provided, use letters, digits, underscore, dot, or dash; start with a letter, digit, or underscore.":
@@ -1043,6 +1045,7 @@ export default {
   "None selected": "",
   "Not right now": "Teraz nie",
   "Notes specific to this project…": "Poznámky špecifické pre tento projekt…",
+  "Nothing is scheduled on this instance yet.": "",
   "Notification marked as archived": "Oznámenie označené ako archivované",
   "Notification marked as read": "Oznámenie označené ako prečítané",
   "Notification marked as un archived": "Oznámenie označené ako nearchivované",
@@ -1135,6 +1138,7 @@ export default {
   "Paste an issue id and click Preview to render the template against a real issue.":
     "Vložte ID problému a kliknite na Náhľad na vykreslenie šablóny na skutočnom probléme.",
   "Paste the code sent to your email": "Vložte kód odoslaný na váš e-mail",
+  "Pause all Auto Project Management": "",
   Paused: "Pozastavené",
   "paused awaiting input": "pozastavené, čaká sa na vstup",
   "Payload URL": "URL payloadu",
@@ -1144,6 +1148,8 @@ export default {
   Personal: "Osobné",
   "Personal Access Tokens": "Osobné prístupové tokeny",
   "Pi Chat": "Pi Chat",
+  "Pi Dash AI can do routine project upkeep for you automatically. It acts with your permissions and only in workspaces you belong to.":
+    "",
   "Pi Dash default": "Pi Dash predvolené",
   "Pi Dash hands AI agents (Claude Code, Codex, …) the keys to a real dev machine so they can pick up work items, write code, and open changes. Three pieces work together to make that possible:":
     "Pi Dash odovzdáva AI agentom (Claude Code, Codex, …) kľúče k skutočnému vývojovému stroju, aby mohli preberať pracovné položky, písať kód a otvárať zmeny. Tri časti spolupracujú, aby to bolo možné:",
@@ -1167,6 +1173,7 @@ export default {
   "Please select a timezone": "Prosím, vyberte časové pásmo",
   "Please select at least one invitation.": "Prosím, vyberte aspoň jednu pozvánku.",
   "Please select at least one work item": "Prosím, vyberte aspoň jednu pracovnú položku",
+  "Please try again.": "",
   Pod: "Pod",
   "Pod (optional)": "Pod (voliteľné)",
   Pods: "Pods",
@@ -1612,6 +1619,7 @@ export default {
     "Skúste iný výraz alebo nám dajte vedieť,\nak ste si istí, že vaše vyhľadávanie je správne.",
   "Try again, please.": "Skúste to znova, prosím.",
   "Try setting-up a strong password to proceed": "Skúste nastaviť silné heslo, aby ste mohli pokračovať.",
+  "Turn everything off without changing individual jobs.": "",
   "Type a command or search": "Napíšte príkaz alebo vyhľadávanie",
   "Type or paste a URL": "Napíšte alebo vložte URL",
   "Type to add a new label": "Píšte pre pridanie nového štítku",

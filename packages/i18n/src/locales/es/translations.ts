@@ -158,6 +158,7 @@ export default {
   "AI agent ticking is off": "El tic del agente de IA está apagado",
   "AI agent ticking is scheduled": "El tic del agente de IA está programado",
   "AI Agents": "Agentes de IA",
+  "AI Assistant": "",
   "AI Dev Machines": "Máquinas de desarrollo de IA",
   "AI Prompt Templates": "Plantillas de prompt de IA",
   All: "Todos",
@@ -210,6 +211,7 @@ export default {
   Attachments: "Adjuntos",
   Authentication: "Autenticación",
   "Authentication error": "Error de autenticación",
+  "Auto Project Management": "",
   "Auto-archive closed work items": "Archivar automáticamente elementos de trabajo cerrados",
   "Auto-archive work items that are closed for":
     "Archivar automáticamente elementos de trabajo que estén cerrados durante",
@@ -1050,6 +1052,7 @@ export default {
   "None selected": "",
   "Not right now": "Ahora no",
   "Notes specific to this project…": "Notas específicas de este proyecto…",
+  "Nothing is scheduled on this instance yet.": "",
   "Notification marked as archived": "Notificación marcada como archivada",
   "Notification marked as read": "Notificación marcada como leída",
   "Notification marked as un archived": "Notificación marcada como no archivada",
@@ -1145,6 +1148,7 @@ export default {
   "Paste an issue id and click Preview to render the template against a real issue.":
     "Pega un ID de incidencia y haz clic en Vista previa para renderizar la plantilla con una incidencia real.",
   "Paste the code sent to your email": "Pega el código enviado a tu correo electrónico",
+  "Pause all Auto Project Management": "",
   Paused: "Pausado",
   "paused awaiting input": "pausado esperando entrada",
   "Payload URL": "URL del payload",
@@ -1154,6 +1158,8 @@ export default {
   Personal: "Personal",
   "Personal Access Tokens": "Tokens de acceso personal",
   "Pi Chat": "Pi Chat",
+  "Pi Dash AI can do routine project upkeep for you automatically. It acts with your permissions and only in workspaces you belong to.":
+    "",
   "Pi Dash default": "Pi Dash predeterminado",
   "Pi Dash hands AI agents (Claude Code, Codex, …) the keys to a real dev machine so they can pick up work items, write code, and open changes. Three pieces work together to make that possible:":
     "Pi Dash entrega a los agentes de IA (Claude Code, Codex, …) las llaves de una máquina de desarrollo real para que puedan tomar elementos de trabajo, escribir código y abrir cambios. Tres piezas trabajan juntas para hacerlo posible:",
@@ -1177,6 +1183,7 @@ export default {
   "Please select a timezone": "Por favor, selecciona una zona horaria",
   "Please select at least one invitation.": "Por favor, selecciona al menos una invitación.",
   "Please select at least one work item": "Por favor, selecciona al menos un elemento de trabajo",
+  "Please try again.": "",
   Pod: "Pod",
   "Pod (optional)": "Pod (opcional)",
   Pods: "Pods",
@@ -1622,6 +1629,7 @@ export default {
     "Prueba con un término diferente o infórmanos\nsi estás seguro de que tu búsqueda es correcta.",
   "Try again, please.": "Inténtalo de nuevo, por favor.",
   "Try setting-up a strong password to proceed": "Intenta configurar una contraseña segura para continuar",
+  "Turn everything off without changing individual jobs.": "",
   "Type a command or search": "Escribe un comando o busca",
   "Type or paste a URL": "Escribe o pega una URL",
   "Type to add a new label": "Escribe para añadir una nueva etiqueta",

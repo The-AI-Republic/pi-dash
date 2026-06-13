@@ -157,6 +157,7 @@ export default {
   "AI agent ticking is off": "AIエージェントのティッキングがオフです",
   "AI agent ticking is scheduled": "AIエージェントのティッキングがスケジュールされています",
   "AI Agents": "AIエージェント",
+  "AI Assistant": "",
   "AI Dev Machines": "AI開発マシン",
   "AI Prompt Templates": "AIプロンプトテンプレート",
   All: "すべて",
@@ -209,6 +210,7 @@ export default {
   Attachments: "添付ファイル",
   Authentication: "認証",
   "Authentication error": "認証エラー",
+  "Auto Project Management": "",
   "Auto-archive closed work items": "クローズした作業項目を自動アーカイブ",
   "Auto-archive work items that are closed for": "クローズしてから一定期間経過した作業項目を自動アーカイブ",
   "Auto-assigned if blank. No spaces. If provided, use letters, digits, underscore, dot, or dash; start with a letter, digit, or underscore.":
@@ -1040,6 +1042,7 @@ export default {
   "None selected": "",
   "Not right now": "今はやめておきます",
   "Notes specific to this project…": "このプロジェクト固有のメモ…",
+  "Nothing is scheduled on this instance yet.": "",
   "Notification marked as archived": "通知がアーカイブ済みとしてマークされました",
   "Notification marked as read": "通知が既読としてマークされました",
   "Notification marked as un archived": "通知がアーカイブ解除としてマークされました",
@@ -1130,6 +1133,7 @@ export default {
   "Paste an issue id and click Preview to render the template against a real issue.":
     "問題IDを貼り付けて「プレビュー」をクリックすると、実際の問題に対してテンプレートが表示されます。",
   "Paste the code sent to your email": "メールに送信されたコードを貼り付けてください",
+  "Pause all Auto Project Management": "",
   Paused: "一時停止中",
   "paused awaiting input": "入力待ちで一時停止中",
   "Payload URL": "ペイロードURL",
@@ -1139,6 +1143,8 @@ export default {
   Personal: "個人",
   "Personal Access Tokens": "個人アクセストークン",
   "Pi Chat": "Pi Chat",
+  "Pi Dash AI can do routine project upkeep for you automatically. It acts with your permissions and only in workspaces you belong to.":
+    "",
   "Pi Dash default": "Pi Dash デフォルト",
   "Pi Dash hands AI agents (Claude Code, Codex, …) the keys to a real dev machine so they can pick up work items, write code, and open changes. Three pieces work together to make that possible:":
     "Pi Dashは、AIエージェント（Claude Code、Codexなど）に実際の開発マシンの鍵を渡し、作業項目を取得してコードを書き、変更を開くことができるようにします。これを可能にするために、3つの要素が連携します:",
@@ -1162,6 +1168,7 @@ export default {
   "Please select a timezone": "タイムゾーンを選択してください。",
   "Please select at least one invitation.": "少なくとも1つの招待を選択してください。",
   "Please select at least one work item": "少なくとも1つの作業項目を選択してください。",
+  "Please try again.": "",
   Pod: "ポッド",
   "Pod (optional)": "ポッド（オプション）",
   Pods: "ポッド",
@@ -1606,6 +1613,7 @@ export default {
     "別の用語をお試しいただくか、\n検索が正しいと確信している場合はお知らせください。",
   "Try again, please.": "もう一度お試しください。",
   "Try setting-up a strong password to proceed": "続行するには強力なパスワードを設定してください。",
+  "Turn everything off without changing individual jobs.": "",
   "Type a command or search": "コマンドまたは検索を入力",
   "Type or paste a URL": "URLを入力または貼り付け",
   "Type to add a new label": "新しいラベルを追加するには入力",

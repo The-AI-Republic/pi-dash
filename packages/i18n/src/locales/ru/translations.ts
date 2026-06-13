@@ -161,6 +161,7 @@ export default {
   "AI agent ticking is off": "Тикание AI-агента выключено",
   "AI agent ticking is scheduled": "Тикание AI-агента запланировано",
   "AI Agents": "AI-агенты",
+  "AI Assistant": "",
   "AI Dev Machines": "AI-машины разработки",
   "AI Prompt Templates": "Шаблоны AI-подсказок",
   All: "Все",
@@ -214,6 +215,7 @@ export default {
   Attachments: "Вложения",
   Authentication: "Аутентификация",
   "Authentication error": "Ошибка аутентификации",
+  "Auto Project Management": "",
   "Auto-archive closed work items": "Автоархивация закрытых рабочих элементов",
   "Auto-archive work items that are closed for": "Автоархивация рабочих элементов, закрытых на",
   "Auto-assigned if blank. No spaces. If provided, use letters, digits, underscore, dot, or dash; start with a letter, digit, or underscore.":
@@ -1048,6 +1050,7 @@ export default {
   "None selected": "",
   "Not right now": "Не сейчас",
   "Notes specific to this project…": "Заметки, относящиеся к этому проекту…",
+  "Nothing is scheduled on this instance yet.": "",
   "Notification marked as archived": "Уведомление помечено как архивированное",
   "Notification marked as read": "Уведомление помечено как прочитанное",
   "Notification marked as un archived": "Уведомление помечено как неархивированное",
@@ -1141,6 +1144,7 @@ export default {
   "Paste an issue id and click Preview to render the template against a real issue.":
     "Вставьте идентификатор задачи и нажмите «Предварительный просмотр», чтобы отобразить шаблон на основе реальной задачи.",
   "Paste the code sent to your email": "Вставьте код, отправленный на вашу электронную почту",
+  "Pause all Auto Project Management": "",
   Paused: "Приостановлено",
   "paused awaiting input": "приостановлено в ожидании ввода",
   "Payload URL": "URL-адрес полезной нагрузки",
@@ -1150,6 +1154,8 @@ export default {
   Personal: "Личное",
   "Personal Access Tokens": "Персональные токены доступа",
   "Pi Chat": "Pi Chat",
+  "Pi Dash AI can do routine project upkeep for you automatically. It acts with your permissions and only in workspaces you belong to.":
+    "",
   "Pi Dash default": "Pi Dash по умолчанию",
   "Pi Dash hands AI agents (Claude Code, Codex, …) the keys to a real dev machine so they can pick up work items, write code, and open changes. Three pieces work together to make that possible:":
     "Pi Dash предоставляет AI-агентам (Claude Code, Codex, …) ключи к реальной машине разработчика, чтобы они могли брать задачи, писать код и открывать изменения. Три компонента работают вместе, чтобы сделать это возможным:",
@@ -1174,6 +1180,7 @@ export default {
   "Please select a timezone": "Пожалуйста, выберите часовой пояс",
   "Please select at least one invitation.": "Пожалуйста, выберите хотя бы одно приглашение.",
   "Please select at least one work item": "Пожалуйста, выберите хотя бы один рабочий элемент",
+  "Please try again.": "",
   Pod: "Под",
   "Pod (optional)": "Под (необязательно)",
   Pods: "Поды",
@@ -1621,6 +1628,7 @@ export default {
     "Попробуйте другой термин или сообщите нам,\nесли уверены, что ваш поиск правильный.",
   "Try again, please.": "Пожалуйста, попробуйте снова.",
   "Try setting-up a strong password to proceed": "Попробуйте установить надежный пароль, чтобы продолжить",
+  "Turn everything off without changing individual jobs.": "",
   "Type a command or search": "Введите команду или поиск",
   "Type or paste a URL": "Введите или вставьте URL",
   "Type to add a new label": "Введите текст, чтобы добавить новую метку",

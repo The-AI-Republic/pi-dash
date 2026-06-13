@@ -159,6 +159,7 @@ export default {
   "AI agent ticking is off": "Ticăitul agentului AI este oprit",
   "AI agent ticking is scheduled": "Ticăitul agentului AI este programat",
   "AI Agents": "Agenți AI",
+  "AI Assistant": "",
   "AI Dev Machines": "Mașini de dezvoltare AI",
   "AI Prompt Templates": "Șabloane de prompt AI",
   All: "Toate",
@@ -213,6 +214,7 @@ export default {
   Attachments: "Atașamente",
   Authentication: "Autentificare",
   "Authentication error": "Eroare de autentificare",
+  "Auto Project Management": "",
   "Auto-archive closed work items": "Arhivare automată a elementelor de lucru închise",
   "Auto-archive work items that are closed for": "Arhivare automată a elementelor de lucru care sunt închise de",
   "Auto-assigned if blank. No spaces. If provided, use letters, digits, underscore, dot, or dash; start with a letter, digit, or underscore.":
@@ -1056,6 +1058,7 @@ export default {
   "None selected": "",
   "Not right now": "Nu acum",
   "Notes specific to this project…": "Note specifice acestui proiect…",
+  "Nothing is scheduled on this instance yet.": "",
   "Notification marked as archived": "Notificare marcată ca arhivată",
   "Notification marked as read": "Notificare marcată ca citită",
   "Notification marked as un archived": "Notificare marcată ca nearhivată",
@@ -1148,6 +1151,7 @@ export default {
   "Paste an issue id and click Preview to render the template against a real issue.":
     "Lipiți un ID de problemă și faceți clic pe Previzualizare pentru a reda șablonul pe o problemă reală.",
   "Paste the code sent to your email": "Lipiți codul trimis pe e-mail",
+  "Pause all Auto Project Management": "",
   Paused: "În pauză",
   "paused awaiting input": "în pauză, așteptând intrare",
   "Payload URL": "URL-ul sarcinii",
@@ -1157,6 +1161,8 @@ export default {
   Personal: "Personal",
   "Personal Access Tokens": "Token-uri de acces personale",
   "Pi Chat": "Pi Chat",
+  "Pi Dash AI can do routine project upkeep for you automatically. It acts with your permissions and only in workspaces you belong to.":
+    "",
   "Pi Dash default": "Pi Dash implicit",
   "Pi Dash hands AI agents (Claude Code, Codex, …) the keys to a real dev machine so they can pick up work items, write code, and open changes. Three pieces work together to make that possible:":
     "Pi Dash pune la dispoziția agenților AI (Claude Code, Codex, …) cheile unei mașini de dezvoltare reale, astfel încât aceștia să poată prelua elemente de lucru, scrie cod și deschide modificări. Trei componente lucrează împreună pentru a face acest lucru posibil:",
@@ -1180,6 +1186,7 @@ export default {
   "Please select a timezone": "Vă rugăm să selectați un fus orar.",
   "Please select at least one invitation.": "Vă rugăm să selectați cel puțin o invitație.",
   "Please select at least one work item": "Vă rugăm să selectați cel puțin un element de lucru.",
+  "Please try again.": "",
   Pod: "Pod",
   "Pod (optional)": "Pod (opțional)",
   Pods: "Pods",
@@ -1626,6 +1633,7 @@ export default {
     "Încercați un alt termen sau anunțați-ne\ndacă sunteți sigur că căutarea dvs. este corectă.",
   "Try again, please.": "Încercați din nou, vă rog.",
   "Try setting-up a strong password to proceed": "Încercați să setați o parolă puternică pentru a continua",
+  "Turn everything off without changing individual jobs.": "",
   "Type a command or search": "Tastați o comandă sau căutați",
   "Type or paste a URL": "Tastați sau lipiți un URL",
   "Type to add a new label": "Tastați pentru a adăuga o etichetă nouă",

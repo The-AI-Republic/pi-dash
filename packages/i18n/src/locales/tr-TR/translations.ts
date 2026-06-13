@@ -157,6 +157,7 @@ export default {
   "AI agent ticking is off": "Yapay zeka ajanı zamanlaması kapalı",
   "AI agent ticking is scheduled": "Yapay zeka ajanı zamanlaması planlandı",
   "AI Agents": "Yapay Zeka Ajanları",
+  "AI Assistant": "",
   "AI Dev Machines": "Yapay Zeka Geliştirme Makineleri",
   "AI Prompt Templates": "Yapay Zeka İstem Şablonları",
   All: "Tümü",
@@ -209,6 +210,7 @@ export default {
   Attachments: "Ekler",
   Authentication: "Kimlik doğrulama",
   "Authentication error": "Kimlik doğrulama hatası",
+  "Auto Project Management": "",
   "Auto-archive closed work items": "Kapalı iş öğelerini otomatik arşivle",
   "Auto-archive work items that are closed for": "Şu kadar süredir kapalı olan iş öğelerini otomatik arşivle",
   "Auto-assigned if blank. No spaces. If provided, use letters, digits, underscore, dot, or dash; start with a letter, digit, or underscore.":
@@ -1037,6 +1039,7 @@ export default {
   "None selected": "",
   "Not right now": "Şu anda değil",
   "Notes specific to this project…": "Bu projeye özel notlar…",
+  "Nothing is scheduled on this instance yet.": "",
   "Notification marked as archived": "Bildirim arşivlendi olarak işaretlendi",
   "Notification marked as read": "Bildirim okundu olarak işaretlendi",
   "Notification marked as un archived": "Bildirim arşivden çıkarıldı olarak işaretlendi",
@@ -1129,6 +1132,7 @@ export default {
   "Paste an issue id and click Preview to render the template against a real issue.":
     "Bir sorun kimliği yapıştırın ve şablonu gerçek bir soruna karşı işlemek için Önizleme'ye tıklayın.",
   "Paste the code sent to your email": "E-postanıza gönderilen kodu yapıştırın",
+  "Pause all Auto Project Management": "",
   Paused: "Duraklatıldı",
   "paused awaiting input": "girdi bekleniyor, duraklatıldı",
   "Payload URL": "Yük URL'si",
@@ -1138,6 +1142,8 @@ export default {
   Personal: "Kişisel",
   "Personal Access Tokens": "Kişisel Erişim Belirteçleri",
   "Pi Chat": "Pi Chat",
+  "Pi Dash AI can do routine project upkeep for you automatically. It acts with your permissions and only in workspaces you belong to.":
+    "",
   "Pi Dash default": "Pi Dash varsayılan",
   "Pi Dash hands AI agents (Claude Code, Codex, …) the keys to a real dev machine so they can pick up work items, write code, and open changes. Three pieces work together to make that possible:":
     "Pi Dash, AI ajanlarına (Claude Code, Codex, …) gerçek bir geliştirme makinesinin anahtarlarını verir, böylece iş öğelerini alabilir, kod yazabilir ve değişiklikler açabilirler. Bunu mümkün kılmak için üç parça birlikte çalışır:",
@@ -1162,6 +1168,7 @@ export default {
   "Please select a timezone": "Lütfen bir saat dilimi seçin",
   "Please select at least one invitation.": "Lütfen en az bir davetiye seçin.",
   "Please select at least one work item": "Lütfen en az bir iş öğesi seçin",
+  "Please try again.": "",
   Pod: "Pod",
   "Pod (optional)": "Pod (isteğe bağlı)",
   Pods: "Podlar",
@@ -1606,6 +1613,7 @@ export default {
     "Farklı bir terim deneyin veya aramanızın doğru olduğundan eminseniz bize bildirin.",
   "Try again, please.": "Lütfen tekrar deneyin.",
   "Try setting-up a strong password to proceed": "Devam etmek için güçlü bir parola oluşturmayı deneyin",
+  "Turn everything off without changing individual jobs.": "",
   "Type a command or search": "Bir komut yazın veya arama yapın",
   "Type or paste a URL": "Bir URL yazın veya yapıştırın",
   "Type to add a new label": "Yeni bir etiket eklemek için yazın",

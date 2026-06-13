@@ -154,6 +154,7 @@ export default {
   "AI agent ticking is off": "AI 代理定时触发已关闭",
   "AI agent ticking is scheduled": "AI 代理定时触发已计划",
   "AI Agents": "AI 代理",
+  "AI Assistant": "",
   "AI Dev Machines": "AI 开发机器",
   "AI Prompt Templates": "AI 提示模板",
   All: "全部",
@@ -204,6 +205,7 @@ export default {
   Attachments: "附件",
   Authentication: "身份验证",
   "Authentication error": "身份验证错误",
+  "Auto Project Management": "",
   "Auto-archive closed work items": "自动归档已关闭的工作项",
   "Auto-archive work items that are closed for": "自动归档已关闭超过以下时间的工作项",
   "Auto-assigned if blank. No spaces. If provided, use letters, digits, underscore, dot, or dash; start with a letter, digit, or underscore.":
@@ -1011,6 +1013,7 @@ export default {
   "None selected": "",
   "Not right now": "暂时不要",
   "Notes specific to this project…": "此项目的特定备注…",
+  "Nothing is scheduled on this instance yet.": "",
   "Notification marked as archived": "通知已标记为归档",
   "Notification marked as read": "通知已标记为已读",
   "Notification marked as un archived": "通知已标记为取消归档",
@@ -1097,6 +1100,7 @@ export default {
   "Paste an issue id and click Preview to render the template against a real issue.":
     "粘贴问题ID，然后点击预览，以根据真实问题渲染模板。",
   "Paste the code sent to your email": "粘贴发送到您邮箱的验证码",
+  "Pause all Auto Project Management": "",
   Paused: "已暂停",
   "paused awaiting input": "已暂停，等待输入",
   "Payload URL": "负载URL",
@@ -1106,6 +1110,8 @@ export default {
   Personal: "个人",
   "Personal Access Tokens": "个人访问令牌",
   "Pi Chat": "Pi Chat",
+  "Pi Dash AI can do routine project upkeep for you automatically. It acts with your permissions and only in workspaces you belong to.":
+    "",
   "Pi Dash default": "Pi Dash 默认",
   "Pi Dash hands AI agents (Claude Code, Codex, …) the keys to a real dev machine so they can pick up work items, write code, and open changes. Three pieces work together to make that possible:":
     "Pi Dash 将 AI 代理（Claude Code、Codex 等）的钥匙交给真实的开发机器，以便它们可以领取工作项、编写代码并打开更改。三个部分协同工作以实现这一点：",
@@ -1129,6 +1135,7 @@ export default {
   "Please select a timezone": "请选择一个时区",
   "Please select at least one invitation.": "请至少选择一个邀请。",
   "Please select at least one work item": "请至少选择一个工作项",
+  "Please try again.": "",
   Pod: "Pod",
   "Pod (optional)": "Pod（可选）",
   Pods: "Pods",
@@ -1553,6 +1560,7 @@ export default {
     "尝试其他搜索词，或者\n如果您确定搜索正确，请告知我们。",
   "Try again, please.": "请重试。",
   "Try setting-up a strong password to proceed": "请设置一个强密码以继续",
+  "Turn everything off without changing individual jobs.": "",
   "Type a command or search": "输入命令或搜索",
   "Type or paste a URL": "输入或粘贴URL",
   "Type to add a new label": "输入以添加新标签",

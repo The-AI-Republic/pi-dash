@@ -157,6 +157,7 @@ export default {
   "AI agent ticking is off": "Tính năng định kỳ của tác nhân AI đang tắt",
   "AI agent ticking is scheduled": "Tính năng định kỳ của tác nhân AI đã được lên lịch",
   "AI Agents": "Tác nhân AI",
+  "AI Assistant": "",
   "AI Dev Machines": "Máy phát triển AI",
   "AI Prompt Templates": "Mẫu lời nhắc AI",
   All: "Tất cả",
@@ -209,6 +210,7 @@ export default {
   Attachments: "Các tệp đính kèm",
   Authentication: "Xác thực",
   "Authentication error": "Lỗi xác thực",
+  "Auto Project Management": "",
   "Auto-archive closed work items": "Tự động lưu trữ các mục công việc đã đóng",
   "Auto-archive work items that are closed for": "Tự động lưu trữ các mục công việc đã đóng trong",
   "Auto-assigned if blank. No spaces. If provided, use letters, digits, underscore, dot, or dash; start with a letter, digit, or underscore.":
@@ -1036,6 +1038,7 @@ export default {
   "None selected": "",
   "Not right now": "Không phải bây giờ",
   "Notes specific to this project…": "Ghi chú cụ thể cho dự án này…",
+  "Nothing is scheduled on this instance yet.": "",
   "Notification marked as archived": "Thông báo được đánh dấu là đã lưu trữ",
   "Notification marked as read": "Thông báo được đánh dấu là đã đọc",
   "Notification marked as un archived": "Thông báo được đánh dấu là chưa lưu trữ",
@@ -1129,6 +1132,7 @@ export default {
   "Paste an issue id and click Preview to render the template against a real issue.":
     "Dán ID sự cố và nhấp vào Xem trước để hiển thị mẫu dựa trên một sự cố thực tế.",
   "Paste the code sent to your email": "Dán mã được gửi đến email của bạn",
+  "Pause all Auto Project Management": "",
   Paused: "Đã tạm dừng",
   "paused awaiting input": "đã tạm dừng chờ đầu vào",
   "Payload URL": "URL tải trọng",
@@ -1138,6 +1142,8 @@ export default {
   Personal: "Cá nhân",
   "Personal Access Tokens": "Mã thông báo truy cập cá nhân",
   "Pi Chat": "Pi Chat",
+  "Pi Dash AI can do routine project upkeep for you automatically. It acts with your permissions and only in workspaces you belong to.":
+    "",
   "Pi Dash default": "Pi Dash mặc định",
   "Pi Dash hands AI agents (Claude Code, Codex, …) the keys to a real dev machine so they can pick up work items, write code, and open changes. Three pieces work together to make that possible:":
     "Pi Dash trao cho các tác nhân AI (Claude Code, Codex, …) chìa khóa để truy cập vào một máy phát triển thực tế, giúp họ có thể nhận các mục công việc, viết mã và mở các thay đổi. Ba phần phối hợp với nhau để thực hiện điều đó:",
@@ -1161,6 +1167,7 @@ export default {
   "Please select a timezone": "Vui lòng chọn múi giờ",
   "Please select at least one invitation.": "Vui lòng chọn ít nhất một lời mời.",
   "Please select at least one work item": "Vui lòng chọn ít nhất một mục công việc",
+  "Please try again.": "",
   Pod: "Pod",
   "Pod (optional)": "Pod (tùy chọn)",
   Pods: "Pod",
@@ -1607,6 +1614,7 @@ export default {
     "Hãy thử một thuật ngữ khác hoặc cho chúng tôi biết\nnếu bạn chắc chắn rằng tìm kiếm của mình là đúng.",
   "Try again, please.": "Vui lòng thử lại.",
   "Try setting-up a strong password to proceed": "Hãy thiết lập một mật khẩu mạnh để tiếp tục",
+  "Turn everything off without changing individual jobs.": "",
   "Type a command or search": "Nhập lệnh hoặc tìm kiếm",
   "Type or paste a URL": "Nhập hoặc dán URL",
   "Type to add a new label": "Nhập để thêm nhãn mới",

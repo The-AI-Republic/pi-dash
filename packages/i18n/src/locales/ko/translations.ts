@@ -155,6 +155,7 @@ export default {
   "AI agent ticking is off": "AI 에이전트 틱이 꺼져 있습니다",
   "AI agent ticking is scheduled": "AI 에이전트 틱이 예약되었습니다",
   "AI Agents": "AI 에이전트",
+  "AI Assistant": "",
   "AI Dev Machines": "AI 개발 머신",
   "AI Prompt Templates": "AI 프롬프트 템플릿",
   All: "모두",
@@ -207,6 +208,7 @@ export default {
   Attachments: "첨부파일들",
   Authentication: "인증",
   "Authentication error": "인증 오류",
+  "Auto Project Management": "",
   "Auto-archive closed work items": "닫힌 작업 항목 자동 보관",
   "Auto-archive work items that are closed for": "다음 기간 동안 닫힌 작업 항목 자동 보관",
   "Auto-assigned if blank. No spaces. If provided, use letters, digits, underscore, dot, or dash; start with a letter, digit, or underscore.":
@@ -1025,6 +1027,7 @@ export default {
   "None selected": "",
   "Not right now": "지금은 안 함",
   "Notes specific to this project…": "이 프로젝트에 대한 노트…",
+  "Nothing is scheduled on this instance yet.": "",
   "Notification marked as archived": "알림이 보관됨으로 표시됨",
   "Notification marked as read": "알림이 읽음으로 표시됨",
   "Notification marked as un archived": "알림이 보관 해제됨으로 표시됨",
@@ -1113,6 +1116,7 @@ export default {
   "Paste an issue id and click Preview to render the template against a real issue.":
     "이슈 ID를 붙여넣고 미리보기를 클릭하여 실제 이슈에 대해 템플릿을 렌더링하세요.",
   "Paste the code sent to your email": "이메일로 전송된 코드를 붙여넣으세요.",
+  "Pause all Auto Project Management": "",
   Paused: "일시 중지됨",
   "paused awaiting input": "입력 대기 중 일시 중지됨",
   "Payload URL": "페이로드 URL",
@@ -1122,6 +1126,8 @@ export default {
   Personal: "개인",
   "Personal Access Tokens": "개인 액세스 토큰",
   "Pi Chat": "Pi 채팅",
+  "Pi Dash AI can do routine project upkeep for you automatically. It acts with your permissions and only in workspaces you belong to.":
+    "",
   "Pi Dash default": "Pi Dash 기본값",
   "Pi Dash hands AI agents (Claude Code, Codex, …) the keys to a real dev machine so they can pick up work items, write code, and open changes. Three pieces work together to make that possible:":
     "Pi Dash는 AI 에이전트(Claude Code, Codex 등)에게 실제 개발 머신의 키를 제공하여 작업 항목을 선택하고, 코드를 작성하고, 변경 사항을 열 수 있도록 합니다. 이를 가능하게 하는 세 가지 요소가 함께 작동합니다:",
@@ -1146,6 +1152,7 @@ export default {
   "Please select a timezone": "시간대를 선택해 주세요.",
   "Please select at least one invitation.": "초대를 하나 이상 선택해 주세요.",
   "Please select at least one work item": "작업 항목을 하나 이상 선택해 주세요.",
+  "Please try again.": "",
   Pod: "Pod",
   "Pod (optional)": "Pod (선택사항)",
   Pods: "Pods",
@@ -1585,6 +1592,7 @@ export default {
     "다른 용어를 시도하거나\n검색이 정확하다고 확신하면 알려주세요.",
   "Try again, please.": "다시 시도해 주세요.",
   "Try setting-up a strong password to proceed": "계속하려면 강력한 비밀번호를 설정하세요.",
+  "Turn everything off without changing individual jobs.": "",
   "Type a command or search": "명령어를 입력하거나 검색하세요.",
   "Type or paste a URL": "URL을 입력하거나 붙여넣으세요.",
   "Type to add a new label": "새 레이블을 추가하려면 입력하세요.",

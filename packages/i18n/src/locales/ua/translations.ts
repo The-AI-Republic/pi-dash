@@ -160,6 +160,7 @@ export default {
   "AI agent ticking is off": "Тікання AI агента вимкнено",
   "AI agent ticking is scheduled": "Тікання AI агента заплановано",
   "AI Agents": "AI Агенти",
+  "AI Assistant": "",
   "AI Dev Machines": "AI Dev Machines",
   "AI Prompt Templates": "AI Prompt Templates",
   All: "Усі",
@@ -212,6 +213,7 @@ export default {
   Attachments: "Вкладення",
   Authentication: "Автентифікація",
   "Authentication error": "Помилка автентифікації",
+  "Auto Project Management": "",
   "Auto-archive closed work items": "Автоматичне архівування закритих робочих елементів",
   "Auto-archive work items that are closed for": "Автоматичне архівування робочих елементів, які закриті протягом",
   "Auto-assigned if blank. No spaces. If provided, use letters, digits, underscore, dot, or dash; start with a letter, digit, or underscore.":
@@ -1042,6 +1044,7 @@ export default {
   "None selected": "",
   "Not right now": "Не зараз",
   "Notes specific to this project…": "Нотатки, специфічні для цього проекту…",
+  "Nothing is scheduled on this instance yet.": "",
   "Notification marked as archived": "Сповіщення позначено як архівоване",
   "Notification marked as read": "Сповіщення позначено як прочитане",
   "Notification marked as un archived": "Сповіщення позначено як неархівоване",
@@ -1135,6 +1138,7 @@ export default {
   "Paste an issue id and click Preview to render the template against a real issue.":
     "Вставте ідентифікатор завдання та натисніть «Попередній перегляд», щоб відобразити шаблон на основі реального завдання.",
   "Paste the code sent to your email": "Вставте код, надісланий на вашу електронну пошту",
+  "Pause all Auto Project Management": "",
   Paused: "Призупинено",
   "paused awaiting input": "призупинено в очікуванні введення",
   "Payload URL": "URL-адреса корисного навантаження",
@@ -1144,6 +1148,8 @@ export default {
   Personal: "Особисте",
   "Personal Access Tokens": "Особисті токени доступу",
   "Pi Chat": "Pi Chat",
+  "Pi Dash AI can do routine project upkeep for you automatically. It acts with your permissions and only in workspaces you belong to.":
+    "",
   "Pi Dash default": "Pi Dash за замовчуванням",
   "Pi Dash hands AI agents (Claude Code, Codex, …) the keys to a real dev machine so they can pick up work items, write code, and open changes. Three pieces work together to make that possible:":
     "Pi Dash надає AI-агентам (Claude Code, Codex, …) ключі до реальної машини розробника, щоб вони могли брати робочі завдання, писати код і відкривати зміни. Три компоненти працюють разом, щоб зробити це можливим:",
@@ -1167,6 +1173,7 @@ export default {
   "Please select a timezone": "Будь ласка, виберіть часовий пояс",
   "Please select at least one invitation.": "Будь ласка, виберіть принаймні одне запрошення.",
   "Please select at least one work item": "Будь ласка, виберіть принаймні один робочий елемент",
+  "Please try again.": "",
   Pod: "Под",
   "Pod (optional)": "Под (необов'язково)",
   Pods: "Поди",
@@ -1612,6 +1619,7 @@ export default {
     "Спробуйте інший термін або повідомте нас,\nякщо ви впевнені, що ваш пошук правильний.",
   "Try again, please.": "Спробуйте ще раз, будь ласка.",
   "Try setting-up a strong password to proceed": "Спробуйте встановити надійний пароль, щоб продовжити.",
+  "Turn everything off without changing individual jobs.": "",
   "Type a command or search": "Введіть команду або пошук",
   "Type or paste a URL": "Введіть або вставте URL",
   "Type to add a new label": "Введіть, щоб додати нову мітку",

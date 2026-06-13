@@ -156,6 +156,7 @@ export default {
   "AI agent ticking is off": "Tick agen AI nonaktif",
   "AI agent ticking is scheduled": "Tick agen AI dijadwalkan",
   "AI Agents": "Agen AI",
+  "AI Assistant": "",
   "AI Dev Machines": "Mesin Dev AI",
   "AI Prompt Templates": "Template Prompt AI",
   All: "Semua",
@@ -208,6 +209,7 @@ export default {
   Attachments: "Lampiran",
   Authentication: "Autentikasi",
   "Authentication error": "Kesalahan autentikasi",
+  "Auto Project Management": "",
   "Auto-archive closed work items": "Arsipkan otomatis item kerja yang ditutup",
   "Auto-archive work items that are closed for": "Arsipkan otomatis item kerja yang ditutup selama",
   "Auto-assigned if blank. No spaces. If provided, use letters, digits, underscore, dot, or dash; start with a letter, digit, or underscore.":
@@ -1035,6 +1037,7 @@ export default {
   "None selected": "",
   "Not right now": "Tidak sekarang",
   "Notes specific to this project…": "Catatan khusus untuk proyek ini…",
+  "Nothing is scheduled on this instance yet.": "",
   "Notification marked as archived": "Notifikasi ditandai sebagai diarsipkan",
   "Notification marked as read": "Notifikasi ditandai sebagai dibaca",
   "Notification marked as un archived": "Notifikasi ditandai sebagai tidak diarsipkan",
@@ -1127,6 +1130,7 @@ export default {
   "Paste an issue id and click Preview to render the template against a real issue.":
     "Tempelkan ID masalah dan klik Pratinjau untuk merender templat terhadap masalah nyata.",
   "Paste the code sent to your email": "Tempelkan kode yang dikirim ke email Anda",
+  "Pause all Auto Project Management": "",
   Paused: "Dijeda",
   "paused awaiting input": "dijeda menunggu masukan",
   "Payload URL": "URL Muatan",
@@ -1136,6 +1140,8 @@ export default {
   Personal: "Pribadi",
   "Personal Access Tokens": "Token Akses Pribadi",
   "Pi Chat": "Pi Chat",
+  "Pi Dash AI can do routine project upkeep for you automatically. It acts with your permissions and only in workspaces you belong to.":
+    "",
   "Pi Dash default": "Default Pi Dash",
   "Pi Dash hands AI agents (Claude Code, Codex, …) the keys to a real dev machine so they can pick up work items, write code, and open changes. Three pieces work together to make that possible:":
     "Pi Dash memberikan kunci mesin dev nyata kepada agen AI (Claude Code, Codex, …) sehingga mereka dapat mengambil item pekerjaan, menulis kode, dan membuka perubahan. Tiga bagian bekerja bersama untuk memungkinkan hal tersebut:",
@@ -1160,6 +1166,7 @@ export default {
   "Please select a timezone": "Harap pilih zona waktu",
   "Please select at least one invitation.": "Harap pilih setidaknya satu undangan.",
   "Please select at least one work item": "Harap pilih setidaknya satu item pekerjaan",
+  "Please try again.": "",
   Pod: "Pod",
   "Pod (optional)": "Pod (opsional)",
   Pods: "Pod",
@@ -1602,6 +1609,7 @@ export default {
     "Coba istilah lain atau beri tahu kami\njika Anda yakin pencarian Anda benar.",
   "Try again, please.": "Coba lagi.",
   "Try setting-up a strong password to proceed": "Coba atur kata sandi yang kuat untuk melanjutkan",
+  "Turn everything off without changing individual jobs.": "",
   "Type a command or search": "Ketik perintah atau cari",
   "Type or paste a URL": "Ketik atau tempel URL",
   "Type to add a new label": "Ketik untuk menambahkan label baru",
