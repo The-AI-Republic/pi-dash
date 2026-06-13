@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 # See the LICENSE file for details.
 
-from django.urls import path
+from django.urls import include, path
 
 from pi_dash.license.api.views import (
     EmailCredentialCheckEndpoint,
@@ -71,4 +71,7 @@ urlpatterns = [
         name="instance-workspace-availability",
     ),
     path("workspaces/", InstanceWorkSpaceEndpoint.as_view(), name="instance-workspace"),
+    # Loop (Auto Project Management) admin — see
+    # .ai_design/loop_project_management/design.md §9.2.
+    path("loop/", include("pi_dash.loop.admin_urls")),
 ]

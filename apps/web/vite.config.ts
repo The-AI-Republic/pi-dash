@@ -21,6 +21,13 @@ export default defineConfig(() => ({
   build: {
     assetsInlineLimit: 0,
   },
+  // Pre-bundle react-markdown. It's reached lazily via the assistant chat
+  // route, so otherwise Vite discovers it on first navigation and 504s the
+  // in-flight import ("Outdated Optimize Dep"), blanking the page. Pre-bundling
+  // it (and its transitive remark/rehype stack) at server start avoids that.
+  optimizeDeps: {
+    include: ["react-markdown"],
+  },
   plugins: [reactRouter(), tsconfigPaths({ projects: [path.resolve(__dirname, "tsconfig.json")] })],
   resolve: {
     alias: {

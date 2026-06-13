@@ -12,8 +12,11 @@ export default {
     "(необязательно — прикрепить эту задачу к существующей удаленной ветке)",
   "{active} active / {total} total": "{active} активных / {total} всего",
   "{count, plural, one {# install} other {# installs}}": "{count, plural, one {# установка} other {# установок}}",
+  "{count, plural, one {# project failed} other {# projects failed}}": "",
+  "{count, plural, one {# project selected} other {# projects selected}}": "",
   "{count, plural, one {Cycle} other {Cycles}}": "{count, plural, one {# Цикл} other {# Циклов}}",
   "{count, plural, one {Epic} other {Epics}}": "{count, plural, one {# Эпик} other {# Эпиков}}",
+  "{count, plural, one {Installed on # project} other {Installed on # projects}}": "",
   "{count, plural, one {Project} other {Projects}}": "{count, plural, one {# Проект} other {# Проектов}}",
   "{count, plural, one {Work item} other {Work items}}":
     "{count, plural, one {# Рабочий элемент} other {# Рабочих элементов}}",
@@ -52,8 +55,6 @@ export default {
   "1 day": "1 день",
   "1 month ago": "1 месяц назад",
   "1 week": "1 неделя",
-  '1. Click "Add runner", pick a project + pod and generate the CLI command.\n2. On the machine that will host the runner, run the displayed `pidash runner add` command. If the host is not logged in yet, the CLI starts `pidash auth login` first.\n3. The daemon registers the runner and it shows online here.\n\nPrerequisite: the agent CLI (codex / claude) must already be installed on the host.':
-    "1. Нажмите «Add runner», выберите проект + под и сгенерируйте команду CLI.\n2. На машине, которая будет хостить раннер, выполните отображаемую команду `pidash runner add`. Если хост ещё не вошёл в систему, CLI сначала запускает `pidash auth login`.\n3. Демон регистрирует раннер, и он отображается как онлайн здесь.\n\nПредварительное условие: агент CLI (codex / claude) уже должен быть установлен на хосте.",
   "10,000-feet view of all active cycles.": "Обзор всех активных циклов с высоты 10 000 футов.",
   "2 weeks": "2 недели",
   "3 days": "3 дня",
@@ -62,6 +63,8 @@ export default {
     "Облачная строка, представляющая один экземпляр агента, привязанный к проекту (и, опционально, к поду). Выполнение `pidash runner add` на авторизованной машине создаёт строку и привязывает эту машину как хост. Одна машина может хостить много раннеров.",
   "A long-running background process that maintains the WebSocket session with Pi Dash cloud, dispatches work to the configured agent, and streams approvals + heartbeats back. One daemon per machine.":
     "Долго работающий фоновый процесс, который поддерживает сессию WebSocket с Pi Dash cloud, отправляет работу настроенному агенту и передаёт обратно подтверждения + сигналы пульса. Один демон на машину.",
+  'A runner is an AI agent instance working on a given project.\n\n1. Click "Add runner", pick a project + pod and generate the CLI command.\n2. On the machine that will host the runner, run the displayed `pidash runner add` command. If the host is not logged in yet, the CLI starts `pidash auth login` first.\n3. The daemon registers the runner and it shows online here.\n\nPrerequisite: the agent CLI (codex / claude) must already be installed on the host.':
+    "Раннер — это экземпляр ИИ-агента, работающий над заданным проектом.\n\n1. Нажмите «Add runner», выберите проект + под и сгенерируйте команду CLI.\n2. На машине, которая будет хостить раннер, выполните отображаемую команду `pidash runner add`. Если хост ещё не вошёл в систему, CLI сначала запускает `pidash auth login`.\n3. Демон регистрирует раннер, и он отображается как онлайн здесь.\n\nПредварительное условие: агент CLI (codex / claude) уже должен быть установлен на хосте.",
   "Ability to read, write, edit, and delete entities inside projects, cycles, and modules":
     "Возможность читать, записывать, редактировать и удалять сущности внутри проектов, циклов и модулей",
   Accept: "Принять",
@@ -299,6 +302,7 @@ export default {
   "Clear filter": "Очистить фильтр",
   "Clear filters": "Очистить фильтры",
   "Clear search": "Очистить поиск",
+  "Clear selection": "",
   "Clear sorting": "Очистить сортировку",
   "Click the button below to join it.": "Нажмите кнопку ниже, чтобы присоединиться.",
   "Click to add description": "Нажмите, чтобы добавить описание",
@@ -781,6 +785,7 @@ export default {
   "Install the pidash CLI and register dev machines as AI agent runners":
     "Установите CLI pidash и зарегистрируйте машины разработки как агенты ИИ",
   "Install updated": "Установка обновлена",
+  Installed: "",
   "Installing…": "Установка…",
   Installs: "Установки",
   Intake: "Входящие",
@@ -1011,6 +1016,7 @@ export default {
   "No projects archived": "Нет архивированных проектов",
   "No projects detected with the matching criteria. \n Create a new project instead.":
     "Проекты, соответствующие критериям, не найдены. \n Создайте новый проект.",
+  "No projects match your search.": "",
   "No prompt templates available. The Pi Dash default will be seeded on the next migrate.":
     "Нет доступных шаблонов подсказок. Шаблон по умолчанию Pi Dash будет добавлен при следующей миграции.",
   "No results found": "Результаты не найдены",
@@ -1039,6 +1045,7 @@ export default {
   "No work items yet": "Пока нет рабочих элементов",
   "No. of {entity}": "Кол-во {entity}",
   None: "Нет",
+  "None selected": "",
   "Not right now": "Не сейчас",
   "Notes specific to this project…": "Заметки, относящиеся к этому проекту…",
   "Notification marked as archived": "Уведомление помечено как архивированное",
@@ -1155,8 +1162,10 @@ export default {
   "Pi Dash: Your AI Employee Management Platform": "Pi Dash: Ваша платформа управления сотрудниками на основе ИИ",
   "Pick a project.": "Выберите проект.",
   "Pick a scheduler.": "Выберите планировщик.",
+  "Pick at least one project to install this scheduler on.": "",
   "Pick from your workspace's enabled schedulers. Already-installed ones aren't listed.":
     "Выберите из включенных планировщиков вашего рабочего пространства. Уже установленные не отображаются.",
+  "Pick one or more projects. One schedule applies to all of them.": "",
   "pidash CLI": "pidash CLI",
   "pidash daemon": "pidash daemon",
   "Plan work in focused timeframes.": "Планируйте работу в сфокусированных временных интервалах.",
@@ -1347,6 +1356,7 @@ export default {
   Scope: "Область",
   Search: "Поиск",
   "Search by title": "Поиск по названию",
+  "Search projects…": "",
   "Secret key": "Секретный ключ",
   "Secret key copied to clipboard.": "Секретный ключ скопирован в буфер обмена.",
   Security: "Безопасность",
@@ -1362,6 +1372,7 @@ export default {
   "Select network": "Выберите сеть",
   "Select or customize your interface color scheme.": "Выберите или настройте цветовую схему интерфейса.",
   "Select organization size": "Выберите размер организации",
+  "Select projects": "",
   "Select your theme": "Выберите тему",
   "Send invitations": "Отправить приглашения",
   "Send me everything": "Отправлять мне всё",
@@ -1782,6 +1793,7 @@ export default {
   You: "Вы",
   "You already have a cycle on the given dates, if you want to create a draft cycle, you can do that by removing both the dates.":
     "У вас уже есть цикл на указанные даты. Если вы хотите создать черновик цикла, вы можете сделать это, удалив обе даты.",
+  "You aren't a member of any project in this workspace to install on.": "",
   "You can only edit the slug of the URL": "Вы можете редактировать только слаг URL.",
   "You can see here if someone invites you to a workspace":
     "Здесь вы можете увидеть, если кто-то приглашает вас в рабочее пространство.",

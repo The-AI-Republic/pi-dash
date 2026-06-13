@@ -5,7 +5,7 @@
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import useSWR from "swr";
+import useSWR, { useSWRConfig } from "swr";
 import { AssistantService } from "@pi-dash/services";
 import type { IAssistantEvent, IAssistantMessage } from "@pi-dash/types";
 
@@ -66,6 +66,7 @@ export function useAssistantChat(slug: string | undefined, threadId: string | un
   const [busy, setBusy] = useState(false);
   const [sending, setSending] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const { mutate: globalMutate } = useSWRConfig();
   // Track applied delta event seqs so an SSE reconnect (which replays from 0)
   // doesn't double-append in-flight streamed text.
   const appliedDeltas = useRef<Set<number>>(new Set());
@@ -179,6 +180,9 @@ export function useAssistantChat(slug: string | undefined, threadId: string | un
         setById((prev) => ({ ...prev, [res.message.id]: res.message }));
         setBusy(true); // starts polling + shows the stop button immediately
         mutate();
+        // Sending bumps the thread's updated_at (and titles it on the first
+        // message) — refresh the always-visible history panel.
+        globalMutate(["assistant-threads", slug]);
       } catch (e: unknown) {
         const err = e as { error?: string; detail?: string } | null;
         setError(err?.detail || err?.error || "Unable to send message");
@@ -186,7 +190,7 @@ export function useAssistantChat(slug: string | undefined, threadId: string | un
         setSending(false);
       }
     },
-    [slug, threadId, mutate]
+    [slug, threadId, mutate, globalMutate]
   );
 
   const stop = useCallback(async () => {

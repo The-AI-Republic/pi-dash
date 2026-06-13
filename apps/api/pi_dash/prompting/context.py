@@ -12,7 +12,7 @@ defend against unintended attribute access on them.
 from __future__ import annotations
 
 import json
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 from pi_dash.db.models.issue import Issue
 from pi_dash.db.models.state import State
@@ -154,6 +154,55 @@ def _comments_section(issue: Issue) -> str:
     return "\n\n".join(parts)
 
 
+def _humanize_interval(seconds: int) -> str:
+    """Render an interval for prose ("3 hours", "90 minutes")."""
+    if seconds % 3600 == 0:
+        hours = seconds // 3600
+        return f"{hours} hour" + ("s" if hours != 1 else "")
+    minutes = max(1, round(seconds / 60))
+    return f"{minutes} minute" + ("s" if minutes != 1 else "")
+
+
+def _tick_context(issue: Issue) -> Optional[Dict[str, Any]]:
+    """Surface the issue's ticking schedule, or ``None`` when it isn't live.
+
+    Lets the prompt tell the agent it is being re-invoked on a cadence and
+    how much tick budget remains before the cap-hit auto-pause. ``cap`` /
+    ``remaining`` are ``None`` for an infinite (``-1``) cap so templates can
+    branch with ``{% if tick.cap is not none %}``.
+
+    Returns ``None`` — so the templates' "Pi Dash automatically re-invokes
+    the agent" block does not render — when no ticker row exists, when the
+    ticker is disarmed (cap hit, user disabled, left the ticking state:
+    promising automatic re-invocation would be false and invites the agent
+    to defer work to a tick that never fires), or when the configured
+    cadence is nonsense (the project-default interval/cap fields are
+    API-writable with no validation; "every 0 hours" or "of -2 ticks"
+    must not reach a prompt).
+    """
+    from pi_dash.db.models.issue_agent_ticker import INFINITE_MAX_TICKS
+
+    # Reverse OneToOne — RelatedObjectDoesNotExist subclasses AttributeError,
+    # so getattr's default covers issues that never armed a ticker.
+    ticker = getattr(issue, "agent_ticker", None)
+    if ticker is None or not ticker.enabled:
+        return None
+    cap = ticker.effective_max_ticks()
+    interval = ticker.effective_interval_seconds()
+    if interval <= 0:
+        return None
+    if cap != INFINITE_MAX_TICKS and cap < 0:
+        return None
+    unlimited = cap == INFINITE_MAX_TICKS
+    return {
+        "count": ticker.tick_count,
+        "cap": None if unlimited else cap,
+        "remaining": None if unlimited else max(0, cap - ticker.tick_count),
+        "interval_seconds": interval,
+        "interval_human": _humanize_interval(interval),
+    }
+
+
 def _parent_done_payload(issue: Issue, run: AgentRun) -> str:
     """Return the implementation run payload the review prompt should inspect.
 
@@ -280,7 +329,16 @@ def build_context(issue: Issue, run: AgentRun) -> Dict[str, Any]:
             "kind": _issue_run_kind(issue),
             "attempt": attempt,
             "turn_number": 1,
+            # How this run was dispatched, from the first-class
+            # ``AgentRun.trigger`` field: "tick" / "comment_and_run" /
+            # "run_ai" / "state_transition" / "scheduler" / "direct".
+            # getattr, not attribute access: the template-preview endpoint
+            # renders with a stub run that has no ``trigger``.
+            "trigger": getattr(run, "trigger", None),
         },
+        # Ticking schedule (None when the issue has no ticker row). Lets the
+        # template explain the re-invocation cadence and remaining budget.
+        "tick": _tick_context(issue),
         "comments_section": _comments_section(issue),
         "parent_done_payload": _parent_done_payload(issue, run),
         # Prior-run workpad body (empty on first run). Surfaced up front so

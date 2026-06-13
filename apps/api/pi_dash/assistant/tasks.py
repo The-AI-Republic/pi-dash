@@ -88,6 +88,7 @@ def _load_context(turn_id):
         workspace_role=int(role),
         thread_id=thread.id,
         turn_id=turn.id,
+        mode=getattr(thread, "kind", "chat"),
     )
     return _Ctx(thread=thread, turn=turn, user=user, user_text=user_text, deps=deps)
 

@@ -13,5 +13,5 @@ customizable: overridable
 - Reproduce the problem before changing code. Record the reproduction signal in the workpad `Notes` section.
 - Treat any `Validation`, `Test Plan`, or `Testing` section in the issue description or comments as non-negotiable acceptance input. Mirror those items into the workpad `Validation` section as checkboxes and execute them before declaring completion.
 - If you discover meaningful out-of-scope improvements during execution, do not expand scope. Note them in the workpad `Notes` as follow-up candidates; the human will triage.
-- Move the issue to a state in the `completed` group only when the matching quality bar (below) is met.
+- Match the issue's final state to what actually happened. A `code_change` that opened a PR moves to the `review` group ("In Review") — the work is awaiting human review and merge, not done — **not** the `completed` group. Move to `completed`/"Done" only for a finished `noncode` task with no PR to review (or when the project exposes no `review`-group state). Either way, only move once the matching quality bar (below) is met.
 - Operate autonomously end-to-end unless your structured escalation assessment says a human decision or external dependency is required.

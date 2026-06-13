@@ -28,7 +28,13 @@ def load_history(thread: AssistantThread) -> list:
     """Return the prior ``list[ModelMessage]`` for this thread (most recent completed turns)."""
     from pydantic_ai.messages import ModelMessagesTypeAdapter
 
-    max_turns = max(1, int(getattr(settings, "ASSISTANT_HISTORY_MAX_TURNS", 40)))
+    # Loop (Auto Project Management) threads replay history too — memory like
+    # "yesterday I closed #42" — but at a tighter default since it's a daily
+    # token cost. See ``.ai_design/loop_project_management/design.md`` §7.7.
+    if getattr(thread, "kind", "chat") == "loop":
+        max_turns = max(1, int(getattr(settings, "ASSISTANT_LOOP_HISTORY_MAX_TURNS", 5)))
+    else:
+        max_turns = max(1, int(getattr(settings, "ASSISTANT_HISTORY_MAX_TURNS", 40)))
     messages: list = []
     blobs = list(
         thread.turns.filter(status=TurnStatus.COMPLETED, model_messages__isnull=False)

@@ -13,8 +13,11 @@ export default {
   "{active} active / {total} total": "{active} aktiv / {total} gesamt",
   "{count, plural, one {# install} other {# installs}}":
     "{count, plural, one {# Installation} other {# Installationen}}",
+  "{count, plural, one {# project failed} other {# projects failed}}": "",
+  "{count, plural, one {# project selected} other {# projects selected}}": "",
   "{count, plural, one {Cycle} other {Cycles}}": "{count, plural, one {Zyklus} other {Zyklen}}",
   "{count, plural, one {Epic} other {Epics}}": "{count, plural, one {Epic} other {Epics}}",
+  "{count, plural, one {Installed on # project} other {Installed on # projects}}": "",
   "{count, plural, one {Project} other {Projects}}": "{count, plural, one {Projekt} other {Projekte}}",
   "{count, plural, one {Work item} other {Work items}}": "{count, plural, one {Work Item} other {Work Items}}",
   "{count, plural, one{# member} other{# members}}": "{count, plural, one{# Mitglied} other{# Mitglieder}}",
@@ -50,8 +53,6 @@ export default {
   "1 day": "1 Tag",
   "1 month ago": "vor 1 Monat",
   "1 week": "1 Woche",
-  '1. Click "Add runner", pick a project + pod and generate the CLI command.\n2. On the machine that will host the runner, run the displayed `pidash runner add` command. If the host is not logged in yet, the CLI starts `pidash auth login` first.\n3. The daemon registers the runner and it shows online here.\n\nPrerequisite: the agent CLI (codex / claude) must already be installed on the host.':
-    '1. Klicken Sie auf "Add runner", wählen Sie ein Projekt + Pod und generieren Sie den CLI-Befehl.\n2. Führen Sie auf dem Rechner, der den Runner hosten wird, den angezeigten Befehl `pidash runner add` aus. Wenn der Host noch nicht angemeldet ist, startet die CLI zuerst `pidash auth login`.\n3. Der Daemon registriert den Runner und er wird hier als online angezeigt.\n\nVoraussetzung: Die Agent-CLI (codex / claude) muss bereits auf dem Host installiert sein.',
   "10,000-feet view of all active cycles.": "10.000-Fuß-Ansicht aller aktiven Zyklen.",
   "2 weeks": "2 Wochen",
   "3 days": "3 Tage",
@@ -60,6 +61,8 @@ export default {
     "Eine cloudseitige Zeile, die eine an ein Projekt (und optional einen Pod) gebundene Agenteninstanz darstellt. Das Ausführen von `pidash runner add` auf einem angemeldeten Rechner erstellt die Zeile und bindet diesen Rechner als Host. Ein Rechner kann viele Runner hosten.",
   "A long-running background process that maintains the WebSocket session with Pi Dash cloud, dispatches work to the configured agent, and streams approvals + heartbeats back. One daemon per machine.":
     "Ein langlebiger Hintergrundprozess, der die WebSocket-Sitzung mit der Pi Dash Cloud aufrechterhält, Arbeit an den konfigurierten Agenten verteilt und Genehmigungen + Heartbeats zurückstreamt. Ein Daemon pro Rechner.",
+  'A runner is an AI agent instance working on a given project.\n\n1. Click "Add runner", pick a project + pod and generate the CLI command.\n2. On the machine that will host the runner, run the displayed `pidash runner add` command. If the host is not logged in yet, the CLI starts `pidash auth login` first.\n3. The daemon registers the runner and it shows online here.\n\nPrerequisite: the agent CLI (codex / claude) must already be installed on the host.':
+    'Ein Runner ist eine KI-Agent-Instanz, die an einem bestimmten Projekt arbeitet.\n\n1. Klicken Sie auf "Add runner", wählen Sie ein Projekt + Pod und generieren Sie den CLI-Befehl.\n2. Führen Sie auf dem Rechner, der den Runner hosten wird, den angezeigten Befehl `pidash runner add` aus. Wenn der Host noch nicht angemeldet ist, startet die CLI zuerst `pidash auth login`.\n3. Der Daemon registriert den Runner und er wird hier als online angezeigt.\n\nVoraussetzung: Die Agent-CLI (codex / claude) muss bereits auf dem Host installiert sein.',
   "Ability to read, write, edit, and delete entities inside projects, cycles, and modules":
     "Fähigkeit, Entitäten in Projekten, Zyklen und Modulen zu lesen, zu schreiben, zu bearbeiten und zu löschen",
   Accept: "Akzeptieren",
@@ -297,6 +300,7 @@ export default {
   "Clear filter": "Filter löschen",
   "Clear filters": "Filter löschen",
   "Clear search": "Suche löschen",
+  "Clear selection": "",
   "Clear sorting": "Sortierung löschen",
   "Click the button below to join it.": "Klicken Sie auf die Schaltfläche unten, um beizutreten.",
   "Click to add description": "Klicken, um Beschreibung hinzuzufügen",
@@ -787,6 +791,7 @@ export default {
   "Install the pidash CLI and register dev machines as AI agent runners":
     "Installieren Sie die pidash CLI und registrieren Sie Entwicklungsmaschinen als KI-Agenten-Runner",
   "Install updated": "Installation aktualisiert",
+  Installed: "",
   "Installing…": "Installiere…",
   Installs: "Installationen",
   Intake: "Intake",
@@ -1018,6 +1023,7 @@ export default {
   "No projects archived": "Keine archivierten Projekte",
   "No projects detected with the matching criteria. \n Create a new project instead.":
     "Es wurden keine Projekte mit den übereinstimmenden Kriterien gefunden. \n Erstellen Sie stattdessen ein neues Projekt.",
+  "No projects match your search.": "",
   "No prompt templates available. The Pi Dash default will be seeded on the next migrate.":
     "Keine Prompt-Vorlagen verfügbar. Die Pi Dash-Standardvorlage wird bei der nächsten Migration eingefügt.",
   "No results found": "Keine Ergebnisse gefunden",
@@ -1047,6 +1053,7 @@ export default {
   "No work items yet": "Noch keine Arbeitselemente",
   "No. of {entity}": "Anzahl der {entity}",
   None: "Keine",
+  "None selected": "",
   "Not right now": "Im Moment nicht",
   "Notes specific to this project…": "Notizen spezifisch für dieses Projekt…",
   "Notification marked as archived": "Benachrichtigung als archiviert markiert",
@@ -1163,8 +1170,10 @@ export default {
   "Pi Dash: Your AI Employee Management Platform": "Pi Dash: Ihre KI-Plattform für Mitarbeiterverwaltung",
   "Pick a project.": "Wählen Sie ein Projekt aus.",
   "Pick a scheduler.": "Wählen Sie einen Scheduler.",
+  "Pick at least one project to install this scheduler on.": "",
   "Pick from your workspace's enabled schedulers. Already-installed ones aren't listed.":
     "Wählen Sie aus den aktivierten Schedulern Ihres Arbeitsbereichs. Bereits installierte werden nicht aufgelistet.",
+  "Pick one or more projects. One schedule applies to all of them.": "",
   "pidash CLI": "pidash CLI",
   "pidash daemon": "pidash-Daemon",
   "Plan work in focused timeframes.": "Planen Sie Arbeit in fokussierten Zeitrahmen.",
@@ -1356,6 +1365,7 @@ export default {
   Scope: "Bereich",
   Search: "Suche",
   "Search by title": "Nach Titel suchen",
+  "Search projects…": "",
   "Secret key": "Geheimer Schlüssel",
   "Secret key copied to clipboard.": "Geheimer Schlüssel in die Zwischenablage kopiert.",
   Security: "Sicherheit",
@@ -1373,6 +1383,7 @@ export default {
   "Select or customize your interface color scheme.":
     "Wählen Sie Ihr Farbschema für die Benutzeroberfläche aus oder passen Sie es an.",
   "Select organization size": "Organisationsgröße auswählen",
+  "Select projects": "",
   "Select your theme": "Wählen Sie Ihr Thema",
   "Send invitations": "Einladungen senden",
   "Send me everything": "Senden Sie mir alles",
@@ -1799,6 +1810,7 @@ export default {
   You: "Du",
   "You already have a cycle on the given dates, if you want to create a draft cycle, you can do that by removing both the dates.":
     "Du hast bereits einen Zyklus an den angegebenen Daten. Wenn du einen Entwurfszyklus erstellen möchtest, kannst du das tun, indem du beide Daten entfernst.",
+  "You aren't a member of any project in this workspace to install on.": "",
   "You can only edit the slug of the URL": "Du kannst nur den Slug der URL bearbeiten",
   "You can see here if someone invites you to a workspace":
     "Hier siehst du, ob dich jemand zu einem Arbeitsbereich einlädt",

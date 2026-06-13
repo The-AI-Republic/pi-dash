@@ -11,8 +11,11 @@ export default {
   "(optional — pin this issue to an existing remote branch)": "(opsional — sematkan isu ini ke cabang remote yang ada)",
   "{active} active / {total} total": "{active} aktif / {total} total",
   "{count, plural, one {# install} other {# installs}}": "{count, plural, one {# instalasi} other {# instalasi}}",
+  "{count, plural, one {# project failed} other {# projects failed}}": "",
+  "{count, plural, one {# project selected} other {# projects selected}}": "",
   "{count, plural, one {Cycle} other {Cycles}}": "{count, plural, one {Siklus} other {Siklus}}",
   "{count, plural, one {Epic} other {Epics}}": "{count, plural, one {Epik} other {Epik}}",
+  "{count, plural, one {Installed on # project} other {Installed on # projects}}": "",
   "{count, plural, one {Project} other {Projects}}": "{count, plural, one {Proyek} other {Proyek}}",
   "{count, plural, one {Work item} other {Work items}}": "{count, plural, one {Item pekerjaan} other {Item pekerjaan}}",
   "{count, plural, one{# member} other{# members}}": "{count, plural, one{# anggota} other{# anggota}}",
@@ -48,8 +51,6 @@ export default {
   "1 day": "1 hari",
   "1 month ago": "1 bulan yang lalu",
   "1 week": "1 minggu",
-  '1. Click "Add runner", pick a project + pod and generate the CLI command.\n2. On the machine that will host the runner, run the displayed `pidash runner add` command. If the host is not logged in yet, the CLI starts `pidash auth login` first.\n3. The daemon registers the runner and it shows online here.\n\nPrerequisite: the agent CLI (codex / claude) must already be installed on the host.':
-    '1. Klik "Tambah runner", pilih proyek + pod dan buat perintah CLI.\n2. Pada mesin yang akan menjadi host runner, jalankan perintah `pidash runner add` yang ditampilkan. Jika host belum masuk, CLI akan memulai `pidash auth login` terlebih dahulu.\n3. Daemon mendaftarkan runner dan akan muncul online di sini.\n\nPrasyarat: CLI agen (codex / claude) harus sudah terinstal di host.',
   "10,000-feet view of all active cycles.": "Pandangan menyeluruh dari semua siklus aktif.",
   "2 weeks": "2 minggu",
   "3 days": "3 hari",
@@ -58,6 +59,8 @@ export default {
     "Baris sisi cloud yang mewakili satu instance agen yang terikat pada proyek (dan opsional pod). Menjalankan `pidash runner add` pada mesin yang sudah masuk akan membuat baris tersebut dan mengikat mesin itu sebagai host. Sebuah mesin dapat menjadi host bagi banyak runner.",
   "A long-running background process that maintains the WebSocket session with Pi Dash cloud, dispatches work to the configured agent, and streams approvals + heartbeats back. One daemon per machine.":
     "Proses latar belakang yang berjalan lama yang mempertahankan sesi WebSocket dengan cloud Pi Dash, mengirimkan pekerjaan ke agen yang dikonfigurasi, dan mengalirkan persetujuan + detak jantung kembali. Satu daemon per mesin.",
+  'A runner is an AI agent instance working on a given project.\n\n1. Click "Add runner", pick a project + pod and generate the CLI command.\n2. On the machine that will host the runner, run the displayed `pidash runner add` command. If the host is not logged in yet, the CLI starts `pidash auth login` first.\n3. The daemon registers the runner and it shows online here.\n\nPrerequisite: the agent CLI (codex / claude) must already be installed on the host.':
+    'Runner adalah instans agen AI yang mengerjakan suatu proyek tertentu.\n\n1. Klik "Tambah runner", pilih proyek + pod dan buat perintah CLI.\n2. Pada mesin yang akan menjadi host runner, jalankan perintah `pidash runner add` yang ditampilkan. Jika host belum masuk, CLI akan memulai `pidash auth login` terlebih dahulu.\n3. Daemon mendaftarkan runner dan akan muncul online di sini.\n\nPrasyarat: CLI agen (codex / claude) harus sudah terinstal di host.',
   "Ability to read, write, edit, and delete entities inside projects, cycles, and modules":
     "Kemampuan untuk membaca, menulis, mengedit, dan menghapus entitas di dalam proyek, siklus, dan modul",
   Accept: "Terima",
@@ -292,6 +295,7 @@ export default {
   "Clear filter": "Hapus filter",
   "Clear filters": "Hapus filter",
   "Clear search": "Hapus pencarian",
+  "Clear selection": "",
   "Clear sorting": "Hapus pengurutan",
   "Click the button below to join it.": "Klik tombol di bawah untuk bergabung.",
   "Click to add description": "Klik untuk menambahkan deskripsi",
@@ -768,6 +772,7 @@ export default {
   "Install the pidash CLI and register dev machines as AI agent runners":
     "Instal CLI pidash dan daftarkan mesin pengembang sebagai pelari agen AI",
   "Install updated": "Instalasi diperbarui",
+  Installed: "",
   "Installing…": "Menginstal…",
   Installs: "Instalasi",
   Intake: "Intake",
@@ -997,6 +1002,7 @@ export default {
   "No projects archived": "Tidak ada proyek yang diarsipkan",
   "No projects detected with the matching criteria. \n Create a new project instead.":
     "Tidak ada proyek yang terdeteksi dengan kriteria yang cocok. \n Buat proyek baru sebagai gantinya.",
+  "No projects match your search.": "",
   "No prompt templates available. The Pi Dash default will be seeded on the next migrate.":
     "Tidak ada template prompt yang tersedia. Default Pi Dash akan diisi pada migrasi berikutnya.",
   "No results found": "Tidak ada hasil ditemukan",
@@ -1026,6 +1032,7 @@ export default {
   "No work items yet": "Belum ada item pekerjaan",
   "No. of {entity}": "Jumlah {entity}",
   None: "Tidak ada",
+  "None selected": "",
   "Not right now": "Tidak sekarang",
   "Notes specific to this project…": "Catatan khusus untuk proyek ini…",
   "Notification marked as archived": "Notifikasi ditandai sebagai diarsipkan",
@@ -1141,8 +1148,10 @@ export default {
   "Pi Dash: Your AI Employee Management Platform": "Pi Dash: Platform Manajemen Karyawan AI Anda",
   "Pick a project.": "Pilih proyek.",
   "Pick a scheduler.": "Pilih penjadwal.",
+  "Pick at least one project to install this scheduler on.": "",
   "Pick from your workspace's enabled schedulers. Already-installed ones aren't listed.":
     "Pilih dari penjadwal yang diaktifkan di ruang kerja Anda. Penjadwal yang sudah terinstal tidak tercantum.",
+  "Pick one or more projects. One schedule applies to all of them.": "",
   "pidash CLI": "pidash CLI",
   "pidash daemon": "pidash daemon",
   "Plan work in focused timeframes.": "Rencanakan pekerjaan dalam jangka waktu yang terfokus.",
@@ -1329,6 +1338,7 @@ export default {
   Scope: "Lingkup",
   Search: "Cari",
   "Search by title": "Cari berdasarkan judul",
+  "Search projects…": "",
   "Secret key": "Kunci rahasia",
   "Secret key copied to clipboard.": "Kunci rahasia disalin ke papan klip.",
   Security: "Keamanan",
@@ -1344,6 +1354,7 @@ export default {
   "Select network": "Pilih jaringan",
   "Select or customize your interface color scheme.": "Pilih atau sesuaikan skema warna antarmuka Anda.",
   "Select organization size": "Pilih ukuran organisasi",
+  "Select projects": "",
   "Select your theme": "Pilih tema Anda",
   "Send invitations": "Kirim undangan",
   "Send me everything": "Kirimkan semuanya kepada saya",
@@ -1760,6 +1771,7 @@ export default {
   You: "Anda",
   "You already have a cycle on the given dates, if you want to create a draft cycle, you can do that by removing both the dates.":
     "Anda sudah memiliki siklus pada tanggal yang diberikan, jika Anda ingin membuat siklus draf, Anda dapat melakukannya dengan menghapus kedua tanggal tersebut.",
+  "You aren't a member of any project in this workspace to install on.": "",
   "You can only edit the slug of the URL": "Anda hanya dapat mengedit slug dari URL",
   "You can see here if someone invites you to a workspace":
     "Anda dapat melihat di sini jika seseorang mengundang Anda ke ruang kerja",

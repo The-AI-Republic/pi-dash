@@ -49,7 +49,7 @@ The workpad is your durable per-issue scratchpad — a single markdown document 
 
 {% endif %}#### States
 
-- `pidash state list{% if run.kind == "scheduler" %} --project {{ project.identifier }}{% endif %}` — list the states available in {% if run.kind == "scheduler" %}this project{% else %}this issue's project{% endif %} with `name`, `group` (`backlog | unstarted | started | completed | cancelled`), and `description`.{% if run.kind != "scheduler" %} Uses `PIDASH_ISSUE_IDENTIFIER` by default; pass `pidash state list <issue-identifier>` or `pidash state list <project-uuid>` to override. Already rendered below under "Available states"; only call again if something looks stale.{% endif %}
+- `pidash state list{% if run.kind == "scheduler" %} --project {{ project.identifier }}{% endif %}` — list the states available in {% if run.kind == "scheduler" %}this project{% else %}this issue's project{% endif %} with `name`, `group` (`backlog | unstarted | started | review | completed | cancelled`), and `description`.{% if run.kind != "scheduler" %} Uses `PIDASH_ISSUE_IDENTIFIER` by default; pass `pidash state list <issue-identifier>` or `pidash state list <project-uuid>` to override. Already rendered below under "Available states"; only call again if something looks stale.{% endif %}
 
 #### Debugging
 
@@ -76,12 +76,23 @@ pidash comment add {{ issue.identifier }} --body-file ./.pidash-blocked.md --as-
 pidash issue patch {{ issue.identifier }} --state "Blocked"
 ```
 
-End a successful run (workpad already written via `pidash workpad update`):
+{% if run.kind == "coding-task" %}End a successful run that opened a PR (workpad already written via `pidash workpad update`) — the change is awaiting human review and merge, so move to the `review` group, **not** `completed`:
+
+```sh
+pidash issue patch {{ issue.identifier }} --state "In Review"
+```
+
+End a successful run with nothing to review — a finished `noncode` task (investigation, status check, comment-only response) that produced no PR — move to the `completed` group:
 
 ```sh
 pidash issue patch {{ issue.identifier }} --state "Done"
 ```
-{% else %}File a finding as a new issue under this project:
+{% else %}End a successful run (workpad already written via `pidash workpad update`) — move the issue to the state matching this pass's outcome (see "Review cycle" and "Available states"):
+
+```sh
+pidash issue patch {{ issue.identifier }} --state "Done"
+```
+{% endif %}{% else %}File a finding as a new issue under this project:
 
 ```sh
 pidash issue create --project {{ project.identifier }} --title "<short summary>" --description "<evidence, file path, severity, suggested fix>"
@@ -97,7 +108,7 @@ pidash issue create --project {{ project.identifier }} --title "<short summary>"
 _(state list unavailable — call `pidash state list` to retrieve it before moving state)_
 {% endif %}
 
-Use the list above to pick the correct `--state` value. Match your intent to the state's `group` first (e.g. `completed` for "this work is done", `cancelled` for "this will not be done"), then to the name and description.
+Use the list above to pick the correct `--state` value. Match your intent to the state's `group` first, then to the name and description.{% if run.kind == "coding-task" %} The mapping that trips runs up most often: a `code_change` that opened a PR is awaiting review → `review` group ("In Review"), **not** `completed`. Use `completed` ("this work is done") only for a finished `noncode` task with no PR, and `cancelled` for "this will not be done".{% endif %}
 
 ### Conventions
 
