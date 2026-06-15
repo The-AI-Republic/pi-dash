@@ -25,10 +25,17 @@ def test_reencrypt_roundtrips(kms_crypto):
 
 def test_missing_key_raises(settings, monkeypatch):
     settings.ASSISTANT_KMS_KEY_ID = ""
-    monkeypatch.setattr(crypto, "_client", FakeKMS())
+    monkeypatch.setattr(crypto, "_backend", crypto.AwsKmsBackend(client=FakeKMS()))
     assert not crypto.is_configured()
     with pytest.raises(AssistantNotConfigured):
         crypto.encrypt("x")
+
+
+def test_unknown_backend_raises(settings, monkeypatch):
+    settings.ASSISTANT_CRYPTO_BACKEND = "gcp-kms"  # not implemented
+    monkeypatch.setattr(crypto, "_backend", None)  # force re-selection
+    with pytest.raises(AssistantNotConfigured):
+        crypto.get_backend()
 
 
 def test_decrypt_with_wrong_key_raises(settings, kms_crypto):
