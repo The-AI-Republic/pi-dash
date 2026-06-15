@@ -118,7 +118,7 @@ def test_delete_soft_deletes(world, instance_admin):
     assert not LoopJob.objects.filter(slug="del", deleted_at__isnull=True).exists()
 
 
-def test_targets_listing(world, instance_admin, fernet_key):
+def test_targets_listing(world, instance_admin, kms_crypto):
     from pi_dash.tests.contract.assistant.conftest import configure_llm
     from pi_dash.tests.contract.loop.conftest import make_target
 

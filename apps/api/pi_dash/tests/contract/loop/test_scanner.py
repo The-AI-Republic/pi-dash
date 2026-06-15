@@ -48,7 +48,7 @@ def test_reconcile_is_idempotent(world, settings, mocker):
     assert second == 0  # nothing new the second time
 
 
-def test_fanout_queues_only_eligible_due(world, settings, fernet_key, mocker):
+def test_fanout_queues_only_eligible_due(world, settings, kms_crypto, mocker):
     settings.LOOP_RECONCILE_EVERY_MINUTES = 99  # disable reconcile this tick
     fire = mocker.patch.object(loop_tasks, "fire_loop_target")
     job = make_job(min_role=15)
@@ -66,7 +66,7 @@ def test_fanout_queues_only_eligible_due(world, settings, fernet_key, mocker):
     assert ineligible.next_run_at > timezone.now()  # cursor advanced past now
 
 
-def test_fanout_respects_dispatch_cap(world, settings, fernet_key, mocker):
+def test_fanout_respects_dispatch_cap(world, settings, kms_crypto, mocker):
     settings.LOOP_RECONCILE_EVERY_MINUTES = 99
     settings.LOOP_MAX_DISPATCH_PER_TICK = 1
     fire = mocker.patch.object(loop_tasks, "fire_loop_target")

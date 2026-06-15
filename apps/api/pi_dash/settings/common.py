@@ -210,9 +210,14 @@ REDIS_HEALTH_CHECK_INTERVAL = os.environ.get("REDIS_HEALTH_CHECK_INTERVAL", 30)
 REDIS_MAX_CONNECTIONS = os.environ.get("REDIS_MAX_CONNECTIONS")
 
 # AI Assistant — see .ai_design/integrate_ai_agent/
-# Comma-separated MultiFernet key list (urlsafe base64, 32 bytes). When unset,
-# BYOK keys cannot be stored (the config endpoint reports assistant_not_configured).
-ASSISTANT_ENCRYPTION_KEY = os.environ.get("ASSISTANT_ENCRYPTION_KEY", "")
+# BYOK keys are encrypted at rest via AWS KMS (pi_dash.assistant.crypto).
+# ASSISTANT_KMS_KEY_ID is the CMK (id / ARN / alias) used to encrypt+decrypt;
+# region comes from AWS_REGION. When unset, BYOK keys cannot be stored (the
+# config endpoint reports assistant_not_configured). ASSISTANT_KMS_ENDPOINT_URL
+# optionally points the KMS client at a compatible endpoint (e.g. LocalStack)
+# for local / self-hosted setups without a real AWS account.
+ASSISTANT_KMS_KEY_ID = os.environ.get("ASSISTANT_KMS_KEY_ID", "")
+ASSISTANT_KMS_ENDPOINT_URL = os.environ.get("ASSISTANT_KMS_ENDPOINT_URL", "")
 # SSRF guard for BYOK base_url. Off in OSS (LAN vLLM/Ollama allowed); cloud sets True.
 ASSISTANT_BLOCK_PRIVATE_URLS = os.environ.get("ASSISTANT_BLOCK_PRIVATE_URLS", "false").lower() in (
     "1",
