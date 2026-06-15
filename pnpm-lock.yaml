@@ -805,6 +805,9 @@ importers:
       '@pi-dash/types':
         specifier: workspace:*
         version: link:../types
+      lucide-react:
+        specifier: 'catalog:'
+        version: 0.469.0(react@18.3.1)
     devDependencies:
       '@pi-dash/typescript-config':
         specifier: workspace:*
