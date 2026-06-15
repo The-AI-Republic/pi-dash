@@ -201,7 +201,7 @@ def kms_crypto(settings, monkeypatch):
     key_id = "arn:aws:kms:us-west-2:000000000000:key/test-cmk"
     settings.ASSISTANT_KMS_KEY_ID = key_id
     settings.AWS_REGION = "us-west-2"
-    monkeypatch.setattr(crypto, "_client", FakeKMS())
+    monkeypatch.setattr(crypto, "_backend", crypto.AwsKmsBackend(client=FakeKMS()))
     return key_id
 
 

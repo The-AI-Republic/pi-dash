@@ -216,6 +216,10 @@ REDIS_MAX_CONNECTIONS = os.environ.get("REDIS_MAX_CONNECTIONS")
 # config endpoint reports assistant_not_configured). ASSISTANT_KMS_ENDPOINT_URL
 # optionally points the KMS client at a compatible endpoint (e.g. LocalStack)
 # for local / self-hosted setups without a real AWS account.
+# Which crypto backend encrypts BYOK keys (pi_dash.assistant.crypto). Only
+# "aws-kms" ships today; the seam exists so other providers (GCP KMS, Azure
+# Key Vault, Vault Transit) can be added without touching call sites.
+ASSISTANT_CRYPTO_BACKEND = os.environ.get("ASSISTANT_CRYPTO_BACKEND", "aws-kms")
 ASSISTANT_KMS_KEY_ID = os.environ.get("ASSISTANT_KMS_KEY_ID", "")
 ASSISTANT_KMS_ENDPOINT_URL = os.environ.get("ASSISTANT_KMS_ENDPOINT_URL", "")
 # SSRF guard for BYOK base_url. Off in OSS (LAN vLLM/Ollama allowed); cloud sets True.
