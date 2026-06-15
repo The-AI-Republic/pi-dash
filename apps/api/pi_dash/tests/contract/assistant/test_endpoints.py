@@ -75,7 +75,7 @@ def test_listing_threads_reaps_abandoned_empty_conversations(world):
 
 # --- messages ---
 
-def test_message_requires_llm_config(world, fernet_key):
+def test_message_requires_llm_config(world, kms_crypto):
     c = client_for(world.member)
     thread = AssistantThread.objects.create(workspace=world.ws, user=world.member)
     res = c.post(f"{base(world.ws)}/threads/{thread.id}/messages/", {"content": "hello"}, format="json")
@@ -83,7 +83,7 @@ def test_message_requires_llm_config(world, fernet_key):
     assert res.data["error"] == "llm_config_missing"
 
 
-def test_message_creates_turn_and_blocks_concurrent(world, fernet_key, mocker, django_capture_on_commit_callbacks):
+def test_message_creates_turn_and_blocks_concurrent(world, kms_crypto, mocker, django_capture_on_commit_callbacks):
     delay = mocker.patch("pi_dash.assistant.views.messages.run_assistant_turn.delay")
     configure_llm(world.member)
     c = client_for(world.member)
@@ -108,7 +108,7 @@ def test_message_creates_turn_and_blocks_concurrent(world, fernet_key, mocker, d
     delay.assert_called_once()
 
 
-def test_message_lists_in_envelope_shape(world, fernet_key, mocker):
+def test_message_lists_in_envelope_shape(world, kms_crypto, mocker):
     mocker.patch("pi_dash.assistant.views.messages.run_assistant_turn.delay")
     configure_llm(world.member)
     c = client_for(world.member)
@@ -121,7 +121,7 @@ def test_message_lists_in_envelope_shape(world, fernet_key, mocker):
     assert "content" in res.data[0]
 
 
-def test_message_list_paginates_and_tolerates_bad_params(world, fernet_key):
+def test_message_list_paginates_and_tolerates_bad_params(world, kms_crypto):
     from pi_dash.assistant.models import MessageKind
     from pi_dash.assistant.runtime import events
 
@@ -142,7 +142,7 @@ def test_message_list_paginates_and_tolerates_bad_params(world, fernet_key):
     assert len(res.data) == 3
 
 
-def test_cannot_access_other_users_thread(world, fernet_key):
+def test_cannot_access_other_users_thread(world, kms_crypto):
     other_thread = AssistantThread.objects.create(workspace=world.ws, user=world.admin)
     c = client_for(world.member)
     res = c.get(f"{base(world.ws)}/threads/{other_thread.id}/messages/")
@@ -151,7 +151,7 @@ def test_cannot_access_other_users_thread(world, fernet_key):
 
 # --- llm config ---
 
-def test_llm_config_lifecycle(world, fernet_key):
+def test_llm_config_lifecycle(world, kms_crypto):
     c = client_for(world.member)
     # unset -> 200 with has_api_key False
     res = c.get("/api/users/me/llm-config/")

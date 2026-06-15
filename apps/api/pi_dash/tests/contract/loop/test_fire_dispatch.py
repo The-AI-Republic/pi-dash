@@ -28,7 +28,7 @@ from pi_dash.tests.contract.loop.conftest import make_job, make_target
 pytestmark = pytest.mark.django_db
 
 
-def test_fire_happy_path_queues_turn(world, fernet_key, mocker, django_capture_on_commit_callbacks):
+def test_fire_happy_path_queues_turn(world, kms_crypto, mocker, django_capture_on_commit_callbacks):
     delay = mocker.patch("pi_dash.loop.dispatch.run_assistant_turn.delay")
     configure_llm(world.member)
     job = make_job(prompt="close merged PR issues")
@@ -50,7 +50,7 @@ def test_fire_happy_path_queues_turn(world, fernet_key, mocker, django_capture_o
     delay.assert_called_once()
 
 
-def test_fire_skips_when_turn_active(world, fernet_key, mocker):
+def test_fire_skips_when_turn_active(world, kms_crypto, mocker):
     mocker.patch("pi_dash.loop.dispatch.run_assistant_turn.delay")
     configure_llm(world.member)
     job = make_job()
@@ -70,7 +70,7 @@ def test_fire_skips_when_turn_active(world, fernet_key, mocker):
     assert AssistantTurn.objects.filter(thread=thread).count() == 1
 
 
-def test_fire_noop_when_cursor_in_future(world, fernet_key):
+def test_fire_noop_when_cursor_in_future(world, kms_crypto):
     configure_llm(world.member)
     job = make_job()
     future = timezone.now() + datetime.timedelta(hours=1)
@@ -78,7 +78,7 @@ def test_fire_noop_when_cursor_in_future(world, fernet_key):
     assert loop_tasks.fire_loop_target(str(target.id)) is False
 
 
-def test_dispatch_rotates_full_thread(world, fernet_key, mocker, django_capture_on_commit_callbacks):
+def test_dispatch_rotates_full_thread(world, kms_crypto, mocker, django_capture_on_commit_callbacks):
     mocker.patch("pi_dash.loop.dispatch.run_assistant_turn.delay")
     settings_headroom = 30
     configure_llm(world.member)
