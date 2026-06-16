@@ -222,6 +222,14 @@ REDIS_MAX_CONNECTIONS = os.environ.get("REDIS_MAX_CONNECTIONS")
 ASSISTANT_CRYPTO_BACKEND = os.environ.get("ASSISTANT_CRYPTO_BACKEND", "aws-kms")
 ASSISTANT_KMS_KEY_ID = os.environ.get("ASSISTANT_KMS_KEY_ID", "")
 ASSISTANT_KMS_ENDPOINT_URL = os.environ.get("ASSISTANT_KMS_ENDPOINT_URL", "")
+# Short-lived in-process cache of decrypted BYOK keys, so the assistant doesn't
+# call KMS Decrypt on every turn. In-memory per worker (plaintext never leaves
+# the process — unlike a shared store); keyed by a hash of the ciphertext so a
+# key change auto-invalidates. TTL also bounds how long a KMS-side revocation
+# lags. Set TTL=0 to disable. Eviction (TTL or LRU at MAXSIZE) is always safe —
+# a miss just costs one extra KMS Decrypt.
+ASSISTANT_KEY_CACHE_TTL = int(os.environ.get("ASSISTANT_KEY_CACHE_TTL", 300))
+ASSISTANT_KEY_CACHE_MAXSIZE = int(os.environ.get("ASSISTANT_KEY_CACHE_MAXSIZE", 1000))
 # SSRF guard for BYOK base_url. Off in OSS (LAN vLLM/Ollama allowed); cloud sets True.
 ASSISTANT_BLOCK_PRIVATE_URLS = os.environ.get("ASSISTANT_BLOCK_PRIVATE_URLS", "false").lower() in (
     "1",
