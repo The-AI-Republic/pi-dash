@@ -71,9 +71,31 @@ Removing them requires a different foundation: a GitHub App.
 
 - **No runner/autonomous-PR work.** Layer 2 is sketched (§12) but not designed
   here. It is gated on Layer 1 shipping first.
-- **No GitHub Enterprise Server host support.** `github.com` (and GitHub-hosted
-  Enterprise Cloud) only, matching the current parser
-  (`parse_github_repo_url`). EGS on a custom host is a later, additive change.
+- **No GitHub Enterprise _Server_ (GHES) support.** First, a distinction this
+  doc otherwise invites readers to confuse: self-hosted **Pi Dash** talking to
+  `github.com` **is** supported (the "self-hosted single-org" mode in §11). What
+  is deferred is self-hosted **GitHub** — a GHES box on a customer host like
+  `github.acme-corp.internal`. We support `github.com` and GitHub-hosted
+  Enterprise **Cloud** (also `github.com`-hosted), matching the current parser
+  (`parse_github_repo_url`) and the `GITHUB_API_BASE` constant in
+  `utils/github_client.py`.
+
+  GHES is deferred — not because it's hard, but because it's pure host-URL
+  configurability that **changes nothing in the architecture**: the App model,
+  token minting, webhooks, and sync logic are identical; only the API base
+  (`https://<host>/api/v3`), App-registration endpoints, and webhook origin
+  differ. That's exactly what makes it a safe, additive later change. Deferring
+  avoids (a) doubling the verification matrix against a license-gated GHES
+  instance during the foundational build, (b) the narrower-than-it-looks network
+  topology (GHES usually lives inside a corporate network — only the self-hosted
+  Pi-Dash-plus-GHES-same-network combination is reachable), and (c) the ongoing
+  cost of feature-gating by GHES version, which lags `github.com`.
+
+  **To keep the later add cheap, Layer 1 must centralize the API base URL** —
+  resolve every call's host through one place (extend `GITHUB_API_BASE` into a
+  per-installation host field) instead of scattering `https://api.github.com`
+  literals. Done now, GHES becomes a config change later, not a refactor.
+
 - **No removal of PAT.** PAT stays as a fallback and for the migration window.
 - **No GitLab/Bitbucket.** Provider abstraction is noted as a seam but not built.
 - **No frontend visual design.** UI surfaces are enumerated (what data appears
@@ -159,8 +181,15 @@ A small service module — proposed `utils/github_app_auth.py` — owns:
 - New write methods land here regardless of token source:
   `close_pull_request`, `merge_pull_request`, `update_issue_state`,
   `request_review`, `get_pull_request`, `list_check_runs`, etc.
+- **Centralize the API base URL.** `GITHUB_API_BASE` is currently a module-level
+  constant pointing at `https://api.github.com`. Make the host an instance
+  property resolved through one place (defaulting to `github.com`) rather than a
+  hard-coded literal scattered across calls. Layer 1 only ever resolves it to
+  `github.com`, but doing this now is what makes GHES (§3) a config change later
+  instead of a refactor.
 
-This keeps a single REST surface; PAT vs App is just credential provenance.
+This keeps a single REST surface; PAT vs App is just credential provenance, and
+host is just configuration.
 
 ### 6.4 Where credentials live (both deployment modes)
 
