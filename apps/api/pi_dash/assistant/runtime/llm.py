@@ -12,9 +12,56 @@ self-hosted vLLM/Ollama, OpenAI) works via ``OpenAIChatModel`` + a custom
 
 from __future__ import annotations
 
+import hashlib
+import threading
+
+from cachetools import TTLCache
+from django.conf import settings
+
 from pi_dash.assistant import crypto
 from pi_dash.assistant.errors import LLMConfigMissing
 from pi_dash.assistant.models import ProviderKind, UserLLMConfig
+
+# Short-lived in-process cache of decrypted BYOK keys, to avoid a KMS Decrypt on
+# every assistant turn. Keyed by a hash of the ciphertext so a user changing
+# their key auto-invalidates (new ciphertext -> new key -> miss). In-memory per
+# worker only: the plaintext never crosses a process/network boundary. Eviction
+# is TTL (time) + LRU (capacity) and always safe — a miss just re-decrypts.
+# Tunable via ASSISTANT_KEY_CACHE_TTL / _MAXSIZE; TTL=0 disables.
+_key_cache: TTLCache | None = None
+_key_cache_lock = threading.Lock()
+
+
+def _get_key_cache() -> TTLCache:
+    global _key_cache
+    if _key_cache is None:
+        ttl = max(1, int(getattr(settings, "ASSISTANT_KEY_CACHE_TTL", 300)))
+        maxsize = max(1, int(getattr(settings, "ASSISTANT_KEY_CACHE_MAXSIZE", 1000)))
+        _key_cache = TTLCache(maxsize=maxsize, ttl=ttl)
+    return _key_cache
+
+
+def get_decrypted_api_key(cfg: UserLLMConfig) -> str:
+    """Decrypt ``cfg``'s BYOK key, served from a short-lived in-process cache.
+
+    Falls back to a direct (uncached) decrypt when caching is disabled
+    (``ASSISTANT_KEY_CACHE_TTL <= 0``) or there is no stored key.
+    """
+    token = cfg.api_key_encrypted
+    if int(getattr(settings, "ASSISTANT_KEY_CACHE_TTL", 300) or 0) <= 0 or not token:
+        return crypto.decrypt(token)
+    cache_key = hashlib.sha256(bytes(token)).hexdigest()
+    with _key_cache_lock:
+        hit = _get_key_cache().get(cache_key)
+    if hit is not None:
+        return hit
+    # Decrypt OUTSIDE the lock so concurrent decrypts of different keys don't
+    # serialize on the KMS round-trip. A rare duplicate decrypt of the same key
+    # under contention is harmless (idempotent).
+    plaintext = crypto.decrypt(token)
+    with _key_cache_lock:
+        _get_key_cache()[cache_key] = plaintext
+    return plaintext
 
 
 def get_config(user) -> UserLLMConfig | None:
@@ -39,7 +86,7 @@ def resolve_byok_model(user):
         provider_kind=cfg.provider_kind,
         base_url=cfg.base_url,
         model_name=cfg.model_name,
-        api_key=crypto.decrypt(cfg.api_key_encrypted),
+        api_key=get_decrypted_api_key(cfg),
     )
 
 
