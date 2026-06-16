@@ -180,8 +180,23 @@ def _lazy_cleanup_install_sessions() -> None:
         log_exception(e)
 
 
-def _refresh_app_installation(app_installation: GithubAppInstallation) -> GithubAppInstallation:
+def _refresh_app_installation(
+    app_installation: GithubAppInstallation,
+    *,
+    raise_on_error: bool = False,
+    extra_update_fields: list[str] | None = None,
+) -> GithubAppInstallation:
     now = timezone.now()
+    update_fields = [
+        "repository_count",
+        "verified_at",
+        "last_checked_at",
+        "last_check_error",
+        "updated_at",
+    ]
+    if extra_update_fields:
+        update_fields.extend(field for field in extra_update_fields if field not in update_fields)
+
     try:
         _, _, repository_count = (
             GithubClient.for_installation(app_installation.installation_id).list_installation_repositories()
@@ -194,31 +209,26 @@ def _refresh_app_installation(app_installation: GithubAppInstallation) -> Github
         app_installation.last_checked_at = now
         app_installation.last_check_error = str(e)[:2000]
         log_exception(e)
-    app_installation.save(
-        update_fields=[
-            "repository_count",
-            "verified_at",
-            "last_checked_at",
-            "last_check_error",
-            "updated_at",
-        ]
-    )
+        app_installation.save(update_fields=update_fields)
+        if raise_on_error:
+            raise GithubAppAuthError("GitHub App connection check failed") from e
+        return app_installation
+
+    app_installation.save(update_fields=update_fields)
     return app_installation
 
 
-def _upsert_app_installation(workspace: Workspace, actor, installation: dict) -> GithubAppInstallation:
+def _upsert_app_installation(
+    workspace: Workspace,
+    actor,
+    installation: dict,
+    *,
+    require_verified: bool = False,
+) -> GithubAppInstallation:
     account = installation.get("account") or {}
     installation_id = int(installation.get("id") or 0)
     if not installation_id:
         raise GithubAppAuthError("GitHub installation response did not include an id")
-    wi = _get_or_create_workspace_integration(workspace, actor)
-    existing = GithubAppInstallation.objects.filter(installation_id=installation_id).select_related(
-        "workspace_integration__workspace"
-    ).first()
-    if existing is not None and existing.workspace_integration_id != wi.id:
-        raise GithubAppAuthError(
-            f"GitHub installation is already connected to workspace {existing.workspace_integration.workspace.slug}"
-        )
     defaults = {
         "account_login": account.get("login") or "",
         "account_type": account.get("type") or GithubAppInstallation.AccountType.UNKNOWN,
@@ -231,11 +241,20 @@ def _upsert_app_installation(workspace: Workspace, actor, installation: dict) ->
         "suspended_at": parse_github_datetime(installation.get("suspended_at")),
         "last_check_error": "",
     }
-    app_installation, _ = GithubAppInstallation.objects.update_or_create(
-        workspace_integration=wi,
-        defaults={"installation_id": installation_id, **defaults},
-    )
-    return _refresh_app_installation(app_installation)
+    with transaction.atomic():
+        wi = _get_or_create_workspace_integration(workspace, actor)
+        existing = GithubAppInstallation.objects.filter(installation_id=installation_id).select_related(
+            "workspace_integration__workspace"
+        ).first()
+        if existing is not None and existing.workspace_integration_id != wi.id:
+            raise GithubAppAuthError(
+                f"GitHub installation is already connected to workspace {existing.workspace_integration.workspace.slug}"
+            )
+        app_installation, _ = GithubAppInstallation.objects.update_or_create(
+            workspace_integration=wi,
+            defaults={"installation_id": installation_id, **defaults},
+        )
+        return _refresh_app_installation(app_installation, raise_on_error=require_verified)
 
 
 def _serialize_repo(gh_repo: dict) -> dict:
@@ -522,7 +541,14 @@ class GithubAppRefreshEndpoint(BaseAPIView):
         app_installation = getattr(wi, "github_app_installation", None) if wi else None
         if app_installation is None:
             return Response({"error": "GitHub App is not installed for this workspace"}, status=status.HTTP_404_NOT_FOUND)
-        return Response(_serialize_app_installation(_refresh_app_installation(app_installation)), status=status.HTTP_200_OK)
+        try:
+            app_installation = _refresh_app_installation(app_installation, raise_on_error=True)
+        except GithubAppAuthError:
+            return Response(
+                {"error": app_installation.last_check_error or "Failed to verify GitHub App installation"},
+                status=status.HTTP_502_BAD_GATEWAY,
+            )
+        return Response(_serialize_app_installation(app_installation), status=status.HTTP_200_OK)
 
 
 class GithubAppCallbackEndpoint(BaseAPIView):
@@ -571,7 +597,12 @@ class GithubAppCallbackEndpoint(BaseAPIView):
             if verify_user_can_access_installation(user_token, installation_id) is None:
                 return fail("installation_not_visible_to_user")
             installation = get_installation(installation_id)
-            app_installation = _upsert_app_installation(install_session.workspace, request.user, installation)
+            app_installation = _upsert_app_installation(
+                install_session.workspace,
+                request.user,
+                installation,
+                require_verified=True,
+            )
         except Exception as e:
             log_exception(e)
             return fail("github_verification_failed")
@@ -653,7 +684,7 @@ class GithubAppWebhookEndpoint(BaseAPIView):
                         revoke_installation_cache(app_installation.installation_id)
                     elif event == "installation" and action == "unsuspend":
                         app_installation.suspended_at = None
-                        _refresh_app_installation(app_installation)
+                        _refresh_app_installation(app_installation, extra_update_fields=["suspended_at"])
                     elif event == "installation_repositories":
                         _refresh_app_installation(app_installation)
                     delivery.status = GithubWebhookDelivery.Status.PROCESSED

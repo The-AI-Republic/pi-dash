@@ -24,6 +24,7 @@ from .base import BaseAPIView
 from pi_dash.license.api.permissions import InstanceAdminPermission
 from pi_dash.license.models import InstanceConfiguration
 from pi_dash.license.api.serializers import InstanceConfigurationSerializer
+from pi_dash.license.api.serializers.configuration import WRITE_ONLY_CONFIG_KEYS
 from pi_dash.license.utils.encryption import encrypt_data
 from pi_dash.utils.cache import cache_response, invalidate_cache
 from pi_dash.license.utils.instance_value import get_email_configuration
@@ -47,13 +48,16 @@ class InstanceConfigurationEndpoint(BaseAPIView):
         for configuration in configurations:
             raw_value = request.data.get(configuration.key, configuration.value)
             value = "" if raw_value is None else str(raw_value).strip()
+            if configuration.key in WRITE_ONLY_CONFIG_KEYS and value == "set":
+                continue
             if configuration.is_encrypted:
                 configuration.value = encrypt_data(value)
             else:
                 configuration.value = value
             bulk_configurations.append(configuration)
 
-        InstanceConfiguration.objects.bulk_update(bulk_configurations, ["value"], batch_size=100)
+        if bulk_configurations:
+            InstanceConfiguration.objects.bulk_update(bulk_configurations, ["value"], batch_size=100)
 
         serializer = InstanceConfigurationSerializer(configurations, many=True)
         return Response(serializer.data, status=status.HTTP_200_OK)
