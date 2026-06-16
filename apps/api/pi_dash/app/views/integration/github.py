@@ -12,10 +12,19 @@ See .ai_design/github_sync/design.md §6.1 and §6.2.
 
 from __future__ import annotations
 
+import json
+import logging
+import secrets
+import uuid
+from datetime import timedelta
+from urllib.parse import urlencode
+
 from django.conf import settings
-from django.db import IntegrityError, transaction
+from django.db import transaction
+from django.http import HttpResponseRedirect
 from django.shortcuts import get_object_or_404
 from django.utils import timezone
+from rest_framework.permissions import AllowAny
 from rest_framework import status
 from rest_framework.response import Response
 
@@ -23,18 +32,34 @@ from pi_dash.app.permissions import ROLE, allow_permission
 from pi_dash.app.views.base import BaseAPIView
 from pi_dash.db.models import (
     APIToken,
+    GithubAppInstallation,
+    GithubAppInstallSession,
     GithubCommentSync,
     GithubIssueSync,
     GithubRepository,
     GithubRepositorySync,
+    GithubWebhookDelivery,
     Integration,
     Label,
     Project,
     Workspace,
+    WorkspaceMember,
     WorkspaceIntegration,
 )
 from pi_dash.license.utils.encryption import decrypt_data, encrypt_data
 from pi_dash.utils.exception_logger import log_exception
+from pi_dash.utils.github_app_auth import (
+    GithubAppAuthError,
+    GithubAppConfigError,
+    exchange_user_code,
+    get_github_app_config,
+    get_installation,
+    parse_github_datetime,
+    require_github_app_config,
+    revoke_installation_cache,
+    verify_user_can_access_installation,
+    verify_webhook_signature,
+)
 from pi_dash.utils.github_client import (
     GithubAuthError,
     GithubClient,
@@ -42,6 +67,8 @@ from pi_dash.utils.github_client import (
     GithubPermissionError,
     parse_github_repo_url,
 )
+
+logger = logging.getLogger(__name__)
 
 
 def _feature_enabled() -> bool:
@@ -69,6 +96,146 @@ def _get_workspace_integration(workspace: Workspace) -> WorkspaceIntegration | N
     if integration is None:
         return None
     return WorkspaceIntegration.objects.filter(workspace=workspace, integration=integration).first()
+
+
+def _get_or_create_workspace_integration(workspace: Workspace, actor) -> WorkspaceIntegration:
+    integration = _get_or_create_github_integration()
+    wi = WorkspaceIntegration.objects.filter(workspace=workspace, integration=integration).first()
+    if wi is not None:
+        return wi
+    api_token = APIToken.objects.create(
+        user=actor,
+        workspace=workspace,
+        user_type=1,
+        is_active=False,
+        label=f"github-integration-{workspace.id}",
+        description="GitHub integration FK shim — not for auth",
+    )
+    return WorkspaceIntegration.objects.create(
+        workspace=workspace,
+        actor=actor,
+        integration=integration,
+        api_token=api_token,
+        config={},
+    )
+
+
+def _is_workspace_admin(user, workspace: Workspace) -> bool:
+    return WorkspaceMember.objects.filter(
+        member=user,
+        workspace=workspace,
+        role=ROLE.ADMIN.value,
+        is_active=True,
+    ).exists()
+
+
+def _redirect_to_profile_integrations(params: dict[str, str]) -> HttpResponseRedirect:
+    base = (getattr(settings, "WEB_URL", None) or getattr(settings, "APP_BASE_URL", None) or "").rstrip("/")
+    path = "/settings/profile/integrations/"
+    query = urlencode(params)
+    url = f"{base}{path}" if base else path
+    if query:
+        url = f"{url}?{query}"
+    return HttpResponseRedirect(url)
+
+
+def _serialize_app_installation(app_installation: GithubAppInstallation | None) -> dict:
+    if app_installation is None:
+        return {"connected": False}
+    return {
+        "connected": True,
+        "installation_id": app_installation.installation_id,
+        "account_login": app_installation.account_login,
+        "account_type": app_installation.account_type,
+        "repository_selection": app_installation.repository_selection,
+        "repository_count": app_installation.repository_count,
+        "permissions": app_installation.permissions,
+        "events": app_installation.events,
+        "installed_at": app_installation.installed_at.isoformat() if app_installation.installed_at else None,
+        "suspended_at": app_installation.suspended_at.isoformat() if app_installation.suspended_at else None,
+        "verified_at": app_installation.verified_at.isoformat() if app_installation.verified_at else None,
+        "last_checked_at": app_installation.last_checked_at.isoformat() if app_installation.last_checked_at else None,
+        "last_check_error": app_installation.last_check_error,
+    }
+
+
+def _lazy_cleanup_install_sessions() -> None:
+    now = timezone.now()
+    try:
+        expired_count = GithubAppInstallSession.objects.filter(
+            status=GithubAppInstallSession.Status.STARTED,
+            expires_at__lt=now,
+        ).update(status=GithubAppInstallSession.Status.EXPIRED, error="Install session expired")
+        deleted_count, _ = GithubAppInstallSession.objects.filter(
+            status__in=[
+                GithubAppInstallSession.Status.COMPLETED,
+                GithubAppInstallSession.Status.EXPIRED,
+                GithubAppInstallSession.Status.FAILED,
+            ],
+            updated_at__lt=now - timedelta(days=7),
+        ).delete(soft=False)
+        if expired_count or deleted_count:
+            logger.info("GitHub App install session cleanup: expired=%s, deleted=%s", expired_count, deleted_count)
+    except Exception as e:
+        log_exception(e)
+
+
+def _refresh_app_installation(app_installation: GithubAppInstallation) -> GithubAppInstallation:
+    now = timezone.now()
+    try:
+        _, _, repository_count = (
+            GithubClient.for_installation(app_installation.installation_id).list_installation_repositories()
+        )
+        app_installation.repository_count = repository_count
+        app_installation.verified_at = now
+        app_installation.last_checked_at = now
+        app_installation.last_check_error = ""
+    except Exception as e:
+        app_installation.last_checked_at = now
+        app_installation.last_check_error = str(e)[:2000]
+        log_exception(e)
+    app_installation.save(
+        update_fields=[
+            "repository_count",
+            "verified_at",
+            "last_checked_at",
+            "last_check_error",
+            "updated_at",
+        ]
+    )
+    return app_installation
+
+
+def _upsert_app_installation(workspace: Workspace, actor, installation: dict) -> GithubAppInstallation:
+    account = installation.get("account") or {}
+    installation_id = int(installation.get("id") or 0)
+    if not installation_id:
+        raise GithubAppAuthError("GitHub installation response did not include an id")
+    wi = _get_or_create_workspace_integration(workspace, actor)
+    existing = GithubAppInstallation.objects.filter(installation_id=installation_id).select_related(
+        "workspace_integration__workspace"
+    ).first()
+    if existing is not None and existing.workspace_integration_id != wi.id:
+        raise GithubAppAuthError(
+            f"GitHub installation is already connected to workspace {existing.workspace_integration.workspace.slug}"
+        )
+    defaults = {
+        "account_login": account.get("login") or "",
+        "account_type": account.get("type") or GithubAppInstallation.AccountType.UNKNOWN,
+        "repository_selection": installation.get("repository_selection")
+        or GithubAppInstallation.RepositorySelection.SELECTED,
+        "repository_count": int(installation.get("repository_count") or 0),
+        "permissions": installation.get("permissions") or {},
+        "events": installation.get("events") or [],
+        "installed_at": parse_github_datetime(installation.get("created_at")),
+        "suspended_at": parse_github_datetime(installation.get("suspended_at")),
+        "last_check_error": "",
+    }
+    app_installation, _ = GithubAppInstallation.objects.update_or_create(
+        workspace_integration=wi,
+        defaults={"installation_id": installation_id, **defaults},
+    )
+    return _refresh_app_installation(app_installation)
 
 
 def _serialize_repo(gh_repo: dict) -> dict:
@@ -250,6 +417,257 @@ class GithubIntegrationReposEndpoint(BaseAPIView):
             },
             status=status.HTTP_200_OK,
         )
+
+
+# --------------------------------------------------------------------- github app
+
+
+class GithubAppStatusEndpoint(BaseAPIView):
+    """GET /users/me/integrations/github/app/"""
+
+    def get(self, request):
+        if not _feature_enabled():
+            return _disabled_response()
+        _lazy_cleanup_install_sessions()
+
+        config = get_github_app_config()
+        configured = bool(
+            config.get("app_id")
+            and config.get("app_slug")
+            and config.get("private_key")
+            and config.get("webhook_secret")
+            and config.get("client_id")
+            and config.get("client_secret")
+        )
+        memberships = (
+            WorkspaceMember.objects.filter(member=request.user, role=ROLE.ADMIN.value, is_active=True)
+            .select_related("workspace")
+            .order_by("workspace__name")
+        )
+        workspace_payload = []
+        for membership in memberships:
+            wi = _get_workspace_integration(membership.workspace)
+            app_installation = None
+            if wi is not None:
+                app_installation = getattr(wi, "github_app_installation", None)
+            workspace_payload.append(
+                {
+                    "id": str(membership.workspace.id),
+                    "slug": membership.workspace.slug,
+                    "name": membership.workspace.name,
+                    "github_app": _serialize_app_installation(app_installation),
+                }
+            )
+
+        return Response(
+            {
+                "configured": configured,
+                "app_slug": config.get("app_slug") or "",
+                "workspaces": workspace_payload,
+            },
+            status=status.HTTP_200_OK,
+        )
+
+
+class GithubAppInstallStartEndpoint(BaseAPIView):
+    """POST /users/me/integrations/github/app/install/"""
+
+    def post(self, request):
+        if not _feature_enabled():
+            return _disabled_response()
+        _lazy_cleanup_install_sessions()
+        try:
+            config = require_github_app_config(oauth=True, webhook=True)
+        except GithubAppConfigError as e:
+            return Response({"error": str(e)}, status=status.HTTP_409_CONFLICT)
+
+        workspace_slug = (request.data.get("workspace_slug") or "").strip()
+        if not workspace_slug:
+            return Response({"error": "workspace_slug is required"}, status=status.HTTP_400_BAD_REQUEST)
+        workspace = get_object_or_404(Workspace, slug=workspace_slug)
+        if not _is_workspace_admin(request.user, workspace):
+            return Response({"error": "You must be a workspace admin to install the GitHub App"}, status=status.HTTP_403_FORBIDDEN)
+
+        state = secrets.token_urlsafe(32)
+        install_session = GithubAppInstallSession.objects.create(
+            state=state,
+            workspace=workspace,
+            actor=request.user,
+            expires_at=timezone.now() + timedelta(minutes=15),
+        )
+        install_url = f"https://github.com/apps/{config['app_slug']}/installations/new?{urlencode({'state': state})}"
+        return Response(
+            {
+                "state": install_session.state,
+                "expires_at": install_session.expires_at.isoformat(),
+                "install_url": install_url,
+            },
+            status=status.HTTP_201_CREATED,
+        )
+
+
+class GithubAppRefreshEndpoint(BaseAPIView):
+    """POST /users/me/integrations/github/app/refresh/"""
+
+    def post(self, request):
+        if not _feature_enabled():
+            return _disabled_response()
+        workspace_slug = (request.data.get("workspace_slug") or "").strip()
+        if not workspace_slug:
+            return Response({"error": "workspace_slug is required"}, status=status.HTTP_400_BAD_REQUEST)
+        workspace = get_object_or_404(Workspace, slug=workspace_slug)
+        if not _is_workspace_admin(request.user, workspace):
+            return Response({"error": "You must be a workspace admin to refresh this connection"}, status=status.HTTP_403_FORBIDDEN)
+        wi = _get_workspace_integration(workspace)
+        app_installation = getattr(wi, "github_app_installation", None) if wi else None
+        if app_installation is None:
+            return Response({"error": "GitHub App is not installed for this workspace"}, status=status.HTTP_404_NOT_FOUND)
+        return Response(_serialize_app_installation(_refresh_app_installation(app_installation)), status=status.HTTP_200_OK)
+
+
+class GithubAppCallbackEndpoint(BaseAPIView):
+    """GET /integrations/github/app/callback/"""
+
+    def get(self, request):
+        if not _feature_enabled():
+            return _redirect_to_profile_integrations({"github_app": "disabled"})
+        _lazy_cleanup_install_sessions()
+
+        state = request.GET.get("state") or ""
+        code = request.GET.get("code") or ""
+        installation_id_raw = request.GET.get("installation_id") or ""
+        if not state:
+            return _redirect_to_profile_integrations({"github_app": "error", "error": "missing_state"})
+
+        install_session = GithubAppInstallSession.objects.filter(state=state).select_related("workspace", "actor").first()
+        if install_session is None:
+            return _redirect_to_profile_integrations({"github_app": "error", "error": "unknown_state"})
+
+        def fail(error: str):
+            install_session.status = GithubAppInstallSession.Status.FAILED
+            install_session.error = error
+            install_session.save(update_fields=["status", "error", "updated_at"])
+            return _redirect_to_profile_integrations({"github_app": "error", "error": error})
+
+        if install_session.status != GithubAppInstallSession.Status.STARTED:
+            return _redirect_to_profile_integrations({"github_app": install_session.status})
+        if install_session.expires_at <= timezone.now():
+            install_session.status = GithubAppInstallSession.Status.EXPIRED
+            install_session.error = "Install session expired"
+            install_session.save(update_fields=["status", "error", "updated_at"])
+            return _redirect_to_profile_integrations({"github_app": "expired"})
+        if install_session.actor_id != request.user.id:
+            return fail("actor_mismatch")
+        if not _is_workspace_admin(request.user, install_session.workspace):
+            return fail("workspace_admin_required")
+        if not installation_id_raw.isdigit():
+            return fail("missing_installation_id")
+        if not code:
+            return fail("missing_oauth_code")
+
+        installation_id = int(installation_id_raw)
+        try:
+            user_token = exchange_user_code(code)
+            if verify_user_can_access_installation(user_token, installation_id) is None:
+                return fail("installation_not_visible_to_user")
+            installation = get_installation(installation_id)
+            app_installation = _upsert_app_installation(install_session.workspace, request.user, installation)
+        except Exception as e:
+            log_exception(e)
+            return fail("github_verification_failed")
+
+        install_session.installation_id = installation_id
+        install_session.account_login = app_installation.account_login
+        install_session.status = GithubAppInstallSession.Status.COMPLETED
+        install_session.completed_at = timezone.now()
+        install_session.error = ""
+        install_session.save(
+            update_fields=["installation_id", "account_login", "status", "completed_at", "error", "updated_at"]
+        )
+        return _redirect_to_profile_integrations(
+            {
+                "github_app": "connected",
+                "workspace_slug": install_session.workspace.slug,
+            }
+        )
+
+
+class GithubAppWebhookEndpoint(BaseAPIView):
+    """POST /integrations/github/app/webhook/"""
+
+    authentication_classes = []
+    permission_classes = [AllowAny]
+
+    def post(self, request):
+        if not _feature_enabled():
+            return _disabled_response()
+        try:
+            if not verify_webhook_signature(request.body, request.headers.get("X-Hub-Signature-256")):
+                return Response({"error": "Invalid signature"}, status=status.HTTP_401_UNAUTHORIZED)
+        except GithubAppConfigError as e:
+            return Response({"error": str(e)}, status=status.HTTP_409_CONFLICT)
+
+        delivery_id = request.headers.get("X-GitHub-Delivery")
+        event = request.headers.get("X-GitHub-Event") or ""
+        if not delivery_id:
+            return Response({"error": "Missing X-GitHub-Delivery"}, status=status.HTTP_400_BAD_REQUEST)
+        try:
+            delivery_uuid = uuid.UUID(delivery_id)
+        except ValueError:
+            return Response({"error": "Invalid X-GitHub-Delivery"}, status=status.HTTP_400_BAD_REQUEST)
+        try:
+            payload = json.loads(request.body.decode("utf-8") or "{}")
+        except json.JSONDecodeError:
+            return Response({"error": "Invalid JSON"}, status=status.HTTP_400_BAD_REQUEST)
+
+        installation = payload.get("installation") or {}
+        installation_id = installation.get("id")
+        action = payload.get("action") or ""
+        delivery, created = GithubWebhookDelivery.objects.get_or_create(
+            delivery_id=delivery_uuid,
+            defaults={
+                "event": event,
+                "action": action,
+                "installation_id": installation_id,
+                "payload": payload,
+                "status": GithubWebhookDelivery.Status.RECEIVED,
+            },
+        )
+        if not created:
+            return Response({"status": delivery.status}, status=status.HTTP_202_ACCEPTED)
+
+        try:
+            if event == "ping":
+                delivery.status = GithubWebhookDelivery.Status.PROCESSED
+            elif event in {"installation", "installation_repositories"}:
+                app_installation = None
+                if installation_id:
+                    app_installation = GithubAppInstallation.objects.filter(installation_id=installation_id).first()
+                if app_installation is None:
+                    delivery.status = GithubWebhookDelivery.Status.SKIPPED
+                else:
+                    if event == "installation" and action in {"deleted", "suspend"}:
+                        app_installation.suspended_at = timezone.now()
+                        app_installation.last_check_error = "GitHub App installation removed or suspended"
+                        app_installation.save(update_fields=["suspended_at", "last_check_error", "updated_at"])
+                        revoke_installation_cache(app_installation.installation_id)
+                    elif event == "installation" and action == "unsuspend":
+                        app_installation.suspended_at = None
+                        _refresh_app_installation(app_installation)
+                    elif event == "installation_repositories":
+                        _refresh_app_installation(app_installation)
+                    delivery.status = GithubWebhookDelivery.Status.PROCESSED
+            else:
+                delivery.status = GithubWebhookDelivery.Status.SKIPPED
+            delivery.processed_at = timezone.now()
+            delivery.save(update_fields=["status", "processed_at", "updated_at"])
+        except Exception as e:
+            log_exception(e)
+            delivery.status = GithubWebhookDelivery.Status.FAILED
+            delivery.error = str(e)[:2000]
+            delivery.processed_at = timezone.now()
+            delivery.save(update_fields=["status", "error", "processed_at", "updated_at"])
+        return Response({"status": delivery.status}, status=status.HTTP_202_ACCEPTED)
 
 
 # --------------------------------------------------------------------- project

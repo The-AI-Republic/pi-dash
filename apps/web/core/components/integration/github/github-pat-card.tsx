@@ -101,7 +101,7 @@ export function GithubPatCard({ integration }: Props) {
             {status?.connected && <CheckCircle className="h-3.5 w-3.5 fill-transparent text-success-primary" />}
           </h3>
           <p className="text-body-xs-regular text-secondary">
-            {status === undefined
+            {!status
               ? "Loading..."
               : status.connected
                 ? `Connected as ${status.github_user_login}. Bind a repository on a project's Settings → GitHub.`
@@ -118,7 +118,7 @@ export function GithubPatCard({ integration }: Props) {
         </div>
       </div>
 
-      {status === undefined ? (
+      {!status ? (
         <Loader>
           <Loader.Item height="32px" width="180px" />
         </Loader>

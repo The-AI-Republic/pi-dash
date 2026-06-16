@@ -16,6 +16,7 @@ export type TProfileSettingsTabs =
   | "activity"
   | "notifications"
   | "security"
+  | "integrations"
   | "api-tokens";
 
 export type TWorkspaceSettingsTabs =

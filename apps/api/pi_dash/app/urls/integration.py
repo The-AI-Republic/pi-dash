@@ -5,6 +5,11 @@
 from django.urls import path
 
 from pi_dash.app.views.integration.github import (
+    GithubAppCallbackEndpoint,
+    GithubAppInstallStartEndpoint,
+    GithubAppRefreshEndpoint,
+    GithubAppStatusEndpoint,
+    GithubAppWebhookEndpoint,
     GithubIntegrationConnectEndpoint,
     GithubIntegrationDisconnectEndpoint,
     GithubIntegrationReposEndpoint,
@@ -15,6 +20,32 @@ from pi_dash.app.views.integration.github import (
 
 
 urlpatterns = [
+    # Profile-level GitHub App install flow
+    path(
+        "users/me/integrations/github/app/",
+        GithubAppStatusEndpoint.as_view(),
+        name="github-app-status",
+    ),
+    path(
+        "users/me/integrations/github/app/install/",
+        GithubAppInstallStartEndpoint.as_view(),
+        name="github-app-install-start",
+    ),
+    path(
+        "users/me/integrations/github/app/refresh/",
+        GithubAppRefreshEndpoint.as_view(),
+        name="github-app-refresh",
+    ),
+    path(
+        "integrations/github/app/callback/",
+        GithubAppCallbackEndpoint.as_view(),
+        name="github-app-callback",
+    ),
+    path(
+        "integrations/github/app/webhook/",
+        GithubAppWebhookEndpoint.as_view(),
+        name="github-app-webhook",
+    ),
     # Workspace-level
     path(
         "workspaces/<str:slug>/integrations/github/",

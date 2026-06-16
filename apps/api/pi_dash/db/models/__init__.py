@@ -20,6 +20,9 @@ from .exporter import ExporterHistory
 from .importer import Importer
 from .intake import Intake, IntakeIssue
 from .integration import (
+    GithubAppInstallation,
+    GithubAppInstallSession,
+    GithubWebhookDelivery,
     GithubCommentSync,
     GithubIssueSync,
     GithubRepository,

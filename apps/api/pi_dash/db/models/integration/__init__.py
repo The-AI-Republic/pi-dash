@@ -4,6 +4,9 @@
 
 from .base import Integration, WorkspaceIntegration
 from .github import (
+    GithubAppInstallation,
+    GithubAppInstallSession,
+    GithubWebhookDelivery,
     GithubRepository,
     GithubRepositorySync,
     GithubIssueSync,
