@@ -37,6 +37,20 @@ def test_settings_modules_do_not_read_os_environ_directly():
 
 
 @pytest.mark.unit
+def test_every_seeded_key_is_registered_as_db():
+    """Every key configure_instance seeds into InstanceConfiguration must be
+    registered as db-sourced in OSS. Otherwise the resolver routes it to env
+    and silently ignores the seeded DB row (the IS_*_ENABLED regression)."""
+    from pi_dash.config.registry import CONFIG
+    from pi_dash.license.management.commands.configure_instance import DERIVED_FLAG_KEYS
+    from pi_dash.utils.instance_config_variables import instance_config_variables
+
+    seeded = [item["key"] for item in instance_config_variables] + list(DERIVED_FLAG_KEYS)
+    bad = [key for key in seeded if CONFIG.get(key, {}).get("source") != "db"]
+    assert not bad, f"seeded keys not registered as db-sourced: {sorted(bad)}"
+
+
+@pytest.mark.unit
 def test_registry_catalogs_every_key_settings_read():
     """Every key passed to get_config(...) in the settings modules must be
     registered, so the registry stays a complete catalog (and strict mode in

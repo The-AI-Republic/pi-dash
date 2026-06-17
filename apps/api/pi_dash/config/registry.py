@@ -24,7 +24,8 @@ Back-compat note (OSS): every key that the legacy ``get_configuration_value``
 resolver served from the DB under the default ``SKIP_ENV_VAR=1`` is classified
 ``"db"`` here, so removing ``SKIP_ENV_VAR`` does not change self-hosted
 behavior. The cloud deployment reclassifies the secret/identity keys to
-``"env"`` via the ee-overlay (it overrides ``CONFIG_SOURCE_OVERRIDES`` below).
+``"env"`` (so they are sourced from SSM) via the ``PIDASH_CONFIG_ENV_KEYS``
+environment variable — see ``_load_env_overrides`` below.
 """
 
 import os
@@ -42,16 +43,24 @@ _RESOLVER_CONFIG = {
     "GOOGLE_CLIENT_ID": {"source": "db", "default": None},
     "GOOGLE_CLIENT_SECRET": {"source": "db", "default": None, "secret": True},
     "ENABLE_GOOGLE_SYNC": {"source": "db", "default": "0"},
+    # IS_*_ENABLED flags are derived + seeded into the DB by configure_instance
+    # and read back by the instances endpoint, so they are db-sourced.
+    "IS_GOOGLE_ENABLED": {"source": "db", "default": "0"},
     # --- GitHub OAuth -----------------------------------------------------
     "GITHUB_CLIENT_ID": {"source": "db", "default": None},
     "GITHUB_CLIENT_SECRET": {"source": "db", "default": None, "secret": True},
     "GITHUB_ORGANIZATION_ID": {"source": "db", "default": None},
     "ENABLE_GITHUB_SYNC": {"source": "db", "default": "0"},
+    "IS_GITHUB_ENABLED": {"source": "db", "default": "0"},
+    # GITHUB_APP_NAME is read by the instances endpoint from the env only
+    # (never seeded into the DB), so it is env-sourced.
+    "GITHUB_APP_NAME": {"source": "env", "default": None},
     # --- GitLab OAuth -----------------------------------------------------
     "GITLAB_HOST": {"source": "db", "default": None},
     "GITLAB_CLIENT_ID": {"source": "db", "default": None},
     "GITLAB_CLIENT_SECRET": {"source": "db", "default": None, "secret": True},
     "ENABLE_GITLAB_SYNC": {"source": "db", "default": "0"},
+    "IS_GITLAB_ENABLED": {"source": "db", "default": "0"},
     # --- Gitea OAuth ------------------------------------------------------
     "IS_GITEA_ENABLED": {"source": "db", "default": "0"},
     "GITEA_HOST": {"source": "db", "default": None},
@@ -74,6 +83,8 @@ _RESOLVER_CONFIG = {
     "GPT_ENGINE": {"source": "db", "default": "gpt-3.5-turbo"},  # deprecated, use LLM_MODEL
     # --- Misc -------------------------------------------------------------
     "UNSPLASH_ACCESS_KEY": {"source": "db", "default": "", "secret": True},
+    # Read by the instances endpoint from the env only (never seeded to DB).
+    "SLACK_CLIENT_ID": {"source": "env", "default": None},
     # --- Analytics (never seeded to DB; always env) -----------------------
     "POSTHOG_API_KEY": {"source": "env", "default": None},
     "POSTHOG_HOST": {"source": "env", "default": None},

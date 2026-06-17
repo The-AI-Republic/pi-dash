@@ -14,6 +14,12 @@ from pi_dash.license.models import InstanceConfiguration
 from pi_dash.utils.instance_config_variables import instance_config_variables
 
 
+# Derived auth flags computed and seeded as DB rows below (not part of
+# instance_config_variables). Exposed as a constant so the config registry can
+# assert every seeded key is registered as db-sourced.
+DERIVED_FLAG_KEYS = ["IS_GOOGLE_ENABLED", "IS_GITHUB_ENABLED", "IS_GITLAB_ENABLED", "IS_GITEA_ENABLED"]
+
+
 def _is_db_sourced(key):
     """Only db-sourced keys are seeded into InstanceConfiguration. env-sourced
     keys (e.g. secrets routed to SSM in the cloud) are read from the
@@ -52,7 +58,7 @@ class Command(BaseCommand):
             else:
                 self.stdout.write(self.style.WARNING(f"{obj.key} configuration already exists"))
 
-        keys = ["IS_GOOGLE_ENABLED", "IS_GITHUB_ENABLED", "IS_GITLAB_ENABLED", "IS_GITEA_ENABLED"]
+        keys = DERIVED_FLAG_KEYS
         if not InstanceConfiguration.objects.filter(key__in=keys).exists():
             for key in keys:
                 if key == "IS_GOOGLE_ENABLED":

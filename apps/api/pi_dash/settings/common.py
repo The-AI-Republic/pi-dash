@@ -25,7 +25,7 @@ from pi_dash.utils.url import is_valid_url
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 # Secret Key
-SECRET_KEY = get_config("SECRET_KEY") or get_random_secret_key()
+SECRET_KEY = get_config("SECRET_KEY", get_random_secret_key())
 
 # SECURITY WARNING: don't run with debug turned on in production!
 DEBUG = int(get_config("DEBUG", "0"))

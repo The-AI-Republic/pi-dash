@@ -40,13 +40,12 @@ class ConfigError(RuntimeError):
 def _strict() -> bool:
     """Whether to raise (vs. warn) on an unregistered key.
 
-    Strict in tests and when DEBUG is on, so CI catches unregistered keys;
-    lenient in prod so a forgotten key degrades gracefully to an env read.
-    Reads the environment directly to avoid importing Django settings here.
+    Strict only under the test settings module, so CI catches unregistered
+    keys; lenient everywhere else (incl. prod, even with DEBUG on) so a
+    forgotten key degrades gracefully to an env read instead of crashing the
+    process. Reads the environment directly to avoid importing Django settings.
     """
-    if os.environ.get("DJANGO_SETTINGS_MODULE", "").endswith(".test"):
-        return True
-    return os.environ.get("DEBUG", "0") not in ("0", "", "false", "False")
+    return os.environ.get("DJANGO_SETTINGS_MODULE", "").endswith(".test")
 
 
 def _instance_configuration_model():
@@ -142,9 +141,12 @@ def get_bool(key: str) -> bool:
     return get_config(key) == "1"
 
 
-def get_int(key: str, default: int | None = None) -> int | None:
-    value = get_config(key)
+def get_int(key: str, default=_UNSET) -> int | None:
+    """Like get_config but coerced to int. When ``default`` is omitted the
+    registry default is used; when supplied it overrides for the lookup and is
+    also the fallback if the value can't be parsed as an int."""
+    value = get_config(key) if default is _UNSET else get_config(key, default)
     try:
         return int(value)
     except (TypeError, ValueError):
-        return default
+        return None if default is _UNSET else default
