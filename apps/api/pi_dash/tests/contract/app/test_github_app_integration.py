@@ -24,7 +24,7 @@ from pi_dash.db.models import (
 from pi_dash.license.models import Instance, InstanceAdmin, InstanceConfiguration
 from pi_dash.license.utils.encryption import decrypt_data, encrypt_data
 from pi_dash.tests.factories import UserFactory, WorkspaceFactory, WorkspaceMemberFactory
-from pi_dash.utils.github_app_auth import GithubAppAuthError
+from pi_dash.utils.github_app_auth import GithubAppAuthError, get_github_app_config
 
 
 pytestmark = [pytest.mark.contract, pytest.mark.django_db]
@@ -72,6 +72,47 @@ def _mark_refreshed(app_installation: GithubAppInstallation, **_kwargs) -> Githu
         update_fields=["verified_at", "last_checked_at", "repository_count", "last_check_error", "updated_at"]
     )
     return app_installation
+
+
+def test_github_app_config_prefers_env_values(settings, monkeypatch):
+    settings.SKIP_ENV_VAR = True
+    InstanceConfiguration.objects.create(key="GITHUB_APP_ID", value="db-app-id", category="GITHUB")
+    InstanceConfiguration.objects.create(key="GITHUB_APP_SLUG", value="db-app-slug", category="GITHUB")
+    InstanceConfiguration.objects.create(
+        key="GITHUB_APP_PRIVATE_KEY",
+        value=encrypt_data("db-private-key"),
+        category="GITHUB",
+        is_encrypted=True,
+    )
+    InstanceConfiguration.objects.create(
+        key="GITHUB_APP_WEBHOOK_SECRET",
+        value=encrypt_data("db-webhook-secret"),
+        category="GITHUB",
+        is_encrypted=True,
+    )
+    InstanceConfiguration.objects.create(key="GITHUB_APP_CLIENT_ID", value="db-client-id", category="GITHUB")
+    InstanceConfiguration.objects.create(
+        key="GITHUB_APP_CLIENT_SECRET",
+        value=encrypt_data("db-client-secret"),
+        category="GITHUB",
+        is_encrypted=True,
+    )
+
+    monkeypatch.setenv("GITHUB_APP_ID", "env-app-id")
+    monkeypatch.setenv("GITHUB_APP_SLUG", "env-app-slug")
+    monkeypatch.setenv("GITHUB_APP_PRIVATE_KEY", "env-private-key")
+    monkeypatch.setenv("GITHUB_APP_WEBHOOK_SECRET", "env-webhook-secret")
+    monkeypatch.setenv("GITHUB_APP_CLIENT_ID", "env-client-id")
+    monkeypatch.setenv("GITHUB_APP_CLIENT_SECRET", "env-client-secret")
+
+    assert get_github_app_config() == {
+        "app_id": "env-app-id",
+        "app_slug": "env-app-slug",
+        "private_key": "env-private-key",
+        "webhook_secret": "env-webhook-secret",
+        "client_id": "env-client-id",
+        "client_secret": "env-client-secret",
+    }
 
 
 class _FakeInstallationClient:
