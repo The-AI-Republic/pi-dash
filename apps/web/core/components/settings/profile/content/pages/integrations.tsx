@@ -30,6 +30,7 @@ const formatDateTime = (value?: string | null) => {
 const installErrorMessage: Record<string, string> = {
   actor_mismatch: "This install session was started by a different Pi Dash user.",
   github_verification_failed: "Pi Dash could not verify the GitHub installation.",
+  login_required: "Sign in to Pi Dash and start the GitHub App install again.",
   installation_not_visible_to_user: "Your GitHub account cannot access that installation.",
   missing_installation_id: "GitHub did not return an installation id.",
   missing_oauth_code: "GitHub did not return a setup authorization code.",

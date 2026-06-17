@@ -554,9 +554,16 @@ class GithubAppRefreshEndpoint(BaseAPIView):
 class GithubAppCallbackEndpoint(BaseAPIView):
     """GET /integrations/github/app/callback/"""
 
+    permission_classes = [AllowAny]
+
     def get(self, request):
         if not _feature_enabled():
             return _redirect_to_profile_integrations({"github_app": "disabled"})
+        # GitHub redirects the browser here; if the Pi Dash session isn't present
+        # (logged out / different browser), redirect with a friendly error instead
+        # of letting DRF return a bare 403. The actor check below is the real guard.
+        if not request.user.is_authenticated:
+            return _redirect_to_profile_integrations({"github_app": "error", "error": "login_required"})
         _lazy_cleanup_install_sessions()
 
         state = request.GET.get("state") or ""
@@ -628,6 +635,9 @@ class GithubAppWebhookEndpoint(BaseAPIView):
 
     authentication_classes = []
     permission_classes = [AllowAny]
+    # GitHub delivers from shared egress IPs; the default AnonRateThrottle
+    # (30/min) would 429 bursts of lifecycle deliveries. Signature is the auth.
+    throttle_classes = []
 
     def post(self, request):
         if not _feature_enabled():

@@ -251,6 +251,27 @@ def test_github_app_callback_rejects_actor_mismatch(session_client, workspace):
     assert GithubAppInstallation.objects.count() == 0
 
 
+def test_github_app_callback_redirects_when_unauthenticated(api_client, workspace, create_user):
+    install_session = GithubAppInstallSession.objects.create(
+        state="state-logged-out",
+        workspace=workspace,
+        actor=create_user,
+        expires_at=timezone.now() + timedelta(minutes=15),
+    )
+
+    response = api_client.get(
+        reverse("github-app-callback"),
+        {"state": install_session.state, "code": "oauth-code", "installation_id": "98765"},
+    )
+
+    assert response.status_code == status.HTTP_302_FOUND
+    assert "github_app=error" in response.headers["Location"]
+    assert "error=login_required" in response.headers["Location"]
+    install_session.refresh_from_db()
+    assert install_session.status == GithubAppInstallSession.Status.STARTED
+    assert GithubAppInstallation.objects.count() == 0
+
+
 def test_github_app_refresh_returns_error_when_connection_check_fails(session_client, workspace, create_user):
     workspace_integration = _get_or_create_workspace_integration(workspace, create_user)
     app_installation = GithubAppInstallation.objects.create(
