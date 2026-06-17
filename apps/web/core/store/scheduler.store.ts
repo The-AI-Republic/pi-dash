@@ -8,11 +8,7 @@ import { set, unset } from "lodash-es";
 import { action, makeObservable, observable, runInAction } from "mobx";
 import { computedFn } from "mobx-utils";
 // pi dash imports
-import type {
-  IScheduler,
-  ISchedulerCreatePayload,
-  ISchedulerUpdatePayload,
-} from "@pi-dash/services";
+import type { IScheduler, ISchedulerCreatePayload, ISchedulerUpdatePayload } from "@pi-dash/services";
 import { SchedulerService } from "@pi-dash/services";
 // store
 import type { CoreRootStore } from "./root.store";
@@ -71,7 +67,9 @@ export class SchedulerStore implements ISchedulerStore {
     const workspace = this.rootStore.workspaceRoot.getWorkspaceBySlug(workspaceSlug);
     if (!workspace) return [];
     const filtered = Object.values(this.schedulerMap).filter((s) => s.workspace === workspace.id);
-    return [...filtered].toSorted((a, b) => a.name.localeCompare(b.name));
+    // Use sort() because toSorted() isn't in this app's tsconfig lib (ES2022).
+    // eslint-disable-next-line unicorn/no-array-sort
+    return [...filtered].sort((a, b) => a.name.localeCompare(b.name));
   });
 
   getSchedulerById = computedFn((schedulerId: string): IScheduler | null => this.schedulerMap[schedulerId] ?? null);

@@ -82,7 +82,51 @@ export interface IGithubProjectBindingStatus {
   is_sync_enabled?: boolean;
   last_synced_at?: string | null;
   last_sync_error?: string;
+  repo_url?: string;
 }
+
+// GitHub App Enablement (.ai_design/github_deep_integration/design.md)
+
+export interface IGithubAppInstallationStatus {
+  connected: boolean;
+  installation_id?: number;
+  account_login?: string;
+  account_type?: "User" | "Organization" | "Unknown";
+  repository_selection?: "all" | "selected";
+  repository_count?: number;
+  permissions?: Record<string, string>;
+  events?: string[];
+  installed_at?: string | null;
+  suspended_at?: string | null;
+  verified_at?: string | null;
+  last_checked_at?: string | null;
+  last_check_error?: string;
+}
+
+export interface IGithubAppWorkspaceStatus {
+  id: string;
+  slug: string;
+  name: string;
+  github_app: IGithubAppInstallationStatus;
+}
+
+export interface IGithubAppStatus {
+  configured: boolean;
+  app_slug: string;
+  workspaces: IGithubAppWorkspaceStatus[];
+}
+
+export interface IGithubAppInstallStartRequest {
+  workspace_slug: string;
+}
+
+export interface IGithubAppInstallStartResponse {
+  state: string;
+  expires_at: string;
+  install_url: string;
+}
+
+export type IGithubAppRefreshRequest = IGithubAppInstallStartRequest;
 
 // slack integration
 export interface ISlackIntegration {

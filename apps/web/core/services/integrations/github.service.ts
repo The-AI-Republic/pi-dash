@@ -5,7 +5,16 @@
  */
 
 import { API_BASE_URL } from "@pi-dash/constants";
-import type { IGithubConnectionStatus, IGithubConnectRequest, IGithubReposPage } from "@pi-dash/types";
+import type {
+  IGithubAppInstallationStatus,
+  IGithubAppInstallStartRequest,
+  IGithubAppInstallStartResponse,
+  IGithubAppRefreshRequest,
+  IGithubAppStatus,
+  IGithubConnectionStatus,
+  IGithubConnectRequest,
+  IGithubReposPage,
+} from "@pi-dash/types";
 import { APIService } from "@/services/api.service";
 
 export class GithubIntegrationService extends APIService {
@@ -39,6 +48,30 @@ export class GithubIntegrationService extends APIService {
 
   async listRepos(workspaceSlug: string, page: number = 1): Promise<IGithubReposPage> {
     return this.get(`/api/workspaces/${workspaceSlug}/integrations/github/repos/`, { params: { page } })
+      .then((response) => response?.data)
+      .catch((error) => {
+        throw error?.response?.data;
+      });
+  }
+
+  async getAppStatus(): Promise<IGithubAppStatus> {
+    return this.get("/api/users/me/integrations/github/app/")
+      .then((response) => response?.data)
+      .catch((error) => {
+        throw error?.response?.data;
+      });
+  }
+
+  async startAppInstall(data: IGithubAppInstallStartRequest): Promise<IGithubAppInstallStartResponse> {
+    return this.post("/api/users/me/integrations/github/app/install/", data)
+      .then((response) => response?.data)
+      .catch((error) => {
+        throw error?.response?.data;
+      });
+  }
+
+  async refreshAppConnection(data: IGithubAppRefreshRequest): Promise<IGithubAppInstallationStatus> {
+    return this.post("/api/users/me/integrations/github/app/refresh/", data)
       .then((response) => response?.data)
       .catch((error) => {
         throw error?.response?.data;

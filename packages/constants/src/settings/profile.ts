@@ -10,6 +10,7 @@ import {
   CircleUser,
   KeyRound,
   LockIcon,
+  Plug,
   type LucideIcon,
   RefreshCw,
   Settings2,
@@ -80,6 +81,11 @@ export const PROFILE_SETTINGS: Record<
     i18n_label: "Notifications",
     icon: Bell,
   },
+  integrations: {
+    key: "integrations",
+    i18n_label: "Integrations",
+    icon: Plug,
+  },
   "api-tokens": {
     key: "api-tokens",
     i18n_label: "Personal Access Tokens",
@@ -102,5 +108,5 @@ export const GROUPED_PROFILE_SETTINGS: Record<
     PROFILE_SETTINGS["security"],
     PROFILE_SETTINGS["activity"],
   ],
-  [PROFILE_SETTINGS_CATEGORY.DEVELOPER]: [PROFILE_SETTINGS["api-tokens"]],
+  [PROFILE_SETTINGS_CATEGORY.DEVELOPER]: [PROFILE_SETTINGS["integrations"], PROFILE_SETTINGS["api-tokens"]],
 };

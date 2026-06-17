@@ -80,7 +80,7 @@ export function ProjectGithubSyncSection() {
     }
   };
 
-  if (wsStatus !== undefined && !wsStatus.connected) {
+  if (wsStatus && !wsStatus.connected) {
     return (
       <div className="flex flex-col gap-2 rounded-md border border-subtle bg-surface-1 p-4">
         <h3 className="text-body-sm-medium">GitHub</h3>
@@ -92,7 +92,7 @@ export function ProjectGithubSyncSection() {
     );
   }
 
-  if (wsStatus === undefined || binding === undefined) {
+  if (!wsStatus || !binding) {
     return (
       <Loader className="flex flex-col gap-2 p-4">
         <Loader.Item height="20px" width="160px" />

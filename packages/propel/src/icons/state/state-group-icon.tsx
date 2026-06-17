@@ -19,6 +19,7 @@ const iconComponents = {
   backlog: BacklogGroupIcon,
   cancelled: CancelledGroupIcon,
   completed: CompletedGroupIcon,
+  review: StartedGroupIcon,
   started: StartedGroupIcon,
   unstarted: UnstartedGroupIcon,
 };
