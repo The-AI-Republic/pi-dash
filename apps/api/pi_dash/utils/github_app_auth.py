@@ -6,7 +6,6 @@ from __future__ import annotations
 
 import hashlib
 import hmac
-import os
 import time
 from datetime import datetime, timezone as dt_timezone
 from typing import Any
@@ -21,14 +20,6 @@ GITHUB_API_BASE = "https://api.github.com"
 GITHUB_WEB_BASE = "https://github.com"
 DEFAULT_TIMEOUT_SECONDS = 30
 INSTALLATION_TOKEN_CACHE_PREFIX = "github_app_installation_token"
-GITHUB_APP_CONFIG_KEYS = {
-    "app_id": "GITHUB_APP_ID",
-    "app_slug": "GITHUB_APP_SLUG",
-    "private_key": "GITHUB_APP_PRIVATE_KEY",
-    "webhook_secret": "GITHUB_APP_WEBHOOK_SECRET",
-    "client_id": "GITHUB_APP_CLIENT_ID",
-    "client_secret": "GITHUB_APP_CLIENT_SECRET",
-}
 
 
 class GithubAppConfigError(Exception):
@@ -50,7 +41,7 @@ def get_github_app_config() -> dict[str, str]:
             {"key": "GITHUB_APP_CLIENT_SECRET", "default": None},
         ]
     )
-    config = {
+    return {
         "app_id": (app_id or "").strip(),
         "app_slug": (app_slug or "").strip(),
         "private_key": (private_key or "").strip(),
@@ -58,11 +49,6 @@ def get_github_app_config() -> dict[str, str]:
         "client_id": (client_id or "").strip(),
         "client_secret": (client_secret or "").strip(),
     }
-    for config_key, env_key in GITHUB_APP_CONFIG_KEYS.items():
-        env_value = os.environ.get(env_key)
-        if env_value:
-            config[config_key] = env_value.strip()
-    return config
 
 
 def require_github_app_config(*, oauth: bool = False, webhook: bool = False) -> dict[str, str]:

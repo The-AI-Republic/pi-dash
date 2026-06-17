@@ -66,7 +66,7 @@ not change how issues or comments sync yet.
 - **Reuse existing infrastructure.** `WorkspaceIntegration` for per-tenant
   install state, `InstanceConfiguration` for per-instance App secrets, the
   `encrypt_data`/`decrypt_data` Fernet utilities, and the `GithubClient` shape.
-  No new secret store, no new queue.
+  No new secret store, no new queue in this foundation.
 - **Preserve PAT sync exactly as-is.** Existing PAT bindings and the 4-hour
   issue/comment polling loop keep working. App adoption must not clobber the
   PAT config or silently switch a repo to a new sync path.
@@ -248,6 +248,12 @@ GithubAppInstallation (per workspace — durable App installation state)
 
 The App **secret** is always instance-level; the **installation** is always
 workspace-level. This split is what makes both deployment modes the same code.
+For the current implementation, `InstanceConfiguration` is the single source of
+truth for these six App config values in hosted and self-hosted deployments.
+Hosted Pi Dash Cloud may later move the operational source of truth to AWS SSM /
+Secrets Manager via the private deployment repo, but that requires a separate
+configuration-source design (see §11.1). This foundation must not mix DB and
+secret-manager precedence rules.
 
 **⚠️ App secrets must NOT be served by the existing config endpoint.** Today
 `InstanceConfigurationEndpoint.get` returns _all_ rows
@@ -404,8 +410,7 @@ the `sha256=` prefix — compare prefixed-to-prefixed (or strip it from both); a
 missing/empty header must reject, not pass. (b) `raw_body` must be the exact
 bytes GitHub sent — capture it _before_ DRF parses/re-serializes the request
 (any re-encode breaks the digest). Reject on mismatch with `401` before any
-parsing. Resolve `webhook_secret` from `InstanceConfiguration` (self-hosted) or
-the single hosted App secret.
+parsing. Resolve `webhook_secret` from `InstanceConfiguration`.
 
 ### 7.3 Persist-then-process bounded lifecycle events
 
@@ -578,7 +583,7 @@ comment.
 
 - **One** GitHub App, registered by Pi Dash, owned by the vendor org.
 - App id / private key / webhook secret live in the hosted instance's
-  `InstanceConfiguration` (or env) — set once.
+  `InstanceConfiguration` — set once.
 - Each customer org **installs** the App from a Pi-Dash-created install session
   (§6.5). The verified installation callback creates/updates the workspace's
   `GithubAppInstallation`; the raw `installation` webhook alone never creates the
@@ -602,6 +607,27 @@ The **only** differences are _who registers the App_ and _which origin receives
 webhooks_. Storage, token minting, verified install binding, lifecycle handlers,
 and connection checks are identical — both read App secrets from
 `InstanceConfiguration` and installs from `WorkspaceIntegration`.
+
+### 11.1 Future design — hosted secret manager
+
+Pi Dash Cloud operations may eventually want AWS SSM Parameter Store or Secrets
+Manager as the source of truth for hosted App credentials because rotation and
+audit are easier there than direct DB writes. That should be designed as a
+separate deployment/configuration change, not as an implicit precedence patch in
+the App integration code.
+
+That future design must decide:
+
+- Whether SSM values are injected as environment variables, synchronized into
+  `InstanceConfiguration`, or referenced by key from `InstanceConfiguration`.
+- Which source wins during migration and how stale DB values are detected or
+  removed.
+- How secret rotation is performed without webhook/client-secret downtime.
+- How admin UI redaction behaves when the value is externally managed.
+- How self-hosted instances continue to use the DB-backed config path.
+
+Until that design exists, the current foundation keeps all six App config values
+in `InstanceConfiguration`.
 
 ## 12. Future runner / autonomous PRs (deferred)
 
