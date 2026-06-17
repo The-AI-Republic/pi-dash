@@ -9,8 +9,18 @@ import os
 from django.core.management.base import BaseCommand, CommandError
 
 # Module imports
+from pi_dash.config.registry import CONFIG
 from pi_dash.license.models import InstanceConfiguration
 from pi_dash.utils.instance_config_variables import instance_config_variables
+
+
+def _is_db_sourced(key):
+    """Only db-sourced keys are seeded into InstanceConfiguration. env-sourced
+    keys (e.g. secrets routed to SSM in the cloud) are read from the
+    environment and must not get a DB row. Unregistered keys keep the legacy
+    behavior of being seeded."""
+    entry = CONFIG.get(key)
+    return entry is None or entry["source"] == "db"
 
 
 class Command(BaseCommand):
@@ -27,6 +37,8 @@ class Command(BaseCommand):
                 raise CommandError(f"{item} env variable is required.")
 
         for item in instance_config_variables:
+            if not _is_db_sourced(item.get("key")):
+                continue
             obj, created = InstanceConfiguration.objects.get_or_create(key=item.get("key"))
             if created:
                 obj.category = item.get("category")
