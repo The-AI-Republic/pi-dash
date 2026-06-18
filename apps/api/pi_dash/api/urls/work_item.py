@@ -5,6 +5,8 @@
 from django.urls import path
 
 from pi_dash.api.views import (
+    GithubPullRequestLinkListCreateAPIEndpoint,
+    GithubPullRequestLinkDetailAPIEndpoint,
     IssueListCreateAPIEndpoint,
     IssueDetailAPIEndpoint,
     IssueMoveAPIEndpoint,
@@ -168,6 +170,16 @@ new_url_patterns = [
         "workspaces/<str:slug>/projects/<str:project_id>/work-items/<uuid:issue_id>/workpad/",
         IssueWorkpadAPIEndpoint.as_view(http_method_names=["get", "patch"]),
         name="work-item-workpad",
+    ),
+    path(
+        "workspaces/<str:slug>/projects/<str:project_id>/work-items/<uuid:issue_id>/github/pull-requests/",
+        GithubPullRequestLinkListCreateAPIEndpoint.as_view(http_method_names=["get", "post"]),
+        name="work-item-github-pr-list",
+    ),
+    path(
+        "workspaces/<str:slug>/projects/<str:project_id>/work-items/<uuid:issue_id>/github/pull-requests/<uuid:pk>/",
+        GithubPullRequestLinkDetailAPIEndpoint.as_view(http_method_names=["delete"]),
+        name="work-item-github-pr-detail",
     ),
 ]
 

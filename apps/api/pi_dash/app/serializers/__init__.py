@@ -63,6 +63,7 @@ from .issue import (
     IssueFlatSerializer,
     IssueStateSerializer,
     IssueLinkSerializer,
+    GithubPullRequestLinkSerializer,
     IssueIntakeSerializer,
     IssueLiteSerializer,
     IssueAttachmentSerializer,

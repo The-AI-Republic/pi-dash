@@ -212,3 +212,51 @@ class GithubAppInstallSession(BaseModel):
         verbose_name_plural = "Github App Install Sessions"
         db_table = "github_app_install_sessions"
         ordering = ("-created_at",)
+
+
+class GithubPullRequestLink(ProjectBaseModel):
+    """Optional link from a Pi Dash issue to a GitHub pull request.
+
+    Standalone (not tied to ``GithubIssueSync``/``GithubRepository``) so that
+    Pi Dash issues with no mirrored GitHub issue can still reference PRs. One
+    issue may link many PRs; a PR links to exactly one issue (the partial-unique
+    constraint below). The ``title``/``state``/``merged``/``draft`` snapshot is
+    display-only and refreshed by the GitHub App ``pull_request`` webhook; it
+    never drives the linked issue's workflow state.
+    """
+
+    class State(models.TextChoices):
+        OPEN = "open", "Open"
+        CLOSED = "closed", "Closed"
+
+    issue = models.ForeignKey("db.Issue", on_delete=models.CASCADE, related_name="github_pull_requests")
+    repo_owner = models.CharField(max_length=255)
+    repo_name = models.CharField(max_length=255)
+    pr_number = models.PositiveIntegerField()
+    url = models.URLField(max_length=500)
+    # Display snapshot — refreshed by the pull_request webhook; never mutates the issue.
+    title = models.CharField(max_length=500, blank=True, default="")
+    state = models.CharField(max_length=12, choices=State.choices, default=State.OPEN)
+    merged = models.BooleanField(default=False)
+    draft = models.BooleanField(default=False)
+    pr_updated_at = models.DateTimeField(null=True, blank=True)
+
+    def __str__(self):
+        return f"{self.repo_owner}/{self.repo_name}#{self.pr_number} <{self.issue_id}>"
+
+    class Meta:
+        verbose_name = "Github Pull Request Link"
+        verbose_name_plural = "Github Pull Request Links"
+        db_table = "github_pull_request_links"
+        ordering = ("-created_at",)
+        constraints = [
+            models.UniqueConstraint(
+                fields=["repo_owner", "repo_name", "pr_number"],
+                condition=models.Q(deleted_at__isnull=True),
+                name="github_pr_link_unique_per_pr_when_active",
+            ),
+        ]
+        indexes = [
+            models.Index(fields=["repo_owner", "repo_name", "pr_number"], name="github_pr_l_repo_ow_idx"),
+            models.Index(fields=["issue"], name="github_pr_l_issue_idx"),
+        ]
