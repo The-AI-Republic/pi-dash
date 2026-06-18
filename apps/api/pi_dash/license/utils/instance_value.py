@@ -5,36 +5,51 @@
 # Python imports
 import os
 
-# Django imports
-from django.conf import settings
-
 # Module imports
+from pi_dash.config.registry import CONFIG
 from pi_dash.license.models import InstanceConfiguration
 from pi_dash.license.utils.encryption import decrypt_data
 
 
-# Helper function to return value from the passed key
+def _source(key):
+    """Where to read ``key`` from. Unregistered keys default to env, matching
+    the centralized accessor's policy (see pi_dash.config)."""
+    entry = CONFIG.get(key)
+    return entry["source"] if entry else "env"
+
+
+# Helper function to return value from the passed key.
+#
+# This is the legacy resolver, kept as a thin compatibility shim over the
+# per-key source registry. It honors the caller-supplied ``default`` exactly as
+# before; the only change from the old behavior is that the source (db vs env)
+# is now decided per key via the registry instead of by the global SKIP_ENV_VAR
+# flag. New code should prefer ``pi_dash.config.get_config`` directly.
 def get_configuration_value(keys):
+    db_keys = [key.get("key") for key in keys if _source(key.get("key")) == "db"]
+    rows = {}
+    if db_keys:
+        rows = {
+            row["key"]: row
+            for row in InstanceConfiguration.objects.filter(key__in=db_keys).values(
+                "key", "value", "is_encrypted"
+            )
+        }
+
     environment_list = []
-    if settings.SKIP_ENV_VAR:
-        # Get the configurations
-        instance_configuration = InstanceConfiguration.objects.values("key", "value", "is_encrypted")
-
-        for key in keys:
-            for item in instance_configuration:
-                if key.get("key") == item.get("key"):
-                    if item.get("is_encrypted", False):
-                        environment_list.append(decrypt_data(item.get("value")))
-                    else:
-                        environment_list.append(item.get("value"))
-
-                    break
+    for key in keys:
+        name = key.get("key")
+        default = key.get("default")
+        if _source(name) == "db":
+            row = rows.get(name)
+            if row is None:
+                environment_list.append(default)
+            elif row.get("is_encrypted", False):
+                environment_list.append(decrypt_data(row.get("value")))
             else:
-                environment_list.append(key.get("default"))
-    else:
-        # Get the configuration from os
-        for key in keys:
-            environment_list.append(os.environ.get(key.get("key"), key.get("default")))
+                environment_list.append(row.get("value"))
+        else:
+            environment_list.append(os.environ.get(name, default))
 
     return tuple(environment_list)
 

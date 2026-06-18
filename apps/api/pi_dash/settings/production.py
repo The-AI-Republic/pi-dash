@@ -7,9 +7,10 @@
 import os
 
 from .common import *  # noqa
+from pi_dash.config import get_config
 
 # SECURITY WARNING: don't run with debug turned on in production!
-DEBUG = int(os.environ.get("DEBUG", 0)) == 1
+DEBUG = int(get_config("DEBUG", 0)) == 1
 
 # Honor the 'X-Forwarded-Proto' header for request.is_secure()
 SECURE_PROXY_SSL_HEADER = ("HTTP_X_FORWARDED_PROTO", "https")
@@ -18,8 +19,8 @@ INSTALLED_APPS += ("scout_apm.django",)  # noqa
 
 
 # Scout Settings
-SCOUT_MONITOR = os.environ.get("SCOUT_MONITOR", False)
-SCOUT_KEY = os.environ.get("SCOUT_KEY", "")
+SCOUT_MONITOR = get_config("SCOUT_MONITOR", False)
+SCOUT_KEY = get_config("SCOUT_KEY", "")
 SCOUT_NAME = "Pi Dash"
 
 LOG_DIR = os.path.join(BASE_DIR, "logs")  # noqa

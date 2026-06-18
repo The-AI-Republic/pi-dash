@@ -3,7 +3,6 @@
 # See the LICENSE file for details.
 
 # Python imports
-import os
 import uuid
 
 # Third party imports
@@ -12,6 +11,7 @@ from botocore.exceptions import ClientError
 from urllib.parse import quote
 
 # Module imports
+from pi_dash.config import get_config
 from pi_dash.utils.exception_logger import log_exception
 from storages.backends.s3boto3 import S3Boto3Storage
 
@@ -23,22 +23,22 @@ class S3Storage(S3Boto3Storage):
     """S3 storage class to generate presigned URLs for S3 objects"""
 
     def __init__(self, request=None):
-        # Get the AWS credentials and bucket name from the environment
-        self.aws_access_key_id = os.environ.get("AWS_ACCESS_KEY_ID")
+        # Get the AWS credentials and bucket name from config (env-sourced).
+        self.aws_access_key_id = get_config("AWS_ACCESS_KEY_ID", None)
         # Use the AWS_SECRET_ACCESS_KEY environment variable for the secret key
-        self.aws_secret_access_key = os.environ.get("AWS_SECRET_ACCESS_KEY")
+        self.aws_secret_access_key = get_config("AWS_SECRET_ACCESS_KEY", None)
         # Use the AWS_S3_BUCKET_NAME environment variable for the bucket name
-        self.aws_storage_bucket_name = os.environ.get("AWS_S3_BUCKET_NAME")
+        self.aws_storage_bucket_name = get_config("AWS_S3_BUCKET_NAME", None)
         # Use the AWS_REGION environment variable for the region
-        self.aws_region = os.environ.get("AWS_REGION")
+        self.aws_region = get_config("AWS_REGION", None)
         # Use the AWS_S3_ENDPOINT_URL environment variable for the endpoint URL
-        self.aws_s3_endpoint_url = os.environ.get("AWS_S3_ENDPOINT_URL") or os.environ.get("MINIO_ENDPOINT_URL")
+        self.aws_s3_endpoint_url = get_config("AWS_S3_ENDPOINT_URL", None) or get_config("MINIO_ENDPOINT_URL", None)
         # Use the SIGNED_URL_EXPIRATION environment variable for the expiration time (default: 3600 seconds)
-        self.signed_url_expiration = int(os.environ.get("SIGNED_URL_EXPIRATION", "3600"))
+        self.signed_url_expiration = int(get_config("SIGNED_URL_EXPIRATION", "3600"))
 
-        if os.environ.get("USE_MINIO") == "1":
+        if get_config("USE_MINIO", None) == "1":
             # Determine protocol based on environment variable
-            if os.environ.get("MINIO_ENDPOINT_SSL") == "1":
+            if get_config("MINIO_ENDPOINT_SSL", None) == "1":
                 endpoint_protocol = "https"
             else:
                 endpoint_protocol = request.scheme if request else "http"
