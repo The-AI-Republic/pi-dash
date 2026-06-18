@@ -46,6 +46,10 @@ pub enum IssueCommand {
     /// and a relevance rank. Use it to recover historical context before
     /// starting similar work.
     Search(SearchArgs),
+    /// Attach a GitHub pull request to a work item so Pi Dash links it and
+    /// tracks its status. Idempotent (re-attaching the same PR is a no-op);
+    /// one issue may have many PRs, but a PR attaches to exactly one issue.
+    AttachPr(AttachPrArgs),
 }
 
 #[derive(Debug, Args)]
@@ -123,6 +127,16 @@ pub struct MoveArgs {
 }
 
 #[derive(Debug, Args)]
+pub struct AttachPrArgs {
+    /// Project-scoped identifier, e.g. `ENG-42`.
+    pub identifier: String,
+
+    /// GitHub pull request URL, e.g. `https://github.com/owner/repo/pull/42`.
+    #[arg(long)]
+    pub url: String,
+}
+
+#[derive(Debug, Args)]
 pub struct SearchArgs {
     /// Search pattern. Supports websearch syntax: quoted phrases, `OR`,
     /// `-exclude`. Stem-aware (e.g. `color` finds `colors`, `colored`).
@@ -171,6 +185,7 @@ pub async fn run(args: IssueArgs, paths: &crate::util::paths::Paths) -> i32 {
         IssueCommand::Patch(p) => cmd_patch(&client, p).await,
         IssueCommand::Move(m) => cmd_move(&client, m).await,
         IssueCommand::Search(s) => cmd_search(&client, s).await,
+        IssueCommand::AttachPr(a) => cmd_attach_pr(&client, a).await,
     };
     match result {
         Ok(()) => 0,
@@ -354,6 +369,30 @@ async fn cmd_patch(client: &ApiClient, args: PatchArgs) -> Result<(), CliError> 
         client.env.workspace_slug, issue.project_id, issue.id
     );
     let resp = client.patch(&path, &Value::Object(body)).await?;
+    println!(
+        "{}",
+        serde_json::to_string(&resp).expect("serialize JSON value")
+    );
+    Ok(())
+}
+
+async fn cmd_attach_pr(client: &ApiClient, args: AttachPrArgs) -> Result<(), CliError> {
+    let url = args.url.trim();
+    if url.is_empty() {
+        return Err(CliError::new(EXIT_INVALID, "--url must not be empty"));
+    }
+
+    // Resolve issue first — we need project_id for the work-item-scoped URL.
+    let issue = resolve_issue(client, &args.identifier).await?;
+
+    let mut body: Map<String, Value> = Map::new();
+    body.insert("url".into(), Value::String(url.to_string()));
+
+    let path = format!(
+        "workspaces/{}/projects/{}/work-items/{}/github/pull-requests/",
+        client.env.workspace_slug, issue.project_id, issue.id
+    );
+    let resp = client.post(&path, &Value::Object(body)).await?;
     println!(
         "{}",
         serde_json::to_string(&resp).expect("serialize JSON value")
