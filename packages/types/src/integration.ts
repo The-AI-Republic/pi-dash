@@ -4,6 +4,8 @@
  * See the LICENSE file for details.
  */
 
+import type { IUserLite } from "./users";
+
 // All the app integrations that are available
 export interface IAppIntegration {
   author: string;
@@ -127,6 +129,32 @@ export interface IGithubAppInstallStartResponse {
 }
 
 export type IGithubAppRefreshRequest = IGithubAppInstallStartRequest;
+
+// GitHub Pull Request links (.ai_design/github_pr_issue_link/design.md)
+
+export type TGithubPullRequestState = "open" | "closed";
+
+export interface IGithubPullRequestLink {
+  id: string;
+  issue: string;
+  repo_owner: string;
+  repo_name: string;
+  pr_number: number;
+  url: string;
+  title: string;
+  state: TGithubPullRequestState;
+  merged: boolean;
+  draft: boolean;
+  pr_updated_at: string | null;
+  created_at: string;
+  updated_at: string;
+  created_by: string | null;
+  created_by_detail?: IUserLite | null;
+}
+
+export interface IGithubPullRequestLinkCreateRequest {
+  url: string;
+}
 
 // slack integration
 export interface ISlackIntegration {

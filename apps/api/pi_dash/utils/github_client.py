@@ -12,6 +12,7 @@ needs, paginated iteration via the Link header. See
 from __future__ import annotations
 
 import re
+from datetime import datetime
 from typing import Iterable, Iterator, Optional
 from urllib.parse import urlencode
 
@@ -149,6 +150,11 @@ class GithubClient:
         response = self._request("POST", url, json={"body": body})
         return response.json()
 
+    def get_pull_request(self, owner: str, name: str, number: int) -> dict:
+        """GET /repos/{owner}/{repo}/pulls/{number} — used to snapshot a PR's
+        title/state/draft/merged when an issue link is attached."""
+        return self._request("GET", f"{self._api_base}/repos/{owner}/{name}/pulls/{number}").json()
+
 
 _ISSUE_URL_RE = re.compile(r"/repos/[^/]+/[^/]+/issues/(\d+)$")
 
@@ -185,3 +191,51 @@ def parse_github_repo_url(url: str) -> Optional[tuple[str, str]]:
         if match:
             return match.group("owner"), match.group("name")
     return None
+
+
+# github.com PR URL, e.g. https://github.com/<owner>/<repo>/pull/<number>.
+# github.com only, matching parse_github_repo_url's host scope.
+_HTTPS_PR_RE = re.compile(
+    r"^https?://github\.com/(?P<owner>[^/\s]+)/(?P<name>[^/\s]+?)/pull/(?P<number>\d+)(?:/[^\s]*)?$"
+)
+
+
+def parse_github_pull_request_url(url: str) -> Optional[tuple[str, str, int]]:
+    """Parse a github.com PR URL into ``(owner, name, number)``.
+
+    Returns ``None`` if the URL is empty, malformed, points at a non-github
+    host, or is not a ``/pull/<n>`` URL (e.g. an ``/issues/<n>`` URL).
+    """
+    if not url:
+        return None
+    match = _HTTPS_PR_RE.match(url.strip())
+    if not match:
+        return None
+    return match.group("owner"), match.group("name"), int(match.group("number"))
+
+
+def _parse_iso8601(value: Optional[str]) -> Optional[datetime]:
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
+def pr_snapshot_from_payload(pull_request: dict) -> dict:
+    """Map a GitHub pull-request object (REST API or webhook payload) onto the
+    display-only snapshot fields stored on ``GithubPullRequestLink``.
+
+    GitHub reports ``merged_at`` rather than a boolean on the webhook payload,
+    so derive ``merged`` from either ``merged`` or ``merged_at``. ``pr_updated_at``
+    is returned as a parsed (tz-aware) ``datetime`` for direct model assignment.
+    """
+    merged = bool(pull_request.get("merged") or pull_request.get("merged_at"))
+    return {
+        "title": (pull_request.get("title") or "")[:500],
+        "state": "closed" if (pull_request.get("state") == "closed") else "open",
+        "merged": merged,
+        "draft": bool(pull_request.get("draft")),
+        "pr_updated_at": _parse_iso8601(pull_request.get("updated_at")),
+    }

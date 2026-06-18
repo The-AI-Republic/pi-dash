@@ -35,6 +35,11 @@ from .issue import (
     IssueWorkpadAPIEndpoint,
 )
 
+from .github_pr import (
+    GithubPullRequestLinkListCreateAPIEndpoint,
+    GithubPullRequestLinkDetailAPIEndpoint,
+)
+
 from .cycle import (
     CycleListCreateAPIEndpoint,
     CycleDetailAPIEndpoint,

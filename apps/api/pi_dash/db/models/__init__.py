@@ -22,6 +22,7 @@ from .intake import Intake, IntakeIssue
 from .integration import (
     GithubAppInstallation,
     GithubAppInstallSession,
+    GithubPullRequestLink,
     GithubWebhookDelivery,
     GithubCommentSync,
     GithubIssueSync,

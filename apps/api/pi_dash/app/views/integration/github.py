@@ -36,6 +36,7 @@ from pi_dash.db.models import (
     GithubAppInstallSession,
     GithubCommentSync,
     GithubIssueSync,
+    GithubPullRequestLink,
     GithubRepository,
     GithubRepositorySync,
     GithubWebhookDelivery,
@@ -66,6 +67,7 @@ from pi_dash.utils.github_client import (
     GithubNotFoundError,
     GithubPermissionError,
     parse_github_repo_url,
+    pr_snapshot_from_payload,
 )
 
 logger = logging.getLogger(__name__)
@@ -630,6 +632,38 @@ class GithubAppCallbackEndpoint(BaseAPIView):
         )
 
 
+def _refresh_pr_links(payload: dict) -> int:
+    """Refresh the display snapshot of any `GithubPullRequestLink` matching the
+    PR in a `pull_request` webhook. Touches only the link row — never the issue.
+
+    Returns the number of links the PR *matched* (0 when no link is attached,
+    which the caller maps to a `skipped` delivery). A matched-but-stale delivery
+    still counts as matched — it is a real, processed delivery, just not applied —
+    so it is not mislabelled `skipped`. Out-of-order/replayed deliveries are
+    ignored via the PR's `updated_at`.
+    """
+    pull_request = payload.get("pull_request") or {}
+    repository = payload.get("repository") or {}
+    number = pull_request.get("number")
+    owner = ((repository.get("owner") or {}).get("login") or "").lower()
+    name = (repository.get("name") or "").lower()
+    if not (owner and name and number):
+        return 0
+
+    snapshot = pr_snapshot_from_payload(pull_request)
+    incoming = snapshot.get("pr_updated_at")
+
+    matched = 0
+    for link in GithubPullRequestLink.objects.filter(repo_owner=owner, repo_name=name, pr_number=number):
+        matched += 1
+        if incoming and link.pr_updated_at and incoming < link.pr_updated_at:
+            continue  # stale / out-of-order delivery — matched but not applied
+        for field, value in snapshot.items():
+            setattr(link, field, value)
+        link.save(update_fields=["title", "state", "merged", "draft", "pr_updated_at", "updated_at"])
+    return matched
+
+
 class GithubAppWebhookEndpoint(BaseAPIView):
     """POST /integrations/github/app/webhook/"""
 
@@ -680,6 +714,11 @@ class GithubAppWebhookEndpoint(BaseAPIView):
         try:
             if event == "ping":
                 delivery.status = GithubWebhookDelivery.Status.PROCESSED
+            elif event == "pull_request":
+                updated = _refresh_pr_links(payload)
+                delivery.status = (
+                    GithubWebhookDelivery.Status.PROCESSED if updated else GithubWebhookDelivery.Status.SKIPPED
+                )
             elif event in {"installation", "installation_repositories"}:
                 app_installation = None
                 if installation_id:

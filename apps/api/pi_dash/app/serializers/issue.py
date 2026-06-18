@@ -32,6 +32,7 @@ from pi_dash.db.models import (
     Module,
     ModuleIssue,
     IssueLink,
+    GithubPullRequestLink,
     FileAsset,
     IssueReaction,
     CommentReaction,
@@ -649,6 +650,37 @@ class IssueModuleDetailSerializer(BaseSerializer):
             "created_at",
             "updated_at",
         ]
+
+
+class GithubPullRequestLinkSerializer(BaseSerializer):
+    """Read serializer for a GitHub PR linked to a work item (web overview).
+
+    All PR-status fields are server-managed (set at attach time and refreshed by
+    the GitHub App webhook), so the client only ever supplies ``url`` on create.
+    """
+
+    created_by_detail = UserLiteSerializer(read_only=True, source="created_by")
+
+    class Meta:
+        model = GithubPullRequestLink
+        fields = [
+            "id",
+            "issue",
+            "repo_owner",
+            "repo_name",
+            "pr_number",
+            "url",
+            "title",
+            "state",
+            "merged",
+            "draft",
+            "pr_updated_at",
+            "created_at",
+            "updated_at",
+            "created_by",
+            "created_by_detail",
+        ]
+        read_only_fields = fields
 
 
 class IssueLinkSerializer(BaseSerializer):
