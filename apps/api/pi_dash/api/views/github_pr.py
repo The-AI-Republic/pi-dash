@@ -19,6 +19,7 @@ from pi_dash.app.permissions import ProjectEntityPermission
 from pi_dash.db.models import GithubPullRequestLink
 from pi_dash.utils.github_pr_links import (
     InvalidPullRequestURL,
+    IssueNotFound,
     PullRequestAlreadyLinked,
     attach_pull_request,
 )
@@ -63,6 +64,8 @@ class GithubPullRequestLinkListCreateAPIEndpoint(BaseAPIView):
                 {"error": "A valid github.com pull request URL is required."},
                 status=status.HTTP_400_BAD_REQUEST,
             )
+        except IssueNotFound:
+            return Response({"error": "Work item not found."}, status=status.HTTP_404_NOT_FOUND)
         except PullRequestAlreadyLinked as e:
             return Response({"error": str(e)}, status=status.HTTP_409_CONFLICT)
 

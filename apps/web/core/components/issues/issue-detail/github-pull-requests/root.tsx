@@ -16,7 +16,7 @@ import { Input } from "@pi-dash/propel/input";
 import { TOAST_TYPE, setToast } from "@pi-dash/propel/toast";
 import { Tooltip } from "@pi-dash/propel/tooltip";
 import type { IGithubPullRequestLink } from "@pi-dash/types";
-import { Loader } from "@pi-dash/ui";
+import { Collapsible } from "@pi-dash/ui";
 // constants
 import { GITHUB_ISSUE_PULL_REQUESTS } from "@/constants/fetch-keys";
 // services
@@ -44,21 +44,22 @@ const getPullRequestBadge = (link: IGithubPullRequestLink): TBadge => {
   return { label: "Closed", variant: "danger", icon: GitPullRequest };
 };
 
+const toErrorMessage = (error: unknown, fallback: string): string => {
+  const data = error as { error?: string; detail?: string } | null;
+  return data?.error ?? data?.detail ?? fallback;
+};
+
 export const IssueGithubPullRequestsRoot = observer(function IssueGithubPullRequestsRoot(props: Props) {
   const { workspaceSlug, projectId, issueId, disabled = false } = props;
   // state
+  const [isOpen, setIsOpen] = useState(true);
   const [url, setUrl] = useState("");
   const [isSubmitting, setIsSubmitting] = useState(false);
   // fetching
-  const {
-    data: pullRequests,
-    isLoading,
-    mutate: mutatePullRequests,
-  } = useSWR(
-    workspaceSlug && projectId && issueId ? GITHUB_ISSUE_PULL_REQUESTS(issueId) : null,
-    workspaceSlug && projectId && issueId
-      ? () => githubService.listIssuePullRequests(workspaceSlug, projectId, issueId)
-      : null
+  const shouldFetch = Boolean(workspaceSlug && projectId && issueId);
+  const { data: pullRequests, mutate: mutatePullRequests } = useSWR(
+    shouldFetch ? GITHUB_ISSUE_PULL_REQUESTS(issueId) : null,
+    shouldFetch ? () => githubService.listIssuePullRequests(workspaceSlug, projectId, issueId) : null
   );
 
   const handleAttach = async () => {
@@ -69,11 +70,11 @@ export const IssueGithubPullRequestsRoot = observer(function IssueGithubPullRequ
       await githubService.attachIssuePullRequest(workspaceSlug, projectId, issueId, { url: trimmedUrl });
       setUrl("");
       await mutatePullRequests();
-    } catch (error: any) {
+    } catch (error: unknown) {
       setToast({
         type: TOAST_TYPE.ERROR,
         title: "Pull request not attached",
-        message: error?.error ?? "The pull request could not be attached.",
+        message: toErrorMessage(error, "The pull request could not be attached."),
       });
     } finally {
       setIsSubmitting(false);
@@ -84,67 +85,69 @@ export const IssueGithubPullRequestsRoot = observer(function IssueGithubPullRequ
     try {
       await githubService.detachIssuePullRequest(workspaceSlug, projectId, issueId, linkId);
       await mutatePullRequests();
-    } catch (error: any) {
+    } catch (error: unknown) {
       setToast({
         type: TOAST_TYPE.ERROR,
         title: "Pull request not detached",
-        message: error?.error ?? "The pull request could not be detached.",
+        message: toErrorMessage(error, "The pull request could not be detached."),
       });
     }
   };
 
-  return (
-    <div className="py-1 text-11">
-      <div className="flex items-center justify-between gap-2">
-        <h4>Pull requests</h4>
-      </div>
+  // Gate: keep issue detail uncluttered — only surface the section once at least
+  // one PR is linked (the coding agent attaches the first one via the CLI). The
+  // attach/detach controls then live alongside the existing links.
+  if (!pullRequests || pullRequests.length === 0) return null;
 
+  return (
+    <Collapsible
+      isOpen={isOpen}
+      onToggle={() => setIsOpen((prev) => !prev)}
+      buttonClassName="w-full"
+      title={
+        <div className="flex items-center gap-1 py-1 text-13 font-medium text-primary">
+          <span>Pull requests</span>
+          <span className="text-tertiary">{pullRequests.length}</span>
+        </div>
+      }
+    >
       <div className="mt-1 flex flex-col gap-1">
-        {isLoading && !pullRequests ? (
-          <Loader className="space-y-2">
-            <Loader.Item height="28px" />
-            <Loader.Item height="28px" />
-          </Loader>
-        ) : pullRequests && pullRequests.length > 0 ? (
-          pullRequests.map((link) => {
-            const badge = getPullRequestBadge(link);
-            const BadgeIcon = badge.icon;
-            return (
-              <div
-                key={link.id}
-                className="group flex items-center gap-2 rounded-md px-2 py-1.5 duration-300 hover:bg-surface-2"
+        {pullRequests.map((link) => {
+          const badge = getPullRequestBadge(link);
+          const BadgeIcon = badge.icon;
+          return (
+            <div
+              key={link.id}
+              className="group flex items-center gap-2 rounded-md px-2 py-1.5 duration-300 hover:bg-surface-2"
+            >
+              <Badge variant={badge.variant} size="sm" prependIcon={<BadgeIcon />}>
+                {badge.label}
+              </Badge>
+              <a
+                href={link.url}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="flex min-w-0 flex-1 items-center gap-1 truncate text-secondary hover:text-primary"
               >
-                <Badge variant={badge.variant} size="sm" prependIcon={<BadgeIcon />}>
-                  {badge.label}
-                </Badge>
-                <a
-                  href={link.url}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="flex min-w-0 flex-1 items-center gap-1 truncate text-secondary hover:text-primary"
-                >
-                  <span className="truncate">
-                    {link.title || `${link.repo_owner}/${link.repo_name} #${link.pr_number}`}
-                  </span>
-                  <ExternalLink className="h-3 w-3 shrink-0" />
-                </a>
-                {!disabled && (
-                  <Tooltip tooltipContent="Detach pull request">
-                    <button
-                      type="button"
-                      className="hover:bg-surface-3 grid h-6 w-6 shrink-0 place-items-center rounded-sm text-tertiary opacity-0 duration-300 outline-none group-hover:opacity-100 hover:text-danger-primary"
-                      onClick={() => handleDetach(link.id)}
-                    >
-                      <TrashIcon className="h-3.5 w-3.5" />
-                    </button>
-                  </Tooltip>
-                )}
-              </div>
-            );
-          })
-        ) : (
-          <p className="px-2 py-1 text-tertiary">No pull requests linked</p>
-        )}
+                <span className="truncate">
+                  {link.title || `${link.repo_owner}/${link.repo_name} #${link.pr_number}`}
+                </span>
+                <ExternalLink className="h-3 w-3 shrink-0" />
+              </a>
+              {!disabled && (
+                <Tooltip tooltipContent="Detach pull request">
+                  <button
+                    type="button"
+                    className="hover:bg-surface-3 grid h-6 w-6 shrink-0 place-items-center rounded-sm text-tertiary opacity-0 duration-300 outline-none group-hover:opacity-100 hover:text-danger-primary"
+                    onClick={() => handleDetach(link.id)}
+                  >
+                    <TrashIcon className="h-3.5 w-3.5" />
+                  </button>
+                </Tooltip>
+              )}
+            </div>
+          );
+        })}
 
         {!disabled && (
           <form
@@ -173,6 +176,6 @@ export const IssueGithubPullRequestsRoot = observer(function IssueGithubPullRequ
           </form>
         )}
       </div>
-    </div>
+    </Collapsible>
   );
 });

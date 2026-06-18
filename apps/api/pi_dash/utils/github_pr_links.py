@@ -11,7 +11,9 @@ snapshot logic lives in exactly one place.
 
 import logging
 
-from pi_dash.db.models import GithubAppInstallation, GithubPullRequestLink
+from django.db import IntegrityError
+
+from pi_dash.db.models import GithubAppInstallation, GithubPullRequestLink, Issue
 from pi_dash.utils.exception_logger import log_exception
 from pi_dash.utils.github_client import (
     GithubClient,
@@ -24,6 +26,10 @@ logger = logging.getLogger(__name__)
 
 class InvalidPullRequestURL(ValueError):
     """The supplied string is not a valid github.com pull request URL."""
+
+
+class IssueNotFound(Exception):
+    """The work item does not exist in the given project/workspace."""
 
 
 class PullRequestAlreadyLinked(Exception):
@@ -56,8 +62,9 @@ def attach_pull_request(*, project_id, issue_id, workspace_slug: str, raw_url: s
     """Attach (or idempotently re-attach) a PR to a work item.
 
     Returns ``(link, created)``. Raises :class:`InvalidPullRequestURL` for a bad
-    URL and :class:`PullRequestAlreadyLinked` when the PR already belongs to a
-    different issue.
+    URL, :class:`IssueNotFound` when the work item is not in the given
+    project/workspace, and :class:`PullRequestAlreadyLinked` when the PR already
+    belongs to a different issue.
     """
     parsed = parse_github_pull_request_url((raw_url or "").strip())
     if parsed is None:
@@ -67,6 +74,12 @@ def attach_pull_request(*, project_id, issue_id, workspace_slug: str, raw_url: s
     # webhook lookup agree.
     owner, name = owner.lower(), name.lower()
 
+    # The permission class only proves project membership; confirm the work item
+    # actually belongs to this project/workspace so a member can't attach a PR
+    # to an arbitrary issue id.
+    if not Issue.objects.filter(id=issue_id, project_id=project_id, workspace__slug=workspace_slug).exists():
+        raise IssueNotFound()
+
     existing = GithubPullRequestLink.objects.filter(repo_owner=owner, repo_name=name, pr_number=number).first()
     if existing is not None:
         if str(existing.issue_id) != str(issue_id):
@@ -74,13 +87,23 @@ def attach_pull_request(*, project_id, issue_id, workspace_slug: str, raw_url: s
         return existing, False
 
     snapshot = best_effort_snapshot(workspace_slug, owner, name, number)
-    link = GithubPullRequestLink.objects.create(
-        project_id=project_id,
-        issue_id=issue_id,
-        repo_owner=owner,
-        repo_name=name,
-        pr_number=number,
-        url=f"https://github.com/{owner}/{name}/pull/{number}",
-        **snapshot,
-    )
-    return link, True
+    try:
+        link = GithubPullRequestLink.objects.create(
+            project_id=project_id,
+            issue_id=issue_id,
+            repo_owner=owner,
+            repo_name=name,
+            pr_number=number,
+            url=f"https://github.com/{owner}/{name}/pull/{number}",
+            **snapshot,
+        )
+        return link, True
+    except IntegrityError:
+        # A concurrent attach won the partial-unique race; resolve to the row
+        # that now exists instead of surfacing a 500.
+        existing = GithubPullRequestLink.objects.filter(repo_owner=owner, repo_name=name, pr_number=number).first()
+        if existing is None:
+            raise
+        if str(existing.issue_id) != str(issue_id):
+            raise PullRequestAlreadyLinked(existing.issue_id)
+        return existing, False

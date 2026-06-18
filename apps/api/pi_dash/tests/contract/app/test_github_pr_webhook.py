@@ -100,6 +100,8 @@ def test_pull_request_ignores_out_of_order_delivery(api_client, link):
     response = _post(api_client, _pr_payload(state="closed", merged=True, updated_at="2020-01-01T00:00:00Z"))
 
     assert response.status_code == status.HTTP_202_ACCEPTED
+    # It matched a real link (so it's processed, not skipped) but was not applied.
+    assert response.data == {"status": GithubWebhookDelivery.Status.PROCESSED}
     link.refresh_from_db()
     assert link.state == "open"  # stale delivery ignored
 

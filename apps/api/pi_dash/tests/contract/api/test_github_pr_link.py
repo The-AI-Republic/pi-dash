@@ -228,6 +228,26 @@ def test_detach_soft_deletes_link(_delay, api_key_client, workspace, pr_project,
     assert reattach.status_code == http_status.HTTP_201_CREATED
 
 
+def test_attach_rejects_issue_not_in_project(api_key_client, workspace, pr_project, create_user):
+    """A member of the named project cannot attach a PR to an arbitrary issue id
+    that lives in a different project."""
+    other_project = Project.objects.create(
+        name="Other", identifier="OTH", workspace=workspace, created_by=create_user
+    )
+    foreign_issue = Issue.objects.create(
+        name="foreign", project=other_project, workspace=workspace, created_by=create_user
+    )
+
+    response = api_key_client.post(
+        _list_url(workspace.slug, pr_project.id, foreign_issue.id),
+        {"url": "https://github.com/acme/web/pull/77"},
+        format="json",
+    )
+
+    assert response.status_code == http_status.HTTP_404_NOT_FOUND
+    assert GithubPullRequestLink.objects.count() == 0
+
+
 def test_attach_requires_project_membership(api_client, workspace, pr_project, issue, create_user):
     """A valid API key whose user is not a member of the project is rejected."""
     from pi_dash.db.models.api import APIToken

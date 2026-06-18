@@ -636,8 +636,10 @@ def _refresh_pr_links(payload: dict) -> int:
     """Refresh the display snapshot of any `GithubPullRequestLink` matching the
     PR in a `pull_request` webhook. Touches only the link row — never the issue.
 
-    Returns the number of links updated (0 when no link is attached, which the
-    caller maps to a `skipped` delivery). Out-of-order/replayed deliveries are
+    Returns the number of links the PR *matched* (0 when no link is attached,
+    which the caller maps to a `skipped` delivery). A matched-but-stale delivery
+    still counts as matched — it is a real, processed delivery, just not applied —
+    so it is not mislabelled `skipped`. Out-of-order/replayed deliveries are
     ignored via the PR's `updated_at`.
     """
     pull_request = payload.get("pull_request") or {}
@@ -651,15 +653,15 @@ def _refresh_pr_links(payload: dict) -> int:
     snapshot = pr_snapshot_from_payload(pull_request)
     incoming = snapshot.get("pr_updated_at")
 
-    updated = 0
+    matched = 0
     for link in GithubPullRequestLink.objects.filter(repo_owner=owner, repo_name=name, pr_number=number):
+        matched += 1
         if incoming and link.pr_updated_at and incoming < link.pr_updated_at:
-            continue  # stale / out-of-order delivery
+            continue  # stale / out-of-order delivery — matched but not applied
         for field, value in snapshot.items():
             setattr(link, field, value)
         link.save(update_fields=["title", "state", "merged", "draft", "pr_updated_at", "updated_at"])
-        updated += 1
-    return updated
+    return matched
 
 
 class GithubAppWebhookEndpoint(BaseAPIView):
