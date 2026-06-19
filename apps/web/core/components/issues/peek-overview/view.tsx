@@ -18,6 +18,7 @@ import useKeypress from "@/hooks/use-keypress";
 import usePeekOverviewOutsideClickDetector from "@/hooks/use-peek-overview-outside-click";
 // local imports
 import type { TIssueOperations } from "../issue-detail";
+import { IssueAgentStatusPanel } from "../issue-detail/agent-status";
 import { IssueActivity } from "../issue-detail/issue-activity";
 import { IssueDetailWidgets } from "../issue-detail-widgets";
 import { IssuePeekOverviewError } from "./error";
@@ -197,6 +198,14 @@ export const IssueView = observer(function IssueView(props: IIssueView) {
                       />
                     </div>
 
+                    <IssueAgentStatusPanel
+                      workspaceSlug={workspaceSlug}
+                      projectId={projectId}
+                      issueId={issueId}
+                      issue={issue}
+                      issueOperations={issueOperations}
+                    />
+
                     <PeekOverviewProperties
                       workspaceSlug={workspaceSlug}
                       projectId={projectId}
@@ -251,6 +260,14 @@ export const IssueView = observer(function IssueView(props: IIssueView) {
                         is_archived ? "pointer-events-none" : ""
                       }`}
                     >
+                      <IssueAgentStatusPanel
+                        workspaceSlug={workspaceSlug}
+                        projectId={projectId}
+                        issueId={issueId}
+                        issue={issue}
+                        issueOperations={issueOperations}
+                      />
+
                       <PeekOverviewProperties
                         workspaceSlug={workspaceSlug}
                         projectId={projectId}
