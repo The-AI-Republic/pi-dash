@@ -18,9 +18,8 @@ import useKeypress from "@/hooks/use-keypress";
 import usePeekOverviewOutsideClickDetector from "@/hooks/use-peek-overview-outside-click";
 // local imports
 import type { TIssueOperations } from "../issue-detail";
-import { IssueActivity } from "../issue-detail/issue-activity";
-import { IssueGithubPullRequestsRoot } from "../issue-detail/github-pull-requests";
 import { IssueDetailWidgets } from "../issue-detail-widgets";
+import { IssuePullRequestsAndActivity } from "../issue-detail/pull-requests-and-activity";
 import { IssuePeekOverviewError } from "./error";
 import type { TPeekModes } from "./header";
 import { IssuePeekOverviewHeader } from "./header";
@@ -206,18 +205,12 @@ export const IssueView = observer(function IssueView(props: IIssueView) {
                       disabled={disabled || is_archived}
                     />
 
-                    <IssueGithubPullRequestsRoot
+                    <IssuePullRequestsAndActivity
                       workspaceSlug={workspaceSlug}
                       projectId={projectId}
                       issueId={issueId}
                       disabled={disabled || is_archived}
-                    />
-
-                    <IssueActivity
-                      workspaceSlug={workspaceSlug}
-                      projectId={projectId}
-                      issueId={issueId}
-                      disabled={is_archived}
+                      activityDisabled={is_archived}
                     />
                   </div>
                 ) : (
@@ -246,18 +239,12 @@ export const IssueView = observer(function IssueView(props: IIssueView) {
                           />
                         </div>
 
-                        <IssueGithubPullRequestsRoot
+                        <IssuePullRequestsAndActivity
                           workspaceSlug={workspaceSlug}
                           projectId={projectId}
                           issueId={issueId}
                           disabled={disabled || is_archived}
-                        />
-
-                        <IssueActivity
-                          workspaceSlug={workspaceSlug}
-                          projectId={projectId}
-                          issueId={issueId}
-                          disabled={is_archived}
+                          activityDisabled={is_archived}
                         />
                       </div>
                     </div>

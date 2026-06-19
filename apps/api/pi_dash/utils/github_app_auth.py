@@ -44,13 +44,20 @@ def get_github_app_config() -> dict[str, str]:
     return {
         "app_id": (app_id or "").strip(),
         "app_slug": (app_slug or "").strip(),
-        # A PEM stored in env/SSM commonly arrives with escaped newlines
-        # (single-line ``\n``); normalize so cryptography can parse it.
-        "private_key": (private_key or "").strip().replace("\\n", "\n"),
+        "private_key": _normalize_private_key(private_key),
         "webhook_secret": (webhook_secret or "").strip(),
         "client_id": (client_id or "").strip(),
         "client_secret": (client_secret or "").strip(),
     }
+
+
+def _normalize_private_key(value: str | None) -> str:
+    """A PEM stored in env/SSM commonly arrives single-line with escaped
+    newlines (``\\n`` or ``\\r\\n``); turn those into real newlines so
+    cryptography/PyJWT can parse the key. A PEM that already has real
+    newlines passes through unchanged. Unescape before stripping so the
+    escaped and real-newline forms normalize identically."""
+    return (value or "").replace("\\r\\n", "\n").replace("\\n", "\n").strip()
 
 
 def require_github_app_config(*, oauth: bool = False, webhook: bool = False) -> dict[str, str]:
