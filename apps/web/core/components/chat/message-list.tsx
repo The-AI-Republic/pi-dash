@@ -18,6 +18,8 @@ interface ChatMessageListProps<M extends ChatListItem> {
   messages: M[];
   renderMessage?: (message: M) => ReactNode;
   emptyState?: ReactNode;
+  /** Extra content rendered after the messages (e.g. a debug event strip). */
+  footer?: ReactNode;
 }
 
 function DefaultBubble({ message }: { message: ChatListItem }) {
@@ -39,6 +41,7 @@ export function ChatMessageList<M extends ChatListItem>({
   messages,
   renderMessage,
   emptyState,
+  footer,
 }: ChatMessageListProps<M>) {
   const bottomRef = useRef<HTMLDivElement>(null);
 
@@ -55,6 +58,7 @@ export function ChatMessageList<M extends ChatListItem>({
           {messages.map((message) => (
             <div key={message.id}>{renderMessage ? renderMessage(message) : <DefaultBubble message={message} />}</div>
           ))}
+          {footer}
           <div ref={bottomRef} />
         </div>
       )}

@@ -6,13 +6,16 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { observer } from "mobx-react";
-import { Send, Square, X } from "lucide-react";
+import { X } from "lucide-react";
 import { useParams } from "react-router";
 import useSWR from "swr";
 import { TOAST_TYPE, setToast } from "@pi-dash/propel/toast";
 import { RunnerService, getRunnerDetail } from "@pi-dash/services";
 import type { IAgentChatEvent, IAgentChatMessage, IAgentChatSession, IRunner } from "@pi-dash/types";
 import { Badge, Button } from "@pi-dash/ui";
+import { ChatComposer } from "@/components/chat/composer";
+import { ChatMessage } from "@/components/chat/message";
+import { ChatMessageList } from "@/components/chat/message-list";
 import { useAgentChatEvents } from "@/components/runners/chat/use-agent-chat-events";
 import { useWorkspace } from "@/hooks/store/use-workspace";
 
@@ -253,6 +256,18 @@ const RunnerChatPage = observer(function RunnerChatPage() {
 
   const reason = disabledReason(runner, session);
   const rows = liveMessages;
+  const busy = !!(session?.active_message_id || session?.active_turn_id);
+  const eventStrip = events
+    .filter(
+      (event) =>
+        !["assistant_delta", "turn_completed", "chat_closed", "chat_warmed", "chat_timing"].includes(event.kind)
+    )
+    .slice(-6)
+    .map((event) => (
+      <div key={event.seq} className="rounded border border-subtle bg-surface-1 px-3 py-2 text-11 text-secondary">
+        <span className="font-mono">{event.kind}</span>
+      </div>
+    ));
 
   return (
     <div className="flex h-full min-h-[640px] flex-col overflow-hidden">
@@ -273,68 +288,23 @@ const RunnerChatPage = observer(function RunnerChatPage() {
         </div>
       </div>
 
-      <div className="min-h-0 flex-1 overflow-auto py-4">
-        {rows.length === 0 ? (
-          <div className="py-16 text-center text-13 text-secondary">No messages</div>
-        ) : (
-          <div className="flex flex-col gap-3">
-            {rows.map((message) => (
-              <div key={message.id} className={`flex ${message.role === "user" ? "justify-end" : "justify-start"}`}>
-                <div
-                  className={`max-w-[72%] rounded-md px-3 py-2 text-13 ${
-                    message.role === "user" ? "bg-accent-primary text-on-color" : "bg-layer-1 text-primary"
-                  }`}
-                >
-                  <div className="whitespace-pre-wrap">{message.content || message.status}</div>
-                </div>
-              </div>
-            ))}
-            {events
-              .filter(
-                (event) =>
-                  !["assistant_delta", "turn_completed", "chat_closed", "chat_warmed", "chat_timing"].includes(
-                    event.kind
-                  )
-              )
-              .slice(-6)
-              .map((event) => (
-                <div
-                  key={event.seq}
-                  className="rounded border border-subtle bg-surface-1 px-3 py-2 text-11 text-secondary"
-                >
-                  <span className="font-mono">{event.kind}</span>
-                </div>
-              ))}
-          </div>
-        )}
-      </div>
+      <ChatMessageList
+        messages={rows}
+        renderMessage={(m) => <ChatMessage role={m.role} content={m.content} status={m.status} />}
+        emptyState={<div className="py-16 text-center text-13 text-secondary">No messages</div>}
+        footer={eventStrip.length > 0 ? <>{eventStrip}</> : undefined}
+      />
 
-      <div className="shrink-0 border-t border-subtle pt-3">
-        {reason && <div className="mb-2 text-12 text-secondary">{reason}</div>}
-        <div className="flex items-end gap-2">
-          <textarea
-            value={draft}
-            onChange={(e) => setDraft(e.target.value)}
-            onKeyDown={(e) => {
-              if (e.key === "Enter" && !e.shiftKey) {
-                e.preventDefault();
-                send();
-              }
-            }}
-            disabled={!!reason || sending}
-            className="min-h-20 flex-1 resize-none rounded-md border border-subtle bg-surface-1 px-3 py-2 text-13 outline-none focus:border-accent-strong"
-          />
-          {session?.active_message_id || session?.active_turn_id ? (
-            <Button onClick={stop} variant="tertiary-danger">
-              <Square className="size-4" />
-            </Button>
-          ) : (
-            <Button onClick={send} disabled={!!reason || !draft.trim()} loading={sending}>
-              <Send className="size-4" />
-            </Button>
-          )}
-        </div>
-      </div>
+      <ChatComposer
+        draft={draft}
+        onDraftChange={setDraft}
+        onSend={send}
+        onStop={stop}
+        busy={busy}
+        sending={sending}
+        disabledReason={reason}
+        placeholder="Message this runner…"
+      />
     </div>
   );
 });
