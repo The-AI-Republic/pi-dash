@@ -13,8 +13,6 @@ import { useIssueDetail } from "@/hooks/store/use-issue-detail";
 // Pi Dash-web
 import { WorkItemAdditionalWidgetCollapsibles } from "@/pi-dash-web/components/issues/issue-detail-widgets/collapsibles";
 import { useTimeLineRelationOptions } from "@/pi-dash-web/components/relations";
-// components
-import { IssueGithubPullRequestsRoot } from "@/components/issues/issue-detail/github-pull-requests";
 // local imports
 import { AttachmentsCollapsible } from "./attachments";
 import { LinksCollapsible } from "./links";
@@ -82,12 +80,6 @@ export const IssueDetailWidgetCollapsibles = observer(function IssueDetailWidget
           issueServiceType={issueServiceType}
         />
       )}
-      <IssueGithubPullRequestsRoot
-        workspaceSlug={workspaceSlug}
-        projectId={projectId}
-        issueId={issueId}
-        disabled={disabled}
-      />
       {shouldRenderAttachments && (
         <AttachmentsCollapsible
           workspaceSlug={workspaceSlug}

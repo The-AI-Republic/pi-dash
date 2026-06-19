@@ -33,6 +33,7 @@ import { NameDescriptionUpdateStatus } from "../issue-update-status";
 import { PeekOverviewProperties } from "../peek-overview/properties";
 import { IssueTitleInput } from "../title-input";
 import { IssueAgentStatusPanel } from "./agent-status";
+import { IssueGithubPullRequestsRoot } from "./github-pull-requests";
 import { IssueActivity } from "./issue-activity";
 import { IssueParentDetail } from "./parent";
 import { IssueReaction } from "./reactions";
@@ -233,6 +234,13 @@ export const IssueMainContent = observer(function IssueMainContent(props: Props)
           />
         </div>
       )}
+
+      <IssueGithubPullRequestsRoot
+        workspaceSlug={workspaceSlug}
+        projectId={projectId}
+        issueId={issueId}
+        disabled={!isEditable || isArchived || isMetadataHydrating}
+      />
 
       <IssueActivity workspaceSlug={workspaceSlug} projectId={projectId} issueId={issueId} disabled={isArchived} />
     </>

@@ -44,7 +44,9 @@ def get_github_app_config() -> dict[str, str]:
     return {
         "app_id": (app_id or "").strip(),
         "app_slug": (app_slug or "").strip(),
-        "private_key": (private_key or "").strip(),
+        # A PEM stored in env/SSM commonly arrives with escaped newlines
+        # (single-line ``\n``); normalize so cryptography can parse it.
+        "private_key": (private_key or "").strip().replace("\\n", "\n"),
         "webhook_secret": (webhook_secret or "").strip(),
         "client_id": (client_id or "").strip(),
         "client_secret": (client_secret or "").strip(),
