@@ -13,7 +13,7 @@ import type { ISvgIcons } from "@pi-dash/propel/icons";
 
 type Props = {
   isActive: boolean;
-  label: string;
+  label: React.ReactNode;
 } & ({ as: "button"; onClick: () => void } | { as: "link"; href: string }) &
   (
     | {
