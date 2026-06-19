@@ -2,17 +2,12 @@
 
 Shared UI translation package for Pi Dash.
 
-## Translation Storage
+The open-source build **ships English only**. The translation machinery (the
+`t()` runtime, the language picker, ICU MessageFormat support) is fully present
+— so adding more languages is a matter of dropping in locale files, no code
+changes required. See [Adding a language](#adding-a-language) below.
 
-Translations live under `packages/i18n/src/locales/<language>/`.
-
-Each locale is a TypeScript object, not JSON:
-
-```ts
-export default {
-  "Save changes": "Enregistrer les modifications",
-} as const;
-```
+## How translation works
 
 UI code uses the source English text as the message id:
 
@@ -22,118 +17,60 @@ const { t } = useTranslation();
 return <button>{t("Save changes")}</button>;
 ```
 
-Missing or empty target translations fall back to English by returning the source message id. ICU MessageFormat parameters are supported:
+Each locale is a TypeScript object (not JSON) mapping that id to a translated
+string:
+
+```ts
+// packages/i18n/src/locales/fr/translations.ts
+export default {
+  "Save changes": "Enregistrer les modifications",
+} as const;
+```
+
+Missing or empty target translations fall back to English by returning the
+source message id, so untranslated keys always render readable English. ICU
+MessageFormat parameters are supported:
 
 ```tsx
 t("Delete {count, plural, one {# work item} other {# work items}}", { count });
 ```
 
-## Adding Copy
+## Adding a language
 
-Add new UI copy by wrapping it with `t("...")`:
+The set of available languages is **derived from the `locales` map** in
+[`src/locales/index.ts`](./src/locales/index.ts) — add an entry there and it
+appears in the language picker automatically (`SUPPORTED_LANGUAGES` in
+`src/constants/language.ts` reads from that map). To add, e.g., German:
 
-```tsx
-t("Create project");
-```
+1. Create `src/locales/de/` with the four locale files mirroring `en/`'s keys:
+   `translations.ts`, `accessibility.ts`, `editor.ts`, `empty-state.ts`. Each is
+   `export default { "<english id>": "<translation>" } as const;` — start from
+   the English files and translate the values (leave a value empty to fall back
+   to English).
+2. Register the locale in `src/locales/index.ts`:
 
-Then run the manual sync command from the repo root:
+   ```ts
+   export const locales = {
+     en: {
+       /* … */
+     },
+     de: {
+       translations: () => import("./de/translations"),
+       accessibility: () => import("./de/accessibility"),
+       editor: () => import("./de/editor"),
+       "empty-state": () => import("./de/empty-state"),
+     },
+   };
+   ```
 
-```bash
-pnpm i18n:sync
-```
+3. If the code isn't already in `TLanguage`, add it to
+   [`src/types/language.ts`](./src/types/language.ts); a display label can be
+   added to `LANGUAGE_LABELS` in `src/constants/language.ts` (it falls back to
+   the language code if omitted).
 
-This scans literal `t("...")` calls, string literals inside conditional `t(...)` calls, `i18n_*` object fields, `*TranslationKey` fields, and `I18N`-named local maps. It rewrites each locale's `translations.ts` as a flat object:
+That's it — `pnpm --filter @pi-dash/i18n build` and the new language is live.
 
-```ts
-export default {
-  "Create project": "",
-} as const;
-```
-
-For English, the value is the same as the key. For non-English locales, new values are empty placeholders until translated.
-
-The sync command is manual. It does not run during `pnpm build`.
-It formats generated locale files before exiting.
-
-## Translating Missing Values
-
-After running `pnpm i18n:sync`, use the LLM translation command to fill empty placeholders:
-
-```bash
-pnpm i18n:translate -- --provider openai --model "$MODEL" --api-key "$OPENAI_API_KEY"
-```
-
-If `--languages` is omitted, all supported non-English languages are translated.
-
-Translate selected languages:
-
-```bash
-pnpm i18n:translate -- --provider openai --model "$MODEL" --api-key "$OPENAI_API_KEY" --languages fr,es,ja
-```
-
-Use Fireworks:
-
-```bash
-pnpm i18n:translate -- --provider fireworks --model "$MODEL" --api-key "$FIREWORKS_API_KEY"
-```
-
-Supported options:
-
-```bash
---provider openai|fireworks
---api-key <key>
---model <model>
---base-url <openai-compatible-chat-completions-url>
---languages fr,es,ja
---limit 100
---batch-size 10
---request-timeout-ms 180000
---retry-count 2
---retry-delay-ms 5000
---continue-on-error
---dry-run
---skip-readme
-```
-
-The script logs progress for each batch and writes successful batches to disk immediately. If a provider times out,
-rerun the same command to continue from the remaining empty placeholders. Use `--continue-on-error` to skip failed
-batches during a large run and leave those placeholders empty for a later retry.
-Generated locale files and translated README files are formatted before the command exits.
-
-Environment variables:
-
-```bash
-I18N_TRANSLATION_PROVIDER
-I18N_TRANSLATION_API_KEY
-I18N_TRANSLATION_MODEL
-I18N_TRANSLATION_BASE_URL
-I18N_TRANSLATION_LANGUAGES
-I18N_TRANSLATION_LIMIT
-I18N_TRANSLATION_BATCH_SIZE
-I18N_TRANSLATION_REQUEST_TIMEOUT_MS
-I18N_TRANSLATION_RETRY_COUNT
-I18N_TRANSLATION_RETRY_DELAY_MS
-I18N_TRANSLATION_CONTINUE_ON_ERROR
-I18N_TRANSLATION_SKIP_README
-OPENAI_API_KEY
-FIREWORKS_API_KEY
-```
-
-The translator only fills empty strings in target locale `translations.ts` files. It uses the source English message id as the source text and rejects model output that changes ICU MessageFormat argument names or argument types.
-
-This package README is developer-facing and kept English-only — the translator does not generate per-locale copies of it.
-
-## Recommended Workflow
-
-1. Add or update UI code with `t("Source English copy")`.
-2. Run `pnpm i18n:sync`.
-3. Review new empty placeholders in `packages/i18n/src/locales/*/translations.ts`.
-4. Run `pnpm i18n:translate -- --provider openai --model "$MODEL"` or translate manually.
-5. Review the diff before committing, especially ICU placeholders such as `{count}`, plural blocks, and translated README command examples.
-6. Run:
-
-```bash
-pnpm --filter @pi-dash/i18n check:format
-pnpm --filter @pi-dash/i18n check:types
-pnpm --filter @pi-dash/i18n check:lint
-```
+> **Note:** the upstream multi-language locales and the key-sync / machine-
+> translation tooling that maintains them are not part of this open-source
+> repository. They live in the Pi Dash Cloud overlay and are layered on top at
+> build time. Self-hosters maintain their own locale files as described above.

@@ -35,12 +35,9 @@ class OutcomeMode(models.TextChoices):
     across projects. The scheduler layer never creates issues or edits code
     itself — it only dispatches an agent run. ``outcome_mode`` steers that run
     by appending a work-mode directive to the dispatched prompt (see
-    ``OUTCOME_MODE_DIRECTIVES`` and ``pi_dash.bgtasks.scheduler``). The agent
-    still does the work via the same ``pidash`` CLI / git tools a user-driven
-    run uses.
-
-    A future PR unifies this into the prompt composer (one composer for issue
-    *and* scheduler runs); for now the directive is appended to the prompt.
+    ``OUTCOME_MODE_DIRECTIVES`` and ``pi_dash.prompting.context.
+    build_scheduler_task_body``). The agent still does the work via the same
+    ``pidash`` CLI / git tools a user-driven run uses.
     """
 
     CREATE_ISSUE = "create_issue", "Create issues"
@@ -72,21 +69,26 @@ OUTCOME_MODE_DIRECTIVES: dict[str, str] = {
         "describing the finding instead (same form as create-issue mode)."
     ),
     OutcomeMode.FIX_AND_REVIEW: (
-        "## Work mode: fix and open for review\n\n"
-        "For each distinct finding, do ALL of the following:\n"
+        "## Work mode: file issue and delegate fix\n\n"
+        "Do NOT modify code or open a pull request in this run — the fix is "
+        "delegated to the issue agent. For each distinct finding, do ALL of "
+        "the following:\n"
         "1. File a Pi Dash issue with the `pidash` CLI (de-dupe against existing "
         "open issues by file + root cause, as in create-issue mode), and note "
-        "the issue identifier it returns:\n"
+        "the issue identifier it returns. Write the description so an AI agent "
+        "can implement the fix without re-investigating: file path(s) and line "
+        "range, the evidence you observed, root cause, severity, a concrete "
+        "suggested fix, and how to validate it:\n"
         "    pidash issue create --project <PROJ> --title \"<short summary>\" \\\n"
-        "        --description \"<file path, line range, evidence, severity, "
-        'suggested fix>"\n'
-        "2. Implement the fix and open a pull request for human review — do NOT "
-        "merge it. Reference the issue identifier in the PR.\n"
-        "3. Move the issue straight to the review column so a human picks it up:\n"
-        "    pidash issue patch <IDENT> --state \"In Review\"\n"
-        "If a fix is risky, ambiguous, or larger than a focused change, do NOT "
-        "force it: leave the issue in its default state (do NOT move it to In "
-        "Review) and describe the blocker in the issue instead of opening a PR."
+        "        --description \"<agent-ready technical details>\"\n"
+        "2. Move the issue to In Progress — this automatically delegates it to "
+        "the coding agent, which implements the fix and opens a pull request "
+        "for human review:\n"
+        "    pidash issue patch <IDENT> --state \"In Progress\"\n"
+        "If a finding is risky, ambiguous, or larger than a focused change, "
+        "still file the issue but leave it in its default state (do NOT move "
+        "it to In Progress) and describe the open questions in the issue "
+        "description instead."
     ),
 }
 

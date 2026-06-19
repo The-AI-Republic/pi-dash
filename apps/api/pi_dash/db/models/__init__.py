@@ -20,6 +20,10 @@ from .exporter import ExporterHistory
 from .importer import Importer
 from .intake import Intake, IntakeIssue
 from .integration import (
+    GithubAppInstallation,
+    GithubAppInstallSession,
+    GithubPullRequestLink,
+    GithubWebhookDelivery,
     GithubCommentSync,
     GithubIssueSync,
     GithubRepository,
@@ -94,3 +98,5 @@ from .description import Description, DescriptionVersion
 from .issue_agent_ticker import IssueAgentTicker
 
 from .scheduler import Scheduler, SchedulerBinding, SchedulerSource
+
+from .loop import LoopJob, LoopTarget, LoopUserPreference, SkipReason

@@ -2,10 +2,13 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 # See the LICENSE file for details.
 
+from datetime import timedelta
+
 import pytest
+from django.utils import timezone
 from rest_framework.test import APIClient
 
-from pi_dash.assistant.models import AssistantThread
+from pi_dash.assistant.models import AssistantThread, AssistantTurn
 from pi_dash.tests.contract.assistant.conftest import configure_llm
 
 pytestmark = pytest.mark.django_db
@@ -43,9 +46,36 @@ def test_non_member_cannot_access(world):
     assert c.get(f"{base(world.ws)}/threads/").status_code == 403
 
 
+def test_listing_threads_reaps_abandoned_empty_conversations(world):
+    """An untitled chat thread with no turns (no history) is reaped once past
+    the grace window, while fresh empties, titled threads, and threads with
+    history survive."""
+    stale = timezone.now() - timedelta(hours=2)
+
+    def make(title="", *, old=False, with_turn=False):
+        t = AssistantThread.objects.create(workspace=world.ws, user=world.member, title=title)
+        if old:
+            AssistantThread.objects.filter(pk=t.pk).update(created_at=stale)
+        if with_turn:
+            AssistantTurn.objects.create(thread=t)
+        return t
+
+    empty_old = make(old=True)  # reaped
+    empty_fresh = make()  # kept (grace)
+    titled_old = make("Kept", old=True)  # kept (has title)
+    history_old = make(old=True, with_turn=True)  # kept (has history)
+
+    res = client_for(world.member).get(f"{base(world.ws)}/threads/")
+    assert res.status_code == 200
+
+    assert not AssistantThread.objects.filter(pk=empty_old.pk).exists()
+    for kept in (empty_fresh, titled_old, history_old):
+        assert AssistantThread.objects.filter(pk=kept.pk).exists()
+
+
 # --- messages ---
 
-def test_message_requires_llm_config(world, fernet_key):
+def test_message_requires_llm_config(world, kms_crypto):
     c = client_for(world.member)
     thread = AssistantThread.objects.create(workspace=world.ws, user=world.member)
     res = c.post(f"{base(world.ws)}/threads/{thread.id}/messages/", {"content": "hello"}, format="json")
@@ -53,7 +83,7 @@ def test_message_requires_llm_config(world, fernet_key):
     assert res.data["error"] == "llm_config_missing"
 
 
-def test_message_creates_turn_and_blocks_concurrent(world, fernet_key, mocker, django_capture_on_commit_callbacks):
+def test_message_creates_turn_and_blocks_concurrent(world, kms_crypto, mocker, django_capture_on_commit_callbacks):
     delay = mocker.patch("pi_dash.assistant.views.messages.run_assistant_turn.delay")
     configure_llm(world.member)
     c = client_for(world.member)
@@ -78,7 +108,7 @@ def test_message_creates_turn_and_blocks_concurrent(world, fernet_key, mocker, d
     delay.assert_called_once()
 
 
-def test_message_lists_in_envelope_shape(world, fernet_key, mocker):
+def test_message_lists_in_envelope_shape(world, kms_crypto, mocker):
     mocker.patch("pi_dash.assistant.views.messages.run_assistant_turn.delay")
     configure_llm(world.member)
     c = client_for(world.member)
@@ -91,7 +121,7 @@ def test_message_lists_in_envelope_shape(world, fernet_key, mocker):
     assert "content" in res.data[0]
 
 
-def test_message_list_paginates_and_tolerates_bad_params(world, fernet_key):
+def test_message_list_paginates_and_tolerates_bad_params(world, kms_crypto):
     from pi_dash.assistant.models import MessageKind
     from pi_dash.assistant.runtime import events
 
@@ -112,7 +142,7 @@ def test_message_list_paginates_and_tolerates_bad_params(world, fernet_key):
     assert len(res.data) == 3
 
 
-def test_cannot_access_other_users_thread(world, fernet_key):
+def test_cannot_access_other_users_thread(world, kms_crypto):
     other_thread = AssistantThread.objects.create(workspace=world.ws, user=world.admin)
     c = client_for(world.member)
     res = c.get(f"{base(world.ws)}/threads/{other_thread.id}/messages/")
@@ -121,7 +151,7 @@ def test_cannot_access_other_users_thread(world, fernet_key):
 
 # --- llm config ---
 
-def test_llm_config_lifecycle(world, fernet_key):
+def test_llm_config_lifecycle(world, kms_crypto):
     c = client_for(world.member)
     # unset -> 200 with has_api_key False
     res = c.get("/api/users/me/llm-config/")

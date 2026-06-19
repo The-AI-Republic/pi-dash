@@ -4,6 +4,8 @@
  * See the LICENSE file for details.
  */
 
+import type { IUserLite } from "./users";
+
 // All the app integrations that are available
 export interface IAppIntegration {
   author: string;
@@ -82,6 +84,76 @@ export interface IGithubProjectBindingStatus {
   is_sync_enabled?: boolean;
   last_synced_at?: string | null;
   last_sync_error?: string;
+  repo_url?: string;
+}
+
+// GitHub App Enablement (.ai_design/github_deep_integration/design.md)
+
+export interface IGithubAppInstallationStatus {
+  connected: boolean;
+  installation_id?: number;
+  account_login?: string;
+  account_type?: "User" | "Organization" | "Unknown";
+  repository_selection?: "all" | "selected";
+  repository_count?: number;
+  permissions?: Record<string, string>;
+  events?: string[];
+  installed_at?: string | null;
+  suspended_at?: string | null;
+  verified_at?: string | null;
+  last_checked_at?: string | null;
+  last_check_error?: string;
+}
+
+export interface IGithubAppWorkspaceStatus {
+  id: string;
+  slug: string;
+  name: string;
+  github_app: IGithubAppInstallationStatus;
+}
+
+export interface IGithubAppStatus {
+  configured: boolean;
+  app_slug: string;
+  workspaces: IGithubAppWorkspaceStatus[];
+}
+
+export interface IGithubAppInstallStartRequest {
+  workspace_slug: string;
+}
+
+export interface IGithubAppInstallStartResponse {
+  state: string;
+  expires_at: string;
+  install_url: string;
+}
+
+export type IGithubAppRefreshRequest = IGithubAppInstallStartRequest;
+
+// GitHub Pull Request links (.ai_design/github_pr_issue_link/design.md)
+
+export type TGithubPullRequestState = "open" | "closed";
+
+export interface IGithubPullRequestLink {
+  id: string;
+  issue: string;
+  repo_owner: string;
+  repo_name: string;
+  pr_number: number;
+  url: string;
+  title: string;
+  state: TGithubPullRequestState;
+  merged: boolean;
+  draft: boolean;
+  pr_updated_at: string | null;
+  created_at: string;
+  updated_at: string;
+  created_by: string | null;
+  created_by_detail?: IUserLite | null;
+}
+
+export interface IGithubPullRequestLinkCreateRequest {
+  url: string;
 }
 
 // slack integration

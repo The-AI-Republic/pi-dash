@@ -62,7 +62,11 @@ def test_matcher_ignores_busy_runner(db, online_runner, queued_run):
 
 
 @pytest.mark.unit
-def test_matcher_ignores_runner_with_active_chat_turn(db, online_runner, queued_run, create_user, workspace):
+def test_matcher_includes_runner_with_active_chat_turn(db, online_runner, queued_run, create_user, workspace):
+    # An active chat turn no longer excludes a runner from issue assignment:
+    # chat and issue runs are concurrent (the runner serves chat in a dedicated
+    # worktree, separate from the issue pool). See design
+    # make_chat_issue_parallel_working §3.4.
     AgentChatSession.objects.create(
         workspace=workspace,
         runner=online_runner,
@@ -70,11 +74,12 @@ def test_matcher_ignores_runner_with_active_chat_turn(db, online_runner, queued_
         pod=online_runner.pod,
         active_turn_id="turn_123",
     )
-    assert matcher.select_runner_for_run(queued_run) is None
+    assert matcher.select_runner_for_run(queued_run) == online_runner
 
 
 @pytest.mark.unit
-def test_matcher_ignores_runner_with_active_chat_message(db, online_runner, queued_run, create_user, workspace):
+def test_matcher_includes_runner_with_active_chat_message(db, online_runner, queued_run, create_user, workspace):
+    # As above: an in-flight chat message does not block issue assignment.
     AgentChatSession.objects.create(
         workspace=workspace,
         runner=online_runner,
@@ -82,7 +87,7 @@ def test_matcher_ignores_runner_with_active_chat_message(db, online_runner, queu
         pod=online_runner.pod,
         active_message_id=queued_run.id,
     )
-    assert matcher.select_runner_for_run(queued_run) is None
+    assert matcher.select_runner_for_run(queued_run) == online_runner
 
 
 # ---------------------------------------------------------------------------

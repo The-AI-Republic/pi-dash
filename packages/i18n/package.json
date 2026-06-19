@@ -14,8 +14,6 @@
   },
   "scripts": {
     "dev": "tsdown --watch --no-clean",
-    "sync:keys": "node scripts/sync-translation-keys.mjs",
-    "translate:missing": "node scripts/translate-missing.mjs",
     "build": "tsdown",
     "check:lint": "oxlint --max-warnings=2 .",
     "check:types": "tsc --noEmit",

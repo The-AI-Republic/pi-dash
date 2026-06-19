@@ -98,6 +98,8 @@ export const GITHUB_INTEGRATION_STATUS = (workspaceSlug: string) =>
 export const GITHUB_INTEGRATION_REPOS = (workspaceSlug: string, page: number) =>
   `GITHUB_INTEGRATION_REPOS_${workspaceSlug.toUpperCase()}_${page}`;
 export const GITHUB_PROJECT_BINDING = (projectId: string) => `GITHUB_PROJECT_BINDING_${projectId.toUpperCase()}`;
+export const GITHUB_APP_STATUS = "GITHUB_APP_STATUS";
+export const GITHUB_ISSUE_PULL_REQUESTS = (issueId: string) => `GITHUB_ISSUE_PULL_REQUESTS_${issueId.toUpperCase()}`;
 
 // cycles
 export const WORKSPACE_ACTIVE_CYCLES_LIST = (workspaceSlug: string, cursor: string, per_page: string) =>

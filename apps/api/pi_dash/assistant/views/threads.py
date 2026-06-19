@@ -4,14 +4,46 @@
 
 from __future__ import annotations
 
+from datetime import timedelta
+
+from django.db.models import Exists, OuterRef
+from django.utils import timezone
 from rest_framework import status
 from rest_framework.response import Response
 
-from pi_dash.assistant.models import AssistantThread
+from pi_dash.assistant.models import AssistantThread, AssistantTurn, ThreadKind
 from pi_dash.assistant.serializers import AssistantThreadSerializer
 from pi_dash.assistant.tasks import cancel_key
 from pi_dash.assistant.views._base import AssistantBaseView
 from pi_dash.settings.redis import redis_instance
+
+# How long an empty, untitled chat thread is kept before it's reaped. The
+# window protects a thread the user just opened (via "New chat") and is typing
+# into — it has no turn yet and an empty title, so without the grace a
+# concurrent thread-list refresh would delete it out from under them.
+EMPTY_THREAD_GRACE = timedelta(hours=1)
+
+
+def _reap_empty_threads(user, slug):
+    """Delete the user's abandoned empty conversations: chat threads with no
+    title, no turns (no chat history at all), and no in-flight turn, once
+    they're older than the grace window. Keeps storage free of "Untitled"
+    threads left behind when a new chat is opened but never used."""
+    cutoff = timezone.now() - EMPTY_THREAD_GRACE
+    has_turn = AssistantTurn.objects.filter(thread=OuterRef("pk"))
+    (
+        AssistantThread.objects.filter(
+            user=user,
+            workspace__slug=slug,
+            kind=ThreadKind.CHAT,
+            title="",
+            active_turn__isnull=True,
+            created_at__lt=cutoff,
+        )
+        .annotate(_has_turn=Exists(has_turn))
+        .filter(_has_turn=False)
+        .delete()
+    )
 
 
 class AssistantThreadListCreateEndpoint(AssistantBaseView):
@@ -19,8 +51,14 @@ class AssistantThreadListCreateEndpoint(AssistantBaseView):
         denied = self.require_member(request, slug)
         if denied:
             return denied
+        # Reap abandoned empty conversations before listing so they neither
+        # clutter the UI nor accumulate in storage.
+        _reap_empty_threads(request.user, slug)
+        # Only chat threads surface in the assistant UI; loop (Auto Project
+        # Management) threads are hidden — that filter is the entire opacity
+        # mechanism (design §6.4).
         threads = AssistantThread.objects.filter(
-            user=request.user, workspace__slug=slug, is_archived=False
+            user=request.user, workspace__slug=slug, is_archived=False, kind=ThreadKind.CHAT
         ).order_by("-updated_at")[:50]
         return Response(AssistantThreadSerializer(threads, many=True).data)
 

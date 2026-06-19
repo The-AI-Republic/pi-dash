@@ -29,7 +29,7 @@ export function ChatComposer({
   busy = false,
   sending = false,
   disabledReason = null,
-  placeholder = "Ask Pi to do something…",
+  placeholder = "Ask Pi Dash to do something…",
   bordered = true,
 }: ChatComposerProps) {
   const disabled = !!disabledReason;

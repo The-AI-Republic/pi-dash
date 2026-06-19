@@ -9,6 +9,7 @@ from pi_dash.app.views import (
     BulkDeleteIssuesEndpoint,
     SubIssuesEndpoint,
     IssueLinkViewSet,
+    GithubPullRequestLinkViewSet,
     IssueAttachmentEndpoint,
     CommentReactionViewSet,
     IssueActivityEndpoint,
@@ -122,6 +123,16 @@ urlpatterns = [
             }
         ),
         name="project-issue-links",
+    ),
+    path(
+        "workspaces/<str:slug>/projects/<str:project_id>/issues/<uuid:issue_id>/github-pull-requests/",
+        GithubPullRequestLinkViewSet.as_view({"get": "list", "post": "create"}),
+        name="project-issue-github-pull-requests",
+    ),
+    path(
+        "workspaces/<str:slug>/projects/<str:project_id>/issues/<uuid:issue_id>/github-pull-requests/<uuid:pk>/",
+        GithubPullRequestLinkViewSet.as_view({"delete": "destroy"}),
+        name="project-issue-github-pull-requests",
     ),
     path(
         "workspaces/<str:slug>/projects/<str:project_id>/issues/<uuid:issue_id>/issue-attachments/",

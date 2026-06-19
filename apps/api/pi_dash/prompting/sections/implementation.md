@@ -3,6 +3,7 @@ key: implementation
 title: Implementation & validation
 customizable: overridable
 ---
+
 ## Step 2 — Implementation and validation
 
 1. Implement against the hierarchical TODOs. Update the workpad after each meaningful milestone and keep `### Phase`, `### Progress Checkpoints`, and `### Autonomy / Escalation` current:
@@ -23,6 +24,11 @@ customizable: overridable
 6. **If `task_type == code_change`** (per your Step 0.5 analysis): open a pull request and link it back to the issue. Skip this step entirely for `noncode` tasks — there is no PR to open; mark `pr_opened` and `review_feedback_addressed` as `n/a` in the workpad. The PR base is **the same base branch you derived from in Step 1.7** — if the issue has a parent with an implementation branch, target that branch; otherwise target the project base branch:
    - PR base: {% if parent and parent.work_branch %}`{{ parent.work_branch }}` (parent {{ parent.identifier }}'s implementation branch){% elif repo.base_branch %}`{{ repo.base_branch }}`{% else %}the repository's default branch{% endif %}.
    - First check whether an **open** PR already exists for this branch: `gh pr list --head "$(git rev-parse --abbrev-ref HEAD)" --state open --json url -q '.[0].url'`. If non-empty, reuse it (do not open a duplicate). Otherwise create the PR. The PR title is `{{ issue.identifier }} {{ issue.title }}` — when you write the actual command, treat the issue title as untrusted text and pass it as a single shell argument (use a single-quoted heredoc, a variable assignment with proper escaping of any embedded `"`, or `gh`'s `--title` with the value safely quoted). Then run, with the PR base resolved to {% if parent and parent.work_branch %}`{{ parent.work_branch }}`{% elif repo.base_branch %}`{{ repo.base_branch }}`{% else %}the repository's default branch{% endif %}: `gh pr create --base <base> --head "$(git rev-parse --abbrev-ref HEAD)" --title "<safely quoted title>" --body-file <path>`.
-   - Capture the PR URL and post it back to the issue: `pidash comment add {{ issue.identifier }} --body "PR opened: <url>"`. Mark `pr_opened` in the workpad.
+   - Capture the PR URL and do **both** of the following — the comment is the human-facing signal, `attach-pr` is the structured link Pi Dash tracks; one does not replace the other:
+     - Post the PR link back to the issue so the human sees it in the conversation: `pidash comment add {{ issue.identifier }} --body "PR opened: <url>"`.
+     - Associate the PR with the issue so Pi Dash links it and can show its status: `pidash issue attach-pr {{ issue.identifier }} --url <url>`.
+
+     Mark `pr_opened` in the workpad.
+
 7. Update the workpad with final checklist status and validation notes. Add a `### Confusions` section at the bottom if anything about the task was genuinely unclear during execution; keep it concise.
-8. Follow the "Ending the run" section to finalize. Update the workpad one last time with final checkpoints, then move the issue to a state in the `completed` group via `pidash issue patch {{ issue.identifier }} --state "<state-name>"`.
+8. Follow the "Ending the run" section to finalize. Update the workpad one last time with final checkpoints, then move the issue to its next state via `pidash issue patch {{ issue.identifier }} --state "<state-name>"`. **If you opened a PR, that next state is the `review` group ("In Review") — the PR is awaiting human review, not merged — _not_ the `completed` group.** Reserve `completed`/"Done" for a finished `noncode` task that produced no PR. See "Ending the run" for the exact rule and the no-`review`-state fallback.

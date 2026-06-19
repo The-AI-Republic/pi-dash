@@ -8,6 +8,7 @@
 from django.db import models
 
 # Module imports
+from pi_dash.db.models.base import BaseModel
 from pi_dash.db.models.project import ProjectBaseModel
 
 
@@ -115,3 +116,147 @@ class GithubCommentSync(ProjectBaseModel):
         verbose_name_plural = "Github Comment Syncs"
         db_table = "github_comment_syncs"
         ordering = ("-created_at",)
+
+
+class GithubAppInstallation(BaseModel):
+    class AccountType(models.TextChoices):
+        USER = "User", "User"
+        ORGANIZATION = "Organization", "Organization"
+        UNKNOWN = "Unknown", "Unknown"
+
+    class RepositorySelection(models.TextChoices):
+        ALL = "all", "All"
+        SELECTED = "selected", "Selected"
+
+    workspace_integration = models.OneToOneField(
+        "db.WorkspaceIntegration",
+        related_name="github_app_installation",
+        on_delete=models.CASCADE,
+    )
+    installation_id = models.BigIntegerField(unique=True, db_index=True)
+    account_login = models.CharField(max_length=255, blank=True, default="")
+    account_type = models.CharField(max_length=32, choices=AccountType.choices, default=AccountType.UNKNOWN)
+    repository_selection = models.CharField(
+        max_length=16,
+        choices=RepositorySelection.choices,
+        default=RepositorySelection.SELECTED,
+    )
+    repository_count = models.PositiveIntegerField(default=0)
+    permissions = models.JSONField(default=dict)
+    events = models.JSONField(default=list)
+    installed_at = models.DateTimeField(null=True, blank=True)
+    suspended_at = models.DateTimeField(null=True, blank=True)
+    verified_at = models.DateTimeField(null=True, blank=True)
+    last_checked_at = models.DateTimeField(null=True, blank=True)
+    last_check_error = models.TextField(blank=True, default="")
+
+    def __str__(self):
+        return f"{self.account_login or self.installation_id} <{self.workspace_integration.workspace.name}>"
+
+    class Meta:
+        verbose_name = "Github App Installation"
+        verbose_name_plural = "Github App Installations"
+        db_table = "github_app_installations"
+        ordering = ("-created_at",)
+
+
+class GithubWebhookDelivery(BaseModel):
+    class Status(models.TextChoices):
+        RECEIVED = "received", "Received"
+        PROCESSED = "processed", "Processed"
+        FAILED = "failed", "Failed"
+        SKIPPED = "skipped", "Skipped"
+
+    delivery_id = models.UUIDField(unique=True, db_index=True)
+    event = models.CharField(max_length=100)
+    action = models.CharField(max_length=100, blank=True, default="")
+    installation_id = models.BigIntegerField(null=True, blank=True, db_index=True)
+    payload = models.JSONField(default=dict)
+    status = models.CharField(max_length=16, choices=Status.choices, default=Status.RECEIVED)
+    received_at = models.DateTimeField(auto_now_add=True)
+    processed_at = models.DateTimeField(null=True, blank=True)
+    error = models.TextField(blank=True, default="")
+
+    def __str__(self):
+        return f"{self.event}:{self.delivery_id}"
+
+    class Meta:
+        verbose_name = "Github Webhook Delivery"
+        verbose_name_plural = "Github Webhook Deliveries"
+        db_table = "github_webhook_deliveries"
+        ordering = ("-received_at",)
+
+
+class GithubAppInstallSession(BaseModel):
+    class Status(models.TextChoices):
+        STARTED = "started", "Started"
+        COMPLETED = "completed", "Completed"
+        EXPIRED = "expired", "Expired"
+        FAILED = "failed", "Failed"
+
+    state = models.CharField(max_length=128, unique=True, db_index=True)
+    workspace = models.ForeignKey("db.Workspace", related_name="github_app_install_sessions", on_delete=models.CASCADE)
+    actor = models.ForeignKey("db.User", related_name="github_app_install_sessions", on_delete=models.CASCADE)
+    installation_id = models.BigIntegerField(null=True, blank=True)
+    account_login = models.CharField(max_length=255, blank=True, default="")
+    status = models.CharField(max_length=16, choices=Status.choices, default=Status.STARTED, db_index=True)
+    expires_at = models.DateTimeField(db_index=True)
+    completed_at = models.DateTimeField(null=True, blank=True)
+    error = models.TextField(blank=True, default="")
+
+    def __str__(self):
+        return f"{self.workspace.slug}:{self.status}:{self.state}"
+
+    class Meta:
+        verbose_name = "Github App Install Session"
+        verbose_name_plural = "Github App Install Sessions"
+        db_table = "github_app_install_sessions"
+        ordering = ("-created_at",)
+
+
+class GithubPullRequestLink(ProjectBaseModel):
+    """Optional link from a Pi Dash issue to a GitHub pull request.
+
+    Standalone (not tied to ``GithubIssueSync``/``GithubRepository``) so that
+    Pi Dash issues with no mirrored GitHub issue can still reference PRs. One
+    issue may link many PRs; a PR links to exactly one issue (the partial-unique
+    constraint below). The ``title``/``state``/``merged``/``draft`` snapshot is
+    display-only and refreshed by the GitHub App ``pull_request`` webhook; it
+    never drives the linked issue's workflow state.
+    """
+
+    class State(models.TextChoices):
+        OPEN = "open", "Open"
+        CLOSED = "closed", "Closed"
+
+    issue = models.ForeignKey("db.Issue", on_delete=models.CASCADE, related_name="github_pull_requests")
+    repo_owner = models.CharField(max_length=255)
+    repo_name = models.CharField(max_length=255)
+    pr_number = models.PositiveIntegerField()
+    url = models.URLField(max_length=500)
+    # Display snapshot — refreshed by the pull_request webhook; never mutates the issue.
+    title = models.CharField(max_length=500, blank=True, default="")
+    state = models.CharField(max_length=12, choices=State.choices, default=State.OPEN)
+    merged = models.BooleanField(default=False)
+    draft = models.BooleanField(default=False)
+    pr_updated_at = models.DateTimeField(null=True, blank=True)
+
+    def __str__(self):
+        return f"{self.repo_owner}/{self.repo_name}#{self.pr_number} <{self.issue_id}>"
+
+    class Meta:
+        verbose_name = "Github Pull Request Link"
+        verbose_name_plural = "Github Pull Request Links"
+        db_table = "github_pull_request_links"
+        ordering = ("-created_at",)
+        constraints = [
+            models.UniqueConstraint(
+                fields=["repo_owner", "repo_name", "pr_number"],
+                condition=models.Q(deleted_at__isnull=True),
+                name="github_pr_link_unique_per_pr_when_active",
+            ),
+        ]
+        indexes = [
+            models.Index(fields=["repo_owner", "repo_name", "pr_number"], name="github_pr_l_repo_ow_idx"),
+            models.Index(fields=["issue"], name="github_pr_l_issue_idx"),
+        ]

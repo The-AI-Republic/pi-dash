@@ -9,8 +9,24 @@ import os
 from django.core.management.base import BaseCommand, CommandError
 
 # Module imports
+from pi_dash.config.registry import CONFIG
 from pi_dash.license.models import InstanceConfiguration
 from pi_dash.utils.instance_config_variables import instance_config_variables
+
+
+# Derived auth flags computed and seeded as DB rows below (not part of
+# instance_config_variables). Exposed as a constant so the config registry can
+# assert every seeded key is registered as db-sourced.
+DERIVED_FLAG_KEYS = ["IS_GOOGLE_ENABLED", "IS_GITHUB_ENABLED", "IS_GITLAB_ENABLED", "IS_GITEA_ENABLED"]
+
+
+def _is_db_sourced(key):
+    """Only db-sourced keys are seeded into InstanceConfiguration. env-sourced
+    keys (e.g. secrets routed to SSM in the cloud) are read from the
+    environment and must not get a DB row. Unregistered keys keep the legacy
+    behavior of being seeded."""
+    entry = CONFIG.get(key)
+    return entry is None or entry["source"] == "db"
 
 
 class Command(BaseCommand):
@@ -27,6 +43,8 @@ class Command(BaseCommand):
                 raise CommandError(f"{item} env variable is required.")
 
         for item in instance_config_variables:
+            if not _is_db_sourced(item.get("key")):
+                continue
             obj, created = InstanceConfiguration.objects.get_or_create(key=item.get("key"))
             if created:
                 obj.category = item.get("category")
@@ -40,7 +58,7 @@ class Command(BaseCommand):
             else:
                 self.stdout.write(self.style.WARNING(f"{obj.key} configuration already exists"))
 
-        keys = ["IS_GOOGLE_ENABLED", "IS_GITHUB_ENABLED", "IS_GITLAB_ENABLED", "IS_GITEA_ENABLED"]
+        keys = DERIVED_FLAG_KEYS
         if not InstanceConfiguration.objects.filter(key__in=keys).exists():
             for key in keys:
                 if key == "IS_GOOGLE_ENABLED":

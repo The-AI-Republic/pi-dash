@@ -179,7 +179,7 @@ def create_issue(
             project=project,
             workspace=project.workspace,
             created_by=user,
-            created_via="assistant",
+            created_via=deps.created_via,
         )
 
     _results.record_write(

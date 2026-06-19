@@ -453,6 +453,70 @@ def test_second_chat_message_is_rejected_while_first_dispatch_is_active(
 
 
 @pytest.mark.unit
+def test_chat_message_accepted_while_issue_run_in_flight(
+    db, session_client, create_user, workspace, pod, enrolled_runner
+):
+    # Concurrent chat + issue (design §3.4): a chat message is accepted (NOT
+    # 409 runner_busy) even though the runner has a RUNNING AgentRun. The runner
+    # serves chat in a dedicated worktree, isolated from the issue pool.
+    AgentRun.objects.create(
+        workspace=workspace,
+        created_by=create_user,
+        pod=pod,
+        runner=enrolled_runner,
+        prompt="issue in flight",
+        status=AgentRunStatus.RUNNING,
+    )
+    session = AgentChatSession.objects.create(
+        workspace=workspace,
+        runner=enrolled_runner,
+        created_by=create_user,
+        pod=pod,
+    )
+    with (
+        patch("django.db.transaction.on_commit", side_effect=lambda fn, **kw: fn()),
+        patch("pi_dash.runner.services.chat.send_to_runner") as send_to_runner,
+    ):
+        resp = session_client.post(
+            f"/api/runners/chat/sessions/{session.id}/messages/",
+            {"content": "hello while the runner is busy with an issue"},
+            format="json",
+        )
+
+    assert resp.status_code == 201, resp.data
+    send_to_runner.assert_called_once()
+
+
+@pytest.mark.unit
+def test_chat_warm_accepted_while_issue_run_in_flight(
+    db, session_client, create_user, workspace, pod, enrolled_runner
+):
+    # Warm is likewise accepted during an issue run (no runner_busy gate).
+    AgentRun.objects.create(
+        workspace=workspace,
+        created_by=create_user,
+        pod=pod,
+        runner=enrolled_runner,
+        prompt="issue in flight",
+        status=AgentRunStatus.RUNNING,
+    )
+    session = AgentChatSession.objects.create(
+        workspace=workspace,
+        runner=enrolled_runner,
+        created_by=create_user,
+        pod=pod,
+    )
+    with (
+        patch("django.db.transaction.on_commit", side_effect=lambda fn, **kw: fn()),
+        patch("pi_dash.runner.services.chat.send_to_runner") as send_to_runner,
+    ):
+        resp = session_client.post(f"/api/runners/chat/sessions/{session.id}/warm/")
+
+    assert resp.status_code == 202, resp.data
+    send_to_runner.assert_called_once()
+
+
+@pytest.mark.unit
 def test_chat_message_post_rejects_large_payload(db, session_client, create_user, workspace, pod, enrolled_runner):
     session = AgentChatSession.objects.create(
         workspace=workspace,

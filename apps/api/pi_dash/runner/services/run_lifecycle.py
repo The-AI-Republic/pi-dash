@@ -29,6 +29,7 @@ from pi_dash.runner.models import (
     RefusalCategory,
     Runner,
     RunnerLiveState,
+    RunnerStatus,
 )
 
 logger = logging.getLogger(__name__)
@@ -286,6 +287,33 @@ def apply_run_resume_unavailable(
         transaction.on_commit(
             lambda pid=run.pod_id: drain_pod_by_id(pid)
         )
+
+
+def apply_assign_rejected_busy(
+    runner: Runner,
+    run_id: UUID | str,
+    *,
+    locked_run: Optional[AgentRun] = None,
+) -> None:
+    """Re-queue an Assign the runner NACKed because it is still busy.
+
+    The matcher frees a runner the moment its previous run goes terminal in
+    the database — but the local agent may still be winding down (most
+    commonly after a user cancel). The next Assign then lands on a runner
+    that cannot take it; the runner reports ``reason=assign_rejected_busy``
+    instead of silently dropping it, because a dropped Assign leaves the run
+    ASSIGNED forever ("busy" in the UI with nothing running).
+
+    Same row reset as :func:`apply_run_resume_unavailable` (it owns the
+    re-queue semantics), plus the runner is flipped to BUSY first so the
+    post-commit pod drain can't instantly re-assign the run to the very
+    runner that just rejected it. The runner's next poll self-corrects its
+    status from the reported state.
+
+    Must be called inside ``transaction.atomic()``.
+    """
+    Runner.objects.filter(pk=runner.pk).update(status=RunnerStatus.BUSY)
+    apply_run_resume_unavailable(runner, run_id, locked_run=locked_run)
 
 
 # Detail-string prefixes for failures that aren't actionable by the user

@@ -18,7 +18,7 @@
  */
 
 // Mirrors the runner CLI's ``--agent`` value-enum (kebab-case).
-export type TRunnerAgent = "claude-code" | "codex" | "cursor-agent";
+export type TRunnerAgent = "claude-code" | "codex" | "cursor-agent" | "open-claw";
 
 export interface IRunnerModelOption {
   /** Unique select value within an agent's list. */
@@ -100,18 +100,19 @@ export const RUNNER_MODEL_OPTIONS: Record<TRunnerAgent, IRunnerModelOption[]> = 
   "claude-code": [DEFAULT_OPTION, ...CLAUDE_OPTIONS],
   codex: [DEFAULT_OPTION, ...CODEX_OPTIONS],
   "cursor-agent": [DEFAULT_OPTION, ...CURSOR_OPTIONS],
+  "open-claw": [DEFAULT_OPTION],
 };
 
 /**
- * Pre-selected model option id per agent in the "Add runner" form. Claude
- * runners default to Fable 5; the others fall back to the agent's own
- * built-in model (the ``"default"`` sentinel). The id must exist in that
- * agent's `RUNNER_MODEL_OPTIONS` list.
+ * Pre-selected model option id per agent in the "Add runner" form. All agents
+ * fall back to the agent's own built-in model (the ``"default"`` sentinel).
+ * The id must exist in that agent's `RUNNER_MODEL_OPTIONS` list.
  */
 export const DEFAULT_MODEL_BY_AGENT: Record<TRunnerAgent, string> = {
-  "claude-code": "claude-fable-5",
+  "claude-code": DEFAULT_MODEL_ID,
   codex: DEFAULT_MODEL_ID,
   "cursor-agent": DEFAULT_MODEL_ID,
+  "open-claw": DEFAULT_MODEL_ID,
 };
 
 /** Look up a selected option's label; falls back to the default label. */

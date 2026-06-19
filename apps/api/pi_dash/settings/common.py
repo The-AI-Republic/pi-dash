@@ -18,22 +18,23 @@ from corsheaders.defaults import default_headers
 
 
 # Module imports
+from pi_dash.config import get_config
 from pi_dash.utils.url import is_valid_url
 
 
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 # Secret Key
-SECRET_KEY = os.environ.get("SECRET_KEY", get_random_secret_key())
+SECRET_KEY = get_config("SECRET_KEY", get_random_secret_key())
 
 # SECURITY WARNING: don't run with debug turned on in production!
-DEBUG = int(os.environ.get("DEBUG", "0"))
+DEBUG = int(get_config("DEBUG", "0"))
 
 # Self-hosted mode
 IS_SELF_MANAGED = True
 
 # Allowed Hosts
-ALLOWED_HOSTS = os.environ.get("ALLOWED_HOSTS", "*").split(",")
+ALLOWED_HOSTS = get_config("ALLOWED_HOSTS", "*").split(",")
 
 # Application definition
 INSTALLED_APPS = [
@@ -132,7 +133,7 @@ TEMPLATES = [
 
 # CORS Settings
 CORS_ALLOW_CREDENTIALS = True
-cors_origins_raw = os.environ.get("CORS_ALLOWED_ORIGINS", "")
+cors_origins_raw = get_config("CORS_ALLOWED_ORIGINS", "")
 # filter out empty strings
 cors_allowed_origins = [origin.strip() for origin in cors_origins_raw.split(",") if origin.strip()]
 if cors_allowed_origins:
@@ -155,18 +156,18 @@ SITE_ID = 1
 AUTH_USER_MODEL = "db.User"
 
 # Database
-if bool(os.environ.get("DATABASE_URL")):
+if bool(get_config("DATABASE_URL")):
     # Parse database configuration from $DATABASE_URL
     DATABASES = {"default": dj_database_url.config()}
 else:
     DATABASES = {
         "default": {
             "ENGINE": "django.db.backends.postgresql",
-            "NAME": os.environ.get("POSTGRES_DB"),
-            "USER": os.environ.get("POSTGRES_USER"),
-            "PASSWORD": os.environ.get("POSTGRES_PASSWORD"),
-            "HOST": os.environ.get("POSTGRES_HOST"),
-            "PORT": os.environ.get("POSTGRES_PORT", "5432"),
+            "NAME": get_config("POSTGRES_DB"),
+            "USER": get_config("POSTGRES_USER"),
+            "PASSWORD": get_config("POSTGRES_PASSWORD"),
+            "HOST": get_config("POSTGRES_HOST"),
+            "PORT": get_config("POSTGRES_PORT", "5432"),
         }
     }
 
@@ -181,18 +182,18 @@ DATABASES["default"]["OPTIONS"]["options"] = (
 ).strip()
 
 
-if os.environ.get("ENABLE_READ_REPLICA", "0") == "1":
-    if bool(os.environ.get("DATABASE_READ_REPLICA_URL")):
+if get_config("ENABLE_READ_REPLICA", "0") == "1":
+    if bool(get_config("DATABASE_READ_REPLICA_URL")):
         # Parse database configuration from $DATABASE_URL
-        DATABASES["replica"] = dj_database_url.parse(os.environ.get("DATABASE_READ_REPLICA_URL"))
+        DATABASES["replica"] = dj_database_url.parse(get_config("DATABASE_READ_REPLICA_URL"))
     else:
         DATABASES["replica"] = {
             "ENGINE": "django.db.backends.postgresql",
-            "NAME": os.environ.get("POSTGRES_READ_REPLICA_DB"),
-            "USER": os.environ.get("POSTGRES_READ_REPLICA_USER"),
-            "PASSWORD": os.environ.get("POSTGRES_READ_REPLICA_PASSWORD"),
-            "HOST": os.environ.get("POSTGRES_READ_REPLICA_HOST"),
-            "PORT": os.environ.get("POSTGRES_READ_REPLICA_PORT", "5432"),
+            "NAME": get_config("POSTGRES_READ_REPLICA_DB"),
+            "USER": get_config("POSTGRES_READ_REPLICA_USER"),
+            "PASSWORD": get_config("POSTGRES_READ_REPLICA_PASSWORD"),
+            "HOST": get_config("POSTGRES_READ_REPLICA_HOST"),
+            "PORT": get_config("POSTGRES_READ_REPLICA_PORT", "5432"),
         }
 
     # Database Routers
@@ -202,29 +203,70 @@ if os.environ.get("ENABLE_READ_REPLICA", "0") == "1":
 
 
 # Redis Config
-REDIS_URL = os.environ.get("REDIS_URL")
+REDIS_URL = get_config("REDIS_URL")
 REDIS_SSL = REDIS_URL and "rediss" in REDIS_URL
-REDIS_SOCKET_CONNECT_TIMEOUT = os.environ.get("REDIS_SOCKET_CONNECT_TIMEOUT", 2.0)
-REDIS_SOCKET_TIMEOUT = os.environ.get("REDIS_SOCKET_TIMEOUT", 5.0)
-REDIS_HEALTH_CHECK_INTERVAL = os.environ.get("REDIS_HEALTH_CHECK_INTERVAL", 30)
-REDIS_MAX_CONNECTIONS = os.environ.get("REDIS_MAX_CONNECTIONS")
+REDIS_SOCKET_CONNECT_TIMEOUT = get_config("REDIS_SOCKET_CONNECT_TIMEOUT", 2.0)
+REDIS_SOCKET_TIMEOUT = get_config("REDIS_SOCKET_TIMEOUT", 5.0)
+REDIS_HEALTH_CHECK_INTERVAL = get_config("REDIS_HEALTH_CHECK_INTERVAL", 30)
+REDIS_MAX_CONNECTIONS = get_config("REDIS_MAX_CONNECTIONS")
 
 # AI Assistant — see .ai_design/integrate_ai_agent/
-# Comma-separated MultiFernet key list (urlsafe base64, 32 bytes). When unset,
-# BYOK keys cannot be stored (the config endpoint reports assistant_not_configured).
-ASSISTANT_ENCRYPTION_KEY = os.environ.get("ASSISTANT_ENCRYPTION_KEY", "")
+# BYOK keys are encrypted at rest via AWS KMS (pi_dash.assistant.crypto).
+# ASSISTANT_KMS_KEY_ID is the CMK (id / ARN / alias) used to encrypt+decrypt;
+# region comes from AWS_REGION. When unset, BYOK keys cannot be stored (the
+# config endpoint reports assistant_not_configured). ASSISTANT_KMS_ENDPOINT_URL
+# optionally points the KMS client at a compatible endpoint (e.g. LocalStack)
+# for local / self-hosted setups without a real AWS account.
+# Which crypto backend encrypts BYOK keys (pi_dash.assistant.crypto). Only
+# "aws-kms" ships today; the seam exists so other providers (GCP KMS, Azure
+# Key Vault, Vault Transit) can be added without touching call sites.
+ASSISTANT_CRYPTO_BACKEND = get_config("ASSISTANT_CRYPTO_BACKEND", "aws-kms")
+ASSISTANT_KMS_KEY_ID = get_config("ASSISTANT_KMS_KEY_ID", "")
+ASSISTANT_KMS_ENDPOINT_URL = get_config("ASSISTANT_KMS_ENDPOINT_URL", "")
+# Short-lived in-process cache of decrypted BYOK keys, so the assistant doesn't
+# call KMS Decrypt on every turn. In-memory per worker (plaintext never leaves
+# the process — unlike a shared store); keyed by a hash of the ciphertext so a
+# key change auto-invalidates. TTL also bounds how long a KMS-side revocation
+# lags. Set TTL=0 to disable. Eviction (TTL or LRU at MAXSIZE) is always safe —
+# a miss just costs one extra KMS Decrypt.
+ASSISTANT_KEY_CACHE_TTL = int(get_config("ASSISTANT_KEY_CACHE_TTL", 300))
+ASSISTANT_KEY_CACHE_MAXSIZE = int(get_config("ASSISTANT_KEY_CACHE_MAXSIZE", 1000))
 # SSRF guard for BYOK base_url. Off in OSS (LAN vLLM/Ollama allowed); cloud sets True.
-ASSISTANT_BLOCK_PRIVATE_URLS = os.environ.get("ASSISTANT_BLOCK_PRIVATE_URLS", "false").lower() in (
+ASSISTANT_BLOCK_PRIVATE_URLS = get_config("ASSISTANT_BLOCK_PRIVATE_URLS", "false").lower() in (
     "1",
     "true",
     "yes",
 )
-ASSISTANT_TURN_SOFT_LIMIT = int(os.environ.get("ASSISTANT_TURN_SOFT_LIMIT", 300))
-ASSISTANT_TURN_HARD_LIMIT = int(os.environ.get("ASSISTANT_TURN_HARD_LIMIT", 330))
+ASSISTANT_TURN_SOFT_LIMIT = int(get_config("ASSISTANT_TURN_SOFT_LIMIT", 300))
+ASSISTANT_TURN_HARD_LIMIT = int(get_config("ASSISTANT_TURN_HARD_LIMIT", 330))
 # Max completed turns replayed to the model as history. Bounds per-turn token
 # cost (and context-window use) on long threads; the durable transcript shown
 # in the UI is unaffected — only what the model sees is truncated.
-ASSISTANT_HISTORY_MAX_TURNS = int(os.environ.get("ASSISTANT_HISTORY_MAX_TURNS", 40))
+ASSISTANT_HISTORY_MAX_TURNS = int(get_config("ASSISTANT_HISTORY_MAX_TURNS", 40))
+
+# Loop (Auto Project Management) — periodic assistant jobs.
+# See .ai_design/loop_project_management/design.md §11.
+# Instance kill switch: when false, the scanner and fire tasks short-circuit.
+LOOP_ENABLED = get_config("LOOP_ENABLED", "true").lower() in ("1", "true", "yes")
+# Deterministic per-edge fire offset window (minutes) so a daily job doesn't
+# fire every membership edge in the same minute.
+LOOP_STAGGER_WINDOW_MINUTES = int(get_config("LOOP_STAGGER_WINDOW_MINUTES", 60))
+# Backpressure: at most this many targets dispatched per scanner tick; the rest
+# stay due and drain on later ticks.
+LOOP_MAX_DISPATCH_PER_TICK = int(get_config("LOOP_MAX_DISPATCH_PER_TICK", 100))
+# Reconcile (create missing targets for new membership edges) runs only when
+# minute % this == 0 — cheap throttle vs. the per-minute due scan.
+LOOP_RECONCILE_EVERY_MINUTES = int(get_config("LOOP_RECONCILE_EVERY_MINUTES", 15))
+# Rotate to a fresh hidden thread when within this many messages of the cap.
+LOOP_ROTATION_HEADROOM = int(get_config("LOOP_ROTATION_HEADROOM", 30))
+# Per-run blast-radius cap, enforced by instruction (hard backstop is the
+# assistant's tool_calls_limit).
+LOOP_MAX_WRITES = int(get_config("LOOP_MAX_WRITES", 10))
+# Per-run cap on get_pull_request_status calls (protects the unauthenticated
+# GitHub rate limit for the host IP).
+LOOP_PR_LOOKUPS_PER_RUN = int(get_config("LOOP_PR_LOOKUPS_PER_RUN", 15))
+# Completed loop turns replayed as history — tighter than chat (daily cost).
+ASSISTANT_LOOP_HISTORY_MAX_TURNS = int(get_config("ASSISTANT_LOOP_HISTORY_MAX_TURNS", 5))
 
 if REDIS_SSL:
     CACHES = {
@@ -298,30 +340,30 @@ EMAIL_BACKEND = "django.core.mail.backends.smtp.EmailBackend"
 
 # Storage Settings
 # Use Minio settings
-USE_MINIO = int(os.environ.get("USE_MINIO", 0)) == 1
+USE_MINIO = int(get_config("USE_MINIO", 0)) == 1
 
 STORAGES = {"staticfiles": {"BACKEND": "whitenoise.storage.CompressedManifestStaticFilesStorage"}}
 STORAGES["default"] = {"BACKEND": "pi_dash.settings.storage.S3Storage"}
-AWS_ACCESS_KEY_ID = os.environ.get("AWS_ACCESS_KEY_ID", "access-key")
-AWS_SECRET_ACCESS_KEY = os.environ.get("AWS_SECRET_ACCESS_KEY", "secret-key")
-AWS_STORAGE_BUCKET_NAME = os.environ.get("AWS_S3_BUCKET_NAME", "uploads")
-AWS_REGION = os.environ.get("AWS_REGION", "")
+AWS_ACCESS_KEY_ID = get_config("AWS_ACCESS_KEY_ID", "access-key")
+AWS_SECRET_ACCESS_KEY = get_config("AWS_SECRET_ACCESS_KEY", "secret-key")
+AWS_STORAGE_BUCKET_NAME = get_config("AWS_S3_BUCKET_NAME", "uploads")
+AWS_REGION = get_config("AWS_REGION", "")
 AWS_DEFAULT_ACL = "public-read"
 AWS_QUERYSTRING_AUTH = False
 AWS_S3_FILE_OVERWRITE = False
-AWS_S3_ENDPOINT_URL = os.environ.get("AWS_S3_ENDPOINT_URL", None) or os.environ.get("MINIO_ENDPOINT_URL", None)
+AWS_S3_ENDPOINT_URL = get_config("AWS_S3_ENDPOINT_URL", None) or get_config("MINIO_ENDPOINT_URL", None)
 if AWS_S3_ENDPOINT_URL and USE_MINIO:
-    parsed_url = urlparse(os.environ.get("WEB_URL", "http://localhost"))
+    parsed_url = urlparse(get_config("WEB_URL", "http://localhost"))
     AWS_S3_CUSTOM_DOMAIN = f"{parsed_url.netloc}/{AWS_STORAGE_BUCKET_NAME}"
     AWS_S3_URL_PROTOCOL = f"{parsed_url.scheme}:"
 
 # RabbitMQ connection settings
-RABBITMQ_HOST = os.environ.get("RABBITMQ_HOST", "localhost")
-RABBITMQ_PORT = os.environ.get("RABBITMQ_PORT", "5672")
-RABBITMQ_USER = os.environ.get("RABBITMQ_USER", "guest")
-RABBITMQ_PASSWORD = os.environ.get("RABBITMQ_PASSWORD", "guest")
-RABBITMQ_VHOST = os.environ.get("RABBITMQ_VHOST", "/")
-AMQP_URL = os.environ.get("AMQP_URL")
+RABBITMQ_HOST = get_config("RABBITMQ_HOST", "localhost")
+RABBITMQ_PORT = get_config("RABBITMQ_PORT", "5672")
+RABBITMQ_USER = get_config("RABBITMQ_USER", "guest")
+RABBITMQ_PASSWORD = get_config("RABBITMQ_PASSWORD", "guest")
+RABBITMQ_VHOST = get_config("RABBITMQ_VHOST", "/")
+AMQP_URL = get_config("AMQP_URL")
 
 # Celery Configuration
 if AMQP_URL:
@@ -352,30 +394,33 @@ CELERY_IMPORTS = (
     "pi_dash.runner.tasks",
 )
 
-FILE_SIZE_LIMIT = int(os.environ.get("FILE_SIZE_LIMIT", 5242880))
+FILE_SIZE_LIMIT = int(get_config("FILE_SIZE_LIMIT", 5242880))
 
-# Unsplash Access key
-UNSPLASH_ACCESS_KEY = os.environ.get("UNSPLASH_ACCESS_KEY")
+# Unsplash Access key. Intentionally read straight from the env here: the same
+# key is also admin-managed (db-sourced) via the InstanceConfiguration resolver
+# for the in-app Unsplash feature, so it cannot route through get_config (which
+# would resolve it from the DB at settings-import time).
+UNSPLASH_ACCESS_KEY = os.environ.get("UNSPLASH_ACCESS_KEY")  # noqa: config-env-read
 # Github Access Token
-GITHUB_ACCESS_TOKEN = os.environ.get("GITHUB_ACCESS_TOKEN", False)
+GITHUB_ACCESS_TOKEN = get_config("GITHUB_ACCESS_TOKEN", False)
 
 # GitHub Issue Sync feature gate. Default on; self-hosters who don't want
 # the integration set GITHUB_SYNC_ENABLED=false. See .ai_design/github_sync/
 # design.md §9 Rollout.
-GITHUB_SYNC_ENABLED = os.environ.get("GITHUB_SYNC_ENABLED", "true").lower() == "true"
+GITHUB_SYNC_ENABLED = get_config("GITHUB_SYNC_ENABLED", "true").lower() == "true"
 
 # Project Scheduler feature gate. Default on; self-hosters who don't want
 # periodic agent ticks against projects set SCHEDULER_ENABLED=false. See
 # .ai_design/project_scheduler/design.md §10 Rollout.
-SCHEDULER_ENABLED = os.environ.get("SCHEDULER_ENABLED", "true").lower() == "true"
+SCHEDULER_ENABLED = get_config("SCHEDULER_ENABLED", "true").lower() == "true"
 
 # Analytics
-ANALYTICS_SECRET_KEY = os.environ.get("ANALYTICS_SECRET_KEY", False)
-ANALYTICS_BASE_API = os.environ.get("ANALYTICS_BASE_API", False)
+ANALYTICS_SECRET_KEY = get_config("ANALYTICS_SECRET_KEY", False)
+ANALYTICS_BASE_API = get_config("ANALYTICS_BASE_API", False)
 
 # Posthog settings
-POSTHOG_API_KEY = os.environ.get("POSTHOG_API_KEY", False)
-POSTHOG_HOST = os.environ.get("POSTHOG_HOST", False)
+POSTHOG_API_KEY = get_config("POSTHOG_API_KEY", False)
+POSTHOG_HOST = get_config("POSTHOG_HOST", False)
 
 # Per-runner HTTPS transport tunables (see ``.ai_design/move_to_https/design.md`` §9).
 # Clamped to [1, 55] so the server-side block always finishes strictly
@@ -386,7 +431,7 @@ POSTHOG_HOST = os.environ.get("POSTHOG_HOST", False)
 # of silently getting a value they didn't ask for.
 _LONG_POLL_MIN_SECS = 1
 _LONG_POLL_MAX_SECS = 55
-_raw_long_poll_secs = int(os.environ.get("LONG_POLL_INTERVAL_SECS", 25))
+_raw_long_poll_secs = int(get_config("LONG_POLL_INTERVAL_SECS", 25))
 if _raw_long_poll_secs < _LONG_POLL_MIN_SECS or _raw_long_poll_secs > _LONG_POLL_MAX_SECS:
     import logging
 
@@ -403,16 +448,16 @@ if _raw_long_poll_secs < _LONG_POLL_MIN_SECS or _raw_long_poll_secs > _LONG_POLL
 LONG_POLL_INTERVAL_SECS = max(
     _LONG_POLL_MIN_SECS, min(_raw_long_poll_secs, _LONG_POLL_MAX_SECS)
 )
-ACCESS_TOKEN_TTL_SECS = int(os.environ.get("ACCESS_TOKEN_TTL_SECS", 3600))
-RUNNER_OFFLINE_THRESHOLD_SECS = int(os.environ.get("RUNNER_OFFLINE_THRESHOLD_SECS", 50))
-OFFLINE_STREAM_TTL_SECS = int(os.environ.get("OFFLINE_STREAM_TTL_SECS", 86400))
-OFFLINE_STREAM_MAXLEN = int(os.environ.get("OFFLINE_STREAM_MAXLEN", 1000))
+ACCESS_TOKEN_TTL_SECS = int(get_config("ACCESS_TOKEN_TTL_SECS", 3600))
+RUNNER_OFFLINE_THRESHOLD_SECS = int(get_config("RUNNER_OFFLINE_THRESHOLD_SECS", 50))
+OFFLINE_STREAM_TTL_SECS = int(get_config("OFFLINE_STREAM_TTL_SECS", 86400))
+OFFLINE_STREAM_MAXLEN = int(get_config("OFFLINE_STREAM_MAXLEN", 1000))
 RUNNER_STREAM_MIN_RETENTION_SECS = int(
-    os.environ.get("RUNNER_STREAM_MIN_RETENTION_SECS", 3600)
+    get_config("RUNNER_STREAM_MIN_RETENTION_SECS", 3600)
 )
-EVENT_BATCH_MAX_AGE_MS = int(os.environ.get("EVENT_BATCH_MAX_AGE_MS", 250))
-EVENT_BATCH_MAX_BYTES = int(os.environ.get("EVENT_BATCH_MAX_BYTES", 65536))
-RUN_MESSAGE_DEDUPE_TTL_SECS = int(os.environ.get("RUN_MESSAGE_DEDUPE_TTL_SECS", 604800))
+EVENT_BATCH_MAX_AGE_MS = int(get_config("EVENT_BATCH_MAX_AGE_MS", 250))
+EVENT_BATCH_MAX_BYTES = int(get_config("EVENT_BATCH_MAX_BYTES", 65536))
+RUN_MESSAGE_DEDUPE_TTL_SECS = int(get_config("RUN_MESSAGE_DEDUPE_TTL_SECS", 604800))
 RUNNER_PROTOCOL_VERSION = 4
 
 # Runner auto-update advisory. Cloud announces these in the welcome frame;
@@ -431,7 +476,7 @@ _RUNNER_VERSION_RE = _re_runner_version.compile(r"^\d+\.\d+\.\d+(-[0-9A-Za-z.-]+
 
 
 def _validated_runner_version(name):
-    raw = os.environ.get(name, "") or None
+    raw = get_config(name, "") or None
     if raw is not None and not _RUNNER_VERSION_RE.match(raw):
         _logging_runner_version.getLogger(__name__).warning(
             "%s=%r does not match MAJOR.MINOR.PATCH[-pre]; "
@@ -450,14 +495,14 @@ MIN_RUNNER_VERSION = _validated_runner_version("MIN_RUNNER_VERSION")
 # 360s is slightly longer than the runner's own 5-minute internal stall
 # watchdog, so the cloud acts as a backstop rather than racing the runner.
 RUNNER_AGENT_STALL_THRESHOLD_SECS = int(
-    os.environ.get("RUNNER_AGENT_STALL_THRESHOLD_SECS", 360)
+    get_config("RUNNER_AGENT_STALL_THRESHOLD_SECS", 360)
 )
 # Snapshot-row freshness guard. The watchdog only acts on runners whose
 # poll-driven `RunnerLiveState.updated_at` is newer than this. Covers
 # roughly three missed 25s polls; stale rows from disabled / downgraded
 # runners age out instead of failing active runs.
 RUNNER_AGENT_OBSERVABILITY_STALE_SECS = int(
-    os.environ.get("RUNNER_AGENT_OBSERVABILITY_STALE_SECS", 90)
+    get_config("RUNNER_AGENT_OBSERVABILITY_STALE_SECS", 90)
 )
 # Access-token signing key ring. Each entry: {kid, secret, status} where
 # status ∈ {"active", "verify_only"}. Exactly one key is active.
@@ -465,66 +510,63 @@ RUNNER_AGENT_OBSERVABILITY_STALE_SECS = int(
 # dev/test setups Just Work; production should override via env / settings.
 RUNNER_ACCESS_TOKEN_KEYS = []
 
-# Skip environment variable configuration
-SKIP_ENV_VAR = os.environ.get("SKIP_ENV_VAR", "1") == "1"
-
-DATA_UPLOAD_MAX_MEMORY_SIZE = int(os.environ.get("FILE_SIZE_LIMIT", 5242880))
+DATA_UPLOAD_MAX_MEMORY_SIZE = int(get_config("FILE_SIZE_LIMIT", 5242880))
 
 # Cookie Settings
 SESSION_COOKIE_SECURE = secure_origins
 SESSION_COOKIE_HTTPONLY = True
 SESSION_ENGINE = "pi_dash.db.models.session"
-SESSION_COOKIE_AGE = int(os.environ.get("SESSION_COOKIE_AGE", 604800))
-SESSION_COOKIE_NAME = os.environ.get("SESSION_COOKIE_NAME", "session-id")
-SESSION_COOKIE_DOMAIN = os.environ.get("COOKIE_DOMAIN", None)
-SESSION_SAVE_EVERY_REQUEST = os.environ.get("SESSION_SAVE_EVERY_REQUEST", "0") == "1"
+SESSION_COOKIE_AGE = int(get_config("SESSION_COOKIE_AGE", 604800))
+SESSION_COOKIE_NAME = get_config("SESSION_COOKIE_NAME", "session-id")
+SESSION_COOKIE_DOMAIN = get_config("COOKIE_DOMAIN", None)
+SESSION_SAVE_EVERY_REQUEST = get_config("SESSION_SAVE_EVERY_REQUEST", "0") == "1"
 
 # Admin Cookie
 ADMIN_SESSION_COOKIE_NAME = "admin-session-id"
-ADMIN_SESSION_COOKIE_AGE = int(os.environ.get("ADMIN_SESSION_COOKIE_AGE", 3600))
+ADMIN_SESSION_COOKIE_AGE = int(get_config("ADMIN_SESSION_COOKIE_AGE", 3600))
 
 # CSRF cookies
 CSRF_COOKIE_SECURE = secure_origins
 CSRF_COOKIE_HTTPONLY = True
 CSRF_TRUSTED_ORIGINS = cors_allowed_origins
-CSRF_COOKIE_DOMAIN = os.environ.get("COOKIE_DOMAIN", None)
+CSRF_COOKIE_DOMAIN = get_config("COOKIE_DOMAIN", None)
 CSRF_FAILURE_VIEW = "pi_dash.authentication.views.common.csrf_failure"
 
 ######  Base URLs ######
 
 # Admin Base URL
-ADMIN_BASE_URL = os.environ.get("ADMIN_BASE_URL", None)
+ADMIN_BASE_URL = get_config("ADMIN_BASE_URL", None)
 if ADMIN_BASE_URL and not is_valid_url(ADMIN_BASE_URL):
     ADMIN_BASE_URL = None
-ADMIN_BASE_PATH = os.environ.get("ADMIN_BASE_PATH", "/god-mode/")
+ADMIN_BASE_PATH = get_config("ADMIN_BASE_PATH", "/god-mode/")
 
 # Space Base URL
-SPACE_BASE_URL = os.environ.get("SPACE_BASE_URL", None)
+SPACE_BASE_URL = get_config("SPACE_BASE_URL", None)
 if SPACE_BASE_URL and not is_valid_url(SPACE_BASE_URL):
     SPACE_BASE_URL = None
-SPACE_BASE_PATH = os.environ.get("SPACE_BASE_PATH", "/spaces/")
+SPACE_BASE_PATH = get_config("SPACE_BASE_PATH", "/spaces/")
 
 # App Base URL
-APP_BASE_URL = os.environ.get("APP_BASE_URL", None)
+APP_BASE_URL = get_config("APP_BASE_URL", None)
 if APP_BASE_URL and not is_valid_url(APP_BASE_URL):
     APP_BASE_URL = None
-APP_BASE_PATH = os.environ.get("APP_BASE_PATH", "/")
+APP_BASE_PATH = get_config("APP_BASE_PATH", "/")
 
 # Live Base URL
-LIVE_BASE_URL = os.environ.get("LIVE_BASE_URL", None)
+LIVE_BASE_URL = get_config("LIVE_BASE_URL", None)
 if LIVE_BASE_URL and not is_valid_url(LIVE_BASE_URL):
     LIVE_BASE_URL = None
-LIVE_BASE_PATH = os.environ.get("LIVE_BASE_PATH", "/live/")
+LIVE_BASE_PATH = get_config("LIVE_BASE_PATH", "/live/")
 
 LIVE_URL = urljoin(LIVE_BASE_URL, LIVE_BASE_PATH) if LIVE_BASE_URL else None
 
 # WEB URL
-WEB_URL = os.environ.get("WEB_URL")
+WEB_URL = get_config("WEB_URL")
 
-HARD_DELETE_AFTER_DAYS = int(os.environ.get("HARD_DELETE_AFTER_DAYS", 60))
+HARD_DELETE_AFTER_DAYS = int(get_config("HARD_DELETE_AFTER_DAYS", 60))
 
 # Instance Changelog URL
-INSTANCE_CHANGELOG_URL = os.environ.get("INSTANCE_CHANGELOG_URL", "")
+INSTANCE_CHANGELOG_URL = get_config("INSTANCE_CHANGELOG_URL", "")
 
 ATTACHMENT_MIME_TYPES = [
     # Images
@@ -619,7 +661,7 @@ ATTACHMENT_MIME_TYPES = [
 # Seed directory path
 SEED_DIR = os.path.join(BASE_DIR, "seeds")
 
-ENABLE_DRF_SPECTACULAR = os.environ.get("ENABLE_DRF_SPECTACULAR", "0") == "1"
+ENABLE_DRF_SPECTACULAR = get_config("ENABLE_DRF_SPECTACULAR", "0") == "1"
 
 if ENABLE_DRF_SPECTACULAR:
     REST_FRAMEWORK["DEFAULT_SCHEMA_CLASS"] = "drf_spectacular.openapi.AutoSchema"
@@ -627,5 +669,5 @@ if ENABLE_DRF_SPECTACULAR:
     from .openapi import SPECTACULAR_SETTINGS  # noqa: F401
 
 # MongoDB Settings
-MONGO_DB_URL = os.environ.get("MONGO_DB_URL", False)
-MONGO_DB_DATABASE = os.environ.get("MONGO_DB_DATABASE", False)
+MONGO_DB_URL = get_config("MONGO_DB_URL", False)
+MONGO_DB_DATABASE = get_config("MONGO_DB_DATABASE", False)

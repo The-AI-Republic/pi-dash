@@ -19,11 +19,9 @@ pnpm fix:lint                    # oxlint --fix
 pnpm turbo run <task> --filter=<pkg>
 pnpm --filter web dev
 pnpm --filter @pi-dash/ui storybook    # Storybook on :6006
-
-# i18n:
-pnpm i18n:sync                   # sync source English messages across all locales
-pnpm i18n:translate              # auto-translate missing keys
 ```
+
+> i18n: the OSS build is English-only — wrap UI copy in `t("Source English text")`; no key catalogue to sync. Adding a language is documented in `packages/i18n/README.md`. (Multi-language locales and their tooling are part of Pi Dash Cloud.)
 
 ## Django backend (`apps/api/`)
 

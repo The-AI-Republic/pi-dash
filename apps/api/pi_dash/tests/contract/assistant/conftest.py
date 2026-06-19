@@ -15,7 +15,7 @@ import types
 from uuid import uuid4
 
 import pytest
-from cryptography.fernet import Fernet
+from botocore.exceptions import ClientError
 from django.utils import timezone
 
 from pi_dash.assistant import crypto
@@ -158,11 +158,51 @@ def world(db):
     )
 
 
+def _kms_client_error(code: str) -> ClientError:
+    return ClientError({"Error": {"Code": code, "Message": code}}, "Decrypt")
+
+
+class FakeKMS:
+    """In-memory stand-in for the KMS client so tests round-trip BYOK crypto
+    without AWS. Ciphertext is an opaque token (never contains the plaintext);
+    decrypt verifies the caller's KeyId matches the one used to encrypt, so the
+    "wrong CMK" path raises like real KMS."""
+
+    def __init__(self):
+        self._store: dict[bytes, tuple[str, bytes]] = {}
+        self._counter = 0
+
+    def encrypt(self, KeyId, Plaintext):
+        self._counter += 1
+        token = f"kmsfake-{self._counter}".encode()
+        self._store[token] = (KeyId, Plaintext)
+        return {"CiphertextBlob": token, "KeyId": KeyId}
+
+    def decrypt(self, CiphertextBlob, KeyId=None):
+        entry = self._store.get(bytes(CiphertextBlob))
+        if entry is None:
+            raise _kms_client_error("InvalidCiphertextException")
+        stored_key, plaintext = entry
+        if KeyId is not None and KeyId != stored_key:
+            raise _kms_client_error("IncorrectKeyException")
+        return {"Plaintext": plaintext, "KeyId": stored_key}
+
+    def re_encrypt(self, CiphertextBlob, DestinationKeyId):
+        entry = self._store.get(bytes(CiphertextBlob))
+        if entry is None:
+            raise _kms_client_error("InvalidCiphertextException")
+        _, plaintext = entry
+        return self.encrypt(KeyId=DestinationKeyId, Plaintext=plaintext)
+
+
 @pytest.fixture
-def fernet_key(settings):
-    key = Fernet.generate_key().decode()
-    settings.ASSISTANT_ENCRYPTION_KEY = key
-    return key
+def kms_crypto(settings, monkeypatch):
+    """Configure KMS-backed BYOK crypto with an in-memory fake (no AWS)."""
+    key_id = "arn:aws:kms:us-west-2:000000000000:key/test-cmk"
+    settings.ASSISTANT_KMS_KEY_ID = key_id
+    settings.AWS_REGION = "us-west-2"
+    monkeypatch.setattr(crypto, "_backend", crypto.AwsKmsBackend(client=FakeKMS()))
+    return key_id
 
 
 def configure_llm(user, *, model="gpt-test", base_url="https://api.example.com/v1"):

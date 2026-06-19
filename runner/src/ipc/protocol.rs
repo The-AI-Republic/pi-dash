@@ -192,9 +192,25 @@ pub struct RunnerStatusSnapshot {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pod_id: Option<Uuid>,
     pub status: RunnerStatus,
+    /// Whether this runner currently holds a live cloud session (welcome
+    /// received). A runner can have `status: Idle` while `connected: false`
+    /// — it's configured and the daemon is up, but its own session-open is
+    /// failing. That combination is exactly the silent-outage case this
+    /// field exists to make visible. `#[serde(default)]` → `false` when an
+    /// older daemon that predates this field is queried.
+    #[serde(default)]
+    pub connected: bool,
     pub current_run: Option<CurrentRunSummary>,
     pub approvals_pending: usize,
     pub last_heartbeat: Option<DateTime<Utc>>,
+    /// When this runner last opened a cloud session. `None` means it has
+    /// never connected since the daemon started.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_session_open: Option<DateTime<Utc>>,
+    /// Consecutive session-open failures since the last success. Non-zero
+    /// means the runner is actively failing to reach the cloud right now.
+    #[serde(default)]
+    pub consecutive_bootstrap_failures: u32,
     /// Per-active-run telemetry. `None` when the daemon isn't running
     /// with `agent_observability_v1` enabled, or when the runner has
     /// never seen a run.
@@ -341,18 +357,55 @@ pub(crate) fn version_lt(a: &str, b: &str) -> bool {
 impl RunnerStatusSnapshot {
     pub fn print_compact(&self) {
         let project = self.project_slug.as_deref().unwrap_or("(no project)");
-        println!("  {} — {:?} project={}", self.name, self.status, project);
+        if self.connected {
+            println!("  {} — {:?} project={}", self.name, self.status, project);
+        } else {
+            // A configured runner with no live session is the silent-outage
+            // case: the daemon is up and the runner reads `Idle` internally,
+            // but it can't reach the cloud. Print DISCONNECTED loudly with the
+            // failure count and last-connected time so operators see it.
+            let last = match self.last_session_open {
+                Some(ts) => format!("last connected {}", humanize_ago(ts)),
+                None => "never connected".to_string(),
+            };
+            let fails = if self.consecutive_bootstrap_failures > 0 {
+                format!("; {} failed attempts", self.consecutive_bootstrap_failures)
+            } else {
+                String::new()
+            };
+            println!(
+                "  {} — DISCONNECTED project={} ({last}{fails})",
+                self.name, project
+            );
+        }
         if let Some(run) = &self.current_run {
             println!(
                 "    current run: {} ({}); events={}",
                 run.run_id, run.status, run.events
             );
-        } else {
+        } else if self.connected {
             println!("    idle");
         }
         if self.approvals_pending > 0 {
             println!("    approvals pending: {}", self.approvals_pending);
         }
+    }
+}
+
+/// Best-effort "2m ago" / "3h ago" formatting for status output. Display-only;
+/// not used in any comparison or serialized form.
+fn humanize_ago(ts: DateTime<Utc>) -> String {
+    let secs = (Utc::now() - ts).num_seconds();
+    if secs < 0 {
+        "just now".to_string()
+    } else if secs < 60 {
+        format!("{secs}s ago")
+    } else if secs < 3600 {
+        format!("{}m ago", secs / 60)
+    } else if secs < 86_400 {
+        format!("{}h ago", secs / 3600)
+    } else {
+        format!("{}d ago", secs / 86_400)
     }
 }
 
@@ -423,9 +476,12 @@ mod tests {
                 project_slug: Some("WEB".into()),
                 pod_id: Some(Uuid::new_v4()),
                 status: RunnerStatus::Idle,
+                connected: true,
                 current_run: None,
                 approvals_pending: 0,
                 last_heartbeat: Some(Utc::now()),
+                last_session_open: Some(Utc::now()),
+                consecutive_bootstrap_failures: 0,
                 observability: None,
             }],
             pools: vec![],
@@ -436,6 +492,30 @@ mod tests {
         assert_eq!(back.runners[0].name, "laptop-main");
         assert_eq!(back.runners[0].project_slug.as_deref(), Some("WEB"));
         assert!(back.daemon.connected);
+        // Connection-health fields survive the round trip.
+        assert!(back.runners[0].connected);
+        assert!(back.runners[0].last_session_open.is_some());
+        assert_eq!(back.runners[0].consecutive_bootstrap_failures, 0);
+    }
+
+    /// A snapshot emitted by an older daemon (before the connection-health
+    /// fields existed) must still decode — the new fields default rather than
+    /// failing the whole `pidash status` call.
+    #[test]
+    fn runner_snapshot_decodes_without_connection_fields() {
+        let raw = serde_json::json!({
+            "runner_id": Uuid::new_v4(),
+            "name": "legacy",
+            "status": "idle",
+            "current_run": null,
+            "approvals_pending": 0,
+            "last_heartbeat": null,
+        });
+        let snap: RunnerStatusSnapshot =
+            serde_json::from_value(raw).expect("legacy snapshot should decode");
+        assert!(!snap.connected, "missing field defaults to disconnected");
+        assert!(snap.last_session_open.is_none());
+        assert_eq!(snap.consecutive_bootstrap_failures, 0);
     }
 
     #[test]
@@ -455,9 +535,12 @@ mod tests {
                 project_slug: None,
                 pod_id: None,
                 status: RunnerStatus::Busy,
+                connected: true,
                 current_run: None,
                 approvals_pending: 0,
                 last_heartbeat: None,
+                last_session_open: Some(Utc::now()),
+                consecutive_bootstrap_failures: 0,
                 observability: Some(ObservabilitySnapshot {
                     last_event_at: Some(Utc::now()),
                     last_event_kind: Some("raw".into()),
@@ -533,9 +616,12 @@ mod tests {
                     project_slug: None,
                     pod_id: None,
                     status: RunnerStatus::Idle,
+                    connected: true,
                     current_run: None,
                     approvals_pending: 0,
                     last_heartbeat: None,
+                    last_session_open: None,
+                    consecutive_bootstrap_failures: 0,
                     observability: None,
                 },
                 RunnerStatusSnapshot {
@@ -544,9 +630,12 @@ mod tests {
                     project_slug: None,
                     pod_id: None,
                     status: RunnerStatus::Idle,
+                    connected: true,
                     current_run: None,
                     approvals_pending: 0,
                     last_heartbeat: None,
+                    last_session_open: None,
+                    consecutive_bootstrap_failures: 0,
                     observability: None,
                 },
             ],

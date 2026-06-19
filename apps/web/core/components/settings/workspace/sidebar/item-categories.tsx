@@ -54,6 +54,15 @@ export const WorkspaceSettingsSidebarItemCategories = observer(function Workspac
                     ? pathname === `/${workspaceSlug}${item.href}/`
                     : new RegExp(`^/${workspaceSlug}${item.href}/`).test(pathname);
 
+                const label =
+                  item.key === "integrations" ? (
+                    <>
+                      {t(item.i18n_label)} <span className="text-caption-sm-medium text-tertiary">(github)</span>
+                    </>
+                  ) : (
+                    t(item.i18n_label)
+                  );
+
                 return (
                   <SettingsSidebarItem
                     key={item.key}
@@ -61,7 +70,7 @@ export const WorkspaceSettingsSidebarItemCategories = observer(function Workspac
                     href={joinUrlPath(workspaceSlug ?? "", item.href)}
                     isActive={isItemActive}
                     icon={WORKSPACE_SETTINGS_ICONS[item.key]}
-                    label={t(item.i18n_label)}
+                    label={label}
                   />
                 );
               })}

@@ -18,8 +18,71 @@ from pi_dash.utils.github_client import (
     GithubClient,
     GithubNotFoundError,
     GithubPermissionError,
+    parse_github_pull_request_url,
     parse_issue_number_from_url,
+    pr_snapshot_from_payload,
 )
+
+
+@pytest.mark.unit
+class TestParsePullRequestUrl:
+    @pytest.mark.parametrize(
+        "url,expected",
+        [
+            ("https://github.com/acme/web/pull/42", ("acme", "web", 42)),
+            ("http://github.com/acme/web/pull/7", ("acme", "web", 7)),
+            ("https://github.com/acme/web/pull/42/files", ("acme", "web", 42)),
+            ("https://github.com/Org-Name/Repo.name/pull/1", ("Org-Name", "Repo.name", 1)),
+        ],
+    )
+    def test_valid(self, url, expected):
+        assert parse_github_pull_request_url(url) == expected
+
+    @pytest.mark.parametrize(
+        "url",
+        [
+            "",
+            None,
+            "not-a-url",
+            "https://github.com/acme/web",  # repo, no PR
+            "https://github.com/acme/web/issues/42",  # issue, not PR
+            "https://gitlab.com/acme/web/pull/42",  # wrong host
+            "https://github.com/acme/web/pull/abc",  # non-numeric
+        ],
+    )
+    def test_invalid(self, url):
+        assert parse_github_pull_request_url(url) is None
+
+
+@pytest.mark.unit
+class TestPrSnapshotFromPayload:
+    def test_open_draft(self):
+        snap = pr_snapshot_from_payload(
+            {"title": "T", "state": "open", "draft": True, "merged": False, "updated_at": "2026-06-17T09:00:00Z"}
+        )
+        assert snap["state"] == "open"
+        assert snap["draft"] is True
+        assert snap["merged"] is False
+        assert snap["pr_updated_at"] is not None
+
+    def test_merged_via_merged_at(self):
+        # Webhook payloads report merged_at rather than a boolean.
+        snap = pr_snapshot_from_payload(
+            {"state": "closed", "merged_at": "2026-06-17T10:00:00Z", "updated_at": "2026-06-17T10:00:00Z"}
+        )
+        assert snap["state"] == "closed"
+        assert snap["merged"] is True
+
+    def test_closed_not_merged(self):
+        snap = pr_snapshot_from_payload({"state": "closed", "merged": False, "merged_at": None})
+        assert snap["state"] == "closed"
+        assert snap["merged"] is False
+
+    def test_title_truncated_and_missing_fields_safe(self):
+        snap = pr_snapshot_from_payload({"title": "x" * 600})
+        assert len(snap["title"]) == 500
+        assert snap["state"] == "open"
+        assert snap["pr_updated_at"] is None
 
 
 @pytest.mark.unit

@@ -22,7 +22,7 @@ ui/              ← component library + Storybook (pnpm --filter @pi-dash/ui st
 shared-state/    ← MobX stores: user, workspace, filters — the canonical client state
 services/        ← API client (fetch wrappers, typed endpoints)
 editor/          ← Tiptap/ProseMirror — collab editor (used with live server)
-i18n/            ← locale dictionaries + `i18n:sync` / `i18n:translate` scripts
+i18n/            ← translation runtime + English locale (OSS is English-only)
 constants/       ← cross-app enums and string keys
 hooks/           ← reusable React hooks
 types/           ← cross-app TypeScript types
@@ -88,14 +88,7 @@ Crossing the ceiling fails `pnpm check:lint`. After cleanups, **lower** the ceil
 
 ## i18n
 
-Translations live in `packages/i18n/src/locales/<lang>/`. UI code uses source English text directly as the message id, for example `t("Create project")`. Run sync after adding copy; it rewrites flat locale maps and adds empty placeholders for non-English locales.
-
-Useful scripts:
-
-```bash
-pnpm i18n:sync         # sync source English messages across all locales
-pnpm i18n:translate    # auto-translate missing keys
-```
+UI code uses source English text directly as the message id, for example `t("Create project")` — there's no separate key catalogue to maintain. The OSS build is English-only; the English locale lives in `packages/i18n/src/locales/en/`. Self-hosters can add their own languages — see `packages/i18n/README.md`. (Upstream multi-language locales and their sync/translate tooling are part of Pi Dash Cloud, not this repo.)
 
 ## Where to read next
 

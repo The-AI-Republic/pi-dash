@@ -110,6 +110,9 @@ impl RunnerInstance {
             cli: None,
         });
         let approvals = ApprovalRouter::new();
+        // Let the state read the live approvals-pending count from this shared
+        // router (B3) instead of a separately-stamped scalar.
+        state.set_approval_router(approvals.clone());
         let (mailbox_tx, mailbox_rx) = mpsc::channel(INSTANCE_MAILBOX_DEPTH);
         let (ack_tx, ack_rx) = mpsc::unbounded_channel();
         let (remove_tx, _remove_rx) = watch::channel(false);
@@ -146,7 +149,8 @@ impl RunnerInstance {
 mod tests {
     use super::*;
     use crate::config::schema::{
-        AgentSection, ApprovalPolicySection, ClaudeCodeSection, CursorAgentSection, CodexSection, WorkspaceSection,
+        AgentSection, ApprovalPolicySection, ClaudeCodeSection, CodexSection, CursorAgentSection,
+        WorkspaceSection,
     };
 
     fn runner_config() -> RunnerConfig {

@@ -8,6 +8,6 @@ Each tool module decorates its functions with ``@assistant.tool`` at import
 time, so importing the package (done in ``AssistantConfig.ready``) wires them up.
 """
 
-from pi_dash.assistant.tools import comments, issues, projects, runs  # noqa: F401
+from pi_dash.assistant.tools import comments, github, issues, projects, runs  # noqa: F401
 
-__all__ = ["projects", "issues", "comments", "runs"]
+__all__ = ["projects", "issues", "comments", "runs", "github"]

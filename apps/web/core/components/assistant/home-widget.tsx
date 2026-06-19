@@ -63,7 +63,7 @@ export const AssistantHomeWidget = observer(function AssistantHomeWidget() {
           onKeyDown={(e) => {
             if (e.key === "Enter") start(draft);
           }}
-          placeholder="Ask Pi to do something…"
+          placeholder="Ask Pi Dash to do something…"
           className="flex-1 rounded-md border border-subtle bg-canvas px-3 py-2 text-13 outline-none focus:border-accent-strong"
         />
         <Button onClick={() => start(draft)} disabled={!draft.trim()} loading={starting}>

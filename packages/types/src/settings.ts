@@ -12,9 +12,11 @@ export type TProfileSettingsTabs =
   | "general"
   | "preferences"
   | "ai-assistant"
+  | "auto-project-management"
   | "activity"
   | "notifications"
   | "security"
+  | "integrations"
   | "api-tokens";
 
 export type TWorkspaceSettingsTabs =
