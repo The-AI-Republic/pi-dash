@@ -65,7 +65,9 @@ export function ChatMessage({ role, content, status, toolActivity }: ChatMessage
             {content ? (
               <MarkdownRenderer markdown={content} />
             ) : (
-              <span className="text-secondary">{status === "streaming" ? "…" : ""}</span>
+              // No content yet: show "…" while streaming, otherwise fall back to the
+              // status (e.g. queued/sent/failed) so the bubble is never blank.
+              <span className="text-secondary">{status === "streaming" ? "…" : status}</span>
             )}
           </div>
         </div>
