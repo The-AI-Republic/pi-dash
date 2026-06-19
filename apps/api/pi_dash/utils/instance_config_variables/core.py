@@ -70,28 +70,10 @@ github_config_variables = [
         "is_encrypted": False,
     },
     {
-        "key": "GITHUB_APP_PRIVATE_KEY",
-        "value": os.environ.get("GITHUB_APP_PRIVATE_KEY"),
-        "category": "GITHUB",
-        "is_encrypted": True,
-    },
-    {
-        "key": "GITHUB_APP_WEBHOOK_SECRET",
-        "value": os.environ.get("GITHUB_APP_WEBHOOK_SECRET"),
-        "category": "GITHUB",
-        "is_encrypted": True,
-    },
-    {
         "key": "GITHUB_APP_CLIENT_ID",
         "value": os.environ.get("GITHUB_APP_CLIENT_ID"),
         "category": "GITHUB",
         "is_encrypted": False,
-    },
-    {
-        "key": "GITHUB_APP_CLIENT_SECRET",
-        "value": os.environ.get("GITHUB_APP_CLIENT_SECRET"),
-        "category": "GITHUB",
-        "is_encrypted": True,
     },
     {
         "key": "GITHUB_CLIENT_ID",
