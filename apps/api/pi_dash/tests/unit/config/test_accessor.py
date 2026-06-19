@@ -129,6 +129,17 @@ def test_every_entry_has_valid_source():
 
 
 @pytest.mark.unit
+def test_github_app_keys_classified_by_secret():
+    """GitHub App identity is db-sourced (god-mode editable); the secrets are
+    env-sourced (SSM in cloud, env locally) and flagged secret."""
+    for key in ("GITHUB_APP_ID", "GITHUB_APP_SLUG", "GITHUB_APP_CLIENT_ID"):
+        assert registry.CONFIG[key]["source"] == "db", key
+    for key in ("GITHUB_APP_PRIVATE_KEY", "GITHUB_APP_WEBHOOK_SECRET", "GITHUB_APP_CLIENT_SECRET"):
+        assert registry.CONFIG[key]["source"] == "env", key
+        assert registry.CONFIG[key].get("secret") is True, key
+
+
+@pytest.mark.unit
 def test_source_overrides_are_applied(monkeypatch):
     monkeypatch.setattr(registry, "_RESOLVER_CONFIG", {"K": {"source": "db", "default": None}})
     monkeypatch.setattr(registry, "CONFIG_SOURCE_OVERRIDES", {"K": "env"})
