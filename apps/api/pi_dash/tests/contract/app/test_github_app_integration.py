@@ -11,7 +11,6 @@ import pytest
 from django.urls import reverse
 from django.utils import timezone
 from rest_framework import status
-from rest_framework.test import APIClient
 
 from pi_dash.app.views.integration.github import _get_or_create_workspace_integration
 from pi_dash.db.models import (
@@ -21,8 +20,6 @@ from pi_dash.db.models import (
     WorkspaceIntegration,
     WorkspaceMember,
 )
-from pi_dash.license.models import Instance, InstanceAdmin, InstanceConfiguration
-from pi_dash.license.utils.encryption import decrypt_data, encrypt_data
 from pi_dash.tests.factories import UserFactory, WorkspaceFactory, WorkspaceMemberFactory
 from pi_dash.utils.github_app_auth import GithubAppAuthError
 
@@ -369,33 +366,3 @@ def test_github_app_webhook_unsuspend_persists_installation_state(api_client, wo
     assert app_installation.suspended_at is None
     assert app_installation.last_check_error == ""
     assert app_installation.repository_count == 5
-
-
-def test_write_only_github_app_config_sentinel_does_not_overwrite_secret(create_user):
-    instance = Instance.objects.create(
-        instance_name="test",
-        instance_id=f"instance-{uuid4()}",
-        current_version="1.0.0",
-        last_checked_at=timezone.now(),
-    )
-    InstanceAdmin.objects.create(instance=instance, user=create_user, role=20, is_verified=True)
-    configuration = InstanceConfiguration.objects.create(
-        key="GITHUB_APP_PRIVATE_KEY",
-        value=encrypt_data("actual-private-key"),
-        category="GITHUB",
-        is_encrypted=True,
-    )
-    client = APIClient()
-    client.force_authenticate(user=create_user)
-
-    response = client.patch(
-        "/api/instances/configurations/",
-        {"GITHUB_APP_PRIVATE_KEY": "set"},
-        format="json",
-    )
-
-    assert response.status_code == status.HTTP_200_OK
-    configuration.refresh_from_db()
-    assert decrypt_data(configuration.value) == "actual-private-key"
-    assert response.data[0]["value"] == "set"
-    assert response.data[0]["is_write_only"] is True

@@ -55,6 +55,16 @@ _RESOLVER_CONFIG = {
     # GITHUB_APP_NAME is read by the instances endpoint from the env only
     # (never seeded into the DB), so it is env-sourced.
     "GITHUB_APP_NAME": {"source": "env", "default": None},
+    # --- GitHub App -------------------------------------------------------
+    # Non-secret identity is db-sourced (admin-editable in god-mode, seeded
+    # from env by configure_instance); the secrets are env-sourced (SSM in
+    # cloud, env locally) and never touch the DB.
+    "GITHUB_APP_ID": {"source": "db", "default": None},
+    "GITHUB_APP_SLUG": {"source": "db", "default": None},
+    "GITHUB_APP_CLIENT_ID": {"source": "db", "default": None},
+    "GITHUB_APP_PRIVATE_KEY": {"source": "env", "default": None, "secret": True},
+    "GITHUB_APP_WEBHOOK_SECRET": {"source": "env", "default": None, "secret": True},
+    "GITHUB_APP_CLIENT_SECRET": {"source": "env", "default": None, "secret": True},
     # --- GitLab OAuth -----------------------------------------------------
     "GITLAB_HOST": {"source": "db", "default": None},
     "GITLAB_CLIENT_ID": {"source": "db", "default": None},
