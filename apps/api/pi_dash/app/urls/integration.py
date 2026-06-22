@@ -17,6 +17,7 @@ from pi_dash.app.views.integration.github import (
     GithubProjectBindEndpoint,
     GithubProjectStatusEndpoint,
 )
+from pi_dash.app.views.integration.platform import PlatformIosWebhookEndpoint
 
 
 urlpatterns = [
@@ -45,6 +46,11 @@ urlpatterns = [
         "integrations/github/app/webhook/",
         GithubAppWebhookEndpoint.as_view(),
         name="github-app-webhook",
+    ),
+    path(
+        "integrations/platform/ios/webhook/",
+        PlatformIosWebhookEndpoint.as_view(),
+        name="platform-ios-webhook",
     ),
     # Workspace-level
     path(

@@ -137,6 +137,11 @@ class Workspace(BaseModel):
     organization_size = models.CharField(max_length=20, blank=True, null=True)
     timezone = models.CharField(max_length=255, default="UTC", choices=TIMEZONE_CHOICES)
     background_color = models.CharField(max_length=255, default=get_random_color)
+    platform_org_id = models.UUIDField(null=True, blank=True, unique=True, db_index=True)
+    platform_org_slug = models.CharField(max_length=128, blank=True, default="", db_index=True)
+    platform_org_version = models.PositiveIntegerField(default=0)
+    platform_linked_at = models.DateTimeField(null=True, blank=True)
+    platform_access_disabled_at = models.DateTimeField(null=True, blank=True)
 
     def __str__(self):
         """Return name of the Workspace"""
@@ -208,6 +213,11 @@ class WorkspaceMember(BaseModel):
     default_props = models.JSONField(default=get_default_props)
     issue_props = models.JSONField(default=get_issue_props)
     is_active = models.BooleanField(default=True)
+    platform_member_id = models.UUIDField(null=True, blank=True, db_index=True)
+    platform_member_version = models.PositiveIntegerField(default=0)
+    platform_member_status = models.CharField(max_length=32, blank=True, default="")
+    platform_last_event_id = models.UUIDField(null=True, blank=True)
+    platform_last_event_at = models.DateTimeField(null=True, blank=True)
     getting_started_checklist = models.JSONField(default=dict)
     tips = models.JSONField(default=dict)
     explored_features = models.JSONField(default=dict)
@@ -219,7 +229,15 @@ class WorkspaceMember(BaseModel):
                 fields=["workspace", "member"],
                 condition=models.Q(deleted_at__isnull=True),
                 name="workspace_member_unique_workspace_member_when_deleted_at_null",
+            ),
+            models.UniqueConstraint(
+                fields=["workspace", "platform_member_id"],
+                condition=models.Q(deleted_at__isnull=True, platform_member_id__isnull=False),
+                name="workspace_member_unique_platform_member",
             )
+        ]
+        indexes = [
+            models.Index(fields=["workspace", "platform_member_version"], name="workspace_member_platform_ver_idx"),
         ]
         verbose_name = "Workspace Member"
         verbose_name_plural = "Workspace Members"

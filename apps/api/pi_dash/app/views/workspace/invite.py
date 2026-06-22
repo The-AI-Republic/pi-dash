@@ -68,6 +68,11 @@ class WorkspaceInvitationsViewset(BaseViewSet):
 
         # Get the workspace object
         workspace = Workspace.objects.get(slug=slug)
+        if workspace.platform_org_id:
+            return Response(
+                {"error": "Workspace invitations are managed from the enterprise admin workspace"},
+                status=status.HTTP_409_CONFLICT,
+            )
 
         # Check if user is already a member of workspace
         workspace_members = WorkspaceMember.objects.filter(
@@ -162,6 +167,11 @@ class WorkspaceJoinEndpoint(BaseAPIView):
     @invalidate_cache(path="/api/users/me/settings/", multiple=True)
     def post(self, request, slug, pk):
         workspace_invite = WorkspaceMemberInvite.objects.get(pk=pk, workspace__slug=slug)
+        if workspace_invite.workspace.platform_org_id:
+            return Response(
+                {"error": "Workspace invitations are managed from the enterprise admin workspace"},
+                status=status.HTTP_409_CONFLICT,
+            )
 
         token = request.data.get("token", "")
 
@@ -257,6 +267,11 @@ class UserWorkspaceInvitationsViewSet(BaseViewSet):
         workspace_invitations = WorkspaceMemberInvite.objects.filter(
             pk__in=invitations, email=request.user.email
         ).order_by("-created_at")
+        if workspace_invitations.filter(workspace__platform_org_id__isnull=False).exists():
+            return Response(
+                {"error": "Workspace invitations are managed from the enterprise admin workspace"},
+                status=status.HTTP_409_CONFLICT,
+            )
 
         # If the user is already a member of workspace and was deactivated then activate the user
         for invitation in workspace_invitations:

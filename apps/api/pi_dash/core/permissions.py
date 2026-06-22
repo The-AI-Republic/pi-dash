@@ -30,7 +30,10 @@ def is_workspace_member(user, workspace_id) -> bool:
     if user is None or not getattr(user, "is_authenticated", False):
         return False
     return WorkspaceMember.objects.filter(
-        workspace_id=workspace_id, member=user, is_active=True
+        workspace_id=workspace_id,
+        workspace__platform_access_disabled_at__isnull=True,
+        member=user,
+        is_active=True,
     ).exists()
 
 
@@ -39,7 +42,12 @@ def workspace_role(user, workspace_id) -> Optional[int]:
     if user is None or not getattr(user, "is_authenticated", False):
         return None
     return (
-        WorkspaceMember.objects.filter(workspace_id=workspace_id, member=user, is_active=True)
+        WorkspaceMember.objects.filter(
+            workspace_id=workspace_id,
+            workspace__platform_access_disabled_at__isnull=True,
+            member=user,
+            is_active=True,
+        )
         .values_list("role", flat=True)
         .first()
     )
@@ -51,7 +59,10 @@ def workspace_role_by_slug(user, workspace_slug) -> Optional[int]:
         return None
     return (
         WorkspaceMember.objects.filter(
-            workspace__slug=workspace_slug, member=user, is_active=True
+            workspace__slug=workspace_slug,
+            workspace__platform_access_disabled_at__isnull=True,
+            member=user,
+            is_active=True,
         )
         .values_list("role", flat=True)
         .first()
@@ -94,6 +105,7 @@ def check_project_role(
     has_allowed_role = ProjectMember.objects.filter(
         member=user,
         workspace__slug=workspace_slug,
+        workspace__platform_access_disabled_at__isnull=True,
         project_id=project_id,
         role__in=allowed_values,
         is_active=True,
@@ -105,12 +117,14 @@ def check_project_role(
         is_project_member = ProjectMember.objects.filter(
             member=user,
             workspace__slug=workspace_slug,
+            workspace__platform_access_disabled_at__isnull=True,
             project_id=project_id,
             is_active=True,
         ).exists()
         if is_project_member and WorkspaceMember.objects.filter(
             member=user,
             workspace__slug=workspace_slug,
+            workspace__platform_access_disabled_at__isnull=True,
             role=ROLE_ADMIN,
             is_active=True,
         ).exists():

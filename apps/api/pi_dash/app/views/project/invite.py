@@ -58,15 +58,20 @@ class ProjectInvitationsViewset(BaseViewSet):
         if not emails:
             return Response({"error": "Emails are required"}, status=status.HTTP_400_BAD_REQUEST)
 
+        workspace = Workspace.objects.get(slug=slug)
+        if workspace.platform_org_id:
+            return Response(
+                {"error": "Project invitations are managed from the enterprise admin workspace"},
+                status=status.HTTP_409_CONFLICT,
+            )
+
         for email in emails:
             workspace_role = WorkspaceMember.objects.filter(
                 workspace__slug=slug, member__email=email.get("email"), is_active=True
-            ).role
+            ).values_list("role", flat=True).first()
 
             if workspace_role in [5, 20] and workspace_role != email.get("role", 5):
                 return Response({"error": "You cannot invite a user with different role than workspace role"})
-
-        workspace = Workspace.objects.get(slug=slug)
 
         project_invitations = []
         for email in emails:
@@ -185,6 +190,11 @@ class ProjectJoinEndpoint(BaseAPIView):
 
     def post(self, request, slug, project_id, pk):
         project_invite = ProjectMemberInvite.objects.get(pk=pk, project_id=project_id, workspace__slug=slug)
+        if project_invite.workspace.platform_org_id:
+            return Response(
+                {"error": "Project invitations are managed from the enterprise admin workspace"},
+                status=status.HTTP_409_CONFLICT,
+            )
 
         email = request.data.get("email", "")
 

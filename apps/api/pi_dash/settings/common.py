@@ -392,6 +392,8 @@ CELERY_IMPORTS = (
     "pi_dash.bgtasks.issue_description_version_sync",
     # runner lifecycle tasks
     "pi_dash.runner.tasks",
+    # platform federation
+    "pi_dash.bgtasks.platform_federation_task",
 )
 
 FILE_SIZE_LIMIT = int(get_config("FILE_SIZE_LIMIT", 5242880))
@@ -408,6 +410,18 @@ GITHUB_ACCESS_TOKEN = get_config("GITHUB_ACCESS_TOKEN", False)
 # the integration set GITHUB_SYNC_ENABLED=false. See .ai_design/github_sync/
 # design.md §9 Rollout.
 GITHUB_SYNC_ENABLED = get_config("GITHUB_SYNC_ENABLED", "true").lower() == "true"
+
+# Platform federation / enterprise identity bridge. Disabled by default so
+# standalone/self-managed installs keep Pi Dash's existing local identity model.
+PLATFORM_FEDERATION_ENABLED = get_config("PLATFORM_FEDERATION_ENABLED", "false").lower() == "true"
+PLATFORM_IOS_ISSUER = get_config("PLATFORM_IOS_ISSUER", "")
+PLATFORM_IOS_JWKS_URL = get_config("PLATFORM_IOS_JWKS_URL", "")
+PLATFORM_IOS_AUDIENCE = get_config("PLATFORM_IOS_AUDIENCE", "pi-dash")
+PLATFORM_IOS_WEBHOOK_SECRET = get_config("PLATFORM_IOS_WEBHOOK_SECRET", "")
+PLATFORM_IOS_INTERNAL_API_BASE_URL = get_config("PLATFORM_IOS_INTERNAL_API_BASE_URL", "")
+PLATFORM_IOS_INTERNAL_API_TOKEN = get_config("PLATFORM_IOS_INTERNAL_API_TOKEN", "")
+PLATFORM_IOS_HTTP_TIMEOUT_SECONDS = int(get_config("PLATFORM_IOS_HTTP_TIMEOUT_SECONDS", "5"))
+PLATFORM_IOS_JWKS_CACHE_SECONDS = int(get_config("PLATFORM_IOS_JWKS_CACHE_SECONDS", "300"))
 
 # Project Scheduler feature gate. Default on; self-hosters who don't want
 # periodic agent ticks against projects set SCHEDULER_ENABLED=false. See

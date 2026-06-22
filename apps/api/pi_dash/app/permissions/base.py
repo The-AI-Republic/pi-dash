@@ -26,6 +26,7 @@ def allow_permission(allowed_roles, level="PROJECT", creator=False, model=None):
                 if not WorkspaceMember.objects.filter(
                     member=request.user,
                     workspace__slug=kwargs["slug"],
+                    workspace__platform_access_disabled_at__isnull=True,
                     is_active=True,
                 ).exists():
                     return Response(
@@ -45,6 +46,7 @@ def allow_permission(allowed_roles, level="PROJECT", creator=False, model=None):
                 if WorkspaceMember.objects.filter(
                     member=request.user,
                     workspace__slug=kwargs["slug"],
+                    workspace__platform_access_disabled_at__isnull=True,
                     role__in=allowed_role_values,
                     is_active=True,
                 ).exists():
@@ -53,6 +55,7 @@ def allow_permission(allowed_roles, level="PROJECT", creator=False, model=None):
                 is_user_has_allowed_role = ProjectMember.objects.filter(
                     member=request.user,
                     workspace__slug=kwargs["slug"],
+                    workspace__platform_access_disabled_at__isnull=True,
                     project_id=kwargs["project_id"],
                     role__in=allowed_role_values,
                     is_active=True,
@@ -65,12 +68,14 @@ def allow_permission(allowed_roles, level="PROJECT", creator=False, model=None):
                     ProjectMember.objects.filter(
                         member=request.user,
                         workspace__slug=kwargs["slug"],
+                        workspace__platform_access_disabled_at__isnull=True,
                         project_id=kwargs["project_id"],
                         is_active=True,
                     ).exists()
                     and WorkspaceMember.objects.filter(
                         member=request.user,
                         workspace__slug=kwargs["slug"],
+                        workspace__platform_access_disabled_at__isnull=True,
                         role=ROLE.ADMIN.value,
                         is_active=True,
                     ).exists()

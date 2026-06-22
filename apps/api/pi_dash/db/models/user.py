@@ -61,6 +61,9 @@ class User(AbstractBaseUser, PermissionsMixin):
     email = models.CharField(max_length=255, null=True, blank=True, unique=True)
 
     # identity
+    platform_user_id = models.UUIDField(null=True, blank=True, unique=True, db_index=True)
+    platform_subject = models.CharField(max_length=255, null=True, blank=True, unique=True)
+    platform_identity_linked_at = models.DateTimeField(null=True, blank=True)
     display_name = models.CharField(max_length=255, default="")
     first_name = models.CharField(max_length=255, blank=True)
     last_name = models.CharField(max_length=255, blank=True)

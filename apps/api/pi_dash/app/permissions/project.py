@@ -18,13 +18,17 @@ class ProjectBasePermission(BasePermission):
         ## Safe Methods -> Handle the filtering logic in queryset
         if request.method in SAFE_METHODS:
             return WorkspaceMember.objects.filter(
-                workspace__slug=view.workspace_slug, member=request.user, is_active=True
+                workspace__slug=view.workspace_slug,
+                workspace__platform_access_disabled_at__isnull=True,
+                member=request.user,
+                is_active=True,
             ).exists()
 
         ## Only workspace owners or admins can create the projects
         if request.method == "POST":
             return WorkspaceMember.objects.filter(
                 workspace__slug=view.workspace_slug,
+                workspace__platform_access_disabled_at__isnull=True,
                 member=request.user,
                 role__in=[ROLE.ADMIN.value, ROLE.MEMBER.value],
                 is_active=True,
@@ -32,6 +36,7 @@ class ProjectBasePermission(BasePermission):
 
         project_member_qs = ProjectMember.objects.filter(
             workspace__slug=view.workspace_slug,
+            workspace__platform_access_disabled_at__isnull=True,
             member=request.user,
             project_id=view.project_id,
             is_active=True,
@@ -47,6 +52,7 @@ class ProjectBasePermission(BasePermission):
                 and WorkspaceMember.objects.filter(
                     member=request.user,
                     workspace__slug=view.workspace_slug,
+                    workspace__platform_access_disabled_at__isnull=True,
                     role=ROLE.ADMIN.value,
                     is_active=True,
                 ).exists()
@@ -61,12 +67,16 @@ class ProjectMemberPermission(BasePermission):
         ## Safe Methods -> Handle the filtering logic in queryset
         if request.method in SAFE_METHODS:
             return ProjectMember.objects.filter(
-                workspace__slug=view.workspace_slug, member=request.user, is_active=True
+                workspace__slug=view.workspace_slug,
+                workspace__platform_access_disabled_at__isnull=True,
+                member=request.user,
+                is_active=True,
             ).exists()
         ## Only workspace owners or admins can create the projects
         if request.method == "POST":
             return WorkspaceMember.objects.filter(
                 workspace__slug=view.workspace_slug,
+                workspace__platform_access_disabled_at__isnull=True,
                 member=request.user,
                 role__in=[ROLE.ADMIN.value, ROLE.MEMBER.value],
                 is_active=True,
@@ -75,6 +85,7 @@ class ProjectMemberPermission(BasePermission):
         ## Only Project Admins can update project attributes
         return ProjectMember.objects.filter(
             workspace__slug=view.workspace_slug,
+            workspace__platform_access_disabled_at__isnull=True,
             member=request.user,
             role__in=[ROLE.ADMIN.value, ROLE.MEMBER.value],
             project_id=view.project_id,
@@ -92,6 +103,7 @@ class ProjectEntityPermission(BasePermission):
             if request.method in SAFE_METHODS:
                 return ProjectMember.objects.filter(
                     workspace__slug=view.workspace_slug,
+                    workspace__platform_access_disabled_at__isnull=True,
                     member=request.user,
                     project__identifier=view.project_identifier,
                     is_active=True,
@@ -101,6 +113,7 @@ class ProjectEntityPermission(BasePermission):
         if request.method in SAFE_METHODS:
             return ProjectMember.objects.filter(
                 workspace__slug=view.workspace_slug,
+                workspace__platform_access_disabled_at__isnull=True,
                 member=request.user,
                 project_id=view.project_id,
                 is_active=True,
@@ -109,6 +122,7 @@ class ProjectEntityPermission(BasePermission):
         ## Only project members or admins can create and edit the project attributes
         return ProjectMember.objects.filter(
             workspace__slug=view.workspace_slug,
+            workspace__platform_access_disabled_at__isnull=True,
             member=request.user,
             role__in=[ROLE.ADMIN.value, ROLE.MEMBER.value],
             project_id=view.project_id,
@@ -123,6 +137,7 @@ class ProjectAdminPermission(BasePermission):
 
         return ProjectMember.objects.filter(
             workspace__slug=view.workspace_slug,
+            workspace__platform_access_disabled_at__isnull=True,
             member=request.user,
             role=ROLE.ADMIN.value,
             project_id=view.project_id,
@@ -137,6 +152,7 @@ class ProjectLitePermission(BasePermission):
 
         return ProjectMember.objects.filter(
             workspace__slug=view.workspace_slug,
+            workspace__platform_access_disabled_at__isnull=True,
             member=request.user,
             project_id=view.project_id,
             is_active=True,
@@ -159,6 +175,7 @@ def can_mutate_states(user, slug, project_id):
     membership = (
         ProjectMember.objects.filter(
             workspace__slug=slug,
+            workspace__platform_access_disabled_at__isnull=True,
             project_id=project_id,
             member=user,
             is_active=True,
@@ -178,6 +195,7 @@ def can_mutate_states(user, slug, project_id):
 
     return WorkspaceMember.objects.filter(
         workspace__slug=slug,
+        workspace__platform_access_disabled_at__isnull=True,
         member=user,
         role=ROLE.ADMIN.value,
         is_active=True,
@@ -198,6 +216,7 @@ class ProjectStateEntityPermission(BasePermission):
         if request.method in SAFE_METHODS:
             return ProjectMember.objects.filter(
                 workspace__slug=view.workspace_slug,
+                workspace__platform_access_disabled_at__isnull=True,
                 member=request.user,
                 project_id=view.project_id,
                 is_active=True,

@@ -34,6 +34,7 @@ class WorkSpaceBasePermission(BasePermission):
             return WorkspaceMember.objects.filter(
                 member=request.user,
                 workspace__slug=view.workspace_slug,
+                workspace__platform_access_disabled_at__isnull=True,
                 role__in=[Admin, Member],
                 is_active=True,
             ).exists()
@@ -43,6 +44,7 @@ class WorkSpaceBasePermission(BasePermission):
             return WorkspaceMember.objects.filter(
                 member=request.user,
                 workspace__slug=view.workspace_slug,
+                workspace__platform_access_disabled_at__isnull=True,
                 role=Admin,
                 is_active=True,
             ).exists()
@@ -54,7 +56,11 @@ class WorkspaceOwnerPermission(BasePermission):
             return False
 
         return WorkspaceMember.objects.filter(
-            workspace__slug=view.workspace_slug, member=request.user, role=Admin
+            workspace__slug=view.workspace_slug,
+            workspace__platform_access_disabled_at__isnull=True,
+            member=request.user,
+            role=Admin,
+            is_active=True,
         ).exists()
 
 
@@ -66,6 +72,7 @@ class WorkSpaceAdminPermission(BasePermission):
         return WorkspaceMember.objects.filter(
             member=request.user,
             workspace__slug=view.workspace_slug,
+            workspace__platform_access_disabled_at__isnull=True,
             role__in=[Admin, Member],
             is_active=True,
         ).exists()
@@ -79,12 +86,16 @@ class WorkspaceEntityPermission(BasePermission):
         ## Safe Methods -> Handle the filtering logic in queryset
         if request.method in SAFE_METHODS:
             return WorkspaceMember.objects.filter(
-                workspace__slug=view.workspace_slug, member=request.user, is_active=True
+                workspace__slug=view.workspace_slug,
+                workspace__platform_access_disabled_at__isnull=True,
+                member=request.user,
+                is_active=True,
             ).exists()
 
         return WorkspaceMember.objects.filter(
             member=request.user,
             workspace__slug=view.workspace_slug,
+            workspace__platform_access_disabled_at__isnull=True,
             role__in=[Admin, Member],
             is_active=True,
         ).exists()
@@ -96,7 +107,10 @@ class WorkspaceViewerPermission(BasePermission):
             return False
 
         return WorkspaceMember.objects.filter(
-            member=request.user, workspace__slug=view.workspace_slug, is_active=True
+            member=request.user,
+            workspace__slug=view.workspace_slug,
+            workspace__platform_access_disabled_at__isnull=True,
+            is_active=True,
         ).exists()
 
 
@@ -106,5 +120,8 @@ class WorkspaceUserPermission(BasePermission):
             return False
 
         return WorkspaceMember.objects.filter(
-            member=request.user, workspace__slug=view.workspace_slug, is_active=True
+            member=request.user,
+            workspace__slug=view.workspace_slug,
+            workspace__platform_access_disabled_at__isnull=True,
+            is_active=True,
         ).exists()

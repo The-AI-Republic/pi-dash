@@ -44,6 +44,7 @@ from .views import (
     GiteaOauthInitiateEndpoint,
     GiteaCallbackSpaceEndpoint,
     GiteaOauthInitiateSpaceEndpoint,
+    PlatformSessionEndpoint,
 )
 
 urlpatterns = [
@@ -137,6 +138,8 @@ urlpatterns = [
     ),
     path("change-password/", ChangePasswordEndpoint.as_view(), name="forgot-password"),
     path("set-password/", SetUserPasswordEndpoint.as_view(), name="set-password"),
+    # Platform federation
+    path("platform/session/", PlatformSessionEndpoint.as_view(), name="platform-session"),
     ## Gitea Oauth
     path("gitea/", GiteaOauthInitiateEndpoint.as_view(), name="gitea-initiate"),
     path("gitea/callback/", GiteaCallbackEndpoint.as_view(), name="gitea-callback"),

@@ -28,6 +28,8 @@ from .integration import (
     GithubIssueSync,
     GithubRepository,
     GithubRepositorySync,
+    PlatformFederationState,
+    PlatformWebhookDelivery,
     Integration,
     SlackProjectSync,
     WorkspaceIntegration,

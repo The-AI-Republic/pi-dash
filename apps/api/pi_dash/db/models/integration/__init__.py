@@ -13,4 +13,5 @@ from .github import (
     GithubIssueSync,
     GithubCommentSync,
 )
+from .platform import PlatformFederationState, PlatformWebhookDelivery
 from .slack import SlackProjectSync
