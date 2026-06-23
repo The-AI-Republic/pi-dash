@@ -19,6 +19,11 @@ from pi_dash.app.serializers.issue import (
 )
 from pi_dash.db.models import (
     APIToken,
+    GitCommentSync,
+    GitIssueSync,
+    GitProviderAccount,
+    GitRepository,
+    GitRepositoryBinding,
     GithubCommentSync,
     GithubIssueSync,
     GithubRepository,
@@ -65,6 +70,38 @@ def repo_sync(db, project, workspace, create_user):
         workspace=workspace,
         repository=repo,
         workspace_integration=wi,
+        actor=create_user,
+    )
+
+
+@pytest.fixture
+def git_binding(db, project, workspace, create_user):
+    account = GitProviderAccount.objects.create(
+        workspace=workspace,
+        provider="gitlab",
+        host_url="https://gitlab.com",
+        auth_type="pat",
+        external_account_id="u1",
+        external_account_login="alice",
+        display_name="alice",
+        capabilities={},
+        credential_config={},
+        status=GitProviderAccount.Status.CONNECTED,
+    )
+    repo = GitRepository.objects.create(
+        provider="gitlab",
+        host_url="https://gitlab.com",
+        external_id="99",
+        namespace="acme",
+        name="web",
+        full_name="acme/web",
+        web_url="https://gitlab.com/acme/web",
+    )
+    return GitRepositoryBinding.objects.create(
+        project=project,
+        workspace=workspace,
+        repository=repo,
+        provider_account=account,
         actor=create_user,
     )
 
@@ -157,6 +194,25 @@ class TestIssueLock:
         )
         assert serializer.is_valid(), serializer.errors
 
+    def test_generic_git_sync_row_rejects_name_edit(self, synced_issue, git_binding):
+        GitIssueSync.objects.create(
+            project=synced_issue.project,
+            workspace=synced_issue.workspace,
+            binding=git_binding,
+            issue=synced_issue,
+            provider="gitlab",
+            external_id="1001",
+            external_iid="7",
+        )
+        serializer = IssueCreateSerializer(
+            instance=synced_issue,
+            data={"name": "New name"},
+            partial=True,
+            context={"project_id": str(synced_issue.project_id), "workspace_id": str(synced_issue.workspace_id)},
+        )
+        with pytest.raises(ValidationError):
+            serializer.is_valid(raise_exception=True)
+
 
 @pytest.mark.unit
 @pytest.mark.django_db
@@ -192,3 +248,29 @@ class TestCommentLock:
             partial=True,
         )
         assert serializer.is_valid(), serializer.errors
+
+    def test_generic_git_comment_sync_rejects_body_edit(self, synced_comment, git_binding):
+        issue_sync = GitIssueSync.objects.create(
+            project=synced_comment.project,
+            workspace=synced_comment.workspace,
+            binding=git_binding,
+            issue=synced_comment.issue,
+            provider="gitlab",
+            external_id="1001",
+            external_iid="7",
+        )
+        GitCommentSync.objects.create(
+            project=synced_comment.project,
+            workspace=synced_comment.workspace,
+            issue_sync=issue_sync,
+            comment=synced_comment,
+            provider="gitlab",
+            external_id="5001",
+        )
+        serializer = IssueCommentSerializer(
+            instance=synced_comment,
+            data={"comment_html": "<p>edited</p>"},
+            partial=True,
+        )
+        with pytest.raises(ValidationError):
+            serializer.is_valid(raise_exception=True)

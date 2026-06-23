@@ -4,7 +4,7 @@
  * See the LICENSE file for details.
  */
 
-import { Github } from "lucide-react";
+import { GitBranch } from "lucide-react";
 import { Breadcrumbs } from "@pi-dash/ui";
 import { BreadcrumbLink } from "@/components/common/breadcrumb-link";
 import { SettingsPageHeader } from "@/components/settings/page-header";
@@ -16,7 +16,7 @@ export function GithubProjectSettingsHeader() {
         <div className="flex items-center gap-2">
           <Breadcrumbs>
             <Breadcrumbs.Item
-              component={<BreadcrumbLink label="GitHub" icon={<Github className="size-4 text-tertiary" />} />}
+              component={<BreadcrumbLink label="Repository" icon={<GitBranch className="size-4 text-tertiary" />} />}
             />
           </Breadcrumbs>
         </div>

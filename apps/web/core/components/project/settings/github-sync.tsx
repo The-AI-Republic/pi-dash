@@ -12,15 +12,19 @@ import { Button } from "@pi-dash/propel/button";
 import { TOAST_TYPE, setToast } from "@pi-dash/propel/toast";
 import { Loader, ToggleSwitch } from "@pi-dash/ui";
 // constants
-import { GITHUB_INTEGRATION_STATUS, GITHUB_PROJECT_BINDING } from "@/constants/fetch-keys";
+import { GIT_PROJECT_BINDING } from "@/constants/fetch-keys";
 // hooks
 import { useUserPermissions } from "@/hooks/store/user";
 // services
-import { GithubIntegrationService } from "@/services/integrations/github.service";
 import { ProjectService } from "@/services/project";
 
-const githubService = new GithubIntegrationService();
 const projectService = new ProjectService();
+
+const providerLabel = (provider?: string) => {
+  if (provider === "github") return "GitHub";
+  if (provider === "gitlab") return "GitLab";
+  return "Git provider";
+};
 
 export function ProjectGithubSyncSection() {
   const params = useParams();
@@ -32,20 +36,17 @@ export function ProjectGithubSyncSection() {
 
   const [submitting, setSubmitting] = useState(false);
 
-  const wsKey = workspaceSlug ? GITHUB_INTEGRATION_STATUS(workspaceSlug) : null;
-  const bindingKey = projectId ? GITHUB_PROJECT_BINDING(projectId) : null;
-
-  const { data: wsStatus } = useSWR(wsKey, () => (workspaceSlug ? githubService.getStatus(workspaceSlug) : null));
+  const bindingKey = projectId ? GIT_PROJECT_BINDING(projectId) : null;
 
   const { data: binding } = useSWR(bindingKey, () =>
-    workspaceSlug && projectId ? projectService.getGithubBindingStatus(workspaceSlug, projectId) : null
+    workspaceSlug && projectId ? projectService.getGitRepositoryBinding(workspaceSlug, projectId) : null
   );
 
   const handleToggle = async (enabled: boolean) => {
     if (!workspaceSlug || !projectId) return;
     setSubmitting(true);
     try {
-      await projectService.setGithubSyncEnabled(workspaceSlug, projectId, enabled);
+      await projectService.setGitSyncEnabled(workspaceSlug, projectId, enabled);
       await mutate(bindingKey);
     } catch (e: any) {
       setToast({
@@ -62,7 +63,7 @@ export function ProjectGithubSyncSection() {
     if (!workspaceSlug || !projectId) return;
     setSubmitting(true);
     try {
-      await projectService.unbindGithubRepository(workspaceSlug, projectId);
+      await projectService.unbindGitRepository(workspaceSlug, projectId);
       await mutate(bindingKey);
       setToast({
         type: TOAST_TYPE.SUCCESS,
@@ -80,19 +81,7 @@ export function ProjectGithubSyncSection() {
     }
   };
 
-  if (wsStatus && !wsStatus.connected) {
-    return (
-      <div className="flex flex-col gap-2 rounded-md border border-subtle bg-surface-1 p-4">
-        <h3 className="text-body-sm-medium">GitHub</h3>
-        <p className="text-body-xs-regular text-secondary">
-          Connect a GitHub credential at the workspace level (Workspace settings → Integrations) to bind repositories to
-          projects.
-        </p>
-      </div>
-    );
-  }
-
-  if (!wsStatus || !binding) {
+  if (!binding) {
     return (
       <Loader className="flex flex-col gap-2 p-4">
         <Loader.Item height="20px" width="160px" />
@@ -102,15 +91,16 @@ export function ProjectGithubSyncSection() {
   }
 
   if (binding.bound && binding.repository) {
+    const label = providerLabel(binding.provider);
     return (
       <div className="flex flex-col gap-3 rounded-md border border-subtle bg-surface-1 p-4">
         <div className="flex items-start justify-between gap-2">
           <div>
-            <h3 className="text-body-sm-medium">GitHub</h3>
+            <h3 className="text-body-sm-medium">{label}</h3>
             <p className="text-body-xs-regular text-secondary">
               Bound to{" "}
-              <a className="text-primary underline" href={binding.repository.url} target="_blank" rel="noreferrer">
-                {binding.repository.owner}/{binding.repository.name}
+              <a className="text-primary underline" href={binding.repository.web_url} target="_blank" rel="noreferrer">
+                {binding.repository.full_name}
               </a>
               . Mirrored issues are read-only on title, description, and synced comment bodies. Workflow fields stay
               editable.
@@ -145,7 +135,7 @@ export function ProjectGithubSyncSection() {
   // can never drift apart.
   return (
     <div className="flex flex-col gap-2 rounded-md border border-subtle bg-surface-1 p-4">
-      <h3 className="text-body-sm-medium">GitHub</h3>
+      <h3 className="text-body-sm-medium">Repository sync</h3>
       <p className="text-body-xs-regular text-secondary">
         Set the project's <strong>Git repository URL</strong> in General Settings and click <strong>Bind</strong>. Once
         a repo is bound here, you can toggle sync on/off without leaving this page.

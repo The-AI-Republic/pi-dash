@@ -2,20 +2,19 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 # See the LICENSE file for details.
 
-"""GitHub read tool — pull-request merge status.
+"""Git provider read tool — pull-request / merge-request status.
 
-Nothing in the DB materializes PR merge state (issue links are free-form URLs,
-the GitHub integration syncs issues/comments not PRs), so the agent checks
-merge state live. This tool **never raises**: ``state="unknown"`` is a normal
-answer the loop's auto-close prompt is written around ("only act when clearly
-established"). Available to chat and loop runs alike. See
+The agent checks merge state live. This tool **never raises**:
+``state="unknown"`` is a normal answer the loop's auto-close prompt is written
+around ("only act when clearly established"). Available to chat and loop runs
+alike. See
 ``.ai_design/loop_project_management/design.md`` §8.2.
 """
 
 from __future__ import annotations
 
 import logging
-import re
+from urllib.parse import quote
 
 from django.conf import settings
 from pydantic_ai import RunContext
@@ -24,12 +23,11 @@ from pi_dash.assistant import ssrf
 from pi_dash.assistant.runtime.agent import assistant
 from pi_dash.assistant.runtime.deps import AssistantDeps
 from pi_dash.assistant.tools import _scoping
+from pi_dash.integrations.git.registry import parse_code_review_url
+from pi_dash.license.utils.encryption import decrypt_data
 
 logger = logging.getLogger(__name__)
 
-_PR_URL_RE = re.compile(
-    r"^https://github\.com/(?P<owner>[\w.-]+)/(?P<repo>[\w.-]+)/pull/(?P<num>\d+)"
-)
 _API_HOST = "https://api.github.com"
 _TIMEOUT_S = 10
 
@@ -38,16 +36,40 @@ def _unknown(reason: str) -> dict:
     return {"state": "unknown", "reason": reason}
 
 
-def _find_token(deps: AssistantDeps, owner: str, repo: str) -> str | None:
-    """Best-effort access token from a GithubRepositorySync on a project the
-    user can access whose repository matches ``owner/repo``. Returns None when
-    none is found (the call then proceeds unauthenticated)."""
-    from pi_dash.db.models import GithubRepositorySync
+def _maybe_decrypt(token: str | None) -> str | None:
+    if not token:
+        return None
+    try:
+        return decrypt_data(token)
+    except Exception:
+        return token
 
+
+def _find_token(deps: AssistantDeps, provider: str, namespace: str, repo: str) -> str | None:
+    """Best-effort access token from a binding on a project the user can access."""
+    from pi_dash.db.models import GitRepositoryBinding, GithubRepositorySync
+
+    binding = (
+        GitRepositoryBinding.objects.filter(
+            project__in=_scoping.member_projects(deps),
+            repository__provider=provider,
+            repository__namespace__iexact=namespace,
+            repository__name__iexact=repo,
+        )
+        .select_related("provider_account")
+        .order_by("-created_at")
+        .first()
+    )
+    if binding is not None:
+        config = binding.provider_account.credential_config or {}
+        return _maybe_decrypt(config.get("token"))
+
+    if provider != "github":
+        return None
     sync = (
         GithubRepositorySync.objects.filter(
             project__in=_scoping.member_projects(deps),
-            repository__owner__iexact=owner,
+            repository__owner__iexact=namespace,
             repository__name__iexact=repo,
         )
         .order_by("-created_at")
@@ -57,17 +79,15 @@ def _find_token(deps: AssistantDeps, owner: str, repo: str) -> str | None:
         return None
     creds = sync.credentials or {}
     token = creds.get("access_token") or creds.get("token")
-    return token or None
+    return _maybe_decrypt(token)
 
 
 @assistant.tool
 def get_pull_request_status(ctx: RunContext[AssistantDeps], url: str) -> dict:
-    """Check whether a GitHub pull request is merged.
+    """Check whether a GitHub pull request or GitLab merge request is merged.
 
-    Pass a full PR URL like ``https://github.com/owner/repo/pull/123``. Returns
-    ``{"state": "merged"|"open"|"closed"|"unknown", ...}``. A non-GitHub or
-    unparseable URL, a rate limit, or a network error all return ``unknown`` —
-    treat ``unknown`` as "could not establish; do not act".
+    Pass a full PR/MR URL. Returns ``{"state": "merged"|"open"|"closed"|"unknown", ...}``.
+    An unsupported URL, rate limit, or network error returns ``unknown``.
     """
     deps = ctx.deps
 
@@ -77,19 +97,28 @@ def get_pull_request_status(ctx: RunContext[AssistantDeps], url: str) -> dict:
         return _unknown("budget_exhausted")
     deps.budget.pr_lookups += 1
 
-    match = _PR_URL_RE.match((url or "").strip())
-    if match is None:
+    parsed = parse_code_review_url((url or "").strip())
+    if parsed is None:
         return _unknown("unsupported_url")
-    owner, repo, num = match.group("owner"), match.group("repo"), match.group("num")
 
-    api_url = f"{_API_HOST}/repos/{owner}/{repo}/pulls/{num}"
+    if parsed.provider == "github":
+        api_url = f"{_API_HOST}/repos/{parsed.namespace}/{parsed.repo_name}/pulls/{parsed.external_iid}"
+    elif parsed.provider == "gitlab":
+        project_path = quote(f"{parsed.namespace}/{parsed.repo_name}", safe="")
+        api_url = f"{parsed.host_url}/api/v4/projects/{project_path}/merge_requests/{parsed.external_iid}"
+    else:
+        return _unknown("unsupported_url")
+
     if ssrf.is_blocked(api_url):
         return _unknown("blocked")
 
-    headers = {"Accept": "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28"}
-    token = _find_token(deps, owner, repo)
-    if token:
+    headers = {"Accept": "application/json"}
+    token = _find_token(deps, parsed.provider, parsed.namespace, parsed.repo_name)
+    if token and parsed.provider == "github":
+        headers["X-GitHub-Api-Version"] = "2022-11-28"
         headers["Authorization"] = f"Bearer {token}"
+    elif token and parsed.provider == "gitlab":
+        headers["PRIVATE-TOKEN"] = token
 
     import httpx
 
@@ -97,7 +126,13 @@ def get_pull_request_status(ctx: RunContext[AssistantDeps], url: str) -> dict:
         with httpx.Client(timeout=_TIMEOUT_S, follow_redirects=False) as client:
             resp = client.get(api_url, headers=headers)
     except Exception:  # noqa: BLE001 — any transport failure is just "unknown"
-        logger.warning("get_pull_request_status: network error for %s/%s#%s", owner, repo, num)
+        logger.warning(
+            "get_pull_request_status: network error for %s:%s/%s#%s",
+            parsed.provider,
+            parsed.namespace,
+            parsed.repo_name,
+            parsed.external_iid,
+        )
         return _unknown("network_error")
 
     if resp.status_code == 404:
@@ -114,9 +149,10 @@ def get_pull_request_status(ctx: RunContext[AssistantDeps], url: str) -> dict:
     except Exception:  # noqa: BLE001
         return _unknown("bad_response")
 
-    if data.get("merged") or data.get("merged_at"):
+    provider_state = data.get("state")
+    if data.get("merged") or data.get("merged_at") or provider_state == "merged":
         state = "merged"
-    elif data.get("state") == "closed":
+    elif provider_state == "closed":
         state = "closed"
     else:
         state = "open"
@@ -124,5 +160,6 @@ def get_pull_request_status(ctx: RunContext[AssistantDeps], url: str) -> dict:
         "state": state,
         "title": data.get("title"),
         "merged_at": data.get("merged_at"),
-        "url": f"https://github.com/{owner}/{repo}/pull/{num}",
+        "url": parsed.url,
+        "provider": parsed.provider,
     }

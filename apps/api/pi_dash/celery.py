@@ -109,9 +109,9 @@ app.conf.beat_schedule = {
         "task": "pi_dash.bgtasks.agent_ticker.scan_due_tickers",
         "schedule": crontab(minute="*"),
     },
-    # GitHub Issue Sync — see .ai_design/github_sync/design.md §6.3.
-    "github-issue-sync-every-4h": {
-        "task": "pi_dash.bgtasks.github_sync_task.sync_all_repos",
+    # Git provider Issue Sync — see .ai_design/git_support_generalization/design.md.
+    "git-issue-sync-every-4h": {
+        "task": "pi_dash.bgtasks.git_sync_task.sync_all_bindings",
         "schedule": crontab(minute=0, hour="*/4"),
     },
     # Project Scheduler scanner — see .ai_design/project_scheduler/design.md §6.1.

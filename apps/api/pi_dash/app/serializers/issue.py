@@ -32,6 +32,7 @@ from pi_dash.db.models import (
     Module,
     ModuleIssue,
     IssueLink,
+    GitCodeReviewLink,
     GithubPullRequestLink,
     FileAsset,
     IssueReaction,
@@ -51,34 +52,32 @@ from pi_dash.utils.content_validator import (
 )
 
 
-# Synced (mirrored from GitHub) rows are read-only on synced fields. The lock
-# predicate is "an active GithubIssueSync / GithubCommentSync row exists,"
-# NOT "external_source == github" — see .ai_design/github_sync/design.md §6.8
-# for why. After unbind, the cascade deletes the sync rows and these helpers
-# stop reporting True, releasing the lock.
+# Synced (mirrored from a Git provider) rows are read-only on synced fields.
+# The lock predicate is "an active sync row exists", not "external_source has
+# a specific value". After unbind, cascades delete sync rows and release locks.
 _LOCKED_ISSUE_FIELDS = {"name", "description_html", "description_json", "description_stripped", "description_binary"}
 _LOCKED_COMMENT_FIELDS = {"comment_html", "comment_json", "comment_stripped"}
 
 
 def _issue_is_actively_synced(issue) -> bool:
-    if issue is None or issue.external_source != "github":
+    if issue is None:
         return False
 
     annotated_is_synced = getattr(issue, "is_synced", None)
     if annotated_is_synced is not None:
         return bool(annotated_is_synced)
 
-    from pi_dash.db.models import GithubIssueSync
+    from pi_dash.db.models import GitIssueSync, GithubIssueSync
 
-    return GithubIssueSync.objects.filter(issue=issue).exists()
+    return GitIssueSync.objects.filter(issue=issue).exists() or GithubIssueSync.objects.filter(issue=issue).exists()
 
 
 def _comment_is_actively_synced(comment) -> bool:
-    if comment is None or comment.external_source != "github":
+    if comment is None:
         return False
-    from pi_dash.db.models import GithubCommentSync
+    from pi_dash.db.models import GitCommentSync, GithubCommentSync
 
-    return GithubCommentSync.objects.filter(comment=comment).exists()
+    return GitCommentSync.objects.filter(comment=comment).exists() or GithubCommentSync.objects.filter(comment=comment).exists()
 
 
 class IssueFlatSerializer(BaseSerializer):
@@ -172,9 +171,9 @@ class IssueCreateSerializer(BaseSerializer):
         allow_triage = self.context.get("allow_triage_state", False)
         state_manager = State.triage_objects if allow_triage else State.objects
 
-        # Read-only lock for actively-synced GitHub issues. See .ai_design/
-        # github_sync/design.md §6.8. Only block when the *value* actually
-        # changed — the web UI re-PATCHes the full editable set on blur even
+        # Read-only lock for actively-synced Git provider issues. Only block
+        # when the *value* actually changed — the web UI re-PATCHes the full
+        # editable set on blur even
         # if the user only clicked through a synced issue, and rejecting
         # unchanged values surfaces a misleading "Work item update failed"
         # toast every time someone navigates a synced issue.
@@ -187,8 +186,8 @@ class IssueCreateSerializer(BaseSerializer):
             if blocked:
                 raise serializers.ValidationError(
                     {
-                        f: "This field is synced from GitHub and is read-only. "
-                           "Unbind the project's GitHub repository to edit."
+                        f: "This field is synced from a Git provider and is read-only. "
+                        "Unbind the project's repository to edit."
                         for f in blocked
                     }
                 )
@@ -683,6 +682,38 @@ class GithubPullRequestLinkSerializer(BaseSerializer):
         read_only_fields = fields
 
 
+class GitCodeReviewLinkSerializer(BaseSerializer):
+    """Read serializer for a Git provider code review linked to a work item."""
+
+    created_by_detail = UserLiteSerializer(read_only=True, source="created_by")
+
+    class Meta:
+        model = GitCodeReviewLink
+        fields = [
+            "id",
+            "issue",
+            "provider",
+            "host_url",
+            "namespace",
+            "repo_name",
+            "repo_external_id",
+            "external_id",
+            "external_iid",
+            "url",
+            "title",
+            "state",
+            "merged",
+            "draft",
+            "remote_updated_at",
+            "metadata",
+            "created_at",
+            "updated_at",
+            "created_by",
+            "created_by_detail",
+        ]
+        read_only_fields = fields
+
+
 class IssueLinkSerializer(BaseSerializer):
     created_by_detail = UserLiteSerializer(read_only=True, source="created_by")
 
@@ -837,8 +868,7 @@ class IssueCommentSerializer(BaseSerializer):
     workspace_detail = WorkspaceLiteSerializer(read_only=True, source="workspace")
     comment_reactions = CommentReactionSerializer(read_only=True, many=True)
     is_member = serializers.BooleanField(read_only=True)
-    # Surfaced so the UI can hide edit/delete affordances on synced rows
-    # (.ai_design/github_sync/design.md §6.8).
+    # Surfaced so the UI can hide edit/delete affordances on synced rows.
     is_synced = serializers.SerializerMethodField()
 
     class Meta:
@@ -869,8 +899,8 @@ class IssueCommentSerializer(BaseSerializer):
             if blocked:
                 raise serializers.ValidationError(
                     {
-                        f: "This comment is synced from GitHub and is read-only. "
-                           "Unbind the project's GitHub repository to edit."
+                        f: "This comment is synced from a Git provider and is read-only. "
+                        "Unbind the project's repository to edit."
                         for f in blocked
                     }
                 )
@@ -941,7 +971,7 @@ class IssueSerializer(DynamicBaseSerializer):
     link_count = serializers.IntegerField(read_only=True)
 
     # Surfaced so the UI can hide title/description edit affordances on
-    # actively-synced GitHub issues (.ai_design/github_sync/design.md §6.8).
+    # actively-synced Git provider issues.
     is_synced = serializers.SerializerMethodField()
 
     class Meta:
