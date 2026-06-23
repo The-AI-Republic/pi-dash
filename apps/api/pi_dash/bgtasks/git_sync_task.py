@@ -83,12 +83,29 @@ def _upsert_issue(
         "created_by_id": binding.actor_id,
         "updated_by_id": binding.actor_id,
     }
-    issue, _created = Issue.objects.update_or_create(
-        project=binding.project,
-        external_source=provider,
-        external_id=issue_iid,
-        defaults=defaults,
+    issue_sync = (
+        GitIssueSync.objects.select_related("issue")
+        .filter(binding=binding, external_iid=issue_iid)
+        .first()
     )
+    if issue_sync is None:
+        issue = Issue.objects.create(
+            project=binding.project,
+            external_source=provider,
+            external_id=issue_iid,
+            **defaults,
+        )
+    else:
+        issue = issue_sync.issue
+        update_values = {
+            **defaults,
+            "external_source": provider,
+            "external_id": issue_iid,
+            "updated_at": timezone.now(),
+        }
+        Issue.objects.filter(pk=issue.pk).update(**update_values)
+        for field, value in update_values.items():
+            setattr(issue, field, value)
     Issue.objects.filter(pk=issue.pk).update(
         created_by_id=binding.actor_id,
         updated_by_id=binding.actor_id,
@@ -97,26 +114,27 @@ def _upsert_issue(
     issue.updated_by_id = binding.actor_id
     _ = default_state
 
+    issue_sync_defaults = {
+        "issue": issue,
+        "provider": provider,
+        "external_id": str(remote_issue.external_id),
+        "web_url": remote_issue.web_url,
+        "remote_state": remote_issue.state,
+        "remote_created_at": remote_issue.created_at,
+        "remote_updated_at": remote_issue.updated_at,
+        "workspace_id": binding.workspace_id,
+        "project_id": binding.project_id,
+        "created_by_id": binding.actor_id,
+        "updated_by_id": binding.actor_id,
+        "metadata": {
+            "author": remote_issue.author,
+            "remote": remote_issue.metadata,
+        },
+    }
     issue_sync, _ = GitIssueSync.objects.update_or_create(
         binding=binding,
         external_iid=issue_iid,
-        defaults={
-            "issue": issue,
-            "provider": provider,
-            "external_id": str(remote_issue.external_id),
-            "web_url": remote_issue.web_url,
-            "remote_state": remote_issue.state,
-            "remote_created_at": remote_issue.created_at,
-            "remote_updated_at": remote_issue.updated_at,
-            "workspace_id": binding.workspace_id,
-            "project_id": binding.project_id,
-            "created_by_id": binding.actor_id,
-            "updated_by_id": binding.actor_id,
-            "metadata": {
-                "author": remote_issue.author,
-                "remote": remote_issue.metadata,
-            },
-        },
+        defaults=issue_sync_defaults,
     )
     return issue, issue_sync
 

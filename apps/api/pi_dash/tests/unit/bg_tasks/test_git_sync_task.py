@@ -130,6 +130,42 @@ def test_sync_one_binding_imports_issues_and_comments(gitlab_binding):
     assert gitlab_binding.last_synced_at is not None
 
 
+def test_sync_issue_identity_is_binding_scoped(gitlab_binding):
+    fake = _FakeAdapter()
+
+    with patch("pi_dash.bgtasks.git_sync_task.get_adapter", return_value=fake):
+        sync_one_binding(str(gitlab_binding.id))
+
+    original_issue = Issue.objects.get(project=gitlab_binding.project, external_source="gitlab", external_id="7")
+    gitlab_binding.delete(soft=False)
+
+    replacement_repo = GitRepository.objects.create(
+        provider="gitlab",
+        host_url="https://gitlab.com",
+        external_id="100",
+        namespace="acme",
+        name="api",
+        full_name="acme/api",
+        web_url="https://gitlab.com/acme/api",
+    )
+    replacement_binding = GitRepositoryBinding.objects.create(
+        project=gitlab_binding.project,
+        workspace=gitlab_binding.workspace,
+        repository=replacement_repo,
+        provider_account=gitlab_binding.provider_account,
+        actor=gitlab_binding.actor,
+        is_sync_enabled=True,
+    )
+
+    with patch("pi_dash.bgtasks.git_sync_task.get_adapter", return_value=fake):
+        sync_one_binding(str(replacement_binding.id))
+
+    issues = list(Issue.objects.filter(project=gitlab_binding.project, external_source="gitlab", external_id="7"))
+    assert len(issues) == 2
+    replacement_sync = GitIssueSync.objects.get(binding=replacement_binding, external_iid="7")
+    assert replacement_sync.issue_id != original_issue.id
+
+
 def test_completion_comment_uses_provider_adapter(gitlab_binding, settings):
     settings.WEB_URL = "https://app.example.com"
     fake = _FakeAdapter()

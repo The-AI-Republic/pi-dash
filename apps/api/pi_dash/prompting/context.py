@@ -236,6 +236,48 @@ def _issue_run_kind(issue: Issue) -> str:
     return recipes.kind_for(template_name_for(state))
 
 
+def _repo_context(project, issue: Issue) -> Dict[str, Any]:
+    """Return provider-neutral repository prompt context for an issue run."""
+    repo = {
+        "url": (getattr(project, "repo_url", "") or None),
+        "base_branch": (getattr(project, "base_branch", "") or None),
+        "work_branch": (getattr(issue, "git_work_branch", "") or None),
+        "provider": None,
+        "provider_display_name": "Git provider",
+        "host_url": None,
+        "full_name": None,
+        "code_review_term": "code review",
+    }
+    from pi_dash.db.models import GitRepositoryBinding
+    from pi_dash.integrations.git.registry import get_adapter
+
+    binding = (
+        GitRepositoryBinding.objects.filter(project=project)
+        .select_related("repository")
+        .first()
+    )
+    if binding is None:
+        return repo
+    remote = binding.repository
+    try:
+        adapter = get_adapter(remote.provider)
+        provider_display_name = adapter.display_name
+        code_review_term = adapter.code_review_term
+    except KeyError:
+        provider_display_name = remote.provider.title()
+        code_review_term = "code review"
+    repo.update(
+        {
+            "provider": remote.provider,
+            "provider_display_name": provider_display_name,
+            "host_url": remote.host_url,
+            "full_name": remote.full_name,
+            "code_review_term": code_review_term,
+        }
+    )
+    return repo
+
+
 def build_context(issue: Issue, run: AgentRun) -> Dict[str, Any]:
     """Build the dict passed into Jinja.
 
@@ -294,11 +336,7 @@ def build_context(issue: Issue, run: AgentRun) -> Dict[str, Any]:
             "name": project.name,
             "description": project.description or "",
         },
-        "repo": {
-            "url": (getattr(project, "repo_url", "") or None),
-            "base_branch": (getattr(project, "base_branch", "") or None),
-            "work_branch": (getattr(issue, "git_work_branch", "") or None),
-        },
+        "repo": _repo_context(project, issue),
         "parent": (
             {
                 "identifier": _issue_identifier(parent),

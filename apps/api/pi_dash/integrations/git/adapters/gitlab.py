@@ -40,6 +40,9 @@ def _normalize_host(host: str) -> str:
         return "https://gitlab.com"
     if not host.startswith(("http://", "https://")):
         host = f"https://{host}"
+    parsed = urlparse(host)
+    if parsed.scheme in {"http", "https"} and parsed.netloc:
+        return f"{parsed.scheme.lower()}://{parsed.netloc.lower()}".rstrip("/")
     return host.rstrip("/")
 
 
@@ -98,8 +101,13 @@ class GitLabClient:
 
     def _request(self, method: str, path: str, **kwargs) -> requests.Response:
         kwargs.setdefault("timeout", self._timeout)
+        kwargs.setdefault("allow_redirects", False)
         url = path if path.startswith("http") else f"{self._api_base}{path}"
+        if path.startswith("http") and _normalize_host(path) != self._host_url:
+            raise GitProviderPermissionError("GitLab API request target does not match the configured host")
         response = requests.request(method, url, headers=self._headers(), **kwargs)
+        if 300 <= response.status_code < 400:
+            raise GitProviderPermissionError("GitLab API redirects are not followed")
         if response.status_code == 401:
             raise GitProviderAuthError(response.text)
         if response.status_code == 403:
@@ -192,6 +200,8 @@ class GitLabAdapter:
     def _client(self, credential: dict) -> GitLabClient:
         host_url = credential.get("host_url") or getattr(settings, "GITLAB_HOST", "") or "https://gitlab.com"
         normalized_host_url = _normalize_host(host_url)
+        if urlparse(normalized_host_url).scheme != "https":
+            raise GitProviderPermissionError("GitLab host must use HTTPS")
         if not self._host_allowed(normalized_host_url):
             raise GitProviderPermissionError(
                 "GitLab host is not allowed; ask an instance admin to add it to GITLAB_ALLOWED_HOSTS."

@@ -484,7 +484,7 @@ GitLab API base is:
 <host_url>/api/v4
 ```
 
-For self-managed GitLab, avoid arbitrary host SSRF by using an allowlist from instance/admin or deployment configuration. Do not let any workspace user-provided URL become an API base without validation. Pi Dash Cloud should default to `gitlab.com` only; customer/self-managed GitLab hosts should be added by operations or instance administration before workspace users can connect credentials or bind repositories for that host.
+For self-managed GitLab, avoid arbitrary host SSRF by using an allowlist from instance/admin or deployment configuration. Do not let any workspace user-provided URL become an API base without validation. Pi Dash Cloud should default to `gitlab.com` only; customer/self-managed GitLab hosts should be added by operations or instance administration before workspace users can connect credentials or bind repositories for that host. Provider API calls should require HTTPS and should not follow redirects; a redirect from an allowlisted host to a different target must fail closed.
 
 ### URL parsing
 

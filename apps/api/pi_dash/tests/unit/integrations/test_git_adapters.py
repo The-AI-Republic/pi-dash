@@ -67,6 +67,7 @@ def test_gitlab_account_verify_allows_gitlab_com(settings, mocker):
     assert identity["username"] == "octo"
     request.assert_called_once()
     assert request.call_args.args[:2] == ("GET", "https://gitlab.com/api/v4/user")
+    assert request.call_args.kwargs["allow_redirects"] is False
 
 
 def test_gitlab_account_verify_allows_configured_self_managed_host(settings, mocker):
@@ -82,6 +83,7 @@ def test_gitlab_account_verify_allows_configured_self_managed_host(settings, moc
     assert identity["username"] == "self-managed"
     request.assert_called_once()
     assert request.call_args.args[:2] == ("GET", "https://gitlab.example.com/api/v4/user")
+    assert request.call_args.kwargs["allow_redirects"] is False
 
 
 @pytest.mark.parametrize(
@@ -96,7 +98,31 @@ def test_gitlab_account_verify_rejects_unconfigured_hosts_before_http(settings, 
     settings.GITLAB_ALLOWED_HOSTS = []
     request = mocker.patch("pi_dash.integrations.git.adapters.gitlab.requests.request")
 
-    with pytest.raises(GitProviderPermissionError, match="GitLab host is not allowed"):
+    with pytest.raises(GitProviderPermissionError, match="GitLab host (is not allowed|must use HTTPS)"):
         GitLabAdapter().verify_provider_account({"token": "token", "host_url": host_url})
 
     request.assert_not_called()
+
+
+def test_gitlab_account_verify_rejects_insecure_allowlisted_host_before_http(settings, mocker):
+    settings.GITLAB_ALLOWED_HOSTS = ["http://gitlab.example.com"]
+    request = mocker.patch("pi_dash.integrations.git.adapters.gitlab.requests.request")
+
+    with pytest.raises(GitProviderPermissionError, match="must use HTTPS"):
+        GitLabAdapter().verify_provider_account({"token": "token", "host_url": "http://gitlab.example.com"})
+
+    request.assert_not_called()
+
+
+def test_gitlab_account_verify_rejects_redirects(settings, mocker):
+    settings.GITLAB_ALLOWED_HOSTS = []
+    request = mocker.patch("pi_dash.integrations.git.adapters.gitlab.requests.request")
+    response = mocker.Mock(status_code=302, headers={"Location": "https://evil.example.com"}, text="")
+    response.raise_for_status.return_value = None
+    request.return_value = response
+
+    with pytest.raises(GitProviderPermissionError, match="redirects are not followed"):
+        GitLabAdapter().verify_provider_account({"token": "token", "host_url": "https://gitlab.com"})
+
+    request.assert_called_once()
+    assert request.call_args.kwargs["allow_redirects"] is False
