@@ -109,8 +109,10 @@ app.conf.beat_schedule = {
         "task": "pi_dash.bgtasks.agent_ticker.scan_due_tickers",
         "schedule": crontab(minute="*"),
     },
-    # Git provider Issue Sync — see .ai_design/git_support_generalization/design.md.
-    "git-issue-sync-every-4h": {
+    # Git provider Issue Sync — keep the legacy schedule name so
+    # django-celery-beat updates existing GitHub rows instead of running the old
+    # GitHub poller and the new provider-neutral poller in parallel.
+    "github-issue-sync-every-4h": {
         "task": "pi_dash.bgtasks.git_sync_task.sync_all_bindings",
         "schedule": crontab(minute=0, hour="*/4"),
     },

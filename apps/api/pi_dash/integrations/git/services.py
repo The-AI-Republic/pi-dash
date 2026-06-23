@@ -60,6 +60,15 @@ def account_credential(account: GitProviderAccount) -> dict:
     return config
 
 
+def _provider_account_queryset(*, workspace: Workspace, provider: str, host_url: str):
+    return GitProviderAccount.objects.filter(
+        workspace=workspace,
+        provider=provider,
+        host_url=normalize_host_url(host_url),
+        status__in=[GitProviderAccount.Status.CONNECTED, GitProviderAccount.Status.DEGRADED],
+    )
+
+
 def create_provider_account(
     *,
     workspace: Workspace,
@@ -113,13 +122,7 @@ def select_provider_account(
     host_url: str,
     provider_account_id=None,
 ) -> GitProviderAccount:
-    normalized_host_url = normalize_host_url(host_url)
-    queryset = GitProviderAccount.objects.filter(
-        workspace=workspace,
-        provider=provider,
-        host_url=normalized_host_url,
-        status__in=[GitProviderAccount.Status.CONNECTED, GitProviderAccount.Status.DEGRADED],
-    )
+    queryset = _provider_account_queryset(workspace=workspace, provider=provider, host_url=host_url)
     if provider_account_id:
         account = queryset.filter(id=provider_account_id).first()
         if account is None:
@@ -131,6 +134,70 @@ def select_provider_account(
     if count > 1:
         raise ProviderAccountAmbiguous("Multiple provider accounts can access this host; choose one")
     return queryset.first()
+
+
+def _account_preference(account: GitProviderAccount) -> tuple[int, str]:
+    capabilities = account.capabilities or {}
+    auth_type = account.auth_type
+    if auth_type == GitProviderAccount.AuthType.PAT and capabilities.get("write_comments"):
+        return (0, str(account.created_at))
+    if capabilities.get("write_comments"):
+        return (1, str(account.created_at))
+    if auth_type == GitProviderAccount.AuthType.PAT:
+        return (2, str(account.created_at))
+    if auth_type == GitProviderAccount.AuthType.GITHUB_APP:
+        return (3, str(account.created_at))
+    return (4, str(account.created_at))
+
+
+def resolve_provider_account_repository(
+    *,
+    workspace: Workspace,
+    parsed,
+    provider_account_id=None,
+) -> tuple[GitProviderAccount, RemoteRepository]:
+    adapter = get_adapter(parsed.provider)
+    if provider_account_id:
+        account = select_provider_account(
+            workspace=workspace,
+            provider=parsed.provider,
+            host_url=parsed.host_url,
+            provider_account_id=provider_account_id,
+        )
+        return account, adapter.get_repository(account_credential(account), parsed)
+
+    accounts = list(
+        _provider_account_queryset(
+            workspace=workspace,
+            provider=parsed.provider,
+            host_url=parsed.host_url,
+        ).order_by("created_at")
+    )
+    if not accounts:
+        raise ProviderAccountRequired("Connect a provider account before binding this repository")
+    if len(accounts) == 1:
+        account = accounts[0]
+        return account, adapter.get_repository(account_credential(account), parsed)
+
+    matches: list[tuple[GitProviderAccount, RemoteRepository]] = []
+    last_provider_error: Exception | None = None
+    for account in accounts:
+        try:
+            matches.append((account, adapter.get_repository(account_credential(account), parsed)))
+        except (GitProviderAuthError, GitProviderPermissionError, GitProviderNotFoundError) as exc:
+            last_provider_error = exc
+
+    if not matches:
+        if last_provider_error is not None:
+            raise last_provider_error
+        raise ProviderAccountRequired("Connect a provider account before binding this repository")
+
+    best_rank = min(_account_preference(account)[0] for account, _remote in matches)
+    best_matches = [(account, remote) for account, remote in matches if _account_preference(account)[0] == best_rank]
+    if len(best_matches) == 1:
+        return best_matches[0]
+
+    raise ProviderAccountAmbiguous("Multiple provider accounts can access this repository; choose one")
 
 
 def upsert_repository(remote: RemoteRepository, *, host_url: str) -> GitRepository:
@@ -241,14 +308,11 @@ def bind_repository(
 
     workspace = get_object_or_404(Workspace, slug=workspace_slug)
     project = get_object_or_404(Project, pk=project_id, workspace=workspace)
-    account = select_provider_account(
+    account, remote = resolve_provider_account_repository(
         workspace=workspace,
-        provider=parsed.provider,
-        host_url=parsed.host_url,
         provider_account_id=provider_account_id,
+        parsed=parsed,
     )
-    adapter = get_adapter(parsed.provider)
-    remote = adapter.get_repository(account_credential(account), parsed)
     repo = upsert_repository(remote, host_url=parsed.host_url)
     clone_url = canonical_clone_url(remote, parsed.clone_url)
     clone_auth_mode = (
