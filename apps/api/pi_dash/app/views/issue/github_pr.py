@@ -21,6 +21,7 @@ from pi_dash.utils.github_pr_links import (
     IssueNotFound,
     PullRequestAlreadyLinked,
     attach_pull_request,
+    detach_pull_request_link,
 )
 
 
@@ -68,5 +69,5 @@ class GithubPullRequestLinkViewSet(BaseViewSet):
 
     def destroy(self, request, slug, project_id, issue_id, pk):
         link = self.get_queryset().get(pk=pk)
-        link.delete()
+        detach_pull_request_link(link)
         return Response(status=status.HTTP_204_NO_CONTENT)

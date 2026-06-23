@@ -519,12 +519,17 @@ class GithubIntegrationDisconnectEndpoint(BaseAPIView):
                 is_sync_enabled=False,
                 last_sync_error="Workspace GitHub integration disconnected",
             )
-            GitProviderAccount.objects.filter(
+            pat_accounts = GitProviderAccount.objects.filter(
                 workspace=workspace,
                 provider=GitProviderAccount.Provider.GITHUB,
                 auth_type=GitProviderAccount.AuthType.PAT,
                 workspace_integration=wi,
-            ).update(
+            )
+            GitRepositoryBinding.objects.filter(provider_account__in=pat_accounts).update(
+                is_sync_enabled=False,
+                last_sync_error="Workspace GitHub integration disconnected",
+            )
+            pat_accounts.update(
                 status=GitProviderAccount.Status.REVOKED,
                 last_check_error="Workspace GitHub integration disconnected",
                 credential_config={"auth_type": "pat", "host_url": "https://github.com", "token": ""},

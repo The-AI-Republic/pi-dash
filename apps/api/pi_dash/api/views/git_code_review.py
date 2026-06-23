@@ -17,6 +17,7 @@ from pi_dash.integrations.git.code_reviews import (
     InvalidCodeReviewURL,
     IssueNotFound,
     attach_code_review,
+    detach_code_review_link,
 )
 
 
@@ -95,5 +96,5 @@ class GitCodeReviewLinkDetailAPIEndpoint(BaseAPIView):
 
     def delete(self, request, slug, project_id, issue_id, pk):
         link = self.get_queryset().get(pk=pk)
-        link.delete()
+        detach_code_review_link(link)
         return Response(status=status.HTTP_204_NO_CONTENT)

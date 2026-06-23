@@ -5,7 +5,7 @@
 import pytest
 from rest_framework import status as http_status
 
-from pi_dash.db.models import GitCodeReviewLink, Issue, Project, ProjectMember
+from pi_dash.db.models import GitCodeReviewLink, GithubPullRequestLink, Issue, Project, ProjectMember
 
 
 pytestmark = [pytest.mark.contract, pytest.mark.django_db]
@@ -76,6 +76,8 @@ def test_attach_github_pull_request_uses_neutral_shape(api_key_client, workspace
     assert response.data["namespace"] == "acme"
     assert response.data["repo_name"] == "web"
     assert response.data["external_iid"] == "42"
+    legacy_link = GithubPullRequestLink.objects.get(repo_owner="acme", repo_name="web", pr_number=42)
+    assert legacy_link.issue_id == issue.id
 
 
 def test_attach_is_idempotent_for_same_issue(api_key_client, workspace, review_project, issue):
@@ -119,6 +121,38 @@ def test_attach_conflict_when_review_linked_to_other_issue(api_key_client, works
     assert response.status_code == http_status.HTTP_409_CONFLICT
 
 
+def test_attach_github_conflicts_when_legacy_pr_linked_to_other_issue(
+    api_key_client,
+    workspace,
+    review_project,
+    issue,
+    create_user,
+):
+    other_issue = Issue.objects.create(
+        name="another issue",
+        project=review_project,
+        workspace=review_project.workspace,
+        created_by=create_user,
+    )
+    GithubPullRequestLink.objects.create(
+        project=review_project,
+        issue=other_issue,
+        repo_owner="acme",
+        repo_name="web",
+        pr_number=10,
+        url="https://github.com/acme/web/pull/10",
+    )
+
+    response = api_key_client.post(
+        _list_url(workspace.slug, review_project.id, issue.id),
+        {"url": "https://github.com/acme/web/pull/10"},
+        format="json",
+    )
+
+    assert response.status_code == http_status.HTTP_409_CONFLICT
+    assert GitCodeReviewLink.objects.filter(provider="github", namespace="acme", repo_name="web").count() == 0
+
+
 def test_list_and_detach(api_key_client, workspace, review_project, issue):
     link = GitCodeReviewLink.objects.create(
         project=review_project,
@@ -138,3 +172,30 @@ def test_list_and_detach(api_key_client, workspace, review_project, issue):
 
     delete_response = api_key_client.delete(_detail_url(workspace.slug, review_project.id, issue.id, link.id))
     assert delete_response.status_code == http_status.HTTP_204_NO_CONTENT
+
+
+def test_detach_github_code_review_soft_deletes_legacy_pr_link(api_key_client, workspace, review_project, issue):
+    link = GitCodeReviewLink.objects.create(
+        project=review_project,
+        issue=issue,
+        provider="github",
+        host_url="https://github.com",
+        namespace="acme",
+        repo_name="web",
+        external_iid="12",
+        url="https://github.com/acme/web/pull/12",
+    )
+    legacy_link = GithubPullRequestLink.objects.create(
+        project=review_project,
+        issue=issue,
+        repo_owner="acme",
+        repo_name="web",
+        pr_number=12,
+        url="https://github.com/acme/web/pull/12",
+    )
+
+    delete_response = api_key_client.delete(_detail_url(workspace.slug, review_project.id, issue.id, link.id))
+
+    assert delete_response.status_code == http_status.HTTP_204_NO_CONTENT
+    assert GitCodeReviewLink.objects.filter(pk=link.id).count() == 0
+    assert GithubPullRequestLink.objects.filter(pk=legacy_link.id).count() == 0
