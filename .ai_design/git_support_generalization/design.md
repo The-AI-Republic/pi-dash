@@ -476,7 +476,7 @@ This is intentionally separate from GitLab issue/MR parity. Without it, GitLab p
 Start with:
 
 - `https://gitlab.com`
-- configured self-hosted GitLab hosts from admin settings
+- self-managed GitLab hosts from an explicit instance-admin or ops-controlled allowlist
 
 GitLab API base is:
 
@@ -484,7 +484,7 @@ GitLab API base is:
 <host_url>/api/v4
 ```
 
-For self-hosted GitLab, avoid arbitrary host SSRF by using an allowlist from configuration or workspace admin settings. Do not let any user-provided URL become an API base without validation.
+For self-managed GitLab, avoid arbitrary host SSRF by using an allowlist from instance/admin or deployment configuration. Do not let any workspace user-provided URL become an API base without validation. Pi Dash Cloud should default to `gitlab.com` only; customer/self-managed GitLab hosts should be added by operations or instance administration before workspace users can connect credentials or bind repositories for that host.
 
 ### URL parsing
 

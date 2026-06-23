@@ -44,11 +44,17 @@ def _normalize_host(host: str) -> str:
 
 
 def _allowed_hosts() -> set[str]:
-    configured = {
-        _normalize_host(getattr(settings, "GITLAB_HOST", "") or "https://gitlab.com"),
-        "https://gitlab.com",
-    }
-    for host in getattr(settings, "GITLAB_ALLOWED_HOSTS", []) or []:
+    configured = {"https://gitlab.com"}
+    gitlab_host = getattr(settings, "GITLAB_HOST", "") or ""
+    if gitlab_host:
+        configured.add(_normalize_host(gitlab_host))
+
+    raw_allowed_hosts = getattr(settings, "GITLAB_ALLOWED_HOSTS", []) or []
+    if isinstance(raw_allowed_hosts, str):
+        raw_allowed_hosts = raw_allowed_hosts.split(",")
+    for host in raw_allowed_hosts:
+        if not host:
+            continue
         configured.add(_normalize_host(host))
     return configured
 
@@ -178,14 +184,19 @@ class GitLabAdapter:
         token = credential.get("token") or ""
         if token:
             try:
-                return decrypt_data(token)
+                return decrypt_data(token) or token
             except Exception:
                 return token
         raise GitProviderAuthError("GitLab token is missing")
 
     def _client(self, credential: dict) -> GitLabClient:
         host_url = credential.get("host_url") or getattr(settings, "GITLAB_HOST", "") or "https://gitlab.com"
-        return GitLabClient(self._token(credential), host_url=host_url)
+        normalized_host_url = _normalize_host(host_url)
+        if not self._host_allowed(normalized_host_url):
+            raise GitProviderPermissionError(
+                "GitLab host is not allowed; ask an instance admin to add it to GITLAB_ALLOWED_HOSTS."
+            )
+        return GitLabClient(self._token(credential), host_url=normalized_host_url)
 
     def _host_allowed(self, host_url: str) -> bool:
         return _normalize_host(host_url) in _allowed_hosts()

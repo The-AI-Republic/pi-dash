@@ -42,6 +42,7 @@
 - [ ] Add GitLab repo URL parser.
 - [ ] Add GitLab merge request URL parser.
 - [ ] Add self-hosted GitLab host allowlist support.
+- [ ] Reject GitLab provider-account verification for hosts outside `gitlab.com` and the admin/ops allowlist before any outbound HTTP request.
 - [ ] Add parser tests for GitHub HTTPS repo URLs.
 - [ ] Add parser tests for GitHub SSH repo URLs.
 - [ ] Add parser tests for GitHub PR URLs.
