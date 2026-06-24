@@ -1632,15 +1632,41 @@ impl ChatWorker {
         payload: serde_json::Value,
     ) {
         *bridge_seq = (*bridge_seq).saturating_add(1);
-        self.out
-            .send(ClientMsg::ChatEvent {
-                chat_session_id,
-                bridge_seq: *bridge_seq,
-                kind: "chat_timing".into(),
-                payload: timing_payload(stage, payload),
-            })
-            .await
-            .ok();
+        let out = self.out.clone();
+        let event = ClientMsg::ChatEvent {
+            chat_session_id,
+            bridge_seq: *bridge_seq,
+            kind: "chat_timing".into(),
+            payload: timing_payload(stage, payload),
+        };
+        tokio::spawn(async move {
+            match tokio::time::timeout(Duration::from_secs(2), out.send(event)).await {
+                Ok(Ok(())) => {}
+                Ok(Err(e)) => {
+                    tracing::debug!(error = %e, "chat timing event post failed");
+                }
+                Err(_) => {
+                    tracing::debug!("chat timing event post timed out");
+                }
+            }
+        });
+    }
+
+    fn send_chat_started_event(&self, chat_session_id: uuid::Uuid, thread_id: String) {
+        let out = self.out.clone();
+        tokio::spawn(async move {
+            if let Err(e) = out
+                .send(ClientMsg::ChatStarted {
+                    chat_session_id,
+                    local_thread_id: thread_id.clone(),
+                    local_session_id: Some(thread_id),
+                    started_at: Utc::now(),
+                })
+                .await
+            {
+                tracing::debug!(error = %e, "chat started event post failed");
+            }
+        });
     }
 
     async fn handle_warm(
@@ -1737,15 +1763,7 @@ impl ChatWorker {
         .await;
         match warmed_thread_id.as_ref() {
             Some(thread_id) if !*started_sent => {
-                self.out
-                    .send(ClientMsg::ChatStarted {
-                        chat_session_id,
-                        local_thread_id: thread_id.clone(),
-                        local_session_id: Some(thread_id.clone()),
-                        started_at: Utc::now(),
-                    })
-                    .await
-                    .ok();
+                self.send_chat_started_event(chat_session_id, thread_id.clone());
                 *started_sent = true;
             }
             _ => {}
@@ -1868,15 +1886,7 @@ impl ChatWorker {
         )
         .await;
         if !*started_sent {
-            self.out
-                .send(ClientMsg::ChatStarted {
-                    chat_session_id,
-                    local_thread_id: turn_id.clone(),
-                    local_session_id: Some(turn_id.clone()),
-                    started_at: Utc::now(),
-                })
-                .await
-                .ok();
+            self.send_chat_started_event(chat_session_id, turn_id.clone());
             *started_sent = true;
         }
         self.out
