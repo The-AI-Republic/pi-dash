@@ -99,6 +99,7 @@ const RunnerChatPage = observer(function RunnerChatPage() {
   const [liveMessages, setLiveMessages] = useState<IAgentChatMessage[]>([]);
   const warmSessionRef = useRef<string | null>(null);
   const createWarmKeyRef = useRef<string | null>(null);
+  const precreatedSessionRef = useRef<IAgentChatSession | null>(null);
   const appliedDeltaSeqsRef = useRef<Set<number>>(new Set());
   const streamStartedAtRef = useRef(Date.now());
 
@@ -121,6 +122,7 @@ const RunnerChatPage = observer(function RunnerChatPage() {
   useEffect(() => {
     warmSessionRef.current = null;
     createWarmKeyRef.current = null;
+    precreatedSessionRef.current = null;
     setEvents([]);
   }, [runnerId]);
 
@@ -161,7 +163,14 @@ const RunnerChatPage = observer(function RunnerChatPage() {
           runner: runnerId,
         });
         if (cancelled) return;
+        precreatedSessionRef.current = created;
         warmSessionRef.current = created.id;
+        mutateSessions((current) => {
+          const currentSessions = current ?? [];
+          return currentSessions.some((item) => item.id === created.id)
+            ? currentSessions
+            : [created, ...currentSessions];
+        }, false);
         await service.warmChatSession(created.id);
         mutateSessions();
       } catch {
@@ -211,11 +220,19 @@ const RunnerChatPage = observer(function RunnerChatPage() {
 
   async function ensureSession(): Promise<IAgentChatSession> {
     if (session?.status === "open") return session;
+    const precreated = precreatedSessionRef.current;
+    if (precreated?.status === "open" && precreated.workspace === workspaceId && precreated.runner === runnerId) {
+      return precreated;
+    }
     const created = await service.createChatSession({
       workspace: workspaceId!,
       runner: runnerId!,
     });
-    await mutateSessions();
+    precreatedSessionRef.current = created;
+    await mutateSessions((current) => {
+      const currentSessions = current ?? [];
+      return currentSessions.some((item) => item.id === created.id) ? currentSessions : [created, ...currentSessions];
+    }, false);
     return created;
   }
 
