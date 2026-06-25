@@ -22,6 +22,7 @@ import type {
 } from "@pi-dash/types";
 import { EIssuesStoreType } from "@pi-dash/types";
 import { useIssues } from "./store/use-issues";
+import { useGlobalViewId } from "./use-global-view-id";
 
 export interface IssueActions {
   fetchIssues: (
@@ -670,16 +671,19 @@ const useArchivedIssueActions = () => {
 
 const useGlobalIssueActions = () => {
   // router
-  const { workspaceSlug: routerWorkspaceSlug, globalViewId: routerGlobalViewId } = useParams();
+  const { workspaceSlug: routerWorkspaceSlug } = useParams();
   const workspaceSlug = routerWorkspaceSlug?.toString();
-  const globalViewId = routerGlobalViewId?.toString();
+  // The view id comes from the route param on `/workspace-views/:globalViewId`
+  // and from context on the param-less `/all-issues` route.
+  const globalViewId = useGlobalViewId();
   // store hooks
   const { issues, issuesFilter } = useIssues(EIssuesStoreType.GLOBAL);
 
   const fetchIssues = useCallback(
-    async (loadType: TLoader, options: IssuePaginationOptions) => {
-      if (!workspaceSlug || !globalViewId) return;
-      return issues.fetchIssues(workspaceSlug.toString(), globalViewId.toString(), loadType, options);
+    async (loadType: TLoader, options: IssuePaginationOptions, viewId?: string) => {
+      const resolvedViewId = viewId ?? globalViewId;
+      if (!workspaceSlug || !resolvedViewId) return;
+      return issues.fetchIssues(workspaceSlug.toString(), resolvedViewId.toString(), loadType, options);
     },
     [issues.fetchIssues, workspaceSlug, globalViewId]
   );
@@ -693,6 +697,15 @@ const useGlobalIssueActions = () => {
 
   const createIssue = useCallback(
     async (projectId: string | undefined | null, data: Partial<TIssue>) => {
+      if (!workspaceSlug || !projectId) return;
+      return await issues.createIssue(workspaceSlug, projectId, data);
+    },
+    [issues.createIssue, workspaceSlug]
+  );
+  // The workspace store has no dedicated quick-add; inline creation at workspace
+  // scope picks a project and goes through the normal create path.
+  const quickAddIssue = useCallback(
+    async (projectId: string | undefined | null, data: TIssue) => {
       if (!workspaceSlug || !projectId) return;
       return await issues.createIssue(workspaceSlug, projectId, data);
     },
@@ -712,6 +725,13 @@ const useGlobalIssueActions = () => {
     },
     [issues.removeIssue, workspaceSlug]
   );
+  const archiveIssue = useCallback(
+    async (projectId: string | undefined | null, issueId: string) => {
+      if (!workspaceSlug || !projectId) return;
+      return await issues.archiveIssue(workspaceSlug, projectId, issueId);
+    },
+    [issues.archiveIssue, workspaceSlug]
+  );
 
   const updateFilters = useCallback(
     async (projectId: string, filterType: TSupportedFilterTypeForUpdate, filters: TSupportedFilterForUpdate) => {
@@ -726,11 +746,13 @@ const useGlobalIssueActions = () => {
       fetchIssues,
       fetchNextIssues,
       createIssue,
+      quickAddIssue,
       updateIssue,
       removeIssue,
+      archiveIssue,
       updateFilters,
     }),
-    [createIssue, updateIssue, removeIssue, updateFilters]
+    [fetchIssues, fetchNextIssues, createIssue, quickAddIssue, updateIssue, removeIssue, archiveIssue, updateFilters]
   );
 };
 

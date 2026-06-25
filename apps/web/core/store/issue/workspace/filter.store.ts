@@ -29,6 +29,7 @@ import { WorkspaceService } from "@/services/workspace.service";
 import type { IBaseIssueFilterStore, IIssueFilterHelperStore } from "../helpers/issue-filter-helper.store";
 import { IssueFilterHelperStore } from "../helpers/issue-filter-helper.store";
 import type { IIssueRootStore } from "../root.store";
+import { getWorkspaceDefaultDisplayFilters, normalizeWorkspaceDisplayFilters } from "./display-filter-defaults";
 
 type TWorkspaceFilters = TStaticViewTypes;
 
@@ -100,7 +101,13 @@ export class WorkspaceIssuesFilter extends IssueFilterHelperStore implements IWo
     const userFilters = this.getIssueFilters(viewId);
     if (!userFilters) return undefined;
 
-    const filteredParams = handleIssueQueryParamsByLayout(EIssueLayoutTypes.SPREADSHEET, "my_issues");
+    // Use the view's active layout (not a hardcoded spreadsheet) so layout-specific
+    // params like group_by/sub_group_by are sent to the server — otherwise the
+    // list/board layouts would never receive grouped issues.
+    const filteredParams = handleIssueQueryParamsByLayout(
+      userFilters?.displayFilters?.layout ?? EIssueLayoutTypes.SPREADSHEET,
+      "my_issues"
+    );
     if (!filteredParams) return undefined;
 
     const filteredRouteParams: Partial<Record<TIssueParams, string | boolean>> = this.computedFilteredParams(
@@ -158,30 +165,30 @@ export class WorkspaceIssuesFilter extends IssueFilterHelperStore implements IWo
       sub_group_by: [],
     };
 
-    const _filters = this.handleIssuesLocalFilters.get(EIssuesStoreType.GLOBAL, workspaceSlug, undefined, viewId);
-    displayFilters = this.computedDisplayFilters(_filters?.display_filters, {
-      layout: EIssueLayoutTypes.SPREADSHEET,
-      order_by: "-created_at",
-    });
-    displayProperties = this.computedDisplayProperties(_filters?.display_properties);
+    const localFilters = this.handleIssuesLocalFilters.get(EIssuesStoreType.GLOBAL, workspaceSlug, undefined, viewId);
+    const defaultDisplayFilters = getWorkspaceDefaultDisplayFilters(viewId);
+    displayFilters = this.computedDisplayFilters(localFilters?.display_filters, defaultDisplayFilters);
+    displayFilters = normalizeWorkspaceDisplayFilters(viewId, displayFilters, localFilters?.display_filters);
+    displayProperties = this.computedDisplayProperties(localFilters?.display_properties);
     kanbanFilters = {
-      group_by: _filters?.kanban_filters?.group_by || [],
-      sub_group_by: _filters?.kanban_filters?.sub_group_by || [],
+      group_by: localFilters?.kanban_filters?.group_by || [],
+      sub_group_by: localFilters?.kanban_filters?.sub_group_by || [],
     };
 
     // Get the view details if the view is not a static view
     if (STATIC_VIEW_TYPES.includes(viewId) === false) {
-      const _filters = await this.issueFilterService.getViewDetails(workspaceSlug, viewId);
-      richFilters = _filters?.rich_filters;
-      displayFilters = this.computedDisplayFilters(_filters?.display_filters, {
+      const viewFilters = await this.issueFilterService.getViewDetails(workspaceSlug, viewId);
+      richFilters = viewFilters?.rich_filters;
+      displayFilters = this.computedDisplayFilters(viewFilters?.display_filters, {
         layout: EIssueLayoutTypes.SPREADSHEET,
         order_by: "-created_at",
       });
-      displayProperties = this.computedDisplayProperties(_filters?.display_properties);
+      displayProperties = this.computedDisplayProperties(viewFilters?.display_properties);
     }
 
-    // override existing order by if ordered by manual sort_order
-    if (displayFilters.order_by === "sort_order") {
+    // Workspace custom views do not support manual project ordering as a default.
+    // The static Work Items view is the exception because it mirrors project issues.
+    if (viewId !== "all-issues" && displayFilters.order_by === "sort_order") {
       displayFilters.order_by = "-created_at";
     }
 
@@ -242,7 +249,9 @@ export class WorkspaceIssuesFilter extends IssueFilterHelperStore implements IWo
             _filters.displayFilters.sub_group_by = null;
             updatedDisplayFilters.sub_group_by = null;
           }
-          // set group_by to state if layout is switched to kanban and group_by is null
+          // Default the board to group by state when none is set (matches the
+          // project board). Users can switch to "State groups" for a single
+          // column per state group across projects via the Display dropdown.
           if (_filters.displayFilters.layout === "kanban" && _filters.displayFilters.group_by === null) {
             _filters.displayFilters.group_by = "state";
             updatedDisplayFilters.group_by = "state";

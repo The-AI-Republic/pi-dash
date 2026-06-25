@@ -12,8 +12,7 @@ import { autoScrollForElements } from "@atlaskit/pragmatic-drag-and-drop-auto-sc
 import { observer } from "mobx-react";
 import { useParams } from "next/navigation";
 import { EIssueFilterType, EUserPermissions, EUserPermissionsLevel } from "@pi-dash/constants";
-import type { EIssuesStoreType } from "@pi-dash/types";
-import { EIssueServiceType, EIssueLayoutTypes } from "@pi-dash/types";
+import { EIssuesStoreType, EIssueServiceType, EIssueLayoutTypes } from "@pi-dash/types";
 //hooks
 import { useIssueDetail } from "@/hooks/store/use-issue-detail";
 import { useIssues } from "@/hooks/store/use-issues";
@@ -39,6 +38,7 @@ export type KanbanStoreType =
   | EIssuesStoreType.CYCLE
   | EIssuesStoreType.PROJECT_VIEW
   | EIssuesStoreType.PROFILE
+  | EIssuesStoreType.GLOBAL
   | EIssuesStoreType.TEAM
   | EIssuesStoreType.TEAM_VIEW
   | EIssuesStoreType.EPIC;
@@ -122,12 +122,18 @@ export const BaseKanBanRoot = observer(function BaseKanBanRoot(props: IBaseKanBa
   const [draggedIssueId, setDraggedIssueId] = useState<string | undefined>(undefined);
   const [deleteIssueModal, setDeleteIssueModal] = useState(false);
 
+  // The global (workspace "all issues") board spans projects, so its create/edit
+  // gate is evaluated at the workspace level rather than per-project.
   const isEditingAllowed = allowPermissions(
     [EUserPermissions.ADMIN, EUserPermissions.MEMBER],
-    EUserPermissionsLevel.PROJECT
+    storeType === EIssuesStoreType.GLOBAL ? EUserPermissionsLevel.WORKSPACE : EUserPermissionsLevel.PROJECT
   );
 
-  const handleOnDrop = useGroupIssuesDragNDrop(storeType, orderBy, group_by, sub_group_by);
+  const handleGroupDrop = useGroupIssuesDragNDrop(storeType, orderBy, group_by, sub_group_by);
+  // Drag-to-move is disabled at workspace scope: columns (states) are
+  // project-specific, so a cross-project reorder/move has no single target.
+  // Cards remain editable via their inline property pills and quick actions.
+  const handleOnDrop = storeType === EIssuesStoreType.GLOBAL ? async () => {} : handleGroupDrop;
 
   const canEditProperties = useCallback(
     (projectId: string | undefined) => {

@@ -203,7 +203,7 @@ export const WORKSPACE_SIDEBAR_DYNAMIC_NAVIGATION_ITEMS: Record<string, IWorkspa
   views: {
     key: "views",
     labelTranslationKey: "Views",
-    href: `/workspace-views/all-issues/`,
+    href: `/all-issues/`,
     access: [EUserWorkspaceRoles.ADMIN, EUserWorkspaceRoles.MEMBER, EUserWorkspaceRoles.GUEST],
     highlight: (pathname: string, url: string) => pathname.includes(url),
   },

@@ -11,8 +11,7 @@ import useSWR from "swr";
 // pi dash imports
 import { GLOBAL_VIEW_TRACKER_ELEMENTS, ISSUE_DISPLAY_FILTERS_BY_PAGE } from "@pi-dash/constants";
 import { EmptyStateDetailed } from "@pi-dash/propel/empty-state";
-import type { EIssueLayoutTypes } from "@pi-dash/types";
-import { EIssuesStoreType, STATIC_VIEW_TYPES } from "@pi-dash/types";
+import { EIssueLayoutTypes, EIssuesStoreType, STATIC_VIEW_TYPES } from "@pi-dash/types";
 // assets
 // components
 import { IssuePeekOverview, IssuePeekUrlSync } from "@/components/issues/peek-overview";
@@ -23,6 +22,7 @@ import { WorkItemFiltersRow } from "@/components/work-item-filters/filters-row";
 import { useGlobalView } from "@/hooks/store/use-global-view";
 import { useIssues } from "@/hooks/store/use-issues";
 import { useAppRouter } from "@/hooks/use-app-router";
+import { useGlobalViewId } from "@/hooks/use-global-view-id";
 import { IssuesStoreContext } from "@/hooks/use-issue-layout-store";
 import { useWorkspaceIssueProperties } from "@/hooks/use-workspace-issue-properties";
 
@@ -36,9 +36,9 @@ export const AllIssueLayoutRoot = observer(function AllIssueLayoutRoot(props: Pr
   const { isDefaultView, isLoading = false, toggleLoading } = props;
   // router
   const router = useAppRouter();
-  const { workspaceSlug: routerWorkspaceSlug, globalViewId: routerGlobalViewId } = useParams();
+  const { workspaceSlug: routerWorkspaceSlug } = useParams();
   const workspaceSlug = routerWorkspaceSlug ? routerWorkspaceSlug.toString() : undefined;
-  const globalViewId = routerGlobalViewId ? routerGlobalViewId.toString() : undefined;
+  const globalViewId = useGlobalViewId();
   // search params
   const searchParams = useSearchParams();
   // store hooks
@@ -93,19 +93,30 @@ export const AllIssueLayoutRoot = observer(function AllIssueLayoutRoot(props: Pr
     { revalidateIfStale: false, revalidateOnFocus: false }
   );
 
-  // Fetch issues
+  // The list and board (kanban) layouts fetch their own grouped issues via their
+  // roots, so the root here only fetches the flat list the spreadsheet consumes.
+  // Filters are always fetched (the other layouts read display filters too).
+  const selfFetchingLayout = activeLayout === EIssueLayoutTypes.LIST || activeLayout === EIssueLayoutTypes.KANBAN;
+
+  // Fetch issues. The key keys on selfFetchingLayout (not the raw layout) so the
+  // spreadsheet/default case stays a single key as activeLayout resolves from
+  // undefined to its loaded value — otherwise the key would change and refetch.
   const { isLoading: issuesLoading } = useSWR(
-    workspaceSlug && globalViewId ? `WORKSPACE_GLOBAL_VIEW_ISSUES_${workspaceSlug}_${globalViewId}` : null,
+    workspaceSlug && globalViewId
+      ? `WORKSPACE_GLOBAL_VIEW_ISSUES_${workspaceSlug}_${globalViewId}_${selfFetchingLayout ? "self" : "default"}`
+      : null,
     async () => {
       if (workspaceSlug && globalViewId) {
-        clear();
-        toggleLoading(true);
         await fetchFilters(workspaceSlug, globalViewId);
-        await fetchIssues(workspaceSlug, globalViewId, groupedIssueIds ? "mutation" : "init-loader", {
-          canGroup: false,
-          perPageCount: 100,
-        });
-        toggleLoading(false);
+        if (!selfFetchingLayout) {
+          clear();
+          toggleLoading(true);
+          await fetchIssues(workspaceSlug, globalViewId, groupedIssueIds ? "mutation" : "init-loader", {
+            canGroup: false,
+            perPageCount: 100,
+          });
+          toggleLoading(false);
+        }
       }
     },
     { revalidateIfStale: false, revalidateOnFocus: false }

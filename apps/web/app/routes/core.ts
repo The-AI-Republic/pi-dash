@@ -142,6 +142,11 @@ export const coreRoutes: RouteConfigEntry[] = [
           ),
         ]),
 
+        // Workspace-wide "All work items" (shorter alias of workspace-views/all-issues)
+        layout("./(all)/[workspaceSlug]/(projects)/all-issues/layout.tsx", [
+          route(":workspaceSlug/all-issues", "./(all)/[workspaceSlug]/(projects)/all-issues/page.tsx"),
+        ]),
+
         // Archived Projects
         layout("./(all)/[workspaceSlug]/(projects)/projects/(detail)/archives/layout.tsx", [
           route(
