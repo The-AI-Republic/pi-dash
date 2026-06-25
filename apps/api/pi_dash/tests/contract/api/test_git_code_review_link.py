@@ -168,7 +168,7 @@ def test_list_and_detach(api_key_client, workspace, review_project, issue):
 
     list_response = api_key_client.get(_list_url(workspace.slug, review_project.id, issue.id))
     assert list_response.status_code == http_status.HTTP_200_OK
-    assert list_response.data["results"][0]["id"] == str(link.id)
+    assert list_response.data["results"][0]["id"] == link.id
 
     delete_response = api_key_client.delete(_detail_url(workspace.slug, review_project.id, issue.id, link.id))
     assert delete_response.status_code == http_status.HTTP_204_NO_CONTENT
