@@ -9,8 +9,8 @@ each linked PR's **own status** (open / merged / draft / closed) fresh so the is
 an overview of its PRs.
 
 **Hard non-goals:** Attaching or refreshing a PR **never** changes the Pi Dash issue's
-workflow state or any other issue field. No write-back to GitHub. Updating *the PR's
-displayed status on the issue* is **not** the same as changing *the issue's* state — only
+workflow state or any other issue field. No write-back to GitHub. Updating _the PR's
+displayed status on the issue_ is **not** the same as changing _the issue's_ state — only
 the former is in scope.
 
 ---
@@ -20,7 +20,7 @@ the former is in scope.
 Pi Dash issues are a **superset** of GitHub issues — most have no GitHub issue at all, so
 the existing mirror path (`GithubIssueSync` → `GithubRepositorySync`) cannot represent
 "this issue is implemented by GitHub PR #42." Today, when an AI agent picks up an issue
-(e.g. *"change the home-page button to blue"*), opens a PR, and posts the PR URL as a
+(e.g. _"change the home-page button to blue"_), opens a PR, and posts the PR URL as a
 free-text comment via `pidash comment add`, there is **no structured link**, **no overview
 of an issue's PRs**, and **no live status**. We want a first-class, optional **issue → PR**
 association that is cheap to create and whose PR status stays current — without inheriting
@@ -53,16 +53,16 @@ any issue-state-mutation semantics.
 
 ## 4. Background — what we build on (verified in code)
 
-| System | Where | Reuse |
-| --- | --- | --- |
-| Inbound webhook receiver | `GithubAppWebhookEndpoint` (`app/views/integration/github.py`, #261) | Add a `pull_request` branch (today it stores-and-skips it). |
-| Installation tokens (if needed) | `utils/github_app_auth.py`, `GithubClient.for_installation` (#261) | Optional best-effort snapshot at attach time when the App is connected. |
-| Issue conversation CLI | `pidash comment add <PROJECT-123> --agent-run-id "$PIDASH_AGENT_RUN_ID"` (`pi-dash-skill/shared/pidash-workflows.md`) | Add a sibling `pidash issue attach-pr` in the same style. |
-| External API surface | `pi_dash.api` (`/api/v1/`, `X-Api-Key`); `api/views/issue.py`, `api/urls/work_item.py` | New attach/detach/list endpoints. |
-| Issue identifier | `Issue.sequence_id` → `PROJECT-123` | Command accepts the human identifier. |
-| Soft-delete + partial unique pattern | `github_repository_sync_unique_per_project_when_active` (`db/models/integration/github.py`) | Same shape for detach/re-attach. |
+| System                               | Where                                                                                                                 | Reuse                                                                   |
+| ------------------------------------ | --------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------- |
+| Inbound webhook receiver             | `GithubAppWebhookEndpoint` (`app/views/integration/github.py`, #261)                                                  | Add a `pull_request` branch (today it stores-and-skips it).             |
+| Installation tokens (if needed)      | `utils/github_app_auth.py`, `GithubClient.for_installation` (#261)                                                    | Optional best-effort snapshot at attach time when the App is connected. |
+| Issue conversation CLI               | `pidash comment add <PROJECT-123> --agent-run-id "$PIDASH_AGENT_RUN_ID"` (`pi-dash-skill/shared/pidash-workflows.md`) | Add a sibling `pidash issue attach-pr` in the same style.               |
+| External API surface                 | `pi_dash.api` (`/api/v1/`, `X-Api-Key`); `api/views/issue.py`, `api/urls/work_item.py`                                | New attach/detach/list endpoints.                                       |
+| Issue identifier                     | `Issue.sequence_id` → `PROJECT-123`                                                                                   | Command accepts the human identifier.                                   |
+| Soft-delete + partial unique pattern | `github_repository_sync_unique_per_project_when_active` (`db/models/integration/github.py`)                           | Same shape for detach/re-attach.                                        |
 
-**Why not `GithubIssueSync`:** it requires a GitHub *issue* and a PAT-backed
+**Why not `GithubIssueSync`:** it requires a GitHub _issue_ and a PAT-backed
 `GithubRepositorySync`; superset issues have neither. The PR link must be standalone.
 
 ## 5. Data model
@@ -102,15 +102,19 @@ GithubPullRequestLink(BaseModel):
 ## 6. Attach via the pidash CLI
 
 ### 6.1 Command
+
 ```bash
 pidash issue attach-pr <PROJECT-123> --url <pr-url>
 ```
+
 The agent runs this after `gh pr create`. It supplies only the URL — the one datum it
 reliably has. The skill prompt (`pi-dash-skill/shared/pidash-workflows.md`) is updated to
 instruct the agent accordingly. A `detach`/`list` variant backs the UI.
 
 ### 6.2 Endpoint (external API, `pi_dash.api`)
+
 `POST /api/v1/workspaces/.../issues/<id>/github/pull-requests/`:
+
 1. Resolve the issue from the identifier **within the API key's workspace**.
 2. **Authorize:** caller must have issue edit/comment permission (not just any workspace
    key). Detach requires the same.
@@ -124,7 +128,7 @@ instruct the agent accordingly. A `detach`/`list` variant backs the UI.
 6. **Optional best-effort snapshot:** if the issue's workspace has a connected App
    installation covering the repo, fetch the PR once via `GithubClient.for_installation`
    to pre-fill `title/state/merged/draft`. If not, leave them blank — they fill on the first
-   webhook (§7). Attach never *fails* for lack of an App.
+   webhook (§7). Attach never _fails_ for lack of an App.
 
 **Why CLI, not a PR-body marker or runner event:** GitHub has no per-PR metadata field, so a
 marker means embedding an id in the PR body/commit and parsing it back — editable
@@ -184,16 +188,16 @@ Slice A is independently useful; Slice B only makes the badges current.
 
 ## 11. File-level impact map
 
-| Area | File(s) | Change |
-| --- | --- | --- |
-| Model + migration | `apps/api/pi_dash/db/models/integration/github.py`, `db/migrations/` | Add `GithubPullRequestLink` + migration. |
-| Attach/detach/list | `apps/api/pi_dash/api/views/issue.py` (or new `api/views/github_pr.py`), `api/urls/work_item.py` | Endpoints; parse + authorize + upsert. |
-| Installation client | `apps/api/pi_dash/utils/github_client.py` | `get_pull_request(owner, name, number)` (used by §6.2 optional snapshot + §7). |
-| Webhook refresh | `apps/api/pi_dash/app/views/integration/github.py` | `pull_request` branch: refresh link snapshot only (Slice B). |
-| GitHub App config | App registration | Pull requests: Read; subscribe `pull_request` (Slice B). |
-| CLI | pidash CLI (where `issue create` / `comment add` live; confirm `deployments/cli`) | New `issue attach-pr` / `detach` / `list-pr` commands. |
-| Skill prompt | `pi-dash-skill/shared/pidash-workflows.md` | Instruct the agent to run `attach-pr` after opening a PR. |
-| Types/UI | `packages/types/src/integration.ts`, issue-detail components | PR-link types + the "Pull requests" issue section. |
+| Area                | File(s)                                                                                          | Change                                                                         |
+| ------------------- | ------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------ |
+| Model + migration   | `apps/api/pi_dash/db/models/integration/github.py`, `db/migrations/`                             | Add `GithubPullRequestLink` + migration.                                       |
+| Attach/detach/list  | `apps/api/pi_dash/api/views/issue.py` (or new `api/views/github_pr.py`), `api/urls/work_item.py` | Endpoints; parse + authorize + upsert.                                         |
+| Installation client | `apps/api/pi_dash/utils/github_client.py`                                                        | `get_pull_request(owner, name, number)` (used by §6.2 optional snapshot + §7). |
+| Webhook refresh     | `apps/api/pi_dash/app/views/integration/github.py`                                               | `pull_request` branch: refresh link snapshot only (Slice B).                   |
+| GitHub App config   | App registration                                                                                 | Pull requests: Read; subscribe `pull_request` (Slice B).                       |
+| CLI                 | pidash CLI (where `issue create` / `comment add` live; confirm `deployments/cli`)                | New `issue attach-pr` / `detach` / `list-pr` commands.                         |
+| Skill prompt        | `pi-dash-skill/shared/pidash-workflows.md`                                                       | Instruct the agent to run `attach-pr` after opening a PR.                      |
+| Types/UI            | `packages/types/src/integration.ts`, issue-detail components                                     | PR-link types + the "Pull requests" issue section.                             |
 
 ## 12. To confirm at implementation (not re-design)
 
