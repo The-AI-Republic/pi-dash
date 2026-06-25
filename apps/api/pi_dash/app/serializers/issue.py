@@ -60,7 +60,10 @@ _LOCKED_COMMENT_FIELDS = {"comment_html", "comment_json", "comment_stripped"}
 
 
 def _issue_is_actively_synced(issue) -> bool:
-    if issue is None:
+    # Native (non-synced) issues have ``external_source`` empty/None — short-
+    # circuit before any DB query so list endpoints don't pay an N+1 of two
+    # .exists() probes per row.
+    if issue is None or not issue.external_source:
         return False
 
     annotated_is_synced = getattr(issue, "is_synced", None)
@@ -73,7 +76,7 @@ def _issue_is_actively_synced(issue) -> bool:
 
 
 def _comment_is_actively_synced(comment) -> bool:
-    if comment is None:
+    if comment is None or not comment.external_source:
         return False
     from pi_dash.db.models import GitCommentSync, GithubCommentSync
 

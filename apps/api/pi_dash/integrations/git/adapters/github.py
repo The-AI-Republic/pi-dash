@@ -32,7 +32,6 @@ from pi_dash.utils.github_client import (
     GithubPermissionError,
     parse_github_pull_request_url,
     parse_github_repo_url,
-    parse_issue_number_from_url,
     pr_snapshot_from_payload,
 )
 
@@ -191,9 +190,7 @@ class GitHubAdapter:
     ) -> Iterable[RemoteComment]:
         owner, name = repository.full_name.split("/", 1)
         try:
-            for comment in self._client(credential).list_all_repo_comments(owner, name):
-                if str(parse_issue_number_from_url(comment.get("issue_url") or "")) != str(issue_iid):
-                    continue
+            for comment in self._client(credential).list_issue_comments(owner, name, int(issue_iid)):
                 user = comment.get("user") or {}
                 yield RemoteComment(
                     external_id=str(comment.get("id") or ""),

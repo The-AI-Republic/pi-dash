@@ -234,7 +234,9 @@ class GitLabAdapter:
             )
 
         parsed = urlparse(candidate)
-        host_url = _normalize_host(parsed.netloc)
+        # netloc carries `user@host[:port]` for ssh:// URLs — strip the userinfo
+        # so the allowlist lookup compares the bare host.
+        host_url = _normalize_host(parsed.netloc.rsplit("@", 1)[-1])
         if parsed.scheme not in {"http", "https", "ssh"} or not self._host_allowed(host_url):
             return None
         path = parsed.path
