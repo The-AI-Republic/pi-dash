@@ -361,6 +361,42 @@ def can_register_another(user_id, workspace_id) -> bool:
     return active.count() < Runner.MAX_PER_USER
 
 
+def pod_has_runner_for_issue_principal(pod, issue, run_creator_id) -> bool:
+    """Does ``pod`` contain any registered runner whose owner could serve a
+    run on ``issue`` triggered by ``run_creator_id``?
+
+    Mirrors the eligibility set used by
+    :func:`pi_dash.runner.services.permissions.filter_runs_usable_by_runner`
+    for ``Visibility.PRIVATE`` runners — the only visibility today. A
+    runner is "potentially serviceable" if its owner is one of:
+
+    - ``run_creator_id`` (the user the dispatch is being attributed to),
+    - ``issue.created_by_id`` (the issue creator),
+    - any current ``issue.assignees``.
+
+    Status is **deliberately ignored** — OFFLINE / BUSY / REVOKED runners
+    all count as "registered". The intent is to detect the structural
+    "nobody on this pod could ever serve this" case, not transient
+    unavailability (``drain_pod`` re-fires on heartbeat). See
+    ``.ai_design/issue_runner/design.md`` §6.6.
+    """
+    eligible_owner_ids: set = set()
+    if run_creator_id is not None:
+        eligible_owner_ids.add(run_creator_id)
+    if issue.created_by_id is not None:
+        eligible_owner_ids.add(issue.created_by_id)
+    eligible_owner_ids.update(
+        issue.assignees.values_list("id", flat=True)
+    )
+    eligible_owner_ids.discard(None)
+    if not eligible_owner_ids:
+        return False
+    return Runner.objects.filter(
+        pod=pod,
+        owner_id__in=eligible_owner_ids,
+    ).exists()
+
+
 def count_active(user_id, workspace_id) -> int:
     return (
         Runner.objects.filter(owner_id=user_id, workspace_id=workspace_id).exclude(status=RunnerStatus.REVOKED).count()

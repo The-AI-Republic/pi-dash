@@ -35,13 +35,74 @@
 >   and issue creation both default to the workspace pod when unspecified.
 >   Soft-delete now guards against removing the last pod of a workspace.
 
+## 0. Model correction — runners are private (2026-06)
+
+> **Sections affected:** §1 Goal (bullet 1 and 5), §2 Conceptual Model
+> (the Runner row and the "Key conceptual shift" paragraph), decision #5
+> framing, §4.2 ("`owner` stays — it no longer gates usage"). Treat the
+> text below as authoritative when it conflicts with those sections.
+
+The cooperative-pod story sketched in §1–§2 ("any workspace member can
+delegate work to any runner in the workspace") was **not** what shipped.
+Commit `1b590146` ("Add private dev machine visibility model", PR #196,
+2026-05-29) introduced `Visibility.PRIVATE` as the only runner-visibility
+value and added `filter_runs_usable_by_runner` to the matcher. From that
+point on, **owner remains the dispatch gate**, not just the billing /
+revoke anchor. Every Pod's queue is *physically* shared but *logically*
+partitioned by runner owner.
+
+**Why the original cooperative model can't work as documented.** The
+runner daemon authenticates against the cloud with a `MachineToken`
+bound to its owner (`runner/authentication.py:120-162`). DRF's
+`request.user` for every runner-originated API call is therefore the
+runner's owner — a real human. Every write the runner makes (issue
+comments via `IssueComment.actor`, state transitions, activity log
+`actor_id`, approvals) is stamped with that human's identity. Letting
+B's runner serve A's issue would put B's name on every audit row of
+A's ticket. There is no per-run dynamic-identity mechanism today (no
+short-lived `created_by`-scoped token, no all-bot writes with a
+side-channel responsibility tag). Until one of those lands, dispatching
+across owners is *inherently mis-attributing*, so the matcher gates on
+owner.
+
+**The actual dispatch rule** (live in
+`runner/services/permissions.py::filter_runs_usable_by_runner`):
+a PRIVATE runner may only consume an `AgentRun` when at least one of
+the following holds —
+
+1. `run.created_by_id == runner.owner_id` (the run's triggering user
+   owns this runner), or
+2. `run.owner_id == runner.owner_id` (legacy billed-to match), or
+3. The run's issue has `created_by == runner.owner_id` **or** lists
+   `runner.owner` as an `assignee`, or
+4. The run's `scheduler_binding.actor_id == runner.owner_id`.
+
+**Where the original design still holds**: Pod data model, soft-delete,
+project-pod relationship, `AgentRun.created_by` vs `owner` split, all
+permission-endpoint refactors (list / detail / cancel / approval move
+to `created_by`). Only the *cooperative-dispatch* narrative is wrong.
+
+**Open follow-up**: if we ever want true workspace-shared runners, the
+auth-attribution layer must be redesigned in lockstep — either per-run
+credentials (the cloud mints a short-lived token scoped to
+`AgentRun.id` whose `request.user = AgentRun.created_by`) or all writes
+go through `agent_system_user` with a `responsible_user_id` side-channel
+on every row. Either approach is a separate design.
+
+See §6.6 below for the eligibility-preflight behavior introduced
+alongside this correction.
+
 ## 1. Goal
 
-- Reframe runners as cooperative AI-agent instances available to a workspace, not personal machines owned by an individual.
-- Introduce `Pod` — a workspace-scoped group of runners that shares a work queue.
+> ⚠ Bullets 1 and 5 below describe the original cooperative-pod
+> aspiration. The shipped behavior is owner-gated dispatch — see §0
+> "Model correction" for the authoritative model.
+
+- ~~Reframe runners as cooperative AI-agent instances available to a workspace, not personal machines owned by an individual.~~ **Corrected:** runners remain private to their owner; they represent that human inside the workspace. Pods are still the queue boundary, but each runner only consumes work where its owner is the run's principal (creator / billed party / issue creator / assignee / scheduler actor).
+- Introduce `Pod` — a project-scoped group of runners that shares a work queue. (Workspace-scoped in the original draft; superseded by `.ai_design/n_runners_in_same_machine/new_pod_project_relationship/` which pinned pods to projects.)
 - Let issues pre-assign to a **pod** (stable, doesn't go offline) instead of a runner (which does).
-- Fix the stranded-QUEUED bug: when a runner finishes a job, its pod's queue drains automatically.
-- Preserve individual accountability: a runner still has an `owner` for management and billing, but not for access gating.
+- Fix the stranded-QUEUED bug: when a runner finishes a job, its pod's queue drains automatically. (A *new* class of stranded-QUEUED bug emerges when a pod has no runner whose owner matches the run's principal; see §6.6 "Eligibility preflight + bounce to Backlog" for the resolution.)
+- ~~Preserve individual accountability: a runner still has an `owner` for management and billing, but not for access gating.~~ **Corrected:** `owner` *is* the access gate for dispatch, in addition to its management/billing role. The intended decoupling was reverted by `1b590146` because the auth transport stamps `request.user = runner.owner` on every write the runner makes.
 
 ## 2. Conceptual Model
 
@@ -50,11 +111,11 @@
 | **Account** (User)    | A human                                                                      | —                                | themselves                      |
 | **Workspace**         | The cooperation boundary — a team                                            | any member                       | workspace admin                 |
 | **Pod**               | A logical group of AI agents (runners)                                       | any workspace member             | pod creator or workspace admin  |
-| **Runner**            | An AI agent instance (a running daemon on some host)                         | any workspace member (via a pod) | runner owner or workspace admin |
-| **Owner** (of runner) | The human who registered the runner and is responsible for its host / budget | —                                | —                               |
+| **Runner**            | An AI agent instance (a running daemon on some host)                         | **its owner**, plus runs whose issue lists the owner as creator or assignee (and runs the owner billed / scheduled) | runner owner or workspace admin |
+| **Owner** (of runner) | The human the runner represents in this workspace. Identifies the runner on every write it makes (via `MachineToken` → `request.user`), pays for its compute, can revoke it | — | — |
 | **Issue**             | Work item                                                                    | its workspace members            | per existing issue permissions  |
 
-**Key conceptual shift**: runner ownership is an _administrative bond_ (who pays for its uptime, who can revoke it), **not** an access gate. Any workspace member can delegate work to any runner in the workspace — mediated through pods.
+**Key conceptual shift (corrected, see §0)**: runner ownership is **both** an administrative bond *and* the access gate for dispatch. A runner only consumes work the matcher's `filter_runs_usable_by_runner` allows for its owner. A user can "borrow" someone else's runner only by being added to the issue (creator or assignee) so the four-predicate filter matches that runner's owner. The original draft of this section claimed any workspace member could dispatch to any runner; that did not ship — see §0.
 
 ## 3. Decisions Locked In
 
@@ -158,7 +219,7 @@ pod = models.ForeignKey(
 
 - `on_delete=PROTECT`: deleting (soft-deleting) a pod with runners is blocked; admin must move or revoke them first.
 - `null=False` from the start — there's no legacy data to backfill. Registration flow resolves a pod before insert (defaulting to `workspace.default_pod` when none is explicitly requested).
-- **`owner` stays** — it continues to mean "responsible human for this specific runner instance" (billing, revoke). It no longer gates usage.
+- **`owner` stays** — it continues to mean "responsible human for this specific runner instance" (billing, revoke). ~~It no longer gates usage.~~ **Corrected (§0):** `owner` also gates dispatch via `Visibility.PRIVATE` + `filter_runs_usable_by_runner`. A runner only takes work where its owner is one of: run creator, run billed-party, issue creator, issue assignee, scheduler binding actor.
 - Name uniqueness changes from `(workspace, name)` to `(pod, name)` — so two pods in the same workspace can each have a runner named "mac-mini". Tradeoff: human-friendly addressing via `(workspace, name)` is less direct, but pod scope is the natural namespace.
 
 Keep `MAX_PER_USER = 5` as a per-operator cap on how many agents one human can onboard. Pod membership is orthogonal.
@@ -390,6 +451,100 @@ Mandatory pre-create validation, in order:
 The orchestration path (`service._create_and_dispatch_run`) bypasses the HTTP layer but still enforces 2–4 before writing the `AgentRun` row. The `actor` parameter is the authoritative `created_by`; if `actor is None`, fall back to `_resolve_fallback_creator(issue)` (renamed from the legacy `_resolve_owner`, see §12) for back-compat only, and log a warning. **Implementation TODO**: grep for all callers of `handle_issue_state_transition` during implementation and ensure each passes an explicit `actor`; a follow-up change should promote `actor=None` from "warn" to "reject" once call sites are audited.
 
 A shared helper `validate_run_creation(user, workspace_id, work_item_id, pod_id)` is factored out and called by both paths.
+
+### 6.6 Eligibility preflight + bounce to Backlog (2026-06)
+
+Companion to §0. Closes the silent-jam case the original design didn't
+anticipate: a pod resolves cleanly, but no runner inside it has an
+owner the matcher would accept for this run. Without a preflight the
+`AgentRun` is created in `QUEUED`, `drain_pod` finishes with zero
+assignments, and the issue gets stuck forever — the ticker's
+`_active_run_for(issue)` short-circuits on the orphaned QUEUED row.
+
+**Eligibility set**: the set of `User.id`s whose runner *could* legally
+serve a hypothetical run on this issue with this creator —
+
+```
+eligible_owner_ids =
+    {run_creator_id, issue.created_by_id}
+    ∪ {assignee.id for assignee in issue.assignees}
+```
+
+`scheduler_binding.actor_id` is added when the run path is the project
+scheduler. The `run_creator_id` is the resolved actor for the current
+trigger (the clicker for `RUN_AI` / `COMMENT_AND_RUN`, the issue
+creator for `STATE_TRANSITION`, the `agent_system_user` bot for `TICK`).
+
+**Eligibility predicate**:
+
+```python
+Runner.objects.filter(
+    pod=resolved_pod,
+    owner_id__in=eligible_owner_ids,
+).exists()
+```
+
+**Liveness scope**: the predicate **ignores `Runner.status`** —
+`OFFLINE`, `BUSY`, and even `REVOKED` runners count as "registered". A
+runner the owner just turned off shouldn't bounce the issue back to
+Backlog (the owner can flip it on); the bounce is reserved for the
+truly-no-chance case where nobody's runner is set up for it. Transient
+unavailability is handled by `drain_pod` re-firing on heartbeat or
+re-enrollment.
+
+**Where the gate runs**: all four issue-run-creation paths preempt
+*before* inserting the `AgentRun` row —
+
+| Path                                                            | Entry                                                       | Trigger              |
+|-----------------------------------------------------------------|-------------------------------------------------------------|----------------------|
+| State transition into a ticking state (e.g. Todo → In Progress) | `orchestration.service._create_and_dispatch_run`            | `STATE_TRANSITION`   |
+| Auto ticker                                                     | `orchestration.scheduling.dispatch_continuation_run`        | `TICK`               |
+| "Run AI" button                                                 | `orchestration.scheduling.dispatch_run_ai_run`              | `RUN_AI`             |
+| "Comment & Run" button                                          | `orchestration.scheduling.dispatch_continuation_run`        | `COMMENT_AND_RUN`    |
+
+The direct `POST /api/v1/runner/runs/` endpoint with an explicit prompt
+(no `work_item`) is **not** gated — direct prompts have no issue to
+move and no audience to comment to; that path returns the existing
+"could not dispatch" error if no runner is online.
+
+**Bounce action** (atomic with the dispatch decision):
+
+1. **Resolve Backlog state**: pick the issue's project's `State` with
+   `group == StateGroup.BACKLOG` ordered by `(-default, sequence)`.
+   Fall back to project's `default_state` if no backlog state exists
+   (defensive — `DEFAULT_STATES` seeds one for every project).
+2. **Move the issue** (skip if already in `BACKLOG` group):
+   `issue.state = backlog_state; issue.save()`. The save fires
+   `fire_state_transition`, which calls
+   `handle_issue_state_transition`. Because Backlog isn't a delegation
+   trigger, the handler's path is: disarm ticker (we're leaving a
+   ticking state) → `not-a-trigger-state` early return. The recursive
+   re-entry terminates immediately.
+3. **Post a system comment** via `IssueComment.objects.create`
+   with `actor=get_agent_system_user()` and
+   `speaker_type=SpeakerType.AGENT`. Canonical body:
+   > *Agent run skipped — no eligible runner.*
+   >
+   > No runner is registered in this pod that can serve this issue.
+   > Add a runner under your account, or assign this issue to a
+   > workspace member whose runner is registered here.
+4. **No `AgentRun` row is created.** Caller returns
+   `TransitionOutcome(reason="no-eligible-runner")` (orchestration
+   path) or `409 Conflict` with `{"code": "no_eligible_runner"}` (HTTP
+   path).
+
+**Why preempt rather than create-then-cancel.** Avoids leaving an
+orphan QUEUED row in the audit trail every time the user lacks a
+runner; avoids the per-tick re-fire problem (a tombstoned FAILED row
+doesn't satisfy `_active_run_for`, so the next tick would re-create
+and re-fail in a loop until manual intervention).
+
+**Idempotence on the ticker**: after the bounce, the issue is in
+Backlog, which is not a ticking state, so the ticker is disarmed by
+step 2. Subsequent ticks do nothing — the issue stays calm until a
+human re-arms it by moving it back into a ticking state, at which
+point the eligibility check fires again with whatever runner
+registration / assignee changes have happened in the meantime.
 
 ## 7. Lifecycle
 
