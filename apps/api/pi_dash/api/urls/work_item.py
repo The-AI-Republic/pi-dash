@@ -5,6 +5,8 @@
 from django.urls import path
 
 from pi_dash.api.views import (
+    GitCodeReviewLinkListCreateAPIEndpoint,
+    GitCodeReviewLinkDetailAPIEndpoint,
     GithubPullRequestLinkListCreateAPIEndpoint,
     GithubPullRequestLinkDetailAPIEndpoint,
     IssueListCreateAPIEndpoint,
@@ -180,6 +182,16 @@ new_url_patterns = [
         "workspaces/<str:slug>/projects/<str:project_id>/work-items/<uuid:issue_id>/github/pull-requests/<uuid:pk>/",
         GithubPullRequestLinkDetailAPIEndpoint.as_view(http_method_names=["delete"]),
         name="work-item-github-pr-detail",
+    ),
+    path(
+        "workspaces/<str:slug>/projects/<str:project_id>/work-items/<uuid:issue_id>/code-reviews/",
+        GitCodeReviewLinkListCreateAPIEndpoint.as_view(http_method_names=["get", "post"]),
+        name="work-item-code-review-list",
+    ),
+    path(
+        "workspaces/<str:slug>/projects/<str:project_id>/work-items/<uuid:issue_id>/code-reviews/<uuid:pk>/",
+        GitCodeReviewLinkDetailAPIEndpoint.as_view(http_method_names=["delete"]),
+        name="work-item-code-review-detail",
     ),
 ]
 

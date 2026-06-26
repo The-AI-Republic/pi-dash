@@ -29,7 +29,7 @@ import { handleCoverImageChange } from "@/helpers/cover-image.helper";
 import { useProject } from "@/hooks/store/use-project";
 import { usePlatformOS } from "@/hooks/use-platform-os";
 // constants
-import { GITHUB_PROJECT_BINDING } from "@/constants/fetch-keys";
+import { GIT_PROJECT_BINDING } from "@/constants/fetch-keys";
 // services
 import { ProjectService } from "@/services/project";
 // local imports
@@ -147,17 +147,17 @@ export function ProjectDetailsForm(props: IProjectDetailsForm) {
 
   const [isBinding, setIsBinding] = useState(false);
 
-  // Fetch the current github binding state so the Bind button can flip to a
+  // Fetch the current Git binding state so the Bind button can flip to a
   // disabled "Bound" pill when the URL in the input matches what's actually
   // bound — saves operators from clicking Bind twice on the same URL and
   // tripping the rebind path for no reason.
-  const bindingFetchKey = projectId ? GITHUB_PROJECT_BINDING(projectId) : null;
-  const { data: githubBinding } = useSWR(bindingFetchKey, () =>
-    workspaceSlug && projectId ? projectService.getGithubBindingStatus(workspaceSlug, projectId) : null
+  const bindingFetchKey = projectId ? GIT_PROJECT_BINDING(projectId) : null;
+  const { data: gitBinding } = useSWR(bindingFetchKey, () =>
+    workspaceSlug && projectId ? projectService.getGitRepositoryBinding(workspaceSlug, projectId) : null
   );
   const watchedRepoUrl = watch("repo_url") ?? "";
   const isAlreadyBound =
-    Boolean(githubBinding?.bound) && (project.repo_url ?? "") === watchedRepoUrl.trim() && watchedRepoUrl.trim() !== "";
+    Boolean(gitBinding?.bound) && (project.repo_url ?? "") === watchedRepoUrl.trim() && watchedRepoUrl.trim() !== "";
 
   const handleBindRepoUrl = async () => {
     if (!workspaceSlug || !projectId) return;
@@ -172,7 +172,7 @@ export function ProjectDetailsForm(props: IProjectDetailsForm) {
     }
     setIsBinding(true);
     try {
-      const res = await projectService.bindGithubRepository(workspaceSlug, projectId, { repo_url: url });
+      const res = await projectService.bindGitRepository(workspaceSlug, projectId, { repo_url: url });
       // Persist the canonical URL back into the project store + form input
       // so the field reflects what's actually bound (e.g. trailing `.git`
       // and `git@…` SSH URLs get rewritten to the https html_url).
@@ -185,7 +185,7 @@ export function ProjectDetailsForm(props: IProjectDetailsForm) {
       setToast({
         type: TOAST_TYPE.SUCCESS,
         title: "Repository bound",
-        message: "Toggle sync on in the GitHub tab to start mirroring issues.",
+        message: "Toggle sync on in repository settings to start mirroring issues.",
       });
     } catch (e: any) {
       setToast({
@@ -203,9 +203,9 @@ export function ProjectDetailsForm(props: IProjectDetailsForm) {
     setIsLoading(true);
     // `repo_url` is intentionally NOT included in the regular save payload.
     // It's persisted exclusively through the Bind button below, which goes
-    // through the github-bind endpoint (verifies the URL upstream, creates
+    // through the repository bind endpoint (verifies the URL upstream, creates
     // the binding, and writes the canonical URL back). This keeps the field
-    // and the actual github binding from drifting apart.
+    // and the actual provider binding from drifting apart.
     const payload: Partial<IProject> = {
       name: formData.name,
       network: formData.network,
@@ -398,7 +398,7 @@ export function ProjectDetailsForm(props: IProjectDetailsForm) {
                     value={value ?? ""}
                     onChange={onChange}
                     hasError={Boolean(errors?.repo_url)}
-                    placeholder={t("e.g. https://github.com/org/repo")}
+                    placeholder={t("e.g. https://github.com/org/repo or https://gitlab.com/group/repo")}
                     className="w-full font-medium"
                     disabled={!isAdmin}
                   />
@@ -417,8 +417,10 @@ export function ProjectDetailsForm(props: IProjectDetailsForm) {
             </div>
             <span className="text-11 text-danger-primary">{errors?.repo_url?.message}</span>
             <p className="text-11 text-tertiary">
-              {t("Bind verifies the URL with GitHub and links this project to that repository. Only github.com URLs are supported. The URL is saved only when you click Bind.") ||
-                "Bind verifies the URL with GitHub and links this project to that repository. Only github.com URLs are supported. The URL is saved only when you click Bind."}
+              {t(
+                "Bind verifies the URL with the connected Git provider and links this project to that repository. GitHub and GitLab URLs are supported. The URL is saved only when you click Bind."
+              ) ||
+                "Bind verifies the URL with the connected Git provider and links this project to that repository. GitHub and GitLab URLs are supported. The URL is saved only when you click Bind."}
             </p>
           </div>
           <div className="flex flex-col gap-1">
@@ -462,7 +464,9 @@ export function ProjectDetailsForm(props: IProjectDetailsForm) {
                 name="identifier"
                 rules={{
                   required: t("Project ID is required"),
-                  validate: (value) => /^[ÇŞĞIİÖÜA-Z0-9]+$/.test(value.toUpperCase()) || t("Only Alphanumeric & Non-latin characters are allowed."),
+                  validate: (value) =>
+                    /^[ÇŞĞIİÖÜA-Z0-9]+$/.test(value.toUpperCase()) ||
+                    t("Only Alphanumeric & Non-latin characters are allowed."),
                   minLength: {
                     value: 1,
                     message: t("Project ID must at least be of 1 character"),

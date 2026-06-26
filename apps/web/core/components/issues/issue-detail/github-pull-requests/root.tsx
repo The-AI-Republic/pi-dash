@@ -15,14 +15,14 @@ import { TrashIcon } from "@pi-dash/propel/icons";
 import { Input } from "@pi-dash/propel/input";
 import { TOAST_TYPE, setToast } from "@pi-dash/propel/toast";
 import { Tooltip } from "@pi-dash/propel/tooltip";
-import type { IGithubPullRequestLink } from "@pi-dash/types";
+import type { IGitCodeReviewLink } from "@pi-dash/types";
 import { Collapsible } from "@pi-dash/ui";
 // constants
-import { GITHUB_ISSUE_PULL_REQUESTS } from "@/constants/fetch-keys";
+import { GIT_ISSUE_CODE_REVIEWS } from "@/constants/fetch-keys";
 // services
-import { GithubIntegrationService } from "@/services/integrations/github.service";
+import { GitIntegrationService } from "@/services/integrations/git.service";
 
-const githubService = new GithubIntegrationService();
+const gitService = new GitIntegrationService();
 
 type Props = {
   workspaceSlug: string;
@@ -37,7 +37,7 @@ type TBadge = {
   icon: typeof GitPullRequest;
 };
 
-const getPullRequestBadge = (link: IGithubPullRequestLink): TBadge => {
+const getCodeReviewBadge = (link: IGitCodeReviewLink): TBadge => {
   if (link.merged) return { label: "Merged", variant: "brand", icon: GitMerge };
   if (link.draft) return { label: "Draft", variant: "neutral", icon: GitPullRequestDraft };
   if (link.state === "open") return { label: "Open", variant: "success", icon: GitPullRequest };
@@ -57,9 +57,9 @@ export const IssueGithubPullRequestsRoot = observer(function IssueGithubPullRequ
   const [isSubmitting, setIsSubmitting] = useState(false);
   // fetching
   const shouldFetch = Boolean(workspaceSlug && projectId && issueId);
-  const { data: pullRequests, mutate: mutatePullRequests } = useSWR(
-    shouldFetch ? GITHUB_ISSUE_PULL_REQUESTS(issueId) : null,
-    shouldFetch ? () => githubService.listIssuePullRequests(workspaceSlug, projectId, issueId) : null
+  const { data: codeReviews, mutate: mutateCodeReviews } = useSWR(
+    shouldFetch ? GIT_ISSUE_CODE_REVIEWS(issueId) : null,
+    shouldFetch ? () => gitService.listIssueCodeReviews(workspaceSlug, projectId, issueId) : null
   );
 
   const handleAttach = async () => {
@@ -67,14 +67,14 @@ export const IssueGithubPullRequestsRoot = observer(function IssueGithubPullRequ
     if (!trimmedUrl || isSubmitting) return;
     setIsSubmitting(true);
     try {
-      await githubService.attachIssuePullRequest(workspaceSlug, projectId, issueId, { url: trimmedUrl });
+      await gitService.attachIssueCodeReview(workspaceSlug, projectId, issueId, { url: trimmedUrl });
       setUrl("");
-      await mutatePullRequests();
+      await mutateCodeReviews();
     } catch (error: unknown) {
       setToast({
         type: TOAST_TYPE.ERROR,
-        title: "Pull request not attached",
-        message: toErrorMessage(error, "The pull request could not be attached."),
+        title: "Code review not attached",
+        message: toErrorMessage(error, "The code review could not be attached."),
       });
     } finally {
       setIsSubmitting(false);
@@ -83,21 +83,21 @@ export const IssueGithubPullRequestsRoot = observer(function IssueGithubPullRequ
 
   const handleDetach = async (linkId: string) => {
     try {
-      await githubService.detachIssuePullRequest(workspaceSlug, projectId, issueId, linkId);
-      await mutatePullRequests();
+      await gitService.detachIssueCodeReview(workspaceSlug, projectId, issueId, linkId);
+      await mutateCodeReviews();
     } catch (error: unknown) {
       setToast({
         type: TOAST_TYPE.ERROR,
-        title: "Pull request not detached",
-        message: toErrorMessage(error, "The pull request could not be detached."),
+        title: "Code review not detached",
+        message: toErrorMessage(error, "The code review could not be detached."),
       });
     }
   };
 
-  // Gate: keep issue detail uncluttered — only surface the section once at least
-  // one PR is linked (the coding agent attaches the first one via the CLI). The
-  // attach/detach controls then live alongside the existing links.
-  if (!pullRequests || pullRequests.length === 0) return null;
+  // Gate: keep issue detail uncluttered - only surface the section once at least
+  // one code review is linked. The attach/detach controls then live alongside
+  // the existing links.
+  if (!codeReviews || codeReviews.length === 0) return null;
 
   return (
     <Collapsible
@@ -106,14 +106,14 @@ export const IssueGithubPullRequestsRoot = observer(function IssueGithubPullRequ
       buttonClassName="w-full"
       title={
         <div className="flex items-center gap-1 py-1 text-13 font-medium text-primary">
-          <span>Pull requests</span>
-          <span className="text-tertiary">{pullRequests.length}</span>
+          <span>Code reviews</span>
+          <span className="text-tertiary">{codeReviews.length}</span>
         </div>
       }
     >
       <div className="mt-1 flex flex-col gap-1">
-        {pullRequests.map((link) => {
-          const badge = getPullRequestBadge(link);
+        {codeReviews.map((link) => {
+          const badge = getCodeReviewBadge(link);
           const BadgeIcon = badge.icon;
           return (
             <div
@@ -130,12 +130,12 @@ export const IssueGithubPullRequestsRoot = observer(function IssueGithubPullRequ
                 className="flex min-w-0 flex-1 items-center gap-1 truncate text-secondary hover:text-primary"
               >
                 <span className="truncate">
-                  {link.title || `${link.repo_owner}/${link.repo_name} #${link.pr_number}`}
+                  {link.title || `${link.namespace}/${link.repo_name} #${link.external_iid}`}
                 </span>
                 <ExternalLink className="h-3 w-3 shrink-0" />
               </a>
               {!disabled && (
-                <Tooltip tooltipContent="Detach pull request">
+                <Tooltip tooltipContent="Detach code review">
                   <button
                     type="button"
                     className="hover:bg-surface-3 grid h-6 w-6 shrink-0 place-items-center rounded-sm text-tertiary opacity-0 duration-300 outline-none group-hover:opacity-100 hover:text-danger-primary"
@@ -161,7 +161,7 @@ export const IssueGithubPullRequestsRoot = observer(function IssueGithubPullRequ
               type="url"
               value={url}
               onChange={(e) => setUrl(e.target.value)}
-              placeholder="Paste a GitHub pull request URL"
+              placeholder="Paste a pull request or merge request URL"
               className="w-full text-11"
               inputSize="xs"
               disabled={isSubmitting}
@@ -171,7 +171,7 @@ export const IssueGithubPullRequestsRoot = observer(function IssueGithubPullRequ
               className="text-on-accent shrink-0 rounded-md bg-accent-primary px-2.5 py-1 font-medium duration-300 outline-none hover:bg-accent-primary-hover disabled:cursor-not-allowed disabled:opacity-60"
               disabled={isSubmitting || !url.trim()}
             >
-              Attach PR
+              Attach
             </button>
           </form>
         )}

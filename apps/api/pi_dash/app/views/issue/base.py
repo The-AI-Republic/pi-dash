@@ -53,6 +53,7 @@ from pi_dash.db.models import (
     IntakeIssue,
     Issue,
     IssueAssignee,
+    GitIssueSync,
     GithubIssueSync,
     IssueLabel,
     IssueLink,
@@ -718,12 +719,11 @@ class IssueViewSet(BaseViewSet):
     def destroy(self, request, slug, project_id, pk=None):
         issue = Issue.objects.get(workspace__slug=slug, project_id=project_id, pk=pk)
 
-        # Block delete on actively-synced GitHub issues. See .ai_design/
-        # github_sync/design.md §6.8.
-        from pi_dash.db.models import GithubIssueSync
-        if issue.external_source == "github" and GithubIssueSync.objects.filter(issue=issue).exists():
+        # Block delete on actively-synced Git provider issues. After unbind,
+        # cascades delete sync rows and the issue becomes user-managed again.
+        if GitIssueSync.objects.filter(issue=issue).exists() or GithubIssueSync.objects.filter(issue=issue).exists():
             return Response(
-                {"error": "This issue is synced from GitHub. Unbind the project's GitHub repository to delete."},
+                {"error": "This issue is synced from a Git provider. Unbind the project's repository to delete."},
                 status=status.HTTP_409_CONFLICT,
             )
 
@@ -1299,7 +1299,7 @@ class IssueDetailIdentifierEndpoint(BaseAPIView):
                 )
                 .annotate(
                     is_synced=Exists(
-                        GithubIssueSync.objects.filter(
+                        GitIssueSync.objects.filter(
                             issue=OuterRef("id"),
                         )
                     )

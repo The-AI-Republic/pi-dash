@@ -12,7 +12,12 @@ import type {
   TProjectAnalyticsCountParams,
   TProjectIssuesSearchParams,
 } from "@pi-dash/types";
-import type { IGithubProjectBindRequest, IGithubProjectBindingStatus } from "@pi-dash/types";
+import type {
+  IGitProjectBindRequest,
+  IGitProjectBindingStatus,
+  IGithubProjectBindRequest,
+  IGithubProjectBindingStatus,
+} from "@pi-dash/types";
 // helpers
 // pi dash web types
 import type { TProject, TPartialProject } from "@/pi-dash-web/types";
@@ -152,6 +157,46 @@ export class ProjectService extends APIService {
 
   async unbindGithubRepository(workspaceSlug: string, projectId: string): Promise<{ bound: boolean }> {
     return this.delete(`/api/workspaces/${workspaceSlug}/projects/${projectId}/github/`)
+      .then((response) => response?.data)
+      .catch((error) => {
+        throw error?.response?.data;
+      });
+  }
+
+  async getGitRepositoryBinding(workspaceSlug: string, projectId: string): Promise<IGitProjectBindingStatus> {
+    return this.get(`/api/workspaces/${workspaceSlug}/projects/${projectId}/repository/`)
+      .then((response) => response?.data)
+      .catch((error) => {
+        throw error?.response?.data;
+      });
+  }
+
+  async bindGitRepository(
+    workspaceSlug: string,
+    projectId: string,
+    data: IGitProjectBindRequest
+  ): Promise<IGitProjectBindingStatus> {
+    return this.post(`/api/workspaces/${workspaceSlug}/projects/${projectId}/repository/bind/`, data)
+      .then((response) => response?.data)
+      .catch((error) => {
+        throw error?.response?.data;
+      });
+  }
+
+  async setGitSyncEnabled(
+    workspaceSlug: string,
+    projectId: string,
+    enabled: boolean
+  ): Promise<IGitProjectBindingStatus> {
+    return this.patch(`/api/workspaces/${workspaceSlug}/projects/${projectId}/repository/`, { enabled })
+      .then((response) => response?.data)
+      .catch((error) => {
+        throw error?.response?.data;
+      });
+  }
+
+  async unbindGitRepository(workspaceSlug: string, projectId: string): Promise<{ bound: boolean }> {
+    return this.delete(`/api/workspaces/${workspaceSlug}/projects/${projectId}/repository/`)
       .then((response) => response?.data)
       .catch((error) => {
         throw error?.response?.data;

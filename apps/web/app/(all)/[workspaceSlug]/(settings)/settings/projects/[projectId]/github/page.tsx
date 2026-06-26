@@ -18,7 +18,7 @@ function GithubSettingsPage() {
   const { currentProjectDetails } = useProject();
   const { workspaceUserInfo, allowPermissions } = useUserPermissions();
 
-  const pageTitle = currentProjectDetails?.name ? `${currentProjectDetails.name} - GitHub` : undefined;
+  const pageTitle = currentProjectDetails?.name ? `${currentProjectDetails.name} - Repository` : undefined;
 
   const canManage = allowPermissions([EUserPermissions.ADMIN, EUserPermissions.MEMBER], EUserPermissionsLevel.PROJECT);
 

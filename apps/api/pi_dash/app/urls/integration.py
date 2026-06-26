@@ -17,6 +17,14 @@ from pi_dash.app.views.integration.github import (
     GithubProjectBindEndpoint,
     GithubProjectStatusEndpoint,
 )
+from pi_dash.app.views.integration.git import (
+    GitProjectRepositoryBindEndpoint,
+    GitProjectRepositoryEndpoint,
+    GitProviderAccountDetailEndpoint,
+    GitProviderAccountListCreateEndpoint,
+    GitProviderAccountReposEndpoint,
+    GitProvidersEndpoint,
+)
 
 
 urlpatterns = [
@@ -67,7 +75,38 @@ urlpatterns = [
         GithubIntegrationReposEndpoint.as_view(),
         name="github-integration-repos",
     ),
+    # Generic Git provider accounts
+    path(
+        "workspaces/<str:slug>/integrations/git/providers/",
+        GitProvidersEndpoint.as_view(),
+        name="git-providers",
+    ),
+    path(
+        "workspaces/<str:slug>/integrations/git/accounts/",
+        GitProviderAccountListCreateEndpoint.as_view(),
+        name="git-provider-accounts",
+    ),
+    path(
+        "workspaces/<str:slug>/integrations/git/accounts/<uuid:account_id>/",
+        GitProviderAccountDetailEndpoint.as_view(),
+        name="git-provider-account-detail",
+    ),
+    path(
+        "workspaces/<str:slug>/integrations/git/accounts/<uuid:account_id>/repos/",
+        GitProviderAccountReposEndpoint.as_view(),
+        name="git-provider-account-repos",
+    ),
     # Project-level
+    path(
+        "workspaces/<str:slug>/projects/<str:project_id>/repository/",
+        GitProjectRepositoryEndpoint.as_view(),
+        name="git-project-repository",
+    ),
+    path(
+        "workspaces/<str:slug>/projects/<str:project_id>/repository/bind/",
+        GitProjectRepositoryBindEndpoint.as_view(),
+        name="git-project-repository-bind",
+    ),
     path(
         "workspaces/<str:slug>/projects/<str:project_id>/github/",
         GithubProjectStatusEndpoint.as_view(),

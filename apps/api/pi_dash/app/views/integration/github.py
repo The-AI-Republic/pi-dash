@@ -20,7 +20,7 @@ from datetime import timedelta
 from urllib.parse import urlencode
 
 from django.conf import settings
-from django.db import transaction
+from django.db import IntegrityError, transaction
 from django.http import HttpResponseRedirect
 from django.shortcuts import get_object_or_404
 from django.utils import timezone
@@ -35,8 +35,14 @@ from pi_dash.db.models import (
     GithubAppInstallation,
     GithubAppInstallSession,
     GithubCommentSync,
+    GitCommentSync,
+    GitCodeReviewLink,
+    GitIssueSync,
     GithubIssueSync,
     GithubPullRequestLink,
+    GitProviderAccount,
+    GitRepository,
+    GitRepositoryBinding,
     GithubRepository,
     GithubRepositorySync,
     GithubWebhookDelivery,
@@ -256,7 +262,9 @@ def _upsert_app_installation(
             workspace_integration=wi,
             defaults={"installation_id": installation_id, **defaults},
         )
-        return _refresh_app_installation(app_installation, raise_on_error=require_verified)
+        app_installation = _refresh_app_installation(app_installation, raise_on_error=require_verified)
+        _upsert_git_account_for_app(app_installation)
+        return app_installation
 
 
 def _serialize_repo(gh_repo: dict) -> dict:
@@ -269,6 +277,147 @@ def _serialize_repo(gh_repo: dict) -> dict:
         "default_branch": gh_repo.get("default_branch") or "",
         "private": bool(gh_repo.get("private", False)),
     }
+
+
+def _upsert_git_account_for_pat(wi: WorkspaceIntegration, user_info: dict) -> GitProviderAccount:
+    config = wi.config or {}
+    account, _ = GitProviderAccount.objects.update_or_create(
+        workspace=wi.workspace,
+        provider=GitProviderAccount.Provider.GITHUB,
+        host_url="https://github.com",
+        auth_type=GitProviderAccount.AuthType.PAT,
+        external_account_id=f"pat:{wi.id}",
+        defaults={
+            "external_account_login": config.get("github_user_login") or user_info.get("login") or "",
+            "display_name": config.get("github_user_login") or user_info.get("login") or "GitHub PAT",
+            "capabilities": {
+                "read_repositories": True,
+                "read_issues": True,
+                "write_comments": True,
+                "manage_webhooks": False,
+                "clone": False,
+            },
+            "credential_config": {
+                "auth_type": "pat",
+                "host_url": "https://github.com",
+                "token": config.get("token") or "",
+            },
+            "workspace_integration": wi,
+            "status": GitProviderAccount.Status.CONNECTED,
+            "verified_at": timezone.now(),
+            "metadata": {"identity": user_info},
+        },
+    )
+    return account
+
+
+def _upsert_git_account_for_app(app_installation: GithubAppInstallation) -> GitProviderAccount:
+    account, _ = GitProviderAccount.objects.update_or_create(
+        workspace=app_installation.workspace_integration.workspace,
+        provider=GitProviderAccount.Provider.GITHUB,
+        host_url="https://github.com",
+        auth_type=GitProviderAccount.AuthType.GITHUB_APP,
+        external_account_id=str(app_installation.installation_id),
+        defaults={
+            "external_account_login": app_installation.account_login,
+            "display_name": app_installation.account_login or f"GitHub App {app_installation.installation_id}",
+            "capabilities": {
+                "read_repositories": True,
+                "read_issues": True,
+                "write_comments": False,
+                "manage_webhooks": True,
+                "clone": False,
+            },
+            "credential_config": {
+                "auth_type": "github_app",
+                "host_url": "https://github.com",
+                "installation_id": app_installation.installation_id,
+            },
+            "workspace_integration": app_installation.workspace_integration,
+            "status": (
+                GitProviderAccount.Status.DEGRADED
+                if app_installation.suspended_at
+                else GitProviderAccount.Status.CONNECTED
+            ),
+            "verified_at": app_installation.verified_at,
+            "last_check_error": app_installation.last_check_error,
+            "metadata": {
+                "permissions": app_installation.permissions,
+                "events": app_installation.events,
+                "repository_selection": app_installation.repository_selection,
+                "repository_count": app_installation.repository_count,
+            },
+        },
+    )
+    return account
+
+
+def _upsert_git_binding_for_github_sync(sync: GithubRepositorySync, verified: dict) -> GitRepositoryBinding:
+    owner = (sync.repository.owner or "").lower()
+    name = (sync.repository.name or "").lower()
+    full_name = f"{owner}/{name}"
+    account = (
+        GitProviderAccount.objects.filter(
+            workspace=sync.workspace,
+            provider=GitProviderAccount.Provider.GITHUB,
+            host_url="https://github.com",
+            workspace_integration=sync.workspace_integration,
+        )
+        .order_by("auth_type")
+        .first()
+    )
+    if account is None:
+        account = GitProviderAccount.objects.create(
+            workspace=sync.workspace,
+            provider=GitProviderAccount.Provider.GITHUB,
+            host_url="https://github.com",
+            auth_type=GitProviderAccount.AuthType.PAT,
+            external_account_id=f"legacy:{sync.workspace_integration_id}",
+            display_name="Legacy GitHub integration",
+            credential_config={
+                "auth_type": "pat",
+                "host_url": "https://github.com",
+                "token": (sync.workspace_integration.config or {}).get("token") or "",
+            },
+            workspace_integration=sync.workspace_integration,
+            status=GitProviderAccount.Status.DEGRADED,
+            last_check_error="Backfilled while binding legacy GitHub repository",
+        )
+    repo, _ = GitRepository.objects.update_or_create(
+        provider=GitRepository.Provider.GITHUB,
+        host_url="https://github.com",
+        external_id=str(sync.repository.repository_id),
+        defaults={
+            "namespace": owner,
+            "name": name,
+            "full_name": full_name,
+            "web_url": verified.get("html_url") or sync.repository.url or f"https://github.com/{full_name}",
+            "clone_url_http": verified.get("clone_url") or "",
+            "clone_url_ssh": verified.get("ssh_url") or "",
+            "default_branch": verified.get("default_branch") or "",
+            "is_private": bool(verified.get("private")),
+            "metadata": verified,
+        },
+    )
+    existing = GitRepositoryBinding.objects.filter(project=sync.project).first()
+    if existing is not None:
+        existing.delete(soft=False)
+    return GitRepositoryBinding.objects.create(
+        project=sync.project,
+        workspace=sync.workspace,
+        repository=repo,
+        provider_account=account,
+        actor=sync.actor,
+        is_sync_enabled=sync.is_sync_enabled,
+        clone_auth_mode=(
+            GitRepositoryBinding.CloneAuthMode.RUNNER_MANAGED
+            if verified.get("private")
+            else GitRepositoryBinding.CloneAuthMode.PUBLIC
+        ),
+        last_synced_at=sync.last_synced_at,
+        last_sync_error=sync.last_sync_error,
+        metadata={"legacy_github_repository_sync_id": str(sync.id)},
+    )
 
 
 # --------------------------------------------------------------------- workspace
@@ -330,6 +479,7 @@ class GithubIntegrationConnectEndpoint(BaseAPIView):
                 "verified_at": timezone.now().isoformat(),
             }
             wi.save(update_fields=["config"])
+            _upsert_git_account_for_pat(wi, user_info)
 
         return Response(
             {
@@ -368,6 +518,21 @@ class GithubIntegrationDisconnectEndpoint(BaseAPIView):
             GithubRepositorySync.objects.filter(workspace_integration=wi).update(
                 is_sync_enabled=False,
                 last_sync_error="Workspace GitHub integration disconnected",
+            )
+            pat_accounts = GitProviderAccount.objects.filter(
+                workspace=workspace,
+                provider=GitProviderAccount.Provider.GITHUB,
+                auth_type=GitProviderAccount.AuthType.PAT,
+                workspace_integration=wi,
+            )
+            GitRepositoryBinding.objects.filter(provider_account__in=pat_accounts).update(
+                is_sync_enabled=False,
+                last_sync_error="Workspace GitHub integration disconnected",
+            )
+            pat_accounts.update(
+                status=GitProviderAccount.Status.REVOKED,
+                last_check_error="Workspace GitHub integration disconnected",
+                credential_config={"auth_type": "pat", "host_url": "https://github.com", "token": ""},
             )
         return Response({"connected": False}, status=status.HTTP_200_OK)
 
@@ -661,6 +826,23 @@ def _refresh_pr_links(payload: dict) -> int:
         for field, value in snapshot.items():
             setattr(link, field, value)
         link.save(update_fields=["title", "state", "merged", "draft", "pr_updated_at", "updated_at"])
+    for link in GitCodeReviewLink.objects.filter(
+        provider="github",
+        host_url="https://github.com",
+        namespace=owner,
+        repo_name=name,
+        external_iid=str(number),
+    ):
+        matched += 1
+        if incoming and link.remote_updated_at and incoming < link.remote_updated_at:
+            continue
+        link.title = snapshot.get("title") or ""
+        link.state = "merged" if snapshot.get("merged") else snapshot.get("state") or "open"
+        link.merged = bool(snapshot.get("merged"))
+        link.draft = bool(snapshot.get("draft"))
+        link.remote_updated_at = incoming
+        link.metadata = {**(link.metadata or {}), "remote": pull_request}
+        link.save(update_fields=["title", "state", "merged", "draft", "remote_updated_at", "metadata", "updated_at"])
     return matched
 
 
@@ -851,6 +1033,7 @@ class GithubProjectBindEndpoint(BaseAPIView):
                     credentials={},
                     is_sync_enabled=False,
                 )
+                _upsert_git_binding_for_github_sync(sync, verified)
                 # Bind doubles as save: persist canonical URL on the project
                 # so General Settings shows what's actually bound.
                 if project.repo_url != canonical_url:
@@ -894,7 +1077,33 @@ class GithubProjectStatusEndpoint(BaseAPIView):
             .first()
         )
         if sync is None:
-            return Response({"bound": False}, status=status.HTTP_200_OK)
+            binding = (
+                GitRepositoryBinding.objects.filter(
+                    project_id=project_id,
+                    workspace__slug=slug,
+                    repository__provider=GitRepository.Provider.GITHUB,
+                )
+                .select_related("repository")
+                .first()
+            )
+            if binding is None:
+                return Response({"bound": False}, status=status.HTTP_200_OK)
+            return Response(
+                {
+                    "bound": True,
+                    "id": str(binding.id),
+                    "repository": {
+                        "id": binding.repository.external_id,
+                        "owner": binding.repository.namespace,
+                        "name": binding.repository.name,
+                        "url": binding.repository.web_url,
+                    },
+                    "is_sync_enabled": binding.is_sync_enabled,
+                    "last_synced_at": binding.last_synced_at.isoformat() if binding.last_synced_at else None,
+                    "last_sync_error": binding.last_sync_error,
+                },
+                status=status.HTTP_200_OK,
+            )
         return Response(
             {
                 "bound": True,
@@ -921,9 +1130,21 @@ class GithubProjectStatusEndpoint(BaseAPIView):
             return Response({"error": "enabled (bool) is required"}, status=status.HTTP_400_BAD_REQUEST)
         sync = GithubRepositorySync.objects.filter(project_id=project_id, workspace__slug=slug).first()
         if sync is None:
-            return Response({"error": "No GitHub binding for this project"}, status=status.HTTP_404_NOT_FOUND)
+            updated = GitRepositoryBinding.objects.filter(
+                project_id=project_id,
+                workspace__slug=slug,
+                repository__provider=GitRepository.Provider.GITHUB,
+            ).update(is_sync_enabled=enabled)
+            if not updated:
+                return Response({"error": "No GitHub binding for this project"}, status=status.HTTP_404_NOT_FOUND)
+            return Response({"is_sync_enabled": enabled}, status=status.HTTP_200_OK)
         sync.is_sync_enabled = enabled
         sync.save(update_fields=["is_sync_enabled"])
+        GitRepositoryBinding.objects.filter(
+            project_id=project_id,
+            workspace__slug=slug,
+            repository__provider=GitRepository.Provider.GITHUB,
+        ).update(is_sync_enabled=enabled)
         return Response({"is_sync_enabled": enabled}, status=status.HTTP_200_OK)
 
     @allow_permission(allowed_roles=[ROLE.ADMIN])
@@ -931,7 +1152,16 @@ class GithubProjectStatusEndpoint(BaseAPIView):
         if not _feature_enabled():
             return _disabled_response()
         sync = GithubRepositorySync.objects.filter(project_id=project_id, workspace__slug=slug).first()
+        binding_qs = GitRepositoryBinding.objects.filter(
+            project_id=project_id,
+            workspace__slug=slug,
+            repository__provider=GitRepository.Provider.GITHUB,
+        )
         if sync is None:
+            for binding in binding_qs:
+                GitCommentSync.objects.filter(issue_sync__binding=binding).delete()
+                GitIssueSync.objects.filter(binding=binding).delete()
+                binding.delete()
             return Response({"bound": False}, status=status.HTTP_200_OK)
         with transaction.atomic():
             # Synchronously soft-delete the dependent sync-tracking rows so
@@ -944,4 +1174,8 @@ class GithubProjectStatusEndpoint(BaseAPIView):
             GithubCommentSync.objects.filter(issue_sync__repository_sync=sync).delete()
             GithubIssueSync.objects.filter(repository_sync=sync).delete()
             sync.delete()
+            for binding in binding_qs:
+                GitCommentSync.objects.filter(issue_sync__binding=binding).delete()
+                GitIssueSync.objects.filter(binding=binding).delete()
+                binding.delete()
         return Response({"bound": False}, status=status.HTTP_200_OK)
