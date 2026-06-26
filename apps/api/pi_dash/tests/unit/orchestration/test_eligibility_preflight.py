@@ -404,14 +404,18 @@ def test_dispatch_run_ai_run_bounces_when_no_runner(
 
 @pytest.mark.unit
 def test_dispatch_run_ai_run_proceeds_when_eligible(
-    db, issue, pod, user_a, states, project
+    db, issue, pod, user_a, states, monkeypatch
 ):
-    """Sanity: with an eligible runner present, no bounce; a run is
-    created. We don't assert on the run's status because drain is stubbed
-    out — the run stays QUEUED, which is fine for this preflight test."""
-    from pi_dash.prompting.seed import seed_default_template
+    """With an eligible runner present, no bounce; the dispatch proceeds.
 
-    seed_default_template()
+    We stub ``build_first_turn`` so the test stays focused on the
+    preflight wiring (otherwise this would silently couple to the
+    prompting / templating subsystem).
+    """
+    monkeypatch.setattr(
+        "pi_dash.orchestration.service.build_first_turn",
+        lambda issue, run: "stub-prompt",
+    )
     Issue.all_objects.filter(pk=issue.pk).update(state=states["in_progress"])
     issue.refresh_from_db()
     _make_runner(user_a, issue.workspace, pod)
@@ -422,6 +426,44 @@ def test_dispatch_run_ai_run_proceeds_when_eligible(
     issue.refresh_from_db()
     assert issue.state.group == "started"  # NOT bounced
     assert IssueComment.objects.filter(issue=issue).count() == 0
+
+
+@pytest.mark.unit
+def test_dispatch_continuation_run_comment_and_run_bounces(
+    db, issue, pod, user_a, user_b, states
+):
+    """Comment & Run uses an explicit user actor (the commenter), not
+    the agent bot. The preflight still bounces when neither the actor,
+    the issue creator, nor any assignee owns a runner in the pod."""
+    Issue.all_objects.filter(pk=issue.pk).update(state=states["in_progress"])
+    issue.refresh_from_db()
+    _make_runner(user_b, issue.workspace, pod)  # B has a runner, A doesn't
+
+    # Prior run so dispatch_continuation_run finds a parent.
+    AgentRun.objects.create(
+        workspace=issue.workspace,
+        created_by=user_a,
+        pod=pod,
+        work_item=issue,
+        status="completed",
+        prompt="prior",
+    )
+
+    # user_a (issue creator) clicks Comment & Run — actor is a real user
+    # here, distinguishing this from the tick path. Eligibility set is
+    # {user_a.id} (creator + issue.created_by) — user_b's runner doesn't
+    # match.
+    run = scheduling.dispatch_continuation_run(
+        issue,
+        triggered_by=scheduling.TRIGGER_COMMENT_AND_RUN,
+        actor=user_a,
+    )
+    assert run is None
+    issue.refresh_from_db()
+    assert issue.state.group == "backlog"
+    # Both the bounce comment AND the issue creator's prior comment
+    # context aren't here — only the bounce comment.
+    assert IssueComment.objects.filter(issue=issue).count() == 1
 
 
 @pytest.mark.unit

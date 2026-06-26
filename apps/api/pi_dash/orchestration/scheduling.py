@@ -412,7 +412,7 @@ def preflight_eligibility_or_bounce(
         pod_has_runner_for_issue_principal,
     )
 
-    creator_id = getattr(run_creator, "id", None) if run_creator is not None else None
+    creator_id = getattr(run_creator, "id", None)
     if pod_has_runner_for_issue_principal(pod, issue, creator_id):
         return True
     _bounce_issue_no_eligible_runner(issue, triggered_by=triggered_by)
@@ -426,6 +426,11 @@ def _bounce_issue_no_eligible_runner(issue: Issue, *, triggered_by: str) -> None
     a side-effect (Backlog isn't a delegation trigger). Skipped when the
     issue is already in the BACKLOG state group — the comment still posts
     so the user sees *why* a click / tick produced no run.
+
+    The state move + comment post are wrapped in a single atomic block
+    so a partial bounce (state changed, no comment) can't survive a
+    crash mid-write — the user would otherwise be staring at an issue
+    that silently jumped back to Backlog with no explanation.
     """
     from django.utils.html import format_html
 
@@ -439,41 +444,43 @@ def _bounce_issue_no_eligible_runner(issue: Issue, *, triggered_by: str) -> None
         triggered_by,
     )
 
-    current_state_group = issue.state.group if issue.state_id else None
-    if current_state_group != StateGroup.BACKLOG.value:
-        target_state = (
-            State.objects.filter(
-                project_id=issue.project_id,
-                group=StateGroup.BACKLOG.value,
-            )
-            .order_by("-default", "sequence")
-            .first()
-        )
-        if target_state is None:
-            logger.warning(
-                "agent_dispatch: no backlog state for project=%s; "
-                "issue=%s stays in current state",
-                issue.project_id,
-                issue.pk,
-            )
-        else:
-            issue.state = target_state
-            issue.save(update_fields=["state", "updated_at"])
-
     body = format_html(
         "<p><strong>Agent run skipped — no eligible runner.</strong></p>"
         "<p>No runner is registered in this pod that can serve this issue. "
         "Add a runner under your account, or assign this issue to a "
         "workspace member whose runner is registered here.</p>"
     )
-    IssueComment.objects.create(
-        issue=issue,
-        project_id=issue.project_id,
-        workspace_id=issue.workspace_id,
-        actor=get_agent_system_user(),
-        comment_html=body,
-        speaker_type=IssueComment.SpeakerType.AGENT,
-    )
+
+    with transaction.atomic():
+        current_state_group = issue.state.group if issue.state_id else None
+        if current_state_group != StateGroup.BACKLOG.value:
+            target_state = (
+                State.objects.filter(
+                    project_id=issue.project_id,
+                    group=StateGroup.BACKLOG.value,
+                )
+                .order_by("-default", "sequence")
+                .first()
+            )
+            if target_state is None:
+                logger.warning(
+                    "agent_dispatch: no backlog state for project=%s; "
+                    "issue=%s stays in current state",
+                    issue.project_id,
+                    issue.pk,
+                )
+            else:
+                issue.state = target_state
+                issue.save(update_fields=["state", "updated_at"])
+
+        IssueComment.objects.create(
+            issue=issue,
+            project=issue.project,
+            workspace=issue.workspace,
+            actor=get_agent_system_user(),
+            comment_html=body,
+            speaker_type=IssueComment.SpeakerType.AGENT,
+        )
 
 
 def dispatch_continuation_run(

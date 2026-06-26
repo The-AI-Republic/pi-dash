@@ -374,6 +374,10 @@ def pod_has_runner_for_issue_principal(pod, issue, run_creator_id) -> bool:
     - ``issue.created_by_id`` (the issue creator),
     - any current ``issue.assignees``.
 
+    ``issue.assignees`` is the M2M live manager; the existing matcher
+    (``filter_runs_usable_by_runner``) traverses it the same way, so
+    the preflight stays consistent with the dispatch gate it shadows.
+
     Status is **deliberately ignored** — OFFLINE / BUSY / REVOKED runners
     all count as "registered". The intent is to detect the structural
     "nobody on this pod could ever serve this" case, not transient
