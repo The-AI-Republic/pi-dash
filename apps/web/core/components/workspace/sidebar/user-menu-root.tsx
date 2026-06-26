@@ -7,7 +7,7 @@
 import { useState, useEffect } from "react";
 import { observer } from "mobx-react";
 import { useRouter } from "next/navigation";
-import { ChevronsUpDown, Globe, LogOut, Settings, Settings2 } from "lucide-react";
+import { ChevronsUpDown, Globe, LogOut, Settings } from "lucide-react";
 // pi dash imports
 import { GOD_MODE_URL } from "@pi-dash/constants";
 import { useTranslation } from "@pi-dash/i18n";
@@ -169,18 +169,6 @@ export const UserMenuRoot = observer(function UserMenuRoot({ variant = "compact"
           >
             <Settings className="size-3.5 shrink-0" />
             {t("Settings")}
-          </CustomMenu.MenuItem>
-          <CustomMenu.MenuItem
-            onClick={() =>
-              toggleProfileSettingsModal({
-                activeTab: "preferences",
-                isOpen: true,
-              })
-            }
-            className="flex items-center gap-2"
-          >
-            <Settings2 className="size-3.5 shrink-0" />
-            {t("Preferences")}
           </CustomMenu.MenuItem>
         </div>
         <CustomMenu.MenuItem onClick={() => setIsCommunityModalOpen(true)} className="flex items-center gap-2">
