@@ -244,6 +244,14 @@ def handle_issue_state_transition(
         )
         return TransitionOutcome(reason="no-pod-available")
 
+    if not scheduling.preflight_eligibility_or_bounce(
+        issue,
+        run_creator=creator,
+        pod=pod,
+        triggered_by=AgentRunTrigger.STATE_TRANSITION.value,
+    ):
+        return TransitionOutcome(reason="no-eligible-runner")
+
     return _create_and_dispatch_run(
         issue=issue,
         parent=parent,
