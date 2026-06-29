@@ -41,6 +41,7 @@ from pi_dash.prompting.composer import (
     SOURCE_WORKSPACE,
     compile_template,
     compose,
+    effective_customizability,
     load_override_index,
     resolve_section,
 )
@@ -109,6 +110,7 @@ def _section_breakdown(kind: str, *, workspace, user) -> list:
     override_index = load_override_index(workspace, user)
     out = []
     for key in recipes.recipe_for(kind):
+        section = registry.get_section(key)
         resolved = resolve_section(
             key, workspace=workspace, project=None, user=user, override_index=override_index
         )
@@ -119,15 +121,23 @@ def _section_breakdown(kind: str, *, workspace, user) -> list:
             row = override_index.get(("user", key))
         else:
             row = None
+        # Capability flags express what the *section* permits (the caller still
+        # combines these with their own admin/member role client-side).
+        tier = effective_customizability(section, workspace)
         out.append(
             {
                 "key": resolved.key,
                 "title": resolved.title,
-                "customizable": resolved.customizable,
+                "customizable": tier,
                 "body": resolved.body,
+                # The pristine registry default, so the editor can diff an
+                # active override against it without first reverting.
+                "default_body": section.default_body,
                 "source": resolved.source,
                 "version": resolved.version,
                 "needs_attention": bool(row.needs_attention) if row is not None else False,
+                "editable_at_workspace": tier != registry.CUSTOMIZABLE_LOCKED,
+                "editable_at_personal": tier == registry.CUSTOMIZABLE_OVERRIDABLE,
             }
         )
     return out
@@ -192,9 +202,24 @@ class PromptSectionDetailEndpoint(APIView):
                 status=status.HTTP_404_NOT_FOUND,
             )
         section = registry.get_section(section_key)
-        if section.is_locked:
+        # Governance tier gate (design §9.2). ``locked`` blocks every scope;
+        # ``workspace`` allows the workspace scope only; ``overridable`` allows
+        # both. The role check above already ensures workspace writes are admin.
+        tier = effective_customizability(section, workspace)
+        if scope == SCOPE_WORKSPACE and tier == registry.CUSTOMIZABLE_LOCKED:
             return Response(
                 {"error": f"section {section_key!r} is locked and cannot be overridden"},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+        if scope == SCOPE_USER and tier != registry.CUSTOMIZABLE_OVERRIDABLE:
+            return Response(
+                {
+                    "error": (
+                        f"section {section_key!r} cannot be personally overridden"
+                        if tier == registry.CUSTOMIZABLE_WORKSPACE
+                        else f"section {section_key!r} is locked and cannot be overridden"
+                    )
+                },
                 status=status.HTTP_403_FORBIDDEN,
             )
 

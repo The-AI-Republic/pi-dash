@@ -8,10 +8,10 @@ import { useContext } from "react";
 // mobx store
 import { StoreContext } from "@/lib/store-context";
 // types
-import type { IPromptTemplateStore } from "@/store/prompt-template.store";
+import type { IPromptSectionStore } from "@/store/prompt-section.store";
 
-export const usePromptTemplate = (): IPromptTemplateStore => {
+export const usePromptSection = (): IPromptSectionStore => {
   const context = useContext(StoreContext);
-  if (context === undefined) throw new Error("usePromptTemplate must be used within StoreProvider");
-  return context.promptTemplate;
+  if (context === undefined) throw new Error("usePromptSection must be used within StoreProvider");
+  return context.promptSection;
 };

@@ -80,10 +80,11 @@ class ComposedPrompt:
 
 
 def effective_customizability(section: registry.PromptSection, workspace) -> str:
-    """Return the customizability that actually applies for ``workspace``.
+    """Return the customizability tier that actually applies for ``workspace``.
 
-    Returns the registry flag in v1. The indirection is the §9.2 seam: a
-    per-workspace admin-lock tier (open / workspace-only / locked) lands as a
+    Returns the static registry flag (``locked`` / ``workspace`` /
+    ``overridable``). The indirection is the §9.2 seam: *dynamic* per-workspace
+    admin-locking (e.g. an admin pinning an otherwise-open section) lands as a
     change to this one function without touching the resolver or callers.
     """
     return section.customizable
@@ -169,13 +170,18 @@ def resolve_section(
         source=SOURCE_DEFAULT,
         version=0,
     )
-    if effective_customizability(section, workspace) == registry.CUSTOMIZABLE_LOCKED:
+    tier = effective_customizability(section, workspace)
+    if tier == registry.CUSTOMIZABLE_LOCKED:
         return default
     if workspace is None:
         # No workspace context (e.g. a global preview): defaults only.
         return default
 
-    scope, row = _lookup_override(workspace, user, key, override_index)
+    # Personal (user-scope) overrides only apply to the fully-open tier. A
+    # ``workspace``-tier section is admin-governed: even if a stale personal row
+    # survives a tier downgrade, it must not resolve.
+    lookup_user = user if tier == registry.CUSTOMIZABLE_OVERRIDABLE else None
+    scope, row = _lookup_override(workspace, lookup_user, key, override_index)
     if row is not None:
         source = f"user:{user.id}" if scope == _SCOPE_USER else SOURCE_WORKSPACE
         return ResolvedSection(

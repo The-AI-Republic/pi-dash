@@ -113,10 +113,10 @@ export const coreRoutes: RouteConfigEntry[] = [
         // components are kept in place so the feature can be restored by
         // re-registering this route; it is intentionally not reachable by URL.
 
-        // Prompts (prompt templates: view for members, create/edit for workspace admins)
+        // Prompts (section-based prompt customization: view for members,
+        // workspace-default editing for admins, personal overrides for members)
         layout("./(all)/[workspaceSlug]/prompts/layout.tsx", [
           route(":workspaceSlug/prompts", "./(all)/[workspaceSlug]/prompts/page.tsx"),
-          route(":workspaceSlug/prompts/:promptId", "./(all)/[workspaceSlug]/prompts/[promptId]/page.tsx"),
         ]),
 
         // Schedulers (workspace-scoped scheduler definitions: project admins install on projects)

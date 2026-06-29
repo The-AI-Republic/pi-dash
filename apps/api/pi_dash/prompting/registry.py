@@ -25,10 +25,22 @@ from pathlib import Path
 
 SECTIONS_DIR = Path(__file__).resolve().parent / "sections"
 
-#: Allowed values for a section's ``customizable`` front-matter field.
+#: Allowed values for a section's ``customizable`` front-matter field — the
+#: three governance tiers (design §9.2):
+#:
+#: - ``locked``      — nobody edits the body; the registry default always wins
+#:   (e.g. ``pidash-cli``, ``guardrails``).
+#: - ``workspace``   — a workspace **admin** may set a workspace-level override,
+#:   but individual members may **not** keep a personal override. The whole
+#:   workspace (and all automatic runs) shares the admin's value.
+#: - ``overridable`` — fully open: a member may keep a **personal** override for
+#:   their own human-triggered runs, and an admin may set the workspace default.
 CUSTOMIZABLE_LOCKED = "locked"
+CUSTOMIZABLE_WORKSPACE = "workspace"
 CUSTOMIZABLE_OVERRIDABLE = "overridable"
-_VALID_CUSTOMIZABLE = frozenset({CUSTOMIZABLE_LOCKED, CUSTOMIZABLE_OVERRIDABLE})
+_VALID_CUSTOMIZABLE = frozenset(
+    {CUSTOMIZABLE_LOCKED, CUSTOMIZABLE_WORKSPACE, CUSTOMIZABLE_OVERRIDABLE}
+)
 
 #: Only files following the ``<key>.md`` convention are loaded. A stray
 #: README.md / NOTES.md without valid front-matter raises at import time
@@ -59,6 +71,17 @@ class PromptSection:
 
     @property
     def is_overridable(self) -> bool:
+        """True only for the fully-open tier (members may personal-override)."""
+        return self.customizable == CUSTOMIZABLE_OVERRIDABLE
+
+    @property
+    def allows_workspace_override(self) -> bool:
+        """Whether a workspace admin may set a workspace-level override."""
+        return self.customizable in (CUSTOMIZABLE_WORKSPACE, CUSTOMIZABLE_OVERRIDABLE)
+
+    @property
+    def allows_personal_override(self) -> bool:
+        """Whether a member may keep a personal (user-scope) override."""
         return self.customizable == CUSTOMIZABLE_OVERRIDABLE
 
 
