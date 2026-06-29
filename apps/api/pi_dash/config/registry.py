@@ -142,6 +142,9 @@ _ENV_INFRA = {
     "ASSISTANT_TURN_HARD_LIMIT": 330,
     "ASSISTANT_HISTORY_MAX_TURNS": 40,
     "ASSISTANT_LOOP_HISTORY_MAX_TURNS": 5,
+    # Git provider outbound targets. gitlab.com is always allowed by the
+    # adapter; self-managed GitLab hosts must be explicitly configured here.
+    "GITLAB_ALLOWED_HOSTS": "",
     # Loop (auto project management)
     "LOOP_ENABLED": "true",
     "LOOP_STAGGER_WINDOW_MINUTES": 60,

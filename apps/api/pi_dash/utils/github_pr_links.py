@@ -13,7 +13,7 @@ import logging
 
 from django.db import IntegrityError
 
-from pi_dash.db.models import GithubAppInstallation, GithubPullRequestLink, Issue
+from pi_dash.db.models import GitCodeReviewLink, GithubAppInstallation, GithubPullRequestLink, Issue
 from pi_dash.utils.exception_logger import log_exception
 from pi_dash.utils.github_client import (
     GithubClient,
@@ -22,6 +22,7 @@ from pi_dash.utils.github_client import (
 )
 
 logger = logging.getLogger(__name__)
+GITHUB_HOST = "https://github.com"
 
 
 class InvalidPullRequestURL(ValueError):
@@ -58,6 +59,63 @@ def best_effort_snapshot(workspace_slug: str, owner: str, name: str, number: int
         return {}
 
 
+def _matching_code_review_link(owner: str, name: str, number: int) -> GitCodeReviewLink | None:
+    return (
+        GitCodeReviewLink.objects.filter(
+            provider="github",
+            host_url=GITHUB_HOST,
+            namespace=owner,
+            repo_name=name,
+            external_iid=str(number),
+        )
+        .order_by("-created_at")
+        .first()
+    )
+
+
+def _ensure_code_review_link(link: GithubPullRequestLink) -> None:
+    existing = _matching_code_review_link(link.repo_owner, link.repo_name, link.pr_number)
+    state = "merged" if link.merged else ("closed" if link.state == GithubPullRequestLink.State.CLOSED else "open")
+    fields = {
+        "project_id": link.project_id,
+        "issue_id": link.issue_id,
+        "url": link.url,
+        "title": link.title,
+        "state": state,
+        "merged": link.merged,
+        "draft": link.draft,
+        "remote_updated_at": link.pr_updated_at,
+        "metadata": {
+            **(existing.metadata if existing else {}),
+            "legacy_github_pull_request_link_id": str(link.id),
+        },
+    }
+    if existing is not None:
+        if existing.issue_id != link.issue_id:
+            raise PullRequestAlreadyLinked(existing.issue_id)
+        for field, value in fields.items():
+            setattr(existing, field, value)
+        existing.save()
+        return
+    GitCodeReviewLink.objects.create(
+        provider="github",
+        host_url=GITHUB_HOST,
+        namespace=link.repo_owner,
+        repo_name=link.repo_name,
+        repo_external_id="",
+        external_id="",
+        external_iid=str(link.pr_number),
+        **fields,
+    )
+
+
+def detach_pull_request_link(link: GithubPullRequestLink) -> None:
+    review_link = _matching_code_review_link(link.repo_owner, link.repo_name, link.pr_number)
+    link.delete()
+    if review_link is not None and review_link.issue_id == link.issue_id:
+        review_link.delete()
+
+
 def attach_pull_request(*, project_id, issue_id, workspace_slug: str, raw_url: str):
     """Attach (or idempotently re-attach) a PR to a work item.
 
@@ -84,7 +142,12 @@ def attach_pull_request(*, project_id, issue_id, workspace_slug: str, raw_url: s
     if existing is not None:
         if str(existing.issue_id) != str(issue_id):
             raise PullRequestAlreadyLinked(existing.issue_id)
+        _ensure_code_review_link(existing)
         return existing, False
+
+    existing_review = _matching_code_review_link(owner, name, number)
+    if existing_review is not None and str(existing_review.issue_id) != str(issue_id):
+        raise PullRequestAlreadyLinked(existing_review.issue_id)
 
     snapshot = best_effort_snapshot(workspace_slug, owner, name, number)
     try:
@@ -97,6 +160,7 @@ def attach_pull_request(*, project_id, issue_id, workspace_slug: str, raw_url: s
             url=f"https://github.com/{owner}/{name}/pull/{number}",
             **snapshot,
         )
+        _ensure_code_review_link(link)
         return link, True
     except IntegrityError:
         # A concurrent attach won the partial-unique race; resolve to the row
@@ -106,4 +170,5 @@ def attach_pull_request(*, project_id, issue_id, workspace_slug: str, raw_url: s
             raise
         if str(existing.issue_id) != str(issue_id):
             raise PullRequestAlreadyLinked(existing.issue_id)
+        _ensure_code_review_link(existing)
         return existing, False

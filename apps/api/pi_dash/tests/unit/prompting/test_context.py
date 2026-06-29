@@ -4,7 +4,14 @@
 
 import pytest
 
-from pi_dash.db.models import Issue, Project, State
+from pi_dash.db.models import (
+    GitProviderAccount,
+    GitRepository,
+    GitRepositoryBinding,
+    Issue,
+    Project,
+    State,
+)
 from pi_dash.prompting.context import build_context
 from pi_dash.runner.models import AgentRun
 
@@ -62,6 +69,7 @@ def test_context_shape(issue, run):
     assert ctx["project"]["identifier"] == "TP"
     assert ctx["repo"]["url"] == "git@github.com:acme/web.git"
     assert ctx["repo"]["base_branch"] == "trunk"
+    assert ctx["repo"]["code_review_term"] == "code review"
     # No git_work_branch set on the issue → should surface as None so templates
     # can branch on `{% if repo.work_branch %}` without false positives.
     assert ctx["repo"]["work_branch"] is None
@@ -86,6 +94,49 @@ def test_context_includes_git_work_branch_when_set(issue, run):
     issue.save(update_fields=["git_work_branch"])
     ctx = build_context(issue, run)
     assert ctx["repo"]["work_branch"] == "feat/pinned-branch"
+
+
+@pytest.mark.unit
+def test_context_includes_bound_git_provider_details(
+    workspace, project, issue, run, create_user
+):
+    account = GitProviderAccount.objects.create(
+        workspace=workspace,
+        provider="gitlab",
+        host_url="https://gitlab.com",
+        auth_type="pat",
+        external_account_id="u1",
+        display_name="alice",
+        credential_config={
+            "token": "token",
+            "host_url": "https://gitlab.com",
+            "auth_type": "pat",
+        },
+    )
+    repo = GitRepository.objects.create(
+        provider="gitlab",
+        host_url="https://gitlab.com",
+        external_id="99",
+        namespace="acme",
+        name="web",
+        full_name="acme/web",
+        web_url="https://gitlab.com/acme/web",
+    )
+    GitRepositoryBinding.objects.create(
+        project=project,
+        workspace=workspace,
+        repository=repo,
+        provider_account=account,
+        actor=create_user,
+    )
+
+    ctx = build_context(issue, run)
+
+    assert ctx["repo"]["provider"] == "gitlab"
+    assert ctx["repo"]["provider_display_name"] == "GitLab"
+    assert ctx["repo"]["host_url"] == "https://gitlab.com"
+    assert ctx["repo"]["full_name"] == "acme/web"
+    assert ctx["repo"]["code_review_term"] == "merge request"
 
 
 @pytest.mark.unit

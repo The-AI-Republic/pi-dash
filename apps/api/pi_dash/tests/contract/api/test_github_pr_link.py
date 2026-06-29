@@ -16,6 +16,7 @@ import pytest
 from rest_framework import status as http_status
 
 from pi_dash.db.models import (
+    GitCodeReviewLink,
     GithubPullRequestLink,
     Issue,
     Project,
@@ -79,6 +80,13 @@ def test_attach_creates_link(api_key_client, workspace, pr_project, issue):
     assert link.issue_id == issue.id
     assert link.state == "open"
     assert link.merged is False
+    review_link = GitCodeReviewLink.objects.get(
+        provider="github",
+        namespace="acme-corp",
+        repo_name="web",
+        external_iid="42",
+    )
+    assert review_link.issue_id == issue.id
 
 
 def test_attach_is_idempotent_for_same_issue(api_key_client, workspace, pr_project, issue):
@@ -114,6 +122,40 @@ def test_attach_conflict_when_pr_linked_to_other_issue(api_key_client, workspace
 
     assert response.status_code == http_status.HTTP_409_CONFLICT
     assert GithubPullRequestLink.objects.filter(repo_owner="acme", repo_name="web", pr_number=9).count() == 1
+
+
+def test_attach_conflicts_when_neutral_code_review_linked_to_other_issue(
+    api_key_client,
+    workspace,
+    pr_project,
+    issue,
+    create_user,
+):
+    other_issue = Issue.objects.create(
+        name="another issue",
+        project=pr_project,
+        workspace=pr_project.workspace,
+        created_by=create_user,
+    )
+    GitCodeReviewLink.objects.create(
+        project=pr_project,
+        issue=other_issue,
+        provider="github",
+        host_url="https://github.com",
+        namespace="acme",
+        repo_name="web",
+        external_iid="10",
+        url="https://github.com/acme/web/pull/10",
+    )
+
+    response = api_key_client.post(
+        _list_url(workspace.slug, pr_project.id, issue.id),
+        {"url": "https://github.com/acme/web/pull/10"},
+        format="json",
+    )
+
+    assert response.status_code == http_status.HTTP_409_CONFLICT
+    assert GithubPullRequestLink.objects.filter(repo_owner="acme", repo_name="web", pr_number=10).count() == 0
 
 
 @pytest.mark.parametrize(
@@ -214,11 +256,22 @@ def test_detach_soft_deletes_link(_delay, api_key_client, workspace, pr_project,
         project=pr_project, issue=issue, repo_owner="acme", repo_name="web", pr_number=3,
         url="https://github.com/acme/web/pull/3",
     )
+    review_link = GitCodeReviewLink.objects.create(
+        project=pr_project,
+        issue=issue,
+        provider="github",
+        host_url="https://github.com",
+        namespace="acme",
+        repo_name="web",
+        external_iid="3",
+        url="https://github.com/acme/web/pull/3",
+    )
 
     response = api_key_client.delete(_detail_url(workspace.slug, pr_project.id, issue.id, link.id))
 
     assert response.status_code == http_status.HTTP_204_NO_CONTENT
     assert GithubPullRequestLink.objects.filter(pk=link.id).count() == 0  # soft-deleted (default manager hides it)
+    assert GitCodeReviewLink.objects.filter(pk=review_link.id).count() == 0
     # the same PR can be re-attached after detach (partial-unique on deleted_at)
     reattach = api_key_client.post(
         _list_url(workspace.slug, pr_project.id, issue.id),
@@ -226,6 +279,15 @@ def test_detach_soft_deletes_link(_delay, api_key_client, workspace, pr_project,
         format="json",
     )
     assert reattach.status_code == http_status.HTTP_201_CREATED
+    assert (
+        GitCodeReviewLink.objects.filter(
+            provider="github",
+            namespace="acme",
+            repo_name="web",
+            external_iid="3",
+        ).count()
+        == 1
+    )
 
 
 def test_attach_rejects_issue_not_in_project(api_key_client, workspace, pr_project, create_user):

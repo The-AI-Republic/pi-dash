@@ -13,4 +13,14 @@ from .github import (
     GithubIssueSync,
     GithubCommentSync,
 )
+from .git import (
+    GitProviderAccount,
+    GitRepository,
+    GitRepositoryBinding,
+    GitIssueSync,
+    GitCommentSync,
+    GitCodeReviewLink,
+    GitWebhookDelivery,
+    GitWebhookRegistration,
+)
 from .slack import SlackProjectSync

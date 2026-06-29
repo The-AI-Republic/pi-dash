@@ -40,6 +40,11 @@ from .github_pr import (
     GithubPullRequestLinkDetailAPIEndpoint,
 )
 
+from .git_code_review import (
+    GitCodeReviewLinkListCreateAPIEndpoint,
+    GitCodeReviewLinkDetailAPIEndpoint,
+)
+
 from .cycle import (
     CycleListCreateAPIEndpoint,
     CycleDetailAPIEndpoint,

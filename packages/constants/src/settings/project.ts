@@ -109,7 +109,7 @@ export const PROJECT_SETTINGS: Record<TProjectSettingsTabs, TProjectSettingsItem
   },
   github: {
     key: "github",
-    i18n_label: "GitHub",
+    i18n_label: "Repository",
     href: `/github`,
     access: [EUserProjectRoles.ADMIN],
     highlight: (pathname: string, baseUrl: string) => pathname === `${baseUrl}/github/`,

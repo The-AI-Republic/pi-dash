@@ -156,6 +156,114 @@ export interface IGithubPullRequestLinkCreateRequest {
   url: string;
 }
 
+// Provider-neutral Git integrations (.ai_design/git_support_generalization/design.md)
+
+export type TGitProvider = "github" | "gitlab";
+export type TGitCodeReviewState = "open" | "closed" | "merged";
+
+export interface IGitProviderDescriptor {
+  key: TGitProvider;
+  display_name: string;
+  code_review_term: string;
+}
+
+export interface IGitProvidersResponse {
+  providers: IGitProviderDescriptor[];
+}
+
+export interface IGitProviderAccount {
+  id: string;
+  provider: TGitProvider;
+  host_url: string;
+  auth_type: string;
+  external_account_id: string;
+  external_account_login: string;
+  display_name: string;
+  capabilities: Record<string, boolean>;
+  status: "connected" | "degraded" | "revoked" | "error";
+  verified_at: string | null;
+  last_check_error: string;
+}
+
+export interface IGitProviderAccountsResponse {
+  accounts: IGitProviderAccount[];
+}
+
+export interface IGitProviderAccountCreateRequest {
+  provider: TGitProvider;
+  token: string;
+  host_url?: string;
+  auth_type?: "pat" | "oauth" | "group_token" | "project_token";
+}
+
+export interface IGitRepositorySummary {
+  id: string;
+  provider: TGitProvider;
+  host_url: string;
+  namespace: string;
+  name: string;
+  full_name: string;
+  web_url: string;
+  clone_url_http: string;
+  clone_url_ssh: string;
+  default_branch: string;
+  private: boolean;
+}
+
+export interface IGitReposPage {
+  repos: IGitRepositorySummary[];
+  page: number;
+  has_next_page: boolean;
+}
+
+export interface IGitProjectBindRequest {
+  repo_url: string;
+  provider_account_id?: string;
+}
+
+export interface IGitProjectBindingStatus {
+  bound: boolean;
+  id?: string;
+  provider?: TGitProvider;
+  provider_account_id?: string;
+  host_url?: string;
+  repository?: IGitRepositorySummary;
+  is_sync_enabled?: boolean;
+  clone_auth_mode?: "public" | "runner_managed" | "managed_ephemeral";
+  last_synced_at?: string | null;
+  last_sync_error?: string;
+  degraded?: boolean;
+  degraded_reason?: string;
+  repo_url?: string;
+}
+
+export interface IGitCodeReviewLink {
+  id: string;
+  issue: string;
+  provider: TGitProvider;
+  host_url: string;
+  namespace: string;
+  repo_name: string;
+  repo_external_id: string;
+  external_id: string;
+  external_iid: string;
+  url: string;
+  title: string;
+  state: TGitCodeReviewState;
+  merged: boolean;
+  draft: boolean;
+  remote_updated_at: string | null;
+  metadata: Record<string, unknown>;
+  created_at: string;
+  updated_at: string;
+  created_by: string | null;
+  created_by_detail?: IUserLite | null;
+}
+
+export interface IGitCodeReviewLinkCreateRequest {
+  url: string;
+}
+
 // slack integration
 export interface ISlackIntegration {
   id: string;

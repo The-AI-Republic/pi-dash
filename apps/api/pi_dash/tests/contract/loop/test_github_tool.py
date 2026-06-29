@@ -64,9 +64,16 @@ def test_closed_unmerged(world, mocker):
     assert out["state"] == "closed"
 
 
-def test_non_github_url(world, mocker):
+def test_gitlab_merged(world, mocker):
+    _patch_httpx(mocker, _Resp(200, {"state": "merged", "merged_at": "2026-01-01T00:00:00Z", "title": "Fix"}))
+    out = github.get_pull_request_status(_ctx(world), "https://gitlab.com/o/r/-/merge_requests/1")
+    assert out["state"] == "merged"
+    assert out["provider"] == "gitlab"
+
+
+def test_unsupported_url(world, mocker):
     spy = mocker.patch("httpx.Client")
-    out = github.get_pull_request_status(_ctx(world), "https://gitlab.com/o/r/merge_requests/1")
+    out = github.get_pull_request_status(_ctx(world), "https://bitbucket.org/o/r/pull-requests/1")
     assert out == {"state": "unknown", "reason": "unsupported_url"}
     spy.assert_not_called()  # no network for an unparseable URL
 
