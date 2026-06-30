@@ -136,8 +136,8 @@ def _section_breakdown(kind: str, *, workspace, user) -> list:
                 "source": resolved.source,
                 "version": resolved.version,
                 "needs_attention": bool(row.needs_attention) if row is not None else False,
-                "editable_at_workspace": tier != registry.CUSTOMIZABLE_LOCKED,
-                "editable_at_personal": tier == registry.CUSTOMIZABLE_OVERRIDABLE,
+                "editable_at_workspace": registry.tier_allows_workspace_override(tier),
+                "editable_at_personal": registry.tier_allows_personal_override(tier),
             }
         )
     return out
@@ -206,12 +206,12 @@ class PromptSectionDetailEndpoint(APIView):
         # ``workspace`` allows the workspace scope only; ``overridable`` allows
         # both. The role check above already ensures workspace writes are admin.
         tier = effective_customizability(section, workspace)
-        if scope == SCOPE_WORKSPACE and tier == registry.CUSTOMIZABLE_LOCKED:
+        if scope == SCOPE_WORKSPACE and not registry.tier_allows_workspace_override(tier):
             return Response(
                 {"error": f"section {section_key!r} is locked and cannot be overridden"},
                 status=status.HTTP_403_FORBIDDEN,
             )
-        if scope == SCOPE_USER and tier != registry.CUSTOMIZABLE_OVERRIDABLE:
+        if scope == SCOPE_USER and not registry.tier_allows_personal_override(tier):
             return Response(
                 {
                     "error": (
@@ -345,14 +345,13 @@ class PromptCompiledEndpoint(APIView):
         scope = _resolve_scope(request)
         user = request.user if scope == SCOPE_USER else None
         compiled = compile_template(kind, workspace=workspace, project=None, user=user)
+        # The per-section breakdown is served by the section-list endpoint the
+        # page already calls; the compiled endpoint only needs the assembled
+        # template body, so we don't re-resolve and re-serialize sections here.
         payload = {
             "kind": kind,
             "scope": scope,
             "template_body": compiled.template_body,
-            "sections": ResolvedSectionSerializer(
-                _section_breakdown(kind, workspace=workspace, user=user),
-                many=True,
-            ).data,
         }
         # Dual compilation (§9.1): when resolving for a user who has overrides,
         # also surface the workspace-only template that automatic runs (ticks,

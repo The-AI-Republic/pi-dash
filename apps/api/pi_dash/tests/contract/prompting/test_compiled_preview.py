@@ -67,12 +67,13 @@ def _preview_url(workspace, kind):
 
 
 @pytest.mark.contract
-def test_compiled_returns_template_and_breakdown(session_client, workspace):
+def test_compiled_returns_template(session_client, workspace):
     resp = session_client.get(_compiled_url(workspace, "coding-task"))
     assert resp.status_code == 200
     assert "{{ issue.identifier }}" in resp.data["template_body"]
-    assert resp.data["sections"]
     assert resp.data["kind"] == "coding-task"
+    # The per-section breakdown is served by the section-list endpoint, not here.
+    assert "sections" not in resp.data
 
 
 @pytest.mark.contract

@@ -18,17 +18,13 @@ import type {
   TPromptKind,
   TPromptScope,
 } from "@pi-dash/types";
-import { Badge, Button } from "@pi-dash/ui";
+import { AlertModalCore, Badge, Button } from "@pi-dash/ui";
 import { PageHead } from "@/components/core/page-title";
 import { usePromptSection } from "@/hooks/store/use-prompt-section";
 import { useUserPermissions } from "@/hooks/store/user";
 import { useWorkspace } from "@/hooks/store/use-workspace";
 
-const KINDS: { kind: TPromptKind; label: string }[] = [
-  { kind: "coding-task", label: "Coding task" },
-  { kind: "review", label: "Review" },
-  { kind: "scheduler", label: "Scheduler" },
-];
+const KINDS: TPromptKind[] = ["coding-task", "review", "scheduler"];
 
 function isPersonalSource(source: string): boolean {
   return source.startsWith("user:");
@@ -51,13 +47,29 @@ const PromptsListPage = observer(function PromptsListPage() {
   const slug = workspaceSlug ?? "";
   const isAdmin = allowPermissions([EUserPermissions.ADMIN], EUserPermissionsLevel.WORKSPACE, slug);
 
+  // Static t("…") arms so the i18n extractor registers these message ids; a
+  // runtime `t(variable)` would be invisible to it.
+  const kindLabel = (k: TPromptKind): string => {
+    switch (k) {
+      case "coding-task":
+        return t("Coding task");
+      case "review":
+        return t("Review");
+      case "scheduler":
+        return t("Scheduler");
+      default:
+        return k;
+    }
+  };
+
   const [kind, setKind] = useState<TPromptKind>("coding-task");
 
   // Effective view for the current user (personal → workspace → default), the
   // workspace-only baseline (so an admin edits the shared default and members
   // see it), and the assembled receipt.
   const userKey = slug ? (["prompt-sections", slug, kind, "user"] as const) : null;
-  const wsKey = slug ? (["prompt-sections", slug, kind, "workspace"] as const) : null;
+  // Only admins can read/write at workspace scope, so members never fetch it.
+  const wsKey = slug && isAdmin ? (["prompt-sections", slug, kind, "workspace"] as const) : null;
   const compiledKey = slug ? (["prompt-compiled", slug, kind, "user"] as const) : null;
 
   const {
@@ -101,14 +113,14 @@ const PromptsListPage = observer(function PromptsListPage() {
       <div className="flex items-center gap-2">
         {KINDS.map((k) => (
           <button
-            key={k.kind}
+            key={k}
             type="button"
-            onClick={() => setKind(k.kind)}
+            onClick={() => setKind(k)}
             className={`rounded-md px-3 py-1.5 text-13 font-medium transition-colors ${
-              kind === k.kind ? "bg-accent-primary text-on-color" : "bg-layer-1 text-secondary hover:text-primary"
+              kind === k ? "bg-accent-primary text-on-color" : "bg-layer-1 text-secondary hover:text-primary"
             }`}
           >
-            {t(k.label)}
+            {kindLabel(k)}
           </button>
         ))}
       </div>
@@ -122,11 +134,15 @@ const PromptsListPage = observer(function PromptsListPage() {
       ) : (
         <section className="flex flex-col gap-3">
           {sections.map((section) => (
+            // Key by kind too: a section shared across recipes (session-framing,
+            // guardrails, …) must remount on tab switch, not carry its open
+            // editor and unsaved draft into the other kind's context.
             <SectionCard
-              key={section.key}
+              key={`${kind}:${section.key}`}
               slug={slug}
               section={section}
               workspaceSection={wsByKey[section.key]}
+              workspaceReady={wsData !== undefined}
               isAdmin={isAdmin}
               onChanged={refresh}
             />
@@ -151,15 +167,21 @@ type SectionCardProps = {
   section: IResolvedSection;
   /** Workspace-scope resolution of the same section, if loaded. */
   workspaceSection: IResolvedSection | undefined;
+  /** Whether the workspace-scope list has resolved (so an override, if any, is known). */
+  workspaceReady: boolean;
   isAdmin: boolean;
   onChanged: () => Promise<void>;
 };
 
-function SectionCard({ slug, section, workspaceSection, isAdmin, onChanged }: SectionCardProps) {
+function SectionCard({ slug, section, workspaceSection, workspaceReady, isAdmin, onChanged }: SectionCardProps) {
   const { t } = useTranslation();
   const [editScope, setEditScope] = useState<TPromptScope | null>(null);
 
-  const canEditWorkspace = section.editable_at_workspace && isAdmin;
+  // Gate workspace editing on the workspace-scope fetch having resolved: until
+  // then we can't tell "no override" from "not loaded yet", and seeding the
+  // editor from the registry default would let Save silently overwrite an
+  // existing workspace override.
+  const canEditWorkspace = section.editable_at_workspace && isAdmin && workspaceReady;
   const canEditPersonal = section.editable_at_personal;
 
   const hasWorkspaceOverride = workspaceSection?.source === "workspace";
@@ -280,6 +302,7 @@ function SectionEditor({
   const [draft, setDraft] = useState(seed);
   const [saving, setSaving] = useState(false);
   const [reverting, setReverting] = useState(false);
+  const [showRevertConfirm, setShowRevertConfirm] = useState(false);
   const [showDefault, setShowDefault] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -325,6 +348,8 @@ function SectionEditor({
     } catch (e: unknown) {
       const err = e as { error?: string } | null;
       setError(err?.error ?? t("Could not revert the section."));
+      // Close the dialog so the inline error is visible behind it.
+      setShowRevertConfirm(false);
     } finally {
       setReverting(false);
     }
@@ -375,11 +400,27 @@ function SectionEditor({
           </Button>
         </div>
         {hasOverride && (
-          <Button size="sm" variant="tertiary-danger" onClick={handleRevert} loading={reverting} disabled={reverting}>
+          <Button size="sm" variant="tertiary-danger" onClick={() => setShowRevertConfirm(true)} disabled={reverting}>
             {t("Revert to default")}
           </Button>
         )}
       </div>
+
+      <AlertModalCore
+        isOpen={showRevertConfirm}
+        handleClose={() => (reverting ? null : setShowRevertConfirm(false))}
+        handleSubmit={handleRevert}
+        isSubmitting={reverting}
+        title={t("Revert to default?")}
+        content={
+          scope === "workspace"
+            ? t(
+                "New agent runs in this workspace will use the Pi Dash default for this section, for every member. This can't be undone."
+              )
+            : t("Runs you trigger will use the shared default for this section again. This can't be undone.")
+        }
+        primaryButtonText={{ default: t("Revert"), loading: t("Reverting") }}
+      />
     </div>
   );
 }

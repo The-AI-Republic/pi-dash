@@ -37,12 +37,11 @@ export interface IPromptSectionListResponse {
   sections: IResolvedSection[];
 }
 
-/** The assembled final template plus its per-section "ingredients". */
+/** The assembled final template. The per-section "ingredients" come from the section-list endpoint. */
 export interface IPromptCompiledResponse {
   kind: TPromptKind;
   scope: TPromptScope;
   template_body: string;
-  sections: IResolvedSection[];
   /** Present only when the caller has personal overrides: what automatic runs get. */
   automatic_template_body?: string;
 }

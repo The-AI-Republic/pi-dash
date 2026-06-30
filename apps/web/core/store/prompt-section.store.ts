@@ -4,7 +4,6 @@
  * See the LICENSE file for details.
  */
 
-import { action, makeObservable, observable, runInAction } from "mobx";
 // pi dash imports
 import type {
   IPromptCompiledResponse,
@@ -21,8 +20,6 @@ import { PromptSectionService } from "@pi-dash/services";
 import type { CoreRootStore } from "./root.store";
 
 export interface IPromptSectionStore {
-  // observable
-  loader: boolean;
   // actions
   fetchSections: (workspaceSlug: string, kind: TPromptKind, scope: TPromptScope) => Promise<IPromptSectionListResponse>;
   fetchCompiled: (workspaceSlug: string, kind: TPromptKind, scope: TPromptScope) => Promise<IPromptCompiledResponse>;
@@ -41,22 +38,15 @@ export interface IPromptSectionStore {
 
 /**
  * Thin store over the prompt-section REST surface. The page caches list /
- * compiled responses with SWR, so this store stays stateless beyond a shared
- * loader flag; the mutating actions return the server row for toast threading.
+ * compiled responses with SWR and drives its own loading state, so this store
+ * holds no observable state; the mutating actions return the server row for
+ * toast threading.
  */
 export class PromptSectionStore implements IPromptSectionStore {
-  loader = false;
   rootStore: CoreRootStore;
   promptSectionService: PromptSectionService;
 
   constructor(_rootStore: CoreRootStore) {
-    makeObservable(this, {
-      loader: observable,
-      fetchSections: action,
-      fetchCompiled: action,
-      upsertSection: action,
-      revertSection: action,
-    });
     this.rootStore = _rootStore;
     this.promptSectionService = new PromptSectionService();
   }
@@ -65,16 +55,7 @@ export class PromptSectionStore implements IPromptSectionStore {
     workspaceSlug: string,
     kind: TPromptKind,
     scope: TPromptScope
-  ): Promise<IPromptSectionListResponse> => {
-    this.loader = true;
-    try {
-      return await this.promptSectionService.list(workspaceSlug, kind, scope);
-    } finally {
-      runInAction(() => {
-        this.loader = false;
-      });
-    }
-  };
+  ): Promise<IPromptSectionListResponse> => this.promptSectionService.list(workspaceSlug, kind, scope);
 
   fetchCompiled = async (
     workspaceSlug: string,

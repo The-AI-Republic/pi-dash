@@ -42,6 +42,21 @@ _VALID_CUSTOMIZABLE = frozenset(
     {CUSTOMIZABLE_LOCKED, CUSTOMIZABLE_WORKSPACE, CUSTOMIZABLE_OVERRIDABLE}
 )
 
+
+def tier_allows_workspace_override(tier: str) -> bool:
+    """Whether a workspace admin may set a workspace-level override at ``tier``.
+
+    Single source of truth for the tier→capability rule. Takes the *tier
+    string* (not a section) so it applies equally to a section's declared tier
+    and to the workspace-effective tier from ``effective_customizability``.
+    """
+    return tier in (CUSTOMIZABLE_WORKSPACE, CUSTOMIZABLE_OVERRIDABLE)
+
+
+def tier_allows_personal_override(tier: str) -> bool:
+    """Whether a member may keep a personal (user-scope) override at ``tier``."""
+    return tier == CUSTOMIZABLE_OVERRIDABLE
+
 #: Only files following the ``<key>.md`` convention are loaded. A stray
 #: README.md / NOTES.md without valid front-matter raises at import time
 #: rather than being silently skipped.
@@ -77,12 +92,12 @@ class PromptSection:
     @property
     def allows_workspace_override(self) -> bool:
         """Whether a workspace admin may set a workspace-level override."""
-        return self.customizable in (CUSTOMIZABLE_WORKSPACE, CUSTOMIZABLE_OVERRIDABLE)
+        return tier_allows_workspace_override(self.customizable)
 
     @property
     def allows_personal_override(self) -> bool:
         """Whether a member may keep a personal (user-scope) override."""
-        return self.customizable == CUSTOMIZABLE_OVERRIDABLE
+        return tier_allows_personal_override(self.customizable)
 
 
 def _parse_front_matter(path: Path) -> PromptSection:
