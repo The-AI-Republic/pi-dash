@@ -11,7 +11,7 @@ import useSWR from "swr";
 import { useTranslation } from "@pi-dash/i18n";
 import { TOAST_TYPE, setToast } from "@pi-dash/propel/toast";
 import { RunnerService } from "@pi-dash/services";
-import type { IAgentRun, TAgentRunStatus } from "@pi-dash/types";
+import type { IAgentRun, TAgentRunErrorSource, TAgentRunStatus } from "@pi-dash/types";
 import { AGENT_RUN_TERMINAL_STATUSES } from "@pi-dash/types";
 import type { TBadgeVariant } from "@pi-dash/ui";
 import { AlertModalCore, Badge, Button, Spinner } from "@pi-dash/ui";
@@ -47,6 +47,13 @@ const RUN_STATUS_I18N_LABELS: Record<TAgentRunStatus, string> = {
   completed: "completed",
   failed: "failed",
   cancelled: "cancelled",
+};
+
+const ERROR_SOURCE_BADGE_VARIANT: Record<TAgentRunErrorSource, TBadgeVariant> = {
+  agent: "accent-warning",
+  pidash_runner: "accent-primary",
+  pidash_cloud: "accent-primary",
+  unknown: "accent-neutral",
 };
 
 function isTerminal(status: TAgentRunStatus): boolean {
@@ -193,6 +200,24 @@ export const RunnerRunsPage = observer(function RunnerRunsPage() {
               {detail.error && (
                 <div className="text-13">
                   <div className="text-danger-primary">{t("Error")}</div>
+                  {detail.error_diagnostic && (
+                    <div className="mt-1 rounded border border-warning-subtle bg-layer-1 p-3">
+                      <div className="flex flex-wrap items-center gap-2">
+                        <span className="text-secondary">{t("Failure source")}</span>
+                        <Badge
+                          variant={ERROR_SOURCE_BADGE_VARIANT[detail.error_diagnostic.source]}
+                          size="sm"
+                        >
+                          {detail.error_diagnostic.source_label}
+                        </Badge>
+                        <span className="font-mono text-11 text-secondary">{detail.error_diagnostic.kind}</span>
+                      </div>
+                      <div className="mt-2 text-primary">{detail.error_diagnostic.summary}</div>
+                      {detail.error_diagnostic.action && (
+                        <div className="mt-1 text-secondary">{detail.error_diagnostic.action}</div>
+                      )}
+                    </div>
+                  )}
                   <pre className="mt-1 rounded bg-danger-subtle p-2 text-11 whitespace-pre-wrap">{detail.error}</pre>
                 </div>
               )}

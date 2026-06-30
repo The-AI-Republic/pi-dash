@@ -18,6 +18,7 @@ from pi_dash.runner.models import (
     Runner,
     RunnerLiveState,
 )
+from pi_dash.runner.diagnostics import classify_run_error
 
 
 # Mirrors the runner-side charset rule in `runner/src/util/runner_name.rs`
@@ -201,6 +202,10 @@ class RunnerEnrollRequestSerializer(serializers.Serializer):
 
 class AgentRunSerializer(serializers.ModelSerializer):
     pod_detail = PodMiniSerializer(source="pod", read_only=True)
+    error_diagnostic = serializers.SerializerMethodField()
+
+    def get_error_diagnostic(self, run: AgentRun):
+        return classify_run_error(run.error)
 
     class Meta:
         model = AgentRun
@@ -222,6 +227,7 @@ class AgentRunSerializer(serializers.ModelSerializer):
             "ended_at",
             "done_payload",
             "error",
+            "error_diagnostic",
             "refusal_category",
             "llm_model",
             "input_tokens",

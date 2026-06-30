@@ -65,7 +65,6 @@ const CODEX_OPTIONS: IRunnerModelOption[] = CODEX_MODELS.flatMap((m) =>
 // variant.
 const CLAUDE_OPTIONS: IRunnerModelOption[] = [
   { id: "claude-opus-4-8", label: "Opus 4.8", model: "claude-opus-4-8" },
-  { id: "claude-fable-5", label: "Fable 5", model: "claude-fable-5" },
   { id: "claude-sonnet-4-6", label: "Sonnet 4.6", model: "claude-sonnet-4-6" },
   { id: "claude-sonnet-4-6-1m", label: "Sonnet 4.6 (1M context)", model: "claude-sonnet-4-6[1m]" },
 ];
@@ -104,12 +103,13 @@ export const RUNNER_MODEL_OPTIONS: Record<TRunnerAgent, IRunnerModelOption[]> = 
 };
 
 /**
- * Pre-selected model option id per agent in the "Add runner" form. All agents
- * fall back to the agent's own built-in model (the ``"default"`` sentinel).
+ * Pre-selected model option id per agent in the "Add runner" form. Claude Code
+ * is pinned to Opus 4.8 so the generated command does not inherit a stale
+ * Claude global default; other agents use the agent's built-in default.
  * The id must exist in that agent's `RUNNER_MODEL_OPTIONS` list.
  */
 export const DEFAULT_MODEL_BY_AGENT: Record<TRunnerAgent, string> = {
-  "claude-code": DEFAULT_MODEL_ID,
+  "claude-code": "claude-opus-4-8",
   codex: DEFAULT_MODEL_ID,
   "cursor-agent": DEFAULT_MODEL_ID,
   "open-claw": DEFAULT_MODEL_ID,

@@ -5,7 +5,7 @@
  */
 
 import type { TIssuePriorities } from "../issues";
-import type { IRunnerLiveState, TAgentRunStatus } from "../runner";
+import type { IAgentRunErrorDiagnostic, IRunnerLiveState, TAgentRunStatus } from "../runner";
 import type { TStateGroups } from "../state";
 import type { TIssuePublicComment } from "./activity/issue_comment";
 import type { TIssueAttachment } from "./issue_attachment";
@@ -126,6 +126,7 @@ export type TIssueAgentRunSummary = {
   ended_at: string | null;
   done_payload: Record<string, unknown> | null;
   error: string;
+  error_diagnostic: IAgentRunErrorDiagnostic | null;
   llm_model: string;
   input_tokens: number | null;
   output_tokens: number | null;

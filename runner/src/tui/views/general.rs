@@ -414,10 +414,16 @@ impl GeneralTab {
             return;
         };
         let text = buf.text().to_string();
+        let runner_idx = ctx.data.picker_runner_index().unwrap_or(0);
         let Some(cfg) = ctx.data.config_working.as_mut() else {
             return;
         };
-        match fields::set_text_value(cfg, fields::FieldId::LogRetentionDays, &text, ctx.data.runner_picker_idx) {
+        match fields::set_text_value(
+            cfg,
+            fields::FieldId::LogRetentionDays,
+            &text,
+            runner_idx,
+        ) {
             Ok(()) => {
                 ctx.data.config_edit_error = None;
             }

@@ -23,6 +23,7 @@ from uuid import UUID
 from django.db import transaction
 from django.utils import timezone
 
+from pi_dash.runner.diagnostics import enrich_run_error
 from pi_dash.runner.models import (
     AgentRun,
     AgentRunStatus,
@@ -423,6 +424,7 @@ def finalize_run_terminal(
         updates["done_payload"] = done_payload
         updates["error"] = ""
     if new_status == AgentRunStatus.FAILED and error_detail:
+        error_detail = enrich_run_error(error_detail, runner=runner, model=model)
         updates["error"] = error_detail[:16000]
     if new_status == AgentRunStatus.REFUSED:
         # A safety-classifier decline. Record the category (always set, so the
