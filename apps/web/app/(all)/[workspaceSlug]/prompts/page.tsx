@@ -325,41 +325,6 @@ function SectionEditor({
   const [showDefault, setShowDefault] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  // Draft preview: render the *unsaved* draft against a real issue/binding so
-  // a valid-but-wrong override (e.g. a conditional that drops instructions) is
-  // caught before Save commits it to every run.
-  const isScheduler = kind === "scheduler";
-  const [previewTarget, setPreviewTarget] = useState("");
-  const [previewText, setPreviewText] = useState("");
-  const [previewing, setPreviewing] = useState(false);
-  const [previewError, setPreviewError] = useState<string | null>(null);
-
-  async function handleDraftPreview() {
-    if (previewing) return;
-    if (!previewTarget) {
-      setPreviewError(isScheduler ? t("Enter a scheduler binding id first.") : t("Enter an issue id first."));
-      return;
-    }
-    setPreviewing(true);
-    setPreviewError(null);
-    try {
-      const target = isScheduler ? { binding_id: previewTarget } : { issue_id: previewTarget };
-      const resp = await promptStore.previewPrompt(slug, kind, {
-        ...target,
-        scope,
-        section_key: sectionKey,
-        body: draft,
-      });
-      setPreviewText(resp.prompt);
-    } catch (e: unknown) {
-      const err = e as { error?: string; detail?: string } | null;
-      setPreviewError(err?.detail ?? err?.error ?? t("Render failed."));
-      setPreviewText("");
-    } finally {
-      setPreviewing(false);
-    }
-  }
-
   const dirty = draft !== seed;
 
   async function handleSave() {
@@ -464,33 +429,13 @@ function SectionEditor({
         <span className="text-11 font-medium text-secondary">
           {t("Preview this draft against a real issue before saving")}
         </span>
-        <div className="flex items-center gap-2">
-          <input
-            value={previewTarget}
-            onChange={(e) => setPreviewTarget(e.target.value)}
-            placeholder={isScheduler ? t("Scheduler binding id (UUID)") : t("Issue id (UUID)")}
-            className="font-mono flex-1 rounded-md border border-subtle bg-layer-2 px-3 py-1.5 text-11 text-primary focus:border-accent-strong focus:outline-none"
-          />
-          <Button
-            size="sm"
-            variant="outline-primary"
-            onClick={handleDraftPreview}
-            loading={previewing}
-            disabled={previewing || !previewTarget}
-          >
-            {t("Preview draft")}
-          </Button>
-        </div>
-        {previewError && (
-          <div className="rounded border border-danger-subtle bg-layer-2 p-2 text-11 text-danger-primary">
-            {previewError}
-          </div>
-        )}
-        {previewText && (
-          <pre className="font-mono max-h-[40vh] overflow-auto rounded-md border border-subtle bg-layer-2 p-3 text-11 leading-5 whitespace-pre-wrap text-primary">
-            {previewText}
-          </pre>
-        )}
+        <PromptPreviewForm
+          slug={slug}
+          kind={kind}
+          submitLabel={t("Preview draft")}
+          draft={{ scope, sectionKey, body: draft }}
+          nested
+        />
       </div>
 
       <AlertModalCore
@@ -558,6 +503,33 @@ function AssembledPanel({ compiled }: { compiled: IPromptCompiledResponse }) {
 
 function PreviewPanel({ slug, kind }: { slug: string; kind: TPromptKind }) {
   const { t } = useTranslation();
+  return (
+    <section className="flex flex-col gap-2 rounded-md border border-subtle px-4 py-3">
+      <h2 className="text-13 font-medium text-primary">{t("Preview")}</h2>
+      <p className="text-11 text-secondary">
+        {t("Render the assembled prompt against real data, without starting a run.")}
+      </p>
+      <PromptPreviewForm slug={slug} kind={kind} submitLabel={t("Preview")} />
+    </section>
+  );
+}
+
+type PromptPreviewFormProps = {
+  slug: string;
+  kind: TPromptKind;
+  submitLabel: string;
+  /** When set, previews an unsaved draft of this section instead of the saved prompt. */
+  draft?: { scope: TPromptScope; sectionKey: string; body: string };
+  /** Use layer-2 surfaces so the form reads correctly when embedded in a layer-1 card. */
+  nested?: boolean;
+};
+
+/**
+ * Shared "render against a real issue/binding" form used both standalone (the
+ * admin PreviewPanel) and inside the section editor (unsaved-draft preview).
+ */
+function PromptPreviewForm({ slug, kind, submitLabel, draft, nested }: PromptPreviewFormProps) {
+  const { t } = useTranslation();
   const promptStore = usePromptSection();
   const [target, setTarget] = useState("");
   const [prompt, setPrompt] = useState("");
@@ -565,8 +537,9 @@ function PreviewPanel({ slug, kind }: { slug: string; kind: TPromptKind }) {
   const [error, setError] = useState<string | null>(null);
 
   const isScheduler = kind === "scheduler";
+  const surface = nested ? "bg-layer-2" : "bg-layer-1";
 
-  async function handlePreview() {
+  async function run() {
     if (loading) return;
     if (!target) {
       setError(isScheduler ? t("Enter a scheduler binding id first.") : t("Enter an issue id first."));
@@ -575,7 +548,10 @@ function PreviewPanel({ slug, kind }: { slug: string; kind: TPromptKind }) {
     setLoading(true);
     setError(null);
     try {
-      const payload = isScheduler ? { binding_id: target } : { issue_id: target };
+      const targetField = isScheduler ? { binding_id: target } : { issue_id: target };
+      const payload = draft
+        ? { ...targetField, scope: draft.scope, section_key: draft.sectionKey, body: draft.body }
+        : targetField;
       const resp = await promptStore.previewPrompt(slug, kind, payload);
       setPrompt(resp.prompt);
     } catch (e: unknown) {
@@ -588,37 +564,29 @@ function PreviewPanel({ slug, kind }: { slug: string; kind: TPromptKind }) {
   }
 
   return (
-    <section className="flex flex-col gap-2 rounded-md border border-subtle px-4 py-3">
-      <h2 className="text-13 font-medium text-primary">{t("Preview")}</h2>
-      <p className="text-11 text-secondary">
-        {t("Render the assembled prompt against real data, without starting a run.")}
-      </p>
+    <>
       <div className="flex items-center gap-2">
         <input
           value={target}
           onChange={(e) => setTarget(e.target.value)}
           placeholder={isScheduler ? t("Scheduler binding id (UUID)") : t("Issue id (UUID)")}
-          className="font-mono flex-1 rounded-md border border-subtle bg-layer-1 px-3 py-1.5 text-11 text-primary focus:border-accent-strong focus:outline-none"
+          className={`font-mono flex-1 rounded-md border border-subtle ${surface} px-3 py-1.5 text-11 text-primary focus:border-accent-strong focus:outline-none`}
         />
-        <Button
-          size="sm"
-          variant="outline-primary"
-          onClick={handlePreview}
-          loading={loading}
-          disabled={loading || !target}
-        >
-          {t("Preview")}
+        <Button size="sm" variant="outline-primary" onClick={run} loading={loading} disabled={loading || !target}>
+          {submitLabel}
         </Button>
       </div>
       {error && (
-        <div className="rounded border border-danger-subtle bg-layer-1 p-2 text-11 text-danger-primary">{error}</div>
+        <div className={`rounded border border-danger-subtle ${surface} p-2 text-11 text-danger-primary`}>{error}</div>
       )}
       {prompt && (
-        <pre className="font-mono max-h-[60vh] overflow-auto rounded-md border border-subtle bg-layer-1 p-3 text-11 leading-5 whitespace-pre-wrap text-primary">
+        <pre
+          className={`font-mono max-h-[60vh] overflow-auto rounded-md border border-subtle ${surface} p-3 text-11 leading-5 whitespace-pre-wrap text-primary`}
+        >
           {prompt}
         </pre>
       )}
-    </section>
+    </>
   );
 }
 

@@ -379,7 +379,8 @@ class PromptPreviewEndpoint(APIView):
         workspace = _get_workspace_or_404(slug)
         if workspace is None:
             return Response({"error": "workspace not found"}, status=status.HTTP_404_NOT_FOUND)
-        if not _is_workspace_admin(request.user, workspace):
+        is_admin = _is_workspace_admin(request.user, workspace)
+        if not is_admin and not _is_workspace_member(request.user, workspace):
             return Response({"error": "forbidden"}, status=status.HTTP_403_FORBIDDEN)
         if kind not in recipes.RECIPES:
             return Response(
@@ -388,6 +389,10 @@ class PromptPreviewEndpoint(APIView):
             )
 
         scope = request.data.get("scope", SCOPE_WORKSPACE)
+        # Members may preview their own (user-scope) composition so they can
+        # check a personal-override draft; the workspace default stays admin-only.
+        if not is_admin and scope != SCOPE_USER:
+            return Response({"error": "forbidden"}, status=status.HTTP_403_FORBIDDEN)
         user = request.user if scope == SCOPE_USER else None
 
         if kind == recipes.KIND_SCHEDULER:
@@ -398,15 +403,34 @@ class PromptPreviewEndpoint(APIView):
             return err
 
         # Optional unsaved draft: render this section's draft body in place of
-        # its resolved one, so an admin can preview before committing (§9.2).
+        # its resolved one, so an editor can preview before committing (§9.2).
         draft_overrides = None
         section_key = request.data.get("section_key")
         draft_body = request.data.get("body")
-        if section_key is not None and draft_body is not None:
+        if section_key is not None:
+            if draft_body is None:
+                return Response(
+                    {"error": "body is required to preview a draft"},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
             if section_key not in recipes.recipe_for(kind):
                 return Response(
                     {"error": f"section {section_key!r} is not part of the {kind!r} prompt"},
                     status=status.HTTP_400_BAD_REQUEST,
+                )
+            # Gate the draft on the same tier rule the write paths enforce, so a
+            # locked/ineligible section can't be rendered from arbitrary text.
+            section = registry.get_section(section_key)
+            tier = effective_customizability(section, workspace)
+            draft_allowed = (
+                registry.tier_allows_workspace_override(tier)
+                if scope == SCOPE_WORKSPACE
+                else registry.tier_allows_personal_override(tier)
+            )
+            if not draft_allowed:
+                return Response(
+                    {"error": f"section {section_key!r} cannot be overridden at scope {scope!r}"},
+                    status=status.HTTP_403_FORBIDDEN,
                 )
             draft_overrides = {section_key: draft_body}
 

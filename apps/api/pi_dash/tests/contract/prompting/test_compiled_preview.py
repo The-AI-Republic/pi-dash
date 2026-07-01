@@ -14,7 +14,16 @@ from rest_framework.test import APIClient
 
 from pi_dash.db.models import Issue, Project, State, User
 from pi_dash.db.models.scheduler import Scheduler, SchedulerBinding
+from pi_dash.prompting import recipes, registry
 from pi_dash.prompting.models import PromptSectionOverride
+
+
+def _section_of_tier(kind, tier):
+    """First section key in ``kind``'s recipe with the given customizable tier."""
+    for key in recipes.recipe_for(kind):
+        if registry.get_section(key).customizable == tier:
+            return key
+    return None
 
 
 @pytest.fixture
@@ -150,7 +159,7 @@ def test_preview_scheduler_without_binding_id_400(session_client, workspace):
 
 
 @pytest.mark.contract
-def test_preview_forbidden_for_non_admin(db, workspace, issue):
+def test_preview_workspace_scope_forbidden_for_non_admin(db, workspace, issue):
     from pi_dash.db.models import WorkspaceMember
 
     member = User.objects.create(
@@ -159,7 +168,66 @@ def test_preview_forbidden_for_non_admin(db, workspace, issue):
     WorkspaceMember.objects.create(workspace=workspace, member=member, role=15)
     client = APIClient()
     client.force_authenticate(user=member)
+    # Default scope is workspace — a member may not preview the workspace default.
     resp = client.post(
         _preview_url(workspace, "coding-task"), {"issue_id": str(issue.id)}, format="json"
     )
     assert resp.status_code == 403
+
+
+@pytest.mark.contract
+def test_preview_user_scope_allowed_for_member(db, workspace, issue):
+    from pi_dash.db.models import WorkspaceMember
+
+    member = User.objects.create(
+        username="m3", email="m3@example.com", first_name="M", last_name="3"
+    )
+    WorkspaceMember.objects.create(workspace=workspace, member=member, role=15)
+    client = APIClient()
+    client.force_authenticate(user=member)
+    # A member may preview their own (user-scope) composition to check a draft.
+    resp = client.post(
+        _preview_url(workspace, "coding-task"),
+        {"issue_id": str(issue.id), "scope": "user"},
+        format="json",
+    )
+    assert resp.status_code == 200
+    assert resp.data["prompt"]
+
+
+@pytest.mark.contract
+def test_preview_draft_renders_overridable_section(session_client, workspace, issue):
+    key = _section_of_tier("coding-task", registry.CUSTOMIZABLE_OVERRIDABLE)
+    if key is None:
+        pytest.skip("no overridable section in the coding-task recipe")
+    resp = session_client.post(
+        _preview_url(workspace, "coding-task"),
+        {"issue_id": str(issue.id), "section_key": key, "body": "DRAFT-PREVIEW-MARKER"},
+        format="json",
+    )
+    assert resp.status_code == 200
+    assert "DRAFT-PREVIEW-MARKER" in resp.data["prompt"]
+
+
+@pytest.mark.contract
+def test_preview_draft_locked_section_forbidden(session_client, workspace, issue):
+    key = _section_of_tier("coding-task", registry.CUSTOMIZABLE_LOCKED)
+    if key is None:
+        pytest.skip("no locked section in the coding-task recipe")
+    resp = session_client.post(
+        _preview_url(workspace, "coding-task"),
+        {"issue_id": str(issue.id), "section_key": key, "body": "SHOULD-BE-BLOCKED"},
+        format="json",
+    )
+    assert resp.status_code == 403
+
+
+@pytest.mark.contract
+def test_preview_draft_missing_body_400(session_client, workspace, issue):
+    key = recipes.recipe_for("coding-task")[0]
+    resp = session_client.post(
+        _preview_url(workspace, "coding-task"),
+        {"issue_id": str(issue.id), "section_key": key},
+        format="json",
+    )
+    assert resp.status_code == 400
