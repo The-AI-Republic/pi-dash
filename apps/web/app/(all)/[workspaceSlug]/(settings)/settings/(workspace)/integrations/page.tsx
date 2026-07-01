@@ -12,6 +12,7 @@ import type { IAppIntegration } from "@pi-dash/types";
 import { NotAuthorizedView } from "@/components/auth-screens/not-authorized-view";
 import { PageHead } from "@/components/core/page-title";
 import { GithubPatCard } from "@/components/integration/github/github-pat-card";
+import { GitlabPatCard } from "@/components/integration/git/gitlab-pat-card";
 import { IntegrationAndImportExportBanner } from "@/components/ui/integration-and-import-export-banner";
 // hooks
 import { useWorkspace } from "@/hooks/store/use-workspace";
@@ -19,9 +20,8 @@ import { useUserPermissions } from "@/hooks/store/user";
 
 // PR-65 follow-up: the legacy `GET /api/integrations/` endpoint that used to
 // drive `IntegrationService.getAppIntegrationsList()` was removed somewhere
-// upstream; pi-dash currently only ships the PAT-based GitHub integration.
-// Render the GitHub card directly with a stub `integration` prop instead of
-// relying on the broken list.
+// upstream. Render the Git provider cards directly instead of relying on the
+// broken list.
 const GITHUB_INTEGRATION_STUB: IAppIntegration = {
   id: "github",
   provider: "github",
@@ -59,6 +59,7 @@ function WorkspaceIntegrationsPage() {
         <IntegrationAndImportExportBanner bannerName="Integrations" />
         <div>
           <GithubPatCard integration={GITHUB_INTEGRATION_STUB} />
+          <GitlabPatCard />
         </div>
       </section>
     </>

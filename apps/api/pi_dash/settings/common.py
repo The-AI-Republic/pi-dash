@@ -36,6 +36,12 @@ IS_SELF_MANAGED = True
 # Allowed Hosts
 ALLOWED_HOSTS = get_config("ALLOWED_HOSTS", "*").split(",")
 
+GITLAB_ALLOWED_HOSTS = [
+    host.strip()
+    for host in get_config("GITLAB_ALLOWED_HOSTS", "").split(",")
+    if host.strip()
+]
+
 # Application definition
 INSTALLED_APPS = [
     "django.contrib.auth",

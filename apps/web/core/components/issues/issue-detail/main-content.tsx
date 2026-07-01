@@ -33,8 +33,8 @@ import { NameDescriptionUpdateStatus } from "../issue-update-status";
 import { PeekOverviewProperties } from "../peek-overview/properties";
 import { IssueTitleInput } from "../title-input";
 import { IssueAgentStatusPanel } from "./agent-status";
-import { IssueActivity } from "./issue-activity";
 import { IssueParentDetail } from "./parent";
+import { IssuePullRequestsAndActivity } from "./pull-requests-and-activity";
 import { IssueReaction } from "./reactions";
 import type { TIssueOperations } from "./root";
 // services init
@@ -234,7 +234,13 @@ export const IssueMainContent = observer(function IssueMainContent(props: Props)
         </div>
       )}
 
-      <IssueActivity workspaceSlug={workspaceSlug} projectId={projectId} issueId={issueId} disabled={isArchived} />
+      <IssuePullRequestsAndActivity
+        workspaceSlug={workspaceSlug}
+        projectId={projectId}
+        issueId={issueId}
+        disabled={!isEditable || isArchived || isMetadataHydrating}
+        activityDisabled={isArchived}
+      />
     </>
   );
 });

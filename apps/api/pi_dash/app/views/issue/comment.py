@@ -19,7 +19,7 @@ from rest_framework import status
 from .. import BaseViewSet
 from pi_dash.app.serializers import IssueCommentSerializer, CommentReactionSerializer
 from pi_dash.app.permissions import allow_permission, ROLE
-from pi_dash.db.models import IssueComment, ProjectMember, CommentReaction, Project, Issue
+from pi_dash.db.models import GitCommentSync, GithubCommentSync, IssueComment, ProjectMember, CommentReaction, Project, Issue
 from pi_dash.bgtasks.issue_activities_task import issue_activity
 from pi_dash.utils.host import base_host
 from pi_dash.bgtasks.webhook_task import model_activity
@@ -145,15 +145,13 @@ class IssueCommentViewSet(BaseViewSet):
     def destroy(self, request, slug, project_id, issue_id, pk):
         issue_comment = IssueComment.objects.get(workspace__slug=slug, project_id=project_id, issue_id=issue_id, pk=pk)
 
-        # Block delete on actively-synced GitHub comments. See .ai_design/
-        # github_sync/design.md §6.8.
-        from pi_dash.db.models import GithubCommentSync
-        if (
-            issue_comment.external_source == "github"
-            and GithubCommentSync.objects.filter(comment=issue_comment).exists()
-        ):
+        # Block delete on actively-synced Git provider comments. After unbind,
+        # cascades delete sync rows and the comment becomes user-managed again.
+        if GitCommentSync.objects.filter(comment=issue_comment).exists() or GithubCommentSync.objects.filter(
+            comment=issue_comment
+        ).exists():
             return Response(
-                {"error": "This comment is synced from GitHub. Unbind the project's GitHub repository to delete."},
+                {"error": "This comment is synced from a Git provider. Unbind the project's repository to delete."},
                 status=status.HTTP_409_CONFLICT,
             )
 

@@ -5,5 +5,6 @@
  */
 
 export * from "./github.service";
+export * from "./git.service";
 export * from "./integration.service";
 export * from "./jira.service";

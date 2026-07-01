@@ -144,6 +144,13 @@ class GithubClient:
             {"per_page": 100, "sort": "updated", "direction": "asc"},
         )
 
+    def list_issue_comments(self, owner: str, name: str, issue_number: int) -> Iterable[dict]:
+        """Paginated /issues/{number}/comments — comments on one issue only."""
+        return self._paginate(
+            f"/repos/{owner}/{name}/issues/{issue_number}/comments",
+            {"per_page": 100, "sort": "created", "direction": "asc"},
+        )
+
     def post_issue_comment(self, owner: str, name: str, issue_number: int, body: str) -> dict:
         """POST /repos/{owner}/{repo}/issues/{number}/comments."""
         url = f"{self._api_base}/repos/{owner}/{name}/issues/{issue_number}/comments"

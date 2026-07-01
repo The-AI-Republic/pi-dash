@@ -15,6 +15,7 @@ from .issue import (
     LabelCreateUpdateSerializer,
     LabelSerializer,
     IssueLinkSerializer,
+    GitCodeReviewLinkSerializer,
     GithubPullRequestLinkSerializer,
     IssueCommentSerializer,
     IssueAttachmentSerializer,

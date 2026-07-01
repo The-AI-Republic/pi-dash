@@ -17,6 +17,7 @@ from pi_dash.db.models import (
     IssueActivity,
     IssueAssignee,
     FileAsset,
+    GitCodeReviewLink,
     GithubPullRequestLink,
     IssueComment,
     IssueLabel,
@@ -520,6 +521,35 @@ class GithubPullRequestLinkSerializer(BaseSerializer):
             "merged",
             "draft",
             "pr_updated_at",
+            "created_at",
+            "updated_at",
+            "created_by",
+        ]
+        read_only_fields = fields
+
+
+class GitCodeReviewLinkSerializer(BaseSerializer):
+    """Read serializer for a Git provider code review linked to a work item."""
+
+    class Meta:
+        model = GitCodeReviewLink
+        fields = [
+            "id",
+            "issue",
+            "provider",
+            "host_url",
+            "namespace",
+            "repo_name",
+            "repo_external_id",
+            "external_id",
+            "external_iid",
+            "url",
+            "title",
+            "state",
+            "merged",
+            "draft",
+            "remote_updated_at",
+            "metadata",
             "created_at",
             "updated_at",
             "created_by",

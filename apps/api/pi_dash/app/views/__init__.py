@@ -144,6 +144,8 @@ from .issue.label import LabelViewSet, BulkCreateIssueLabelsEndpoint
 
 from .issue.link import IssueLinkViewSet
 
+from .issue.git_code_review import GitCodeReviewLinkViewSet
+
 from .issue.github_pr import GithubPullRequestLinkViewSet
 
 from .issue.relation import IssueRelationViewSet
