@@ -112,7 +112,12 @@ def _section_breakdown(kind: str, *, workspace, user) -> list:
     for key in recipes.recipe_for(kind):
         section = registry.get_section(key)
         resolved = resolve_section(
-            key, workspace=workspace, project=None, user=user, override_index=override_index
+            key,
+            workspace=workspace,
+            project=None,
+            user=user,
+            override_index=override_index,
+            section=section,
         )
         # The row that resolved is the one matching the resolved source.
         if resolved.source == SOURCE_WORKSPACE:
@@ -392,9 +397,27 @@ class PromptPreviewEndpoint(APIView):
         if err is not None:
             return err
 
+        # Optional unsaved draft: render this section's draft body in place of
+        # its resolved one, so an admin can preview before committing (§9.2).
+        draft_overrides = None
+        section_key = request.data.get("section_key")
+        draft_body = request.data.get("body")
+        if section_key is not None and draft_body is not None:
+            if section_key not in recipes.recipe_for(kind):
+                return Response(
+                    {"error": f"section {section_key!r} is not part of the {kind!r} prompt"},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            draft_overrides = {section_key: draft_body}
+
         try:
             composed = compose(
-                kind, workspace=workspace, project=project, user=user, context=context
+                kind,
+                workspace=workspace,
+                project=project,
+                user=user,
+                context=context,
+                draft_overrides=draft_overrides,
             )
         except PromptRenderError as exc:
             return Response(

@@ -77,9 +77,11 @@ const PromptsListPage = observer(function PromptsListPage() {
     error: userError,
     mutate: mutateUser,
   } = useSWR<IPromptSectionListResponse>(userKey, () => promptStore.fetchSections(slug, kind, "user"));
-  const { data: wsData, mutate: mutateWs } = useSWR<IPromptSectionListResponse>(wsKey, () =>
-    promptStore.fetchSections(slug, kind, "workspace")
-  );
+  const {
+    data: wsData,
+    error: wsError,
+    mutate: mutateWs,
+  } = useSWR<IPromptSectionListResponse>(wsKey, () => promptStore.fetchSections(slug, kind, "workspace"));
   const { data: compiled, mutate: mutateCompiled } = useSWR<IPromptCompiledResponse>(compiledKey, () =>
     promptStore.fetchCompiled(slug, kind, "user")
   );
@@ -133,6 +135,16 @@ const PromptsListPage = observer(function PromptsListPage() {
         <div className="text-13 text-secondary">{t("Loading…")}</div>
       ) : (
         <section className="flex flex-col gap-3">
+          {isAdmin && wsError && (
+            // The workspace-scope list is what gates the "Customize for
+            // workspace" buttons; if it failed, say so rather than leave an
+            // admin staring at silently-missing controls.
+            <div className="rounded-md border border-warning-subtle bg-layer-1 p-3 text-11 text-warning-primary">
+              {t(
+                "Couldn't load this workspace's section defaults, so workspace editing is unavailable. Reload to try again."
+              )}
+            </div>
+          )}
           {sections.map((section) => (
             // Key by kind too: a section shared across recipes (session-framing,
             // guardrails, …) must remount on tab switch, not carry its open
@@ -140,6 +152,7 @@ const PromptsListPage = observer(function PromptsListPage() {
             <SectionCard
               key={`${kind}:${section.key}`}
               slug={slug}
+              kind={kind}
               section={section}
               workspaceSection={wsByKey[section.key]}
               workspaceReady={wsData !== undefined}
@@ -152,7 +165,9 @@ const PromptsListPage = observer(function PromptsListPage() {
 
       {compiled && <AssembledPanel compiled={compiled} />}
 
-      {isAdmin && <PreviewPanel slug={slug} kind={kind} />}
+      {/* Key by kind so the panel's rendered prompt + issue-id input reset on
+          tab switch instead of showing a stale other-kind result. */}
+      {isAdmin && <PreviewPanel key={kind} slug={slug} kind={kind} />}
     </div>
   );
 });
@@ -163,6 +178,7 @@ const PromptsListPage = observer(function PromptsListPage() {
 
 type SectionCardProps = {
   slug: string;
+  kind: TPromptKind;
   /** Effective (user-scope) resolution of the section. */
   section: IResolvedSection;
   /** Workspace-scope resolution of the same section, if loaded. */
@@ -173,7 +189,7 @@ type SectionCardProps = {
   onChanged: () => Promise<void>;
 };
 
-function SectionCard({ slug, section, workspaceSection, workspaceReady, isAdmin, onChanged }: SectionCardProps) {
+function SectionCard({ slug, kind, section, workspaceSection, workspaceReady, isAdmin, onChanged }: SectionCardProps) {
   const { t } = useTranslation();
   const [editScope, setEditScope] = useState<TPromptScope | null>(null);
 
@@ -242,6 +258,7 @@ function SectionCard({ slug, section, workspaceSection, workspaceReady, isAdmin,
       ) : (
         <SectionEditor
           slug={slug}
+          kind={kind}
           sectionKey={section.key}
           scope={editScope}
           seed={seedFor(editScope)}
@@ -278,6 +295,7 @@ function SourceBadge({ source }: { source: string }) {
 
 type SectionEditorProps = {
   slug: string;
+  kind: TPromptKind;
   sectionKey: string;
   scope: TPromptScope;
   seed: string;
@@ -289,6 +307,7 @@ type SectionEditorProps = {
 
 function SectionEditor({
   slug,
+  kind,
   sectionKey,
   scope,
   seed,
@@ -305,6 +324,41 @@ function SectionEditor({
   const [showRevertConfirm, setShowRevertConfirm] = useState(false);
   const [showDefault, setShowDefault] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  // Draft preview: render the *unsaved* draft against a real issue/binding so
+  // a valid-but-wrong override (e.g. a conditional that drops instructions) is
+  // caught before Save commits it to every run.
+  const isScheduler = kind === "scheduler";
+  const [previewTarget, setPreviewTarget] = useState("");
+  const [previewText, setPreviewText] = useState("");
+  const [previewing, setPreviewing] = useState(false);
+  const [previewError, setPreviewError] = useState<string | null>(null);
+
+  async function handleDraftPreview() {
+    if (previewing) return;
+    if (!previewTarget) {
+      setPreviewError(isScheduler ? t("Enter a scheduler binding id first.") : t("Enter an issue id first."));
+      return;
+    }
+    setPreviewing(true);
+    setPreviewError(null);
+    try {
+      const target = isScheduler ? { binding_id: previewTarget } : { issue_id: previewTarget };
+      const resp = await promptStore.previewPrompt(slug, kind, {
+        ...target,
+        scope,
+        section_key: sectionKey,
+        body: draft,
+      });
+      setPreviewText(resp.prompt);
+    } catch (e: unknown) {
+      const err = e as { error?: string; detail?: string } | null;
+      setPreviewError(err?.detail ?? err?.error ?? t("Render failed."));
+      setPreviewText("");
+    } finally {
+      setPreviewing(false);
+    }
+  }
 
   const dirty = draft !== seed;
 
@@ -403,6 +457,39 @@ function SectionEditor({
           <Button size="sm" variant="tertiary-danger" onClick={() => setShowRevertConfirm(true)} disabled={reverting}>
             {t("Revert to default")}
           </Button>
+        )}
+      </div>
+
+      <div className="flex flex-col gap-2 rounded-md border border-subtle bg-layer-1 p-3">
+        <span className="text-11 font-medium text-secondary">
+          {t("Preview this draft against a real issue before saving")}
+        </span>
+        <div className="flex items-center gap-2">
+          <input
+            value={previewTarget}
+            onChange={(e) => setPreviewTarget(e.target.value)}
+            placeholder={isScheduler ? t("Scheduler binding id (UUID)") : t("Issue id (UUID)")}
+            className="font-mono flex-1 rounded-md border border-subtle bg-layer-2 px-3 py-1.5 text-11 text-primary focus:border-accent-strong focus:outline-none"
+          />
+          <Button
+            size="sm"
+            variant="outline-primary"
+            onClick={handleDraftPreview}
+            loading={previewing}
+            disabled={previewing || !previewTarget}
+          >
+            {t("Preview draft")}
+          </Button>
+        </div>
+        {previewError && (
+          <div className="rounded border border-danger-subtle bg-layer-2 p-2 text-11 text-danger-primary">
+            {previewError}
+          </div>
+        )}
+        {previewText && (
+          <pre className="font-mono max-h-[40vh] overflow-auto rounded-md border border-subtle bg-layer-2 p-3 text-11 leading-5 whitespace-pre-wrap text-primary">
+            {previewText}
+          </pre>
         )}
       </div>
 

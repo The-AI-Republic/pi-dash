@@ -31,7 +31,7 @@ export class PromptSectionService extends APIService {
   }
 
   async list(workspaceSlug: string, kind: TPromptKind, scope: TPromptScope): Promise<IPromptSectionListResponse> {
-    return this.get(`/api/workspaces/${workspaceSlug}/prompt-sections`, { kind, scope })
+    return this.get(`/api/workspaces/${workspaceSlug}/prompt-sections`, { params: { kind, scope } })
       .then((res) => res?.data)
       .catch((err) => {
         throw err?.response?.data;
@@ -59,7 +59,7 @@ export class PromptSectionService extends APIService {
   }
 
   async compiled(workspaceSlug: string, kind: TPromptKind, scope: TPromptScope): Promise<IPromptCompiledResponse> {
-    return this.get(`/api/workspaces/${workspaceSlug}/prompts/${kind}/compiled`, { scope })
+    return this.get(`/api/workspaces/${workspaceSlug}/prompts/${kind}/compiled`, { params: { scope } })
       .then((res) => res?.data)
       .catch((err) => {
         throw err?.response?.data;

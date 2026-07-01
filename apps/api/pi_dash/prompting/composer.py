@@ -22,7 +22,7 @@ See ``.ai_design/prompt_section_system/design.md`` §6, §7.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, Dict, List, Optional
 
 from pi_dash.prompting import recipes, registry
@@ -31,6 +31,8 @@ from pi_dash.prompting.renderer import PromptRenderError, render
 #: Manifest/source labels.
 SOURCE_DEFAULT = "default"
 SOURCE_WORKSPACE = "workspace"
+#: Marks a section body supplied as an unsaved draft for preview only.
+SOURCE_DRAFT = "draft"
 
 
 @dataclass(frozen=True)
@@ -150,7 +152,13 @@ def _lookup_override(workspace, user, key, override_index):
 
 
 def resolve_section(
-    key: str, *, workspace, project, user, override_index: Optional[Dict] = None
+    key: str,
+    *,
+    workspace,
+    project,
+    user,
+    override_index: Optional[Dict] = None,
+    section: Optional[registry.PromptSection] = None,
 ) -> ResolvedSection:
     """Resolve one section's body via the precedence chain.
 
@@ -160,8 +168,10 @@ def resolve_section(
 
     ``override_index`` (from :func:`load_override_index`) avoids per-section
     queries when resolving a whole recipe; omit it for one-off resolution.
+    ``section`` lets a caller that already fetched the registry entry pass it
+    in to skip the redundant lookup.
     """
-    section = registry.get_section(key)
+    section = section or registry.get_section(key)
     default = ResolvedSection(
         key=section.key,
         title=section.title,
@@ -281,12 +291,22 @@ def _attributed_render_error(
 
 
 def compose(
-    kind: str, *, workspace, project, user, context: Dict[str, Any]
+    kind: str,
+    *,
+    workspace,
+    project,
+    user,
+    context: Dict[str, Any],
+    draft_overrides: Optional[Dict[str, str]] = None,
 ) -> ComposedPrompt:
     """Resolve, assemble, and render the recipe for ``kind``.
 
     Raises :class:`PromptRenderError` (attributed to the failing section) when
     rendering fails — the caller fails the run cleanly, never a 500.
+
+    ``draft_overrides`` (section key → body) substitutes an *unsaved* body for
+    the resolved one before assembly, so a preview can render a draft the admin
+    hasn't committed yet. Keys outside this recipe are ignored.
     """
     recipe = recipes.recipe_for(kind)
     override_index = load_override_index(workspace, user)
@@ -296,6 +316,13 @@ def compose(
         )
         for key in recipe
     ]
+    if draft_overrides:
+        resolved = [
+            replace(r, body=draft_overrides[r.key], source=SOURCE_DRAFT)
+            if r.key in draft_overrides
+            else r
+            for r in resolved
+        ]
     template_body, manifest = _assemble(resolved)
     try:
         text = render(template_body, context)

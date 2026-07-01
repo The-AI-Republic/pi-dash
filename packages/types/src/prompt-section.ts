@@ -71,6 +71,9 @@ export interface IPromptPreviewPayload {
   issue_id?: string;
   binding_id?: string;
   scope?: TPromptScope;
+  /** Preview an unsaved draft of this section (with `body`) instead of the saved one. */
+  section_key?: string;
+  body?: string;
 }
 
 export interface IPromptPreviewResponse {
