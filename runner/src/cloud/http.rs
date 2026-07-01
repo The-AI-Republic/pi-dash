@@ -427,39 +427,39 @@ impl RunnerCloudClient {
     /// Single-flight refresh per `RunnerCloudClient`. Concurrent
     /// callers piggy-back on the in-flight call.
     pub async fn refresh(&self) -> Result<(), TransportError> {
-        let waiter = {
+        let mut rx = {
             let mut guard = self.inner.state.lock().await;
             if let Some(rx) = &guard.refresh_in_flight {
-                Some(rx.clone())
+                rx.clone()
             } else {
                 let (tx, rx) = watch::channel(RefreshOutcome::Pending);
-                guard.refresh_in_flight = Some(rx);
-                drop(guard);
-                let result = self.do_refresh().await;
-                let outcome = match &result {
-                    Ok(()) => RefreshOutcome::Done(Ok(())),
-                    Err(err) => RefreshOutcome::Done(Err(TransportErrorCode::from(err))),
-                };
-                let _ = tx.send(outcome);
-                let mut guard = self.inner.state.lock().await;
-                guard.refresh_in_flight = None;
-                return result;
+                guard.refresh_in_flight = Some(rx.clone());
+                let client = self.clone();
+                tokio::spawn(async move {
+                    let result = client.do_refresh().await;
+                    let outcome = match &result {
+                        Ok(()) => RefreshOutcome::Done(Ok(())),
+                        Err(err) => RefreshOutcome::Done(Err(TransportErrorCode::from(err))),
+                    };
+                    let _ = tx.send(outcome);
+                    let mut guard = client.inner.state.lock().await;
+                    guard.refresh_in_flight = None;
+                });
+                rx
             }
         };
-        if let Some(mut rx) = waiter {
-            // Wait until the channel transitions to Done.
-            loop {
-                if rx.changed().await.is_err() {
-                    return Err(TransportError::Network("refresh waiter dropped".into()));
-                }
-                match rx.borrow_and_update().clone() {
-                    RefreshOutcome::Pending => continue,
-                    RefreshOutcome::Done(Ok(())) => return Ok(()),
-                    RefreshOutcome::Done(Err(code)) => return Err(code.into_err()),
-                }
+
+        // Wait until the channel transitions to Done.
+        loop {
+            if rx.changed().await.is_err() {
+                return Err(TransportError::Network("refresh waiter dropped".into()));
+            }
+            match rx.borrow_and_update().clone() {
+                RefreshOutcome::Pending => continue,
+                RefreshOutcome::Done(Ok(())) => return Ok(()),
+                RefreshOutcome::Done(Err(code)) => return Err(code.into_err()),
             }
         }
-        Ok(())
     }
 
     async fn do_refresh(&self) -> Result<(), TransportError> {
@@ -2196,6 +2196,53 @@ mod tests {
             matches!(classify_send_error(err), TransportError::Connect(_)),
             "a refused connection must classify as Connect",
         );
+    }
+
+    #[tokio::test]
+    async fn cancelling_refresh_waiter_does_not_poison_future_refreshes() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let mut held = Vec::new();
+            while let Ok((stream, _)) = listener.accept().await {
+                held.push(stream);
+            }
+        });
+
+        let runner_id = Uuid::new_v4();
+        let tmp = tempfile::tempdir().unwrap();
+        let creds = CredentialsHandle::new(
+            tmp.path().join("credentials.toml"),
+            RunnerCredentials {
+                runner_id,
+                name: "runner".into(),
+                refresh_token: "rt_slow".into(),
+                refresh_token_generation: 1,
+            },
+        );
+        let transport = SharedHttpTransport::new_with_timeout(
+            format!("http://{addr}"),
+            Duration::from_millis(100),
+        )
+        .unwrap();
+        let client = RunnerCloudClient::new(runner_id, creds, transport);
+
+        tokio::time::timeout(Duration::from_millis(20), client.ensure_access_token())
+            .await
+            .expect_err("slow refresh should be cancelled by the caller timeout");
+
+        let err = tokio::time::timeout(Duration::from_secs(1), client.ensure_access_token())
+            .await
+            .expect("refresh waiter should complete")
+            .expect_err("held connection should still fail refresh");
+        let rendered = err.to_string();
+        assert!(
+            !rendered.contains("refresh waiter dropped"),
+            "unexpected error after cancelled waiter: {err}"
+        );
+        assert!(rendered.contains("timeout"), "unexpected error: {err}");
+        let guard = client.inner.state.lock().await;
+        assert!(guard.refresh_in_flight.is_none());
     }
 
     #[test]
