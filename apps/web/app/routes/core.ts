@@ -473,6 +473,11 @@ export const coreRoutes: RouteConfigEntry[] = [
   // Profile settings redirects
   route("profile/*", "routes/redirects/core/profile-settings.tsx"),
 
+  // Settings index redirect: /settings (and /settings/profile) → /settings/profile/general.
+  // The static `settings/profile/:profileTabId` route out-ranks this splat, so
+  // real tabs still render their page.
+  route("settings/*", "routes/redirects/core/settings.tsx"),
+
   // Account settings redirects
   route(":workspaceSlug/settings/account/*", "routes/redirects/core/workspace-account-settings.tsx"),
 ] satisfies RouteConfig;
