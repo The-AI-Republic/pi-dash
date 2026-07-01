@@ -120,6 +120,14 @@ const RunnerChatPage = observer(function RunnerChatPage() {
   );
 
   useEffect(() => {
+    if (!sessions) return;
+    const precreated = precreatedSessionRef.current;
+    if (!precreated) return;
+    const current = sessions.find((item) => item.id === precreated.id);
+    precreatedSessionRef.current = current?.status === "open" ? current : null;
+  }, [sessions]);
+
+  useEffect(() => {
     warmSessionRef.current = null;
     createWarmKeyRef.current = null;
     precreatedSessionRef.current = null;
@@ -221,8 +229,13 @@ const RunnerChatPage = observer(function RunnerChatPage() {
   async function ensureSession(): Promise<IAgentChatSession> {
     if (session?.status === "open") return session;
     const precreated = precreatedSessionRef.current;
-    if (precreated?.status === "open" && precreated.workspace === workspaceId && precreated.runner === runnerId) {
-      return precreated;
+    if (precreated && precreated.workspace === workspaceId && precreated.runner === runnerId) {
+      const current = sessions?.find((item) => item.id === precreated.id);
+      const reusable = current ?? (sessions ? null : precreated);
+      if (reusable?.status === "open") {
+        return reusable;
+      }
+      precreatedSessionRef.current = null;
     }
     const created = await service.createChatSession({
       workspace: workspaceId!,
