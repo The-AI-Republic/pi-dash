@@ -379,15 +379,27 @@ impl Tab for GeneralTab {
         }
     }
 
-    fn handle_paste(&mut self, text: String, _ctx: &mut TabCtx<'_>) -> KeyHandled {
+    fn handle_paste(
+        &mut self,
+        text: String,
+        _ctx: &mut TabCtx<'_>,
+        focus: &FocusPath,
+    ) -> KeyHandled {
+        // Register form: route the paste to whichever text field is
+        // focused (cloud_url / token / host_label). This is the primary
+        // onboarding surface — the token is meant to be pasted, not typed.
+        if let Some(reg) = self.register.as_mut()
+            && let Some(reg_focus) = focus.current().and_then(Self::register_focus_for_item)
+            && let Some(area) = reg.focused_textarea_mut(reg_focus)
+        {
+            area.insert_str(&text);
+            return KeyHandled::Consumed;
+        }
+        // Daemon-settings edit buffer (e.g. log-retention).
         if let Some(buf) = self.edit_buffer.as_mut() {
             buf.insert_str(&text);
             return KeyHandled::Consumed;
         }
-        // Pasting into the register form is best-effort: we don't know
-        // which field is focused without the FocusPath, so paste lands
-        // on whichever TextArea is currently the leaf via insert. The
-        // GeneralTab drops the paste otherwise.
         KeyHandled::NotConsumed
     }
 
@@ -942,4 +954,79 @@ pub async fn submit_register(
         .map_err(|e| format!("writing service unit: {e:#}"))?;
     let outcome = crate::service::reload::restart_and_verify(paths).await;
     Ok((cfg, outcome))
+}
+
+#[cfg(test)]
+mod paste_tests {
+    use super::*;
+    use crate::tui::event::AppEvent;
+    use crate::tui::event_sender::AppEventSender;
+    use crate::tui::input::keymap::KeymapRegistry;
+    use crate::tui::tui_runtime::frame_requester::FrameScheduler;
+    use crate::tui::view::tab::{Tab, TabCtx};
+    use crate::util::paths::Paths;
+    use tokio::sync::mpsc;
+
+    fn paths() -> Paths {
+        let root = tempfile::tempdir().expect("tempdir").keep();
+        Paths {
+            config_dir: root.join("config"),
+            data_dir: root.join("data"),
+            runtime_dir: root.join("runtime"),
+        }
+    }
+
+    #[tokio::test]
+    async fn paste_routes_to_focused_register_token_field() {
+        let mut data = AppData::new(paths());
+        let mut tab = GeneralTab::new();
+        tab.on_config_missing(&data);
+
+        let (tx, _rx) = mpsc::unbounded_channel::<AppEvent>();
+        let sender = AppEventSender::new(tx);
+        let keymap = KeymapRegistry::new();
+        let p = paths();
+        let (frame, _draw) = FrameScheduler::spawn();
+        let mut ctx = TabCtx {
+            tx: &sender,
+            data: &mut data,
+            keymap: &keymap,
+            paths: &p,
+            frame: &frame,
+        };
+
+        let mut focus = FocusPath::default();
+        focus.push(CARD_REGISTER);
+        focus.push(ITEM_REG_TOKEN);
+
+        let h = tab.handle_paste("pasted-token".into(), &mut ctx, &focus);
+        assert_eq!(h, KeyHandled::Consumed);
+        assert_eq!(tab.register_form_snapshot().unwrap().token, "pasted-token");
+    }
+
+    #[tokio::test]
+    async fn paste_routes_to_settings_edit_buffer() {
+        let mut data = AppData::new(paths());
+        let mut tab = GeneralTab::new();
+        tab.edit_buffer = Some(TextArea::with_text("14"));
+
+        let (tx, _rx) = mpsc::unbounded_channel::<AppEvent>();
+        let sender = AppEventSender::new(tx);
+        let keymap = KeymapRegistry::new();
+        let p = paths();
+        let (frame, _draw) = FrameScheduler::spawn();
+        let mut ctx = TabCtx {
+            tx: &sender,
+            data: &mut data,
+            keymap: &keymap,
+            paths: &p,
+            frame: &frame,
+        };
+
+        // No register form, focus empty -> falls through to edit buffer.
+        let focus = FocusPath::default();
+        let h = tab.handle_paste("7".into(), &mut ctx, &focus);
+        assert_eq!(h, KeyHandled::Consumed);
+        assert_eq!(tab.edit_buffer.as_ref().unwrap().text(), "147");
+    }
 }

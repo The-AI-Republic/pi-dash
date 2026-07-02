@@ -1240,7 +1240,8 @@ impl App {
                     };
                     let _ = view.handle_paste(text, &mut ctx);
                 } else {
-                    self.with_tab_ctx(|tab, ctx| tab.handle_paste(text, ctx));
+                    let focus = self.focus_for(self.tab).clone();
+                    self.with_tab_ctx(|tab, ctx| tab.handle_paste(text, ctx, &focus));
                 }
                 self.frame.schedule_frame();
                 Ok(true)
