@@ -5,7 +5,7 @@
  */
 
 import { useMemo } from "react";
-import { XCircle, ArchiveRestoreIcon } from "lucide-react";
+import { XCircle, ArchiveRestoreIcon, FolderInput } from "lucide-react";
 // pi dash imports
 import { useTranslation } from "@pi-dash/i18n";
 import { LinkIcon, CopyIcon, NewTabIcon, EditIcon, ArchiveIcon, TrashIcon } from "@pi-dash/propel/icons";
@@ -68,6 +68,7 @@ export interface MenuItemFactoryProps {
   setDeleteIssueModal: (open: boolean) => void;
   setArchiveIssueModal?: (open: boolean) => void;
   setDuplicateWorkItemModal?: (open: boolean) => void;
+  setMoveIssueModal?: (open: boolean) => void;
   handleRemoveFromView?: () => void;
   handleRestore?: () => Promise<void>;
   // External handlers
@@ -155,6 +156,7 @@ export const useMenuItemFactory = (props: MenuItemFactoryProps) => {
     setDeleteIssueModal,
     setArchiveIssueModal,
     setDuplicateWorkItemModal,
+    setMoveIssueModal,
     handleRemoveFromView,
   } = props;
 
@@ -241,6 +243,14 @@ export const useMenuItemFactory = (props: MenuItemFactoryProps) => {
     shouldRender: isRestoringAllowed,
   });
 
+  const createMoveMenuItem = (): TContextMenuItem => ({
+    key: "move",
+    title: t("Move to project"),
+    icon: FolderInput,
+    action: () => handleOptionalAction(setMoveIssueModal, "Move", true),
+    shouldRender: isEditingAllowed,
+  });
+
   const createDeleteMenuItem = (): TContextMenuItem => ({
     key: "delete",
     title: t("Delete"),
@@ -261,6 +271,7 @@ export const useMenuItemFactory = (props: MenuItemFactoryProps) => {
     createRemoveFromModuleMenuItem,
     createArchiveMenuItem,
     createRestoreMenuItem,
+    createMoveMenuItem,
     createDeleteMenuItem,
   };
 };
@@ -289,6 +300,7 @@ export const useWorkItemDetailMenuItems = (props: MenuItemFactoryProps): TContex
     () => [
       factory.createCopyMenuItem(props.workspaceSlug),
       factory.createOpenInNewTabMenuItem(),
+      factory.createMoveMenuItem(),
       factory.createArchiveMenuItem(),
       factory.createRestoreMenuItem(),
       factory.createDeleteMenuItem(),

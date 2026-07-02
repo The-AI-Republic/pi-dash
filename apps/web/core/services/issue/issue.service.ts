@@ -231,6 +231,19 @@ export class IssueService extends APIService {
       });
   }
 
+  async moveIssue(
+    workspaceSlug: string,
+    projectId: string,
+    issueId: string,
+    data: { project: string }
+  ): Promise<TIssue> {
+    return this.post(`/api/workspaces/${workspaceSlug}/projects/${projectId}/work-items/${issueId}/move/`, data)
+      .then((response) => response?.data)
+      .catch((error) => {
+        throw error?.response?.data;
+      });
+  }
+
   async deleteIssue(workspaceSlug: string, projectId: string, issuesId: string): Promise<any> {
     return this.delete(`/api/workspaces/${workspaceSlug}/projects/${projectId}/${this.serviceType}/${issuesId}/`)
       .then((response) => response?.data)

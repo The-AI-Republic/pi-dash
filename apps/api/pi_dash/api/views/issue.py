@@ -8,10 +8,10 @@ import uuid
 
 # Django imports
 from django.core.serializers.json import DjangoJSONEncoder
-from django.http import Http404, HttpResponseRedirect
+from django.http import HttpResponseRedirect
 from django.urls import reverse
 from django.utils.dateparse import parse_datetime
-from django.db import IntegrityError, connection, transaction
+from django.db import IntegrityError, transaction
 from django.db.models import (
     Case,
     CharField,
@@ -78,34 +78,20 @@ from pi_dash.db.models import (
     IssueComment,
     IssueLink,
     IssueRelation,
-    IssueMention,
-    IssueReaction,
     Label,
     Project,
     ProjectMember,
     CycleIssue,
-    State,
     StateGroup,
-    IssueAssignee,
-    IssueLabel,
-    IssueSubscriber,
-    IssueVote,
-    IssueVersion,
-    IssueDescriptionVersion,
-    IssueSequence,
-    ModuleIssue,
     Workspace,
-    CommentReaction,
-    Description,
 )
-from pi_dash.runner.models import Pod
 from pi_dash.settings.storage import S3Storage
 from pi_dash.bgtasks.storage_metadata_task import get_asset_object_metadata
 from .base import BaseAPIView
 from pi_dash.utils.host import base_host
 from pi_dash.utils.issue_relation_mapper import get_actual_relation
 from pi_dash.search.issue import extract_snippet, issue_search_queryset
-from pi_dash.utils.uuid import convert_uuid_to_integer
+from pi_dash.utils.issue_move import move_work_item_to_project, IssueMoveError
 from pi_dash.bgtasks.webhook_task import model_activity
 from pi_dash.app.permissions import ROLE
 from pi_dash.utils.openapi import (
@@ -872,153 +858,18 @@ class IssueMoveAPIEndpoint(BaseAPIView):
     serializer_class = IssueSerializer
 
     def post(self, request, slug, project_id, pk):
-        target_ref = str(request.data.get("project") or "").strip()
-        if not target_ref:
-            return Response({"error": "project is required"}, status=status.HTTP_400_BAD_REQUEST)
-
-        issue = Issue.issue_objects.get(workspace__slug=slug, project_id=project_id, pk=pk)
-        target_project = Project.resolve(slug, target_ref)
-        if str(target_project.id) == str(issue.project_id):
-            return Response(IssueSerializer(issue).data, status=status.HTTP_200_OK)
-
-        can_access_target = ProjectMember.objects.filter(
-            workspace__slug=slug,
-            project=target_project,
-            member=request.user,
-            role__gte=ROLE.MEMBER.value,
-            is_active=True,
-        ).exists()
-        if not can_access_target:
-            return Response(
-                {"error": "You do not have permission to move work items into the target project"},
-                status=status.HTTP_403_FORBIDDEN,
+        try:
+            issue = move_work_item_to_project(
+                slug=slug,
+                project_id=project_id,
+                pk=pk,
+                target_ref=request.data.get("project"),
+                actor=request.user,
+                origin=base_host(request=request, is_app=True),
             )
+        except IssueMoveError as exc:
+            return Response({"error": exc.message}, status=exc.status_code)
 
-        current_instance = json.dumps(IssueSerializer(issue).data, cls=DjangoJSONEncoder)
-        requested_data = json.dumps({"project": str(target_project.id)}, cls=DjangoJSONEncoder)
-
-        target_state = State.objects.filter(
-            ~Q(is_triage=True),
-            project=target_project,
-            default=True,
-        ).first() or State.objects.filter(~Q(is_triage=True), project=target_project).first()
-        if target_state is None:
-            return Response(
-                {"error": "Target project does not have a workflow state"},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
-
-        with transaction.atomic():
-            # ``of=("self",)`` scopes the row lock to the base ``issues`` row.
-            # ``Issue.issue_objects`` excludes triage states via
-            # ``.exclude(state__group=...)`` and ``state`` is a nullable FK, so
-            # the queryset carries a LEFT OUTER JOIN to ``states``. A bare
-            # ``SELECT ... FOR UPDATE`` then asks Postgres to lock the nullable
-            # side of that outer join, which it refuses ("FOR UPDATE cannot be
-            # applied to the nullable side of an outer join") — a 500 on every
-            # move. Same fix as ``IssueWorkpadAPIEndpoint.patch``.
-            issue = (
-                Issue.issue_objects.select_for_update(of=("self",))
-                .get(workspace__slug=slug, project_id=project_id, pk=pk)
-            )
-            lock_key = convert_uuid_to_integer(target_project.id)
-            with connection.cursor() as cursor:
-                cursor.execute("SELECT pg_advisory_xact_lock(%s)", [lock_key])
-
-            last_sequence = IssueSequence.objects.filter(project=target_project).aggregate(
-                largest=Max("sequence")
-            )["largest"]
-            next_sequence = last_sequence + 1 if last_sequence else 1
-
-            issue.project = target_project
-            issue.workspace = target_project.workspace
-            issue.sequence_id = next_sequence
-            issue.state = target_state
-            issue.assigned_pod = Pod.default_for_project_id(target_project.id)
-            issue.parent = None
-            issue.estimate_point = None
-            issue.type = None
-            issue.save(
-                update_fields=[
-                    "project",
-                    "workspace",
-                    "sequence_id",
-                    "state",
-                    "assigned_pod",
-                    "parent",
-                    "estimate_point",
-                    "type",
-                    "updated_at",
-                ]
-            )
-
-            IssueSequence.objects.filter(issue=issue).exclude(project=target_project).update(issue=None)
-            IssueSequence.objects.create(issue=issue, sequence=next_sequence, project=target_project)
-
-            valid_assignees = ProjectMember.objects.filter(
-                project=target_project,
-                member_id__in=IssueAssignee.objects.filter(issue=issue).values_list("assignee_id", flat=True),
-                role__gte=ROLE.MEMBER.value,
-                is_active=True,
-            ).values_list("member_id", flat=True)
-            IssueAssignee.objects.filter(issue=issue).exclude(assignee_id__in=valid_assignees).delete()
-            IssueAssignee.objects.filter(issue=issue).update(
-                project=target_project,
-                workspace=target_project.workspace,
-            )
-
-            IssueLabel.objects.filter(issue=issue).delete()
-            CycleIssue.objects.filter(issue=issue).delete()
-            ModuleIssue.objects.filter(issue=issue).delete()
-            IssueRelation.objects.filter(Q(issue=issue) | Q(related_issue=issue)).delete()
-            Issue.objects.filter(parent=issue).exclude(project=target_project).update(parent=None)
-
-            comment_ids = list(IssueComment.objects.filter(issue=issue).values_list("id", flat=True))
-            description_ids = list(
-                IssueComment.objects.filter(issue=issue, description__isnull=False).values_list(
-                    "description_id", flat=True
-                )
-            )
-
-            update_kwargs = {
-                "project": target_project,
-                "workspace": target_project.workspace,
-            }
-            IssueLink.objects.filter(issue=issue).update(**update_kwargs)
-            IssueMention.objects.filter(issue=issue).update(**update_kwargs)
-            IssueSubscriber.objects.filter(issue=issue).update(**update_kwargs)
-            IssueReaction.objects.filter(issue=issue).update(**update_kwargs)
-            IssueVote.objects.filter(issue=issue).update(**update_kwargs)
-            IssueVersion.objects.filter(issue=issue).update(**update_kwargs)
-            IssueDescriptionVersion.objects.filter(issue=issue).update(**update_kwargs)
-            IssueActivity.objects.filter(Q(issue=issue) | Q(issue_comment_id__in=comment_ids)).update(
-                **update_kwargs
-            )
-            IssueComment.objects.filter(issue=issue).update(**update_kwargs)
-            CommentReaction.objects.filter(comment_id__in=comment_ids).update(**update_kwargs)
-            Description.objects.filter(id__in=description_ids).update(**update_kwargs)
-            FileAsset.objects.filter(Q(issue=issue) | Q(comment_id__in=comment_ids)).update(**update_kwargs)
-
-        issue_activity.delay(
-            type="issue.activity.updated",
-            requested_data=requested_data,
-            actor_id=str(request.user.id),
-            issue_id=str(pk),
-            project_id=str(target_project.id),
-            current_instance=current_instance,
-            epoch=int(timezone.now().timestamp()),
-        )
-        model_activity.delay(
-            model_name="issue",
-            model_id=str(pk),
-            requested_data={"project": str(target_project.id)},
-            current_instance=current_instance,
-            actor_id=request.user.id,
-            slug=slug,
-            origin=base_host(request=request, is_app=True),
-        )
-
-        issue = Issue.issue_objects.select_related("project", "workspace", "state").get(pk=pk)
         return Response(IssueSerializer(issue).data, status=status.HTTP_200_OK)
 
 
