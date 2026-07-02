@@ -2,6 +2,8 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 # See the LICENSE file for details.
 
+import math
+
 from django.db import transaction
 from django.db.models import Q
 from django.utils import timezone
@@ -27,6 +29,30 @@ from pi_dash.runner.services.validation import (
     RunCreationError,
     validate_run_creation,
 )
+
+
+DEFAULT_PER_PAGE = 50
+MAX_PER_PAGE = 200
+
+
+def _parse_pagination(query_params) -> tuple[int, int]:
+    """Resolve ``page`` (1-based) and ``per_page`` from query params.
+
+    Invalid or out-of-bounds values fall back to safe defaults rather than
+    erroring: ``page`` clamps to a minimum of 1, ``per_page`` to ``[1,
+    MAX_PER_PAGE]`` with a ``DEFAULT_PER_PAGE`` fallback.
+    """
+
+    def _to_int(value, default):
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return default
+
+    page = max(1, _to_int(query_params.get("page"), 1))
+    per_page = _to_int(query_params.get("per_page"), DEFAULT_PER_PAGE)
+    per_page = max(1, min(per_page, MAX_PER_PAGE))
+    return page, per_page
 
 
 def _can_view_run(user, run: AgentRun) -> bool:
@@ -93,7 +119,28 @@ class AgentRunListEndpoint(APIView):
         workspace_id = request.query_params.get("workspace")
         if workspace_id:
             qs = qs.filter(workspace_id=workspace_id)
-        return Response(AgentRunSerializer(qs[:200], many=True).data)
+
+        # Page-number pagination. The list grew unbounded (previously capped at
+        # a flat 200), so the client now requests one page at a time and only
+        # the first page loads by default. ``page`` is 1-based and reflected in
+        # the runs-view URL so a page is directly linkable. Out-of-range pages
+        # return an empty ``results`` with the real ``total_pages`` so the UI
+        # can recover.
+        page, per_page = _parse_pagination(request.query_params)
+        total_count = qs.count()
+        total_pages = max(1, math.ceil(total_count / per_page))
+        offset = (page - 1) * per_page
+        results = qs[offset : offset + per_page]
+        return Response(
+            {
+                "results": AgentRunSerializer(results, many=True).data,
+                "count": len(results),
+                "total_count": total_count,
+                "total_pages": total_pages,
+                "page": page,
+                "per_page": per_page,
+            }
+        )
 
     def post(self, request):
         triggered_by = (request.data.get("triggered_by") or "").strip()
