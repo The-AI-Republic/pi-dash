@@ -161,6 +161,7 @@ export default {
   "AI Agents": "AI Agents",
   "AI Dev Machines": "AI Dev Machines",
   "AI Prompt Templates": "AI Prompt Templates",
+  "AI Workers": "AI Workers",
   All: "All",
   "All permissions set to true within the workspace.": "All permissions set to true within the workspace.",
   "All Projects": "All Projects",
@@ -1130,6 +1131,7 @@ export default {
   Personal: "Personal",
   "Personal Access Tokens": "Personal Access Tokens",
   "Pi Chat": "Pi Chat",
+  "Pi Dash AI": "Pi Dash AI",
   "Pi Dash default": "Pi Dash default",
   "Pi Dash hands AI agents (Claude Code, Codex, …) the keys to a real dev machine so they can pick up work items, write code, and open changes. Three pieces work together to make that possible:":
     "Pi Dash hands AI agents (Claude Code, Codex, …) the keys to a real dev machine so they can pick up work items, write code, and open changes. Three pieces work together to make that possible:",
