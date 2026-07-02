@@ -25,6 +25,7 @@ def test_every_section_has_valid_customizable_flag():
     for section in registry.all_sections():
         assert section.customizable in {
             registry.CUSTOMIZABLE_LOCKED,
+            registry.CUSTOMIZABLE_WORKSPACE,
             registry.CUSTOMIZABLE_OVERRIDABLE,
         }
 
@@ -35,6 +36,26 @@ def test_locked_and_overridable_classification():
     assert registry.get_section("ending-run").is_locked
     assert registry.get_section("implementation").is_overridable
     assert registry.get_section("review-cycle").is_overridable
+
+
+@pytest.mark.unit
+def test_customizable_tier_capabilities():
+    """The three tiers map to (workspace-override, personal-override) capability."""
+    locked = registry.PromptSection("k", "T", registry.CUSTOMIZABLE_LOCKED, "b\n")
+    assert locked.is_locked
+    assert not locked.allows_workspace_override
+    assert not locked.allows_personal_override
+
+    ws_only = registry.PromptSection("k", "T", registry.CUSTOMIZABLE_WORKSPACE, "b\n")
+    assert not ws_only.is_locked
+    assert not ws_only.is_overridable
+    assert ws_only.allows_workspace_override
+    assert not ws_only.allows_personal_override
+
+    open_ = registry.PromptSection("k", "T", registry.CUSTOMIZABLE_OVERRIDABLE, "b\n")
+    assert open_.is_overridable
+    assert open_.allows_workspace_override
+    assert open_.allows_personal_override
 
 
 @pytest.mark.unit

@@ -41,6 +41,7 @@ from pi_dash.prompting.composer import (
     SOURCE_WORKSPACE,
     compile_template,
     compose,
+    effective_customizability,
     load_override_index,
     resolve_section,
 )
@@ -109,8 +110,14 @@ def _section_breakdown(kind: str, *, workspace, user) -> list:
     override_index = load_override_index(workspace, user)
     out = []
     for key in recipes.recipe_for(kind):
+        section = registry.get_section(key)
         resolved = resolve_section(
-            key, workspace=workspace, project=None, user=user, override_index=override_index
+            key,
+            workspace=workspace,
+            project=None,
+            user=user,
+            override_index=override_index,
+            section=section,
         )
         # The row that resolved is the one matching the resolved source.
         if resolved.source == SOURCE_WORKSPACE:
@@ -119,15 +126,23 @@ def _section_breakdown(kind: str, *, workspace, user) -> list:
             row = override_index.get(("user", key))
         else:
             row = None
+        # Capability flags express what the *section* permits (the caller still
+        # combines these with their own admin/member role client-side).
+        tier = effective_customizability(section, workspace)
         out.append(
             {
                 "key": resolved.key,
                 "title": resolved.title,
-                "customizable": resolved.customizable,
+                "customizable": tier,
                 "body": resolved.body,
+                # The pristine registry default, so the editor can diff an
+                # active override against it without first reverting.
+                "default_body": section.default_body,
                 "source": resolved.source,
                 "version": resolved.version,
                 "needs_attention": bool(row.needs_attention) if row is not None else False,
+                "editable_at_workspace": registry.tier_allows_workspace_override(tier),
+                "editable_at_personal": registry.tier_allows_personal_override(tier),
             }
         )
     return out
@@ -192,9 +207,24 @@ class PromptSectionDetailEndpoint(APIView):
                 status=status.HTTP_404_NOT_FOUND,
             )
         section = registry.get_section(section_key)
-        if section.is_locked:
+        # Governance tier gate (design §9.2). ``locked`` blocks every scope;
+        # ``workspace`` allows the workspace scope only; ``overridable`` allows
+        # both. The role check above already ensures workspace writes are admin.
+        tier = effective_customizability(section, workspace)
+        if scope == SCOPE_WORKSPACE and not registry.tier_allows_workspace_override(tier):
             return Response(
                 {"error": f"section {section_key!r} is locked and cannot be overridden"},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+        if scope == SCOPE_USER and not registry.tier_allows_personal_override(tier):
+            return Response(
+                {
+                    "error": (
+                        f"section {section_key!r} cannot be personally overridden"
+                        if tier == registry.CUSTOMIZABLE_WORKSPACE
+                        else f"section {section_key!r} is locked and cannot be overridden"
+                    )
+                },
                 status=status.HTTP_403_FORBIDDEN,
             )
 
@@ -320,14 +350,13 @@ class PromptCompiledEndpoint(APIView):
         scope = _resolve_scope(request)
         user = request.user if scope == SCOPE_USER else None
         compiled = compile_template(kind, workspace=workspace, project=None, user=user)
+        # The per-section breakdown is served by the section-list endpoint the
+        # page already calls; the compiled endpoint only needs the assembled
+        # template body, so we don't re-resolve and re-serialize sections here.
         payload = {
             "kind": kind,
             "scope": scope,
             "template_body": compiled.template_body,
-            "sections": ResolvedSectionSerializer(
-                _section_breakdown(kind, workspace=workspace, user=user),
-                many=True,
-            ).data,
         }
         # Dual compilation (§9.1): when resolving for a user who has overrides,
         # also surface the workspace-only template that automatic runs (ticks,
@@ -350,7 +379,8 @@ class PromptPreviewEndpoint(APIView):
         workspace = _get_workspace_or_404(slug)
         if workspace is None:
             return Response({"error": "workspace not found"}, status=status.HTTP_404_NOT_FOUND)
-        if not _is_workspace_admin(request.user, workspace):
+        is_admin = _is_workspace_admin(request.user, workspace)
+        if not is_admin and not _is_workspace_member(request.user, workspace):
             return Response({"error": "forbidden"}, status=status.HTTP_403_FORBIDDEN)
         if kind not in recipes.RECIPES:
             return Response(
@@ -359,6 +389,10 @@ class PromptPreviewEndpoint(APIView):
             )
 
         scope = request.data.get("scope", SCOPE_WORKSPACE)
+        # Members may preview their own (user-scope) composition so they can
+        # check a personal-override draft; the workspace default stays admin-only.
+        if not is_admin and scope != SCOPE_USER:
+            return Response({"error": "forbidden"}, status=status.HTTP_403_FORBIDDEN)
         user = request.user if scope == SCOPE_USER else None
 
         if kind == recipes.KIND_SCHEDULER:
@@ -368,9 +402,46 @@ class PromptPreviewEndpoint(APIView):
         if err is not None:
             return err
 
+        # Optional unsaved draft: render this section's draft body in place of
+        # its resolved one, so an editor can preview before committing (§9.2).
+        draft_overrides = None
+        section_key = request.data.get("section_key")
+        draft_body = request.data.get("body")
+        if section_key is not None:
+            if draft_body is None:
+                return Response(
+                    {"error": "body is required to preview a draft"},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            if section_key not in recipes.recipe_for(kind):
+                return Response(
+                    {"error": f"section {section_key!r} is not part of the {kind!r} prompt"},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            # Gate the draft on the same tier rule the write paths enforce, so a
+            # locked/ineligible section can't be rendered from arbitrary text.
+            section = registry.get_section(section_key)
+            tier = effective_customizability(section, workspace)
+            draft_allowed = (
+                registry.tier_allows_workspace_override(tier)
+                if scope == SCOPE_WORKSPACE
+                else registry.tier_allows_personal_override(tier)
+            )
+            if not draft_allowed:
+                return Response(
+                    {"error": f"section {section_key!r} cannot be overridden at scope {scope!r}"},
+                    status=status.HTTP_403_FORBIDDEN,
+                )
+            draft_overrides = {section_key: draft_body}
+
         try:
             composed = compose(
-                kind, workspace=workspace, project=project, user=user, context=context
+                kind,
+                workspace=workspace,
+                project=project,
+                user=user,
+                context=context,
+                draft_overrides=draft_overrides,
             )
         except PromptRenderError as exc:
             return Response(

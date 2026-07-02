@@ -22,7 +22,7 @@ See ``.ai_design/prompt_section_system/design.md`` §6, §7.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, Dict, List, Optional
 
 from pi_dash.prompting import recipes, registry
@@ -31,6 +31,8 @@ from pi_dash.prompting.renderer import PromptRenderError, render
 #: Manifest/source labels.
 SOURCE_DEFAULT = "default"
 SOURCE_WORKSPACE = "workspace"
+#: Marks a section body supplied as an unsaved draft for preview only.
+SOURCE_DRAFT = "draft"
 
 
 @dataclass(frozen=True)
@@ -80,10 +82,11 @@ class ComposedPrompt:
 
 
 def effective_customizability(section: registry.PromptSection, workspace) -> str:
-    """Return the customizability that actually applies for ``workspace``.
+    """Return the customizability tier that actually applies for ``workspace``.
 
-    Returns the registry flag in v1. The indirection is the §9.2 seam: a
-    per-workspace admin-lock tier (open / workspace-only / locked) lands as a
+    Returns the static registry flag (``locked`` / ``workspace`` /
+    ``overridable``). The indirection is the §9.2 seam: *dynamic* per-workspace
+    admin-locking (e.g. an admin pinning an otherwise-open section) lands as a
     change to this one function without touching the resolver or callers.
     """
     return section.customizable
@@ -149,7 +152,13 @@ def _lookup_override(workspace, user, key, override_index):
 
 
 def resolve_section(
-    key: str, *, workspace, project, user, override_index: Optional[Dict] = None
+    key: str,
+    *,
+    workspace,
+    project,
+    user,
+    override_index: Optional[Dict] = None,
+    section: Optional[registry.PromptSection] = None,
 ) -> ResolvedSection:
     """Resolve one section's body via the precedence chain.
 
@@ -159,8 +168,10 @@ def resolve_section(
 
     ``override_index`` (from :func:`load_override_index`) avoids per-section
     queries when resolving a whole recipe; omit it for one-off resolution.
+    ``section`` lets a caller that already fetched the registry entry pass it
+    in to skip the redundant lookup.
     """
-    section = registry.get_section(key)
+    section = section or registry.get_section(key)
     default = ResolvedSection(
         key=section.key,
         title=section.title,
@@ -169,13 +180,18 @@ def resolve_section(
         source=SOURCE_DEFAULT,
         version=0,
     )
-    if effective_customizability(section, workspace) == registry.CUSTOMIZABLE_LOCKED:
+    tier = effective_customizability(section, workspace)
+    if tier == registry.CUSTOMIZABLE_LOCKED:
         return default
     if workspace is None:
         # No workspace context (e.g. a global preview): defaults only.
         return default
 
-    scope, row = _lookup_override(workspace, user, key, override_index)
+    # Personal (user-scope) overrides only apply to the fully-open tier. A
+    # ``workspace``-tier section is admin-governed: even if a stale personal row
+    # survives a tier downgrade, it must not resolve.
+    lookup_user = user if tier == registry.CUSTOMIZABLE_OVERRIDABLE else None
+    scope, row = _lookup_override(workspace, lookup_user, key, override_index)
     if row is not None:
         source = f"user:{user.id}" if scope == _SCOPE_USER else SOURCE_WORKSPACE
         return ResolvedSection(
@@ -275,12 +291,22 @@ def _attributed_render_error(
 
 
 def compose(
-    kind: str, *, workspace, project, user, context: Dict[str, Any]
+    kind: str,
+    *,
+    workspace,
+    project,
+    user,
+    context: Dict[str, Any],
+    draft_overrides: Optional[Dict[str, str]] = None,
 ) -> ComposedPrompt:
     """Resolve, assemble, and render the recipe for ``kind``.
 
     Raises :class:`PromptRenderError` (attributed to the failing section) when
     rendering fails — the caller fails the run cleanly, never a 500.
+
+    ``draft_overrides`` (section key → body) substitutes an *unsaved* body for
+    the resolved one before assembly, so a preview can render a draft the admin
+    hasn't committed yet. Keys outside this recipe are ignored.
     """
     recipe = recipes.recipe_for(kind)
     override_index = load_override_index(workspace, user)
@@ -290,6 +316,13 @@ def compose(
         )
         for key in recipe
     ]
+    if draft_overrides:
+        resolved = [
+            replace(r, body=draft_overrides[r.key], source=SOURCE_DRAFT)
+            if r.key in draft_overrides
+            else r
+            for r in resolved
+        ]
     template_body, manifest = _assemble(resolved)
     try:
         text = render(template_body, context)
