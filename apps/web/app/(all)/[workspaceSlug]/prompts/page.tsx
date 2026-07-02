@@ -37,12 +37,22 @@ type TSectionEntry = {
   kinds: TPromptKind[];
 };
 
+type TReceiptEntry = {
+  kind: TPromptKind;
+  compiled: IPromptCompiledResponse;
+  sections: IResolvedSection[];
+};
+
 function isPersonalSource(source: string): boolean {
   return source.startsWith("user:");
 }
 
 function sectionAnchorId(sectionKey: string): string {
   return `prompt-section-${sectionKey}`;
+}
+
+function receiptAnchorId(kind: TPromptKind): string {
+  return `prompt-receipt-${kind}`;
 }
 
 function useKindLabel() {
@@ -268,14 +278,41 @@ function ReceiptLibrary({ slug, isAdmin }: { slug: string; isAdmin: boolean }) {
   const coding = useCompiledPrompt(slug, "coding-task");
   const review = useCompiledPrompt(slug, "review");
   const scheduler = useCompiledPrompt(slug, "scheduler");
+  const codingSections = usePromptSectionList(slug, "coding-task", "user");
+  const reviewSections = usePromptSectionList(slug, "review", "user");
+  const schedulerSections = usePromptSectionList(slug, "scheduler", "user");
 
   const compiledByKind: Partial<Record<TPromptKind, IPromptCompiledResponse>> = {
     "coding-task": coding.data,
     review: review.data,
     scheduler: scheduler.data,
   };
-  const error = coding.error || review.error || scheduler.error;
-  const ready = coding.data !== undefined && review.data !== undefined && scheduler.data !== undefined;
+  const sectionsByKind: Partial<Record<TPromptKind, IResolvedSection[]>> = {
+    "coding-task": codingSections.data?.sections,
+    review: reviewSections.data?.sections,
+    scheduler: schedulerSections.data?.sections,
+  };
+  const error =
+    coding.error ||
+    review.error ||
+    scheduler.error ||
+    codingSections.error ||
+    reviewSections.error ||
+    schedulerSections.error;
+  const ready =
+    coding.data !== undefined &&
+    review.data !== undefined &&
+    scheduler.data !== undefined &&
+    codingSections.data !== undefined &&
+    reviewSections.data !== undefined &&
+    schedulerSections.data !== undefined;
+
+  const entries: TReceiptEntry[] = [];
+  for (const kind of KINDS) {
+    const compiled = compiledByKind[kind];
+    const sections = sectionsByKind[kind];
+    if (compiled && sections) entries.push({ kind, compiled, sections });
+  }
 
   if (error) {
     return (
@@ -288,14 +325,55 @@ function ReceiptLibrary({ slug, isAdmin }: { slug: string; isAdmin: boolean }) {
   if (!ready) return <div className="text-13 text-secondary">{t("Loading…")}</div>;
 
   return (
-    <section className="flex flex-col gap-3">
-      {KINDS.map((kind) => {
-        const compiled = compiledByKind[kind];
-        return compiled ? (
-          <ReceiptCard key={kind} slug={slug} kind={kind} compiled={compiled} isAdmin={isAdmin} />
-        ) : null;
-      })}
+    <section className="grid gap-4 lg:grid-cols-[16rem_minmax(0,1fr)]">
+      <ReceiptNavigation entries={entries} />
+      <div className="flex min-w-0 flex-col gap-3">
+        <div className="rounded-md border border-subtle bg-layer-1 px-4 py-3">
+          <h2 className="text-13 font-medium text-primary">{t("Receipt")}</h2>
+          <p className="mt-1 text-12 text-secondary">
+            {t(
+              "A receipt is the final prompt template assembled from ordered sections. Editing a section changes the matching part of every receipt that includes it."
+            )}
+          </p>
+        </div>
+        {entries.map(({ kind, compiled, sections }) => (
+          <ReceiptCard
+            key={kind}
+            receiptId={receiptAnchorId(kind)}
+            slug={slug}
+            kind={kind}
+            compiled={compiled}
+            sections={sections}
+            isAdmin={isAdmin}
+          />
+        ))}
+      </div>
     </section>
+  );
+}
+
+function ReceiptNavigation({ entries }: { entries: TReceiptEntry[] }) {
+  const { t } = useTranslation();
+  const kindLabel = useKindLabel();
+
+  return (
+    <aside className="self-start rounded-md border border-subtle bg-layer-1 lg:sticky lg:top-4">
+      <div className="border-b border-subtle px-3 py-2 text-11 font-medium text-secondary">{t("Receipts")}</div>
+      <nav className="flex max-h-[calc(100vh-12rem)] flex-col gap-1 overflow-auto p-2">
+        {entries.map(({ kind, sections }) => (
+          <a
+            key={kind}
+            href={`#${receiptAnchorId(kind)}`}
+            className="rounded px-2 py-1.5 text-12 text-secondary hover:bg-layer-2 hover:text-primary"
+          >
+            <span className="block truncate">{kindLabel(kind)}</span>
+            <span className="block truncate text-10 text-placeholder">
+              {t("{{count}} sections", { count: sections.length })}
+            </span>
+          </a>
+        ))}
+      </nav>
+    </aside>
   );
 }
 
@@ -627,14 +705,18 @@ function SectionEditor({
 // ----------------------------------------------------------------------
 
 function ReceiptCard({
+  receiptId,
   slug,
   kind,
   compiled,
+  sections,
   isAdmin,
 }: {
+  receiptId: string;
   slug: string;
   kind: TPromptKind;
   compiled: IPromptCompiledResponse;
+  sections: IResolvedSection[];
   isAdmin: boolean;
 }) {
   const { t } = useTranslation();
@@ -642,15 +724,35 @@ function ReceiptCard({
   const [open, setOpen] = useState(false);
 
   return (
-    <section className="rounded-md border border-subtle">
+    <section id={receiptId} className="scroll-mt-4 rounded-md border border-subtle">
       <button
         type="button"
         onClick={() => setOpen((v) => !v)}
         className="flex w-full items-center justify-between px-4 py-3 text-13 font-medium text-primary"
       >
-        <span>{kindLabel(kind)}</span>
+        <span className="flex items-center gap-2">
+          {kindLabel(kind)}
+          <Badge variant="accent-neutral" size="sm">
+            {t("{{count}} sections", { count: sections.length })}
+          </Badge>
+        </span>
         <span className="text-11 text-secondary">{open ? t("Hide") : t("Show")}</span>
       </button>
+      <div className="border-t border-subtle px-4 py-3">
+        <h3 className="text-11 font-medium text-secondary">{t("Composed from")}</h3>
+        <ol className="mt-2 grid gap-1.5 md:grid-cols-2">
+          {sections.map((section, index) => (
+            <li key={section.key} className="flex min-w-0 items-center gap-2 rounded bg-layer-1 px-2 py-1.5">
+              <span className="font-mono text-10 text-placeholder">{String(index + 1).padStart(2, "0")}</span>
+              <div className="min-w-0 flex-1">
+                <span className="block truncate text-12 text-primary">{section.title}</span>
+                <span className="block truncate text-10 text-placeholder">{section.key}</span>
+              </div>
+              <SourceBadge source={section.source} />
+            </li>
+          ))}
+        </ol>
+      </div>
       {open && (
         <div className="flex flex-col gap-3 border-t border-subtle px-4 py-3">
           <pre className="font-mono max-h-[60vh] overflow-auto rounded-md border border-subtle bg-layer-1 p-3 text-11 leading-5 whitespace-pre-wrap text-primary">
