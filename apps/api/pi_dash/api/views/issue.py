@@ -8,7 +8,7 @@ import uuid
 
 # Django imports
 from django.core.serializers.json import DjangoJSONEncoder
-from django.http import Http404, HttpResponseRedirect
+from django.http import HttpResponseRedirect
 from django.urls import reverse
 from django.utils.dateparse import parse_datetime
 from django.db import IntegrityError, connection, transaction

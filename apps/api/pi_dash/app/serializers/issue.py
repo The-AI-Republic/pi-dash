@@ -81,7 +81,10 @@ def _comment_is_actively_synced(comment) -> bool:
         return False
     from pi_dash.db.models import GitCommentSync, GithubCommentSync
 
-    return GitCommentSync.objects.filter(comment=comment).exists() or GithubCommentSync.objects.filter(comment=comment).exists()
+    return (
+        GitCommentSync.objects.filter(comment=comment).exists()
+        or GithubCommentSync.objects.filter(comment=comment).exists()
+    )
 
 
 class IssueFlatSerializer(BaseSerializer):
