@@ -52,7 +52,11 @@ export const MoveIssueModal = observer(function MoveIssueModal(props: Props) {
 
   const filteredProjectIds = targetProjectIds.filter((id) => {
     const project = getProjectById(id);
-    const projectQuery = `${project?.identifier ?? ""} ${project?.name ?? ""}`.toLowerCase();
+    // Drop ids whose project details aren't loaded — otherwise an unresolved
+    // project matches every query and renders as `null` below, suppressing the
+    // "no other projects" empty state and leaving a blank area.
+    if (!project) return false;
+    const projectQuery = `${project.identifier ?? ""} ${project.name ?? ""}`.toLowerCase();
     return projectQuery.includes(query.toLowerCase());
   });
 

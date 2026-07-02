@@ -858,12 +858,16 @@ class IssueMoveAPIEndpoint(BaseAPIView):
     serializer_class = IssueSerializer
 
     def post(self, request, slug, project_id, pk):
+        # A non-dict body (JSON list/primitive) has no ``.get`` — coerce it so a
+        # malformed payload becomes a clean 400 ("project is required") rather
+        # than an AttributeError 500.
+        data = request.data if isinstance(request.data, dict) else {}
         try:
             issue = move_work_item_to_project(
                 slug=slug,
                 project_id=project_id,
                 pk=pk,
-                target_ref=request.data.get("project"),
+                target_ref=data.get("project"),
                 actor=request.user,
                 origin=base_host(request=request, is_app=True),
             )
