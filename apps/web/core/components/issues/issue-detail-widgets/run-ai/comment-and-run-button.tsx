@@ -16,6 +16,7 @@ import { useCreateAgentRun } from "./use-create-agent-run";
 
 type Props = {
   workspaceSlug: string;
+  projectId: string;
   issueId: string;
   /** Posts the comment currently typed in the composer and returns it (or
    * ``undefined`` when empty / on failure). Supplied by ``CommentCreate`` via
@@ -33,7 +34,7 @@ type Props = {
 };
 
 export const CommentAndRunActionButton = observer(function CommentAndRunActionButton(props: Props) {
-  const { workspaceSlug, issueId, submitComment, disabled = false, size = "lg", className } = props;
+  const { workspaceSlug, projectId, issueId, submitComment, disabled = false, size = "lg", className } = props;
   const { t } = useTranslation();
   const { triggerRun, isSubmitting: isRunning } = useCreateAgentRun();
 
@@ -44,7 +45,7 @@ export const CommentAndRunActionButton = observer(function CommentAndRunActionBu
     // immediately dispatch the run. No second dialog.
     const comment = await submitComment();
     if (!comment) return;
-    await triggerRun({ workspaceSlug, issueId, mode: "comment_and_run" });
+    await triggerRun({ workspaceSlug, projectId, issueId, mode: "comment_and_run" });
   };
 
   return (

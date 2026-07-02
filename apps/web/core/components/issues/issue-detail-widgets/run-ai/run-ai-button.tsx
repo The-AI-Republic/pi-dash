@@ -17,12 +17,13 @@ import { useCreateAgentRun } from "./use-create-agent-run";
 
 type Props = {
   workspaceSlug: string;
+  projectId: string;
   issueId: string;
   disabled?: boolean;
 };
 
 export const RunAIActionButton = observer(function RunAIActionButton(props: Props) {
-  const { workspaceSlug, issueId, disabled = false } = props;
+  const { workspaceSlug, projectId, issueId, disabled = false } = props;
   const { t } = useTranslation();
   const { isMobile } = usePlatformOS();
   const { triggerRun, isSubmitting } = useCreateAgentRun();
@@ -30,7 +31,7 @@ export const RunAIActionButton = observer(function RunAIActionButton(props: Prop
   const handleClick = (e: React.MouseEvent<HTMLButtonElement>) => {
     e.preventDefault();
     e.stopPropagation();
-    triggerRun({ workspaceSlug, issueId, mode: "run_ai" });
+    triggerRun({ workspaceSlug, projectId, issueId, mode: "run_ai" });
   };
 
   return (
