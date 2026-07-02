@@ -11,6 +11,7 @@ import pytest
 from pi_dash.prompting import recipes
 from pi_dash.prompting.composer import (
     SOURCE_DEFAULT,
+    SOURCE_DRAFT,
     SOURCE_WORKSPACE,
     compile_template,
     compose,
@@ -59,6 +60,38 @@ def test_manifest_line_ranges_are_ordered_and_gapped():
         assert e.line_start > prev_end  # strictly after previous (blank-line gap)
         assert e.line_end >= e.line_start
         prev_end = e.line_end
+
+
+@pytest.mark.unit
+def test_compose_applies_draft_override_for_preview():
+    recipe = recipes.recipe_for("coding-task")
+    target = recipe[0]
+    out = compose(
+        "coding-task",
+        workspace=None,
+        project=None,
+        user=None,
+        context=_ctx(),
+        draft_overrides={target: "DRAFT-PREVIEW-MARKER"},
+    )
+    assert "DRAFT-PREVIEW-MARKER" in out.text
+    entry = next(e for e in out.manifest if e.section_key == target)
+    assert entry.source == SOURCE_DRAFT
+
+
+@pytest.mark.unit
+def test_compose_ignores_draft_override_outside_recipe():
+    # A draft for a key not in this recipe must not alter the output.
+    out = compose(
+        "coding-task",
+        workspace=None,
+        project=None,
+        user=None,
+        context=_ctx(),
+        draft_overrides={"not-a-real-section": "SHOULD-NOT-APPEAR"},
+    )
+    assert "SHOULD-NOT-APPEAR" not in out.text
+    assert all(e.source == SOURCE_DEFAULT for e in out.manifest)
 
 
 @pytest.mark.unit

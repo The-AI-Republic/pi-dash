@@ -233,15 +233,21 @@ function getRunView(
         icon: CircleAlert,
         iconClassName: "text-warning-primary",
       };
-    case "failed":
+    case "failed": {
+      const failureDetail = run.error_diagnostic
+        ? `${run.error_diagnostic.source_label}: ${truncate(run.error_diagnostic.summary)}`
+        : run.error
+          ? truncate(run.error)
+          : t("The latest run did not complete.");
       return {
         title: t("AI agent run failed"),
-        detail: run.error ? truncate(run.error) : t("The latest run did not complete."),
+        detail: failureDetail,
         badge: t("Failed"),
         badgeVariant: "danger",
         icon: CircleAlert,
         iconClassName: "text-danger-primary",
       };
+    }
     case "cancelled":
       return {
         title: t("AI agent run was cancelled"),

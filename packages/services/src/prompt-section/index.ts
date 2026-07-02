@@ -4,4 +4,4 @@
  * See the LICENSE file for details.
  */
 
-export * from "./prompt-template.service";
+export * from "./prompt-section.service";

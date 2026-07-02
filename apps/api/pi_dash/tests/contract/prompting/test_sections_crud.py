@@ -11,7 +11,25 @@ from django.urls import reverse
 from rest_framework.test import APIClient
 
 from pi_dash.db.models import User, WorkspaceMember
+from pi_dash.prompting import registry
 from pi_dash.prompting.models import PromptSectionOverride
+
+
+def _retier(monkeypatch, key, tier):
+    """Replace a registry section with a copy at a different governance tier,
+    so the tier gate can be exercised without hard-coding which real section
+    happens to carry it."""
+    original = registry.get_section(key)
+    monkeypatch.setitem(
+        registry.REGISTRY,
+        key,
+        registry.PromptSection(
+            key=original.key,
+            title=original.title,
+            customizable=tier,
+            default_body=original.default_body,
+        ),
+    )
 
 
 @pytest.fixture
@@ -135,6 +153,56 @@ def test_put_locked_section_forbidden(session_client, workspace):
         format="json",
     )
     assert resp.status_code == 403
+
+
+# ----------------------------------------------------------------------
+# Governance tier: workspace-only (admin overrides, members cannot)
+# ----------------------------------------------------------------------
+
+
+@pytest.mark.contract
+def test_workspace_tier_admin_can_override(session_client, workspace, monkeypatch):
+    _retier(monkeypatch, "implementation", registry.CUSTOMIZABLE_WORKSPACE)
+    resp = session_client.put(
+        _detail_url(workspace, "implementation"),
+        {"scope": "workspace", "body": "Org-wide guidance."},
+        format="json",
+    )
+    assert resp.status_code == 200, resp.data
+
+
+@pytest.mark.contract
+def test_workspace_tier_member_cannot_personally_override(member_client, workspace, monkeypatch):
+    _retier(monkeypatch, "implementation", registry.CUSTOMIZABLE_WORKSPACE)
+    resp = member_client.put(
+        _detail_url(workspace, "implementation"),
+        {"scope": "user", "body": "my personal copy"},
+        format="json",
+    )
+    assert resp.status_code == 403
+
+
+@pytest.mark.contract
+def test_list_exposes_tier_and_capabilities(session_client, workspace, monkeypatch):
+    _retier(monkeypatch, "implementation", registry.CUSTOMIZABLE_WORKSPACE)
+    resp = session_client.get(_list_url(workspace))
+    assert resp.status_code == 200
+    by_key = {s["key"]: s for s in resp.data["sections"]}
+
+    # Every section carries the new diff + capability fields.
+    impl = by_key["implementation"]
+    assert "default_body" in impl
+    assert impl["customizable"] == "workspace"
+    assert impl["editable_at_workspace"] is True
+    assert impl["editable_at_personal"] is False
+
+    locked = by_key["pidash-cli"]
+    assert locked["editable_at_workspace"] is False
+    assert locked["editable_at_personal"] is False
+
+    open_ = by_key["analyze-and-scope"]
+    assert open_["editable_at_workspace"] is True
+    assert open_["editable_at_personal"] is True
 
 
 @pytest.mark.contract

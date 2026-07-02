@@ -155,6 +155,27 @@ def test_get_runs_lists_by_created_by(db, session_client, workspace, project):
     assert "not mine" not in prompts
 
 
+@pytest.mark.unit
+def test_get_run_detail_exposes_error_diagnostic(db, session_client, workspace, project):
+    error = "Failed to authenticate. API Error: 401 Invalid authentication credentials"
+    run = AgentRun.objects.create(
+        workspace=workspace,
+        created_by=workspace.owner,
+        pod=Pod.default_for_project(project),
+        prompt="broken auth",
+        status=AgentRunStatus.FAILED,
+        error=error,
+    )
+
+    resp = session_client.get(f"/api/runners/runs/{run.id}/")
+
+    assert resp.status_code == status.HTTP_200_OK
+    assert resp.data["error"] == error
+    assert resp.data["error_diagnostic"]["source"] == "agent"
+    assert resp.data["error_diagnostic"]["kind"] == "agent_authentication"
+    assert resp.data["error_diagnostic"]["summary"] == error
+
+
 # ---------------------------------------------------------------------------
 # GET /api/runners/runs/ — broadened "involved with" scope.
 #
@@ -217,6 +238,24 @@ def _make_issue(workspace, *, created_by, assignees=()):
     # delete it so each test controls exactly which runs exist.
     AgentRun.objects.filter(work_item=issue).delete()
     return issue
+
+
+def _add_online_runner(workspace, project, *, owner=None, name="rnr"):
+    """Register an ONLINE runner owned by ``owner`` (default: workspace
+    owner) in ``project``'s default pod, so the eligibility preflight lets
+    a run on that owner's issue dispatch instead of bouncing to Backlog."""
+    from django.utils import timezone
+
+    from pi_dash.runner.models import Runner, RunnerStatus
+
+    return Runner.objects.create(
+        owner=owner or workspace.owner,
+        workspace=workspace,
+        pod=Pod.default_for_project(project),
+        name=name,
+        status=RunnerStatus.ONLINE,
+        last_heartbeat_at=timezone.now(),
+    )
 
 
 @pytest.mark.unit
@@ -427,16 +466,6 @@ def _make_in_progress_issue_with_paused_run(workspace):
     from pi_dash.db.models import Issue, Project, State
     from pi_dash.runner.models import Runner, RunnerStatus
 
-    project = Project.objects.filter(workspace=workspace).first()
-    pod = Pod.default_for_project(project)
-    runner = Runner.objects.create(
-        owner=workspace.owner,
-        workspace=workspace,
-        pod=pod,
-        name="carun",
-        status=RunnerStatus.ONLINE,
-        last_heartbeat_at=timezone.now(),
-    )
     with impersonate(workspace.owner):
         project = Project.objects.create(
             name="CARun",
@@ -455,6 +484,18 @@ def _make_in_progress_issue_with_paused_run(workspace):
             state=in_progress,
             created_by=workspace.owner,
         )
+    # Runner must live in the *issue's* pod (the CARun project's default pod)
+    # so the eligibility preflight sees a runner whose owner is the issue
+    # creator — otherwise dispatch bounces the issue to Backlog.
+    pod = Pod.default_for_project(project)
+    runner = Runner.objects.create(
+        owner=workspace.owner,
+        workspace=workspace,
+        pod=pod,
+        name="carun",
+        status=RunnerStatus.ONLINE,
+        last_heartbeat_at=timezone.now(),
+    )
     # The state-transition signal auto-creates an immediate-dispatch run
     # (and the matcher may have flipped it to ASSIGNED). Delete it so the
     # test's PAUSED parent is the only prior run, with no active-run noise.
@@ -694,6 +735,7 @@ def test_run_ai_succeeds_when_no_prior_run(db, session_client, workspace):
             name="Fresh task", workspace=workspace, project=fresh_project,
             state=in_progress, created_by=workspace.owner,
         )
+    _add_online_runner(workspace, fresh_project)
     # Discard the run the state-transition signal auto-created so the
     # endpoint genuinely sees no prior.
     AgentRun.objects.filter(work_item=issue).delete()
@@ -850,6 +892,7 @@ def test_skip_immediate_dispatch_header_suppresses_run_creation_on_state_change(
             name="Task", workspace=workspace, project=project,
             state=todo, created_by=workspace.owner,
         )
+    _add_online_runner(workspace, project)
 
     # PATCH state=In Progress with the skip header — signal must not
     # create an AgentRun, but must still arm the schedule.
@@ -892,6 +935,7 @@ def test_no_skip_header_creates_run_on_state_change(db, session_client, workspac
             name="Task", workspace=workspace, project=project,
             state=todo, created_by=workspace.owner,
         )
+    _add_online_runner(workspace, project)
 
     resp = session_client.patch(
         f"/api/workspaces/{workspace.slug}/projects/{project.id}/issues/{issue.id}/",

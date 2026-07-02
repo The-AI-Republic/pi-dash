@@ -24,11 +24,11 @@ use ratatui::widgets::{
 use super::super::app::AppData;
 use super::super::event::AppEvent;
 use super::super::input::keymap::Context;
+use super::super::view::KeyHandled;
 use super::super::view::focus::{
-    border_style, dived_marker, is_focused, is_in_path, FocusNode, FocusPath,
+    FocusNode, FocusPath, border_style, dived_marker, is_focused, is_in_path,
 };
 use super::super::view::tab::{Tab, TabCtx, TabKind};
-use super::super::view::KeyHandled;
 use super::super::widgets::{SelectableList, TextArea};
 use super::config as fields;
 
@@ -62,18 +62,18 @@ impl RunnerStatusTab {
             Some(s) => s.runners.iter().map(|r| r.name.clone()).collect(),
             None => Vec::new(),
         };
+        if let Some(name) = data.picker_runner_name()
+            && let Some(idx) = ids.iter().position(|id| id == &name)
+        {
+            self.list.jump_to(idx, &ids);
+            return;
+        }
         self.list.reconcile(&ids);
     }
 
     pub fn selected_runner_name(&self, data: &AppData) -> Option<String> {
-        if let Some(id) = self.list.selected_id() {
-            return Some(id.clone());
-        }
-        let working = data.config_working.as_ref()?;
-        working
-            .runners
-            .get(data.runner_picker_idx)
-            .map(|r| r.name.clone())
+        data.picker_runner_name()
+            .or_else(|| self.list.selected_id().cloned())
     }
 
     /// Index of the field currently selected at Layer 2 (for the
@@ -224,15 +224,15 @@ impl Tab for RunnerStatusTab {
             match key.code {
                 KeyCode::Char('j') | KeyCode::Down => {
                     self.list.move_down(&runner_ids);
-                    if let Some(idx) = self.list.selected_index() {
-                        ctx.tx.send(AppEvent::SelectRunner(idx));
+                    if let Some(name) = self.list.selected_id() {
+                        ctx.tx.send(AppEvent::SelectRunnerByName(name.clone()));
                     }
                     return KeyHandled::Consumed;
                 }
                 KeyCode::Char('k') | KeyCode::Up => {
                     self.list.move_up(&runner_ids);
-                    if let Some(idx) = self.list.selected_index() {
-                        ctx.tx.send(AppEvent::SelectRunner(idx));
+                    if let Some(name) = self.list.selected_id() {
+                        ctx.tx.send(AppEvent::SelectRunnerByName(name.clone()));
                     }
                     return KeyHandled::Consumed;
                 }
@@ -262,16 +262,22 @@ impl Tab for RunnerStatusTab {
         }
     }
 
-    fn activate_item(&mut self, item_id: super::super::view::CardId, ctx: &mut TabCtx<'_>) -> KeyHandled {
+    fn activate_item(
+        &mut self,
+        item_id: super::super::view::CardId,
+        ctx: &mut TabCtx<'_>,
+    ) -> KeyHandled {
         // Only settings fields are activatable items in this tab.
         let Some(field_id) = fields::FieldId::from_id_str(item_id) else {
+            return KeyHandled::NotConsumed;
+        };
+        let Some(runner_idx) = ctx.data.picker_runner_index() else {
             return KeyHandled::NotConsumed;
         };
         let Some(cfg) = ctx.data.config_working.as_mut() else {
             return KeyHandled::NotConsumed;
         };
         ctx.data.config_edit_error = None;
-        let runner_idx = ctx.data.runner_picker_idx;
         let spec = fields::FIELDS
             .iter()
             .find(|s| s.id == field_id)
@@ -313,10 +319,12 @@ impl RunnerStatusTab {
             return;
         };
         let text = buf.text().to_string();
+        let Some(runner_idx) = ctx.data.picker_runner_index() else {
+            return;
+        };
         let Some(cfg) = ctx.data.config_working.as_mut() else {
             return;
         };
-        let runner_idx = ctx.data.runner_picker_idx;
         match fields::set_text_value(cfg, id, &text, runner_idx) {
             Ok(()) => {
                 ctx.data.config_edit_error = None;
@@ -345,7 +353,11 @@ impl RunnerStatusTab {
             p.render(area, buf);
             return;
         }
-        let picked_idx = self.list.selected_index().unwrap_or(0).min(runners.len() - 1);
+        let picked_idx = self
+            .list
+            .selected_index()
+            .unwrap_or(0)
+            .min(runners.len() - 1);
         let items: Vec<ListItem<'_>> = runners
             .iter()
             .enumerate()
@@ -404,7 +416,13 @@ impl RunnerStatusTab {
         StatefulWidget::render(list, area, buf, &mut lstate);
     }
 
-    fn render_settings_panel(&self, area: Rect, buf: &mut Buffer, data: &AppData, focus: &FocusPath) {
+    fn render_settings_panel(
+        &self,
+        area: Rect,
+        buf: &mut Buffer,
+        data: &AppData,
+        focus: &FocusPath,
+    ) {
         let Some(working) = data.config_working.as_ref() else {
             return;
         };
@@ -452,7 +470,7 @@ impl RunnerStatusTab {
             working,
             &loaded,
             self.focused_field_idx(focus),
-            data.runner_picker_idx,
+            data.picker_runner_index().unwrap_or(0),
             edit_buffer_str.as_deref(),
         ))
         .block(
@@ -510,8 +528,8 @@ fn render_live_state_panel(
     selected_name: Option<&str>,
     focused: bool,
 ) {
-    let snapshot = selected_name
-        .and_then(|n| data.status.as_ref().and_then(|s| s.runner_by_name(n)));
+    let snapshot =
+        selected_name.and_then(|n| data.status.as_ref().and_then(|s| s.runner_by_name(n)));
     let mut lines: Vec<Line<'static>> = Vec::new();
     let Some(r) = snapshot else {
         lines.push(Line::from(Span::styled(
@@ -529,7 +547,10 @@ fn render_live_state_panel(
             .render(area, buf);
         return;
     };
-    let pod = r.pod_id.map(|p| p.to_string()).unwrap_or_else(|| "(unassigned)".into());
+    let pod = r
+        .pod_id
+        .map(|p| p.to_string())
+        .unwrap_or_else(|| "(unassigned)".into());
     lines.push(field_kv("Pod", &pod));
     lines.push(field_kv("Heartbeat", &fmt_age(r.last_heartbeat)));
     let current_run = match &r.current_run {
@@ -586,10 +607,7 @@ fn render_live_state_panel(
 
 fn field_kv(label: &str, value: &str) -> Line<'static> {
     Line::from(vec![
-        Span::styled(
-            format!("{label:<11} "),
-            Style::default().fg(Color::Cyan),
-        ),
+        Span::styled(format!("{label:<11} "), Style::default().fg(Color::Cyan)),
         Span::raw(value.to_string()),
     ])
 }
@@ -609,5 +627,142 @@ fn fmt_age(ts: Option<chrono::DateTime<chrono::Utc>>) -> String {
                 format!("{}h{}m ago", secs / 3600, (secs % 3600) / 60)
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::cloud::protocol::RunnerStatus;
+    use crate::config::schema::{Config, DaemonConfig, RunnerConfig, WorkspaceSection};
+    use crate::ipc::protocol::{DaemonInfo, RunnerStatusSnapshot, StatusSnapshot};
+    use crate::util::paths::Paths;
+    use std::path::PathBuf;
+    use uuid::Uuid;
+
+    fn paths() -> Paths {
+        let root = tempfile::tempdir().expect("tempdir").keep();
+        Paths {
+            config_dir: root.join("config"),
+            data_dir: root.join("data"),
+            runtime_dir: root.join("runtime"),
+        }
+    }
+
+    fn runner(name: &str) -> RunnerConfig {
+        RunnerConfig {
+            name: name.into(),
+            runner_id: Uuid::new_v4(),
+            workspace_slug: Some("acme".into()),
+            project_slug: Some("TEST".into()),
+            pod_id: None,
+            workspace: WorkspaceSection {
+                working_dir: PathBuf::from("/tmp/pidash-test"),
+            },
+            workdir: None,
+            agent: Default::default(),
+            codex: Default::default(),
+            claude_code: Default::default(),
+            cursor_agent: Default::default(),
+            openclaw: Default::default(),
+            approval_policy: Default::default(),
+        }
+    }
+
+    fn config(runners: Vec<RunnerConfig>) -> Config {
+        Config {
+            version: 2,
+            daemon: DaemonConfig {
+                cloud_url: "https://pidash.example".into(),
+                dev_machine_id: None,
+                log_level: "info".into(),
+                log_retention_days: 14,
+                agent_observability_v1: false,
+                auto_update: true,
+            },
+            runners,
+            workdirs: vec![],
+            cli: None,
+        }
+    }
+
+    fn snapshot(name: &str) -> RunnerStatusSnapshot {
+        RunnerStatusSnapshot {
+            runner_id: Uuid::new_v4(),
+            name: name.into(),
+            project_slug: Some("TEST".into()),
+            pod_id: None,
+            status: RunnerStatus::Idle,
+            connected: true,
+            current_run: None,
+            approvals_pending: 0,
+            last_heartbeat: None,
+            last_session_open: None,
+            consecutive_bootstrap_failures: 0,
+            observability: None,
+        }
+    }
+
+    fn status(names: &[&str]) -> StatusSnapshot {
+        StatusSnapshot {
+            daemon: DaemonInfo {
+                cloud_url: "https://pidash.example".into(),
+                connected: true,
+                uptime_secs: 0,
+                update: None,
+            },
+            runners: names.iter().map(|name| snapshot(name)).collect(),
+            pools: vec![],
+        }
+    }
+
+    #[test]
+    fn reconcile_anchors_live_list_to_config_selected_runner_name() {
+        let mut data = AppData::new(paths());
+        data.config_working = Some(config(vec![
+            runner("claude_macmini01"),
+            runner("ai_assistant"),
+        ]));
+        data.config_loaded = data.config_working.clone();
+        data.status = Some(status(&["ai_assistant", "claude_macmini01"]));
+        data.selected_runner_name = Some("claude_macmini01".to_string());
+
+        let mut tab = RunnerStatusTab::new();
+        tab.reconcile(&data);
+
+        assert_eq!(
+            tab.list.selected_id(),
+            Some(&"claude_macmini01".to_string())
+        );
+        assert_eq!(tab.list.selected_index(), Some(1));
+        assert_eq!(data.runner_index_by_name("claude_macmini01"), Some(0));
+    }
+
+    #[test]
+    fn rejected_select_reanchors_highlight_to_committed_picker() {
+        // A runner still in daemon status but no longer in config ("stale_c")
+        // can't become the picker selection. After the rejected commit, the
+        // list highlight must snap back to the committed picker instead of
+        // stranding on the unselectable row (mirrors App::select_runner_by_name).
+        let mut data = AppData::new(paths());
+        data.config_working = Some(config(vec![runner("alpha"), runner("beta")]));
+        data.config_loaded = data.config_working.clone();
+        data.status = Some(status(&["alpha", "beta", "stale_c"]));
+        data.selected_runner_name = Some("alpha".to_string());
+
+        let mut tab = RunnerStatusTab::new();
+        let live_ids: Vec<String> = vec!["alpha".into(), "beta".into(), "stale_c".into()];
+        // User navigates the live list onto the daemon-only runner.
+        tab.list.jump_to(2, &live_ids);
+        assert_eq!(tab.list.selected_id(), Some(&"stale_c".to_string()));
+
+        // Commit is rejected: the name isn't in config.
+        assert!(!data.select_runner_by_name("stale_c"));
+
+        // The fix's recovery step: reconcile back to the committed picker.
+        tab.reconcile(&data);
+
+        assert_eq!(tab.list.selected_id(), Some(&"alpha".to_string()));
+        assert_eq!(data.picker_runner_name(), Some("alpha".to_string()));
     }
 }

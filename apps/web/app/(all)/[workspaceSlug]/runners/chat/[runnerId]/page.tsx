@@ -99,6 +99,7 @@ const RunnerChatPage = observer(function RunnerChatPage() {
   const [liveMessages, setLiveMessages] = useState<IAgentChatMessage[]>([]);
   const warmSessionRef = useRef<string | null>(null);
   const createWarmKeyRef = useRef<string | null>(null);
+  const precreatedSessionRef = useRef<IAgentChatSession | null>(null);
   const appliedDeltaSeqsRef = useRef<Set<number>>(new Set());
   const streamStartedAtRef = useRef(Date.now());
 
@@ -119,8 +120,17 @@ const RunnerChatPage = observer(function RunnerChatPage() {
   );
 
   useEffect(() => {
+    if (!sessions) return;
+    const precreated = precreatedSessionRef.current;
+    if (!precreated) return;
+    const current = sessions.find((item) => item.id === precreated.id);
+    precreatedSessionRef.current = current?.status === "open" ? current : null;
+  }, [sessions]);
+
+  useEffect(() => {
     warmSessionRef.current = null;
     createWarmKeyRef.current = null;
+    precreatedSessionRef.current = null;
     setEvents([]);
   }, [runnerId]);
 
@@ -161,7 +171,14 @@ const RunnerChatPage = observer(function RunnerChatPage() {
           runner: runnerId,
         });
         if (cancelled) return;
+        precreatedSessionRef.current = created;
         warmSessionRef.current = created.id;
+        mutateSessions((current) => {
+          const currentSessions = current ?? [];
+          return currentSessions.some((item) => item.id === created.id)
+            ? currentSessions
+            : [created, ...currentSessions];
+        }, false);
         await service.warmChatSession(created.id);
         mutateSessions();
       } catch {
@@ -211,11 +228,24 @@ const RunnerChatPage = observer(function RunnerChatPage() {
 
   async function ensureSession(): Promise<IAgentChatSession> {
     if (session?.status === "open") return session;
+    const precreated = precreatedSessionRef.current;
+    if (precreated && precreated.workspace === workspaceId && precreated.runner === runnerId) {
+      const current = sessions?.find((item) => item.id === precreated.id);
+      const reusable = current ?? (sessions ? null : precreated);
+      if (reusable?.status === "open") {
+        return reusable;
+      }
+      precreatedSessionRef.current = null;
+    }
     const created = await service.createChatSession({
       workspace: workspaceId!,
       runner: runnerId!,
     });
-    await mutateSessions();
+    precreatedSessionRef.current = created;
+    await mutateSessions((current) => {
+      const currentSessions = current ?? [];
+      return currentSessions.some((item) => item.id === created.id) ? currentSessions : [created, ...currentSessions];
+    }, false);
     return created;
   }
 

@@ -59,8 +59,8 @@ import type { IProjectRootStore } from "./project";
 import { ProjectRootStore } from "./project";
 import type { IProjectViewStore } from "./project-view.store";
 import { ProjectViewStore } from "./project-view.store";
-import type { IPromptTemplateStore } from "./prompt-template.store";
-import { PromptTemplateStore } from "./prompt-template.store";
+import type { IPromptSectionStore } from "./prompt-section.store";
+import { PromptSectionStore } from "./prompt-section.store";
 import type { IRouterStore } from "./router.store";
 import { RouterStore } from "./router.store";
 import type { ISchedulerStore } from "./scheduler.store";
@@ -105,7 +105,7 @@ export class CoreRootStore {
   editorAssetStore: IEditorAssetStore;
   workItemFilters: IWorkItemFilterStore;
   powerK: IPowerKStore;
-  promptTemplate: IPromptTemplateStore;
+  promptSection: IPromptSectionStore;
   scheduler: ISchedulerStore;
 
   constructor() {
@@ -138,7 +138,7 @@ export class CoreRootStore {
     this.analytics = new AnalyticsStore();
     this.workItemFilters = new WorkItemFilterStore();
     this.powerK = new PowerKStore();
-    this.promptTemplate = new PromptTemplateStore(this);
+    this.promptSection = new PromptSectionStore(this);
     this.scheduler = new SchedulerStore(this);
   }
 
@@ -173,7 +173,7 @@ export class CoreRootStore {
     this.editorAssetStore = new EditorAssetStore();
     this.workItemFilters = new WorkItemFilterStore();
     this.powerK = new PowerKStore();
-    this.promptTemplate = new PromptTemplateStore(this);
+    this.promptSection = new PromptSectionStore(this);
     this.scheduler = new SchedulerStore(this);
   }
 }

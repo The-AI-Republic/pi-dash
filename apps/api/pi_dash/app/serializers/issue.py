@@ -46,6 +46,7 @@ from pi_dash.db.models import (
     EstimatePoint,
 )
 from pi_dash.runner.models import Pod
+from pi_dash.runner.diagnostics import classify_run_error
 from pi_dash.utils.content_validator import (
     validate_html_content,
     validate_binary_data,
@@ -1228,6 +1229,7 @@ class IssueDetailSerializer(IssueSerializer):
             "ended_at": self._serialize_datetime(run.ended_at),
             "done_payload": run.done_payload,
             "error": run.error,
+            "error_diagnostic": classify_run_error(run.error),
             "llm_model": run.llm_model,
             "input_tokens": run.input_tokens,
             "output_tokens": run.output_tokens,

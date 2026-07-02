@@ -39,7 +39,7 @@ export * from "./page";
 export * from "./payment";
 export * from "./pragmatic";
 export * from "./project";
-export * from "./prompt-template";
+export * from "./prompt-section";
 export * from "./publish";
 export * from "./reaction";
 export * from "./runner";
