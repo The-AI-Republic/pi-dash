@@ -86,7 +86,9 @@ def no_runner_dispatch(monkeypatch):
 
 
 @pytest.mark.unit
-def test_todo_to_in_progress_creates_run(seeded, issue, states):
+def test_todo_to_in_progress_creates_run(
+    seeded, issue, states, runner_for_workspace
+):
     outcome = service.handle_issue_state_transition(
         issue=issue,
         from_state=states["todo"],
@@ -141,7 +143,7 @@ def test_no_op_when_waiting_for_worktree_run_exists(
 
 @pytest.mark.unit
 def test_follow_up_run_links_parent(
-    seeded, issue, states, workspace, create_user
+    seeded, issue, states, workspace, create_user, runner_for_workspace
 ):
     prior = AgentRun.objects.create(
         owner=create_user,
@@ -172,7 +174,7 @@ def test_non_trigger_state_does_nothing(seeded, issue, states):
 
 @pytest.mark.unit
 def test_run_config_carries_git_fields_from_issue_and_project(
-    seeded, project, issue, states
+    seeded, project, issue, states, runner_for_workspace
 ):
     project.repo_url = "git@github.com:acme/web.git"
     project.base_branch = "develop"
@@ -199,7 +201,9 @@ def test_run_config_carries_git_fields_from_issue_and_project(
 
 
 @pytest.mark.unit
-def test_run_config_empty_git_fields_surface_as_none(seeded, issue, states):
+def test_run_config_empty_git_fields_surface_as_none(
+    seeded, issue, states, runner_for_workspace
+):
     # Project defaults to blank repo_url; issue defaults to blank work branch.
     # Both must land as ``None`` so the runner / prompt fallbacks kick in
     # rather than comparing against empty strings.

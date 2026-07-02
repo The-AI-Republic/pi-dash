@@ -378,10 +378,16 @@ def pod_has_runner_for_issue_principal(pod, issue, run_creator_id) -> bool:
     (``filter_runs_usable_by_runner``) traverses it the same way, so
     the preflight stays consistent with the dispatch gate it shadows.
 
-    Status is **deliberately ignored** — OFFLINE / BUSY / REVOKED runners
-    all count as "registered". The intent is to detect the structural
-    "nobody on this pod could ever serve this" case, not transient
-    unavailability (``drain_pod`` re-fires on heartbeat). See
+    Transient status is **deliberately ignored** — OFFLINE / BUSY runners
+    still count as "registered" because the owner can flip them back on and
+    ``drain_pod`` re-fires on heartbeat. REVOKED runners, however, are
+    **permanent** — a revoked runner can never be un-revoked and
+    ``drain_pod`` only ever assigns ONLINE runners, so a REVOKED-only match
+    would let the run be created and then jam in QUEUED forever (the exact
+    silent-jam this preflight exists to prevent). They are therefore
+    excluded, consistent with ``count_active`` / ``can_register_another``.
+    The intent is to detect the structural "nobody on this pod could ever
+    serve this" case, not transient unavailability. See
     ``.ai_design/issue_runner/design.md`` §6.6.
     """
     eligible_owner_ids: set = set()
@@ -395,10 +401,14 @@ def pod_has_runner_for_issue_principal(pod, issue, run_creator_id) -> bool:
     eligible_owner_ids.discard(None)
     if not eligible_owner_ids:
         return False
-    return Runner.objects.filter(
-        pod=pod,
-        owner_id__in=eligible_owner_ids,
-    ).exists()
+    return (
+        Runner.objects.filter(
+            pod=pod,
+            owner_id__in=eligible_owner_ids,
+        )
+        .exclude(status=RunnerStatus.REVOKED)
+        .exists()
+    )
 
 
 def count_active(user_id, workspace_id) -> int:

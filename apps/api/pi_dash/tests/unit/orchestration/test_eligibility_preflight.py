@@ -206,16 +206,51 @@ def test_pod_has_runner_no_eligible_owner(db, pod, issue, user_a, user_b):
 
 
 @pytest.mark.unit
-def test_pod_has_runner_revoked_runner_still_counts(db, pod, issue, user_a):
-    """Per design §6.6: status-agnostic. Even REVOKED counts as registered."""
+def test_pod_has_runner_revoked_runner_does_not_count(db, pod, issue, user_a):
+    """REVOKED is permanent — a revoked runner can never pick the run up
+    (``drain_pod`` assigns ONLINE only), so counting it would let the run be
+    created and jam in QUEUED forever. It must NOT satisfy the predicate
+    (consistent with ``count_active`` / ``can_register_another``)."""
     _make_runner(user_a, issue.workspace, pod, status=RunnerStatus.REVOKED)
-    assert matcher.pod_has_runner_for_issue_principal(pod, issue, user_a.id) is True
+    assert matcher.pod_has_runner_for_issue_principal(pod, issue, user_a.id) is False
 
 
 @pytest.mark.unit
 def test_pod_has_runner_offline_runner_still_counts(db, pod, issue, user_a):
     _make_runner(user_a, issue.workspace, pod, status=RunnerStatus.OFFLINE)
     assert matcher.pod_has_runner_for_issue_principal(pod, issue, user_a.id) is True
+
+
+@pytest.mark.unit
+def test_pod_has_runner_revoked_ignored_but_live_owner_still_counts(
+    db, pod, issue, user_a
+):
+    """A REVOKED runner doesn't count, but a second ONLINE runner under the
+    same eligible owner still makes the pod eligible."""
+    _make_runner(user_a, issue.workspace, pod, name="dead", status=RunnerStatus.REVOKED)
+    _make_runner(user_a, issue.workspace, pod, name="live", status=RunnerStatus.ONLINE)
+    assert matcher.pod_has_runner_for_issue_principal(pod, issue, user_a.id) is True
+
+
+@pytest.mark.unit
+def test_dispatch_run_ai_run_bounces_when_only_runner_revoked(
+    db, issue, pod, user_a, states
+):
+    """Regression for the silent-QUEUED jam: the eligible owner's *only*
+    runner is REVOKED (permanent — ``drain_pod`` assigns ONLINE only). The
+    preflight must bounce rather than create an AgentRun that would jam in
+    QUEUED forever."""
+    Issue.all_objects.filter(pk=issue.pk).update(state=states["in_progress"])
+    issue.refresh_from_db()
+    _make_runner(user_a, issue.workspace, pod, status=RunnerStatus.REVOKED)
+
+    run = scheduling.dispatch_run_ai_run(issue, actor=user_a)
+
+    assert run is None
+    assert AgentRun.objects.filter(work_item=issue).count() == 0
+    issue.refresh_from_db()
+    assert issue.state.group == "backlog"
+    assert IssueComment.objects.filter(issue=issue).count() == 1
 
 
 @pytest.mark.unit
@@ -343,8 +378,10 @@ def test_bounce_skips_state_move_when_already_in_backlog(
 def test_bounce_falls_back_gracefully_when_no_backlog_state(
     db, workspace, create_user, user_a, user_b
 ):
-    """Defensive: project has no Backlog state at all. Bounce should not
-    crash; it skips the state move but still posts the comment."""
+    """Defensive: project has no Backlog state and no non-ticking fallback.
+    The bounce must not crash, must still post the comment, and must
+    **disarm the ticker** — otherwise the issue stays in a ticking state and
+    the next tick re-enters the bounce, spamming a comment each time."""
     with impersonate(create_user):
         bare_project = Project.objects.create(
             name="Bare",
@@ -353,6 +390,12 @@ def test_bounce_falls_back_gracefully_when_no_backlog_state(
             created_by=create_user,
         )
     pod = Pod.default_for_project(bare_project)
+    # Neutral (non-ticking) state to create the issue in, so issue creation
+    # doesn't itself fire the state-transition dispatch. There is
+    # deliberately no Backlog state and no default_state fallback.
+    unstarted = State.objects.create(
+        name="Todo", project=bare_project, group="unstarted"
+    )
     started = State.objects.create(
         name="In Progress", project=bare_project, group="started"
     )
@@ -361,9 +404,14 @@ def test_bounce_falls_back_gracefully_when_no_backlog_state(
             name="No-backlog",
             workspace=workspace,
             project=bare_project,
-            state=started,
+            state=unstarted,
             created_by=user_a,
         )
+    # Move into the ticking state without firing the signal, and arm the
+    # ticker as if the issue were actively running.
+    Issue.all_objects.filter(pk=bare_issue.pk).update(state=started)
+    bare_issue.refresh_from_db()
+    IssueAgentTicker.objects.create(issue=bare_issue, enabled=True, tick_count=1)
 
     _make_runner(user_b, workspace, pod)
 
@@ -378,6 +426,8 @@ def test_bounce_falls_back_gracefully_when_no_backlog_state(
     bare_issue.refresh_from_db()
     assert bare_issue.state_id == started.id  # unchanged — no backlog target
     assert IssueComment.objects.filter(issue=bare_issue).count() == 1
+    # The loop-breaker: ticker disarmed even though the issue couldn't move.
+    assert IssueAgentTicker.objects.get(issue=bare_issue).enabled is False
 
 
 # ---------------------------------------------------------------------------

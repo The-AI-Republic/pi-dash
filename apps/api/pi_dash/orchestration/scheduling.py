@@ -427,6 +427,15 @@ def _bounce_issue_no_eligible_runner(issue: Issue, *, triggered_by: str) -> None
     issue is already in the BACKLOG state group — the comment still posts
     so the user sees *why* a click / tick produced no run.
 
+    Target resolution (design §6.6 step 1): prefer the project's Backlog
+    state (``default`` first, then ``sequence``); if the project has no
+    Backlog state at all, fall back to ``project.default_state`` **only
+    when it is not itself a ticking state** — moving into a ticking state
+    would re-fire dispatch and bounce again in a loop. When neither a
+    Backlog nor a safe fallback exists, the issue is left in place and the
+    ticker is disarmed explicitly (below) so the next tick can't re-enter
+    this bounce forever.
+
     The state move + comment post are wrapped in a single atomic block
     so a partial bounce (state changed, no comment) can't survive a
     crash mid-write — the user would otherwise be staring at an issue
@@ -463,15 +472,32 @@ def _bounce_issue_no_eligible_runner(issue: Issue, *, triggered_by: str) -> None
                 .first()
             )
             if target_state is None:
-                logger.warning(
-                    "agent_dispatch: no backlog state for project=%s; "
-                    "issue=%s stays in current state",
-                    issue.project_id,
-                    issue.pk,
-                )
-            else:
+                # Defensive: DEFAULT_STATES seeds a Backlog state for every
+                # project, but if one is missing fall back to the project's
+                # default_state — only when it isn't itself a ticking state,
+                # since moving into a ticking state re-fires dispatch and
+                # re-bounces (design §6.6 step 1).
+                fallback = issue.project.default_state
+                if fallback is not None and not is_ticking_state(fallback):
+                    target_state = fallback
+                else:
+                    logger.warning(
+                        "agent_dispatch: no safe backlog target for "
+                        "project=%s; issue=%s stays in current state, "
+                        "ticker disarmed",
+                        issue.project_id,
+                        issue.pk,
+                    )
+            if target_state is not None and target_state.pk != issue.state_id:
                 issue.state = target_state
                 issue.save(update_fields=["state", "updated_at"])
+
+        # If the issue couldn't be moved out of a ticking state, the
+        # state-move signal never disarmed the ticker — do it explicitly so
+        # a subsequent tick doesn't re-enter this bounce endlessly, spamming
+        # a comment each time.
+        if is_ticking_state(issue.state if issue.state_id else None):
+            disarm_ticker(issue)
 
         IssueComment.objects.create(
             issue=issue,
