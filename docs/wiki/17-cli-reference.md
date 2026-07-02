@@ -360,6 +360,46 @@ pidash comment update ENG-42 <COMMENT_UUID> (--body <BODY> | --body-file <PATH>)
 
 ---
 
+## AI assistant
+
+### `pidash ai <COMMAND>`
+
+Send a command to the AI assistant in your connected Pi Dash cloud and print its
+reply. This is the CLI door to the same built-in assistant available on the web
+landing page — it operates Pi Dash **as you** (querying and creating projects,
+issues, and comments, and dispatching coding runs), scoped to your permissions.
+
+Everything after `ai` is joined into one message, so quoting is optional:
+
+```
+pidash ai "create an issue in ENG for the flaky login test and set priority high"
+pidash ai what changed on ENG-42 this week
+```
+
+The command opens a fresh assistant thread, sends your message, waits for the
+turn to finish (streaming tool activity to stderr), and prints the assistant's
+answer on stdout.
+
+| Flag               | Purpose                                                                                                                          |
+| ------------------ | -------------------------------------------------------------------------------------------------------------------------------- |
+| `--json`           | Emit the raw turn result (`{thread_id, turn_id, messages}`) as one JSON document instead of the human transcript.                |
+| `--timeout <SECS>` | Give up waiting after this many seconds (default `180`). The turn may still finish in the cloud; only the local wait is bounded. |
+
+**BYOK (bring your own key).** The assistant is BYOK-only: you must configure an
+LLM provider and API key under **Settings → AI assistant** in Pi Dash. If it is
+not set up, `pidash ai` prints a clear reason and exits non-zero rather than
+hanging:
+
+```
+{"error":"the Pi Dash AI assistant is not set up yet. It is BYOK (bring your own key): add your LLM provider and API key under Settings → AI assistant in Pi Dash, then run `pidash ai` again"}
+```
+
+Exit code is `0` when the assistant replies, and non-zero when the assistant
+reports an error, the wait times out, or BYOK is unconfigured — so scripts can
+branch on it.
+
+---
+
 ## States
 
 ### `pidash state list [PROJECT_OR_ISSUE]`
@@ -386,6 +426,8 @@ Internal daemon entry point. Invoked by systemd / launchd / Windows scheduled ta
 ## Exit codes
 
 `issue`, `comment`, `state`, `workspace`, `project`, `context` print JSON on stdout and JSON on stderr for errors. Their exit codes follow `api_client::EXIT_*` constants — non-zero on any error.
+
+`ai` prints its reply as human-readable text on stdout (or JSON with `--json`), streams tool activity to stderr, and prints a `{"error": ...}` line to stderr on failure. It exits `0` when the assistant replies and non-zero otherwise (BYOK unconfigured, assistant error, or local timeout).
 
 Other commands return `0` on success and surface anyhow errors on failure (non-zero exit).
 

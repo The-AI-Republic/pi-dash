@@ -1,6 +1,7 @@
 use anyhow::Result;
 use clap::{CommandFactory, Parser, Subcommand};
 
+mod ai;
 pub mod auth;
 mod comment;
 pub mod config_cmd;
@@ -116,6 +117,10 @@ pub enum Command {
     /// Deregister with the cloud and delete local credentials.
     Remove(remove::Args),
 
+    /// Send a command to the connected Pi Dash cloud AI assistant and print
+    /// its reply. BYOK: requires an LLM provider + key configured in Pi Dash.
+    Ai(ai::AiArgs),
+
     /// Read or update a Pi Dash work item (fetch, change state, edit fields).
     Issue(issue::IssueArgs),
 
@@ -164,6 +169,7 @@ pub async fn run(cli: Cli) -> Result<()> {
         Command::Doctor(args) => doctor::run(args, &paths).await,
         Command::Update(args) => update::run(args, &paths).await,
         Command::Remove(args) => remove::run(args, &paths).await,
+        Command::Ai(args) => ai::run(args, &paths).await,
         Command::Issue(args) => run_crud(issue::run(args, &paths).await),
         Command::Comment(args) => run_crud(comment::run(args, &paths).await),
         Command::State(args) => run_crud(state::run(args, &paths).await),
