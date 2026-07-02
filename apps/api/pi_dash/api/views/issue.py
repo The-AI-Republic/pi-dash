@@ -8,7 +8,7 @@ import uuid
 
 # Django imports
 from django.core.serializers.json import DjangoJSONEncoder
-from django.http import Http404, HttpResponseRedirect
+from django.http import HttpResponseRedirect
 from django.urls import reverse
 from django.utils.dateparse import parse_datetime
 from django.db import IntegrityError, connection, transaction
@@ -1020,6 +1020,47 @@ class IssueMoveAPIEndpoint(BaseAPIView):
 
         issue = Issue.issue_objects.select_related("project", "workspace", "state").get(pk=pk)
         return Response(IssueSerializer(issue).data, status=status.HTTP_200_OK)
+
+
+class IssueReTickAPIEndpoint(BaseAPIView):
+    """Re-grant a fresh tick budget to an exhausted issue ticker.
+
+    The CLI-facing sibling of the web ``AgentReTickEndpoint``. Grants an
+    extra phase-sized budget and re-arms the ticker **only** when the
+    issue is still in a ticking state (In Progress / In Review) and the
+    current budget is exhausted; otherwise it is a no-op that reports
+    ``granted = false`` with a machine-readable ``reason``. See
+    ``pi_dash.orchestration.scheduling.re_tick_ticker`` for the rules.
+    """
+
+    model = Issue
+    permission_classes = [ProjectEntityPermission]
+
+    def post(self, request, slug, project_id, pk):
+        from pi_dash.orchestration import scheduling
+
+        issue = (
+            Issue.objects.select_related("project", "workspace", "state")
+            .filter(workspace__slug=slug, project_id=project_id, pk=pk)
+            .first()
+        )
+        if issue is None:
+            return Response({"error": "Work item not found"}, status=status.HTTP_404_NOT_FOUND)
+
+        result = scheduling.re_tick_ticker(issue)
+        ticker = result["ticker"]
+        payload = {
+            "granted": result["granted"],
+            "reason": result["reason"],
+        }
+        if ticker is not None:
+            payload["tick_count"] = ticker.tick_count
+            payload["max_ticks"] = ticker.effective_max_ticks()
+            payload["enabled"] = ticker.enabled
+            payload["next_run_at"] = (
+                ticker.next_run_at.isoformat() if ticker.next_run_at else None
+            )
+        return Response(payload, status=status.HTTP_200_OK)
 
 
 class LabelListCreateAPIEndpoint(BaseAPIView):

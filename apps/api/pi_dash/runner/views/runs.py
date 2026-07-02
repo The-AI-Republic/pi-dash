@@ -305,6 +305,62 @@ class AgentRunListEndpoint(APIView):
         )
 
 
+class AgentReTickEndpoint(APIView):
+    """Re-grant a fresh tick budget to an exhausted issue ticker.
+
+    Manual "re-ticking" from the issue detail AgentRun card. Body must
+    include ``work_item`` (issue id). Grants an extra phase-sized budget
+    and re-arms the ticker **only** when the issue is still in a ticking
+    state and the current budget is exhausted; otherwise it is a no-op.
+    See ``scheduling.re_tick_ticker`` for the exact rules.
+    """
+
+    authentication_classes = [BaseSessionAuthentication]
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        import uuid
+
+        from pi_dash.db.models.issue import Issue
+        from pi_dash.orchestration import scheduling
+
+        work_item_id = request.data.get("work_item")
+        if not work_item_id:
+            return Response(
+                {"error": "work_item is required for re-tick"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        try:
+            uuid.UUID(str(work_item_id))
+        except (ValueError, TypeError):
+            # A malformed value would make the ``pk=`` lookup raise Django's
+            # ValidationError (an unhandled 500) — return a clean 400 instead.
+            return Response(
+                {"error": "invalid work_item UUID format"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        issue = Issue.all_objects.filter(pk=work_item_id).first()
+        if issue is None:
+            return Response({"error": "issue not found"}, status=status.HTTP_404_NOT_FOUND)
+        if not is_workspace_member(request.user, issue.workspace_id):
+            return Response({"error": "issue not found"}, status=status.HTTP_404_NOT_FOUND)
+
+        result = scheduling.re_tick_ticker(issue)
+        ticker = result["ticker"]
+        payload = {
+            "granted": result["granted"],
+            "reason": result["reason"],
+        }
+        if ticker is not None:
+            payload["tick_count"] = ticker.tick_count
+            payload["max_ticks"] = ticker.effective_max_ticks()
+            payload["enabled"] = ticker.enabled
+            payload["next_run_at"] = (
+                ticker.next_run_at.isoformat() if ticker.next_run_at else None
+            )
+        return Response(payload, status=status.HTTP_200_OK)
+
+
 class AgentRunDetailEndpoint(APIView):
     authentication_classes = [BaseSessionAuthentication]
     permission_classes = [IsAuthenticated]

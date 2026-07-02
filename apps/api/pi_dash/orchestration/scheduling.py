@@ -349,6 +349,105 @@ def reset_ticker_after_comment_and_run(issue: Issue) -> Optional[IssueAgentTicke
     return sched
 
 
+def re_tick_ticker(issue: Issue) -> dict:
+    """Grant a fresh phase-sized tick budget to an exhausted ticker and re-arm.
+
+    Manual "re-ticking". When a ticker has burned through its budget
+    (``cap_reached()``) while the issue is still in a ticking state
+    (In Progress / In Review), the user can re-grant budget so the
+    continuation clock resumes. Unlike
+    :func:`reset_ticker_after_comment_and_run` (which zeroes
+    ``tick_count``), re-ticking **grows** the cap by one fresh phase
+    budget and leaves ``tick_count`` intact — the issue detail card keeps
+    showing cumulative progress ("Tick 24 of 48") rather than resetting to
+    "Tick 0 of 24".
+
+    The grant amount is the project default for the issue's *current*
+    phase (In Progress vs In Review), so re-ticking In Review re-grants the
+    In-Review budget and re-ticking In Progress re-grants the In-Progress
+    budget. Because ``tick_count == effective_max_ticks()`` at exhaustion,
+    ``new_cap = effective_max_ticks() + grant`` yields exactly ``grant``
+    fresh ticks. Using the phase's *project default* as the grant unit
+    keeps repeated re-ticks granting a stable amount even though the grant
+    is persisted by bumping the phase cap override.
+
+    Returns ``{"granted": bool, "reason": str, "ticker": IssueAgentTicker|None}``.
+    All three guardrails below must hold or the call is a no-op with
+    ``granted = False`` and no mutation:
+
+    * a ticker row exists (``reason = "no_ticker"``),
+    * the issue is currently in a ticking state (``reason =
+      "not_ticking_state"``),
+    * the budget is actually exhausted (``reason =
+      "budget_not_exhausted"``).
+
+    ``select_for_update`` serializes against ``fire_tick`` and the deferred
+    cap-hit pause (§6.1 / §4.4.1).
+    """
+    with transaction.atomic():
+        # Re-fetch and lock the issue inside the transaction so the state
+        # guard below sees the latest committed state, not a possibly-stale
+        # instance handed in by the caller. Without this, a concurrent
+        # transition out of a ticking state (e.g. to Done) could race the
+        # re-arm and leave the ticker enabled for a non-ticking issue.
+        locked_issue = (
+            Issue.all_objects.select_for_update(of=("self",))
+            .select_related("state", "project")
+            .filter(pk=issue.pk)
+            .first()
+        )
+        if locked_issue is None:
+            return {"granted": False, "reason": "no_issue", "ticker": None}
+
+        sched = (
+            IssueAgentTicker.objects.select_for_update()
+            .filter(issue=locked_issue)
+            .first()
+        )
+        if sched is None:
+            return {"granted": False, "reason": "no_ticker", "ticker": None}
+        # Bind the freshly-locked issue so phase-aware methods
+        # (``_is_review_phase``/``effective_max_ticks``) resolve against the
+        # current state rather than lazy-loading a fresh copy.
+        sched.issue = locked_issue
+        if not is_ticking_state(locked_issue.state):
+            return {"granted": False, "reason": "not_ticking_state", "ticker": sched}
+        if not sched.cap_reached():
+            return {"granted": False, "reason": "budget_not_exhausted", "ticker": sched}
+
+        grant = _project_default_max_ticks(locked_issue)
+        review = sched._is_review_phase()
+        new_cap = sched.effective_max_ticks() + grant
+        if review:
+            sched.review_max_ticks = new_cap
+        else:
+            sched.max_ticks = new_cap
+
+        # Re-arm: clear the disarm cause and restart the clock unless the
+        # user disabled ticking on this issue or the project suppresses it.
+        suppress = sched.user_disabled or not _project_ticking_enabled(locked_issue)
+        sched.enabled = not suppress
+        sched.disarm_reason = TickerDisarmReason.NONE
+        sched.next_run_at = _compute_next_run_at(sched.effective_interval_seconds())
+        sched.save(
+            update_fields=[
+                "review_max_ticks" if review else "max_ticks",
+                "enabled",
+                "disarm_reason",
+                "next_run_at",
+                "updated_at",
+            ]
+        )
+    logger.info(
+        "agent_ticker: re-ticked issue=%s new_cap=%s enabled=%s next_run_at=%s",
+        locked_issue.pk,
+        new_cap,
+        sched.enabled,
+        sched.next_run_at,
+    )
+    return {"granted": True, "reason": "granted", "ticker": sched}
+
+
 # ---------------------------------------------------------------------------
 # Continuation dispatch
 # ---------------------------------------------------------------------------
