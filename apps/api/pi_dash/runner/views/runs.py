@@ -87,6 +87,10 @@ class AgentRunListEndpoint(APIView):
                 | Q(work_item__created_by=request.user)
                 | Q(work_item__assignees=request.user)
             )
+            # ``pod__project`` is read by AgentRunSerializer.pod_detail
+            # (PodMiniSerializer.project_identifier); join it to avoid an
+            # N+1 across the up-to-200 rows serialized below.
+            .select_related("pod__project")
             .distinct()
             .order_by("-created_at")
         )
