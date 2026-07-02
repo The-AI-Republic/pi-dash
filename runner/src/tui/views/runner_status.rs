@@ -110,9 +110,22 @@ impl Tab for RunnerStatusTab {
             .map(|c| !c.runners.is_empty())
             .unwrap_or(false);
         let settings_children = if runners_present {
+            // Only fields visible for the picked runner are navigable. Agent
+            // `binary` / `model_default` fields for kinds other than the
+            // runner's `agent.kind` are excluded here so up/down skips them,
+            // exactly matching what `editable_lines` draws. `row` keeps the
+            // original `FIELDS` index; `next_sibling` sorts+dedups rows, so the
+            // gaps left by hidden fields navigate correctly.
+            let runner_idx = data.picker_runner_index().unwrap_or(0);
             fields::FIELDS
                 .iter()
                 .enumerate()
+                .filter(|(_, spec)| {
+                    data.config_working
+                        .as_ref()
+                        .map(|cfg| fields::field_visible(cfg, spec.id, runner_idx))
+                        .unwrap_or(true)
+                })
                 .map(|(i, spec)| FocusNode::Item {
                     id: spec.id.id_str(),
                     interactive: true,
@@ -764,5 +777,92 @@ mod tests {
 
         assert_eq!(tab.list.selected_id(), Some(&"alpha".to_string()));
         assert_eq!(data.picker_runner_name(), Some("alpha".to_string()));
+    }
+
+    fn runner_with_kind(name: &str, kind: crate::config::schema::AgentKind) -> RunnerConfig {
+        let mut r = runner(name);
+        r.agent.kind = kind;
+        r
+    }
+
+    /// Collect the leaf ids of the settings card in the focus tree.
+    fn settings_field_ids(tab: &RunnerStatusTab, data: &AppData) -> Vec<&'static str> {
+        tab.focus_tree(data)
+            .into_iter()
+            .find(|n| n.id() == CARD_SETTINGS)
+            .map(|n| n.children().iter().map(|c| c.id()).collect())
+            .unwrap_or_default()
+    }
+
+    #[test]
+    fn focus_tree_hides_non_selected_agent_fields() {
+        use crate::config::schema::AgentKind;
+
+        // Runner uses Claude Code — only Claude's binary/model_default should be
+        // navigable; the other three agents' fields must be excluded.
+        let mut data = AppData::new(paths());
+        data.config_working = Some(config(vec![runner_with_kind(
+            "claude_runner",
+            AgentKind::ClaudeCode,
+        )]));
+        data.config_loaded = data.config_working.clone();
+        data.status = Some(status(&["claude_runner"]));
+        data.selected_runner_name = Some("claude_runner".to_string());
+
+        let tab = RunnerStatusTab::new();
+        let ids = settings_field_ids(&tab, &data);
+
+        assert!(ids.contains(&"field:claude_binary"));
+        assert!(ids.contains(&"field:claude_model_default"));
+        for hidden in [
+            "field:codex_binary",
+            "field:codex_model_default",
+            "field:cursor_binary",
+            "field:cursor_model_default",
+            "field:openclaw_binary",
+            "field:openclaw_model_default",
+        ] {
+            assert!(!ids.contains(&hidden), "{hidden} should be hidden");
+        }
+        // Non-agent fields stay navigable.
+        assert!(ids.contains(&"field:agent_kind"));
+        assert!(ids.contains(&"field:runner_name"));
+    }
+
+    #[test]
+    fn focus_tree_agent_fields_follow_selected_kind() {
+        use crate::config::schema::AgentKind;
+
+        for (kind, want, other) in [
+            (
+                AgentKind::Codex,
+                "field:codex_binary",
+                "field:openclaw_binary",
+            ),
+            (
+                AgentKind::OpenClaw,
+                "field:openclaw_binary",
+                "field:codex_binary",
+            ),
+            (
+                AgentKind::CursorAgent,
+                "field:cursor_binary",
+                "field:claude_binary",
+            ),
+        ] {
+            let mut data = AppData::new(paths());
+            data.config_working = Some(config(vec![runner_with_kind("r", kind)]));
+            data.config_loaded = data.config_working.clone();
+            data.status = Some(status(&["r"]));
+            data.selected_runner_name = Some("r".to_string());
+
+            let tab = RunnerStatusTab::new();
+            let ids = settings_field_ids(&tab, &data);
+            assert!(ids.contains(&want), "{want} should be visible for {kind:?}");
+            assert!(
+                !ids.contains(&other),
+                "{other} should be hidden for {kind:?}"
+            );
+        }
     }
 }
