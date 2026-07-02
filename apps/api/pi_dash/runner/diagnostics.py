@@ -11,10 +11,26 @@ soon as the API ships.
 
 from __future__ import annotations
 
+import re
 from typing import Any
 
 _ENRICHED_RAW_ERROR_MARKER = "Raw agent error:"
-_AGENT_AUTH_HEADER = "401 authentication_failed"
+_AUTH_HEADER_SUFFIX = "authentication_failed"
+_AUTH_STATUS_RE = re.compile(r"\b(401|403)\b")
+
+
+def _auth_header(detail: str) -> str:
+    """Synthetic header line for an enriched auth failure.
+
+    Derives the HTTP status from the raw error when present instead of
+    assuming ``401`` — a ``403`` or a code-less token-refresh failure also
+    classifies as an auth error and must not be mislabeled as a 401.
+    """
+
+    match = _AUTH_STATUS_RE.search(detail)
+    if match:
+        return f"{match.group(1)} {_AUTH_HEADER_SUFFIX}"
+    return _AUTH_HEADER_SUFFIX
 
 
 def _first_non_empty_line(value: str) -> str:
@@ -66,12 +82,18 @@ def _agent_label_from_enriched_error(detail: str) -> str:
 
 
 def infer_agent_label(*, runner: Any = None, error: str = "", model: Any = None) -> str:
-    """Best-effort display name for the local agent behind a run."""
+    """Best-effort display name for the local agent behind a run.
 
-    for value in [model, error]:
-        label = _match_agent_label(str(value or ""))
-        if label:
-            return label
+    Structured, runner-scoped signals (the model id, the runner's declared
+    capabilities, its name/host label) are checked before the raw error
+    text. The error string can incidentally mention an unrelated agent —
+    a path like ``/Users/claude/...`` or a URL — which would otherwise
+    misattribute the run; it is only consulted as a last resort.
+    """
+
+    label = _match_agent_label(str(model or ""))
+    if label:
+        return label
 
     capabilities = getattr(runner, "capabilities", None)
     for value in _iter_text_values(capabilities):
@@ -84,7 +106,7 @@ def infer_agent_label(*, runner: Any = None, error: str = "", model: Any = None)
         if label:
             return label
 
-    return ""
+    return _match_agent_label(str(error or ""))
 
 
 def _runner_location(runner: Any = None) -> str:
@@ -120,7 +142,7 @@ def enrich_run_error(error: str, *, runner: Any = None, model: Any = None) -> st
     auth_subject = f"{agent_label} auth" if agent_label else "AI agent auth"
     agent_command = agent_label or "the AI agent"
     return (
-        f"{_AGENT_AUTH_HEADER}\n"
+        f"{_auth_header(detail)}\n"
         f"AI agent: {auth_subject} appears expired or invalid. "
         f"Go to the {_runner_location(runner)} and re-authenticate {agent_command}, "
         "then restart the Pi Dash runner.\n\n"

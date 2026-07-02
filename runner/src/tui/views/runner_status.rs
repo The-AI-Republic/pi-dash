@@ -737,4 +737,32 @@ mod tests {
         assert_eq!(tab.list.selected_index(), Some(1));
         assert_eq!(data.runner_index_by_name("claude_macmini01"), Some(0));
     }
+
+    #[test]
+    fn rejected_select_reanchors_highlight_to_committed_picker() {
+        // A runner still in daemon status but no longer in config ("stale_c")
+        // can't become the picker selection. After the rejected commit, the
+        // list highlight must snap back to the committed picker instead of
+        // stranding on the unselectable row (mirrors App::select_runner_by_name).
+        let mut data = AppData::new(paths());
+        data.config_working = Some(config(vec![runner("alpha"), runner("beta")]));
+        data.config_loaded = data.config_working.clone();
+        data.status = Some(status(&["alpha", "beta", "stale_c"]));
+        data.selected_runner_name = Some("alpha".to_string());
+
+        let mut tab = RunnerStatusTab::new();
+        let live_ids: Vec<String> = vec!["alpha".into(), "beta".into(), "stale_c".into()];
+        // User navigates the live list onto the daemon-only runner.
+        tab.list.jump_to(2, &live_ids);
+        assert_eq!(tab.list.selected_id(), Some(&"stale_c".to_string()));
+
+        // Commit is rejected: the name isn't in config.
+        assert!(!data.select_runner_by_name("stale_c"));
+
+        // The fix's recovery step: reconcile back to the committed picker.
+        tab.reconcile(&data);
+
+        assert_eq!(tab.list.selected_id(), Some(&"alpha".to_string()));
+        assert_eq!(data.picker_runner_name(), Some("alpha".to_string()));
+    }
 }

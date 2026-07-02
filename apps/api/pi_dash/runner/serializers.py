@@ -205,6 +205,12 @@ class AgentRunSerializer(serializers.ModelSerializer):
     error_diagnostic = serializers.SerializerMethodField()
 
     def get_error_diagnostic(self, run: AgentRun):
+        # Only the per-run detail drawer renders this block. Skip the
+        # classifier's per-row string scans when serializing a list (the
+        # runs table uses ``many=True``), which would otherwise pay the
+        # cost on every row for data the list view discards.
+        if isinstance(self.parent, serializers.ListSerializer):
+            return None
         return classify_run_error(run.error)
 
     class Meta:

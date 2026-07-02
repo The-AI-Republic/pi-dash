@@ -1207,6 +1207,15 @@ impl App {
 
     fn select_runner_by_name(&mut self, name: &str) {
         if !self.data.select_runner_by_name(name) {
+            // The name came from the live daemon-status list, which can
+            // include a runner that is no longer in config_working (e.g.
+            // deleted from config but still reported until restart). Such a
+            // runner can't become the picker selection, so re-anchor the
+            // list highlight to the committed picker — otherwise the cursor
+            // strands on the unselectable row while the settings/live-state
+            // panels and the delete action still target the previous runner.
+            self.runner_status.reconcile(&self.data);
+            self.frame.schedule_frame();
             return;
         }
         self.runner_status.reconcile(&self.data);

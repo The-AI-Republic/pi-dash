@@ -21,6 +21,43 @@ def test_classify_agent_authentication_error():
     assert diagnostic["summary"] == "Failed to authenticate. API Error: 401 Invalid authentication credentials"
 
 
+def test_enrich_non_401_auth_error_does_not_claim_401():
+    """A 403 (or code-less) auth failure must not be relabeled as a 401."""
+    raw = "Failed to authenticate. API Error: 403 Forbidden"
+
+    enriched = enrich_run_error(raw)
+
+    assert enriched.startswith("403 authentication_failed\n")
+    assert "401" not in enriched.splitlines()[0]
+
+
+def test_enrich_codeless_auth_error_uses_neutral_header():
+    raw = "Failed to authenticate: token refresh returned no credentials"
+
+    enriched = enrich_run_error(raw)
+
+    assert enriched.startswith("authentication_failed\n")
+
+
+def test_infer_agent_label_prefers_runner_over_error_mention():
+    """An unrelated 'claude' in the error text must not mislabel a Codex run."""
+    runner = SimpleNamespace(
+        name="workx_codex01",
+        host_label="mini-build",
+        capabilities=["agent:codex"],
+        dev_machine=None,
+    )
+    # Error references a path that merely contains "claude".
+    raw = "Failed to authenticate. Check /Users/claude/.codex/auth.json"
+
+    enriched = enrich_run_error(raw, runner=runner)
+
+    assert "re-authenticate Codex" in enriched
+    diagnostic = classify_run_error(enriched)
+    assert diagnostic is not None
+    assert diagnostic["source_label"] == "Codex"
+
+
 def test_classify_agent_model_access_error():
     diagnostic = classify_run_error("Selected model 'claude-fable-5' may not exist or you may not have access to it.")
 

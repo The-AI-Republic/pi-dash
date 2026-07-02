@@ -56,6 +56,27 @@ const ERROR_SOURCE_BADGE_VARIANT: Record<TAgentRunErrorSource, TBadgeVariant> = 
   unknown: "accent-neutral",
 };
 
+// Map the diagnostic's internal category token to a human-readable,
+// translatable label. Unknown/new tokens fall back to the raw value.
+function errorKindLabel(kind: string, t: (text: string) => string): string {
+  switch (kind) {
+    case "agent_authentication":
+      return t("Authentication");
+    case "agent_model_access":
+      return t("Model access");
+    case "runner_registration":
+      return t("Runner registration");
+    case "runner_lifecycle":
+      return t("Runner lifecycle");
+    case "agent_stalled":
+      return t("Agent stalled");
+    case "unknown":
+      return t("Unknown");
+    default:
+      return kind;
+  }
+}
+
 function isTerminal(status: TAgentRunStatus): boolean {
   return AGENT_RUN_TERMINAL_STATUSES.includes(status);
 }
@@ -204,13 +225,12 @@ export const RunnerRunsPage = observer(function RunnerRunsPage() {
                     <div className="mt-1 rounded border border-warning-subtle bg-layer-1 p-3">
                       <div className="flex flex-wrap items-center gap-2">
                         <span className="text-secondary">{t("Failure source")}</span>
-                        <Badge
-                          variant={ERROR_SOURCE_BADGE_VARIANT[detail.error_diagnostic.source]}
-                          size="sm"
-                        >
+                        <Badge variant={ERROR_SOURCE_BADGE_VARIANT[detail.error_diagnostic.source]} size="sm">
                           {detail.error_diagnostic.source_label}
                         </Badge>
-                        <span className="font-mono text-11 text-secondary">{detail.error_diagnostic.kind}</span>
+                        <span className="text-11 text-secondary">
+                          {errorKindLabel(detail.error_diagnostic.kind, t)}
+                        </span>
                       </div>
                       <div className="mt-2 text-primary">{detail.error_diagnostic.summary}</div>
                       {detail.error_diagnostic.action && (
