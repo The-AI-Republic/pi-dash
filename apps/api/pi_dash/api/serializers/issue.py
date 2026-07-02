@@ -85,6 +85,20 @@ class IssueSerializer(BaseSerializer):
         ):
             raise serializers.ValidationError("Start date cannot exceed target date")
 
+        # ``assigned_pod`` is the pod this issue's agent runs dispatch to. It is
+        # optional — omitting it lets ``Issue.save`` resolve the project's default
+        # pod. When supplied it must belong to the issue's *own* project: pods are
+        # project-scoped, so accepting any pod would let a caller route this
+        # project's runs to another project's runners (a cross-project escape
+        # hatch). Mirrors the guard the app-tier serializer already enforces.
+        if data.get("assigned_pod") is not None:
+            pod = data["assigned_pod"]
+            project_id = self.context.get("project_id")
+            if project_id is None and self.instance is not None:
+                project_id = self.instance.project_id
+            if project_id is not None and str(pod.project_id) != str(project_id):
+                raise serializers.ValidationError({"assigned_pod": "pod is in a different project"})
+
         try:
             if data.get("description_html", None) is not None:
                 parsed = html.fromstring(data["description_html"])
