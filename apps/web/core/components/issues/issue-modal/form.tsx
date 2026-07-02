@@ -113,9 +113,13 @@ export const IssueFormRoot = observer(function IssueFormRoot(props: IssueFormPro
   const [isGeneratingTitle, setIsGeneratingTitle] = useState<boolean>(false);
 
   // Pi Dash AI assistant availability — when configured, the title becomes
-  // optional and is generated from the description on save.
+  // optional and is generated from the description on save. This only applies
+  // to creating a brand-new (non-draft) work item: editing a saved issue keeps
+  // the title required, and drafts skip generation so closing the modal never
+  // silently spends an AI call.
   const { config: llmConfig } = useLLMConfig();
   const aiAvailable = Boolean(llmConfig?.has_api_key);
+  const titleOptional = aiAvailable && !data?.id && !isDraft;
 
   // refs
   const editorRef = useRef<EditorRefApi>(null);
@@ -251,10 +255,9 @@ export const IssueFormRoot = observer(function IssueFormRoot(props: IssueFormPro
 
     // If the user left the title blank on a new work item and has a Pi Dash AI
     // assistant configured, generate a title from the description before saving.
-    // Drafts skip this so closing the modal doesn't silently spend an AI call.
-    const isNewIssue = !data?.id;
+    // `titleOptional` already excludes edits and drafts.
     const titleIsBlank = (formData.name ?? "").trim() === "";
-    if (isNewIssue && aiAvailable && titleIsBlank && !is_draft_issue) {
+    if (titleOptional && titleIsBlank) {
       const descriptionText = getTextContent(formData.description_html ?? "").trim();
       if (!descriptionText) {
         setToast({
@@ -495,7 +498,7 @@ export const IssueFormRoot = observer(function IssueFormRoot(props: IssueFormPro
                   issueTitleRef={issueTitleRef}
                   formState={formState}
                   handleFormChange={handleFormChange}
-                  aiAvailable={aiAvailable}
+                  aiAvailable={titleOptional}
                 />
               </div>
             </div>

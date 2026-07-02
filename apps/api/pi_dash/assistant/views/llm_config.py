@@ -132,7 +132,9 @@ class UserLLMConfigGenerateTitleEndpoint(BaseAPIView):
     throttle_classes = [UserLLMConfigGenerateTitleThrottle]
 
     def post(self, request):
-        description = (request.data.get("description") or "").strip()
+        # Coerce to str before .strip(): an untrusted payload may send a
+        # non-string description (e.g. a number), which would otherwise 500.
+        description = str(request.data.get("description") or "").strip()
         if not description:
             return Response(
                 {"error": "description_required", "detail": "A description is required to generate a title."},
