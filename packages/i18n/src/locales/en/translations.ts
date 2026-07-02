@@ -161,6 +161,7 @@ export default {
   "AI Agents": "AI Agents",
   "AI Dev Machines": "AI Dev Machines",
   "AI Prompt Templates": "AI Prompt Templates",
+  "AI Workers": "AI Workers",
   All: "All",
   "All permissions set to true within the workspace.": "All permissions set to true within the workspace.",
   "All Projects": "All Projects",
@@ -892,11 +893,12 @@ export default {
   "Make public": "Make public",
   "Manage features": "Manage features",
   "Manage widgets": "Manage widgets",
-  "Manage your AI Agent connectivities": "Manage your AI Agent connectivities",
+  "Manage your AI Worker connectivities": "Manage your AI Worker connectivities",
   Manifest: "Manifest",
   Manual: "Manual",
   "Manually or through automation, you can archive work items that are completed or cancelled. Find them here once archived.":
     "Manually or through automation, you can archive work items that are completed or cancelled. Find them here once archived.",
+  "Manually Run AI": "Manually Run AI",
   "Manually trigger an extra AI agent run. (Issues in the In Progress state already tick an agent run every few hours.)":
     "Manually trigger an extra AI agent run. (Issues in the In Progress state already tick an agent run every few hours.)",
   "Map your project goals to Modules and track easily.": "Map your project goals to Modules and track easily.",
@@ -1130,6 +1132,7 @@ export default {
   Personal: "Personal",
   "Personal Access Tokens": "Personal Access Tokens",
   "Pi Chat": "Pi Chat",
+  "Pi Dash AI": "Pi Dash AI",
   "Pi Dash default": "Pi Dash default",
   "Pi Dash hands AI agents (Claude Code, Codex, …) the keys to a real dev machine so they can pick up work items, write code, and open changes. Three pieces work together to make that possible:":
     "Pi Dash hands AI agents (Claude Code, Codex, …) the keys to a real dev machine so they can pick up work items, write code, and open changes. Three pieces work together to make that possible:",
@@ -1289,7 +1292,6 @@ export default {
   Rotate: "Rotate",
   "Rotate dev machine token?": "Rotate dev machine token?",
   "Run {runId} · requested {at}": "Run {runId} · requested {at}",
-  "Run AI": "Run AI",
   "Run an installer on the machine that will host your AI agent. The wrapper commands download the latest signed binary, drop `pidash` on your PATH, and walk you through the device-code login.":
     "Run an installer on the machine that will host your AI agent. The wrapper commands download the latest signed binary, drop `pidash` on your PATH, and walk you through the device-code login.",
   "Run this on the machine that will host the runner:": "Run this on the machine that will host the runner:",

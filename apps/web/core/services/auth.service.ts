@@ -10,6 +10,7 @@ import type { ICsrfTokenData, IEmailCheckData, IEmailCheckResponse } from "@pi-d
 // helpers
 // services
 import { APIService } from "@/services/api.service";
+import { performSignOut } from "@/services/auth-signout";
 
 export class AuthService extends APIService {
   constructor() {
@@ -59,26 +60,10 @@ export class AuthService extends APIService {
       });
   }
 
-  async signOut(baseUrl: string): Promise<any> {
-    await this.requestCSRFToken().then((data) => {
-      const csrfToken = data?.csrf_token;
-
-      if (!csrfToken) throw Error("CSRF token not found");
-
-      const form = document.createElement("form");
-      const element1 = document.createElement("input");
-
-      form.method = "POST";
-      form.action = `${baseUrl}/auth/sign-out/`;
-
-      element1.value = csrfToken;
-      element1.name = "csrfmiddlewaretoken";
-      element1.type = "hidden";
-      form.appendChild(element1);
-
-      document.body.appendChild(form);
-
-      form.submit();
-    });
+  // Sign-out is delegated to an overridable seam (``./auth-signout``) so hosted
+  // editions can swap the strategy — e.g. an OIDC edition whose logout is a
+  // JSON request — without forking this whole service. See auth-signout.ts.
+  async signOut(baseUrl: string): Promise<void> {
+    await performSignOut(this, baseUrl);
   }
 }
