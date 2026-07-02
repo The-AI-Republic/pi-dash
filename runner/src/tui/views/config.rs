@@ -200,6 +200,41 @@ pub fn field_at(idx: usize) -> &'static FieldSpec {
     &FIELDS[idx.min(FIELDS.len() - 1)]
 }
 
+/// The `AgentKind` an agent-specific config field belongs to, or `None`
+/// for fields that aren't tied to a particular agent (those are always
+/// shown regardless of the runner's selected kind).
+pub fn field_agent_kind(id: FieldId) -> Option<AgentKind> {
+    match id {
+        FieldId::CodexBinary | FieldId::CodexModelDefault => Some(AgentKind::Codex),
+        FieldId::ClaudeBinary | FieldId::ClaudeModelDefault => Some(AgentKind::ClaudeCode),
+        FieldId::CursorBinary | FieldId::CursorModelDefault => Some(AgentKind::CursorAgent),
+        FieldId::OpenClawBinary | FieldId::OpenClawModelDefault => Some(AgentKind::OpenClaw),
+        _ => None,
+    }
+}
+
+/// The agent kind selected by the runner at `runner_idx`, defaulting to
+/// `AgentKind::default()` when no runner exists so the panel still renders a
+/// coherent section.
+fn selected_agent_kind(cfg: &Config, runner_idx: usize) -> AgentKind {
+    runner_at(cfg, runner_idx)
+        .map(|r| r.agent.kind)
+        .unwrap_or_default()
+}
+
+/// Whether a field should be shown (and navigable) for the runner at
+/// `runner_idx`. Agent-specific `binary` / `model_default` fields are visible
+/// only when they belong to that runner's selected `agent.kind`; every other
+/// field is always visible. The Runners-tab render layer and the focus tree
+/// share this predicate so keyboard navigation never lands on a field that
+/// isn't drawn.
+pub fn field_visible(cfg: &Config, id: FieldId, runner_idx: usize) -> bool {
+    match field_agent_kind(id) {
+        None => true,
+        Some(kind) => selected_agent_kind(cfg, runner_idx) == kind,
+    }
+}
+
 fn runner_at(cfg: &Config, idx: usize) -> Option<&crate::config::schema::RunnerConfig> {
     if cfg.runners.is_empty() {
         return None;
@@ -516,28 +551,37 @@ pub fn editable_lines(
     ));
     lines.push(Line::raw(""));
 
-    // Per-agent binary / model_default. Every agent's pair is registered in
-    // `FIELDS` (and therefore in the focus tree), so each must be rendered or
-    // navigation would land on an invisible, un-highlighted field. Rendered in
-    // `FIELDS` order so the index-based selection highlight lines up.
-    for (section, ids) in [
+    // Per-agent binary / model_default. Only the section for the runner's
+    // selected `agent.kind` is drawn; the other agents' fields are hidden here
+    // AND excluded from the focus tree (see `focus_tree` and `field_visible`),
+    // so navigation never lands on an invisible, un-highlighted field. Rendered
+    // in `FIELDS` order so the index-based selection highlight lines up.
+    let selected_kind = selected_agent_kind(working, runner_idx);
+    for (section, kind, ids) in [
         (
             "Codex",
+            AgentKind::Codex,
             [FieldId::CodexBinary, FieldId::CodexModelDefault],
         ),
         (
             "Claude Code",
+            AgentKind::ClaudeCode,
             [FieldId::ClaudeBinary, FieldId::ClaudeModelDefault],
         ),
         (
             "Cursor Agent",
+            AgentKind::CursorAgent,
             [FieldId::CursorBinary, FieldId::CursorModelDefault],
         ),
         (
             "OpenClaw",
+            AgentKind::OpenClaw,
             [FieldId::OpenClawBinary, FieldId::OpenClawModelDefault],
         ),
     ] {
+        if kind != selected_kind {
+            continue;
+        }
         lines.push(section_header(section));
         for id in ids {
             lines.extend(render_editable_row(
@@ -766,4 +810,95 @@ fn index_of(id: FieldId) -> usize {
         .iter()
         .position(|f| f.id == id)
         .expect("FieldId missing from FIELDS table")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::schema::{
+        Config, DaemonConfig, RunnerConfig, WorkspaceSection,
+    };
+    use std::path::PathBuf;
+    use uuid::Uuid;
+
+    fn config_with_kind(kind: AgentKind) -> Config {
+        let mut runner = RunnerConfig {
+            name: "r".into(),
+            runner_id: Uuid::new_v4(),
+            workspace_slug: Some("acme".into()),
+            project_slug: Some("TEST".into()),
+            pod_id: None,
+            workspace: WorkspaceSection {
+                working_dir: PathBuf::from("/tmp/pidash-test"),
+            },
+            workdir: None,
+            agent: Default::default(),
+            codex: Default::default(),
+            claude_code: Default::default(),
+            cursor_agent: Default::default(),
+            openclaw: Default::default(),
+            approval_policy: Default::default(),
+        };
+        runner.agent.kind = kind;
+        Config {
+            version: 2,
+            daemon: DaemonConfig {
+                cloud_url: "https://pidash.example".into(),
+                dev_machine_id: None,
+                log_level: "info".into(),
+                log_retention_days: 14,
+                agent_observability_v1: false,
+                auto_update: true,
+            },
+            runners: vec![runner],
+            workdirs: vec![],
+            cli: None,
+        }
+    }
+
+    fn rendered_text(cfg: &Config) -> String {
+        editable_lines(cfg, &None, 0, 0, None)
+            .iter()
+            .map(|line| {
+                line.spans
+                    .iter()
+                    .map(|s| s.content.as_ref())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    #[test]
+    fn editable_lines_shows_only_selected_agent_section() {
+        // Claude Code runner: the Claude section header shows; the other three
+        // agent section headers are absent.
+        let text = rendered_text(&config_with_kind(AgentKind::ClaudeCode));
+        assert!(text.contains("Claude Code"));
+        assert!(!text.contains("Codex"));
+        assert!(!text.contains("Cursor Agent"));
+        assert!(!text.contains("OpenClaw"));
+
+        // Codex runner: mirror the check the other way.
+        let text = rendered_text(&config_with_kind(AgentKind::Codex));
+        assert!(text.contains("Codex"));
+        assert!(!text.contains("Claude Code"));
+        assert!(!text.contains("Cursor Agent"));
+        assert!(!text.contains("OpenClaw"));
+    }
+
+    #[test]
+    fn field_visible_matches_selected_kind() {
+        let cfg = config_with_kind(AgentKind::CursorAgent);
+        // Cursor fields visible; other agents' fields hidden.
+        assert!(field_visible(&cfg, FieldId::CursorBinary, 0));
+        assert!(field_visible(&cfg, FieldId::CursorModelDefault, 0));
+        assert!(!field_visible(&cfg, FieldId::CodexBinary, 0));
+        assert!(!field_visible(&cfg, FieldId::ClaudeBinary, 0));
+        assert!(!field_visible(&cfg, FieldId::OpenClawBinary, 0));
+        // Non-agent fields always visible.
+        assert!(field_visible(&cfg, FieldId::AgentKind, 0));
+        assert!(field_visible(&cfg, FieldId::RunnerName, 0));
+        assert!(field_visible(&cfg, FieldId::ApprovalAutoReadonly, 0));
+    }
 }
