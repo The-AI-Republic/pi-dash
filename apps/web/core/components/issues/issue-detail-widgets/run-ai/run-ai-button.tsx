@@ -49,7 +49,7 @@ export const RunAIActionButton = observer(function RunAIActionButton(props: Prop
           loading={isSubmitting}
         >
           <AiIcon className="h-3.5 w-3.5 flex-shrink-0" />
-          <span className="text-body-xs-medium">{t("Run AI")}</span>
+          <span className="text-body-xs-medium">{t("Manually Run AI")}</span>
         </Button>
       </span>
     </Tooltip>
