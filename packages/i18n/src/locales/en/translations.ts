@@ -898,6 +898,7 @@ export default {
   Manual: "Manual",
   "Manually or through automation, you can archive work items that are completed or cancelled. Find them here once archived.":
     "Manually or through automation, you can archive work items that are completed or cancelled. Find them here once archived.",
+  "Manually Run AI": "Manually Run AI",
   "Manually trigger an extra AI agent run. (Issues in the In Progress state already tick an agent run every few hours.)":
     "Manually trigger an extra AI agent run. (Issues in the In Progress state already tick an agent run every few hours.)",
   "Map your project goals to Modules and track easily.": "Map your project goals to Modules and track easily.",
@@ -1291,7 +1292,6 @@ export default {
   Rotate: "Rotate",
   "Rotate dev machine token?": "Rotate dev machine token?",
   "Run {runId} · requested {at}": "Run {runId} · requested {at}",
-  "Run AI": "Run AI",
   "Run an installer on the machine that will host your AI agent. The wrapper commands download the latest signed binary, drop `pidash` on your PATH, and walk you through the device-code login.":
     "Run an installer on the machine that will host your AI agent. The wrapper commands download the latest signed binary, drop `pidash` on your PATH, and walk you through the device-code login.",
   "Run this on the machine that will host the runner:": "Run this on the machine that will host the runner:",
