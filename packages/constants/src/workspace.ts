@@ -239,7 +239,7 @@ export const WORKSPACE_SIDEBAR_STATIC_NAVIGATION_ITEMS: Record<string, IWorkspac
   },
   assistant: {
     key: "assistant",
-    labelTranslationKey: "AI Assistant",
+    labelTranslationKey: "Pi Dash AI",
     href: `/assistant/`,
     // Guests are excluded (parity with the backend 403).
     access: [EUserWorkspaceRoles.ADMIN, EUserWorkspaceRoles.MEMBER],
@@ -283,7 +283,7 @@ export const WORKSPACE_SIDEBAR_STATIC_NAVIGATION_ITEMS: Record<string, IWorkspac
   },
   runners: {
     key: "runners",
-    labelTranslationKey: "AI Agents",
+    labelTranslationKey: "AI Workers",
     href: `/runners/`,
     access: [EUserWorkspaceRoles.ADMIN, EUserWorkspaceRoles.MEMBER],
     highlight: (pathname: string, url: string) => pathname.includes(url),
