@@ -116,12 +116,14 @@ class IssueSerializer(BaseSerializer):
                     project_id = self.instance.project_id
                 if project_id is not None and not _same_uuid(pod.project_id, project_id):
                     raise serializers.ValidationError({"assigned_pod": "pod is in a different project"})
-            # Block reassigning OR clearing the pod once a run is active: the run's
-            # pod FK is immutable, so the change would only take effect on the next
-            # dispatch and silently desync the live run from the issue's routing.
-            # Re-sending the current pod is a no-op; only an actual change is
-            # rejected.
-            if self.instance is not None and self.instance.assigned_pod_id is not None:
+            # Block changing the pod once a run is active: the run's pod FK is
+            # immutable, so the change would only take effect on the next dispatch
+            # and silently desync the live run from the issue's routing. Fires on
+            # any real change — assign, reassign, or clear — including from the NULL
+            # (default-pod) state a live run may already have dispatched onto, so
+            # the gate is the value change itself, not "currently has a pod".
+            # ``has_active_run`` is checked last so its query only runs on a change.
+            if self.instance is not None:
                 new_pod_id = pod.id if pod is not None else None
                 if str(new_pod_id) != str(self.instance.assigned_pod_id) and self.instance.has_active_run:
                     raise serializers.ValidationError(
