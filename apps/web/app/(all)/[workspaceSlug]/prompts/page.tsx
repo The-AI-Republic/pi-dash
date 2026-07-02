@@ -7,7 +7,7 @@
 import { useMemo, useState } from "react";
 import { observer } from "mobx-react";
 import { useParams } from "react-router";
-import useSWR from "swr";
+import useSWR, { useSWRConfig } from "swr";
 import { EUserPermissions, EUserPermissionsLevel } from "@pi-dash/constants";
 import { useTranslation } from "@pi-dash/i18n";
 import { TOAST_TYPE, setToast } from "@pi-dash/propel/toast";
@@ -25,9 +25,51 @@ import { useUserPermissions } from "@/hooks/store/user";
 import { useWorkspace } from "@/hooks/store/use-workspace";
 
 const KINDS: TPromptKind[] = ["coding-task", "review", "scheduler"];
+type TPromptPageTab = "sections" | "receipt";
+
+type TKindSections = {
+  kind: TPromptKind;
+  sections: IResolvedSection[];
+};
+
+type TSectionEntry = {
+  section: IResolvedSection;
+  kinds: TPromptKind[];
+};
 
 function isPersonalSource(source: string): boolean {
   return source.startsWith("user:");
+}
+
+function useKindLabel() {
+  const { t } = useTranslation();
+
+  // Static t("…") arms so the i18n extractor registers these message ids; a
+  // runtime `t(variable)` would be invisible to it.
+  return (k: TPromptKind): string => {
+    switch (k) {
+      case "coding-task":
+        return t("Coding task");
+      case "review":
+        return t("Review");
+      case "scheduler":
+        return t("Scheduler");
+      default:
+        return k;
+    }
+  };
+}
+
+function usePromptSectionList(slug: string, kind: TPromptKind, scope: TPromptScope, enabled = true) {
+  const promptStore = usePromptSection();
+  const key = slug && enabled ? (["prompt-sections", slug, kind, scope] as const) : null;
+  return useSWR<IPromptSectionListResponse>(key, () => promptStore.fetchSections(slug, kind, scope));
+}
+
+function useCompiledPrompt(slug: string, kind: TPromptKind) {
+  const promptStore = usePromptSection();
+  const key = slug ? (["prompt-compiled", slug, kind, "user"] as const) : null;
+  return useSWR<IPromptCompiledResponse>(key, () => promptStore.fetchCompiled(slug, kind, "user"));
 }
 
 /**
@@ -42,62 +84,12 @@ const PromptsListPage = observer(function PromptsListPage() {
   const { currentWorkspace } = useWorkspace();
   const { allowPermissions } = useUserPermissions();
   const { t } = useTranslation();
-  const promptStore = usePromptSection();
 
   const slug = workspaceSlug ?? "";
   const isAdmin = allowPermissions([EUserPermissions.ADMIN], EUserPermissionsLevel.WORKSPACE, slug);
-
-  // Static t("…") arms so the i18n extractor registers these message ids; a
-  // runtime `t(variable)` would be invisible to it.
-  const kindLabel = (k: TPromptKind): string => {
-    switch (k) {
-      case "coding-task":
-        return t("Coding task");
-      case "review":
-        return t("Review");
-      case "scheduler":
-        return t("Scheduler");
-      default:
-        return k;
-    }
-  };
-
-  const [kind, setKind] = useState<TPromptKind>("coding-task");
-
-  // Effective view for the current user (personal → workspace → default), the
-  // workspace-only baseline (so an admin edits the shared default and members
-  // see it), and the assembled receipt.
-  const userKey = slug ? (["prompt-sections", slug, kind, "user"] as const) : null;
-  // Only admins can read/write at workspace scope, so members never fetch it.
-  const wsKey = slug && isAdmin ? (["prompt-sections", slug, kind, "workspace"] as const) : null;
-  const compiledKey = slug ? (["prompt-compiled", slug, kind, "user"] as const) : null;
-
-  const {
-    data: userData,
-    error: userError,
-    mutate: mutateUser,
-  } = useSWR<IPromptSectionListResponse>(userKey, () => promptStore.fetchSections(slug, kind, "user"));
-  const {
-    data: wsData,
-    error: wsError,
-    mutate: mutateWs,
-  } = useSWR<IPromptSectionListResponse>(wsKey, () => promptStore.fetchSections(slug, kind, "workspace"));
-  const { data: compiled, mutate: mutateCompiled } = useSWR<IPromptCompiledResponse>(compiledKey, () =>
-    promptStore.fetchCompiled(slug, kind, "user")
-  );
-
-  const wsByKey = useMemo(() => {
-    const map: Record<string, IResolvedSection> = {};
-    for (const s of wsData?.sections ?? []) map[s.key] = s;
-    return map;
-  }, [wsData]);
-
-  async function refresh() {
-    await Promise.all([mutateUser(), mutateWs(), mutateCompiled()]);
-  }
+  const [tab, setTab] = useState<TPromptPageTab>("sections");
 
   const pageTitle = currentWorkspace?.name ? `${currentWorkspace.name} · ${t("Prompts")}` : t("Prompts");
-  const sections = userData?.sections ?? [];
 
   return (
     <div className="flex flex-col gap-6 p-6">
@@ -106,71 +98,176 @@ const PromptsListPage = observer(function PromptsListPage() {
       <header className="flex flex-col gap-1">
         <h1 className="text-16 font-semibold text-primary">{t("Prompts")}</h1>
         <p className="text-13 text-secondary">
-          {t(
-            "The prompt an agent runs is assembled from ordered sections. Admins can customize the overridable sections for the whole workspace; you can keep your own personal overrides for runs you trigger. Locked sections are fixed."
-          )}
+          {t("Manage reusable sections and inspect the assembled prompt receipts.")}
         </p>
       </header>
 
       <div className="flex items-center gap-2">
-        {KINDS.map((k) => (
+        {(["sections", "receipt"] as TPromptPageTab[]).map((nextTab) => (
           <button
-            key={k}
+            key={nextTab}
             type="button"
-            onClick={() => setKind(k)}
+            onClick={() => setTab(nextTab)}
             className={`rounded-md px-3 py-1.5 text-13 font-medium transition-colors ${
-              kind === k ? "bg-accent-primary text-on-color" : "bg-layer-1 text-secondary hover:text-primary"
+              tab === nextTab ? "bg-accent-primary text-on-color" : "bg-layer-1 text-secondary hover:text-primary"
             }`}
           >
-            {kindLabel(k)}
+            {nextTab === "sections" ? t("Sections") : t("Receipt")}
           </button>
         ))}
       </div>
 
-      {userError ? (
-        <div className="rounded-md border border-danger-subtle bg-layer-1 p-4 text-13 text-danger-primary">
-          {t("Could not load prompt sections for this workspace.")}
-        </div>
-      ) : userData === undefined ? (
-        <div className="text-13 text-secondary">{t("Loading…")}</div>
+      {tab === "sections" ? (
+        <SectionsLibrary slug={slug} isAdmin={isAdmin} />
       ) : (
-        <section className="flex flex-col gap-3">
-          {isAdmin && wsError && (
-            // The workspace-scope list is what gates the "Customize for
-            // workspace" buttons; if it failed, say so rather than leave an
-            // admin staring at silently-missing controls.
-            <div className="rounded-md border border-warning-subtle bg-layer-1 p-3 text-11 text-warning-primary">
-              {t(
-                "Couldn't load this workspace's section defaults, so workspace editing is unavailable. Reload to try again."
-              )}
-            </div>
-          )}
-          {sections.map((section) => (
-            // Key by kind too: a section shared across recipes (session-framing,
-            // guardrails, …) must remount on tab switch, not carry its open
-            // editor and unsaved draft into the other kind's context.
-            <SectionCard
-              key={`${kind}:${section.key}`}
-              slug={slug}
-              kind={kind}
-              section={section}
-              workspaceSection={wsByKey[section.key]}
-              workspaceReady={wsData !== undefined}
-              isAdmin={isAdmin}
-              onChanged={refresh}
-            />
-          ))}
-        </section>
+        <ReceiptLibrary slug={slug} isAdmin={isAdmin} />
       )}
-
-      {compiled && <AssembledPanel compiled={compiled} />}
-
-      {/* Key by kind so the panel's rendered prompt + issue-id input reset on
-          tab switch instead of showing a stale other-kind result. */}
-      {isAdmin && <PreviewPanel key={kind} slug={slug} kind={kind} />}
     </div>
   );
 });
+
+function SectionsLibrary({ slug, isAdmin }: { slug: string; isAdmin: boolean }) {
+  const { t } = useTranslation();
+  const { mutate } = useSWRConfig();
+
+  const codingUser = usePromptSectionList(slug, "coding-task", "user");
+  const reviewUser = usePromptSectionList(slug, "review", "user");
+  const schedulerUser = usePromptSectionList(slug, "scheduler", "user");
+  const codingWs = usePromptSectionList(slug, "coding-task", "workspace", isAdmin);
+  const reviewWs = usePromptSectionList(slug, "review", "workspace", isAdmin);
+  const schedulerWs = usePromptSectionList(slug, "scheduler", "workspace", isAdmin);
+
+  const userLists = useMemo<TKindSections[]>(
+    () => [
+      { kind: "coding-task", sections: codingUser.data?.sections ?? [] },
+      { kind: "review", sections: reviewUser.data?.sections ?? [] },
+      { kind: "scheduler", sections: schedulerUser.data?.sections ?? [] },
+    ],
+    [codingUser.data, reviewUser.data, schedulerUser.data]
+  );
+  const wsLists = useMemo<TKindSections[]>(
+    () => [
+      { kind: "coding-task", sections: codingWs.data?.sections ?? [] },
+      { kind: "review", sections: reviewWs.data?.sections ?? [] },
+      { kind: "scheduler", sections: schedulerWs.data?.sections ?? [] },
+    ],
+    [codingWs.data, reviewWs.data, schedulerWs.data]
+  );
+
+  const entries = useMemo<TSectionEntry[]>(() => {
+    const map = new Map<string, TSectionEntry>();
+    for (const { kind, sections } of userLists) {
+      for (const section of sections) {
+        const existing = map.get(section.key);
+        if (existing) {
+          if (!existing.kinds.includes(kind)) existing.kinds.push(kind);
+        } else {
+          map.set(section.key, { section, kinds: [kind] });
+        }
+      }
+    }
+    return Array.from(map.values());
+  }, [userLists]);
+
+  const wsByKey = useMemo(() => {
+    const map: Record<string, IResolvedSection> = {};
+    for (const { sections } of wsLists) {
+      for (const section of sections) map[section.key] = section;
+    }
+    return map;
+  }, [wsLists]);
+
+  const userError = codingUser.error || reviewUser.error || schedulerUser.error;
+  const wsError = codingWs.error || reviewWs.error || schedulerWs.error;
+  const userReady = codingUser.data !== undefined && reviewUser.data !== undefined && schedulerUser.data !== undefined;
+  const workspaceReady =
+    !isAdmin || (codingWs.data !== undefined && reviewWs.data !== undefined && schedulerWs.data !== undefined);
+
+  async function refresh() {
+    await Promise.all([
+      codingUser.mutate(),
+      reviewUser.mutate(),
+      schedulerUser.mutate(),
+      codingWs.mutate(),
+      reviewWs.mutate(),
+      schedulerWs.mutate(),
+      ...KINDS.map((kind) => mutate(["prompt-compiled", slug, kind, "user"] as const)),
+    ]);
+  }
+
+  if (userError) {
+    return (
+      <div className="rounded-md border border-danger-subtle bg-layer-1 p-4 text-13 text-danger-primary">
+        {t("Could not load prompt sections for this workspace.")}
+      </div>
+    );
+  }
+
+  if (!userReady) return <div className="text-13 text-secondary">{t("Loading…")}</div>;
+
+  return (
+    <section className="flex flex-col gap-3">
+      {isAdmin && wsError && (
+        // The workspace-scope list is what gates the "Customize for
+        // workspace" buttons; if it failed, say so rather than leave an
+        // admin staring at silently-missing controls.
+        <div className="rounded-md border border-warning-subtle bg-layer-1 p-3 text-11 text-warning-primary">
+          {t(
+            "Couldn't load this workspace's section defaults, so workspace editing is unavailable. Reload to try again."
+          )}
+        </div>
+      )}
+      {entries.map(({ section, kinds }) => (
+        <SectionCard
+          key={section.key}
+          slug={slug}
+          previewKinds={kinds}
+          section={section}
+          workspaceSection={wsByKey[section.key]}
+          workspaceReady={workspaceReady}
+          isAdmin={isAdmin}
+          onChanged={refresh}
+        />
+      ))}
+    </section>
+  );
+}
+
+function ReceiptLibrary({ slug, isAdmin }: { slug: string; isAdmin: boolean }) {
+  const { t } = useTranslation();
+  const coding = useCompiledPrompt(slug, "coding-task");
+  const review = useCompiledPrompt(slug, "review");
+  const scheduler = useCompiledPrompt(slug, "scheduler");
+
+  const compiledByKind: Partial<Record<TPromptKind, IPromptCompiledResponse>> = {
+    "coding-task": coding.data,
+    review: review.data,
+    scheduler: scheduler.data,
+  };
+  const error = coding.error || review.error || scheduler.error;
+  const ready = coding.data !== undefined && review.data !== undefined && scheduler.data !== undefined;
+
+  if (error) {
+    return (
+      <div className="rounded-md border border-danger-subtle bg-layer-1 p-4 text-13 text-danger-primary">
+        {t("Could not load prompt receipts for this workspace.")}
+      </div>
+    );
+  }
+
+  if (!ready) return <div className="text-13 text-secondary">{t("Loading…")}</div>;
+
+  return (
+    <section className="flex flex-col gap-3">
+      {KINDS.map((kind) => {
+        const compiled = compiledByKind[kind];
+        return compiled ? (
+          <ReceiptCard key={kind} slug={slug} kind={kind} compiled={compiled} isAdmin={isAdmin} />
+        ) : null;
+      })}
+    </section>
+  );
+}
 
 // ----------------------------------------------------------------------
 // Section card + inline editor
@@ -178,7 +275,7 @@ const PromptsListPage = observer(function PromptsListPage() {
 
 type SectionCardProps = {
   slug: string;
-  kind: TPromptKind;
+  previewKinds: TPromptKind[];
   /** Effective (user-scope) resolution of the section. */
   section: IResolvedSection;
   /** Workspace-scope resolution of the same section, if loaded. */
@@ -189,8 +286,17 @@ type SectionCardProps = {
   onChanged: () => Promise<void>;
 };
 
-function SectionCard({ slug, kind, section, workspaceSection, workspaceReady, isAdmin, onChanged }: SectionCardProps) {
+function SectionCard({
+  slug,
+  previewKinds,
+  section,
+  workspaceSection,
+  workspaceReady,
+  isAdmin,
+  onChanged,
+}: SectionCardProps) {
   const { t } = useTranslation();
+  const kindLabel = useKindLabel();
   const [editScope, setEditScope] = useState<TPromptScope | null>(null);
 
   // Gate workspace editing on the workspace-scope fetch having resolved: until
@@ -229,6 +335,13 @@ function SectionCard({ slug, kind, section, workspaceSection, workspaceReady, is
               </Badge>
             )}
           </div>
+          <div className="flex flex-wrap gap-1.5">
+            {previewKinds.map((kind) => (
+              <Badge key={kind} variant="accent-neutral" size="sm">
+                {kindLabel(kind)}
+              </Badge>
+            ))}
+          </div>
           {section.needs_attention && (
             <span className="text-11 text-warning-primary">
               {t("This override may no longer render after a recent change — review and re-save it.")}
@@ -258,7 +371,7 @@ function SectionCard({ slug, kind, section, workspaceSection, workspaceReady, is
       ) : (
         <SectionEditor
           slug={slug}
-          kind={kind}
+          previewKinds={previewKinds}
           sectionKey={section.key}
           scope={editScope}
           seed={seedFor(editScope)}
@@ -295,7 +408,7 @@ function SourceBadge({ source }: { source: string }) {
 
 type SectionEditorProps = {
   slug: string;
-  kind: TPromptKind;
+  previewKinds: TPromptKind[];
   sectionKey: string;
   scope: TPromptScope;
   seed: string;
@@ -307,7 +420,7 @@ type SectionEditorProps = {
 
 function SectionEditor({
   slug,
-  kind,
+  previewKinds,
   sectionKey,
   scope,
   seed,
@@ -317,8 +430,10 @@ function SectionEditor({
   onChanged,
 }: SectionEditorProps) {
   const { t } = useTranslation();
+  const kindLabel = useKindLabel();
   const promptStore = usePromptSection();
   const [draft, setDraft] = useState(seed);
+  const [previewKind, setPreviewKind] = useState<TPromptKind>(previewKinds[0] ?? "coding-task");
   const [saving, setSaving] = useState(false);
   const [reverting, setReverting] = useState(false);
   const [showRevertConfirm, setShowRevertConfirm] = useState(false);
@@ -426,12 +541,30 @@ function SectionEditor({
       </div>
 
       <div className="flex flex-col gap-2 rounded-md border border-subtle bg-layer-1 p-3">
-        <span className="text-11 font-medium text-secondary">
-          {t("Preview this draft against a real issue before saving")}
-        </span>
+        <div className="flex items-center justify-between gap-2">
+          <span className="text-11 font-medium text-secondary">{t("Preview draft")}</span>
+          {previewKinds.length > 1 && (
+            <div className="flex items-center gap-1">
+              {previewKinds.map((kind) => (
+                <button
+                  key={kind}
+                  type="button"
+                  onClick={() => setPreviewKind(kind)}
+                  className={`rounded px-2 py-1 text-11 transition-colors ${
+                    previewKind === kind
+                      ? "bg-accent-primary text-on-color"
+                      : "bg-layer-2 text-secondary hover:text-primary"
+                  }`}
+                >
+                  {kindLabel(kind)}
+                </button>
+              ))}
+            </div>
+          )}
+        </div>
         <PromptPreviewForm
           slug={slug}
-          kind={kind}
+          kind={previewKind}
           submitLabel={t("Preview draft")}
           draft={{ scope, sectionKey, body: draft }}
           nested
@@ -461,8 +594,19 @@ function SectionEditor({
 // Assembled "receipt" + preview
 // ----------------------------------------------------------------------
 
-function AssembledPanel({ compiled }: { compiled: IPromptCompiledResponse }) {
+function ReceiptCard({
+  slug,
+  kind,
+  compiled,
+  isAdmin,
+}: {
+  slug: string;
+  kind: TPromptKind;
+  compiled: IPromptCompiledResponse;
+  isAdmin: boolean;
+}) {
   const { t } = useTranslation();
+  const kindLabel = useKindLabel();
   const [open, setOpen] = useState(false);
 
   return (
@@ -472,16 +616,11 @@ function AssembledPanel({ compiled }: { compiled: IPromptCompiledResponse }) {
         onClick={() => setOpen((v) => !v)}
         className="flex w-full items-center justify-between px-4 py-3 text-13 font-medium text-primary"
       >
-        <span>{t("Assembled prompt")}</span>
+        <span>{kindLabel(kind)}</span>
         <span className="text-11 text-secondary">{open ? t("Hide") : t("Show")}</span>
       </button>
       {open && (
         <div className="flex flex-col gap-3 border-t border-subtle px-4 py-3">
-          <p className="text-11 text-secondary">
-            {t(
-              "This is how the sections above combine into the final template (Jinja markers intact) for runs you trigger."
-            )}
-          </p>
           <pre className="font-mono max-h-[60vh] overflow-auto rounded-md border border-subtle bg-layer-1 p-3 text-11 leading-5 whitespace-pre-wrap text-primary">
             {compiled.template_body}
           </pre>
@@ -495,21 +634,14 @@ function AssembledPanel({ compiled }: { compiled: IPromptCompiledResponse }) {
               </pre>
             </>
           )}
+          {isAdmin && (
+            <div className="flex flex-col gap-2 border-t border-subtle pt-3">
+              <h2 className="text-13 font-medium text-primary">{t("Preview")}</h2>
+              <PromptPreviewForm slug={slug} kind={kind} submitLabel={t("Preview")} />
+            </div>
+          )}
         </div>
       )}
-    </section>
-  );
-}
-
-function PreviewPanel({ slug, kind }: { slug: string; kind: TPromptKind }) {
-  const { t } = useTranslation();
-  return (
-    <section className="flex flex-col gap-2 rounded-md border border-subtle px-4 py-3">
-      <h2 className="text-13 font-medium text-primary">{t("Preview")}</h2>
-      <p className="text-11 text-secondary">
-        {t("Render the assembled prompt against real data, without starting a run.")}
-      </p>
-      <PromptPreviewForm slug={slug} kind={kind} submitLabel={t("Preview")} />
     </section>
   );
 }
