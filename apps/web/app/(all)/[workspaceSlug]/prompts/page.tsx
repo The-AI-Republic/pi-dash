@@ -41,6 +41,10 @@ function isPersonalSource(source: string): boolean {
   return source.startsWith("user:");
 }
 
+function sectionAnchorId(sectionKey: string): string {
+  return `prompt-section-${sectionKey}`;
+}
+
 function useKindLabel() {
   const { t } = useTranslation();
 
@@ -206,30 +210,56 @@ function SectionsLibrary({ slug, isAdmin }: { slug: string; isAdmin: boolean }) 
   if (!userReady) return <div className="text-13 text-secondary">{t("Loading…")}</div>;
 
   return (
-    <section className="flex flex-col gap-3">
-      {isAdmin && wsError && (
-        // The workspace-scope list is what gates the "Customize for
-        // workspace" buttons; if it failed, say so rather than leave an
-        // admin staring at silently-missing controls.
-        <div className="rounded-md border border-warning-subtle bg-layer-1 p-3 text-11 text-warning-primary">
-          {t(
-            "Couldn't load this workspace's section defaults, so workspace editing is unavailable. Reload to try again."
-          )}
-        </div>
-      )}
-      {entries.map(({ section, kinds }) => (
-        <SectionCard
-          key={section.key}
-          slug={slug}
-          previewKinds={kinds}
-          section={section}
-          workspaceSection={wsByKey[section.key]}
-          workspaceReady={workspaceReady}
-          isAdmin={isAdmin}
-          onChanged={refresh}
-        />
-      ))}
+    <section className="grid gap-4 lg:grid-cols-[16rem_minmax(0,1fr)]">
+      <SectionNavigation entries={entries} />
+      <div className="flex min-w-0 flex-col gap-3">
+        {isAdmin && wsError && (
+          // The workspace-scope list is what gates the "Customize for
+          // workspace" buttons; if it failed, say so rather than leave an
+          // admin staring at silently-missing controls.
+          <div className="rounded-md border border-warning-subtle bg-layer-1 p-3 text-11 text-warning-primary">
+            {t(
+              "Couldn't load this workspace's section defaults, so workspace editing is unavailable. Reload to try again."
+            )}
+          </div>
+        )}
+        {entries.map(({ section, kinds }) => (
+          <SectionCard
+            key={section.key}
+            sectionId={sectionAnchorId(section.key)}
+            slug={slug}
+            previewKinds={kinds}
+            section={section}
+            workspaceSection={wsByKey[section.key]}
+            workspaceReady={workspaceReady}
+            isAdmin={isAdmin}
+            onChanged={refresh}
+          />
+        ))}
+      </div>
     </section>
+  );
+}
+
+function SectionNavigation({ entries }: { entries: TSectionEntry[] }) {
+  const { t } = useTranslation();
+
+  return (
+    <aside className="self-start rounded-md border border-subtle bg-layer-1 lg:sticky lg:top-4">
+      <div className="border-b border-subtle px-3 py-2 text-11 font-medium text-secondary">{t("Sections")}</div>
+      <nav className="flex max-h-[calc(100vh-12rem)] flex-col gap-1 overflow-auto p-2">
+        {entries.map(({ section }) => (
+          <a
+            key={section.key}
+            href={`#${sectionAnchorId(section.key)}`}
+            className="rounded px-2 py-1.5 text-12 text-secondary hover:bg-layer-2 hover:text-primary"
+          >
+            <span className="block truncate">{section.title}</span>
+            <span className="block truncate text-10 text-placeholder">{section.key}</span>
+          </a>
+        ))}
+      </nav>
+    </aside>
   );
 }
 
@@ -274,6 +304,7 @@ function ReceiptLibrary({ slug, isAdmin }: { slug: string; isAdmin: boolean }) {
 // ----------------------------------------------------------------------
 
 type SectionCardProps = {
+  sectionId: string;
   slug: string;
   previewKinds: TPromptKind[];
   /** Effective (user-scope) resolution of the section. */
@@ -287,6 +318,7 @@ type SectionCardProps = {
 };
 
 function SectionCard({
+  sectionId,
   slug,
   previewKinds,
   section,
@@ -317,7 +349,7 @@ function SectionCard({
   };
 
   return (
-    <div className="rounded-md border border-subtle">
+    <div id={sectionId} className="scroll-mt-4 rounded-md border border-subtle">
       <div className="flex items-start justify-between gap-3 px-4 py-3">
         <div className="flex flex-col gap-1">
           <div className="flex items-center gap-2">
