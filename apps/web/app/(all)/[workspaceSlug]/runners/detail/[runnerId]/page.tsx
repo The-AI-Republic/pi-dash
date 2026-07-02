@@ -86,6 +86,12 @@ const RunnerDetailPage = observer(function RunnerDetailPage() {
                 <span className="font-mono text-11">{runner.id}</span>
               </MetaRow>
               <MetaRow label={t("Pod")}>{runner.pod_detail ? runner.pod_detail.name : "—"}</MetaRow>
+              <MetaRow label={t("Project")}>{runner.pod_detail?.project_identifier || "—"}</MetaRow>
+              <MetaRow label={t("Dev machine")}>
+                {runner.dev_machine_detail
+                  ? runner.dev_machine_detail.label || runner.dev_machine_detail.host_label || "—"
+                  : "—"}
+              </MetaRow>
               <MetaRow label={t("OS / Arch")}>{runner.os ? `${runner.os} / ${runner.arch}` : "—"}</MetaRow>
               <MetaRow label={t("Version")}>{runner.runner_version || "—"}</MetaRow>
               <MetaRow label={t("Protocol version")}>{runner.protocol_version}</MetaRow>

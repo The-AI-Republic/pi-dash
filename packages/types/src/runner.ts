@@ -10,6 +10,19 @@ export interface IPodMini {
   id: string;
   name: string;
   is_default: boolean;
+  /** Project FK uuid that owns this pod. */
+  project: string;
+  /** Project's human-friendly identifier (slug), e.g. ``PDASHOSS01``. */
+  project_identifier: string;
+}
+
+/** Identity of the dev machine a runner is bound to, surfaced on the
+ * runner detail page. ``null`` on legacy ``pidash connect`` runners with
+ * no dev_machine FK. */
+export interface IDevMachineMini {
+  id: string;
+  host_label: string;
+  label: string;
 }
 
 export interface IPod {
@@ -79,6 +92,8 @@ export interface IRunner {
   owner: string | null;
   pod: string;
   pod_detail: IPodMini | null;
+  /** Dev machine this runner runs on. ``null`` on legacy runners. */
+  dev_machine_detail: IDevMachineMini | null;
   /** Connection that owns this runner. Required post-refactor. */
   connection: string;
   /** Volatile per-active-run agent snapshot. Optional / null when the
