@@ -272,6 +272,8 @@ class AgentReTickEndpoint(APIView):
     permission_classes = [IsAuthenticated]
 
     def post(self, request):
+        import uuid
+
         from pi_dash.db.models.issue import Issue
         from pi_dash.orchestration import scheduling
 
@@ -279,6 +281,15 @@ class AgentReTickEndpoint(APIView):
         if not work_item_id:
             return Response(
                 {"error": "work_item is required for re-tick"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        try:
+            uuid.UUID(str(work_item_id))
+        except (ValueError, TypeError):
+            # A malformed value would make the ``pk=`` lookup raise Django's
+            # ValidationError (an unhandled 500) — return a clean 400 instead.
+            return Response(
+                {"error": "invalid work_item UUID format"},
                 status=status.HTTP_400_BAD_REQUEST,
             )
         issue = Issue.all_objects.filter(pk=work_item_id).first()

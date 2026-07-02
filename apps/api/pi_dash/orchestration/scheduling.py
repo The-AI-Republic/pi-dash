@@ -385,19 +385,37 @@ def re_tick_ticker(issue: Issue) -> dict:
     cap-hit pause (§6.1 / §4.4.1).
     """
     with transaction.atomic():
+        # Re-fetch and lock the issue inside the transaction so the state
+        # guard below sees the latest committed state, not a possibly-stale
+        # instance handed in by the caller. Without this, a concurrent
+        # transition out of a ticking state (e.g. to Done) could race the
+        # re-arm and leave the ticker enabled for a non-ticking issue.
+        locked_issue = (
+            Issue.all_objects.select_for_update()
+            .select_related("state", "project")
+            .filter(pk=issue.pk)
+            .first()
+        )
+        if locked_issue is None:
+            return {"granted": False, "reason": "no_issue", "ticker": None}
+
         sched = (
             IssueAgentTicker.objects.select_for_update()
-            .filter(issue=issue)
+            .filter(issue=locked_issue)
             .first()
         )
         if sched is None:
             return {"granted": False, "reason": "no_ticker", "ticker": None}
-        if not is_ticking_state(issue.state):
+        # Bind the freshly-locked issue so phase-aware methods
+        # (``_is_review_phase``/``effective_max_ticks``) resolve against the
+        # current state rather than lazy-loading a fresh copy.
+        sched.issue = locked_issue
+        if not is_ticking_state(locked_issue.state):
             return {"granted": False, "reason": "not_ticking_state", "ticker": sched}
         if not sched.cap_reached():
             return {"granted": False, "reason": "budget_not_exhausted", "ticker": sched}
 
-        grant = _project_default_max_ticks(issue)
+        grant = _project_default_max_ticks(locked_issue)
         review = sched._is_review_phase()
         new_cap = sched.effective_max_ticks() + grant
         if review:
@@ -407,7 +425,7 @@ def re_tick_ticker(issue: Issue) -> dict:
 
         # Re-arm: clear the disarm cause and restart the clock unless the
         # user disabled ticking on this issue or the project suppresses it.
-        suppress = sched.user_disabled or not _project_ticking_enabled(issue)
+        suppress = sched.user_disabled or not _project_ticking_enabled(locked_issue)
         sched.enabled = not suppress
         sched.disarm_reason = TickerDisarmReason.NONE
         sched.next_run_at = _compute_next_run_at(sched.effective_interval_seconds())
@@ -422,7 +440,7 @@ def re_tick_ticker(issue: Issue) -> dict:
         )
     logger.info(
         "agent_ticker: re-ticked issue=%s new_cap=%s enabled=%s next_run_at=%s",
-        issue.pk,
+        locked_issue.pk,
         new_cap,
         sched.enabled,
         sched.next_run_at,
