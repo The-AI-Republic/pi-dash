@@ -394,6 +394,121 @@ def _resolve_creator_for_trigger(issue: Issue, *, triggered_by: str, actor=None)
     return project.project_lead or project.default_assignee
 
 
+def preflight_eligibility_or_bounce(
+    issue: Issue, *, run_creator, pod, triggered_by: str
+) -> bool:
+    """Return True if dispatch can proceed; False if the issue was bounced.
+
+    Companion preflight to the four issue-run dispatch paths. When no
+    runner registered in ``pod`` has an owner the matcher's
+    ``filter_runs_usable_by_runner`` would accept for a run on ``issue``
+    created by ``run_creator``, this moves the issue back to its
+    project's Backlog state and posts a system comment explaining why.
+    The caller must NOT create the ``AgentRun`` when this returns False.
+
+    See ``.ai_design/issue_runner/design.md`` §6.6.
+    """
+    from pi_dash.runner.services.matcher import (
+        pod_has_runner_for_issue_principal,
+    )
+
+    creator_id = getattr(run_creator, "id", None)
+    if pod_has_runner_for_issue_principal(pod, issue, creator_id):
+        return True
+    _bounce_issue_no_eligible_runner(issue, triggered_by=triggered_by)
+    return False
+
+
+def _bounce_issue_no_eligible_runner(issue: Issue, *, triggered_by: str) -> None:
+    """Move ``issue`` back to Backlog and post the no-eligible-runner notice.
+
+    State move fires ``fire_state_transition`` which disarms the ticker as
+    a side-effect (Backlog isn't a delegation trigger). Skipped when the
+    issue is already in the BACKLOG state group — the comment still posts
+    so the user sees *why* a click / tick produced no run.
+
+    Target resolution (design §6.6 step 1): prefer the project's Backlog
+    state (``default`` first, then ``sequence``); if the project has no
+    Backlog state at all, fall back to ``project.default_state`` **only
+    when it is not itself a ticking state** — moving into a ticking state
+    would re-fire dispatch and bounce again in a loop. When neither a
+    Backlog nor a safe fallback exists, the issue is left in place and the
+    ticker is disarmed explicitly (below) so the next tick can't re-enter
+    this bounce forever.
+
+    The state move + comment post are wrapped in a single atomic block
+    so a partial bounce (state changed, no comment) can't survive a
+    crash mid-write — the user would otherwise be staring at an issue
+    that silently jumped back to Backlog with no explanation.
+    """
+    from django.utils.html import format_html
+
+    from pi_dash.db.models.issue import IssueComment
+    from pi_dash.db.models.state import State, StateGroup
+    from pi_dash.orchestration.workpad import get_agent_system_user
+
+    logger.info(
+        "agent_dispatch: bounce issue=%s reason=no-eligible-runner triggered_by=%s",
+        issue.pk,
+        triggered_by,
+    )
+
+    body = format_html(
+        "<p><strong>Agent run skipped — no eligible runner.</strong></p>"
+        "<p>No runner is registered in this pod that can serve this issue. "
+        "Add a runner under your account, or assign this issue to a "
+        "workspace member whose runner is registered here.</p>"
+    )
+
+    with transaction.atomic():
+        current_state_group = issue.state.group if issue.state_id else None
+        if current_state_group != StateGroup.BACKLOG.value:
+            target_state = (
+                State.objects.filter(
+                    project_id=issue.project_id,
+                    group=StateGroup.BACKLOG.value,
+                )
+                .order_by("-default", "sequence")
+                .first()
+            )
+            if target_state is None:
+                # Defensive: DEFAULT_STATES seeds a Backlog state for every
+                # project, but if one is missing fall back to the project's
+                # default_state — only when it isn't itself a ticking state,
+                # since moving into a ticking state re-fires dispatch and
+                # re-bounces (design §6.6 step 1).
+                fallback = issue.project.default_state
+                if fallback is not None and not is_ticking_state(fallback):
+                    target_state = fallback
+                else:
+                    logger.warning(
+                        "agent_dispatch: no safe backlog target for "
+                        "project=%s; issue=%s stays in current state, "
+                        "ticker disarmed",
+                        issue.project_id,
+                        issue.pk,
+                    )
+            if target_state is not None and target_state.pk != issue.state_id:
+                issue.state = target_state
+                issue.save(update_fields=["state", "updated_at"])
+
+        # If the issue couldn't be moved out of a ticking state, the
+        # state-move signal never disarmed the ticker — do it explicitly so
+        # a subsequent tick doesn't re-enter this bounce endlessly, spamming
+        # a comment each time.
+        if is_ticking_state(issue.state if issue.state_id else None):
+            disarm_ticker(issue)
+
+        IssueComment.objects.create(
+            issue=issue,
+            project=issue.project,
+            workspace=issue.workspace,
+            actor=get_agent_system_user(),
+            comment_html=body,
+            speaker_type=IssueComment.SpeakerType.AGENT,
+        )
+
+
 def dispatch_continuation_run(
     issue: Issue,
     *,
@@ -406,7 +521,8 @@ def dispatch_continuation_run(
     explicit ``actor`` for Comment & Run), pod, then delegates to
     :func:`pi_dash.orchestration.service._create_continuation_run`.
     Returns the created run, or ``None`` when the single-active-run
-    guardrail blocks creation or no pod is available.
+    guardrail blocks creation, no pod is available, or the eligibility
+    preflight bounced the issue (§6.6).
     """
     from pi_dash.orchestration import service as orchestration_service
 
@@ -445,6 +561,11 @@ def dispatch_continuation_run(
             issue.pk,
             triggered_by,
         )
+        return None
+
+    if not preflight_eligibility_or_bounce(
+        issue, run_creator=creator, pod=pod, triggered_by=triggered_by
+    ):
         return None
 
     outcome = orchestration_service._create_continuation_run(
@@ -505,6 +626,11 @@ def dispatch_run_ai_run(issue: Issue, *, actor) -> Optional[AgentRun]:
             issue.pk,
             TRIGGER_RUN_AI,
         )
+        return None
+
+    if not preflight_eligibility_or_bounce(
+        issue, run_creator=creator, pod=pod, triggered_by=TRIGGER_RUN_AI
+    ):
         return None
 
     parent = orchestration_service._latest_prior_run(issue)
