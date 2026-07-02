@@ -15,7 +15,7 @@ Issue context:
 - URL: {{ issue.url }}
 {% if issue.target_date %}- Target date: {{ issue.target_date }}{% endif %}
 
-Project: {{ project.name }} ({{ project.identifier }})
+This issue belongs to the Project: {{ project.name }} ({{ project.identifier }})
 {% if project.description %}
 {{ project.description }}
 {% endif %}
