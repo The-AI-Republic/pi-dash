@@ -391,7 +391,7 @@ def re_tick_ticker(issue: Issue) -> dict:
         # transition out of a ticking state (e.g. to Done) could race the
         # re-arm and leave the ticker enabled for a non-ticking issue.
         locked_issue = (
-            Issue.all_objects.select_for_update()
+            Issue.all_objects.select_for_update(of=("self",))
             .select_related("state", "project")
             .filter(pk=issue.pk)
             .first()
