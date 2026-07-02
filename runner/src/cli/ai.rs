@@ -144,9 +144,10 @@ async fn drive(
     let mut printed: HashSet<i64> = HashSet::new();
     loop {
         // Progress: surface any new tool activity / errors as they land.
-        if let Ok(msgs) = fetch_messages(client, slug, &thread_id, user_seq).await
-            && !json
-        {
+        // Only fetch progress when we will actually render it — in `--json`
+        // mode the transcript is printed once at the end, so skip the extra
+        // per-poll request. `!json` must come first so it short-circuits.
+        if !json && let Ok(msgs) = fetch_messages(client, slug, &thread_id, user_seq).await {
             for m in &msgs {
                 stream_progress(m, &mut printed);
             }

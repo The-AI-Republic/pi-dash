@@ -376,6 +376,10 @@ pidash ai "create an issue in ENG for the flaky login test and set priority high
 pidash ai what changed on ENG-42 this week
 ```
 
+Because everything after `ai` is treated as the message, put `--json` and
+`--timeout` **before** the command (e.g. `pidash ai --json what changed on ENG-42`);
+otherwise they are swallowed into the message text.
+
 The command opens a fresh assistant thread, sends your message, waits for the
 turn to finish (streaming tool activity to stderr), and prints the assistant's
 answer on stdout.
