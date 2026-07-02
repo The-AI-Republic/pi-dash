@@ -111,10 +111,14 @@ pub enum AppEvent {
     /// Result of restart_and_verify after a save.
     ReloadOutcomeUpdated(ReloadOutcome),
 
-    /// IPC-scoped runner-picker change. `runners[idx]` becomes the
-    /// scope for read endpoints; `IpcStatusUpdated` etc. will pick it
-    /// up on the next refresh.
-    SelectRunner(usize),
+    /// IPC-scoped runner-picker change by config-file index.
+    /// `config_working.runners[idx]` becomes the scope for read endpoints;
+    /// `IpcStatusUpdated` etc. will pick it up on the next refresh.
+    SelectRunnerByIndex(usize),
+    /// IPC-scoped runner-picker change by runner name. Used when the
+    /// visible list is built from live daemon status, whose order can differ
+    /// from `config.toml`.
+    SelectRunnerByName(String),
 }
 
 impl std::fmt::Debug for AppEvent {
@@ -141,19 +145,29 @@ impl std::fmt::Debug for AppEvent {
                 .finish(),
             AppEvent::ServiceStart => f.write_str("ServiceStart"),
             AppEvent::ServiceStop => f.write_str("ServiceStop"),
-            AppEvent::ServiceActionResult(s) => f.debug_tuple("ServiceActionResult").field(s).finish(),
+            AppEvent::ServiceActionResult(s) => {
+                f.debug_tuple("ServiceActionResult").field(s).finish()
+            }
             AppEvent::Refresh => f.write_str("Refresh"),
             AppEvent::SubmitRegister => f.write_str("SubmitRegister"),
-            AppEvent::EnrollOutcome { reload, .. } => {
-                f.debug_struct("EnrollOutcome").field("ok", &reload.ok).finish()
-            }
+            AppEvent::EnrollOutcome { reload, .. } => f
+                .debug_struct("EnrollOutcome")
+                .field("ok", &reload.ok)
+                .finish(),
             AppEvent::EnrollFailed(s) => f.debug_tuple("EnrollFailed").field(s).finish(),
-            AppEvent::SubmitRemoveRunner(n) => f.debug_tuple("SubmitRemoveRunner").field(n).finish(),
+            AppEvent::SubmitRemoveRunner(n) => {
+                f.debug_tuple("SubmitRemoveRunner").field(n).finish()
+            }
             AppEvent::SaveConfig => f.write_str("SaveConfig"),
             AppEvent::SaveAndQuit => f.write_str("SaveAndQuit"),
             AppEvent::DiscardConfigEdits => f.write_str("DiscardConfigEdits"),
             AppEvent::ReloadOutcomeUpdated(_) => f.write_str("ReloadOutcomeUpdated"),
-            AppEvent::SelectRunner(i) => f.debug_tuple("SelectRunner").field(i).finish(),
+            AppEvent::SelectRunnerByIndex(i) => {
+                f.debug_tuple("SelectRunnerByIndex").field(i).finish()
+            }
+            AppEvent::SelectRunnerByName(name) => {
+                f.debug_tuple("SelectRunnerByName").field(name).finish()
+            }
         }
     }
 }

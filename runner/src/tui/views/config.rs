@@ -430,7 +430,7 @@ pub fn runner_picker_bar(data: &AppData) -> Paragraph<'static> {
         );
     };
     let total = working.runners.len();
-    let picked = data.runner_picker_idx.min(total.saturating_sub(1));
+    let picked = data.picker_runner_index().unwrap_or(0).min(total.saturating_sub(1));
     let mut spans: Vec<Span<'static>> = Vec::new();
     for (i, r) in working.runners.iter().enumerate() {
         let label = format!(" {}. {} ", i + 1, r.name);

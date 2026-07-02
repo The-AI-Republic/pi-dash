@@ -42,9 +42,9 @@ use super::input::keymap::{self, Action, Context, KeymapRegistry, Resolution};
 use super::ipc_client::TuiIpc;
 use super::tui_runtime::{FrameRequester, Tui, TuiEvent};
 use super::view::tab::TabCtx;
+use super::view::tab::{Tab as TabTrait, TabKind};
 use super::view::{FocusPath, KeyHandled, View, ViewCompletion, ViewCtx};
 use super::views::{ApprovalsTab, GeneralTab, RunnerStatusTab, RunsTab};
-use super::view::tab::{Tab as TabTrait, TabKind};
 use crate::util::paths::Paths;
 
 /// Public re-export so `cli/tui.rs` keeps using `tui::app::Tab`.
@@ -71,8 +71,10 @@ pub struct AppData {
     pub last_approval_count: usize,
     pub service_state: Option<String>,
     pub service_action_msg: Option<String>,
-    /// Index into `config_working.runners` chosen by the runner picker.
-    pub runner_picker_idx: usize,
+    /// Runner identity chosen by the picker. Views may present runners in
+    /// different orders, so selection must be stored by name and resolved back
+    /// to the current config index only at mutation/render boundaries.
+    pub selected_runner_name: Option<String>,
     /// In-flight gates so a slow IPC call doesn't pile up across ticks.
     pub ipc_status_in_flight: bool,
     pub ipc_approvals_in_flight: bool,
@@ -105,7 +107,7 @@ impl AppData {
             last_approval_count: 0,
             service_state: None,
             service_action_msg: None,
-            runner_picker_idx: 0,
+            selected_runner_name: None,
             ipc_status_in_flight: false,
             ipc_approvals_in_flight: false,
             ipc_runs_in_flight: false,
@@ -115,29 +117,61 @@ impl AppData {
         }
     }
 
-    /// Resolve the current picker index to a runner *name* (the IPC
+    /// Resolve the current picker identity to a runner *name* (the IPC
     /// scope key). Returns `None` for "use the daemon's default."
     pub fn picker_runner_name(&self) -> Option<String> {
+        let runners = &self.config_working.as_ref()?.runners;
+        if runners.is_empty() {
+            return None;
+        }
+        if let Some(name) = self.selected_runner_name.as_deref()
+            && runners.iter().any(|r| r.name == name)
+        {
+            return Some(name.to_string());
+        }
+        runners.first().map(|r| r.name.clone())
+    }
+
+    pub fn picker_runner_index(&self) -> Option<usize> {
+        let name = self.picker_runner_name()?;
+        self.runner_index_by_name(&name)
+    }
+
+    pub fn runner_index_by_name(&self, name: &str) -> Option<usize> {
         self.config_working
+            .as_ref()?
+            .runners
+            .iter()
+            .position(|r| r.name == name)
+    }
+
+    pub fn select_runner_by_name(&mut self, name: &str) -> bool {
+        if self.runner_index_by_name(name).is_none() {
+            return false;
+        }
+        self.selected_runner_name = Some(name.to_string());
+        self.sync_picker_to_ipc();
+        true
+    }
+
+    pub fn select_runner_by_index(&mut self, idx: usize) -> bool {
+        let Some(name) = self
+            .config_working
             .as_ref()
-            .and_then(|c| c.runners.get(self.runner_picker_idx))
+            .and_then(|c| c.runners.get(idx))
             .map(|r| r.name.clone())
+        else {
+            return false;
+        };
+        self.selected_runner_name = Some(name);
+        self.sync_picker_to_ipc();
+        true
     }
 
     pub fn sync_picker_to_ipc(&mut self) {
-        let total = self
-            .config_working
-            .as_ref()
-            .map(|c| c.runners.len())
-            .unwrap_or(0);
-        if total == 0 {
-            self.ipc.selected_runner = None;
-            return;
-        }
-        if self.runner_picker_idx >= total {
-            self.runner_picker_idx = total - 1;
-        }
-        self.ipc.selected_runner = self.picker_runner_name();
+        let selected = self.picker_runner_name();
+        self.selected_runner_name = selected.clone();
+        self.ipc.selected_runner = selected;
     }
 }
 
@@ -573,8 +607,7 @@ impl App {
                             self.quit = true;
                         }
                         Err(e) => {
-                            self.data.config_edit_error =
-                                Some(format!("save failed: {e:#}"));
+                            self.data.config_edit_error = Some(format!("save failed: {e:#}"));
                             self.frame.schedule_frame();
                         }
                     }
@@ -594,20 +627,11 @@ impl App {
                 self.event_tx.send(AppEvent::Refresh);
                 self.frame.schedule_frame();
             }
-            AppEvent::SelectRunner(idx) => {
-                let total = self
-                    .data
-                    .config_working
-                    .as_ref()
-                    .map(|c| c.runners.len())
-                    .unwrap_or(0);
-                if total > 0 && idx < total {
-                    self.data.runner_picker_idx = idx;
-                    self.data.sync_picker_to_ipc();
-                    self.data.suppress_approval_alert = true;
-                    self.event_tx.send(AppEvent::Refresh);
-                    self.frame.schedule_frame();
-                }
+            AppEvent::SelectRunnerByIndex(idx) => {
+                self.select_runner_by_config_index(idx);
+            }
+            AppEvent::SelectRunnerByName(name) => {
+                self.select_runner_by_name(&name);
             }
         }
         Ok(())
@@ -774,10 +798,9 @@ impl App {
     /// (empty tree) and for keys the layered model doesn't claim
     /// (those continue down the legacy path / keymap).
     fn dispatch_focus_key(&mut self, key: KeyEvent) -> KeyHandled {
-        use super::view::focus::{locate, next_sibling, parent_siblings, FocusNode, NavDir};
+        use super::view::focus::{FocusNode, NavDir, locate, next_sibling, parent_siblings};
 
-        let tree = self
-            .with_tab_ctx(|tab, ctx| tab.focus_tree(ctx.data));
+        let tree = self.with_tab_ctx(|tab, ctx| tab.focus_tree(ctx.data));
         if tree.is_empty() {
             return KeyHandled::NotConsumed;
         }
@@ -872,8 +895,7 @@ impl App {
                 // an internal list cursor on the Runs tab). If it
                 // declines, consume anyway so the legacy keymap (Tabs
                 // ←/→) doesn't switch tabs out from under the user.
-                let inner =
-                    self.with_tab_ctx(|tab, ctx| tab.handle_item_key(key, ctx, &focus));
+                let inner = self.with_tab_ctx(|tab, ctx| tab.handle_item_key(key, ctx, &focus));
                 if matches!(inner, KeyHandled::Consumed) {
                     self.frame.schedule_frame();
                 }
@@ -896,8 +918,7 @@ impl App {
                         }
                         FocusNode::Item { id, .. } => {
                             let id = *id;
-                            let _ = self
-                                .with_tab_ctx(|tab, ctx| tab.activate_item(id, ctx));
+                            let _ = self.with_tab_ctx(|tab, ctx| tab.activate_item(id, ctx));
                             self.frame.schedule_frame();
                         }
                     }
@@ -905,8 +926,7 @@ impl App {
                 KeyHandled::Consumed
             }
             KeyCode::Esc => {
-                let consumed =
-                    self.with_tab_ctx(|tab, ctx| tab.handle_item_key(key, ctx, &focus));
+                let consumed = self.with_tab_ctx(|tab, ctx| tab.handle_item_key(key, ctx, &focus));
                 if matches!(consumed, KeyHandled::Consumed) {
                     self.frame.schedule_frame();
                     return KeyHandled::Consumed;
@@ -1014,9 +1034,7 @@ impl App {
         match action {
             Action::Quit => {
                 let dirty = match (&self.data.config_loaded, &self.data.config_working) {
-                    (Some(loaded), Some(working)) => {
-                        super::views::config::differs(loaded, working)
-                    }
+                    (Some(loaded), Some(working)) => super::views::config::differs(loaded, working),
                     _ => false,
                 };
                 let v = super::views::modals::confirm::ConfirmExitView::new(dirty);
@@ -1047,22 +1065,34 @@ impl App {
 
             Action::ListUp => {
                 self.with_tab_ctx(|tab, ctx| {
-                    tab.handle_key(KeyEvent::new(KeyCode::Up, crossterm::event::KeyModifiers::NONE), ctx);
+                    tab.handle_key(
+                        KeyEvent::new(KeyCode::Up, crossterm::event::KeyModifiers::NONE),
+                        ctx,
+                    );
                 });
             }
             Action::ListDown => {
                 self.with_tab_ctx(|tab, ctx| {
-                    tab.handle_key(KeyEvent::new(KeyCode::Down, crossterm::event::KeyModifiers::NONE), ctx);
+                    tab.handle_key(
+                        KeyEvent::new(KeyCode::Down, crossterm::event::KeyModifiers::NONE),
+                        ctx,
+                    );
                 });
             }
             Action::ListAccept => {
                 self.with_tab_ctx(|tab, ctx| {
-                    tab.handle_key(KeyEvent::new(KeyCode::Enter, crossterm::event::KeyModifiers::NONE), ctx);
+                    tab.handle_key(
+                        KeyEvent::new(KeyCode::Enter, crossterm::event::KeyModifiers::NONE),
+                        ctx,
+                    );
                 });
             }
             Action::ListCancel => {
                 self.with_tab_ctx(|tab, ctx| {
-                    tab.handle_key(KeyEvent::new(KeyCode::Esc, crossterm::event::KeyModifiers::NONE), ctx);
+                    tab.handle_key(
+                        KeyEvent::new(KeyCode::Esc, crossterm::event::KeyModifiers::NONE),
+                        ctx,
+                    );
                 });
             }
 
@@ -1122,7 +1152,7 @@ impl App {
 
             Action::RunnerPickerPrev => self.move_picker(-1),
             Action::RunnerPickerNext => self.move_picker(1),
-            Action::RunnerPickerJump(i) => self.event_tx.send(AppEvent::SelectRunner(i)),
+            Action::RunnerPickerJump(i) => self.event_tx.send(AppEvent::SelectRunnerByIndex(i)),
 
             Action::SaveConfig => self.event_tx.send(AppEvent::SaveConfig),
             Action::DiscardEdits => self.event_tx.send(AppEvent::DiscardConfigEdits),
@@ -1160,9 +1190,38 @@ impl App {
             return;
         }
         let n = total as isize;
-        let cur = self.data.runner_picker_idx as isize;
+        let cur = self.data.picker_runner_index().unwrap_or(0) as isize;
         let next = (cur + delta).rem_euclid(n) as usize;
-        self.event_tx.send(AppEvent::SelectRunner(next));
+        self.event_tx.send(AppEvent::SelectRunnerByIndex(next));
+    }
+
+    fn select_runner_by_config_index(&mut self, idx: usize) {
+        if !self.data.select_runner_by_index(idx) {
+            return;
+        }
+        self.runner_status.reconcile(&self.data);
+        self.data.suppress_approval_alert = true;
+        self.event_tx.send(AppEvent::Refresh);
+        self.frame.schedule_frame();
+    }
+
+    fn select_runner_by_name(&mut self, name: &str) {
+        if !self.data.select_runner_by_name(name) {
+            // The name came from the live daemon-status list, which can
+            // include a runner that is no longer in config_working (e.g.
+            // deleted from config but still reported until restart). Such a
+            // runner can't become the picker selection, so re-anchor the
+            // list highlight to the committed picker — otherwise the cursor
+            // strands on the unselectable row while the settings/live-state
+            // panels and the delete action still target the previous runner.
+            self.runner_status.reconcile(&self.data);
+            self.frame.schedule_frame();
+            return;
+        }
+        self.runner_status.reconcile(&self.data);
+        self.data.suppress_approval_alert = true;
+        self.event_tx.send(AppEvent::Refresh);
+        self.frame.schedule_frame();
     }
 
     pub fn handle_tui_event(&mut self, ev: TuiEvent) -> Result<bool> {

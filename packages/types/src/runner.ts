@@ -124,6 +124,16 @@ export interface IAgentRunEvent {
   created_at: string;
 }
 
+export type TAgentRunErrorSource = "agent" | "pidash_runner" | "pidash_cloud" | "unknown";
+
+export interface IAgentRunErrorDiagnostic {
+  source: TAgentRunErrorSource;
+  source_label: string;
+  kind: string;
+  summary: string;
+  action: string;
+}
+
 export interface IAgentRun {
   id: string;
   status: TAgentRunStatus;
@@ -143,6 +153,7 @@ export interface IAgentRun {
   ended_at: string | null;
   done_payload: Record<string, unknown> | null;
   error: string;
+  error_diagnostic: IAgentRunErrorDiagnostic | null;
   llm_model: string;
   input_tokens: number | null;
   output_tokens: number | null;

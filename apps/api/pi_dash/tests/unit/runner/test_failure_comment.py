@@ -237,6 +237,32 @@ def test_cloud_stall_reconciler_failure_does_not_post_comment(
 
 
 @pytest.mark.unit
+def test_agent_auth_failure_persists_actionable_cloud_error(
+    db, create_user, workspace, pod, issue
+):
+    runner = _make_runner(create_user, workspace, pod, name="workx_claude01")
+    runner.capabilities = ["agent:claude_code"]
+    runner.save(update_fields=["capabilities"])
+    run = _make_run(create_user, workspace, pod, runner, issue)
+    raw = "Failed to authenticate. API Error: 401 Invalid authentication credentials"
+
+    finalize_run_terminal(
+        runner,
+        run.id,
+        AgentRunStatus.FAILED,
+        error_detail=raw,
+    )
+
+    run.refresh_from_db()
+    assert run.error.startswith("401 authentication_failed\n")
+    assert (
+        'AI agent: Claude Code auth appears expired or invalid. Go to the dev machine for runner "workx_claude01" '
+        "and re-authenticate Claude Code"
+    ) in run.error
+    assert f"Raw agent error:\n{raw}" in run.error
+
+
+@pytest.mark.unit
 def test_completed_finalize_does_not_post_comment(
     db, create_user, workspace, pod, issue
 ):

@@ -155,6 +155,27 @@ def test_get_runs_lists_by_created_by(db, session_client, workspace, project):
     assert "not mine" not in prompts
 
 
+@pytest.mark.unit
+def test_get_run_detail_exposes_error_diagnostic(db, session_client, workspace, project):
+    error = "Failed to authenticate. API Error: 401 Invalid authentication credentials"
+    run = AgentRun.objects.create(
+        workspace=workspace,
+        created_by=workspace.owner,
+        pod=Pod.default_for_project(project),
+        prompt="broken auth",
+        status=AgentRunStatus.FAILED,
+        error=error,
+    )
+
+    resp = session_client.get(f"/api/runners/runs/{run.id}/")
+
+    assert resp.status_code == status.HTTP_200_OK
+    assert resp.data["error"] == error
+    assert resp.data["error_diagnostic"]["source"] == "agent"
+    assert resp.data["error_diagnostic"]["kind"] == "agent_authentication"
+    assert resp.data["error_diagnostic"]["summary"] == error
+
+
 # ---------------------------------------------------------------------------
 # GET /api/runners/runs/ — broadened "involved with" scope.
 #

@@ -18,6 +18,7 @@ from pi_dash.runner.models import (
     Runner,
     RunnerLiveState,
 )
+from pi_dash.runner.diagnostics import classify_run_error
 
 
 # Mirrors the runner-side charset rule in `runner/src/util/runner_name.rs`
@@ -201,6 +202,16 @@ class RunnerEnrollRequestSerializer(serializers.Serializer):
 
 class AgentRunSerializer(serializers.ModelSerializer):
     pod_detail = PodMiniSerializer(source="pod", read_only=True)
+    error_diagnostic = serializers.SerializerMethodField()
+
+    def get_error_diagnostic(self, run: AgentRun):
+        # Only the per-run detail drawer renders this block. Skip the
+        # classifier's per-row string scans when serializing a list (the
+        # runs table uses ``many=True``), which would otherwise pay the
+        # cost on every row for data the list view discards.
+        if isinstance(self.parent, serializers.ListSerializer):
+            return None
+        return classify_run_error(run.error)
 
     class Meta:
         model = AgentRun
@@ -222,6 +233,7 @@ class AgentRunSerializer(serializers.ModelSerializer):
             "ended_at",
             "done_payload",
             "error",
+            "error_diagnostic",
             "refusal_category",
             "llm_model",
             "input_tokens",
