@@ -170,6 +170,17 @@ impl RunEventMirror {
         ) || should_flush
     }
 
+    /// Buffer a full-content run event (e.g. the agent's narrative message)
+    /// that must reach the cloud verbatim rather than being folded into the
+    /// count-only compaction summary. Like a milestone event it first flushes
+    /// any pending compact buffer so ordering relative to surrounding
+    /// low-signal events is preserved, then records the payload as-is under
+    /// `kind`. Returns `true` if the caller should flush.
+    pub(crate) fn push_content(&mut self, kind: String, payload: serde_json::Value) -> bool {
+        let should_flush = self.flush_compact_to_pending();
+        self.push_record(kind, payload) || should_flush
+    }
+
     pub(crate) async fn flush(&mut self, out: &RunnerOut) -> bool {
         self.flush_compact_to_pending();
         if self.pending.is_empty() {
@@ -383,6 +394,44 @@ mod tests {
                 assert_eq!(events.len(), 1);
                 assert_eq!(events[0].seq, 1);
                 assert_eq!(events[0].kind, RUN_EVENT_COMPACT_KIND);
+            }
+            other => panic!("expected RunEvents, got {other:?}"),
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn run_event_mirror_forwards_content_verbatim_after_compacting_prior_low_signal() {
+        let runner_id = uuid::Uuid::new_v4();
+        let run_id = uuid::Uuid::new_v4();
+        let (out_tx, mut out_rx) = mpsc::channel::<Envelope<ClientMsg>>(8);
+        let out = RunnerOut::new(runner_id, out_tx);
+        let mut mirror = RunEventMirror::new(run_id);
+
+        // A couple of low-signal deltas, then the agent's narrative message.
+        assert!(!mirror.push(
+            "stream_event/content_block_delta".into(),
+            "raw method=stream_event/content_block_delta".into()
+        ));
+        let content = serde_json::json!({
+            "schema": "runner_agent_message_v1",
+            "text": "Let me first explore the original color of the button.",
+        });
+        assert!(!mirror.push_content("agent/message".into(), content.clone()));
+        assert!(mirror.flush(&out).await);
+
+        let env = tokio::time::timeout(std::time::Duration::from_secs(2), out_rx.recv())
+            .await
+            .expect("timed out waiting for RunEvents")
+            .expect("channel closed before RunEvents arrived");
+        match env.body {
+            ClientMsg::RunEvents { events, .. } => {
+                // First the compacted delta summary, then the verbatim message.
+                assert_eq!(events.len(), 2);
+                assert_eq!(events[0].seq, 1);
+                assert_eq!(events[0].kind, RUN_EVENT_COMPACT_KIND);
+                assert_eq!(events[1].seq, 2);
+                assert_eq!(events[1].kind, "agent/message");
+                assert_eq!(events[1].payload, content);
             }
             other => panic!("expected RunEvents, got {other:?}"),
         }
