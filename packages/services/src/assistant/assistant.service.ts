@@ -119,4 +119,12 @@ export class AssistantService extends APIService {
         throw err?.response?.data;
       });
   }
+
+  async generateTitle(description: string): Promise<{ title: string }> {
+    return this.post(`/api/users/me/llm-config/generate-title/`, { description })
+      .then((res) => res?.data)
+      .catch((err) => {
+        throw err?.response?.data;
+      });
+  }
 }

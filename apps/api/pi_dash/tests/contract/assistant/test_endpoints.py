@@ -173,3 +173,51 @@ def test_llm_config_lifecycle(world, kms_crypto):
     # delete
     assert c.delete("/api/users/me/llm-config/").status_code == 204
     assert c.get("/api/users/me/llm-config/").data["has_api_key"] is False
+
+
+# --- generate title ---
+
+GENERATE_TITLE_URL = "/api/users/me/llm-config/generate-title/"
+
+
+def test_generate_title_requires_llm_config(world, kms_crypto):
+    c = client_for(world.member)
+    res = c.post(GENERATE_TITLE_URL, {"description": "Ship the new dashboard export."}, format="json")
+    assert res.status_code == 422
+    assert res.data["error"] == "llm_config_missing"
+
+
+def test_generate_title_requires_description(world, kms_crypto):
+    configure_llm(world.member)
+    c = client_for(world.member)
+    res = c.post(GENERATE_TITLE_URL, {"description": "   "}, format="json")
+    assert res.status_code == 400
+    assert res.data["error"] == "description_required"
+
+
+def test_generate_title_returns_generated_title(world, kms_crypto, mocker):
+    mocker.patch(
+        "pi_dash.assistant.views.llm_config._generate_title",
+        return_value="Add dashboard CSV export",
+    )
+    configure_llm(world.member)
+    c = client_for(world.member)
+    res = c.post(
+        GENERATE_TITLE_URL,
+        {"description": "Users want to download the dashboard data as a CSV file."},
+        format="json",
+    )
+    assert res.status_code == 200
+    assert res.data["title"] == "Add dashboard CSV export"
+
+
+def test_generate_title_reports_provider_failure(world, kms_crypto, mocker):
+    mocker.patch(
+        "pi_dash.assistant.views.llm_config._generate_title",
+        side_effect=RuntimeError("boom"),
+    )
+    configure_llm(world.member)
+    c = client_for(world.member)
+    res = c.post(GENERATE_TITLE_URL, {"description": "Something to summarize."}, format="json")
+    assert res.status_code == 502
+    assert res.data["error"] == "provider_unreachable"

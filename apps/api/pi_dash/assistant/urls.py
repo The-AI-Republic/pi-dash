@@ -7,6 +7,7 @@ from django.urls import path
 from pi_dash.assistant.views.events import assistant_event_stream
 from pi_dash.assistant.views.llm_config import (
     UserLLMConfigEndpoint,
+    UserLLMConfigGenerateTitleEndpoint,
     UserLLMConfigTestEndpoint,
 )
 from pi_dash.assistant.views.messages import (
@@ -44,4 +45,9 @@ urlpatterns = [
     ),
     path("users/me/llm-config/", UserLLMConfigEndpoint.as_view(), name="assistant-llm-config"),
     path("users/me/llm-config/test/", UserLLMConfigTestEndpoint.as_view(), name="assistant-llm-config-test"),
+    path(
+        "users/me/llm-config/generate-title/",
+        UserLLMConfigGenerateTitleEndpoint.as_view(),
+        name="assistant-llm-config-generate-title",
+    ),
 ]

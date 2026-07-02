@@ -15,6 +15,7 @@ import type { EditorRefApi } from "@pi-dash/editor";
 import { useTranslation } from "@pi-dash/i18n";
 import { Button } from "@pi-dash/propel/button";
 import { TOAST_TYPE, setToast } from "@pi-dash/propel/toast";
+import { AssistantService } from "@pi-dash/services";
 import type { TIssue, TWorkspaceDraftIssue } from "@pi-dash/types";
 // hooks
 import { ToggleSwitch } from "@pi-dash/ui";
@@ -27,6 +28,7 @@ import {
   getTabIndex,
 } from "@pi-dash/utils";
 // components
+import { useLLMConfig } from "@/components/assistant/use-llm-config";
 import {
   IssueDefaultProperties,
   IssueDescriptionEditor,
@@ -50,6 +52,8 @@ import { DuplicateModalRoot } from "@/pi-dash-web/components/de-dupe/duplicate-m
 import { IssueTypeSelect, WorkItemTemplateSelect } from "@/pi-dash-web/components/issues/issue-modal";
 import { WorkItemModalAdditionalProperties } from "@/pi-dash-web/components/issues/issue-modal/modal-additional-properties";
 import { useDebouncedDuplicateIssues } from "@/pi-dash-web/hooks/use-debounced-duplicate-issues";
+
+const assistantService = new AssistantService();
 
 export interface IssueFormProps {
   data?: Partial<TIssue>;
@@ -106,6 +110,12 @@ export const IssueFormRoot = observer(function IssueFormRoot(props: IssueFormPro
   // states
   const [gptAssistantModal, setGptAssistantModal] = useState(false);
   const [isMoving, setIsMoving] = useState<boolean>(false);
+  const [isGeneratingTitle, setIsGeneratingTitle] = useState<boolean>(false);
+
+  // Pi Dash AI assistant availability — when configured, the title becomes
+  // optional and is generated from the description on save.
+  const { config: llmConfig } = useLLMConfig();
+  const aiAvailable = Boolean(llmConfig?.has_api_key);
 
   // refs
   const editorRef = useRef<EditorRefApi>(null);
@@ -164,7 +174,7 @@ export const IssueFormRoot = observer(function IssueFormRoot(props: IssueFormPro
 
   // derived values
   const projectDetails = projectId ? getProjectById(projectId) : undefined;
-  const isDisabled = isSubmitting || isApplyingTemplate;
+  const isDisabled = isSubmitting || isApplyingTemplate || isGeneratingTitle;
 
   const { getIndex } = getTabIndex(ETabIndices.ISSUE_FORM, isMobile);
 
@@ -238,6 +248,41 @@ export const IssueFormRoot = observer(function IssueFormRoot(props: IssueFormPro
       })
     )
       return;
+
+    // If the user left the title blank on a new work item and has a Pi Dash AI
+    // assistant configured, generate a title from the description before saving.
+    // Drafts skip this so closing the modal doesn't silently spend an AI call.
+    const isNewIssue = !data?.id;
+    const titleIsBlank = (formData.name ?? "").trim() === "";
+    if (isNewIssue && aiAvailable && titleIsBlank && !is_draft_issue) {
+      const descriptionText = getTextContent(formData.description_html ?? "").trim();
+      if (!descriptionText) {
+        setToast({
+          type: TOAST_TYPE.ERROR,
+          title: t("Error"),
+          message: t("Add a description so Pi Dash AI can generate a title."),
+        });
+        return;
+      }
+      try {
+        setIsGeneratingTitle(true);
+        const { title } = await assistantService.generateTitle(descriptionText);
+        const generatedTitle = (title ?? "").trim();
+        if (!generatedTitle) throw new Error("empty-title");
+        formData.name = generatedTitle;
+        setValue<"name">("name", generatedTitle);
+      } catch (error: unknown) {
+        const detail = (error as { detail?: string })?.detail;
+        setToast({
+          type: TOAST_TYPE.ERROR,
+          title: t("Error"),
+          message: detail ?? t("Pi Dash AI couldn't generate a title. Please add one manually."),
+        });
+        return;
+      } finally {
+        setIsGeneratingTitle(false);
+      }
+    }
 
     const submitData = !data?.id
       ? formData
@@ -450,6 +495,7 @@ export const IssueFormRoot = observer(function IssueFormRoot(props: IssueFormPro
                   issueTitleRef={issueTitleRef}
                   formState={formState}
                   handleFormChange={handleFormChange}
+                  aiAvailable={aiAvailable}
                 />
               </div>
             </div>

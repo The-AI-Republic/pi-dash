@@ -25,6 +25,12 @@ type TIssueTitleInputProps = {
   issueTitleRef: React.MutableRefObject<HTMLInputElement | null>;
   formState: FormState<TIssue>;
   handleFormChange: () => void;
+  /**
+   * When true, the user has a working Pi Dash AI assistant configured, so the
+   * title becomes optional — if left blank, Pi Dash AI generates one from the
+   * description on save. When false, the title stays required.
+   */
+  aiAvailable?: boolean;
 };
 
 export const IssueTitleInput = observer(function IssueTitleInput(props: TIssueTitleInputProps) {
@@ -33,6 +39,7 @@ export const IssueTitleInput = observer(function IssueTitleInput(props: TIssueTi
     issueTitleRef,
     formState: { errors },
     handleFormChange,
+    aiAvailable = false,
   } = props;
   // store hooks
   const { isMobile } = usePlatformOS();
@@ -40,8 +47,11 @@ export const IssueTitleInput = observer(function IssueTitleInput(props: TIssueTi
 
   const { getIndex } = getTabIndex(ETabIndices.ISSUE_FORM, isMobile);
 
+  // When AI is available the title is optional (generated on save), so only the
+  // length rule applies. Otherwise enforce the required + non-whitespace rules.
   const validateWhitespace = (value: string) => {
-    if (value.trim() === "") {
+    if (aiAvailable) return undefined;
+    if ((value ?? "").trim() === "") {
       return t("Title is required");
     }
     return undefined;
@@ -53,7 +63,7 @@ export const IssueTitleInput = observer(function IssueTitleInput(props: TIssueTi
         name="name"
         rules={{
           validate: validateWhitespace,
-          required: t("Title is required"),
+          required: aiAvailable ? false : t("Title is required"),
           maxLength: {
             value: 255,
             message: t("Title should be less than 255 characters"),
@@ -71,8 +81,9 @@ export const IssueTitleInput = observer(function IssueTitleInput(props: TIssueTi
             }}
             ref={issueTitleRef || ref}
             hasError={Boolean(errors.name)}
-            placeholder={t("Title")}
+            placeholder={aiAvailable ? t("Title is optional — Pi Dash AI will generate it") : t("Title")}
             className="w-full text-body-sm-regular"
+            // oxlint-disable-next-line jsx-a11y/no-autofocus -- The create/edit modal intentionally focuses the title field on open.
             autoFocus
             tabIndex={getIndex("name")}
           />
