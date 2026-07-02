@@ -69,6 +69,30 @@ const TIME_COMPONENT_REGEX = /\d{4}-\d{2}-\d{2}[T\s]\d{2}:\d{2}/;
 
 const hasTimeComponent = (value: string): boolean => TIME_COMPONENT_REGEX.test(value);
 
+// Building an Intl.DateTimeFormat is comparatively expensive, and these
+// formatters are invoked once per rendered timestamp (potentially hundreds of
+// times per list view). Cache one formatter per timezone id.
+const wallClockFormatterCache = new Map<string, Intl.DateTimeFormat>();
+
+const getWallClockFormatter = (zone: string): Intl.DateTimeFormat => {
+  const cached = wallClockFormatterCache.get(zone);
+  if (cached) return cached;
+  const formatter = new Intl.DateTimeFormat("en-US", {
+    timeZone: zone,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    // hourCycle "h23" pins midnight to 00 across engines; some default to h24
+    // (formatting midnight as "24") under hour12:false.
+    hourCycle: "h23",
+  });
+  wallClockFormatterCache.set(zone, formatter);
+  return formatter;
+};
+
 /**
  * @returns {Date | undefined} a "wall clock" Date, or undefined for an invalid instant
  * @description Converts an instant to a Date whose LOCAL fields equal the date/time
@@ -81,16 +105,7 @@ const hasTimeComponent = (value: string): boolean => TIME_COMPONENT_REGEX.test(v
 const getWallClockDateInTimeZone = (instant: Date, timeZone: string): Date | undefined => {
   if (!isValid(instant)) return undefined;
   const zone = isUsableTimeZone(timeZone) ? timeZone : UTC_TIME_ZONE;
-  const parts = new Intl.DateTimeFormat("en-US", {
-    timeZone: zone,
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit",
-    hour: "2-digit",
-    minute: "2-digit",
-    second: "2-digit",
-    hour12: false,
-  }).formatToParts(instant);
+  const parts = getWallClockFormatter(zone).formatToParts(instant);
 
   const lookup: Record<string, number> = {};
   for (const part of parts) {
@@ -99,7 +114,7 @@ const getWallClockDateInTimeZone = (instant: Date, timeZone: string): Date | und
     }
   }
 
-  // Some engines emit hour "24" for midnight when hour12 is false; normalize it.
+  // Safety net: normalize any stray "24" (h24) for midnight to 0.
   const hour = (lookup.hour ?? 0) % 24;
   return new Date(lookup.year, lookup.month - 1, lookup.day, hour, lookup.minute, lookup.second);
 };
