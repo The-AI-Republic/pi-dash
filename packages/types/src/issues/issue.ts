@@ -113,6 +113,11 @@ export type TIssueAgentTicker = {
   next_run_at: string | null;
   last_tick_at: string | null;
   disarm_reason?: "" | "left_ticking_state" | "cap_hit" | "terminal_signal" | "user_disabled";
+  /** True only when re-ticking would actually do something: the issue is
+   * still in a ticking state (In Progress / In Review) AND its current tick
+   * budget is exhausted. Gates the "re-tick" button so it never appears
+   * when the server would no-op. */
+  can_re_tick?: boolean;
 };
 
 export type TIssueAgentRunSummary = {
