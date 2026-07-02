@@ -355,29 +355,29 @@ def _bulk_create_runs(workspace, project, count, prefix="run"):
 
 
 @pytest.mark.unit
-def test_get_runs_defaults_to_first_page_of_fifty(db, session_client, workspace, project):
-    """With no page param, only the first 50 runs come back and the envelope
+def test_get_runs_defaults_to_first_page_of_thirty(db, session_client, workspace, project):
+    """With no page param, only the first 30 runs come back and the envelope
     reports the true totals."""
     _bulk_create_runs(workspace, project, 60)
     resp = session_client.get("/api/runners/runs/")
     assert resp.status_code == status.HTTP_200_OK
     assert resp.data["page"] == 1
-    assert resp.data["per_page"] == 50
+    assert resp.data["per_page"] == 30
     assert resp.data["total_count"] == 60
     assert resp.data["total_pages"] == 2
-    assert resp.data["count"] == 50
-    assert len(resp.data["results"]) == 50
+    assert resp.data["count"] == 30
+    assert len(resp.data["results"]) == 30
 
 
 @pytest.mark.unit
 def test_get_runs_second_page_returns_remainder(db, session_client, workspace, project):
     """Page 2 returns the remaining items and does not overlap page 1."""
-    _bulk_create_runs(workspace, project, 60)
+    _bulk_create_runs(workspace, project, 45)
     page1 = session_client.get("/api/runners/runs/", {"page": 1})
     page2 = session_client.get("/api/runners/runs/", {"page": 2})
     assert page2.status_code == status.HTTP_200_OK
     assert page2.data["page"] == 2
-    assert len(page2.data["results"]) == 10
+    assert len(page2.data["results"]) == 15
     ids1 = {r["id"] for r in page1.data["results"]}
     ids2 = {r["id"] for r in page2.data["results"]}
     assert ids1.isdisjoint(ids2)

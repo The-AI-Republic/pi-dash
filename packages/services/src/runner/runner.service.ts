@@ -111,7 +111,7 @@ export class RunnerService extends APIService {
 
   /**
    * List agent runs one page at a time. ``page`` is 1-based; the server
-   * defaults to 50 items per page. Returns the paginated envelope so callers
+   * defaults to 30 items per page. Returns the paginated envelope so callers
    * can render page controls and only the requested page is loaded.
    */
   async listRuns(workspaceId?: string, page = 1, perPage?: number): Promise<IAgentRunPage> {

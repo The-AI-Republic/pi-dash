@@ -31,7 +31,7 @@ from pi_dash.runner.services.validation import (
 )
 
 
-DEFAULT_PER_PAGE = 50
+DEFAULT_PER_PAGE = 30
 MAX_PER_PAGE = 200
 
 
