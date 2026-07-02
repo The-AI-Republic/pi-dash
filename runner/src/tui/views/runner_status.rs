@@ -275,6 +275,21 @@ impl Tab for RunnerStatusTab {
         }
     }
 
+    fn handle_paste(
+        &mut self,
+        text: String,
+        _ctx: &mut TabCtx<'_>,
+        _focus: &FocusPath,
+    ) -> KeyHandled {
+        // Only the settings edit buffer accepts text on this tab; route
+        // the paste there so tokens/paths can be pasted rather than typed.
+        if let Some(buf) = self.edit_buffer.as_mut() {
+            buf.insert_str(&text);
+            return KeyHandled::Consumed;
+        }
+        KeyHandled::NotConsumed
+    }
+
     fn activate_item(
         &mut self,
         item_id: super::super::view::CardId,
@@ -864,5 +879,35 @@ mod tests {
                 "{other} should be hidden for {kind:?}"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn paste_routes_to_settings_edit_buffer() {
+        use crate::tui::event_sender::AppEventSender;
+        use crate::tui::input::keymap::KeymapRegistry;
+        use crate::tui::tui_runtime::frame_requester::FrameScheduler;
+        use tokio::sync::mpsc;
+
+        let mut data = AppData::new(paths());
+        let mut tab = RunnerStatusTab::new();
+        tab.edit_buffer = Some(TextArea::with_text("abc"));
+
+        let (tx, _rx) = mpsc::unbounded_channel::<AppEvent>();
+        let sender = AppEventSender::new(tx);
+        let keymap = KeymapRegistry::new();
+        let p = paths();
+        let (frame, _draw) = FrameScheduler::spawn();
+        let mut ctx = TabCtx {
+            tx: &sender,
+            data: &mut data,
+            keymap: &keymap,
+            paths: &p,
+            frame: &frame,
+        };
+
+        let focus = FocusPath::default();
+        let h = tab.handle_paste("XYZ".into(), &mut ctx, &focus);
+        assert_eq!(h, KeyHandled::Consumed);
+        assert_eq!(tab.edit_buffer.as_ref().unwrap().text(), "abcXYZ");
     }
 }

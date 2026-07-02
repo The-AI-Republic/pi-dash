@@ -2,6 +2,8 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 # See the LICENSE file for details.
 
+import math
+
 from django.db import transaction
 from django.db.models import Q
 from django.utils import timezone
@@ -27,6 +29,30 @@ from pi_dash.runner.services.validation import (
     RunCreationError,
     validate_run_creation,
 )
+
+
+DEFAULT_PER_PAGE = 30
+MAX_PER_PAGE = 200
+
+
+def _parse_pagination(query_params) -> tuple[int, int]:
+    """Resolve ``page`` (1-based) and ``per_page`` from query params.
+
+    Invalid or out-of-bounds values fall back to safe defaults rather than
+    erroring: ``page`` clamps to a minimum of 1, ``per_page`` to ``[1,
+    MAX_PER_PAGE]`` with a ``DEFAULT_PER_PAGE`` fallback.
+    """
+
+    def _to_int(value, default):
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return default
+
+    page = max(1, _to_int(query_params.get("page"), 1))
+    per_page = _to_int(query_params.get("per_page"), DEFAULT_PER_PAGE)
+    per_page = max(1, min(per_page, MAX_PER_PAGE))
+    return page, per_page
 
 
 def _can_view_run(user, run: AgentRun) -> bool:
@@ -93,7 +119,28 @@ class AgentRunListEndpoint(APIView):
         workspace_id = request.query_params.get("workspace")
         if workspace_id:
             qs = qs.filter(workspace_id=workspace_id)
-        return Response(AgentRunSerializer(qs[:200], many=True).data)
+
+        # Page-number pagination. The list grew unbounded (previously capped at
+        # a flat 200), so the client now requests one page at a time and only
+        # the first page loads by default. ``page`` is 1-based and reflected in
+        # the runs-view URL so a page is directly linkable. Out-of-range pages
+        # return an empty ``results`` with the real ``total_pages`` so the UI
+        # can recover.
+        page, per_page = _parse_pagination(request.query_params)
+        total_count = qs.count()
+        total_pages = max(1, math.ceil(total_count / per_page))
+        offset = (page - 1) * per_page
+        results = qs[offset : offset + per_page]
+        return Response(
+            {
+                "results": AgentRunSerializer(results, many=True).data,
+                "count": len(results),
+                "total_count": total_count,
+                "total_pages": total_pages,
+                "page": page,
+                "per_page": per_page,
+            }
+        )
 
     def post(self, request):
         triggered_by = (request.data.get("triggered_by") or "").strip()
@@ -256,6 +303,62 @@ class AgentRunListEndpoint(APIView):
             AgentRunSerializer(run).data,
             status=status.HTTP_201_CREATED,
         )
+
+
+class AgentReTickEndpoint(APIView):
+    """Re-grant a fresh tick budget to an exhausted issue ticker.
+
+    Manual "re-ticking" from the issue detail AgentRun card. Body must
+    include ``work_item`` (issue id). Grants an extra phase-sized budget
+    and re-arms the ticker **only** when the issue is still in a ticking
+    state and the current budget is exhausted; otherwise it is a no-op.
+    See ``scheduling.re_tick_ticker`` for the exact rules.
+    """
+
+    authentication_classes = [BaseSessionAuthentication]
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        import uuid
+
+        from pi_dash.db.models.issue import Issue
+        from pi_dash.orchestration import scheduling
+
+        work_item_id = request.data.get("work_item")
+        if not work_item_id:
+            return Response(
+                {"error": "work_item is required for re-tick"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        try:
+            uuid.UUID(str(work_item_id))
+        except (ValueError, TypeError):
+            # A malformed value would make the ``pk=`` lookup raise Django's
+            # ValidationError (an unhandled 500) — return a clean 400 instead.
+            return Response(
+                {"error": "invalid work_item UUID format"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        issue = Issue.all_objects.filter(pk=work_item_id).first()
+        if issue is None:
+            return Response({"error": "issue not found"}, status=status.HTTP_404_NOT_FOUND)
+        if not is_workspace_member(request.user, issue.workspace_id):
+            return Response({"error": "issue not found"}, status=status.HTTP_404_NOT_FOUND)
+
+        result = scheduling.re_tick_ticker(issue)
+        ticker = result["ticker"]
+        payload = {
+            "granted": result["granted"],
+            "reason": result["reason"],
+        }
+        if ticker is not None:
+            payload["tick_count"] = ticker.tick_count
+            payload["max_ticks"] = ticker.effective_max_ticks()
+            payload["enabled"] = ticker.enabled
+            payload["next_run_at"] = (
+                ticker.next_run_at.isoformat() if ticker.next_run_at else None
+            )
+        return Response(payload, status=status.HTTP_200_OK)
 
 
 class AgentRunDetailEndpoint(APIView):

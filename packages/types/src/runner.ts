@@ -164,6 +164,20 @@ export interface IAgentRun {
   events?: IAgentRunEvent[];
 }
 
+/** One page of agent runs from `GET /api/runners/runs/`. */
+export interface IAgentRunPage {
+  results: IAgentRun[];
+  /** Number of items on this page. */
+  count: number;
+  /** Total items across all pages. */
+  total_count: number;
+  /** Total number of pages (at least 1, even when empty). */
+  total_pages: number;
+  /** Current 1-based page. */
+  page: number;
+  per_page: number;
+}
+
 export type TApprovalKind = "command_execution" | "file_change" | "network_access" | "other";
 export type TApprovalDecision = "accept" | "decline" | "accept_for_session";
 export type TApprovalStatus = "pending" | "accepted" | "declined" | "expired";

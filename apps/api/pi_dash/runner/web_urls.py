@@ -15,6 +15,7 @@ from pi_dash.runner.views import (
     AgentChatSessionDetailEndpoint,
     AgentChatSessionListEndpoint,
     AgentChatWarmEndpoint,
+    AgentReTickEndpoint,
     AgentRunCancelEndpoint,
     AgentRunDetailEndpoint,
     AgentRunListEndpoint,
@@ -88,6 +89,7 @@ urlpatterns = [
     path("projects/", ProjectListEndpoint.as_view(), name="project-list"),
     # Runs
     path("runs/", AgentRunListEndpoint.as_view(), name="runner-runs"),
+    path("re-tick/", AgentReTickEndpoint.as_view(), name="runner-re-tick"),
     path(
         "runs/<uuid:run_id>/",
         AgentRunDetailEndpoint.as_view(),

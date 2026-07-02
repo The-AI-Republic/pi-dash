@@ -53,6 +53,14 @@ pub enum IssueCommand {
     /// Attach a GitHub pull request to a work item. Alias of `attach-review`
     /// kept for existing scripts.
     AttachPr(AttachReviewArgs),
+    /// Re-grant a fresh ticking budget to an issue whose agent-ticker budget
+    /// is exhausted, so the periodic agent runs resume. No-op (reports
+    /// `granted: false`) unless the issue is currently in a ticking state
+    /// (In Progress / In Review) AND its current budget is used up.
+    ReTick {
+        /// Project-scoped identifier, e.g. `ENG-42`.
+        identifier: String,
+    },
 }
 
 #[derive(Debug, Args)]
@@ -190,6 +198,7 @@ pub async fn run(args: IssueArgs, paths: &crate::util::paths::Paths) -> i32 {
         IssueCommand::Search(s) => cmd_search(&client, s).await,
         IssueCommand::AttachReview(a) => cmd_attach_review(&client, a).await,
         IssueCommand::AttachPr(a) => cmd_attach_review(&client, a).await,
+        IssueCommand::ReTick { identifier } => cmd_re_tick(&client, &identifier).await,
     };
     match result {
         Ok(()) => 0,
@@ -468,6 +477,23 @@ async fn cmd_move(client: &ApiClient, args: MoveArgs) -> Result<(), CliError> {
         client.env.workspace_slug, issue.project_id, issue.id
     );
     let resp = client.post(&path, &body).await?;
+    println!(
+        "{}",
+        serde_json::to_string(&resp).expect("serialize JSON value")
+    );
+    Ok(())
+}
+
+async fn cmd_re_tick(client: &ApiClient, identifier: &str) -> Result<(), CliError> {
+    let issue = resolve_issue(client, identifier).await?;
+    let path = format!(
+        "workspaces/{}/projects/{}/work-items/{}/re-tick/",
+        client.env.workspace_slug, issue.project_id, issue.id
+    );
+    // The server applies the guardrails (ticking state + exhausted budget)
+    // and reports `granted: false` with a reason when nothing changed, so a
+    // no-op is a normal 200 rather than an error.
+    let resp = client.post(&path, &serde_json::json!({})).await?;
     println!(
         "{}",
         serde_json::to_string(&resp).expect("serialize JSON value")

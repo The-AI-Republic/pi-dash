@@ -252,6 +252,17 @@ impl View for AddRunnerView {
         }
     }
 
+    fn handle_paste(&mut self, text: String, _ctx: &mut ViewCtx<'_>) -> KeyHandled {
+        // Route the paste to the focused field. The token is the whole
+        // reason this modal exists ("paste enrollment token"), so pasting
+        // must land in whichever TextArea currently has focus.
+        if let Some(area) = self.focused_textarea_mut() {
+            area.insert_str(&text);
+            return KeyHandled::Consumed;
+        }
+        KeyHandled::NotConsumed
+    }
+
     fn is_complete(&self) -> bool {
         self.complete
     }
@@ -314,5 +325,75 @@ fn mask_token(raw: &str) -> String {
         "*".repeat(raw.len())
     } else {
         format!("{}…{}", &raw[..2], &raw[raw.len() - 2..])
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tui::event::AppEvent;
+    use crate::tui::event_sender::AppEventSender;
+    use crate::tui::input::keymap::KeymapRegistry;
+    use crate::util::paths::Paths;
+    use tokio::sync::mpsc;
+
+    fn paths() -> Paths {
+        let root = tempfile::tempdir().expect("tempdir").keep();
+        Paths {
+            config_dir: root.join("config"),
+            data_dir: root.join("data"),
+            runtime_dir: root.join("runtime"),
+        }
+    }
+
+    fn view() -> AddRunnerView {
+        let data = AppData::new(paths());
+        AddRunnerView::open(&data)
+    }
+
+    fn with_ctx(f: impl FnOnce(&mut ViewCtx<'_>)) {
+        let (tx, _rx) = mpsc::unbounded_channel::<AppEvent>();
+        let sender = AppEventSender::new(tx);
+        let keymap = KeymapRegistry::new();
+        let p = paths();
+        let mut ctx = ViewCtx {
+            tx: &sender,
+            keymap: &keymap,
+            paths: &p,
+        };
+        f(&mut ctx);
+    }
+
+    #[test]
+    fn paste_lands_in_focused_token_field() {
+        let mut v = view();
+        // Default focus is the token field — the whole point of this modal.
+        with_ctx(|ctx| {
+            let h = v.handle_paste("enroll-tok-123".into(), ctx);
+            assert_eq!(h, KeyHandled::Consumed);
+        });
+        assert_eq!(v.token.text(), "enroll-tok-123");
+    }
+
+    #[test]
+    fn paste_follows_focus_to_other_fields() {
+        let mut v = view();
+        v.focus = Focus::HostLabel;
+        v.host_label.clear();
+        with_ctx(|ctx| {
+            assert_eq!(v.handle_paste("mac-mini".into(), ctx), KeyHandled::Consumed);
+        });
+        assert_eq!(v.host_label.text(), "mac-mini");
+        assert_eq!(v.token.text(), "");
+    }
+
+    #[test]
+    fn paste_ignored_when_submit_focused() {
+        let mut v = view();
+        v.focus = Focus::Submit;
+        with_ctx(|ctx| {
+            assert_eq!(v.handle_paste("nope".into(), ctx), KeyHandled::NotConsumed);
+        });
+        assert!(v.token.text().is_empty());
     }
 }

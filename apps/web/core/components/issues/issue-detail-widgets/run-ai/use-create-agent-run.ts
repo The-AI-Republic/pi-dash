@@ -8,6 +8,7 @@ import { useCallback, useState } from "react";
 import { useTranslation } from "@pi-dash/i18n";
 import { TOAST_TYPE, setToast } from "@pi-dash/propel/toast";
 // hooks
+import { useIssueDetail } from "@/hooks/store/use-issue-detail";
 import { useWorkspace } from "@/hooks/store/use-workspace";
 // services
 import { AgentRunService } from "@/services/runner";
@@ -16,6 +17,7 @@ const agentRunService = new AgentRunService();
 
 type CreateRunArgs = {
   workspaceSlug: string;
+  projectId: string;
   issueId: string;
   /** Selects the dispatch path. Both modes have the prompt rendered
    * server-side from the issue's phase template (``coding-task`` for
@@ -29,11 +31,12 @@ type CreateRunArgs = {
 
 export function useCreateAgentRun() {
   const workspaceStore = useWorkspace();
+  const { fetchIssue } = useIssueDetail();
   const { t } = useTranslation();
   const [isSubmitting, setIsSubmitting] = useState(false);
 
   const triggerRun = useCallback(
-    async ({ workspaceSlug, issueId, mode }: CreateRunArgs) => {
+    async ({ workspaceSlug, projectId, issueId, mode }: CreateRunArgs) => {
       const workspace = workspaceStore.getWorkspaceBySlug(workspaceSlug);
       if (!workspace?.id) {
         setToast({
@@ -61,6 +64,15 @@ export function useCreateAgentRun() {
           title: t("Agent run started"),
           message: t("The AI agent will pick up this work item shortly."),
         });
+        // Re-fetch the issue so the AgentRun status card reflects the run we
+        // just started (it lands as ``queued`` — an active status — which also
+        // kicks off the card's live poller). Best-effort: a refresh failure
+        // must not turn the successful trigger into an error.
+        try {
+          await fetchIssue(workspaceSlug, projectId, issueId);
+        } catch {
+          // ignore — the card will catch up on its next scheduled refresh
+        }
         return run;
       } catch (error: unknown) {
         const message = (error as { error?: string })?.error ?? t("Could not start the agent run. Please try again.");
@@ -74,7 +86,7 @@ export function useCreateAgentRun() {
         setIsSubmitting(false);
       }
     },
-    [workspaceStore, t]
+    [workspaceStore, fetchIssue, t]
   );
 
   return { triggerRun, isSubmitting };
