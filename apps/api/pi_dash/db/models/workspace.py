@@ -258,6 +258,68 @@ class WorkspaceMemberInvite(BaseModel):
         return f"{self.workspace.name} {self.email} {self.accepted}"
 
 
+class WorkspaceJoinRequest(BaseModel):
+    """A request from a workspace-less user to join a workspace, addressed to a
+    workspace admin by email.
+
+    This is the inverse of ``WorkspaceMemberInvite``: instead of an admin
+    inviting an email, a prospective member (who is signed in but has no
+    workspace) types a workspace admin's email during onboarding to ask to
+    join. A workspace admin then approves or denies the request.
+    """
+
+    class Status(models.TextChoices):
+        PENDING = "PENDING", "Pending"
+        APPROVED = "APPROVED", "Approved"
+        DENIED = "DENIED", "Denied"
+
+    # Nullable on purpose: when the typed admin email does not resolve to any
+    # workspace admin we still record the request (with a null workspace) so the
+    # requester's onboarding "pending" state is identical whether or not the
+    # email belonged to a real admin. This avoids leaking which emails are
+    # workspace admins (enumeration).
+    workspace = models.ForeignKey(
+        "db.Workspace",
+        on_delete=models.CASCADE,
+        related_name="workspace_join_request",
+        null=True,
+        blank=True,
+    )
+    requester = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="workspace_join_request",
+    )
+    admin_email = models.CharField(max_length=255)
+    message = models.TextField(null=True, blank=True)
+    role = models.PositiveSmallIntegerField(choices=ROLE_CHOICES, default=15)
+    status = models.CharField(max_length=20, choices=Status.choices, default=Status.PENDING)
+    responded_at = models.DateTimeField(null=True, blank=True)
+    responded_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        related_name="responded_workspace_join_request",
+        null=True,
+        blank=True,
+    )
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=["requester", "workspace"],
+                condition=models.Q(deleted_at__isnull=True, status="PENDING"),
+                name="workspace_join_request_unique_requester_workspace_when_pending",
+            )
+        ]
+        verbose_name = "Workspace Join Request"
+        verbose_name_plural = "Workspace Join Requests"
+        db_table = "workspace_join_requests"
+        ordering = ("-created_at",)
+
+    def __str__(self):
+        return f"{self.requester_id} -> {self.admin_email} ({self.status})"
+
+
 class Team(BaseModel):
     name = models.CharField(max_length=255, verbose_name="Team Name")
     description = models.TextField(verbose_name="Team Description", blank=True)
