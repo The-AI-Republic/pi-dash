@@ -287,7 +287,7 @@ export const WORKSPACE_SIDEBAR_STATIC_NAVIGATION_ITEMS: Record<string, IWorkspac
     href: `/runners/`,
     access: [EUserWorkspaceRoles.ADMIN, EUserWorkspaceRoles.MEMBER],
     highlight: (pathname: string, url: string) => pathname.includes(url),
-    tooltipTranslationKey: "Manage your AI Agent connectivities",
+    tooltipTranslationKey: "Manage your AI Worker connectivities",
   },
   prompts: {
     key: "prompts",

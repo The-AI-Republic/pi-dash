@@ -893,7 +893,7 @@ export default {
   "Make public": "Make public",
   "Manage features": "Manage features",
   "Manage widgets": "Manage widgets",
-  "Manage your AI Agent connectivities": "Manage your AI Agent connectivities",
+  "Manage your AI Worker connectivities": "Manage your AI Worker connectivities",
   Manifest: "Manifest",
   Manual: "Manual",
   "Manually or through automation, you can archive work items that are completed or cancelled. Find them here once archived.":
