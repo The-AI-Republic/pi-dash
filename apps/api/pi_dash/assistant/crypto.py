@@ -4,17 +4,17 @@
 
 """At-rest encryption for BYOK LLM API keys.
 
-A thin, provider-agnostic seam (:class:`CipherBackend`) over a managed KMS, so
-the call sites (``encrypt`` / ``decrypt`` / ``rotate`` / ``is_configured``) stay
-the same regardless of which provider does the crypto. BYOK provider keys are
-tiny, so backends encrypt them directly (no envelope); ``encrypt`` returns the
-opaque ciphertext stored in ``UserLLMConfig.api_key_encrypted``.
+A thin, provider-agnostic seam (:class:`CipherBackend`) over the configured
+secret backend, so the call sites (``encrypt`` / ``decrypt`` / ``rotate`` /
+``is_configured``) stay the same regardless of which provider does the crypto.
+BYOK provider keys are tiny, so backends encrypt them directly (no envelope);
+``encrypt`` returns the opaque ciphertext stored in
+``UserLLMConfig.api_key_encrypted``.
 
-Only **AWS KMS** is implemented today. To add another provider (GCP KMS, Azure
-Key Vault, Vault Transit, …) implement :class:`CipherBackend`, register it in
-``_BACKENDS``, and select it with ``ASSISTANT_CRYPTO_BACKEND`` — no call-site
-changes. Whatever the provider, the goal is the same: the plaintext key
-material never lives in app config, and decrypt is auditable + revocable.
+AWS KMS and local Fernet keys are implemented today. To add another provider
+(GCP KMS, Azure Key Vault, Vault Transit, …) implement :class:`CipherBackend`,
+register it in ``_BACKENDS``, and select it with ``ASSISTANT_CRYPTO_BACKEND`` —
+no call-site changes.
 
 Conventions for implementations:
   - "ciphertext I can't decrypt with this key" and "not configured" both raise
@@ -28,6 +28,7 @@ import abc
 
 import boto3
 from botocore.exceptions import BotoCoreError, ClientError
+from cryptography.fernet import Fernet, InvalidToken, MultiFernet
 from django.conf import settings
 
 from pi_dash.assistant.errors import AssistantNotConfigured
@@ -67,9 +68,7 @@ class AwsKmsBackend(CipherBackend):
     # key" (tampered/foreign blob or wrong CMK) — a data problem → reported as
     # AssistantNotConfigured. Everything else (AccessDenied, throttling,
     # endpoint down) is operational and propagates.
-    _UNDECRYPTABLE_CODES = frozenset(
-        {"InvalidCiphertextException", "IncorrectKeyException", "NotFoundException"}
-    )
+    _UNDECRYPTABLE_CODES = frozenset({"InvalidCiphertextException", "IncorrectKeyException", "NotFoundException"})
 
     def __init__(self, client=None):
         # ``client`` is injectable for tests; built lazily otherwise.
@@ -81,9 +80,7 @@ class AwsKmsBackend(CipherBackend):
     def _require_key_id(self) -> str:
         key_id = self._key_id()
         if not key_id:
-            raise AssistantNotConfigured(
-                "ASSISTANT_KMS_KEY_ID is not set; BYOK keys cannot be stored."
-            )
+            raise AssistantNotConfigured("ASSISTANT_KMS_KEY_ID is not set; BYOK keys cannot be stored.")
         return key_id
 
     def _kms(self):
@@ -134,10 +131,70 @@ class AwsKmsBackend(CipherBackend):
         return resp["CiphertextBlob"]
 
 
+class FernetBackend(CipherBackend):
+    """Local/self-hosted backend using app-managed Fernet keys.
+
+    Config: ``ASSISTANT_ENCRYPTION_KEY`` as a comma-separated key list. The
+    first key encrypts new values; all keys can decrypt existing values, which
+    lets operators prepend a new key and call ``rotate`` without downtime.
+    """
+
+    def __init__(self):
+        self._fernet: MultiFernet | None = None
+
+    def _raw_keys(self) -> list[str]:
+        raw = (getattr(settings, "ASSISTANT_ENCRYPTION_KEY", "") or "").strip()
+        return [key.strip() for key in raw.split(",") if key.strip()]
+
+    def _require_fernet(self) -> MultiFernet:
+        if self._fernet is not None:
+            return self._fernet
+
+        keys = self._raw_keys()
+        if not keys:
+            raise AssistantNotConfigured("ASSISTANT_ENCRYPTION_KEY is not set; BYOK keys cannot be stored.")
+        try:
+            self._fernet = MultiFernet([Fernet(key.encode("utf-8")) for key in keys])
+        except ValueError as exc:
+            raise AssistantNotConfigured("ASSISTANT_ENCRYPTION_KEY must contain valid Fernet key(s).") from exc
+        return self._fernet
+
+    def is_configured(self) -> bool:
+        if not self._raw_keys():
+            return False
+        try:
+            self._require_fernet()
+        except AssistantNotConfigured:
+            return False
+        return True
+
+    def encrypt(self, plaintext: str) -> bytes:
+        return self._require_fernet().encrypt(plaintext.encode("utf-8"))
+
+    def decrypt(self, token: bytes) -> str:
+        if not token:
+            return ""
+        try:
+            return self._require_fernet().decrypt(bytes(token)).decode("utf-8")
+        except InvalidToken as exc:
+            raise AssistantNotConfigured(
+                "Stored BYOK key could not be decrypted with the configured encryption key."
+            ) from exc
+
+    def rotate(self, token: bytes) -> bytes:
+        try:
+            return self._require_fernet().rotate(bytes(token))
+        except InvalidToken as exc:
+            raise AssistantNotConfigured(
+                "Stored BYOK key could not be decrypted with the configured encryption key."
+            ) from exc
+
+
 # Registry of available backends, keyed by the ``ASSISTANT_CRYPTO_BACKEND``
 # value. Add a provider here once its CipherBackend is implemented.
 _BACKENDS: dict[str, type[CipherBackend]] = {
     "aws-kms": AwsKmsBackend,
+    "fernet": FernetBackend,
 }
 
 # Process-wide cached backend instance (its KMS client is reused across calls).
@@ -151,8 +208,7 @@ def get_backend() -> CipherBackend:
         backend_cls = _BACKENDS.get(name)
         if backend_cls is None:
             raise AssistantNotConfigured(
-                f"unknown ASSISTANT_CRYPTO_BACKEND {name!r} "
-                f"(available: {', '.join(sorted(_BACKENDS))})"
+                f"unknown ASSISTANT_CRYPTO_BACKEND {name!r} (available: {', '.join(sorted(_BACKENDS))})"
             )
         _backend = backend_cls()
     return _backend
