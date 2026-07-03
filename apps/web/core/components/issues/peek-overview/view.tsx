@@ -61,6 +61,7 @@ export const IssueView = observer(function IssueView(props: IIssueView) {
   const [isArchiveIssueModalOpen, setIsArchiveIssueModalOpen] = useState(false);
   const [isDuplicateIssueModalOpen, setIsDuplicateIssueModalOpen] = useState(false);
   const [isEditIssueModalOpen, setIsEditIssueModalOpen] = useState(false);
+  const [isMoveIssueModalOpen, setIsMoveIssueModalOpen] = useState(false);
   // ref
   const issuePeekOverviewRef = useRef<HTMLDivElement>(null);
   const editorRef = useRef<EditorRefApi>(null);
@@ -82,9 +83,14 @@ export const IssueView = observer(function IssueView(props: IIssueView) {
   const toggleArchiveIssueModal = (value: boolean) => setIsArchiveIssueModalOpen(value);
   const toggleDuplicateIssueModal = (value: boolean) => setIsDuplicateIssueModalOpen(value);
   const toggleEditIssueModal = (value: boolean) => setIsEditIssueModalOpen(value);
+  const toggleMoveIssueModal = (value: boolean) => setIsMoveIssueModalOpen(value);
 
   const isAnyLocalModalOpen =
-    isDeleteIssueModalOpen || isArchiveIssueModalOpen || isDuplicateIssueModalOpen || isEditIssueModalOpen;
+    isDeleteIssueModalOpen ||
+    isArchiveIssueModalOpen ||
+    isDuplicateIssueModalOpen ||
+    isEditIssueModalOpen ||
+    isMoveIssueModalOpen;
 
   usePeekOverviewOutsideClickDetector(
     issuePeekOverviewRef,
@@ -163,6 +169,7 @@ export const IssueView = observer(function IssueView(props: IIssueView) {
                 toggleArchiveIssueModal={toggleArchiveIssueModal}
                 toggleDuplicateIssueModal={toggleDuplicateIssueModal}
                 toggleEditIssueModal={toggleEditIssueModal}
+                toggleMoveIssueModal={toggleMoveIssueModal}
                 handleRestoreIssue={handleRestore}
                 isArchived={is_archived}
                 issueId={issueId}

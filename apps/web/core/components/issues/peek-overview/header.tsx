@@ -63,6 +63,7 @@ export type PeekOverviewHeaderProps = {
   toggleArchiveIssueModal: (value: boolean) => void;
   toggleDuplicateIssueModal: (value: boolean) => void;
   toggleEditIssueModal: (value: boolean) => void;
+  toggleMoveIssueModal: (value: boolean) => void;
   handleRestoreIssue: () => Promise<void>;
   isSubmitting: TNameDescriptionLoader;
 };
@@ -82,6 +83,7 @@ export const IssuePeekOverviewHeader = observer(function IssuePeekOverviewHeader
     toggleArchiveIssueModal,
     toggleDuplicateIssueModal,
     toggleEditIssueModal,
+    toggleMoveIssueModal,
     handleRestoreIssue,
     isSubmitting,
   } = props;
@@ -116,15 +118,14 @@ export const IssuePeekOverviewHeader = observer(function IssuePeekOverviewHeader
     isArchived,
   });
 
-  const handleCopyText = (e: React.MouseEvent<HTMLButtonElement>) => {
+  const handleCopyText = async (e: React.MouseEvent<HTMLButtonElement>) => {
     e.stopPropagation();
     e.preventDefault();
-    copyUrlToClipboard(workItemLink).then(() => {
-      setToast({
-        type: TOAST_TYPE.SUCCESS,
-        title: t("Link copied!"),
-        message: t("Link copied to clipboard"),
-      });
+    await copyUrlToClipboard(workItemLink);
+    setToast({
+      type: TOAST_TYPE.SUCCESS,
+      title: t("Link copied!"),
+      message: t("Link copied to clipboard"),
     });
   };
 
@@ -132,14 +133,15 @@ export const IssuePeekOverviewHeader = observer(function IssuePeekOverviewHeader
     try {
       const deleteIssue = issueDetails?.archived_at ? removeArchivedIssue : removeIssue;
 
-      return deleteIssue(workspaceSlug, projectId, issueId).then(() => {
-        setPeekIssue(undefined);
-      });
+      await deleteIssue(workspaceSlug, projectId, issueId);
+      setPeekIssue(undefined);
     } catch (_error) {
       setToast({
         title: t("Error!"),
         type: TOAST_TYPE.ERROR,
-        message: t("{entity} delete failed", { entity: t("{count, plural, one {Work item} other {Work items}}", { count: 1 }) }),
+        message: t("{entity} delete failed", {
+          entity: t("{count, plural, one {Work item} other {Work items}}", { count: 1 }),
+        }),
       });
     }
   };
@@ -220,6 +222,7 @@ export const IssuePeekOverviewHeader = observer(function IssuePeekOverviewHeader
               toggleArchiveIssueModal={toggleArchiveIssueModal}
               toggleDuplicateIssueModal={toggleDuplicateIssueModal}
               toggleEditIssueModal={toggleEditIssueModal}
+              toggleMoveIssueModal={toggleMoveIssueModal}
               isPeekMode
             />
           )}

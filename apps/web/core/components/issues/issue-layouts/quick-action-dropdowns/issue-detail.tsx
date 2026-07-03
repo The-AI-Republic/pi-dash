@@ -37,6 +37,7 @@ type TWorkItemDetailQuickActionProps = IQuickActionProps & {
   toggleDeleteIssueModal?: (value: boolean) => void;
   toggleDuplicateIssueModal?: (value: boolean) => void;
   toggleArchiveIssueModal?: (value: boolean) => void;
+  toggleMoveIssueModal?: (value: boolean) => void;
   isPeekMode?: boolean;
 };
 
@@ -57,6 +58,7 @@ export const WorkItemDetailQuickActions = observer(function WorkItemDetailQuickA
     toggleDeleteIssueModal,
     toggleDuplicateIssueModal,
     toggleArchiveIssueModal,
+    toggleMoveIssueModal,
     isPeekMode = false,
   } = props;
   // router
@@ -129,6 +131,7 @@ export const WorkItemDetailQuickActions = observer(function WorkItemDetailQuickA
 
   const customMoveAction = () => {
     setMoveIssueModal(true);
+    if (toggleMoveIssueModal) toggleMoveIssueModal(true);
   };
 
   // Menu items and modals using helper
@@ -162,23 +165,15 @@ export const WorkItemDetailQuickActions = observer(function WorkItemDetailQuickA
     .map((item) => {
       // Customize edit action for work item
       if (item.key === "edit") {
-        return {
-          ...item,
+        return Object.assign({}, item, {
           shouldRender: isEditingAllowed && !isPeekMode,
-        };
-      }
-      // Customize delete action for work item
-      if (item.key === "delete") {
-        return {
-          ...item,
-        };
+        });
       }
       // Hide copy link in peek mode
       if (item.key === "copy-link") {
-        return {
-          ...item,
+        return Object.assign({}, item, {
           shouldRender: !isPeekMode,
-        };
+        });
       }
       return item;
     })
@@ -234,7 +229,10 @@ export const WorkItemDetailQuickActions = observer(function WorkItemDetailQuickA
       {issue.project_id && (
         <MoveIssueModal
           isOpen={moveIssueModal}
-          onClose={() => setMoveIssueModal(false)}
+          onClose={() => {
+            setMoveIssueModal(false);
+            if (toggleMoveIssueModal) toggleMoveIssueModal(false);
+          }}
           issueId={issue.id}
           projectId={issue.project_id}
         />
