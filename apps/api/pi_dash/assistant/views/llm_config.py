@@ -17,18 +17,7 @@ from pi_dash.assistant.models import ProviderKind, UserLLMConfig
 from pi_dash.assistant.runtime.llm import build_model
 from pi_dash.assistant.serializers import UserLLMConfigSerializer
 from pi_dash.assistant.views._base import AssistantBaseView
-from pi_dash.ee.assistant.model_provider import resolve_model_for_user
-
-# Work-item titles are capped at 255 chars by the model; keep the AI-generated
-# one comfortably inside a single readable line.
-_TITLE_MAX_LEN = 255
-_TITLE_SYSTEM_PROMPT = (
-    "You write concise, specific titles for project work items. "
-    "Given a work item's description, reply with a single short title "
-    "(at most 80 characters) that captures what it is about. "
-    "Return only the title text: no surrounding quotes, no trailing "
-    "punctuation, and no preamble such as 'Title:'."
-)
+from pi_dash.ee.assistant.model_provider import generate_title_for_user
 
 
 def _serialize(cfg: UserLLMConfig | None) -> dict:
@@ -128,10 +117,10 @@ class AssistantGenerateTitleEndpoint(AssistantBaseView):
 
     A workspace-scoped assistant action that lives alongside the chat under
     ``workspaces/<slug>/ai-assistant/``. Used by the create-issue modal when the
-    user leaves the title blank but has the assistant configured. It resolves the
-    model through the same CE/EE seam as the chat (:func:`resolve_model_for_user`),
-    so platform-provided keys work identically, and reports errors with the same
-    stable machine codes as the rest of the assistant surface.
+    user leaves the title blank but has the assistant configured. It calls the
+    configured provider directly with a single prompt instead of starting an
+    agent turn, and reports errors with the same stable machine codes as the
+    rest of the assistant surface.
     """
 
     throttle_classes = [AssistantGenerateTitleThrottle]
@@ -151,12 +140,9 @@ class AssistantGenerateTitleEndpoint(AssistantBaseView):
             )
 
         try:
-            model = resolve_model_for_user(request.user)
+            title = generate_title_for_user(request.user, description)
         except AssistantError as exc:
             return Response({"error": exc.code, "detail": exc.detail}, status=exc.http_status)
-
-        try:
-            title = _generate_title(model, description)
         except Exception:  # noqa: BLE001 — never echo raw errors (may reveal internal hosts)
             return Response(
                 {"error": "provider_unreachable", "detail": "Could not reach the AI provider."},
@@ -169,30 +155,6 @@ class AssistantGenerateTitleEndpoint(AssistantBaseView):
                 status=status.HTTP_502_BAD_GATEWAY,
             )
         return Response({"title": title})
-
-
-def _generate_title(model, description: str) -> str:
-    from pydantic_ai import Agent, UsageLimits
-
-    agent = Agent(model=model, system_prompt=_TITLE_SYSTEM_PROMPT)
-
-    async def _go():
-        result = await agent.run(description, usage_limits=UsageLimits(request_limit=1))
-        return result.output
-
-    return _clean_title(async_to_sync(_go)())
-
-
-def _clean_title(raw: str) -> str:
-    """Normalize the model's reply into a single-line title within the length cap."""
-    title = (raw or "").strip()
-    if not title:
-        return ""
-    # The model occasionally wraps the title in quotes or spreads it over lines.
-    title = title.splitlines()[0].strip().strip("\"'").strip()
-    if len(title) > _TITLE_MAX_LEN:
-        title = title[:_TITLE_MAX_LEN].rstrip()
-    return title
 
 
 def _run_test(cfg: UserLLMConfig, api_key: str) -> tuple[bool, str, str]:

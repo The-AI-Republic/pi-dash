@@ -3,6 +3,7 @@
 // See the LICENSE file for details.
 
 import { API_BASE_URL } from "@pi-dash/constants";
+import type { AxiosRequestConfig } from "axios";
 import type {
   IAssistantMessage,
   IAssistantSendResponse,
@@ -120,11 +121,11 @@ export class AssistantService extends APIService {
       });
   }
 
-  async generateTitle(slug: string, description: string): Promise<{ title: string }> {
-    return this.post(`${this.base(slug)}/generate-title/`, { description })
+  async generateTitle(slug: string, description: string, config: AxiosRequestConfig = {}): Promise<{ title: string }> {
+    return this.post(`${this.base(slug)}/generate-title/`, { description }, config)
       .then((res) => res?.data)
       .catch((err) => {
-        throw err?.response?.data;
+        throw err?.response?.data ?? err;
       });
   }
 }

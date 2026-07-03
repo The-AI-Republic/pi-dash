@@ -1564,8 +1564,10 @@ export default {
   "Title is optional — Pi Dash AI will generate it": "Title is optional — Pi Dash AI will generate it",
   "Title is required": "Title is required",
   "Add a description so Pi Dash AI can generate a title.": "Add a description so Pi Dash AI can generate a title.",
-  "Pi Dash AI couldn't generate a title. Please add one manually.":
-    "Pi Dash AI couldn't generate a title. Please add one manually.",
+  "Generating title": "Generating title",
+  "Pi Dash AI is generating a title.": "Pi Dash AI is generating a title.",
+  "Pi Dash AI couldn't generate a title. Try again or enter a title manually.":
+    "Pi Dash AI couldn't generate a title. Try again or enter a title manually.",
   "Title should be less than {length} characters": "Title should be less than {length} characters",
   "Title should be less than 255 characters": "Title should be less than 255 characters",
   "To create work items or manage your work, you need to create a project or be a part of one.":

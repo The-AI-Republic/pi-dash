@@ -31,6 +31,7 @@ type TIssueTitleInputProps = {
    * description on save. When false, the title stays required.
    */
   aiAvailable?: boolean;
+  disabled?: boolean;
 };
 
 export const IssueTitleInput = observer(function IssueTitleInput(props: TIssueTitleInputProps) {
@@ -40,6 +41,7 @@ export const IssueTitleInput = observer(function IssueTitleInput(props: TIssueTi
     formState: { errors },
     handleFormChange,
     aiAvailable = false,
+    disabled = false,
   } = props;
   // store hooks
   const { isMobile } = usePlatformOS();
@@ -83,6 +85,7 @@ export const IssueTitleInput = observer(function IssueTitleInput(props: TIssueTi
             hasError={Boolean(errors.name)}
             placeholder={aiAvailable ? t("Title is optional — Pi Dash AI will generate it") : t("Title")}
             className="w-full text-body-sm-regular"
+            disabled={disabled}
             // oxlint-disable-next-line jsx-a11y/no-autofocus -- The create/edit modal intentionally focuses the title field on open.
             autoFocus
             tabIndex={getIndex("name")}
