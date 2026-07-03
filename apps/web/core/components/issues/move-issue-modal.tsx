@@ -4,7 +4,7 @@
  * See the LICENSE file for details.
  */
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { observer } from "mobx-react";
 import { useParams, useRouter } from "next/navigation";
 import { AlertCircle } from "lucide-react";
@@ -38,7 +38,7 @@ export const MoveIssueModal = observer(function MoveIssueModal(props: Props) {
   // pi dash hooks
   const { t } = useTranslation();
   // store hooks
-  const { joinedProjectIds, getProjectById, getProjectIdentifierById } = useProject();
+  const { joinedProjectIds, getProjectById, getProjectIdentifierById, fetchProjects } = useProject();
   const {
     issues: { moveIssue },
   } = useIssues(EIssuesStoreType.PROJECT);
@@ -49,6 +49,18 @@ export const MoveIssueModal = observer(function MoveIssueModal(props: Props) {
     () => joinedProjectIds.filter((id) => id !== projectId),
     [joinedProjectIds, projectId]
   );
+
+  useEffect(() => {
+    if (!isOpen || !workspaceSlug) return;
+
+    fetchProjects(workspaceSlug.toString()).catch(() => {
+      setToast({
+        type: TOAST_TYPE.ERROR,
+        title: t("Error!"),
+        message: t("Projects could not be loaded. Please try again."),
+      });
+    });
+  }, [fetchProjects, isOpen, t, workspaceSlug]);
 
   const filteredProjectIds = targetProjectIds.filter((id) => {
     const project = getProjectById(id);
@@ -88,7 +100,10 @@ export const MoveIssueModal = observer(function MoveIssueModal(props: Props) {
       });
       router.push(link);
     } catch (error) {
-      const message = (error as { error?: string })?.error ?? t("Work item could not be moved. Please try again.");
+      const message =
+        (error as { error?: string; detail?: string })?.error ??
+        (error as { detail?: string })?.detail ??
+        t("Work item could not be moved. Please try again.");
       setToast({
         type: TOAST_TYPE.ERROR,
         title: t("Error!"),

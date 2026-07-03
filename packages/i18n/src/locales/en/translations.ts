@@ -990,6 +990,7 @@ export default {
   "No matching cycles": "No matching cycles",
   "No matching members": "No matching members",
   "No matching projects": "No matching projects",
+  "No other projects available to move this work item to.": "No other projects available to move this work item to.",
   "No matching results": "No matching results",
   "No matching results.": "No matching results.",
   "No matching work items found": "No matching work items found",
@@ -1214,6 +1215,7 @@ export default {
   "Project updated successfully": "Project updated successfully",
   Projects: "Projects",
   "Projects and work items": "Projects and work items",
+  "Projects could not be loaded. Please try again.": "Projects could not be loaded. Please try again.",
   Prompt: "Prompt",
   "Prompt is required.": "Prompt is required.",
   "Prompt saved": "Prompt saved",
@@ -1712,6 +1714,7 @@ export default {
     "Work item could not be added to the cycle. Please try again.",
   "Work item could not be archived. Please try again.": "Work item could not be archived. Please try again.",
   "Work item could not be created. Please try again.": "Work item could not be created. Please try again.",
+  "Work item could not be moved. Please try again.": "Work item could not be moved. Please try again.",
   "Work item could not be removed from the cycle. Please try again.":
     "Work item could not be removed from the cycle. Please try again.",
   "Work item could not be removed from the module. Please try again.":
@@ -1725,6 +1728,7 @@ export default {
   "Work item does not exist": "Work item does not exist",
   "Work item ID copied to clipboard.": "Work item ID copied to clipboard.",
   "Work item link copied to clipboard": "Work item link copied to clipboard",
+  "Work item moved successfully.": "Work item moved successfully.",
   "Work item removed from the cycle successfully.": "Work item removed from the cycle successfully.",
   "Work item removed from the module successfully.": "Work item removed from the module successfully.",
   "Work item subscribed successfully": "Work item subscribed successfully",
