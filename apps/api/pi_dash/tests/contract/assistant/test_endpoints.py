@@ -21,7 +21,7 @@ def client_for(user):
 
 
 def base(ws):
-    return f"/api/workspaces/{ws.slug}/assistant"
+    return f"/api/workspaces/{ws.slug}/ai-assistant"
 
 
 # --- threads ---
@@ -154,13 +154,13 @@ def test_cannot_access_other_users_thread(world, kms_crypto):
 def test_llm_config_lifecycle(world, kms_crypto):
     c = client_for(world.member)
     # unset -> 200 with has_api_key False
-    res = c.get("/api/users/me/llm-config/")
+    res = c.get("/api/users/me/ai-assistant/config/")
     assert res.status_code == 200
     assert res.data["has_api_key"] is False
 
     # set
     res = c.put(
-        "/api/users/me/llm-config/",
+        "/api/users/me/ai-assistant/config/",
         {"provider_kind": "openai_compatible", "base_url": "https://api.example.com/v1", "model_name": "m", "api_key": "sk-12345678"},
         format="json",
     )
@@ -171,18 +171,19 @@ def test_llm_config_lifecycle(world, kms_crypto):
     assert "api_key" not in res.data
 
     # delete
-    assert c.delete("/api/users/me/llm-config/").status_code == 204
-    assert c.get("/api/users/me/llm-config/").data["has_api_key"] is False
+    assert c.delete("/api/users/me/ai-assistant/config/").status_code == 204
+    assert c.get("/api/users/me/ai-assistant/config/").data["has_api_key"] is False
 
 
 # --- generate title ---
 
-GENERATE_TITLE_URL = "/api/users/me/llm-config/generate-title/"
+def gen_title_url(ws):
+    return f"{base(ws)}/generate-title/"
 
 
 def test_generate_title_requires_llm_config(world, kms_crypto):
     c = client_for(world.member)
-    res = c.post(GENERATE_TITLE_URL, {"description": "Ship the new dashboard export."}, format="json")
+    res = c.post(gen_title_url(world.ws), {"description": "Ship the new dashboard export."}, format="json")
     assert res.status_code == 422
     assert res.data["error"] == "llm_config_missing"
 
@@ -190,7 +191,7 @@ def test_generate_title_requires_llm_config(world, kms_crypto):
 def test_generate_title_requires_description(world, kms_crypto):
     configure_llm(world.member)
     c = client_for(world.member)
-    res = c.post(GENERATE_TITLE_URL, {"description": "   "}, format="json")
+    res = c.post(gen_title_url(world.ws), {"description": "   "}, format="json")
     assert res.status_code == 400
     assert res.data["error"] == "description_required"
 
@@ -203,7 +204,7 @@ def test_generate_title_returns_generated_title(world, kms_crypto, mocker):
     configure_llm(world.member)
     c = client_for(world.member)
     res = c.post(
-        GENERATE_TITLE_URL,
+        gen_title_url(world.ws),
         {"description": "Users want to download the dashboard data as a CSV file."},
         format="json",
     )
@@ -218,6 +219,12 @@ def test_generate_title_reports_provider_failure(world, kms_crypto, mocker):
     )
     configure_llm(world.member)
     c = client_for(world.member)
-    res = c.post(GENERATE_TITLE_URL, {"description": "Something to summarize."}, format="json")
+    res = c.post(gen_title_url(world.ws), {"description": "Something to summarize."}, format="json")
     assert res.status_code == 502
     assert res.data["error"] == "provider_unreachable"
+
+
+def test_generate_title_blocked_for_guest(world, kms_crypto):
+    c = client_for(world.guest)
+    res = c.post(gen_title_url(world.ws), {"description": "Ship the new dashboard export."}, format="json")
+    assert res.status_code == 403

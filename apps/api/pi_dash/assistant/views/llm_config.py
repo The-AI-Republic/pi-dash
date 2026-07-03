@@ -14,8 +14,10 @@ from pi_dash.app.views.base import BaseAPIView
 from pi_dash.assistant import crypto, ssrf
 from pi_dash.assistant.errors import AssistantError
 from pi_dash.assistant.models import ProviderKind, UserLLMConfig
-from pi_dash.assistant.runtime.llm import build_model, resolve_byok_model
+from pi_dash.assistant.runtime.llm import build_model
 from pi_dash.assistant.serializers import UserLLMConfigSerializer
+from pi_dash.assistant.views._base import AssistantBaseView
+from pi_dash.ee.assistant.model_provider import resolve_model_for_user
 
 # Work-item titles are capped at 255 chars by the model; keep the AI-generated
 # one comfortably inside a single readable line.
@@ -117,21 +119,28 @@ class UserLLMConfigTestEndpoint(BaseAPIView):
         return Response({"ok": False, "error_code": code, "detail": detail})
 
 
-class UserLLMConfigGenerateTitleThrottle(UserRateThrottle):
+class AssistantGenerateTitleThrottle(UserRateThrottle):
     scope = "assistant_llm_generate_title"
 
 
-class UserLLMConfigGenerateTitleEndpoint(BaseAPIView):
-    """Generate a work-item title from its description using the user's BYOK model.
+class AssistantGenerateTitleEndpoint(AssistantBaseView):
+    """Generate a work-item title from its description using the assistant model.
 
-    Used by the create-issue modal when the user leaves the title blank but has an
-    AI assistant configured. Errors are reported with the same stable machine codes
-    as the rest of the assistant surface so the client can react uniformly.
+    A workspace-scoped assistant action that lives alongside the chat under
+    ``workspaces/<slug>/ai-assistant/``. Used by the create-issue modal when the
+    user leaves the title blank but has the assistant configured. It resolves the
+    model through the same CE/EE seam as the chat (:func:`resolve_model_for_user`),
+    so platform-provided keys work identically, and reports errors with the same
+    stable machine codes as the rest of the assistant surface.
     """
 
-    throttle_classes = [UserLLMConfigGenerateTitleThrottle]
+    throttle_classes = [AssistantGenerateTitleThrottle]
 
-    def post(self, request):
+    def post(self, request, slug):
+        denied = self.require_member(request, slug)
+        if denied:
+            return denied
+
         # Coerce to str before .strip(): an untrusted payload may send a
         # non-string description (e.g. a number), which would otherwise 500.
         description = str(request.data.get("description") or "").strip()
@@ -141,15 +150,8 @@ class UserLLMConfigGenerateTitleEndpoint(BaseAPIView):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        cfg = UserLLMConfig.objects.filter(user=request.user).first()
-        if cfg is None or not cfg.has_api_key:
-            return Response(
-                {"error": "llm_config_missing", "detail": "No AI assistant is configured."},
-                status=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            )
-
         try:
-            model = resolve_byok_model(request.user)
+            model = resolve_model_for_user(request.user)
         except AssistantError as exc:
             return Response({"error": exc.code, "detail": exc.detail}, status=exc.http_status)
 

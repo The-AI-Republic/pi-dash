@@ -269,7 +269,7 @@ export const IssueFormRoot = observer(function IssueFormRoot(props: IssueFormPro
       }
       try {
         setIsGeneratingTitle(true);
-        const { title } = await assistantService.generateTitle(descriptionText);
+        const { title } = await assistantService.generateTitle(workspaceSlug?.toString() ?? "", descriptionText);
         const generatedTitle = (title ?? "").trim();
         if (!generatedTitle) throw new Error("empty-title");
         formData.name = generatedTitle;
