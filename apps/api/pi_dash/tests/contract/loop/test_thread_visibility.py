@@ -25,7 +25,7 @@ def test_thread_list_excludes_loop_threads(world):
     AssistantThread.objects.create(workspace=world.ws, user=world.member, kind=ThreadKind.CHAT, title="chat")
     AssistantThread.objects.create(workspace=world.ws, user=world.member, kind=ThreadKind.LOOP, title="loop")
     c = _client(world.member)
-    res = c.get(f"/api/workspaces/{world.ws.slug}/assistant/threads/")
+    res = c.get(f"/api/workspaces/{world.ws.slug}/ai-assistant/threads/")
     assert res.status_code == 200
     titles = {t["title"] for t in res.data}
     assert "chat" in titles
@@ -35,7 +35,7 @@ def test_thread_list_excludes_loop_threads(world):
 def test_thread_create_is_always_chat(world):
     c = _client(world.member)
     res = c.post(
-        f"/api/workspaces/{world.ws.slug}/assistant/threads/",
+        f"/api/workspaces/{world.ws.slug}/ai-assistant/threads/",
         {"title": "hi", "kind": "loop"},  # kind is ignored
         format="json",
     )
@@ -49,5 +49,5 @@ def test_owner_can_read_own_loop_thread_messages(world):
         workspace=world.ws, user=world.member, kind=ThreadKind.LOOP
     )
     c = _client(world.member)
-    res = c.get(f"/api/workspaces/{world.ws.slug}/assistant/threads/{loop_thread.id}/messages/")
+    res = c.get(f"/api/workspaces/{world.ws.slug}/ai-assistant/threads/{loop_thread.id}/messages/")
     assert res.status_code == 200

@@ -16,6 +16,8 @@ from pi_dash.assistant.errors import AssistantError
 from pi_dash.assistant.models import ProviderKind, UserLLMConfig
 from pi_dash.assistant.runtime.llm import build_model
 from pi_dash.assistant.serializers import UserLLMConfigSerializer
+from pi_dash.assistant.views._base import AssistantBaseView
+from pi_dash.ee.assistant.model_provider import generate_title_for_user
 
 
 def _serialize(cfg: UserLLMConfig | None) -> dict:
@@ -104,6 +106,55 @@ class UserLLMConfigTestEndpoint(BaseAPIView):
             cfg.save(update_fields=["last_verified_at"])
             return Response({"ok": True})
         return Response({"ok": False, "error_code": code, "detail": detail})
+
+
+class AssistantGenerateTitleThrottle(UserRateThrottle):
+    scope = "assistant_llm_generate_title"
+
+
+class AssistantGenerateTitleEndpoint(AssistantBaseView):
+    """Generate a work-item title from its description using the assistant model.
+
+    A workspace-scoped assistant action that lives alongside the chat under
+    ``workspaces/<slug>/ai-assistant/``. Used by the create-issue modal when the
+    user leaves the title blank but has the assistant configured. It calls the
+    configured provider directly with a single prompt instead of starting an
+    agent turn, and reports errors with the same stable machine codes as the
+    rest of the assistant surface.
+    """
+
+    throttle_classes = [AssistantGenerateTitleThrottle]
+
+    def post(self, request, slug):
+        denied = self.require_member(request, slug)
+        if denied:
+            return denied
+
+        # Coerce to str before .strip(): an untrusted payload may send a
+        # non-string description (e.g. a number), which would otherwise 500.
+        description = str(request.data.get("description") or "").strip()
+        if not description:
+            return Response(
+                {"error": "description_required", "detail": "A description is required to generate a title."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        try:
+            title = generate_title_for_user(request.user, description)
+        except AssistantError as exc:
+            return Response({"error": exc.code, "detail": exc.detail}, status=exc.http_status)
+        except Exception:  # noqa: BLE001 — never echo raw errors (may reveal internal hosts)
+            return Response(
+                {"error": "provider_unreachable", "detail": "Could not reach the AI provider."},
+                status=status.HTTP_502_BAD_GATEWAY,
+            )
+
+        if not title:
+            return Response(
+                {"error": "generation_failed", "detail": "The AI assistant did not return a usable title."},
+                status=status.HTTP_502_BAD_GATEWAY,
+            )
+        return Response({"title": title})
 
 
 def _run_test(cfg: UserLLMConfig, api_key: str) -> tuple[bool, str, str]:

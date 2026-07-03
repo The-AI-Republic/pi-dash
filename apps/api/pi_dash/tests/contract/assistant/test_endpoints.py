@@ -3,6 +3,7 @@
 # See the LICENSE file for details.
 
 from datetime import timedelta
+import types
 
 import pytest
 from django.utils import timezone
@@ -21,10 +22,11 @@ def client_for(user):
 
 
 def base(ws):
-    return f"/api/workspaces/{ws.slug}/assistant"
+    return f"/api/workspaces/{ws.slug}/ai-assistant"
 
 
 # --- threads ---
+
 
 def test_member_can_list_and_create_threads(world):
     c = client_for(world.member)
@@ -74,6 +76,7 @@ def test_listing_threads_reaps_abandoned_empty_conversations(world):
 
 
 # --- messages ---
+
 
 def test_message_requires_llm_config(world, kms_crypto):
     c = client_for(world.member)
@@ -151,17 +154,23 @@ def test_cannot_access_other_users_thread(world, kms_crypto):
 
 # --- llm config ---
 
+
 def test_llm_config_lifecycle(world, kms_crypto):
     c = client_for(world.member)
     # unset -> 200 with has_api_key False
-    res = c.get("/api/users/me/llm-config/")
+    res = c.get("/api/users/me/ai-assistant/config/")
     assert res.status_code == 200
     assert res.data["has_api_key"] is False
 
     # set
     res = c.put(
-        "/api/users/me/llm-config/",
-        {"provider_kind": "openai_compatible", "base_url": "https://api.example.com/v1", "model_name": "m", "api_key": "sk-12345678"},
+        "/api/users/me/ai-assistant/config/",
+        {
+            "provider_kind": "openai_compatible",
+            "base_url": "https://api.example.com/v1",
+            "model_name": "m",
+            "api_key": "sk-12345678",
+        },
         format="json",
     )
     assert res.status_code == 200
@@ -171,5 +180,196 @@ def test_llm_config_lifecycle(world, kms_crypto):
     assert "api_key" not in res.data
 
     # delete
-    assert c.delete("/api/users/me/llm-config/").status_code == 204
-    assert c.get("/api/users/me/llm-config/").data["has_api_key"] is False
+    assert c.delete("/api/users/me/ai-assistant/config/").status_code == 204
+    assert c.get("/api/users/me/ai-assistant/config/").data["has_api_key"] is False
+
+
+# --- generate title ---
+
+
+def gen_title_url(ws):
+    return f"{base(ws)}/generate-title/"
+
+
+def test_generate_title_requires_llm_config(world, kms_crypto):
+    c = client_for(world.member)
+    res = c.post(gen_title_url(world.ws), {"description": "Ship the new dashboard export."}, format="json")
+    assert res.status_code == 422
+    assert res.data["error"] == "llm_config_missing"
+
+
+def test_generate_title_requires_description(world, kms_crypto):
+    configure_llm(world.member)
+    c = client_for(world.member)
+    res = c.post(gen_title_url(world.ws), {"description": "   "}, format="json")
+    assert res.status_code == 400
+    assert res.data["error"] == "description_required"
+
+
+def test_generate_title_returns_generated_title(world, kms_crypto, mocker):
+    mocker.patch(
+        "pi_dash.assistant.views.llm_config.generate_title_for_user",
+        return_value="Add dashboard CSV export",
+    )
+    configure_llm(world.member)
+    c = client_for(world.member)
+    res = c.post(
+        gen_title_url(world.ws),
+        {"description": "Users want to download the dashboard data as a CSV file."},
+        format="json",
+    )
+    assert res.status_code == 200
+    assert res.data["title"] == "Add dashboard CSV export"
+
+
+def test_generate_title_uses_direct_openai_compatible_call(world, kms_crypto, monkeypatch):
+    calls = []
+
+    class FakeCompletions:
+        def create(self, **kwargs):
+            calls.append(kwargs)
+            return types.SimpleNamespace(
+                choices=[types.SimpleNamespace(message=types.SimpleNamespace(content='"Add dashboard CSV export."'))]
+            )
+
+    class FakeOpenAI:
+        def __init__(self, **kwargs):
+            calls.append({"client": kwargs})
+            self.chat = types.SimpleNamespace(completions=FakeCompletions())
+
+    monkeypatch.setattr("openai.OpenAI", FakeOpenAI)
+    configure_llm(world.member)
+    c = client_for(world.member)
+
+    res = c.post(
+        gen_title_url(world.ws),
+        {"description": "Users want to download the dashboard data as a CSV file."},
+        format="json",
+    )
+
+    assert res.status_code == 200
+    assert res.data["title"] == "Add dashboard CSV export"
+    assert calls[0] == {
+        "client": {
+            "api_key": "sk-test-key-123456",
+            "base_url": "https://api.example.com/v1",
+            "timeout": 20.0,
+        }
+    }
+    assert calls[1]["model"] == "gpt-test"
+    assert calls[1]["max_tokens"] == 256
+    assert calls[1]["messages"][0]["role"] == "system"
+    assert calls[1]["messages"][1]["content"] == "Users want to download the dashboard data as a CSV file."
+    assert "extra_body" not in calls[1]
+
+
+def test_generate_title_disables_deepseek_thinking_mode(world, kms_crypto, monkeypatch):
+    calls = []
+
+    class FakeCompletions:
+        def create(self, **kwargs):
+            calls.append(kwargs)
+            return types.SimpleNamespace(
+                choices=[types.SimpleNamespace(message=types.SimpleNamespace(content='"Add dashboard CSV export."'))]
+            )
+
+    class FakeOpenAI:
+        def __init__(self, **kwargs):
+            self.chat = types.SimpleNamespace(completions=FakeCompletions())
+
+    monkeypatch.setattr("openai.OpenAI", FakeOpenAI)
+    configure_llm(world.member, model="deepseek-v4-pro", base_url="https://api.deepseek.com")
+    c = client_for(world.member)
+
+    res = c.post(
+        gen_title_url(world.ws),
+        {"description": "Users want to download the dashboard data as a CSV file."},
+        format="json",
+    )
+
+    assert res.status_code == 200
+    assert res.data["title"] == "Add dashboard CSV export"
+    assert calls[0]["extra_body"] == {"thinking": {"type": "disabled"}}
+
+
+def test_generate_title_strips_reasoning_wrappers(world, kms_crypto, monkeypatch):
+    class FakeCompletions:
+        def create(self, **kwargs):
+            return types.SimpleNamespace(
+                choices=[
+                    types.SimpleNamespace(
+                        message=types.SimpleNamespace(
+                            content="<think>Need a concise title.</think>\nTitle: Add dashboard CSV export."
+                        )
+                    )
+                ]
+            )
+
+    class FakeOpenAI:
+        def __init__(self, **kwargs):
+            self.chat = types.SimpleNamespace(completions=FakeCompletions())
+
+    monkeypatch.setattr("openai.OpenAI", FakeOpenAI)
+    configure_llm(world.member)
+    c = client_for(world.member)
+
+    res = c.post(
+        gen_title_url(world.ws),
+        {"description": "Users want to download the dashboard data as a CSV file."},
+        format="json",
+    )
+
+    assert res.status_code == 200
+    assert res.data["title"] == "Add dashboard CSV export"
+
+
+def test_generate_title_ignores_structured_reasoning_blocks(world, kms_crypto, monkeypatch):
+    class FakeCompletions:
+        def create(self, **kwargs):
+            return types.SimpleNamespace(
+                choices=[
+                    types.SimpleNamespace(
+                        message=types.SimpleNamespace(
+                            content=[
+                                {"type": "reasoning", "text": "Need a concise title."},
+                                {"type": "text", "text": "Add dashboard CSV export"},
+                            ]
+                        )
+                    )
+                ]
+            )
+
+    class FakeOpenAI:
+        def __init__(self, **kwargs):
+            self.chat = types.SimpleNamespace(completions=FakeCompletions())
+
+    monkeypatch.setattr("openai.OpenAI", FakeOpenAI)
+    configure_llm(world.member)
+    c = client_for(world.member)
+
+    res = c.post(
+        gen_title_url(world.ws),
+        {"description": "Users want to download the dashboard data as a CSV file."},
+        format="json",
+    )
+
+    assert res.status_code == 200
+    assert res.data["title"] == "Add dashboard CSV export"
+
+
+def test_generate_title_reports_provider_failure(world, kms_crypto, mocker):
+    mocker.patch(
+        "pi_dash.assistant.views.llm_config.generate_title_for_user",
+        side_effect=RuntimeError("boom"),
+    )
+    configure_llm(world.member)
+    c = client_for(world.member)
+    res = c.post(gen_title_url(world.ws), {"description": "Something to summarize."}, format="json")
+    assert res.status_code == 502
+    assert res.data["error"] == "provider_unreachable"
+
+
+def test_generate_title_blocked_for_guest(world, kms_crypto):
+    c = client_for(world.guest)
+    res = c.post(gen_title_url(world.ws), {"description": "Ship the new dashboard export."}, format="json")
+    assert res.status_code == 403

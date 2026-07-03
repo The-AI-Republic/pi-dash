@@ -3,6 +3,7 @@
 // See the LICENSE file for details.
 
 import { API_BASE_URL } from "@pi-dash/constants";
+import type { AxiosRequestConfig } from "axios";
 import type {
   IAssistantMessage,
   IAssistantSendResponse,
@@ -18,7 +19,7 @@ export class AssistantService extends APIService {
   }
 
   private base(slug: string): string {
-    return `/api/workspaces/${slug}/assistant`;
+    return `/api/workspaces/${slug}/ai-assistant`;
   }
 
   async listThreads(slug: string): Promise<IAssistantThread[]> {
@@ -89,7 +90,7 @@ export class AssistantService extends APIService {
   // --- BYOK LLM config (user-level) ---
 
   async getLLMConfig(): Promise<IUserLLMConfig> {
-    return this.get(`/api/users/me/llm-config/`)
+    return this.get(`/api/users/me/ai-assistant/config/`)
       .then((res) => res?.data)
       .catch((err) => {
         throw err?.response?.data;
@@ -97,7 +98,7 @@ export class AssistantService extends APIService {
   }
 
   async putLLMConfig(data: IUserLLMConfigInput): Promise<IUserLLMConfig> {
-    return this.put(`/api/users/me/llm-config/`, data)
+    return this.put(`/api/users/me/ai-assistant/config/`, data)
       .then((res) => res?.data)
       .catch((err) => {
         throw err?.response?.data;
@@ -105,7 +106,7 @@ export class AssistantService extends APIService {
   }
 
   async deleteLLMConfig(): Promise<void> {
-    return this.delete(`/api/users/me/llm-config/`)
+    return this.delete(`/api/users/me/ai-assistant/config/`)
       .then((res) => res?.data)
       .catch((err) => {
         throw err?.response?.data;
@@ -113,10 +114,18 @@ export class AssistantService extends APIService {
   }
 
   async testLLMConfig(): Promise<{ ok: boolean; error_code?: string; detail?: string }> {
-    return this.post(`/api/users/me/llm-config/test/`)
+    return this.post(`/api/users/me/ai-assistant/config/test/`)
       .then((res) => res?.data)
       .catch((err) => {
         throw err?.response?.data;
+      });
+  }
+
+  async generateTitle(slug: string, description: string, config: AxiosRequestConfig = {}): Promise<{ title: string }> {
+    return this.post(`${this.base(slug)}/generate-title/`, { description }, config)
+      .then((res) => res?.data)
+      .catch((err) => {
+        throw err?.response?.data ?? err;
       });
   }
 }
