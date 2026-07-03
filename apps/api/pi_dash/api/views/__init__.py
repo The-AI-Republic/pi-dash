@@ -19,6 +19,7 @@ from .issue import (
     IssueListCreateAPIEndpoint,
     IssueDetailAPIEndpoint,
     IssueMoveAPIEndpoint,
+    IssueReTickAPIEndpoint,
     LabelListCreateAPIEndpoint,
     LabelDetailAPIEndpoint,
     IssueLinkListCreateAPIEndpoint,

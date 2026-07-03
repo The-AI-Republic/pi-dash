@@ -141,9 +141,15 @@ impl TextArea {
     }
 
     pub fn insert_str(&mut self, s: &str) {
+        // This widget is strictly single-line (flat char cursor, single-Line
+        // render), and typing can never produce a newline. `insert_str` is the
+        // paste entry point, so strip CR/LF here — a trailing newline copied
+        // with a token would otherwise corrupt the layout and be submitted as
+        // part of the value (e.g. an enrollment token that fails validation).
+        let sanitized: String = s.chars().filter(|c| *c != '\r' && *c != '\n').collect();
         let byte = self.byte_index(self.cursor);
-        self.text.insert_str(byte, s);
-        self.cursor += s.chars().count();
+        self.text.insert_str(byte, &sanitized);
+        self.cursor += sanitized.chars().count();
     }
 
     pub fn delete_backward(&mut self) {
@@ -255,6 +261,16 @@ mod tests {
         // Release is filtered (consumed silently — not double-typed).
         assert_eq!(h, KeyHandled::Consumed);
         assert_eq!(t.text(), "");
+    }
+
+    #[test]
+    fn insert_str_strips_newlines() {
+        // Pasting a token with a trailing newline (and an embedded CRLF)
+        // must not leak line breaks into this single-line field.
+        let mut t = TextArea::with_text("tok");
+        t.insert_str("-abc\r\ndef\n");
+        assert_eq!(t.text(), "tok-abcdef");
+        assert_eq!(t.cursor(), t.text().chars().count());
     }
 
     #[test]
