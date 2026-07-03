@@ -128,6 +128,8 @@ from .issue.base import (
     IssueDetailIdentifierEndpoint,
 )
 
+from .issue.move import IssueMoveEndpoint
+
 from .issue.activity import IssueActivityEndpoint
 
 from .issue.archive import IssueArchiveViewSet, BulkArchiveIssuesEndpoint
