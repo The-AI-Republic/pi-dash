@@ -25,10 +25,11 @@ type Props = {
   onClose: () => void;
   issueId: string;
   projectId: string;
+  storeType?: EIssuesStoreType.GLOBAL | EIssuesStoreType.PROJECT;
 };
 
 export const MoveIssueModal = observer(function MoveIssueModal(props: Props) {
-  const { isOpen, onClose, issueId, projectId } = props;
+  const { isOpen, onClose, issueId, projectId, storeType = EIssuesStoreType.PROJECT } = props;
   // states
   const [query, setQuery] = useState("");
   const [movingToProjectId, setMovingToProjectId] = useState<string | null>(null);
@@ -41,7 +42,7 @@ export const MoveIssueModal = observer(function MoveIssueModal(props: Props) {
   const { joinedProjectIds, getProjectById, getProjectIdentifierById, fetchProjects } = useProject();
   const {
     issues: { moveIssue },
-  } = useIssues(EIssuesStoreType.PROJECT);
+  } = useIssues(storeType);
 
   // Only same-workspace projects the user belongs to, excluding the current one.
   // Cross-workspace moves are intentionally unsupported.
