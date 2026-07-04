@@ -74,13 +74,13 @@ pub struct AddArgs {
     #[arg(long)]
     pub workdir: Option<String>,
 
-    /// Opt out of the default worktree pool and create a legacy runner that
-    /// executes the agent directly in `working_dir`. Without this flag,
-    /// `runner add` auto-provisions (or reuses) a pool from `working_dir` so
-    /// lane-isolation features — notably concurrent chat during an issue run —
-    /// work out of the box. Ignored when `--workdir` is given (that already
-    /// selects a pool). Old configs are unaffected; this only changes what a
-    /// *new* `runner add` writes.
+    /// Deprecated: opt out of the default worktree pool and create a legacy
+    /// runner that executes the agent directly in `working_dir`. Without this
+    /// flag, `runner add` auto-provisions (or reuses) a pool from `working_dir`
+    /// so lane-isolation features — notably concurrent chat during an issue
+    /// run — work out of the box. Ignored when `--workdir` is given (that
+    /// already selects a pool). Old configs are unaffected; this only changes
+    /// what a *new* `runner add` writes.
     #[arg(long)]
     pub no_pool: bool,
 
@@ -174,6 +174,11 @@ pub async fn add(args: AddArgs, paths: &Paths) -> Result<RunnerConfig> {
                  `pidash workdir add --name {workdir_name} --path <repo>`"
             );
         }
+    }
+    if args.no_pool && args.workdir.is_none() {
+        eprintln!(
+            "Warning: `pidash runner add --no-pool` is deprecated. New runners should use the default worktree pool mode or `--workdir <name>`."
+        );
     }
 
     let api_token = ensure_cli_token(paths, args.url.as_deref(), args.workspace.as_deref()).await?;
