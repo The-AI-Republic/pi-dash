@@ -12,7 +12,7 @@ use clap::{Args as ClapArgs, Subcommand};
 use std::io::IsTerminal;
 use std::path::PathBuf;
 
-use crate::cli::runner_ops::{self, AppliedWorkdir, RunnerWorkdirPlan};
+use crate::cli::runner_ops::{self, AppliedWorkdir, ApplyEnrollOptions, RunnerWorkdirPlan};
 use crate::cloud::http::{CreateRunnerRequest, SharedHttpTransport, create_runner};
 use crate::cloud::runners::{delete_runner, probe_cloud_reachable};
 use crate::config::file;
@@ -244,11 +244,13 @@ pub async fn add(args: AddArgs, paths: &Paths) -> Result<RunnerConfig> {
         paths,
         &resp,
         &cloud_url,
-        args.working_dir.clone(),
-        args.agent,
-        args.model.as_deref(),
-        args.reasoning_effort.as_deref(),
-        workdir_plan,
+        ApplyEnrollOptions {
+            working_dir: args.working_dir.clone(),
+            agent_kind: args.agent,
+            model: args.model.as_deref(),
+            reasoning_effort: args.reasoning_effort.as_deref(),
+            workdir_plan,
+        },
     )
     .await
     {

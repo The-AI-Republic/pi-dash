@@ -345,6 +345,15 @@ pub enum AppliedWorkdir {
     },
 }
 
+#[derive(Debug, Clone)]
+pub struct ApplyEnrollOptions<'a> {
+    pub working_dir: Option<PathBuf>,
+    pub agent_kind: AgentKind,
+    pub model: Option<&'a str>,
+    pub reasoning_effort: Option<&'a str>,
+    pub workdir_plan: RunnerWorkdirPlan,
+}
+
 /// Apply an `EnrollResponse` (from either the legacy enroll endpoint or
 /// the new CLI-initiated create endpoint) to local disk:
 ///
@@ -360,17 +369,14 @@ pub async fn apply_enroll_response(
     paths: &Paths,
     resp: &EnrollResponse,
     cloud_url: &str,
-    working_dir: Option<PathBuf>,
-    agent_kind: AgentKind,
-    model: Option<&str>,
-    reasoning_effort: Option<&str>,
-    workdir_plan: RunnerWorkdirPlan,
+    options: ApplyEnrollOptions<'_>,
 ) -> Result<AppliedRunner> {
-    let working_dir =
-        working_dir.unwrap_or_else(|| paths.runner_dir(resp.runner_id).join("workspace"));
+    let working_dir = options
+        .working_dir
+        .unwrap_or_else(|| paths.runner_dir(resp.runner_id).join("workspace"));
 
     let (codex, claude_code, cursor_agent, openclaw) =
-        agent_sections_for(agent_kind, model, reasoning_effort);
+        agent_sections_for(options.agent_kind, options.model, options.reasoning_effort);
     let new_runner = RunnerConfig {
         name: resp.runner_name.clone(),
         runner_id: resp.runner_id,
@@ -379,7 +385,9 @@ pub async fn apply_enroll_response(
         pod_id: None,
         workspace: WorkspaceSection { working_dir },
         workdir: None,
-        agent: AgentSection { kind: agent_kind },
+        agent: AgentSection {
+            kind: options.agent_kind,
+        },
         codex,
         claude_code,
         cursor_agent,
@@ -431,7 +439,7 @@ pub async fn apply_enroll_response(
         }
         is_first_runner = cfg.runners.is_empty();
         let mut runner = new_runner_for_closure;
-        applied_workdir = apply_workdir_plan(cfg, &mut runner, &workdir_plan)?;
+        applied_workdir = apply_workdir_plan(cfg, &mut runner, &options.workdir_plan)?;
         cfg.runners.push(runner);
         Ok(())
     })
@@ -738,6 +746,20 @@ mod tests {
         }
     }
 
+    fn enroll_options(
+        working_dir: PathBuf,
+        agent_kind: AgentKind,
+        workdir_plan: RunnerWorkdirPlan,
+    ) -> ApplyEnrollOptions<'static> {
+        ApplyEnrollOptions {
+            working_dir: Some(working_dir),
+            agent_kind,
+            model: None,
+            reasoning_effort: None,
+            workdir_plan,
+        }
+    }
+
     fn mark_git_repo(path: &std::path::Path) {
         std::fs::create_dir_all(path.join(".git")).unwrap();
     }
@@ -769,11 +791,11 @@ mod tests {
             &paths,
             &resp,
             "https://example.com",
-            Some(tmp.path().join("wd")),
-            AgentKind::Codex,
-            None,
-            None,
-            RunnerWorkdirPlan::Legacy,
+            enroll_options(
+                tmp.path().join("wd"),
+                AgentKind::Codex,
+                RunnerWorkdirPlan::Legacy,
+            ),
         )
         .await
         .unwrap();
@@ -793,11 +815,11 @@ mod tests {
             &paths,
             &r1,
             "https://example.com",
-            Some(tmp.path().join("wd1")),
-            AgentKind::Codex,
-            None,
-            None,
-            RunnerWorkdirPlan::Legacy,
+            enroll_options(
+                tmp.path().join("wd1"),
+                AgentKind::Codex,
+                RunnerWorkdirPlan::Legacy,
+            ),
         )
         .await
         .unwrap();
@@ -807,11 +829,11 @@ mod tests {
             &paths,
             &r2,
             "https://example.com",
-            Some(tmp.path().join("wd2")),
-            AgentKind::Codex,
-            None,
-            None,
-            RunnerWorkdirPlan::Legacy,
+            enroll_options(
+                tmp.path().join("wd2"),
+                AgentKind::Codex,
+                RunnerWorkdirPlan::Legacy,
+            ),
         )
         .await
         .unwrap();
@@ -832,11 +854,11 @@ mod tests {
             &paths,
             &existing,
             "https://example.com",
-            Some(repo.clone()),
-            AgentKind::ClaudeCode,
-            None,
-            None,
-            RunnerWorkdirPlan::Legacy,
+            enroll_options(
+                repo.clone(),
+                AgentKind::ClaudeCode,
+                RunnerWorkdirPlan::Legacy,
+            ),
         )
         .await
         .unwrap();
@@ -846,11 +868,11 @@ mod tests {
             &paths,
             &added,
             "https://example.com",
-            Some(repo.clone()),
-            AgentKind::Codex,
-            None,
-            None,
-            RunnerWorkdirPlan::AutoPoolIfGit,
+            enroll_options(
+                repo.clone(),
+                AgentKind::Codex,
+                RunnerWorkdirPlan::AutoPoolIfGit,
+            ),
         )
         .await
         .unwrap();
@@ -903,11 +925,7 @@ mod tests {
             &paths,
             &r1,
             "https://example.com",
-            Some(repo.clone()),
-            AgentKind::Codex,
-            None,
-            None,
-            RunnerWorkdirPlan::Legacy,
+            enroll_options(repo.clone(), AgentKind::Codex, RunnerWorkdirPlan::Legacy),
         )
         .await
         .unwrap();
@@ -917,11 +935,7 @@ mod tests {
             &paths,
             &r2,
             "https://example.com",
-            Some(repo),
-            AgentKind::Codex,
-            None,
-            None,
-            RunnerWorkdirPlan::Legacy,
+            enroll_options(repo, AgentKind::Codex, RunnerWorkdirPlan::Legacy),
         )
         .await
         .unwrap_err();
@@ -945,11 +959,11 @@ mod tests {
             &paths,
             &r1,
             "https://cloud-a.example.com",
-            Some(tmp.path().join("wd1")),
-            AgentKind::Codex,
-            None,
-            None,
-            RunnerWorkdirPlan::Legacy,
+            enroll_options(
+                tmp.path().join("wd1"),
+                AgentKind::Codex,
+                RunnerWorkdirPlan::Legacy,
+            ),
         )
         .await
         .unwrap();
@@ -959,11 +973,11 @@ mod tests {
             &paths,
             &r2,
             "https://cloud-b.example.com",
-            Some(tmp.path().join("wd2")),
-            AgentKind::Codex,
-            None,
-            None,
-            RunnerWorkdirPlan::Legacy,
+            enroll_options(
+                tmp.path().join("wd2"),
+                AgentKind::Codex,
+                RunnerWorkdirPlan::Legacy,
+            ),
         )
         .await
         .unwrap_err();
