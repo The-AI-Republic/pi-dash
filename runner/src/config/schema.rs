@@ -1,6 +1,6 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 use uuid::Uuid;
 
@@ -519,6 +519,20 @@ pub struct Credentials {
 /// number; the cloud rejects `Hello` beyond it as well.
 pub const MAX_RUNNERS_PER_DAEMON: usize = 50;
 
+/// Normalize a path for *physical-identity* comparison. When the path exists we
+/// `canonicalize` it, resolving symlinks and (on case-insensitive filesystems)
+/// casing so two spellings of one directory — a symlinked `~/repo`, or `C:\repo`
+/// vs `c:\repo` — compare equal. When it does not yet exist (a canonical clone
+/// the daemon creates lazily, or a unit-test fixture path) we fall back to
+/// lexical absolutization, preserving the old behavior. Every "same or nested
+/// working dir" collision check routes through this so config validation and
+/// `runner add`'s auto-pool dedup agree on what "the same repo" means.
+pub(crate) fn canonical_for_compare(path: &Path) -> PathBuf {
+    std::fs::canonicalize(path)
+        .or_else(|_| std::path::absolute(path))
+        .unwrap_or_else(|_| path.to_path_buf())
+}
+
 impl Config {
     /// First configured runner, or `None` for a freshly enrolled connection
     /// that has no runners yet. Callers that need a panic-on-absent
@@ -604,14 +618,15 @@ impl Config {
                 }
                 let ap = &a.workspace.working_dir;
                 let bp = &b.workspace.working_dir;
-                if ap == bp {
+                let (apc, bpc) = (canonical_for_compare(ap), canonical_for_compare(bp));
+                if apc == bpc {
                     return Err(ConfigError::DuplicateWorkingDir {
                         runner_a: a.name.clone(),
                         runner_b: b.name.clone(),
                         path: ap.display().to_string(),
                     });
                 }
-                if ap.starts_with(bp) || bp.starts_with(ap) {
+                if apc.starts_with(&bpc) || bpc.starts_with(&apc) {
                     return Err(ConfigError::NestedWorkingDir {
                         runner_a: a.name.clone(),
                         path_a: ap.display().to_string(),
@@ -651,7 +666,10 @@ impl Config {
         // corrupt git state exactly as two legacy runners sharing a dir would.
         // (Default worktrees_dirs live under `data_dir/worktrees/<name>` and
         // cannot collide: names are unique.)
-        let collide = |x: &PathBuf, y: &PathBuf| x == y || x.starts_with(y) || y.starts_with(x);
+        let collide = |x: &PathBuf, y: &PathBuf| {
+            let (x, y) = (canonical_for_compare(x), canonical_for_compare(y));
+            x == y || x.starts_with(&y) || y.starts_with(&x)
+        };
         let claimed = |w: &WorkdirConfig| -> Vec<PathBuf> {
             let mut v = vec![w.path.clone()];
             if let Some(wt) = &w.worktrees_dir {
@@ -1013,6 +1031,45 @@ mod tests {
         assert!(msg.contains("\"a\""), "message: {msg}");
         assert!(msg.contains("\"b\""), "message: {msg}");
         assert!(msg.contains("/work/shared"), "message: {msg}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn canonical_for_compare_resolves_symlinks() {
+        let tmp = tempfile::tempdir().unwrap();
+        let real = tmp.path().join("repo");
+        std::fs::create_dir(&real).unwrap();
+        let link = tmp.path().join("repo-link");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        // A directory and a symlink pointing at it normalize to one path.
+        assert_eq!(canonical_for_compare(&real), canonical_for_compare(&link));
+        // A path that doesn't exist yet still normalizes deterministically
+        // (lexical fallback) so it stays comparable with itself.
+        let ghost = tmp.path().join("not-created-yet");
+        assert_eq!(canonical_for_compare(&ghost), canonical_for_compare(&ghost));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn validate_rejects_legacy_runners_sharing_a_dir_via_symlink() {
+        // Two spellings of one physical directory — a real path and a symlink
+        // to it — must collide, or two legacy runners would silently trample
+        // each other's git state. Lexical comparison missed this; the
+        // canonicalize-based check catches it.
+        let tmp = tempfile::tempdir().unwrap();
+        let real = tmp.path().join("repo");
+        std::fs::create_dir(&real).unwrap();
+        let link = tmp.path().join("repo-link");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        let cfg = config_with(vec![
+            runner("a", real.to_str().unwrap()),
+            runner("b", link.to_str().unwrap()),
+        ]);
+        let err = cfg.validate().unwrap_err();
+        assert!(
+            matches!(err, ConfigError::DuplicateWorkingDir { .. }),
+            "expected symlinked working dirs to collide, got {err:?}"
+        );
     }
 
     #[test]
