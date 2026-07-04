@@ -15,7 +15,7 @@ use crate::config::file;
 use crate::config::schema::{
     AgentKind, AgentSection, ApprovalPolicySection, ClaudeCodeSection, CleanMode, CliSection,
     CodexSection, Config, CursorAgentSection, DEFAULT_POOL_SIZE, DaemonConfig, OpenClawSection,
-    RunnerConfig, WorkdirConfig, WorkspaceSection,
+    RunnerConfig, WorkdirConfig, WorkspaceSection, canonical_for_compare,
 };
 use crate::util::paths::Paths;
 use std::io::IsTerminal;
@@ -579,7 +579,7 @@ fn migrate_exact_legacy_runners(
 }
 
 fn same_path(a: &Path, b: &Path) -> bool {
-    absolute_path(a) == absolute_path(b)
+    canonical_for_compare(a) == canonical_for_compare(b)
 }
 
 fn absolute_path(path: &Path) -> PathBuf {
