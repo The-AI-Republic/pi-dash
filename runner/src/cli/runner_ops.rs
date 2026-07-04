@@ -8,13 +8,14 @@
 //! shared dev-machine token in `[cli].token`.
 
 use anyhow::{Context, Result};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use crate::cloud::http::{EnrollResponse, RunnerCredentials, write_runner_credentials};
 use crate::config::file;
 use crate::config::schema::{
-    AgentKind, AgentSection, ApprovalPolicySection, ClaudeCodeSection, CursorAgentSection,
-    CliSection, CodexSection, Config, DaemonConfig, OpenClawSection, RunnerConfig, WorkspaceSection,
+    AgentKind, AgentSection, ApprovalPolicySection, ClaudeCodeSection, CleanMode, CliSection,
+    CodexSection, Config, CursorAgentSection, DEFAULT_POOL_SIZE, DaemonConfig, OpenClawSection,
+    RunnerConfig, WorkdirConfig, WorkspaceSection,
 };
 use crate::util::paths::Paths;
 use std::io::IsTerminal;
@@ -66,7 +67,9 @@ fn model_applies_to_agent(kind: AgentKind, model: &str) -> bool {
         AgentKind::ClaudeCode => has("claude-"),
         // `o3` / `o4` are valid bare model names; the dash-terminated
         // families (`gpt-`, `codex`) require a suffix.
-        AgentKind::Codex => has("gpt-") || m == "o3" || m == "o4" || has("o3-") || has("o4-") || has("codex"),
+        AgentKind::Codex => {
+            has("gpt-") || m == "o3" || m == "o4" || has("o3-") || has("o4-") || has("codex")
+        }
         AgentKind::CursorAgent | AgentKind::OpenClaw => !m.is_empty(),
     }
 }
@@ -310,6 +313,36 @@ pub fn clear_cli_token(paths: &Paths) -> Result<()> {
 pub struct AppliedRunner {
     pub runner: RunnerConfig,
     pub is_first_runner: bool,
+    pub workdir: Option<AppliedWorkdir>,
+}
+
+/// How `pidash runner add` wants the new runner bound locally.
+#[derive(Debug, Clone, Default)]
+pub enum RunnerWorkdirPlan {
+    /// Legacy mode: the runner executes directly in `workspace.working_dir`.
+    #[default]
+    Legacy,
+    /// Bind to an already configured `[[workdir]]`.
+    Existing { name: String },
+    /// If `workspace.working_dir` is already a git repo, create or reuse a
+    /// pool for it and bind the new runner to that pool. Non-git paths stay
+    /// legacy so first-run bootstrap remains permissive.
+    AutoPoolIfGit,
+}
+
+/// Workdir binding that was actually written to config.toml.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AppliedWorkdir {
+    Existing {
+        name: String,
+        migrated_legacy_runners: Vec<String>,
+    },
+    AutoPool {
+        name: String,
+        path: PathBuf,
+        created: bool,
+        migrated_legacy_runners: Vec<String>,
+    },
 }
 
 /// Apply an `EnrollResponse` (from either the legacy enroll endpoint or
@@ -331,6 +364,7 @@ pub async fn apply_enroll_response(
     agent_kind: AgentKind,
     model: Option<&str>,
     reasoning_effort: Option<&str>,
+    workdir_plan: RunnerWorkdirPlan,
 ) -> Result<AppliedRunner> {
     let working_dir =
         working_dir.unwrap_or_else(|| paths.runner_dir(resp.runner_id).join("workspace"));
@@ -381,8 +415,10 @@ pub async fn apply_enroll_response(
     // `mutate_config_or_init` would race with a concurrent `auth login
     // --url <different>` that may be rewriting `[cli]` at the same time.
     let new_runner_for_closure = new_runner.clone();
+    let runner_id = new_runner.runner_id;
     let mut is_first_runner = false;
-    file::mutate_config_or_init(paths, init_cfg, |cfg| {
+    let mut applied_workdir = None;
+    let cfg_after = file::mutate_config_or_init(paths, init_cfg, |cfg| {
         if !cfg.daemon.cloud_url.is_empty() && cfg.daemon.cloud_url != cloud_url {
             anyhow::bail!(
                 "this host is enrolled with cloud {} — refusing to add a runner pointing at {}",
@@ -394,10 +430,18 @@ pub async fn apply_enroll_response(
             cfg.daemon.cloud_url = cloud_url.to_string();
         }
         is_first_runner = cfg.runners.is_empty();
-        cfg.runners.push(new_runner_for_closure);
+        let mut runner = new_runner_for_closure;
+        applied_workdir = apply_workdir_plan(cfg, &mut runner, &workdir_plan)?;
+        cfg.runners.push(runner);
         Ok(())
     })
-    .map_err(|e| anyhow::anyhow!("persisting [[runner]] block under config lock: {e}"))?;
+    .context("persisting [[runner]] block under config lock")?;
+    let new_runner = cfg_after
+        .runners
+        .iter()
+        .find(|runner| runner.runner_id == runner_id)
+        .cloned()
+        .unwrap_or(new_runner);
 
     // Credentials write happens AFTER config so a config-write failure
     // (cloud-URL mismatch, validation error, IO) doesn't leave an orphan
@@ -431,6 +475,7 @@ pub async fn apply_enroll_response(
         return Ok(AppliedRunner {
             runner: new_runner,
             is_first_runner,
+            workdir: applied_workdir,
         });
     }
     write_runner_credentials(
@@ -448,7 +493,121 @@ pub async fn apply_enroll_response(
     Ok(AppliedRunner {
         runner: new_runner,
         is_first_runner,
+        workdir: applied_workdir,
     })
+}
+
+fn apply_workdir_plan(
+    cfg: &mut Config,
+    runner: &mut RunnerConfig,
+    plan: &RunnerWorkdirPlan,
+) -> Result<Option<AppliedWorkdir>> {
+    match plan {
+        RunnerWorkdirPlan::Legacy => Ok(None),
+        RunnerWorkdirPlan::Existing { name } => {
+            let path = cfg
+                .workdirs
+                .iter()
+                .find(|w| w.name == *name)
+                .map(|w| w.path.clone())
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "no work dir named {name:?}; add it first with `pidash workdir add --name {name} --path <repo>`"
+                    )
+                })?;
+            let migrated_legacy_runners = migrate_exact_legacy_runners(cfg, &path, name);
+            runner.workdir = Some(name.clone());
+            Ok(Some(AppliedWorkdir::Existing {
+                name: name.clone(),
+                migrated_legacy_runners,
+            }))
+        }
+        RunnerWorkdirPlan::AutoPoolIfGit => {
+            let path = absolute_path(&runner.workspace.working_dir);
+            if !crate::workspace::git::is_git_repo(&path) {
+                return Ok(None);
+            }
+            let (name, created) = match cfg.workdirs.iter().find(|w| same_path(&w.path, &path)) {
+                Some(existing) => (existing.name.clone(), false),
+                None => {
+                    let name = unique_workdir_name(cfg, &runner.name);
+                    cfg.workdirs.push(WorkdirConfig {
+                        name: name.clone(),
+                        path: path.clone(),
+                        pool_size: DEFAULT_POOL_SIZE,
+                        clean_mode: CleanMode::default(),
+                        keep_paths: Vec::new(),
+                        setup_command: None,
+                        worktrees_dir: None,
+                    });
+                    (name, true)
+                }
+            };
+            let migrated_legacy_runners = migrate_exact_legacy_runners(cfg, &path, &name);
+            runner.workdir = Some(name.clone());
+            Ok(Some(AppliedWorkdir::AutoPool {
+                name,
+                path,
+                created,
+                migrated_legacy_runners,
+            }))
+        }
+    }
+}
+
+fn migrate_exact_legacy_runners(
+    cfg: &mut Config,
+    workdir_path: &Path,
+    workdir_name: &str,
+) -> Vec<String> {
+    let mut migrated = Vec::new();
+    for runner in &mut cfg.runners {
+        if runner.workdir.is_none() && same_path(&runner.workspace.working_dir, workdir_path) {
+            runner.workdir = Some(workdir_name.to_string());
+            migrated.push(runner.name.clone());
+        }
+    }
+    migrated
+}
+
+fn same_path(a: &Path, b: &Path) -> bool {
+    absolute_path(a) == absolute_path(b)
+}
+
+fn absolute_path(path: &Path) -> PathBuf {
+    std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf())
+}
+
+/// Derive a unique `[[workdir]]` name for an auto-provisioned pool, seeded from
+/// the runner's name. Non-identifier chars are folded to `-`; collisions get a
+/// numeric suffix so repeated `runner add`s never clash.
+fn unique_workdir_name(cfg: &Config, seed: &str) -> String {
+    let base: String = seed
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '-'
+            }
+        })
+        .collect();
+    let base = base.trim_matches('-').to_string();
+    let base = if base.is_empty() {
+        "pool".to_string()
+    } else {
+        base
+    };
+    if !cfg.workdirs.iter().any(|w| w.name == base) {
+        return base;
+    }
+    for n in 2.. {
+        let cand = format!("{base}-{n}");
+        if !cfg.workdirs.iter().any(|w| w.name == cand) {
+            return cand;
+        }
+    }
+    unreachable!("an unbounded search always finds a free name")
 }
 
 #[cfg(test)]
@@ -495,16 +654,18 @@ mod tests {
 
     #[test]
     fn unknown_codex_effort_is_dropped() {
-        let (codex, _, _, _) =
-            agent_sections_for(AgentKind::Codex, Some("gpt-5.5"), Some("turbo"));
+        let (codex, _, _, _) = agent_sections_for(AgentKind::Codex, Some("gpt-5.5"), Some("turbo"));
         assert_eq!(codex.model_default.as_deref(), Some("gpt-5.5"));
         assert_eq!(codex.effort_default, None);
     }
 
     #[test]
     fn cursor_accepts_any_nonempty_slug() {
-        let (_, _, cursor, _) =
-            agent_sections_for(AgentKind::CursorAgent, Some("claude-opus-4-8-thinking-high"), None);
+        let (_, _, cursor, _) = agent_sections_for(
+            AgentKind::CursorAgent,
+            Some("claude-opus-4-8-thinking-high"),
+            None,
+        );
         assert_eq!(
             cursor.model_default.as_deref(),
             Some("claude-opus-4-8-thinking-high")
@@ -577,6 +738,10 @@ mod tests {
         }
     }
 
+    fn mark_git_repo(path: &std::path::Path) {
+        std::fs::create_dir_all(path.join(".git")).unwrap();
+    }
+
     fn sample_response(runner_name: &str) -> EnrollResponse {
         EnrollResponse {
             runner_id: Uuid::new_v4(),
@@ -608,6 +773,7 @@ mod tests {
             AgentKind::Codex,
             None,
             None,
+            RunnerWorkdirPlan::Legacy,
         )
         .await
         .unwrap();
@@ -631,6 +797,7 @@ mod tests {
             AgentKind::Codex,
             None,
             None,
+            RunnerWorkdirPlan::Legacy,
         )
         .await
         .unwrap();
@@ -644,12 +811,125 @@ mod tests {
             AgentKind::Codex,
             None,
             None,
+            RunnerWorkdirPlan::Legacy,
         )
         .await
         .unwrap();
         assert!(!applied.is_first_runner);
         let cfg = file::load_config(&paths).unwrap();
         assert_eq!(cfg.runners.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn auto_pool_migrates_existing_legacy_runner_with_same_working_dir() {
+        let tmp = tempdir().unwrap();
+        let paths = paths_for(tmp.path());
+        let repo = tmp.path().join("repo");
+        mark_git_repo(&repo);
+
+        let existing = sample_response("existing_claude");
+        apply_enroll_response(
+            &paths,
+            &existing,
+            "https://example.com",
+            Some(repo.clone()),
+            AgentKind::ClaudeCode,
+            None,
+            None,
+            RunnerWorkdirPlan::Legacy,
+        )
+        .await
+        .unwrap();
+
+        let added = sample_response("new_codex");
+        let applied = apply_enroll_response(
+            &paths,
+            &added,
+            "https://example.com",
+            Some(repo.clone()),
+            AgentKind::Codex,
+            None,
+            None,
+            RunnerWorkdirPlan::AutoPoolIfGit,
+        )
+        .await
+        .unwrap();
+
+        let AppliedWorkdir::AutoPool {
+            name,
+            created,
+            migrated_legacy_runners,
+            ..
+        } = applied.workdir.expect("new runner should be auto-pooled")
+        else {
+            panic!("expected auto-pool binding");
+        };
+        assert_eq!(name, "new_codex");
+        assert!(created);
+        assert_eq!(migrated_legacy_runners, vec!["existing_claude"]);
+
+        let cfg = file::load_config(&paths).unwrap();
+        cfg.validate().unwrap();
+        assert_eq!(cfg.workdirs.len(), 1);
+        assert_eq!(
+            cfg.workdirs[0].path,
+            std::path::absolute(&repo).unwrap_or(repo)
+        );
+        assert_eq!(
+            cfg.runners
+                .iter()
+                .find(|r| r.runner_id == existing.runner_id)
+                .and_then(|r| r.workdir.as_deref()),
+            Some("new_codex")
+        );
+        assert_eq!(
+            cfg.runners
+                .iter()
+                .find(|r| r.runner_id == added.runner_id)
+                .and_then(|r| r.workdir.as_deref()),
+            Some("new_codex")
+        );
+    }
+
+    #[tokio::test]
+    async fn legacy_add_still_rejects_duplicate_working_dir() {
+        let tmp = tempdir().unwrap();
+        let paths = paths_for(tmp.path());
+        let repo = tmp.path().join("repo");
+        mark_git_repo(&repo);
+
+        let r1 = sample_response("r1");
+        apply_enroll_response(
+            &paths,
+            &r1,
+            "https://example.com",
+            Some(repo.clone()),
+            AgentKind::Codex,
+            None,
+            None,
+            RunnerWorkdirPlan::Legacy,
+        )
+        .await
+        .unwrap();
+
+        let r2 = sample_response("r2");
+        let err = apply_enroll_response(
+            &paths,
+            &r2,
+            "https://example.com",
+            Some(repo),
+            AgentKind::Codex,
+            None,
+            None,
+            RunnerWorkdirPlan::Legacy,
+        )
+        .await
+        .unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("share") && msg.contains("working_dir"),
+            "unexpected duplicate-working-dir error: {msg}"
+        );
     }
 
     #[tokio::test]
@@ -669,6 +949,7 @@ mod tests {
             AgentKind::Codex,
             None,
             None,
+            RunnerWorkdirPlan::Legacy,
         )
         .await
         .unwrap();
@@ -682,10 +963,11 @@ mod tests {
             AgentKind::Codex,
             None,
             None,
+            RunnerWorkdirPlan::Legacy,
         )
         .await
         .unwrap_err();
-        assert!(format!("{err}").contains("refusing to add a runner pointing at"));
+        assert!(format!("{err:#}").contains("refusing to add a runner pointing at"));
         // No credentials file should exist for r2 — the bail happened
         // before the write.
         let r2_creds = paths.for_runner(r2.runner_id).credentials_path();
