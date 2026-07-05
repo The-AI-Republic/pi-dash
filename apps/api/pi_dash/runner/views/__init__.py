@@ -64,6 +64,11 @@ from .runs import (
     AgentRunListEndpoint,
     AgentRunReleasePinEndpoint,
 )
+from .machine_sessions import (
+    MachineSessionDeleteEndpoint,
+    MachineSessionOpenEndpoint,
+    machine_session_poll,
+)
 from .sessions import (
     RunnerSessionDeleteEndpoint,
     RunnerSessionOpenEndpoint,
@@ -128,4 +133,7 @@ __all__ = [
     "RunnerSessionDeleteEndpoint",
     "RunnerSessionOpenEndpoint",
     "runner_session_poll",
+    "MachineSessionDeleteEndpoint",
+    "MachineSessionOpenEndpoint",
+    "machine_session_poll",
 ]

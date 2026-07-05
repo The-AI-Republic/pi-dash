@@ -19,6 +19,10 @@ import uuid as _uuid
 from typing import Any, Dict
 from uuid import UUID
 
+from pi_dash.runner.services.machine_outbox import (
+    MachineOfflineError,
+    enqueue_for_machine,
+)
 from pi_dash.runner.services.outbox import (
     RunnerOfflineError,
     enqueue_for_runner,
@@ -54,6 +58,25 @@ def send_to_runner(runner_id: UUID | str, message: Dict[str, Any]) -> None:
         raise
     except Exception:
         logger.exception("send_to_runner enqueue failed for %s", runner_id)
+
+
+def send_to_machine(dev_machine_id: UUID | str, message: Dict[str, Any]) -> None:
+    """Best-effort enqueue of a machine-scoped control message.
+
+    Routes through the machine outbox: live stream when the dev machine
+    has an active control session, offline buffer when it does not.
+    Offline-rejected types (``create_runner`` / ``config_push``) raise
+    :class:`MachineOfflineError`; the caller (e.g. the cloud-driven
+    runner-creation endpoint) is expected to surface that to the
+    operator rather than silently deferring.
+    """
+    try:
+        enqueue_for_machine(dev_machine_id, _ensure_envelope(message))
+    except MachineOfflineError:
+        # Caller decides how to surface an offline machine.
+        raise
+    except Exception:
+        logger.exception("send_to_machine enqueue failed for %s", dev_machine_id)
 
 
 def close_runner_session(runner_id: UUID | str, code: int = 4010) -> None:

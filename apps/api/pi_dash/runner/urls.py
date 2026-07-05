@@ -21,6 +21,8 @@ from pi_dash.runner.views import (
     ChatMessageStartedEndpoint,
     ChatStartedEndpoint,
     HealthEndpoint,
+    MachineSessionDeleteEndpoint,
+    MachineSessionOpenEndpoint,
     MachineTokenRedeemEndpoint,
     MetricsEndpoint,
     ProjectListEndpoint,
@@ -42,6 +44,7 @@ from pi_dash.runner.views import (
     RunnerSelfRevokeEndpoint,
     RunnerSessionDeleteEndpoint,
     RunnerSessionOpenEndpoint,
+    machine_session_poll,
     runner_session_poll,
 )
 
@@ -100,6 +103,24 @@ urlpatterns = [
         "runners/<uuid:runner_id>/sessions/<uuid:sid>/poll",
         runner_session_poll,
         name="runner-session-poll",
+    ),
+    # Machine-level control session lifecycle + poll. Keyed on the dev
+    # machine (not a runner) and authenticated by the shared MachineToken,
+    # so the daemon has a channel even with zero runners enrolled.
+    path(
+        "dev-machines/<uuid:dev_machine_id>/sessions/",
+        MachineSessionOpenEndpoint.as_view(),
+        name="machine-session-open",
+    ),
+    path(
+        "dev-machines/<uuid:dev_machine_id>/sessions/<uuid:sid>/",
+        MachineSessionDeleteEndpoint.as_view(),
+        name="machine-session-delete",
+    ),
+    path(
+        "dev-machines/<uuid:dev_machine_id>/sessions/<uuid:sid>/poll",
+        machine_session_poll,
+        name="machine-session-poll",
     ),
     # Run-lifecycle + event upstream.
     path(

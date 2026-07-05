@@ -633,6 +633,48 @@ class RunnerSession(models.Model):
         ]
 
 
+class MachineSession(models.Model):
+    """Machine-level (per dev-machine) cloud control session.
+
+    The twin of :class:`RunnerSession`, but scoped to a whole
+    ``DevMachine`` rather than a single runner. The daemon opens exactly
+    one of these on startup — authenticated by the shared ``mt_``
+    MachineToken — and long-polls it for machine-scoped control
+    messages (e.g. ``create_runner``, ``config_push``). Because it is
+    keyed on the machine and not on any runner, it exists even when the
+    machine hosts zero runners, which is exactly the "add your first
+    runner" case cloud-driven runner creation needs a channel for.
+
+    Exactly one active session per machine is enforced via a partial
+    unique constraint, mirroring the per-runner session.
+    """
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    dev_machine = models.ForeignKey(
+        "DevMachine", on_delete=models.CASCADE, related_name="sessions"
+    )
+    protocol_version = models.PositiveIntegerField(default=4)
+    created_at = models.DateTimeField(auto_now_add=True)
+    last_seen_at = models.DateTimeField(null=True, blank=True)
+    revoked_at = models.DateTimeField(null=True, blank=True)
+    revoked_reason = models.CharField(max_length=32, blank=True, default="")
+
+    class Meta:
+        db_table = "machine_session"
+        ordering = ("-created_at",)
+        constraints = [
+            models.UniqueConstraint(
+                fields=["dev_machine"],
+                condition=models.Q(revoked_at__isnull=True),
+                name="machine_session_one_active_per_machine",
+            ),
+        ]
+        indexes = [
+            models.Index(fields=["dev_machine", "revoked_at"]),
+            models.Index(fields=["last_seen_at"]),
+        ]
+
+
 class RunnerForceRefresh(models.Model):
     """Force-refresh directive for a runner.
 
