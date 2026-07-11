@@ -8,7 +8,7 @@ import { useEffect, useRef, useState } from "react";
 import { useLocation, useNavigate } from "react-router";
 import { setToast, TOAST_TYPE } from "@pi-dash/propel/toast";
 import { ChatComposer } from "@/components/chat/composer";
-import { ChatMessageList } from "@/components/chat/message-list";
+import { ChatContainer } from "@/components/chat/container";
 import { AssistantMessage } from "@/components/assistant/assistant-message";
 import { AssistantSetupCard } from "@/components/assistant/setup-card";
 import { useAssistantChat } from "@/components/assistant/use-assistant-chat";
@@ -48,30 +48,30 @@ export function AssistantChatRoot({ slug, threadId }: { slug: string; threadId: 
   };
 
   return (
-    <div className="flex h-full min-h-0 flex-col overflow-hidden">
-      <ChatMessageList
-        messages={messages}
-        renderMessage={(m) => <AssistantMessage message={m} />}
-        emptyState={
-          needsSetup ? (
-            <AssistantSetupCard />
-          ) : (
-            <div className="py-16 text-center text-13 text-secondary">
-              Ask about your issues, create work, or start a coding run.
-            </div>
-          )
-        }
-      />
-      {error && <div className="text-danger mb-2 text-12">{error}</div>}
-      <ChatComposer
-        draft={draft}
-        onDraftChange={setDraft}
-        onSend={onSend}
-        onStop={stop}
-        busy={busy}
-        sending={sending}
-        disabledReason={needsSetup ? API_KEY_REMINDER : null}
-      />
-    </div>
+    <ChatContainer
+      messages={messages}
+      renderMessage={(m) => <AssistantMessage message={m} />}
+      emptyState={
+        needsSetup ? (
+          <AssistantSetupCard />
+        ) : (
+          <div className="py-16 text-center text-13 text-secondary">
+            Ask about your issues, create work, or start a coding run.
+          </div>
+        )
+      }
+      error={error ? <div className="text-danger mb-2 text-12">{error}</div> : undefined}
+      composer={
+        <ChatComposer
+          draft={draft}
+          onDraftChange={setDraft}
+          onSend={onSend}
+          onStop={stop}
+          busy={busy}
+          sending={sending}
+          disabledReason={needsSetup ? API_KEY_REMINDER : null}
+        />
+      }
+    />
   );
 }
