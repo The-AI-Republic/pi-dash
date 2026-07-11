@@ -14,6 +14,7 @@ always taken from ``deps`` (server-set), never from model arguments. See
 from __future__ import annotations
 
 from django.contrib.auth import get_user_model
+from django.core.exceptions import ValidationError
 from pydantic_ai import ModelRetry
 
 from pi_dash.core import permissions as core_permissions
@@ -64,9 +65,20 @@ def my_issues(deps, scope: str = "all"):
 
 
 def get_issue(deps, issue_id) -> Issue:
-    issue = (
-        scoped_issues(deps).select_related("project", "state").filter(id=issue_id).first()
-    )
+    # ``id`` is a UUIDField: a malformed value (e.g. the assistant passing a
+    # human-readable identifier or a hallucinated string instead of the UUID)
+    # makes Django raise ValidationError/ValueError at query time. Translate
+    # that into ToolNotFound so the model gets a retry message instead of the
+    # exception crashing the whole turn.
+    try:
+        issue = (
+            scoped_issues(deps)
+            .select_related("project", "state")
+            .filter(id=issue_id)
+            .first()
+        )
+    except (ValidationError, ValueError):
+        issue = None
     if issue is None:
         raise ToolNotFound(f"Issue {issue_id} not found or not accessible.")
     return issue

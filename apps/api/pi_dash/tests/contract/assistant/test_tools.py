@@ -151,6 +151,20 @@ def test_create_issue_parent_not_accessible(world, member_ctx):
         )
 
 
+def test_create_issue_parent_malformed_uuid(world, member_ctx):
+    ctx, *_ = member_ctx
+    # A non-UUID parent_issue_id (e.g. the assistant passing a human-readable
+    # identifier instead of the UUID) must surface as a graceful ToolNotFound
+    # (ModelRetry), not an unhandled ValidationError that crashes the turn.
+    with pytest.raises(_scoping.ToolNotFound):
+        issues.create_issue(
+            ctx,
+            project_id=str(world.proj_a.id),
+            name="Sub-task",
+            parent_issue_id="not-a-uuid",
+        )
+
+
 def test_update_issue_set_and_unlink_parent(world, member_ctx):
     ctx, *_ = member_ctx
     # set parent
