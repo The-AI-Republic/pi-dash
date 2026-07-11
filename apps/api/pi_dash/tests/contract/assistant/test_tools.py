@@ -5,6 +5,7 @@
 import types
 
 import pytest
+from pydantic_ai import ModelRetry
 
 from pi_dash.assistant.models import (
     AssistantMessage,
@@ -15,6 +16,7 @@ from pi_dash.assistant.models import (
 from pi_dash.assistant.tools import _scoping, comments, issues, runs
 from pi_dash.db.models import Issue, IssueComment
 from pi_dash.tests.contract.assistant.conftest import (
+    ROLE_ADMIN,
     ROLE_GUEST,
     ROLE_MEMBER,
     fake_ctx,
@@ -29,6 +31,14 @@ def member_ctx(world):
     thread = AssistantThread.objects.create(workspace=world.ws, user=world.member)
     turn = AssistantTurn.objects.create(thread=thread)
     deps = make_deps(world.member, world.ws, ROLE_MEMBER, thread_id=thread.id, turn_id=turn.id)
+    return fake_ctx(deps), thread, turn
+
+
+@pytest.fixture
+def admin_ctx(world):
+    thread = AssistantThread.objects.create(workspace=world.ws, user=world.admin)
+    turn = AssistantTurn.objects.create(thread=thread)
+    deps = make_deps(world.admin, world.ws, ROLE_ADMIN, thread_id=thread.id, turn_id=turn.id)
     return fake_ctx(deps), thread, turn
 
 
@@ -99,6 +109,95 @@ def test_update_issue_fields(world, member_ctx):
     world.issue_a.refresh_from_db()
     assert world.issue_a.name == "Renamed"
     assert world.issue_a.priority == "high"
+
+
+def test_create_issue_with_parent(world, member_ctx):
+    ctx, *_ = member_ctx
+    res = issues.create_issue(
+        ctx,
+        project_id=str(world.proj_a.id),
+        name="Sub-task",
+        parent_issue_id=str(world.issue_a.id),
+    )
+    assert res["created"] is True
+    assert res["parent_id"] == str(world.issue_a.id)
+    issue = Issue.objects.get(id=res["id"])
+    assert issue.parent_id == world.issue_a.id
+
+
+def test_create_issue_parent_must_be_same_project(world, admin_ctx):
+    ctx, *_ = admin_ctx
+    # admin can access both projects, but issue_b (proj_b) still can't parent a
+    # proj_a child — the same-project guard, not the access guard, rejects it.
+    with pytest.raises(ModelRetry) as exc:
+        issues.create_issue(
+            ctx,
+            project_id=str(world.proj_a.id),
+            name="Sub-task",
+            parent_issue_id=str(world.issue_b.id),
+        )
+    assert "same project" in str(exc.value)
+
+
+def test_create_issue_parent_not_accessible(world, member_ctx):
+    ctx, *_ = member_ctx
+    # member is not in proj_b, so issue_b is not accessible as a parent.
+    with pytest.raises(_scoping.ToolNotFound):
+        issues.create_issue(
+            ctx,
+            project_id=str(world.proj_a.id),
+            name="Sub-task",
+            parent_issue_id=str(world.issue_b.id),
+        )
+
+
+def test_update_issue_set_and_unlink_parent(world, member_ctx):
+    ctx, *_ = member_ctx
+    # set parent
+    res = issues.update_issue(
+        ctx, issue_id=str(world.guest_issue.id), parent_issue_id=str(world.issue_a.id)
+    )
+    assert res["updated"] is True
+    assert "parent" in res["changed"]
+    world.guest_issue.refresh_from_db()
+    assert world.guest_issue.parent_id == world.issue_a.id
+
+    # unlink via null
+    res = issues.update_issue(ctx, issue_id=str(world.guest_issue.id), parent_issue_id=None)
+    assert "parent" in res["changed"]
+    world.guest_issue.refresh_from_db()
+    assert world.guest_issue.parent_id is None
+
+
+def test_update_issue_omitted_parent_left_unchanged(world, member_ctx):
+    ctx, *_ = member_ctx
+    world.guest_issue.parent = world.issue_a
+    world.guest_issue.save(update_fields=["parent"])
+    # update another field without passing parent_issue_id
+    res = issues.update_issue(ctx, issue_id=str(world.guest_issue.id), name="Renamed")
+    assert "parent" not in res["changed"]
+    world.guest_issue.refresh_from_db()
+    assert world.guest_issue.parent_id == world.issue_a.id  # untouched
+
+
+def test_update_issue_reject_self_parent(world, member_ctx):
+    ctx, *_ = member_ctx
+    with pytest.raises(ModelRetry):
+        issues.update_issue(
+            ctx, issue_id=str(world.issue_a.id), parent_issue_id=str(world.issue_a.id)
+        )
+
+
+def test_update_issue_reject_cycle(world, member_ctx):
+    ctx, *_ = member_ctx
+    # guest_issue -> issue_a (child of issue_a)
+    world.guest_issue.parent = world.issue_a
+    world.guest_issue.save(update_fields=["parent"])
+    # now try to make issue_a a child of guest_issue -> cycle
+    with pytest.raises(ModelRetry):
+        issues.update_issue(
+            ctx, issue_id=str(world.issue_a.id), parent_issue_id=str(world.guest_issue.id)
+        )
 
 
 def test_dispatch_coding_run(world, member_ctx, mocker):
